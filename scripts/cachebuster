@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+  script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+  link_target="$(readlink -- "$script_path")"
+  if [[ "$link_target" == /* ]]; then
+    script_path="$link_target"
+  else
+    script_path="$script_dir/$link_target"
+  fi
+done
+script_path="$(cd -P -- "$(dirname -- "$script_path")" && pwd)/$(basename -- "$script_path")"
+plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+codex_manifest="$plugin_root/.codex-plugin/plugin.json"
+claude_manifest="$plugin_root/claude/.claude-plugin/plugin.json"
+current="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$codex_manifest" | head -1)"
+if [[ -z "$current" ]]; then
+  printf 'agent-sessions: could not read plugin version\n' >&2
+  exit 1
+fi
+base="${current%%+*}"
+next="$base+codex.$(date -u +%Y%m%d%H%M%S)"
+codex_temporary="$codex_manifest.$$.tmp"
+claude_temporary="$claude_manifest.$$.tmp"
+trap 'rm -f -- "$codex_temporary" "$claude_temporary"' EXIT
+rewrite_version() {
+  source_manifest="$1"
+  destination="$2"
+  awk -v version="$next" '
+    !done && /^[[:space:]]*"version"[[:space:]]*:/ {
+      sub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" version "\"")
+      done = 1
+    }
+    { print }
+    END { if (!done) exit 2 }
+  ' "$source_manifest" >"$destination"
+  chmod --reference="$source_manifest" "$destination" 2>/dev/null || chmod 0644 "$destination"
+}
+rewrite_version "$codex_manifest" "$codex_temporary"
+rewrite_version "$claude_manifest" "$claude_temporary"
+# The Codex manifest is the cachebuster's commit record, so publish every
+# dependent manifest first and the authoritative runtime version last.
+mv -f -- "$claude_temporary" "$claude_manifest"
+mv -f -- "$codex_temporary" "$codex_manifest"
+trap - EXIT
+printf '%s\n' "$next"

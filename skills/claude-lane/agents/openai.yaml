@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Lane"
+  short_description: "Delegate durable work to a local or remote Claude Code lane"
+  default_prompt: "Spawn a named Claude Code lane on the requested host, or locally when none is specified; collect its final answer and archive it when finished."

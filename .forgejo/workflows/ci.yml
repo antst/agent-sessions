@@ -1,0 +1,148 @@
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: docker
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash go golangci-lint make
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint
+        run: make lint
+
+  test:
+    runs-on: docker
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash git go make python3
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test plugin and native runtime
+        run: scripts/test
+
+  race:
+    runs-on: docker
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash build-base git go make python3
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Race test plugin and native runtime
+        run: make test-race
+
+  build:
+    runs-on: docker
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            platform: linux-x64
+          - goos: linux
+            goarch: arm64
+            platform: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            platform: darwin-x64
+          - goos: darwin
+            goarch: arm64
+            platform: darwin-arm64
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash go
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build native binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          RELEASE_REF: ${{ forge.ref }}
+          RELEASE_SHA: ${{ forge.sha }}
+          RELEASE_VERSION: ${{ forge.ref_name }}
+        run: |
+          case "$RELEASE_REF" in
+            refs/tags/*) ;;
+            *) RELEASE_VERSION="$(printf '%.12s' "$RELEASE_SHA")" ;;
+          esac
+          mkdir -p "bin/${{ matrix.platform }}"
+          for binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane; do
+            go build -trimpath -ldflags='-s -w' \
+              -o "bin/${{ matrix.platform }}/$binary" "./cmd/$binary"
+          done
+          go build -trimpath -ldflags="-s -w -X main.version=$RELEASE_VERSION" \
+            -o "bin/${{ matrix.platform }}/peer-federator" ./cmd/peer-federator
+          ./scripts/package-release \
+            "${{ matrix.platform }}" "$RELEASE_VERSION" \
+            "bin/${{ matrix.platform }}" dist/release
+
+      - name: Upload native binaries
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: agent-sessions-${{ matrix.platform }}
+          path: dist/release/*.tar.gz
+
+  release:
+    if: startsWith(forge.ref, 'refs/tags/v')
+    runs-on: docker
+    needs: [lint, test, race, build]
+    steps:
+      - name: Install dependencies
+        # forgejo-release uses jq and curl directly. Installing them avoids its
+        # Debian-only apt-get fallback on this Alpine runner.
+        run: apk add --no-cache bash coreutils curl jq
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ forge.ref_name }}
+        run: |
+          manifest_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            .codex-plugin/plugin.json | head -1)"
+          tag_version="${RELEASE_TAG#v}"
+          if [ "${manifest_version%%+*}" != "$tag_version" ]; then
+            printf 'tag %s does not match manifest version %s\n' "$RELEASE_TAG" "$manifest_version" >&2
+            exit 1
+          fi
+
+      - name: Download platform archives
+        uses: forgejo/download-artifact@v4
+        with:
+          pattern: agent-sessions-*
+          path: dist/release
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist/release
+          sha256sum agent-sessions-*.tar.gz > SHA256SUMS
+
+      - name: Publish Forgejo release
+        uses: actions/forgejo-release@v2.13.4
+        with:
+          direction: upload
+          tag: ${{ forge.ref_name }}
+          title: ${{ forge.ref_name }}
+          release-dir: dist/release
+          release-notes: |
+            Precompiled Agent Sessions binaries for Linux and macOS on x86-64 and arm64.
+            Verify the selected archive against SHA256SUMS before installing.

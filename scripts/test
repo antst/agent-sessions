@@ -1,0 +1,660 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Portable shell checks plus the complete Go suite.
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+  script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+  link_target="$(readlink -- "$script_path")"
+  if [[ "$link_target" == /* ]]; then
+    script_path="$link_target"
+  else
+    script_path="$script_dir/$link_target"
+  fi
+done
+script_path="$(cd -P -- "$(dirname -- "$script_path")" && pwd)/$(basename -- "$script_path")"
+plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+
+bash -n \
+  "$plugin_root/scripts/cachebuster" \
+  "$plugin_root/scripts/package-release" \
+  "$plugin_root/scripts/repair-history-projection" \
+  "$plugin_root/scripts/native-entry" \
+  "$plugin_root/scripts/test-claude-contract" \
+  "$plugin_root/scripts/test"
+
+"$plugin_root/scripts/test-claude-contract"
+
+if grep -Fq '"SessionEnd"' "$plugin_root/hooks/hooks.json"; then
+	printf 'attachment-ambiguous SessionEnd hook remains globally registered\n' >&2
+	exit 1
+fi
+
+claude_lane_help="$(go run "$plugin_root/cmd/agent-session-runtime" claude-lane --help)"
+for command in run start resume wait status interrupt archive list doctor; do
+  if ! grep -Fq "claude-peer-lane $command" <<<"$claude_lane_help"; then
+    printf 'Claude lane help is missing command %s\n' "$command" >&2
+    exit 1
+  fi
+done
+for flag in --permission-mode --max-budget-usd --auto-archive-after --no-auto-archive --persistent --notify --schema --bare --mine; do
+  if ! grep -Fq -- "$flag" <<<"$claude_lane_help"; then
+    printf 'Claude lane help is missing flag %s\n' "$flag" >&2
+    exit 1
+  fi
+done
+if grep -Rq '\[TODO' "$plugin_root/skills/claude-lane" ||
+   ! grep -Fq 'contract_version: 1' "$plugin_root/skills/claude-lane/SKILL.md" ||
+   ! grep -Fq 'claude-peer-lane' "$plugin_root/docs/CLAUDE-LANES.md"; then
+  printf 'Codex Claude-lane skill or contract documentation is incomplete\n' >&2
+  exit 1
+fi
+for event_type in turn.interrupted error; do
+  if ! grep -Fq "\`$event_type\`" "$plugin_root/skills/claude-lane/references/contract.md"; then
+    printf 'Claude lane contract is missing emitted event %s\n' "$event_type" >&2
+    exit 1
+  fi
+done
+if ! grep -Fq 'does not publish a native peer socket' "$plugin_root/skills/claude-lane/SKILL.md"; then
+  printf 'Claude lane skill does not document why bare mode is rejected\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'Do **not** poll' "$plugin_root/skills/claude-lane/SKILL.md"; then
+  printf 'Claude lane skill does not document push-based peer delivery\n' >&2
+  exit 1
+fi
+for skill in "$plugin_root/skills/claude-lane/SKILL.md" "$plugin_root/claude/skills/codex-lane/SKILL.md"; do
+  if ! grep -Fq 'peer-federator lane --host HOST' "$skill" ||
+     ! grep -Fq 'never fall back to SSH' "$skill"; then
+    printf 'Lane skill %s does not document hub-only remote execution\n' "$skill" >&2
+    exit 1
+  fi
+done
+if ! grep -Fq 'do not poll this tool' "$plugin_root/internal/bridge/mcp.go"; then
+  printf 'Peer inbox tool does not identify itself as recovery-only\n' >&2
+  exit 1
+fi
+
+if grep -En '(^|[^[:alnum:]_])(node|flock)([^[:alnum:]_]|$)|readlink -f' \
+  "$plugin_root/scripts/cachebuster" \
+  "$plugin_root/scripts/package-release" \
+  "$plugin_root/scripts/repair-history-projection" \
+  "$plugin_root/scripts/native-entry" \
+  "$plugin_root/scripts/test-claude-contract" \
+  "$plugin_root/claude/skills/codex-lane/scripts/lane-preflight"; then
+  printf 'active scripts unexpectedly depend on Node, flock, or GNU readlink -f\n' >&2
+  exit 1
+fi
+temporary_parent="${TMPDIR:-/tmp}"
+if [[ "$(uname -s)" == Darwin ]]; then
+  # Nested fake App Server control sockets exceed Darwin's UDS limit under
+  # the long per-user TMPDIR. The production runtime has its own compact-root
+  # fallback; keep this isolated contract fixture compact for the same reason.
+  temporary_parent=/tmp
+fi
+temporary_parent="$(cd -P -- "$temporary_parent" && pwd)"
+temporary_root="$(mktemp -d "$temporary_parent/codex-peer-test.XXXXXX")"
+cleanup() {
+  rm -rf -- "$temporary_root"
+}
+trap cleanup EXIT
+
+fake_codex="$temporary_root/fake-codex"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@"' >"$fake_codex"
+chmod 0700 "$fake_codex"
+
+launcher_binary="$temporary_root/codex-peer"
+go build -o "$launcher_binary" "$plugin_root/cmd/codex-peer"
+runtime_binary="$temporary_root/agent-session-runtime"
+go build -o "$runtime_binary" "$plugin_root/cmd/agent-session-runtime"
+
+informational="$({
+  CODEX_PEER_CODEX_BIN="$fake_codex" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/state" \
+    "$launcher_binary" -n reviewer --version
+})"
+if [[ "$informational" != "--version" || -e "$temporary_root/state" ]]; then
+  printf 'codex-peer did not pass its informational invocation through cleanly\n' >&2
+  exit 1
+fi
+
+explicit_yolo="$({
+  CODEX_PEER_CODEX_BIN="$fake_codex" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/yolo-state" \
+    "$launcher_binary" -n reviewer --yolo --version
+})"
+if [[ "$explicit_yolo" != $'--yolo\n--version' || -e "$temporary_root/yolo-state" ]]; then
+  printf 'codex-peer did not preserve an explicit user-selected --yolo flag\n' >&2
+  exit 1
+fi
+
+# codex-peer owns the remote endpoint and resolves one canonical cwd for the
+# bridge transaction. Every other Codex argument remains byte-for-byte ordered.
+launcher_fixture="$temporary_root/launcher-fixture"
+launcher_cwd="$temporary_root/launcher-cwd"
+mkdir -p "$launcher_fixture" "$launcher_cwd/relative" "$launcher_cwd/one" "$launcher_cwd/two"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  'if [ -n "${NATIVE_RECORD-}" ]; then printf "%s\\n" "$@" >>"$NATIVE_RECORD"; fi' \
+	'case "${1-}:${2-}" in' \
+	'  appserver:profile-key) printf "%s\\n" 0123456789abcdefabcd ;;' \
+	'  appserver:stopped) exit 0 ;;' \
+	'  supervisor:start) exit 0 ;;' \
+	'  launch:proc-start) printf "%s\\n" owner_fixture ;;' \
+	'  launch:start) printf "%s\\n" 00000000-0000-0000-0000-000000000777 ;;' \
+	'  launch:bind)' \
+	'    shift 2; bind_cwd=' \
+	'    while [ "$#" -gt 1 ]; do [ "$1" = --cwd ] && bind_cwd="$2"; shift 2; done' \
+	'    [ -n "${FAKE_BIND_CWD-}" ] && bind_cwd="$FAKE_BIND_CWD"' \
+	'    printf "%s\\n%s\\n" 00000000-0000-0000-0000-000000000778 "$bind_cwd"' \
+	'    ;;' \
+	'  lane:*|claude-lane:*) exit 0 ;;' \
+  '  *) exit 64 ;;' \
+  'esac' \
+  >"$launcher_fixture/native-runtime"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'for arg in "$@"; do' \
+  '  if [ "$arg" = --help ]; then' \
+  '    printf "%s\\n" "USAGE WORDING CHANGED" >&2' \
+  '    exit 97' \
+  '  fi' \
+  'done' \
+  'printf "%s\\n" "$@" >"$CODEX_RECORD"' \
+  >"$launcher_fixture/codex"
+chmod 0700 \
+  "$launcher_fixture/native-runtime" \
+  "$launcher_fixture/codex"
+launcher_record=
+run_launcher_case() {
+  local case_name="$1"
+  shift
+  launcher_record="$temporary_root/$case_name.argv"
+  local native_record="$temporary_root/$case_name.native"
+  (
+    cd "$launcher_cwd"
+    CODEX_THREAD_ID= CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
+      CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" \
+      CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+      CODEX_RECORD="$launcher_record" \
+      NATIVE_RECORD="$native_record" \
+      CLAUDE_PEER_DATA_DIR="$temporary_root/$case_name-state" \
+      "$launcher_binary" "$@"
+  )
+}
+run_launcher_failure() {
+  local case_name="$1" expected="$2"
+  shift 2
+  set +e
+  run_launcher_case "$case_name" "$@" >"$temporary_root/$case_name.out" 2>"$temporary_root/$case_name.err"
+  local status=$?
+  set -e
+  if ((status != 2)) || ! grep -Fq "$expected" "$temporary_root/$case_name.err"; then
+    printf 'codex-peer did not fail closed for %s (status=%s)\n' "$case_name" "$status" >&2
+    exit 1
+  fi
+}
+assert_launcher_argv() {
+  local expected
+  expected="$(printf '%s\n' "${@:2}")"
+  if [[ "$(<"$1")" != "$expected" ]]; then
+    printf 'codex-peer argv mismatch for %s\nexpected:\n%s\nactual:\n%s\n' \
+      "$1" "$expected" "$(<"$1")" >&2
+    exit 1
+  fi
+}
+
+run_launcher_case short-cd -C "$launcher_cwd/one" --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd/one" --no-alt-screen
+run_launcher_case fresh-no-args
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd"
+run_launcher_case fresh-name-only -n bash32-peer
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd"
+if ! grep -Fxq -- '--name-source' "$temporary_root/fresh-name-only.native" ||
+   ! grep -Fxq 'launch' "$temporary_root/fresh-name-only.native"; then
+  printf 'fresh launcher did not preserve the command-line name source\n' >&2
+  exit 1
+fi
+launcher_record="$temporary_root/fresh-env-name.argv"
+native_record="$temporary_root/fresh-env-name.native"
+(
+  cd "$launcher_cwd"
+  CODEX_THREAD_ID= CLAUDE_PEER_SESSION_NAME='environment peer' CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
+    CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+    CODEX_RECORD="$launcher_record" \
+    NATIVE_RECORD="$native_record" CLAUDE_PEER_DATA_DIR="$temporary_root/fresh-env-name-state" \
+    "$launcher_binary"
+)
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd"
+if ! grep -Fxq -- '--name-source' "$native_record" || ! grep -Fxq 'explicit' "$native_record" ||
+   ! grep -Fxq 'environment peer' "$native_record"; then
+  printf 'fresh launcher did not materialize CLAUDE_PEER_SESSION_NAME\n' >&2
+  exit 1
+fi
+run_launcher_case fresh-yolo --yolo --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" --yolo --no-alt-screen
+if ! grep -Fxq -- '--approval-policy' "$temporary_root/fresh-yolo.native" ||
+   ! grep -Fxq 'never' "$temporary_root/fresh-yolo.native" ||
+   ! grep -Fxq 'danger-full-access' "$temporary_root/fresh-yolo.native"; then
+	printf 'fresh launcher did not apply yolo policy at thread creation\n' >&2
+	exit 1
+fi
+run_launcher_case long-cd --cd "$launcher_cwd/two" --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 --cd "$launcher_cwd/two" --no-alt-screen
+run_launcher_case equals-cd --cd="$launcher_cwd/one" --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 --cd="$launcher_cwd/one" --no-alt-screen
+run_launcher_case relative-cd -C relative --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C relative --no-alt-screen
+run_launcher_case attached-absolute-cd -C"$launcher_cwd/one" --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C"$launcher_cwd/one" --no-alt-screen
+run_launcher_case attached-relative-cd -Crelative --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -Crelative --no-alt-screen
+run_launcher_case multiple-cd -C"$launcher_cwd/one" --cd "$launcher_cwd/two" -Crelative --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C"$launcher_cwd/one" --cd "$launcher_cwd/two" -Crelative --no-alt-screen
+run_launcher_case argument-boundary -C "$launcher_cwd/one" -- command -C literal --cd=literal -Cfoo
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd/one" -- command -C literal --cd=literal -Cfoo
+# Classification is independent of human-readable Codex help output; the
+# fixture deliberately fails every --help probe above.
+run_launcher_case prompt-boundary -- literal-prompt
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" -- literal-prompt
+run_launcher_case native-resume resume existing-thread --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --no-alt-screen
+run_launcher_case native-resume-no-options resume existing-thread
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd"
+if ! grep -Fxq -- '--cwd-explicit' "$temporary_root/native-resume.native" || ! grep -Fxq 'false' "$temporary_root/native-resume.native"; then
+  printf 'resumed launcher did not distinguish inherited cwd\n' >&2
+  exit 1
+fi
+launcher_record="$temporary_root/native-resume-inherited-cwd.argv"
+native_record="$temporary_root/native-resume-inherited-cwd.native"
+CODEX_THREAD_ID= FAKE_BIND_CWD="$launcher_cwd/two" CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
+  CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+  CODEX_RECORD="$launcher_record" \
+  NATIVE_RECORD="$native_record" CLAUDE_PEER_DATA_DIR="$temporary_root/native-resume-inherited-cwd-state" \
+  "$launcher_binary" resume existing-thread --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd/two" --no-alt-screen
+run_launcher_case native-resume-explicit-cwd -C "$launcher_cwd" resume existing-thread --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --no-alt-screen
+if ! grep -Fxq -- '--cwd-explicit' "$temporary_root/native-resume-explicit-cwd.native" || ! grep -Fxq 'true' "$temporary_root/native-resume-explicit-cwd.native"; then
+  printf 'resumed launcher did not distinguish explicit cwd\n' >&2
+  exit 1
+fi
+run_launcher_case native-resume-trailing-cwd resume existing-thread --model gpt-test -C relative --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 --model gpt-test -C relative --no-alt-screen
+run_launcher_case native-resume-yolo resume existing-thread --yolo --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --yolo --no-alt-screen
+if ! grep -Fxq -- '--approval-policy' "$temporary_root/native-resume-yolo.native" ||
+   ! grep -Fxq 'never' "$temporary_root/native-resume-yolo.native" ||
+   ! grep -Fxq 'danger-full-access' "$temporary_root/native-resume-yolo.native"; then
+  printf 'resumed yolo launcher did not persist policy before the native Codex attachment\n' >&2
+  exit 1
+fi
+run_launcher_case global-yolo-resume --yolo resume existing-thread --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --yolo --no-alt-screen
+if ! grep -Fxq -- '--approval-policy' "$temporary_root/global-yolo-resume.native" ||
+   ! grep -Fxq 'never' "$temporary_root/global-yolo-resume.native" ||
+   ! grep -Fxq 'danger-full-access' "$temporary_root/global-yolo-resume.native"; then
+  printf 'global yolo option did not persist policy before the native Codex attachment\n' >&2
+  exit 1
+fi
+run_launcher_case global-display-resume --no-alt-screen resume existing-thread
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --no-alt-screen
+for approval_args in '-a never' '--ask-for-approval never' '-anever' '-a=never' '--ask-for-approval=never'; do
+  # shellcheck disable=SC2086 # deliberate option spelling matrix
+  run_launcher_case "fresh-approval-${approval_args//[^a-zA-Z0-9]/-}" $approval_args
+  # shellcheck disable=SC2086 # deliberate option spelling matrix
+  run_launcher_case "resume-approval-${approval_args//[^a-zA-Z0-9]/-}" resume existing-thread $approval_args
+done
+run_launcher_case native-resume-options --strict-config -c model=gpt-test --enable feature-a --disable feature-b --model gpt-test --oss --local-provider ollama --profile testing --sandbox read-only --approve-for-me --ask-for-approval=on-request --search --no-alt-screen resume --all --include-non-interactive existing-thread --add-dir "$launcher_cwd/one" -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --strict-config -c model=gpt-test --enable feature-a --disable feature-b --model gpt-test --oss --local-provider ollama --profile testing --sandbox read-only --approve-for-me --ask-for-approval=on-request --search --no-alt-screen --all --include-non-interactive --add-dir "$launcher_cwd/one" -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
+run_launcher_case fresh-variadic-image -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
+run_launcher_case resume-variadic-image resume existing-thread -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
+run_launcher_failure native-resume-last 'picker and --last are unsupported' resume --last --model gpt-test --no-alt-screen
+run_launcher_failure native-resume-picker 'picker and --last are unsupported' resume --all --no-alt-screen
+run_launcher_case resume-model-value -m resume resume existing-thread --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" -m resume --no-alt-screen
+run_launcher_case resume-profile-value -p resume resume existing-thread --no-alt-screen
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" -p resume --no-alt-screen
+run_launcher_failure native-fork 'fork is not owner-attested yet' -n forked fork existing-thread --no-alt-screen
+run_launcher_failure native-remote 'caller-controlled --remote options are not supported' --remote unix:///tmp/foreign.sock
+run_launcher_failure native-remote-token 'caller-controlled --remote options are not supported' resume existing-thread --remote-auth-token-env TOKEN
+run_launcher_case native-fresh-options -c model=gpt-test --model gpt-test --sandbox workspace-write -a never --add-dir "$launcher_cwd/one" --search -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
+assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" -c model=gpt-test --model gpt-test --sandbox workspace-write -a never --add-dir "$launcher_cwd/one" --search -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
+run_launcher_case noninteractive-exec exec -C "$launcher_cwd/two" -- echo ok
+assert_launcher_argv "$launcher_record" exec -C "$launcher_cwd/two" -- echo ok
+run_launcher_case noninteractive-app app
+assert_launcher_argv "$launcher_record" app
+run_launcher_case global-cd-before-subcommand -C "$launcher_cwd/two" completion bash
+assert_launcher_argv "$launcher_record" -C "$launcher_cwd/two" completion bash
+run_launcher_case informational-invalid-cd -C /definitely/not/here --version
+assert_launcher_argv "$launcher_record" -C /definitely/not/here --version
+
+# Production classification never parses human-readable help. When a real
+# Codex binary is available to the test environment, use its current Commands
+# block only as a drift detector: every discovered non-interactive command must
+# pass through without invoking runtime bootstrap or creating a peer thread.
+real_codex="$(command -v codex || true)"
+if [[ -n "$real_codex" ]]; then
+  real_commands="$({ "$real_codex" --help || true; } | awk '
+    /^Commands:$/ { commands=1; next }
+    commands && /^[^[:space:]]/ { exit }
+    commands && /^  [[:alnum:]][[:alnum:]-]*[[:space:]]/ { print $1 }
+  ')"
+  if [[ -z "$real_commands" ]] || ! grep -Fxq exec <<<"$real_commands" || ! grep -Fxq resume <<<"$real_commands"; then
+    printf 'could not extract the installed Codex command list for launcher drift validation\n' >&2
+    exit 1
+  fi
+  while IFS= read -r real_command; do
+    case "$real_command" in
+      resume|fork) continue ;;
+    esac
+    run_launcher_case "real-command-$real_command" "$real_command"
+    assert_launcher_argv "$launcher_record" "$real_command"
+    if [[ -e "$temporary_root/real-command-$real_command.native" ]]; then
+      printf 'installed Codex command %s was misclassified as a fresh peer\n' "$real_command" >&2
+      exit 1
+    fi
+  done <<<"$real_commands"
+fi
+
+# The lane launchers are separate native executables, not aliases to the
+# runtime or to each other. Exercise their final exec boundary explicitly.
+for lane_binary in codex-peer-lane claude-peer-lane; do
+  go build -o "$temporary_root/$lane_binary" "$plugin_root/cmd/$lane_binary"
+  lane_record="$temporary_root/$lane_binary.native"
+  lane_state="$temporary_root/$lane_binary-state"
+  CODEX_THREAD_ID= CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
+    CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" \
+    CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+    CODEX_RECORD="$temporary_root/$lane_binary.codex" \
+    NATIVE_RECORD="$lane_record" CLAUDE_PEER_DATA_DIR="$lane_state" \
+    "$temporary_root/$lane_binary" doctor
+  expected_role=lane
+  [[ "$lane_binary" == claude-peer-lane ]] && expected_role=claude-lane
+  if ! tail -2 "$lane_record" | grep -Fxq "$expected_role" ||
+     ! tail -1 "$lane_record" | grep -Fxq doctor; then
+    printf '%s did not exec the expected shared-runtime role\n' "$lane_binary" >&2
+    exit 1
+  fi
+done
+
+# INSTALL_ROOT is independently configurable from PREFIX; installed launchers
+# must point at that exact tree rather than a hard-coded libexec relative path.
+custom_install_root="$temporary_root/custom-install"
+custom_prefix="$temporary_root/custom-prefix"
+install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
+for launcher in codex-peer codex-peer-lane claude-peer-lane; do
+  if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
+    printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
+    exit 1
+  fi
+done
+if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/agent-session-runtime\" \"$custom_prefix/bin/agent-session-runtime\"" <<<"$install_plan" ||
+   ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
+  printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
+  exit 1
+fi
+runtime_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=1 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
+if ! grep -Eq "CODEX_PEER_CODEX_BIN=.*agent-session-runtime\" bootstrap" <<<"$runtime_install_plan" ||
+   grep -Eq 'scripts/(ensure-runtime|build-runtime)' <<<"$runtime_install_plan"; then
+  printf 'install does not bootstrap through the installed native runtime\n' >&2
+  exit 1
+fi
+preflight_plan="$(make -n -C "$plugin_root" install-preflight CODEX=codex-test-cli)"
+if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
+  printf 'install preflight does not print the App Server stop command\n' >&2
+  exit 1
+fi
+make -s -C "$plugin_root" install \
+  START_RUNTIME=0 CODEX="$fake_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
+  >"$temporary_root/install.out"
+installed_runtimes=("$custom_install_root"/bin/*/agent-session-runtime)
+installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
+if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
+   [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
+   [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
+   [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
+   [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
+  printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
+  exit 1
+fi
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+  if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
+    printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
+    exit 1
+  fi
+done
+
+# A source checkout must never relabel an old bin/ artifact as current merely
+# because Go is absent. Only a release archive's explicit prebuilt marker may
+# authorize reuse of an existing executable.
+make_bin="$(command -v make)"
+no_go_path="$temporary_root/no-go-path"
+mkdir -p "$no_go_path"
+for tool in mkdir sed head uname; do
+  ln -s "$(command -v "$tool")" "$no_go_path/$tool"
+done
+set +e
+PATH="$no_go_path" "$make_bin" -s -C "$plugin_root" build \
+  >"$temporary_root/no-go-build.out" 2>"$temporary_root/no-go-build.err"
+no_go_status=$?
+set -e
+if ((no_go_status == 0)) || ! grep -Fq 'no authorized packaged' "$temporary_root/no-go-build.err"; then
+  printf 'source build reused a stale binary without Go (status=%s)\n' "$no_go_status" >&2
+  exit 1
+fi
+# Release archives are slim installable payloads. Their marker must select the
+# bundled binaries even on a build host that also has Go installed.
+release_output="$temporary_root/releases"
+release_archive="$("$plugin_root/scripts/package-release" \
+  linux-x64 v0.1.0 "$installed_binary_dir" "$release_output")"
+release_extract="$temporary_root/release-extract"
+mkdir -p "$release_extract"
+tar -C "$release_extract" -xzf "$release_archive"
+release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
+if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
+	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
+   [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
+   [[ -e "$release_root/go.mod" ]]; then
+  printf 'release archive is not a slim installable prebuilt payload\n' >&2
+  exit 1
+fi
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+  if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
+    printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
+    exit 1
+  fi
+done
+release_build="$(make -s -C "$release_root" build GOOS=linux GOARCH=amd64)"
+if ! grep -Fq 'Using packaged prebuilt' <<<"$release_build"; then
+  printf 'release archive did not select its packaged binary\n' >&2
+  exit 1
+fi
+set +e
+make -s -C "$release_root" build GOOS=darwin GOARCH=arm64 \
+  >"$temporary_root/wrong-release.out" 2>"$temporary_root/wrong-release.err"
+wrong_release_status=$?
+set -e
+if (( wrong_release_status == 0 )) ||
+   ! grep -Fq 'does not contain prebuilt darwin-arm64/agent-session-runtime' "$temporary_root/wrong-release.err"; then
+  printf 'release archive did not reject a mismatched host platform\n' >&2
+  exit 1
+fi
+for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$release_root/.mcp.json"; do
+  for required_mcp_env in CODEX_HOME TMPDIR XDG_RUNTIME_DIR XDG_STATE_HOME; do
+    if ! grep -Fq "\"$required_mcp_env\"" "$packaged_mcp"; then
+      printf 'MCP launch does not preserve required caller/runtime environment %s in %s\n' \
+        "$required_mcp_env" "$packaged_mcp" >&2
+      exit 1
+    fi
+  done
+  if ! grep -Fq '"default_tools_approval_mode": "approve"' "$packaged_mcp"; then
+    printf 'MCP launch does not bypass the daemon-wide pre-dispatch approval prompt in %s\n' "$packaged_mcp" >&2
+    exit 1
+  fi
+done
+
+set +e
+CODEX_PEER_CODEX_BIN="$fake_codex" \
+  "$launcher_binary" -n '   ' --version \
+  >"$temporary_root/empty-name.out" 2>"$temporary_root/empty-name.err"
+empty_name_status=$?
+set -e
+if (( empty_name_status != 2 )) || ! grep -q 'requires a non-empty value' "$temporary_root/empty-name.err"; then
+  printf 'codex-peer did not reject an empty peer name\n' >&2
+  exit 1
+fi
+
+# A plugin version mismatch must never restart the App Server from inside the
+# turn that is currently writing its rollout. This is the regression that can
+# produce duplicate ordinals and freeze Codex's derived history projection.
+in_turn_state="$temporary_root/in-turn-state"
+mkdir -p "$in_turn_state"
+set +e
+CODEX_THREAD_ID="00000000-0000-0000-0000-000000000002" \
+  CODEX_PEER_CODEX_BIN="$fake_codex" \
+  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
+  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+  CLAUDE_PEER_DATA_DIR="$in_turn_state" \
+  "$runtime_binary" bootstrap \
+  >"$temporary_root/in-turn.out" 2>"$temporary_root/in-turn.err"
+in_turn_status=$?
+set -e
+if (( in_turn_status != 75 )) || ! grep -q 'plugin update deferred' "$temporary_root/in-turn.err"; then
+  printf 'native runtime bootstrap did not refuse an in-turn App Server update\n' >&2
+  exit 1
+fi
+if [[ -s "$temporary_root/in-turn.out" ]]; then
+  printf 'native runtime bootstrap invoked Codex before refusing an in-turn update\n' >&2
+  exit 1
+fi
+
+# Exercise the version-change path with a stopped fake App Server and record
+# the actual Codex argv. This protects behavior even if shell quoting or
+# indirection changes; activation may start a server but must never restart it.
+recording_codex="$temporary_root/recording-codex"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@" >"$CODEX_RECORD"' 'exit 1' >"$recording_codex"
+chmod 0700 "$recording_codex"
+set +e
+CODEX_THREAD_ID= \
+  CODEX_HOME="$temporary_root/stopped-codex-home" \
+  CODEX_RECORD="$temporary_root/codex-argv" \
+  CODEX_PEER_CODEX_BIN="$recording_codex" \
+  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
+  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+  CLAUDE_PEER_APP_SERVER_SOCKET= \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/stopped-state" \
+  CLAUDE_PEER_SUPERVISOR_SOCKET= \
+  "$runtime_binary" bootstrap \
+  >"$temporary_root/stopped.out" 2>"$temporary_root/stopped.err"
+stopped_status=$?
+set -e
+if (( stopped_status == 0 )); then
+  printf 'native runtime bootstrap unexpectedly survived the deliberately failed fake daemon start\n' >&2
+  exit 1
+fi
+if [[ "$(<"$temporary_root/codex-argv")" != $'app-server\ndaemon\nstart' ]]; then
+  printf 'version-change activation did not invoke exactly app-server daemon start\n' >&2
+  exit 1
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  repair_home="$temporary_root/repair-home"
+  repair_thread="00000000-0000-0000-0000-000000000001"
+  python3 - "$repair_home" "$repair_thread" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+thread_id = sys.argv[2]
+root.mkdir(parents=True)
+rollout = root / "rollout.jsonl"
+records = [
+    {"ordinal": 41, "type": "event_msg", "payload": {"type": "token_count"}},
+    {"ordinal": 41, "type": "event_msg", "payload": {"type": "thread_settings_applied"}},
+    {"ordinal": 42, "type": "event_msg", "payload": {"type": "task_started"}},
+]
+encoded = [json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records]
+rollout.write_bytes(b"".join(encoded))
+
+state = sqlite3.connect(root / "state_5.sqlite")
+state.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
+state.execute("INSERT INTO threads VALUES (?, ?)", (thread_id, str(rollout)))
+state.commit()
+state.close()
+
+history = sqlite3.connect(root / "thread_history_1.sqlite")
+history.execute(
+    "CREATE TABLE thread_history_projection_state ("
+    "thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER NOT NULL, "
+    "next_rollout_ordinal INTEGER NOT NULL)"
+)
+history.execute(
+    "INSERT INTO thread_history_projection_state VALUES (?, ?, ?)",
+    (thread_id, len(encoded[0]), 42),
+)
+history.commit()
+history.close()
+PY
+  repair_plan="$(CODEX_THREAD_ID= CODEX_HOME="$repair_home" \
+    "$plugin_root/scripts/repair-history-projection" "$repair_thread")"
+  if ! grep -q '"applied": false' <<<"$repair_plan"; then
+    printf 'projection repair dry run did not produce a plan\n' >&2
+    exit 1
+  fi
+  repair_result="$(CODEX_THREAD_ID= CODEX_HOME="$repair_home" \
+    "$plugin_root/scripts/repair-history-projection" --apply "$repair_thread")"
+  if ! grep -q '"applied": true' <<<"$repair_result"; then
+    printf 'projection repair did not report success\n' >&2
+    exit 1
+  fi
+  repaired_offset="$(python3 - "$repair_home/thread_history_1.sqlite" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+print(connection.execute(
+    "SELECT next_rollout_byte_offset FROM thread_history_projection_state"
+).fetchone()[0])
+connection.close()
+PY
+)"
+  expected_offset="$(python3 - "$repair_home/rollout.jsonl" <<'PY'
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    stream.readline()
+    stream.readline()
+    print(stream.tell())
+PY
+)"
+  if [[ "$repaired_offset" != "$expected_offset" ]]; then
+    printf 'projection repair wrote offset %s, expected %s\n' "$repaired_offset" "$expected_offset" >&2
+    exit 1
+  fi
+  if ! compgen -G "$repair_home/thread_history_1.sqlite.backup-*" >/dev/null; then
+    printf 'projection repair did not create a SQLite backup\n' >&2
+    exit 1
+  fi
+fi
+
+cd -- "$plugin_root"
+if [[ "${RACE:-0}" == "1" ]]; then
+  go test -race ./...
+else
+  go test ./...
+fi
+
+SKIP_GO_TEST=1 "$plugin_root/scripts/federation/test"

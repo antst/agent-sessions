@@ -1,0 +1,20 @@
+{
+  "name": "agent-sessions",
+  "interface": {
+    "displayName": "Agent Sessions"
+  },
+  "plugins": [
+    {
+      "name": "claude-code-peer",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

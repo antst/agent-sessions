@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Installed hook and MCP entry point; never falls back to Node.
+
+state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
+native_runtime="$(sed -n '1p' "$state_root/native-runtime-path" 2>/dev/null || true)"
+if [[ -z "$native_runtime" || ! -x "$native_runtime" ]]; then
+  printf 'claude-code-peer: native runtime is not installed; run codex-peer once to install it\n' >&2
+  exit 1
+fi
+exec "$native_runtime" "$@"

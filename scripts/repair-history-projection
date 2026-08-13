@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Repair the one projection-cursor shape produced when Codex App Server is
+# replaced while an older process is still appending an active rollout.
+# Canonical rollout JSONL is never modified.
+
+apply=0
+if [[ "${1:-}" == "--apply" ]]; then
+  apply=1
+  shift
+fi
+if (( $# != 1 )) || [[ -z "$1" ]]; then
+  printf 'usage: repair-history-projection [--apply] THREAD_ID\n' >&2
+  exit 2
+fi
+thread_id="$1"
+
+if [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+  printf 'repair-history-projection: refuse to run inside a Codex turn; exit every Codex client first\n' >&2
+  exit 2
+fi
+
+python_bin="${PYTHON3:-$(command -v python3 || true)}"
+if [[ -z "$python_bin" ]]; then
+  printf 'repair-history-projection: Python 3 with sqlite3 support is required\n' >&2
+  exit 127
+fi
+
+codex_home="${CODEX_HOME:-${HOME}/.codex}"
+umask 077
+exec "$python_bin" - "$codex_home" "$thread_id" "$apply" <<'PY'
+import datetime
+import errno
+import hashlib
+import json
+import os
+import socket
+import sqlite3
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+
+class RepairError(Exception):
+    pass
+
+
+def fail(message):
+    raise RepairError(message)
+
+
+def readonly(path):
+    uri = "file:" + quote(str(path), safe="/") + "?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
+def table_exists(connection, name):
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def find_database(root, pattern, table, query, parameters):
+    matches = []
+    for path in sorted(root.glob(pattern)):
+        try:
+            connection = readonly(path)
+            try:
+                if not table_exists(connection, table):
+                    continue
+                row = connection.execute(query, parameters).fetchone()
+                if row is not None:
+                    matches.append((path, row))
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            continue
+    if len(matches) != 1:
+        fail(
+            f"expected exactly one {pattern} database containing thread {thread_id}, "
+            f"found {len(matches)}"
+        )
+    return matches[0]
+
+
+def parse_record(raw, description):
+    if not raw.endswith(b"\n"):
+        fail(f"{description} is not a complete newline-terminated JSONL record")
+    try:
+        record = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"{description} is not valid JSON: {error}")
+    ordinal = record.get("ordinal")
+    if not isinstance(ordinal, int):
+        fail(f"{description} has no integer ordinal")
+    return record
+
+
+def previous_record(stream, offset):
+    if offset <= 1:
+        fail("the projection cursor has no preceding rollout record")
+    stream.seek(offset - 1)
+    if stream.read(1) != b"\n":
+        fail("the projection byte offset is not at a JSONL record boundary")
+    end = offset - 1
+    position = end
+    start = 0
+    while position > 0:
+        block_start = max(0, position - 65536)
+        stream.seek(block_start)
+        block = stream.read(position - block_start)
+        newline = block.rfind(b"\n")
+        if newline >= 0:
+            start = block_start + newline + 1
+            break
+        position = block_start
+    stream.seek(start)
+    return stream.read(end - start) + b"\n"
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+try:
+    root = Path(sys.argv[1]).expanduser().resolve()
+    thread_id = sys.argv[2]
+    apply = sys.argv[3] == "1"
+    if not root.is_dir():
+        fail(f"CODEX_HOME does not exist: {root}")
+
+    control_socket = root / "app-server-control" / "app-server-control.sock"
+    if control_socket.exists():
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.5)
+        try:
+            probe.connect(str(control_socket))
+        except OSError as error:
+            if error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+                fail(f"App Server liveness probe was inconclusive: {error}")
+        else:
+            fail("managed App Server is running; stop it before inspecting or repairing the projection")
+        finally:
+            probe.close()
+
+    state_path, state_row = find_database(
+        root,
+        "state_*.sqlite",
+        "threads",
+        "SELECT rollout_path FROM threads WHERE id = ?",
+        (thread_id,),
+    )
+    rollout = Path(state_row[0]).expanduser().resolve()
+    if not rollout.is_file():
+        fail(f"rollout does not exist: {rollout}")
+
+    history_path, cursor = find_database(
+        root,
+        "thread_history_*.sqlite",
+        "thread_history_projection_state",
+        "SELECT next_rollout_byte_offset, next_rollout_ordinal "
+        "FROM thread_history_projection_state WHERE thread_id = ?",
+        (thread_id,),
+    )
+    old_offset, expected_ordinal = cursor
+    if not isinstance(old_offset, int) or not isinstance(expected_ordinal, int):
+        fail("projection cursor is not integral")
+
+    before_hash = sha256(rollout)
+    with rollout.open("rb") as stream:
+        size = rollout.stat().st_size
+        if old_offset < 0 or old_offset >= size:
+            fail(f"projection byte offset {old_offset} is outside rollout size {size}")
+        previous = parse_record(previous_record(stream, old_offset), "preceding record")
+        stream.seek(old_offset)
+        duplicate_raw = stream.readline()
+        duplicate = parse_record(duplicate_raw, "record at projection cursor")
+        new_offset = stream.tell()
+        following = parse_record(stream.readline(), "record after duplicate")
+
+    duplicate_payload = duplicate.get("payload")
+    duplicate_payload_type = (
+        duplicate_payload.get("type") if isinstance(duplicate_payload, dict) else None
+    )
+    known_shape = (
+        previous["ordinal"] == expected_ordinal - 1
+        and duplicate["ordinal"] == expected_ordinal - 1
+        and following["ordinal"] == expected_ordinal
+        and duplicate.get("type") == "event_msg"
+        and duplicate_payload_type == "thread_settings_applied"
+    )
+    if not known_shape:
+        fail(
+            "cursor does not match the known interrupted-App-Server duplicate: "
+            f"previous={previous['ordinal']} current={duplicate['ordinal']} "
+            f"next={following['ordinal']} expected={expected_ordinal} "
+            f"current_type={duplicate.get('type')}/{duplicate_payload_type}"
+        )
+
+    report = {
+        "type": "projection.repair-plan" if not apply else "projection.repaired",
+        "threadId": thread_id,
+        "stateDatabase": str(state_path),
+        "historyDatabase": str(history_path),
+        "rollout": str(rollout),
+        "rolloutSha256": before_hash,
+        "expectedOrdinal": expected_ordinal,
+        "duplicateOrdinal": duplicate["ordinal"],
+        "duplicateType": f"{duplicate.get('type')}/{duplicate_payload_type}",
+        "oldByteOffset": old_offset,
+        "newByteOffset": new_offset,
+        "applied": apply,
+    }
+
+    if apply:
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = history_path.with_name(history_path.name + f".backup-{stamp}-{os.getpid()}")
+        source = sqlite3.connect(history_path)
+        backup = sqlite3.connect(backup_path)
+        try:
+            source.backup(backup)
+        finally:
+            backup.close()
+            source.close()
+
+        writer = sqlite3.connect(history_path, timeout=2.0)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            current = writer.execute(
+                "SELECT next_rollout_byte_offset, next_rollout_ordinal "
+                "FROM thread_history_projection_state WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            if current != (old_offset, expected_ordinal):
+                fail(f"projection cursor changed while preparing repair: {current!r}")
+            updated = writer.execute(
+                "UPDATE thread_history_projection_state "
+                "SET next_rollout_byte_offset = ? "
+                "WHERE thread_id = ? AND next_rollout_byte_offset = ? "
+                "AND next_rollout_ordinal = ?",
+                (new_offset, thread_id, old_offset, expected_ordinal),
+            )
+            if updated.rowcount != 1:
+                fail("projection cursor update did not affect exactly one row")
+            writer.commit()
+        except Exception:
+            writer.rollback()
+            raise
+        finally:
+            writer.close()
+
+        after_hash = sha256(rollout)
+        if after_hash != before_hash:
+            fail("canonical rollout changed during repair; projection backup retained")
+        report["backup"] = str(backup_path)
+
+    print(json.dumps(report, sort_keys=True))
+except RepairError as error:
+    print(f"repair-history-projection: {error}", file=sys.stderr)
+    sys.exit(1)
+except sqlite3.Error as error:
+    print(f"repair-history-projection: sqlite error: {error}", file=sys.stderr)
+    sys.exit(1)
+PY

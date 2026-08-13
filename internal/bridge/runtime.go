@@ -1,0 +1,784 @@
+package bridge
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+	"unicode"
+
+	"github.com/antst/agent-sessions/internal/fileutil"
+	"github.com/antst/agent-sessions/internal/sessionkey"
+)
+
+const maxFrameBytes = 1024 * 1024
+
+type daemon struct {
+	mu               sync.Mutex
+	sessionID        string
+	cwd              string
+	name             string
+	nameSource       string
+	permissionMode   string
+	status           string
+	supervisorSocket string
+	ownerPID         int
+	ownerProcStart   string
+	procStart        string
+	startedAt        int64
+	heartbeat        time.Duration
+	backendSocket    string
+	stableSocket     string
+	registryFile     string
+	stateFile        string
+	inboxDir         string
+	pendingDir       string
+	sessionIndex     string
+	listener         net.Listener
+	seen             map[string]struct{}
+	seenOrder        []string
+	closeOnce        sync.Once
+	done             chan struct{}
+}
+
+type envelope struct {
+	From, FromSession, FromName, FromProduct, FromMode, MessageID, SentAt, Message string
+}
+
+// Main dispatches one role of the agent-session-runtime executable.
+func Main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, hook, mcp, or launch")
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "shim":
+		runShimMain(os.Args[2:])
+	case "supervisor":
+		os.Exit(runSupervisorCommand(os.Args[2:]))
+	case "appserver":
+		os.Exit(runAppServerCommand(os.Args[2:]))
+	case "lane":
+		os.Exit(runLaneCommand(os.Args[2:]))
+	case "claude-lane":
+		os.Exit(runClaudeLaneCommand(os.Args[2:]))
+	case "claude-lane-manager":
+		os.Exit(runClaudeLaneManager(os.Args[2:]))
+	case "hook":
+		runHookCommand()
+	case "mcp":
+		os.Exit(runMCPCommand())
+	case "launch":
+		os.Exit(runLaunchCommand(os.Args[2:]))
+	default:
+		fmt.Fprintf(os.Stderr, "agent-session-runtime: unknown command %q\n", os.Args[1])
+		os.Exit(2)
+	}
+}
+
+func runShimMain(argv []string) {
+	args := parseArgs(argv)
+	if args["session-id"] == "" || args["cwd"] == "" {
+		fmt.Fprintln(os.Stderr, "agent-session-runtime shim requires --session-id and --cwd")
+		os.Exit(2)
+	}
+	d := newDaemon(args)
+	if err := d.start(); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-code-peer native shim: %v\n", err)
+		os.Exit(1)
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	select {
+	case <-signals:
+	case <-d.done:
+	}
+	d.shutdown()
+}
+
+func parseArgs(argv []string) map[string]string {
+	result := map[string]string{}
+	for i := 0; i < len(argv); i++ {
+		if !strings.HasPrefix(argv[i], "--") || i+1 >= len(argv) {
+			continue
+		}
+		result[strings.TrimPrefix(argv[i], "--")] = argv[i+1]
+		i++
+	}
+	return result
+}
+
+func newDaemon(args map[string]string) *daemon {
+	pid := os.Getpid()
+	sessionID := args["session-id"]
+	dataDir := args["data-dir"]
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = filepath.Join(home, ".local", "state", "claude-code-peer")
+	}
+	claudeDir := args["claude-config-dir"]
+	if claudeDir == "" {
+		home, _ := os.UserHomeDir()
+		claudeDir = filepath.Join(home, ".claude")
+	}
+	codexHome := args["codex-home"]
+	if codexHome == "" {
+		home, _ := os.UserHomeDir()
+		codexHome = filepath.Join(home, ".codex")
+	}
+	runtimeDir := args["runtime-dir"]
+	if runtimeDir == "" {
+		runtimeDir = os.TempDir()
+	}
+	uid := os.Getuid()
+	runtimeRoot := bridgeRuntimeRoot(runtimeDir, uid)
+	key := sessionKey(sessionID)
+	cwd := args["cwd"]
+	heartbeat := 10 * time.Second
+	if value, err := strconv.Atoi(args["heartbeat-ms"]); err == nil && value > 0 {
+		heartbeat = time.Duration(max(value, 50)) * time.Millisecond
+	}
+	ownerPID, _ := strconv.Atoi(args["owner-pid"])
+	name := args["name"]
+	if name == "" {
+		name = fmt.Sprintf("codex-%s-%s", sanitizeName(filepath.Base(cwd)), first8(sessionID))
+	}
+	nameSource := args["name-source"]
+	if nameSource == "" {
+		nameSource = "generated"
+	}
+	return &daemon{
+		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
+		permissionMode: defaultString(args["permission-mode"], "default"), status: "idle",
+		supervisorSocket: args["supervisor-socket"], ownerPID: ownerPID,
+		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),
+		startedAt: time.Now().UnixMilli(), heartbeat: heartbeat,
+		backendSocket: filepath.Join(runtimeRoot, fmt.Sprintf("%d.sock", pid)),
+		stableSocket:  filepath.Join(runtimeRoot, fmt.Sprintf("session-%s.sock", key)),
+		registryFile:  filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)),
+		stateFile:     filepath.Join(dataDir, "sessions", key, "state.json"),
+		inboxDir:      filepath.Join(dataDir, "sessions", key, "inbox"),
+		pendingDir:    filepath.Join(dataDir, "sessions", key, "inbox", "pending"),
+		sessionIndex:  filepath.Join(codexHome, "session_index.jsonl"),
+		seen:          map[string]struct{}{}, done: make(chan struct{}),
+	}
+}
+
+func bridgeRuntimeRoot(runtimeDir string, uid int) string {
+	runtimeRoot := filepath.Join(runtimeDir, fmt.Sprintf("codex-claude-peer-%d", uid))
+	// Keep every peer address below the smaller Unix-domain socket limits used
+	// by supported systems. The stable alias is longer than supervisor.sock, so
+	// it is the canonical path-length check for every process in the bridge.
+	longestSocket := filepath.Join(runtimeRoot, "session-"+strings.Repeat("0", 20)+".sock")
+	if len(longestSocket) > 100 {
+		return filepath.Join(os.TempDir(), fmt.Sprintf("ccp-%d", uid))
+	}
+	return runtimeRoot
+}
+
+// ensurePrivateRuntimeDir establishes the trust boundary for every UDS and
+// stable alias the bridge creates.  In particular, MkdirAll alone is unsafe
+// for the predictable /tmp fallback: another user may have created the leaf
+// first and retained authority to replace its contents.
+func ensurePrivateRuntimeDir(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("create private runtime directory: %w", err)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect private runtime directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("refuse unsafe runtime path %s: not a real directory", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("refuse unsafe runtime directory %s: owner is not uid %d", path, os.Geteuid())
+	}
+	if info.Mode().Perm() != 0700 {
+		if err := os.Chmod(path, 0700); err != nil { //nolint:gosec // 0700 is required for a private Unix-socket directory.
+			return fmt.Errorf("secure runtime directory %s: %w", path, err)
+		}
+		info, err = os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+			return fmt.Errorf("runtime directory %s did not retain mode 0700", path)
+		}
+	}
+	return nil
+}
+
+func (d *daemon) start() error {
+	if err := ensurePrivateRuntimeDir(filepath.Dir(d.backendSocket)); err != nil {
+		return err
+	}
+	cleanupStaleStateFile(d.stateFile, filepath.Dir(d.backendSocket), filepath.Dir(d.registryFile))
+	_ = os.Remove(d.backendSocket)
+	listener, err := net.Listen("unix", d.backendSocket)
+	if err != nil {
+		return err
+	}
+	d.listener = listener
+	_ = os.Chmod(d.backendSocket, 0600)
+	if err := d.publishAlias(); err != nil {
+		_ = listener.Close()
+		return err
+	}
+	d.mu.Lock()
+	d.refreshNameLocked()
+	err = d.writeRecordsLocked()
+	d.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	go d.acceptLoop()
+	go d.maintenanceLoop()
+	return nil
+}
+
+func (d *daemon) acceptLoop() {
+	for {
+		conn, err := d.listener.Accept()
+		if err != nil {
+			select {
+			case <-d.done:
+				return
+			default:
+				continue
+			}
+		}
+		go d.handleConnection(conn)
+	}
+}
+
+func (d *daemon) handleConnection(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 4096), maxFrameBytes)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var frame map[string]any
+		if json.Unmarshal(line, &frame) == nil {
+			d.handleFrame(frame)
+		}
+	}
+}
+
+func (d *daemon) handleFrame(frame map[string]any) {
+	switch stringValue(frame["type"]) {
+	case "user":
+		d.handleUser(frame)
+	case "control":
+		d.handleControl(frame)
+	}
+}
+
+func (d *daemon) handleUser(frame map[string]any) {
+	if target := stringValue(frame["session_id"]); target != "" && target != d.sessionID {
+		return
+	}
+	message, _ := frame["message"].(map[string]any)
+	content := stringValue(message["content"])
+	if content == "" {
+		return
+	}
+	id := stringValue(frame["msg_id"])
+	if id == "" {
+		id = stringValue(frame["uuid"])
+	}
+	if id == "" {
+		// Retried transports without an explicit id must still converge on one
+		// durable wake record across shim replacement.
+		id = "derived-" + sessionKey(defaultString(stringValue(frame["from"]), "unknown")+"\x00"+content)
+	}
+	d.mu.Lock()
+	if _, exists := d.seen[id]; exists {
+		d.mu.Unlock()
+		return
+	}
+	d.seen[id] = struct{}{}
+	d.seenOrder = append(d.seenOrder, id)
+	if len(d.seenOrder) > 500 {
+		delete(d.seen, d.seenOrder[0])
+		d.seenOrder = d.seenOrder[1:]
+	}
+	supervisor := d.supervisorSocket
+	d.mu.Unlock()
+	env := parsePeerMessage(content)
+	item := map[string]any{
+		"type": "message", "id": defaultString(env.MessageID, id), "transportMessageId": id,
+		"receivedAt": time.Now().UTC().Format(time.RFC3339Nano),
+		"from":       defaultString(stringValue(frame["from"]), defaultString(env.From, "unknown")),
+		"message":    defaultString(env.Message, content),
+	}
+	putIf(item, "sentAt", env.SentAt)
+	putIf(item, "fromName", env.FromName)
+	putIf(item, "fromSession", env.FromSession)
+	putIf(item, "fromProduct", env.FromProduct)
+	putIf(item, "fromMode", env.FromMode)
+	if supervisor != "" && d.supervisorOwnsWake(supervisor, item) {
+		return
+	}
+	_ = d.enqueue(item)
+}
+
+func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool {
+	response, err := requestControl(supervisor, map[string]any{
+		"action": "wake", "sessionId": d.sessionID, "item": item,
+	}, 30*time.Second)
+	ownedStates := []string{"accepted", "in_flight", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
+	if err == nil && containsString(ownedStates, stringValue(response["delivery"])) {
+		return true
+	}
+	var rejected *controlResponseError
+	if errors.As(err, &rejected) {
+		// The supervisor rejected the request before claiming durable ownership.
+		return false
+	}
+	// A timed-out control call is ambiguous. Re-query and idempotently retry
+	// the same message id until the supervisor proves durable ownership or
+	// becomes unreachable; never create two delivery paths.
+	deadline := time.Now().Add(5 * time.Second)
+	for err != nil && time.Now().Before(deadline) && probeUnixSocket(supervisor, 300*time.Millisecond) {
+		status, statusErr := requestControl(supervisor, map[string]any{
+			"action": "wake_status", "sessionId": d.sessionID, "messageId": stringValue(item["id"]),
+		}, 2*time.Second)
+		if statusErr == nil && containsString([]string{"in_flight", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
+			return true
+		}
+		response, err = requestControl(supervisor, map[string]any{
+			"action": "wake", "sessionId": d.sessionID, "item": item,
+		}, 2*time.Second)
+		if err == nil && stringValue(response["delivery"]) != "" {
+			return true
+		}
+		if errors.As(err, &rejected) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// A live supervisor plus an unanswered mutating request is ambiguous, so
+	// keep the durable path authoritative. Falling back here is the original
+	// double-delivery race. If the supervisor actually died, the inbox is the
+	// only remaining delivery path and is safe.
+	return probeUnixSocket(supervisor, 300*time.Millisecond)
+}
+
+func (d *daemon) handleControl(frame map[string]any) {
+	action := stringValue(frame["action"])
+	if action == "shutdown" {
+		d.closeOnce.Do(func() { close(d.done) })
+		return
+	}
+	if action == "peer_message_status" {
+		_ = d.enqueue(map[string]any{
+			"type": "delivery-status", "id": randomID(), "receivedAt": time.Now().UTC().Format(time.RFC3339Nano),
+			"from": defaultString(stringValue(frame["from"]), "unknown"), "originalMessageId": frame["orig_msg_id"],
+			"status": frame["status"], "reason": frame["reason"],
+		})
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch action {
+	case "update":
+		if value := stringValue(frame["cwd"]); value != "" {
+			d.cwd = value
+		}
+		if value := stringValue(frame["supervisorSocket"]); value != "" {
+			d.supervisorSocket = value
+		}
+		d.applyNameLocked(stringValue(frame["name"]), stringValue(frame["nameSource"]))
+		if value := stringValue(frame["permissionMode"]); value != "" {
+			d.permissionMode = value
+		}
+		d.applyStatusLocked(stringValue(frame["status"]))
+	case "rename":
+		if value := stringValue(frame["name"]); value != "" {
+			d.name = sanitizeName(value)
+			d.nameSource = "manual"
+		}
+	case "status":
+		d.applyStatusLocked(stringValue(frame["status"]))
+	default:
+		return
+	}
+	_ = d.writeRecordsLocked()
+}
+
+func (d *daemon) applyNameLocked(value, source string) {
+	if value == "" {
+		return
+	}
+	var allowed bool
+	switch source {
+	case "canonical", "launch", "lane":
+		allowed = true
+	case "explicit":
+		allowed = d.nameSource != "manual"
+	case "codex":
+		allowed = d.nameSource != "explicit" && d.nameSource != "launch" && d.nameSource != "lane" &&
+			d.nameSource != "canonical" && d.nameSource != "manual"
+	default:
+		allowed = d.nameSource == "generated"
+	}
+	if allowed {
+		d.name = sanitizeName(value)
+		d.nameSource = defaultString(source, d.nameSource)
+	}
+}
+
+func (d *daemon) applyStatusLocked(value string) {
+	if value == "busy" || value == "shell" || value == "idle" || value == "waiting" {
+		d.status = value
+	}
+}
+
+func (d *daemon) maintenanceLoop() {
+	ticker := time.NewTicker(d.heartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ownerStatus := cleanupProcessIdentityStatus(d.ownerPID, d.ownerProcStart).Status
+			if ownerStatus == processIdentityStale {
+				d.closeOnce.Do(func() { close(d.done) })
+				return
+			}
+			d.mu.Lock()
+			d.refreshNameLocked()
+			_ = d.writeRecordsLocked()
+			d.mu.Unlock()
+		case <-d.done:
+			return
+		}
+	}
+}
+
+func (d *daemon) refreshNameLocked() {
+	if d.nameSource == "explicit" || d.nameSource == "launch" || d.nameSource == "lane" || d.nameSource == "canonical" || d.nameSource == "manual" {
+		return
+	}
+	file, err := os.Open(d.sessionIndex)
+	if err != nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
+	latest := ""
+	for scanner.Scan() {
+		var row map[string]any
+		if json.Unmarshal(scanner.Bytes(), &row) != nil || stringValue(row["id"]) != d.sessionID {
+			continue
+		}
+		for _, key := range []string{"thread_name", "title", "name"} {
+			if value := stringValue(row[key]); value != "" {
+				latest = value
+				break
+			}
+		}
+	}
+	if latest != "" {
+		d.name = sanitizeName(latest)
+		d.nameSource = "codex"
+	}
+}
+
+func (d *daemon) writeRecordsLocked() error {
+	now := time.Now().UnixMilli()
+	state := map[string]any{
+		"pid": os.Getpid(), "procStart": d.procStart, "ownerPid": d.ownerPID, "ownerProcStart": d.ownerProcStart,
+		"sessionId": d.sessionID, "cwd": d.cwd, "name": d.name, "nameSource": d.nameSource,
+		"permissionMode": d.permissionMode, "socketPath": d.stableSocket, "backendSocketPath": d.backendSocket,
+		"registryFile": d.registryFile, "inboxDir": d.inboxDir, "startedAt": d.startedAt,
+		"status": d.status, "supervisorSocket": d.supervisorSocket, "updatedAt": now,
+	}
+	registry := map[string]any{
+		"pid": os.Getpid(), "sessionId": d.sessionID, "cwd": d.cwd, "startedAt": d.startedAt,
+		"procStart": d.procStart, "version": "codex-claude-peer/0.1.0", "peerProtocol": 1,
+		"kind": "interactive", "entrypoint": "codex", "name": d.name, "nameSource": d.nameSource,
+		"status": d.status, "updatedAt": now, "statusUpdatedAt": now,
+		"messagingSocketPath": d.stableSocket, "bridgeSessionId": nil,
+	}
+	if err := writeJSONAtomic(d.stateFile, state); err != nil {
+		return err
+	}
+	return writeJSONAtomic(d.registryFile, registry)
+}
+
+func (d *daemon) enqueue(item map[string]any) error {
+	if err := os.MkdirAll(d.pendingDir, 0700); err != nil {
+		return err
+	}
+	id := safeID(stringValue(item["id"]))
+	if id == "" {
+		id = randomID()
+	}
+	entries, _ := os.ReadDir(d.pendingDir)
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), "-"+id+".json") {
+			return nil
+		}
+	}
+	file := filepath.Join(d.pendingDir, fmt.Sprintf("%016d-%s.json", time.Now().UnixMilli(), id))
+	if err := writeJSONAtomic(file, item); err != nil {
+		return err
+	}
+	entries, _ = os.ReadDir(d.pendingDir)
+	names := []string{}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names[:max(0, len(names)-50)] {
+		_ = os.Remove(filepath.Join(d.pendingDir, name))
+	}
+	return nil
+}
+
+func (d *daemon) publishAlias() error {
+	temporary := fmt.Sprintf("%s.%d.%s.tmp", d.stableSocket, os.Getpid(), randomID())
+	if err := os.Symlink(d.backendSocket, temporary); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, d.stableSocket); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
+func (d *daemon) shutdown() {
+	d.closeOnce.Do(func() { close(d.done) })
+	if d.listener != nil {
+		_ = d.listener.Close()
+	}
+	removeJSONIf(d.registryFile, func(row map[string]any) bool {
+		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
+	})
+	removeJSONIf(d.stateFile, func(row map[string]any) bool {
+		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
+	})
+	if target, err := os.Readlink(d.stableSocket); err == nil {
+		resolved := target
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(filepath.Dir(d.stableSocket), resolved)
+		}
+		resolved, _ = filepath.Abs(resolved)
+		backend, _ := filepath.Abs(d.backendSocket)
+		if resolved == backend {
+			_ = os.Remove(d.stableSocket)
+		}
+	}
+	_ = os.Remove(d.backendSocket)
+}
+
+type controlResponseError struct {
+	message string
+}
+
+func (e *controlResponseError) Error() string { return e.message }
+
+func requestControl(socket string, request map[string]any, timeout time.Duration) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	body, _ := json.Marshal(request)
+	if _, err = conn.Write(append(body, '\n')); err != nil {
+		return nil, err
+	}
+	line, err := bufio.NewReader(ioLimitReader{r: conn, n: maxFrameBytes}).ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+	var response map[string]any
+	if err = json.Unmarshal(line, &response); err != nil {
+		return nil, err
+	}
+	if ok, _ := response["ok"].(bool); !ok {
+		return nil, &controlResponseError{message: defaultString(stringValue(response["error"]), "local control failed")}
+	}
+	return response, nil
+}
+
+type ioLimitReader struct {
+	r net.Conn
+	n int
+}
+
+func (l ioLimitReader) Read(p []byte) (int, error) {
+	if len(p) > l.n {
+		p = p[:l.n]
+	}
+	return l.r.Read(p)
+}
+
+var envelopeRE = regexp.MustCompile(`(?s)^<cross-session-message([^>]*)>\n(.*)\n</cross-session-message>$`)
+var attributeRE = regexp.MustCompile(`^\s+([a-z][a-z0-9-]*)="([^"<>\n\r]*)"`)
+var escapedCloseRE = regexp.MustCompile(`(?i)<\\/cross-session-message`)
+
+func parsePeerMessage(content string) envelope {
+	match := envelopeRE.FindStringSubmatch(content)
+	if match == nil {
+		return envelope{Message: content}
+	}
+	attrs := map[string]string{}
+	rest := match[1]
+	for rest != "" {
+		part := attributeRE.FindStringSubmatch(rest)
+		if part == nil {
+			return envelope{Message: content}
+		}
+		attrs[part[1]] = part[2]
+		rest = rest[len(part[0]):]
+	}
+	body := match[2]
+	metadata := map[string]any{}
+	const prefix = "[codex-peer-metadata: "
+	if strings.HasPrefix(body, prefix) {
+		line, tail, found := strings.Cut(body, "\n")
+		if !found {
+			tail = ""
+		}
+		if strings.HasSuffix(line, "]") && json.Unmarshal([]byte(line[len(prefix):len(line)-1]), &metadata) == nil {
+			body = tail
+		}
+	}
+	product := defaultString(attrs["from-product"], stringValue(metadata["fromProduct"]))
+	if product != "codex" && product != "claude" {
+		product = ""
+	}
+	mode := attrs["from-mode"]
+	if mode != "bypass" && mode != "prompting" {
+		mode = ""
+	}
+	return envelope{
+		From: attrs["from"], FromSession: attrs["from-session"], FromName: attrs["from-name"],
+		FromProduct: product, FromMode: mode, MessageID: defaultString(attrs["message-id"], stringValue(metadata["messageId"])),
+		SentAt: defaultString(attrs["sent-at"], stringValue(metadata["sentAt"])), Message: escapedCloseRE.ReplaceAllString(body, "</cross-session-message"),
+	}
+}
+
+func writeJSONAtomic(file string, value any) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		return err
+	}
+	return fileutil.WriteJSONAtomic(file, value)
+}
+
+func removeJSONIf(file string, predicate func(map[string]any) bool) {
+	body, err := os.ReadFile(file) //nolint:gosec // callers supply fixed bridge-owned state and registry paths.
+	if err != nil {
+		return
+	}
+	var row map[string]any
+	if json.Unmarshal(body, &row) == nil && predicate(row) {
+		_ = os.Remove(file)
+	}
+}
+
+func sanitizeName(value string) string {
+	var out []rune
+	separator := false
+	for _, r := range strings.TrimSpace(value) {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '.' || r == '_' || r == '-' {
+			out = append(out, r)
+			separator = false
+		} else if !separator {
+			out = append(out, '-')
+			separator = true
+		}
+		if len(out) >= 80 {
+			break
+		}
+	}
+	result := strings.Trim(string(out), "._-")
+	if result == "" {
+		return "codex"
+	}
+	return result
+}
+
+func sessionKey(id string) string {
+	return sessionkey.FromID(id)
+}
+func safeID(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 80 {
+			break
+		}
+	}
+	return b.String()
+}
+func randomID() string {
+	body := make([]byte, 16)
+	_, _ = rand.Read(body)
+	body[6] = (body[6] & 0x0f) | 0x40
+	body[8] = (body[8] & 0x3f) | 0x80
+	s := hex.EncodeToString(body)
+	return fmt.Sprintf("%s-%s-%s-%s-%s", s[:8], s[8:12], s[12:16], s[16:20], s[20:])
+}
+func readProcStart(pid int) string {
+	started, _ := captureProcessStart(pid)
+	return started
+}
+func first8(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
+}
+func defaultString(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+func stringValue(value any) string { text, _ := value.(string); return text }
+func intValue(value any) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	}
+	return 0
+}
+func putIf(target map[string]any, key, value string) {
+	if value != "" {
+		target[key] = value
+	}
+}

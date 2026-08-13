@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.antst.peer-federator.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGE_ME/.local/bin/peer-federator</string>
+    <string>agent</string>
+    <string>--hub</string><string>10.2.17.1:7419</string>
+    <string>--host</string><string>workstation-a</string>
+    <string>--name</string><string>workstation-a</string>
+    <!-- Add the enable-remote-lanes command-line flag only when every host on the hub is
+         trusted to execute native lane commands as this user. -->
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/peer-federator-agent.log</string>
+  <key>StandardErrorPath</key><string>/tmp/peer-federator-agent.log</string>
+</dict>
+</plist>

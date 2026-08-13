@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "claude_peer": {
+      "command": "./scripts/native-entry",
+      "args": [
+        "mcp"
+      ],
+      "cwd": ".",
+      "default_tools_approval_mode": "approve",
+      "env_vars": [
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_PLUGIN_DATA",
+        "CLAUDE_PEER_CLAUDE_CONFIG_DIR",
+        "CLAUDE_PEER_DATA_DIR",
+        "CODEX_HOME",
+        "PLUGIN_DATA",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME"
+      ],
+      "tool_timeout_sec": 30
+    }
+  }
+}

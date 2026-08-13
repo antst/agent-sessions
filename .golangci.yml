@@ -1,0 +1,93 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - errorlint         # Catches direct error comparisons that fail on wrapped errors
+    - govet
+    - ineffassign
+    - staticcheck      # Includes stylecheck rules for error strings
+    - unused
+    - bodyclose
+    - gocyclo
+    - misspell
+    - unconvert
+    - unparam
+    - revive
+    - gocritic
+    - gosec
+    - prealloc
+    - whitespace
+    - asciicheck
+    - bidichk
+    - durationcheck
+    - errname
+    - exhaustive
+    - gocheckcompilerdirectives
+    - makezero
+    - nilerr
+    - nilnesserr
+    - nolintlint
+    - nosprintfhostport
+    - reassign
+    - recvcheck
+    - usestdlibvars
+    - wastedassign
+  settings:
+    gocyclo:
+      min-complexity: 15
+    staticcheck:
+      checks:
+        - "all"         # Enable all rules including ST1020 (comment format)
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: exported
+          severity: warning
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+            - "checkPublicInterface"    # Check comments on public interface methods
+        - name: package-comments
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: defer
+        - name: constant-logical-expr
+        - name: bool-literal-in-expr
+        - name: atomic
+        - name: error-strings    # Error strings should not be capitalized or end with punctuation
+  exclusions:
+    # Do not inherit golangci-lint's broad compatibility exclusions. Every
+    # exception below is local and justified by the protocol or test harness.
+    presets: []
+    rules:
+      # Test fixtures intentionally launch the current test binary and contain
+      # compact protocol simulators. Production code remains fully checked.
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - gosec
+      # RFC 6455 requires SHA-1 for WebSocket's non-security accept-key proof.
+      - path: internal/bridge/appserver\.go
+        text: "G401|G505"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports       # Checks import sorting
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/antst/agent-sessions
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

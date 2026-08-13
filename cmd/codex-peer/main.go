@@ -1,0 +1,21 @@
+// Command codex-peer launches owner-attested interactive Codex peers.
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/antst/agent-sessions/internal/launcher"
+)
+
+func main() {
+	if err := launcher.RunCodexPeer(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "codex-peer: %v\n", err)
+		var exit *launcher.ExitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.Code)
+		}
+		os.Exit(1)
+	}
+}

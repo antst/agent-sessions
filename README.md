@@ -1,0 +1,185 @@
+# Agent Sessions
+
+Native, persistent session lifecycle for Codex and Claude Code, plus local and federated
+cross-session messaging. Interactive sessions and durable worker lanes can be created, resumed,
+supervised, discovered, and messaged with nearly the same lifecycle on Linux and macOS.
+
+This repository is one Go module with shared implementation under `internal/`. It builds five
+separate native executables:
+
+- `agent-session-runtime` — the shared diagnostic/runtime multicall used by the launchers;
+- `codex-peer` — an interactive Codex TUI on the shared App Server;
+- `codex-peer-lane` — project-neutral lifecycle commands for named orchestrated lanes (`run`,
+  `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and `doctor`).
+- `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers spawned
+  by Codex.
+- `peer-federator` — a separate network process that projects live peers and lane commands across
+  trusted hosts. It shares this source tree but remains an independently operated binary/service.
+
+## Quick start
+
+```bash
+git clone https://github.com/antst/agent-sessions.git
+cd agent-sessions
+make test-race
+codex app-server daemon stop # after exiting every Codex client
+make install-all
+
+codex-peer -n reviewer # approve the plugin hooks when Codex asks the first time
+claude agents --json
+```
+
+On the first Codex launch after installation, approve the one-time hook prompt for
+`claude-code-peer@agent-sessions`. The lifecycle hooks are what register the session and deliver
+fallback inbox messages; declining them leaves the plugin installed but the peer bridge incomplete.
+This is Codex's plugin-hook trust prompt, not a request to loosen the session's sandbox or tool
+approval policy. Restart any Codex TUI that was already open during installation so it loads the
+new plugin and presents the prompt.
+
+`codex-peer` creates each fresh root through the shared App Server and resolves an explicit UUID or
+unique-name resume target to one authoritative UUID. It binds that exact UUID to the
+wrapper process identity, then replaces the wrapper process with the TUI. The supervisor
+uses that durable owner record to remove the shim and thread-scoped MCP children even when Codex skips
+`SessionEnd` or the TUI is killed; PID reuse is rejected by the process-start token.
+Because remote Codex 0.147 delays `SessionStart` until the first user turn, fresh and resumed roots are
+published while their exact live wrapper owner is still marked prepared. A successful fresh publication
+commits the zero-turn thread as durable before the wrapper returns; failures before that commit delete it.
+The first SessionStart promotes the record to attached. If a committed wrapper exits before SessionStart,
+the reaper removes its shim but does not archive the still-loaded zero-turn thread. Its exact stale owner
+record becomes a one-use proof for immediate exact or name resume; the replacement transaction consumes it.
+
+Codex installs plugin hooks and MCP inventory daemon-wide. Ordinary Codex threads therefore see the
+`claude_peer` tool names, but their hook executions are silent and tool calls fail closed before roster,
+inbox, or send access because the stdio server is not a child of the managed App Server or the thread
+has no exact interactive-owner/lane capability. Authorization is
+thread-scoped: a plain client deliberately attached to an already-authorized peer UUID is not
+distinguishable without an upstream per-attachment token.
+The plugin requests daemon-side approval for `claude_peer` dispatch so ordinary calls reach that
+fail-closed authorization check instead of hanging at a global pre-dispatch prompt. This approves
+dispatch only; it does not grant a thread peer authority or change its sandbox/approval policy.
+
+The launcher removes only its own `-n/--peer-name` and, for resume, the selector it resolves to one
+UUID. It invokes the managed `--remote unix:// resume UUID` target, supplies a canonical cwd when the
+caller did not provide one, then appends every remaining Codex argument unchanged and in its original
+relative order. This includes model, profile, config, feature, sandbox, approval, search, variadic
+image, hook-trust, and display options regardless of whether they appeared before or after the input
+`resume` selector. Explicit `--yolo` is additionally mirrored through the shared App Server lifecycle:
+fresh peers receive it at `thread/start`, while resumed peers receive it through `thread/resume` plus
+`thread/settings/update` before publication. The real Codex attachment still receives the caller's
+unchanged option. The update is durable thread state: later plain resumes of that thread remain in
+full-access mode until its settings are explicitly changed. Supported resume syntax is `codex-peer [GLOBAL_OPTIONS] resume [RESUME_OPTIONS]
+UUID_OR_NAME [PROMPT_OR_OPTIONS]`; options may appear on either side of the input selector. A name selects
+the newest usable exact-name session. Picker/`--last`, fork, caller-controlled remote endpoints, and
+already-loaded targets without an exact stale zero-turn owner proof remain unsupported. Resume
+inherits the thread's canonical cwd; an explicit `-C` must resolve to that same directory.
+
+`make install` copies the native runtime payload and the Codex `claude-lane` skill under
+`${PREFIX:-~/.local}/libexec/agent-sessions`, registers that installed marketplace, installs the
+plugin, and links the native runtime plus all three launchers under `${PREFIX:-~/.local}/bin`.
+`make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
+`make install-claude` independently installs the
+text-only Claude plugin; `make install-all` does both. A version-changing install requires App Server to
+be stopped; the bridge never restarts a running server because doing so can interrupt an active
+rollout. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
+a same-version rebuild replaces only the supervisor, without restarting App Server. CI archives carry prebuilt Linux and macOS binaries for x86-64 and arm64, so release
+installations do not require Go or Node.js.
+
+For tags named `vX.Y.Z`, CI publishes four installable release archives plus `SHA256SUMS` on the
+Forgejo Release. Download the archive matching the host, verify it, extract it, exit all Codex
+clients, stop App Server, and run `make install-all` from the extracted directory. The packaged
+marker makes the installer use the bundled binary even if Go is installed.
+
+## What it provides
+
+- Claude discovers root Codex threads through its native local session registry.
+- Incoming messages wake idle threads or steer an already-running turn.
+- `claude_peer` MCP tools provide list, send, identity, inbox, and rename operations.
+- Peer delivery is push-based; active orchestrators should continue useful work rather than poll.
+  `check_inbox` is only for messages queued past an automatic delivery boundary.
+- TUI `/rename` changes flow immediately back to `claude agents --json`.
+- Stable per-session UDS reply addresses are republished when a TUI resumes the same thread.
+  Normal TUI exit removes the live address, discovery row, shim, and thread-scoped MCP children.
+- Dead shim transports are replaced and garbage-collected without deleting queued messages.
+- Child Codex subagents remain private to their parent while the root is a published peer.
+- Generic lanes inherit normal user configuration and impose no model, reasoning, sandbox,
+  approval, web, or project policy.
+- A lane is owned by its launching orchestrator by default. When that owner exits, active work is
+  interrupted and the lane is archived, stopping its discovery shim while retaining resumable
+  transcript history. For a corroborated Claude caller, the Claude session process is the owner—not
+  a short-lived Bash or Python wrapper that invokes the CLI. `--persistent` explicitly creates a
+  lane that survives its owner.
+- Completed lanes can take follow-up turns on the same transcript. Parent-owned Claude lanes notify
+  their corroborated owner automatically; persistent lanes may nominate a peer with `--notify`.
+  By default a terminal lane remains available for one minute, then auto-archives if no newer turn
+  started. `--auto-archive-after SECONDS` configures that grace and `--no-auto-archive` disables it;
+  combine the latter with `--persistent` for a
+  permanently idle, messageable lane.
+  JSON-Schema output enforcement, detached worktree isolation, and terminal accounting are
+  available to orchestrators.
+- A versioned Claude Code plugin teaches any local orchestrator this generic lane contract without
+  copying bridge logic or choosing model, effort, sandbox, approval, web, or project policy.
+- A Codex `claude-lane` skill provides the reverse direction: Codex can launch, message, collect,
+  resume, and clean up Claude Code workers through the same lifecycle vocabulary. Claude lane
+  workers receive `ListAgents` and `SendMessage` by default, so they can discover and initiate
+  ordinary messages to other local or federated peers. The native Claude worker is the lane's
+  discoverable peer and receives messages directly; the lifecycle manager does not proxy them.
+- With the separate `peer-federator` protocol-2 daemon installed, both skills can run their native
+  lane CLI on a named connected host. Remote lifecycle traffic and ordinary peer messages remain
+  hub-only; remote execution is an explicit destination opt-in, the cleanup fuse cannot be disabled
+  remotely, the destination exposes no direct spawn listener, and there is no SSH fallback.
+
+## Repository layout
+
+```text
+.codex-plugin/              plugin manifest
+.agents/plugins/            repository-local marketplace
+.claude-plugin/             Claude Code marketplace catalog
+claude/                     self-contained Claude Code plugin and orchestration skill
+.mcp.json                   MCP registration
+hooks/                      Codex lifecycle hook registration
+skills/                     Codex skill for orchestrating Claude Code lanes
+cmd/                        five executable entry points
+internal/bridge/            local session lifecycle and messaging runtime
+internal/launcher/          native launcher argument and bootstrap logic
+internal/federator/         independent cross-host federation runtime
+deploy/peer-federator/      systemd and launchd service templates
+scripts/                    hook/MCP trampoline, maintenance, packaging, and test tooling
+docs/                       installation, lane integration, and protocol notes
+.forgejo/workflows/         tests and four-platform release builds
+```
+
+The command packages contain only process entry points. Shared implementation stays private under
+`internal/`; local session semantics remain in `internal/bridge`, launcher policy in
+`internal/launcher`, and host federation in `internal/federator`. Federation does not run inside
+the local session supervisor.
+
+## Development
+
+```bash
+make lint
+make test
+make test-race
+make build
+make dev-install        # source-linked Codex/runtime development install
+make dev-install-claude # source-linked Claude orchestration skill
+make install-claude     # Claude skill from the stable installed runtime tree
+make install-all        # native runtime plus Claude orchestration skill
+make reinstall   # refresh cachebuster, rebuild, and reinstall the local plugin
+make repair-projection THREAD_ID=<uuid>         # inspect known Codex 0.147 projection damage
+make repair-projection THREAD_ID=<uuid> APPLY=1 # back up and repair the exact known shape
+```
+
+The lint target verifies `.golangci.yml` before running `golangci-lint`. Forgejo runs lint, normal
+tests, race tests, and all four architecture builds concurrently; release publication remains gated
+on every one of those jobs.
+
+See [installation](docs/INSTALL.md), [Codex lane integration](docs/LANES.md),
+[Claude lane integration](docs/CLAUDE-LANES.md),
+[Claude adapter installation](docs/CLAUDE-INSTALL.md), and the
+reverse-engineered [Claude protocol notes](docs/PROTOCOL.md).
+
+The Claude-side wire format is not a public Anthropic API. Development validation used Claude Code
+2.1.227 and Codex CLI 0.147.0 on Linux; both macOS architectures are continuously cross-compiled.
+The bridge follows Claude's trusted-local model: Codex and Claude peer processes running as the
+same operating-system user are mutually trusted. It is not a cross-user or remote authorization
+boundary; private runtime directories and sockets protect against other local users.

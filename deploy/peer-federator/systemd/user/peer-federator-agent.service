@@ -1,0 +1,16 @@
+[Unit]
+Description=Peer Federator host agent
+Documentation=https://github.com/antst/agent-sessions/blob/main/docs/FEDERATION.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/peer-federator/agent.env
+ExecStart=/usr/bin/env peer-federator agent
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,40 @@
+{
+  "description": "Register Codex threads as Claude Code peers and deliver queued peer messages.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/scripts/native-entry\" hook",
+            "timeout": 10,
+            "additionalContextLimit": 1200
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/scripts/native-entry\" hook",
+            "timeout": 10,
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/scripts/native-entry\" hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
