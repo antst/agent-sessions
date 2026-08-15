@@ -252,6 +252,9 @@ func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 	if _, present := resumeParams["sandbox"]; present {
 		t.Fatalf("prepared resume mixed sandbox mutation with thread loading: %#v", resumeParams)
 	}
+	if stringValue(resumeParams["cwd"]) != root {
+		t.Fatalf("prepared resume did not apply the requested cwd: %#v", resumeParams)
+	}
 	sandboxPolicy, _ := settingsParams["sandboxPolicy"].(map[string]any)
 	if stringValue(settingsParams["approvalPolicy"]) != "never" || stringValue(sandboxPolicy["type"]) != "dangerFullAccess" {
 		t.Fatalf("prepared resume did not persist effective yolo settings: %#v", settingsParams)

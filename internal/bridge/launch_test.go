@@ -710,10 +710,21 @@ func TestPreparedResumeTakesOverLoadedZeroTurnOwnerWithoutArchiving(t *testing.T
 	}
 }
 
-func TestPreparedResumeRejectsDifferentExplicitCwdBeforeOwnerWrite(t *testing.T) {
-	threadRoot := t.TempDir()
-	requestedRoot := t.TempDir()
+func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testing.T) {
+	migrationRoot := t.TempDir()
+	threadRoot := filepath.Join(migrationRoot, "codex-messaging")
+	requestedRoot := filepath.Join(migrationRoot, "agent-sessions")
+	if err := os.Mkdir(threadRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(threadRoot, requestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {
+		t.Fatalf("saved cwd still exists after rename: %v", err)
+	}
 	threadID := "00000000-0000-0000-0000-000000000114"
+	var published map[string]any
 	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
 		switch stringValue(request["method"]) {
 		case "initialize":
@@ -723,19 +734,32 @@ func TestPreparedResumeRejectsDifferentExplicitCwdBeforeOwnerWrite(t *testing.T)
 		case "thread/list", "thread/loaded/list":
 			return map[string]any{"data": []any{}}, nil
 		default:
-			return nil, errors.New("unexpected explicit-cwd method")
+			return nil, errors.New("unexpected migrated-cwd method")
 		}
 	})
-	setPreparedLaunchTestEnv(t, threadRoot, socket)
-	_, _, err := bindPreparedResumeNative([]string{
+	setPreparedLaunchTestEnv(t, requestedRoot, socket, func(request map[string]any) map[string]any {
+		switch stringValue(request["action"]) {
+		case "register_prepared":
+			published = request
+			commitPreparedOwnerForTest(resolveNativePaths(), threadID)
+			return map[string]any{"state": map[string]any{"sessionId": threadID}}
+		default:
+			return map[string]any{}
+		}
+	})
+	got, effectiveCwd, err := bindPreparedResumeNative([]string{
 		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "true",
 		"--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", readProcStart(os.Getpid()),
 	})
-	if err == nil || !strings.Contains(err.Error(), "explicit resume cwd") {
-		t.Fatalf("explicit different cwd error = %v", err)
+	if err != nil || got != threadID || effectiveCwd != requestedRoot {
+		t.Fatalf("migrated cwd resume = id=%q cwd=%q err=%v", got, effectiveCwd, err)
 	}
-	if owner := readInteractiveOwner(resolveNativePaths(), threadID); owner != nil {
-		t.Fatalf("explicit different cwd wrote owner: %#v", owner)
+	owner := readInteractiveOwner(resolveNativePaths(), threadID)
+	if owner == nil || owner.Cwd != requestedRoot || stringValue(published["cwd"]) != requestedRoot {
+		t.Fatalf("migrated cwd owner=%#v publication=%#v", owner, published)
+	}
+	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {
+		t.Fatalf("resume recreated the missing saved cwd: %v", err)
 	}
 }
 
