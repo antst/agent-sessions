@@ -80,6 +80,10 @@ func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localP
 		}
 		permissionMode := peerPermissionMode(pid, record.PermissionMode)
 		if record.Entrypoint == "grok" {
+			// Grok permission changes are runtime state, not immutable argv. If
+			// the live bridge cannot corroborate its current state, over-report
+			// privilege instead of silently labelling a yolo session constrained.
+			permissionMode = "bypassPermissions"
 			if inspected, ok := inspectGrokPermissionMode(record.MessagingSocketPath, pid, record); ok {
 				permissionMode = inspected
 			}

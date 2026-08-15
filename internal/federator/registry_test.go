@@ -198,8 +198,8 @@ func TestDiscoverGrokPeerRejectsMismatchedInspection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := peers["host-a/"+record.SessionID].PermissionMode; got != "default" {
-				t.Fatalf("mismatched inspection permission = %q, want argv fallback default", got)
+			if got := peers["host-a/"+record.SessionID].PermissionMode; got != "bypassPermissions" {
+				t.Fatalf("mismatched inspection permission = %q, want conservative bypass", got)
 			}
 		})
 	}
@@ -221,8 +221,8 @@ func TestDiscoverGrokPeerFallsBackWhenInspectionIsUnresponsive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := peers["host-a/"+record.SessionID].PermissionMode; got != "default" {
-		t.Fatalf("unresponsive inspection permission = %q, want argv fallback default", got)
+	if got := peers["host-a/"+record.SessionID].PermissionMode; got != "bypassPermissions" {
+		t.Fatalf("unresponsive inspection permission = %q, want conservative bypass", got)
 	}
 }
 

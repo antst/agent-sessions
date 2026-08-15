@@ -56,6 +56,12 @@ otherwise `default`. It refreshes that value while the peer is live, including
 after an in-TUI permission change. Missing or ambiguous live state fails
 closed instead of guessing from argv.
 
+During a peer-injected turn, the bridge snapshots that live permission class
+immediately before submitting the prompt so MCP calls made by the same turn do
+not deadlock against its ACP request. A permission change made while that turn
+is already running becomes visible after the turn completes; the snapshot can
+therefore lag for at most the 30-minute injected-turn timeout.
+
 Once the ACP bridge has loaded the exact session, the peer appears in
 `list_peers` and can receive `send_message`. The installed `agent_sessions` MCP
 server lets Grok list/message peers and invoke the existing `codex-peer-lane`

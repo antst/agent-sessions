@@ -28,6 +28,7 @@ const (
 	grokControlTimeout    = 10 * time.Second
 	grokACPStartupTimeout = 15 * time.Second
 	grokACPPromptTimeout  = 30 * time.Minute
+	grokStatusRetryDelay  = 25 * time.Millisecond
 )
 
 // grokHostConfig describes one process-attested interactive Grok launch.  A
@@ -270,21 +271,33 @@ func attestGrokMCPCaller(paths nativePaths) (string, error) {
 }
 
 func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
-	response, err := requestControl(record.ControlSocket, map[string]any{
-		"action": "status", "sessionId": record.SessionID, "launchToken": token,
-	}, grokControlTimeout)
-	if err != nil {
-		return err
+	deadline := time.Now().Add(grokControlTimeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return errors.New("timed out waiting for authoritative Grok permission mode")
+		}
+		response, err := requestControl(record.ControlSocket, map[string]any{
+			"action": "status", "sessionId": record.SessionID, "launchToken": token,
+		}, remaining)
+		if err != nil {
+			return err
+		}
+		if busy, _ := response["refreshBusy"].(bool); busy {
+			timer := time.NewTimer(min(grokStatusRetryDelay, remaining))
+			<-timer.C
+			continue
+		}
+		mode := stringValue(response["permissionMode"])
+		if mode != "default" && mode != "bypassPermissions" {
+			return errors.New("grok host returned no authoritative permission mode")
+		}
+		if deferred, _ := response["refreshDeferred"].(bool); deferred &&
+			stringValue(response["permissionAuthority"]) != "active_prompt_snapshot" {
+			return errors.New("grok host deferred permission refresh without an active prompt snapshot")
+		}
+		return nil
 	}
-	mode := stringValue(response["permissionMode"])
-	if mode != "default" && mode != "bypassPermissions" {
-		return errors.New("grok host returned no authoritative permission mode")
-	}
-	if deferred, _ := response["refreshDeferred"].(bool); deferred &&
-		stringValue(response["permissionAuthority"]) != "active_prompt_snapshot" {
-		return errors.New("grok host deferred permission refresh without an active prompt snapshot")
-	}
-	return nil
 }
 
 // inferGrokParent turns an inherited launch capability into lane lifecycle
@@ -1002,7 +1015,11 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 			permissionMode, valid = h.activePromptPermissionSnapshot()
 			if !published || !valid {
 				h.peerMu.Unlock()
-				return nil, errors.New("grok ACP is busy without an authoritative active prompt permission snapshot")
+				return map[string]any{
+					"sessionId": h.config.SessionID, "leaderReady": h.leader != nil,
+					"loaded": false, "ready": false, "refreshBusy": true,
+					"refreshDeferred": true, "permissionAuthority": "none",
+				}, nil
 			}
 			loaded = true
 			permissionAuthority = "active_prompt_snapshot"
@@ -1147,13 +1164,14 @@ func (h *grokHost) deliverWake(messageID string) {
 		h.requeueWake(messageID, err)
 		return
 	}
+	h.beginActivePromptPermissionSnapshot()
 	if err := h.ensurePeerPublished(); err != nil {
+		h.clearActivePromptPermissionSnapshot()
 		h.acpMu.Unlock()
 		h.requeueWake(messageID, err)
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPPromptTimeout)
-	h.beginActivePromptPermissionSnapshot()
 	_, err = h.acp.request(ctx, "session/prompt", map[string]any{
 		"sessionId": h.config.SessionID,
 		"prompt":    []map[string]any{{"type": "text", "text": trustedPeerText(item)}},

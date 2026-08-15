@@ -399,7 +399,7 @@ func TestGrokHostStatusDoesNotDeadlockInjectedTurn(t *testing.T) {
 	waitForGrokDelivery(t, host, "busy-status", "delivered")
 }
 
-func TestGrokHostBusyStatusWithoutActivePromptSnapshotFailsClosed(t *testing.T) {
+func TestGrokHostBusyStatusWithoutActivePromptSnapshotIsRetryable(t *testing.T) {
 	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-busy-no-snapshot")
 	defer stopTestGrokHost(t, host, cancel, result)
 	waitGrokHostReady(t, host)
@@ -409,12 +409,25 @@ func TestGrokHostBusyStatusWithoutActivePromptSnapshotFailsClosed(t *testing.T) 
 	status, err := requestControl(host.paths.ControlSocket, map[string]any{
 		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
 	}, 250*time.Millisecond)
-	host.acpMu.Unlock()
-	if err == nil || !strings.Contains(err.Error(), "without an authoritative active prompt permission snapshot") {
+	if busy, _ := status["refreshBusy"].(bool); err != nil || !busy || stringValue(status["permissionMode"]) != "" {
 		t.Fatalf("busy status without prompt snapshot = %#v, %v", status, err)
 	}
 	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
 		t.Fatalf("busy status without prompt snapshot blocked for %s", elapsed)
+	}
+	host.modeMu.RLock()
+	record := host.record
+	host.modeMu.RUnlock()
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		host.acpMu.Unlock()
+	}()
+	started = time.Now()
+	if err := refreshGrokLaunchPermission(&record, host.config.LaunchToken); err != nil {
+		t.Fatalf("retry transient busy permission refresh: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 50*time.Millisecond || elapsed >= time.Second {
+		t.Fatalf("transient busy permission refresh completed in %s", elapsed)
 	}
 }
 

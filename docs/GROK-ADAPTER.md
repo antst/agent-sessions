@@ -118,6 +118,10 @@ The product is the leader + waker. Hooks are not the delivery path.
   that live value is true, and refresh it while the peer is live so an in-TUI
   permission change cannot leave stale authority metadata. A missing,
   malformed, duplicate, or dormant row is a fail-closed readiness failure.
+  While an injected `session/prompt` owns the ACP stream, use the live mode
+  captured immediately before submission as an explicitly labelled snapshot;
+  a mode change during that turn becomes authoritative after it completes.
+  Other ACP contention is retryable and supplies no permission class.
 - Publish the live session into Claude's registry (`entrypoint: "grok"`)
   so `send_message` can address it. Reuse the existing shim; point
   `supervisorSocket` at the waker.
