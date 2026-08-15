@@ -601,12 +601,8 @@ func TestCanonicalLaunchDirectoryRejectsLineBreak(t *testing.T) {
 
 func TestPreparedResumeBindsExactUUIDFromAuthoritativeRead(t *testing.T) {
 	root := t.TempDir()
-	threadCwd, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
 	requestedRoot := t.TempDir()
-	requestedRoot, err = filepath.EvalSymlinks(requestedRoot)
+	requestedRoot, err := filepath.EvalSymlinks(requestedRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,15 +637,15 @@ func TestPreparedResumeBindsExactUUIDFromAuthoritativeRead(t *testing.T) {
 		"--target", threadID, "--cwd", requestedRoot, "--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", started,
 		"--cwd-explicit", "false", "--approval-policy", "never", "--sandbox", "danger-full-access",
 	})
-	if err != nil || got != threadID || effectiveCwd != threadCwd {
+	if err != nil || got != threadID || effectiveCwd != requestedRoot {
 		t.Fatalf("exact resume bind = id=%q cwd=%q err=%v", got, effectiveCwd, err)
 	}
 	owner := readInteractiveOwner(resolveNativePaths(), threadID)
-	if owner == nil || !owner.Pending || !owner.Prepared || owner.DeleteOnAbort || owner.OwnerPID != os.Getpid() || owner.Name != "existing-peer" || owner.Cwd != threadCwd {
+	if owner == nil || !owner.Pending || !owner.Prepared || owner.DeleteOnAbort || owner.OwnerPID != os.Getpid() || owner.Name != "existing-peer" || owner.Cwd != requestedRoot {
 		t.Fatalf("exact resume owner = %#v", owner)
 	}
 	if stringValue(published["action"]) != "register_prepared" || stringValue(published["sessionId"]) != threadID ||
-		stringValue(published["cwd"]) != threadCwd || stringValue(published["approvalPolicy"]) != "never" ||
+		stringValue(published["cwd"]) != requestedRoot || stringValue(published["approvalPolicy"]) != "never" ||
 		stringValue(published["sandbox"]) != "danger-full-access" {
 		t.Fatalf("exact resume publication = %#v", published)
 	}
@@ -710,7 +706,7 @@ func TestPreparedResumeTakesOverLoadedZeroTurnOwnerWithoutArchiving(t *testing.T
 	}
 }
 
-func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
+func TestPreparedResumeDetachesLoadedStaleOwnerBeforeImplicitCwdChange(t *testing.T) {
 	migrationRoot := t.TempDir()
 	threadRoot := filepath.Join(migrationRoot, "codex-messaging")
 	requestedRoot := filepath.Join(migrationRoot, "agent-sessions")
@@ -718,6 +714,10 @@ func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Rename(threadRoot, requestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRequestedRoot, err := canonicalLaunchDirectory(requestedRoot)
+	if err != nil {
 		t.Fatal(err)
 	}
 	threadID := "00000000-0000-0000-0000-00000000012a"
@@ -766,15 +766,15 @@ func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, effectiveCwd, err := bindPreparedResumeNative([]string{
-		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "true",
+		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "false",
 		"--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", readProcStart(os.Getpid()),
 	})
-	if err != nil || got != threadID || effectiveCwd != requestedRoot {
+	if err != nil || got != threadID || effectiveCwd != canonicalRequestedRoot {
 		t.Fatalf("loaded migrated cwd resume = id=%q cwd=%q err=%v", got, effectiveCwd, err)
 	}
 	owner := readInteractiveOwner(paths, threadID)
 	if strings.Join(actions, ",") != "detach_stale_prepared,register_prepared" ||
-		owner == nil || !owner.ResumeLoaded || owner.Cwd != requestedRoot || stringValue(published["cwd"]) != requestedRoot {
+		owner == nil || !owner.ResumeLoaded || owner.Cwd != canonicalRequestedRoot || stringValue(published["cwd"]) != canonicalRequestedRoot {
 		t.Fatalf("loaded cwd migration actions=%v owner=%#v publication=%#v", actions, owner, published)
 	}
 	if strings.Contains(strings.Join(methods, ","), "thread/archive") || strings.Contains(strings.Join(methods, ","), "thread/unarchive") {
@@ -782,7 +782,7 @@ func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
 	}
 }
 
-func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testing.T) {
+func TestPreparedResumeUsesCurrentCwdWhenSavedCwdIsMissing(t *testing.T) {
 	migrationRoot := t.TempDir()
 	threadRoot := filepath.Join(migrationRoot, "codex-messaging")
 	requestedRoot := filepath.Join(migrationRoot, "agent-sessions")
@@ -790,6 +790,10 @@ func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testin
 		t.Fatal(err)
 	}
 	if err := os.Rename(threadRoot, requestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRequestedRoot, err := canonicalLaunchDirectory(requestedRoot)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {
@@ -820,14 +824,14 @@ func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testin
 		}
 	})
 	got, effectiveCwd, err := bindPreparedResumeNative([]string{
-		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "true",
+		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "false",
 		"--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", readProcStart(os.Getpid()),
 	})
-	if err != nil || got != threadID || effectiveCwd != requestedRoot {
+	if err != nil || got != threadID || effectiveCwd != canonicalRequestedRoot {
 		t.Fatalf("migrated cwd resume = id=%q cwd=%q err=%v", got, effectiveCwd, err)
 	}
 	owner := readInteractiveOwner(resolveNativePaths(), threadID)
-	if owner == nil || owner.Cwd != requestedRoot || stringValue(published["cwd"]) != requestedRoot {
+	if owner == nil || owner.Cwd != canonicalRequestedRoot || stringValue(published["cwd"]) != canonicalRequestedRoot {
 		t.Fatalf("migrated cwd owner=%#v publication=%#v", owner, published)
 	}
 	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {

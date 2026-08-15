@@ -15,16 +15,16 @@ The bridge publishes this compatible subset:
 ```json
 {
   "pid": 12345,
-  "sessionId": "codex-session-id",
+  "sessionId": "product-session-id",
   "cwd": "/project",
   "startedAt": 1786000000000,
   "procStart": "123456789",
-  "version": "codex-claude-peer/0.1.0",
+  "version": "agent-sessions/0.1.0",
   "peerProtocol": 1,
   "kind": "interactive",
-  "entrypoint": "codex",
-  "name": "codex-project-ab12cd34",
-  "nameSource": "generated",
+  "entrypoint": "codex|claude|agy",
+  "name": "reviewer",
+  "nameSource": "launch",
   "status": "idle",
   "messagingSocketPath": "/run/user/1000/codex-claude-peer-1000/session-0123456789abcdef0123.sock"
 }
@@ -80,7 +80,7 @@ Claude 2.1.226 strictly parses the recognized envelope attributes in grammar ord
 Unknown attributes before the closing `>` cause the inbound security gate to discard
 permission-mode attestation and hold the message for human approval. Codex therefore puts extension
 metadata on the first body line: transport `msg_id` as `messageId`, an ISO-8601 `sentAt`, and
-`fromProduct: "codex"`.
+`fromProduct: "codex"`, `"claude"`, or `"agy"`.
 The App Server and hook receive paths show message ID, send/receive times, and sender type in
 model-visible metadata. The parser remains backward-compatible with the short-lived attribute form
 used by earlier bridge builds.

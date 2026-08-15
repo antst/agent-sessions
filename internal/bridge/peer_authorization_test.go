@@ -1257,7 +1257,7 @@ func TestStdioMCPRequiresHostAttestationBeforeEveryTool(t *testing.T) {
 				"x-codex-turn-metadata": map[string]any{"session_id": sessionID, "thread_id": turnThreadID},
 			},
 		})
-		result, err := handleNativeMCPRequest("tools/call", params, "")
+		result, err := handleNativeMCPRequest("tools/call", params, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1402,7 +1402,7 @@ func TestMCPImpersonationHelper(t *testing.T) {
 			"x-codex-turn-metadata": map[string]any{"session_id": threadID, "thread_id": threadID},
 		},
 	})
-	result, err := handleNativeMCPRequest("tools/call", params, "")
+	result, err := handleNativeMCPRequest("tools/call", params, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

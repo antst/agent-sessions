@@ -18,6 +18,7 @@ plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 
 bash -n \
   "$plugin_root/scripts/cachebuster" \
+  "$plugin_root/scripts/install-agy-plugin" \
   "$plugin_root/scripts/package-release" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
@@ -387,12 +388,68 @@ done
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in codex-peer codex-peer-lane claude-peer-lane; do
+for launcher in codex-peer codex-peer-lane claude-peer-lane agy-peer; do
   if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
     printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
     exit 1
   fi
 done
+agy_active_root="$temporary_root/agy-active"
+agy_manifest="$temporary_root/agy-import-manifest.json"
+agy_install_plan="$(make -n -C "$plugin_root" install-agy AGY_PLUGIN_ROOT="$plugin_root/agy" AGY_ACTIVE_PLUGIN_ROOT="$agy_active_root" AGY_IMPORT_MANIFEST="$agy_manifest" AGY_INSTALLER_RUNTIME="$runtime_binary")"
+if ! grep -Fq './scripts/install-agy-plugin validate' <<<"$agy_install_plan" ||
+   ! grep -Fq './scripts/install-agy-plugin install' <<<"$agy_install_plan" ||
+   ! grep -Fq "\"$runtime_binary\" \"$agy_manifest\"" <<<"$agy_install_plan" ||
+   grep -Eq 'agy[^ ]* plugin (validate|install|uninstall)' <<<"$agy_install_plan"; then
+  printf 'Antigravity install must update the documented plugin directory without invoking the GUI-delegating CLI subcommand\n' >&2
+  exit 1
+fi
+agy_default_plan="$(make -n -C "$plugin_root" install-agy HOME="$temporary_root/agy-home" AGY_PLUGIN_ROOT="$plugin_root/agy" AGY_INSTALLER_RUNTIME="$runtime_binary")"
+if ! grep -Fq "$temporary_root/agy-home/.gemini/config/plugins/agent-sessions" <<<"$agy_default_plan" ||
+   ! grep -Fq "$temporary_root/agy-home/.gemini/config/import_manifest.json" <<<"$agy_default_plan"; then
+  printf 'Antigravity install must target the shared plugin root and register its import manifest\n' >&2
+  exit 1
+fi
+agy_fallback_plan="$(make -n -C "$plugin_root" install-agy AGY_PLUGIN_ROOT="$temporary_root/missing-agy-payload" AGY_ACTIVE_PLUGIN_ROOT="$agy_active_root" AGY_IMPORT_MANIFEST="$agy_manifest" AGY_INSTALLER_RUNTIME="$runtime_binary")"
+if [[ "$(grep -Fc "\"$plugin_root/agy\"" <<<"$agy_fallback_plan")" -ne 2 ]]; then
+  printf 'Antigravity install must validate and install the same checkout fallback payload\n' >&2
+  exit 1
+fi
+"$plugin_root/scripts/install-agy-plugin" install "$plugin_root/agy" "$agy_active_root" "$runtime_binary" "$agy_manifest"
+if [[ ! -x "$agy_active_root/scripts/native-entry" ]] ||
+   ! cmp -s "$plugin_root/agy/plugin.json" "$agy_active_root/plugin.json" ||
+   ! cmp -s "$plugin_root/agy/mcp_config.json" "$agy_active_root/mcp_config.json" ||
+   ! grep -Fq '"name": "agent-sessions"' "$agy_manifest"; then
+  printf 'Antigravity direct plugin install did not preserve the validated payload\n' >&2
+  exit 1
+fi
+touch "$agy_active_root/stale-from-prior-version"
+"$plugin_root/scripts/install-agy-plugin" install "$plugin_root/agy" "$agy_active_root" "$runtime_binary" "$agy_manifest"
+if [[ -e "$agy_active_root/stale-from-prior-version" ]]; then
+  printf 'Antigravity direct plugin install merged over stale payload instead of replacing it\n' >&2
+  exit 1
+fi
+rollback_root="$temporary_root/agy-rollback"
+mkdir -p "$rollback_root"
+printf 'preserve me\n' >"$rollback_root/original"
+failing_manifest_runtime="$temporary_root/failing-manifest-runtime"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$failing_manifest_runtime"
+chmod 0700 "$failing_manifest_runtime"
+if "$plugin_root/scripts/install-agy-plugin" install "$plugin_root/agy" "$rollback_root" "$failing_manifest_runtime" "$temporary_root/unwritten-manifest.json" 2>/dev/null ||
+   [[ ! -f "$rollback_root/original" || -f "$rollback_root/plugin.json" ]]; then
+  printf 'Antigravity plugin install did not roll back after manifest registration failed\n' >&2
+  exit 1
+fi
+python3 - "$plugin_root/agy" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for name in ("plugin.json", "hooks.json", "mcp_config.json"):
+    with (root / name).open(encoding="utf-8") as handle:
+        json.load(handle)
+PY
 if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/agent-session-runtime\" \"$custom_prefix/bin/agent-session-runtime\"" <<<"$install_plan" ||
    ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
   printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
@@ -416,6 +473,9 @@ installed_runtimes=("$custom_install_root"/bin/*/agent-session-runtime)
 installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
 if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
    [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
+	 [[ ! -f "$custom_install_root/agy/plugin.json" ]] ||
+	 [[ ! -f "$custom_install_root/agy/hooks.json" ]] ||
+	 [[ ! -f "$custom_install_root/agy/mcp_config.json" ]] ||
    [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
    [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
@@ -423,11 +483,12 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
+	 [[ "$(readlink "$custom_prefix/bin/agy-peer")" != "$installed_binary_dir/agy-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane agy-peer peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
     exit 1
@@ -463,13 +524,16 @@ tar -C "$release_extract" -xzf "$release_archive"
 release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
 if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
 	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
+	 [[ ! -f "$release_root/agy/plugin.json" ]] ||
+	 [[ ! -f "$release_root/agy/skills/peer-messaging/SKILL.md" ]] ||
+	 [[ ! -f "$release_root/agy/skills/agent-lanes/SKILL.md" ]] ||
    [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane agy-peer peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1

@@ -81,8 +81,8 @@ the lifecycle escape hatches.
 
 ## Lifecycle defaults
 
-- A lane is owned by the launching Codex or Claude session when that owner can be corroborated by process ancestry and live peer discovery. It is interrupted and archived after that owner exits.
-- Otherwise the direct launcher process is the owner.
+- A lane is owned by the launching Codex, Claude, or Antigravity session when that owner can be corroborated by process ancestry and live peer discovery. It is interrupted and archived after that owner exits.
+- A caller without a corroborated agent owner must explicitly use `--persistent`; a transient shell is never guessed as the owner.
 - Completed work auto-archives after 60 seconds. The exact deadline is exposed as `auto_archive_at`; cleanup occurs on the manager's sub-second maintenance loop.
 - `--auto-archive-after S` changes the grace period. `--no-auto-archive` disables it and requires explicit archive.
 - `--persistent` detaches lifecycle ownership. `--notify TARGET` is persistent-only; parent-owned lanes notify their inferred owner without a flag.
@@ -90,10 +90,10 @@ the lifecycle escape hatches.
 - A terminal notice is an infrastructure pointer, not a conversational message. Collect it with the printed `wait` command rather than replying to its sender address; after a worker crash that address may no longer be live.
 
 `claude-peer-lane list` returns all active Claude lanes in the profile and `--all` adds archived
-lanes. `list --mine` selects only lanes owned by the current Codex or Claude orchestrator, matching
+lanes. `list --mine` selects only lanes owned by the current Codex, Claude, or Antigravity orchestrator, matching
 the stable owner PID plus process-start identity rather than a mutable session ID. Persistent lanes
 have no owner and are therefore excluded; use `--mine --all` to include owned archived lanes. The
-query fails if no live Codex or Claude owner can be corroborated rather than silently falling back
+query fails if no live Codex, Claude, or Antigravity owner can be corroborated rather than silently falling back
 to a transient shell process.
 
 ## Claude-specific policy
@@ -103,7 +103,7 @@ Claude has no Codex sandbox axis. The launcher passes through Claude's `--permis
 The default permission mode is `dontAsk`, because a headless worker cannot answer an interactive
 approval. Workers start with `--settings '{"crossSessionInbound":"accept"}'` so native peer input
 does not wait for an approval UI the lane does not have. When the launcher
-corroborates a bypass-mode Codex or Claude owner and the caller did not explicitly choose a mode,
+corroborates a bypass-mode Codex, Claude, or Antigravity owner and the caller did not explicitly choose a mode,
 the lane inherits `bypassPermissions`; an explicit `--permission-mode` always wins. The launcher
 never trusts an inherited thread ID alone: it requires a live Codex-host ancestor as a launch-context
 precondition plus a live matching session bridge PID, process-start identity, session ID, and

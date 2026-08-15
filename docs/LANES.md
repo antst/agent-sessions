@@ -56,7 +56,7 @@ codex-peer-lane list --all
 codex-peer-lane doctor --json
 ```
 
-A parent-owned lane must be launched beneath a live Codex or Claude orchestrator whose process
+A parent-owned lane must be launched beneath a live Codex, Claude, or Antigravity orchestrator whose process
 identity can be corroborated. A plain shell, cron job, or CI runner has no such lifecycle owner;
 use `--persistent` there or the command fails closed with an actionable owner error.
 
@@ -89,7 +89,7 @@ Message a remote lane through its qualified source-side discovery name (`name--h
 incoming message's `from` UDS; its destination-local name and thread ID are lifecycle addresses.
 
 Parent-owned lanes automatically create a durable supervisor-owned terminal job for their owning
-Codex or Claude session. On completed, failed, or interrupted outcomes—or a bridge-enforced timeout—the
+Codex, Claude, or Antigravity session. On completed, failed, or interrupted outcomes—or a bridge-enforced timeout—the
 owner receives a small pointer
 containing lane name, thread ID, turn ID, raw App Server status, normalized outcome, wrapper exit
 code, `collection=required`, and the exact `wait` command. These fields describe the App Server
@@ -166,7 +166,7 @@ collector; the unacknowledged turn remains running or recoverable by a later `wa
 `lane.list` event includes active lanes by default and archived-but-resumable lanes with `--all`.
 `--mine` filters by the current orchestrator's corroborated process identity, not its mutable
 session ID; persistent lanes are intentionally excluded because they have no lifecycle owner.
-Combine `--mine --all` to include that orchestrator's archived lanes. If no live Codex or Claude
+Combine `--mine --all` to include that orchestrator's archived lanes. If no live Codex, Claude, or Antigravity
 owner can be corroborated, `--mine` fails instead of returning a misleading empty list; unlike
 lifecycle ownership, this cross-invocation query never falls back to a transient shell process.
 `doctor --json` emits one `lane.doctor` event containing `contract_version`, runtime version/path,

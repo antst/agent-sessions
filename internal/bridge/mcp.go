@@ -14,21 +14,21 @@ import (
 	"time"
 )
 
-const mcpInstructions = "Use stable peer names as primary addresses. send_message refreshes discovery immediately before every send; use name [ref] only to disambiguate duplicate names. Exact peer session IDs and uds: reply addresses are also accepted. Tool calls are active only when Codex supplies host-owned metadata for an attested peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const mcpInstructions = "Use stable peer names as primary addresses. send_message refreshes discovery immediately before every send; use name [ref] only to disambiguate duplicate names. Exact peer session IDs and uds: reply addresses are also accepted. Tool calls are active only inside a process-attested Agent Sessions peer; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
 var nativeToolDefinitions = []map[string]any{
 	{
-		"name": "list_peers", "description": "List live Claude Code and Codex peer sessions on this host that can receive a message.",
+		"name": "list_peers", "description": "List live Claude Code, Codex, and Antigravity peer sessions on this host that can receive a message.",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 	},
 	{
-		"name": "send_message", "description": "Send a plain-text message to a live local Claude Code or Codex peer session. Use list_peers first if the target is ambiguous.",
+		"name": "send_message", "description": "Send a plain-text message to a live local agent peer session. Use list_peers first if the target is ambiguous.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
 				"target":     map[string]any{"type": "string", "description": "Peer name (preferred), exact session ID, name [ref], or explicit uds: address."},
 				"message":    map[string]any{"type": "string", "minLength": 1, "maxLength": 900000},
 				"summary":    map[string]any{"type": "string", "description": "Optional short description of why the message is being sent."},
-				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 			},
 			"required": []string{"target", "message", "session_id"}, "additionalProperties": false,
 		},
@@ -37,23 +37,23 @@ var nativeToolDefinitions = []map[string]any{
 		"name": "check_inbox", "description": "Recovery-only: read and consume peer messages queued past an automatic delivery boundary. Active peer messages are pushed into the session automatically; do not poll this tool.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 			}, "required": []string{"session_id"}, "additionalProperties": false,
 		},
 	},
 	{
-		"name": "identity", "description": "Show this Codex session's Claude-compatible peer name and address.",
+		"name": "identity", "description": "Show this agent session's peer name and address.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 			}, "required": []string{"session_id"}, "additionalProperties": false,
 		},
 	},
 	{
-		"name": "rename_session", "description": "Change the peer name that Claude Code sessions see for this Codex session.",
+		"name": "rename_session", "description": "Change the peer name advertised for this agent session.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 				"name":       map[string]any{"type": "string", "minLength": 1, "maxLength": 80},
 			}, "required": []string{"session_id", "name"}, "additionalProperties": false,
 		},
@@ -85,6 +85,19 @@ type laneOwner struct {
 }
 
 func runMCPCommand() int {
+	return runAttestedMCPCommand("claude-code-peer mcp", false, func(params json.RawMessage) (string, error) {
+		if err := attestStdioMCPHost(); err != nil {
+			return "", fmt.Errorf("host attestation: %w", err)
+		}
+		caller, err := attestStdioMCPCaller(params)
+		if err != nil {
+			return "", fmt.Errorf("caller attestation: %w", err)
+		}
+		return caller, nil
+	})
+}
+
+func runAttestedMCPCommand(label string, implicitCallerSession bool, attest func(json.RawMessage) (string, error)) int {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 2*maxFrameBytes)
 	writer := bufio.NewWriter(os.Stdout)
@@ -107,7 +120,18 @@ func runMCPCommand() int {
 		if len(request.ID) == 0 {
 			continue
 		}
-		result, err := handleNativeMCPRequest(request.Method, request.Params, "")
+		callerSessionID := ""
+		var err error
+		if request.Method == "tools/call" {
+			callerSessionID, err = attest(request.Params)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: inactive attestation: %v\n", label, err)
+				writeMCPResponse(writer, request.ID, inactiveMCPResult(), nil)
+				_ = writer.Flush()
+				continue
+			}
+		}
+		result, err := handleNativeMCPRequest(request.Method, request.Params, callerSessionID, implicitCallerSession)
 		if err != nil {
 			code := -32603
 			var rpcErr *rpcError
@@ -121,7 +145,7 @@ func runMCPCommand() int {
 		_ = writer.Flush()
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native MCP server failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s server failed: %v\n", label, err)
 		return 1
 	}
 	return 0
@@ -143,7 +167,7 @@ func writeMCPResponse(writer *bufio.Writer, id json.RawMessage, result any, rpcE
 	_, _ = writer.Write(append(body, '\n'))
 }
 
-func handleNativeMCPRequest(method string, params json.RawMessage, callerSessionID string) (any, error) {
+func handleNativeMCPRequest(method string, params json.RawMessage, callerSessionID string, implicitCallerSession bool) (any, error) {
 	switch method {
 	case "initialize":
 		var input map[string]any
@@ -151,13 +175,13 @@ func handleNativeMCPRequest(method string, params json.RawMessage, callerSession
 		return map[string]any{
 			"protocolVersion": defaultString(stringValue(input["protocolVersion"]), "2025-06-18"),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "claude-code-peer", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "agent-sessions", "version": "0.1.0"},
 			"instructions":    mcpInstructions,
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": nativeToolDefinitions}, nil
+		return map[string]any{"tools": nativeToolDefinitionsForSession(implicitCallerSession)}, nil
 	case "tools/call":
 		var call struct {
 			Name      string         `json:"name"`
@@ -196,9 +220,40 @@ func handleNativeMCPRequest(method string, params json.RawMessage, callerSession
 	}
 }
 
+func nativeToolDefinitionsForSession(implicitCallerSession bool) []map[string]any {
+	if !implicitCallerSession {
+		return nativeToolDefinitions
+	}
+	definitions := make([]map[string]any, 0, len(nativeToolDefinitions))
+	for _, definition := range nativeToolDefinitions {
+		clonedDefinition := make(map[string]any, len(definition))
+		for key, value := range definition {
+			clonedDefinition[key] = value
+		}
+		if schema, ok := definition["inputSchema"].(map[string]any); ok {
+			clonedSchema := make(map[string]any, len(schema))
+			for key, value := range schema {
+				clonedSchema[key] = value
+			}
+			if required, ok := schema["required"].([]string); ok {
+				filtered := make([]string, 0, len(required))
+				for _, name := range required {
+					if name != "session_id" {
+						filtered = append(filtered, name)
+					}
+				}
+				clonedSchema["required"] = filtered
+			}
+			clonedDefinition["inputSchema"] = clonedSchema
+		}
+		definitions = append(definitions, clonedDefinition)
+	}
+	return definitions
+}
+
 func inactiveMCPResult() map[string]any {
 	return map[string]any{
-		"content": []map[string]any{{"type": "text", "text": "claude_peer is inactive outside an attested peer session"}},
+		"content": []map[string]any{{"type": "text", "text": "Agent Sessions peer tools are inactive outside an attested peer session"}},
 		"isError": true,
 	}
 }
@@ -226,8 +281,8 @@ func attestStdioMCPHost() error {
 //nolint:gocyclo
 func callNativePeerTool(name string, args map[string]any, callerSessionID string) (map[string]any, error) {
 	paths := resolveNativePaths()
-	if !authorizedPeerThreadNative(paths, callerSessionID) {
-		return nil, errors.New("claude_peer is inactive outside an attested peer session")
+	if !authorizedPeerSessionNative(paths, callerSessionID) {
+		return nil, errors.New("peer tools are inactive outside an attested peer session")
 	}
 	switch name {
 	case "list_peers":
@@ -237,10 +292,7 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		}
 		lines := []string{}
 		for _, peer := range peers {
-			product := "Claude Code"
-			if peer.Entrypoint == "codex" {
-				product = "Codex"
-			}
+			product := peerProductDisplayName(peer.Entrypoint)
 			session := ""
 			if peer.SessionID != "" {
 				session = ", session " + peer.SessionID
@@ -250,7 +302,7 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 				defaultString(peer.Cwd, "?"), session, peer.Address,
 			))
 		}
-		text := "No live Claude-compatible peer sockets were found."
+		text := "No live Agent Sessions peer sockets were found."
 		if len(lines) > 0 {
 			text = strings.Join(lines, "\n")
 		}
@@ -299,8 +351,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		address := encodeNativeAddress(stringValue(state["socketPath"]))
 		name := stringValue(state["name"])
 		return map[string]any{
-			"text": name + " — " + address,
-			"data": map[string]any{"name": name, "address": address, "sessionId": stringValue(state["sessionId"])},
+			"text": name + " [" + sessionID + "] — " + address,
+			"data": map[string]any{"name": name, "address": address, "sessionId": sessionID},
 		}, nil
 	case "rename_session":
 		sessionID, err := requireMCPCallerSession(paths, args, callerSessionID)
@@ -330,15 +382,15 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 }
 
 func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessionID string) (string, error) {
-	requested, err := requiredMCPString(args, "session_id")
-	if err != nil {
-		return "", err
+	if !validSessionID(callerSessionID) || !authorizedPeerSessionNative(paths, callerSessionID) {
+		return "", errors.New("peer tools are inactive outside an attested peer session")
 	}
-	if !validSessionID(callerSessionID) || !authorizedPeerThreadNative(paths, callerSessionID) {
-		return "", errors.New("claude_peer is inactive outside an attested peer session")
+	requested := strings.TrimSpace(stringValue(args["session_id"]))
+	if requested == "" {
+		return callerSessionID, nil
 	}
 	if requested != callerSessionID {
-		return "", fmt.Errorf("session-scoped peer tool cannot act as Codex session %s", requested)
+		return "", errors.New("session-scoped peer tool cannot act as another agent session")
 	}
 	return callerSessionID, nil
 }
@@ -346,7 +398,7 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
 	var envelope map[string]any
 	if json.Unmarshal(params, &envelope) != nil {
-		return "", errors.New("claude_peer is inactive outside an attested peer session")
+		return "", errors.New("peer tools are inactive outside an attested peer session")
 	}
 	meta, _ := envelope["_meta"].(map[string]any)
 	turnMeta, _ := meta["x-codex-turn-metadata"].(map[string]any)
@@ -354,7 +406,7 @@ func attestStdioMCPCaller(params json.RawMessage) (string, error) {
 	sessionID := stringValue(turnMeta["session_id"])
 	turnThreadID := stringValue(turnMeta["thread_id"])
 	if !validSessionID(threadID) || sessionID != threadID || turnThreadID != threadID {
-		return "", errors.New("claude_peer is inactive outside an attested peer session")
+		return "", errors.New("peer tools are inactive outside an attested peer session")
 	}
 	return threadID, nil
 }
@@ -661,11 +713,11 @@ func resolveNativeSessionID(id string, peers []peerSession) (string, *peerSessio
 func readOwnNativeState(paths nativePaths, sessionID string) (map[string]any, error) {
 	state := readJSONMap(filepath.Join(paths.dataRoot, "sessions", sessionKey(sessionID), "state.json"))
 	if state == nil || stringValue(state["sessionId"]) != sessionID {
-		return nil, fmt.Errorf("no live Claude peer bridge for Codex session %s", sessionID)
+		return nil, fmt.Errorf("no live Agent Sessions peer bridge for session %s", sessionID)
 	}
 	socket := stringValue(state["socketPath"])
 	if socket == "" || !probeUnixSocket(socket, 250*time.Millisecond) {
-		return nil, fmt.Errorf("no live Claude peer bridge for Codex session %s", sessionID)
+		return nil, fmt.Errorf("no live Agent Sessions peer bridge for session %s", sessionID)
 	}
 	return state, nil
 }
@@ -678,9 +730,9 @@ func createNativeUserFrame(own map[string]any, message string) (map[string]any, 
 	if stringValue(own["permissionMode"]) == "bypassPermissions" {
 		mode = "bypass"
 	}
-	content := wrapNativePeerMessage(
+	content := wrapNativePeerMessageFromProduct(
 		from, stringValue(own["sessionId"]), stringValue(own["name"]), mode,
-		messageID, sentAt, message,
+		messageID, sentAt, defaultString(stringValue(own["entrypoint"]), "codex"), message,
 	)
 	return map[string]any{
 		"msgV": 1, "msg_id": messageID, "type": "user",
@@ -690,6 +742,10 @@ func createNativeUserFrame(own map[string]any, message string) (map[string]any, 
 }
 
 func wrapNativePeerMessage(from, sessionID, name, mode, messageID, sentAt, message string) string {
+	return wrapNativePeerMessageFromProduct(from, sessionID, name, mode, messageID, sentAt, "codex", message)
+}
+
+func wrapNativePeerMessageFromProduct(from, sessionID, name, mode, messageID, sentAt, product, message string) string {
 	attributes := []string{}
 	if from != "" {
 		attributes = append(attributes, `from="`+safeNativeAttribute(from)+`"`)
@@ -703,8 +759,9 @@ func wrapNativePeerMessage(from, sessionID, name, mode, messageID, sentAt, messa
 	if mode == "bypass" || mode == "prompting" {
 		attributes = append(attributes, `from-mode="`+mode+`"`)
 	}
+	product = normalizePeerProduct(product)
 	metadata, _ := json.Marshal(map[string]any{
-		"fromProduct": "codex", "messageId": safeNativeAttribute(messageID), "sentAt": safeNativeAttribute(sentAt),
+		"fromProduct": product, "messageId": safeNativeAttribute(messageID), "sentAt": safeNativeAttribute(sentAt),
 	})
 	body := escapeNativeEnvelopeBody(message)
 	suffix := ""
@@ -712,6 +769,26 @@ func wrapNativePeerMessage(from, sessionID, name, mode, messageID, sentAt, messa
 		suffix = " " + strings.Join(attributes, " ")
 	}
 	return "<cross-session-message" + suffix + ">\n[codex-peer-metadata: " + string(metadata) + "]\n" + body + "\n</cross-session-message>"
+}
+
+func normalizePeerProduct(product string) string {
+	switch product {
+	case "codex", "claude", "agy":
+		return product
+	default:
+		return ""
+	}
+}
+
+func peerProductDisplayName(product string) string {
+	switch normalizePeerProduct(product) {
+	case "codex":
+		return "Codex"
+	case "agy":
+		return "Antigravity"
+	default:
+		return "Claude Code"
+	}
 }
 
 func escapeNativeEnvelopeBody(message string) string {

@@ -1,2 +1,2 @@
-// Package bridge implements the local Codex and Claude Code peer transport.
+// Package bridge implements local agent session lifecycle and peer transport.
 package bridge

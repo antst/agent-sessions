@@ -1,6 +1,6 @@
 {
   "name": "codex-peer",
-  "version": "0.1.0+codex.20260813232547",
+  "version": "0.1.0+codex.20260815173218",
   "description": "Start, collect, message, resume, and archive named Codex lanes through the codex-peer-lane CLI.",
   "author": {
     "name": "Agent Sessions contributors"

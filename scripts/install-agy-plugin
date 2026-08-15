@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:-}"
+source_root="${2:-}"
+destination="${3:-}"
+manifest_runtime="${4:-}"
+manifest_path="${5:-}"
+
+usage() {
+  printf 'usage: install-agy-plugin validate SOURCE | install SOURCE DESTINATION RUNTIME IMPORT_MANIFEST\n' >&2
+  exit 2
+}
+
+validate_plugin() {
+  local root="$1"
+  [[ -d "$root" ]] || { printf 'Antigravity plugin directory does not exist: %s\n' "$root" >&2; exit 1; }
+  for required in plugin.json hooks.json mcp_config.json scripts/native-entry \
+      skills/peer-messaging/SKILL.md skills/agent-lanes/SKILL.md; do
+    [[ -f "$root/$required" ]] || { printf 'Antigravity plugin is missing %s\n' "$required" >&2; exit 1; }
+  done
+  [[ -x "$root/scripts/native-entry" ]] || { printf 'Antigravity plugin native-entry is not executable\n' >&2; exit 1; }
+  grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' "$root/plugin.json" || {
+    printf 'Antigravity plugin manifest does not name agent-sessions\n' >&2
+    exit 1
+  }
+}
+
+case "$action" in
+  validate)
+    [[ -n "$source_root" && -z "$destination" && -z "$manifest_runtime" && -z "$manifest_path" ]] || usage
+    validate_plugin "$source_root"
+    ;;
+  install)
+    [[ -n "$source_root" && -n "$destination" && -x "$manifest_runtime" && -n "$manifest_path" ]] || usage
+    validate_plugin "$source_root"
+    [[ "$destination" != "/" && "$destination" != "." && "$destination" != *$'\n'* ]] || {
+      printf 'refusing unsafe Antigravity plugin destination: %s\n' "$destination" >&2
+      exit 1
+    }
+    parent="$(dirname "$destination")"
+    base="$(basename "$destination")"
+    mkdir -p "$parent"
+    stage="$(mktemp -d "$parent/.${base}.stage.XXXXXX")"
+    backup=""
+    installed=0
+    committed=0
+    cleanup() {
+      if [[ -n "$stage" && -e "$stage" ]]; then
+        rm -rf -- "$stage"
+      fi
+      if [[ "$committed" -eq 0 && "$installed" -eq 1 && ( -e "$destination" || -L "$destination" ) ]]; then
+        rm -rf -- "$destination"
+      fi
+      if [[ -n "$backup" && ( -e "$backup" || -L "$backup" ) ]]; then
+        if [[ "$committed" -eq 0 ]]; then
+          mv -- "$backup" "$destination"
+        else
+          rm -rf -- "$backup"
+        fi
+      fi
+    }
+    trap cleanup EXIT
+    cp -R "$source_root"/. "$stage"/
+    validate_plugin "$stage"
+    if [[ -e "$destination" || -L "$destination" ]]; then
+      backup="$(mktemp -d "$parent/.${base}.backup.XXXXXX")"
+      rmdir "$backup"
+      mv -- "$destination" "$backup"
+    fi
+    mv -- "$stage" "$destination"
+    stage=""
+    installed=1
+    "$manifest_runtime" agy-plugin-manifest "$manifest_path"
+    committed=1
+    if [[ -n "$backup" ]]; then
+      rm -rf -- "$backup"
+      backup=""
+    fi
+    trap - EXIT
+    ;;
+  *) usage ;;
+esac
