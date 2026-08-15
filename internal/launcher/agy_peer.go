@@ -155,11 +155,27 @@ func agyExecutable() (string, error) {
 	if path := os.Getenv("AGY_PEER_AGY_BIN"); path != "" {
 		return path, nil
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		userCLI := filepath.Join(home, ".local", "bin", "agy")
+		if info, statErr := os.Stat(userCLI); statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return userCLI, nil
+		}
+	}
 	path, err := exec.LookPath("agy")
 	if err != nil {
 		return "", &ExitError{Code: 127, Err: errors.New("agy was not found on PATH")}
 	}
+	if isAntigravityGUIExecutable(path) {
+		return "", &ExitError{Code: 127, Err: errors.New("agy on PATH is Antigravity's GUI helper, not the headless Agy CLI; install the CLI at ~/.local/bin/agy or set AGY_PEER_AGY_BIN")}
+	}
 	return path, nil
+}
+
+func isAntigravityGUIExecutable(path string) bool {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return strings.HasSuffix(filepath.ToSlash(filepath.Clean(path)), "/.antigravity/antigravity/bin/agy")
 }
 
 func peerRuntimeExecutable() (string, error) {

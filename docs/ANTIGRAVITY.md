@@ -21,6 +21,12 @@ and `update`, plus help/version flags, pass through without peer activation.
 `--dangerously-skip-permissions` is reflected as the bridge's bypass permission
 class; the launcher does not otherwise choose Agy policy.
 
+`agy-peer` prefers the headless CLI at `~/.local/bin/agy`. This matters on
+macOS because the Antigravity GUI also provides an executable named `agy` under
+`~/.antigravity/antigravity/bin`; that helper is rejected rather than launching
+the GUI accidentally. Set `AGY_PEER_AGY_BIN` when the headless CLI is installed
+somewhere else.
+
 ## Install
 
 The native payload is staged by `make install`. Activate the Agy plugin with:

@@ -1,7 +1,10 @@
 package launcher
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +61,45 @@ func TestReplaceEnvironmentRemovesInheritedLaunchToken(t *testing.T) {
 	want := []string{"A=1", "B=2", agyLaunchTokenEnv + "=new"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("environment = %#v, want %#v", got, want)
+	}
+}
+
+func TestAgyExecutablePrefersHeadlessUserCLIOverPath(t *testing.T) {
+	home := t.TempDir()
+	userCLI := filepath.Join(home, ".local", "bin", "agy")
+	writeAgyExecutable(t, userCLI)
+	pathCLI := filepath.Join(t.TempDir(), "agy")
+	writeAgyExecutable(t, pathCLI)
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", filepath.Dir(pathCLI))
+	t.Setenv("AGY_PEER_AGY_BIN", "")
+
+	got, err := agyExecutable()
+	if err != nil || got != userCLI {
+		t.Fatalf("agy executable = %q, %v; want %q", got, err, userCLI)
+	}
+}
+
+func TestAgyExecutableRejectsAntigravityGUIHelper(t *testing.T) {
+	home := t.TempDir()
+	gui := filepath.Join(home, ".antigravity", "antigravity", "bin", "agy")
+	writeAgyExecutable(t, gui)
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", filepath.Dir(gui))
+	t.Setenv("AGY_PEER_AGY_BIN", "")
+
+	got, err := agyExecutable()
+	if err == nil || got != "" || !strings.Contains(err.Error(), "GUI helper") || !strings.Contains(err.Error(), "AGY_PEER_AGY_BIN") {
+		t.Fatalf("GUI agy resolution = %q, %v", got, err)
+	}
+}
+
+func writeAgyExecutable(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 }

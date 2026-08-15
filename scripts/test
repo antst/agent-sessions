@@ -394,8 +394,8 @@ for launcher in codex-peer codex-peer-lane claude-peer-lane agy-peer; do
   fi
 done
 agy_install_plan="$(make -n -C "$plugin_root" install-agy AGY=agy-test-cli AGY_PLUGIN_ROOT="$plugin_root/agy")"
-if ! grep -Fq 'agy-test-cli plugin validate' <<<"$agy_install_plan" ||
-   ! grep -Fq 'agy-test-cli plugin install' <<<"$agy_install_plan" ||
+if ! grep -Fq '"agy-test-cli" plugin validate' <<<"$agy_install_plan" ||
+   ! grep -Fq '"agy-test-cli" plugin install' <<<"$agy_install_plan" ||
    grep -Fq 'plugin uninstall' <<<"$agy_install_plan"; then
   printf 'Antigravity install must validate and atomically update without uninstalling the live plugin first\n' >&2
   exit 1

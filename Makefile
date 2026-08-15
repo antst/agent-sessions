@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
-AGY ?= agy
+AGY ?= $(if $(wildcard $(HOME)/.local/bin/agy),$(HOME)/.local/bin/agy,agy)
 GOLANGCI_LINT ?= golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
@@ -288,10 +288,10 @@ validate-agy:
 		printf 'Antigravity CLI is required for Antigravity plugin validation\n' >&2; \
 		exit 127; \
 	}
-	$(AGY) plugin validate "$(if $(wildcard $(AGY_PLUGIN_ROOT)/plugin.json),$(AGY_PLUGIN_ROOT),$(CURDIR)/agy)"
+	"$(AGY)" plugin validate "$(if $(wildcard $(AGY_PLUGIN_ROOT)/plugin.json),$(AGY_PLUGIN_ROOT),$(CURDIR)/agy)"
 
 install-agy: validate-agy
-	$(AGY) plugin install "$(AGY_PLUGIN_ROOT)"
+	"$(AGY)" plugin install "$(AGY_PLUGIN_ROOT)"
 
 dev-install-agy:
 	$(MAKE) install-agy AGY_PLUGIN_ROOT="$(CURDIR)/agy"
