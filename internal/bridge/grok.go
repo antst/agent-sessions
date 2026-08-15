@@ -1188,6 +1188,11 @@ func (h *grokHost) cleanup() {
 func (h *grokHost) ensurePeerPublished() error {
 	h.peerMu.Lock()
 	defer h.peerMu.Unlock()
+	select {
+	case <-h.done:
+		return errors.New("grok host is stopping")
+	default:
+	}
 	if h.peer != nil {
 		return nil
 	}

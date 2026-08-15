@@ -387,6 +387,14 @@ func TestGrokHostStatusDoesNotDeadlockInjectedTurn(t *testing.T) {
 	waitForGrokDelivery(t, host, "busy-status", "delivered")
 }
 
+func TestGrokHostCannotRepublishAfterCleanupStarts(t *testing.T) {
+	host := &grokHost{done: make(chan struct{})}
+	close(host.done)
+	if err := host.ensurePeerPublished(); err == nil || !strings.Contains(err.Error(), "stopping") {
+		t.Fatalf("publish after stop error = %v", err)
+	}
+}
+
 func TestGrokHostDoesNotPublishBeforeSuccessfulAuthentication(t *testing.T) {
 	t.Setenv("GROK_FAKE_AUTH_REJECT", "1")
 	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-bad-auth")
