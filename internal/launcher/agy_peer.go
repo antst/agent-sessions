@@ -240,6 +240,7 @@ func validateAgyCLI(path string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), agyCLIProbeTimeout)
 	defer cancel()
+	// #nosec G702 -- path is an executable candidate selected explicitly or from the caller's PATH and is validated by this probe.
 	command := exec.CommandContext(ctx, path, "--help")
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
