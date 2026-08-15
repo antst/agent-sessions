@@ -1,6 +1,6 @@
 {
   "name": "claude-code-peer",
-  "version": "0.1.0+codex.20260815161529",
+  "version": "0.1.0+codex.20260815173218",
   "description": "Give Codex, Claude, and Antigravity sessions a durable lifecycle and cross-session messaging.",
   "author": {
     "name": "Agent Sessions contributors"

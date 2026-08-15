@@ -5,6 +5,13 @@ peer. It preserves Agy's process and argument semantics: the launcher removes
 only `-n/--peer-name`, creates a process-bound launch token, and then replaces
 itself with `agy` using the remaining argv unchanged.
 
+The launcher fails closed unless the selected executable exposes the headless
+Agy CLI contract. It probes executable `agy` candidates on `PATH` with the
+non-launching `--help` command, skips desktop Antigravity/GUI shims, and falls
+back to `~/.local/bin/agy` when necessary. `AGY_PEER_AGY_BIN` may select a
+specific executable, but the same validation applies and a GUI launcher is
+rejected.
+
 ```bash
 agy-peer -n reviewer
 agy-peer -n batch-review -p "Review the current change"
@@ -21,12 +28,6 @@ and `update`, plus help/version flags, pass through without peer activation.
 `--dangerously-skip-permissions` is reflected as the bridge's bypass permission
 class; the launcher does not otherwise choose Agy policy.
 
-`agy-peer` prefers the headless CLI at `~/.local/bin/agy`. This matters on
-macOS because the Antigravity GUI also provides an executable named `agy` under
-`~/.antigravity/antigravity/bin`; that helper is rejected rather than launching
-the GUI accidentally. Set `AGY_PEER_AGY_BIN` when the headless CLI is installed
-somewhere else.
-
 ## Install
 
 The native payload is staged by `make install`. Activate the Agy plugin with:
@@ -37,8 +38,20 @@ make install-agy
 make install-all
 ```
 
-Use `make dev-install-agy` when the installed plugin should deliberately follow
-the current checkout. The plugin contains Antigravity's `plugin.json`, hook
+Installation stages the plugin directly in Agy's global plugin directory,
+`~/.gemini/config/plugins/agent-sessions`, and records the same
+skills/MCP/hooks entry that Agy writes to `config/import_manifest.json`. It
+deliberately does not invoke `agy plugin install`: current macOS builds
+delegate that subcommand to the desktop application, which can open or update
+the GUI. Existing import entries and unknown manifest metadata are preserved.
+
+Before starting Agy, the launcher prepends its installed native-runtime
+directory to `PATH`. The plugin's stdio MCP entry therefore resolves the exact
+`agent-session-runtime` installed beside `agy-peer`, even when that directory
+was absent from the caller's original `PATH`.
+
+Use `make dev-install-agy` to stage the plugin directly from the current
+checkout. The plugin contains Antigravity's `plugin.json`, hook
 configuration, MCP registration, and two skills. Validate it directly with
 `make validate-agy`.
 
@@ -67,8 +80,9 @@ Inside the conversation the MCP server is named `agent_sessions` and exposes:
 - `identity`
 - `rename_session`
 
-The current `session_id` is injected by the PreInvocation hook. A model-supplied
-ID can corroborate the process-bound identity but cannot grant authority.
+The MCP server derives the current `session_id` from the process-attested launch
+record. A model-supplied ID is optional: it can corroborate that identity but
+cannot grant authority or select another conversation.
 
 ## Delivery boundaries
 

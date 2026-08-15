@@ -21,8 +21,9 @@ existing lane explicitly.
 - For a remote host, use
   `peer-federator lane --host HOST --product codex --source-session SESSION_ID --`
   or the same command with product `claude` in place of the local binary. Use
-  this Agy conversation's exact session ID from the injected startup context or
-  `agent_sessions.identity`; automatic source inference is Codex/Claude-only.
+  this Agy conversation's exact session ID from the startup context or call
+  `agent_sessions.identity` without `session_id` to recover it from the attested
+  MCP host. Automatic source inference is Codex/Claude-only.
   Never fall back to SSH or silently run locally.
 
 Run `<binary> doctor --json` before the first local lane of each product. Require

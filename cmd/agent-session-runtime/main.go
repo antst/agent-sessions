@@ -11,6 +11,17 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "agy-plugin-manifest" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: agent-session-runtime agy-plugin-manifest PATH")
+			os.Exit(2)
+		}
+		if err := launcher.RegisterAgyPluginManifest(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-session-runtime agy-plugin-manifest: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "bootstrap" {
 		if len(os.Args) != 2 {
 			fmt.Fprintln(os.Stderr, "usage: agent-session-runtime bootstrap")

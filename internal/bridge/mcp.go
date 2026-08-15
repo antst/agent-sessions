@@ -28,7 +28,7 @@ var nativeToolDefinitions = []map[string]any{
 				"target":     map[string]any{"type": "string", "description": "Peer name (preferred), exact session ID, name [ref], or explicit uds: address."},
 				"message":    map[string]any{"type": "string", "minLength": 1, "maxLength": 900000},
 				"summary":    map[string]any{"type": "string", "description": "Optional short description of why the message is being sent."},
-				"session_id": map[string]any{"type": "string", "description": "Current peer session ID supplied by the host hook context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 			},
 			"required": []string{"target", "message", "session_id"}, "additionalProperties": false,
 		},
@@ -37,7 +37,7 @@ var nativeToolDefinitions = []map[string]any{
 		"name": "check_inbox", "description": "Recovery-only: read and consume peer messages queued past an automatic delivery boundary. Active peer messages are pushed into the session automatically; do not poll this tool.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Current peer session ID supplied by the host hook context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 			}, "required": []string{"session_id"}, "additionalProperties": false,
 		},
 	},
@@ -45,7 +45,7 @@ var nativeToolDefinitions = []map[string]any{
 		"name": "identity", "description": "Show this agent session's peer name and address.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Current peer session ID supplied by the host hook context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 			}, "required": []string{"session_id"}, "additionalProperties": false,
 		},
 	},
@@ -53,7 +53,7 @@ var nativeToolDefinitions = []map[string]any{
 		"name": "rename_session", "description": "Change the peer name advertised for this agent session.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Current peer session ID supplied by the host hook context."},
+				"session_id": map[string]any{"type": "string", "description": "Current peer session ID from host context. Optional when the MCP host attests it directly."},
 				"name":       map[string]any{"type": "string", "minLength": 1, "maxLength": 80},
 			}, "required": []string{"session_id", "name"}, "additionalProperties": false,
 		},
@@ -85,7 +85,7 @@ type laneOwner struct {
 }
 
 func runMCPCommand() int {
-	return runAttestedMCPCommand("claude-code-peer mcp", func(params json.RawMessage) (string, error) {
+	return runAttestedMCPCommand("claude-code-peer mcp", false, func(params json.RawMessage) (string, error) {
 		if err := attestStdioMCPHost(); err != nil {
 			return "", fmt.Errorf("host attestation: %w", err)
 		}
@@ -97,7 +97,7 @@ func runMCPCommand() int {
 	})
 }
 
-func runAttestedMCPCommand(label string, attest func(json.RawMessage) (string, error)) int {
+func runAttestedMCPCommand(label string, implicitCallerSession bool, attest func(json.RawMessage) (string, error)) int {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 2*maxFrameBytes)
 	writer := bufio.NewWriter(os.Stdout)
@@ -131,7 +131,7 @@ func runAttestedMCPCommand(label string, attest func(json.RawMessage) (string, e
 				continue
 			}
 		}
-		result, err := handleNativeMCPRequest(request.Method, request.Params, callerSessionID)
+		result, err := handleNativeMCPRequest(request.Method, request.Params, callerSessionID, implicitCallerSession)
 		if err != nil {
 			code := -32603
 			var rpcErr *rpcError
@@ -167,7 +167,7 @@ func writeMCPResponse(writer *bufio.Writer, id json.RawMessage, result any, rpcE
 	_, _ = writer.Write(append(body, '\n'))
 }
 
-func handleNativeMCPRequest(method string, params json.RawMessage, callerSessionID string) (any, error) {
+func handleNativeMCPRequest(method string, params json.RawMessage, callerSessionID string, implicitCallerSession bool) (any, error) {
 	switch method {
 	case "initialize":
 		var input map[string]any
@@ -181,7 +181,7 @@ func handleNativeMCPRequest(method string, params json.RawMessage, callerSession
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": nativeToolDefinitions}, nil
+		return map[string]any{"tools": nativeToolDefinitionsForSession(implicitCallerSession)}, nil
 	case "tools/call":
 		var call struct {
 			Name      string         `json:"name"`
@@ -218,6 +218,37 @@ func handleNativeMCPRequest(method string, params json.RawMessage, callerSession
 	default:
 		return nil, &rpcError{Code: -32601, Message: "Method not found: " + method}
 	}
+}
+
+func nativeToolDefinitionsForSession(implicitCallerSession bool) []map[string]any {
+	if !implicitCallerSession {
+		return nativeToolDefinitions
+	}
+	definitions := make([]map[string]any, 0, len(nativeToolDefinitions))
+	for _, definition := range nativeToolDefinitions {
+		clonedDefinition := make(map[string]any, len(definition))
+		for key, value := range definition {
+			clonedDefinition[key] = value
+		}
+		if schema, ok := definition["inputSchema"].(map[string]any); ok {
+			clonedSchema := make(map[string]any, len(schema))
+			for key, value := range schema {
+				clonedSchema[key] = value
+			}
+			if required, ok := schema["required"].([]string); ok {
+				filtered := make([]string, 0, len(required))
+				for _, name := range required {
+					if name != "session_id" {
+						filtered = append(filtered, name)
+					}
+				}
+				clonedSchema["required"] = filtered
+			}
+			clonedDefinition["inputSchema"] = clonedSchema
+		}
+		definitions = append(definitions, clonedDefinition)
+	}
+	return definitions
 }
 
 func inactiveMCPResult() map[string]any {
@@ -320,8 +351,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		address := encodeNativeAddress(stringValue(state["socketPath"]))
 		name := stringValue(state["name"])
 		return map[string]any{
-			"text": name + " — " + address,
-			"data": map[string]any{"name": name, "address": address, "sessionId": stringValue(state["sessionId"])},
+			"text": name + " [" + sessionID + "] — " + address,
+			"data": map[string]any{"name": name, "address": address, "sessionId": sessionID},
 		}, nil
 	case "rename_session":
 		sessionID, err := requireMCPCallerSession(paths, args, callerSessionID)
@@ -351,15 +382,15 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 }
 
 func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessionID string) (string, error) {
-	requested, err := requiredMCPString(args, "session_id")
-	if err != nil {
-		return "", err
-	}
 	if !validSessionID(callerSessionID) || !authorizedPeerSessionNative(paths, callerSessionID) {
 		return "", errors.New("peer tools are inactive outside an attested peer session")
 	}
+	requested := strings.TrimSpace(stringValue(args["session_id"]))
+	if requested == "" {
+		return callerSessionID, nil
+	}
 	if requested != callerSessionID {
-		return "", fmt.Errorf("session-scoped peer tool cannot act as agent session %s", requested)
+		return "", errors.New("session-scoped peer tool cannot act as another agent session")
 	}
 	return callerSessionID, nil
 }

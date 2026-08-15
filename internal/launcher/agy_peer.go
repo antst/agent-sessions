@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,9 +9,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const agyLaunchTokenEnv = "AGENT_SESSIONS_AGY_LAUNCH_TOKEN"
+
+const agyCLIProbeTimeout = 5 * time.Second
+
+var agyCLIHelpMarkers = []string{
+	"Usage of agy:",
+	"--conversation",
+	"--prompt-interactive",
+	"--output-format",
+	"Available subcommands:",
+}
 
 type agyPlan struct {
 	peerName        string
@@ -65,6 +77,7 @@ func RunAgyPeer(args []string) error {
 	}
 	environment := append([]string{}, os.Environ()...)
 	environment = replaceEnvironment(environment, agyLaunchTokenEnv, token)
+	environment = prependEnvironmentPath(environment, filepath.Dir(runtimePath))
 	return Exec(agy, plan.forwarded, environment)
 }
 
@@ -99,11 +112,24 @@ func parseAgyPeerArgs(args []string) (agyPlan, error) {
 		return agyPlan{}, usageError("-n/--peer-name applies only to an interactive or headless Antigravity session")
 	}
 	for _, argument := range beforeDoubleDash(plan.forwarded) {
-		if argument == "--dangerously-skip-permissions" {
+		if agyBypassRequested(argument) {
 			plan.permissionMode = "bypassPermissions"
 		}
 	}
 	return plan, nil
+}
+
+func agyBypassRequested(argument string) bool {
+	for _, name := range []string{"--dangerously-skip-permissions", "-dangerously-skip-permissions"} {
+		if argument == name {
+			return true
+		}
+		if strings.HasPrefix(argument, name+"=") {
+			enabled, err := strconv.ParseBool(strings.TrimPrefix(argument, name+"="))
+			return err == nil && enabled
+		}
+	}
+	return false
 }
 
 func agyPassthrough(args []string) bool {
@@ -152,30 +178,110 @@ func agyOptionConsumesNext(argument string) bool {
 }
 
 func agyExecutable() (string, error) {
-	if path := os.Getenv("AGY_PEER_AGY_BIN"); path != "" {
+	if configured := strings.TrimSpace(os.Getenv("AGY_PEER_AGY_BIN")); configured != "" {
+		path, err := exec.LookPath(configured)
+		if err != nil {
+			return "", &ExitError{Code: 127, Err: fmt.Errorf("AGY_PEER_AGY_BIN is unavailable: %s", configured)}
+		}
+		if err := validateAgyCLI(path); err != nil {
+			return "", &ExitError{Code: 127, Err: fmt.Errorf("AGY_PEER_AGY_BIN is not the headless Antigravity CLI: %s: %w", path, err)}
+		}
 		return path, nil
 	}
+	rejected := make([]string, 0)
+	for _, path := range agyExecutableCandidates() {
+		if err := validateAgyCLI(path); err == nil {
+			return path, nil
+		}
+		rejected = append(rejected, path)
+	}
+	if len(rejected) == 0 {
+		return "", &ExitError{Code: 127, Err: errors.New("headless Antigravity CLI agy was not found on PATH or at ~/.local/bin/agy")}
+	}
+	return "", &ExitError{Code: 127, Err: fmt.Errorf(
+		"no headless Antigravity CLI named agy was found; rejected non-CLI candidates: %s; set AGY_PEER_AGY_BIN to the CLI executable",
+		strings.Join(rejected, ", "),
+	)}
+}
+
+func agyExecutableCandidates() []string {
+	seen := make(map[string]struct{})
+	candidates := make([]string, 0)
+	addCandidate := func(candidate string) {
+		candidate, err := filepath.Abs(candidate)
+		if err != nil {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			return
+		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	for _, directory := range filepath.SplitList(os.Getenv("PATH")) {
+		if directory == "" {
+			directory = "."
+		}
+		addCandidate(filepath.Join(directory, "agy"))
+	}
 	if home, err := os.UserHomeDir(); err == nil {
-		userCLI := filepath.Join(home, ".local", "bin", "agy")
-		if info, statErr := os.Stat(userCLI); statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return userCLI, nil
+		addCandidate(filepath.Join(home, ".local", "bin", "agy"))
+	}
+	return candidates
+}
+
+func validateAgyCLI(path string) error {
+	if isAntigravityGUIExecutable(path) {
+		return errors.New("executable is Antigravity's GUI helper")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agyCLIProbeTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, path, "--help")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		return errors.New("--help probe timed out")
+	}
+	if err != nil {
+		return fmt.Errorf("--help probe failed: %w", err)
+	}
+	help := string(output)
+	for _, marker := range agyCLIHelpMarkers {
+		if !strings.Contains(help, marker) {
+			return fmt.Errorf("--help output is missing %q", marker)
 		}
 	}
-	path, err := exec.LookPath("agy")
-	if err != nil {
-		return "", &ExitError{Code: 127, Err: errors.New("agy was not found on PATH")}
-	}
-	if isAntigravityGUIExecutable(path) {
-		return "", &ExitError{Code: 127, Err: errors.New("agy on PATH is Antigravity's GUI helper, not the headless Agy CLI; install the CLI at ~/.local/bin/agy or set AGY_PEER_AGY_BIN")}
-	}
-	return path, nil
+	return nil
 }
 
 func isAntigravityGUIExecutable(path string) bool {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
+	current := path
+	for range 64 {
+		if knownAntigravityGUIPath(current) {
+			return true
+		}
+		target, err := os.Readlink(current)
+		if err != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(current), target)
+		}
+		current = filepath.Clean(target)
 	}
-	return strings.HasSuffix(filepath.ToSlash(filepath.Clean(path)), "/.antigravity/antigravity/bin/agy")
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return knownAntigravityGUIPath(resolved)
+	}
+	return false
+}
+
+func knownAntigravityGUIPath(path string) bool {
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	return strings.Contains(cleaned, "/.antigravity/antigravity/bin/") ||
+		strings.Contains(cleaned, "/Antigravity.app/Contents/")
 }
 
 func peerRuntimeExecutable() (string, error) {
@@ -206,4 +312,25 @@ func replaceEnvironment(environment []string, name, value string) []string {
 		}
 	}
 	return append(result, prefix+value)
+}
+
+func prependEnvironmentPath(environment []string, directory string) []string {
+	directory = filepath.Clean(directory)
+	current := ""
+	for _, item := range environment {
+		if strings.HasPrefix(item, "PATH=") {
+			current = strings.TrimPrefix(item, "PATH=")
+			break
+		}
+	}
+	for _, existing := range filepath.SplitList(current) {
+		if filepath.Clean(existing) == directory {
+			return environment
+		}
+	}
+	value := directory
+	if current != "" {
+		value += string(os.PathListSeparator) + current
+	}
+	return replaceEnvironment(environment, "PATH", value)
 }

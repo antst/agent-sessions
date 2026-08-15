@@ -173,7 +173,7 @@ make test-race
 make build
 make dev-install        # source-linked Codex/runtime development install
 make dev-install-claude # source-linked Claude orchestration skill
-make dev-install-agy    # source-linked Antigravity plugin
+make dev-install-agy    # Antigravity plugin staged from the current checkout
 make install-claude     # Claude skill from the stable installed runtime tree
 make install-agy        # Antigravity hooks, MCP, and skills from the installed tree
 make install-all        # native runtime plus Claude and Antigravity plugins

@@ -62,6 +62,12 @@ func TestAgyHookAttachesLiveLaunchAndInjectsPeerMessage(t *testing.T) {
 	if stringValue(attached["conversationId"]) != conversationID || !authorizedPeerSessionNative(paths, conversationID) {
 		t.Fatalf("launch was not attached: %#v", attached)
 	}
+	if caller, sessionErr := requireMCPCallerSession(paths, map[string]any{}, conversationID); sessionErr != nil || caller != conversationID {
+		t.Fatalf("attested Agy MCP caller without model-supplied session_id = %q, %v", caller, sessionErr)
+	}
+	if _, sessionErr := requireMCPCallerSession(paths, map[string]any{"session_id": "00000000-0000-0000-0000-000000000099"}, conversationID); sessionErr == nil {
+		t.Fatal("Agy MCP caller supplied a mismatched session_id")
+	}
 	owner, ok := inferPeerParent(paths, os.Getpid())
 	if !ok || owner.PID != os.Getpid() || owner.SessionID != conversationID || owner.PermissionMode != "default" {
 		t.Fatalf("Antigravity launch was not accepted as a lane owner: %#v, ok=%v", owner, ok)
@@ -86,10 +92,32 @@ func TestAgyHookAttachesLiveLaunchAndInjectsPeerMessage(t *testing.T) {
 	if entries, _ := os.ReadDir(pending); len(entries) != 0 {
 		t.Fatalf("delivered inbox still contains %d entries", len(entries))
 	}
-	if _, err := handleAgyHook("Stop", agyHookInput{ConversationID: conversationID, WorkspacePaths: []string{root}}); err != nil {
+	stopOutput, err := handleAgyHook("Stop", agyHookInput{ConversationID: conversationID, WorkspacePaths: []string{root}})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if len(stopOutput) != 0 {
+		t.Fatalf("quiet Stop hook overrode other plugins: %#v", stopOutput)
+	}
 	assertAgyTestStatus(t, controls, "idle")
+}
+
+func TestAgyMCPToolSchemasDoNotRequireEphemeralSessionID(t *testing.T) {
+	result, err := handleNativeMCPRequest("tools/list", nil, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := result.(map[string]any)["tools"].([]map[string]any)
+	if len(tools) != len(nativeToolDefinitions) {
+		t.Fatalf("Agy tool definitions = %d, want %d", len(tools), len(nativeToolDefinitions))
+	}
+	for _, tool := range tools {
+		schema, _ := tool["inputSchema"].(map[string]any)
+		required, _ := schema["required"].([]string)
+		if containsString(required, "session_id") {
+			t.Fatalf("Agy tool %q still requires ephemeral session_id: %v", stringValue(tool["name"]), required)
+		}
+	}
 }
 
 func TestAgyHookDoesNotPublishOrdinarySessionWithoutLaunchToken(t *testing.T) {

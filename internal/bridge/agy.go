@@ -181,15 +181,13 @@ func agyHookOutput(event, startup, context string) map[string]any {
 		}
 	case event == "Stop" && context != "":
 		return map[string]any{"decision": "continue", "reason": context}
-	case event == "Stop":
-		return map[string]any{"decision": "stop"}
 	default:
 		return map[string]any{}
 	}
 }
 
 func runAgyMCPCommand() int {
-	return runAttestedMCPCommand("agent-sessions Antigravity mcp", func(_ json.RawMessage) (string, error) {
+	return runAttestedMCPCommand("agent-sessions Antigravity mcp", true, func(_ json.RawMessage) (string, error) {
 		paths := resolveNativePaths()
 		record, _, err := authorizedAgentLaunch(paths, strings.TrimSpace(os.Getenv(agyLaunchTokenEnvironment)), "agy", true)
 		if err != nil {
@@ -323,7 +321,7 @@ func sanitizeNameOrEmpty(value string) string {
 
 func agyStartupContext(state map[string]any) string {
 	return fmt.Sprintf(
-		"Agent Sessions peer messaging is active. This Antigravity conversation is advertised as %q. For agent_sessions MCP tool calls, pass session_id exactly %q. Use list_peers before sending when the recipient is unclear.",
+		"Agent Sessions peer messaging is active. This Antigravity conversation is advertised as %q with conversation ID %q. The agent_sessions MCP server derives this identity from the attested host process; session_id is optional and, when supplied, must match. Use list_peers before sending when the recipient is unclear.",
 		stringValue(state["name"]), stringValue(state["sessionId"]),
 	)
 }

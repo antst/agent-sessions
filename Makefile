@@ -2,7 +2,6 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
-AGY ?= $(if $(wildcard $(HOME)/.local/bin/agy),$(HOME)/.local/bin/agy,agy)
 GOLANGCI_LINT ?= golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
@@ -20,6 +19,10 @@ CLAUDE_STAGED_ROOT := $(CLAUDE_RELEASE_ROOT)/$(CLAUDE_PLUGIN_VERSION)
 CLAUDE_MARKETPLACE_ROOT ?= $(CLAUDE_STAGED_ROOT)
 AGY_PLUGIN ?= agent-sessions
 AGY_PLUGIN_ROOT ?= $(INSTALL_ROOT)/agy
+AGY_PLUGIN_SOURCE = $(if $(wildcard $(AGY_PLUGIN_ROOT)/plugin.json),$(AGY_PLUGIN_ROOT),$(CURDIR)/agy)
+AGY_ACTIVE_PLUGIN_ROOT ?= $(HOME)/.gemini/config/plugins/$(AGY_PLUGIN)
+AGY_IMPORT_MANIFEST ?= $(HOME)/.gemini/config/import_manifest.json
+AGY_INSTALLER_RUNTIME ?= $(BIN_DIR)/agent-session-runtime
 START_RUNTIME ?= 1
 PEER_FEDERATOR_CONFIG_DIR ?= $(HOME)/.config/peer-federator
 PEER_FEDERATOR_DOC_ROOT ?= $(PREFIX)/share/doc/peer-federator
@@ -284,14 +287,10 @@ dev-install-claude:
 	$(MAKE) install-claude CLAUDE_MARKETPLACE_ROOT="$(CURDIR)"
 
 validate-agy:
-	@command -v "$(AGY)" >/dev/null 2>&1 || { \
-		printf 'Antigravity CLI is required for Antigravity plugin validation\n' >&2; \
-		exit 127; \
-	}
-	"$(AGY)" plugin validate "$(if $(wildcard $(AGY_PLUGIN_ROOT)/plugin.json),$(AGY_PLUGIN_ROOT),$(CURDIR)/agy)"
+	./scripts/install-agy-plugin validate "$(AGY_PLUGIN_SOURCE)"
 
-install-agy: validate-agy
-	"$(AGY)" plugin install "$(AGY_PLUGIN_ROOT)"
+install-agy: validate-agy build
+	./scripts/install-agy-plugin install "$(AGY_PLUGIN_SOURCE)" "$(AGY_ACTIVE_PLUGIN_ROOT)" "$(AGY_INSTALLER_RUNTIME)" "$(AGY_IMPORT_MANIFEST)"
 
 dev-install-agy:
 	$(MAKE) install-agy AGY_PLUGIN_ROOT="$(CURDIR)/agy"
