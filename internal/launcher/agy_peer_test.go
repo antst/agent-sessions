@@ -44,6 +44,22 @@ func TestAgyPeerRecognizesNativeBypassFlagSpellings(t *testing.T) {
 	}
 }
 
+func TestAgyPeerUsesLastNativeBypassFlagValue(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"--dangerously-skip-permissions", "--dangerously-skip-permissions=false"}, want: "default"},
+		{args: []string{"--dangerously-skip-permissions=false", "--dangerously-skip-permissions"}, want: "bypassPermissions"},
+		{args: []string{"-dangerously-skip-permissions=true", "--dangerously-skip-permissions=false"}, want: "default"},
+	} {
+		plan, err := parseAgyPeerArgs(test.args)
+		if err != nil || plan.permissionMode != test.want {
+			t.Fatalf("bypass sequence %q = mode %q, err %v; want %q", test.args, plan.permissionMode, err, test.want)
+		}
+	}
+}
+
 func TestAgyPeerPassesNativeSubcommandsThrough(t *testing.T) {
 	for _, args := range [][]string{{"models", "list"}, {"plugin", "list"}, {"--help"}, {"--model", "x", "agents"}} {
 		plan, err := parseAgyPeerArgs(args)
@@ -166,6 +182,17 @@ func TestAgyExecutableRejectsUserLocalSymlinkToGUI(t *testing.T) {
 	}
 	if _, statErr := os.Stat(guiMarker); !os.IsNotExist(statErr) {
 		t.Fatalf("GUI-backed user-local agy was executed during validation: %v", statErr)
+	}
+}
+
+func TestKnownAntigravityGUIPathMatchesDarwinPathCaseInsensitively(t *testing.T) {
+	for _, path := range []string{
+		"/applications/antigravity.app/contents/MacOS/Antigravity",
+		"/APPLICATIONS/ANTIGRAVITY.APP/CONTENTS/MacOS/Antigravity",
+	} {
+		if !knownAntigravityGUIPathForOS(path, "darwin") {
+			t.Fatalf("Darwin GUI path was not recognized: %s", path)
+		}
 	}
 }
 

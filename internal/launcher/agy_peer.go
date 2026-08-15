@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -112,24 +113,28 @@ func parseAgyPeerArgs(args []string) (agyPlan, error) {
 		return agyPlan{}, usageError("-n/--peer-name applies only to an interactive or headless Antigravity session")
 	}
 	for _, argument := range beforeDoubleDash(plan.forwarded) {
-		if agyBypassRequested(argument) {
-			plan.permissionMode = "bypassPermissions"
+		if enabled, recognized := agyBypassValue(argument); recognized {
+			if enabled {
+				plan.permissionMode = "bypassPermissions"
+			} else {
+				plan.permissionMode = "default"
+			}
 		}
 	}
 	return plan, nil
 }
 
-func agyBypassRequested(argument string) bool {
+func agyBypassValue(argument string) (enabled, recognized bool) {
 	for _, name := range []string{"--dangerously-skip-permissions", "-dangerously-skip-permissions"} {
 		if argument == name {
-			return true
+			return true, true
 		}
 		if strings.HasPrefix(argument, name+"=") {
 			enabled, err := strconv.ParseBool(strings.TrimPrefix(argument, name+"="))
-			return err == nil && enabled
+			return enabled, err == nil
 		}
 	}
-	return false
+	return false, false
 }
 
 func agyPassthrough(args []string) bool {
@@ -280,9 +285,18 @@ func isAntigravityGUIExecutable(path string) bool {
 }
 
 func knownAntigravityGUIPath(path string) bool {
+	return knownAntigravityGUIPathForOS(path, runtime.GOOS)
+}
+
+func knownAntigravityGUIPathForOS(path, goos string) bool {
 	cleaned := filepath.ToSlash(filepath.Clean(path))
+	guiAppMarker := "/Antigravity.app/Contents/"
+	if goos == "darwin" {
+		cleaned = strings.ToLower(cleaned)
+		guiAppMarker = strings.ToLower(guiAppMarker)
+	}
 	return strings.Contains(cleaned, "/.antigravity/antigravity/bin/") ||
-		strings.Contains(cleaned, "/Antigravity.app/Contents/")
+		strings.Contains(cleaned, guiAppMarker)
 }
 
 func peerRuntimeExecutable() (string, error) {
