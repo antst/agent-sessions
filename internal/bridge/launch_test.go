@@ -720,6 +720,10 @@ func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
 	if err := os.Rename(threadRoot, requestedRoot); err != nil {
 		t.Fatal(err)
 	}
+	canonicalRequestedRoot, err := canonicalLaunchDirectory(requestedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	threadID := "00000000-0000-0000-0000-00000000012a"
 	methods := []string{}
 	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -769,12 +773,12 @@ func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
 		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "true",
 		"--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", readProcStart(os.Getpid()),
 	})
-	if err != nil || got != threadID || effectiveCwd != requestedRoot {
+	if err != nil || got != threadID || effectiveCwd != canonicalRequestedRoot {
 		t.Fatalf("loaded migrated cwd resume = id=%q cwd=%q err=%v", got, effectiveCwd, err)
 	}
 	owner := readInteractiveOwner(paths, threadID)
 	if strings.Join(actions, ",") != "detach_stale_prepared,register_prepared" ||
-		owner == nil || !owner.ResumeLoaded || owner.Cwd != requestedRoot || stringValue(published["cwd"]) != requestedRoot {
+		owner == nil || !owner.ResumeLoaded || owner.Cwd != canonicalRequestedRoot || stringValue(published["cwd"]) != canonicalRequestedRoot {
 		t.Fatalf("loaded cwd migration actions=%v owner=%#v publication=%#v", actions, owner, published)
 	}
 	if strings.Contains(strings.Join(methods, ","), "thread/archive") || strings.Contains(strings.Join(methods, ","), "thread/unarchive") {
@@ -790,6 +794,10 @@ func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testin
 		t.Fatal(err)
 	}
 	if err := os.Rename(threadRoot, requestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRequestedRoot, err := canonicalLaunchDirectory(requestedRoot)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {
@@ -823,11 +831,11 @@ func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testin
 		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "true",
 		"--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", readProcStart(os.Getpid()),
 	})
-	if err != nil || got != threadID || effectiveCwd != requestedRoot {
+	if err != nil || got != threadID || effectiveCwd != canonicalRequestedRoot {
 		t.Fatalf("migrated cwd resume = id=%q cwd=%q err=%v", got, effectiveCwd, err)
 	}
 	owner := readInteractiveOwner(resolveNativePaths(), threadID)
-	if owner == nil || owner.Cwd != requestedRoot || stringValue(published["cwd"]) != requestedRoot {
+	if owner == nil || owner.Cwd != canonicalRequestedRoot || stringValue(published["cwd"]) != canonicalRequestedRoot {
 		t.Fatalf("migrated cwd owner=%#v publication=%#v", owner, published)
 	}
 	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {
