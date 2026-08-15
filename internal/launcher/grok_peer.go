@@ -596,6 +596,7 @@ func grokExecutableCandidates() []string {
 func validateGrokCLI(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grokProbeTimeout)
 	defer cancel()
+	// #nosec G702 -- The candidate is a resolved local executable and the probe argv is fixed.
 	command := exec.CommandContext(ctx, path, "--no-auto-update", "--help")
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
