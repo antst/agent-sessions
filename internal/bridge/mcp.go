@@ -221,7 +221,7 @@ func handleNativeMCPRequestWithTools(
 		return map[string]any{
 			"protocolVersion": defaultString(stringValue(input["protocolVersion"]), "2025-06-18"),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "claude-code-peer", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "agent-sessions", "version": "0.1.0"},
 			"instructions":    instructions,
 		}, nil
 	case "ping":

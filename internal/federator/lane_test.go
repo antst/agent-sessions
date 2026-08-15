@@ -226,7 +226,9 @@ func TestPermissionModeFromProcessArgsPreservesArgumentBoundaries(t *testing.T) 
 		{args: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, want: "bypassPermissions"},
 		{args: []string{"grok", "--permission-mode", "always-approve", "--permission-mode", "default"}, want: "default"},
 		{args: []string{"grok", "--permission-mode=default", "--always-approve"}, want: "bypassPermissions"},
+		{args: []string{"claude", "--dangerously-skip-permissions", "--permission-mode", "plan"}, want: "bypassPermissions"},
 		{args: []string{"claude", "--dangerously-skip-permissions", "--dangerously-skip-permissions=false"}, want: "default"},
+		{args: []string{"claude", "--dangerously-skip-permissions=false", "--permission-mode", "bypassPermissions"}, want: "bypassPermissions"},
 		{args: []string{"claude", "-p", "explain --dangerously-skip-permissions"}, want: "default"},
 		{args: []string{"claude", "--", "--dangerously-skip-permissions"}, want: "default"},
 	}

@@ -78,12 +78,18 @@ func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localP
 		} else {
 			instanceIdentity = strconv.Itoa(pid) + "\x00" + instanceIdentity
 		}
+		permissionMode := peerPermissionMode(pid, record.PermissionMode)
+		if record.Entrypoint == "grok" {
+			if inspected, ok := inspectGrokPermissionMode(record.MessagingSocketPath, pid, record); ok {
+				permissionMode = inspected
+			}
+		}
 		peer := Peer{
 			ID: id, HostID: hostID, HostName: hostName, SessionID: record.SessionID,
 			GlobalID: globalSessionID(hostID, record.SessionID), Name: record.Name,
 			DisplayName: qualifiedName(record.Name, hostName), Status: record.Status,
 			Cwd: record.Cwd, Entrypoint: record.Entrypoint,
-			PermissionMode: peerPermissionMode(pid, record.PermissionMode), StartedAt: record.StartedAt,
+			PermissionMode: permissionMode, StartedAt: record.StartedAt,
 			PeerProtocol: record.PeerProtocol,
 			InstanceID:   sessionKey(hostID + "\x00" + instanceIdentity),
 		}

@@ -287,8 +287,28 @@ func (d *daemon) handleConnection(conn net.Conn) {
 		}
 		var frame map[string]any
 		if json.Unmarshal(line, &frame) == nil {
+			if stringValue(frame["type"]) == "control" && stringValue(frame["action"]) == "inspect" {
+				d.writeInspection(conn)
+				continue
+			}
 			d.handleFrame(frame)
 		}
+	}
+}
+
+// writeInspection exposes only the live daemon identity and current permission
+// class. Federators use it to corroborate a Grok registry row without trusting
+// mutable registry content or stale TUI argv after an in-session mode change.
+func (d *daemon) writeInspection(conn net.Conn) {
+	d.mu.Lock()
+	response := map[string]any{
+		"type": "peer_inspection", "pid": os.Getpid(), "procStart": d.procStart,
+		"sessionId": d.sessionID, "entrypoint": d.entrypoint, "permissionMode": d.permissionMode,
+	}
+	d.mu.Unlock()
+	body, err := json.Marshal(response)
+	if err == nil {
+		_, _ = conn.Write(append(body, '\n'))
 	}
 }
 

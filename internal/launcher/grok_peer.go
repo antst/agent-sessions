@@ -594,6 +594,9 @@ func grokExecutableCandidates() []string {
 }
 
 func validateGrokCLI(path string) error {
+	if err := rejectMacOSAppBundleExecutable(path); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), grokProbeTimeout)
 	defer cancel()
 	// #nosec G702 -- The candidate is a resolved local executable and the probe argv is fixed.
@@ -612,6 +615,35 @@ func validateGrokCLI(path string) error {
 		}
 	}
 	return nil
+}
+
+// rejectMacOSAppBundleExecutable prevents a desktop application helper from
+// being executed as part of CLI validation. macOS commonly exposes helpers
+// through PATH symlinks, and its default filesystems accept case-variant
+// spellings, so both the selected path and its resolved target are matched
+// case-insensitively before running even the otherwise inert --help probe.
+func rejectMacOSAppBundleExecutable(path string) error {
+	if pathInsideMacOSAppContents(path) {
+		return errors.New("executable is inside a macOS application bundle, not a standalone Grok CLI")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve Grok executable symlinks: %w", err)
+	}
+	if pathInsideMacOSAppContents(resolved) {
+		return errors.New("executable resolves inside a macOS application bundle, not a standalone Grok CLI")
+	}
+	return nil
+}
+
+func pathInsideMacOSAppContents(path string) bool {
+	parts := strings.Split(strings.ToLower(filepath.ToSlash(filepath.Clean(path))), "/")
+	for index := 0; index+1 < len(parts); index++ {
+		if strings.HasSuffix(parts[index], ".app") && parts[index+1] == "contents" {
+			return true
+		}
+	}
+	return false
 }
 
 func startGrokHost(runtimePath string, request grokHostRequest) (grokHostProcess, error) {

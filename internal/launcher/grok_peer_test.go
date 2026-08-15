@@ -294,6 +294,73 @@ func TestGrokExecutableSkipsInvalidPathCandidateAndValidatesOverride(t *testing.
 	}
 }
 
+func TestGrokExecutableRejectsMacOSAppBundleBeforeProbe(t *testing.T) {
+	for _, source := range []string{"override", "path", "fallback"} {
+		for _, symlinked := range []bool{false, true} {
+			name := source + "/direct"
+			if symlinked {
+				name = source + "/symlink"
+			}
+			t.Run(name, func(t *testing.T) {
+				root := t.TempDir()
+				marker := filepath.Join(root, "gui-helper-invoked")
+				bundleDirectory := filepath.Join(root, "Applications", "Grok.Build.APP", "cOnTeNtS", "MacOS")
+				bundleCLI := writeGrokFixture(t, bundleDirectory, `: >"$GROK_GUI_MARKER"; `+validGrokHelpFixture())
+				candidate := bundleCLI
+
+				if symlinked {
+					shimDirectory := filepath.Join(root, "shim")
+					if err := os.MkdirAll(shimDirectory, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					candidate = filepath.Join(shimDirectory, "grok")
+					if err := os.Symlink(bundleCLI, candidate); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				emptyPath := filepath.Join(root, "empty-path")
+				if err := os.MkdirAll(emptyPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("GROK_GUI_MARKER", marker)
+				t.Setenv("GROK_PEER_GROK_BIN", "")
+				t.Setenv("PATH", emptyPath)
+				t.Setenv("HOME", filepath.Join(root, "home"))
+
+				switch source {
+				case "override":
+					t.Setenv("GROK_PEER_GROK_BIN", candidate)
+				case "path":
+					t.Setenv("PATH", filepath.Dir(candidate))
+				case "fallback":
+					home := filepath.Join(root, "home")
+					if !symlinked {
+						home = filepath.Join(root, "Applications", "Fallback.APP", "CoNtEnTs", "Home")
+						writeGrokFixture(t, filepath.Join(home, ".grok", "bin"), `: >"$GROK_GUI_MARKER"; `+validGrokHelpFixture())
+					} else {
+						fallback := filepath.Join(home, ".grok", "bin", "grok")
+						if err := os.MkdirAll(filepath.Dir(fallback), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(bundleCLI, fallback); err != nil {
+							t.Fatal(err)
+						}
+					}
+					t.Setenv("HOME", home)
+				}
+
+				if got, err := grokExecutable(); err == nil {
+					t.Fatalf("macOS application helper was accepted as Grok CLI: %q", got)
+				}
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("macOS application helper was executed during validation: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestGrokRuntimeSelectionDoesNotRequireCodex(t *testing.T) {
 	root := t.TempDir()
 	runtimePath := filepath.Join(root, "agent-session-runtime")

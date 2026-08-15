@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -372,19 +374,48 @@ func TestGrokHostStatusDoesNotDeadlockInjectedTurn(t *testing.T) {
 		t.Fatalf("busy wake = %#v, %v", response, err)
 	}
 	waitForGrokDelivery(t, host, "busy-status", "in_flight")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, valid := host.activePromptPermissionSnapshot(); valid {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, valid := host.activePromptPermissionSnapshot(); !valid {
+		t.Fatal("injected prompt did not publish its active permission snapshot")
+	}
 	started := time.Now()
 	status, err := requestControl(host.paths.ControlSocket, map[string]any{
 		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
 	}, 250*time.Millisecond)
 	ready, _ := status["ready"].(bool)
 	deferred, _ := status["refreshDeferred"].(bool)
-	if err != nil || !deferred || !ready {
+	if err != nil || !deferred || !ready || stringValue(status["permissionAuthority"]) != "active_prompt_snapshot" {
 		t.Fatalf("busy status = %#v, %v", status, err)
 	}
 	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
 		t.Fatalf("busy status blocked behind session/prompt for %s", elapsed)
 	}
 	waitForGrokDelivery(t, host, "busy-status", "delivered")
+}
+
+func TestGrokHostBusyStatusWithoutActivePromptSnapshotFailsClosed(t *testing.T) {
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-busy-no-snapshot")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+
+	host.acpMu.Lock()
+	started := time.Now()
+	status, err := requestControl(host.paths.ControlSocket, map[string]any{
+		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+	}, 250*time.Millisecond)
+	host.acpMu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "without an authoritative active prompt permission snapshot") {
+		t.Fatalf("busy status without prompt snapshot = %#v, %v", status, err)
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("busy status without prompt snapshot blocked for %s", elapsed)
+	}
 }
 
 func TestGrokHostCannotRepublishAfterCleanupStarts(t *testing.T) {
@@ -471,6 +502,60 @@ func TestGrokHostRefreshesRuntimePermissionMode(t *testing.T) {
 	}, time.Second)
 	if err != nil || stringValue(status["permissionMode"]) != "default" {
 		t.Fatalf("prompting status = %#v, %v", status, err)
+	}
+}
+
+func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
+	yolo := filepath.Join(t.TempDir(), "yolo")
+	if err := os.WriteFile(yolo, []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_FAKE_YOLO_FILE", yolo)
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-mode-publish-retry")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+
+	var reject atomic.Bool
+	reject.Store(true)
+	host.peerMu.Lock()
+	host.publishPermission = func(peer *daemon) error {
+		if reject.Load() {
+			return errors.New("injected registry publication failure")
+		}
+		return peer.writeRecordsLocked()
+	}
+	host.peerMu.Unlock()
+	if err := os.WriteFile(yolo, []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := requestControl(host.paths.ControlSocket, map[string]any{
+		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+	}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "injected registry publication failure") {
+		t.Fatalf("failed permission publication status = %#v, %v", status, err)
+	}
+	if mode := host.currentPermissionMode(); mode != "default" {
+		t.Fatalf("failed publication committed host mode %q", mode)
+	}
+	if record := readGrokLaunchRecord(grokLaunchRecordPath(resolveNativePaths(), host.config.SessionID)); record == nil || record.PermissionMode != "default" {
+		t.Fatalf("failed publication committed launch record %#v", record)
+	}
+
+	reject.Store(false)
+	status, err = requestControl(host.paths.ControlSocket, map[string]any{
+		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+	}, time.Second)
+	if err != nil || stringValue(status["permissionMode"]) != "bypassPermissions" {
+		t.Fatalf("retried permission publication status = %#v, %v", status, err)
+	}
+	record := readGrokLaunchRecord(grokLaunchRecordPath(resolveNativePaths(), host.config.SessionID))
+	state := readJSONMap(filepath.Join(resolveNativePaths().dataRoot, "sessions", sessionKey(host.config.SessionID), "state.json"))
+	registry := readJSONMap(stringValue(state["registryFile"]))
+	if record == nil || record.PermissionMode != "bypassPermissions" ||
+		stringValue(state["permissionMode"]) != "bypassPermissions" ||
+		stringValue(registry["permissionMode"]) != "bypassPermissions" {
+		t.Fatalf("retried mode was not persisted and published: record=%#v state=%#v registry=%#v", record, state, registry)
 	}
 }
 

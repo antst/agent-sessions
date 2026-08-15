@@ -478,13 +478,58 @@ if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
   printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
   exit 1
 fi
-grok_install_plan="$(make -n -C "$plugin_root" install-grok GROK=grok-test-cli GROK_PLUGIN_ROOT="$custom_install_root/grok")"
-if ! grep -Fq "grok-test-cli plugin validate \"$custom_install_root/grok\"" <<<"$grok_install_plan" ||
-   ! grep -Fq 'grok-test-cli plugin uninstall "agent-sessions" --keep-data' <<<"$grok_install_plan" ||
-   ! grep -Fq "grok-test-cli plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan"; then
+grok_install_plan="$(make -n -C "$plugin_root" install-grok GROK=grok-test-cli \
+  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok")"
+if ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_install_plan" ||
+   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin uninstall \"agent-sessions\" --keep-data" <<<"$grok_install_plan" ||
+   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan"; then
   printf 'Grok plugin install plan does not validate and explicitly trust the installed payload\n' >&2
   exit 1
 fi
+
+# Every plugin-management verb must traverse grok-peer's fail-closed CLI
+# resolver. A desktop helper or merely Grok-shaped incompatible executable may
+# be probed with the inert --help contract, but must never receive `plugin`.
+for fixture_kind in gui incompatible; do
+  rejected_grok="$temporary_root/$fixture_kind-grok/grok"
+  rejected_log="$temporary_root/$fixture_kind-grok.log"
+  mkdir -p "$(dirname -- "$rejected_grok")"
+  if [[ "$fixture_kind" == gui ]]; then
+    fixture_help="Grok desktop application"
+  else
+    fixture_help=$'Grok Build TUI\nUsage: grok [OPTIONS]\nCommands:\n  plugin  Manage plugins'
+  fi
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf '\''%s\n'\'' "$*" >>"$REJECTED_GROK_LOG"' \
+    'if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then' \
+    '  printf '\''%s\n'\'' "$REJECTED_GROK_HELP"' \
+    '  exit 0' \
+    'fi' \
+    'printf '\''fixture must never receive a plugin command\n'\'' >&2' \
+    'exit 97' >"$rejected_grok"
+  chmod 0700 "$rejected_grok"
+  set +e
+  REJECTED_GROK_LOG="$rejected_log" REJECTED_GROK_HELP="$fixture_help" \
+    make -s -C "$plugin_root" validate-grok GROK="$rejected_grok" \
+      GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+      >"$temporary_root/$fixture_kind-grok.out" 2>"$temporary_root/$fixture_kind-grok.err"
+  rejected_status=$?
+  set -e
+  if [[ -f "$rejected_log" ]]; then
+    rejected_argv="$(tr '\n' ' ' <"$rejected_log")"
+  else
+    rejected_argv='<not probed>'
+  fi
+  if ((rejected_status == 0)) || [[ ! -f "$rejected_log" ]] ||
+     grep -Eq '(^|[[:space:]])plugin([[:space:]]|$)' "$rejected_log" ||
+     [[ "$(wc -l <"$rejected_log")" -ne 1 ]] ||
+     ! grep -Fxq -- '--no-auto-update --help' "$rejected_log"; then
+    printf 'Grok %s fixture escaped validated plugin management (status=%s; argv=%s)\n' \
+      "$fixture_kind" "$rejected_status" "$rejected_argv" >&2
+    exit 1
+  fi
+done
 
 # A source checkout must never relabel an old bin/ artifact as current merely
 # because Go is absent. Only a release archive's explicit prebuilt marker may

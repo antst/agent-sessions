@@ -280,6 +280,10 @@ func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
 	if mode != "default" && mode != "bypassPermissions" {
 		return errors.New("grok host returned no authoritative permission mode")
 	}
+	if deferred, _ := response["refreshDeferred"].(bool); deferred &&
+		stringValue(response["permissionAuthority"]) != "active_prompt_snapshot" {
+		return errors.New("grok host deferred permission refresh without an active prompt snapshot")
+	}
 	return nil
 }
 
@@ -471,6 +475,16 @@ type grokHost struct {
 	lease    *os.File
 	modeMu   sync.RWMutex
 	mode     string
+	// activePromptMode is authoritative only while this host's ACP stream is
+	// blocked in the injected session/prompt whose immediately preceding roster
+	// refresh produced the snapshot. It must never turn arbitrary acpMu
+	// contention into permission authority.
+	activePromptMode  string
+	activePromptValid bool
+
+	// publishPermission is a test seam. Production writes both daemon records
+	// through writeRecordsLocked.
+	publishPermission func(*daemon) error
 
 	acpMu     sync.Mutex
 	acp       *grokACPClient
@@ -793,32 +807,39 @@ func (h *grokHost) refreshPermissionModeLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Every path that needs both locks takes peerMu before modeMu. Keep the
+	// candidate dirty until the daemon state and registry both contain it; a
+	// failed publication must be retried by the next roster refresh.
+	h.peerMu.Lock()
+	defer h.peerMu.Unlock()
 	h.modeMu.Lock()
+	defer h.modeMu.Unlock()
 	if mode == h.mode {
-		h.modeMu.Unlock()
 		return nil
+	}
+	if peer := h.peer; peer != nil {
+		peer.mu.Lock()
+		previous := peer.permissionMode
+		peer.permissionMode = mode
+		publisher := h.publishPermission
+		if publisher == nil {
+			publisher = func(peer *daemon) error { return peer.writeRecordsLocked() }
+		}
+		err = publisher(peer)
+		if err != nil {
+			peer.permissionMode = previous
+			peer.mu.Unlock()
+			return fmt.Errorf("publish live Grok permission mode: %w", err)
+		}
+		peer.mu.Unlock()
 	}
 	nextRecord := h.record
 	nextRecord.PermissionMode = mode
 	if err := writeJSONAtomic(grokLaunchRecordPath(resolveNativePaths(), nextRecord.SessionID), nextRecord); err != nil {
-		h.modeMu.Unlock()
 		return fmt.Errorf("persist live Grok permission mode: %w", err)
 	}
 	h.mode = mode
 	h.record = nextRecord
-	h.modeMu.Unlock()
-	h.peerMu.Lock()
-	peer := h.peer
-	h.peerMu.Unlock()
-	if peer != nil {
-		peer.mu.Lock()
-		peer.permissionMode = mode
-		err = peer.writeRecordsLocked()
-		peer.mu.Unlock()
-		if err != nil {
-			return fmt.Errorf("publish live Grok permission mode: %w", err)
-		}
-	}
 	return nil
 }
 
@@ -826,6 +847,30 @@ func (h *grokHost) currentPermissionMode() string {
 	h.modeMu.RLock()
 	defer h.modeMu.RUnlock()
 	return defaultString(h.mode, "default")
+}
+
+func (h *grokHost) beginActivePromptPermissionSnapshot() {
+	h.modeMu.Lock()
+	h.activePromptMode = defaultString(h.mode, "default")
+	h.activePromptValid = true
+	h.modeMu.Unlock()
+}
+
+func (h *grokHost) clearActivePromptPermissionSnapshot() {
+	h.modeMu.Lock()
+	h.activePromptMode = ""
+	h.activePromptValid = false
+	h.modeMu.Unlock()
+}
+
+func (h *grokHost) activePromptPermissionSnapshot() (string, bool) {
+	h.modeMu.RLock()
+	defer h.modeMu.RUnlock()
+	if !h.activePromptValid {
+		return "", false
+	}
+	mode := h.activePromptMode
+	return mode, mode == "default" || mode == "bypassPermissions"
 }
 
 func grokRosterPermissionMode(response map[string]any, sessionID string) (string, error) {
@@ -933,6 +978,7 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 	case "status":
 		loaded := false
 		refreshDeferred := !h.acpMu.TryLock()
+		permissionAuthority := "live_roster"
 		if !refreshDeferred {
 			ctx, cancel := context.WithTimeout(context.Background(), grokACPStartupTimeout)
 			err := h.ensureACPLocked(ctx)
@@ -945,19 +991,30 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 		}
 		h.peerMu.Lock()
 		published := h.peer != nil
-		h.peerMu.Unlock()
+		var permissionMode string
 		if refreshDeferred {
 			// session/prompt owns the ACP request stream until the injected turn
 			// completes. Its permission mode was refreshed immediately before
 			// submission; blocking here would deadlock an MCP call made by that
 			// same turn. Human-started turns do not occupy this stream and take
 			// the live refresh path above.
-			loaded = published
+			var valid bool
+			permissionMode, valid = h.activePromptPermissionSnapshot()
+			if !published || !valid {
+				h.peerMu.Unlock()
+				return nil, errors.New("grok ACP is busy without an authoritative active prompt permission snapshot")
+			}
+			loaded = true
+			permissionAuthority = "active_prompt_snapshot"
+		} else {
+			permissionMode = h.currentPermissionMode()
 		}
+		h.peerMu.Unlock()
 		return map[string]any{
 			"sessionId": h.config.SessionID, "leaderReady": h.leader != nil,
 			"loaded": loaded, "ready": loaded && published,
-			"permissionMode": h.currentPermissionMode(), "refreshDeferred": refreshDeferred,
+			"permissionMode": permissionMode, "refreshDeferred": refreshDeferred,
+			"permissionAuthority": permissionAuthority,
 		}, nil
 	case "wake":
 		h.peerMu.Lock()
@@ -1096,10 +1153,12 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPPromptTimeout)
+	h.beginActivePromptPermissionSnapshot()
 	_, err = h.acp.request(ctx, "session/prompt", map[string]any{
 		"sessionId": h.config.SessionID,
 		"prompt":    []map[string]any{{"type": "text", "text": trustedPeerText(item)}},
 	})
+	h.clearActivePromptPermissionSnapshot()
 	cancel()
 	if err != nil {
 		var rpcErr *grokRPCError

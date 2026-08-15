@@ -12,21 +12,40 @@ func peerPermissionMode(pid int, _ string) string {
 
 func permissionModeFromProcessArgs(args []string) string {
 	mode := "default"
+	dangerousSkip := false
 	for index, argument := range args {
 		if argument == "--" {
 			break
+		}
+		if selected, recognized := dangerousSkipPermission(argument); recognized {
+			dangerousSkip = selected
+			continue
 		}
 		if selected, recognized := processArgPermissionMode(args, index); recognized {
 			mode = selected
 		}
 	}
+	if dangerousSkip {
+		return "bypassPermissions"
+	}
 	return mode
+}
+
+func dangerousSkipPermission(argument string) (bool, bool) {
+	switch argument {
+	case "--dangerously-skip-permissions", "--dangerously-skip-permissions=true":
+		return true, true
+	case "--dangerously-skip-permissions=false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func processArgPermissionMode(args []string, index int) (string, bool) {
 	argument := args[index]
 	switch argument {
-	case "--dangerously-skip-permissions", "--always-approve",
+	case "--always-approve",
 		"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--ask-for-approval=never",
 		"-a=never", "-anever":
 		return "bypassPermissions", true
@@ -38,10 +57,6 @@ func processArgPermissionMode(args []string, index int) (string, bool) {
 		if index+1 < len(args) {
 			return map[bool]string{true: "bypassPermissions", false: "default"}[args[index+1] == "never"], true
 		}
-	case "--dangerously-skip-permissions=false":
-		return "default", true
-	case "--dangerously-skip-permissions=true":
-		return "bypassPermissions", true
 	case "--permission-mode=default", "--permission-mode=acceptEdits", "--permission-mode=auto",
 		"--permission-mode=always-approve",
 		"--permission-mode=dontAsk", "--permission-mode=plan":

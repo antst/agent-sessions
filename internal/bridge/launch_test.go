@@ -716,6 +716,10 @@ func TestPreparedResumeDetachesLoadedStaleOwnerBeforeImplicitCwdChange(t *testin
 	if err := os.Rename(threadRoot, requestedRoot); err != nil {
 		t.Fatal(err)
 	}
+	requestedRoot, err := filepath.EvalSymlinks(requestedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	threadID := "00000000-0000-0000-0000-00000000012a"
 	methods := []string{}
 	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -786,6 +790,10 @@ func TestPreparedResumeUsesCurrentCwdWhenSavedCwdIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Rename(threadRoot, requestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	requestedRoot, err := filepath.EvalSymlinks(requestedRoot)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(threadRoot); !os.IsNotExist(err) {

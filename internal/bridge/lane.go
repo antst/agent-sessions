@@ -1046,7 +1046,7 @@ func inferPeerParent(paths nativePaths, startPID int) (laneOwner, bool) {
 	}
 	deepest := candidates[0]
 	for _, candidate := range candidates[1:] {
-		if processHasAncestor(candidate.PID, deepest.PID) {
+		if candidate.PID != deepest.PID && processHasAncestor(candidate.PID, deepest.PID) {
 			deepest = candidate
 		}
 	}

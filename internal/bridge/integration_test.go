@@ -2,11 +2,51 @@ package bridge
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestNativeShimInspectionReportsLiveIdentityAndPermission(t *testing.T) {
+	root := t.TempDir()
+	d := newDaemon(map[string]string{
+		"session-id": "grok-inspection-session", "cwd": root, "entrypoint": "grok",
+		"permission-mode": "default", "data-dir": filepath.Join(root, "state"),
+		"claude-config-dir": filepath.Join(root, "claude"), "codex-home": filepath.Join(root, "codex"),
+		"runtime-dir": filepath.Join(root, "run"),
+	})
+	if err := d.start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.shutdown)
+
+	// Simulate an in-session policy change that has not yet been inferred from
+	// the TUI's immutable process argv.
+	d.mu.Lock()
+	d.permissionMode = "bypassPermissions"
+	d.mu.Unlock()
+
+	conn, err := net.DialTimeout("unix", d.stableSocket, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if err := json.NewEncoder(conn).Encode(map[string]any{"type": "control", "action": "inspect"}); err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if stringValue(response["type"]) != "peer_inspection" || intValue(response["pid"]) != os.Getpid() ||
+		stringValue(response["procStart"]) != d.procStart || stringValue(response["sessionId"]) != d.sessionID ||
+		stringValue(response["entrypoint"]) != "grok" || stringValue(response["permissionMode"]) != "bypassPermissions" {
+		t.Fatalf("inspection response = %#v", response)
+	}
+}
 
 func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 	root := t.TempDir()
