@@ -710,6 +710,78 @@ func TestPreparedResumeTakesOverLoadedZeroTurnOwnerWithoutArchiving(t *testing.T
 	}
 }
 
+func TestPreparedResumeDetachesLoadedStaleOwnerBeforeCwdOverride(t *testing.T) {
+	migrationRoot := t.TempDir()
+	threadRoot := filepath.Join(migrationRoot, "codex-messaging")
+	requestedRoot := filepath.Join(migrationRoot, "agent-sessions")
+	if err := os.Mkdir(threadRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(threadRoot, requestedRoot); err != nil {
+		t.Fatal(err)
+	}
+	threadID := "00000000-0000-0000-0000-00000000012a"
+	methods := []string{}
+	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+		method := stringValue(request["method"])
+		if method != "initialize" {
+			methods = append(methods, method)
+		}
+		switch method {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/read":
+			return map[string]any{"thread": map[string]any{"id": threadID, "cwd": threadRoot, "source": "cli"}}, nil
+		case "thread/list":
+			return map[string]any{"data": []any{}}, nil
+		case "thread/loaded/list":
+			return map[string]any{"data": []string{threadID}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected loaded cwd-override method %s", method)
+		}
+	})
+	actions := []string{}
+	var published map[string]any
+	setPreparedLaunchTestEnv(t, requestedRoot, socket, func(request map[string]any) map[string]any {
+		action := stringValue(request["action"])
+		actions = append(actions, action)
+		switch action {
+		case "detach_stale_prepared":
+			return map[string]any{"detached": true}
+		case "register_prepared":
+			published = request
+			commitPreparedOwnerForTest(resolveNativePaths(), threadID)
+			return map[string]any{"state": map[string]any{"sessionId": threadID}}
+		default:
+			return map[string]any{}
+		}
+	})
+	paths := resolveNativePaths()
+	stale := interactiveOwnerRecord{
+		ThreadID: threadID, RequestID: "exited-loaded-cwd", OwnerPID: 1 << 30,
+		OwnerProcStart: "definitely-stale", Pending: true, Prepared: true, ParkOnAbort: true, Aborting: true,
+		Cwd: threadRoot, UpdatedAt: time.Now().UnixMilli(),
+	}
+	if err := writeJSONAtomic(interactiveOwnerPath(paths, threadID), stale); err != nil {
+		t.Fatal(err)
+	}
+	got, effectiveCwd, err := bindPreparedResumeNative([]string{
+		"--target", threadID, "--cwd", requestedRoot, "--cwd-explicit", "true",
+		"--owner-pid", strconv.Itoa(os.Getpid()), "--owner-proc-start", readProcStart(os.Getpid()),
+	})
+	if err != nil || got != threadID || effectiveCwd != requestedRoot {
+		t.Fatalf("loaded migrated cwd resume = id=%q cwd=%q err=%v", got, effectiveCwd, err)
+	}
+	owner := readInteractiveOwner(paths, threadID)
+	if strings.Join(actions, ",") != "detach_stale_prepared,register_prepared" ||
+		owner == nil || !owner.ResumeLoaded || owner.Cwd != requestedRoot || stringValue(published["cwd"]) != requestedRoot {
+		t.Fatalf("loaded cwd migration actions=%v owner=%#v publication=%#v", actions, owner, published)
+	}
+	if strings.Contains(strings.Join(methods, ","), "thread/archive") || strings.Contains(strings.Join(methods, ","), "thread/unarchive") {
+		t.Fatalf("loaded cwd migration archived the thread: %v", methods)
+	}
+}
+
 func TestPreparedResumeMigratesMissingSavedCwdWhenExplicitlyOverridden(t *testing.T) {
 	migrationRoot := t.TempDir()
 	threadRoot := filepath.Join(migrationRoot, "codex-messaging")
@@ -1001,7 +1073,7 @@ func TestPreparedResumeSynchronouslyReleasesExitedLoadedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.close()
-	if staleOwner, err := releaseStaleLoadedInteractiveOwner(client, paths, threadID); err != nil || staleOwner != nil {
+	if staleOwner, err := releaseStaleLoadedInteractiveOwner(client, paths, threadID, false); err != nil || staleOwner != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1042,7 +1114,7 @@ func TestPreparedResumeDoesNotReleaseUncorroboratedLoadedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.close()
-	if _, err := releaseStaleLoadedInteractiveOwner(client, paths, threadID); err == nil || !strings.Contains(err.Error(), "cannot currently corroborate") {
+	if _, err := releaseStaleLoadedInteractiveOwner(client, paths, threadID, false); err == nil || !strings.Contains(err.Error(), "cannot currently corroborate") {
 		t.Fatalf("unknown loaded owner release error = %v", err)
 	}
 	if owner := readInteractiveOwner(paths, threadID); owner == nil || owner.RequestID != "unknown-owner" {
