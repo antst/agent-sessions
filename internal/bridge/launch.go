@@ -100,7 +100,8 @@ func bindPreparedResumeNative(argv []string) (threadID, effectiveCwd string, res
 	if err := validatePreparedRootThread(thread); err != nil {
 		return "", "", err
 	}
-	staleLoadedOwner, err := releaseStaleLoadedInteractiveOwner(client, paths, thread.ID)
+	detachLoadedForCwd := cwdExplicit && resumeCwdChanged(thread.Cwd, requestedCwd)
+	staleLoadedOwner, err := releaseStaleLoadedInteractiveOwner(client, paths, thread.ID, detachLoadedForCwd)
 	if err != nil {
 		return "", "", err
 	}
@@ -145,7 +146,12 @@ func bindPreparedResumeNative(argv []string) (threadID, effectiveCwd string, res
 // owner is returned as a one-use takeover proof: Codex supports resuming that
 // still-loaded thread, while archive/unarchive races with the replacement TUI
 // and moves its rollout out of the live session tree.
-func releaseStaleLoadedInteractiveOwner(client *appServerClient, paths nativePaths, threadID string) (*interactiveOwnerRecord, error) {
+func resumeCwdChanged(savedCwd, requestedCwd string) bool {
+	canonicalSaved, err := canonicalLaunchDirectory(savedCwd)
+	return err != nil || canonicalSaved != requestedCwd
+}
+
+func releaseStaleLoadedInteractiveOwner(client *appServerClient, paths nativePaths, threadID string, detachForCwdOverride bool) (*interactiveOwnerRecord, error) {
 	loaded, err := loadedPreparedThreads(client)
 	if err != nil {
 		return nil, err
@@ -167,6 +173,14 @@ func releaseStaleLoadedInteractiveOwner(client *appServerClient, paths nativePat
 	if owner.Pending {
 		if !owner.Prepared || !owner.ParkOnAbort {
 			return nil, fmt.Errorf("codex thread %s has an incomplete stale launch owner", threadID)
+		}
+		if detachForCwdOverride {
+			if _, err := requestControl(paths.supervisorSock, map[string]any{
+				"action": "detach_stale_prepared", "sessionId": threadID, "requestId": owner.RequestID,
+				"ownerPid": owner.OwnerPID, "ownerProcStart": owner.OwnerProcStart,
+			}, preparedAbortTimeout); err != nil {
+				return nil, fmt.Errorf("detach exited Codex peer %s for cwd override: %w", threadID, err)
+			}
 		}
 		return owner, nil
 	}
@@ -212,12 +226,14 @@ func bindInteractiveOwner(client *appServerClient, paths nativePaths, thread app
 	if loaded[thread.ID] && staleLoadedOwner == nil {
 		return nil, fmt.Errorf("codex thread %s is already loaded; close its existing client before resuming it as a peer", thread.ID)
 	}
-	threadCwd, err := canonicalLaunchDirectory(thread.Cwd)
-	if err != nil {
-		return nil, fmt.Errorf("resolve existing Codex thread cwd: %w", err)
-	}
-	if cwdExplicit && requestedCwd != threadCwd {
-		return nil, fmt.Errorf("codex thread %s uses cwd %s; explicit resume cwd %s is unsupported", thread.ID, threadCwd, requestedCwd)
+	// Match native `codex resume -C`: an explicit cwd is authoritative even
+	// when the session's saved directory was renamed or removed.
+	effectiveCwd := requestedCwd
+	if !cwdExplicit {
+		effectiveCwd, err = canonicalLaunchDirectory(thread.Cwd)
+		if err != nil {
+			return nil, fmt.Errorf("resolve existing Codex thread cwd: %w", err)
+		}
 	}
 	if lane, laneErr := readLaneStateFile(paths, thread.ID); laneErr == nil && lane.Type == "codex-peer-lane" {
 		return nil, fmt.Errorf("codex thread %s is governed by codex-peer-lane", thread.ID)
@@ -239,7 +255,7 @@ func bindInteractiveOwner(client *appServerClient, paths nativePaths, thread app
 	}
 	record := &interactiveOwnerRecord{
 		ThreadID: thread.ID, RequestID: randomID(), OwnerPID: ownerPID, OwnerProcStart: ownerStart,
-		Pending: true, Prepared: true, ResumeLoaded: loaded[thread.ID], Cwd: threadCwd,
+		Pending: true, Prepared: true, ResumeLoaded: loaded[thread.ID], Cwd: effectiveCwd,
 		Name: thread.Name, NameSource: map[bool]string{true: "codex", false: "generated"}[thread.Name != ""],
 		UpdatedAt: time.Now().UnixMilli(),
 	}

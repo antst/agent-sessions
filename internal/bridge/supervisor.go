@@ -818,6 +818,43 @@ func (s *nativeSupervisor) releaseStaleInteractiveOwner(threadID string) error {
 	return s.releaseInteractiveThreadLocked(threadID, record)
 }
 
+func (s *nativeSupervisor) detachStalePreparedOwner(request map[string]any) error {
+	threadID := stringValue(request["sessionId"])
+	if !validSessionID(threadID) {
+		return errors.New("detach requires a valid Codex thread id")
+	}
+	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
+	if err != nil {
+		return err
+	}
+	defer unlockLaneLifecycle(lifecycleLock)
+	record := readInteractiveOwner(s.paths, threadID)
+	if !interactiveOwnerMatchesRequest(record, request) || !record.Pending || !record.Prepared || !record.ParkOnAbort {
+		return errors.New("loaded Codex thread has no matching stale prepared owner")
+	}
+	switch exactProcessIdentityStatus(record.OwnerPID, record.OwnerProcStart).Status {
+	case processIdentityMatches:
+		return errors.New("refuse to detach a live prepared Codex peer owner")
+	case processIdentityUnknown:
+		return errors.New("cannot corroborate the stale prepared Codex peer owner")
+	case processIdentityStale:
+	}
+	s.subscribeMu.Lock()
+	defer s.subscribeMu.Unlock()
+	client, err := s.ensureClient()
+	if err != nil {
+		return err
+	}
+	if err := requestWithTimeout(client, 5*time.Second, "thread/unsubscribe", map[string]any{"threadId": threadID}, nil); err != nil {
+		return fmt.Errorf("unsubscribe stale prepared Codex peer %s: %w", threadID, err)
+	}
+	s.mu.Lock()
+	delete(s.subscribed, threadID)
+	delete(s.activeTurns, threadID)
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *nativeSupervisor) knownPeerLineage(threadID string) bool {
 	if !validSessionID(threadID) {
 		return false
@@ -917,6 +954,12 @@ func (s *nativeSupervisor) handleControl(request map[string]any) (map[string]any
 			return nil, err
 		}
 		return map[string]any{"sessionId": sessionID, "released": true}, nil
+	case "detach_stale_prepared":
+		sessionID := stringValue(request["sessionId"])
+		if err := s.detachStalePreparedOwner(request); err != nil {
+			return nil, err
+		}
+		return map[string]any{"sessionId": sessionID, "detached": true}, nil
 	case "wake":
 		item, _ := request["item"].(map[string]any)
 		delivery, err := s.queueWake(stringValue(request["sessionId"]), item)
@@ -1773,6 +1816,7 @@ func resumePreparedThread(client *appServerClient, threadID string, request map[
 	}
 	var resumed struct {
 		Thread         appThread `json:"thread"`
+		Cwd            string    `json:"cwd"`
 		ApprovalPolicy any       `json:"approvalPolicy"`
 	}
 	if err := requestWithTimeout(client, 30*time.Second, "thread/resume", params, &resumed); err != nil {
@@ -1782,9 +1826,14 @@ func resumePreparedThread(client *appServerClient, threadID string, request map[
 	if approvalPolicy == "" {
 		return nil, "", errors.New("thread/resume did not report its effective approval policy")
 	}
-	if expected := strings.TrimSpace(stringValue(request["cwd"])); expected != "" && resumed.Thread.Cwd != expected {
-		return nil, "", fmt.Errorf("thread/resume applied cwd %q, expected %q", resumed.Thread.Cwd, expected)
+	effectiveCwd := strings.TrimSpace(resumed.Cwd)
+	if effectiveCwd == "" {
+		return nil, "", errors.New("thread/resume did not report its effective cwd")
 	}
+	if expected := strings.TrimSpace(stringValue(request["cwd"])); expected != "" && effectiveCwd != expected {
+		return nil, "", fmt.Errorf("thread/resume applied cwd %q, expected %q", effectiveCwd, expected)
+	}
+	resumed.Thread.Cwd = effectiveCwd
 	requestedApproval := strings.TrimSpace(stringValue(request["approvalPolicy"]))
 	requestedSandbox := strings.TrimSpace(stringValue(request["sandbox"]))
 	if requestedApproval != "" || requestedSandbox != "" {
