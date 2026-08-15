@@ -25,10 +25,13 @@ import (
 const (
 	grokLaunchTokenEnv    = "AGENT_SESSIONS_GROK_LAUNCH_TOKEN"
 	grokSessionIDEnv      = "AGENT_SESSIONS_GROK_SESSION_ID"
-	grokControlTimeout    = 10 * time.Second
 	grokACPStartupTimeout = 15 * time.Second
-	grokACPPromptTimeout  = 30 * time.Minute
-	grokStatusRetryDelay  = 25 * time.Millisecond
+	// The outer control budget must exceed the inner ACP startup/refresh
+	// budget so a cold reconnect can return its authoritative result.
+	grokControlTimeout   = grokACPStartupTimeout + 5*time.Second
+	grokACPPromptTimeout = 30 * time.Minute
+	grokStatusRetryDelay = 25 * time.Millisecond
+	grokStatusRetryMax   = 250 * time.Millisecond
 )
 
 // grokHostConfig describes one process-attested interactive Grok launch.  A
@@ -272,6 +275,7 @@ func attestGrokMCPCaller(paths nativePaths) (string, error) {
 
 func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
 	deadline := time.Now().Add(grokControlTimeout)
+	retryDelay := grokStatusRetryDelay
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -284,8 +288,9 @@ func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
 			return err
 		}
 		if busy, _ := response["refreshBusy"].(bool); busy {
-			timer := time.NewTimer(min(grokStatusRetryDelay, remaining))
+			timer := time.NewTimer(min(retryDelay, remaining))
 			<-timer.C
+			retryDelay = min(retryDelay*2, grokStatusRetryMax)
 			continue
 		}
 		mode := stringValue(response["permissionMode"])
