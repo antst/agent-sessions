@@ -205,7 +205,11 @@ func TestGrokPeerCwdIsCanonicalButNativeArgvIsUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.requestedCwd != realDirectory || !plan.cwdExplicit {
+	canonicalRealDirectory, err := filepath.EvalSymlinks(realDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.requestedCwd != canonicalRealDirectory || !plan.cwdExplicit {
 		t.Fatalf("cwd = %q explicit=%v", plan.requestedCwd, plan.cwdExplicit)
 	}
 	if !reflect.DeepEqual(plan.interactiveArgs, args) {
