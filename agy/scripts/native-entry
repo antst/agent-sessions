@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
+native_runtime="${AGY_PEER_NATIVE_RUNTIME:-$(sed -n '1p' "$state_root/native-runtime-path" 2>/dev/null || true)}"
+if [[ -z "$native_runtime" || ! -x "$native_runtime" ]]; then
+  printf 'agent-sessions: native runtime is not installed; run make install first\n' >&2
+  exit 1
+fi
+exec "$native_runtime" "$@"

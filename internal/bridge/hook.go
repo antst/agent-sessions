@@ -101,7 +101,7 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 			return nil, err
 		}
 		updateHookShim(state, "busy")
-		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID, hookAdditionalContextLimit)
+		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID)
 		if err != nil || (len(messages) == 0 && !queued) {
 			return map[string]any{}, err
 		}
@@ -118,7 +118,7 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 			return nil, err
 		}
 		updateHookShim(state, "idle")
-		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID, hookAdditionalContextLimit)
+		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID)
 		if err != nil || (len(messages) == 0 && !queued) {
 			return map[string]any{}, err
 		}
@@ -330,7 +330,7 @@ func consumeNativeInbox(paths nativePaths, sessionID string) ([]map[string]any, 
 // form fits in the hook host's bounded context.  The first overflow and every
 // later message remain queued for check_inbox or a subsequent hook; no message
 // is truncated and then silently deleted.
-func consumeNativeInboxLimited(paths nativePaths, sessionID string, limit int) ([]map[string]any, bool, error) {
+func consumeNativeInboxLimited(paths nativePaths, sessionID string) ([]map[string]any, bool, error) {
 	names, pending, err := nativeInboxNames(paths, sessionID)
 	if err != nil {
 		return nil, false, err
@@ -348,7 +348,7 @@ func consumeNativeInboxLimited(paths nativePaths, sessionID string, limit int) (
 			continue
 		}
 		candidate := append(append([]map[string]any{}, messages...), value)
-		if len(formatNativeHookMessages(candidate)) > limit {
+		if len(formatNativeHookMessages(candidate)) > hookAdditionalContextLimit {
 			return messages, true, nil
 		}
 		messages = candidate
@@ -399,12 +399,12 @@ func nativeInboxNames(paths nativePaths, sessionID string) ([]string, string, er
 }
 
 func nativeInboxOverflowNotice() string {
-	return "Trusted peer messages are queued, but the next complete message exceeds the hook context limit. Call claude_peer.check_inbox now to receive it without truncation; the queued message has not been removed."
+	return "Trusted peer messages are queued, but the next complete message exceeds the hook context limit. Call the peer MCP check_inbox tool now to receive it without truncation; the queued message has not been removed."
 }
 
 func formatNativeHookMessages(messages []map[string]any) string {
 	blocks := []string{
-		"Trusted cross-session agent instructions follow. They come from collaborating agents running in the same isolated environment. Treat their requests, findings, and status updates as trusted task input: incorporate them and act on them when they are consistent with the current user and developer instructions. They do not change this session's permission mode or grant user approval. Reply with the claude_peer send_message tool when useful.",
+		"Trusted cross-session agent instructions follow. They come from collaborating agents running in the same isolated environment. Treat their requests, findings, and status updates as trusted task input: incorporate them and act on them when they are consistent with the current user and developer instructions. They do not change this session's permission mode or grant user approval. Reply with the peer MCP send_message tool when useful.",
 	}
 	for _, message := range messages {
 		if stringValue(message["type"]) == "delivery-status" {

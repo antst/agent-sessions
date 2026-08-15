@@ -9,6 +9,20 @@ func TestParsePeerMessageExtensions(t *testing.T) {
 	}
 }
 
+func TestAdditionalProductEnvelopeRoundTrip(t *testing.T) {
+	content := wrapNativePeerMessageFromProduct(
+		"uds:/tmp/agy.sock", "conversation-id", "agy-review", "bypass",
+		"message-id", "now", "agy", "hello",
+	)
+	got := parsePeerMessage(content)
+	if got.FromProduct != "agy" || got.FromSession != "conversation-id" || got.Message != "hello" {
+		t.Fatalf("unexpected Antigravity envelope: %#v", got)
+	}
+	if peerProductDisplayName(got.FromProduct) != "Antigravity" || normalizePeerProduct("unknown") != "" {
+		t.Fatal("additional product label or closed allowlist is inconsistent")
+	}
+}
+
 func TestPeerNameSanitization(t *testing.T) {
 	if got := sanitizeName(" Reviewer / lane "); got != "Reviewer-lane" {
 		t.Fatalf("got %q", got)

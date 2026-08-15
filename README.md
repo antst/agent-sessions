@@ -1,10 +1,10 @@
 # Agent Sessions
 
-Native, persistent session lifecycle for Codex and Claude Code, plus local and federated
+Native, persistent session lifecycle for Codex, Claude Code, and Antigravity, plus local and federated
 cross-session messaging. Interactive sessions and durable worker lanes can be created, resumed,
 supervised, discovered, and messaged with nearly the same lifecycle on Linux and macOS.
 
-This repository is one Go module with shared implementation under `internal/`. It builds five
+This repository is one Go module with shared implementation under `internal/`. It builds six
 separate native executables:
 
 - `agent-session-runtime` — the shared diagnostic/runtime multicall used by the launchers;
@@ -13,6 +13,8 @@ separate native executables:
   `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and `doctor`).
 - `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers spawned
   by Codex.
+- `agy-peer` — an owner-attested interactive or headless Antigravity session with the same peer
+  discovery and MCP messaging tools.
 - `peer-federator` — a separate network process that projects live peers and lane commands across
   trusted hosts. It shares this source tree but remains an independently operated binary/service.
 
@@ -26,6 +28,7 @@ codex app-server daemon stop # after exiting every Codex client
 make install-all
 
 codex-peer -n reviewer # approve the plugin hooks when Codex asks the first time
+agy-peer -n agy-reviewer # Antigravity plugin hooks/MCP activate only for this launch
 claude agents --json
 ```
 
@@ -73,12 +76,14 @@ the newest usable exact-name session. Picker/`--last`, fork, caller-controlled r
 already-loaded targets without an exact stale zero-turn owner proof remain unsupported. Resume
 inherits the thread's canonical cwd; an explicit `-C` must resolve to that same directory.
 
-`make install` copies the native runtime payload and the Codex `claude-lane` skill under
+`make install` copies the native runtime payload, Antigravity plugin payload, and the Codex
+`claude-lane` skill under
 `${PREFIX:-~/.local}/libexec/agent-sessions`, registers that installed marketplace, installs the
-plugin, and links the native runtime plus all three launchers under `${PREFIX:-~/.local}/bin`.
+plugin, and links the native runtime plus all four launchers under `${PREFIX:-~/.local}/bin`.
 `make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
 `make install-claude` independently installs the
-text-only Claude plugin; `make install-all` does both. A version-changing install requires App Server to
+text-only Claude plugin; `make install-agy` installs the Antigravity plugin; `make install-all`
+does all three. A version-changing install requires App Server to
 be stopped; the bridge never restarts a running server because doing so can interrupt an active
 rollout. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
 a same-version rebuild replaces only the supervisor, without restarting App Server. CI archives carry prebuilt Linux and macOS binaries for x86-64 and arm64, so release
@@ -94,6 +99,8 @@ marker makes the installer use the bundled binary even if Go is installed.
 - Claude discovers root Codex threads through its native local session registry.
 - Incoming messages wake idle threads or steer an already-running turn.
 - `claude_peer` MCP tools provide list, send, identity, inbox, and rename operations.
+- `agy-peer` exposes the same tool set as `agent_sessions` inside an attested Antigravity
+  conversation. Globally installed Agy hooks are silent for ordinary `agy` launches.
 - Peer delivery is push-based; active orchestrators should continue useful work rather than poll.
   `check_inbox` is only for messages queued past an automatic delivery boundary.
 - TUI `/rename` changes flow immediately back to `claude agents --json`.
@@ -123,6 +130,9 @@ marker makes the installer use the bundled binary even if Go is installed.
   workers receive `ListAgents` and `SendMessage` by default, so they can discover and initiate
   ordinary messages to other local or federated peers. The native Claude worker is the lane's
   discoverable peer and receives messages directly; the lifecycle manager does not proxy them.
+- The Antigravity plugin carries an `agent-lanes` skill that drives those same two native lane
+  CLIs. Agy is corroborated as the lifecycle owner, so default lanes are retired with that Agy
+  process and terminal notices target its conversation.
 - With the separate `peer-federator` protocol-2 daemon installed, both skills can run their native
   lane CLI on a named connected host. Remote lifecycle traffic and ordinary peer messages remain
   hub-only; remote execution is an explicit destination opt-in, the cleanup fuse cannot be disabled
@@ -135,10 +145,11 @@ marker makes the installer use the bundled binary even if Go is installed.
 .agents/plugins/            repository-local marketplace
 .claude-plugin/             Claude Code marketplace catalog
 claude/                     self-contained Claude Code plugin and orchestration skill
+agy/                        Antigravity hooks, MCP registration, and peer/lane skills
 .mcp.json                   MCP registration
 hooks/                      Codex lifecycle hook registration
 skills/                     Codex skill for orchestrating Claude Code lanes
-cmd/                        five executable entry points
+cmd/                        six executable entry points
 internal/bridge/            local session lifecycle and messaging runtime
 internal/launcher/          native launcher argument and bootstrap logic
 internal/federator/         independent cross-host federation runtime
@@ -162,8 +173,10 @@ make test-race
 make build
 make dev-install        # source-linked Codex/runtime development install
 make dev-install-claude # source-linked Claude orchestration skill
+make dev-install-agy    # source-linked Antigravity plugin
 make install-claude     # Claude skill from the stable installed runtime tree
-make install-all        # native runtime plus Claude orchestration skill
+make install-agy        # Antigravity hooks, MCP, and skills from the installed tree
+make install-all        # native runtime plus Claude and Antigravity plugins
 make reinstall   # refresh cachebuster, rebuild, and reinstall the local plugin
 make repair-projection THREAD_ID=<uuid>         # inspect known Codex 0.147 projection damage
 make repair-projection THREAD_ID=<uuid> APPLY=1 # back up and repair the exact known shape
@@ -175,11 +188,12 @@ on every one of those jobs.
 
 See [installation](docs/INSTALL.md), [Codex lane integration](docs/LANES.md),
 [Claude lane integration](docs/CLAUDE-LANES.md),
+[Antigravity integration](docs/ANTIGRAVITY.md),
 [Claude adapter installation](docs/CLAUDE-INSTALL.md), and the
 reverse-engineered [Claude protocol notes](docs/PROTOCOL.md).
 
 The Claude-side wire format is not a public Anthropic API. Development validation used Claude Code
-2.1.227 and Codex CLI 0.147.0 on Linux; both macOS architectures are continuously cross-compiled.
-The bridge follows Claude's trusted-local model: Codex and Claude peer processes running as the
+2.1.227, Codex CLI 0.147.0, and Antigravity CLI 1.1.13 on Linux; both macOS architectures are continuously cross-compiled.
+The bridge follows Claude's trusted-local model: Codex, Claude, and Antigravity peer processes running as the
 same operating-system user are mutually trusted. It is not a cross-user or remote authorization
 boundary; private runtime directories and sockets protect against other local users.

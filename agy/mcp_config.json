@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agent_sessions": {
+      "command": "agent-session-runtime",
+      "args": [
+        "agy-mcp"
+      ]
+    }
+  }
+}

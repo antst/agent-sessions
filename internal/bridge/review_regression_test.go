@@ -134,7 +134,7 @@ func TestHookInboxLeavesOverflowQueued(t *testing.T) {
 	if err := writeJSONAtomic(filepath.Join(pending, "002-large.json"), map[string]any{"message": strings.Repeat("x", 10_000), "from": "peer"}); err != nil {
 		t.Fatal(err)
 	}
-	messages, queued, err := consumeNativeInboxLimited(paths, sessionID, hookAdditionalContextLimit)
+	messages, queued, err := consumeNativeInboxLimited(paths, sessionID)
 	if err != nil || len(messages) != 1 || !queued {
 		t.Fatalf("limited consume = %d messages queued=%v err=%v", len(messages), queued, err)
 	}

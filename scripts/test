@@ -387,12 +387,19 @@ done
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in codex-peer codex-peer-lane claude-peer-lane; do
+for launcher in codex-peer codex-peer-lane claude-peer-lane agy-peer; do
   if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
     printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
     exit 1
   fi
 done
+agy_install_plan="$(make -n -C "$plugin_root" install-agy AGY=agy-test-cli AGY_PLUGIN_ROOT="$plugin_root/agy")"
+if ! grep -Fq 'agy-test-cli plugin validate' <<<"$agy_install_plan" ||
+   ! grep -Fq 'agy-test-cli plugin install' <<<"$agy_install_plan" ||
+   grep -Fq 'plugin uninstall' <<<"$agy_install_plan"; then
+  printf 'Antigravity install must validate and atomically update without uninstalling the live plugin first\n' >&2
+  exit 1
+fi
 if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/agent-session-runtime\" \"$custom_prefix/bin/agent-session-runtime\"" <<<"$install_plan" ||
    ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
   printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
@@ -416,6 +423,9 @@ installed_runtimes=("$custom_install_root"/bin/*/agent-session-runtime)
 installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
 if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
    [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
+	 [[ ! -f "$custom_install_root/agy/plugin.json" ]] ||
+	 [[ ! -f "$custom_install_root/agy/hooks.json" ]] ||
+	 [[ ! -f "$custom_install_root/agy/mcp_config.json" ]] ||
    [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
    [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
@@ -423,11 +433,12 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
+	 [[ "$(readlink "$custom_prefix/bin/agy-peer")" != "$installed_binary_dir/agy-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane agy-peer peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
     exit 1
@@ -463,13 +474,16 @@ tar -C "$release_extract" -xzf "$release_archive"
 release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
 if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
 	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
+	 [[ ! -f "$release_root/agy/plugin.json" ]] ||
+	 [[ ! -f "$release_root/agy/skills/peer-messaging/SKILL.md" ]] ||
+	 [[ ! -f "$release_root/agy/skills/agent-lanes/SKILL.md" ]] ||
    [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane agy-peer peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1

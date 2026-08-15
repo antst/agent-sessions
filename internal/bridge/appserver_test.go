@@ -325,7 +325,7 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 				t.Fatalf("dynamic call did not succeed: %v", result)
 			}
 			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "No live Claude-compatible") {
+			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "No live Agent Sessions") {
 				t.Fatalf("unexpected dynamic content: %v", items)
 			}
 			return
