@@ -10,7 +10,8 @@ record has a live `pid` and a connectable `messagingSocketPath`. The bridge corr
 identity through `/proc/<pid>/stat` on Linux and the kernel process table on macOS; an observation
 failure is distinct from proof that a process is stale.
 
-The bridge publishes this compatible subset:
+The bridge publishes this compatible subset. `entrypoint` is `codex` for an
+App-Server-backed peer and `grok` for a private-leader-backed Grok peer:
 
 ```json
 {
@@ -80,7 +81,7 @@ Claude 2.1.226 strictly parses the recognized envelope attributes in grammar ord
 Unknown attributes before the closing `>` cause the inbound security gate to discard
 permission-mode attestation and hold the message for human approval. Codex therefore puts extension
 metadata on the first body line: transport `msg_id` as `messageId`, an ISO-8601 `sentAt`, and
-`fromProduct: "codex"`.
+`fromProduct: "codex"` or `"grok"` according to the attested sender.
 The App Server and hook receive paths show message ID, send/receive times, and sender type in
 model-visible metadata. The parser remains backward-compatible with the short-lived attribute form
 used by earlier bridge builds.
@@ -226,6 +227,42 @@ On an inbound peer message:
 Direct peer messages are pushed into an active recipient turn automatically. Orchestrators should
 continue useful work rather than poll `check_inbox`, sleep, or block waiting for delivery;
 `check_inbox` exists only to recover messages held past a delivery boundary.
+
+## Grok private-leader wake path
+
+`grok-peer` preselects an exact UUID, starts one private Grok leader and one
+persistent official ACP stdio bridge, then replaces itself with the attached
+Grok TUI. The leader socket uses Grok's private protocol; Agent Sessions never
+speaks it. Wake delivery uses ACP v1 over
+`grok --leader-socket <private> agent --leader stdio`: initialize, authenticate
+with the CLI's advertised `cached_token` method, load the preselected session,
+then submit `session/prompt`.
+
+The peer is not published until ACP has loaded the exact session ID and cwd
+and the official FleetView extension (`_x.ai/sessions/list` wrapping
+`x.ai/sessions/list`) returns exactly one resident row for it. The row's
+boolean `yolo` is the authoritative live permission class; the bridge refreshes
+it while the session is resident, so argv, user config, and in-TUI changes do
+not leave stale sender or lane-owner metadata. Infrastructure-only leader and
+waker processes use explicit neutral permission mode, while the TUI keeps the
+user's native policy.
+Incoming messages are durably journaled by message ID before the host accepts
+ownership, serialized through the persistent bridge, and never duplicated
+after an ambiguous post-write timeout. A dead bridge is recreated and reloads
+the same session before the next queued wake. Neither load nor prompt supplies
+yolo/auto metadata; a peer message cannot widen the TUI's policy.
+
+One `grok-peer` launch owns one session UUID. Its raw random launch token exists
+only in the owner process tree and private control frames; disk records contain
+only SHA-256. MCP and Codex/Claude lane ownership additionally require exact
+owner, host, and leader process-start identities, the live bridge publication,
+the inherited token, and ancestry inside that leader tree. On owner death the
+host removes its discovery row and stops only its own leader and bridge process
+groups. Native Grok clients must not concurrently open the same UUID.
+
+The first release deliberately supports fresh sessions and exact-UUID resume.
+Title resolution, a bare resume picker, native Grok lanes, and Grok federation
+remain native-Grok or later-version concerns rather than private-store parsing.
 
 Headless App Server turns can issue server-initiated `item/tool/call` JSON-RPC requests. The native
 client handles bridge-owned `claude_peer` tools directly only after the App Server-supplied `threadId`

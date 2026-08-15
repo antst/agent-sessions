@@ -257,17 +257,22 @@ if (( unreachable_status == 0 )) || ! grep -Fq '"contract_ok": true' <<<"$unreac
 fi
 
 mkdir -p "$temporary_root/cachebuster/.codex-plugin" "$temporary_root/cachebuster/claude/.claude-plugin" \
+  "$temporary_root/cachebuster/grok/.grok-plugin" \
   "$temporary_root/cachebuster/scripts"
 cp "$plugin_root/.codex-plugin/plugin.json" "$temporary_root/cachebuster/.codex-plugin/plugin.json"
 cp "$plugin_root/claude/.claude-plugin/plugin.json" "$temporary_root/cachebuster/claude/.claude-plugin/plugin.json"
+cp "$plugin_root/grok/.grok-plugin/plugin.json" "$temporary_root/cachebuster/grok/.grok-plugin/plugin.json"
 cp "$plugin_root/scripts/cachebuster" "$temporary_root/cachebuster/scripts/cachebuster"
 next_version="$("$temporary_root/cachebuster/scripts/cachebuster")"
 next_codex="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   "$temporary_root/cachebuster/.codex-plugin/plugin.json" | head -1)"
 next_claude="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   "$temporary_root/cachebuster/claude/.claude-plugin/plugin.json" | head -1)"
-if [[ "$next_version" != "$next_codex" || "$next_version" != "$next_claude" ]]; then
-  printf 'cachebuster did not update both plugin manifests together\n' >&2
+next_grok="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$temporary_root/cachebuster/grok/.grok-plugin/plugin.json" | head -1)"
+if [[ "$next_version" != "$next_codex" || "$next_version" != "$next_claude" ||
+   "$next_version" != "$next_grok" ]]; then
+  printf 'cachebuster did not update all plugin manifests together\n' >&2
   exit 1
 fi
 

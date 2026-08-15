@@ -22,9 +22,23 @@ bash -n \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
+  "$plugin_root/grok/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
+if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
+  printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
+  exit 1
+fi
+
 "$plugin_root/scripts/test-claude-contract"
+
+codex_plugin_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_root/.codex-plugin/plugin.json" | head -1)"
+grok_plugin_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_root/grok/.grok-plugin/plugin.json" | head -1)"
+if [[ -z "$grok_plugin_version" ]] || [[ "$grok_plugin_version" != "$codex_plugin_version" ]]; then
+  printf 'Grok plugin version %s does not match Codex plugin version %s\n' \
+    "$grok_plugin_version" "$codex_plugin_version" >&2
+  exit 1
+fi
 
 if grep -Fq '"SessionEnd"' "$plugin_root/hooks/hooks.json"; then
 	printf 'attachment-ambiguous SessionEnd hook remains globally registered\n' >&2
@@ -387,7 +401,7 @@ done
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in codex-peer codex-peer-lane claude-peer-lane; do
+for launcher in codex-peer codex-peer-lane claude-peer-lane grok-peer; do
   if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
     printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
     exit 1
@@ -423,16 +437,54 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
     exit 1
   fi
 done
+if [[ ! -f "$custom_install_root/grok/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$custom_install_root/grok/.mcp.json" ]] ||
+   [[ ! -x "$custom_install_root/grok/scripts/native-entry" ]] ||
+   ! grep -Fq '"grok-mcp"' "$custom_install_root/grok/.mcp.json" ||
+   ! grep -Fq '${GROK_PLUGIN_ROOT}/scripts/native-entry' "$custom_install_root/grok/.mcp.json"; then
+  printf 'copied-prefix installation omitted the Grok MCP plugin or its native runtime entry\n' >&2
+  exit 1
+fi
+grok_cache="$temporary_root/grok-cache"
+cp -R "$custom_install_root/grok" "$grok_cache"
+grok_cache_state="$temporary_root/grok-cache-state"
+mkdir -p "$grok_cache_state"
+grok_cache_runtime="$temporary_root/grok-cache-runtime"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@"' >"$grok_cache_runtime"
+chmod 0700 "$grok_cache_runtime"
+printf '%s\n' "$grok_cache_runtime" >"$grok_cache_state/native-runtime-path"
+grok_cache_result="$(CLAUDE_PEER_DATA_DIR="$grok_cache_state" "$grok_cache/scripts/native-entry" grok-mcp)"
+if [[ "$grok_cache_result" != grok-mcp ]]; then
+  printf 'cached Grok plugin did not resolve and invoke the installed native runtime\n' >&2
+  exit 1
+fi
+grok_exact_runtime="$temporary_root/grok-exact-runtime"
+printf '%s\n' '#!/bin/sh' 'printf "exact:%s\\n" "$*"' >"$grok_exact_runtime"
+chmod 0700 "$grok_exact_runtime"
+grok_exact_result="$(GROK_PEER_NATIVE_RUNTIME="$grok_exact_runtime" CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
+  "$grok_cache/scripts/native-entry" grok-mcp)"
+if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
+  printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
+  exit 1
+fi
+grok_install_plan="$(make -n -C "$plugin_root" install-grok GROK=grok-test-cli GROK_PLUGIN_ROOT="$custom_install_root/grok")"
+if ! grep -Fq "grok-test-cli plugin validate \"$custom_install_root/grok\"" <<<"$grok_install_plan" ||
+   ! grep -Fq 'grok-test-cli plugin uninstall "agent-sessions" --keep-data' <<<"$grok_install_plan" ||
+   ! grep -Fq "grok-test-cli plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan"; then
+  printf 'Grok plugin install plan does not validate and explicitly trust the installed payload\n' >&2
+  exit 1
+fi
 
 # A source checkout must never relabel an old bin/ artifact as current merely
 # because Go is absent. Only a release archive's explicit prebuilt marker may
@@ -464,12 +516,15 @@ release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
 if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
 	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/grok/.mcp.json" ]] ||
+   [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1

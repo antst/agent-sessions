@@ -37,6 +37,52 @@ func TestNativeEnvelopeKeepsExtensionsOutOfAttestedAttributes(t *testing.T) {
 	}
 }
 
+func TestGrokMCPToolsUseAttestedSessionWithoutRequiringModelID(t *testing.T) {
+	for _, definition := range grokToolDefinitions {
+		schema, _ := definition["inputSchema"].(map[string]any)
+		required, _ := schema["required"].([]any)
+		for _, value := range required {
+			if stringValue(value) == "session_id" {
+				t.Fatalf("Grok tool %q still requires model-supplied session_id", definition["name"])
+			}
+		}
+		if strings.Contains(stringValue(definition["description"]), "this Codex session") {
+			t.Fatalf("Grok tool %q retained Codex-only description", definition["name"])
+		}
+	}
+	for _, definition := range nativeToolDefinitions {
+		if stringValue(definition["name"]) != "identity" {
+			continue
+		}
+		schema, _ := definition["inputSchema"].(map[string]any)
+		required, _ := schema["required"].([]string)
+		if !containsString(required, "session_id") {
+			t.Fatal("Codex identity tool stopped requiring session_id")
+		}
+	}
+}
+
+func TestGrokEnvelopePublishesProductIdentity(t *testing.T) {
+	content := wrapNativePeerMessageForProduct(
+		"grok", "uds:/tmp/grok.sock", "session-id", "grok-peer", "prompting",
+		"message-id", "2026-08-15T17:00:00Z", "hello",
+	)
+	parsed := parsePeerMessage(content)
+	if parsed.FromProduct != "grok" || parsed.FromName != "grok-peer" || parsed.Message != "hello" {
+		t.Fatalf("Grok envelope = %#v", parsed)
+	}
+}
+
+func TestNativePeerProductLabel(t *testing.T) {
+	for entrypoint, want := range map[string]string{
+		"codex": "Codex", "grok": "Grok", "claude": "Claude Code", "": "Claude Code",
+	} {
+		if got := nativePeerProductLabel(entrypoint); got != want {
+			t.Fatalf("nativePeerProductLabel(%q) = %q, want %q", entrypoint, got, want)
+		}
+	}
+}
+
 func TestNativeAddressAndTargetResolution(t *testing.T) {
 	path := "/tmp/path with spaces/peer.sock"
 	address := encodeNativeAddress(path)

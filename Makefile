@@ -2,6 +2,7 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
+GROK ?= grok
 GOLANGCI_LINT ?= golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
@@ -17,6 +18,8 @@ CLAUDE_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[
 CLAUDE_RELEASE_ROOT ?= $(PREFIX)/share/agent-sessions/claude-marketplaces
 CLAUDE_STAGED_ROOT := $(CLAUDE_RELEASE_ROOT)/$(CLAUDE_PLUGIN_VERSION)
 CLAUDE_MARKETPLACE_ROOT ?= $(CLAUDE_STAGED_ROOT)
+GROK_PLUGIN_ROOT ?= $(INSTALL_ROOT)/grok
+GROK_PLUGIN_NAME := agent-sessions
 START_RUNTIME ?= 1
 PEER_FEDERATOR_CONFIG_DIR ?= $(HOME)/.config/peer-federator
 PEER_FEDERATOR_DOC_ROOT ?= $(PREFIX)/share/doc/peer-federator
@@ -60,10 +63,11 @@ endif
 PLATFORM := $(GOOS)-$(PLATFORM_ARCH)
 BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
-BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator
+BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator
 
 .PHONY: all lint test test-race build build-peer-federator install-preflight install dev-install reinstall \
-	stage-claude validate-claude install-claude dev-install-claude install-all dev-install-all \
+	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
+	dev-install-grok install-all dev-install-all \
 	install-peer-federator install-systemd-user-files install-systemd-user \
 	install-launchd-user-files install-launchd-user repair-projection clean
 
@@ -94,6 +98,7 @@ build:
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer" ./cmd/codex-peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer-lane" ./cmd/codex-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer-lane" ./cmd/claude-peer-lane; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer" ./cmd/grok-peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='$(PEER_FEDERATOR_LDFLAGS)' -o "$(BIN_DIR)/peer-federator" ./cmd/peer-federator; \
 	else \
 		printf 'Go is required because this source tree has no authorized packaged %s binaries\n' "$(PLATFORM)" >&2; \
@@ -143,10 +148,11 @@ install: install-preflight
 		"$(INSTALL_ROOT)/bin" \
 		"$(INSTALL_ROOT)/deploy" \
 		"$(INSTALL_ROOT)/docs" \
+		"$(INSTALL_ROOT)/grok" \
 		"$(INSTALL_ROOT)/hooks" \
 		"$(INSTALL_ROOT)/scripts" \
 		"$(INSTALL_ROOT)/skills"
-	cp -R .agents .codex-plugin deploy docs hooks scripts skills "$(INSTALL_ROOT)/"
+	cp -R .agents .codex-plugin deploy docs grok hooks scripts skills "$(INSTALL_ROOT)/"
 	cp .mcp.json README.md "$(INSTALL_ROOT)/"
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
@@ -155,6 +161,7 @@ install: install-preflight
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer" "$(PREFIX)/bin/codex-peer"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
@@ -189,6 +196,7 @@ dev-install: install-preflight
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer" "$(PREFIX)/bin/codex-peer"
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
+	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"
 	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
@@ -276,11 +284,34 @@ install-claude: validate-claude
 dev-install-claude:
 	$(MAKE) install-claude CLAUDE_MARKETPLACE_ROOT="$(CURDIR)"
 
+validate-grok:
+	@command -v "$(GROK)" >/dev/null 2>&1 || { \
+		printf 'Grok Build CLI is required for Grok plugin validation\n' >&2; \
+		exit 127; \
+	}
+	$(GROK) plugin validate "$(GROK_PLUGIN_ROOT)"
+
+install-grok: validate-grok
+	# --trust authorizes this plugin's native MCP process to run with the
+	# current user's privileges. Install only from this trusted local tree.
+	@if $(GROK) plugin list --json | \
+		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(GROK_PLUGIN_NAME)"'; then \
+		# Deliberately omit --confirm: fail closed if that name belongs to a \
+		# multi-plugin repository instead of deleting its unrelated plugins. \
+		$(GROK) plugin uninstall "$(GROK_PLUGIN_NAME)" --keep-data; \
+	fi
+	$(GROK) plugin install "$(GROK_PLUGIN_ROOT)" --trust
+
+dev-install-grok:
+	$(MAKE) install-grok GROK_PLUGIN_ROOT="$(CURDIR)/grok"
+
 install-all: install
 	$(MAKE) install-claude
+	$(MAKE) install-grok
 
 dev-install-all: dev-install
 	$(MAKE) dev-install-claude
+	$(MAKE) dev-install-grok
 
 repair-projection:
 	@test -n "$(THREAD_ID)" || { printf 'usage: make repair-projection THREAD_ID=<id> [APPLY=1]\n' >&2; exit 2; }
