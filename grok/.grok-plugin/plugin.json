@@ -1,5 +1,5 @@
 {
   "name": "agent-sessions",
-  "version": "0.1.0+codex.20260813232547",
+  "version": "0.1.1+codex.20260816105439",
   "description": "Discover and message Agent Sessions peers from Grok."
 }
