@@ -196,6 +196,7 @@ func cleanupStaleGrokLaunchPaths(record grokLaunchRecord) {
 	_ = os.Remove(expected.ControlSocket)
 	_ = os.Remove(expected.LeaderSocket)
 	_ = os.Remove(filepath.Join(expected.LaunchDir, "leader.lock"))
+	_ = os.Remove(filepath.Join(expected.LaunchDir, "diagnostics.log"))
 	_ = os.Remove(expected.LaunchDir)
 }
 
@@ -416,14 +417,15 @@ func inferGrokParent(paths nativePaths, startPID int) (laneOwner, bool) {
 }
 
 type grokManagedProcess struct {
-	cmd       *exec.Cmd
-	procStart string
-	done      chan struct{}
-	mu        sync.Mutex
-	err       error
+	cmd         *exec.Cmd
+	procStart   string
+	done        chan struct{}
+	mu          sync.Mutex
+	err         error
+	diagnostics *grokProcessDiagnostics
 }
 
-func startGrokManagedProcess(command *exec.Cmd) (*grokManagedProcess, error) {
+func startGrokManagedProcess(command *exec.Cmd, diagnostics *grokProcessDiagnostics) (*grokManagedProcess, error) {
 	configureGrokChildProcess(command)
 	if err := command.Start(); err != nil {
 		return nil, err
@@ -434,7 +436,7 @@ func startGrokManagedProcess(command *exec.Cmd) (*grokManagedProcess, error) {
 		_ = command.Wait()
 		return nil, fmt.Errorf("capture Grok child identity: %w", err)
 	}
-	managed := &grokManagedProcess{cmd: command, procStart: procStart, done: make(chan struct{})}
+	managed := &grokManagedProcess{cmd: command, procStart: procStart, done: make(chan struct{}), diagnostics: diagnostics}
 	go func() {
 		err := command.Wait()
 		managed.mu.Lock()
@@ -451,6 +453,44 @@ func (p *grokManagedProcess) waitError() error {
 	return p.err
 }
 
+func (p *grokManagedProcess) attributedError(role string, cause error) error {
+	// All callers with a started process stop or observe it first. Use a bounded
+	// final join because stdout EOF can precede a last stderr write, while an
+	// unverifiable process identity must never hang host shutdown indefinitely.
+	joined := p == nil || p.done == nil
+	if p != nil && p.done != nil {
+		timer := time.NewTimer(grokDiagnosticJoinTimeout)
+		select {
+		case <-p.done:
+			joined = true
+			if cause == nil {
+				cause = p.waitError()
+			}
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	if !joined {
+		if p == nil || p.diagnostics == nil {
+			return fmt.Errorf("%s; managed process join incomplete; private diagnostics unavailable", role)
+		}
+		return p.diagnostics.safeError(role, false)
+	}
+	if cause == nil {
+		cause = errors.New("process exited unexpectedly")
+	}
+	if p == nil || p.diagnostics == nil {
+		return fmt.Errorf("%s; private diagnostics unavailable", role)
+	}
+	p.diagnostics.recordFailure(cause)
+	return p.diagnostics.safeError(role, true)
+}
+
 type grokACPClient struct {
 	process   *grokManagedProcess
 	stdin     io.WriteCloser
@@ -461,6 +501,18 @@ type grokACPClient struct {
 	readErr   error
 	requestMu sync.Mutex
 	nextID    int64
+}
+
+func (c *grokACPClient) readError() error {
+	if c == nil {
+		return io.EOF
+	}
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.readErr == nil {
+		return io.EOF
+	}
+	return c.readErr
 }
 
 type grokRosterState struct {
@@ -666,15 +718,16 @@ type grokHost struct {
 	config grokHostConfig
 	paths  grokHostPaths
 
-	listener net.Listener
-	leader   *grokManagedProcess
-	peer     *daemon
-	peerMu   sync.Mutex
-	record   grokLaunchRecord
-	lease    *os.File
-	modeMu   sync.RWMutex
-	mode     string
-	status   string
+	listener    net.Listener
+	leader      *grokManagedProcess
+	diagnostics *grokDiagnosticSink
+	peer        *daemon
+	peerMu      sync.Mutex
+	record      grokLaunchRecord
+	lease       *os.File
+	modeMu      sync.RWMutex
+	mode        string
+	status      string
 	// activeInterjectionMode is authoritative from the roster refresh immediately
 	// preceding x.ai/interject until the first successful roster refresh after the
 	// actor accepts it. Grok can hold roster requests for the whole generated turn,
@@ -816,7 +869,7 @@ func (h *grokHost) run(ctx context.Context) error {
 		case <-h.done:
 			return nil
 		case <-h.leader.done:
-			return fmt.Errorf("private Grok leader exited: %w", h.leader.waitError())
+			return h.leader.attributedError("private Grok leader exited", nil)
 		case <-ownerTicker.C:
 			if cleanupProcessIdentityStatus(h.config.OwnerPID, h.config.OwnerProcStart).Status == processIdentityStale {
 				return nil
@@ -855,15 +908,21 @@ func (h *grokHost) start() error {
 	if err := os.Mkdir(h.paths.LaunchDir, 0o700); err != nil {
 		return fmt.Errorf("create private Grok launch directory: %w", err)
 	}
+	diagnostics, err := newGrokDiagnosticSink(filepath.Join(h.paths.LaunchDir, "diagnostics.log"))
+	if err != nil {
+		return err
+	}
+	h.diagnostics = diagnostics
+	leaderDiagnostics := diagnostics.process("private Grok leader")
 	leaderCommand := h.grokCommand(
 		"--permission-mode", "default",
 		"agent", "leader", "--leader-socket", h.paths.LeaderSocket,
 		"--no-exit-on-disconnect", "--relay-on-demand", "--no-auto-update",
 	)
-	leaderCommand.Stdout, leaderCommand.Stderr = os.Stderr, os.Stderr
-	leader, err := startGrokManagedProcess(leaderCommand)
+	leaderCommand.Stdout, leaderCommand.Stderr = leaderDiagnostics, leaderDiagnostics
+	leader, err := startGrokManagedProcess(leaderCommand, leaderDiagnostics)
 	if err != nil {
-		return fmt.Errorf("start private Grok leader: %w", err)
+		return (&grokManagedProcess{diagnostics: leaderDiagnostics}).attributedError("start private Grok leader", err)
 	}
 	h.leader = leader
 	h.record.LeaderPID, h.record.LeaderProcStart = leader.cmd.Process.Pid, leader.procStart
@@ -905,7 +964,7 @@ func (h *grokHost) waitForLeaderSocket(timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		select {
 		case <-h.leader.done:
-			return fmt.Errorf("private Grok leader exited before its socket was ready: %w", h.leader.waitError())
+			return h.leader.attributedError("private Grok leader exited before its socket was ready", nil)
 		default:
 		}
 		if info, err := os.Lstat(h.paths.LeaderSocket); err == nil && info.Mode()&os.ModeSocket != 0 {
@@ -965,7 +1024,13 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 	if h.acp != nil {
 		select {
 		case <-h.acp.readDone:
+			process := h.acp.process
+			readErr := h.acp.readError()
 			h.closeACPLocked()
+			// Wait boundedly for the completed observer's final stderr before
+			// recording its failure. A healthy replacement remains transparent to
+			// the caller, so discard the fixed role-only outward error.
+			_ = process.attributedError("official Grok ACP observer exited", readErr)
 		default:
 		}
 	}
@@ -987,15 +1052,16 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		command.Stderr = os.Stderr
-		process, err := startGrokManagedProcess(command)
+		observerDiagnostics := h.diagnostics.process("official Grok ACP observer")
+		command.Stderr = observerDiagnostics
+		process, err := startGrokManagedProcess(command, observerDiagnostics)
 		if err != nil {
-			return fmt.Errorf("start official Grok ACP leader bridge: %w", err)
+			return (&grokManagedProcess{diagnostics: observerDiagnostics}).attributedError("start official Grok ACP observer", err)
 		}
 		h.record.WakerPID, h.record.WakerProcStart = process.cmd.Process.Pid, process.procStart
 		if err := writeJSONAtomic(grokLaunchRecordPath(resolveNativePaths(), h.record.SessionID), h.record); err != nil {
 			stopGrokManagedProcess(process, 2*time.Second)
-			return fmt.Errorf("persist Grok ACP waker ownership: %w", err)
+			return process.attributedError("persist official Grok ACP observer ownership", err)
 		}
 		h.acp = newGrokACPClient(process, stdin, stdout, h.config.SessionID, generation, h.rosterUpdates)
 		result, err := h.acp.request(ctx, "initialize", map[string]any{
@@ -1006,18 +1072,21 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 			},
 		})
 		if err != nil {
+			process := h.acp.process
 			h.closeACPLocked()
-			return err
+			return process.attributedError("initialize official Grok ACP observer", err)
 		}
 		if !grokAuthMethodAdvertised(result, "cached_token") {
+			process := h.acp.process
 			h.closeACPLocked()
-			return errors.New("grok ACP did not advertise cached_token authentication")
+			return process.attributedError("authenticate official Grok ACP observer", errors.New("cached_token authentication was not advertised"))
 		}
 		if _, err := h.acp.request(ctx, "authenticate", map[string]any{
 			"methodId": "cached_token", "_meta": map[string]any{"headless": true},
 		}); err != nil {
+			process := h.acp.process
 			h.closeACPLocked()
-			return fmt.Errorf("authenticate Grok ACP from cached CLI credentials: %w", err)
+			return process.attributedError("authenticate official Grok ACP observer", err)
 		}
 	}
 	return nil
@@ -1702,6 +1771,15 @@ func (h *grokHost) cleanup() {
 				cleanupProcessIdentityStatus(record.WakerPID, record.WakerProcStart).Status == processIdentityStale {
 				removeDurableOwnership()
 			}
+		}
+		if h.diagnostics != nil {
+			if err := h.diagnostics.close(); err != nil {
+				fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: close private diagnostic log failed")
+			}
+		}
+		diagnosticPath := filepath.Join(h.paths.LaunchDir, "diagnostics.log")
+		if err := os.Remove(diagnosticPath); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: remove private diagnostic log failed")
 		}
 		// Unlink private endpoints before acquiring acpMu. The live failure this
 		// ordering guards against had already reaped both child groups but killed

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -20,6 +21,15 @@ import (
 )
 
 const grokFakeProcessEnv = "AGENT_SESSIONS_GROK_FAKE_PROCESS"
+
+const (
+	grokFakeLeaderStderrEnv   = "AGENT_SESSIONS_GROK_FAKE_LEADER_STDERR"
+	grokFakeLeaderFinalEnv    = "AGENT_SESSIONS_GROK_FAKE_LEADER_FINAL_STDERR"
+	grokFakeLeaderExitEnv     = "AGENT_SESSIONS_GROK_FAKE_LEADER_EXIT"
+	grokFakeObserverStderrEnv = "AGENT_SESSIONS_GROK_FAKE_OBSERVER_STDERR"
+	grokFakeObserverExitEnv   = "AGENT_SESSIONS_GROK_FAKE_OBSERVER_EXIT"
+	grokFakeObserverFinalEnv  = "AGENT_SESSIONS_GROK_FAKE_OBSERVER_FINAL_STDERR"
+)
 
 func TestGrokFakeProcess(_ *testing.T) {
 	if os.Getenv(grokFakeProcessEnv) != "1" {
@@ -59,6 +69,15 @@ func grokFakeArgument(args []string, wanted string) string {
 }
 
 func runGrokFakeLeader(args []string) {
+	if diagnostic := os.Getenv(grokFakeLeaderStderrEnv); diagnostic != "" {
+		_, _ = fmt.Fprint(os.Stderr, diagnostic)
+	}
+	if final := os.Getenv(grokFakeLeaderFinalEnv); final != "" {
+		_, _ = fmt.Fprint(os.Stderr, final)
+	}
+	if code, _ := strconv.Atoi(os.Getenv(grokFakeLeaderExitEnv)); code > 0 {
+		os.Exit(code)
+	}
 	socket := grokFakeArgument(args, "--leader-socket")
 	_ = os.Remove(socket)
 	_ = os.WriteFile(filepath.Join(filepath.Dir(socket), "leader.lock"), []byte("fake lock\n"), 0o600)
@@ -83,6 +102,17 @@ func runGrokFakeLeader(args []string) {
 }
 
 func runGrokFakeACP() {
+	if diagnostic := os.Getenv(grokFakeObserverStderrEnv); diagnostic != "" {
+		_, _ = fmt.Fprint(os.Stderr, diagnostic)
+	}
+	if final := os.Getenv(grokFakeObserverFinalEnv); final != "" {
+		_ = os.Stdout.Close()
+		time.Sleep(25 * time.Millisecond)
+		_, _ = fmt.Fprint(os.Stderr, final)
+	}
+	if code, _ := strconv.Atoi(os.Getenv(grokFakeObserverExitEnv)); code > 0 {
+		os.Exit(code)
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	var activeTurnUntil time.Time
 	for scanner.Scan() {
@@ -201,6 +231,272 @@ func recordGrokFake(value map[string]any) {
 	}
 	_, _ = file.Write(append(body, '\n'))
 	_ = file.Close()
+}
+
+func TestGrokManagedOutputUsesPrivateDiagnosticSink(t *testing.T) {
+	leaderMarker := "FOREIGN-MCP-LEADER-STDERR\n"
+	observerMarker := "ACP-OBSERVER-STDERR\n"
+	t.Setenv(grokFakeLeaderStderrEnv, leaderMarker)
+	t.Setenv(grokFakeObserverStderrEnv, observerMarker)
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-private-diagnostics")
+	stopped := false
+	defer func() {
+		if !stopped {
+			stopTestGrokHost(t, host, cancel, result)
+		}
+	}()
+	waitGrokHostReady(t, host)
+
+	if host.leader.cmd.Stdout == os.Stderr || host.leader.cmd.Stderr == os.Stderr {
+		t.Fatal("private Grok leader output still targets the interactive terminal")
+	}
+	host.acpMu.Lock()
+	observer := host.acp
+	host.acpMu.Unlock()
+	if observer == nil || observer.process.cmd.Stderr == os.Stderr {
+		t.Fatal("official Grok ACP observer stderr still targets the interactive terminal")
+	}
+
+	diagnosticPath := filepath.Join(host.paths.LaunchDir, "diagnostics.log")
+	deadline := time.Now().Add(2 * time.Second)
+	var body []byte
+	for time.Now().Before(deadline) {
+		body, _ = os.ReadFile(diagnosticPath)
+		if strings.Contains(string(body), leaderMarker) && strings.Contains(string(body), observerMarker) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(string(body), "[private Grok leader] "+leaderMarker) ||
+		!strings.Contains(string(body), "[official Grok ACP observer] "+observerMarker) {
+		t.Fatalf("private diagnostic log does not contain attributed child output: %q", body)
+	}
+	info, err := os.Stat(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 || info.Size() > grokDiagnosticFileLimit {
+		t.Fatalf("private diagnostic log mode/size = %o/%d", info.Mode().Perm(), info.Size())
+	}
+
+	stopTestGrokHost(t, host, cancel, result)
+	stopped = true
+	if _, err := os.Lstat(diagnosticPath); !os.IsNotExist(err) {
+		t.Fatalf("private diagnostic log survived cleanup: %v", err)
+	}
+}
+
+func TestGrokManagedProcessFailuresKeepRawDiagnosticsPrivate(t *testing.T) {
+	tests := []struct {
+		name                         string
+		role                         string
+		exitEnv                      string
+		stderrEnv                    string
+		args                         []string
+		closeStdoutBeforeFinalStderr bool
+	}{
+		{
+			name: "leader", role: "private Grok leader exited", exitEnv: grokFakeLeaderExitEnv,
+			stderrEnv: grokFakeLeaderStderrEnv,
+			args:      []string{"--permission-mode", "default", "agent", "leader", "--leader-socket", filepath.Join(t.TempDir(), "leader.sock")},
+		},
+		{
+			name: "observer", role: "official Grok ACP observer exited", exitEnv: grokFakeObserverExitEnv,
+			stderrEnv: grokFakeObserverStderrEnv,
+			args:      []string{"--no-auto-update", "agent", "--leader", "stdio"}, closeStdoutBeforeFinalStderr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			diagnosticPath := filepath.Join(root, "diagnostics.log")
+			sink, err := newGrokDiagnosticSink(diagnosticPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = sink.close() }()
+			secretCanary := "SECRET-CANARY-" + strings.ToUpper(test.name)
+			tailMarker := "TAIL-" + secretCanary
+			diagnostic := "PREFIX-MUST-BE-EVICTED" + strings.Repeat("x", grokDiagnosticTailLimit+1024)
+			finalDiagnostic := strings.Repeat("y", grokDiagnosticTailLimit+1024) + "\x1b[31m" + tailMarker + "\n"
+			command := exec.Command(os.Args[0], append([]string{"-test.run=^TestGrokFakeProcess$", "--"}, test.args...)...)
+			command.Env = append(os.Environ(), grokFakeProcessEnv+"=1", test.exitEnv+"=37")
+			if test.closeStdoutBeforeFinalStderr {
+				command.Env = append(command.Env, test.stderrEnv+"="+diagnostic, grokFakeObserverFinalEnv+"="+finalDiagnostic)
+			} else {
+				command.Env = append(command.Env, test.stderrEnv+"="+diagnostic, grokFakeLeaderFinalEnv+"="+finalDiagnostic)
+			}
+			processDiagnostics := sink.process(test.role)
+			var stdout io.ReadCloser
+			if test.closeStdoutBeforeFinalStderr {
+				stdout, err = command.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				command.Stdout = processDiagnostics
+			}
+			command.Stderr = processDiagnostics
+			managed, err := startGrokManagedProcess(command, processDiagnostics)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stdout != nil {
+				if _, err := io.ReadAll(stdout); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failure := managed.attributedError(test.role, nil)
+			message := failure.Error()
+			if !strings.Contains(message, test.role) || !strings.Contains(message, "private host diagnostics") ||
+				strings.Contains(message, diagnosticPath) || strings.Contains(message, "bytes") ||
+				strings.Contains(message, secretCanary) || strings.Contains(message, "\x1b") {
+				t.Fatalf("managed-process error leaked raw diagnostics or lost safe attribution: %q", message)
+			}
+			body, err := os.ReadFile(diagnosticPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(body), tailMarker) || strings.Contains(string(body), "PREFIX-MUST-BE-EVICTED") {
+				t.Fatalf("live bounded diagnostic file did not retain its newest tail: size=%d", len(body))
+			}
+			info, err := os.Stat(diagnosticPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o600 || info.Size() > grokDiagnosticFileLimit {
+				t.Fatalf("bounded diagnostic file mode/size = %o/%d", info.Mode().Perm(), info.Size())
+			}
+		})
+	}
+}
+
+func TestGrokDiagnosticSinkAmortizesSmallWritesAndKeepsNewestOutput(t *testing.T) {
+	diagnosticPath := filepath.Join(t.TempDir(), "diagnostics.log")
+	sink, err := newGrokDiagnosticSink(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sink.close() }()
+
+	const writes = 12000
+	for index := 0; index < writes; index++ {
+		line := fmt.Sprintf("small-write-%05d-%s\n", index, strings.Repeat("x", 16))
+		if _, err := sink.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, err := os.ReadFile(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), fmt.Sprintf("small-write-%05d", writes-1)) {
+		t.Fatal("bounded diagnostic log lost its newest small write")
+	}
+	if strings.Contains(string(body), "small-write-00000") {
+		t.Fatal("bounded diagnostic log retained output older than its compacted tail")
+	}
+	info, err := os.Stat(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > grokDiagnosticFileLimit {
+		t.Fatalf("bounded diagnostic log size = %d, want <= %d", info.Size(), grokDiagnosticFileLimit)
+	}
+	sink.mu.Lock()
+	compactions := sink.compactions
+	sink.mu.Unlock()
+	if compactions == 0 || compactions >= 16 {
+		t.Fatalf("small writes caused %d compactions; want occasional amortized compaction", compactions)
+	}
+}
+
+func TestGrokManagedProcessAttributionBoundsIncompleteJoin(t *testing.T) {
+	diagnosticPath := filepath.Join(t.TempDir(), "diagnostics.log")
+	sink, err := newGrokDiagnosticSink(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sink.close() }()
+	role := "official Grok ACP observer exited"
+	diagnostics := sink.process(role)
+	process := &grokManagedProcess{done: make(chan struct{}), diagnostics: diagnostics}
+	secretCanary := "SECRET-INCOMPLETE-JOIN-CANARY"
+
+	started := time.Now()
+	failure := process.attributedError(role, errors.New(secretCanary))
+	elapsed := time.Since(started)
+	if elapsed < grokDiagnosticJoinTimeout/2 || elapsed > 2*time.Second {
+		t.Fatalf("incomplete managed-process join returned after %s", elapsed)
+	}
+	message := failure.Error()
+	if !strings.Contains(message, role) || !strings.Contains(message, "join incomplete") ||
+		!strings.Contains(message, "private host diagnostics") || strings.Contains(message, diagnosticPath) ||
+		strings.Contains(message, "bytes") || strings.Contains(message, secretCanary) {
+		t.Fatalf("incomplete-join error leaked raw diagnostics or lost fixed attribution: %q", message)
+	}
+	body, err := os.ReadFile(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), secretCanary) {
+		t.Fatal("unjoined managed-process cause was recorded before final join")
+	}
+}
+
+func TestGrokObserverDiagnosticsNeverEnterWakeStatusOrDurableRecord(t *testing.T) {
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-private-wake-error")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+
+	secretCanary := "SECRET-OBSERVER-CANARY-DO-NOT-PERSIST"
+	t.Setenv(grokFakeObserverStderrEnv, "\x1b[31m"+secretCanary+"\n")
+	t.Setenv(grokFakeObserverExitEnv, "41")
+	host.acpMu.Lock()
+	host.closeACPLocked()
+	host.acpMu.Unlock()
+
+	messageID := "private-observer-failure"
+	response, err := requestControl(host.paths.ControlSocket, map[string]any{
+		"action": "wake", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+		"item": map[string]any{"id": messageID, "message": "exercise observer failure"},
+	}, time.Second)
+	if err != nil || stringValue(response["delivery"]) != "accepted" {
+		t.Fatalf("queue wake for observer failure = %#v, %v", response, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var status map[string]any
+	for time.Now().Before(deadline) {
+		status, err = requestControl(host.paths.ControlSocket, map[string]any{
+			"action": "wake_status", "sessionId": host.config.SessionID,
+			"launchToken": host.config.LaunchToken, "messageId": messageID,
+		}, time.Second)
+		if err == nil && strings.Contains(stringValue(status["detail"]), "official Grok ACP observer") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	encodedStatus, _ := json.Marshal(status)
+	recordPath := grokWakeRecordPath(resolveNativePaths(), host.config.SessionID, messageID)
+	recordBody, readErr := os.ReadFile(recordPath)
+	if err != nil || readErr != nil {
+		t.Fatalf("observer failure wake status/read = %#v, %v / %v", status, err, readErr)
+	}
+	for label, body := range map[string][]byte{"wake_status": encodedStatus, "durable wake": recordBody} {
+		if strings.Contains(string(body), secretCanary) || strings.Contains(string(body), "\x1b") ||
+			strings.Contains(string(body), host.paths.LaunchDir) || strings.Contains(string(body), "bytes") {
+			t.Fatalf("%s leaked raw observer diagnostics: %s", label, body)
+		}
+	}
+	if detail := stringValue(status["detail"]); !strings.Contains(detail, "official Grok ACP observer") ||
+		!strings.Contains(detail, "private host diagnostics") {
+		t.Fatalf("wake status lost fixed role-only diagnostic metadata: %#v", status)
+	}
+	diagnosticBody, err := os.ReadFile(filepath.Join(host.paths.LaunchDir, "diagnostics.log"))
+	if err != nil || !strings.Contains(string(diagnosticBody), secretCanary) {
+		t.Fatalf("private diagnostic log did not retain observer canary: %v", err)
+	}
 }
 
 func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
@@ -406,27 +702,28 @@ func TestInferGrokParentRequiresLiveLaunchCapabilityAndLeaderAncestry(t *testing
 }
 
 func TestGrokHostReconnectsACPBridgeBeforeNextWake(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "bridge-exited")
-	t.Setenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE", marker)
 	host, cancel, result, record := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-reconnect")
 	defer stopTestGrokHost(t, host, cancel, result)
 	waitGrokHostReady(t, host)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		host.acpMu.Lock()
-		dead := host.acp != nil
-		if dead {
-			select {
-			case <-host.acp.readDone:
-			default:
-				dead = false
-			}
-		}
+	host.acpMu.Lock()
+	oldPID := host.acp.process.cmd.Process.Pid
+	stopGrokManagedProcess(host.acp.process, time.Second)
+	select {
+	case <-host.acp.readDone:
+	case <-time.After(time.Second):
 		host.acpMu.Unlock()
-		if dead {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+		t.Fatal("stopped observer did not close its ACP stream")
+	}
+	ctx, refreshCancel := context.WithTimeout(context.Background(), time.Second)
+	err := host.ensureACPConnectedLocked(ctx)
+	refreshCancel()
+	newPID := 0
+	if host.acp != nil {
+		newPID = host.acp.process.cmd.Process.Pid
+	}
+	host.acpMu.Unlock()
+	if err != nil || newPID <= 1 || newPID == oldPID {
+		t.Fatalf("dead observer did not reconnect transparently in one call: old=%d new=%d err=%v", oldPID, newPID, err)
 	}
 	response, err := requestControl(host.paths.ControlSocket, map[string]any{
 		"action": "wake", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
@@ -1415,7 +1712,7 @@ func startTestGrokHost(t *testing.T, ownerPID int, ownerStart, sessionID string)
 	config := grokHostConfig{
 		GrokBin: os.Args[0], SessionID: sessionID, Cwd: root,
 		OwnerPID: ownerPID, OwnerProcStart: ownerStart,
-		LaunchToken: strings.Repeat("a", 32), RuntimeDir: filepath.Join(root, "run"),
+		LaunchToken: grokTokenHash(root)[:32], RuntimeDir: filepath.Join(root, "run"),
 		Name: "grok-test", PermissionMode: "default",
 	}
 	config.command = func(args ...string) *exec.Cmd {

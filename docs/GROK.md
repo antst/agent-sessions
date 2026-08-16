@@ -121,6 +121,15 @@ deduplicate repeated interjection IDs; after an ambiguous post-write timeout,
 the durable wake remains `in_flight`, is logged, and is never replayed
 automatically because replay could duplicate model work.
 
+The private leader and ACP observer are background infrastructure, so their
+stdout and stderr are isolated from the interactive TUI. A foreign MCP failure
+therefore remains attributed to its server in Grok's `/mcp` view and session
+`events.jsonl` instead of appearing as an unrelated top-level fatal in the
+prompt. If a managed infrastructure process itself exits, `grok-peer` reports
+the failing role without copying private child output into terminal, control,
+or durable wake records. Agent Sessions never copies raw third-party output
+into model-visible protocol data.
+
 If the peer never appears, run `grok login`, confirm `grok inspect --json`
 shows one enabled `agent-sessions` plugin with `scope: "user"` at
 `~/.grok/plugins/agent-sessions` and its `agent_sessions` MCP target under that

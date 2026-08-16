@@ -121,6 +121,13 @@ The product is the leader + waker. Hooks are not the delivery path.
   catalog omits plugin-only clients, so catalog presence is not a readiness
   signal. Do not retry OAuth or mutate MCP configuration. Unrelated MCP
   failures do not block peer readiness.
+- Diagnostics: the private leader and ACP observer are background processes;
+  never attach their raw stdout/stderr to the interactive terminal. Route each
+  stream through a bridge-owned bounded diagnostic sink. Grok's structured MCP
+  status and session events retain per-server attribution for unrelated MCP
+  failures. Report the failing managed role without copying raw child output
+  into terminal, control, or durable wake records, and remove the private sink
+  during normal cleanup.
 - Policy: the TUI alone receives the user's native argv and configuration.
   Start the infrastructure-only leader and ACP bridge with explicit
   `--permission-mode default` so their own configuration cannot widen a

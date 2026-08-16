@@ -129,7 +129,7 @@ must refuse when a process it would replace is still live.
 | G-05 | Linux, macOS | Cold logs contain no reclaimed process scope, duplicate actor, or observer ownership failure. |
 | G-06 | Linux, macOS | TUI, host, private leader, ACP observer, and MCP server identities match one launch record. |
 | G-07 | Linux, macOS | Observer initializes/authenticates, sees one resident row, and sends neither `session/load` nor `session/prompt`. |
-| G-08 | Linux, macOS | Ordinary Grok and `grok-peer` use equivalent auth/config for same cwd; foreign MCP OAuth failure is attributed correctly. |
+| G-08 | Linux, macOS | Ordinary Grok and `grok-peer` use equivalent auth/config for the same cwd; a foreign MCP OAuth failure remains server-attributed in Grok's MCP status/events and private leader/observer diagnostics never render as an unattributed fatal in the interactive TUI. |
 | G-09 | Linux, macOS | Idle `x.ai/interject` visibly starts a turn without typing and returns exact acknowledgement. |
 | G-10 | Linux, macOS | Busy/generating/tool-active interjection is received once without replacing the TUI actor. |
 | G-11 | Linux, macOS | Burst, duplicate ID, conflicting reuse, reconnect, rejection, response-before-echo, missing actor echo, and ambiguous EOF preserve the documented local dedup/never-replay contract. |
