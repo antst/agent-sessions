@@ -580,7 +580,7 @@ func codexBridgeStateMatchesPeer(state map[string]any, peer peerSession) bool {
 }
 
 func corroboratedOwnerPermissionMode(peer peerSession, pid int) string {
-	permissionMode, err := peerProcessPermissionMode(pid)
+	permissionMode, err := peerProcessPermissionMode(pid, peer.ProcStart)
 	if err != nil {
 		return "default"
 	}
@@ -1435,27 +1435,82 @@ func doctorClaudeLane() (int, error) {
 	_, supervisorErr := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 2*time.Second)
 	supervisorReachable := supervisorErr == nil
 	version := ""
+	authenticated := false
+	authMethod := ""
+	authProvider := ""
+	authError := ""
 	if available {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		body, versionErr := exec.CommandContext(ctx, claudeBin, "--version").Output() //nolint:gosec // configured local Claude executable.
+		cancel()
 		if versionErr == nil {
 			version = strings.TrimSpace(string(body))
+		}
+		status, statusErr := inspectClaudeAuthentication(claudeBin)
+		authenticated = status.LoggedIn && statusErr == nil
+		authMethod = status.AuthMethod
+		authProvider = status.APIProvider
+		if statusErr != nil {
+			authError = statusErr.Error()
+		} else if !status.LoggedIn {
+			authError = "Claude Code is not authenticated"
 		}
 	}
 	executable, _ := os.Executable()
 	if err := emitLane(map[string]any{
 		"type": "lane.doctor", "product": "claude", "contract_version": claudeLaneContractVersion,
 		"runtime_path": executable, "claude_available": available, "claude_path": emptyStringAsNil(claudeBin),
-		"claude_version": emptyStringAsNil(version), "state_root": profileDataRoot(paths),
+		"claude_version": emptyStringAsNil(version), "claude_logged_in": authenticated,
+		"claude_auth_method": emptyStringAsNil(authMethod), "claude_api_provider": emptyStringAsNil(authProvider),
+		"claude_auth_error": emptyStringAsNil(authError), "state_root": profileDataRoot(paths),
 		"supervisor_reachable": supervisorReachable, "supervisor_socket": paths.supervisorSock,
 	}); err != nil {
 		return 1, err
 	}
-	if !available || !supervisorReachable {
+	if !available || !authenticated || !supervisorReachable {
 		return 1, nil
 	}
 	return 0, nil
+}
+
+type claudeAuthenticationStatus struct {
+	LoggedIn    bool   `json:"loggedIn"`
+	AuthMethod  string `json:"authMethod"`
+	APIProvider string `json:"apiProvider"`
+}
+
+func inspectClaudeAuthentication(claudeBin string) (claudeAuthenticationStatus, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, claudeBin, "auth", "status", "--json")
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	body, commandErr := command.Output()
+	if ctx.Err() != nil {
+		return claudeAuthenticationStatus{}, errors.New("authentication check for Claude Code timed out")
+	}
+	var status claudeAuthenticationStatus
+	if err := json.Unmarshal(body, &status); err != nil {
+		if commandErr != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return status, fmt.Errorf("authentication check for Claude Code failed: %w: %s", commandErr, detail)
+			}
+			return status, fmt.Errorf("authentication check for Claude Code failed: %w", commandErr)
+		}
+		return status, fmt.Errorf("decode Claude Code authentication status: %w", err)
+	}
+	if commandErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(commandErr, &exitErr) || exitErr.ExitCode() != 1 || status.LoggedIn {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return status, fmt.Errorf("authentication check for Claude Code failed: %w: %s", commandErr, detail)
+			}
+			return status, fmt.Errorf("authentication check for Claude Code failed: %w", commandErr)
+		}
+	}
+	return status, nil
 }
 
 func interruptClaudeLane(o claudeLaneOptions) (int, error) {

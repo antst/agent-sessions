@@ -16,13 +16,15 @@ import (
 
 const mcpInstructions = "Use stable peer names as primary addresses. send_message refreshes discovery immediately before every send; use name [ref] only to disambiguate duplicate names. Exact peer session IDs and uds: reply addresses are also accepted. Tool calls are active only when Codex supplies host-owned metadata for an attested peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
+const grokMCPInstructions = "Use stable peer names as primary addresses. send_message refreshes discovery immediately before every send; use name [ref] only to disambiguate duplicate names. Exact peer session IDs and uds: reply addresses are also accepted. This MCP process is authorized only by the live process-attested grok-peer launch. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+
 var nativeToolDefinitions = []map[string]any{
 	{
-		"name": "list_peers", "description": "List live Claude Code and Codex peer sessions on this host that can receive a message.",
+		"name": "list_peers", "description": "List live Claude Code, Codex, and Grok peer sessions on this host that can receive a message.",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 	},
 	{
-		"name": "send_message", "description": "Send a plain-text message to a live local Claude Code or Codex peer session. Use list_peers first if the target is ambiguous.",
+		"name": "send_message", "description": "Send a plain-text message to a live local Claude Code, Codex, or Grok peer session. Use list_peers first if the target is ambiguous.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
 				"target":     map[string]any{"type": "string", "description": "Peer name (preferred), exact session ID, name [ref], or explicit uds: address."},
@@ -60,6 +62,34 @@ var nativeToolDefinitions = []map[string]any{
 	},
 }
 
+var grokToolDefinitions = grokPeerToolDefinitions()
+
+func grokPeerToolDefinitions() []map[string]any {
+	body, _ := json.Marshal(nativeToolDefinitions)
+	var definitions []map[string]any
+	_ = json.Unmarshal(body, &definitions)
+	for _, definition := range definitions {
+		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this Grok session")
+		description = strings.ReplaceAll(description, "Current Codex session", "Current Grok session")
+		definition["description"] = description
+		schema, _ := definition["inputSchema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		if session, ok := properties["session_id"].(map[string]any); ok {
+			session["description"] = "Optional corroboration of the current Grok session ID. The launch token is authoritative."
+		}
+		if required, ok := schema["required"].([]any); ok {
+			kept := required[:0]
+			for _, value := range required {
+				if stringValue(value) != "session_id" {
+					kept = append(kept, value)
+				}
+			}
+			schema["required"] = kept
+		}
+	}
+	return definitions
+}
+
 type peerSession struct {
 	PID                 int    `json:"pid"`
 	SessionID           string `json:"sessionId"`
@@ -85,6 +115,30 @@ type laneOwner struct {
 }
 
 func runMCPCommand() int {
+	return runMCPServer(nativeToolDefinitions, mcpInstructions, func(params json.RawMessage) (string, error) {
+		if err := attestStdioMCPHost(); err != nil {
+			return "", fmt.Errorf("inactive host attestation: %w", err)
+		}
+		caller, err := attestStdioMCPCaller(params)
+		if err != nil {
+			return "", fmt.Errorf("inactive caller attestation: %w", err)
+		}
+		return caller, nil
+	})
+}
+
+func runGrokMCPCommand() int {
+	paths := resolveNativePaths()
+	return runMCPServer(grokToolDefinitions, grokMCPInstructions, func(_ json.RawMessage) (string, error) {
+		caller, err := attestGrokMCPCaller(paths)
+		if err != nil {
+			return "", fmt.Errorf("inactive Grok caller attestation: %w", err)
+		}
+		return caller, nil
+	})
+}
+
+func runMCPServer(toolDefinitions []map[string]any, instructions string, attest func(json.RawMessage) (string, error)) int {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 2*maxFrameBytes)
 	writer := bufio.NewWriter(os.Stdout)
@@ -107,7 +161,7 @@ func runMCPCommand() int {
 		if len(request.ID) == 0 {
 			continue
 		}
-		result, err := handleNativeMCPRequest(request.Method, request.Params, "")
+		result, err := handleNativeMCPRequestWithTools(request.Method, request.Params, "", toolDefinitions, instructions, attest)
 		if err != nil {
 			code := -32603
 			var rpcErr *rpcError
@@ -144,6 +198,22 @@ func writeMCPResponse(writer *bufio.Writer, id json.RawMessage, result any, rpcE
 }
 
 func handleNativeMCPRequest(method string, params json.RawMessage, callerSessionID string) (any, error) {
+	return handleNativeMCPRequestWithTools(method, params, callerSessionID, nativeToolDefinitions, mcpInstructions, func(params json.RawMessage) (string, error) {
+		if err := attestStdioMCPHost(); err != nil {
+			return "", fmt.Errorf("inactive host attestation: %w", err)
+		}
+		return attestStdioMCPCaller(params)
+	})
+}
+
+func handleNativeMCPRequestWithTools(
+	method string,
+	params json.RawMessage,
+	callerSessionID string,
+	toolDefinitions []map[string]any,
+	instructions string,
+	attest func(json.RawMessage) (string, error),
+) (any, error) {
 	switch method {
 	case "initialize":
 		var input map[string]any
@@ -151,13 +221,13 @@ func handleNativeMCPRequest(method string, params json.RawMessage, callerSession
 		return map[string]any{
 			"protocolVersion": defaultString(stringValue(input["protocolVersion"]), "2025-06-18"),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "claude-code-peer", "version": "0.1.0"},
-			"instructions":    mcpInstructions,
+			"serverInfo":      map[string]any{"name": "agent-sessions", "version": "0.1.0"},
+			"instructions":    instructions,
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": nativeToolDefinitions}, nil
+		return map[string]any{"tools": toolDefinitions}, nil
 	case "tools/call":
 		var call struct {
 			Name      string         `json:"name"`
@@ -167,14 +237,10 @@ func handleNativeMCPRequest(method string, params json.RawMessage, callerSession
 			return nil, err
 		}
 		if callerSessionID == "" {
-			if err := attestStdioMCPHost(); err != nil {
-				fmt.Fprintf(os.Stderr, "claude-code-peer mcp: inactive host attestation: %v\n", err)
-				return inactiveMCPResult(), nil
-			}
 			var err error
-			callerSessionID, err = attestStdioMCPCaller(params)
+			callerSessionID, err = attest(params)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "claude-code-peer mcp: inactive caller attestation: %v\n", err)
+				fmt.Fprintf(os.Stderr, "claude-code-peer mcp: %v\n", err)
 				return inactiveMCPResult(), nil
 			}
 		}
@@ -226,7 +292,7 @@ func attestStdioMCPHost() error {
 //nolint:gocyclo
 func callNativePeerTool(name string, args map[string]any, callerSessionID string) (map[string]any, error) {
 	paths := resolveNativePaths()
-	if !authorizedPeerThreadNative(paths, callerSessionID) {
+	if !authorizedPeerSessionNative(paths, callerSessionID) {
 		return nil, errors.New("claude_peer is inactive outside an attested peer session")
 	}
 	switch name {
@@ -237,10 +303,7 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		}
 		lines := []string{}
 		for _, peer := range peers {
-			product := "Claude Code"
-			if peer.Entrypoint == "codex" {
-				product = "Codex"
-			}
+			product := nativePeerProductLabel(peer.Entrypoint)
 			session := ""
 			if peer.SessionID != "" {
 				session = ", session " + peer.SessionID
@@ -329,18 +392,36 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 	}
 }
 
-func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessionID string) (string, error) {
-	requested, err := requiredMCPString(args, "session_id")
-	if err != nil {
-		return "", err
+func nativePeerProductLabel(entrypoint string) string {
+	switch entrypoint {
+	case "codex":
+		return "Codex"
+	case "grok":
+		return "Grok"
+	default:
+		return "Claude Code"
 	}
-	if !validSessionID(callerSessionID) || !authorizedPeerThreadNative(paths, callerSessionID) {
+}
+
+func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessionID string) (string, error) {
+	if !validSessionID(callerSessionID) || !authorizedPeerSessionNative(paths, callerSessionID) {
 		return "", errors.New("claude_peer is inactive outside an attested peer session")
 	}
+	requested := strings.TrimSpace(stringValue(args["session_id"]))
+	if requested == "" && liveGrokLaunchForSession(paths, callerSessionID) != nil {
+		return callerSessionID, nil
+	}
+	if requested == "" {
+		return "", errors.New("session_id is required")
+	}
 	if requested != callerSessionID {
-		return "", fmt.Errorf("session-scoped peer tool cannot act as Codex session %s", requested)
+		return "", fmt.Errorf("session-scoped peer tool cannot act as session %s", requested)
 	}
 	return callerSessionID, nil
+}
+
+func authorizedPeerSessionNative(paths nativePaths, sessionID string) bool {
+	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil
 }
 
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
@@ -452,7 +533,7 @@ func nativeSenderMatchingTargetMode(own map[string]any, target, socket string, r
 		}
 	} else {
 		var err error
-		permissionMode, err = peerProcessPermissionMode(resolved.PID)
+		permissionMode, err = peerProcessPermissionMode(resolved.PID, resolved.ProcStart)
 		if err != nil {
 			return nil, fmt.Errorf("classify terminal notice target %q: %w", target, err)
 		}
@@ -466,6 +547,10 @@ func nativeSenderMatchingTargetMode(own map[string]any, target, socket string, r
 }
 
 func peerFederatorPermissionMode(peer peerSession) (string, error) {
+	return peerFederatorPermissionModeWithReader(peer, readPeerProcessArgs)
+}
+
+func peerFederatorPermissionModeWithReader(peer peerSession, readArgs func(int, string) ([]string, error)) (string, error) {
 	if peer.FederatedBy != "peer-federator" || !strings.HasPrefix(peer.Version, "peer-federator/") {
 		return "", errors.New("federated peer is not a corroborated peer-federator shadow")
 	}
@@ -478,7 +563,7 @@ func peerFederatorPermissionMode(peer peerSession) (string, error) {
 	if permissionMode != "default" && permissionMode != "bypassPermissions" {
 		return "", errors.New("federated peer supplied an invalid source-asserted permission mode")
 	}
-	args, err := readProcessArgs(peer.PID)
+	args, err := readArgs(peer.PID, peer.ProcStart)
 	if err != nil {
 		return "", fmt.Errorf("inspect peer-federator shadow: %w", err)
 	}
@@ -678,7 +763,7 @@ func createNativeUserFrame(own map[string]any, message string) (map[string]any, 
 	if stringValue(own["permissionMode"]) == "bypassPermissions" {
 		mode = "bypass"
 	}
-	content := wrapNativePeerMessage(
+	content := wrapNativePeerMessageForProduct(defaultString(stringValue(own["entrypoint"]), "codex"),
 		from, stringValue(own["sessionId"]), stringValue(own["name"]), mode,
 		messageID, sentAt, message,
 	)
@@ -690,6 +775,10 @@ func createNativeUserFrame(own map[string]any, message string) (map[string]any, 
 }
 
 func wrapNativePeerMessage(from, sessionID, name, mode, messageID, sentAt, message string) string {
+	return wrapNativePeerMessageForProduct("codex", from, sessionID, name, mode, messageID, sentAt, message)
+}
+
+func wrapNativePeerMessageForProduct(product, from, sessionID, name, mode, messageID, sentAt, message string) string {
 	attributes := []string{}
 	if from != "" {
 		attributes = append(attributes, `from="`+safeNativeAttribute(from)+`"`)
@@ -703,8 +792,11 @@ func wrapNativePeerMessage(from, sessionID, name, mode, messageID, sentAt, messa
 	if mode == "bypass" || mode == "prompting" {
 		attributes = append(attributes, `from-mode="`+mode+`"`)
 	}
+	if product != "codex" && product != "claude" && product != "grok" {
+		product = "codex"
+	}
 	metadata, _ := json.Marshal(map[string]any{
-		"fromProduct": "codex", "messageId": safeNativeAttribute(messageID), "sentAt": safeNativeAttribute(sentAt),
+		"fromProduct": product, "messageId": safeNativeAttribute(messageID), "sentAt": safeNativeAttribute(sentAt),
 	})
 	body := escapeNativeEnvelopeBody(message)
 	suffix := ""

@@ -128,6 +128,7 @@ func TestUnauthorizedSupervisorOperationsFailBeforeMutation(t *testing.T) {
 
 func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 	root := t.TempDir()
+	savedRoot := filepath.Join(root, "renamed-away")
 	threadID := "00000000-0000-0000-0000-000000000a13"
 	resumed := make(chan struct{}, 1)
 	resumeEntered := make(chan struct{})
@@ -148,7 +149,7 @@ func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 			default:
 			}
 			return map[string]any{
-				"thread": map[string]any{"id": threadID, "cwd": root}, "approvalPolicy": "on-request",
+				"thread": map[string]any{"id": threadID, "cwd": savedRoot}, "cwd": root, "approvalPolicy": "on-request",
 			}, nil
 		case "thread/settings/update":
 			settingsParams, _ = request["params"].(map[string]any)
@@ -241,8 +242,10 @@ func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 		t.Fatalf("prepared register did not resume exact thread: %#v", result)
 	}
 	state, _ := result["state"].(map[string]any)
+	resumedThread, _ := result["thread"].(*appThread)
 	if stringValue(state["sessionId"]) != threadID || stringValue(state["permissionMode"]) != "bypassPermissions" ||
 		stringValue(result["approvalPolicy"]) != "never" ||
+		resumedThread == nil || resumedThread.Cwd != root ||
 		len(supervisor.shims) != 1 || !supervisor.subscribed[threadID] {
 		t.Fatalf("prepared register state=%#v shims=%#v subscribed=%#v", state, supervisor.shims, supervisor.subscribed)
 	}
@@ -252,12 +255,73 @@ func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 	if _, present := resumeParams["sandbox"]; present {
 		t.Fatalf("prepared resume mixed sandbox mutation with thread loading: %#v", resumeParams)
 	}
+	if stringValue(resumeParams["cwd"]) != root {
+		t.Fatalf("prepared resume did not apply the requested cwd: %#v", resumeParams)
+	}
 	sandboxPolicy, _ := settingsParams["sandboxPolicy"].(map[string]any)
 	if stringValue(settingsParams["approvalPolicy"]) != "never" || stringValue(sandboxPolicy["type"]) != "dangerFullAccess" {
 		t.Fatalf("prepared resume did not persist effective yolo settings: %#v", settingsParams)
 	}
 	if committed := readInteractiveOwner(paths, threadID); committed == nil || committed.DeleteOnAbort || !committed.ParkOnAbort {
 		t.Fatalf("prepared register did not commit durability: %#v", committed)
+	}
+	if supervisor.client != nil {
+		supervisor.client.close()
+	}
+}
+
+func TestDetachStalePreparedOwnerUnsubscribesWithoutRemovingTakeoverProof(t *testing.T) {
+	root := t.TempDir()
+	threadID := "00000000-0000-0000-0000-000000000a49"
+	methods := []string{}
+	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+		method := stringValue(request["method"])
+		if method != "initialize" {
+			methods = append(methods, method)
+		}
+		switch method {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/unsubscribe":
+			params, _ := request["params"].(map[string]any)
+			if stringValue(params["threadId"]) != threadID {
+				return nil, errors.New("unsubscribe targeted the wrong thread")
+			}
+			return map[string]any{}, nil
+		default:
+			return nil, fmt.Errorf("unexpected stale-detach method %s", method)
+		}
+	})
+	paths := nativePaths{
+		dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "profile"), appServerSock: appSocket,
+	}
+	record := interactiveOwnerRecord{
+		ThreadID: threadID, RequestID: "stale-prepared-detach", OwnerPID: 1 << 30,
+		OwnerProcStart: "definitely-stale", Pending: true, Prepared: true, ParkOnAbort: true, Aborting: true,
+		Cwd: filepath.Join(root, "renamed-away"), UpdatedAt: time.Now().UnixMilli(),
+	}
+	if err := writeJSONAtomic(interactiveOwnerPath(paths, threadID), record); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := &nativeSupervisor{
+		paths: paths, done: make(chan struct{}), shims: map[string]map[string]any{},
+		activeTurns: map[string]string{threadID: "stale-turn"}, subscribed: map[string]bool{threadID: true},
+		retired: map[string]bool{}, releasing: map[string]int64{},
+	}
+	result, err := supervisor.handleControl(map[string]any{
+		"action": "detach_stale_prepared", "sessionId": threadID, "requestId": record.RequestID,
+		"ownerPid": record.OwnerPID, "ownerProcStart": record.OwnerProcStart,
+	})
+	detached, _ := result["detached"].(bool)
+	if err != nil || !detached {
+		t.Fatalf("detach stale prepared owner = result=%#v err=%v", result, err)
+	}
+	retained := readInteractiveOwner(paths, threadID)
+	if !sameInteractiveOwner(retained, &record) || supervisor.subscribed[threadID] || supervisor.activeTurns[threadID] != "" {
+		t.Fatalf("stale detach lost proof or subscription state: owner=%#v subscribed=%v active=%#v", retained, supervisor.subscribed[threadID], supervisor.activeTurns)
+	}
+	if strings.Join(methods, ",") != "thread/unsubscribe" {
+		t.Fatalf("stale detach methods = %v", methods)
 	}
 	if supervisor.client != nil {
 		supervisor.client.close()
@@ -392,7 +456,7 @@ func TestPreparedRegisterAndAbortSerializeWithoutResidue(t *testing.T) {
 			return map[string]any{}, nil
 		case "thread/resume":
 			return map[string]any{
-				"thread": map[string]any{"id": threadID, "cwd": root}, "approvalPolicy": "on-request",
+				"thread": map[string]any{"id": threadID, "cwd": root}, "cwd": root, "approvalPolicy": "on-request",
 			}, nil
 		case "thread/delete":
 			select {

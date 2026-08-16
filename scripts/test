@@ -22,9 +22,23 @@ bash -n \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
+  "$plugin_root/grok/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
+if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
+  printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
+  exit 1
+fi
+
 "$plugin_root/scripts/test-claude-contract"
+
+codex_plugin_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_root/.codex-plugin/plugin.json" | head -1)"
+grok_plugin_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_root/grok/.grok-plugin/plugin.json" | head -1)"
+if [[ -z "$grok_plugin_version" ]] || [[ "$grok_plugin_version" != "$codex_plugin_version" ]]; then
+  printf 'Grok plugin version %s does not match Codex plugin version %s\n' \
+    "$grok_plugin_version" "$codex_plugin_version" >&2
+  exit 1
+fi
 
 if grep -Fq '"SessionEnd"' "$plugin_root/hooks/hooks.json"; then
 	printf 'attachment-ambiguous SessionEnd hook remains globally registered\n' >&2
@@ -387,7 +401,7 @@ done
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in codex-peer codex-peer-lane claude-peer-lane; do
+for launcher in codex-peer codex-peer-lane claude-peer-lane grok-peer; do
   if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
     printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
     exit 1
@@ -409,6 +423,11 @@ if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
   printf 'install preflight does not print the App Server stop command\n' >&2
   exit 1
 fi
+if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
+   ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan"; then
+  printf 'install preflight does not require clean managed Grok shutdown\n' >&2
+  exit 1
+fi
 make -s -C "$plugin_root" install \
   START_RUNTIME=0 CODEX="$fake_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
   >"$temporary_root/install.out"
@@ -423,13 +442,211 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$custom_install_root/grok/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$custom_install_root/grok/.mcp.json" ]] ||
+   [[ ! -x "$custom_install_root/grok/scripts/native-entry" ]] ||
+   ! grep -Fq '"grok-mcp"' "$custom_install_root/grok/.mcp.json" ||
+   ! grep -Fq '${GROK_PLUGIN_ROOT}/scripts/native-entry' "$custom_install_root/grok/.mcp.json"; then
+  printf 'copied-prefix installation omitted the Grok MCP plugin or its native runtime entry\n' >&2
+  exit 1
+fi
+grok_cache="$temporary_root/grok-cache"
+cp -R "$custom_install_root/grok" "$grok_cache"
+grok_cache_state="$temporary_root/grok-cache-state"
+mkdir -p "$grok_cache_state"
+grok_cache_runtime="$temporary_root/grok-cache-runtime"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@"' >"$grok_cache_runtime"
+chmod 0700 "$grok_cache_runtime"
+printf '%s\n' "$grok_cache_runtime" >"$grok_cache_state/native-runtime-path"
+grok_cache_result="$(CLAUDE_PEER_DATA_DIR="$grok_cache_state" "$grok_cache/scripts/native-entry" grok-mcp)"
+if [[ "$grok_cache_result" != grok-mcp ]]; then
+  printf 'cached Grok plugin did not resolve and invoke the installed native runtime\n' >&2
+  exit 1
+fi
+grok_exact_runtime="$temporary_root/grok-exact-runtime"
+printf '%s\n' '#!/bin/sh' 'printf "exact:%s\\n" "$*"' >"$grok_exact_runtime"
+chmod 0700 "$grok_exact_runtime"
+grok_exact_result="$(GROK_PEER_NATIVE_RUNTIME="$grok_exact_runtime" CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
+  "$grok_cache/scripts/native-entry" grok-mcp)"
+if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
+  printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
+  exit 1
+fi
+grok_user_plugin_root="$temporary_root/grok-user-plugins/agent-sessions"
+grok_install_plan="$(make -n -C "$plugin_root" install-grok GROK=grok-test-cli \
+  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+  GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
+  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root")"
+if ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_install_plan" ||
+   ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$grok_install_plan" ||
+   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin uninstall \"agent-sessions\" --keep-data" <<<"$grok_install_plan" ||
+   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan" ||
+   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" inspect --json" <<<"$grok_install_plan" ||
+   ! grep -Fq "\"$custom_prefix/bin/agent-session-runtime\" grok-plugin-verify --root \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
+   ! grep -Fq "rm -rf -- \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
+   ! grep -Fq "mv \"\$stage_dir\" \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
+   grep -Fq ' plugin enable ' <<<"$grok_install_plan"; then
+  printf 'Grok plugin install plan does not validate, stage, enable, and inspect the user payload\n' >&2
+  exit 1
+fi
+grok_auto_install_plan="$(GROK="$temporary_root/inherited-chat-grok" make -e -n -C "$plugin_root" install-grok \
+  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root")"
+if grep -Fq 'GROK_PEER_GROK_BIN=' <<<"$grok_auto_install_plan" ||
+   ! grep -Fq "\"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_auto_install_plan"; then
+  printf 'default Grok plugin install does not ignore inherited GROK under make -e\n' >&2
+  exit 1
+fi
+
+grok_plugin_fixture="$temporary_root/grok-build-fixture"
+grok_plugin_log="$temporary_root/grok-plugin-commands.log"
+cat >"$grok_plugin_fixture" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$GROK_PLUGIN_TEST_LOG"
+if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then
+  printf '%s\n' 'Grok Build TUI' 'Usage: grok [OPTIONS]' '--leader-socket <PATH>' 'Commands:' '  agent' '  leader'
+  exit 0
+fi
+if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
+  printf '%s\n' '[]'
+  exit "${GROK_PLUGIN_TEST_LIST_STATUS:-0}"
+fi
+if [ "$1" = "plugin" ] && { [ "$2" = "validate" ] || [ "$2" = "install" ] || [ "$2" = "uninstall" ]; }; then
+  exit 0
+fi
+if [ "$1" = "inspect" ] && [ "$2" = "--json" ]; then
+  printf '{"plugins":[{"name":"agent-sessions","scope":"user","path":"%s","enabled":true,"provides":{"mcpServers":1}}],"mcpServers":[{"name":"agent_sessions","transport":"stdio","target":"%s/scripts/native-entry","source":{"type":"plugin","plugin_name":"agent-sessions","path":"%s"}}]}\n' \
+    "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT"
+  exit "${GROK_PLUGIN_TEST_INSPECT_STATUS:-0}"
+fi
+exit 91
+EOF
+chmod 0700 "$grok_plugin_fixture"
+CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
+  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$grok_user_plugin_root" \
+  make -s -C "$plugin_root" install-grok \
+  GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
+  GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+  GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
+  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root"
+if [[ ! -f "$grok_user_plugin_root/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$grok_user_plugin_root/.mcp.json" ]] ||
+   [[ ! -x "$grok_user_plugin_root/scripts/native-entry" ]] ||
+   ! grep -Fq 'plugin validate' "$grok_plugin_log" ||
+   ! grep -Fq "plugin install $custom_install_root/grok --trust" "$grok_plugin_log" ||
+   ! grep -Fq 'plugin uninstall agent-sessions --keep-data' "$grok_plugin_log" ||
+   ! grep -Fq 'inspect --json' "$grok_plugin_log" ||
+   grep -Fq 'plugin enable' "$grok_plugin_log"; then
+  printf 'Grok user plugin staging did not preserve, enable, and inspect the validated payload\n' >&2
+  exit 1
+fi
+
+unsafe_grok_root="$temporary_root/grok-user-plugins"
+mkdir -p "$unsafe_grok_root"
+: >"$unsafe_grok_root/must-survive"
+set +e
+CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
+  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$unsafe_grok_root" \
+  make -s -C "$plugin_root" install-grok \
+    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
+    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
+    GROK_USER_PLUGIN_ROOT="$unsafe_grok_root" \
+    >"$temporary_root/unsafe-grok-root.out" 2>"$temporary_root/unsafe-grok-root.err"
+unsafe_grok_status=$?
+set -e
+if ((unsafe_grok_status == 0)) || [[ ! -f "$unsafe_grok_root/must-survive" ]] ||
+   ! grep -Fq 'Refusing unsafe GROK_USER_PLUGIN_ROOT' "$temporary_root/unsafe-grok-root.err"; then
+  printf 'Grok plugin install did not fail closed before replacing an unsafe user plugin root\n' >&2
+  exit 1
+fi
+
+failed_list_root="$temporary_root/grok-user-plugins/failed-list/agent-sessions"
+set +e
+CLAUDE_PEER_DATA_DIR="$grok_cache_state" GROK_PLUGIN_TEST_LIST_STATUS=41 \
+  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$failed_list_root" \
+  make -s -C "$plugin_root" install-grok \
+    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
+    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
+    GROK_USER_PLUGIN_ROOT="$failed_list_root" \
+    >"$temporary_root/failed-grok-list.out" 2>"$temporary_root/failed-grok-list.err"
+failed_list_status=$?
+set -e
+if ((failed_list_status == 0)) || [[ -e "$failed_list_root" ]] ||
+   ! grep -Fq 'Cannot inspect existing Grok plugin registrations' "$temporary_root/failed-grok-list.err"; then
+  printf 'Grok plugin install masked a failed plugin-list producer\n' >&2
+  exit 1
+fi
+
+failed_inspect_root="$temporary_root/grok-user-plugins/failed-inspect/agent-sessions"
+set +e
+CLAUDE_PEER_DATA_DIR="$grok_cache_state" GROK_PLUGIN_TEST_INSPECT_STATUS=42 \
+  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$failed_inspect_root" \
+  make -s -C "$plugin_root" install-grok \
+    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
+    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
+    GROK_USER_PLUGIN_ROOT="$failed_inspect_root" \
+    >"$temporary_root/failed-grok-inspect.out" 2>"$temporary_root/failed-grok-inspect.err"
+failed_inspect_status=$?
+set -e
+if ((failed_inspect_status == 0)) || [[ ! -f "$failed_inspect_root/.grok-plugin/plugin.json" ]]; then
+  printf 'Grok plugin install masked a failed inspect producer\n' >&2
+  exit 1
+fi
+
+# Every plugin-management verb must traverse grok-peer's fail-closed CLI
+# resolver. A desktop helper or merely Grok-shaped incompatible executable may
+# be probed with the inert --help contract, but must never receive `plugin`.
+for fixture_kind in gui incompatible; do
+  rejected_grok="$temporary_root/$fixture_kind-grok/grok"
+  rejected_log="$temporary_root/$fixture_kind-grok.log"
+  mkdir -p "$(dirname -- "$rejected_grok")"
+  if [[ "$fixture_kind" == gui ]]; then
+    fixture_help="Grok desktop application"
+  else
+    fixture_help=$'Grok Build TUI\nUsage: grok [OPTIONS]\nCommands:\n  plugin  Manage plugins'
+  fi
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf '\''%s\n'\'' "$*" >>"$REJECTED_GROK_LOG"' \
+    'if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then' \
+    '  printf '\''%s\n'\'' "$REJECTED_GROK_HELP"' \
+    '  exit 0' \
+    'fi' \
+    'printf '\''fixture must never receive a plugin command\n'\'' >&2' \
+    'exit 97' >"$rejected_grok"
+  chmod 0700 "$rejected_grok"
+  set +e
+  REJECTED_GROK_LOG="$rejected_log" REJECTED_GROK_HELP="$fixture_help" \
+    make -s -C "$plugin_root" validate-grok GROK="$rejected_grok" \
+      GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
+      >"$temporary_root/$fixture_kind-grok.out" 2>"$temporary_root/$fixture_kind-grok.err"
+  rejected_status=$?
+  set -e
+  if [[ -f "$rejected_log" ]]; then
+    rejected_argv="$(tr '\n' ' ' <"$rejected_log")"
+  else
+    rejected_argv='<not probed>'
+  fi
+  if ((rejected_status == 0)) || [[ ! -f "$rejected_log" ]] ||
+     grep -Eq '(^|[[:space:]])plugin([[:space:]]|$)' "$rejected_log" ||
+     [[ "$(wc -l <"$rejected_log")" -ne 1 ]] ||
+     ! grep -Fxq -- '--no-auto-update --help' "$rejected_log"; then
+    printf 'Grok %s fixture escaped validated plugin management (status=%s; argv=%s)\n' \
+      "$fixture_kind" "$rejected_status" "$rejected_argv" >&2
     exit 1
   fi
 done
@@ -464,12 +681,15 @@ release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
 if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
 	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/grok/.mcp.json" ]] ||
+   [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator; do
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1

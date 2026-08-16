@@ -36,7 +36,9 @@ type daemon struct {
 	nameSource       string
 	permissionMode   string
 	status           string
+	entrypoint       string
 	supervisorSocket string
+	supervisorToken  string
 	ownerPID         int
 	ownerProcStart   string
 	procStart        string
@@ -52,8 +54,11 @@ type daemon struct {
 	listener         net.Listener
 	seen             map[string]struct{}
 	seenOrder        []string
-	closeOnce        sync.Once
-	done             chan struct{}
+	stopped          bool
+	// maintenanceBeforeWrite is a test seam for terminal-write ordering.
+	maintenanceBeforeWrite func()
+	closeOnce              sync.Once
+	done                   chan struct{}
 }
 
 type envelope struct {
@@ -63,7 +68,7 @@ type envelope struct {
 // Main dispatches one role of the agent-session-runtime executable.
 func Main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, hook, mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -79,10 +84,18 @@ func Main() {
 		os.Exit(runClaudeLaneCommand(os.Args[2:]))
 	case "claude-lane-manager":
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
+	case "grok":
+		os.Exit(runGrokSafetyCommand(os.Args[2:]))
+	case "grok-host":
+		os.Exit(runGrokHostCommand(os.Args[2:]))
+	case "grok-plugin-verify":
+		os.Exit(runGrokPluginVerify(os.Args[2:]))
 	case "hook":
 		runHookCommand()
 	case "mcp":
 		os.Exit(runMCPCommand())
+	case "grok-mcp":
+		os.Exit(runGrokMCPCommand())
 	case "launch":
 		os.Exit(runLaunchCommand(os.Args[2:]))
 	default:
@@ -154,18 +167,26 @@ func newDaemon(args map[string]string) *daemon {
 		heartbeat = time.Duration(max(value, 50)) * time.Millisecond
 	}
 	ownerPID, _ := strconv.Atoi(args["owner-pid"])
+	entrypoint := defaultString(args["entrypoint"], "codex")
 	name := args["name"]
 	if name == "" {
-		name = fmt.Sprintf("codex-%s-%s", sanitizeName(filepath.Base(cwd)), first8(sessionID))
+		name = fmt.Sprintf("%s-%s-%s", entrypoint, sanitizeName(filepath.Base(cwd)), first8(sessionID))
 	}
 	nameSource := args["name-source"]
 	if nameSource == "" {
 		nameSource = "generated"
 	}
+	status := args["status"]
+	switch status {
+	case "busy", "shell", "waiting":
+	default:
+		status = "idle"
+	}
 	return &daemon{
 		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
-		permissionMode: defaultString(args["permission-mode"], "default"), status: "idle",
-		supervisorSocket: args["supervisor-socket"], ownerPID: ownerPID,
+		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
+		entrypoint:       entrypoint,
+		supervisorSocket: args["supervisor-socket"], supervisorToken: args["supervisor-token"], ownerPID: ownerPID,
 		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),
 		startedAt: time.Now().UnixMilli(), heartbeat: heartbeat,
 		backendSocket: filepath.Join(runtimeRoot, fmt.Sprintf("%d.sock", pid)),
@@ -279,8 +300,28 @@ func (d *daemon) handleConnection(conn net.Conn) {
 		}
 		var frame map[string]any
 		if json.Unmarshal(line, &frame) == nil {
+			if stringValue(frame["type"]) == "control" && stringValue(frame["action"]) == "inspect" {
+				d.writeInspection(conn)
+				continue
+			}
 			d.handleFrame(frame)
 		}
+	}
+}
+
+// writeInspection exposes only the live daemon identity and current permission
+// class. Federators use it to corroborate a Grok registry row without trusting
+// mutable registry content or stale TUI argv after an in-session mode change.
+func (d *daemon) writeInspection(conn net.Conn) {
+	d.mu.Lock()
+	response := map[string]any{
+		"type": "peer_inspection", "pid": os.Getpid(), "procStart": d.procStart,
+		"sessionId": d.sessionID, "entrypoint": d.entrypoint, "permissionMode": d.permissionMode,
+	}
+	d.mu.Unlock()
+	body, err := json.Marshal(response)
+	if err == nil {
+		_, _ = conn.Write(append(body, '\n'))
 	}
 }
 
@@ -344,9 +385,9 @@ func (d *daemon) handleUser(frame map[string]any) {
 
 func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool {
 	response, err := requestControl(supervisor, map[string]any{
-		"action": "wake", "sessionId": d.sessionID, "item": item,
+		"action": "wake", "sessionId": d.sessionID, "launchToken": d.supervisorToken, "item": item,
 	}, 30*time.Second)
-	ownedStates := []string{"accepted", "in_flight", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
+	ownedStates := []string{"accepted", "in_flight", "actor_accepted", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
 	if err == nil && containsString(ownedStates, stringValue(response["delivery"])) {
 		return true
 	}
@@ -361,13 +402,14 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 	deadline := time.Now().Add(5 * time.Second)
 	for err != nil && time.Now().Before(deadline) && probeUnixSocket(supervisor, 300*time.Millisecond) {
 		status, statusErr := requestControl(supervisor, map[string]any{
-			"action": "wake_status", "sessionId": d.sessionID, "messageId": stringValue(item["id"]),
+			"action": "wake_status", "sessionId": d.sessionID, "launchToken": d.supervisorToken,
+			"messageId": stringValue(item["id"]),
 		}, 2*time.Second)
-		if statusErr == nil && containsString([]string{"in_flight", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
+		if statusErr == nil && containsString([]string{"in_flight", "actor_accepted", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
 			return true
 		}
 		response, err = requestControl(supervisor, map[string]any{
-			"action": "wake", "sessionId": d.sessionID, "item": item,
+			"action": "wake", "sessionId": d.sessionID, "launchToken": d.supervisorToken, "item": item,
 		}, 2*time.Second)
 		if err == nil && stringValue(response["delivery"]) != "" {
 			return true
@@ -465,6 +507,9 @@ func (d *daemon) maintenanceLoop() {
 				d.closeOnce.Do(func() { close(d.done) })
 				return
 			}
+			if d.maintenanceBeforeWrite != nil {
+				d.maintenanceBeforeWrite()
+			}
 			d.mu.Lock()
 			d.refreshNameLocked()
 			_ = d.writeRecordsLocked()
@@ -476,6 +521,9 @@ func (d *daemon) maintenanceLoop() {
 }
 
 func (d *daemon) refreshNameLocked() {
+	if d.entrypoint != "codex" {
+		return
+	}
 	if d.nameSource == "explicit" || d.nameSource == "launch" || d.nameSource == "lane" || d.nameSource == "canonical" || d.nameSource == "manual" {
 		return
 	}
@@ -506,19 +554,22 @@ func (d *daemon) refreshNameLocked() {
 }
 
 func (d *daemon) writeRecordsLocked() error {
+	if d.stopped {
+		return errors.New("peer daemon is stopping")
+	}
 	now := time.Now().UnixMilli()
 	state := map[string]any{
 		"pid": os.Getpid(), "procStart": d.procStart, "ownerPid": d.ownerPID, "ownerProcStart": d.ownerProcStart,
 		"sessionId": d.sessionID, "cwd": d.cwd, "name": d.name, "nameSource": d.nameSource,
 		"permissionMode": d.permissionMode, "socketPath": d.stableSocket, "backendSocketPath": d.backendSocket,
 		"registryFile": d.registryFile, "inboxDir": d.inboxDir, "startedAt": d.startedAt,
-		"status": d.status, "supervisorSocket": d.supervisorSocket, "updatedAt": now,
+		"status": d.status, "entrypoint": d.entrypoint, "supervisorSocket": d.supervisorSocket, "updatedAt": now,
 	}
 	registry := map[string]any{
 		"pid": os.Getpid(), "sessionId": d.sessionID, "cwd": d.cwd, "startedAt": d.startedAt,
 		"procStart": d.procStart, "version": "codex-claude-peer/0.1.0", "peerProtocol": 1,
-		"kind": "interactive", "entrypoint": "codex", "name": d.name, "nameSource": d.nameSource,
-		"status": d.status, "updatedAt": now, "statusUpdatedAt": now,
+		"kind": "interactive", "entrypoint": d.entrypoint, "name": d.name, "nameSource": d.nameSource,
+		"status": d.status, "permissionMode": d.permissionMode, "updatedAt": now, "statusUpdatedAt": now,
 		"messagingSocketPath": d.stableSocket, "bridgeSessionId": nil,
 	}
 	if err := writeJSONAtomic(d.stateFile, state); err != nil {
@@ -576,12 +627,18 @@ func (d *daemon) shutdown() {
 	if d.listener != nil {
 		_ = d.listener.Close()
 	}
+	// Serialize the terminal state with every heartbeat and control update.
+	// A heartbeat may already have won its ticker select when done closes; the
+	// stopped latch prevents that writer from recreating state after removal.
+	d.mu.Lock()
+	d.stopped = true
 	removeJSONIf(d.registryFile, func(row map[string]any) bool {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
 	removeJSONIf(d.stateFile, func(row map[string]any) bool {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
+	d.mu.Unlock()
 	if target, err := os.Readlink(d.stableSocket); err == nil {
 		resolved := target
 		if !filepath.IsAbs(resolved) {
@@ -674,7 +731,7 @@ func parsePeerMessage(content string) envelope {
 		}
 	}
 	product := defaultString(attrs["from-product"], stringValue(metadata["fromProduct"]))
-	if product != "codex" && product != "claude" {
+	if product != "codex" && product != "claude" && product != "grok" {
 		product = ""
 	}
 	mode := attrs["from-mode"]

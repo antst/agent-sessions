@@ -1,10 +1,10 @@
 # Agent Sessions
 
-Native, persistent session lifecycle for Codex and Claude Code, plus local and federated
+Native, persistent session lifecycle for Codex, Claude Code, and Grok, plus local and federated
 cross-session messaging. Interactive sessions and durable worker lanes can be created, resumed,
 supervised, discovered, and messaged with nearly the same lifecycle on Linux and macOS.
 
-This repository is one Go module with shared implementation under `internal/`. It builds five
+This repository is one Go module with shared implementation under `internal/`. It builds six
 separate native executables:
 
 - `agent-session-runtime` — the shared diagnostic/runtime multicall used by the launchers;
@@ -13,6 +13,7 @@ separate native executables:
   `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and `doctor`).
 - `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers spawned
   by Codex.
+- `grok-peer` — an interactive Grok TUI backed by a private leader and an ACP wake client.
 - `peer-federator` — a separate network process that projects live peers and lane commands across
   trusted hosts. It shares this source tree but remains an independently operated binary/service.
 
@@ -75,12 +76,22 @@ inherits the thread's canonical cwd; an explicit `-C` must resolve to that same 
 
 `make install` copies the native runtime payload and the Codex `claude-lane` skill under
 `${PREFIX:-~/.local}/libexec/agent-sessions`, registers that installed marketplace, installs the
-plugin, and links the native runtime plus all three launchers under `${PREFIX:-~/.local}/bin`.
+plugin, and links the native runtime plus all four launchers under `${PREFIX:-~/.local}/bin`.
 `make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
-`make install-claude` independently installs the
-text-only Claude plugin; `make install-all` does both. A version-changing install requires App Server to
-be stopped; the bridge never restarts a running server because doing so can interrupt an active
-rollout. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
+`make install-claude` independently installs the text-only Claude plugin. `make install-grok`
+validates and copies the local Grok plugin into Grok's auto-trusted user plugin directory; that
+explicit install allows its `agent_sessions` MCP server to run the installed native runtime with
+the current user's privileges. Review the local source before granting it. Reinstallation migrates
+the older direct-install entry and replaces only `~/.grok/plugins/agent-sessions`. It uses a
+temporary trusted registration only to update Grok's enabled-plugin configuration, removes that
+row while preserving data, and fails unless `grok inspect --json` resolves the exact staged user
+plugin and MCP executable. Start a new Grok session or reload plugins after installing.
+Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
+the TUI's native policy and its effective live mode is attested before publication.
+`make install-all` installs all three surfaces. A version-changing install requires App Server to
+be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
+stop automatically. The bridge never restarts a running server or replaces a live managed Grok
+host because doing so can interrupt active work. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
 a same-version rebuild replaces only the supervisor, without restarting App Server. CI archives carry prebuilt Linux and macOS binaries for x86-64 and arm64, so release
 installations do not require Go or Node.js.
 
@@ -135,10 +146,11 @@ marker makes the installer use the bundled binary even if Go is installed.
 .agents/plugins/            repository-local marketplace
 .claude-plugin/             Claude Code marketplace catalog
 claude/                     self-contained Claude Code plugin and orchestration skill
+grok/                       Grok plugin manifest and MCP registration
 .mcp.json                   MCP registration
 hooks/                      Codex lifecycle hook registration
 skills/                     Codex skill for orchestrating Claude Code lanes
-cmd/                        five executable entry points
+cmd/                        six executable entry points
 internal/bridge/            local session lifecycle and messaging runtime
 internal/launcher/          native launcher argument and bootstrap logic
 internal/federator/         independent cross-host federation runtime
@@ -162,8 +174,10 @@ make test-race
 make build
 make dev-install        # source-linked Codex/runtime development install
 make dev-install-claude # source-linked Claude orchestration skill
+make dev-install-grok   # source-linked trusted Grok MCP plugin
 make install-claude     # Claude skill from the stable installed runtime tree
-make install-all        # native runtime plus Claude orchestration skill
+make install-grok       # trusted Grok MCP plugin from the stable installed runtime tree
+make install-all        # native runtime plus Claude and Grok integrations
 make reinstall   # refresh cachebuster, rebuild, and reinstall the local plugin
 make repair-projection THREAD_ID=<uuid>         # inspect known Codex 0.147 projection damage
 make repair-projection THREAD_ID=<uuid> APPLY=1 # back up and repair the exact known shape
@@ -173,8 +187,8 @@ The lint target verifies `.golangci.yml` before running `golangci-lint`. Forgejo
 tests, race tests, and all four architecture builds concurrently; release publication remains gated
 on every one of those jobs.
 
-See [installation](docs/INSTALL.md), [Codex lane integration](docs/LANES.md),
-[Claude lane integration](docs/CLAUDE-LANES.md),
+See [installation](docs/INSTALL.md), the normative [acceptance matrix](docs/ACCEPTANCE-MATRIX.md), [Grok interactive peers](docs/GROK.md),
+[Codex lane integration](docs/LANES.md), [Claude lane integration](docs/CLAUDE-LANES.md),
 [Claude adapter installation](docs/CLAUDE-INSTALL.md), and the
 reverse-engineered [Claude protocol notes](docs/PROTOCOL.md).
 

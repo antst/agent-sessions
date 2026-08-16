@@ -15,6 +15,15 @@ claude-peer-lane run \
   - < review-brief.md
 ```
 
+`doctor` checks the selected Claude Code executable, its current authentication state, and the
+managed supervisor. It reports `claude_logged_in`, `claude_auth_method`, and
+`claude_api_provider`, and exits non-zero when the CLI is logged out or its authentication status
+cannot be established. Run it from the same environment that will launch the lane so API-key,
+OAuth, and cloud-provider configuration are evaluated consistently. This is a local readiness
+check; it does not spend a model turn and therefore cannot prove that a credential has not been
+revoked or that the account currently has inference entitlement. The first real lane turn is the
+end-to-end authentication check.
+
 Detached mode returns `lane.ready` before the result:
 
 ```bash
