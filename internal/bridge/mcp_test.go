@@ -3,6 +3,7 @@ package bridge
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -144,7 +146,7 @@ func TestNativeMCPListsAndSendsToLivePeer(t *testing.T) {
 		}
 	}()
 
-	owner := exec.Command("/bin/sh", "-c", "sleep 30")
+	owner := exec.Command("sleep", "30")
 	if err := owner.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +260,64 @@ func TestNativeMCPListsAndSendsToLivePeer(t *testing.T) {
 	}
 }
 
+func TestPeerProcessPermissionModeRetriesTransientProcArgs(t *testing.T) {
+	pid := os.Getpid()
+	procStart := readProcStart(pid)
+	if procStart == "" {
+		t.Fatal("test process has no start token")
+	}
+	attempts, pauses := 0, 0
+	args, err := readPeerProcessArgsWithReader(pid, procStart, func(gotPID int) ([]string, error) {
+		if gotPID != pid {
+			t.Fatalf("argv reader pid = %d, want %d", gotPID, pid)
+		}
+		attempts++
+		switch attempts {
+		case 1:
+			return nil, syscall.EIO
+		case 2:
+			return nil, syscall.EINTR
+		default:
+			return []string{"claude", "--dangerously-skip-permissions"}, nil
+		}
+	}, func(delay time.Duration) {
+		pauses++
+		if delay != 10*time.Millisecond {
+			t.Fatalf("retry delay = %s", delay)
+		}
+	}, func(int, string) bool { return true })
+	if err != nil || permissionModeFromArgs(args) != "bypassPermissions" || attempts != 3 || pauses != 2 {
+		t.Fatalf("transient argv classification = args %q, attempts %d, pauses %d, err %v", args, attempts, pauses, err)
+	}
+
+	attempts, pauses = 0, 0
+	_, err = readPeerProcessArgsWithReader(pid, procStart, func(int) ([]string, error) {
+		attempts++
+		return nil, syscall.EIO
+	}, func(time.Duration) { pauses++ }, func(int, string) bool { return true })
+	if !errors.Is(err, syscall.EIO) || attempts != 3 || pauses != 2 {
+		t.Fatalf("persistent argv failure = attempts %d, pauses %d, err %v", attempts, pauses, err)
+	}
+
+	attempts = 0
+	if _, err := readPeerProcessArgsWithReader(pid, "wrong-start", func(int) ([]string, error) {
+		attempts++
+		return []string{"claude"}, nil
+	}, func(time.Duration) {}, func(int, string) bool { return false }); err == nil || attempts != 0 {
+		t.Fatalf("mismatched process identity = attempts %d, err %v", attempts, err)
+	}
+
+	identityChecks := 0
+	if _, err := readPeerProcessArgsWithReader(pid, procStart, func(int) ([]string, error) {
+		return []string{"claude"}, nil
+	}, func(time.Duration) {}, func(int, string) bool {
+		identityChecks++
+		return identityChecks == 1
+	}); err == nil || !strings.Contains(err.Error(), "changed while reading") {
+		t.Fatalf("post-read process identity change = checks %d, err %v", identityChecks, err)
+	}
+}
+
 func TestPermissionModeFromPeerCommand(t *testing.T) {
 	for name, test := range map[string]struct {
 		args []string
@@ -331,6 +391,26 @@ func TestValidatePeerFederatorShadowArgsRequiresLiveControlAndOwner(t *testing.T
 	}
 	if err := validatePeerFederatorShadowArgs(args, "/run/user/1000/peer-federator/shadows/example.sock"); err != nil {
 		t.Fatal(err)
+	}
+	peer := peerSession{
+		PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()),
+		FederatedBy: "peer-federator", Version: "peer-federator/0.1.0", PermissionMode: "bypassPermissions",
+		MessagingSocketPath: "/run/user/1000/peer-federator/shadows/example.sock",
+	}
+	attempts := 0
+	mode, err := peerFederatorPermissionModeWithReader(peer, func(pid int, procStart string) ([]string, error) {
+		return readPeerProcessArgsWithReader(pid, procStart, func(int) ([]string, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, syscall.EIO
+			}
+			return args, nil
+		}, func(time.Duration) {}, func(pid int, procStart string) bool {
+			return exactProcessIdentityStatus(pid, procStart).Status == processIdentityMatches
+		})
+	})
+	if err != nil || mode != "bypassPermissions" || attempts != 2 {
+		t.Fatalf("federated transient argv classification = mode %q, attempts %d, err %v", mode, attempts, err)
 	}
 	args[1] = "agent"
 	if err := validatePeerFederatorShadowArgs(args, "/run/user/1000/peer-federator/shadows/example.sock"); err == nil {

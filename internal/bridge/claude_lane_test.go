@@ -222,7 +222,7 @@ func TestClaudeLaneOwnerPermissionClassIsInheritedOnlyWhenImplicit(t *testing.T)
 }
 
 func TestClaudeLaneOwnerPermissionClassRejectsUncorroboratedRegistryBypass(t *testing.T) {
-	peer := peerSession{PID: os.Getpid(), PermissionMode: "bypassPermissions"}
+	peer := peerSession{PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), PermissionMode: "bypassPermissions"}
 	if got := corroboratedOwnerPermissionMode(peer, peer.PID); got != "default" {
 		t.Fatalf("source-asserted bypass was trusted without argv corroboration: %q", got)
 	}

@@ -580,7 +580,7 @@ func codexBridgeStateMatchesPeer(state map[string]any, peer peerSession) bool {
 }
 
 func corroboratedOwnerPermissionMode(peer peerSession, pid int) string {
-	permissionMode, err := peerProcessPermissionMode(pid)
+	permissionMode, err := peerProcessPermissionMode(pid, peer.ProcStart)
 	if err != nil {
 		return "default"
 	}

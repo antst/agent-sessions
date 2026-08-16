@@ -533,7 +533,7 @@ func nativeSenderMatchingTargetMode(own map[string]any, target, socket string, r
 		}
 	} else {
 		var err error
-		permissionMode, err = peerProcessPermissionMode(resolved.PID)
+		permissionMode, err = peerProcessPermissionMode(resolved.PID, resolved.ProcStart)
 		if err != nil {
 			return nil, fmt.Errorf("classify terminal notice target %q: %w", target, err)
 		}
@@ -547,6 +547,10 @@ func nativeSenderMatchingTargetMode(own map[string]any, target, socket string, r
 }
 
 func peerFederatorPermissionMode(peer peerSession) (string, error) {
+	return peerFederatorPermissionModeWithReader(peer, readPeerProcessArgs)
+}
+
+func peerFederatorPermissionModeWithReader(peer peerSession, readArgs func(int, string) ([]string, error)) (string, error) {
 	if peer.FederatedBy != "peer-federator" || !strings.HasPrefix(peer.Version, "peer-federator/") {
 		return "", errors.New("federated peer is not a corroborated peer-federator shadow")
 	}
@@ -559,7 +563,7 @@ func peerFederatorPermissionMode(peer peerSession) (string, error) {
 	if permissionMode != "default" && permissionMode != "bypassPermissions" {
 		return "", errors.New("federated peer supplied an invalid source-asserted permission mode")
 	}
-	args, err := readProcessArgs(peer.PID)
+	args, err := readArgs(peer.PID, peer.ProcStart)
 	if err != nil {
 		return "", fmt.Errorf("inspect peer-federator shadow: %w", err)
 	}
