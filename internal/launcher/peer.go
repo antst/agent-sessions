@@ -39,20 +39,26 @@ func RunPeer(args []string) error {
 
 func genericResumeInvocation(product, kind, sessionID string, extra []string) (string, []string, error) {
 	var launcherName string
-	var args []string
+	args := make([]string, 0, len(extra)+2)
 	switch kind + ":" + product {
 	case federator.SessionKindInteractive + ":codex":
-		launcherName, args = "codex-peer", []string{"resume", sessionID}
+		launcherName = "codex-peer"
+		args = append(args, "resume", sessionID)
 	case federator.SessionKindInteractive + ":claude":
-		launcherName, args = "claude-peer", []string{"--resume", sessionID}
+		launcherName = "claude-peer"
+		args = append(args, "--resume", sessionID)
 	case federator.SessionKindInteractive + ":grok":
-		launcherName, args = "grok-peer", []string{"--resume", sessionID}
+		launcherName = "grok-peer"
+		args = append(args, "--resume", sessionID)
 	case federator.SessionKindLane + ":codex":
-		launcherName, args = "codex-peer-lane", []string{"resume", sessionID}
+		launcherName = "codex-peer-lane"
+		args = append(args, "resume", sessionID)
 	case federator.SessionKindLane + ":claude":
-		launcherName, args = "claude-peer-lane", []string{"resume", sessionID}
+		launcherName = "claude-peer-lane"
+		args = append(args, "resume", sessionID)
 	case federator.SessionKindLane + ":grok":
-		launcherName, args = "grok-peer-lane", []string{"resume", sessionID}
+		launcherName = "grok-peer-lane"
+		args = append(args, "resume", sessionID)
 	default:
 		return "", nil, fmt.Errorf("session %s has unsupported resume kind %q for product %q", sessionID, kind, product)
 	}

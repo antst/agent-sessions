@@ -674,6 +674,7 @@ func writeLauncherFileAtomic(path string, body []byte, mode os.FileMode) error {
 		return err
 	}
 	temporary := path + ".tmp-" + strconv.Itoa(os.Getpid())
+	// #nosec G703 -- caller supplies a profile-owned path.
 	if err := os.WriteFile(temporary, body, mode); err != nil {
 		return err
 	}

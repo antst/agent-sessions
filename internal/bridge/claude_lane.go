@@ -1860,6 +1860,7 @@ func prepareClaudeLaneProfile(paths nativePaths, privateRoot string) error {
 		if err != nil {
 			return err
 		}
+		// #nosec G703 -- name comes from the fixed allowlist above.
 		if err := os.WriteFile(filepath.Join(privateRoot, name), body, 0600); err != nil {
 			return err
 		}

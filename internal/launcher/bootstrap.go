@@ -266,7 +266,7 @@ func processAbsent(pid int) bool {
 }
 
 func capture(path string, args ...string) (string, error) {
-	// #nosec G204 -- path is the selected Codex or installed runtime executable.
+	// #nosec G204 G702 -- path is the selected Codex or installed runtime executable.
 	command := exec.Command(path, args...)
 	command.Stderr = os.Stderr
 	payload, err := command.Output()

@@ -54,12 +54,16 @@ func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]
 		}
 		switch {
 		case argument == "--group":
-			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
+			index++
+			if index >= len(args) {
 				return nil, peerLaunchContext{}, usageError("--group requires a non-empty value")
 			}
-			context.groups = append(context.groups, args[index+1])
+			group := args[index]
+			if strings.TrimSpace(group) == "" {
+				return nil, peerLaunchContext{}, usageError("--group requires a non-empty value")
+			}
+			context.groups = append(context.groups, group)
 			context.groupsSpecified = true
-			index++
 		case strings.HasPrefix(argument, "--group="):
 			value := strings.TrimPrefix(argument, "--group=")
 			if strings.TrimSpace(value) == "" {
