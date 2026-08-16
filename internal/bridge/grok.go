@@ -31,6 +31,7 @@ const (
 	// budget so a cold reconnect can return its authoritative result.
 	grokControlTimeout      = grokACPStartupTimeout + 5*time.Second
 	grokACPInterjectTimeout = 30 * time.Second
+	grokInterjectionModeTTL = 30 * time.Minute
 	grokStatusRetryDelay    = 25 * time.Millisecond
 	grokStatusRetryMax      = 250 * time.Millisecond
 )
@@ -265,10 +266,12 @@ func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
 	return live, nil
 }
 
-// liveGrokLaunchForSession returns only a fully resident and published launch.
-// Registry data alone is discovery, never authority: all three owning process
-// identities, the private paths, and the bridge state must corroborate it.
-func liveGrokLaunchForSession(paths nativePaths, sessionID string) *grokLaunchRecord {
+// activeGrokLaunchForSession returns an owner-attested launch whose private
+// leader and control plane are live. Publication is deliberately not required:
+// the Grok MCP process must prove it can answer one harmless tool call before
+// the peer is advertised, and requiring the advertisement here would make that
+// readiness check circular.
+func activeGrokLaunchForSession(paths nativePaths, sessionID string) *grokLaunchRecord {
 	if !validSessionID(sessionID) {
 		return nil
 	}
@@ -281,6 +284,17 @@ func liveGrokLaunchForSession(paths nativePaths, sessionID string) *grokLaunchRe
 	}
 	expected := grokRuntimePathsForKey(record.RuntimeDir, os.Getuid(), record.TokenHash[:20])
 	if !liveGrokControlPaths(*record, expected) {
+		return nil
+	}
+	return record
+}
+
+// liveGrokLaunchForSession returns only a fully resident and published launch.
+// Registry data alone is discovery, never authority: the owning process tree,
+// private paths, and published bridge state must all corroborate it.
+func liveGrokLaunchForSession(paths nativePaths, sessionID string) *grokLaunchRecord {
+	record := activeGrokLaunchForSession(paths, sessionID)
+	if record == nil {
 		return nil
 	}
 	state, err := readOwnNativeState(paths, sessionID)
@@ -318,15 +332,23 @@ func attestGrokMCPCaller(paths nativePaths) (string, error) {
 	if !validGrokLaunchToken(token) || !validSessionID(sessionID) {
 		return "", errors.New("grok MCP launch context is unavailable")
 	}
-	record := liveGrokLaunchForSession(paths, sessionID)
+	record := activeGrokLaunchForSession(paths, sessionID)
 	if record == nil || subtle.ConstantTimeCompare([]byte(record.TokenHash), []byte(grokTokenHash(token))) != 1 {
 		return "", errors.New("grok MCP launch token is not attested by a live host")
 	}
 	if !processHasAncestor(os.Getpid(), record.LeaderPID) {
 		return "", errors.New("grok MCP process is not descended from the private launch leader")
 	}
-	if err := refreshGrokLaunchPermission(record, token); err != nil {
-		return "", fmt.Errorf("refresh live Grok permission mode: %w", err)
+	// The host's pre-publication MCP probe runs while it owns the ACP request
+	// stream. Calling status from that probe would wait on the same stream and
+	// deadlock. The raw capability, exact ancestry, owner/host/leader identities,
+	// and private control paths already authorize this narrow bootstrap phase.
+	// Once the daemon is published, every model-visible call refreshes the live
+	// permission class normally before it can act as the peer.
+	if liveGrokLaunchForSession(paths, sessionID) != nil {
+		if err := refreshGrokLaunchPermission(record, token); err != nil {
+			return "", fmt.Errorf("refresh live Grok permission mode: %w", err)
+		}
 	}
 	return sessionID, nil
 }
@@ -431,6 +453,7 @@ type grokACPClient struct {
 	process   *grokManagedProcess
 	stdin     io.WriteCloser
 	responses chan map[string]any
+	interject chan map[string]any
 	readDone  chan struct{}
 	readMu    sync.Mutex
 	readErr   error
@@ -453,16 +476,25 @@ func (e *grokRPCError) Error() string {
 func newGrokACPClient(process *grokManagedProcess, stdin io.WriteCloser, stdout io.ReadCloser) *grokACPClient {
 	client := &grokACPClient{
 		process: process, stdin: stdin, responses: make(chan map[string]any, 32),
-		readDone: make(chan struct{}),
+		interject: make(chan map[string]any, 32), readDone: make(chan struct{}),
 	}
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 4096), maxFrameBytes)
 		for scanner.Scan() {
 			var message map[string]any
-			if json.Unmarshal(scanner.Bytes(), &message) != nil || message["id"] == nil {
-				// session/load replay and live session/update notifications have no
-				// request id. They are intentionally ignored by the waker.
+			if json.Unmarshal(scanner.Bytes(), &message) != nil {
+				continue
+			}
+			if message["id"] == nil {
+				if stringValue(message["method"]) != "_x.ai/session/interjection" {
+					continue
+				}
+				select {
+				case client.interject <- message:
+				case <-client.readDone:
+					return
+				}
 				continue
 			}
 			select {
@@ -477,6 +509,57 @@ func newGrokACPClient(process *grokManagedProcess, stdin io.WriteCloser, stdout 
 		close(client.readDone)
 	}()
 	return client
+}
+
+func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, messageID, text string) error {
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	c.nextID++
+	id := c.nextID
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": "_x.ai/interject",
+		"params": map[string]any{"sessionId": sessionID, "text": text, "interjectionId": messageID},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := c.stdin.Write(append(body, '\n')); err != nil {
+		return fmt.Errorf("write Grok ACP _x.ai/interject: %w", err)
+	}
+	for {
+		select {
+		case notification := <-c.interject:
+			params, _ := notification["params"].(map[string]any)
+			if stringValue(params["sessionId"]) == sessionID && stringValue(params["interjectionId"]) == messageID {
+				return nil
+			}
+		case response := <-c.responses:
+			if int64Value(response["id"]) != id {
+				continue
+			}
+			if raw, ok := response["error"].(map[string]any); ok {
+				return &grokRPCError{Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected")}
+			}
+			result, _ := response["result"].(map[string]any)
+			inner, _ := result["result"].(map[string]any)
+			if stringValue(inner["status"]) != "queued" {
+				return errors.New("grok ACP interjection returned no queued acknowledgement")
+			}
+			// Grok 1.0.4 returns queued even when the resident actor's mailbox
+			// is closed. Only the actor's matching notification proves that it
+			// began handling this immutable interjection id.
+		case <-c.readDone:
+			c.readMu.Lock()
+			readErr := c.readErr
+			c.readMu.Unlock()
+			if readErr == nil {
+				readErr = io.EOF
+			}
+			return fmt.Errorf("read Grok ACP interjection acknowledgement: %w", readErr)
+		case <-ctx.Done():
+			return fmt.Errorf("wait for Grok actor interjection acknowledgement: %w", ctx.Err())
+		}
+	}
 }
 
 func (c *grokACPClient) request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
@@ -551,12 +634,14 @@ type grokHost struct {
 	lease    *os.File
 	modeMu   sync.RWMutex
 	mode     string
-	// activeInterjectionMode is authoritative only while this host is submitting an
-	// injected x.ai/interject whose immediately preceding roster refresh
-	// produced the snapshot. It must never turn arbitrary acpMu contention into
-	// permission authority.
+	// activeInterjectionMode is authoritative from the roster refresh immediately
+	// preceding x.ai/interject until the first successful roster refresh after the
+	// actor accepts it. Grok can hold roster requests for the whole generated turn,
+	// so the snapshot must outlive the brief actor-ack RPC. It must never turn
+	// arbitrary acpMu contention into permission authority.
 	activeInterjectionMode  string
 	activeInterjectionValid bool
+	activeInterjectionAt    time.Time
 
 	// publishPermission is a test seam. Production writes both daemon records
 	// through writeRecordsLocked.
@@ -777,7 +862,7 @@ func (h *grokHost) prepareLoop() {
 	defer ticker.Stop()
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), grokACPStartupTimeout)
-		err := h.ensureACP(ctx)
+		err := h.ensureACPForPublication(ctx)
 		cancel()
 		if err == nil && h.ensurePeerPublished() == nil {
 			return
@@ -796,14 +881,20 @@ func (h *grokHost) ensureACP(ctx context.Context) error {
 	return h.ensureACPReadyLocked(ctx)
 }
 
+func (h *grokHost) ensureACPForPublication(ctx context.Context) error {
+	h.acpMu.Lock()
+	defer h.acpMu.Unlock()
+	if err := h.ensureACPReadyLocked(ctx); err != nil {
+		return err
+	}
+	return h.ensureAgentSessionsMCPReadyLocked(ctx)
+}
+
 func (h *grokHost) ensureACPReadyLocked(ctx context.Context) error {
 	if err := h.ensureACPConnectedLocked(ctx); err != nil {
 		return err
 	}
-	if err := h.refreshPermissionModeLocked(ctx); err != nil {
-		return err
-	}
-	return h.ensureAgentSessionsMCPReadyLocked(ctx)
+	return h.refreshPermissionModeLocked(ctx)
 }
 
 func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
@@ -888,6 +979,9 @@ func (h *grokHost) refreshPermissionModeLocked(ctx context.Context) error {
 	h.modeMu.Lock()
 	defer h.modeMu.Unlock()
 	if mode == h.mode {
+		h.activeInterjectionMode = ""
+		h.activeInterjectionValid = false
+		h.activeInterjectionAt = time.Time{}
 		return nil
 	}
 	if peer := h.peer; peer != nil {
@@ -913,56 +1007,37 @@ func (h *grokHost) refreshPermissionModeLocked(ctx context.Context) error {
 	}
 	h.mode = mode
 	h.record = nextRecord
+	h.activeInterjectionMode = ""
+	h.activeInterjectionValid = false
+	h.activeInterjectionAt = time.Time{}
 	return nil
 }
 
 func (h *grokHost) ensureAgentSessionsMCPReadyLocked(ctx context.Context) error {
-	result, err := h.acp.request(ctx, "_x.ai/mcp/list", map[string]any{
-		"method": "x.ai/mcp/list",
-		"params": map[string]any{"sessionId": h.config.SessionID, "cache": true},
+	// Grok 1.0.4 starts trusted plugin MCPs in the resident session, but its
+	// x.ai/mcp/list catalog omits those plugin-only clients. Exercise the exact
+	// server and a read-only tool instead; success proves discovery, process
+	// startup, MCP initialization, and launch attestation end to end.
+	result, err := h.acp.request(ctx, "_x.ai/mcp/call", map[string]any{
+		"sessionId": h.config.SessionID,
+		"server":    "agent_sessions",
+		"tool":      "list_peers",
+		"arguments": map[string]any{},
 	})
 	if err != nil {
-		return fmt.Errorf("query live Grok MCP readiness: %w", err)
+		return fmt.Errorf("probe live Grok agent_sessions MCP: %w", err)
 	}
-	return grokAgentSessionsMCPReady(result)
+	return grokAgentSessionsMCPCallReady(result)
 }
 
-func grokAgentSessionsMCPReady(response map[string]any) error {
+func grokAgentSessionsMCPCallReady(response map[string]any) error {
 	result, _ := response["result"].(map[string]any)
-	servers, ok := result["servers"].([]any)
-	if !ok {
-		return errors.New("grok MCP response has no servers")
+	if isError, _ := result["isError"].(bool); isError {
+		return errors.New("grok agent_sessions MCP readiness tool returned an error")
 	}
-	matches := 0
-	ready := false
-	for _, raw := range servers {
-		server, _ := raw.(map[string]any)
-		if stringValue(server["name"]) != "agent_sessions" {
-			continue
-		}
-		matches++
-		if stringValue(server["source"]) != "local" || stringValue(server["type"]) != "stdio" {
-			continue
-		}
-		session, _ := server["session"].(map[string]any)
-		enabled, enabledOK := session["enabled"].(bool)
-		if !enabledOK || !enabled || stringValue(session["status"]) != "ready" {
-			continue
-		}
-		tools, _ := session["tools"].([]any)
-		for _, toolRaw := range tools {
-			tool, _ := toolRaw.(map[string]any)
-			toolEnabled, toolEnabledOK := tool["enabled"].(bool)
-			if stringValue(tool["name"]) == "send_message" && toolEnabledOK && toolEnabled {
-				ready = true
-			}
-		}
-	}
-	if matches != 1 {
-		return fmt.Errorf("grok MCP response returned %d agent_sessions rows", matches)
-	}
-	if !ready {
-		return errors.New("grok agent_sessions MCP is not ready with send_message enabled")
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		return errors.New("grok agent_sessions MCP readiness tool returned no content")
 	}
 	return nil
 }
@@ -977,6 +1052,7 @@ func (h *grokHost) beginActiveInterjectionPermissionSnapshot() {
 	h.modeMu.Lock()
 	h.activeInterjectionMode = defaultString(h.mode, "default")
 	h.activeInterjectionValid = true
+	h.activeInterjectionAt = time.Now()
 	h.modeMu.Unlock()
 }
 
@@ -984,13 +1060,15 @@ func (h *grokHost) clearActiveInterjectionPermissionSnapshot() {
 	h.modeMu.Lock()
 	h.activeInterjectionMode = ""
 	h.activeInterjectionValid = false
+	h.activeInterjectionAt = time.Time{}
 	h.modeMu.Unlock()
 }
 
 func (h *grokHost) activeInterjectionPermissionSnapshot() (string, bool) {
 	h.modeMu.RLock()
 	defer h.modeMu.RUnlock()
-	if !h.activeInterjectionValid {
+	if !h.activeInterjectionValid || h.activeInterjectionAt.IsZero() ||
+		time.Since(h.activeInterjectionAt) > grokInterjectionModeTTL {
 		return "", false
 	}
 	mode := h.activeInterjectionMode
@@ -1100,6 +1178,22 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 	}
 	switch stringValue(request["action"]) {
 	case "status":
+		// Grok may defer roster responses until an interjected model turn ends.
+		// Serve the immediately-preceding authoritative roster snapshot throughout
+		// that interval instead of letting this MCP call become the request that
+		// blocks on the same actor. The next successful background roster refresh
+		// retires the snapshot.
+		if permissionMode, valid := h.activeInterjectionPermissionSnapshot(); valid {
+			h.peerMu.Lock()
+			published := h.peer != nil
+			leaderReady := h.leader != nil
+			h.peerMu.Unlock()
+			return map[string]any{
+				"sessionId": h.config.SessionID, "leaderReady": leaderReady,
+				"loaded": true, "ready": published, "permissionMode": permissionMode,
+				"refreshDeferred": true, "permissionAuthority": "active_interjection_snapshot",
+			}, nil
+		}
 		resident := false
 		refreshDeferred := !h.acpMu.TryLock()
 		permissionAuthority := "live_roster"
@@ -1283,15 +1377,10 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
-	_, err = h.acp.request(ctx, "_x.ai/interject", map[string]any{
-		"method": "x.ai/interject",
-		"params": map[string]any{
-			"sessionId": h.config.SessionID, "text": trustedPeerText(item), "interjectionId": messageID,
-		},
-	})
-	h.clearActiveInterjectionPermissionSnapshot()
+	err = h.acp.requestInterjection(ctx, h.config.SessionID, messageID, trustedPeerText(item))
 	cancel()
 	if err != nil {
+		h.clearActiveInterjectionPermissionSnapshot()
 		var rpcErr *grokRPCError
 		if errors.As(err, &rpcErr) {
 			// A JSON-RPC error proves the interjection was rejected. It is safe to
@@ -1305,11 +1394,13 @@ func (h *grokHost) deliverWake(messageID string) {
 		// never issue a second interjection that could duplicate accepted work.
 		h.closeACPLocked()
 		h.acpMu.Unlock()
-		h.setWakeResult(messageID, "in_flight", "delivery outcome is unknown: "+err.Error())
+		detail := "delivery outcome is unknown: " + err.Error()
+		h.setWakeResult(messageID, "in_flight", detail)
+		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: wake %s remains ambiguous and will not be replayed: %s\n", messageID, detail)
 		return
 	}
 	h.acpMu.Unlock()
-	h.setWakeResult(messageID, "delivered", "")
+	h.setWakeResult(messageID, "actor_accepted", "")
 }
 
 func (h *grokHost) requeueWake(messageID string, deliveryErr error) {

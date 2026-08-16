@@ -65,7 +65,7 @@ type envelope struct {
 // Main dispatches one role of the agent-session-runtime executable.
 func Main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -85,6 +85,8 @@ func Main() {
 		os.Exit(runGrokSafetyCommand(os.Args[2:]))
 	case "grok-host":
 		os.Exit(runGrokHostCommand(os.Args[2:]))
+	case "grok-plugin-verify":
+		os.Exit(runGrokPluginVerify(os.Args[2:]))
 	case "hook":
 		runHookCommand()
 	case "mcp":
@@ -376,7 +378,7 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 	response, err := requestControl(supervisor, map[string]any{
 		"action": "wake", "sessionId": d.sessionID, "launchToken": d.supervisorToken, "item": item,
 	}, 30*time.Second)
-	ownedStates := []string{"accepted", "in_flight", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
+	ownedStates := []string{"accepted", "in_flight", "actor_accepted", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
 	if err == nil && containsString(ownedStates, stringValue(response["delivery"])) {
 		return true
 	}
@@ -394,7 +396,7 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 			"action": "wake_status", "sessionId": d.sessionID, "launchToken": d.supervisorToken,
 			"messageId": stringValue(item["id"]),
 		}, 2*time.Second)
-		if statusErr == nil && containsString([]string{"in_flight", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
+		if statusErr == nil && containsString([]string{"in_flight", "actor_accepted", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
 			return true
 		}
 		response, err = requestControl(supervisor, map[string]any{

@@ -237,24 +237,32 @@ speaks it. Wake delivery uses ACP v1 over
 `grok --leader-socket <private> agent --leader stdio`: initialize, authenticate
 with the CLI's advertised `cached_token` method, observe the preselected
 resident session through `_x.ai/sessions/list`, verify the exact local
-`agent_sessions` stdio MCP through cached `_x.ai/mcp/list`, then submit Grok's official
+`agent_sessions` stdio MCP through a direct read-only `_x.ai/mcp/call` to
+`list_peers`, then submit Grok's official
 `_x.ai/interject` extension. The observer never calls `session/load` or
 `session/prompt`: a concurrent load can replace the TUI's still-starting actor
 and reclaim its MCP process scope.
 
-The peer is not published until the official FleetView extension (`_x.ai/sessions/list` wrapping
-`x.ai/sessions/list`) returns exactly one resident row and cached MCP inventory
-reports `agent_sessions` ready with `send_message` enabled. Unrelated MCP
-failures are ignored. The roster row's
+The peer is not published until the official FleetView extension
+(`_x.ai/sessions/list` wrapping `x.ai/sessions/list`) returns exactly one
+resident row and `agent_sessions.list_peers` succeeds through Grok's MCP call
+extension. Grok 1.0.4's catalog omits plugin-only MCP clients, so catalog
+presence is not treated as readiness. Unrelated MCP failures are ignored. The roster row's
 boolean `yolo` is the authoritative live permission class; the bridge refreshes
 it while the session is resident, so argv, user config, and in-TUI changes do
 not leave stale sender or lane-owner metadata. Infrastructure-only leader and
 waker processes use explicit neutral permission mode, while the TUI keeps the
 user's native policy.
 Incoming messages are durably journaled by message ID before the host accepts
-ownership, serialized through the persistent bridge, and never duplicated
-after an ambiguous post-write timeout. A dead observer is recreated,
-reauthenticates, and re-observes roster plus MCP readiness before the next
+ownership and serialized through the persistent bridge. Grok's `queued`
+response is not an actor acknowledgement: Grok 1.0.4 can return it after a
+closed mailbox send. Agent Sessions therefore waits for the matching
+`x.ai/session/interjection` notification and records `actor_accepted` only
+after the resident actor echoes the exact session and interjection ID. That
+notification proves actor acceptance, not model completion. Grok does not
+deduplicate repeated interjection IDs, so an ambiguous post-write timeout stays
+durably `in_flight`, is logged, and is never replayed automatically. A dead observer is recreated,
+reauthenticates, and re-observes roster plus direct MCP-call readiness before the next
 queued wake; it never attaches as a second session owner. Roster, MCP, and
 interjection requests supply no yolo/auto override, so a peer message cannot
 widen the TUI's policy.

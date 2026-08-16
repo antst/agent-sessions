@@ -55,10 +55,15 @@ RACE=1 /bin/bash ./scripts/test
 go vet ./...
 make lint
 
-CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 scripts/package-release
-CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 scripts/package-release
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 scripts/package-release
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 scripts/package-release
+VERSION=acceptance
+CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 make build
+scripts/package-release linux-x64 "$VERSION" bin/linux-x64 dist
+CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 make build
+scripts/package-release linux-arm64 "$VERSION" bin/linux-arm64 dist
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 make build
+scripts/package-release darwin-x64 "$VERSION" bin/darwin-x64 dist
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 make build
+scripts/package-release darwin-arm64 "$VERSION" bin/darwin-arm64 dist
 ```
 
 | ID | Assertion |
@@ -88,6 +93,7 @@ must refuse when a process it would replace is still live.
 | U-07 | macOS | Chat/desktop same-name CLIs are skipped/rejected without launching a GUI or updater. |
 | U-08 | Linux, macOS | Plugin entry points select the exact same runtime revision as their owner host. |
 | U-09 | Release | Every release archive installs without Go and matches its published checksum. |
+| U-10 | Linux, macOS | Malformed/unreadable Grok launch inventory fails closed with an inventory diagnostic, not false "peer still running" advice. |
 
 ## Codex interactive peer (`T/F`)
 
@@ -126,7 +132,7 @@ must refuse when a process it would replace is still live.
 | G-08 | Linux, macOS | Ordinary Grok and `grok-peer` use equivalent auth/config for same cwd; foreign MCP OAuth failure is attributed correctly. |
 | G-09 | Linux, macOS | Idle `x.ai/interject` visibly starts a turn without typing and returns exact acknowledgement. |
 | G-10 | Linux, macOS | Busy/generating/tool-active interjection is received once without replacing the TUI actor. |
-| G-11 | Linux, macOS | Burst, duplicate ID, conflicting reuse, reconnect, rejection, and ambiguous EOF preserve documented exactly-once behavior. |
+| G-11 | Linux, macOS | Burst, duplicate ID, conflicting reuse, reconnect, rejection, response-before-echo, missing actor echo, and ambiguous EOF preserve the documented local dedup/never-replay contract. |
 | G-12 | Linux, macOS | Restart restores queued records but never replays ambiguous `in_flight` interjection. |
 | G-13 | Linux, macOS | Exact-UUID resume preserves identity, name, cwd, plugin access, and messageability. |
 | G-14 | Linux, macOS | Launch/config/admin policy and in-TUI changes converge across roster, record, registry, status, federation, and label. |
@@ -134,6 +140,8 @@ must refuse when a process it would replace is still live.
 | G-16 | Linux, macOS | Normal TUI exit terminates only its private leader, observer, host, MCP, sockets, locks, and records. |
 | G-17 | Linux, macOS | Ordinary `grok leader list`/`kill` is tested only on run-owned shared leaders, never used for a healthy private peer. |
 | G-18 | Linux, macOS | Owner/host/leader death, auth failure, roster ambiguity, PID reuse, and stale records clean up without killing unrelated clients. |
+| G-19 | Linux, macOS | Direct `agent_sessions.list_peers` readiness failure blocks first publication; catalog omission and unrelated MCP failures do not, and the already-running server never rejects itself through a recursive readiness check. |
+| G-20 | Linux, macOS | After actor acceptance, a Grok-deferred roster request cannot block the interjected turn's own `agent_sessions` calls; the labelled pre-interjection permission snapshot retires on the first successful post-turn roster refresh and expires after 30 minutes if recovery remains broken. |
 
 ## Pairwise peer messaging (`T/X`)
 

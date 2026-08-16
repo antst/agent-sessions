@@ -105,10 +105,15 @@ marketplace should deliberately follow the mutable checkout. Claude plugin insta
 changes the user's Claude Code marketplace and plugin settings. See
 [CLAUDE-INSTALL.md](./CLAUDE-INSTALL.md).
 
-The Grok target validates the local plugin and installs it with explicit
-`--trust`, which allows its native MCP command to execute as the current user.
-It replaces only a prior single-plugin `agent-sessions` installation and keeps
-that plugin's data. See [GROK.md](./GROK.md).
+The Grok target validates the local plugin and copies it into Grok's documented
+auto-trusted user directory, `~/.grok/plugins/agent-sessions`, which allows its
+native MCP command to execute as the current user. It migrates only a prior
+single-plugin direct installation and keeps separate plugin data. Grok's
+official trusted installer is used only to update the enabled-plugin setting;
+that temporary registry row is then removed with `--keep-data`. Installation
+fails unless `grok inspect --json` resolves exactly one enabled user plugin and
+the exact staged `agent_sessions` MCP executable. See
+[GROK.md](./GROK.md).
 
 The equivalent source-linked development command is:
 

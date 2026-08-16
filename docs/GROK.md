@@ -9,7 +9,7 @@ TUI.
 ## Install
 
 Install and log in to the Grok Build CLI first. Then install Agent Sessions and
-explicitly trust its local Grok plugin:
+explicitly trust its local Grok plugin payload:
 
 ```bash
 make install
@@ -22,10 +22,26 @@ with multiple valid candidates, pin the intended Grok Build executable with
 `make install-grok GROK=/absolute/path/to/grok`; a pinned path is still
 validated and never falls through silently.
 
-`make install-all` also installs the Codex and Claude integrations. Grok's
-`--trust` allows the `agent_sessions` MCP server to execute the installed native
-runtime as your user; review this repository before granting it. Start a new
-Grok process (or reload its plugins) after changing the plugin installation.
+`make install-all` also installs the Codex and Claude integrations. The installer
+copies the validated payload to Grok's documented auto-trusted user location,
+`~/.grok/plugins/agent-sessions`. Grok 1.0.4 has no direct command for enabling
+an auto-discovered user plugin, so the installer briefly registers the source
+through Grok's trusted plugin installer, then removes only that registry row
+with `--keep-data`. This lets the official CLI update its enabled-plugin
+configuration without leaving a second installation. Finally, it requires
+`grok inspect --json` to resolve exactly one enabled user plugin at that path
+and exactly one `agent_sessions` MCP command at the staged native entry. This allows the
+`agent_sessions` MCP server to execute the installed native runtime as your
+user; review this repository before granting it. The installer migrates the
+older direct-install registry entry because Grok can list that entry as enabled
+while omitting its MCP server from a live session. Start a new Grok process (or
+reload its plugins) after changing the plugin installation.
+
+Both `make install-grok` and `make install-all` refuse to replace the payload
+while any managed `grok-peer` owner, host, private leader, or observer is live
+or cannot be verified. `GROK_USER_PLUGIN_ROOT` overrides are accepted only when
+their final path component is exactly `agent-sessions`; the installer will not
+remove a broader user plugin directory.
 
 ## Use
 
@@ -62,16 +78,22 @@ otherwise `default`. It refreshes that value while the peer is live, including
 after an in-TUI permission change. Missing or ambiguous live state fails
 closed instead of guessing from argv.
 
-The bridge snapshots that live permission class only while submitting the
-brief interjection RPC, so an MCP call that begins before its acknowledgement
-does not deadlock against the same ACP stream. The periodic live roster refresh
-continues during the model turn; an in-TUI permission change is not pinned for
-the duration of that turn.
+The bridge snapshots that live permission class immediately before submitting
+an interjection and keeps the labelled snapshot until the first successful
+roster refresh after actor acceptance. Grok can defer roster replies while the
+interjected model turn is running; during that interval the snapshot prevents
+the session's own MCP tools from deadlocking behind the same ACP stream. An
+in-TUI permission change made during that interval becomes authoritative after
+the turn releases the roster and the refresh completes. The snapshot expires
+after 30 minutes even if roster recovery never succeeds; later MCP and lane
+authorization then fail closed instead of inheriting an indefinitely stale
+permission class.
 
-Once the ACP bridge sees exactly one resident row and a cached `x.ai/mcp/list`
-snapshot reports the local `agent_sessions` stdio server ready with
-`send_message` enabled, the peer appears in `list_peers`. Failures in unrelated
-MCP servers do not block it. Delivery uses Grok's
+Once the ACP bridge sees exactly one resident row and a direct read-only
+`x.ai/mcp/call` to `agent_sessions.list_peers` succeeds, the peer appears in
+`list_peers`. That probe exercises actual plugin discovery, process startup,
+MCP initialization, and launch attestation; failures in unrelated MCP servers
+do not block it. Delivery uses Grok's
 official `x.ai/interject` extension; the wake client deliberately does not
 `session/load` the TUI-owned session, because a second load can replace the
 resident actor while the TUI is still starting its MCP processes. The installed `agent_sessions` MCP
@@ -81,8 +103,19 @@ The launcher pins that plugin process to the same selected native-runtime
 binary as the private host, preventing mixed-revision host/MCP operation.
 There is no native `grok-peer-lane` yet.
 
-If the peer never appears, run `grok login`, confirm the installed plugin is
-enabled with `grok plugin list --json`, and start a new `grok-peer`. The adapter
+Grok's immediate `queued` interjection response is not delivery proof: version
+1.0.4 returns it even if a stale resident handle's actor mailbox has closed.
+Agent Sessions waits for the matching live actor notification before recording
+`actor_accepted`. This proves that the actor began handling the message, while
+the matrix's destination-visible reply proves the turn completed. Grok does not
+deduplicate repeated interjection IDs; after an ambiguous post-write timeout,
+the durable wake remains `in_flight`, is logged, and is never replayed
+automatically because replay could duplicate model work.
+
+If the peer never appears, run `grok login`, confirm `grok inspect --json`
+shows one enabled `agent-sessions` plugin with `scope: "user"` at
+`~/.grok/plugins/agent-sessions` and its `agent_sessions` MCP target under that
+same directory, and start a new `grok-peer`. The adapter
 fails closed when cached CLI authentication or the official ACP contract is
 unavailable; it never opens a login browser or falls back to PTY injection.
 

@@ -84,6 +84,7 @@ func runGrokFakeLeader(args []string) {
 
 func runGrokFakeACP() {
 	scanner := bufio.NewScanner(os.Stdin)
+	var activeTurnUntil time.Time
 	for scanner.Scan() {
 		var request map[string]any
 		if json.Unmarshal(scanner.Bytes(), &request) != nil {
@@ -104,6 +105,9 @@ func runGrokFakeACP() {
 				continue
 			}
 		case "_x.ai/sessions/list":
+			if delay := time.Until(activeTurnUntil); delay > 0 {
+				time.Sleep(delay)
+			}
 			if os.Getenv("GROK_FAKE_BAD_ROSTER") == "1" {
 				result["result"] = map[string]any{"sessions": []any{}}
 				break
@@ -124,32 +128,49 @@ func runGrokFakeACP() {
 					return
 				}
 			}
-		case "_x.ai/mcp/list":
+		case "_x.ai/mcp/call":
 			status := "ready"
-			if os.Getenv("GROK_FAKE_MCP_NOT_READY") == "1" {
-				status = "initializing"
-			}
 			if path := os.Getenv("GROK_FAKE_MCP_STATUS_FILE"); path != "" {
 				body, _ := os.ReadFile(path)
 				status = strings.TrimSpace(string(body))
 			}
-			result["result"] = map[string]any{"servers": []any{
-				map[string]any{"name": "unrelated", "source": "local", "type": "stdio", "authRequired": true},
-				map[string]any{
-					"name": "agent_sessions", "source": "local", "type": "stdio",
-					"session": map[string]any{"enabled": true, "status": status, "tools": []any{
-						map[string]any{"name": "send_message", "enabled": true},
-					}},
-				},
-			}}
+			result["result"] = map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": "peer inventory ready"}},
+				"isError": status != "ready",
+			}
 		case "_x.ai/interject":
 			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
 				time.Sleep(time.Duration(delay) * time.Millisecond)
 			}
 			result["result"] = map[string]any{"status": "queued"}
+			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_ACTIVE_TURN_MS")); delay > 0 {
+				activeTurnUntil = time.Now().Add(time.Duration(delay) * time.Millisecond)
+			}
+			inner, _ := request["params"].(map[string]any)
+			notification := map[string]any{
+				"sessionId": stringValue(inner["sessionId"]), "interjectionId": stringValue(inner["interjectionId"]),
+				"text": stringValue(inner["text"]),
+			}
+			if os.Getenv("GROK_FAKE_INTERJECT_ECHO_ORDER") == "after" {
+				writeGrokFakeResponse(request["id"], result, nil)
+				writeGrokFakeNotification("_x.ai/session/interjection", notification)
+				continue
+			}
+			if os.Getenv("GROK_FAKE_NO_INTERJECT_ECHO") != "1" {
+				writeGrokFakeNotification("_x.ai/session/interjection", notification)
+			}
+			if os.Getenv("GROK_FAKE_CLOSE_AFTER_INTERJECT") == "1" {
+				writeGrokFakeResponse(request["id"], result, nil)
+				return
+			}
 		}
 		writeGrokFakeResponse(request["id"], result, nil)
 	}
+}
+
+func writeGrokFakeNotification(method string, params map[string]any) {
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	_, _ = fmt.Fprintln(os.Stdout, string(body))
 }
 
 func writeGrokFakeResponse(id any, result, rpcErr map[string]any) {
@@ -192,12 +213,12 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 		t.Fatalf("first wake = %#v, %v", response, err)
 	}
 	duplicate, err := requestControl(host.paths.ControlSocket, request, 2*time.Second)
-	if err != nil || !containsString([]string{"queued", "in_flight", "delivered"}, stringValue(duplicate["delivery"])) {
+	if err != nil || !containsString([]string{"queued", "in_flight", "actor_accepted"}, stringValue(duplicate["delivery"])) {
 		t.Fatalf("duplicate wake = %#v, %v", duplicate, err)
 	}
-	waitForGrokDelivery(t, host, "message-1", "delivered")
+	waitForGrokDelivery(t, host, "message-1", "actor_accepted")
 	final, err := requestControl(host.paths.ControlSocket, request, 2*time.Second)
-	if err != nil || stringValue(final["delivery"]) != "delivered" {
+	if err != nil || stringValue(final["delivery"]) != "actor_accepted" {
 		t.Fatalf("delivered duplicate = %#v, %v", final, err)
 	}
 	conflict := map[string]any{
@@ -212,7 +233,7 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 	requests := readGrokFakeRecords(t, record)
 	methods := []string{}
 	var argvs [][]string
-	var initialize, authenticate, mcpList, interject map[string]any
+	var initialize, authenticate, mcpCall, interject map[string]any
 	loads, prompts := 0, 0
 	for _, entry := range requests {
 		if rawArgs, ok := entry["args"].([]any); ok {
@@ -236,8 +257,8 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 			loads++
 		case "session/prompt":
 			prompts++
-		case "_x.ai/mcp/list":
-			mcpList, _ = request["params"].(map[string]any)
+		case "_x.ai/mcp/call":
+			mcpCall, _ = request["params"].(map[string]any)
 		case "_x.ai/interject":
 			interject, _ = request["params"].(map[string]any)
 		}
@@ -247,11 +268,11 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 	}
 	var durable grokWakeRecord
 	body, err := os.ReadFile(grokWakeRecordPath(resolveNativePaths(), host.config.SessionID, "message-1"))
-	if err != nil || json.Unmarshal(body, &durable) != nil || durable.Delivery != "delivered" ||
+	if err != nil || json.Unmarshal(body, &durable) != nil || durable.Delivery != "actor_accepted" ||
 		durable.MessageID != "message-1" || durable.Fingerprint != wakeItemFingerprint(item) {
 		t.Fatalf("durable Grok wake = %+v, read=%v", durable, err)
 	}
-	wantPrefix := []string{"initialize", "authenticate", "_x.ai/sessions/list", "_x.ai/mcp/list", "_x.ai/interject"}
+	wantPrefix := []string{"initialize", "authenticate", "_x.ai/sessions/list", "_x.ai/mcp/call", "_x.ai/interject"}
 	next := 0
 	for _, method := range methods {
 		if next < len(wantPrefix) && method == wantPrefix[next] {
@@ -261,14 +282,12 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 	if next != len(wantPrefix) {
 		t.Fatalf("ACP method prefix = %v, want %v", methods, wantPrefix)
 	}
-	inner, _ := interject["params"].(map[string]any)
-	mcpInner, _ := mcpList["params"].(map[string]any)
-	mcpCached, _ := mcpInner["cache"].(bool)
 	if intValue(initialize["protocolVersion"]) != 1 || stringValue(authenticate["methodId"]) != "cached_token" ||
-		stringValue(mcpList["method"]) != "x.ai/mcp/list" || stringValue(mcpInner["sessionId"]) != host.config.SessionID || !mcpCached ||
-		stringValue(interject["method"]) != "x.ai/interject" || stringValue(inner["sessionId"]) != host.config.SessionID ||
-		stringValue(inner["interjectionId"]) != "message-1" || !strings.Contains(stringValue(inner["text"]), "do exactly one turn") {
-		t.Fatalf("ACP bootstrap mismatch: initialize=%#v authenticate=%#v mcp=%#v interject=%#v", initialize, authenticate, mcpList, interject)
+		stringValue(mcpCall["sessionId"]) != host.config.SessionID || stringValue(mcpCall["server"]) != "agent_sessions" ||
+		stringValue(mcpCall["tool"]) != "list_peers" ||
+		stringValue(interject["sessionId"]) != host.config.SessionID ||
+		stringValue(interject["interjectionId"]) != "message-1" || !strings.Contains(stringValue(interject["text"]), "do exactly one turn") {
+		t.Fatalf("ACP bootstrap mismatch: initialize=%#v authenticate=%#v mcp=%#v interject=%#v", initialize, authenticate, mcpCall, interject)
 	}
 	wantLeader := []string{"--permission-mode", "default", "agent", "leader", "--leader-socket", host.paths.LeaderSocket, "--no-exit-on-disconnect", "--relay-on-demand", "--no-auto-update"}
 	wantBridge := []string{"--no-auto-update", "--permission-mode", "default", "--leader-socket", host.paths.LeaderSocket, "agent", "--leader", "stdio"}
@@ -306,23 +325,42 @@ func TestGrokHostDoesNotPublishBeforeAgentSessionsMCPIsReady(t *testing.T) {
 	waitGrokHostReady(t, host)
 }
 
-func TestGrokAgentSessionsMCPReadinessIgnoresUnrelatedFailure(t *testing.T) {
-	response := map[string]any{"result": map[string]any{"servers": []any{
-		map[string]any{"name": "exa", "authRequired": true},
-		map[string]any{
-			"name": "agent_sessions", "source": "local", "type": "stdio",
-			"session": map[string]any{"enabled": true, "status": "ready", "tools": []any{
-				map[string]any{"name": "send_message", "enabled": true},
-			}},
-		},
-	}}}
-	if err := grokAgentSessionsMCPReady(response); err != nil {
-		t.Fatalf("unrelated MCP failure blocked agent_sessions readiness: %v", err)
+func TestGrokMCPReadinessGatesPublicationNotLiveAttestation(t *testing.T) {
+	statusFile := filepath.Join(t.TempDir(), "mcp-status")
+	if err := os.WriteFile(statusFile, []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	session := response["result"].(map[string]any)["servers"].([]any)[1].(map[string]any)["session"].(map[string]any)
-	session["status"] = "initializing"
-	if err := grokAgentSessionsMCPReady(response); err == nil {
-		t.Fatal("initializing agent_sessions MCP was accepted as ready")
+	t.Setenv("GROK_FAKE_MCP_STATUS_FILE", statusFile)
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-mcp-flap")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+	if err := os.WriteFile(statusFile, []byte("initializing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := requestControl(host.paths.ControlSocket, map[string]any{
+		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+	}, time.Second)
+	ready, _ := status["ready"].(bool)
+	if err != nil || !ready || stringValue(status["permissionAuthority"]) != "live_roster" {
+		t.Fatalf("published Grok status after MCP inventory flap = %#v, %v", status, err)
+	}
+}
+
+func TestGrokAgentSessionsMCPReadinessRequiresSuccessfulToolResult(t *testing.T) {
+	response := map[string]any{"result": map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": "ready"}},
+	}}
+	if err := grokAgentSessionsMCPCallReady(response); err != nil {
+		t.Fatalf("successful agent_sessions readiness call was rejected: %v", err)
+	}
+	response["result"].(map[string]any)["isError"] = true
+	if err := grokAgentSessionsMCPCallReady(response); err == nil {
+		t.Fatal("failed agent_sessions readiness call was accepted")
+	}
+	delete(response["result"].(map[string]any), "isError")
+	delete(response["result"].(map[string]any), "content")
+	if err := grokAgentSessionsMCPCallReady(response); err == nil {
+		t.Fatal("empty agent_sessions readiness call was accepted")
 	}
 }
 
@@ -392,7 +430,7 @@ func TestGrokHostReconnectsACPBridgeBeforeNextWake(t *testing.T) {
 	if err != nil || stringValue(response["delivery"]) != "accepted" {
 		t.Fatalf("wake after bridge exit = %#v, %v", response, err)
 	}
-	waitForGrokDelivery(t, host, "after-reconnect", "delivered")
+	waitForGrokDelivery(t, host, "after-reconnect", "actor_accepted")
 	requests := readGrokFakeRecords(t, record)
 	initializeCount, interjectCount := 0, 0
 	for _, entry := range requests {
@@ -445,7 +483,142 @@ func TestGrokHostStatusDoesNotDeadlockInjectedTurn(t *testing.T) {
 	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
 		t.Fatalf("busy status blocked behind x.ai/interject for %s", elapsed)
 	}
-	waitForGrokDelivery(t, host, "busy-status", "delivered")
+	waitForGrokDelivery(t, host, "busy-status", "actor_accepted")
+}
+
+func TestGrokHostStatusUsesSnapshotUntilPostInterjectionRosterRefresh(t *testing.T) {
+	t.Setenv("GROK_FAKE_ACTIVE_TURN_MS", "750")
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-post-echo-status")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+	response, err := requestControl(host.paths.ControlSocket, map[string]any{
+		"action": "wake", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+		"item": map[string]any{"id": "post-echo-status", "message": "call an MCP tool after actor acknowledgement"},
+	}, time.Second)
+	if err != nil || stringValue(response["delivery"]) != "accepted" {
+		t.Fatalf("post-echo wake = %#v, %v", response, err)
+	}
+	waitForGrokDelivery(t, host, "post-echo-status", "actor_accepted")
+	if _, valid := host.activeInterjectionPermissionSnapshot(); !valid {
+		t.Fatal("actor acknowledgement cleared the permission snapshot before the generated turn")
+	}
+	host.modeMu.RLock()
+	record := host.record
+	host.modeMu.RUnlock()
+	started := time.Now()
+	if err := refreshGrokLaunchPermission(&record, host.config.LaunchToken); err != nil {
+		t.Fatalf("MCP permission refresh before background roster poll: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("MCP permission refresh started a blocking roster request in %s", elapsed)
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		ctx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer refreshCancel()
+		refreshDone <- host.ensureACP(ctx)
+	}()
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !host.acpMu.TryLock() {
+			break
+		}
+		host.acpMu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if host.acpMu.TryLock() {
+		host.acpMu.Unlock()
+		t.Fatal("post-interjection roster refresh did not hold the ACP stream")
+	}
+
+	started = time.Now()
+	if err := refreshGrokLaunchPermission(&record, host.config.LaunchToken); err != nil {
+		t.Fatalf("MCP permission refresh during generated turn: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("MCP permission refresh blocked behind generated turn for %s", elapsed)
+	}
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("post-interjection roster refresh: %v", err)
+	}
+	if _, valid := host.activeInterjectionPermissionSnapshot(); valid {
+		t.Fatal("successful post-interjection roster refresh did not retire the snapshot")
+	}
+}
+
+func TestGrokHostActiveInterjectionPermissionSnapshotExpires(t *testing.T) {
+	host := &grokHost{mode: "bypassPermissions"}
+	host.beginActiveInterjectionPermissionSnapshot()
+	if mode, valid := host.activeInterjectionPermissionSnapshot(); !valid || mode != "bypassPermissions" {
+		t.Fatalf("fresh snapshot = %q, %v", mode, valid)
+	}
+	host.modeMu.Lock()
+	host.activeInterjectionAt = time.Now().Add(-grokInterjectionModeTTL - time.Second)
+	host.modeMu.Unlock()
+	if mode, valid := host.activeInterjectionPermissionSnapshot(); valid || mode != "" {
+		t.Fatalf("expired snapshot remained authoritative: %q, %v", mode, valid)
+	}
+}
+
+func TestGrokHostRequiresActorInterjectionEcho(t *testing.T) {
+	t.Run("response before echo", func(t *testing.T) {
+		t.Setenv("GROK_FAKE_INTERJECT_ECHO_ORDER", "after")
+		host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-echo-after")
+		defer stopTestGrokHost(t, host, cancel, result)
+		waitGrokHostReady(t, host)
+		response, err := requestControl(host.paths.ControlSocket, map[string]any{
+			"action": "wake", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+			"item": map[string]any{"id": "echo-after", "message": "require actor echo"},
+		}, time.Second)
+		if err != nil || stringValue(response["delivery"]) != "accepted" {
+			t.Fatalf("echo-after wake = %#v, %v", response, err)
+		}
+		waitForGrokDelivery(t, host, "echo-after", "actor_accepted")
+	})
+
+	t.Run("queued response without echo stays ambiguous", func(t *testing.T) {
+		t.Setenv("GROK_FAKE_NO_INTERJECT_ECHO", "1")
+		t.Setenv("GROK_FAKE_CLOSE_AFTER_INTERJECT", "1")
+		host, cancel, result, record := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-no-echo")
+		defer stopTestGrokHost(t, host, cancel, result)
+		waitGrokHostReady(t, host)
+		response, err := requestControl(host.paths.ControlSocket, map[string]any{
+			"action": "wake", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+			"item": map[string]any{"id": "no-echo", "message": "do not replay this"},
+		}, time.Second)
+		if err != nil || stringValue(response["delivery"]) != "accepted" {
+			t.Fatalf("no-echo wake = %#v, %v", response, err)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		ambiguous := false
+		for time.Now().Before(deadline) {
+			status, statusErr := requestControl(host.paths.ControlSocket, map[string]any{
+				"action": "wake_status", "sessionId": host.config.SessionID,
+				"launchToken": host.config.LaunchToken, "messageId": "no-echo",
+			}, time.Second)
+			if statusErr == nil && stringValue(status["delivery"]) == "in_flight" &&
+				strings.Contains(stringValue(status["detail"]), "unknown") {
+				ambiguous = true
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if !ambiguous {
+			t.Fatal("queued response without an actor echo did not become visibly ambiguous")
+		}
+		time.Sleep(750 * time.Millisecond)
+		interjects := 0
+		for _, entry := range readGrokFakeRecords(t, record) {
+			request, _ := entry["request"].(map[string]any)
+			if stringValue(request["method"]) == "_x.ai/interject" {
+				interjects++
+			}
+		}
+		if interjects != 1 {
+			t.Fatalf("ambiguous actor acknowledgement was replayed %d times", interjects)
+		}
+	})
 }
 
 func TestGrokHostBusyStatusWithoutActivePromptSnapshotIsRetryable(t *testing.T) {

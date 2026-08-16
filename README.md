@@ -79,10 +79,13 @@ inherits the thread's canonical cwd; an explicit `-C` must resolve to that same 
 plugin, and links the native runtime plus all four launchers under `${PREFIX:-~/.local}/bin`.
 `make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
 `make install-claude` independently installs the text-only Claude plugin. `make install-grok`
-validates and installs the local Grok plugin with `--trust`; that explicit trust allows its
-`agent_sessions` MCP server to run the installed native runtime with the current user's privileges.
-Review the local source before granting it. Reinstallation replaces only the existing `agent-sessions`
-Grok plugin and preserves its plugin data; start a new Grok session or reload plugins after installing.
+validates and copies the local Grok plugin into Grok's auto-trusted user plugin directory; that
+explicit install allows its `agent_sessions` MCP server to run the installed native runtime with
+the current user's privileges. Review the local source before granting it. Reinstallation migrates
+the older direct-install entry and replaces only `~/.grok/plugins/agent-sessions`. It uses a
+temporary trusted registration only to update Grok's enabled-plugin configuration, removes that
+row while preserving data, and fails unless `grok inspect --json` resolves the exact staged user
+plugin and MCP executable. Start a new Grok session or reload plugins after installing.
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
 the TUI's native policy and its effective live mode is attested before publication.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to

@@ -421,7 +421,7 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 }
 
 func authorizedPeerSessionNative(paths nativePaths, sessionID string) bool {
-	return authorizedPeerThreadNative(paths, sessionID) || liveGrokLaunchForSession(paths, sessionID) != nil
+	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil
 }
 
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
