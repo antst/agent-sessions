@@ -1021,7 +1021,7 @@ func validateLaneOwner(persistent bool, pid int, procStart string) error {
 		return nil
 	}
 	if !exactProcessIdentityMatch(pid, procStart) {
-		return errors.New("cannot corroborate a stable lifecycle owner; retry from a live Codex or Claude session, or use --persistent")
+		return errors.New("cannot corroborate a stable lifecycle owner; retry from a live Codex, Claude, or Grok session, or use --persistent")
 	}
 	return nil
 }
@@ -1031,18 +1031,26 @@ func sameLaneOwner(leftPID int, leftProcStart string, rightPID int, rightProcSta
 }
 
 func inferPeerParent(paths nativePaths, startPID int) (laneOwner, bool) {
-	codexOwner, codexOK := inferCodexParent(paths, startPID)
-	claudeOwner, claudeOK := inferClaudeParent(paths, startPID)
-	if codexOK && claudeOK {
-		if processHasAncestor(claudeOwner.PID, codexOwner.PID) {
-			return claudeOwner, true
+	candidates := make([]laneOwner, 0, 3)
+	if owner, ok := inferCodexParent(paths, startPID); ok {
+		candidates = append(candidates, owner)
+	}
+	if owner, ok := inferClaudeParent(paths, startPID); ok {
+		candidates = append(candidates, owner)
+	}
+	if owner, ok := inferGrokParent(paths, startPID); ok {
+		candidates = append(candidates, owner)
+	}
+	if len(candidates) == 0 {
+		return laneOwner{}, false
+	}
+	deepest := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.PID != deepest.PID && processHasAncestor(candidate.PID, deepest.PID) {
+			deepest = candidate
 		}
-		return codexOwner, true
 	}
-	if codexOK {
-		return codexOwner, true
-	}
-	return claudeOwner, claudeOK
+	return deepest, true
 }
 
 func doctorLaneNative() (int, error) {

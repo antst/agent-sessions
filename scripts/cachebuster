@@ -15,6 +15,7 @@ script_path="$(cd -P -- "$(dirname -- "$script_path")" && pwd)/$(basename -- "$s
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 codex_manifest="$plugin_root/.codex-plugin/plugin.json"
 claude_manifest="$plugin_root/claude/.claude-plugin/plugin.json"
+grok_manifest="$plugin_root/grok/.grok-plugin/plugin.json"
 current="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$codex_manifest" | head -1)"
 if [[ -z "$current" ]]; then
   printf 'agent-sessions: could not read plugin version\n' >&2
@@ -24,7 +25,8 @@ base="${current%%+*}"
 next="$base+codex.$(date -u +%Y%m%d%H%M%S)"
 codex_temporary="$codex_manifest.$$.tmp"
 claude_temporary="$claude_manifest.$$.tmp"
-trap 'rm -f -- "$codex_temporary" "$claude_temporary"' EXIT
+grok_temporary="$grok_manifest.$$.tmp"
+trap 'rm -f -- "$codex_temporary" "$claude_temporary" "$grok_temporary"' EXIT
 rewrite_version() {
   source_manifest="$1"
   destination="$2"
@@ -40,9 +42,11 @@ rewrite_version() {
 }
 rewrite_version "$codex_manifest" "$codex_temporary"
 rewrite_version "$claude_manifest" "$claude_temporary"
+rewrite_version "$grok_manifest" "$grok_temporary"
 # The Codex manifest is the cachebuster's commit record, so publish every
 # dependent manifest first and the authoritative runtime version last.
 mv -f -- "$claude_temporary" "$claude_manifest"
+mv -f -- "$grok_temporary" "$grok_manifest"
 mv -f -- "$codex_temporary" "$codex_manifest"
 trap - EXIT
 printf '%s\n' "$next"

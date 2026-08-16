@@ -5,7 +5,7 @@
 Agent Sessions targets Linux and macOS on x86-64 and arm64. It requires Codex CLI with plugins,
 hooks, and managed App Server support; Claude Code with local cross-session messaging; and Bash for
 installation and maintenance scripts. Building from source requires Go 1.22 or newer. CI/release
-artifacts include the five native binaries and require
+artifacts include the six native binaries and require
 neither Go nor Node.js on the destination host.
 
 | Host | Bundled binary |
@@ -16,7 +16,7 @@ neither Go nor Node.js on the destination host.
 | macOS Apple Silicon | `bin/darwin-arm64/agent-session-runtime` |
 
 Each platform directory also contains the distinct `codex-peer`, `codex-peer-lane`,
-`claude-peer-lane`, and `peer-federator` executables. `peer-federator` remains a separately
+`claude-peer-lane`, `grok-peer`, and `peer-federator` executables. `peer-federator` remains a separately
 operated process; installing the binary does not enable or load a federation service.
 
 Linux is end-to-end tested on the development host. Both macOS architectures cross-compile in CI;
@@ -24,9 +24,9 @@ a real macOS host test is still recommended before certifying a release for prod
 
 ## Release archive installation
 
-A `vX.Y.Z` tag whose base version matches the plugin manifest creates a Forgejo Release containing
+A `vX.Y.Z` tag whose base version matches the plugin manifest creates a GitHub Release containing
 four archives and `SHA256SUMS`. Choose exactly one archive for the destination host. Each archive
-has one top-level directory and contains the matching native executable plus the Codex and Claude
+has one top-level directory and contains the matching native executable plus the Codex, Claude, and Grok
 plugin payloads, launchers, documentation, and installer; it deliberately omits Go source.
 
 ```bash
@@ -44,7 +44,8 @@ On macOS, use `shasum -a 256 -c --ignore-missing SHA256SUMS` and the matching `d
 `darwin-arm64` archive. The `.agent-sessions-prebuilt` marker makes `make build` and the install
 targets use the packaged executable even if Go is present. Extracting an archive on the wrong OS
 or architecture fails before installation with the missing platform name. `make install` installs
-only the native Codex side; `make install-all` also installs the Claude orchestration plugin.
+only the native runtime and Codex side; `make install-all` also installs the Claude orchestration
+and trusted Grok MCP plugins.
 
 ## Source installation
 
@@ -60,13 +61,14 @@ For a release archive with the matching prebuilt binary, run only `make install`
 
 By default, `make install`:
 
-1. builds all five binaries under `bin/<platform>`;
+1. builds all six binaries under `bin/<platform>`;
 2. copies the runtime plugin payload into `~/.local/libexec/agent-sessions`;
 3. registers that installed tree's marketplace as `agent-sessions`;
 4. installs `claude-code-peer@agent-sessions` into Codex's plugin cache; and
 5. creates command symlinks in `~/.local/bin` whose absolute targets are derived from the exact
    configured `INSTALL_ROOT`, not from an assumed prefix layout; and
-6. starts the shared runtime from a cleanly stopped App Server without interrupting a rollout.
+6. starts the shared runtime only after App Server is stopped and no managed
+   `grok-peer` TUI/private leader is live, without interrupting either product.
 
 The first newly launched Codex session then asks for one-time approval of the installed plugin's
 lifecycle hooks. Approve `claude-code-peer@agent-sessions`; otherwise `SessionStart`,
@@ -83,20 +85,35 @@ same hooks and MCP server after an upgrade; it does not remove the user's `perso
 Override the destination with `PREFIX=/another/prefix` or `INSTALL_ROOT=/another/libexec/path`.
 Override the Codex executable with `CODEX=/path/to/codex`. Use `make dev-install` when you
 intentionally want the native runtime, launchers, and marketplace to track a mutable source checkout. Run install
-from a host terminal after exiting every Codex client and running `codex app-server daemon stop`.
+from a host terminal after exiting every Codex client, running
+`codex app-server daemon stop`, and normally exiting every `grok-peer` TUI.
 The installer refuses to replace any running App Server—even an idle one—because a separate
 quiescence check followed by restart has an unavoidable race with native clients starting work.
+It also refuses while a managed Grok launch record has any live or unverifiable
+owner, host, private leader, or observer identity. Normal Grok TUI exit removes
+that private process group automatically; see [Grok leader shutdown](GROK.md#stop-leaders-safely).
 Packagers can use `START_RUNTIME=0` to stage files without starting host services.
 
 `make install` deliberately changes only the Codex/runtime side. To install the reusable Claude
-orchestration skill as well, use `make install-all`; on a host where the runtime is already
-installed, `make install-claude` is sufficient. It stages the cache-busted Claude payload under a
+orchestration skill and Grok MCP plugin as well, use `make install-all`; on a host where the runtime
+is already installed, `make install-claude` and `make install-grok` update those surfaces
+independently. The Claude target stages its cache-busted payload under a
 versioned, immutable directory below `$(PREFIX)/share/agent-sessions/claude-marketplaces` before
 updating the marketplace, so later native-only installs cannot change an active Claude plugin.
 Use `make dev-install-claude` only when the Claude
 marketplace should deliberately follow the mutable checkout. Claude plugin installation is explicit because it
 changes the user's Claude Code marketplace and plugin settings. See
 [CLAUDE-INSTALL.md](./CLAUDE-INSTALL.md).
+
+The Grok target validates the local plugin and copies it into Grok's documented
+auto-trusted user directory, `~/.grok/plugins/agent-sessions`, which allows its
+native MCP command to execute as the current user. It migrates only a prior
+single-plugin direct installation and keeps separate plugin data. Grok's
+official trusted installer is used only to update the enabled-plugin setting;
+that temporary registry row is then removed with `--keep-data`. Installation
+fails unless `grok inspect --json` resolves exactly one enabled user plugin and
+the exact staged `agent_sessions` MCP executable. See
+[GROK.md](./GROK.md).
 
 The equivalent source-linked development command is:
 
@@ -142,7 +159,8 @@ make test-race     # race-enabled Go tests
 make build         # current host, under bin/<platform>
 make build GOOS=darwin GOARCH=arm64
 make install-claude # install/update codex-peer in Claude Code
-make install-all    # native runtime plus Claude Code plugin
+make install-grok   # validate/trust/install the Grok MCP plugin
+make install-all    # native runtime plus Claude Code and Grok plugins
 make reinstall     # new cachebuster, rebuild, reinstall
 make repair-projection THREAD_ID=<uuid>          # inspect the known duplicate-ordinal failure
 make repair-projection THREAD_ID=<uuid> APPLY=1  # back up and repair only that exact failure

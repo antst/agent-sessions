@@ -40,6 +40,130 @@ func (b *bufferWriteCloser) Bytes() []byte {
 
 func (b *bufferWriteCloser) String() string { return string(b.Bytes()) }
 
+func TestInspectClaudeAuthentication(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantLogged bool
+		wantMethod string
+		wantErr    string
+	}{
+		{
+			name:       "authenticated subscription",
+			body:       `printf '%s\n' 'update warning' >&2; printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'`,
+			wantLogged: true,
+			wantMethod: "claude.ai",
+		},
+		{
+			name:       "documented logged out exit",
+			body:       `printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'; exit 1`,
+			wantMethod: "none",
+		},
+		{
+			name:    "malformed status",
+			body:    `printf '%s\n' 'not-json'`,
+			wantErr: "decode Claude Code authentication status",
+		},
+		{
+			name:    "unexpected command failure",
+			body:    `printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'; exit 2`,
+			wantErr: "authentication check for Claude Code failed",
+		},
+		{
+			name:    "unsupported auth command diagnostic",
+			body:    `printf '%s\n' 'unsupported-auth-status' >&2; exit 2`,
+			wantErr: "unsupported-auth-status",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claudeBin := filepath.Join(t.TempDir(), "claude")
+			script := "#!/bin/sh\n" +
+				`[ "$*" = "auth status --json" ] || exit 97` + "\n" + test.body + "\n"
+			if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			status, err := inspectClaudeAuthentication(claudeBin)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("authentication error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || status.LoggedIn != test.wantLogged || status.AuthMethod != test.wantMethod {
+				t.Fatalf("authentication status = %+v, %v", status, err)
+			}
+		})
+	}
+}
+
+func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
+	tests := []struct {
+		name       string
+		authStatus string
+		authExit   int
+		wantCode   int
+		wantLogged bool
+	}{
+		{
+			name:       "authenticated",
+			authStatus: `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}`,
+			wantLogged: true,
+		},
+		{
+			name:       "logged out",
+			authStatus: `{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}`,
+			authExit:   1,
+			wantCode:   1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			claudeBin := filepath.Join(root, "claude")
+			script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  --version) printf '%%s\\n' '2.1.233' ;;\n  'auth status --json') printf '%%s\\n' '%s'; exit %d ;;\n  *) exit 97 ;;\nesac\n", test.authStatus, test.authExit)
+			if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			supervisorSocket := startAuthorizationControlServer(t, func(map[string]any) map[string]any {
+				return map[string]any{}
+			})
+			t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
+			t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+			t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := os.Stdout
+			os.Stdout = write
+			code, doctorErr := doctorClaudeLane()
+			_ = write.Close()
+			os.Stdout = original
+			body, _ := io.ReadAll(read)
+			_ = read.Close()
+			if doctorErr != nil || code != test.wantCode {
+				t.Fatalf("doctor = code %d err %v, body %s", code, doctorErr, body)
+			}
+			var report map[string]any
+			if err := json.Unmarshal(body, &report); err != nil {
+				t.Fatalf("decode doctor report: %v, body %s", err, body)
+			}
+			supervisorReachable, _ := report["supervisor_reachable"].(bool)
+			if report["claude_logged_in"] != test.wantLogged || report["claude_version"] != "2.1.233" || !supervisorReachable {
+				t.Fatalf("doctor report = %#v", report)
+			}
+			if test.wantLogged && report["claude_auth_error"] != nil {
+				t.Fatalf("authenticated doctor reported auth error: %#v", report)
+			}
+			if !test.wantLogged && !strings.Contains(stringValue(report["claude_auth_error"]), "not authenticated") {
+				t.Fatalf("logged-out doctor report = %#v", report)
+			}
+		})
+	}
+}
+
 func TestParseClaudeLaneArgsLifecycleAndPolicy(t *testing.T) {
 	options, err := parseClaudeLaneArgs([]string{
 		"start", "--name", "reviewer", "--permission-mode", "dontAsk",
@@ -98,7 +222,7 @@ func TestClaudeLaneOwnerPermissionClassIsInheritedOnlyWhenImplicit(t *testing.T)
 }
 
 func TestClaudeLaneOwnerPermissionClassRejectsUncorroboratedRegistryBypass(t *testing.T) {
-	peer := peerSession{PID: os.Getpid(), PermissionMode: "bypassPermissions"}
+	peer := peerSession{PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), PermissionMode: "bypassPermissions"}
 	if got := corroboratedOwnerPermissionMode(peer, peer.PID); got != "default" {
 		t.Fatalf("source-asserted bypass was trusted without argv corroboration: %q", got)
 	}

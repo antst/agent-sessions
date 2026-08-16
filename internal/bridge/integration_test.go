@@ -2,11 +2,122 @@ package bridge
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestNativeShimInspectionReportsLiveIdentityAndPermission(t *testing.T) {
+	root := t.TempDir()
+	d := newDaemon(map[string]string{
+		"session-id": "grok-inspection-session", "cwd": root, "entrypoint": "grok",
+		"permission-mode": "default", "data-dir": filepath.Join(root, "state"),
+		"claude-config-dir": filepath.Join(root, "claude"), "codex-home": filepath.Join(root, "codex"),
+		"runtime-dir": filepath.Join(root, "run"),
+	})
+	if err := d.start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.shutdown)
+
+	// Simulate an in-session policy change that has not yet been inferred from
+	// the TUI's immutable process argv.
+	d.mu.Lock()
+	d.permissionMode = "bypassPermissions"
+	d.mu.Unlock()
+
+	conn, err := net.DialTimeout("unix", d.stableSocket, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if err := json.NewEncoder(conn).Encode(map[string]any{"type": "control", "action": "inspect"}); err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if stringValue(response["type"]) != "peer_inspection" || intValue(response["pid"]) != os.Getpid() ||
+		stringValue(response["procStart"]) != d.procStart || stringValue(response["sessionId"]) != d.sessionID ||
+		stringValue(response["entrypoint"]) != "grok" || stringValue(response["permissionMode"]) != "bypassPermissions" {
+		t.Fatalf("inspection response = %#v", response)
+	}
+}
+
+func TestNativeShimInitializesPublishedStatus(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "busy", want: "busy"},
+		{input: "waiting", want: "waiting"},
+		{input: "shell", want: "shell"},
+		{input: "invalid", want: "idle"},
+		{want: "idle"},
+	} {
+		d := newDaemon(map[string]string{
+			"session-id": "status-" + defaultString(test.input, "empty"), "cwd": root,
+			"status": test.input, "data-dir": filepath.Join(root, "state"),
+			"claude-config-dir": filepath.Join(root, "claude"), "codex-home": filepath.Join(root, "codex"),
+			"runtime-dir": filepath.Join(root, "run"),
+		})
+		if d.status != test.want {
+			t.Fatalf("initial status %q = %q, want %q", test.input, d.status, test.want)
+		}
+	}
+}
+
+func TestNativeShimShutdownCannotBeUndoneBySelectedHeartbeat(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := newDaemon(map[string]string{
+		"session-id": "shutdown-heartbeat-race", "cwd": root,
+		"owner-pid": strconv.Itoa(os.Getpid()), "owner-proc-start": readProcStart(os.Getpid()),
+		"data-dir": filepath.Join(root, "state"), "claude-config-dir": filepath.Join(root, "claude"),
+		"codex-home": filepath.Join(root, "codex"), "runtime-dir": runtimeDir, "heartbeat-ms": "20",
+	})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	d.maintenanceBeforeWrite = func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	if err := d.start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		d.shutdown()
+		close(release)
+		t.Fatal("native shim heartbeat did not reach the blocked writer")
+	}
+
+	// The heartbeat has already selected its write path, but has not acquired
+	// d.mu. Shutdown must commit the stopped latch and remove both records first.
+	d.shutdown()
+	close(release)
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, path := range []string{d.stateFile, d.registryFile} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("native shim record was recreated after shutdown at %s: %v", path, err)
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 	root := t.TempDir()

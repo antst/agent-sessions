@@ -469,15 +469,47 @@ func parentProcessID(pid int) (int, bool) {
 // peerProcessPermissionMode maps the live peer process to the two permission
 // classes recognized by Claude's cross-session inbound gate. It is used only
 // for bridge-generated infrastructure notices, never to choose Codex policy.
-func peerProcessPermissionMode(pid int) (string, error) {
-	if pid <= 1 {
-		return "", errors.New("peer process id is unavailable")
-	}
-	args, err := readProcessArgs(pid)
+func peerProcessPermissionMode(pid int, procStart string) (string, error) {
+	args, err := readPeerProcessArgs(pid, procStart)
 	if err != nil {
 		return "", err
 	}
 	return permissionModeFromArgs(args), nil
+}
+
+func readPeerProcessArgs(pid int, procStart string) ([]string, error) {
+	return readPeerProcessArgsWithReader(pid, procStart, readProcessArgs, time.Sleep, func(pid int, procStart string) bool {
+		return exactProcessIdentityStatus(pid, procStart).Status == processIdentityMatches
+	})
+}
+
+func readPeerProcessArgsWithReader(
+	pid int,
+	procStart string,
+	readArgs func(int) ([]string, error),
+	pause func(time.Duration),
+	identityMatches func(int, string) bool,
+) ([]string, error) {
+	if pid <= 1 || procStart == "" {
+		return nil, errors.New("peer process identity is unavailable")
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if !identityMatches(pid, procStart) {
+			return nil, errors.New("peer process identity no longer matches its registry")
+		}
+		args, err := readArgs(pid)
+		if err == nil {
+			if !identityMatches(pid, procStart) {
+				return nil, errors.New("peer process identity changed while reading its arguments")
+			}
+			return args, nil
+		}
+		if (!errors.Is(err, syscall.EIO) && !errors.Is(err, syscall.EINTR)) || attempt == 2 {
+			return nil, err
+		}
+		pause(10 * time.Millisecond)
+	}
+	return nil, errors.New("peer process arguments remained unavailable")
 }
 
 func permissionModeFromArgs(fields []string) string {

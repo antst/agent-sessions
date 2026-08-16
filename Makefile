@@ -2,6 +2,14 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
+# Ignore an inherited GROK environment variable: a long-lived peer may have
+# pinned its own launcher, but that must not disable discovery for a later
+# install. An explicit make command-line GROK=/absolute/path pins one candidate.
+GROK_INPUT_ORIGIN := $(origin GROK)
+GROK ?=
+GROK_PEER ?= $(BIN_DIR)/grok-peer
+GROK_PLUGIN_VERIFY ?= $(BIN_DIR)/agent-session-runtime
+GROK_PEER_ENV = $(if $(and $(findstring command line,$(GROK_INPUT_ORIGIN)),$(strip $(GROK))),GROK_PEER_GROK_BIN="$(GROK)")
 GOLANGCI_LINT ?= golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
@@ -17,6 +25,9 @@ CLAUDE_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[
 CLAUDE_RELEASE_ROOT ?= $(PREFIX)/share/agent-sessions/claude-marketplaces
 CLAUDE_STAGED_ROOT := $(CLAUDE_RELEASE_ROOT)/$(CLAUDE_PLUGIN_VERSION)
 CLAUDE_MARKETPLACE_ROOT ?= $(CLAUDE_STAGED_ROOT)
+GROK_PLUGIN_ROOT ?= $(INSTALL_ROOT)/grok
+GROK_PLUGIN_NAME := agent-sessions
+GROK_USER_PLUGIN_ROOT ?= $(HOME)/.grok/plugins/$(GROK_PLUGIN_NAME)
 START_RUNTIME ?= 1
 PEER_FEDERATOR_CONFIG_DIR ?= $(HOME)/.config/peer-federator
 PEER_FEDERATOR_DOC_ROOT ?= $(PREFIX)/share/doc/peer-federator
@@ -60,10 +71,11 @@ endif
 PLATFORM := $(GOOS)-$(PLATFORM_ARCH)
 BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
-BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane peer-federator
+BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator
 
-.PHONY: all lint test test-race build build-peer-federator install-preflight install dev-install reinstall \
-	stage-claude validate-claude install-claude dev-install-claude install-all dev-install-all \
+.PHONY: all lint test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
+	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
+	dev-install-grok install-all dev-install-all \
 	install-peer-federator install-systemd-user-files install-systemd-user \
 	install-launchd-user-files install-launchd-user repair-projection clean
 
@@ -94,6 +106,7 @@ build:
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer" ./cmd/codex-peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer-lane" ./cmd/codex-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer-lane" ./cmd/claude-peer-lane; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer" ./cmd/grok-peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='$(PEER_FEDERATOR_LDFLAGS)' -o "$(BIN_DIR)/peer-federator" ./cmd/peer-federator; \
 	else \
 		printf 'Go is required because this source tree has no authorized packaged %s binaries\n' "$(PLATFORM)" >&2; \
@@ -133,6 +146,32 @@ install-preflight: build
 				'After it stops, run make install again.' >&2; \
 			exit 75; \
 		}; \
+		grok_status=0; \
+		"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
+		if [[ $$grok_status -eq 3 ]]; then \
+			printf '%s\n' \
+				'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
+				'Its private leader and ACP observer stop automatically with that TUI.' \
+				'After they stop, run make install again.' >&2; \
+			exit 75; \
+		elif [[ $$grok_status -ne 0 ]]; then \
+			printf 'Cannot verify that managed Grok peers are stopped (inventory exit %s). Resolve the diagnostic above before installing.\n' "$$grok_status" >&2; \
+			exit "$$grok_status"; \
+		fi; \
+	fi
+
+grok-install-preflight: build
+	@grok_status=0; \
+	"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
+	if [[ $$grok_status -eq 3 ]]; then \
+		printf '%s\n' \
+			'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
+			'Its private leader and ACP observer stop automatically with that TUI.' \
+			'After they stop, run make install-grok again.' >&2; \
+		exit 75; \
+	elif [[ $$grok_status -ne 0 ]]; then \
+		printf 'Cannot verify that managed Grok peers are stopped (inventory exit %s). Resolve the diagnostic above before installing.\n' "$$grok_status" >&2; \
+		exit "$$grok_status"; \
 	fi
 
 install: install-preflight
@@ -143,10 +182,11 @@ install: install-preflight
 		"$(INSTALL_ROOT)/bin" \
 		"$(INSTALL_ROOT)/deploy" \
 		"$(INSTALL_ROOT)/docs" \
+		"$(INSTALL_ROOT)/grok" \
 		"$(INSTALL_ROOT)/hooks" \
 		"$(INSTALL_ROOT)/scripts" \
 		"$(INSTALL_ROOT)/skills"
-	cp -R .agents .codex-plugin deploy docs hooks scripts skills "$(INSTALL_ROOT)/"
+	cp -R .agents .codex-plugin deploy docs grok hooks scripts skills "$(INSTALL_ROOT)/"
 	cp .mcp.json README.md "$(INSTALL_ROOT)/"
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
@@ -155,6 +195,7 @@ install: install-preflight
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer" "$(PREFIX)/bin/codex-peer"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
@@ -189,6 +230,7 @@ dev-install: install-preflight
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer" "$(PREFIX)/bin/codex-peer"
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
+	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"
 	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
@@ -276,11 +318,70 @@ install-claude: validate-claude
 dev-install-claude:
 	$(MAKE) install-claude CLAUDE_MARKETPLACE_ROOT="$(CURDIR)"
 
+validate-grok: build
+	@test -x "$(GROK_PEER)" || { \
+		printf 'The validated grok-peer launcher is required for Grok plugin management: %s\n' "$(GROK_PEER)" >&2; \
+		exit 127; \
+	}
+	# Never execute GROK directly: grok-peer applies the same fail-closed CLI
+	# contract probe used for interactive launches, including explicit overrides.
+	$(GROK_PEER_ENV) "$(GROK_PEER)" plugin validate "$(GROK_PLUGIN_ROOT)"
+
+install-grok: grok-install-preflight validate-grok
+	@plugin_root="$(GROK_USER_PLUGIN_ROOT)"; \
+		plugin_parent="$$(dirname -- "$$plugin_root")"; \
+		plugin_leaf="$$(basename -- "$$plugin_root")"; \
+		if [[ "$$plugin_root" != /* || "$$plugin_root" == "$(HOME)" || \
+			"$$plugin_leaf" != "$(GROK_PLUGIN_NAME)" || -z "$$plugin_parent" || \
+			"$$plugin_parent" == "." || "$$plugin_parent" == "/" ]]; then \
+			printf 'Refusing unsafe GROK_USER_PLUGIN_ROOT (must be a dedicated .../%s directory): %s\n' \
+				"$(GROK_PLUGIN_NAME)" "$$plugin_root" >&2; \
+			exit 2; \
+		fi
+	# Grok documents ~/.grok/plugins as its auto-trusted user plugin location.
+	# Copying this native MCP payload there is the explicit trust decision.
+	# Migrate the older direct-install registry row first; it can be listed as
+	# enabled while still being omitted from a live session's MCP inventory.
+	# Deliberately omit --confirm below: fail closed if that name belongs to a
+	# multi-plugin repository instead of deleting its unrelated plugins.
+	@plugin_list="$$( $(GROK_PEER_ENV) "$(GROK_PEER)" plugin list --json )" || { \
+		status=$$?; \
+		printf 'Cannot inspect existing Grok plugin registrations (exit %s).\n' "$$status" >&2; \
+		exit "$$status"; \
+	}; \
+	if printf '%s\n' "$$plugin_list" | awk -v name='$(GROK_PLUGIN_NAME)' 'BEGIN { RS = "}" } \
+			index($$0, "\"name\"") && index($$0, "\"" name "\"") && index($$0, "\"repo_key\"") { found = 1 } \
+			END { exit(found ? 0 : 1) }'; then \
+		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin uninstall "$(GROK_PLUGIN_NAME)" --keep-data; \
+	fi
+	@plugin_parent="$$(dirname -- "$(GROK_USER_PLUGIN_ROOT)")"; \
+		mkdir -p "$$plugin_parent"; \
+		stage_dir="$$(mktemp -d "$$plugin_parent/.agent-sessions.stage.XXXXXX")"; \
+		trap 'rm -rf -- "$$stage_dir"' EXIT; \
+		cp -R "$(GROK_PLUGIN_ROOT)/." "$$stage_dir/"; \
+		rm -rf -- "$(GROK_USER_PLUGIN_ROOT)"; \
+		mv "$$stage_dir" "$(GROK_USER_PLUGIN_ROOT)"; \
+		trap - EXIT
+	# Grok 1.0.4 discovers the live plugin from its user-plugin directory, but
+	# only its official installer may safely update the enabled-plugin config.
+	# Use a temporary direct registration for that write, remove only that
+	# registration while preserving data/config, then verify Grok's resolved
+	# runtime view rather than trusting either command's exit status alone.
+	$(GROK_PEER_ENV) "$(GROK_PEER)" plugin install "$(GROK_PLUGIN_ROOT)" --trust
+	$(GROK_PEER_ENV) "$(GROK_PEER)" plugin uninstall "$(GROK_PLUGIN_NAME)" --keep-data
+	set -o pipefail; $(GROK_PEER_ENV) "$(GROK_PEER)" inspect --json | \
+		"$(GROK_PLUGIN_VERIFY)" grok-plugin-verify --root "$(GROK_USER_PLUGIN_ROOT)"
+
+dev-install-grok:
+	$(MAKE) install-grok GROK_PLUGIN_ROOT="$(CURDIR)/grok"
+
 install-all: install
 	$(MAKE) install-claude
+	$(MAKE) install-grok
 
 dev-install-all: dev-install
 	$(MAKE) dev-install-claude
+	$(MAKE) dev-install-grok
 
 repair-projection:
 	@test -n "$(THREAD_ID)" || { printf 'usage: make repair-projection THREAD_ID=<id> [APPLY=1]\n' >&2; exit 2; }

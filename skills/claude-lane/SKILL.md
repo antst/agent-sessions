@@ -56,7 +56,10 @@ the stable process identity rather than a mutable session ID; persistent lanes a
 the unfiltered list for global name-collision checks. `--mine` fails rather than guessing when the
 caller is not a corroborated live Codex or Claude peer.
 
-Require `contract_version: 1`, `claude_available: true`, and `supervisor_reachable: true`. Pick a unique descriptive name. The launcher also rejects collisions against live Claude/Codex peers and Codex lanes.
+Require `contract_version: 1`, `claude_available: true`, `claude_logged_in: true`, and
+`supervisor_reachable: true`. This is a local credential-state preflight; require the first real
+turn to succeed before claiming end-to-end authentication. Pick a unique descriptive name. The
+launcher also rejects collisions against live Claude/Codex peers and Codex lanes.
 
 ## Start and collect
 
