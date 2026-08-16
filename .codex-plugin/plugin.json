@@ -1,6 +1,6 @@
 {
   "name": "claude-code-peer",
-  "version": "0.1.0+codex.20260813232547",
+  "version": "0.1.1+codex.20260816105439",
   "description": "Give Codex and Claude sessions a durable lifecycle and cross-session messaging.",
   "author": {
     "name": "Agent Sessions contributors"
