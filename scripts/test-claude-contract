@@ -14,7 +14,13 @@ done
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 
 preflight="$plugin_root/claude/skills/codex-lane/scripts/lane-preflight"
+grok_preflight="$plugin_root/claude/skills/grok-lane/scripts/lane-preflight"
 sh -n "$preflight"
+sh -n "$grok_preflight"
+if [[ ! -x "$grok_preflight" ]]; then
+  printf 'Claude Grok lane preflight is not executable\n' >&2
+  exit 1
+fi
 
 codex_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   "$plugin_root/.codex-plugin/plugin.json" | head -1)"
@@ -35,6 +41,12 @@ if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$skill" | head -1)" != codex-lane ]] 
   printf 'Claude skill frontmatter is incomplete or mismatched\n' >&2
   exit 1
 fi
+grok_skill="$plugin_root/claude/skills/grok-lane/SKILL.md"
+if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$grok_skill" | head -1)" != grok-lane ]] ||
+   [[ -z "$(sed -n 's/^description:[[:space:]]*//p' "$grok_skill" | head -1)" ]]; then
+  printf 'Claude Grok skill frontmatter is incomplete or mismatched\n' >&2
+  exit 1
+fi
 claude_markdown=()
 while IFS= read -r file; do
   claude_markdown[${#claude_markdown[@]}]="$file"
@@ -47,6 +59,13 @@ for reference in events failures install policy; do
   file="$plugin_root/claude/skills/codex-lane/references/$reference.md"
   if [[ ! -f "$file" ]] || ! grep -Fq "references/$reference.md" "$skill"; then
     printf 'Claude skill reference %s is missing or unlinked\n' "$reference" >&2
+    exit 1
+  fi
+done
+for reference in contract install; do
+  file="$plugin_root/claude/skills/grok-lane/references/$reference.md"
+  if [[ ! -f "$file" ]] || ! grep -Fq "references/$reference.md" "$grok_skill"; then
+    printf 'Claude Grok skill reference %s is missing or unlinked\n' "$reference" >&2
     exit 1
   fi
 done
@@ -85,6 +104,10 @@ if grep -Fq "s/\\r/" "$preflight"; then
   printf 'Claude lane preflight uses GNU-only sed carriage-return matching\n' >&2
   exit 1
 fi
+if grep -Fq "s/\\r/" "$grok_preflight"; then
+  printf 'Grok lane preflight uses GNU-only sed carriage-return matching\n' >&2
+  exit 1
+fi
 
 contract_gocache="${GOCACHE:-${TMPDIR:-/tmp}/agent-sessions-go-cache}"
 mkdir -p "$contract_gocache"
@@ -92,6 +115,19 @@ lane_help="$(cd -- "$plugin_root" && GOCACHE="$contract_gocache" go run ./cmd/ag
 for command in run start resume wait status interrupt archive list doctor; do
   if ! grep -Fq "codex-peer-lane $command" <<<"$lane_help"; then
     printf 'Claude contract documents missing lane command %s\n' "$command" >&2
+    exit 1
+  fi
+done
+grok_lane_help="$(cd -- "$plugin_root" && GOCACHE="$contract_gocache" go run ./cmd/agent-session-runtime grok-lane --help)"
+for command in run start resume wait status interrupt archive list doctor; do
+  if ! grep -Fq "grok-peer-lane $command" <<<"$grok_lane_help"; then
+    printf 'Claude Grok contract documents missing lane command %s\n' "$command" >&2
+    exit 1
+  fi
+done
+for event in lane.ready lane.list lane.doctor item.completed turn.completed lane.status lane.archived; do
+  if ! grep -R -Fq "$event" "$plugin_root/claude/skills/grok-lane" "$plugin_root/docs/GROK-LANES.md"; then
+    printf 'Claude Grok contract omits event %s\n' "$event" >&2
     exit 1
   fi
 done
@@ -126,7 +162,11 @@ make -s -C "$plugin_root" stage-claude PREFIX="$temporary_root/prefix" \
   CLAUDE_RELEASE_ROOT="$claude_release_root"
 staged_marketplace="$claude_release_root/$claude_version"
 if [[ ! -f "$staged_marketplace/.claude-plugin/marketplace.json" ]] ||
-   [[ ! -f "$staged_marketplace/claude/.claude-plugin/plugin.json" ]]; then
+   [[ ! -f "$staged_marketplace/claude/.claude-plugin/plugin.json" ]] ||
+   [[ ! -f "$staged_marketplace/claude/skills/grok-lane/SKILL.md" ]] ||
+   [[ ! -x "$staged_marketplace/claude/skills/grok-lane/scripts/lane-preflight" ]] ||
+   [[ ! -f "$staged_marketplace/claude/skills/grok-lane/references/contract.md" ]] ||
+   [[ ! -f "$staged_marketplace/claude/skills/grok-lane/references/install.md" ]]; then
   printf 'Claude plugin was not staged as an immutable versioned marketplace\n' >&2
   exit 1
 fi
@@ -138,6 +178,27 @@ restage_status=$?
 set -e
 if (( restage_status == 0 )) || ! grep -Fq 'already exists with different content' "$temporary_root/restage.err"; then
   printf 'Claude immutable-stage guard accepted same-version content drift\n' >&2
+  exit 1
+fi
+
+contract_binary_dir="$temporary_root/package-bin"
+contract_release_dir="$temporary_root/package-release"
+mkdir -p "$contract_binary_dir" "$contract_release_dir"
+for binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+  printf '%s\n' '#!/bin/sh' 'exit 0' >"$contract_binary_dir/$binary"
+  chmod 0700 "$contract_binary_dir/$binary"
+done
+contract_archive="$("$plugin_root/scripts/package-release" contract-test contract-test \
+  "$contract_binary_dir" "$contract_release_dir")"
+contract_extract="$temporary_root/package-extract"
+mkdir -p "$contract_extract"
+tar -C "$contract_extract" -xzf "$contract_archive"
+packaged_grok_skill="$contract_extract/agent-sessions-contract-test-contract-test/claude/skills/grok-lane"
+if [[ ! -f "$packaged_grok_skill/SKILL.md" ]] ||
+   [[ ! -x "$packaged_grok_skill/scripts/lane-preflight" ]] ||
+   [[ ! -f "$packaged_grok_skill/references/contract.md" ]] ||
+   [[ ! -f "$packaged_grok_skill/references/install.md" ]]; then
+  printf 'Release package omitted part of the Claude Grok lane skill contract\n' >&2
   exit 1
 fi
 
@@ -253,6 +314,100 @@ set -e
 if (( unreachable_status == 0 )) || ! grep -Fq '"contract_ok": true' <<<"$unreachable_report" ||
    ! grep -Fq '"runtime_ready": false' <<<"$unreachable_report"; then
   printf 'Claude lane preflight did not distinguish compatibility from reachability\n' >&2
+  exit 1
+fi
+
+path_grok_lane="$temporary_root/bin/grok-peer-lane"
+fake_grok_lane="$temporary_root/grok-peer-lane"
+grok_doctor_record="$temporary_root/grok-doctor-commands"
+printf '%s\n' '#!/bin/sh' 'exit 88' >"$path_grok_lane"
+chmod 0700 "$path_grok_lane"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >>"$FAKE_GROK_DOCTOR_RECORD"' \
+  '[ "$*" = "doctor --json" ] || exit 2' \
+  'case "${FAKE_GROK_DOCTOR_MODE:-ready}" in' \
+  '  ready) printf "%s\n" '\''{"type":"lane.doctor","product":"grok","contract_version":1,"grok_available":true,"grok_path":"/fake/grok","grok_version":"grok 1.0.4","grok_error":null,"supervisor_reachable":false}'\'' ;;' \
+  '  wrong-contract) printf "%s\n" '\''{"type":"lane.doctor","product":"grok","contract_version":2,"grok_available":true,"grok_error":null}'\'' ;;' \
+  '  unavailable) printf "%s\n" '\''{"type":"lane.doctor","product":"grok","contract_version":1,"grok_available":false,"grok_path":null,"grok_error":null}'\''; exit 1 ;;' \
+  '  grok-error) printf "%s\n" '\''{"type":"lane.doctor","product":"grok","contract_version":1,"grok_available":true,"grok_path":"/fake/grok","grok_error":"Grok Build version check failed"}'\''; exit 1 ;;' \
+  '  *) exit 2 ;;' \
+  'esac' >"$fake_grok_lane"
+chmod 0700 "$fake_grok_lane"
+printf '%s\n' "$fake_runtime" >"$temporary_root/state/native-runtime-path"
+
+: >"$grok_doctor_record"
+grok_ready_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/state" FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" \
+  FAKE_GROK_DOCTOR_MODE=ready "$grok_preflight")"
+if ! grep -Fq '"summary": "ready"' <<<"$grok_ready_report" ||
+   ! grep -Fq '"runtime_ready": true' <<<"$grok_ready_report" ||
+   ! grep -Fq '"contract_version": 1' <<<"$grok_ready_report" ||
+   ! grep -Fq '"grok_available":true' <<<"$grok_ready_report" ||
+   ! grep -Fq '"supervisor_reachable":false' <<<"$grok_ready_report" ||
+   ! grep -Fq "\"invocation\": \"$fake_grok_lane\"" <<<"$grok_ready_report" ||
+   [[ "$(<"$grok_doctor_record")" != 'doctor --json' ]]; then
+  printf 'Claude Grok lane preflight rejected a ready contract-1 runtime: %s\n' "$grok_ready_report" >&2
+  exit 1
+fi
+
+rm -f "$temporary_root/state/native-runtime-path"
+set +e
+grok_missing_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/state" FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" \
+  "$grok_preflight")"
+grok_missing_status=$?
+set -e
+if (( grok_missing_status == 0 )) ||
+   ! grep -Fq '"launcher_found": true' <<<"$grok_missing_report" ||
+   ! grep -Fq '"runtime_found": false' <<<"$grok_missing_report" ||
+   ! grep -Fq '"invocation": ""' <<<"$grok_missing_report" ||
+   ! grep -Fq 'Grok lane runtime is not installed' <<<"$grok_missing_report"; then
+  printf 'Claude Grok lane preflight did not fail closed without the installed runtime marker: %s\n' "$grok_missing_report" >&2
+  exit 1
+fi
+printf '%s\n' "$fake_runtime" >"$temporary_root/state/native-runtime-path"
+
+set +e
+grok_wrong_contract_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/state" FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" \
+  FAKE_GROK_DOCTOR_MODE=wrong-contract "$grok_preflight")"
+grok_wrong_contract_status=$?
+set -e
+if (( grok_wrong_contract_status == 0 )) ||
+   ! grep -Fq '"contract_version": 2' <<<"$grok_wrong_contract_report" ||
+   ! grep -Fq '"runtime_ready": false' <<<"$grok_wrong_contract_report" ||
+   ! grep -Fq '"doctor_exit": 0' <<<"$grok_wrong_contract_report"; then
+  printf 'Claude Grok lane preflight accepted the wrong contract major: %s\n' "$grok_wrong_contract_report" >&2
+  exit 1
+fi
+
+set +e
+grok_unavailable_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/state" FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" \
+  FAKE_GROK_DOCTOR_MODE=unavailable "$grok_preflight")"
+grok_unavailable_status=$?
+set -e
+if (( grok_unavailable_status == 0 )) ||
+   ! grep -Fq '"contract_version": 1' <<<"$grok_unavailable_report" ||
+   ! grep -Fq '"runtime_ready": false' <<<"$grok_unavailable_report" ||
+   ! grep -Fq '"doctor_exit": 1' <<<"$grok_unavailable_report" ||
+   ! grep -Fq '"grok_available":false' <<<"$grok_unavailable_report"; then
+  printf 'Claude Grok lane preflight accepted an unavailable Grok Build CLI: %s\n' "$grok_unavailable_report" >&2
+  exit 1
+fi
+
+set +e
+grok_error_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/state" FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" \
+  FAKE_GROK_DOCTOR_MODE=grok-error "$grok_preflight")"
+grok_error_status=$?
+set -e
+if (( grok_error_status == 0 )) ||
+   ! grep -Fq '"runtime_ready": false' <<<"$grok_error_report" ||
+   ! grep -Fq '"doctor_exit": 1' <<<"$grok_error_report" ||
+   ! grep -Fq '"grok_error":"Grok Build version check failed"' <<<"$grok_error_report"; then
+  printf 'Claude Grok lane preflight accepted a failed Grok Build probe: %s\n' "$grok_error_report" >&2
   exit 1
 fi
 

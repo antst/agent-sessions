@@ -22,6 +22,7 @@ bash -n \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
+  "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
   "$plugin_root/grok/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
@@ -52,6 +53,19 @@ for command in run start resume wait status interrupt archive list doctor; do
     exit 1
   fi
 done
+grok_lane_help="$(go run "$plugin_root/cmd/agent-session-runtime" grok-lane --help)"
+for command in run start resume wait status interrupt archive list doctor; do
+  if ! grep -Fq "grok-peer-lane $command" <<<"$grok_lane_help"; then
+    printf 'Grok lane help is missing command %s\n' "$command" >&2
+    exit 1
+  fi
+done
+for flag in --permission-mode --model --reasoning-effort --auto-archive-after --no-auto-archive --persistent --mine; do
+  if ! grep -Fq -- "$flag" <<<"$grok_lane_help"; then
+    printf 'Grok lane help is missing flag %s\n' "$flag" >&2
+    exit 1
+  fi
+done
 for flag in --permission-mode --max-budget-usd --auto-archive-after --no-auto-archive --persistent --notify --schema --bare --mine; do
   if ! grep -Fq -- "$flag" <<<"$claude_lane_help"; then
     printf 'Claude lane help is missing flag %s\n' "$flag" >&2
@@ -78,6 +92,19 @@ if ! grep -Fq 'Do **not** poll' "$plugin_root/skills/claude-lane/SKILL.md"; then
   printf 'Claude lane skill does not document push-based peer delivery\n' >&2
   exit 1
 fi
+if grep -Rq '\[TODO' "$plugin_root/skills/grok-lane" ||
+   ! grep -Fq 'contract_version: 1' "$plugin_root/skills/grok-lane/SKILL.md" ||
+   ! grep -Fq 'grok-peer-lane' "$plugin_root/docs/GROK-LANES.md"; then
+  printf 'Codex Grok-lane skill or contract documentation is incomplete\n' >&2
+  exit 1
+fi
+if [[ ! -f "$plugin_root/grok/skills/agent-lanes/SKILL.md" ]] ||
+   ! grep -Fq 'Codex lanes require contract version **2**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
+   ! grep -Fq 'Claude lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
+   ! grep -Fq 'report the lane cell as blocked; never "try anyway."' "$plugin_root/grok/skills/agent-lanes/SKILL.md"; then
+  printf 'Grok agent-lanes skill does not distinguish Codex and Claude contracts\n' >&2
+  exit 1
+fi
 for skill in "$plugin_root/skills/claude-lane/SKILL.md" "$plugin_root/claude/skills/codex-lane/SKILL.md"; do
   if ! grep -Fq 'peer-federator lane --host HOST' "$skill" ||
      ! grep -Fq 'never fall back to SSH' "$skill"; then
@@ -96,7 +123,8 @@ if grep -En '(^|[^[:alnum:]_])(node|flock)([^[:alnum:]_]|$)|readlink -f' \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
-  "$plugin_root/claude/skills/codex-lane/scripts/lane-preflight"; then
+  "$plugin_root/claude/skills/codex-lane/scripts/lane-preflight" \
+  "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight"; then
   printf 'active scripts unexpectedly depend on Node, flock, or GNU readlink -f\n' >&2
   exit 1
 fi
@@ -424,7 +452,8 @@ if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
   exit 1
 fi
 if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
-   ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan"; then
+   ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan" ||
+   ! grep -Fq 'grok-peer-lane archive SESSION_OR_NAME' <<<"$preflight_plan"; then
   printf 'install preflight does not require clean managed Grok shutdown\n' >&2
   exit 1
 fi
@@ -436,6 +465,7 @@ installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
 if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
    [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
    [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
+   [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
    [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
    [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
@@ -443,11 +473,12 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/grok-peer-lane")" != "$installed_binary_dir/grok-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
     exit 1
@@ -455,6 +486,7 @@ for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-
 done
 if [[ ! -f "$custom_install_root/grok/.grok-plugin/plugin.json" ]] ||
    [[ ! -f "$custom_install_root/grok/.mcp.json" ]] ||
+   [[ ! -f "$custom_install_root/grok/skills/agent-lanes/SKILL.md" ]] ||
    [[ ! -x "$custom_install_root/grok/scripts/native-entry" ]] ||
    ! grep -Fq '"grok-mcp"' "$custom_install_root/grok/.mcp.json" ||
    ! grep -Fq '${GROK_PLUGIN_ROOT}/scripts/native-entry' "$custom_install_root/grok/.mcp.json"; then
@@ -542,6 +574,7 @@ CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
   GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root"
 if [[ ! -f "$grok_user_plugin_root/.grok-plugin/plugin.json" ]] ||
    [[ ! -f "$grok_user_plugin_root/.mcp.json" ]] ||
+   [[ ! -f "$grok_user_plugin_root/skills/agent-lanes/SKILL.md" ]] ||
    [[ ! -x "$grok_user_plugin_root/scripts/native-entry" ]] ||
    ! grep -Fq 'plugin validate' "$grok_plugin_log" ||
    ! grep -Fq "plugin install $custom_install_root/grok --trust" "$grok_plugin_log" ||
@@ -680,8 +713,11 @@ tar -C "$release_extract" -xzf "$release_archive"
 release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
 if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
 	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/skills/grok-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/claude/skills/grok-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/grok/skills/agent-lanes/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.mcp.json" ]] ||
    [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
@@ -689,7 +725,7 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1

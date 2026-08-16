@@ -71,7 +71,7 @@ endif
 PLATFORM := $(GOOS)-$(PLATFORM_ARCH)
 BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
-BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator
+BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator
 
 .PHONY: all lint test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
 	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
@@ -107,6 +107,7 @@ build:
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer-lane" ./cmd/codex-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer-lane" ./cmd/claude-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer" ./cmd/grok-peer; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer-lane" ./cmd/grok-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='$(PEER_FEDERATOR_LDFLAGS)' -o "$(BIN_DIR)/peer-federator" ./cmd/peer-federator; \
 	else \
 		printf 'Go is required because this source tree has no authorized packaged %s binaries\n' "$(PLATFORM)" >&2; \
@@ -150,8 +151,10 @@ install-preflight: build
 		"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 		if [[ $$grok_status -eq 3 ]]; then \
 			printf '%s\n' \
-				'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
-				'Its private leader and ACP observer stop automatically with that TUI.' \
+				'A managed Grok peer or lane is still running.' \
+				'Exit every grok-peer TUI normally, then list and archive headless lanes with:' \
+				'  grok-peer-lane list' \
+				'  grok-peer-lane archive SESSION_OR_NAME' \
 				'After they stop, run make install again.' >&2; \
 			exit 75; \
 		elif [[ $$grok_status -ne 0 ]]; then \
@@ -165,8 +168,10 @@ grok-install-preflight: build
 	"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 	if [[ $$grok_status -eq 3 ]]; then \
 		printf '%s\n' \
-			'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
-			'Its private leader and ACP observer stop automatically with that TUI.' \
+			'A managed Grok peer or lane is still running.' \
+			'Exit every grok-peer TUI normally, then list and archive headless lanes with:' \
+			'  grok-peer-lane list' \
+			'  grok-peer-lane archive SESSION_OR_NAME' \
 			'After they stop, run make install-grok again.' >&2; \
 		exit 75; \
 	elif [[ $$grok_status -ne 0 ]]; then \
@@ -196,6 +201,7 @@ install: install-preflight
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
@@ -231,6 +237,7 @@ dev-install: install-preflight
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"
+	ln -sfn "$(abspath $(BIN_DIR))/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \

@@ -151,19 +151,21 @@ busy, then require the exact return marker:
 
 | Source | Destinations |
 |---|---|
-| Codex peer | Codex peer, Grok peer, Codex lane, Claude lane |
-| Grok peer | Codex peer, Grok peer, Codex lane, Claude lane |
-| Codex lane | Codex peer, Grok peer, Codex lane, Claude lane |
-| Claude lane | Codex peer, Grok peer, Codex lane, Claude lane |
+| Codex peer | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Grok peer | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Codex lane | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Claude lane | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Grok lane | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
 
 Repeat same-host, Linux→macOS, macOS→Linux, and Linux→Linux. Repeat with the
 destination offline then resumed and across federator reconnect. Enqueue-only
 evidence is `RED`.
 
-## Codex and Claude lanes (`L/F/X`)
+## Codex, Claude, and Grok lanes (`L/F/X`)
 
-Run every cell for local and remote Codex and Claude lanes, owned in turn by a
-live Codex peer and a live Grok peer. Use real turns and unique names.
+Run every applicable cell for local and remote Codex, Claude, and Grok lanes, owned in turn by a
+live Codex peer, a live Claude peer, and a live Grok peer. Grok lane federation is explicitly
+implemented. Use real turns and unique names.
 
 | ID | Cell |
 |---|---|
@@ -174,18 +176,24 @@ live Codex peer and a live Grok peer. Use real turns and unique names.
 | L-05 | Idle peer message starts one collectable follow-up; busy message follows product semantics. |
 | L-06 | Lane replies to owner and messages every applicable peer/lane destination. |
 | L-07 | `resume` reuses exact identity and refuses while prior work is owed. |
-| L-08 | `interrupt` yields correct raw status, normalized outcome, exit, notice, and collection. |
+| L-08 | `interrupt` yields correct raw status, normalized outcome, exit, collection, and a notice where that product supports notices. |
 | L-09 | Execution timeout yields `timed_out`/124; collection timeout does not mutate work. |
-| L-10 | Archive is idempotent, removes discovery, retains transcript, and reports dropped notices. |
+| L-10 | Archive is idempotent, removes discovery, retains transcript, and reports dropped notices where notices are supported. |
 | L-11 | Archived resume performs supported unarchive exactly once and preserves identity/transcript. |
 | L-12 | Auto-archive deadline, cancellation, custom grace, and no-auto-archive match docs. |
 | L-13 | Duplicate name and invalid owner/token/product remove provisional worktree/process/socket. |
 | L-14 | User dirty worktree and archived lane worktree are preserved. |
 | L-15 | Owner exit interrupts/archives parent-owned work; persistent lane and unrelated lanes survive. |
-| L-16 | Worker/manager/supervisor crash recovery restores terminal items, cursor, notice, and cleanup once. |
+| L-16 | Worker/manager/supervisor crash recovery restores terminal items, cursor, supported notices, and cleanup once. |
 | L-17 | Permission inheritance requires exact local owner; explicit lane policy always wins. |
 | L-18 | Remote run/start/resume/wait/status/interrupt/archive/list preserve streams, exit, cwd, notify, and cleanup fuse. |
 | L-19 | Remote stdin cap, prompt-file semantics, hub loss, and disabled destination capability fail closed. |
+| L-20 | Grok persists its ACP-created native UUID beside the stable lane UUID; `session/load` reuses that exact native identity under one sole ACP driver and never attaches to an interactive Grok conversation. |
+| L-21 | Grok idle/busy inbound messages serialize into collectable turns; duplicate message IDs are idempotent and conflicting reuse fails closed. |
+| L-22 | Grok headless policy is explicitly always-approve, published as bypass, and never inferred from an uncorroborated owner or downgraded to an unusable prompting mode. |
+| L-23 | Codex and Claude plugins ship a valid Grok-lane skill; its executable Claude preflight and linked contract/install references survive staging and packaging; the Grok plugin ships an agent-lanes skill that distinguishes Codex contract 2 from Claude contract 1. |
+| L-24 | Grok `lane.status`/`lane.list` report stable and native identities, lifecycle state, collection debt, owner/persistence, and auto-archive policy; every collected terminal result is `turn.completed` with explicit status/outcome/exit. |
+| L-25 | Grok normal archive and crash reconciliation remove the real ACP worker and all attributable MCP/tool descendants on Linux and macOS. The macOS cell must exercise a registered restricted shell in its own session after manager SIGKILL. Unmanaged restricted daemons that create a new session and reparent after their registered shell has exited are explicitly unsupported and excluded from a green cleanup claim, never guessed or killed heuristically. |
 
 ## Federation (`X/F`)
 

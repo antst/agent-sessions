@@ -24,6 +24,8 @@ const (
 	CapabilityCodexLane = "codex-lane"
 	// CapabilityClaudeLane is the Claude lane host-roster feature identifier.
 	CapabilityClaudeLane = "claude-lane"
+	// CapabilityGrokLane is the Grok lane host-roster feature identifier.
+	CapabilityGrokLane = "grok-lane"
 )
 
 // Host is one connected federation agent and the remote services it can run.

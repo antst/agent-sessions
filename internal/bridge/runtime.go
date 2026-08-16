@@ -52,11 +52,15 @@ type daemon struct {
 	pendingDir       string
 	sessionIndex     string
 	listener         net.Listener
+	handlerWG        sync.WaitGroup
+	admissionClosed  bool
+	connections      map[net.Conn]struct{}
 	seen             map[string]struct{}
 	seenOrder        []string
 	stopped          bool
 	// maintenanceBeforeWrite is a test seam for terminal-write ordering.
 	maintenanceBeforeWrite func()
+	handleBeforeFrame      func()
 	closeOnce              sync.Once
 	done                   chan struct{}
 }
@@ -66,10 +70,18 @@ type envelope struct {
 }
 
 // Main dispatches one role of the agent-session-runtime executable.
+//
+//nolint:gocyclo // Runtime role dispatch is intentionally centralized.
 func Main() {
+	if isGrokToolWrapperInvocation() {
+		os.Exit(runGrokToolWrapper(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
+	}
+	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
+		os.Exit(code)
 	}
 	switch os.Args[1] {
 	case "shim":
@@ -78,12 +90,10 @@ func Main() {
 		os.Exit(runSupervisorCommand(os.Args[2:]))
 	case "appserver":
 		os.Exit(runAppServerCommand(os.Args[2:]))
-	case "lane":
-		os.Exit(runLaneCommand(os.Args[2:]))
-	case "claude-lane":
-		os.Exit(runClaudeLaneCommand(os.Args[2:]))
 	case "claude-lane-manager":
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
+	case "grok-lane-manager":
+		os.Exit(runGrokLaneManager(os.Args[2:]))
 	case "grok":
 		os.Exit(runGrokSafetyCommand(os.Args[2:]))
 	case "grok-host":
@@ -101,6 +111,19 @@ func Main() {
 	default:
 		fmt.Fprintf(os.Stderr, "agent-session-runtime: unknown command %q\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+func runNativeLaneRole(role string, args []string) (int, bool) {
+	switch role {
+	case "lane":
+		return runLaneCommand(args), true
+	case "claude-lane":
+		return runClaudeLaneCommand(args), true
+	case "grok-lane":
+		return runGrokLaneCommand(args), true
+	default:
+		return 0, false
 	}
 }
 
@@ -197,6 +220,7 @@ func newDaemon(args map[string]string) *daemon {
 		pendingDir:    filepath.Join(dataDir, "sessions", key, "inbox", "pending"),
 		sessionIndex:  filepath.Join(codexHome, "session_index.jsonl"),
 		seen:          map[string]struct{}{}, done: make(chan struct{}),
+		connections: map[net.Conn]struct{}{},
 	}
 }
 
@@ -285,7 +309,24 @@ func (d *daemon) acceptLoop() {
 				continue
 			}
 		}
-		go d.handleConnection(conn)
+		d.mu.Lock()
+		if d.admissionClosed {
+			d.mu.Unlock()
+			_ = conn.Close()
+			continue
+		}
+		d.handlerWG.Add(1)
+		d.connections[conn] = struct{}{}
+		d.mu.Unlock()
+		go func() {
+			defer func() {
+				d.mu.Lock()
+				delete(d.connections, conn)
+				d.mu.Unlock()
+				d.handlerWG.Done()
+			}()
+			d.handleConnection(conn)
+		}()
 	}
 }
 
@@ -303,6 +344,9 @@ func (d *daemon) handleConnection(conn net.Conn) {
 			if stringValue(frame["type"]) == "control" && stringValue(frame["action"]) == "inspect" {
 				d.writeInspection(conn)
 				continue
+			}
+			if d.handleBeforeFrame != nil {
+				d.handleBeforeFrame()
 			}
 			d.handleFrame(frame)
 		}
@@ -387,7 +431,7 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 	response, err := requestControl(supervisor, map[string]any{
 		"action": "wake", "sessionId": d.sessionID, "launchToken": d.supervisorToken, "item": item,
 	}, 30*time.Second)
-	ownedStates := []string{"accepted", "in_flight", "actor_accepted", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
+	ownedStates := []string{"accepted", "in_flight", "actor_accepted", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict", "failed", "interrupted", "timed_out"}
 	if err == nil && containsString(ownedStates, stringValue(response["delivery"])) {
 		return true
 	}
@@ -405,7 +449,7 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 			"action": "wake_status", "sessionId": d.sessionID, "launchToken": d.supervisorToken,
 			"messageId": stringValue(item["id"]),
 		}, 2*time.Second)
-		if statusErr == nil && containsString([]string{"in_flight", "actor_accepted", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
+		if statusErr == nil && containsString([]string{"in_flight", "actor_accepted", "delivered", "queueing", "queued", "fallback_delivered", "failed", "interrupted", "timed_out"}, stringValue(status["delivery"])) {
 			return true
 		}
 		response, err = requestControl(supervisor, map[string]any{
@@ -579,6 +623,11 @@ func (d *daemon) writeRecordsLocked() error {
 }
 
 func (d *daemon) enqueue(item map[string]any) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped {
+		return errors.New("peer daemon is stopping")
+	}
 	if err := os.MkdirAll(d.pendingDir, 0700); err != nil {
 		return err
 	}
@@ -624,9 +673,29 @@ func (d *daemon) publishAlias() error {
 
 func (d *daemon) shutdown() {
 	d.closeOnce.Do(func() { close(d.done) })
-	if d.listener != nil {
-		_ = d.listener.Close()
+	// Stop admitting frames, then drain every frame whose transport write may
+	// already have succeeded. This gives each accepted user message exactly one
+	// chance to reach its supervisor or durable inbox before teardown removes
+	// either path.
+	d.mu.Lock()
+	d.admissionClosed = true
+	listener := d.listener
+	connections := make([]net.Conn, 0, len(d.connections))
+	for conn := range d.connections {
+		connections = append(connections, conn)
 	}
+	d.mu.Unlock()
+	if listener != nil {
+		_ = listener.Close()
+	}
+	// Existing streams may already contain more newline-delimited frames. Give
+	// their handlers a short bounded drain window; after it, closing the stream
+	// makes any later sender write observably fail instead of being silently
+	// accepted after teardown.
+	for _, conn := range connections {
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	}
+	d.handlerWG.Wait()
 	// Serialize the terminal state with every heartbeat and control update.
 	// A heartbeat may already have won its ticker select when done closes; the
 	// stopped latch prevents that writer from recreating state after removal.

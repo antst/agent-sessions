@@ -33,6 +33,7 @@ type AgentOptions struct {
 	EnableRemoteLanes    bool
 	CodexLaneExecutable  string
 	ClaudeLaneExecutable string
+	GrokLaneExecutable   string
 	Logger               *log.Logger
 }
 
@@ -136,17 +137,23 @@ func configureLaneExecutables(options *AgentOptions) error {
 	if !options.EnableRemoteLanes {
 		options.CodexLaneExecutable = ""
 		options.ClaudeLaneExecutable = ""
+		options.GrokLaneExecutable = ""
 		return nil
 	}
 	codexConfigured := options.CodexLaneExecutable
 	claudeConfigured := options.ClaudeLaneExecutable
+	grokConfigured := options.GrokLaneExecutable
 	options.CodexLaneExecutable = resolveLaneExecutable(codexConfigured, "codex-peer-lane")
 	options.ClaudeLaneExecutable = resolveLaneExecutable(claudeConfigured, "claude-peer-lane")
+	options.GrokLaneExecutable = resolveLaneExecutable(grokConfigured, "grok-peer-lane")
 	if codexConfigured != "" && options.CodexLaneExecutable == "" {
 		return fmt.Errorf("configured codex lane launcher %q is not executable", codexConfigured)
 	}
 	if claudeConfigured != "" && options.ClaudeLaneExecutable == "" {
 		return fmt.Errorf("configured Claude lane launcher %q is not executable", claudeConfigured)
+	}
+	if grokConfigured != "" && options.GrokLaneExecutable == "" {
+		return fmt.Errorf("configured Grok lane launcher %q is not executable", grokConfigured)
 	}
 	return nil
 }

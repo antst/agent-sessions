@@ -134,6 +134,23 @@ func runGrokFakeACP() {
 				writeGrokFakeResponse(request["id"], nil, map[string]any{"code": -32001, "message": "bad cached token"})
 				continue
 			}
+		case "session/new", "session/load":
+			result["sessionId"] = defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv))
+		case "session/prompt":
+			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
+				time.Sleep(time.Duration(delay) * time.Millisecond)
+			}
+			params, _ := request["params"].(map[string]any)
+			writeGrokFakeNotification("session/update", map[string]any{
+				"sessionId": stringValue(params["sessionId"]),
+				"update": map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": defaultString(os.Getenv("GROK_FAKE_ANSWER"), "fake Grok lane answer")},
+				},
+			})
+			result["stopReason"] = "end_turn"
+		case "session/cancel":
+			continue
 		case "_x.ai/sessions/list":
 			if delay := time.Until(activeTurnUntil); delay > 0 {
 				time.Sleep(delay)
@@ -153,7 +170,8 @@ func runGrokFakeACP() {
 				activity = strings.TrimSpace(string(body))
 			}
 			result["result"] = map[string]any{"sessions": []any{map[string]any{
-				"sessionId": os.Getenv(grokSessionIDEnv), "resident": true, "yolo": yolo, "activity": activity,
+				"sessionId": defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv)),
+				"resident":  true, "yolo": yolo, "activity": activity,
 			}}}
 			if marker := os.Getenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE"); marker != "" {
 				file, createErr := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -1512,6 +1530,36 @@ func TestActiveGrokLaunchSessionsBlocksLiveOrUnverifiableInstallState(t *testing
 	}
 	if _, err := activeGrokLaunchSessions(paths); err == nil || !strings.Contains(err.Error(), "malformed") {
 		t.Fatalf("malformed Grok inventory error = %v", err)
+	}
+}
+
+func TestActiveGrokLaunchSessionsIncludesLaneProcessSessionAndMalformedLaneState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	paths := resolveNativePaths()
+	sessionID := randomID()
+	processSessionID, err := grokProcessSessionID(os.Getpid())
+	if err != nil {
+		t.Skipf("process-session inventory is unsupported: %v", err)
+	}
+	state := grokLaneState{
+		Type: "grok-peer-lane", Name: "install-lane", SessionID: sessionID, Status: "archived",
+		WorkerSessionID: processSessionID, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli(),
+	}
+	if err := writeGrokLaneState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	live, err := activeGrokLaunchSessions(paths)
+	if err != nil || !reflect.DeepEqual(live, []string{sessionID}) {
+		t.Fatalf("Grok lane process-session inventory = %v, %v", live, err)
+	}
+	if err := os.WriteFile(grokLaneStatePath(paths, sessionID), []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activeGrokLaunchSessions(paths); err == nil || !strings.Contains(err.Error(), "malformed Grok lane") {
+		t.Fatalf("malformed Grok lane inventory error = %v", err)
 	}
 }
 

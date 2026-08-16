@@ -4,8 +4,8 @@ The hub and agents exchange newline-delimited JSON over plain TCP. The first age
 `hello`; a diagnostic client can instead send `probe`. Protocol version mismatches are rejected.
 
 Agents publish complete snapshots of their live local peers. The hub broadcasts the combined
-roster plus one host record per connected agent. Host records advertise `codex-lane` and/or
-`claude-lane` capabilities only when the destination operator explicitly enables remote lane
+roster plus one host record per connected agent. Host records advertise `codex-lane`,
+`claude-lane`, and/or `grok-lane` capabilities only when the destination operator explicitly enables remote lane
 execution. This opt-in authorizes all hosts on the trusted hub to invoke the native lane CLI as
 that agent's OS user. Remote peers are represented locally by supervised shadow processes
 with real PIDs, numeric Claude registry records, and Unix sockets. Peer records carry a stable

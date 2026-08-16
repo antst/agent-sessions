@@ -116,6 +116,28 @@ func TestPrepareRemoteLaneInjectsPersistentNotifyThroughSourceShadow(t *testing.
 	}
 }
 
+func TestPrepareRemoteGrokLaneUsesAdvertisedLauncher(t *testing.T) {
+	agent := &agent{
+		options: AgentOptions{EnableRemoteLanes: true, GrokLaneExecutable: "/bin/true"},
+		remote:  map[string]Peer{"host-a/source": {ID: "host-a/source"}}, network: &wireConn{},
+		shadows: map[string]*shadowHandle{"host-a/source": {pid: os.Getpid(), socket: "/run/grok-source.sock"}},
+	}
+	executable, args, err := agent.prepareRemoteLane(Message{
+		Product: "grok", SourceID: "host-a/source", Args: []string{"start", "--name", "grok-worker", "-"},
+	})
+	if err != nil || executable != "/bin/true" {
+		t.Fatalf("prepare remote Grok lane = %q, %#v, %v", executable, args, err)
+	}
+	want := []string{"start", "--name", "grok-worker", "-", "--persistent", "--notify", "uds:/run/grok-source.sock"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("remote Grok args = %#v, want %#v", args, want)
+	}
+	capabilities := agent.laneCapabilities()
+	if len(capabilities) != 1 || capabilities[0] != CapabilityGrokLane {
+		t.Fatalf("remote Grok capabilities = %#v", capabilities)
+	}
+}
+
 func TestRemoteLaneExecutionRequiresExplicitEnable(t *testing.T) {
 	agent := &agent{options: AgentOptions{CodexLaneExecutable: "/bin/true"}}
 	if capabilities := agent.laneCapabilities(); len(capabilities) != 0 {
@@ -189,6 +211,7 @@ func TestRemoteLaneStdinDetectionMatchesNativeLifecycle(t *testing.T) {
 		{product: "codex", args: []string{"start", "--name", "worker"}, want: true},
 		{product: "codex", args: []string{"run", "--name", "worker", "-"}, want: true},
 		{product: "claude", args: []string{"resume", "worker"}, want: true},
+		{product: "grok", args: []string{"resume", "worker"}, want: true},
 		{product: "claude", args: []string{"start", "--prompt-file", "brief.md"}, want: false},
 		{product: "codex", args: []string{"start", "--name", "--prompt-file"}, want: true},
 		{product: "claude", args: []string{"start", "--tools", "--prompt-file"}, want: true},

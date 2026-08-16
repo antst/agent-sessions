@@ -2313,6 +2313,25 @@ func lockLaneLifecycle(paths nativePaths, threadID string) (*os.File, error) {
 	return file, nil
 }
 
+func tryLockLaneLifecycle(paths nativePaths, threadID string) (*os.File, bool, error) {
+	directory := filepath.Join(profileDataRoot(paths), "lane-lifecycle-locks")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return nil, false, err
+	}
+	file, err := os.OpenFile(filepath.Join(directory, sessionKey(threadID)+".lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // thread id is hashed.
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return file, true, nil
+}
+
 func unlockLaneLifecycle(file *os.File) {
 	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	_ = file.Close()

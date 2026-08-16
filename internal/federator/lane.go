@@ -79,7 +79,7 @@ func normalizeCapabilities(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
 	for _, value := range values {
-		if value != CapabilityCodexLane && value != CapabilityClaudeLane || seen[value] {
+		if value != CapabilityCodexLane && value != CapabilityClaudeLane && value != CapabilityGrokLane || seen[value] {
 			continue
 		}
 		seen[value] = true
@@ -121,6 +121,9 @@ func (a *agent) laneCapabilities() []string {
 	if a.options.ClaudeLaneExecutable != "" {
 		capabilities = append(capabilities, CapabilityClaudeLane)
 	}
+	if a.options.GrokLaneExecutable != "" {
+		capabilities = append(capabilities, CapabilityGrokLane)
+	}
 	return capabilities
 }
 
@@ -130,6 +133,8 @@ func capabilityForProduct(product string) string {
 		return CapabilityCodexLane
 	case "claude":
 		return CapabilityClaudeLane
+	case "grok":
+		return CapabilityGrokLane
 	default:
 		return ""
 	}
@@ -216,7 +221,7 @@ func randomLaneRequestID(hostID string) (string, error) {
 func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 	capability := capabilityForProduct(request.Product)
 	if capability == "" || len(request.Args) == 0 {
-		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: "lane request requires --product codex|claude and native lane arguments"})
+		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: "lane request requires --product codex|claude|grok and native lane arguments"})
 		return
 	}
 	if len(request.Input) > maxLaneInputBytes {
@@ -353,6 +358,8 @@ func (a *agent) prepareRemoteLane(request Message) (string, []string, error) {
 		executable = a.options.CodexLaneExecutable
 	case "claude":
 		executable = a.options.ClaudeLaneExecutable
+	case "grok":
+		executable = a.options.GrokLaneExecutable
 	default:
 		return "", nil, fmt.Errorf("unsupported lane product %q", request.Product)
 	}
@@ -749,7 +756,7 @@ func RunRemoteLane(ctx context.Context, options RemoteLaneOptions, stdin io.Read
 		options.RuntimeDir = DefaultRuntimeDir()
 	}
 	if options.Host == "" || capabilityForProduct(options.Product) == "" || len(options.Args) == 0 {
-		return 1, errors.New("remote lane requires --host, --product codex|claude, and native lane arguments after --")
+		return 1, errors.New("remote lane requires --host, --product codex|claude|grok, and native lane arguments after --")
 	}
 	if options.SourceSession == "" {
 		options.SourceSession = inferRemoteLaneSourceSession(os.Getpid())

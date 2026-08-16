@@ -233,16 +233,14 @@ func runGrokSafetyCommand(argv []string) int {
 	return 0
 }
 
+//nolint:gocyclo // Installer inventory deliberately validates every durable ownership source fail-closed.
 func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
+	liveSet := map[string]bool{}
 	directory := filepath.Join(profileDataRoot(paths), "grok-launches")
 	entries, err := os.ReadDir(directory)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read Grok launch inventory: %w", err)
 	}
-	live := make([]string, 0)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -260,10 +258,48 @@ func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
 		}
 		for _, identity := range identities {
 			if identity.Status != processIdentityStale {
-				live = append(live, record.SessionID)
+				liveSet[record.SessionID] = true
 				break
 			}
 		}
+	}
+	laneDirectory := filepath.Join(profileDataRoot(paths), "grok-lanes")
+	laneEntries, laneErr := os.ReadDir(laneDirectory)
+	if laneErr != nil && !os.IsNotExist(laneErr) {
+		return nil, fmt.Errorf("read Grok lane inventory: %w", laneErr)
+	}
+	for _, entry := range laneEntries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(laneDirectory, entry.Name())
+		body, readErr := os.ReadFile(path) //nolint:gosec // path is a bridge-owned inventory entry under a fixed private directory.
+		if readErr != nil {
+			return nil, fmt.Errorf("read Grok lane inventory record: %w", readErr)
+		}
+		var state grokLaneState
+		if json.Unmarshal(body, &state) != nil || state.Type != "grok-peer-lane" || !validSessionID(state.SessionID) {
+			return nil, fmt.Errorf("refuse malformed Grok lane record: %s", path)
+		}
+		manager := cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart)
+		worker := cleanupProcessIdentityStatus(state.WorkerPID, state.WorkerProcStart)
+		registryGuard, cleanupRoots, registryErr := grokLaneCleanupRoots(state, false)
+		if registryErr != nil {
+			return nil, fmt.Errorf("read Grok lane tool ownership: %w", registryErr)
+		}
+		taggedRemain := grokTaggedProcessesRemain(state.LaunchTokenHash, 0, cleanupRoots...)
+		if registryGuard != nil {
+			registryGuard.close()
+		}
+		if state.Status != "archived" || manager.Status != processIdentityStale || worker.Status != processIdentityStale ||
+			grokProcessSessionHasMembers(state.WorkerSessionID, 0) ||
+			taggedRemain {
+			liveSet[state.SessionID] = true
+		}
+	}
+	live := make([]string, 0, len(liveSet))
+	for sessionID := range liveSet {
+		live = append(live, sessionID)
 	}
 	sort.Strings(live)
 	return live, nil
@@ -496,10 +532,13 @@ type grokACPClient struct {
 	stdin     io.WriteCloser
 	responses chan map[string]any
 	interject chan map[string]any
+	notifyMu  sync.RWMutex
+	notify    func(map[string]any)
 	readDone  chan struct{}
 	readMu    sync.Mutex
 	readErr   error
 	requestMu sync.Mutex
+	writeMu   sync.Mutex
 	nextID    int64
 }
 
@@ -558,6 +597,12 @@ func newGrokACPClient(
 				continue
 			}
 			if message["id"] == nil {
+				client.notifyMu.RLock()
+				notify := client.notify
+				client.notifyMu.RUnlock()
+				if notify != nil {
+					notify(message)
+				}
 				switch stringValue(message["method"]) {
 				case "_x.ai/session/interjection":
 					select {
@@ -585,6 +630,12 @@ func newGrokACPClient(
 		close(client.readDone)
 	}()
 	return client
+}
+
+func (c *grokACPClient) setNotificationHandler(handler func(map[string]any)) {
+	c.notifyMu.Lock()
+	c.notify = handler
+	c.notifyMu.Unlock()
 }
 
 func publishLatestGrokRosterState(updates chan grokRosterState, state grokRosterState) {
@@ -615,7 +666,10 @@ func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, mess
 	if err != nil {
 		return err
 	}
-	if _, err := c.stdin.Write(append(body, '\n')); err != nil {
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(body, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("write Grok ACP _x.ai/interject: %w", err)
 	}
 	for {
@@ -665,7 +719,10 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.stdin.Write(append(body, '\n')); err != nil {
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(body, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("write Grok ACP %s: %w", method, err)
 	}
 	for {
@@ -693,6 +750,22 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 			return nil, fmt.Errorf("grok ACP %s: %w", method, ctx.Err())
 		}
 	}
+}
+
+func (c *grokACPClient) notifyRequest(method string, params map[string]any) error {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": method, "params": params,
+	})
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(body, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("write Grok ACP %s notification: %w", method, err)
+	}
+	return nil
 }
 
 func (c *grokACPClient) close() {
@@ -1681,7 +1754,7 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
-	err = h.acp.requestInterjection(ctx, h.config.SessionID, messageID, trustedPeerText(item))
+	err = h.acp.requestInterjection(ctx, h.config.SessionID, messageID, trustedPeerTextForProduct(item, "grok"))
 	cancel()
 	if err != nil {
 		h.clearActiveInterjectionPermissionSnapshot()

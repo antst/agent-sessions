@@ -275,9 +275,9 @@ the inherited token, and ancestry inside that leader tree. On owner death the
 host removes its discovery row and stops only its own leader and bridge process
 groups. Native Grok clients must not concurrently open the same UUID.
 
-The first release deliberately supports fresh sessions and exact-UUID resume.
-Title resolution, a bare resume picker, native Grok lanes, and Grok federation
-remain native-Grok or later-version concerns rather than private-store parsing.
+Interactive Grok supports fresh sessions and exact-UUID resume. Title resolution and a bare resume
+picker remain native-Grok concerns rather than private-store parsing. Separate sole-owner headless
+ACP sessions implement local Grok lanes; Grok lane federation remains a later capability.
 
 Headless App Server turns can issue server-initiated `item/tool/call` JSON-RPC requests. The native
 client handles bridge-owned `claude_peer` tools directly only after the App Server-supplied `threadId`
