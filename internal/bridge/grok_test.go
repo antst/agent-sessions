@@ -1236,6 +1236,11 @@ func TestGrokHostOwnerDeathStopsProcessGroupAndUnpublishes(t *testing.T) {
 	waitGrokHostReady(t, host)
 	leaderPID := host.leader.cmd.Process.Pid
 	childPID := waitGrokFakeChildPID(t, childFile)
+	launchRecord := grokLaunchRecordPath(resolveNativePaths(), host.config.SessionID)
+	host.peerMu.Lock()
+	peerStateDir := filepath.Dir(host.peer.stateFile)
+	peerRegistry := host.peer.registryFile
+	host.peerMu.Unlock()
 	if err := owner.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -1257,8 +1262,102 @@ func TestGrokHostOwnerDeathStopsProcessGroupAndUnpublishes(t *testing.T) {
 	if _, err := os.Lstat(host.paths.ControlSocket); !os.IsNotExist(err) {
 		t.Fatalf("control socket survived cleanup: %v", err)
 	}
+	for _, path := range []string{launchRecord, host.paths.LeaderSocket, filepath.Join(host.paths.LaunchDir, "leader.lock"), host.paths.LaunchDir, peerStateDir, peerRegistry} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("Grok launch artifact survived cleanup at %s: %v", path, err)
+		}
+	}
 	if live := liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID); live != nil {
 		t.Fatalf("dead launch remains attested: %#v", live)
+	}
+}
+
+func TestGrokHostRemovesDurableOwnershipBeforeACPShutdownCanBlock(t *testing.T) {
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = owner.Process.Kill()
+		_ = owner.Wait()
+	}()
+	ownerStart := readProcStart(owner.Process.Pid)
+	if ownerStart == "" {
+		t.Fatal("owner process has no start token")
+	}
+	host, cancel, result, _ := startTestGrokHost(t, owner.Process.Pid, ownerStart, "session-cleanup-order")
+	waitGrokHostReady(t, host)
+
+	launchRecord := grokLaunchRecordPath(resolveNativePaths(), host.config.SessionID)
+	host.peerMu.Lock()
+	peerStateDir := filepath.Dir(host.peer.stateFile)
+	peerRegistry := host.peer.registryFile
+	host.peerMu.Unlock()
+	host.acpMu.Lock()
+	unlocked := false
+	finished := false
+	defer func() {
+		if !unlocked {
+			host.acpMu.Unlock()
+		}
+		cancel()
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("Grok host did not finish during test cleanup")
+			}
+		}
+	}()
+	cancel()
+
+	paths := []string{
+		launchRecord,
+		host.paths.ControlSocket,
+		host.paths.LeaderSocket,
+		filepath.Join(host.paths.LaunchDir, "leader.lock"),
+		host.paths.LaunchDir,
+		peerStateDir,
+		peerRegistry,
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		allAbsent := true
+		for _, path := range paths {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				allAbsent = false
+				break
+			}
+		}
+		if allAbsent {
+			break
+		}
+		if time.Now().After(deadline) {
+			for _, path := range paths {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Errorf("Grok launch artifact remained before ACP shutdown at %s: %v", path, err)
+				}
+			}
+			t.Fatal("Grok durable ownership was not removed before the ACP shutdown lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("Grok cleanup completed while ACP shutdown was blocked: %v", err)
+	default:
+	}
+
+	host.acpMu.Unlock()
+	unlocked = true
+	select {
+	case err := <-result:
+		finished = true
+		if err != nil {
+			t.Fatalf("Grok host exit after releasing ACP shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Grok cleanup did not finish after releasing ACP shutdown")
 	}
 }
 

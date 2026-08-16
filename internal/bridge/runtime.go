@@ -54,8 +54,11 @@ type daemon struct {
 	listener         net.Listener
 	seen             map[string]struct{}
 	seenOrder        []string
-	closeOnce        sync.Once
-	done             chan struct{}
+	stopped          bool
+	// maintenanceBeforeWrite is a test seam for terminal-write ordering.
+	maintenanceBeforeWrite func()
+	closeOnce              sync.Once
+	done                   chan struct{}
 }
 
 type envelope struct {
@@ -504,6 +507,9 @@ func (d *daemon) maintenanceLoop() {
 				d.closeOnce.Do(func() { close(d.done) })
 				return
 			}
+			if d.maintenanceBeforeWrite != nil {
+				d.maintenanceBeforeWrite()
+			}
 			d.mu.Lock()
 			d.refreshNameLocked()
 			_ = d.writeRecordsLocked()
@@ -548,6 +554,9 @@ func (d *daemon) refreshNameLocked() {
 }
 
 func (d *daemon) writeRecordsLocked() error {
+	if d.stopped {
+		return errors.New("peer daemon is stopping")
+	}
 	now := time.Now().UnixMilli()
 	state := map[string]any{
 		"pid": os.Getpid(), "procStart": d.procStart, "ownerPid": d.ownerPID, "ownerProcStart": d.ownerProcStart,
@@ -618,12 +627,18 @@ func (d *daemon) shutdown() {
 	if d.listener != nil {
 		_ = d.listener.Close()
 	}
+	// Serialize the terminal state with every heartbeat and control update.
+	// A heartbeat may already have won its ticker select when done closes; the
+	// stopped latch prevents that writer from recreating state after removal.
+	d.mu.Lock()
+	d.stopped = true
 	removeJSONIf(d.registryFile, func(row map[string]any) bool {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
 	removeJSONIf(d.stateFile, func(row map[string]any) bool {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
+	d.mu.Unlock()
 	if target, err := os.Readlink(d.stableSocket); err == nil {
 		resolved := target
 		if !filepath.IsAbs(resolved) {

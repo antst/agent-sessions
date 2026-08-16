@@ -33,6 +33,7 @@ const (
 	grokACPInterjectTimeout = 30 * time.Second
 	grokInterjectionModeTTL = 30 * time.Minute
 	grokRosterPushGrace     = 1500 * time.Millisecond
+	grokCleanupWaitTimeout  = 5 * time.Second
 	grokStatusRetryDelay    = 25 * time.Millisecond
 	grokStatusRetryMax      = 250 * time.Millisecond
 )
@@ -1672,32 +1673,80 @@ func (h *grokHost) cleanup() {
 		if h.listener != nil {
 			_ = h.listener.Close()
 		}
+		paths := resolveNativePaths()
+		hostProcStart := readProcStart(os.Getpid())
+		launchRecordPath := grokLaunchRecordPath(paths, h.config.SessionID)
+		removeDurableOwnership := func() {
+			removeJSONIf(launchRecordPath, func(row map[string]any) bool {
+				return stringValue(row["tokenHash"]) == grokTokenHash(h.config.LaunchToken) &&
+					intValue(row["hostPid"]) == os.Getpid() && stringValue(row["hostProcStart"]) == hostProcStart
+			})
+		}
 		h.peerMu.Lock()
 		if h.peer != nil {
 			h.peer.shutdown()
 			h.peer = nil
 		}
 		h.peerMu.Unlock()
+		peerStateDir := filepath.Join(paths.dataRoot, "sessions", sessionKey(h.config.SessionID))
+		_ = os.Remove(peerStateDir) // Only succeeds when the session left no durable inbox content.
+
+		// Stop both private process groups before discarding their durable
+		// identities. The waker is stopped from the persisted record rather than
+		// through acpMu: a control request may still hold that mutex while Grok's
+		// /quit process-scope teardown is already reaping this host.
+		stopGrokManagedProcess(h.leader, 2*time.Second)
+		if record := readGrokLaunchRecord(launchRecordPath); record != nil {
+			stopStaleGrokProcess(record.WakerPID, record.WakerProcStart)
+			if cleanupProcessIdentityStatus(record.LeaderPID, record.LeaderProcStart).Status == processIdentityStale &&
+				cleanupProcessIdentityStatus(record.WakerPID, record.WakerProcStart).Status == processIdentityStale {
+				removeDurableOwnership()
+			}
+		}
+		// Unlink private endpoints before acquiring acpMu. The live failure this
+		// ordering guards against had already reaped both child groups but killed
+		// the host while a final ACP control request was unwinding.
+		h.removePrivateRuntimeArtifacts(false)
 		h.acpMu.Lock()
 		h.closeACPLocked()
 		h.acpMu.Unlock()
-		stopGrokManagedProcess(h.leader, 2*time.Second)
-		h.wg.Wait()
-		_ = os.Remove(h.paths.ControlSocket)
-		_ = os.Remove(h.paths.LeaderSocket)
-		_ = os.Remove(filepath.Join(h.paths.LaunchDir, "leader.lock"))
-		_ = os.Remove(h.paths.LaunchDir)
-		paths := resolveNativePaths()
-		removeJSONIf(grokLaunchRecordPath(paths, h.record.SessionID), func(row map[string]any) bool {
-			return stringValue(row["tokenHash"]) == h.record.TokenHash &&
-				intValue(row["hostPid"]) == os.Getpid() && stringValue(row["hostProcStart"]) == h.record.HostProcStart
-		})
+		// closeACPLocked provides the final process join. Retry the exact-predicate
+		// ownership and endpoint cleanup now that no private child can still use it.
+		removeDurableOwnership()
+		h.removePrivateRuntimeArtifacts(true)
 		if h.lease != nil {
 			_ = syscall.Flock(int(h.lease.Fd()), syscall.LOCK_UN)
 			_ = h.lease.Close()
 			h.lease = nil
 		}
+		workersDone := make(chan struct{})
+		go func() {
+			h.wg.Wait()
+			close(workersDone)
+		}()
+		timer := time.NewTimer(grokCleanupWaitTimeout)
+		defer timer.Stop()
+		select {
+		case <-workersDone:
+		case <-timer.C:
+			fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: cleanup workers did not stop before the bounded shutdown deadline")
+		}
 	})
+}
+
+func (h *grokHost) removePrivateRuntimeArtifacts(report bool) {
+	for _, path := range []string{
+		h.paths.ControlSocket,
+		h.paths.LeaderSocket,
+		filepath.Join(h.paths.LaunchDir, "leader.lock"),
+	} {
+		if err := os.Remove(path); report && err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: remove private runtime artifact %s: %v\n", path, err)
+		}
+	}
+	if err := os.Remove(h.paths.LaunchDir); report && err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: remove private launch directory %s: %v\n", h.paths.LaunchDir, err)
+	}
 }
 
 func (h *grokHost) ensurePeerPublished() error {

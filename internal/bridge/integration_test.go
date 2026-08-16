@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -69,6 +71,51 @@ func TestNativeShimInitializesPublishedStatus(t *testing.T) {
 		if d.status != test.want {
 			t.Fatalf("initial status %q = %q, want %q", test.input, d.status, test.want)
 		}
+	}
+}
+
+func TestNativeShimShutdownCannotBeUndoneBySelectedHeartbeat(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := newDaemon(map[string]string{
+		"session-id": "shutdown-heartbeat-race", "cwd": root,
+		"owner-pid": strconv.Itoa(os.Getpid()), "owner-proc-start": readProcStart(os.Getpid()),
+		"data-dir": filepath.Join(root, "state"), "claude-config-dir": filepath.Join(root, "claude"),
+		"codex-home": filepath.Join(root, "codex"), "runtime-dir": runtimeDir, "heartbeat-ms": "20",
+	})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	d.maintenanceBeforeWrite = func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	if err := d.start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		d.shutdown()
+		close(release)
+		t.Fatal("native shim heartbeat did not reach the blocked writer")
+	}
+
+	// The heartbeat has already selected its write path, but has not acquired
+	// d.mu. Shutdown must commit the stopped latch and remove both records first.
+	d.shutdown()
+	close(release)
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, path := range []string{d.stateFile, d.registryFile} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("native shim record was recreated after shutdown at %s: %v", path, err)
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
