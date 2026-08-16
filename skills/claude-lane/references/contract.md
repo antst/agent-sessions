@@ -23,6 +23,12 @@ There is no Claude thread-archive API. Archive shuts down the manager, native st
 - `error`: command failure; `timeout: true` distinguishes a collection bound from other errors
 - `lane.status`, `lane.list`, `lane.archived`, `lane.doctor`
 
+`lane.doctor` reports `contract_version`, runtime identity, `claude_available`,
+`claude_logged_in`, `claude_auth_method`, `claude_api_provider`, profile state, and supervisor
+reachability. Require `claude_logged_in: true` before starting work, but treat it only as Claude
+Code's local credential-state report. A successful first inference turn is the end-to-end
+authentication and entitlement proof.
+
 Claude accounting can include `total_cost_usd`; `accounting.cost_available` is true only when Claude supplied it.
 
 ## Outcomes

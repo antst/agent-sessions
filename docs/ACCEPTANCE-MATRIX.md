@@ -166,8 +166,8 @@ live Codex peer and a live Grok peer. Use real turns and unique names.
 
 | ID | Cell |
 |---|---|
-| L-01 | `doctor` proves CLI/auth/runtime readiness and supported contract major. |
-| L-02 | Foreground `run` emits coherent JSONL and exact expected final answer. |
+| L-01 | `doctor` proves CLI/runtime readiness, the CLI's locally reported authentication state, and a supported contract major; it must fail when Claude reports logged out. |
+| L-02 | Foreground `run` completes a real inference turn, thereby proving end-to-end authentication, and emits coherent JSONL with the exact expected final answer. |
 | L-03 | `start` returns `lane.ready`; `status` is busy; `wait` collects matching turn once. |
 | L-04 | `wait --timeout` does not interrupt; later wait collects the turn. |
 | L-05 | Idle peer message starts one collectable follow-up; busy message follows product semantics. |

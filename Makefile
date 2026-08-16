@@ -342,6 +342,8 @@ install-grok: grok-install-preflight validate-grok
 	# Copying this native MCP payload there is the explicit trust decision.
 	# Migrate the older direct-install registry row first; it can be listed as
 	# enabled while still being omitted from a live session's MCP inventory.
+	# Deliberately omit --confirm below: fail closed if that name belongs to a
+	# multi-plugin repository instead of deleting its unrelated plugins.
 	@plugin_list="$$( $(GROK_PEER_ENV) "$(GROK_PEER)" plugin list --json )" || { \
 		status=$$?; \
 		printf 'Cannot inspect existing Grok plugin registrations (exit %s).\n' "$$status" >&2; \
@@ -350,8 +352,6 @@ install-grok: grok-install-preflight validate-grok
 	if printf '%s\n' "$$plugin_list" | awk -v name='$(GROK_PLUGIN_NAME)' 'BEGIN { RS = "}" } \
 			index($$0, "\"name\"") && index($$0, "\"" name "\"") && index($$0, "\"repo_key\"") { found = 1 } \
 			END { exit(found ? 0 : 1) }'; then \
-		# Deliberately omit --confirm: fail closed if that name belongs to a \
-		# multi-plugin repository instead of deleting its unrelated plugins. \
 		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin uninstall "$(GROK_PLUGIN_NAME)" --keep-data; \
 	fi
 	@plugin_parent="$$(dirname -- "$(GROK_USER_PLUGIN_ROOT)")"; \
