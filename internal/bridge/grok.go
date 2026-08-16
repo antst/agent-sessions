@@ -284,7 +284,8 @@ func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
 		manager := cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart)
 		worker := cleanupProcessIdentityStatus(state.WorkerPID, state.WorkerProcStart)
 		if state.Status != "archived" || manager.Status != processIdentityStale || worker.Status != processIdentityStale ||
-			grokProcessSessionHasMembers(state.WorkerSessionID, 0) || grokTaggedProcessesRemain(state.LaunchTokenHash, 0) {
+			grokProcessSessionHasMembers(state.WorkerSessionID, 0) ||
+			grokTaggedProcessesRemain(state.LaunchTokenHash, 0, grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}) {
 			liveSet[state.SessionID] = true
 		}
 	}

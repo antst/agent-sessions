@@ -26,11 +26,13 @@ func stopGrokProcessSession(sessionID int, _ string, _ int) error {
 
 func grokProcessSessionHasMembers(sessionID, _ int) bool { return sessionID > 1 }
 
-func stopGrokTaggedProcesses(tokenHash string, _ int) error {
+func stopGrokTaggedProcesses(tokenHash string, _ int, _ ...grokSessionMember) error {
 	if tokenHash == "" {
 		return nil
 	}
 	return errors.New("Grok lane tagged-process cleanup is unsupported")
 }
 
-func grokTaggedProcessesRemain(tokenHash string, _ int) bool { return tokenHash != "" }
+func grokTaggedProcessesRemain(tokenHash string, _ int, _ ...grokSessionMember) bool {
+	return tokenHash != ""
+}

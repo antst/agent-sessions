@@ -1188,13 +1188,19 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		if interrupt && client != nil {
 			_ = client.notifyRequest("session/cancel", map[string]any{"sessionId": grokSessionID})
 		}
+		// Snapshot and stop exact descendants while the durable worker root is
+		// still alive. On Darwin, restricted system binaries expose argv but not
+		// their inherited environment through KERN_PROCARGS2; after the worker
+		// exits and they reparent, that ownership relationship is unrecoverable.
+		taggedCleanupErr := stopGrokTaggedProcesses(cleanupState.LaunchTokenHash, os.Getpid(), grokSessionMember{
+			PID: cleanupState.WorkerPID, ProcStart: cleanupState.WorkerProcStart,
+		})
 		if client != nil {
 			client.close()
 		} else {
 			stopGrokManagedProcess(worker, 2*time.Second)
 		}
 		sessionCleanupErr := stopGrokProcessSession(workerSessionID, workerProcStart, os.Getpid())
-		taggedCleanupErr := stopGrokTaggedProcesses(cleanupState.LaunchTokenHash, os.Getpid())
 		if m.diagnostics != nil {
 			_ = m.diagnostics.close()
 		}

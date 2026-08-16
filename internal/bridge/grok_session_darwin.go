@@ -40,32 +40,30 @@ func platformGrokProcessSessionMembers(sessionID int) ([]grokSessionMember, erro
 	return members, nil
 }
 
-func platformGrokTaggedProcessMembers(tokenHash string) ([]grokSessionMember, error) {
+func platformGrokTaggedProcessMembers(tokenHash string, roots []grokSessionMember) ([]grokSessionMember, error) {
 	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
 		return nil, err
 	}
-	members := []grokSessionMember{}
+	candidates := []grokProcessCandidate{}
 	for _, process := range processes {
 		pid := int(process.Proc.P_pid)
 		if pid <= 1 {
-			continue
-		}
-		environment, environmentErr := procinfo.Environment(pid)
-		if environmentErr != nil || !grokEnvironmentMatchesTokenHash(environment, tokenHash) {
 			continue
 		}
 		info := procinfo.Read(pid)
 		if info.Status == procinfo.Absent {
 			continue
 		}
-		if info.Status != procinfo.Known || info.Start == "" {
-			return nil, fmt.Errorf("cannot corroborate tagged Grok lane process %d", pid)
-		}
-		if info.State == "Z" || info.State == "X" {
+		if info.Status != procinfo.Known || info.Start == "" || info.State == "Z" || info.State == "X" {
 			continue
 		}
-		members = append(members, grokSessionMember{PID: pid, ProcStart: info.Start})
+		environment, environmentErr := procinfo.Environment(pid)
+		candidates = append(candidates, grokProcessCandidate{
+			grokSessionMember: grokSessionMember{PID: pid, ProcStart: info.Start},
+			Parent:            info.Parent,
+			Tagged:            environmentErr == nil && grokEnvironmentMatchesTokenHash(environment, tokenHash),
+		})
 	}
-	return members, nil
+	return grokOwnedProcessMembers(candidates, roots)
 }

@@ -56,6 +56,9 @@ func TestGrokLaneProcessSessionHelper(_ *testing.T) {
 	}
 	child := exec.Command("sleep", "30")
 	if os.Getenv(grokLaneDetachedChildEnv) == "1" {
+		// Model Darwin's restricted executables: XNU exposes their argv but
+		// deliberately omits the inherited environment from KERN_PROCARGS2.
+		child.Env = []string{}
 		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	} else {
 		child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -548,15 +551,27 @@ func TestStopGrokTaggedProcessesRemovesDetachedLaunchChildren(t *testing.T) {
 	if parentErr != nil || childErr != nil || parentSID != pid || childSID != childPID {
 		t.Fatalf("detached topology parent=%d/%d child=%d/%d errors=%v/%v", pid, parentSID, childPID, childSID, parentErr, childErr)
 	}
+	workerRoot := grokSessionMember{PID: pid, ProcStart: readProcStart(pid)}
+	if workerRoot.ProcStart == "" {
+		t.Fatal("tagged Grok ownership root has no process-start identity")
+	}
 	var members []grokSessionMember
 	deadline := time.Now().Add(2 * time.Second)
-	for len(members) < 2 {
-		members, err = grokTaggedProcessMembers(tokenHash)
+	for {
+		members, err = grokTaggedProcessMembers(tokenHash, workerRoot)
 		if err != nil {
 			t.Fatalf("enumerate tagged Grok members: %v", err)
 		}
+		parentFound, childFound := false, false
+		for _, member := range members {
+			parentFound = parentFound || member.PID == pid
+			childFound = childFound || member.PID == childPID
+		}
+		if parentFound && childFound {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("tagged Grok members = %+v; want parent and detached child", members)
+			t.Fatalf("tagged Grok members = %+v; want parent %d and detached child %d", members, pid, childPID)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -571,12 +586,12 @@ func TestStopGrokTaggedProcessesRemovesDetachedLaunchChildren(t *testing.T) {
 	if live, err := activeGrokLaunchSessions(paths); err != nil || !reflect.DeepEqual(live, []string{state.SessionID}) {
 		t.Fatalf("tagged Grok install inventory = %v, %v", live, err)
 	}
-	if err := stopGrokTaggedProcesses(tokenHash, 0); err != nil {
+	if err := stopGrokTaggedProcesses(tokenHash, 0, workerRoot); err != nil {
 		t.Fatal(err)
 	}
 	_ = command.Wait()
 	waited = true
-	if grokTaggedProcessesRemain(tokenHash, 0) || exactProcessIdentityMatch(childPID, readProcStart(childPID)) {
+	if grokTaggedProcessesRemain(tokenHash, 0, workerRoot) || exactProcessIdentityMatch(childPID, readProcStart(childPID)) {
 		t.Fatal("detached tagged Grok child survived cleanup")
 	}
 }

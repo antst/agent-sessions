@@ -857,11 +857,12 @@ func rollbackGrokLaneResume(paths nativePaths, original grokLaneState, startupID
 	if processIdentityMayBeLive(latest.ManagerPID, latest.ManagerProcStart) {
 		return errors.New("replacement Grok lane manager still owns failed resume")
 	}
-	stopStaleGrokProcess(latest.WorkerPID, latest.WorkerProcStart)
-	if err := stopGrokProcessSession(latest.WorkerSessionID, latest.WorkerProcStart, 0); err != nil {
+	workerRoot := grokSessionMember{PID: latest.WorkerPID, ProcStart: latest.WorkerProcStart}
+	if err := stopGrokTaggedProcesses(latest.LaunchTokenHash, 0, workerRoot); err != nil {
 		return err
 	}
-	if err := stopGrokTaggedProcesses(latest.LaunchTokenHash, 0); err != nil {
+	stopStaleGrokProcess(latest.WorkerPID, latest.WorkerProcStart)
+	if err := stopGrokProcessSession(latest.WorkerSessionID, latest.WorkerProcStart, 0); err != nil {
 		return err
 	}
 	if err := cleanupGrokLaneOwnedFiles(paths, latest, 0); err != nil {
@@ -893,8 +894,13 @@ func reconcileGrokLaneManager(paths nativePaths, state grokLaneState, now int64)
 	startingOrphan := state.Status == "starting" && state.ManagerPID <= 1 && state.UpdatedAt+20_000 <= now
 	managerExited := state.ManagerPID > 1 && managerIdentity.Status == processIdentityStale
 	missingManager := state.Status != "starting" && state.Status != "archived" && state.ManagerPID <= 1
-	archivedResidue := state.Status == "archived" && grokLaneHasOwnedResidue(paths, state)
-	archivedUnnormalized := state.Status == "archived" && !grokLaneStateNormalized(state)
+	// The manager persists archived before it tears down its worker and clears
+	// durable ownership. That is an in-progress shutdown, not a crashed lane.
+	// Reconciliation may take over only after the exact manager identity is
+	// absent or stale; killing a matching/unknown manager here can interrupt its
+	// cleanup transaction and strand the very residue we are trying to remove.
+	archivedResidue := state.Status == "archived" && managerUnavailable && grokLaneHasOwnedResidue(paths, state)
+	archivedUnnormalized := state.Status == "archived" && managerUnavailable && !grokLaneStateNormalized(state)
 	if startingOrphan || managerExited || missingManager || archivedResidue || archivedUnnormalized {
 		return forceArchiveGrokLane(paths, state.SessionID, "Grok lane manager exited")
 	}
@@ -905,7 +911,7 @@ func grokLaneHasOwnedResidue(paths nativePaths, state grokLaneState) bool {
 	if processIdentityMayBeLive(state.ManagerPID, state.ManagerProcStart) ||
 		processIdentityMayBeLive(state.WorkerPID, state.WorkerProcStart) ||
 		grokProcessSessionHasMembers(state.WorkerSessionID, 0) ||
-		grokTaggedProcessesRemain(state.LaunchTokenHash, 0) ||
+		grokTaggedProcessesRemain(state.LaunchTokenHash, 0, grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}) ||
 		state.ControlSocket != "" || state.MessagingSocket != "" {
 		return true
 	}
@@ -1303,11 +1309,12 @@ func forceArchiveGrokLane(paths nativePaths, sessionID, reason string) error {
 	if !explicitArchive {
 		flushOrphanGrokLaneNotices(paths, state.SessionID)
 	}
-	stopStaleGrokProcess(state.WorkerPID, state.WorkerProcStart)
-	if err := stopGrokProcessSession(state.WorkerSessionID, state.WorkerProcStart, 0); err != nil {
+	workerRoot := grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}
+	if err := stopGrokTaggedProcesses(state.LaunchTokenHash, 0, workerRoot); err != nil {
 		return err
 	}
-	if err := stopGrokTaggedProcesses(state.LaunchTokenHash, 0); err != nil {
+	stopStaleGrokProcess(state.WorkerPID, state.WorkerProcStart)
+	if err := stopGrokProcessSession(state.WorkerSessionID, state.WorkerProcStart, 0); err != nil {
 		return err
 	}
 	if err := cleanupGrokLaneOwnedFiles(paths, state, 0); err != nil {
@@ -1370,7 +1377,7 @@ func cleanupGrokLaneOwnedFiles(paths nativePaths, state grokLaneState, currentMa
 	if grokProcessSessionHasMembers(state.WorkerSessionID, currentManagerPID) {
 		return errors.New("grok lane process session is still live")
 	}
-	if grokTaggedProcessesRemain(state.LaunchTokenHash, currentManagerPID) {
+	if grokTaggedProcessesRemain(state.LaunchTokenHash, currentManagerPID, grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}) {
 		return errors.New("tagged Grok lane process is still live")
 	}
 	managerObservation := cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart)

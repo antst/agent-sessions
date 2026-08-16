@@ -117,6 +117,18 @@ MCP children, and owned runtime artifacts while preserving Grok's native transcr
 a fresh sole ACP driver and calls `session/load` for the exact stored native Grok UUID. Agent
 Sessions does not call a native Grok archive or unarchive API.
 
+Owned-process cleanup combines the durable worker session, exact live process ancestry, and the
+per-launch capability tag, and rechecks each PID/start identity immediately before signaling it.
+This covers Grok Build and its normal MCP/tool children even when a child changes process group or
+session. On macOS, the kernel deliberately hides the environment of restricted executables, and
+the current platform rejects recursive `kqueue NOTE_TRACK`; therefore an arbitrary restricted
+program that both creates a new session and reparents before Agent Sessions can observe it is no
+longer observable or safely attributable and can survive cleanup undetected. Such unmanaged
+daemonization is unsupported and excluded from a green cleanup claim. Agent Sessions never guesses
+ownership or kills a process from a PID, session number, or token hash alone. Installed macOS
+acceptance must still prove that real Grok Build, MCP, and tool descendants leave no process or
+artifact residue after normal archive and crash reconciliation.
+
 Terminal turns durably queue a `GROK_LANE_TERMINAL` collection pointer for the configured owner.
 The pointer contains a stable notice ID and exact `wait` command; it is never the answer. Its native
 message ID is the same stable notice ID, so a retry after an ambiguous state write is deduplicated by
@@ -163,8 +175,9 @@ counted green:
   through ownership inference;
 - full pairwise peer/lane messaging for every installed product, including
   Linux-to-macOS and macOS-to-Linux remote Grok lifecycle, collection, messaging, and archive;
-- normal and forced cleanup with no manager, ACP, MCP, socket, launch record,
-  registry row, or private directory resurrection;
+- normal and forced cleanup with no manager, ACP, standard MCP/tool descendant,
+  socket, launch record, registry row, or private directory resurrection, including
+  the restricted-executable ancestry path on macOS;
 - fresh normal and race suites, vet, lint, all supported cross-build/package
   archives, and archive-content verification including `grok-peer-lane`.
 

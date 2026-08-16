@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 type grokSessionMember struct {
@@ -19,7 +17,16 @@ type grokSessionMember struct {
 	ProcStart string
 }
 
-const grokTaggedQuiescencePasses = 3
+type grokProcessCandidate struct {
+	grokSessionMember
+	Parent int
+	Tagged bool
+}
+
+const (
+	grokTaggedQuiescencePasses = 3
+	grokProcessSurveyInterval  = 100 * time.Millisecond
+)
 
 func grokProcessSessionID(pid int) (int, error) {
 	return unix.Getsid(pid)
@@ -50,11 +57,11 @@ func grokEnvironmentMatchesTokenHash(environment []string, tokenHash string) boo
 	return false
 }
 
-func grokTaggedProcessMembers(tokenHash string) ([]grokSessionMember, error) {
+func grokTaggedProcessMembers(tokenHash string, roots ...grokSessionMember) ([]grokSessionMember, error) {
 	if len(tokenHash) != 64 {
 		return nil, nil
 	}
-	members, err := platformGrokTaggedProcessMembers(tokenHash)
+	members, err := platformGrokTaggedProcessMembers(tokenHash, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -62,22 +69,55 @@ func grokTaggedProcessMembers(tokenHash string) ([]grokSessionMember, error) {
 	return members, nil
 }
 
-func grokTaggedProcessStatus(member grokSessionMember, tokenHash string) processIdentityStatus {
-	identity := exactProcessIdentityStatus(member.PID, member.ProcStart)
-	if identity.Status != processIdentityMatches {
-		return identity.Status
-	}
-	environment, err := procinfo.Environment(member.PID)
-	if err != nil {
-		if procinfo.Read(member.PID).Status == procinfo.Absent {
-			return processIdentityStale
+// grokOwnedProcessMembers expands directly tagged processes with the exact
+// descendants of durable ownership roots. Darwin intentionally omits the
+// environment from KERN_PROCARGS2 for restricted system binaries, so a token
+// alone cannot identify commands such as /bin/sleep even though they inherited
+// it. Parentage is authoritative only while an exact root/previously discovered
+// member is still live; callers retain the returned PID/start identities across
+// subsequent surveys and signal escalation.
+//
+//nolint:gocyclo // Ownership expansion distinguishes stale, unknown, tagged, and transitive exact identities.
+func grokOwnedProcessMembers(candidates []grokProcessCandidate, roots []grokSessionMember) ([]grokSessionMember, error) {
+	byPID := make(map[int]grokProcessCandidate, len(candidates))
+	owned := make(map[int]bool, len(candidates))
+	for _, candidate := range candidates {
+		byPID[candidate.PID] = candidate
+		if candidate.Tagged {
+			owned[candidate.PID] = true
 		}
-		return processIdentityUnknown
 	}
-	if !grokEnvironmentMatchesTokenHash(environment, tokenHash) {
-		return processIdentityStale
+	for _, root := range roots {
+		if root.PID <= 1 || root.ProcStart == "" {
+			continue
+		}
+		candidate, ok := byPID[root.PID]
+		if ok && candidate.ProcStart == root.ProcStart {
+			owned[root.PID] = true
+			continue
+		}
+		switch exactProcessIdentityStatus(root.PID, root.ProcStart).Status {
+		case processIdentityUnknown:
+			return nil, errors.New("cannot corroborate Grok lane ownership root")
+		case processIdentityMatches:
+			return nil, errors.New("grok lane ownership root is missing from process snapshot")
+		case processIdentityStale:
+		}
 	}
-	return processIdentityMatches
+	for changed := true; changed; {
+		changed = false
+		for _, candidate := range candidates {
+			if !owned[candidate.PID] && owned[candidate.Parent] {
+				owned[candidate.PID] = true
+				changed = true
+			}
+		}
+	}
+	members := make([]grokSessionMember, 0, len(owned))
+	for pid := range owned {
+		members = append(members, byPID[pid].grokSessionMember)
+	}
+	return members, nil
 }
 
 func grokSessionMemberStatus(member grokSessionMember, sessionID int) processIdentityStatus {
@@ -164,34 +204,51 @@ func grokProcessSessionHasMembers(sessionID, excludedPID int) bool {
 	return false
 }
 
-// stopGrokTaggedProcesses terminates every launch descendant that retained the
-// per-launch capability in its environment. Grok deliberately starts MCP and
-// tool commands in independent sessions, so a worker-session sweep alone is
-// insufficient after a manager or worker crash.
-func stopGrokTaggedProcesses(tokenHash string, excludedPID int) error {
+// stopGrokTaggedProcesses terminates every process attributable through the
+// per-launch capability or the exact live ancestry of a durable ownership
+// root. Grok deliberately starts MCP and tool commands in independent
+// sessions, so a worker-session sweep alone is insufficient after a manager
+// or worker crash.
+//
+//nolint:gocyclo // Cleanup repeatedly expands and corroborates exact ownership while escalating bounded signals.
+func stopGrokTaggedProcesses(tokenHash string, excludedPID int, roots ...grokSessionMember) error {
 	if len(tokenHash) != 64 {
 		return nil
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	signal := syscall.SIGTERM
 	emptyPasses := 0
+	known := map[int]grokSessionMember{}
+	for _, root := range roots {
+		if root.PID > 1 && root.ProcStart != "" {
+			known[root.PID] = root
+		}
+	}
 	for {
-		members, err := grokTaggedProcessMembers(tokenHash)
+		roots := make([]grokSessionMember, 0, len(known))
+		for _, member := range known {
+			roots = append(roots, member)
+		}
+		members, err := grokTaggedProcessMembers(tokenHash, roots...)
 		if err != nil {
 			return err
 		}
-		remaining := 0
 		for _, member := range members {
+			known[member.PID] = member
+		}
+		remaining := 0
+		for pid, member := range known {
 			if member.PID == excludedPID {
 				continue
 			}
-			switch grokTaggedProcessStatus(member, tokenHash) {
+			switch exactProcessIdentityStatus(member.PID, member.ProcStart).Status {
 			case processIdentityMatches:
 				remaining++
 				_ = syscall.Kill(member.PID, signal)
 			case processIdentityUnknown:
 				return errors.New("cannot corroborate tagged Grok lane process")
 			case processIdentityStale:
+				delete(known, pid)
 			}
 		}
 		if remaining == 0 {
@@ -199,7 +256,7 @@ func stopGrokTaggedProcesses(tokenHash string, excludedPID int) error {
 			if emptyPasses >= grokTaggedQuiescencePasses {
 				return nil
 			}
-			time.Sleep(25 * time.Millisecond)
+			time.Sleep(grokProcessSurveyInterval)
 			continue
 		}
 		emptyPasses = 0
@@ -210,16 +267,16 @@ func stopGrokTaggedProcesses(tokenHash string, excludedPID int) error {
 			signal = syscall.SIGKILL
 			deadline = time.Now().Add(2 * time.Second)
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(grokProcessSurveyInterval)
 	}
 }
 
-func grokTaggedProcessesRemain(tokenHash string, excludedPID int) bool {
+func grokTaggedProcessesRemain(tokenHash string, excludedPID int, roots ...grokSessionMember) bool {
 	if len(tokenHash) != 64 {
 		return false
 	}
 	for pass := 0; pass < grokTaggedQuiescencePasses; pass++ {
-		members, err := grokTaggedProcessMembers(tokenHash)
+		members, err := grokTaggedProcessMembers(tokenHash, roots...)
 		if err != nil {
 			return true
 		}
@@ -227,14 +284,14 @@ func grokTaggedProcessesRemain(tokenHash string, excludedPID int) bool {
 			if member.PID == excludedPID {
 				continue
 			}
-			switch grokTaggedProcessStatus(member, tokenHash) {
+			switch exactProcessIdentityStatus(member.PID, member.ProcStart).Status {
 			case processIdentityMatches, processIdentityUnknown:
 				return true
 			case processIdentityStale:
 			}
 		}
 		if pass+1 < grokTaggedQuiescencePasses {
-			time.Sleep(25 * time.Millisecond)
+			time.Sleep(grokProcessSurveyInterval)
 		}
 	}
 	return false
