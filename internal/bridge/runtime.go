@@ -68,8 +68,11 @@ type envelope struct {
 // Main dispatches one role of the agent-session-runtime executable.
 func Main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
+	}
+	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
+		os.Exit(code)
 	}
 	switch os.Args[1] {
 	case "shim":
@@ -78,10 +81,6 @@ func Main() {
 		os.Exit(runSupervisorCommand(os.Args[2:]))
 	case "appserver":
 		os.Exit(runAppServerCommand(os.Args[2:]))
-	case "lane":
-		os.Exit(runLaneCommand(os.Args[2:]))
-	case "claude-lane":
-		os.Exit(runClaudeLaneCommand(os.Args[2:]))
 	case "claude-lane-manager":
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
 	case "grok":
@@ -101,6 +100,19 @@ func Main() {
 	default:
 		fmt.Fprintf(os.Stderr, "agent-session-runtime: unknown command %q\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+func runNativeLaneRole(role string, args []string) (int, bool) {
+	switch role {
+	case "lane":
+		return runLaneCommand(args), true
+	case "claude-lane":
+		return runClaudeLaneCommand(args), true
+	case "grok-lane":
+		return runGrokLaneCommand(args), true
+	default:
+		return 0, false
 	}
 }
 

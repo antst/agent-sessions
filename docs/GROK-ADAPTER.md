@@ -177,8 +177,9 @@ The product is the leader + waker. Hooks are not the delivery path.
 - Inbox+Stop except as the Codex-style fallback after the waker has
   *not* claimed ownership. An accepted ACP wake must not also be
   Stop-injected.
-- `grok-peer-lane` and `--product grok` federation. Grok owning existing
-  Codex/Claude lanes is in scope; a native Grok lane product is not.
+- Reusing an interactive `grok-peer` conversation as a worker lane. Native
+  `grok-peer-lane` workers own separate headless ACP sessions; they never add a
+  second writer to a pager-owned conversation.
 - `grok -p --resume` against a live pager (dual writer).
 - Binding or adopting `~/.grok/leader.sock`.
 - Scraping `~/.grok/sessions` or parsing `grok sessions` human output to
@@ -245,9 +246,14 @@ correct.
 
 ---
 
-## Later, not this draft
+## Follow-on: native Grok lanes
 
-`grok-peer-lane` and Grok federation. Only after interactive wake is real.
+Interactive wake is now proven on installed Linux and macOS builds. Native
+`grok-peer-lane` work therefore proceeds as a separate implementation and PR,
+using a sole-owner headless ACP process rather than changing this interactive
+adapter. Its contract and acceptance requirements live in
+[GROK-LANES.md](GROK-LANES.md). Grok federation remains disabled until the
+local lane lifecycle is complete and independently accepted.
 
 Do not substitute a hook adapter if a future Grok release breaks this contract.
 Fail the installed smoke and revisit the ACP/leader integration instead.

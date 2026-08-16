@@ -5,7 +5,7 @@
 Agent Sessions targets Linux and macOS on x86-64 and arm64. It requires Codex CLI with plugins,
 hooks, and managed App Server support; Claude Code with local cross-session messaging; and Bash for
 installation and maintenance scripts. Building from source requires Go 1.22 or newer. CI/release
-artifacts include the six native binaries and require
+artifacts include the seven native binaries and require
 neither Go nor Node.js on the destination host.
 
 | Host | Bundled binary |
@@ -16,7 +16,7 @@ neither Go nor Node.js on the destination host.
 | macOS Apple Silicon | `bin/darwin-arm64/agent-session-runtime` |
 
 Each platform directory also contains the distinct `codex-peer`, `codex-peer-lane`,
-`claude-peer-lane`, `grok-peer`, and `peer-federator` executables. `peer-federator` remains a separately
+`claude-peer-lane`, `grok-peer`, `grok-peer-lane`, and `peer-federator` executables. `peer-federator` remains a separately
 operated process; installing the binary does not enable or load a federation service.
 
 Linux is end-to-end tested on the development host. Both macOS architectures cross-compile in CI;
@@ -61,7 +61,7 @@ For a release archive with the matching prebuilt binary, run only `make install`
 
 By default, `make install`:
 
-1. builds all six binaries under `bin/<platform>`;
+1. builds all seven binaries under `bin/<platform>`;
 2. copies the runtime plugin payload into `~/.local/libexec/agent-sessions`;
 3. registers that installed tree's marketplace as `agent-sessions`;
 4. installs `claude-code-peer@agent-sessions` into Codex's plugin cache; and

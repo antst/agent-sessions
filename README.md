@@ -4,7 +4,7 @@ Native, persistent session lifecycle for Codex, Claude Code, and Grok, plus loca
 cross-session messaging. Interactive sessions and durable worker lanes can be created, resumed,
 supervised, discovered, and messaged with nearly the same lifecycle on Linux and macOS.
 
-This repository is one Go module with shared implementation under `internal/`. It builds six
+This repository is one Go module with shared implementation under `internal/`. It builds seven
 separate native executables:
 
 - `agent-session-runtime` — the shared diagnostic/runtime multicall used by the launchers;
@@ -14,6 +14,7 @@ separate native executables:
 - `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers spawned
   by Codex.
 - `grok-peer` — an interactive Grok TUI backed by a private leader and an ACP wake client.
+- `grok-peer-lane` — durable headless Grok ACP workers (under active development).
 - `peer-federator` — a separate network process that projects live peers and lane commands across
   trusted hosts. It shares this source tree but remains an independently operated binary/service.
 
@@ -76,7 +77,7 @@ inherits the thread's canonical cwd; an explicit `-C` must resolve to that same 
 
 `make install` copies the native runtime payload and the Codex `claude-lane` skill under
 `${PREFIX:-~/.local}/libexec/agent-sessions`, registers that installed marketplace, installs the
-plugin, and links the native runtime plus all four launchers under `${PREFIX:-~/.local}/bin`.
+plugin, and links the native runtime plus all five launchers under `${PREFIX:-~/.local}/bin`.
 `make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
 `make install-claude` independently installs the text-only Claude plugin. `make install-grok`
 validates and copies the local Grok plugin into Grok's auto-trusted user plugin directory; that

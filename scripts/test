@@ -443,11 +443,12 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
+   [[ "$(readlink "$custom_prefix/bin/grok-peer-lane")" != "$installed_binary_dir/grok-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
+for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
     exit 1
@@ -689,7 +690,7 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
+for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1

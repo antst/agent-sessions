@@ -110,7 +110,9 @@ server lets Grok list/message peers and invoke the existing `codex-peer-lane`
 and `claude-peer-lane` launchers with process-attested lifecycle ownership.
 The launcher pins that plugin process to the same selected native-runtime
 binary as the private host, preventing mixed-revision host/MCP operation.
-There is no native `grok-peer-lane` yet.
+Native headless Grok worker lanes are being added through `grok-peer-lane`;
+they own separate ACP sessions and never attach to or concurrently write an
+interactive `grok-peer` conversation. See [GROK-LANES.md](GROK-LANES.md).
 
 Grok's immediate `queued` interjection response is not delivery proof: version
 1.0.4 returns it even if a stale resident handle's actor mailbox has closed.
