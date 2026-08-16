@@ -117,17 +117,21 @@ MCP children, and owned runtime artifacts while preserving Grok's native transcr
 a fresh sole ACP driver and calls `session/load` for the exact stored native Grok UUID. Agent
 Sessions does not call a native Grok archive or unarchive API.
 
-Owned-process cleanup combines the durable worker session, exact live process ancestry, and the
-per-launch capability tag, and rechecks each PID/start identity immediately before signaling it.
-This covers Grok Build and its normal MCP/tool children even when a child changes process group or
-session. On macOS, the kernel deliberately hides the environment of restricted executables, and
-the current platform rejects recursive `kqueue NOTE_TRACK`; therefore an arbitrary restricted
-program that both creates a new session and reparents before Agent Sessions can observe it is no
-longer observable or safely attributable and can survive cleanup undetected. Such unmanaged
-daemonization is unsupported and excluded from a green cleanup claim. Agent Sessions never guesses
-ownership or kills a process from a PID, session number, or token hash alone. Installed macOS
-acceptance must still prove that real Grok Build, MCP, and tool descendants leave no process or
-artifact residue after normal archive and crash reconciliation.
+Owned-process cleanup combines the durable worker session, exact live process ancestry, the
+per-launch capability tag, and a private tool-shell registry. Before Grok executes bash or zsh, a
+token-bound wrapper durably registers that shell's PID and kernel start identity under a shared
+admission lock; archive/reconciliation holds the exclusive lock while stopping those roots and
+their descendants. Every PID and sub-second start identity is rechecked immediately before a
+signal. This covers Grok Build and its normal MCP/tool children even when a registered shell changes
+process group or reparents after a manager crash. On macOS, the kernel deliberately hides the
+environment of restricted executables, and the current platform rejects recursive `kqueue
+NOTE_TRACK`; therefore an arbitrary restricted program that creates a new session and becomes
+reparented after its registered shell has already exited is no longer observable or safely
+attributable and can survive cleanup undetected. Such unmanaged daemonization is unsupported and
+excluded from a green cleanup claim. Agent Sessions never guesses ownership or kills a process from
+a PID, session number, or token hash alone. Installed macOS acceptance must still prove that real
+Grok Build, MCP, and tool descendants leave no process or artifact residue after normal archive and
+crash reconciliation.
 
 Terminal turns durably queue a `GROK_LANE_TERMINAL` collection pointer for the configured owner.
 The pointer contains a stable notice ID and exact `wait` command; it is never the answer. Its native

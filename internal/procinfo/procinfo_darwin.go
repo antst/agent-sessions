@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strings"
 	"syscall"
 	"time"
@@ -40,10 +41,11 @@ func Read(pid int) Info {
 	}
 	started := time.Unix(value.Proc.P_starttime.Sec, int64(value.Proc.P_starttime.Usec)*int64(time.Microsecond)).UTC()
 	return Info{
-		Status: Known,
-		State:  state,
-		Start:  started.Format("Mon Jan _2 15:04:05 2006"),
-		Parent: int(value.Eproc.Ppid),
+		Status:      Known,
+		State:       state,
+		Start:       started.Format("Mon Jan _2 15:04:05 2006"),
+		StrongStart: fmt.Sprintf("%d:%06d", value.Proc.P_starttime.Sec, value.Proc.P_starttime.Usec),
+		Parent:      int(value.Eproc.Ppid),
 	}
 }
 

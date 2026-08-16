@@ -9,8 +9,13 @@ func grokProcessSessionID(_ int) (int, error) {
 }
 
 type grokSessionMember struct {
-	PID       int
-	ProcStart string
+	PID         int
+	ProcStart   string
+	StrongStart string
+}
+
+func grokProcessIdentityStatus(member grokSessionMember) processIdentityStatus {
+	return exactProcessIdentityStatus(member.PID, member.ProcStart).Status
 }
 
 func grokProcessSessionMembers(_ int) ([]grokSessionMember, error) {
@@ -23,6 +28,12 @@ func stopGrokProcessSession(sessionID int, _ string, _ int) error {
 	}
 	return errors.New("Grok lane process-session cleanup is unsupported")
 }
+
+func stopGrokProcessSessionStrong(sessionID int, _, _ string, excludedPID int) error {
+	return stopGrokProcessSession(sessionID, "", excludedPID)
+}
+
+func stopStaleGrokLaneWorker(_ grokSessionMember) {}
 
 func grokProcessSessionHasMembers(sessionID, _ int) bool { return sessionID > 1 }
 

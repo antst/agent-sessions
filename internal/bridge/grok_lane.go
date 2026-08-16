@@ -88,7 +88,11 @@ type grokLaneState struct {
 	ManagerLog            string             `json:"managerLog,omitempty"`
 	WorkerPID             int                `json:"workerPid,omitempty"`
 	WorkerProcStart       string             `json:"workerProcStart,omitempty"`
+	WorkerStrongStart     string             `json:"workerStrongStart,omitempty"`
 	WorkerSessionID       int                `json:"workerSessionId,omitempty"`
+	ToolRegistryVersion   int                `json:"toolRegistryVersion,omitempty"`
+	ToolShellName         string             `json:"toolShellName,omitempty"`
+	ToolRealShell         string             `json:"toolRealShell,omitempty"`
 	MessagingSocket       string             `json:"messagingSocket,omitempty"`
 	LaunchTokenHash       string             `json:"launchTokenHash,omitempty"`
 	RuntimeDir            string             `json:"runtimeDir,omitempty"`
@@ -785,7 +789,7 @@ func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLan
 	startupID := randomID()
 	hostPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), launchToken)
 	state.Status, state.ControlSocket, state.LaunchTokenHash, state.RuntimeDir = "starting", hostPaths.ControlSocket, grokTokenHash(launchToken), paths.runtimeDir
-	state.ManagerPID, state.ManagerProcStart, state.WorkerPID, state.WorkerProcStart, state.WorkerSessionID, state.MessagingSocket = 0, "", 0, "", 0, ""
+	state.ManagerPID, state.ManagerProcStart, state.WorkerPID, state.WorkerProcStart, state.WorkerStrongStart, state.WorkerSessionID, state.MessagingSocket = 0, "", 0, "", "", 0, ""
 	state.StartupID = startupID
 	state.Persistent = persistent
 	if persistent {
@@ -857,15 +861,22 @@ func rollbackGrokLaneResume(paths nativePaths, original grokLaneState, startupID
 	if processIdentityMayBeLive(latest.ManagerPID, latest.ManagerProcStart) {
 		return errors.New("replacement Grok lane manager still owns failed resume")
 	}
-	workerRoot := grokSessionMember{PID: latest.WorkerPID, ProcStart: latest.WorkerProcStart}
-	if err := stopGrokTaggedProcesses(latest.LaunchTokenHash, 0, workerRoot); err != nil {
+	registryGuard, cleanupRoots, err := grokLaneCleanupRoots(latest, true)
+	if err != nil {
 		return err
 	}
-	stopStaleGrokProcess(latest.WorkerPID, latest.WorkerProcStart)
-	if err := stopGrokProcessSession(latest.WorkerSessionID, latest.WorkerProcStart, 0); err != nil {
+	defer registryGuard.close()
+	if err := stopGrokTaggedProcesses(latest.LaunchTokenHash, 0, cleanupRoots...); err != nil {
 		return err
 	}
-	if err := cleanupGrokLaneOwnedFiles(paths, latest, 0); err != nil {
+	stopStaleGrokLaneWorker(grokLaneWorkerRoot(latest))
+	if err := stopGrokProcessSessionStrong(latest.WorkerSessionID, latest.WorkerProcStart, latest.WorkerStrongStart, 0); err != nil {
+		return err
+	}
+	if err := registryGuard.removeArtifacts(); err != nil {
+		return err
+	}
+	if err := cleanupGrokLaneOwnedFiles(paths, latest, 0, cleanupRoots...); err != nil {
 		return err
 	}
 	return writeGrokLaneState(paths, original)
@@ -908,10 +919,17 @@ func reconcileGrokLaneManager(paths nativePaths, state grokLaneState, now int64)
 }
 
 func grokLaneHasOwnedResidue(paths nativePaths, state grokLaneState) bool {
+	registryGuard, cleanupRoots, registryErr := grokLaneCleanupRoots(state, false)
+	if registryGuard != nil {
+		defer registryGuard.close()
+	}
+	if registryErr != nil {
+		return true
+	}
 	if processIdentityMayBeLive(state.ManagerPID, state.ManagerProcStart) ||
 		processIdentityMayBeLive(state.WorkerPID, state.WorkerProcStart) ||
 		grokProcessSessionHasMembers(state.WorkerSessionID, 0) ||
-		grokTaggedProcessesRemain(state.LaunchTokenHash, 0, grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}) ||
+		grokTaggedProcessesRemain(state.LaunchTokenHash, 0, cleanupRoots...) ||
 		state.ControlSocket != "" || state.MessagingSocket != "" {
 		return true
 	}
@@ -1261,10 +1279,11 @@ func grokLaneCleanupComplete(paths nativePaths, state grokLaneState) bool {
 }
 
 func grokLaneStateNormalized(state grokLaneState) bool {
-	return state.ManagerPID == 0 && state.ManagerProcStart == "" && state.WorkerPID == 0 && state.WorkerProcStart == "" && state.WorkerSessionID == 0 &&
+	return state.ManagerPID == 0 && state.ManagerProcStart == "" && state.WorkerPID == 0 && state.WorkerProcStart == "" && state.WorkerStrongStart == "" && state.WorkerSessionID == 0 &&
 		state.ControlSocket == "" && state.MessagingSocket == "" && state.StartupID == ""
 }
 
+//nolint:gocyclo // Forced archive is an ownership transaction with explicit notice, process, registry, and artifact stages.
 func forceArchiveGrokLane(paths nativePaths, sessionID, reason string) error {
 	observed, err := readGrokLaneState(paths, sessionID)
 	if err != nil {
@@ -1309,18 +1328,25 @@ func forceArchiveGrokLane(paths nativePaths, sessionID, reason string) error {
 	if !explicitArchive {
 		flushOrphanGrokLaneNotices(paths, state.SessionID)
 	}
-	workerRoot := grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}
-	if err := stopGrokTaggedProcesses(state.LaunchTokenHash, 0, workerRoot); err != nil {
+	registryGuard, cleanupRoots, err := grokLaneCleanupRoots(state, true)
+	if err != nil {
 		return err
 	}
-	stopStaleGrokProcess(state.WorkerPID, state.WorkerProcStart)
-	if err := stopGrokProcessSession(state.WorkerSessionID, state.WorkerProcStart, 0); err != nil {
+	defer registryGuard.close()
+	if err := stopGrokTaggedProcesses(state.LaunchTokenHash, 0, cleanupRoots...); err != nil {
 		return err
 	}
-	if err := cleanupGrokLaneOwnedFiles(paths, state, 0); err != nil {
+	stopStaleGrokLaneWorker(grokLaneWorkerRoot(state))
+	if err := stopGrokProcessSessionStrong(state.WorkerSessionID, state.WorkerProcStart, state.WorkerStrongStart, 0); err != nil {
 		return err
 	}
-	state.ManagerPID, state.ManagerProcStart, state.WorkerPID, state.WorkerProcStart, state.WorkerSessionID = 0, "", 0, "", 0
+	if err := registryGuard.removeArtifacts(); err != nil {
+		return err
+	}
+	if err := cleanupGrokLaneOwnedFiles(paths, state, 0, cleanupRoots...); err != nil {
+		return err
+	}
+	state.ManagerPID, state.ManagerProcStart, state.WorkerPID, state.WorkerProcStart, state.WorkerStrongStart, state.WorkerSessionID = 0, "", 0, "", "", 0
 	state.ControlSocket, state.MessagingSocket = "", ""
 	return writeGrokLaneState(paths, state)
 }
@@ -1373,16 +1399,22 @@ func stopExactGrokLaneManager(pid int, procStart string) {
 // its numeric backend socket.
 //
 //nolint:gocyclo // Cleanup independently corroborates each process identity and owned artifact.
-func cleanupGrokLaneOwnedFiles(paths nativePaths, state grokLaneState, currentManagerPID int) error {
+func cleanupGrokLaneOwnedFiles(paths nativePaths, state grokLaneState, currentManagerPID int, cleanupRoots ...grokSessionMember) error {
 	if grokProcessSessionHasMembers(state.WorkerSessionID, currentManagerPID) {
 		return errors.New("grok lane process session is still live")
 	}
-	if grokTaggedProcessesRemain(state.LaunchTokenHash, currentManagerPID, grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}) {
+	if len(cleanupRoots) == 0 {
+		cleanupRoots = append(cleanupRoots, grokLaneWorkerRoot(state))
+	}
+	if grokTaggedProcessesRemain(state.LaunchTokenHash, currentManagerPID, cleanupRoots...) {
 		return errors.New("tagged Grok lane process is still live")
 	}
 	managerObservation := cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart)
-	workerObservation := cleanupProcessIdentityStatus(state.WorkerPID, state.WorkerProcStart)
-	if workerObservation.Status != processIdentityStale {
+	workerStatus := processIdentityStale
+	if state.WorkerPID > 1 {
+		workerStatus = grokProcessIdentityStatus(grokLaneWorkerRoot(state))
+	}
+	if workerStatus != processIdentityStale {
 		return errors.New("cannot prove Grok lane worker cleanup")
 	}
 	safeBackendRemoval := state.ManagerPID <= 1

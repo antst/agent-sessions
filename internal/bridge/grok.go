@@ -283,9 +283,17 @@ func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
 		}
 		manager := cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart)
 		worker := cleanupProcessIdentityStatus(state.WorkerPID, state.WorkerProcStart)
+		registryGuard, cleanupRoots, registryErr := grokLaneCleanupRoots(state, false)
+		if registryErr != nil {
+			return nil, fmt.Errorf("read Grok lane tool ownership: %w", registryErr)
+		}
+		taggedRemain := grokTaggedProcessesRemain(state.LaunchTokenHash, 0, cleanupRoots...)
+		if registryGuard != nil {
+			registryGuard.close()
+		}
 		if state.Status != "archived" || manager.Status != processIdentityStale || worker.Status != processIdentityStale ||
 			grokProcessSessionHasMembers(state.WorkerSessionID, 0) ||
-			grokTaggedProcessesRemain(state.LaunchTokenHash, 0, grokSessionMember{PID: state.WorkerPID, ProcStart: state.WorkerProcStart}) {
+			taggedRemain {
 			liveSet[state.SessionID] = true
 		}
 	}

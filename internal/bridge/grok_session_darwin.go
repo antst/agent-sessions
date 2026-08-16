@@ -35,7 +35,7 @@ func platformGrokProcessSessionMembers(sessionID int) ([]grokSessionMember, erro
 		if info.State == "Z" || info.State == "X" {
 			continue
 		}
-		members = append(members, grokSessionMember{PID: pid, ProcStart: info.Start})
+		members = append(members, grokSessionMember{PID: pid, ProcStart: info.Start, StrongStart: info.StrongStart})
 	}
 	return members, nil
 }
@@ -60,7 +60,7 @@ func platformGrokTaggedProcessMembers(tokenHash string, roots []grokSessionMembe
 		}
 		environment, environmentErr := procinfo.Environment(pid)
 		candidates = append(candidates, grokProcessCandidate{
-			grokSessionMember: grokSessionMember{PID: pid, ProcStart: info.Start},
+			grokSessionMember: grokSessionMember{PID: pid, ProcStart: info.Start, StrongStart: info.StrongStart},
 			Parent:            info.Parent,
 			Tagged:            environmentErr == nil && grokEnvironmentMatchesTokenHash(environment, tokenHash),
 		})

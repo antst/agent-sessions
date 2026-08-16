@@ -20,12 +20,15 @@ const (
 )
 
 // Info is the stable process information used for ownership and registry
-// compatibility. Start matches Claude's procStart contract on each platform.
+// compatibility. Start matches Claude's procStart contract on each platform;
+// StrongStart preserves the kernel's finer-grained identity for destructive
+// cleanup authorization.
 type Info struct {
-	Status Status
-	State  string
-	Start  string
-	Parent int
+	Status      Status
+	State       string
+	Start       string
+	StrongStart string
+	Parent      int
 }
 
 // LooksLikeCodexHost recognizes the native and Node-hosted Codex entrypoints

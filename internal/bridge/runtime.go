@@ -70,7 +70,12 @@ type envelope struct {
 }
 
 // Main dispatches one role of the agent-session-runtime executable.
+//
+//nolint:gocyclo // Runtime role dispatch is intentionally centralized.
 func Main() {
+	if isGrokToolWrapperInvocation() {
+		os.Exit(runGrokToolWrapper(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)

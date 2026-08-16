@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 type grokSessionMember struct {
-	PID       int
-	ProcStart string
+	PID         int
+	ProcStart   string
+	StrongStart string
 }
 
 type grokProcessCandidate struct {
@@ -92,11 +95,11 @@ func grokOwnedProcessMembers(candidates []grokProcessCandidate, roots []grokSess
 			continue
 		}
 		candidate, ok := byPID[root.PID]
-		if ok && candidate.ProcStart == root.ProcStart {
+		if ok && grokProcessIdentityEqual(candidate.grokSessionMember, root) {
 			owned[root.PID] = true
 			continue
 		}
-		switch exactProcessIdentityStatus(root.PID, root.ProcStart).Status {
+		switch grokProcessIdentityStatus(root) {
 		case processIdentityUnknown:
 			return nil, errors.New("cannot corroborate Grok lane ownership root")
 		case processIdentityMatches:
@@ -120,10 +123,48 @@ func grokOwnedProcessMembers(candidates []grokProcessCandidate, roots []grokSess
 	return members, nil
 }
 
+func grokProcessIdentityEqual(observed, expected grokSessionMember) bool {
+	if observed.PID != expected.PID || observed.ProcStart != expected.ProcStart {
+		return false
+	}
+	return expected.StrongStart == "" || observed.StrongStart == expected.StrongStart
+}
+
+// grokProcessIdentityStatus is the destructive-cleanup identity check. New
+// Grok lane records carry StrongStart so Darwin PID reuse within procStart's
+// one-second display granularity cannot authorize a signal.
+func grokProcessIdentityStatus(member grokSessionMember) processIdentityStatus {
+	if member.PID <= 1 || member.ProcStart == "" {
+		return processIdentityUnknown
+	}
+	info := procinfo.Read(member.PID)
+	switch info.Status {
+	case procinfo.Absent:
+		return processIdentityStale
+	case procinfo.Known:
+		if info.State == "Z" || info.State == "X" {
+			return processIdentityStale
+		}
+		if info.Start == "" || info.Start != member.ProcStart {
+			return processIdentityStale
+		}
+		if member.StrongStart != "" && info.StrongStart != member.StrongStart {
+			return processIdentityStale
+		}
+		if member.StrongStart != "" && info.StrongStart == "" {
+			return processIdentityUnknown
+		}
+		return processIdentityMatches
+	case procinfo.Unknown:
+		return processIdentityUnknown
+	}
+	return processIdentityUnknown
+}
+
 func grokSessionMemberStatus(member grokSessionMember, sessionID int) processIdentityStatus {
-	identity := exactProcessIdentityStatus(member.PID, member.ProcStart)
-	if identity.Status != processIdentityMatches {
-		return identity.Status
+	identity := grokProcessIdentityStatus(member)
+	if identity != processIdentityMatches {
+		return identity
 	}
 	sid, err := unix.Getsid(member.PID)
 	if errors.Is(err, syscall.ESRCH) {
@@ -138,8 +179,12 @@ func grokSessionMemberStatus(member grokSessionMember, sessionID int) processIde
 	return processIdentityMatches
 }
 
-//nolint:gocyclo // Session cleanup repeatedly corroborates identity while escalating bounded signals.
 func stopGrokProcessSession(sessionID int, expectedLeaderStart string, excludedPID int) error {
+	return stopGrokProcessSessionStrong(sessionID, expectedLeaderStart, "", excludedPID)
+}
+
+//nolint:gocyclo // Session cleanup repeatedly corroborates identity while escalating bounded signals.
+func stopGrokProcessSessionStrong(sessionID int, expectedLeaderStart, expectedLeaderStrongStart string, excludedPID int) error {
 	if sessionID <= 1 {
 		return nil
 	}
@@ -151,7 +196,8 @@ func stopGrokProcessSession(sessionID int, expectedLeaderStart string, excludedP
 			return err
 		}
 		for _, member := range members {
-			if member.PID == sessionID && (expectedLeaderStart == "" || member.ProcStart != expectedLeaderStart) {
+			if member.PID == sessionID && (expectedLeaderStart == "" || member.ProcStart != expectedLeaderStart ||
+				(expectedLeaderStrongStart != "" && member.StrongStart != expectedLeaderStrongStart)) {
 				return errors.New("refuse reused Grok lane process-session identity")
 			}
 		}
@@ -180,6 +226,23 @@ func stopGrokProcessSession(sessionID int, expectedLeaderStart string, excludedP
 			deadline = time.Now().Add(2 * time.Second)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func stopStaleGrokLaneWorker(member grokSessionMember) {
+	if grokProcessIdentityStatus(member) != processIdentityMatches {
+		return
+	}
+	_ = syscall.Kill(-member.PID, syscall.SIGTERM)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if grokProcessIdentityStatus(member) == processIdentityStale {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if grokProcessIdentityStatus(member) == processIdentityMatches {
+		_ = syscall.Kill(-member.PID, syscall.SIGKILL)
 	}
 }
 
@@ -241,7 +304,7 @@ func stopGrokTaggedProcesses(tokenHash string, excludedPID int, roots ...grokSes
 			if member.PID == excludedPID {
 				continue
 			}
-			switch exactProcessIdentityStatus(member.PID, member.ProcStart).Status {
+			switch grokProcessIdentityStatus(member) {
 			case processIdentityMatches:
 				remaining++
 				_ = syscall.Kill(member.PID, signal)
@@ -284,7 +347,7 @@ func grokTaggedProcessesRemain(tokenHash string, excludedPID int, roots ...grokS
 			if member.PID == excludedPID {
 				continue
 			}
-			switch exactProcessIdentityStatus(member.PID, member.ProcStart).Status {
+			switch grokProcessIdentityStatus(member) {
 			case processIdentityMatches, processIdentityUnknown:
 				return true
 			case processIdentityStale:

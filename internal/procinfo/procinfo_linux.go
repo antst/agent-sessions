@@ -31,7 +31,7 @@ func Read(pid int) Info {
 		return Info{Status: Unknown}
 	}
 	parent, _ := strconv.Atoi(fields[1])
-	return Info{Status: Known, State: fields[0], Start: fields[19], Parent: parent}
+	return Info{Status: Known, State: fields[0], Start: fields[19], StrongStart: fields[19], Parent: parent}
 }
 
 // Args reads the process argument vector without losing argument boundaries.

@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 type grokLaneManager struct {
@@ -31,6 +33,8 @@ type grokLaneManager struct {
 	lifecycleLock   *os.File
 	launchLease     *os.File
 	diagnostics     *grokDiagnosticSink
+	toolShellPath   string
+	toolRealShell   string
 	worker          *grokManagedProcess
 	client          *grokACPClient
 	peer            *daemon
@@ -137,6 +141,9 @@ func (m *grokLaneManager) start() error {
 		return err
 	}
 	m.diagnostics = diagnostics
+	if err := m.prepareToolRegistry(); err != nil {
+		return err
+	}
 	_ = os.Remove(m.state.ControlSocket)
 	listener, err := net.Listen("unix", m.state.ControlSocket)
 	if err != nil {
@@ -257,7 +264,7 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	args = append(args, "stdio")
 	command := exec.Command(grokBin, args...) //nolint:gosec // launcher-selected Grok Build executable and validated structured options.
 	command.Dir = m.state.Cwd
-	command.Env = grokLaneManagerEnvironment(os.Environ(), m.launchToken, m.state.SessionID)
+	command.Env = grokLaneWorkerEnvironment(os.Environ(), m.launchToken, m.state, m.toolShellPath, m.toolRealShell)
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return err
@@ -280,6 +287,13 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	}
 	m.worker = worker
 	m.state.WorkerPID, m.state.WorkerProcStart = worker.cmd.Process.Pid, worker.procStart
+	workerInfo := procinfo.Read(worker.cmd.Process.Pid)
+	if workerInfo.Status != procinfo.Known || workerInfo.Start != worker.procStart || workerInfo.StrongStart == "" {
+		m.mu.Unlock()
+		stopGrokManagedProcess(worker, 2*time.Second)
+		return errors.New("capture strong headless Grok lane worker identity")
+	}
+	m.state.WorkerStrongStart = workerInfo.StrongStart
 	workerSessionID, sessionErr := grokProcessSessionID(worker.cmd.Process.Pid)
 	if sessionErr != nil || workerSessionID != worker.cmd.Process.Pid {
 		m.mu.Unlock()
@@ -1179,28 +1193,32 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		m.state.Status, m.state.AutoArchiveAt = "archived", 0
 		persistErr := m.persistLocked()
 		client, worker := m.client, m.worker
-		grokSessionID, workerSessionID, workerProcStart := m.state.GrokSessionID, m.state.WorkerSessionID, m.state.WorkerProcStart
+		grokSessionID, workerSessionID, workerProcStart, workerStrongStart := m.state.GrokSessionID, m.state.WorkerSessionID, m.state.WorkerProcStart, m.state.WorkerStrongStart
 		cleanupState := cloneGrokLaneState(m.state)
 		m.mu.Unlock()
+		registryGuard, cleanupRoots, registryErr := grokLaneCleanupRoots(cleanupState, true)
+		if registryGuard != nil {
+			defer registryGuard.close()
+		}
 		if persistErr == nil && !explicitArchive {
 			m.flushTerminalNotices()
 		}
 		if interrupt && client != nil {
 			_ = client.notifyRequest("session/cancel", map[string]any{"sessionId": grokSessionID})
 		}
-		// Snapshot and stop exact descendants while the durable worker root is
-		// still alive. On Darwin, restricted system binaries expose argv but not
-		// their inherited environment through KERN_PROCARGS2; after the worker
-		// exits and they reparent, that ownership relationship is unrecoverable.
-		taggedCleanupErr := stopGrokTaggedProcesses(cleanupState.LaunchTokenHash, os.Getpid(), grokSessionMember{
-			PID: cleanupState.WorkerPID, ProcStart: cleanupState.WorkerProcStart,
-		})
+		// Snapshot and stop the exact worker plus every registered tool-shell
+		// root before ACP shutdown changes ancestry. Registered roots remain
+		// authoritative after manager death even when Darwin hides their env.
+		taggedCleanupErr := registryErr
+		if taggedCleanupErr == nil {
+			taggedCleanupErr = stopGrokTaggedProcesses(cleanupState.LaunchTokenHash, os.Getpid(), cleanupRoots...)
+		}
 		if client != nil {
 			client.close()
 		} else {
 			stopGrokManagedProcess(worker, 2*time.Second)
 		}
-		sessionCleanupErr := stopGrokProcessSession(workerSessionID, workerProcStart, os.Getpid())
+		sessionCleanupErr := stopGrokProcessSessionStrong(workerSessionID, workerProcStart, workerStrongStart, os.Getpid())
 		if m.diagnostics != nil {
 			_ = m.diagnostics.close()
 		}
@@ -1211,8 +1229,11 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		if cleanupErr == nil {
 			cleanupErr = taggedCleanupErr
 		}
+		if cleanupErr == nil && registryGuard != nil {
+			cleanupErr = registryGuard.removeArtifacts()
+		}
 		if cleanupErr == nil {
-			cleanupErr = cleanupGrokLaneOwnedFiles(m.paths, cleanupState, os.Getpid())
+			cleanupErr = cleanupGrokLaneOwnedFiles(m.paths, cleanupState, os.Getpid(), cleanupRoots...)
 		}
 		if m.launchLease != nil {
 			_ = syscall.Flock(int(m.launchLease.Fd()), syscall.LOCK_UN)
@@ -1221,7 +1242,7 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		if cleanupErr == nil {
 			m.mu.Lock()
 			previous := cloneGrokLaneState(m.state)
-			m.state.ManagerPID, m.state.ManagerProcStart, m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerSessionID = 0, "", 0, "", 0
+			m.state.ManagerPID, m.state.ManagerProcStart, m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerStrongStart, m.state.WorkerSessionID = 0, "", 0, "", "", 0
 			m.state.ControlSocket, m.state.MessagingSocket, m.state.StartupID = "", "", ""
 			if err := m.persistLocked(); err != nil {
 				m.state = previous

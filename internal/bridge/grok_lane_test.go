@@ -11,17 +11,28 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 const grokLaneLockHolderEnv = "AGENT_SESSIONS_GROK_LANE_LOCK_HOLDER"
 const grokLaneSessionHelperEnv = "AGENT_SESSIONS_GROK_LANE_SESSION_HELPER"
 const grokLaneDetachedChildEnv = "AGENT_SESSIONS_GROK_LANE_DETACHED_CHILD"
+const grokToolWrapperExecHelperEnv = "AGENT_SESSIONS_GROK_TOOL_EXEC_HELPER"
+
+func TestGrokToolWrapperExecHelper(_ *testing.T) {
+	if os.Getenv(grokToolWrapperExecHelperEnv) != "1" {
+		return
+	}
+	os.Exit(runGrokToolWrapper([]string{"-c", "printf TOOL_WRAPPER_EXEC_OK"}))
+}
 
 func TestGrokLaneLifecycleLockHolder(_ *testing.T) {
 	if os.Getenv(grokLaneLockHolderEnv) != "1" {
@@ -1148,4 +1159,217 @@ func waitForGrokLaneFile(t *testing.T, path string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("file did not appear: %s", path)
+}
+
+func TestGrokToolRegistrySerializesRegistrationWithArchive(t *testing.T) {
+	launchToken := randomID() + randomID()
+	sessionID := "11111111-2222-4333-8444-555555555555"
+	runtimeDir := t.TempDir()
+	managerInfo := procinfo.Read(os.Getpid())
+	if managerInfo.Status != procinfo.Known || managerInfo.Start == "" || managerInfo.StrongStart == "" {
+		t.Fatal("current process has no strong identity")
+	}
+	state := grokLaneState{
+		Type: "grok-peer-lane", SessionID: sessionID, Status: "idle",
+		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start,
+		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: runtimeDir,
+		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: "bash", ToolRealShell: "/bin/bash",
+	}
+	host := grokRuntimePaths(runtimeDir, os.Getuid(), launchToken)
+	if err := os.MkdirAll(filepath.Join(host.LaunchDir, "tool-roots"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(host.LaunchDir, "tool-register.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lock.Close()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	statePath := grokLaneStatePath(resolveNativePaths(), sessionID)
+	if err := writeJSONAtomic(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(host.LaunchDir, "bash")
+	t.Setenv(grokToolWrapperModeEnv, "1")
+	t.Setenv(grokToolRealShellEnv, state.ToolRealShell)
+	t.Setenv(grokToolWrapperPathEnv, wrapperPath)
+	t.Setenv(grokLaunchTokenEnv, launchToken)
+	t.Setenv(grokSessionIDEnv, sessionID)
+	originalArgv0 := os.Args[0]
+	os.Args[0] = wrapperPath
+	defer func() { os.Args[0] = originalArgv0 }()
+	if err := registerGrokToolRoot(); err != nil {
+		t.Fatalf("register tool root: %v", err)
+	}
+	guard, roots, err := grokLaneCleanupRoots(state, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0].PID != os.Getpid() || roots[0].StrongStart != managerInfo.StrongStart {
+		t.Fatalf("tool roots = %+v", roots)
+	}
+	guard.close()
+
+	exclusive, _, err := grokLaneCleanupRoots(state, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- registerGrokToolRoot() }()
+	select {
+	case err := <-result:
+		exclusive.close()
+		t.Fatalf("registration bypassed cleanup lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	state.Status = "archived"
+	if err := writeJSONAtomic(statePath, state); err != nil {
+		exclusive.close()
+		t.Fatal(err)
+	}
+	exclusive.close()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("post-archive tool registration succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked tool registration did not finish")
+	}
+}
+
+func TestGrokProcessStrongIdentityRejectsSameDisplayStart(t *testing.T) {
+	info := procinfo.Read(os.Getpid())
+	if info.Status != procinfo.Known || info.Start == "" || info.StrongStart == "" {
+		t.Fatal("current process has no strong identity")
+	}
+	member := grokSessionMember{PID: os.Getpid(), ProcStart: info.Start, StrongStart: info.StrongStart + "-reused"}
+	if status := grokProcessIdentityStatus(member); status != processIdentityStale {
+		t.Fatalf("strong identity mismatch status = %v; want stale", status)
+	}
+}
+
+func TestGrokToolRegistryIntentPrecedesArtifacts(t *testing.T) {
+	launchToken := randomID() + randomID()
+	state := grokLaneState{
+		Type: "grok-peer-lane", SessionID: "12345678-1234-4234-8234-123456789abc",
+		Status: "starting", LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: t.TempDir(),
+	}
+	host := grokRuntimePaths(state.RuntimeDir, os.Getuid(), launchToken)
+	if err := os.MkdirAll(host.LaunchDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("stop after durable intent")
+	manager := &grokLaneManager{state: state, hostPaths: host}
+	manager.persistOverride = func(candidate grokLaneState) error {
+		if candidate.ToolRegistryVersion != grokToolRegistryVersion || candidate.ToolShellName == "" || candidate.ToolRealShell == "" {
+			t.Fatalf("incomplete registry intent: %+v", candidate)
+		}
+		paths, pathErr := grokToolRegistryPathsForState(candidate)
+		if pathErr != nil {
+			t.Fatal(pathErr)
+		}
+		for _, path := range []string{paths.lock, paths.roots, paths.wrapper} {
+			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("registry artifact preceded durable intent: %s (%v)", path, statErr)
+			}
+		}
+		return sentinel
+	}
+	if err := manager.prepareToolRegistry(); !errors.Is(err, sentinel) {
+		t.Fatalf("prepare error = %v; want sentinel", err)
+	}
+}
+
+func TestGrokToolRegistryMissingLockIsRecoverableOnlyBeforeArtifacts(t *testing.T) {
+	launchToken := randomID() + randomID()
+	state := grokLaneState{
+		Type: "grok-peer-lane", SessionID: "87654321-4321-4321-8321-cba987654321",
+		Status: "starting", LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: t.TempDir(),
+		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: "bash", ToolRealShell: "/bin/bash",
+	}
+	paths, err := grokToolRegistryPathsForState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.lock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := lockGrokToolRegistry(state, true)
+	if err != nil {
+		t.Fatalf("intent-only registry should be recoverable: %v", err)
+	}
+	guard.close()
+	if err := os.Mkdir(paths.roots, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockGrokToolRegistry(state, true); err == nil {
+		t.Fatal("registry artifacts without their admission lock were accepted")
+	}
+}
+
+func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
+	launchToken := randomID() + randomID()
+	sessionID := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	runtimeDir := t.TempDir()
+	managerInfo := procinfo.Read(os.Getpid())
+	realShell, err := selectGrokLaneRealShell(os.Environ())
+	if err != nil || managerInfo.Status != procinfo.Known {
+		t.Fatalf("prepare wrapper fixture: shell=%q err=%v manager=%+v", realShell, err, managerInfo)
+	}
+	state := grokLaneState{
+		Type: "grok-peer-lane", SessionID: sessionID, Status: "idle",
+		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start,
+		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: runtimeDir,
+		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: filepath.Base(realShell), ToolRealShell: realShell,
+	}
+	host := grokRuntimePaths(runtimeDir, os.Getuid(), launchToken)
+	if err := os.MkdirAll(filepath.Join(host.LaunchDir, "tool-roots"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(host.LaunchDir, "tool-register.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lock.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(host.LaunchDir, filepath.Base(realShell))
+	if err := os.Symlink(executable, wrapperPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	statePath := grokLaneStatePath(resolveNativePaths(), sessionID)
+	if err := writeJSONAtomic(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(wrapperPath, "-test.run=^TestGrokToolWrapperExecHelper$")
+	command.Args[0] = filepath.Base(wrapperPath)
+	command.Env = grokLaneWorkerEnvironment(os.Environ(), launchToken, state, wrapperPath, realShell)
+	command.Env = replaceTestEnvironment(command.Env, grokToolWrapperExecHelperEnv, "1")
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "TOOL_WRAPPER_EXEC_OK" {
+		t.Fatalf("wrapper subprocess: err=%v output=%q", err, output)
+	}
+	recordPath := filepath.Join(host.LaunchDir, "tool-roots", strconv.Itoa(command.ProcessState.Pid())+".json")
+	var record grokToolRootRecord
+	body, err := os.ReadFile(recordPath)
+	if err != nil || json.Unmarshal(body, &record) != nil || record.PID != command.ProcessState.Pid() || record.StrongStart == "" {
+		t.Fatalf("wrapper record: err=%v record=%+v", err, record)
+	}
+}
+
+func replaceTestEnvironment(environment []string, name, value string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }
