@@ -648,6 +648,12 @@ func pathInsideMacOSAppContents(path string) bool {
 
 func startGrokHost(runtimePath string, request grokHostRequest) (grokHostProcess, error) {
 	command := exec.Command(runtimePath, grokHostArguments(request)...) //nolint:gosec // runtimePath is the validated native runtime from this Agent Sessions install.
+	// The launcher is about to exec into the interactive Grok TUI. Keep the
+	// cleanup watchdog outside that TUI's foreground process group so a normal
+	// /quit cannot terminate it before it removes the private leader and durable
+	// launch ownership. The host still observes the exact owner PID/start token
+	// and exits as soon as that exec-preserved owner disappears.
+	configureGrokHostProcess(command)
 	command.Env = replaceGrokLaunchEnvironment(os.Environ(), request.LaunchToken, request.SessionID, runtimePath)
 	stdout, err := command.StdoutPipe()
 	if err != nil {

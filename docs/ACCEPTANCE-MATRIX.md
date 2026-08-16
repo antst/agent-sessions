@@ -137,7 +137,7 @@ must refuse when a process it would replace is still live.
 | G-13 | Linux, macOS | Exact-UUID resume preserves identity, name, cwd, plugin access, and messageability. |
 | G-14 | Linux, macOS | Launch/config/admin policy and in-TUI changes converge across roster, record, registry, status, federation, and label. |
 | G-15 | Linux, macOS | Failed permission publication retries; background refresh reports retryable busy instead of stale authority. |
-| G-16 | Linux, macOS | Normal TUI exit terminates only its private leader, observer, host, MCP, sockets, locks, and records. |
+| G-16 | Linux, macOS | Before exit, the host process group differs from the TUI's and the private leader/observer remain isolated; normal TUI exit then terminates only those owned processes and removes the MCP, sockets, locks, launch record, private directory, registry, and empty state directory. |
 | G-17 | Linux, macOS | Ordinary `grok leader list`/`kill` is tested only on run-owned shared leaders, never used for a healthy private peer. |
 | G-18 | Linux, macOS | Owner/host/leader death, auth failure, roster ambiguity, PID reuse, and stale records clean up without killing unrelated clients. |
 | G-19 | Linux, macOS | Direct `agent_sessions.list_peers` readiness failure blocks first publication; catalog omission and unrelated MCP failures do not, and the already-running server never rejects itself through a recursive readiness check. |
