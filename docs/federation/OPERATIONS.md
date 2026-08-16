@@ -30,10 +30,12 @@ trusted hub to execute native lane commands as the destination OS user. Set
 intended. There is no per-request approval prompt.
 
 When enabled, remote lane execution additionally requires the matching destination launcher. The agent searches
-`PATH` and then `~/.local/bin` for `codex-peer-lane` and `claude-peer-lane`. Override either path
-with `PEER_FEDERATOR_CODEX_LANE` or `PEER_FEDERATOR_CLAUDE_LANE`. `peer-federator hosts` reports
+`PATH` and then `~/.local/bin` for `codex-peer-lane`, `claude-peer-lane`, and `grok-peer-lane`.
+Override the paths with `PEER_FEDERATOR_CODEX_LANE`, `PEER_FEDERATOR_CLAUDE_LANE`, or
+`PEER_FEDERATOR_GROK_LANE`. `peer-federator hosts` reports
 only capabilities actually available on each currently connected agent.
-Claude lane workers are currently conformance-tested with Claude Code 2.1.227; an executable can
+Claude lane workers are currently conformance-tested with Claude Code 2.1.227 and Grok lanes with
+Grok Build 1.0.4; an executable can
 be discoverable while an older Claude release still fails its native worker-readiness check.
 
 Each enabled destination accepts at most 32 concurrent remote lane CLI processes. Remote callers

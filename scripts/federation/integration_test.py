@@ -223,6 +223,7 @@ def main() -> int:
             "--claude-config-dir", str(peer_a.root / "config"),
             "--runtime-dir", str(root / "a-run"),
             "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
+            "--grok-lane", str(lane_fixture),
         )
         agent_b = start(
             "agent-b",
@@ -231,6 +232,7 @@ def main() -> int:
             "--claude-config-dir", str(peer_b.root / "config"),
             "--runtime-dir", str(root / "b-run"),
             "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
+            "--grok-lane", str(lane_fixture),
         )
 
         shadow_b_match = wait_for(
@@ -257,18 +259,19 @@ def main() -> int:
         )
         assert hosts["protocol_version"] == 2
         assert hosts["hosts"] == [
-            {"id": "host-b", "name": "beta", "capabilities": ["claude-lane", "codex-lane"]}
+            {"id": "host-b", "name": "beta", "capabilities": ["claude-lane", "codex-lane", "grok-lane"]}
         ]
 
         # Having launchers installed is not authority to execute them. A third
         # agent without the explicit opt-in joins the roster with no lane
-        # capabilities even when both executable overrides are supplied.
+        # capabilities even when every executable override is supplied.
         agent_c = start(
             "agent-c-disabled",
             "agent", "--hub", f"127.0.0.1:{port}", "--host", "host-c", "--name", "gamma",
             "--claude-config-dir", str(root / "c-config"),
             "--runtime-dir", str(root / "c-run"),
             "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
+            "--grok-lane", str(lane_fixture),
         )
         disabled_host = wait_for(
             lambda: next(
@@ -323,6 +326,25 @@ def main() -> int:
             "uds:" + shadow_a_on_b["messagingSocketPath"],
         ]
         assert "fixture stderr" in remote_start.stderr
+
+        remote_grok_start = subprocess.run(
+            [
+                binary, "lane", "--runtime-dir", str(root / "a-run"),
+                "--source-session", "session-a", "--host", "beta", "--product", "grok", "--",
+                "start", "--name", "remote-grok-worker", "-",
+            ],
+            input="REMOTE_GROK_INPUT_TOKEN\n",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        remote_grok_record = json.loads(remote_grok_start.stdout)
+        assert remote_grok_record["input"] == "REMOTE_GROK_INPUT_TOKEN\n"
+        assert remote_grok_record["args"] == [
+            "start", "--name", "remote-grok-worker", "-", "--persistent", "--notify",
+            "uds:" + shadow_a_on_b["messagingSocketPath"],
+        ]
 
         duplicate = subprocess.run(
             [
@@ -457,6 +479,7 @@ def main() -> int:
             "--claude-config-dir", str(peer_b.root / "config"),
             "--runtime-dir", str(root / "b-run"),
             "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
+            "--grok-lane", str(lane_fixture),
         )
         shadow_b_on_a = wait_for(
             lambda: shadow_for(peer_a.registry, "host-b/session-b"),

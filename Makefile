@@ -151,8 +151,10 @@ install-preflight: build
 		"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 		if [[ $$grok_status -eq 3 ]]; then \
 			printf '%s\n' \
-				'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
-				'Its private leader and ACP observer stop automatically with that TUI.' \
+				'A managed Grok peer or lane is still running.' \
+				'Exit every grok-peer TUI normally, then list and archive headless lanes with:' \
+				'  grok-peer-lane list' \
+				'  grok-peer-lane archive SESSION_OR_NAME' \
 				'After they stop, run make install again.' >&2; \
 			exit 75; \
 		elif [[ $$grok_status -ne 0 ]]; then \
@@ -166,8 +168,10 @@ grok-install-preflight: build
 	"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 	if [[ $$grok_status -eq 3 ]]; then \
 		printf '%s\n' \
-			'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
-			'Its private leader and ACP observer stop automatically with that TUI.' \
+			'A managed Grok peer or lane is still running.' \
+			'Exit every grok-peer TUI normally, then list and archive headless lanes with:' \
+			'  grok-peer-lane list' \
+			'  grok-peer-lane archive SESSION_OR_NAME' \
 			'After they stop, run make install-grok again.' >&2; \
 		exit 75; \
 	elif [[ $$grok_status -ne 0 ]]; then \

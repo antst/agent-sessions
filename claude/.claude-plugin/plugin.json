@@ -1,12 +1,13 @@
 {
   "name": "codex-peer",
-  "version": "0.1.1+codex.20260816105439",
-  "description": "Start, collect, message, resume, and archive named Codex lanes through the codex-peer-lane CLI.",
+  "version": "0.1.1+codex.20260816120714",
+  "description": "Start, collect, message, resume, and archive named Codex and Grok lanes.",
   "author": {
     "name": "Agent Sessions contributors"
   },
   "keywords": [
     "codex",
+    "grok",
     "orchestration",
     "delegation",
     "cross-session-messaging"

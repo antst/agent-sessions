@@ -2447,16 +2447,20 @@ func (s *nativeSupervisor) reconcileLoop() {
 }
 
 func (s *nativeSupervisor) reconcile() error {
+	var reconcileErrors []error
 	cleanupStaleBridgeArtifacts(s.paths)
 	reconcileClaudeLaneManagers(s.paths)
+	if err := reconcileGrokLaneManagers(s.paths); err != nil {
+		reconcileErrors = append(reconcileErrors, err)
+	}
 	client, err := s.ensureClient()
 	if err != nil {
-		return err
+		return errors.Join(append(reconcileErrors, err)...)
 	}
 	s.reconcileExitedInteractiveOwners()
 	loadedSet, err := loadedPreparedThreads(client)
 	if err != nil {
-		return err
+		return errors.Join(append(reconcileErrors, err)...)
 	}
 	loaded := make([]string, 0, len(loadedSet))
 	for threadID := range loadedSet {
@@ -2466,7 +2470,6 @@ func (s *nativeSupervisor) reconcile() error {
 	if err := s.auditLoadedRetirement(client, loaded); err != nil {
 		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: archived-thread audit failed: %v\n", err)
 	}
-	var reconcileErrors []error
 	for _, threadID := range loaded {
 		if err := s.reconcileLoadedThread(client, threadID, releasing); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile loaded thread %s: %w", threadID, err))
@@ -3216,12 +3219,16 @@ func readJSONMap(file string) map[string]any {
 }
 
 func trustedPeerText(item map[string]any) string {
+	return trustedPeerTextForProduct(item, "codex")
+}
+
+func trustedPeerTextForProduct(item map[string]any, recipientProduct string) string {
 	sender := stringValue(item["from"])
 	if name := stringValue(item["fromName"]); name != "" {
 		sender = fmt.Sprintf("%s (%s)", name, defaultString(sender, "unknown address"))
 	}
 	if sender == "" {
-		sender = "an unidentified Claude Code peer"
+		sender = "an unidentified peer"
 	}
 	metadata := []string{}
 	for _, pair := range [][2]string{
@@ -3237,7 +3244,11 @@ func trustedPeerText(item map[string]any) string {
 		parts = append(parts, "Message metadata: "+strings.Join(metadata, ", "))
 	}
 	parts = append(parts, stringValue(item["message"]))
-	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. Reply with claude_peer.send_message when useful.")
+	replyInstruction := "Reply with claude_peer.send_message when useful."
+	if recipientProduct == "grok" {
+		replyInstruction = "Reply with the Agent Sessions send_message tool when useful."
+	}
+	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. "+replyInstruction)
 	return strings.Join(parts, "\n\n")
 }
 

@@ -14,7 +14,8 @@ separate native executables:
 - `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers spawned
   by Codex.
 - `grok-peer` — an interactive Grok TUI backed by a private leader and an ACP wake client.
-- `grok-peer-lane` — durable headless Grok ACP workers (under active development).
+- `grok-peer-lane` — durable named headless Grok ACP workers with messaging, collection, resume,
+  interrupt, and archive lifecycle.
 - `peer-federator` — a separate network process that projects live peers and lane commands across
   trusted hosts. It shares this source tree but remains an independently operated binary/service.
 
@@ -150,8 +151,8 @@ claude/                     self-contained Claude Code plugin and orchestration 
 grok/                       Grok plugin manifest and MCP registration
 .mcp.json                   MCP registration
 hooks/                      Codex lifecycle hook registration
-skills/                     Codex skill for orchestrating Claude Code lanes
-cmd/                        six executable entry points
+skills/                     Codex skills for orchestrating Claude Code and Grok lanes
+cmd/                        seven executable entry points
 internal/bridge/            local session lifecycle and messaging runtime
 internal/launcher/          native launcher argument and bootstrap logic
 internal/federator/         independent cross-host federation runtime

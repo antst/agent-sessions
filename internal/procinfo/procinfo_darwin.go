@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,21 +50,32 @@ func Read(pid int) Info {
 // Args uses KERN_PROCARGS2 so prompts that resemble flags remain distinct
 // from the actual process argument vector.
 func Args(pid int) ([]string, error) {
+	_, args, err := processArgsAndEnvironment(pid)
+	return args, err
+}
+
+// Environment uses the environment tail in Darwin's KERN_PROCARGS2 payload.
+func Environment(pid int) ([]string, error) {
+	environment, _, err := processArgsAndEnvironment(pid)
+	return environment, err
+}
+
+func processArgsAndEnvironment(pid int) ([]string, []string, error) {
 	body, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(body) < 4 {
-		return nil, errors.New("kern.procargs2 response is truncated")
+		return nil, nil, errors.New("kern.procargs2 response is truncated")
 	}
 	argc := int(binary.LittleEndian.Uint32(body[:4]))
 	if argc <= 0 || argc > 65536 {
-		return nil, errors.New("kern.procargs2 returned an invalid argc")
+		return nil, nil, errors.New("kern.procargs2 returned an invalid argc")
 	}
 	rest := body[4:]
 	executableEnd := bytes.IndexByte(rest, 0)
 	if executableEnd < 0 {
-		return nil, errors.New("kern.procargs2 omitted executable terminator")
+		return nil, nil, errors.New("kern.procargs2 omitted executable terminator")
 	}
 	rest = bytes.TrimLeft(rest[executableEnd+1:], "\x00")
 	args := make([]string, 0, argc)
@@ -80,7 +92,23 @@ func Args(pid int) ([]string, error) {
 		}
 	}
 	if len(args) != argc {
-		return nil, errors.New("kern.procargs2 omitted argv entries")
+		return nil, nil, errors.New("kern.procargs2 omitted argv entries")
 	}
-	return args, nil
+	environment := make([]string, 0)
+	rest = bytes.TrimLeft(rest, "\x00")
+	for len(rest) > 0 {
+		end := bytes.IndexByte(rest, 0)
+		if end < 0 {
+			end = len(rest)
+		}
+		entry := string(rest[:end])
+		if strings.Contains(entry, "=") {
+			environment = append(environment, entry)
+		}
+		if end == len(rest) {
+			break
+		}
+		rest = bytes.TrimLeft(rest[end+1:], "\x00")
+	}
+	return environment, args, nil
 }

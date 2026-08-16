@@ -17,14 +17,24 @@ func RunLane(role string, args []string) error {
 		return fmt.Errorf("unsupported lane role %q", role)
 	}
 	environment := []string(nil)
-	if role == "grok-lane" {
+	if role == "grok-lane" && grokLaneNeedsExecutable(args) {
 		grok, err := grokExecutable()
 		if err != nil {
 			return err
 		}
 		environment = replaceLaneEnvironment(os.Environ(), "GROK_PEER_GROK_BIN", grok)
+		environment = replaceLaneEnvironment(environment, "GROK_PEER_NATIVE_RUNTIME", selected.Path)
 	}
 	return Exec(selected.Path, append([]string{role}, args...), environment)
+}
+
+func grokLaneNeedsExecutable(args []string) bool {
+	for _, argument := range args {
+		if argument == "-h" || argument == "--help" {
+			return false
+		}
+	}
+	return len(args) > 0 && (args[0] == "run" || args[0] == "start" || args[0] == "resume" || args[0] == "doctor")
 }
 
 func replaceLaneEnvironment(environment []string, key, value string) []string {

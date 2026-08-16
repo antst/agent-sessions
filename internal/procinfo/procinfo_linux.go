@@ -47,3 +47,17 @@ func Args(pid int) ([]string, error) {
 	}
 	return args, nil
 }
+
+// Environment reads the process environment without losing entry boundaries.
+func Environment(pid int) ([]string, error) {
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return nil, err
+	}
+	parts := bytes.Split(bytes.TrimRight(body, "\x00"), []byte{0})
+	environment := make([]string, 0, len(parts))
+	for _, part := range parts {
+		environment = append(environment, string(part))
+	}
+	return environment, nil
+}

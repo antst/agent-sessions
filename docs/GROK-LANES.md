@@ -5,9 +5,8 @@ orchestrator a durable, named Grok Build session that can receive peer
 messages, execute turns without a TUI, emit normalized JSONL results, resume
 by exact identity, and archive cleanly.
 
-This document is the implementation contract for the initial lane PR. Until
-the acceptance section is green, the binary is experimental and must not be
-advertised by federation.
+This document is the implementation and acceptance contract. Grok lanes use the same explicitly
+enabled, hub-routed remote lifecycle transport as Codex and Claude lanes; SSH is never a fallback.
 
 ## Ownership boundary
 
@@ -19,19 +18,20 @@ owned by an interactive `grok` or `grok-peer` process.
 The supported ACP lifecycle is:
 
 ```text
-spawn: grok --session-id UUID agent --no-leader stdio
+spawn: grok agent --no-leader stdio
 initialize
 authenticate
-session/new                         # start/run
+session/new                         # start/run; returns native Grok UUID
 session/load                        # exact lane resume only
 session/prompt                      # launcher and peer turns, serialized
 session/cancel                      # interrupt
 shutdown + verified process cleanup # archive
 ```
 
-The UUID is selected before process start so the lane's plugin and native MCP
-receive one immutable launch identity. Names are local lifecycle aliases;
-resume resolves them only through Agent Sessions lane state. It never scrapes
+Agent Sessions selects an immutable lane UUID before process start. ACP `session/new` separately
+returns Grok's native conversation UUID; both are persisted, and every prompt/load/cancel/roster
+operation uses the native UUID. Names are local lifecycle aliases; resume resolves them only
+through Agent Sessions lane state, then `session/load`s the persisted native UUID. It never scrapes
 Grok's private store or uses Grok's title matching.
 
 ## Commands and output
@@ -61,12 +61,18 @@ turn.started
 lane.ready
 item.completed (user_message)
 item.completed (agent_message, phase=final_answer)
-turn.completed | turn.failed
+turn.completed (status/outcome/exit describe every terminal result)
 ```
 
-Unknown ACP notifications are retained as diagnostics but never interpreted
-as terminal results. A turn completes only from the corresponding ACP prompt
-response or a protocol-defined terminal error.
+Unknown ACP notifications are ignored and never interpreted as terminal
+results. A turn completes only from the corresponding ACP prompt response or
+a protocol-defined terminal error.
+
+`lane.status` and each `lane.list` row expose the stable lane identity, native
+Grok conversation UUID, cwd, lifecycle status, current collection-debt
+`turn_id`, last collected turn, owner/persistence, and auto-archive policy.
+Terminal result details are emitted by `wait` as `turn.completed`; the status
+event is not a substitute for collection.
 
 ## Peer messaging and attestation
 
@@ -74,6 +80,8 @@ The lane loads the installed `agent_sessions` Grok plugin in its own session.
 Its MCP process is authorized by a per-launch capability plus exact process
 identity and ancestry. Model-supplied session IDs, lane names, socket paths,
 and permission labels are corroboration only and never grant authority.
+Lifecycle control is a local same-UID boundary: the Unix control socket is
+owner-only and every request must carry the exact stable lane session ID.
 
 The manager publishes one peer row only after all of these are true:
 
@@ -104,15 +112,32 @@ install preflight converge on one idempotent cleanup path. Cleanup withdraws
 the peer before deleting sockets and state, stops only exact process identities,
 and preserves uncollected terminal results until explicit archive.
 
+Archive is bridge-owned. It retires the Agent Sessions manager, sole ACP driver, peer publication,
+MCP children, and owned runtime artifacts while preserving Grok's native transcript. Resume starts
+a fresh sole ACP driver and calls `session/load` for the exact stored native Grok UUID. Agent
+Sessions does not call a native Grok archive or unarchive API.
+
+Terminal turns durably queue a `GROK_LANE_TERMINAL` collection pointer for the configured owner.
+The pointer contains a stable notice ID and exact `wait` command; it is never the answer. Its native
+message ID is the same stable notice ID, so a retry after an ambiguous state write is deduplicated by
+the destination peer.
+
+## Remote lanes
+
+An operator must explicitly enable remote lane execution on the destination federator. A healthy
+destination advertises `grok-lane` only when its exact `grok-peer-lane` launcher is available. Use
+`peer-federator lane --host HOST --product grok -- COMMAND ...`; every lifecycle command remains the
+native Grok JSONL contract. Federation injects `--persistent` and a notify target back through the
+source shadow for remote `run`, `start`, and `resume`, so callers must not override persistence or
+notification flags. Every operation requires the hub and fails closed on disconnect.
+
 ## Permissions
 
-Headless lanes cannot answer an interactive approval prompt. The initial
-implementation must expose an explicit Grok permission option and choose a
-documented non-interactive default verified against the installed Grok Build
-version. Owner-derived bypass is allowed only from a process-attested local
-owner; an explicit caller choice wins. Effective live permission comes from
-the resident roster, not argv inference, and is refreshed before it authorizes
-lane inheritance or outgoing peer labels.
+Headless lanes cannot answer an interactive approval prompt. They therefore require explicit Grok
+always-approve mode and publish `bypassPermissions`. Prompting modes fail at argument validation
+instead of creating an unusable worker. Lifecycle ownership still requires an exact corroborated
+local owner unless `--persistent` is selected; ownership never grants or downgrades permission.
+Effective live permission comes from the resident roster, not argv inference.
 
 Model, reasoning effort, cwd, plugin path, and permission switches are passed
 as structured launcher options. Arbitrary native argv is not accepted on the
@@ -132,12 +157,12 @@ counted green:
 - idle peer message, reverse reply, message during an active turn, duplicate
   message ID, disconnect/reconnect, manager crash recovery, and outstanding
   result collection;
-- default and bypass permission publication, explicit-mode precedence, live
+- bypass permission publication, rejection of default/prompting modes, live
   roster changes, and unauthorized MCP/control callers rejected;
-- Codex-, Claude-, and Grok-owned local lanes, including terminal notices and
-  no privilege escalation through ownership inference;
-- full pairwise peer/lane messaging for every installed product, plus remote
-  Grok lane cells only after Grok federation is explicitly implemented;
+- Codex-, Claude-, and Grok-owned local lanes, with no privilege escalation
+  through ownership inference;
+- full pairwise peer/lane messaging for every installed product, including
+  Linux-to-macOS and macOS-to-Linux remote Grok lifecycle, collection, messaging, and archive;
 - normal and forced cleanup with no manager, ACP, MCP, socket, launch record,
   registry row, or private directory resurrection;
 - fresh normal and race suites, vet, lint, all supported cross-build/package

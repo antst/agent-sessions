@@ -379,6 +379,9 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
+		if stringValue(state["nameSource"]) == "lane" {
+			return nil, errors.New("lane names are managed by the lane lifecycle CLI")
+		}
 		if err := sendUnixJSON(stringValue(state["socketPath"]), map[string]any{
 			"type": "control", "action": "rename", "name": newName,
 		}, time.Second); err != nil {

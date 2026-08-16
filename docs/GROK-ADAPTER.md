@@ -166,8 +166,8 @@ The product is the leader + waker. Hooks are not the delivery path.
 - A process-attested Grok session may own `codex-peer-lane` and
   `claude-peer-lane` children. Use the same deepest-live-ancestor rule as Codex
   and Claude; a model-provided session ID is never authority.
-- `fromProduct` / entrypoint allowlist: add `"grok"` next to
-  `codex|claude` on this branch. Grep those strings. Do not add `agy`.
+- `fromProduct` / entrypoint allowlist is `codex|claude|grok`. Grep those strings when adding a
+  product; do not reuse an unrelated product identity.
 
 ### What not to build
 
@@ -248,12 +248,10 @@ correct.
 
 ## Follow-on: native Grok lanes
 
-Interactive wake is now proven on installed Linux and macOS builds. Native
-`grok-peer-lane` work therefore proceeds as a separate implementation and PR,
-using a sole-owner headless ACP process rather than changing this interactive
-adapter. Its contract and acceptance requirements live in
-[GROK-LANES.md](GROK-LANES.md). Grok federation remains disabled until the
-local lane lifecycle is complete and independently accepted.
+Interactive wake is proven on installed Linux and macOS builds. `grok-peer-lane` uses a separate
+sole-owner headless ACP process rather than changing this interactive adapter. Its contract and
+acceptance requirements live in [GROK-LANES.md](GROK-LANES.md). Grok federation remains disabled
+until the local lane lifecycle is independently accepted and a remote design is implemented.
 
 Do not substitute a hook adapter if a future Grok release breaks this contract.
 Fail the installed smoke and revisit the ACP/leader integration instead.

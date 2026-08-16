@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-sessions",
-  "description": "Claude Code orchestration surface for named, messageable Codex lanes on the local shared App Server.",
+  "description": "Claude Code orchestration surface for named, messageable Codex and Grok lanes.",
   "owner": {
     "name": "Agent Sessions contributors"
   },
   "plugins": [
     {
       "name": "codex-peer",
-      "description": "Start, collect, message, resume, and archive named Codex lanes through the codex-peer-lane CLI.",
+      "description": "Start, collect, message, resume, and archive named Codex and Grok lanes.",
       "author": {
         "name": "Agent Sessions contributors"
       },
@@ -16,6 +16,7 @@
       "category": "productivity",
       "keywords": [
         "codex",
+        "grok",
         "orchestration",
         "delegation",
         "cross-session-messaging"
