@@ -2,8 +2,13 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
-GROK ?= grok
+# Ignore an inherited GROK environment variable: a long-lived peer may have
+# pinned its own launcher, but that must not disable discovery for a later
+# install. An explicit make command-line GROK=/absolute/path pins one candidate.
+GROK_INPUT_ORIGIN := $(origin GROK)
+GROK ?=
 GROK_PEER ?= $(BIN_DIR)/grok-peer
+GROK_PEER_ENV = $(if $(and $(filter command line override,$(GROK_INPUT_ORIGIN)),$(strip $(GROK))),GROK_PEER_GROK_BIN="$(GROK)")
 GOLANGCI_LINT ?= golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
@@ -137,6 +142,13 @@ install-preflight: build
 				'App Server is still running. Exit every Codex client, then stop it with:' \
 				'  $(CODEX) app-server daemon stop' \
 				'After it stops, run make install again.' >&2; \
+			exit 75; \
+		}; \
+		"$(BIN_DIR)/agent-session-runtime" grok stopped || { \
+			printf '%s\n' \
+				'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
+				'Its private leader and ACP observer stop automatically with that TUI.' \
+				'After they stop, run make install again.' >&2; \
 			exit 75; \
 		}; \
 	fi
@@ -292,18 +304,18 @@ validate-grok: build
 	}
 	# Never execute GROK directly: grok-peer applies the same fail-closed CLI
 	# contract probe used for interactive launches, including explicit overrides.
-	GROK_PEER_GROK_BIN="$(GROK)" "$(GROK_PEER)" plugin validate "$(GROK_PLUGIN_ROOT)"
+	$(GROK_PEER_ENV) "$(GROK_PEER)" plugin validate "$(GROK_PLUGIN_ROOT)"
 
 install-grok: validate-grok
 	# --trust authorizes this plugin's native MCP process to run with the
 	# current user's privileges. Install only from this trusted local tree.
-	@if GROK_PEER_GROK_BIN="$(GROK)" "$(GROK_PEER)" plugin list --json | \
+	@if $(GROK_PEER_ENV) "$(GROK_PEER)" plugin list --json | \
 		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(GROK_PLUGIN_NAME)"'; then \
 		# Deliberately omit --confirm: fail closed if that name belongs to a \
 		# multi-plugin repository instead of deleting its unrelated plugins. \
-		GROK_PEER_GROK_BIN="$(GROK)" "$(GROK_PEER)" plugin uninstall "$(GROK_PLUGIN_NAME)" --keep-data; \
+		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin uninstall "$(GROK_PLUGIN_NAME)" --keep-data; \
 	fi
-	GROK_PEER_GROK_BIN="$(GROK)" "$(GROK_PEER)" plugin install "$(GROK_PLUGIN_ROOT)" --trust
+	$(GROK_PEER_ENV) "$(GROK_PEER)" plugin install "$(GROK_PLUGIN_ROOT)" --trust
 
 dev-install-grok:
 	$(MAKE) install-grok GROK_PLUGIN_ROOT="$(CURDIR)/grok"

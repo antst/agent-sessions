@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,10 +29,10 @@ const (
 	grokACPStartupTimeout = 15 * time.Second
 	// The outer control budget must exceed the inner ACP startup/refresh
 	// budget so a cold reconnect can return its authoritative result.
-	grokControlTimeout   = grokACPStartupTimeout + 5*time.Second
-	grokACPPromptTimeout = 30 * time.Minute
-	grokStatusRetryDelay = 25 * time.Millisecond
-	grokStatusRetryMax   = 250 * time.Millisecond
+	grokControlTimeout      = grokACPStartupTimeout + 5*time.Second
+	grokACPInterjectTimeout = 30 * time.Second
+	grokStatusRetryDelay    = 25 * time.Millisecond
+	grokStatusRetryMax      = 250 * time.Millisecond
 )
 
 // grokHostConfig describes one process-attested interactive Grok launch.  A
@@ -207,7 +208,64 @@ func readGrokLaunchRecord(path string) *grokLaunchRecord {
 	return &record
 }
 
-// liveGrokLaunchForSession returns only a fully loaded and published launch.
+// runGrokSafetyCommand exposes the read-only process inventory needed by the
+// installer. It never terminates a TUI or leader: the user must exit the
+// owning grok-peer normally so its host can clean up the exact process group.
+func runGrokSafetyCommand(argv []string) int {
+	if len(argv) != 1 || argv[0] != "stopped" {
+		fmt.Fprintln(os.Stderr, "usage: agent-session-runtime grok stopped")
+		return 2
+	}
+	live, err := activeGrokLaunchSessions(resolveNativePaths())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime grok stopped: %v\n", err)
+		return 1
+	}
+	encoded, _ := json.Marshal(map[string]any{"stopped": len(live) == 0, "liveSessionIds": live})
+	fmt.Println(string(encoded))
+	if len(live) > 0 {
+		return 3
+	}
+	return 0
+}
+
+func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
+	directory := filepath.Join(profileDataRoot(paths), "grok-launches")
+	entries, err := os.ReadDir(directory)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read Grok launch inventory: %w", err)
+	}
+	live := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(directory, entry.Name())
+		record := readGrokLaunchRecord(path)
+		if record == nil {
+			return nil, fmt.Errorf("refuse malformed Grok launch record: %s", path)
+		}
+		identities := []processIdentityObservation{
+			cleanupProcessIdentityStatus(record.OwnerPID, record.OwnerProcStart),
+			cleanupProcessIdentityStatus(record.HostPID, record.HostProcStart),
+			cleanupProcessIdentityStatus(record.LeaderPID, record.LeaderProcStart),
+			cleanupProcessIdentityStatus(record.WakerPID, record.WakerProcStart),
+		}
+		for _, identity := range identities {
+			if identity.Status != processIdentityStale {
+				live = append(live, record.SessionID)
+				break
+			}
+		}
+	}
+	sort.Strings(live)
+	return live, nil
+}
+
+// liveGrokLaunchForSession returns only a fully resident and published launch.
 // Registry data alone is discovery, never authority: all three owning process
 // identities, the private paths, and the bridge state must corroborate it.
 func liveGrokLaunchForSession(paths nativePaths, sessionID string) *grokLaunchRecord {
@@ -298,8 +356,8 @@ func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
 			return errors.New("grok host returned no authoritative permission mode")
 		}
 		if deferred, _ := response["refreshDeferred"].(bool); deferred &&
-			stringValue(response["permissionAuthority"]) != "active_prompt_snapshot" {
-			return errors.New("grok host deferred permission refresh without an active prompt snapshot")
+			stringValue(response["permissionAuthority"]) != "active_interjection_snapshot" {
+			return errors.New("grok host deferred permission refresh without an active interjection snapshot")
 		}
 		return nil
 	}
@@ -493,20 +551,19 @@ type grokHost struct {
 	lease    *os.File
 	modeMu   sync.RWMutex
 	mode     string
-	// activePromptMode is authoritative only while this host's ACP stream is
-	// blocked in the injected session/prompt whose immediately preceding roster
-	// refresh produced the snapshot. It must never turn arbitrary acpMu
-	// contention into permission authority.
-	activePromptMode  string
-	activePromptValid bool
+	// activeInterjectionMode is authoritative only while this host is submitting an
+	// injected x.ai/interject whose immediately preceding roster refresh
+	// produced the snapshot. It must never turn arbitrary acpMu contention into
+	// permission authority.
+	activeInterjectionMode  string
+	activeInterjectionValid bool
 
 	// publishPermission is a test seam. Production writes both daemon records
 	// through writeRecordsLocked.
 	publishPermission func(*daemon) error
 
-	acpMu     sync.Mutex
-	acp       *grokACPClient
-	acpLoaded bool
+	acpMu sync.Mutex
+	acp   *grokACPClient
 
 	wakeMu     sync.Mutex
 	wakes      map[string]*grokWakeRecord
@@ -736,10 +793,25 @@ func (h *grokHost) prepareLoop() {
 func (h *grokHost) ensureACP(ctx context.Context) error {
 	h.acpMu.Lock()
 	defer h.acpMu.Unlock()
-	return h.ensureACPLocked(ctx)
+	return h.ensureACPReadyLocked(ctx)
 }
 
-func (h *grokHost) ensureACPLocked(ctx context.Context) error {
+func (h *grokHost) ensureACPReadyLocked(ctx context.Context) error {
+	if err := h.ensureACPConnectedLocked(ctx); err != nil {
+		return err
+	}
+	if err := h.refreshPermissionModeLocked(ctx); err != nil {
+		return err
+	}
+	return h.ensureAgentSessionsMCPReadyLocked(ctx)
+}
+
+func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
+	// This client observes and interjects into the TUI-owned resident actor; it
+	// must never attach with session/load. A concurrent load can replace the
+	// actor while the TUI is still creating its MCP process scope. The live
+	// roster is the readiness/permission observation, and x.ai/interject targets
+	// that resident actor without becoming a second session owner.
 	if h.acp != nil {
 		select {
 		case <-h.acp.readDone:
@@ -794,23 +866,6 @@ func (h *grokHost) ensureACPLocked(ctx context.Context) error {
 			return fmt.Errorf("authenticate Grok ACP from cached CLI credentials: %w", err)
 		}
 	}
-	if h.acpLoaded {
-		return h.refreshPermissionModeLocked(ctx)
-	}
-	if _, err := h.acp.request(ctx, "session/load", map[string]any{
-		"sessionId": h.config.SessionID, "cwd": h.config.Cwd, "mcpServers": []any{},
-	}); err != nil {
-		var rpcErr *grokRPCError
-		if !errors.As(err, &rpcErr) {
-			h.closeACPLocked()
-		}
-		return fmt.Errorf("load attached Grok session: %w", err)
-	}
-	h.acpLoaded = true
-	if err := h.refreshPermissionModeLocked(ctx); err != nil {
-		h.acpLoaded = false
-		return err
-	}
 	return nil
 }
 
@@ -861,33 +916,84 @@ func (h *grokHost) refreshPermissionModeLocked(ctx context.Context) error {
 	return nil
 }
 
+func (h *grokHost) ensureAgentSessionsMCPReadyLocked(ctx context.Context) error {
+	result, err := h.acp.request(ctx, "_x.ai/mcp/list", map[string]any{
+		"method": "x.ai/mcp/list",
+		"params": map[string]any{"sessionId": h.config.SessionID, "cache": true},
+	})
+	if err != nil {
+		return fmt.Errorf("query live Grok MCP readiness: %w", err)
+	}
+	return grokAgentSessionsMCPReady(result)
+}
+
+func grokAgentSessionsMCPReady(response map[string]any) error {
+	result, _ := response["result"].(map[string]any)
+	servers, ok := result["servers"].([]any)
+	if !ok {
+		return errors.New("grok MCP response has no servers")
+	}
+	matches := 0
+	ready := false
+	for _, raw := range servers {
+		server, _ := raw.(map[string]any)
+		if stringValue(server["name"]) != "agent_sessions" {
+			continue
+		}
+		matches++
+		if stringValue(server["source"]) != "local" || stringValue(server["type"]) != "stdio" {
+			continue
+		}
+		session, _ := server["session"].(map[string]any)
+		enabled, enabledOK := session["enabled"].(bool)
+		if !enabledOK || !enabled || stringValue(session["status"]) != "ready" {
+			continue
+		}
+		tools, _ := session["tools"].([]any)
+		for _, toolRaw := range tools {
+			tool, _ := toolRaw.(map[string]any)
+			toolEnabled, toolEnabledOK := tool["enabled"].(bool)
+			if stringValue(tool["name"]) == "send_message" && toolEnabledOK && toolEnabled {
+				ready = true
+			}
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("grok MCP response returned %d agent_sessions rows", matches)
+	}
+	if !ready {
+		return errors.New("grok agent_sessions MCP is not ready with send_message enabled")
+	}
+	return nil
+}
+
 func (h *grokHost) currentPermissionMode() string {
 	h.modeMu.RLock()
 	defer h.modeMu.RUnlock()
 	return defaultString(h.mode, "default")
 }
 
-func (h *grokHost) beginActivePromptPermissionSnapshot() {
+func (h *grokHost) beginActiveInterjectionPermissionSnapshot() {
 	h.modeMu.Lock()
-	h.activePromptMode = defaultString(h.mode, "default")
-	h.activePromptValid = true
+	h.activeInterjectionMode = defaultString(h.mode, "default")
+	h.activeInterjectionValid = true
 	h.modeMu.Unlock()
 }
 
-func (h *grokHost) clearActivePromptPermissionSnapshot() {
+func (h *grokHost) clearActiveInterjectionPermissionSnapshot() {
 	h.modeMu.Lock()
-	h.activePromptMode = ""
-	h.activePromptValid = false
+	h.activeInterjectionMode = ""
+	h.activeInterjectionValid = false
 	h.modeMu.Unlock()
 }
 
-func (h *grokHost) activePromptPermissionSnapshot() (string, bool) {
+func (h *grokHost) activeInterjectionPermissionSnapshot() (string, bool) {
 	h.modeMu.RLock()
 	defer h.modeMu.RUnlock()
-	if !h.activePromptValid {
+	if !h.activeInterjectionValid {
 		return "", false
 	}
-	mode := h.activePromptMode
+	mode := h.activeInterjectionMode
 	return mode, mode == "default" || mode == "bypassPermissions"
 }
 
@@ -933,7 +1039,7 @@ func (h *grokHost) closeACPLocked() {
 	if h.acp != nil {
 		h.acp.close()
 	}
-	h.acp, h.acpLoaded = nil, false
+	h.acp = nil
 }
 
 func (h *grokHost) acceptLoop() {
@@ -994,14 +1100,14 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 	}
 	switch stringValue(request["action"]) {
 	case "status":
-		loaded := false
+		resident := false
 		refreshDeferred := !h.acpMu.TryLock()
 		permissionAuthority := "live_roster"
 		if !refreshDeferred {
 			ctx, cancel := context.WithTimeout(context.Background(), grokACPStartupTimeout)
-			err := h.ensureACPLocked(ctx)
+			err := h.ensureACPReadyLocked(ctx)
 			cancel()
-			loaded = h.acpLoaded
+			resident = err == nil
 			h.acpMu.Unlock()
 			if err != nil {
 				return nil, err
@@ -1011,13 +1117,13 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 		published := h.peer != nil
 		var permissionMode string
 		if refreshDeferred {
-			// session/prompt owns the ACP request stream until the injected turn
-			// completes. Its permission mode was refreshed immediately before
-			// submission; blocking here would deadlock an MCP call made by that
-			// same turn. Human-started turns do not occupy this stream and take
-			// the live refresh path above.
+			// The interject request briefly owns the ACP request stream. Its
+			// permission mode was refreshed immediately before submission;
+			// blocking here would deadlock an MCP call that starts before the
+			// request returns. Human-started turns do not occupy this stream and
+			// take the live refresh path above.
 			var valid bool
-			permissionMode, valid = h.activePromptPermissionSnapshot()
+			permissionMode, valid = h.activeInterjectionPermissionSnapshot()
 			if !published || !valid {
 				h.peerMu.Unlock()
 				return map[string]any{
@@ -1026,15 +1132,15 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 					"refreshDeferred": true, "permissionAuthority": "none",
 				}, nil
 			}
-			loaded = true
-			permissionAuthority = "active_prompt_snapshot"
+			resident = true
+			permissionAuthority = "active_interjection_snapshot"
 		} else {
 			permissionMode = h.currentPermissionMode()
 		}
 		h.peerMu.Unlock()
 		return map[string]any{
 			"sessionId": h.config.SessionID, "leaderReady": h.leader != nil,
-			"loaded": loaded, "ready": loaded && published,
+			"loaded": resident, "ready": resident && published,
 			"permissionMode": permissionMode, "refreshDeferred": refreshDeferred,
 			"permissionAuthority": permissionAuthority,
 		}, nil
@@ -1162,31 +1268,33 @@ func (h *grokHost) deliverWake(messageID string) {
 
 	h.acpMu.Lock()
 	ctx, cancel := context.WithTimeout(context.Background(), grokACPStartupTimeout)
-	err := h.ensureACPLocked(ctx)
+	err := h.ensureACPReadyLocked(ctx)
 	cancel()
 	if err != nil {
 		h.acpMu.Unlock()
 		h.requeueWake(messageID, err)
 		return
 	}
-	h.beginActivePromptPermissionSnapshot()
+	h.beginActiveInterjectionPermissionSnapshot()
 	if err := h.ensurePeerPublished(); err != nil {
-		h.clearActivePromptPermissionSnapshot()
+		h.clearActiveInterjectionPermissionSnapshot()
 		h.acpMu.Unlock()
 		h.requeueWake(messageID, err)
 		return
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), grokACPPromptTimeout)
-	_, err = h.acp.request(ctx, "session/prompt", map[string]any{
-		"sessionId": h.config.SessionID,
-		"prompt":    []map[string]any{{"type": "text", "text": trustedPeerText(item)}},
+	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
+	_, err = h.acp.request(ctx, "_x.ai/interject", map[string]any{
+		"method": "x.ai/interject",
+		"params": map[string]any{
+			"sessionId": h.config.SessionID, "text": trustedPeerText(item), "interjectionId": messageID,
+		},
 	})
-	h.clearActivePromptPermissionSnapshot()
+	h.clearActiveInterjectionPermissionSnapshot()
 	cancel()
 	if err != nil {
 		var rpcErr *grokRPCError
 		if errors.As(err, &rpcErr) {
-			// A JSON-RPC error proves the prompt was rejected. It is safe to
+			// A JSON-RPC error proves the interjection was rejected. It is safe to
 			// reconnect and retry the same immutable message id.
 			h.closeACPLocked()
 			h.acpMu.Unlock()
@@ -1194,7 +1302,7 @@ func (h *grokHost) deliverWake(messageID string) {
 			return
 		}
 		// EOF/timeout after the write is ambiguous. Keep durable ownership and
-		// never issue a second prompt that could duplicate a completed turn.
+		// never issue a second interjection that could duplicate accepted work.
 		h.closeACPLocked()
 		h.acpMu.Unlock()
 		h.setWakeResult(messageID, "in_flight", "delivery outcome is unknown: "+err.Error())

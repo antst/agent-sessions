@@ -294,6 +294,27 @@ func TestGrokExecutableSkipsInvalidPathCandidateAndValidatesOverride(t *testing.
 	}
 }
 
+func TestGrokExecutableFallsBackToVendorCLIWhenPathContainsChatProduct(t *testing.T) {
+	root := t.TempDir()
+	chatDirectory := filepath.Join(root, "chat")
+	home := filepath.Join(root, "home")
+	chatMarker := filepath.Join(root, "chat-probed")
+	writeGrokFixture(t, chatDirectory, `: >"$GROK_CHAT_MARKER"; printf '%s\n' 'AI coding agent powered by Grok' 'Commands:' '  daemon'`)
+	want := writeGrokFixture(t, filepath.Join(home, ".grok", "bin"), validGrokHelpFixture())
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", chatDirectory)
+	t.Setenv("GROK_CHAT_MARKER", chatMarker)
+	t.Setenv("GROK_PEER_GROK_BIN", "")
+
+	got, err := grokExecutable()
+	if err != nil || got != want {
+		t.Fatalf("grok executable = %q, %v; want vendor fallback %q", got, err, want)
+	}
+	if _, err := os.Stat(chatMarker); err != nil {
+		t.Fatalf("chat candidate was not contract-probed before fallback: %v", err)
+	}
+}
+
 func TestGrokExecutableRejectsMacOSAppBundleBeforeProbe(t *testing.T) {
 	for _, source := range []string{"override", "path", "fallback"} {
 		for _, symlinked := range []bool{false, true} {

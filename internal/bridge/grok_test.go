@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,20 +103,6 @@ func runGrokFakeACP() {
 				writeGrokFakeResponse(request["id"], nil, map[string]any{"code": -32001, "message": "bad cached token"})
 				continue
 			}
-		case "session/load":
-			if os.Getenv("GROK_FAKE_LOAD_REJECT") == "1" {
-				writeGrokFakeResponse(request["id"], nil, map[string]any{"code": -32000, "message": "session not ready"})
-				continue
-			}
-			if marker := os.Getenv("GROK_FAKE_EXIT_AFTER_LOAD_ONCE"); marker != "" {
-				file, createErr := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-				if createErr == nil {
-					_ = file.Close()
-					writeGrokFakeResponse(request["id"], result, nil)
-					return
-				}
-			}
-			writeGrokFakeNotification("session/update", map[string]any{"sessionId": "unrelated"})
 		case "_x.ai/sessions/list":
 			if os.Getenv("GROK_FAKE_BAD_ROSTER") == "1" {
 				result["result"] = map[string]any{"sessions": []any{}}
@@ -129,19 +116,40 @@ func runGrokFakeACP() {
 			result["result"] = map[string]any{"sessions": []any{map[string]any{
 				"sessionId": os.Getenv(grokSessionIDEnv), "resident": true, "yolo": yolo,
 			}}}
-		case "session/prompt":
+			if marker := os.Getenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE"); marker != "" {
+				file, createErr := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+				if createErr == nil {
+					_ = file.Close()
+					writeGrokFakeResponse(request["id"], result, nil)
+					return
+				}
+			}
+		case "_x.ai/mcp/list":
+			status := "ready"
+			if os.Getenv("GROK_FAKE_MCP_NOT_READY") == "1" {
+				status = "initializing"
+			}
+			if path := os.Getenv("GROK_FAKE_MCP_STATUS_FILE"); path != "" {
+				body, _ := os.ReadFile(path)
+				status = strings.TrimSpace(string(body))
+			}
+			result["result"] = map[string]any{"servers": []any{
+				map[string]any{"name": "unrelated", "source": "local", "type": "stdio", "authRequired": true},
+				map[string]any{
+					"name": "agent_sessions", "source": "local", "type": "stdio",
+					"session": map[string]any{"enabled": true, "status": status, "tools": []any{
+						map[string]any{"name": "send_message", "enabled": true},
+					}},
+				},
+			}}
+		case "_x.ai/interject":
 			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
 				time.Sleep(time.Duration(delay) * time.Millisecond)
 			}
-			result["stopReason"] = "end_turn"
+			result["result"] = map[string]any{"status": "queued"}
 		}
 		writeGrokFakeResponse(request["id"], result, nil)
 	}
-}
-
-func writeGrokFakeNotification(method string, params map[string]any) {
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
-	_, _ = fmt.Fprintln(os.Stdout, string(body))
 }
 
 func writeGrokFakeResponse(id any, result, rpcErr map[string]any) {
@@ -203,9 +211,9 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 
 	requests := readGrokFakeRecords(t, record)
 	methods := []string{}
-	prompts := 0
 	var argvs [][]string
-	var initialize, authenticate, load, prompt map[string]any
+	var initialize, authenticate, mcpList, interject map[string]any
+	loads, prompts := 0, 0
 	for _, entry := range requests {
 		if rawArgs, ok := entry["args"].([]any); ok {
 			args := make([]string, 0, len(rawArgs))
@@ -219,22 +227,23 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 		if method != "" {
 			methods = append(methods, method)
 		}
-		if method == "session/prompt" {
-			prompts++
-		}
 		switch method {
 		case "initialize":
 			initialize, _ = request["params"].(map[string]any)
 		case "authenticate":
 			authenticate, _ = request["params"].(map[string]any)
 		case "session/load":
-			load, _ = request["params"].(map[string]any)
+			loads++
 		case "session/prompt":
-			prompt, _ = request["params"].(map[string]any)
+			prompts++
+		case "_x.ai/mcp/list":
+			mcpList, _ = request["params"].(map[string]any)
+		case "_x.ai/interject":
+			interject, _ = request["params"].(map[string]any)
 		}
 	}
-	if prompts != 1 {
-		t.Fatalf("session/prompt count = %d, methods %v", prompts, methods)
+	if loads != 0 || prompts != 0 || interject == nil {
+		t.Fatalf("wake transport load=%d prompt=%d interject=%#v, methods %v", loads, prompts, interject, methods)
 	}
 	var durable grokWakeRecord
 	body, err := os.ReadFile(grokWakeRecordPath(resolveNativePaths(), host.config.SessionID, "message-1"))
@@ -242,7 +251,7 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 		durable.MessageID != "message-1" || durable.Fingerprint != wakeItemFingerprint(item) {
 		t.Fatalf("durable Grok wake = %+v, read=%v", durable, err)
 	}
-	wantPrefix := []string{"initialize", "authenticate", "session/load", "_x.ai/sessions/list", "session/prompt"}
+	wantPrefix := []string{"initialize", "authenticate", "_x.ai/sessions/list", "_x.ai/mcp/list", "_x.ai/interject"}
 	next := 0
 	for _, method := range methods {
 		if next < len(wantPrefix) && method == wantPrefix[next] {
@@ -252,15 +261,14 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 	if next != len(wantPrefix) {
 		t.Fatalf("ACP method prefix = %v, want %v", methods, wantPrefix)
 	}
+	inner, _ := interject["params"].(map[string]any)
+	mcpInner, _ := mcpList["params"].(map[string]any)
+	mcpCached, _ := mcpInner["cache"].(bool)
 	if intValue(initialize["protocolVersion"]) != 1 || stringValue(authenticate["methodId"]) != "cached_token" ||
-		stringValue(load["sessionId"]) != host.config.SessionID || !samePath(stringValue(load["cwd"]), host.config.Cwd) {
-		t.Fatalf("ACP bootstrap mismatch: initialize=%#v authenticate=%#v load=%#v", initialize, authenticate, load)
-	}
-	if _, ok := load["_meta"]; ok {
-		t.Fatalf("session/load unexpectedly changes Grok policy: %#v", load)
-	}
-	if _, ok := prompt["_meta"]; ok {
-		t.Fatalf("session/prompt unexpectedly changes Grok policy: %#v", prompt)
+		stringValue(mcpList["method"]) != "x.ai/mcp/list" || stringValue(mcpInner["sessionId"]) != host.config.SessionID || !mcpCached ||
+		stringValue(interject["method"]) != "x.ai/interject" || stringValue(inner["sessionId"]) != host.config.SessionID ||
+		stringValue(inner["interjectionId"]) != "message-1" || !strings.Contains(stringValue(inner["text"]), "do exactly one turn") {
+		t.Fatalf("ACP bootstrap mismatch: initialize=%#v authenticate=%#v mcp=%#v interject=%#v", initialize, authenticate, mcpList, interject)
 	}
 	wantLeader := []string{"--permission-mode", "default", "agent", "leader", "--leader-socket", host.paths.LeaderSocket, "--no-exit-on-disconnect", "--relay-on-demand", "--no-auto-update"}
 	wantBridge := []string{"--no-auto-update", "--permission-mode", "default", "--leader-socket", host.paths.LeaderSocket, "agent", "--leader", "stdio"}
@@ -274,6 +282,47 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 	}
 	if live := liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID); live == nil {
 		t.Fatal("loaded Grok host was not live-attested")
+	}
+}
+
+func TestGrokHostDoesNotPublishBeforeAgentSessionsMCPIsReady(t *testing.T) {
+	statusFile := filepath.Join(t.TempDir(), "mcp-status")
+	if err := os.WriteFile(statusFile, []byte("initializing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_FAKE_MCP_STATUS_FILE", statusFile)
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-mcp-readiness")
+	defer stopTestGrokHost(t, host, cancel, result)
+	time.Sleep(300 * time.Millisecond)
+	host.peerMu.Lock()
+	published := host.peer != nil
+	host.peerMu.Unlock()
+	if published || liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID) != nil {
+		t.Fatal("Grok peer published before agent_sessions MCP was ready")
+	}
+	if err := os.WriteFile(statusFile, []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitGrokHostReady(t, host)
+}
+
+func TestGrokAgentSessionsMCPReadinessIgnoresUnrelatedFailure(t *testing.T) {
+	response := map[string]any{"result": map[string]any{"servers": []any{
+		map[string]any{"name": "exa", "authRequired": true},
+		map[string]any{
+			"name": "agent_sessions", "source": "local", "type": "stdio",
+			"session": map[string]any{"enabled": true, "status": "ready", "tools": []any{
+				map[string]any{"name": "send_message", "enabled": true},
+			}},
+		},
+	}}}
+	if err := grokAgentSessionsMCPReady(response); err != nil {
+		t.Fatalf("unrelated MCP failure blocked agent_sessions readiness: %v", err)
+	}
+	session := response["result"].(map[string]any)["servers"].([]any)[1].(map[string]any)["session"].(map[string]any)
+	session["status"] = "initializing"
+	if err := grokAgentSessionsMCPReady(response); err == nil {
+		t.Fatal("initializing agent_sessions MCP was accepted as ready")
 	}
 }
 
@@ -315,7 +364,7 @@ func TestInferGrokParentRequiresLiveLaunchCapabilityAndLeaderAncestry(t *testing
 
 func TestGrokHostReconnectsACPBridgeBeforeNextWake(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "bridge-exited")
-	t.Setenv("GROK_FAKE_EXIT_AFTER_LOAD_ONCE", marker)
+	t.Setenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE", marker)
 	host, cancel, result, record := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-reconnect")
 	defer stopTestGrokHost(t, host, cancel, result)
 	waitGrokHostReady(t, host)
@@ -345,18 +394,18 @@ func TestGrokHostReconnectsACPBridgeBeforeNextWake(t *testing.T) {
 	}
 	waitForGrokDelivery(t, host, "after-reconnect", "delivered")
 	requests := readGrokFakeRecords(t, record)
-	initializeCount, promptCount := 0, 0
+	initializeCount, interjectCount := 0, 0
 	for _, entry := range requests {
 		request, _ := entry["request"].(map[string]any)
 		switch stringValue(request["method"]) {
 		case "initialize":
 			initializeCount++
-		case "session/prompt":
-			promptCount++
+		case "_x.ai/interject":
+			interjectCount++
 		}
 	}
-	if initializeCount != 2 || promptCount != 1 {
-		t.Fatalf("reconnect request counts initialize=%d prompt=%d", initializeCount, promptCount)
+	if initializeCount != 2 || interjectCount != 1 {
+		t.Fatalf("reconnect request counts initialize=%d interject=%d", initializeCount, interjectCount)
 	}
 }
 
@@ -376,13 +425,13 @@ func TestGrokHostStatusDoesNotDeadlockInjectedTurn(t *testing.T) {
 	waitForGrokDelivery(t, host, "busy-status", "in_flight")
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if _, valid := host.activePromptPermissionSnapshot(); valid {
+		if _, valid := host.activeInterjectionPermissionSnapshot(); valid {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, valid := host.activePromptPermissionSnapshot(); !valid {
-		t.Fatal("injected prompt did not publish its active permission snapshot")
+	if _, valid := host.activeInterjectionPermissionSnapshot(); !valid {
+		t.Fatal("interjection did not publish its active permission snapshot")
 	}
 	started := time.Now()
 	status, err := requestControl(host.paths.ControlSocket, map[string]any{
@@ -390,11 +439,11 @@ func TestGrokHostStatusDoesNotDeadlockInjectedTurn(t *testing.T) {
 	}, 250*time.Millisecond)
 	ready, _ := status["ready"].(bool)
 	deferred, _ := status["refreshDeferred"].(bool)
-	if err != nil || !deferred || !ready || stringValue(status["permissionAuthority"]) != "active_prompt_snapshot" {
+	if err != nil || !deferred || !ready || stringValue(status["permissionAuthority"]) != "active_interjection_snapshot" {
 		t.Fatalf("busy status = %#v, %v", status, err)
 	}
 	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
-		t.Fatalf("busy status blocked behind session/prompt for %s", elapsed)
+		t.Fatalf("busy status blocked behind x.ai/interject for %s", elapsed)
 	}
 	waitForGrokDelivery(t, host, "busy-status", "delivered")
 }
@@ -410,10 +459,10 @@ func TestGrokHostBusyStatusWithoutActivePromptSnapshotIsRetryable(t *testing.T) 
 		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
 	}, 250*time.Millisecond)
 	if busy, _ := status["refreshBusy"].(bool); err != nil || !busy || stringValue(status["permissionMode"]) != "" {
-		t.Fatalf("busy status without prompt snapshot = %#v, %v", status, err)
+		t.Fatalf("busy status without interjection snapshot = %#v, %v", status, err)
 	}
 	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
-		t.Fatalf("busy status without prompt snapshot blocked for %s", elapsed)
+		t.Fatalf("busy status without interjection snapshot blocked for %s", elapsed)
 	}
 	host.modeMu.RLock()
 	record := host.record
@@ -589,6 +638,42 @@ func TestGrokHostRejectsConcurrentOwnerForSameSession(t *testing.T) {
 	}
 }
 
+func TestActiveGrokLaunchSessionsBlocksLiveOrUnverifiableInstallState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	paths := resolveNativePaths()
+	record := grokLaunchRecord{
+		SessionID: "install-live", TokenHash: strings.Repeat("a", 64),
+		OwnerPID: os.Getpid(), OwnerProcStart: readProcStart(os.Getpid()),
+	}
+	path := grokLaunchRecordPath(paths, record.SessionID)
+	if err := writeJSONAtomic(path, record); err != nil {
+		t.Fatal(err)
+	}
+	live, err := activeGrokLaunchSessions(paths)
+	if err != nil || !reflect.DeepEqual(live, []string{record.SessionID}) {
+		t.Fatalf("live Grok inventory = %v, %v", live, err)
+	}
+
+	record.OwnerPID, record.OwnerProcStart = 0, ""
+	if err := writeJSONAtomic(path, record); err != nil {
+		t.Fatal(err)
+	}
+	live, err = activeGrokLaunchSessions(paths)
+	if err != nil || len(live) != 0 {
+		t.Fatalf("stale Grok inventory = %v, %v", live, err)
+	}
+
+	if err := os.WriteFile(path, []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activeGrokLaunchSessions(paths); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("malformed Grok inventory error = %v", err)
+	}
+}
+
 func TestGrokHostOwnerDeathStopsProcessGroupAndUnpublishes(t *testing.T) {
 	childFile := filepath.Join(t.TempDir(), "leader-child.pid")
 	t.Setenv("GROK_FAKE_CHILD_FILE", childFile)
@@ -728,7 +813,7 @@ func waitGrokHostReady(t *testing.T, host *grokHost) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("Grok host did not load and publish its exact session")
+	t.Fatal("Grok host did not observe and publish its exact resident session")
 }
 
 func waitForGrokDelivery(t *testing.T, host *grokHost, messageID, wanted string) {

@@ -65,7 +65,7 @@ type envelope struct {
 // Main dispatches one role of the agent-session-runtime executable.
 func Main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-host, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -81,6 +81,8 @@ func Main() {
 		os.Exit(runClaudeLaneCommand(os.Args[2:]))
 	case "claude-lane-manager":
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
+	case "grok":
+		os.Exit(runGrokSafetyCommand(os.Args[2:]))
 	case "grok-host":
 		os.Exit(runGrokHostCommand(os.Args[2:]))
 	case "hook":

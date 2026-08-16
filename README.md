@@ -86,8 +86,9 @@ Grok plugin and preserves its plugin data; start a new Grok session or reload pl
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
 the TUI's native policy and its effective live mode is attested before publication.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
-be stopped; the bridge never restarts a running server because doing so can interrupt an active
-rollout. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
+be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
+stop automatically. The bridge never restarts a running server or replaces a live managed Grok
+host because doing so can interrupt active work. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
 a same-version rebuild replaces only the supervisor, without restarting App Server. CI archives carry prebuilt Linux and macOS binaries for x86-64 and arm64, so release
 installations do not require Go or Node.js.
 
@@ -183,7 +184,7 @@ The lint target verifies `.golangci.yml` before running `golangci-lint`. Forgejo
 tests, race tests, and all four architecture builds concurrently; release publication remains gated
 on every one of those jobs.
 
-See [installation](docs/INSTALL.md), [Grok interactive peers](docs/GROK.md),
+See [installation](docs/INSTALL.md), the normative [acceptance matrix](docs/ACCEPTANCE-MATRIX.md), [Grok interactive peers](docs/GROK.md),
 [Codex lane integration](docs/LANES.md), [Claude lane integration](docs/CLAUDE-LANES.md),
 [Claude adapter installation](docs/CLAUDE-INSTALL.md), and the
 reverse-engineered [Claude protocol notes](docs/PROTOCOL.md).

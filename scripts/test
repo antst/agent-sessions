@@ -423,6 +423,11 @@ if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
   printf 'install preflight does not print the App Server stop command\n' >&2
   exit 1
 fi
+if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
+   ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan"; then
+  printf 'install preflight does not require clean managed Grok shutdown\n' >&2
+  exit 1
+fi
 make -s -C "$plugin_root" install \
   START_RUNTIME=0 CODEX="$fake_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
   >"$temporary_root/install.out"
@@ -484,6 +489,13 @@ if ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-pe
    ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin uninstall \"agent-sessions\" --keep-data" <<<"$grok_install_plan" ||
    ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan"; then
   printf 'Grok plugin install plan does not validate and explicitly trust the installed payload\n' >&2
+  exit 1
+fi
+grok_auto_install_plan="$(GROK="$temporary_root/inherited-chat-grok" make -n -C "$plugin_root" install-grok \
+  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok")"
+if grep -Fq 'GROK_PEER_GROK_BIN=' <<<"$grok_auto_install_plan" ||
+   ! grep -Fq "\"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_auto_install_plan"; then
+  printf 'default Grok plugin install does not use grok-peer auto-discovery\n' >&2
   exit 1
 fi
 

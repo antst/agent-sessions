@@ -17,12 +17,13 @@ codex-peer          grok-peer
      |                   |
  TUI + supervisor     TUI + ACP waker
      |                   |
- thread/turn/start    session/prompt
+ thread/turn/start    x.ai/interject
 ```
 
 `codex-peer` owns App Server and starts turns through it. `grok-peer` must
 own a private leader (`grok agent leader --leader-socket <private>`) and
-start turns with ACP `session/prompt`. Isolated `grok` (no `--leader`) has
+start turns through the resident TUI actor with Grok's official ACP extension
+`x.ai/interject`. Isolated `grok` (no `--leader`) has
 no external inject, same class of hole that parked AGY.
 
 ---
@@ -30,15 +31,18 @@ no external inject, same class of hole that parked AGY.
 ## Wake gate — passed on Grok 1.0.4
 
 The blocking feasibility gate passed on 2026-08-15 with Grok 1.0.4
-(`d846eb93d9`) on Linux. A private leader and an already-open TUI shared one
-session. A second, official ACP bridge authenticated with the CLI's cached
-token, loaded that session, and submitted `session/prompt`. The prompt became a
-second completed turn and appeared in the idle TUI without terminal input.
+(`d846eb93d9`) on Linux: a private leader accepted idle and in-turn work for an
+already-open TUI with no terminal input. The original probe attached a second
+ACP client with `session/load` and then used `session/prompt`. A later installed
+startup exposed why that must not be the product contract: if the TUI's
+`session/new` and the second client's `session/load` overlap, Grok can replace
+the resident actor and reclaim the TUI's still-starting MCP process scope.
 
-A second probe submitted `session/prompt` while the TUI was already running a
-turn. The leader accepted it, serialized it behind the active turn, and showed
-the result in the same TUI. This proves both idle wake and in-turn queueing. The
-probe used a private socket and left the user's default leader untouched.
+The implemented transport therefore uses Grok's official `x.ai/interject`
+extension. It addresses the existing resident actor directly and handles both
+states natively: an idle interjection starts a turn, while a mid-turn
+interjection is queued by Grok. The observer never calls `session/load` or
+`session/prompt`, so it cannot become a second owner of the TUI session.
 
 The leader socket is **not** an ACP socket. It uses Grok's private leader
 framing and registration handshake. ACP clients must connect through Grok's
@@ -51,10 +55,13 @@ official stdio bridge:
 3. Start:  grok --no-auto-update --permission-mode default --leader-socket $SOCK \
              agent --leader stdio
 4. Over the bridge's stdin/stdout: initialize; authenticate with the
-   advertised cached_token method; session/load with the TUI sessionId and
-   cwd; session/prompt.
-5. Pass: the already-open TUI starts the turn with no keystrokes. While a turn
-   is active, a second prompt waits behind it and then runs in the same TUI.
+   advertised cached_token method; observe the exact resident row through
+   `_x.ai/sessions/list`; verify the exact `agent_sessions` plugin through a
+   read-only cached `_x.ai/mcp/list`; submit `_x.ai/interject` wrapping
+   `x.ai/interject` with the TUI session ID, text, and durable message ID.
+5. Pass: the already-open idle TUI starts a turn with no keystrokes. While a
+   turn is active, Grok incorporates the interjection at its next safe point in
+   that same turn and the attached TUI remains usable afterward.
 ```
 
 Use a private socket under a temp dir, never `~/.grok/leader.sock`.
@@ -63,11 +70,12 @@ Use a private socket under a temp dir, never `~/.grok/leader.sock`.
 The ACP calls use protocol version 1 and newline-delimited JSON-RPC. The exact
 sequence is `initialize` with `protocolVersion: 1` and explicit disabled
 filesystem/terminal client capabilities, authentication using the advertised `cached_token` method,
-`session/load` with `{sessionId, cwd, mcpServers: []}`, then `session/prompt`
-with a one-part text prompt. If cached authentication is unavailable, fail
-closed and direct the user to `grok login`; never open a browser from the
-adapter. Do not use `session/new` or `session/resume`. The bridge must tolerate
-replayed `session/update` notifications while waiting for the matching
+The extension request is encoded as method `_x.ai/interject` with params
+`{method: "x.ai/interject", params: {sessionId, text, interjectionId}}`.
+If cached authentication is unavailable, fail closed and direct the user to
+`grok login`; never open a browser from the adapter. Do not use `session/new`,
+`session/load`, `session/prompt`, or `session/resume` from the observer. The
+bridge must tolerate extension notifications while waiting for the matching
 JSON-RPC response.
 
 ---
@@ -99,29 +107,33 @@ The product is the leader + waker. Hooks are not the delivery path.
 - ACP waker: spawn and supervise the official `agent --leader stdio` bridge as
   a second client of that leader. It speaks the existing shim
   control `action=wake` / `wake_status` used by `supervisorOwnsWake` in
-  `runtime.go`. Initialize once, authenticate with `cached_token`, and
-  `session/load` the launch's exact session ID and cwd. Idle or in-turn:
-  `session/prompt`. One message id, one durable owner, same as Codex
-  `queueWake`.
+  `runtime.go`. Initialize once, authenticate with `cached_token`, observe the
+  exact resident session through the roster, and deliver idle or in-turn work
+  through `x.ai/interject`. One message id, one durable owner, same as Codex
+  `queueWake`. Never attach this observer with `session/load`.
 - Readiness: the launcher may exec after the private leader is listening, but
   the host must not publish a registry row until the persistent ACP bridge has
-  successfully loaded the exact session ID and cwd. A fresh TUI creates the
-  preselected UUID; the bridge retries load while the exact owner is alive.
+  observed exactly one resident roster row for the preselected session ID. A
+  fresh TUI creates that UUID; the bridge retries observation while the exact
+  owner is alive. Publication additionally requires exactly one local stdio
+  `agent_sessions` row whose session status is ready and whose `send_message`
+  tool is enabled. Query with `cache: true`; do not retry OAuth or mutate MCP
+  configuration. Unrelated MCP failures do not block peer readiness.
 - Policy: the TUI alone receives the user's native argv and configuration.
   Start the infrastructure-only leader and ACP bridge with explicit
   `--permission-mode default` so their own configuration cannot widen a
-  prompting TUI. `session/load` and `session/prompt` omit `_meta.yoloMode` and
-  `_meta.autoMode`; a peer message is not approval. After load, query Grok's
+  prompting TUI. The observer's roster and interjection requests do not set
+  `_meta.yoloMode` or `_meta.autoMode`; a peer message is not approval. Query Grok's
   official FleetView ACP extension (`_x.ai/sessions/list` wrapping
   `x.ai/sessions/list`) and require exactly one row for the session with
   `resident: true` and a boolean `yolo`. Publish `bypassPermissions` only when
   that live value is true, and refresh it while the peer is live so an in-TUI
   permission change cannot leave stale authority metadata. A missing,
   malformed, duplicate, or dormant row is a fail-closed readiness failure.
-  While an injected `session/prompt` owns the ACP stream, use the live mode
+  While an injected `x.ai/interject` owns the ACP stream, use the live mode
   captured immediately before submission as an explicitly labelled snapshot;
-  a mode change during that turn becomes authoritative after it completes.
-  Other ACP contention is retryable and supplies no permission class.
+  after the queue acknowledgement, periodic roster refresh resumes during the
+  turn. Other ACP contention is retryable and supplies no permission class.
 - Publish the live session into Claude's registry (`entrypoint: "grok"`)
   so `send_message` can address it. Reuse the existing shim; point
   `supervisorSocket` at the waker.
@@ -174,11 +186,13 @@ of pid reuse.
 
 - Launcher: `-n` stripped; `--no-leader` / `--leader-socket` / non-`off`
   `--sandbox` error; passthrough subcommands do not start a leader.
-- Waker: fake ACP records `session/prompt` on `action=wake` for an idle
-  attached session; inbox stays empty; same message id is not prompted
+- Waker: fake ACP records one `x.ai/interject` on `action=wake` for an idle
+  resident session and asserts that the observer never calls `session/load` or
+  `session/prompt`; inbox stays empty; the same message id is not interjected
   twice; ACP failure *before* claim returns an error (shim may inbox).
-- Busy delivery: hold one turn active, submit a second wake, and prove it is
-  serialized and delivered once after the first turn.
+- Busy delivery: hold one turn active, submit an interjection, and prove Grok
+  incorporates it once at a safe point without replacing the resident actor;
+  the attached TUI remains usable afterward.
 - Lifecycle: waker disconnect/reconnect, normal TUI exit, killed TUI, failed
   authentication, and leader death all converge without a published stale peer.
 - Command drift: extract Grok's real top-level command list and require every
@@ -186,8 +200,8 @@ of pid reuse.
 - Linux and macOS live smokes, including Darwin's shorter Unix-socket path
   budget.
 - `make lint`, `make test`, race tests, vet, and all supported cross-builds.
-- Readiness and policy: no registry row before successful load and exact live
-  roster attestation; no yolo/auto metadata in load or prompt; infrastructure
+- Readiness and policy: no registry row before exact live roster attestation
+  and `agent_sessions` MCP readiness; no yolo/auto metadata in observer requests; infrastructure
   clients are explicitly neutral; argv, user config, admin policy, and in-TUI
   changes are reflected through the roster's effective `yolo` value.
 - Attestation: empty/mismatched session IDs cannot grant authority; a live
@@ -204,8 +218,8 @@ send_message target=grok-reviewer message=GROK-PEER-WAKE
 
 Terminal A starts that turn with no typing, remains the attached TUI afterward,
 and accepts the user's next prompt. Repeat while a first turn is active and
-prove the peer turn is queued exactly once. If either path fails, the PR is not
-done. The implementation PR must repeat this smoke on an installed build; the
+prove the interjection is incorporated exactly once. If either path fails, the
+PR is not done. The implementation PR must repeat this smoke on an installed build; the
 design probe is evidence of feasibility, not evidence that the adapter is
 correct.
 

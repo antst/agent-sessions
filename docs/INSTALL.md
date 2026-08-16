@@ -67,7 +67,8 @@ By default, `make install`:
 4. installs `claude-code-peer@agent-sessions` into Codex's plugin cache; and
 5. creates command symlinks in `~/.local/bin` whose absolute targets are derived from the exact
    configured `INSTALL_ROOT`, not from an assumed prefix layout; and
-6. starts the shared runtime from a cleanly stopped App Server without interrupting a rollout.
+6. starts the shared runtime only after App Server is stopped and no managed
+   `grok-peer` TUI/private leader is live, without interrupting either product.
 
 The first newly launched Codex session then asks for one-time approval of the installed plugin's
 lifecycle hooks. Approve `claude-code-peer@agent-sessions`; otherwise `SessionStart`,
@@ -84,9 +85,13 @@ same hooks and MCP server after an upgrade; it does not remove the user's `perso
 Override the destination with `PREFIX=/another/prefix` or `INSTALL_ROOT=/another/libexec/path`.
 Override the Codex executable with `CODEX=/path/to/codex`. Use `make dev-install` when you
 intentionally want the native runtime, launchers, and marketplace to track a mutable source checkout. Run install
-from a host terminal after exiting every Codex client and running `codex app-server daemon stop`.
+from a host terminal after exiting every Codex client, running
+`codex app-server daemon stop`, and normally exiting every `grok-peer` TUI.
 The installer refuses to replace any running App Server—even an idle one—because a separate
 quiescence check followed by restart has an unavoidable race with native clients starting work.
+It also refuses while a managed Grok launch record has any live or unverifiable
+owner, host, private leader, or observer identity. Normal Grok TUI exit removes
+that private process group automatically; see [Grok leader shutdown](GROK.md#stop-leaders-safely).
 Packagers can use `START_RUNTIME=0` to stage files without starting host services.
 
 `make install` deliberately changes only the Codex/runtime side. To install the reusable Claude
