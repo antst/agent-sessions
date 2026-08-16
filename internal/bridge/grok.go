@@ -32,6 +32,7 @@ const (
 	grokControlTimeout      = grokACPStartupTimeout + 5*time.Second
 	grokACPInterjectTimeout = 30 * time.Second
 	grokInterjectionModeTTL = 30 * time.Minute
+	grokRosterPushGrace     = 1500 * time.Millisecond
 	grokStatusRetryDelay    = 25 * time.Millisecond
 	grokStatusRetryMax      = 250 * time.Millisecond
 )
@@ -461,6 +462,16 @@ type grokACPClient struct {
 	nextID    int64
 }
 
+type grokRosterState struct {
+	permissionMode string
+	status         string
+	fromPush       bool
+	generation     uint64
+	authorityLost  bool
+}
+
+var errGrokRosterAuthorityLost = errors.New("live Grok roster authority lost")
+
 type grokRPCError struct {
 	Code    int
 	Message string
@@ -473,7 +484,14 @@ func (e *grokRPCError) Error() string {
 	return fmt.Sprintf("Grok ACP error %d: %s", e.Code, e.Message)
 }
 
-func newGrokACPClient(process *grokManagedProcess, stdin io.WriteCloser, stdout io.ReadCloser) *grokACPClient {
+func newGrokACPClient(
+	process *grokManagedProcess,
+	stdin io.WriteCloser,
+	stdout io.ReadCloser,
+	sessionID string,
+	generation uint64,
+	rosterUpdates chan grokRosterState,
+) *grokACPClient {
 	client := &grokACPClient{
 		process: process, stdin: stdin, responses: make(chan map[string]any, 32),
 		interject: make(chan map[string]any, 32), readDone: make(chan struct{}),
@@ -487,13 +505,18 @@ func newGrokACPClient(process *grokManagedProcess, stdin io.WriteCloser, stdout 
 				continue
 			}
 			if message["id"] == nil {
-				if stringValue(message["method"]) != "_x.ai/session/interjection" {
-					continue
-				}
-				select {
-				case client.interject <- message:
-				case <-client.readDone:
-					return
+				switch stringValue(message["method"]) {
+				case "_x.ai/session/interjection":
+					select {
+					case client.interject <- message:
+					case <-client.readDone:
+						return
+					}
+				case "_x.ai/sessions/changed", "x.ai/sessions/changed":
+					if state, ok := grokRosterNotificationState(message, sessionID); ok {
+						state.generation = generation
+						publishLatestGrokRosterState(rosterUpdates, state)
+					}
 				}
 				continue
 			}
@@ -509,6 +532,22 @@ func newGrokACPClient(process *grokManagedProcess, stdin io.WriteCloser, stdout 
 		close(client.readDone)
 	}()
 	return client
+}
+
+func publishLatestGrokRosterState(updates chan grokRosterState, state grokRosterState) {
+	select {
+	case updates <- state:
+		return
+	default:
+	}
+	select {
+	case <-updates:
+	default:
+	}
+	select {
+	case updates <- state:
+	default:
+	}
 }
 
 func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, messageID, text string) error {
@@ -634,6 +673,7 @@ type grokHost struct {
 	lease    *os.File
 	modeMu   sync.RWMutex
 	mode     string
+	status   string
 	// activeInterjectionMode is authoritative from the roster refresh immediately
 	// preceding x.ai/interject until the first successful roster refresh after the
 	// actor accepts it. Grok can hold roster requests for the whole generated turn,
@@ -642,20 +682,25 @@ type grokHost struct {
 	activeInterjectionMode  string
 	activeInterjectionValid bool
 	activeInterjectionAt    time.Time
+	lastRosterPushAt        time.Time
+	acpGeneration           uint64
+	rosterValid             bool
 
-	// publishPermission is a test seam. Production writes both daemon records
+	// publishRosterState is a test seam. Production writes both daemon records
 	// through writeRecordsLocked.
-	publishPermission func(*daemon) error
+	publishRosterState func(*daemon) error
 
 	acpMu sync.Mutex
 	acp   *grokACPClient
 
-	wakeMu     sync.Mutex
-	wakes      map[string]*grokWakeRecord
-	wakeQueue  []string
-	wakeNotify chan struct{}
+	wakeMu        sync.Mutex
+	wakes         map[string]*grokWakeRecord
+	wakeQueue     []string
+	wakeNotify    chan struct{}
+	rosterUpdates chan grokRosterState
 
 	done      chan struct{}
+	doneOnce  sync.Once
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 }
@@ -694,9 +739,10 @@ func newGrokHost(config grokHostConfig) (*grokHost, error) {
 	host := &grokHost{
 		config: config,
 		paths:  grokRuntimePaths(config.RuntimeDir, os.Getuid(), config.LaunchToken),
-		mode:   config.PermissionMode,
-		wakes:  make(map[string]*grokWakeRecord), wakeNotify: make(chan struct{}, 1),
-		done: make(chan struct{}),
+		mode:   config.PermissionMode, status: "idle",
+		wakes: make(map[string]*grokWakeRecord), wakeNotify: make(chan struct{}, 1),
+		rosterUpdates: make(chan grokRosterState, 8),
+		done:          make(chan struct{}),
 	}
 	host.restoreWakeRecords()
 	return host, nil
@@ -834,11 +880,23 @@ func (h *grokHost) start() error {
 	if err := os.Chmod(h.paths.ControlSocket, 0o600); err != nil {
 		return fmt.Errorf("secure Grok control socket: %w", err)
 	}
-	h.wg.Add(3)
+	h.wg.Add(4)
 	go func() { defer h.wg.Done(); h.acceptLoop() }()
 	go func() { defer h.wg.Done(); h.wakeLoop() }()
 	go func() { defer h.wg.Done(); h.prepareLoop() }()
+	go func() { defer h.wg.Done(); h.rosterLoop() }()
 	return nil
+}
+
+func (h *grokHost) rosterLoop() {
+	for {
+		select {
+		case state := <-h.rosterUpdates:
+			_ = h.applyRosterState(state)
+		case <-h.done:
+			return
+		}
+	}
 }
 
 func (h *grokHost) waitForLeaderSocket(timeout time.Duration) error {
@@ -894,7 +952,7 @@ func (h *grokHost) ensureACPReadyLocked(ctx context.Context) error {
 	if err := h.ensureACPConnectedLocked(ctx); err != nil {
 		return err
 	}
-	return h.refreshPermissionModeLocked(ctx)
+	return h.refreshRosterStateLocked(ctx)
 }
 
 func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
@@ -911,6 +969,10 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 		}
 	}
 	if h.acp == nil {
+		// Invalidate the old observer before any replacement spawn/persist work.
+		// Otherwise first publication can race through the dead generation while
+		// this function is still constructing the replacement client.
+		generation := h.nextACPGeneration()
 		command := h.grokCommand(
 			"--no-auto-update", "--permission-mode", "default",
 			"--leader-socket", h.paths.LeaderSocket,
@@ -934,7 +996,7 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 			stopGrokManagedProcess(process, 2*time.Second)
 			return fmt.Errorf("persist Grok ACP waker ownership: %w", err)
 		}
-		h.acp = newGrokACPClient(process, stdin, stdout)
+		h.acp = newGrokACPClient(process, stdin, stdout, h.config.SessionID, generation, h.rosterUpdates)
 		result, err := h.acp.request(ctx, "initialize", map[string]any{
 			"protocolVersion": 1,
 			"clientCapabilities": map[string]any{
@@ -960,16 +1022,26 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 	return nil
 }
 
-func (h *grokHost) refreshPermissionModeLocked(ctx context.Context) error {
-	result, err := h.acp.request(ctx, "_x.ai/sessions/list", map[string]any{
-		"method": "x.ai/sessions/list", "params": map[string]any{},
-	})
+func (h *grokHost) refreshRosterStateLocked(ctx context.Context) error {
+	result, err := h.acp.request(ctx, "_x.ai/sessions/list", map[string]any{})
 	if err != nil {
 		return fmt.Errorf("query live Grok session roster: %w", err)
 	}
-	mode, err := grokRosterPermissionMode(result, h.config.SessionID)
+	state, err := grokRosterStateFromResponse(result, h.config.SessionID)
 	if err != nil {
+		if errors.Is(err, errGrokRosterAuthorityLost) {
+			h.stopForRosterAuthorityLoss(h.currentACPGeneration())
+		}
 		return err
+	}
+	state.generation = h.currentACPGeneration()
+	return h.applyRosterState(state)
+}
+
+func (h *grokHost) applyRosterState(state grokRosterState) error {
+	if state.authorityLost {
+		h.stopForRosterAuthorityLoss(state.generation)
+		return errGrokRosterAuthorityLost
 	}
 	// Every path that needs both locks takes peerMu before modeMu. Keep the
 	// candidate dirty until the daemon state and registry both contain it; a
@@ -978,39 +1050,126 @@ func (h *grokHost) refreshPermissionModeLocked(ctx context.Context) error {
 	defer h.peerMu.Unlock()
 	h.modeMu.Lock()
 	defer h.modeMu.Unlock()
-	if mode == h.mode {
+	if state.generation != 0 && state.generation != h.acpGeneration {
+		return nil
+	}
+	pushObservedAt := h.reconcileRosterPushLocked(&state)
+	if state.permissionMode == h.mode && state.status == h.status {
+		h.rosterValid = true
+		if !pushObservedAt.IsZero() {
+			h.lastRosterPushAt = pushObservedAt
+		}
 		h.activeInterjectionMode = ""
 		h.activeInterjectionValid = false
 		h.activeInterjectionAt = time.Time{}
 		return nil
 	}
-	if peer := h.peer; peer != nil {
-		peer.mu.Lock()
-		previous := peer.permissionMode
-		peer.permissionMode = mode
-		publisher := h.publishPermission
-		if publisher == nil {
-			publisher = func(peer *daemon) error { return peer.writeRecordsLocked() }
-		}
-		err = publisher(peer)
-		if err != nil {
-			peer.permissionMode = previous
-			peer.mu.Unlock()
-			return fmt.Errorf("publish live Grok permission mode: %w", err)
-		}
-		peer.mu.Unlock()
+	if err := h.publishRosterStateLocked(state); err != nil {
+		return err
 	}
 	nextRecord := h.record
-	nextRecord.PermissionMode = mode
-	if err := writeJSONAtomic(grokLaunchRecordPath(resolveNativePaths(), nextRecord.SessionID), nextRecord); err != nil {
-		return fmt.Errorf("persist live Grok permission mode: %w", err)
+	if state.permissionMode != h.mode {
+		nextRecord.PermissionMode = state.permissionMode
+		if err := writeJSONAtomic(grokLaunchRecordPath(resolveNativePaths(), nextRecord.SessionID), nextRecord); err != nil {
+			return fmt.Errorf("persist live Grok permission mode: %w", err)
+		}
 	}
-	h.mode = mode
+	h.mode = state.permissionMode
+	h.status = state.status
 	h.record = nextRecord
+	h.rosterValid = true
+	if !pushObservedAt.IsZero() {
+		h.lastRosterPushAt = pushObservedAt
+	}
 	h.activeInterjectionMode = ""
 	h.activeInterjectionValid = false
 	h.activeInterjectionAt = time.Time{}
 	return nil
+}
+
+// reconcileRosterPushLocked preserves Grok's forced turn-boundary push over
+// the one list snapshot that can race before currentPromptId changes. Callers
+// hold modeMu. The returned timestamp is committed only after daemon and
+// launch-record publication succeeds.
+func (h *grokHost) reconcileRosterPushLocked(state *grokRosterState) time.Time {
+	if state.fromPush {
+		return time.Now()
+	}
+	if state.status != h.status && !h.lastRosterPushAt.IsZero() && time.Since(h.lastRosterPushAt) < grokRosterPushGrace {
+		state.status = h.status
+	}
+	return time.Time{}
+}
+
+// publishRosterStateLocked updates both native daemon records atomically from
+// the host's perspective and restores the previous in-memory values on error.
+// Callers hold peerMu and modeMu.
+func (h *grokHost) publishRosterStateLocked(state grokRosterState) error {
+	peer := h.peer
+	if peer == nil {
+		return nil
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	previousMode := peer.permissionMode
+	previousStatus := peer.status
+	peer.permissionMode = state.permissionMode
+	peer.status = state.status
+	publisher := h.publishRosterState
+	if publisher == nil {
+		publisher = func(peer *daemon) error { return peer.writeRecordsLocked() }
+	}
+	if err := publisher(peer); err != nil {
+		peer.permissionMode = previousMode
+		peer.status = previousStatus
+		return fmt.Errorf("publish live Grok roster state: %w", err)
+	}
+	return nil
+}
+
+func (h *grokHost) currentACPGeneration() uint64 {
+	h.modeMu.RLock()
+	defer h.modeMu.RUnlock()
+	return h.acpGeneration
+}
+
+func (h *grokHost) nextACPGeneration() uint64 {
+	// A reconnect and first publication must serialize on peerMu. Otherwise an
+	// old generation can pass the publication check immediately before this
+	// reset and publish an actor whose authority has just been invalidated.
+	h.peerMu.Lock()
+	defer h.peerMu.Unlock()
+	h.modeMu.Lock()
+	defer h.modeMu.Unlock()
+	h.acpGeneration++
+	h.rosterValid = false
+	h.lastRosterPushAt = time.Time{}
+	return h.acpGeneration
+}
+
+func (h *grokHost) stopForRosterAuthorityLoss(generation uint64) {
+	// An absent actor is expected while the TUI is still starting. Once the
+	// peer is published, a complete roster snapshot or global removal event is
+	// authoritative: withdraw the adapter rather than leave stale state visible.
+	// The peerMu -> modeMu order matches every state publication path and makes
+	// the reconnect-generation check atomic with the publication check.
+	h.peerMu.Lock()
+	h.modeMu.Lock()
+	current := generation == 0 || generation == h.acpGeneration
+	published := h.peer != nil
+	if current {
+		h.rosterValid = false
+		h.lastRosterPushAt = time.Time{}
+	}
+	if current && published {
+		h.requestStop()
+	}
+	h.modeMu.Unlock()
+	h.peerMu.Unlock()
+}
+
+func (h *grokHost) requestStop() {
+	h.doneOnce.Do(func() { close(h.done) })
 }
 
 func (h *grokHost) ensureAgentSessionsMCPReadyLocked(ctx context.Context) error {
@@ -1048,6 +1207,12 @@ func (h *grokHost) currentPermissionMode() string {
 	return defaultString(h.mode, "default")
 }
 
+func (h *grokHost) currentStatus() string {
+	h.modeMu.RLock()
+	defer h.modeMu.RUnlock()
+	return defaultString(h.status, "idle")
+}
+
 func (h *grokHost) beginActiveInterjectionPermissionSnapshot() {
 	h.modeMu.Lock()
 	h.activeInterjectionMode = defaultString(h.mode, "default")
@@ -1075,31 +1240,100 @@ func (h *grokHost) activeInterjectionPermissionSnapshot() (string, bool) {
 	return mode, mode == "default" || mode == "bypassPermissions"
 }
 
-func grokRosterPermissionMode(response map[string]any, sessionID string) (string, error) {
+func grokRosterStateFromResponse(response map[string]any, sessionID string) (grokRosterState, error) {
 	result, _ := response["result"].(map[string]any)
 	sessions, ok := result["sessions"].([]any)
 	if !ok {
-		return "", errors.New("grok session roster response has no sessions")
+		return grokRosterState{}, fmt.Errorf("%w: response has no sessions", errGrokRosterAuthorityLost)
 	}
+	state, matches, err := grokRosterStateFromRows(sessions, sessionID)
+	if err != nil {
+		return grokRosterState{}, fmt.Errorf("%w: %w", errGrokRosterAuthorityLost, err)
+	}
+	if matches != 1 {
+		return grokRosterState{}, fmt.Errorf("%w: roster returned %d exact rows for %s", errGrokRosterAuthorityLost, matches, sessionID)
+	}
+	if state.authorityLost {
+		return grokRosterState{}, fmt.Errorf("%w: actor %s is not live", errGrokRosterAuthorityLost, sessionID)
+	}
+	return state, nil
+}
+
+func grokRosterNotificationState(message map[string]any, sessionID string) (grokRosterState, bool) {
+	params, _ := message["params"].(map[string]any)
+	if nested, ok := params["params"].(map[string]any); ok {
+		if method := stringValue(params["method"]); method != "" && method != "x.ai/sessions/changed" {
+			return grokRosterState{}, false
+		}
+		params = nested
+	}
+	if removed, ok := params["removed"].([]any); ok {
+		for _, raw := range removed {
+			if stringValue(raw) == sessionID {
+				return grokRosterState{fromPush: true, authorityLost: true}, true
+			}
+		}
+	}
+	rows, ok := params["upserted"].([]any)
+	if !ok {
+		return grokRosterState{}, false
+	}
+	state, matches, err := grokRosterStateFromRows(rows, sessionID)
+	state.fromPush = true
+	if matches == 0 {
+		return grokRosterState{}, false
+	}
+	if err != nil || matches != 1 {
+		return grokRosterState{fromPush: true, authorityLost: true}, true
+	}
+	return state, true
+}
+
+func grokRosterStateFromRows(rows []any, sessionID string) (grokRosterState, int, error) {
 	matches := 0
-	mode := ""
-	for _, raw := range sessions {
+	state := grokRosterState{}
+	for _, raw := range rows {
 		row, _ := raw.(map[string]any)
+		if stringValue(row["sessionId"]) != sessionID {
+			continue
+		}
+		matches++
 		resident, residentOK := row["resident"].(bool)
-		if stringValue(row["sessionId"]) != sessionID || !residentOK || !resident {
+		if !residentOK {
+			return grokRosterState{}, matches, errors.New("exact Grok session roster row has no resident state")
+		}
+		activity := stringValue(row["activity"])
+		if !resident || activity == "completed" || activity == "dormant" || activity == "dead" {
+			state.authorityLost = true
 			continue
 		}
 		yolo, yoloOK := row["yolo"].(bool)
 		if !yoloOK {
-			return "", errors.New("live Grok session roster row has no yolo state")
+			return grokRosterState{}, matches, errors.New("live Grok session roster row has no yolo state")
 		}
-		matches++
-		mode = map[bool]string{true: "bypassPermissions", false: "default"}[yolo]
+		status, err := grokRosterActivityStatus(activity)
+		if err != nil {
+			return grokRosterState{}, matches, err
+		}
+		state = grokRosterState{
+			permissionMode: map[bool]string{true: "bypassPermissions", false: "default"}[yolo],
+			status:         status,
+		}
 	}
-	if matches != 1 {
-		return "", fmt.Errorf("grok session roster returned %d live rows for %s", matches, sessionID)
+	return state, matches, nil
+}
+
+func grokRosterActivityStatus(activity string) (string, error) {
+	switch activity {
+	case "working":
+		return "busy", nil
+	case "needs_input":
+		return "waiting", nil
+	case "idle":
+		return "idle", nil
+	default:
+		return "", fmt.Errorf("live Grok session roster row has unsupported activity %q", activity)
 	}
-	return mode, nil
 }
 
 func grokAuthMethodAdvertised(result map[string]any, wanted string) bool {
@@ -1433,8 +1667,8 @@ func (h *grokHost) setWakeResult(messageID, delivery, detail string) {
 }
 
 func (h *grokHost) cleanup() {
+	h.requestStop()
 	h.closeOnce.Do(func() {
-		close(h.done)
 		if h.listener != nil {
 			_ = h.listener.Close()
 		}
@@ -1477,11 +1711,20 @@ func (h *grokHost) ensurePeerPublished() error {
 	if h.peer != nil {
 		return nil
 	}
+	h.modeMu.RLock()
+	rosterValid := h.rosterValid
+	permissionMode := defaultString(h.mode, "default")
+	status := defaultString(h.status, "idle")
+	h.modeMu.RUnlock()
+	if !rosterValid {
+		return errors.New("grok host has no authoritative live roster state")
+	}
 	paths := resolveNativePaths()
 	args := map[string]string{
 		"session-id": h.config.SessionID, "cwd": h.config.Cwd,
 		"name": h.config.Name, "name-source": "launch", "entrypoint": "grok",
-		"permission-mode":   h.currentPermissionMode(),
+		"permission-mode":   permissionMode,
+		"status":            status,
 		"supervisor-socket": h.paths.ControlSocket,
 		"supervisor-token":  h.config.LaunchToken,
 		"owner-pid":         strconvItoa(h.config.OwnerPID), "owner-proc-start": h.config.OwnerProcStart,

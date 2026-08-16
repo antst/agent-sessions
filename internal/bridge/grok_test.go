@@ -117,8 +117,13 @@ func runGrokFakeACP() {
 				body, _ := os.ReadFile(path)
 				yolo = strings.TrimSpace(string(body)) == "1"
 			}
+			activity := defaultString(strings.TrimSpace(os.Getenv("GROK_FAKE_ACTIVITY")), "idle")
+			if path := os.Getenv("GROK_FAKE_ACTIVITY_FILE"); path != "" {
+				body, _ := os.ReadFile(path)
+				activity = strings.TrimSpace(string(body))
+			}
 			result["result"] = map[string]any{"sessions": []any{map[string]any{
-				"sessionId": os.Getenv(grokSessionIDEnv), "resident": true, "yolo": yolo,
+				"sessionId": os.Getenv(grokSessionIDEnv), "resident": true, "yolo": yolo, "activity": activity,
 			}}}
 			if marker := os.Getenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE"); marker != "" {
 				file, createErr := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -655,7 +660,7 @@ func TestGrokHostBusyStatusWithoutActivePromptSnapshotIsRetryable(t *testing.T) 
 
 func TestGrokHostCannotRepublishAfterCleanupStarts(t *testing.T) {
 	host := &grokHost{done: make(chan struct{})}
-	close(host.done)
+	host.requestStop()
 	if err := host.ensurePeerPublished(); err == nil || !strings.Contains(err.Error(), "stopping") {
 		t.Fatalf("publish after stop error = %v", err)
 	}
@@ -740,12 +745,371 @@ func TestGrokHostRefreshesRuntimePermissionMode(t *testing.T) {
 	}
 }
 
+func TestGrokHostPublishesLiveRosterActivity(t *testing.T) {
+	activity := filepath.Join(t.TempDir(), "activity")
+	if err := os.WriteFile(activity, []byte("idle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_FAKE_ACTIVITY_FILE", activity)
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-activity")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+
+	for _, test := range []struct {
+		activity string
+		status   string
+	}{
+		{activity: "working", status: "busy"},
+		{activity: "needs_input", status: "waiting"},
+		{activity: "idle", status: "idle"},
+	} {
+		if err := os.WriteFile(activity, []byte(test.activity+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := requestControl(host.paths.ControlSocket, map[string]any{
+			"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+		}, time.Second); err != nil {
+			t.Fatalf("refresh %s roster activity: %v", test.activity, err)
+		}
+		state := readJSONMap(filepath.Join(resolveNativePaths().dataRoot, "sessions", sessionKey(host.config.SessionID), "state.json"))
+		registry := readJSONMap(stringValue(state["registryFile"]))
+		if host.currentStatus() != test.status || stringValue(state["status"]) != test.status || stringValue(registry["status"]) != test.status {
+			t.Fatalf("%s activity publication = host %q state %#v registry %#v", test.activity, host.currentStatus(), state, registry)
+		}
+	}
+}
+
+func TestGrokHostInitialPublicationUsesAuthoritativeRosterStatus(t *testing.T) {
+	for _, test := range []struct {
+		activity string
+		status   string
+	}{
+		{activity: "working", status: "busy"},
+		{activity: "needs_input", status: "waiting"},
+	} {
+		t.Run(test.activity, func(t *testing.T) {
+			t.Setenv("GROK_FAKE_ACTIVITY", test.activity)
+			host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-initial-"+test.activity)
+			defer stopTestGrokHost(t, host, cancel, result)
+			waitGrokHostReady(t, host)
+			state := readJSONMap(filepath.Join(resolveNativePaths().dataRoot, "sessions", sessionKey(host.config.SessionID), "state.json"))
+			registry := readJSONMap(stringValue(state["registryFile"]))
+			if host.currentStatus() != test.status || stringValue(state["status"]) != test.status ||
+				stringValue(registry["status"]) != test.status {
+				t.Fatalf("initial %s publication = host %q state %#v registry %#v", test.activity, host.currentStatus(), state, registry)
+			}
+		})
+	}
+}
+
+func TestGrokRosterChangedNotificationParsesExactResidentActivity(t *testing.T) {
+	message := map[string]any{
+		"method": "_x.ai/sessions/changed",
+		"params": map[string]any{"method": "x.ai/sessions/changed", "params": map[string]any{
+			"upserted": []any{
+				map[string]any{"sessionId": "foreign", "resident": true, "yolo": true, "activity": "working"},
+				map[string]any{"sessionId": "target", "resident": true, "yolo": false, "activity": "needs_input"},
+			},
+		}},
+	}
+	state, ok := grokRosterNotificationState(message, "target")
+	if !ok || state.permissionMode != "default" || state.status != "waiting" {
+		t.Fatalf("roster notification state = %+v, %v", state, ok)
+	}
+	if _, ok := grokRosterNotificationState(message, "absent"); ok {
+		t.Fatal("foreign roster notification was accepted for absent session")
+	}
+	wrongWrapper := map[string]any{
+		"method": "_x.ai/sessions/changed",
+		"params": map[string]any{"method": "x.ai/something/else", "params": map[string]any{
+			"upserted": []any{map[string]any{"sessionId": "target", "resident": true, "yolo": false, "activity": "working"}},
+		}},
+	}
+	if _, ok := grokRosterNotificationState(wrongWrapper, "target"); ok {
+		t.Fatal("notification with a different nested extension method was accepted")
+	}
+}
+
+func TestGrokRosterTerminalAndRemovalLoseLiveAuthority(t *testing.T) {
+	response := func(row map[string]any) map[string]any {
+		return map[string]any{"result": map[string]any{"sessions": []any{row}}}
+	}
+	for _, row := range []map[string]any{
+		{"sessionId": "target", "resident": false, "yolo": false, "activity": "idle"},
+		{"sessionId": "target", "resident": true, "yolo": false, "activity": "completed"},
+		{"sessionId": "target", "resident": true, "yolo": false, "activity": "dormant"},
+		{"sessionId": "target", "resident": true, "yolo": false, "activity": "dead"},
+		{"sessionId": "target", "resident": true, "yolo": false, "activity": "future"},
+	} {
+		if _, err := grokRosterStateFromResponse(response(row), "target"); !errors.Is(err, errGrokRosterAuthorityLost) {
+			t.Fatalf("unavailable roster row %#v returned %v", row, err)
+		}
+	}
+	for _, sessions := range [][]any{
+		{},
+		{
+			map[string]any{"sessionId": "target", "resident": true, "yolo": false, "activity": "idle"},
+			map[string]any{"sessionId": "target", "resident": true, "yolo": false, "activity": "working"},
+		},
+	} {
+		if _, err := grokRosterStateFromResponse(map[string]any{"result": map[string]any{"sessions": sessions}}, "target"); !errors.Is(err, errGrokRosterAuthorityLost) {
+			t.Fatalf("ambiguous roster %#v returned %v", sessions, err)
+		}
+	}
+
+	for _, message := range []map[string]any{
+		{"method": "_x.ai/sessions/changed", "params": map[string]any{"removed": []any{"target"}}},
+		{"method": "_x.ai/sessions/changed", "params": map[string]any{"upserted": []any{
+			map[string]any{"sessionId": "target", "resident": false, "yolo": false, "activity": "idle"},
+		}}},
+	} {
+		state, ok := grokRosterNotificationState(message, "target")
+		if !ok || !state.fromPush || !state.authorityLost {
+			t.Fatalf("authority-loss notification = %+v, %v", state, ok)
+		}
+	}
+}
+
+func TestGrokRosterPushWinsOneReconciliationWindowAndOldGenerationIsIgnored(t *testing.T) {
+	host := &grokHost{
+		mode: "default", status: "idle", acpGeneration: 2,
+		done: make(chan struct{}),
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "busy", fromPush: true, generation: 1,
+	}); err != nil || host.currentStatus() != "idle" {
+		t.Fatalf("stale generation changed status to %q: %v", host.currentStatus(), err)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "busy", fromPush: true, generation: 2,
+	}); err != nil || host.currentStatus() != "busy" {
+		t.Fatalf("current push status = %q, %v", host.currentStatus(), err)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "idle", generation: 2,
+	}); err != nil || host.currentStatus() != "busy" {
+		t.Fatalf("immediately stale list overrode push: status %q, %v", host.currentStatus(), err)
+	}
+	host.modeMu.Lock()
+	host.lastRosterPushAt = time.Now().Add(-2 * grokRosterPushGrace)
+	host.modeMu.Unlock()
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "idle", generation: 2,
+	}); err != nil || host.currentStatus() != "idle" {
+		t.Fatalf("reconciled list status = %q, %v", host.currentStatus(), err)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "busy", generation: 2,
+	}); err != nil || host.currentStatus() != "busy" {
+		t.Fatalf("next working list status = %q, %v", host.currentStatus(), err)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "idle", fromPush: true, generation: 2,
+	}); err != nil || host.currentStatus() != "idle" {
+		t.Fatalf("idle push status = %q, %v", host.currentStatus(), err)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "busy", generation: 2,
+	}); err != nil || host.currentStatus() != "idle" {
+		t.Fatalf("immediately stale working list overrode idle push: status %q, %v", host.currentStatus(), err)
+	}
+}
+
+func TestGrokFailedPushPublicationDoesNotAdvanceReconciliationWindow(t *testing.T) {
+	host := &grokHost{
+		mode: "default", status: "idle", acpGeneration: 1,
+		peer:               &daemon{permissionMode: "default", status: "idle"},
+		publishRosterState: func(*daemon) error { return errors.New("injected publication failure") },
+		done:               make(chan struct{}),
+	}
+	err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "busy", fromPush: true, generation: 1,
+	})
+	if err == nil || host.currentStatus() != "idle" {
+		t.Fatalf("failed push publication = status %q, err %v", host.currentStatus(), err)
+	}
+	host.modeMu.RLock()
+	pushAt := host.lastRosterPushAt
+	host.modeMu.RUnlock()
+	if !pushAt.IsZero() {
+		t.Fatalf("failed push advanced reconciliation window to %s", pushAt)
+	}
+}
+
+func TestGrokReconnectClearsPushGraceBeforeNewRosterSnapshot(t *testing.T) {
+	host := &grokHost{
+		mode: "default", status: "busy", acpGeneration: 1, rosterValid: true,
+		lastRosterPushAt: time.Now(), done: make(chan struct{}),
+	}
+	if generation := host.nextACPGeneration(); generation != 2 {
+		t.Fatalf("next ACP generation = %d", generation)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "idle", generation: 1, fromPush: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.applyRosterState(grokRosterState{
+		permissionMode: "default", status: "busy", generation: 2,
+	}); err != nil || host.currentStatus() != "busy" {
+		t.Fatalf("new-generation roster state = %q, %v", host.currentStatus(), err)
+	}
+	host.modeMu.RLock()
+	valid := host.rosterValid
+	pushAt := host.lastRosterPushAt
+	host.modeMu.RUnlock()
+	if !valid || !pushAt.IsZero() {
+		t.Fatalf("new generation authority = valid %v pushAt %s", valid, pushAt)
+	}
+}
+
+func TestGrokReconnectSerializesWithPeerPublication(t *testing.T) {
+	host := &grokHost{
+		mode: "default", status: "idle", acpGeneration: 1, rosterValid: true,
+		done: make(chan struct{}),
+	}
+	host.peerMu.Lock()
+	next := make(chan uint64, 1)
+	go func() { next <- host.nextACPGeneration() }()
+	select {
+	case generation := <-next:
+		host.peerMu.Unlock()
+		t.Fatalf("generation %d advanced through the publication lock", generation)
+	case <-time.After(50 * time.Millisecond):
+	}
+	host.peer = &daemon{}
+	host.peerMu.Unlock()
+	select {
+	case generation := <-next:
+		if generation != 2 {
+			t.Fatalf("next generation = %d", generation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconnect did not resume after publication lock released")
+	}
+	host.modeMu.RLock()
+	valid := host.rosterValid
+	host.modeMu.RUnlock()
+	if valid {
+		t.Fatal("reconnect left the previous generation authoritative")
+	}
+}
+
+func TestGrokReconnectInvalidatesRosterBeforeReplacementProcessStarts(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	config := grokHostConfig{
+		GrokBin: os.Args[0], SessionID: "session-reconnect-before-spawn", Cwd: root,
+		OwnerPID: os.Getpid(), OwnerProcStart: readProcStart(os.Getpid()),
+		LaunchToken: strings.Repeat("r", 32), RuntimeDir: filepath.Join(root, "run"),
+		PermissionMode: "default",
+	}
+	config.command = func(args ...string) *exec.Cmd {
+		close(entered)
+		<-release
+		return exec.Command(os.Args[0], append([]string{"-test.run=^TestGrokFakeProcess$", "--"}, args...)...)
+	}
+	host, err := newGrokHost(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.modeMu.Lock()
+	host.acpGeneration = 1
+	host.rosterValid = true
+	host.modeMu.Unlock()
+	host.record = grokLaunchRecord{SessionID: config.SessionID}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- host.ensureACPConnectedLocked(ctx) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("replacement process construction did not start")
+	}
+	if err := host.ensurePeerPublished(); err == nil || !strings.Contains(err.Error(), "no authoritative live roster state") {
+		t.Fatalf("publication during replacement construction = %v", err)
+	}
+	cancel()
+	close(release)
+	select {
+	case <-result:
+	case <-time.After(3 * time.Second):
+		t.Fatal("replacement attempt did not finish")
+	}
+	host.acpMu.Lock()
+	host.closeACPLocked()
+	host.acpMu.Unlock()
+}
+
+func TestGrokRemovalBetweenReadinessAndPublicationBlocksPublication(t *testing.T) {
+	host := &grokHost{
+		mode: "default", status: "idle", acpGeneration: 1, rosterValid: true,
+		done: make(chan struct{}),
+	}
+	if err := host.applyRosterState(grokRosterState{generation: 1, authorityLost: true}); !errors.Is(err, errGrokRosterAuthorityLost) {
+		t.Fatalf("authority loss error = %v", err)
+	}
+	select {
+	case <-host.done:
+		t.Fatal("pre-publication authority loss stopped the host instead of allowing readiness retry")
+	default:
+	}
+	if err := host.ensurePeerPublished(); err == nil || !strings.Contains(err.Error(), "no authoritative live roster state") {
+		t.Fatalf("publication after authority loss = %v", err)
+	}
+}
+
+func TestGrokOldGenerationRemovalCannotStopReconnectedPeer(t *testing.T) {
+	host := &grokHost{
+		mode: "default", status: "idle", acpGeneration: 2, rosterValid: true,
+		peer: &daemon{}, done: make(chan struct{}),
+	}
+	host.stopForRosterAuthorityLoss(1)
+	select {
+	case <-host.done:
+		t.Fatal("old observer generation stopped the reconnected Grok peer")
+	default:
+	}
+	host.modeMu.RLock()
+	valid := host.rosterValid
+	host.modeMu.RUnlock()
+	if !valid {
+		t.Fatal("old observer generation cleared current roster authority")
+	}
+}
+
+func TestGrokPublishedPeerStopsWhenRosterAuthorityIsRemoved(t *testing.T) {
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-roster-removed")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+	if err := host.applyRosterState(grokRosterState{
+		generation: host.currentACPGeneration(), authorityLost: true, fromPush: true,
+	}); !errors.Is(err, errGrokRosterAuthorityLost) {
+		t.Fatalf("authority loss error = %v", err)
+	}
+	select {
+	case <-host.done:
+	case <-time.After(time.Second):
+		t.Fatal("published Grok peer did not stop after authoritative removal")
+	}
+}
+
 func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
 	yolo := filepath.Join(t.TempDir(), "yolo")
 	if err := os.WriteFile(yolo, []byte("0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	activity := filepath.Join(t.TempDir(), "activity")
+	if err := os.WriteFile(activity, []byte("idle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GROK_FAKE_YOLO_FILE", yolo)
+	t.Setenv("GROK_FAKE_ACTIVITY_FILE", activity)
 	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-mode-publish-retry")
 	defer stopTestGrokHost(t, host, cancel, result)
 	waitGrokHostReady(t, host)
@@ -753,7 +1117,7 @@ func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
 	var reject atomic.Bool
 	reject.Store(true)
 	host.peerMu.Lock()
-	host.publishPermission = func(peer *daemon) error {
+	host.publishRosterState = func(peer *daemon) error {
 		if reject.Load() {
 			return errors.New("injected registry publication failure")
 		}
@@ -761,6 +1125,9 @@ func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
 	}
 	host.peerMu.Unlock()
 	if err := os.WriteFile(yolo, []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activity, []byte("working\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -773,6 +1140,9 @@ func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
 	if mode := host.currentPermissionMode(); mode != "default" {
 		t.Fatalf("failed publication committed host mode %q", mode)
 	}
+	if status := host.currentStatus(); status != "idle" {
+		t.Fatalf("failed publication committed host status %q", status)
+	}
 	if record := readGrokLaunchRecord(grokLaunchRecordPath(resolveNativePaths(), host.config.SessionID)); record == nil || record.PermissionMode != "default" {
 		t.Fatalf("failed publication committed launch record %#v", record)
 	}
@@ -781,7 +1151,7 @@ func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
 	status, err = requestControl(host.paths.ControlSocket, map[string]any{
 		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
 	}, time.Second)
-	if err != nil || stringValue(status["permissionMode"]) != "bypassPermissions" {
+	if err != nil || stringValue(status["permissionMode"]) != "bypassPermissions" || host.currentStatus() != "busy" {
 		t.Fatalf("retried permission publication status = %#v, %v", status, err)
 	}
 	record := readGrokLaunchRecord(grokLaunchRecordPath(resolveNativePaths(), host.config.SessionID))
@@ -789,7 +1159,8 @@ func TestGrokHostPermissionPublishFailureRemainsDirtyAndRetries(t *testing.T) {
 	registry := readJSONMap(stringValue(state["registryFile"]))
 	if record == nil || record.PermissionMode != "bypassPermissions" ||
 		stringValue(state["permissionMode"]) != "bypassPermissions" ||
-		stringValue(registry["permissionMode"]) != "bypassPermissions" {
+		stringValue(registry["permissionMode"]) != "bypassPermissions" ||
+		stringValue(state["status"]) != "busy" || stringValue(registry["status"]) != "busy" {
 		t.Fatalf("retried mode was not persisted and published: record=%#v state=%#v registry=%#v", record, state, registry)
 	}
 }

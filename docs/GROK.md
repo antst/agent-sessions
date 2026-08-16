@@ -78,6 +78,15 @@ otherwise `default`. It refreshes that value while the peer is live, including
 after an in-TUI permission change. Missing or ambiguous live state fails
 closed instead of guessing from argv.
 
+The same roster is the authoritative coarse activity source. A resident
+`working` actor is published as `busy`, `needs_input` as `waiting`, and `idle`
+as `idle`; these values are updated from global roster-change notifications
+and reconciled by a one-second read-only roster poll. Completed, dormant,
+dead, removed, nonresident, missing, duplicate, or unknown actors withdraw the
+peer instead of leaving stale discovery state. FleetView does not expose a
+load-free fine-grained shell/tool state, so this adapter does not invent
+`shell` from generic `working` activity.
+
 The bridge snapshots that live permission class immediately before submitting
 an interjection and keeps the labelled snapshot until the first successful
 roster refresh after actor acceptance. Grok can defer roster replies while the

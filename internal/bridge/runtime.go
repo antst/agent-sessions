@@ -173,9 +173,15 @@ func newDaemon(args map[string]string) *daemon {
 	if nameSource == "" {
 		nameSource = "generated"
 	}
+	status := args["status"]
+	switch status {
+	case "busy", "shell", "waiting":
+	default:
+		status = "idle"
+	}
 	return &daemon{
 		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
-		permissionMode: defaultString(args["permission-mode"], "default"), status: "idle",
+		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
 		entrypoint:       entrypoint,
 		supervisorSocket: args["supervisor-socket"], supervisorToken: args["supervisor-token"], ownerPID: ownerPID,
 		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),

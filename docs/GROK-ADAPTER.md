@@ -139,6 +139,13 @@ The product is the leader + waker. Hooks are not the delivery path.
   authority to 30 minutes: if roster recovery remains broken, later MCP and
   lane authorization fails closed rather than inheriting stale privilege.
   Other ACP contention is retryable and supplies no permission class.
+- Activity: consume the machine-wide `_x.ai/sessions/changed` stream and
+  reconcile with the read-only roster once per second. Map only resident
+  `working` to `busy`, `needs_input` to `waiting`, and `idle` to `idle`.
+  Completed, dormant, dead, removed, nonresident, missing, duplicate, and
+  unknown rows are unavailable and must withdraw an already-published peer.
+  Tag pushes by ACP observer generation so an old reconnect cannot overwrite
+  current state. The load-free FleetView roster has no truthful `shell` state.
 - Publish the live session into Claude's registry (`entrypoint: "grok"`)
   so `send_message` can address it. Reuse the existing shim; point
   `supervisorSocket` at the waker.

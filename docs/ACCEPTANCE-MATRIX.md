@@ -142,6 +142,7 @@ must refuse when a process it would replace is still live.
 | G-18 | Linux, macOS | Owner/host/leader death, auth failure, roster ambiguity, PID reuse, and stale records clean up without killing unrelated clients. |
 | G-19 | Linux, macOS | Direct `agent_sessions.list_peers` readiness failure blocks first publication; catalog omission and unrelated MCP failures do not, and the already-running server never rejects itself through a recursive readiness check. |
 | G-20 | Linux, macOS | After actor acceptance, a Grok-deferred roster request cannot block the interjected turn's own `agent_sessions` calls; the labelled pre-interjection permission snapshot retires on the first successful post-turn roster refresh and expires after 30 minutes if recovery remains broken. |
+| G-21 | Linux, macOS | Global roster pushes plus one-second reconciliation publish `working`/`needs_input`/`idle` as busy/waiting/idle; initial non-idle state is retained, old observer generations and turn-boundary stale polls cannot overwrite it, and removed/terminal/nonresident/ambiguous actors withdraw the peer. |
 
 ## Pairwise peer messaging (`T/X`)
 

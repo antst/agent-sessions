@@ -48,6 +48,30 @@ func TestNativeShimInspectionReportsLiveIdentityAndPermission(t *testing.T) {
 	}
 }
 
+func TestNativeShimInitializesPublishedStatus(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "busy", want: "busy"},
+		{input: "waiting", want: "waiting"},
+		{input: "shell", want: "shell"},
+		{input: "invalid", want: "idle"},
+		{want: "idle"},
+	} {
+		d := newDaemon(map[string]string{
+			"session-id": "status-" + defaultString(test.input, "empty"), "cwd": root,
+			"status": test.input, "data-dir": filepath.Join(root, "state"),
+			"claude-config-dir": filepath.Join(root, "claude"), "codex-home": filepath.Join(root, "codex"),
+			"runtime-dir": filepath.Join(root, "run"),
+		})
+		if d.status != test.want {
+			t.Fatalf("initial status %q = %q, want %q", test.input, d.status, test.want)
+		}
+	}
+}
+
 func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 	root := t.TempDir()
 	sessionID := "native-integration-session"
