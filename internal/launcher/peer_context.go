@@ -46,19 +46,22 @@ func persistentRuntimeEnvironment(environment []string) []string {
 func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]string, peerLaunchContext, error) {
 	forwarded := make([]string, 0, len(args))
 	var context peerLaunchContext
-	for index := 0; index < len(args); index++ {
-		argument := args[index]
+	remaining := args
+	for len(remaining) > 0 {
+		argument := remaining[0]
+		remaining = remaining[1:]
 		if argument == "--" {
-			forwarded = append(forwarded, args[index:]...)
+			forwarded = append(forwarded, argument)
+			forwarded = append(forwarded, remaining...)
 			break
 		}
 		switch {
 		case argument == "--group":
-			index++
-			if index >= len(args) {
+			if len(remaining) == 0 {
 				return nil, peerLaunchContext{}, usageError("--group requires a non-empty value")
 			}
-			group := args[index]
+			group := remaining[0]
+			remaining = remaining[1:]
 			if strings.TrimSpace(group) == "" {
 				return nil, peerLaunchContext{}, usageError("--group requires a non-empty value")
 			}
@@ -81,9 +84,9 @@ func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]
 			context.forceNoYolo = true
 		default:
 			forwarded = append(forwarded, argument)
-			if consumesNext(argument) && index+1 < len(args) {
-				forwarded = append(forwarded, args[index+1])
-				index++
+			if consumesNext(argument) && len(remaining) > 0 {
+				forwarded = append(forwarded, remaining[0])
+				remaining = remaining[1:]
 			}
 		}
 	}
