@@ -43,7 +43,6 @@ func persistentRuntimeEnvironment(environment []string) []string {
 	return result
 }
 
-//nolint:gocyclo // Presence-sensitive shared flags are parsed in one ordered pass around native arguments.
 func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]string, peerLaunchContext, error) {
 	forwarded := make([]string, 0, len(args))
 	var context peerLaunchContext
@@ -68,20 +67,8 @@ func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]
 			}
 			context.groups = append(context.groups, value)
 			context.groupsSpecified = true
-		case argument == "--parent-session":
-			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
-				return nil, peerLaunchContext{}, usageError("--parent-session requires a non-empty value")
-			}
-			context.parentSession = args[index+1]
-			context.parentSpecified = true
-			index++
-		case strings.HasPrefix(argument, "--parent-session="):
-			value := strings.TrimSpace(strings.TrimPrefix(argument, "--parent-session="))
-			if value == "" {
-				return nil, peerLaunchContext{}, usageError("--parent-session requires a non-empty value")
-			}
-			context.parentSession = value
-			context.parentSpecified = true
+		case argument == "--parent-session" || strings.HasPrefix(argument, "--parent-session="):
+			return nil, peerLaunchContext{}, usageError("--parent-session is internal; parent membership is assigned by an attested lane launch")
 		case argument == "--inherit-groups":
 			context.inheritParentGroups, context.inheritGroupsSpecified = true, true
 		case argument == "--no-inherit-groups":

@@ -107,6 +107,10 @@ func laneAgentConfigured() bool {
 // authority for its product, effective groups, and live lifecycle identity.
 func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGroupOptions {
 	if body := strings.TrimSpace(os.Getenv(remoteParentEnvironment)); body != "" {
+		// Remote parent context is authoritative for the parent layer and never
+		// grants a destination-local lifecycle owner. Clear any ancestry hint
+		// inherited from the host process before parsing the attested context.
+		*owner = laneOwner{}
 		var parent federator.ParentContext
 		if json.Unmarshal([]byte(body), &parent) != nil || parent.HostID == "" || parent.SessionID == "" {
 			groups.parentErr = errors.New("invalid remote lane parent context")

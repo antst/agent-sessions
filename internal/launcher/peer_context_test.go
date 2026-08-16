@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-func TestPeerLaunchContextSeparatesParentLayerFromCodexTargetArgs(t *testing.T) {
+func TestPeerLaunchContextSeparatesGroupLayerFromCodexTargetArgs(t *testing.T) {
 	forwarded, context, err := extractPeerLaunchContext([]string{
-		"--group", "project", "--group=review", "--parent-session", "parent-id", "--inherit-groups",
+		"--group", "project", "--group=review", "--inherit-groups",
 		"resume", "thread-id", "--model", "gpt-test",
 	}, codexOptionConsumesNext)
 	if err != nil {
@@ -18,9 +18,12 @@ func TestPeerLaunchContextSeparatesParentLayerFromCodexTargetArgs(t *testing.T) 
 		t.Fatalf("target argv = %q, want %q", forwarded, want)
 	}
 	if !reflect.DeepEqual(context.groups, []string{"project", "review"}) || !context.groupsSpecified ||
-		context.parentSession != "parent-id" || !context.parentSpecified ||
+		context.parentSession != "" || context.parentSpecified ||
 		!context.inheritParentGroups || !context.inheritGroupsSpecified {
 		t.Fatalf("parent context = %+v", context)
+	}
+	if _, _, err := extractPeerLaunchContext([]string{"--parent-session", "someone-else"}, codexOptionConsumesNext); err == nil {
+		t.Fatal("public peer launch accepted a caller-selected parent")
 	}
 }
 

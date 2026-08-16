@@ -911,6 +911,7 @@ func (m *grokLaneManager) maintenanceLoop() {
 			m.mu.Lock()
 			ownerDead := !m.state.Persistent && cleanupProcessIdentityStatus(m.state.OwnerPID, m.state.OwnerProcStart).Status == processIdentityStale
 			autoArchive := m.state.AutoArchiveAt > 0 && time.Now().UnixMilli() >= m.state.AutoArchiveAt
+			pendingNotices := grokLaneHasUnsentNotices(m.state)
 			if ownerDead || autoArchive {
 				m.closing = true
 			}
@@ -922,6 +923,9 @@ func (m *grokLaneManager) maintenanceLoop() {
 			if autoArchive {
 				m.shutdown("auto-archive delay elapsed", true)
 				return
+			}
+			if pendingNotices {
+				go m.tryFlushTerminalNotices()
 			}
 		}
 	}
@@ -988,6 +992,18 @@ func grokLaneHasUnsentNotices(state grokLaneState) bool {
 func (m *grokLaneManager) flushTerminalNotices() {
 	m.noticeMu.Lock()
 	defer m.noticeMu.Unlock()
+	m.flushTerminalNoticesLocked()
+}
+
+func (m *grokLaneManager) tryFlushTerminalNotices() {
+	if !m.noticeMu.TryLock() {
+		return
+	}
+	defer m.noticeMu.Unlock()
+	m.flushTerminalNoticesLocked()
+}
+
+func (m *grokLaneManager) flushTerminalNoticesLocked() {
 	noticeLock, err := lockGrokLaneNotices(m.paths, m.state.SessionID)
 	if err != nil {
 		return

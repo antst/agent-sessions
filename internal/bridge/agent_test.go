@@ -50,17 +50,22 @@ func useBridgeTestAgent(t *testing.T) string {
 }
 
 func prepareBridgeTestLaneParent(t *testing.T, runtimeDir, childID, parentID string) {
+	prepareBridgeTestLaneParentForProduct(t, runtimeDir, childID, parentID, "claude")
+}
+
+func prepareBridgeTestLaneParentForProduct(t *testing.T, runtimeDir, childID, parentID, product string) {
 	t.Helper()
 	if _, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
-		SessionID: childID, Product: "claude", Kind: federator.SessionKindLane,
+		SessionID: childID, Product: product, Kind: federator.SessionKindLane,
 		ParentSessionID: parentID, ParentHostID: "bridge-test-host", ParentSpecified: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func registerBridgeTestParent(t *testing.T, runtimeDir, parentID string) (<-chan struct{}, func()) {
+func registerBridgeTestParent(t *testing.T, runtimeDir string) (<-chan struct{}, func()) {
 	t.Helper()
+	const parentID = "target-session"
 	if _, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
 		SessionID: parentID, Product: "codex", Kind: federator.SessionKindInteractive,
 	}); err != nil {

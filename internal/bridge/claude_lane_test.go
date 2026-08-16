@@ -1877,7 +1877,7 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 		Status: "archived", PermissionMode: "dontAsk", WorkerSocket: filepath.Join(root, "dead-source.sock"), CreatedAt: 1,
 		Notices: []claudeLaneNotice{{ID: "notice-retry", TurnID: "turn-1", Target: "session:target-session", Message: "terminal", CreatedAt: 1}},
 	}
-	_, stopParent := registerBridgeTestParent(t, runtimeDir, "target-session")
+	_, stopParent := registerBridgeTestParent(t, runtimeDir)
 	prepareBridgeTestLaneParent(t, runtimeDir, state.SessionID, "target-session")
 	stopParent()
 	if err := writeClaudeLaneState(paths, state); err != nil {
@@ -1891,7 +1891,7 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 	if latest.Notices[0].SentAt != 0 {
 		t.Fatal("unreachable orphan notice was falsely acknowledged")
 	}
-	received, _ := registerBridgeTestParent(t, runtimeDir, "target-session")
+	received, _ := registerBridgeTestParent(t, runtimeDir)
 	reconcileClaudeLaneManagers(paths)
 	select {
 	case <-received:
@@ -1920,7 +1920,7 @@ func TestClaudeLaneOrphanNoticeUsesVirtualSender(t *testing.T) {
 		Status: "idle", PermissionMode: "dontAsk", WorkerSocket: filepath.Join(root, "dead-source.sock"), CreatedAt: 1,
 		Notices: []claudeLaneNotice{{ID: "notice-1", TurnID: "turn-1", Target: "session:" + targetSession, Message: "terminal", CreatedAt: 1}},
 	}
-	received, _ := registerBridgeTestParent(t, runtimeDir, targetSession)
+	received, _ := registerBridgeTestParent(t, runtimeDir)
 	prepareBridgeTestLaneParent(t, runtimeDir, state.SessionID, targetSession)
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		t.Fatal(err)

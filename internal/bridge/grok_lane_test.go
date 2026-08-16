@@ -406,6 +406,48 @@ func TestGrokLaneTerminalNoticeFramePreservesGrokProduct(t *testing.T) {
 	}
 }
 
+func TestGrokLaneMaintenanceRetriesTerminalNotice(t *testing.T) {
+	runtimeDir := useBridgeTestAgent(t)
+	root := t.TempDir()
+	paths := nativePaths{profileRoot: filepath.Join(root, "profile")}
+	state := grokLaneState{
+		Type: "grok-peer-lane", Name: "worker", SessionID: "grok-notice-retry", Status: "idle", Persistent: true,
+		NotifyTarget: "session:target-session",
+		Notices: []claudeLaneNotice{{
+			ID: "notice-retry", TurnID: "turn-1", Target: "session:target-session", Message: "terminal", CreatedAt: 1,
+		}},
+	}
+	_, stopParent := registerBridgeTestParent(t, runtimeDir)
+	prepareBridgeTestLaneParentForProduct(t, runtimeDir, state.SessionID, "target-session", "grok")
+	stopParent()
+	if err := writeGrokLaneState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	manager := &grokLaneManager{paths: paths, state: state, done: make(chan struct{})}
+	manager.flushTerminalNotices()
+	latest, err := readGrokLaneState(paths, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Notices[0].SentAt != 0 || latest.Notices[0].Attempts == 0 {
+		t.Fatalf("failed first delivery was not retained for retry: %+v", latest.Notices[0])
+	}
+	received, _ := registerBridgeTestParent(t, runtimeDir)
+	go manager.maintenanceLoop()
+	defer close(manager.done)
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live Grok manager did not retry its terminal notice")
+	}
+	if !waitForCondition(time.Second, func() bool {
+		latest, readErr := readGrokLaneState(paths, state.SessionID)
+		return readErr == nil && latest.Notices[0].SentAt != 0
+	}) {
+		t.Fatal("retried Grok terminal notice was not acknowledged durably")
+	}
+}
+
 func TestCleanupGrokLanePreservesReusedPIDBackendAndRejectsMalformedOwnership(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))

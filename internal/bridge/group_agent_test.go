@@ -216,9 +216,10 @@ func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	t.Setenv("AGENT_SESSIONS_GROK_SESSION_ID", "")
 
-	codex := withLaneLaunchContext(laneOptions{command: "start", persistent: true})
-	claude := withClaudeLaneLaunchContext(claudeLaneOptions{command: "start", persistent: true})
-	grok := withGrokLaneLaunchContext(grokLaneOptions{command: "start", persistent: true})
+	localOwner := laneOwner{PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), SessionID: "destination-local-parent"}
+	codex := withLaneResolvedParent(laneOptions{command: "start", persistent: true}, localOwner)
+	claude := withClaudeLaneResolvedParent(claudeLaneOptions{command: "start", persistent: true}, localOwner)
+	grok := withGrokLaneResolvedParent(grokLaneOptions{command: "start", persistent: true}, localOwner)
 	for product, state := range map[string]laneGroupOptions{
 		"codex": codex.groupOptions, "claude": claude.groupOptions, "grok": grok.groupOptions,
 	} {
