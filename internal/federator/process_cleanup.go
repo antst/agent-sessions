@@ -1,0 +1,289 @@
+package federator
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/antst/agent-sessions/internal/procinfo"
+)
+
+type exactProcess struct {
+	PID         int
+	Start       string
+	StrongStart string
+}
+
+func exactProcessStatus(process exactProcess) procinfo.Status {
+	info := procinfo.Read(process.PID)
+	if info.Status != procinfo.Known {
+		return info.Status
+	}
+	if info.State == "Z" || info.State == "X" {
+		return procinfo.Absent
+	}
+	if info.Start != process.Start || process.StrongStart != "" && info.StrongStart != process.StrongStart {
+		return procinfo.Absent
+	}
+	return procinfo.Known
+}
+
+func peerAdapterRoot(peer localPeer) exactProcess {
+	return exactProcess{PID: peer.PID, Start: peer.ProcStart, StrongStart: peer.AdapterStrongStart}
+}
+
+func discoverExactProcessTree(root exactProcess) ([]exactProcess, error) {
+	if exactProcessStatus(root) == procinfo.Absent {
+		return nil, nil
+	}
+	processes, err := procinfo.List()
+	if err != nil {
+		return nil, err
+	}
+	byPID := make(map[int]procinfo.Process, len(processes))
+	owned := map[int]bool{}
+	for _, process := range processes {
+		byPID[process.PID] = process
+	}
+	observed, ok := byPID[root.PID]
+	if !ok {
+		return nil, errors.New("live peer adapter is missing from process snapshot")
+	}
+	if observed.Start != root.Start || root.StrongStart != "" && observed.StrongStart != root.StrongStart {
+		return nil, nil
+	}
+	owned[root.PID] = true
+	for changed := true; changed; {
+		changed = false
+		for _, process := range processes {
+			if !owned[process.PID] && owned[process.Parent] {
+				owned[process.PID] = true
+				changed = true
+			}
+		}
+	}
+	result := make([]exactProcess, 0, len(owned))
+	for pid := range owned {
+		process := byPID[pid]
+		result = append(result, exactProcess{PID: pid, Start: process.Start, StrongStart: process.StrongStart})
+	}
+	return result, nil
+}
+
+// stopPeerAdapterTree freezes the exact native adapter first, repeatedly
+// freezes its discovered descendants until the ancestry set is quiescent, and
+// only then terminates the retained identities. A child cannot fork across the
+// terminal survey, and PID reuse is rechecked before every signal.
+//
+//nolint:gocyclo // Exact freeze, discovery, signalling, and retry states are deliberately explicit.
+func stopPeerAdapterTree(peer localPeer) error {
+	root := peerAdapterRoot(peer)
+	switch exactProcessStatus(root) {
+	case procinfo.Absent:
+		return nil
+	case procinfo.Unknown:
+		return errors.New("cannot corroborate peer adapter identity")
+	case procinfo.Known:
+	}
+	if err := syscall.Kill(root.PID, syscall.SIGSTOP); err != nil {
+		return err
+	}
+	known := map[int]exactProcess{root.PID: root}
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		for _, member := range known {
+			if exactProcessStatus(member) == procinfo.Known {
+				_ = syscall.Kill(member.PID, syscall.SIGCONT)
+			}
+		}
+	}()
+	stablePasses := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for stablePasses < 3 {
+		members, err := discoverExactProcessTree(root)
+		if err != nil {
+			return err
+		}
+		before := len(known)
+		for _, member := range members {
+			known[member.PID] = member
+		}
+		for pid, member := range known {
+			switch exactProcessStatus(member) {
+			case procinfo.Known:
+				if err := syscall.Kill(member.PID, syscall.SIGSTOP); err != nil {
+					return err
+				}
+			case procinfo.Absent:
+				delete(known, pid)
+			case procinfo.Unknown:
+				return fmt.Errorf("cannot corroborate peer adapter descendant %d", pid)
+			}
+		}
+		if len(known) == before {
+			stablePasses++
+		} else {
+			stablePasses = 0
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out freezing peer adapter process tree")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	for pid, member := range known {
+		if pid != root.PID && exactProcessStatus(member) == procinfo.Known {
+			_ = syscall.Kill(member.PID, syscall.SIGKILL)
+		}
+	}
+	if exactProcessStatus(root) == procinfo.Known {
+		_ = syscall.Kill(root.PID, syscall.SIGKILL)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		remaining := false
+		for _, member := range known {
+			if exactProcessStatus(member) == procinfo.Known {
+				remaining = true
+				break
+			}
+		}
+		if !remaining {
+			completed = true
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return errors.New("timed out stopping peer adapter process tree")
+}
+
+func withClaudePeerRetirementLock(peer localPeer, action func() error) error {
+	if peer.PrivateConfigRoot == "" {
+		return action()
+	}
+	lockPath := ClaudePeerLifecycleLockPath(peer.PrivateConfigRoot)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // deterministic agent-owned session lock.
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.New("Claude peer profile is attached during retirement") //nolint:staticcheck // Claude is a product name.
+	}
+	return action()
+}
+
+// retirePeerAdapter holds the deterministic profile lock across both process
+// retirement and artifact removal. A resume therefore cannot launch in the
+// gap between stopping an orphaned adapter and cleaning its PID-bound files.
+func retirePeerAdapter(peer localPeer) error {
+	return withClaudePeerRetirementLock(peer, func() error {
+		if exactProcessStatus(peerAdapterRoot(peer)) == procinfo.Known {
+			if err := stopPeerAdapterTree(peer); err != nil {
+				return err
+			}
+		}
+		return cleanupClaudePeerArtifactsLocked(peer)
+	})
+}
+
+//nolint:gocyclo // Every owned artifact is independently re-attested before removal.
+func cleanupClaudePeerArtifactsLocked(peer localPeer) error {
+	if peer.PrivateConfigRoot == "" {
+		return nil
+	}
+	// A recycled PID is not absence: never unlink its PID-bound socket merely
+	// because it no longer matches the old adapter identity.
+	if procinfo.Read(peer.PID).Status != procinfo.Absent {
+		return errors.New("native Claude PID is not absent after retirement")
+	}
+	recordPath := filepath.Join(peer.PrivateConfigRoot, "sessions", strconv.Itoa(peer.PID)+".json")
+	body, err := os.ReadFile(recordPath) //nolint:gosec // deterministic agent-owned private profile.
+	if err == nil {
+		var record registryRecord
+		if json.Unmarshal(body, &record) != nil || record.PID != peer.PID || record.SessionID != peer.SessionID ||
+			record.ProcStart != peer.ProcStart || record.MessagingSocketPath != peer.Socket {
+			return errors.New("native Claude record changed before cleanup")
+		}
+		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before record cleanup")
+		}
+		if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := removeClaudePeerSidecars(peer.PrivateConfigRoot, peer.PID); err != nil {
+		return err
+	}
+	if filepath.Base(peer.Socket) != strconv.Itoa(peer.PID)+".sock" {
+		return errors.New("native Claude socket is not PID-bound")
+	}
+	if info, err := os.Lstat(peer.Socket); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return errors.New("native Claude socket path changed type")
+		}
+		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before socket cleanup")
+		}
+		return os.Remove(peer.Socket)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func removeClaudePeerSidecars(privateRoot string, pid int) error {
+	directory := filepath.Join(privateRoot, "sessions")
+	prefix := strconv.Itoa(pid) + "."
+	entries, err := os.ReadDir(directory)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".key") {
+			continue
+		}
+		digest := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".key")
+		if len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+			continue
+		}
+		if procinfo.Read(pid).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before key cleanup")
+		}
+		path := filepath.Join(directory, name)
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return statErr
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("native Claude peer-token sidecar changed type")
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}

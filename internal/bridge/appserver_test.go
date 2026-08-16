@@ -321,11 +321,11 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 				continue
 			}
 			result := request["result"].(map[string]any)
-			if success, _ := result["success"].(bool); !success {
-				t.Fatalf("dynamic call did not succeed: %v", result)
+			if success, _ := result["success"].(bool); success {
+				t.Fatalf("ungrouped dynamic call unexpectedly succeeded: %v", result)
 			}
 			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "No live Claude-compatible") {
+			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "communication is inactive for this ungrouped session") {
 				t.Fatalf("unexpected dynamic content: %v", items)
 			}
 			return

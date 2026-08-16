@@ -143,9 +143,10 @@ the destination peer.
 An operator must explicitly enable remote lane execution on the destination federator. A healthy
 destination advertises `grok-lane` only when its exact `grok-peer-lane` launcher is available. Use
 `peer-federator lane --host HOST --product grok -- COMMAND ...`; every lifecycle command remains the
-native Grok JSONL contract. Federation injects `--persistent` and a notify target back through the
-source shadow for remote `run`, `start`, and `resume`, so callers must not override persistence or
-notification flags. Every operation requires the hub and fails closed on disconnect.
+native Grok JSONL contract. Federation carries an agent-attested parent context and returns
+terminal pointers through grouped routing. The child always receives the remote parent anchor;
+other parent groups are copied only after explicit `--inherit-groups`. Every remote operation
+requires the hub and fails closed on disconnect.
 
 ## Permissions
 

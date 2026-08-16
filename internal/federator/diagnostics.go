@@ -3,6 +3,7 @@ package federator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -22,9 +23,51 @@ type AgentStatus struct {
 	RemotePeers     int      `json:"remote_peers"`
 	RemoteHosts     int      `json:"remote_hosts"`
 	Capabilities    []string `json:"capabilities,omitempty"`
-	Shadows         int      `json:"shadows"`
 	RegistryDir     string   `json:"registry_dir"`
 	RuntimeDir      string   `json:"runtime_dir"`
+}
+
+// ResolvePreferencesRequest applies explicit launch overrides or restores the
+// durable values when an override is omitted.
+type ResolvePreferencesRequest struct {
+	SessionID              string
+	Product                string
+	Kind                   string
+	Groups                 []string
+	GroupsSpecified        bool
+	ParentSessionID        string
+	ParentHostID           string
+	ParentGroups           []string
+	ParentSpecified        bool
+	InheritParentGroups    bool
+	InheritGroupsSpecified bool
+	AlwaysApprove          bool
+	AlwaysApproveSpecified bool
+}
+
+// ResolvedPreferences is the durable preference plus computed effective groups.
+type ResolvedPreferences struct {
+	Preference      SessionPreferences
+	EffectiveGroups []string
+}
+
+// LookupSessionPreferences returns one durable catalog row without requiring
+// the product session to be live. Generic resume uses the stored product to
+// select the correct native adapter.
+func LookupSessionPreferences(runtimeDir, sessionID string) (ResolvedPreferences, error) {
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir()
+	}
+	response, err := requestAgentControl(runtimeDir, Message{
+		Type: "session_lookup", Version: GroupProtocolVersion, SessionID: sessionID,
+	})
+	if err != nil {
+		return ResolvedPreferences{}, err
+	}
+	if response.Type != "session_lookup" || response.Preference == nil {
+		return ResolvedPreferences{}, errors.New("agent returned no session catalog row")
+	}
+	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
 }
 
 // DoctorOptions selects the hub and local registry inspected by Doctor.
@@ -48,12 +91,13 @@ type DoctorReport struct {
 	LiveLocalRecords         int          `json:"live_local_records"`
 	MessageableLocalPeers    int          `json:"messageable_local_peers"`
 	UnmessageableLiveRecords int          `json:"unmessageable_live_records"`
-	FederatedShadows         int          `json:"federated_shadows"`
 	AgentRunning             bool         `json:"agent_running"`
 	Agent                    *AgentStatus `json:"agent,omitempty"`
 }
 
 // Doctor checks hub compatibility, the local registry, and an optional running agent.
+//
+//nolint:gocyclo // Doctor intentionally aggregates independent readiness evidence in one report.
 func Doctor(ctx context.Context, options DoctorOptions) DoctorReport {
 	if options.ClaudeConfigDir == "" {
 		options.ClaudeConfigDir = DefaultClaudeConfigDir()
@@ -69,25 +113,30 @@ func Doctor(ctx context.Context, options DoctorOptions) DoctorReport {
 	}
 	report.HubReachable, report.HubCompatible = probeHub(ctx, options.Hub)
 	report.RegistryReady, report.LiveLocalRecords, report.MessageableLocalPeers,
-		report.UnmessageableLiveRecords, report.FederatedShadows = inspectRegistry(report.RegistryDir)
+		report.UnmessageableLiveRecords = inspectRegistry(report.RegistryDir)
 	if status, err := ReadAgentStatus(options.RuntimeDir); err == nil {
 		report.AgentRunning = true
 		report.Agent = &status
 	}
-	report.OK = report.HubCompatible && report.RegistryReady && report.UnmessageableLiveRecords == 0
+	report.OK = (options.Hub == "" || report.HubCompatible) && report.RegistryReady &&
+		report.UnmessageableLiveRecords == 0 && report.AgentRunning
 	switch {
-	case options.Hub == "":
-		report.Summary = "hub address is not configured"
-	case !report.HubReachable:
+	case !report.AgentRunning:
+		report.Summary = "host agent is not running"
+	case options.Hub != "" && !report.HubReachable:
 		report.Summary = "hub is unreachable"
-	case !report.HubCompatible:
+	case options.Hub != "" && !report.HubCompatible:
 		report.Summary = "hub protocol is incompatible"
 	case !report.RegistryReady:
 		report.Summary = "claude session registry is unavailable"
 	case report.UnmessageableLiveRecords > 0:
 		report.Summary = "live sessions without messaging sockets were found"
 	default:
-		report.Summary = "ready"
+		if options.Hub == "" {
+			report.Summary = "ready (local routing only)"
+		} else {
+			report.Summary = "ready"
+		}
 	}
 	return report
 }
@@ -120,6 +169,99 @@ func ReadAgentStatus(runtimeDir string) (AgentStatus, error) {
 	return status, nil
 }
 
+// ResolveSessionPreferences updates or restores one durable session catalog entry.
+func ResolveSessionPreferences(runtimeDir string, request ResolvePreferencesRequest) (ResolvedPreferences, error) {
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir()
+	}
+	conn, err := net.DialTimeout("unix", filepath.Join(runtimeDir, "agent.sock"), time.Second)
+	if err != nil {
+		return ResolvedPreferences{}, err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := newWireConn(conn).Send(Message{
+		Type: "session_preferences", Version: GroupProtocolVersion,
+		SessionID: request.SessionID, Product: request.Product,
+		SessionKind: request.Kind,
+		Groups:      request.Groups, GroupsSpecified: request.GroupsSpecified,
+		ParentSessionID: request.ParentSessionID, ParentSpecified: request.ParentSpecified,
+		ParentHostID: request.ParentHostID, ParentGroups: request.ParentGroups,
+		InheritParentGroups: request.InheritParentGroups, InheritGroupsSpecified: request.InheritGroupsSpecified,
+		AlwaysApprove: request.AlwaysApprove, AlwaysApproveSpecified: request.AlwaysApproveSpecified,
+	}); err != nil {
+		return ResolvedPreferences{}, err
+	}
+	var response Message
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return ResolvedPreferences{}, err
+	}
+	if response.Type != "session_preferences" || response.Preference == nil {
+		return ResolvedPreferences{}, fmt.Errorf("resolve session preferences failed: %s", response.Error)
+	}
+	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
+}
+
+// RouteAgentFrame sends one product-neutral request through the local host agent.
+func RouteAgentFrame(runtimeDir, sourceSessionID string, frame AgentFrame) (AgentFrameResult, error) {
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir()
+	}
+	body, err := json.Marshal(frame)
+	if err != nil {
+		return AgentFrameResult{}, err
+	}
+	conn, err := net.DialTimeout("unix", filepath.Join(runtimeDir, "agent.sock"), time.Second)
+	if err != nil {
+		return AgentFrameResult{}, err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(wireWriteTimeout + 5*time.Second))
+	if err := newWireConn(conn).Send(Message{Type: "agent_frame", SourceSessionID: sourceSessionID, Frame: body}); err != nil {
+		return AgentFrameResult{}, err
+	}
+	var response Message
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return AgentFrameResult{}, err
+	}
+	if response.Type != "agent_frame_result" {
+		return AgentFrameResult{}, fmt.Errorf("agent route failed: %s", response.Error)
+	}
+	var result AgentFrameResult
+	if err := json.Unmarshal(response.Frame, &result); err != nil {
+		return AgentFrameResult{}, err
+	}
+	return result, nil
+}
+
+// RouteTerminalNotice routes one durable child-to-parent pointer after the
+// child's live adapter has disappeared. The host agent derives and verifies the
+// exact parent from the session catalog; callers cannot choose another peer.
+func RouteTerminalNotice(runtimeDir, sourceSessionID, target string, frame AgentFrame) (AgentFrameResult, error) {
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir()
+	}
+	body, err := json.Marshal(frame)
+	if err != nil {
+		return AgentFrameResult{}, err
+	}
+	response, err := requestAgentControl(runtimeDir, Message{
+		Type: "terminal_notice", Version: GroupProtocolVersion, SourceSessionID: sourceSessionID,
+		TargetID: target, Frame: body,
+	})
+	if err != nil {
+		return AgentFrameResult{}, err
+	}
+	if response.Type != "agent_frame_result" {
+		return AgentFrameResult{}, fmt.Errorf("route terminal notice failed: %s", response.Error)
+	}
+	var result AgentFrameResult
+	if err := json.Unmarshal(response.Frame, &result); err != nil {
+		return AgentFrameResult{}, err
+	}
+	return result, nil
+}
+
 func probeHub(ctx context.Context, address string) (bool, bool) {
 	if address == "" {
 		return false, false
@@ -141,10 +283,10 @@ func probeHub(ctx context.Context, address string) (bool, bool) {
 	return true, response.Type == "probe_ok" && response.Version == ProtocolVersion
 }
 
-func inspectRegistry(registryDir string) (ready bool, live, messageable, unmessageable, shadows int) {
+func inspectRegistry(registryDir string) (ready bool, live, messageable, unmessageable int) {
 	entries, err := os.ReadDir(registryDir)
 	if err != nil {
-		return false, 0, 0, 0, 0
+		return false, 0, 0, 0
 	}
 	for _, entry := range entries {
 		pid := parsePID(entry.Name())
@@ -167,7 +309,6 @@ func inspectRegistry(registryDir string) (ready bool, live, messageable, unmessa
 			}
 		}
 		if record.FederatedBy != "" {
-			shadows++
 			continue
 		}
 		live++
@@ -177,5 +318,5 @@ func inspectRegistry(registryDir string) (ready bool, live, messageable, unmessa
 			unmessageable++
 		}
 	}
-	return true, live, messageable, unmessageable, shadows
+	return true, live, messageable, unmessageable
 }

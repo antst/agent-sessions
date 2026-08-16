@@ -29,6 +29,8 @@ type codexPlan struct {
 	requestedCwd      string
 	cwdExplicit       bool
 	requestedYolo     bool
+	yoloSpecified     bool
+	peerContext       peerLaunchContext
 	originalArgs      []string
 	interactiveArgs   []string
 	selectionTarget   string
@@ -60,6 +62,14 @@ func RunCodexPeer(args []string) error {
 	if err != nil {
 		return err
 	}
+	resolved, err := resolvedPeerPreferences(threadID, "codex")
+	if err != nil {
+		return fmt.Errorf("restore Agent Sessions peer preferences: %w", err)
+	}
+	if resolved.Preference.AlwaysApprove && !plan.requestedYolo {
+		plan.requestedYolo = true
+		plan.interactiveArgs = append(plan.interactiveArgs, "--yolo")
+	}
 	return execInteractiveCodex(codex, threadID, selectedCwd, plan)
 }
 
@@ -86,6 +96,8 @@ func prepareFreshThread(runtimePath string, plan codexPlan, ownerPID int, ownerS
 	if plan.peerName != "" {
 		launchArgs = append(launchArgs, "--name", plan.peerName, "--name-source", plan.peerNameSource)
 	}
+	contextArgs := plan.peerContext.launchArguments(plan.requestedYolo, plan.yoloSpecified)
+	launchArgs = append(launchArgs, contextArgs...)
 	if plan.requestedYolo {
 		launchArgs = append(launchArgs, "--approval-policy", "never", "--sandbox", "danger-full-access")
 	}
@@ -115,6 +127,8 @@ func resumedBindArguments(plan codexPlan, ownerPID int, ownerStart string) []str
 		"--cwd-explicit", strconv.FormatBool(plan.cwdExplicit),
 		"--owner-pid", strconv.Itoa(ownerPID), "--owner-proc-start", ownerStart,
 	}
+	contextArgs := plan.peerContext.launchArguments(plan.requestedYolo, plan.yoloSpecified)
+	args = append(args, contextArgs...)
 	if plan.requestedYolo {
 		args = append(args, "--approval-policy", "never", "--sandbox", "danger-full-access")
 	}
@@ -148,7 +162,7 @@ func execInteractiveCodex(codex, threadID, cwd string, plan codexPlan) error {
 	case modeFork, modePassthrough:
 		return errors.New("internal launcher error: interactive Codex mode is not executable")
 	}
-	return Exec(codex, launchArgs, nil)
+	return Exec(codex, launchArgs, peerEnvironment(os.Environ(), threadID, "codex"))
 }
 
 func codexExecutable() (string, error) {
@@ -164,7 +178,12 @@ func codexExecutable() (string, error) {
 
 func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, error) {
 	plan := codexPlan{mode: modeFresh, peerNameSource: "launch", requestedCwd: cwd}
-	codexArgs, peerName, err := extractPeerNameArgs(args)
+	contextArgs, peerContext, err := extractPeerLaunchContext(args, codexOptionConsumesNext)
+	if err != nil {
+		return codexPlan{}, err
+	}
+	plan.peerContext = peerContext
+	codexArgs, peerName, err := extractPeerNameArgs(contextArgs)
 	if err != nil {
 		return codexPlan{}, err
 	}
@@ -372,10 +391,17 @@ func validateInteractiveOptions(plan *codexPlan, forwarded []string) error {
 		}
 		if isYolo(argument) {
 			plan.requestedYolo = true
+			plan.yoloSpecified = true
 		}
 		if codexOptionConsumesNext(argument) {
 			index++
 		}
+	}
+	if plan.peerContext.forceNoYolo {
+		if plan.requestedYolo {
+			return usageError("--no-yolo conflicts with a Codex yolo option")
+		}
+		plan.yoloSpecified = true
 	}
 	return nil
 }

@@ -299,10 +299,28 @@ func TestClaudeLaneWorkerEnvDropsInheritedIdentityAndEnablesMessaging(t *testing
 	environment := claudeLaneWorkerEnv([]string{
 		"PATH=/bin", "CLAUDE_PID=123", "CLAUDE_CODE_SESSION_ID=wrong",
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0", "CODEX_THREAD_ID=outer", "KEEP=yes",
-	})
-	if len(environment) != 3 || environment[0] != "PATH=/bin" || environment[1] != "KEEP=yes" ||
-		environment[2] != "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" {
+	}, "child-session", "/private/config", "/public/config")
+	joined := strings.Join(environment, "\n")
+	for _, expected := range []string{
+		"PATH=/bin", "KEEP=yes", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1",
+		"AGENT_SESSIONS_SESSION_ID=child-session", "AGENT_SESSIONS_PRODUCT=claude",
+		"AGENT_SESSIONS_AGENT_RUNTIME_DIR=" + laneAgentRuntimeDir(),
+		"CLAUDE_CONFIG_DIR=/private/config", "CLAUDE_SECURESTORAGE_CONFIG_DIR=/public/config",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("worker environment = %#v; missing %s", environment, expected)
+		}
+	}
+	if strings.Contains(joined, "CODEX_THREAD_ID=outer") {
 		t.Fatalf("worker environment = %#v", environment)
+	}
+}
+
+func TestClaudeLaneSecureStorageRootPrefersParentCredentialRoot(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/private/parent")
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/public/credentials")
+	if got := claudeLaneSecureStorageRoot("/private/parent"); got != "/public/credentials" {
+		t.Fatalf("secure storage root = %q", got)
 	}
 }
 
@@ -1260,6 +1278,7 @@ func TestClaudeLaneManagerCaptureFailureDoesNotPersistOwner(t *testing.T) {
 }
 
 func TestClaudeLaneWorkerCaptureFailureReapsChildWithoutPersistence(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	claudeBin := filepath.Join(root, "fake-claude")
 	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0700); err != nil {
@@ -1538,6 +1557,7 @@ func TestClaudeLaneManagerCannotOverwriteArchivedState(t *testing.T) {
 }
 
 func TestClaudeLaneUnknownCleanupPreservesStateAndTransport(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
@@ -1846,6 +1866,7 @@ func TestClaudeLaneStatusBindsOutcomeToReportedTurn(t *testing.T) {
 }
 
 func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
+	runtimeDir := useBridgeTestAgent(t)
 	root := t.TempDir()
 	paths := nativePaths{
 		dataRoot: filepath.Join(root, "data"), profileRoot: filepath.Join(root, "profile"),
@@ -1856,6 +1877,9 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 		Status: "archived", PermissionMode: "dontAsk", WorkerSocket: filepath.Join(root, "dead-source.sock"), CreatedAt: 1,
 		Notices: []claudeLaneNotice{{ID: "notice-retry", TurnID: "turn-1", Target: "session:target-session", Message: "terminal", CreatedAt: 1}},
 	}
+	_, stopParent := registerBridgeTestParent(t, runtimeDir, "target-session")
+	prepareBridgeTestLaneParent(t, runtimeDir, state.SessionID, "target-session")
+	stopParent()
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
@@ -1867,30 +1891,7 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 	if latest.Notices[0].SentAt != 0 {
 		t.Fatal("unreachable orphan notice was falsely acknowledged")
 	}
-	if err := os.MkdirAll(filepath.Join(paths.claudeRoot, "sessions"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	socket := filepath.Join(root, "retry-target.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
-	row := map[string]any{
-		"pid": os.Getpid(), "procStart": readProcStart(os.Getpid()), "sessionId": "target-session",
-		"name": "target", "messagingSocketPath": socket, "kind": "interactive", "peerProtocol": 1,
-	}
-	if err := writeJSONAtomic(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(os.Getpid())+".json"), row); err != nil {
-		t.Fatal(err)
-	}
-	received := make(chan struct{})
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			_ = conn.Close()
-			close(received)
-		}
-	}()
+	received, _ := registerBridgeTestParent(t, runtimeDir, "target-session")
 	reconcileClaudeLaneManagers(paths)
 	select {
 	case <-received:
@@ -1907,44 +1908,23 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 }
 
 func TestClaudeLaneOrphanNoticeUsesVirtualSender(t *testing.T) {
+	runtimeDir := useBridgeTestAgent(t)
 	root := t.TempDir()
 	paths := nativePaths{
 		dataRoot: filepath.Join(root, "data"), profileRoot: filepath.Join(root, "profile"),
 		claudeRoot: filepath.Join(root, "claude"), runtimeDir: filepath.Join(root, "runtime"),
 	}
-	if err := os.MkdirAll(filepath.Join(paths.claudeRoot, "sessions"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	socket := filepath.Join(root, "target.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
 	targetSession := "target-session"
-	row := map[string]any{
-		"pid": os.Getpid(), "procStart": readProcStart(os.Getpid()), "sessionId": targetSession,
-		"name": "target", "messagingSocketPath": socket, "kind": "interactive", "peerProtocol": 1,
-	}
-	if err := writeJSONAtomic(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(os.Getpid())+".json"), row); err != nil {
-		t.Fatal(err)
-	}
 	state := claudeLaneState{
 		Type: "claude-peer-lane", Name: "worker", ThreadID: "session-test", SessionID: "session-test",
 		Status: "idle", PermissionMode: "dontAsk", WorkerSocket: filepath.Join(root, "dead-source.sock"), CreatedAt: 1,
 		Notices: []claudeLaneNotice{{ID: "notice-1", TurnID: "turn-1", Target: "session:" + targetSession, Message: "terminal", CreatedAt: 1}},
 	}
+	received, _ := registerBridgeTestParent(t, runtimeDir, targetSession)
+	prepareBridgeTestLaneParent(t, runtimeDir, state.SessionID, targetSession)
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
-	received := make(chan struct{})
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			_ = conn.Close()
-			close(received)
-		}
-	}()
 	flushOrphanClaudeLaneNotices(paths, state.SessionID)
 	select {
 	case <-received:

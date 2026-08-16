@@ -2,7 +2,6 @@ package federator
 
 import (
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -64,17 +63,16 @@ func TestFullLaneOutputQueueFailsProxyInsteadOfDroppingTerminal(t *testing.T) {
 	}
 }
 
-func TestPrepareRemoteLaneInjectsPersistentNotifyThroughSourceShadow(t *testing.T) {
+func TestPrepareRemoteLaneInjectsPersistentGroupedParentNotice(t *testing.T) {
+	parent := groupedRemoteLaneParent("host-a", "source", "codex")
 	agent := &agent{
 		options: AgentOptions{EnableRemoteLanes: true, CodexLaneExecutable: "/bin/true"},
-		remote:  map[string]Peer{"host-a/source": {ID: "host-a/source"}},
+		remote:  map[string]Peer{"host-a/source": parent},
 		network: &wireConn{},
-		shadows: map[string]*shadowHandle{
-			"host-a/source": {pid: os.Getpid(), socket: "/run/source-shadow.sock"},
-		},
 	}
 	executable, args, err := agent.prepareRemoteLane(Message{
 		Product: "codex", SourceID: "host-a/source", Args: []string{"start", "--name", "worker", "-"},
+		ParentContext: groupedRemoteLaneParentContext(parent),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +80,7 @@ func TestPrepareRemoteLaneInjectsPersistentNotifyThroughSourceShadow(t *testing.
 	if executable != "/bin/true" {
 		t.Fatalf("executable = %q", executable)
 	}
-	want := []string{"start", "--name", "worker", "-", "--persistent", "--notify", "uds:/run/source-shadow.sock"}
+	want := []string{"start", "--name", "worker", "-", "--persistent", "--notify", "host-a/source"}
 	if len(args) != len(want) {
 		t.Fatalf("args = %#v, want %#v", args, want)
 	}
@@ -119,22 +117,39 @@ func TestPrepareRemoteLaneInjectsPersistentNotifyThroughSourceShadow(t *testing.
 func TestPrepareRemoteGrokLaneUsesAdvertisedLauncher(t *testing.T) {
 	agent := &agent{
 		options: AgentOptions{EnableRemoteLanes: true, GrokLaneExecutable: "/bin/true"},
-		remote:  map[string]Peer{"host-a/source": {ID: "host-a/source"}}, network: &wireConn{},
-		shadows: map[string]*shadowHandle{"host-a/source": {pid: os.Getpid(), socket: "/run/grok-source.sock"}},
+		remote:  map[string]Peer{"host-a/source": groupedRemoteLaneParent("host-a", "source", "grok")}, network: &wireConn{},
 	}
+	parent := agent.remote["host-a/source"]
 	executable, args, err := agent.prepareRemoteLane(Message{
 		Product: "grok", SourceID: "host-a/source", Args: []string{"start", "--name", "grok-worker", "-"},
+		ParentContext: groupedRemoteLaneParentContext(parent),
 	})
 	if err != nil || executable != "/bin/true" {
 		t.Fatalf("prepare remote Grok lane = %q, %#v, %v", executable, args, err)
 	}
-	want := []string{"start", "--name", "grok-worker", "-", "--persistent", "--notify", "uds:/run/grok-source.sock"}
+	want := []string{"start", "--name", "grok-worker", "-", "--persistent", "--notify", "host-a/source"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("remote Grok args = %#v, want %#v", args, want)
 	}
 	capabilities := agent.laneCapabilities()
 	if len(capabilities) != 1 || capabilities[0] != CapabilityGrokLane {
 		t.Fatalf("remote Grok capabilities = %#v", capabilities)
+	}
+}
+
+func groupedRemoteLaneParent(hostID, sessionID, product string) Peer {
+	return Peer{
+		ID: hostID + "/" + sessionID, HostID: hostID, SessionID: sessionID,
+		GlobalID: globalSessionID(hostID, sessionID), Name: product + "-parent", DisplayName: product + "-parent",
+		Entrypoint: product, PeerProtocol: GroupProtocolVersion, InstanceID: "instance-" + sessionID,
+		Groups: []string{"project", privateGroupPrefix + hostID + "/" + sessionID},
+	}
+}
+
+func groupedRemoteLaneParentContext(peer Peer) *ParentContext {
+	return &ParentContext{
+		HostID: peer.HostID, SessionID: peer.SessionID, Product: peer.Entrypoint,
+		InstanceID: peer.InstanceID, Groups: append([]string(nil), peer.Groups...),
 	}
 }
 

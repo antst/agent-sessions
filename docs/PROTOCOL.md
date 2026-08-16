@@ -1,48 +1,54 @@
-# Claude peer protocol notes
+# Claude carrier and product-adapter protocol notes
 
 These notes describe behavior observed in the installed Claude Code 2.1.226 Linux executable. This
 is not a public Anthropic protocol specification.
 
-## Discovery
+## Native registry and Agent Sessions discovery
 
 Claude enumerates JSON files in `$CLAUDE_CONFIG_DIR/sessions` or `~/.claude/sessions`. A messageable
 record has a live `pid` and a connectable `messagingSocketPath`. The bridge corroborates process-start
 identity through `/proc/<pid>/stat` on Linux and the kernel process table on macOS; an observation
 failure is distinct from proof that a process is stale.
 
-The bridge publishes this compatible subset. `entrypoint` is `codex` for an
-App-Server-backed peer and `grok` for a private-leader-backed Grok peer:
+The host agent publishes exactly one public service record using this
+compatible subset. Product adapters register their real sockets privately with
+the host agent; remote peers are never projected into Claude's registry.
+`claude-peer` and Claude lanes use private config roots containing their native
+self row plus a projection of this same one service record:
 
 ```json
 {
   "pid": 12345,
-  "sessionId": "codex-session-id",
-  "cwd": "/project",
+  "sessionId": "agent-host-key",
+  "cwd": "/agent-state",
   "startedAt": 1786000000000,
   "procStart": "123456789",
-  "version": "codex-claude-peer/0.1.0",
+  "version": "agent-sessions/0.1.1",
   "peerProtocol": 1,
-  "kind": "interactive",
-  "entrypoint": "codex",
-  "name": "codex-project-ab12cd34",
-  "nameSource": "generated",
+  "kind": "service",
+  "entrypoint": "agent-sessions",
+  "name": "agent-sessions--workstation",
+  "nameSource": "agent",
   "status": "idle",
   "messagingSocketPath": "/run/user/1000/codex-claude-peer-1000/session-0123456789abcdef0123.sock"
 }
 ```
 
-Claude's `agents --json` command was used as an independent smoke test and displayed the bridge
-record as an interactive session.
+Claude's `agents --json` command is the independent smoke test: a running host
+agent adds one row regardless of local or remote peer count.
 
-The peer name is the primary durable address. The Codex MCP sender resolves it from fresh discovery
-immediately before every send. A short ref is only a transient duplicate-name disambiguator and
-must not be cached or persisted.
+Agent Sessions discovery is an AgentFrame request to that service, not a scan
+of the Claude registry. It returns only peers sharing a group with the caller.
+A visible peer can be addressed by name, display name, host/session ID, or
+exact session ID. Hidden duplicate names do not participate in resolution.
 
-The advertised UDS path is a stable per-Codex-session symlink to the current shim's private
-PID-named listener. Claude Code keys its conversation-local `name [ref]` identity by this path, so
-the bridge avoids gratuitous ref rotation when a shim process is replaced. The Codex MCP sender
-also accepts an exact full peer `sessionId` (or `session:<id>`), but Claude Code's native sender does
-not resolve raw session IDs and the discovery record has no alias field.
+Codex and Grok adapters own stable per-session UDS paths. A wrapped Claude
+attachment instead registers Claude's native PID-bound socket; that socket can
+rotate across exact resume while the Agent Sessions session ID, catalog row,
+groups, and private profile remain stable.
+The host agent routes to that socket only after group admission. Claude's
+native sender addresses the service row and puts the complete AgentFrame JSON
+in the message body.
 
 `nameSource` is `codex` when the name comes from Codex's session index, `explicit` when supplied by
 `CLAUDE_PEER_SESSION_NAME`, `launch` for a prepared interactive wrapper, `lane` for a durable lane,
@@ -79,9 +85,10 @@ Claude 2.1.226 strictly parses the recognized envelope attributes in grammar ord
 `from-session`, `hop-chain`, `from-name`, and `from-mode`. Native peers do not normally emit
 `from-session`, but controlled testing confirmed that it is grammar-recognized in this position.
 Unknown attributes before the closing `>` cause the inbound security gate to discard
-permission-mode attestation and hold the message for human approval. Codex therefore puts extension
-metadata on the first body line: transport `msg_id` as `messageId`, an ISO-8601 `sentAt`, and
-`fromProduct: "codex"` or `"grok"` according to the attested sender.
+permission-mode attestation and hold the message for human approval. The host
+agent therefore leaves the native attribute grammar unchanged and carries the
+complete AgentFrame JSON in the body. Its `delivery` frame contains the
+attested source, product, permission class, message ID, group, and content.
 The App Server and hook receive paths show message ID, send/receive times, and sender type in
 model-visible metadata. The parser remains backward-compatible with the short-lived attribute form
 used by earlier bridge builds.
@@ -277,7 +284,7 @@ groups. Native Grok clients must not concurrently open the same UUID.
 
 Interactive Grok supports fresh sessions and exact-UUID resume. Title resolution and a bare resume
 picker remain native-Grok concerns rather than private-store parsing. Separate sole-owner headless
-ACP sessions implement local Grok lanes; Grok lane federation remains a later capability.
+ACP sessions implement local or federated Grok lanes.
 
 Headless App Server turns can issue server-initiated `item/tool/call` JSON-RPC requests. The native
 client handles bridge-owned `claude_peer` tools directly only after the App Server-supplied `threadId`
@@ -316,6 +323,7 @@ type field that changes those behaviors. The bridge therefore exposes product ty
 Codex listing and message envelope, but cannot change native `ListAgents` labeling or make a raw
 Codex session UUID a Claude-native target.
 
-File transfer, remote-host Claude messaging, and Windows named pipes are not implemented. Immediate
+File transfer and Windows named pipes are not implemented. Remote-host grouped
+messaging uses protocol-3 host agents plus the optional hub. Immediate
 wake requires an App-Server-backed session; conventionally launched standalone Codex processes keep
 the hook-inbox fallback behavior.

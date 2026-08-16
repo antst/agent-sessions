@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 var exactLaunchThreadIDRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -67,7 +69,7 @@ func bindPreparedResumeNative(argv []string) (threadID, effectiveCwd string, res
 	}
 	for option := range options {
 		if option != "target" && option != "cwd" && option != "owner-pid" && option != "owner-proc-start" &&
-			option != "cwd-explicit" && option != "approval-policy" && option != "sandbox" {
+			option != "cwd-explicit" && option != "approval-policy" && option != "sandbox" && !agentLaunchOption(option) {
 			return "", "", fmt.Errorf("unknown bind option --%s", option)
 		}
 	}
@@ -98,6 +100,13 @@ func bindPreparedResumeNative(argv []string) (threadID, effectiveCwd string, res
 	}
 	if err := validatePreparedRootThread(thread); err != nil {
 		return "", "", err
+	}
+	resolved, managed, err := resolvePreparedPeerPreferences(thread.ID, options)
+	if err != nil {
+		return "", "", err
+	}
+	if managed {
+		applyResolvedApproval(options, resolved.Preference.AlwaysApprove)
 	}
 	// Match native `codex resume`: every invocation uses the launcher's
 	// effective cwd (the shell cwd unless -C overrides it). Codex retains the
@@ -130,6 +139,7 @@ func bindPreparedResumeNative(argv []string) (threadID, effectiveCwd string, res
 		"cwd": record.Cwd, "name": record.Name, "nameSource": record.NameSource,
 		"status": "idle",
 	}
+	putIf(publication, "agentRuntimeDir", options["agent-runtime-dir"])
 	putIf(publication, "approvalPolicy", options["approval-policy"])
 	putIf(publication, "sandbox", options["sandbox"])
 	published, err := requestControl(paths.supervisorSock, publication, preparedPublicationTimeout)
@@ -503,7 +513,7 @@ func startPreparedLaunchNative(argv []string) (threadID string, resultErr error)
 	}
 	for option := range options {
 		if option != "cwd" && option != "name" && option != "name-source" && option != "owner-pid" && option != "owner-proc-start" &&
-			option != "approval-policy" && option != "sandbox" {
+			option != "approval-policy" && option != "sandbox" && !agentLaunchOption(option) {
 			return "", fmt.Errorf("unknown start option --%s", option)
 		}
 	}
@@ -559,6 +569,13 @@ func startPreparedLaunchNative(argv []string) (threadID string, resultErr error)
 	if !validSessionID(threadID) {
 		return threadID, errors.New("invalid thread id returned by App Server")
 	}
+	resolved, managed, err := resolvePreparedPeerPreferences(threadID, options)
+	if err != nil {
+		return threadID, err
+	}
+	if managed && resolved.Preference.AlwaysApprove != (strings.TrimSpace(options["approval-policy"]) == "never") {
+		return threadID, errors.New("resolved yolo preference does not match the fresh Codex launch policy")
+	}
 	approvalPolicy := stringValue(started.ApprovalPolicy)
 	if approvalPolicy == "" {
 		return threadID, errors.New("thread/start did not report its effective approval policy")
@@ -610,6 +627,7 @@ func startPreparedLaunchNative(argv []string) (threadID string, resultErr error)
 		"ownerPid": record.OwnerPID, "ownerProcStart": record.OwnerProcStart,
 		"cwd": cwd, "name": name, "nameSource": nameSource,
 		"approvalPolicy": approvalPolicy, "permissionMode": permissionMode, "status": "idle",
+		"agentRuntimeDir": options["agent-runtime-dir"],
 	}, preparedPublicationTimeout)
 	if err != nil {
 		return threadID, fmt.Errorf("publish prepared Codex peer: %w", err)
@@ -678,6 +696,84 @@ func canonicalLaunchDirectory(value string) (string, error) {
 		return "", errors.New("launch cwd cannot contain a line break")
 	}
 	return canonical, nil
+}
+
+func agentLaunchOption(option string) bool {
+	switch option {
+	case "agent-runtime-dir", "groups-json", "groups-specified", "parent-session", "parent-specified",
+		"inherit-parent-groups", "inherit-groups-specified", "always-approve", "always-approve-specified":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolvePreparedPeerPreferences(sessionID string, options map[string]string) (federator.ResolvedPreferences, bool, error) {
+	runtimeDir := strings.TrimSpace(options["agent-runtime-dir"])
+	if runtimeDir == "" {
+		return federator.ResolvedPreferences{}, false, nil
+	}
+	groups := []string{}
+	if err := json.Unmarshal([]byte(defaultString(options["groups-json"], "[]")), &groups); err != nil {
+		return federator.ResolvedPreferences{}, true, errors.New("decode peer groups")
+	}
+	groupsSpecified, err := strictLaunchBool(options, "groups-specified")
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, err
+	}
+	parentSpecified, err := strictLaunchBool(options, "parent-specified")
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, err
+	}
+	inherit, err := strictLaunchBool(options, "inherit-parent-groups")
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, err
+	}
+	inheritSpecified, err := strictLaunchBool(options, "inherit-groups-specified")
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, err
+	}
+	alwaysApprove, err := strictLaunchBool(options, "always-approve")
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, err
+	}
+	alwaysApproveSpecified, err := strictLaunchBool(options, "always-approve-specified")
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, err
+	}
+	resolved, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
+		SessionID: sessionID, Product: "codex", Kind: federator.SessionKindInteractive, Groups: groups, GroupsSpecified: groupsSpecified,
+		ParentSessionID: options["parent-session"], ParentSpecified: parentSpecified,
+		InheritParentGroups: inherit, InheritGroupsSpecified: inheritSpecified,
+		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,
+	})
+	if err != nil {
+		return federator.ResolvedPreferences{}, true, fmt.Errorf("resolve Agent Sessions peer preferences: %w", err)
+	}
+	return resolved, true, nil
+}
+
+func strictLaunchBool(options map[string]string, name string) (bool, error) {
+	value := options[name]
+	if value == "true" {
+		return true, nil
+	}
+	if value == "false" {
+		return false, nil
+	}
+	return false, fmt.Errorf("--%s must be true or false", name)
+}
+
+func applyResolvedApproval(options map[string]string, alwaysApprove bool) {
+	if alwaysApprove {
+		options["approval-policy"] = "never"
+		options["sandbox"] = "danger-full-access"
+		return
+	}
+	if options["always-approve-specified"] == "true" {
+		delete(options, "approval-policy")
+		delete(options, "sandbox")
+	}
 }
 
 func parseLaunchOptions(argv []string) (map[string]string, error) {

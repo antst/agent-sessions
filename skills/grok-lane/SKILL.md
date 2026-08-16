@@ -22,8 +22,8 @@ peer-federator lane --host HOST --product grok -- list --all
 
 Require a connected hub, destination capability `grok-lane`, and healthy contract version 1. Then
 replace each `grok-peer-lane` command below with
-`peer-federator lane --host HOST --product grok --`. Federation supplies `--persistent` and a notify
-target for remote `run`, `start`, and `resume`; do not pass `--persistent`, `--notify`,
+`peer-federator lane --host HOST --product grok --`. Federation carries the attested parent context
+and returns terminal notices through grouped routing; do not pass `--persistent`, `--notify`,
 `--no-notify`, or `--no-auto-archive`. Pass `-C /absolute/remote/path` when cwd matters. Remote stdin
 is capped at 1 MiB; `--prompt-file` refers to a destination-local file. On disconnect fail closed;
 never use SSH or silently run locally.
@@ -98,6 +98,8 @@ grok-peer-lane archive review-api
 
 - Default lanes belong to the launching Codex, Claude, or Grok peer and archive after that exact owner
   exits. A plain shell must use `--persistent`.
+- Every lane keeps its immediate parent anchor. Parent groups propagate only after explicit
+  `--inherit-groups`; repeat `--group NAME` for child-specific groups.
 - Completed lanes auto-archive after 60 seconds. Extend it with `--auto-archive-after`; use
   `--no-auto-archive` only when you will explicitly archive.
 - `interrupt` sends ACP `session/cancel`; collect the interrupted terminal event afterward.

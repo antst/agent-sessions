@@ -34,7 +34,7 @@ changes additionally require at least two Linux hosts and one macOS host.
 4. TUI output proves startup, response, status/permission mode, and exit.
 5. UUID, name, canonical cwd, archive state, permission class, PID, and
    process-start identity are recorded.
-6. Registry, owner, shim/host, lane, and federated-shadow state are captured
+6. Registry, owner, adapter/host-agent, lane, catalog, and group state are captured
    before, during, and after.
 7. Protocol method counts prove no duplicate archive, unarchive, prompt, turn,
    wake, or delivery.
@@ -118,6 +118,20 @@ must refuse when a process it would replace is still live.
 | C-17 | Explicit archive is idempotent; archived behavior is correct; resume performs one unarchive and retains transcript. |
 | C-18 | Missing sockets, stale owner, PID reuse, and interrupted publication recover without affecting another thread. |
 
+## Claude interactive peer (`T/F`)
+
+| ID | Platforms | Cell |
+|---|---|---|
+| CL-01 | Linux, macOS | Bare `claude` remains an opt-out and changes neither the Agent Sessions catalog nor registration set. |
+| CL-02 | Linux, macOS | `claude-peer` starts a real native TUI in a deterministic private profile containing only its exact native row and one projected host-agent service row. |
+| CL-03 | Linux, macOS | Two Claude peers use distinct private registries/sockets and discover one another only through group-filtered Agent Sessions routing. |
+| CL-04 | Linux, macOS | Exact UUID resume retains transcript, private profile, explicit groups, inheritance snapshot, name, cwd, and effective durable YOLO choice; explicit overrides replace only their selected fields. |
+| CL-05 | Linux, macOS | Native name/status/permission changes refresh the host-agent registration without duplicating the service row. |
+| CL-06 | Linux, macOS | Host-agent restart republishes one service row and every idle Claude supershim re-registers without restarting Claude. |
+| CL-07 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, supershim crash, stale native row, PID reuse, and socket mismatch retire only the exact owned Claude process/registration/artifacts. |
+| CL-08 | Linux, macOS | Native carrier discover/direct/multicast/broadcast returns correlated results; the outer envelope remains native-strict and the entire AgentFrame stays in its body. |
+| CL-09 | Linux, macOS | Claude→Codex, Claude→Claude, and Claude→Grok lane launches all bind the immediate Claude parent, including nested and persistent children. |
+
 ## Grok interactive peer (`T/F`)
 
 | ID | Platforms | Cell |
@@ -151,11 +165,12 @@ busy, then require the exact return marker:
 
 | Source | Destinations |
 |---|---|
-| Codex peer | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Grok peer | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Codex lane | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Claude lane | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Grok lane | Codex peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Codex peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Claude peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Grok peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Codex lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Claude lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Grok lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
 
 Repeat same-host, Linux→macOS, macOS→Linux, and Linux→Linux. Repeat with the
 destination offline then resumed and across federator reconnect. Enqueue-only
@@ -199,14 +214,33 @@ implemented. Use real turns and unique names.
 
 | ID | Cell |
 |---|---|
-| X-01 | Startup, hub connectivity, local projection, and qualified remote discovery are correct. |
-| X-02 | Same-name peers on different hosts resolve only through exact qualified name/ref/address. |
-| X-03 | Pairwise messaging and lane lifecycle pass Linux↔macOS and Linux↔Linux. |
-| X-04 | Permission labels, including live Grok changes, are corroborated or conservative. |
-| X-05 | Federator/hub/host reconnect removes stale shadows and restores identities without duplicates. |
-| X-06 | Duplicate/replayed frames and invalid identity/token/product are rejected. |
-| X-07 | Remote owner death and archive remove only owned destination resources. |
-| X-08 | Install/tests never stop or reload an unrelated live federator. |
+| X-01 | Local-only startup publishes exactly one host service row; grouped discovery/direct/multicast/broadcast work without a hub. |
+| X-02 | Same-name visible peers are ambiguous, same-name peers in disjoint groups do not interfere, and hidden identities do not leak. |
+| X-03 | Pairwise messaging and lane lifecycle pass Linux↔macOS and Linux↔Linux without per-peer shadows. |
+| X-04 | Every snapshot peer has an exact host/session identity, protocol, product, instance, groups, and its own private anchor; malformed replacement snapshots retain the last valid roster. |
+| X-05 | Hub and host-agent restart restore one service row and peer registrations without duplicates or peer restart. |
+| X-06 | Legacy flat delivery, duplicate resolved multicast recipients, invalid source/product/group, and a broadcast to a non-member group are rejected before delivery. |
+| X-07 | Remote parent context retains the source-host private anchor; optional parent groups propagate only after explicit `--inherit-groups`. |
+| X-08 | Install/tests never stop or reload an unrelated live host agent or hub. |
+
+## Parent layer × target layer (`P/L/X`)
+
+Run every local pair and every supported federated pair, not just different-product pairs:
+
+| Parent | Codex lane | Claude lane | Grok lane |
+|---|---|---|---|
+| Codex | required | required | required |
+| Claude | required | required | required |
+| Grok | required | required | required |
+
+For every cell prove the child gets its own private group plus the immediate
+parent anchor, does not inherit other parent groups by default, inherits them
+only with explicit `--inherit-groups`, and restores that choice on resume. A
+three-level chain must bind a grandchild to its immediate parent rather than
+the original root. Each cell also covers parent↔child messaging, terminal
+notice/collection, interrupt, archive, exact resume, parent exit,
+`--persistent`, and target-owned cleanup. The target adapter remains
+product-specific; the parent/group layer is shared.
 
 ## Archive and unarchive contract
 

@@ -90,9 +90,9 @@ if ! grep -Fq -- '-enable-remote-lanes' <<<"$agent_help"; then
   printf 'agent CLI help is missing the explicit remote-execution opt-in\n' >&2
   exit 1
 fi
-if ! grep -Fq '# Federation protocol version 2' docs/federation/PROTOCOL.md ||
-   ! grep -Fq 'hub connectivity is mandatory' docs/federation/PROTOCOL.md; then
-  printf 'protocol documentation does not pin hub-only version 2 behavior\n' >&2
+if ! grep -Fq '# Federation protocol version 3' docs/federation/PROTOCOL.md ||
+   ! grep -Fq 'Local grouped routing continues without a hub' docs/federation/PROTOCOL.md; then
+  printf 'protocol documentation does not pin grouped protocol-3 behavior\n' >&2
   exit 1
 fi
 python3 scripts/federation/integration_test.py "$temporary_root/peer-federator"

@@ -1,0 +1,160 @@
+package launcher
+
+import (
+	"encoding/json"
+	"os"
+	"strings"
+
+	"github.com/antst/agent-sessions/internal/federator"
+)
+
+const (
+	agentRuntimeDirEnv = "AGENT_SESSIONS_AGENT_RUNTIME_DIR"
+	peerSessionIDEnv   = "AGENT_SESSIONS_SESSION_ID"
+	peerProductEnv     = "AGENT_SESSIONS_PRODUCT"
+	remoteParentEnv    = "AGENT_SESSIONS_REMOTE_PARENT_CONTEXT"
+)
+
+// peerLaunchContext is the product-neutral parent layer. Product launchers
+// strip these options before invoking their native CLI and pass them to the
+// host agent independently of target-specific arguments.
+type peerLaunchContext struct {
+	groups                 []string
+	groupsSpecified        bool
+	parentSession          string
+	parentSpecified        bool
+	inheritParentGroups    bool
+	inheritGroupsSpecified bool
+	forceNoYolo            bool
+}
+
+func persistentRuntimeEnvironment(environment []string) []string {
+	blocked := map[string]bool{
+		peerSessionIDEnv: true, peerProductEnv: true, remoteParentEnv: true,
+		"CODEX_THREAD_ID": true, grokLaunchTokenEnv: true, grokSessionIDEnv: true,
+	}
+	result := make([]string, 0, len(environment))
+	for _, value := range environment {
+		key, _, _ := strings.Cut(value, "=")
+		if !blocked[key] {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+//nolint:gocyclo // Presence-sensitive shared flags are parsed in one ordered pass around native arguments.
+func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]string, peerLaunchContext, error) {
+	forwarded := make([]string, 0, len(args))
+	var context peerLaunchContext
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			forwarded = append(forwarded, args[index:]...)
+			break
+		}
+		switch {
+		case argument == "--group":
+			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
+				return nil, peerLaunchContext{}, usageError("--group requires a non-empty value")
+			}
+			context.groups = append(context.groups, args[index+1])
+			context.groupsSpecified = true
+			index++
+		case strings.HasPrefix(argument, "--group="):
+			value := strings.TrimPrefix(argument, "--group=")
+			if strings.TrimSpace(value) == "" {
+				return nil, peerLaunchContext{}, usageError("--group requires a non-empty value")
+			}
+			context.groups = append(context.groups, value)
+			context.groupsSpecified = true
+		case argument == "--parent-session":
+			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
+				return nil, peerLaunchContext{}, usageError("--parent-session requires a non-empty value")
+			}
+			context.parentSession = args[index+1]
+			context.parentSpecified = true
+			index++
+		case strings.HasPrefix(argument, "--parent-session="):
+			value := strings.TrimSpace(strings.TrimPrefix(argument, "--parent-session="))
+			if value == "" {
+				return nil, peerLaunchContext{}, usageError("--parent-session requires a non-empty value")
+			}
+			context.parentSession = value
+			context.parentSpecified = true
+		case argument == "--inherit-groups":
+			context.inheritParentGroups, context.inheritGroupsSpecified = true, true
+		case argument == "--no-inherit-groups":
+			context.inheritParentGroups, context.inheritGroupsSpecified = false, true
+		case argument == "--no-yolo":
+			context.forceNoYolo = true
+		default:
+			forwarded = append(forwarded, argument)
+			if consumesNext(argument) && index+1 < len(args) {
+				forwarded = append(forwarded, args[index+1])
+				index++
+			}
+		}
+	}
+	return forwarded, context, nil
+}
+
+func peerEnvironment(environment []string, sessionID, product string) []string {
+	environment = replaceLaneEnvironment(environment, agentRuntimeDirEnv, agentRuntimeDir())
+	environment = replaceLaneEnvironment(environment, peerSessionIDEnv, sessionID)
+	return replaceLaneEnvironment(environment, peerProductEnv, product)
+}
+
+func (c peerLaunchContext) launchArguments(alwaysApprove bool, alwaysApproveSpecified bool) []string {
+	groups := []byte("[]")
+	if c.groups != nil {
+		groups, _ = json.Marshal(c.groups)
+	}
+	runtimeDir := agentRuntimeDir()
+	args := []string{
+		"--agent-runtime-dir", runtimeDir,
+		"--groups-json", string(groups),
+		"--groups-specified", boolString(c.groupsSpecified),
+		"--parent-session", c.parentSession,
+		"--parent-specified", boolString(c.parentSpecified),
+		"--inherit-parent-groups", boolString(c.inheritParentGroups),
+		"--inherit-groups-specified", boolString(c.inheritGroupsSpecified),
+		"--always-approve", boolString(alwaysApprove),
+		"--always-approve-specified", boolString(alwaysApproveSpecified),
+	}
+	return args
+}
+
+func agentRuntimeDir() string {
+	if value := strings.TrimSpace(os.Getenv(agentRuntimeDirEnv)); value != "" {
+		return value
+	}
+	return federator.DefaultRuntimeDir()
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func resolvedPeerPreferences(sessionID, product string) (federator.ResolvedPreferences, error) {
+	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
+		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
+	})
+}
+
+func resolvePeerLaunchContext(
+	sessionID, product string,
+	context peerLaunchContext,
+	alwaysApprove, alwaysApproveSpecified bool,
+) (federator.ResolvedPreferences, error) {
+	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
+		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
+		Groups: context.groups, GroupsSpecified: context.groupsSpecified,
+		ParentSessionID: context.parentSession, ParentSpecified: context.parentSpecified,
+		InheritParentGroups: context.inheritParentGroups, InheritGroupsSpecified: context.inheritGroupsSpecified,
+		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,
+	})
+}

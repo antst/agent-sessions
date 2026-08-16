@@ -214,14 +214,18 @@ func (m *grokLaneManager) start() error {
 	if !persistent && !exactProcessIdentityMatch(ownerPID, ownerProcStart) {
 		return errors.New("grok lane lifecycle owner exited during startup")
 	}
-	peer := newDaemon(map[string]string{
+	peerOptions := map[string]string{
 		"session-id": m.state.SessionID, "cwd": m.state.Cwd, "name": m.state.Name,
 		"name-source": "lane", "entrypoint": "grok", "permission-mode": m.state.PermissionMode,
 		"status": "idle", "supervisor-socket": m.state.ControlSocket, "supervisor-token": m.launchToken,
 		"owner-pid": fmt.Sprintf("%d", os.Getpid()), "owner-proc-start": m.state.ManagerProcStart,
 		"data-dir": m.paths.dataRoot, "claude-config-dir": m.paths.claudeRoot,
 		"codex-home": m.paths.codexHome, "runtime-dir": m.paths.runtimeDir,
-	})
+	}
+	if laneAgentConfigured() {
+		peerOptions["agent-runtime-dir"] = laneAgentRuntimeDir()
+	}
+	peer := newDaemon(peerOptions)
 	if err := peer.start(); err != nil {
 		return fmt.Errorf("publish Grok lane peer: %w", err)
 	}
@@ -745,6 +749,18 @@ func (m *grokLaneManager) handleControl(request map[string]any) (map[string]any,
 		if notifySet, _ := request["notifySet"].(bool); notifySet {
 			m.state.NotifyTarget = stringValue(request["notifyTarget"])
 		}
+		groupsBody, _ := json.Marshal(request["groups"])
+		explicitBody, _ := json.Marshal(request["explicitGroups"])
+		var groups, explicit []string
+		if json.Unmarshal(groupsBody, &groups) != nil || json.Unmarshal(explicitBody, &explicit) != nil {
+			m.state = previous
+			m.mu.Unlock()
+			return nil, errors.New("invalid Grok lane group state")
+		}
+		m.state.Groups, m.state.ExplicitGroups = groups, explicit
+		m.state.ParentSessionID = stringValue(request["parentSessionId"])
+		m.state.ParentHostID = stringValue(request["parentHostId"])
+		m.state.InheritParentGroups, _ = request["inheritParentGroups"].(bool)
 		m.state.Turns = append(m.state.Turns, turn)
 		m.state.TurnID, m.state.LatestTurnID, m.state.AutoArchiveAt = turn.ID, turn.ID, 0
 		err := m.persistLocked()
@@ -950,9 +966,10 @@ func queueGrokLaneTerminalNotice(state *grokLaneState, turn grokLaneTurn) {
 		}
 	}
 	noticeID := sessionKey("grok-lane-terminal\x00" + state.SessionID + "\x00" + turn.ID)
+	collect := laneCollectionPointer("grok", state.SessionID, state.ParentHostID, state.Groups)
 	message := fmt.Sprintf(
-		"GROK_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: grok-peer-lane wait %s",
-		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, state.SessionID,
+		"GROK_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
+		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,
 	)
 	state.Notices = append(state.Notices, claudeLaneNotice{
 		ID: noticeID, TurnID: turn.ID, Target: state.NotifyTarget, Message: message, CreatedAt: time.Now().UnixMilli(),
@@ -1052,21 +1069,8 @@ func currentGrokLaneNotifyTarget(paths nativePaths, state grokLaneState, fallbac
 }
 
 func deliverGrokLaneNotice(paths nativePaths, state grokLaneState, target, noticeID, message string) error {
-	peers, err := listNativePeerSessions(paths)
-	if err != nil {
-		return err
-	}
-	resolvedSocket, resolved, err := resolveNativePeerTarget(target, peers)
-	if err != nil {
-		return err
-	}
-	virtualSender := grokLaneVirtualSender(state)
-	virtualSender, err = nativeSenderMatchingTargetMode(virtualSender, target, resolvedSocket, resolved, peers)
-	if err != nil {
-		return err
-	}
-	frame := createGrokLaneNoticeFrame(virtualSender, noticeID, message)
-	return sendUnixJSON(resolvedSocket, frame, 5*time.Second)
+	_ = paths
+	return deliverGroupedLaneNotice(state.SessionID, target, noticeID, message)
 }
 
 func createGrokLaneNoticeFrame(sender map[string]any, noticeID, message string) map[string]any {

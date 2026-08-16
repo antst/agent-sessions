@@ -26,8 +26,8 @@ explicitly enabled remote lane execution. Then replace every `claude-peer-lane` 
 peer-federator lane --host HOST --product claude --
 ```
 
-For remote `run`, `start`, and `resume`, federation automatically adds `--persistent` and a notify
-target back to this live Codex session. Do not pass `--persistent`, `--notify`, `--no-notify`, or
+For remote `run`, `start`, and `resume`, federation carries this live parent’s attested context and
+returns terminal notices through grouped routing. Do not pass `--persistent`, `--notify`, `--no-notify`, or
 `--no-auto-archive` for those commands. Remote lanes therefore have no lifecycle owner and are
 excluded from `--mine`; use the remote plain `list`, names, or IDs. Their native JSONL, exit codes, collection rules, grace
 timer, and archive behavior are otherwise unchanged.
@@ -53,13 +53,13 @@ claude-peer-lane list
 
 Use `claude-peer-lane list --mine` to show only lanes owned by this orchestrator. Ownership uses
 the stable process identity rather than a mutable session ID; persistent lanes are excluded. Keep
-the unfiltered list for global name-collision checks. `--mine` fails rather than guessing when the
+the unfiltered list for host-local lifecycle state. `--mine` fails rather than guessing when the
 caller is not a corroborated live Codex or Claude peer.
 
 Require `contract_version: 1`, `claude_available: true`, `claude_logged_in: true`, and
 `supervisor_reachable: true`. This is a local credential-state preflight; require the first real
-turn to succeed before claiming end-to-end authentication. Pick a unique descriptive name. The
-launcher also rejects collisions against live Claude/Codex peers and Codex lanes.
+turn to succeed before claiming end-to-end authentication. Pick a descriptive name and retain the
+exact lane ID: messaging names are group-scoped, while bare lifecycle names can be host-ambiguous.
 
 ## Start and collect
 
@@ -101,8 +101,8 @@ Use only one collector for a lane. Select the `agent_message` with `phase: "fina
 ## Follow-up and messages
 
 An idle local lane is a normal Claude-visible peer. Send it a peer message by name or session ID,
-then collect the new turn with `wait`. For a remote lane, address the source-side shadow shown by
-current peer discovery—normally `name--host [ref]`—or reply to an incoming message's `from` UDS.
+then collect the new turn with `wait`. For a remote lane, use the same group-filtered Agent
+Sessions discovery and send tools; no source-side shadow is created.
 The destination-local name and session ID are valid only for `peer-federator lane` lifecycle commands.
 
 A peer message accepted while a lane is already working steers that active turn and shares its one
@@ -128,6 +128,8 @@ Collect every outstanding turn first. `resume` refuses collection debt rather th
 - Completed lanes auto-archive after 60 seconds by default. Pass `--auto-archive-after S` when the orchestrator needs a larger collection window.
 - Pass `--no-auto-archive` only when you will explicitly archive the lane.
 - Pass `--persistent` to survive the owner. Explicit `--notify` is allowed only with `--persistent`.
+- Every lane keeps the immediate parent anchor. Add `--inherit-groups` only when the parent
+  deliberately propagates its other groups; use repeatable `--group NAME` for child-only groups.
 - `wait --timeout` bounds collection only and never interrupts Claude. `run/start/resume --timeout` is a durable turn deadline.
 - Launcher submission acknowledgement is bounded at 30 seconds whenever no native turn is active; a missing replay frame then fails and retires the worker. Native peer turns have no caller-supplied execution deadline and can defer that check until they finish.
 - Always archive a persistent or no-auto-archive lane when the task ends:

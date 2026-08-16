@@ -87,7 +87,7 @@ jobs:
             *) RELEASE_VERSION="$(printf '%.12s' "$RELEASE_SHA")" ;;
           esac
           mkdir -p "bin/${{ matrix.platform }}"
-          for binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane; do
+          for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane; do
             go build -trimpath -ldflags='-s -w' \
               -o "bin/${{ matrix.platform }}/$binary" "./cmd/$binary"
           done

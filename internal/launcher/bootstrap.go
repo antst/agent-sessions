@@ -99,7 +99,8 @@ func preflightVersionChange(selected Runtime, loadedVersion string) error {
 }
 
 func activateRuntime(selected Runtime, versionMarker string) error {
-	if err := runQuiet(selected.Codex, "app-server", "daemon", "start"); err != nil {
+	persistentEnvironment := persistentRuntimeEnvironment(os.Environ())
+	if err := runQuietWithEnvironment(persistentEnvironment, selected.Codex, "app-server", "daemon", "start"); err != nil {
 		return fmt.Errorf("start Codex App Server: %w", err)
 	}
 	if err := writeAtomic(filepath.Join(selected.StateRoot, "native-runtime-path"), selected.Path); err != nil {
@@ -108,7 +109,7 @@ func activateRuntime(selected Runtime, versionMarker string) error {
 	if err := writeAtomic(versionMarker, selected.PluginVersion); err != nil {
 		return fmt.Errorf("publish plugin version: %w", err)
 	}
-	if err := runQuiet(selected.Path, "supervisor", "start", "--plugin-version", selected.PluginVersion); err != nil {
+	if err := runQuietWithEnvironment(persistentEnvironment, selected.Path, "supervisor", "start", "--plugin-version", selected.PluginVersion); err != nil {
 		return errors.New("app Server started, but peer supervisor replacement failed; rerun the launcher to retry it")
 	}
 	return nil
@@ -272,9 +273,12 @@ func capture(path string, args ...string) (string, error) {
 	return string(payload), err
 }
 
-func runQuiet(path string, args ...string) error {
+func runQuietWithEnvironment(environment []string, path string, args ...string) error {
 	// #nosec G204 -- path is the selected Codex or installed runtime executable.
 	command := exec.Command(path, args...)
+	if environment != nil {
+		command.Env = environment
+	}
 	command.Stdin = nil
 	command.Stdout = io.Discard
 	command.Stderr = os.Stderr

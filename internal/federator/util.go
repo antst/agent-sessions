@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,6 +15,28 @@ import (
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
+
+func replaceEnvironment(environment []string, replacements map[string]string) []string {
+	result := make([]string, 0, len(environment)+len(replacements))
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if _, replaced := replacements[name]; !replaced {
+			result = append(result, entry)
+		}
+	}
+	keys := make([]string, 0, len(replacements))
+	for key := range replacements {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		result = append(result, key+"="+replacements[key])
+	}
+	return result
+}
 
 // RuntimeVersion is the build version published in federated registry rows.
 // The command sets it from link-time version metadata before starting a daemon.
@@ -31,6 +54,28 @@ func defaultString(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// DefaultStateDir returns the durable catalog directory for one host agent.
+func DefaultStateDir(hostID string) string {
+	root := os.Getenv("XDG_STATE_HOME")
+	if root == "" {
+		home, _ := os.UserHomeDir()
+		root = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(root, "agent-sessions", "agents", cleanID(hostID))
+}
+
+// ClaudePeerPrivateRoot is the deterministic native-profile root retained for
+// one wrapped Claude session across attachments and exact resumes.
+func ClaudePeerPrivateRoot(hostID, sessionID string) string {
+	return filepath.Join(DefaultStateDir(hostID), "claude-peers", sessionKey(sessionID), "config")
+}
+
+// ClaudePeerLifecycleLockPath serializes one stable private profile across a
+// native attachment, exact resume, and host-agent crash retirement.
+func ClaudePeerLifecycleLockPath(privateRoot string) string {
+	return filepath.Join(filepath.Dir(privateRoot), "lifecycle.lock")
 }
 
 func cleanID(value string) string {

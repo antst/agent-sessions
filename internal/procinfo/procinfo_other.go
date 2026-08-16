@@ -18,3 +18,8 @@ func Args(_ int) ([]string, error) {
 func Environment(_ int) ([]string, error) {
 	return nil, errors.New("process environment inspection is unsupported on this platform")
 }
+
+// List reports that process-table inspection is unavailable.
+func List() ([]Process, error) {
+	return nil, errors.New("process table inspection is unsupported on this platform")
+}

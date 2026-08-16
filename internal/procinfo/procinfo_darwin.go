@@ -62,6 +62,36 @@ func Environment(pid int) ([]string, error) {
 	return environment, err
 }
 
+// List returns one exact identity for every process visible in one Darwin
+// kernel-table snapshot. Processes that disappear before identity capture are
+// omitted; unreadable live identities fail closed.
+func List() ([]Process, error) {
+	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Process, 0, len(processes))
+	for _, process := range processes {
+		pid := int(process.Proc.P_pid)
+		if pid <= 1 {
+			continue
+		}
+		info := Read(pid)
+		switch info.Status {
+		case Absent:
+			continue
+		case Known:
+			if info.State == "Z" || info.State == "X" {
+				continue
+			}
+			result = append(result, Process{PID: pid, Info: info})
+		case Unknown:
+			return nil, fmt.Errorf("cannot identify live process %d", pid)
+		}
+	}
+	return result, nil
+}
+
 func processArgsAndEnvironment(pid int) ([]string, []string, error) {
 	body, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {

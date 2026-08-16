@@ -1,15 +1,10 @@
 package bridge
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -108,155 +103,25 @@ func TestNativeAddressAndTargetResolution(t *testing.T) {
 	}
 }
 
-func TestNativeMCPListsAndSendsToLivePeer(t *testing.T) {
+func TestNativeMCPRejectsFlatRegistryForUngroupedSession(t *testing.T) {
 	root := t.TempDir()
-	claudeRoot := filepath.Join(root, "claude")
-	dataRoot := filepath.Join(root, "state")
-	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", claudeRoot)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", dataRoot)
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
-	if err := os.MkdirAll(filepath.Join(claudeRoot, "sessions"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	peerSocket := filepath.Join(root, "peer.sock")
-	peerListener, err := net.Listen("unix", peerSocket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = peerListener.Close() }()
-	received := make(chan map[string]any, 1)
-	go func() {
-		for {
-			conn, err := peerListener.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = conn.Close() }()
-				line, _ := bufio.NewReader(conn).ReadBytes('\n')
-				if len(line) == 0 {
-					return
-				}
-				var frame map[string]any
-				if json.Unmarshal(line, &frame) == nil {
-					received <- frame
-				}
-			}()
-		}
-	}()
-
-	owner := exec.Command("sleep", "30")
-	if err := owner.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = owner.Process.Kill()
-		_, _ = owner.Process.Wait()
-	}()
-	peer := map[string]any{
-		"pid": owner.Process.Pid, "sessionId": "claude-session", "cwd": "/tmp/project",
-		"name": "peer-a", "status": "idle", "entrypoint": "claude", "procStart": readProcStart(owner.Process.Pid),
-		"messagingSocketPath": peerSocket, "startedAt": time.Now().UnixMilli(),
-	}
-	registry := filepath.Join(claudeRoot, "sessions", fmt.Sprintf("%d.json", owner.Process.Pid))
-	if err := writeJSONAtomic(registry, peer); err != nil {
-		t.Fatal(err)
-	}
-
-	ownListener, err := net.Listen("unix", filepath.Join(root, "own.sock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ownListener.Close() }()
-	go func() {
-		for {
-			conn, err := ownListener.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
 	ownID := "00000000-0000-0000-0000-000000000061"
-	if err := writeJSONAtomic(filepath.Join(dataRoot, "sessions", sessionKey(ownID), "state.json"), map[string]any{
-		"sessionId": ownID, "name": "codex-review", "permissionMode": "bypassPermissions",
-		"socketPath": ownListener.Addr().String(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	paths := resolveNativePaths()
-	writeTestAttachedInteractiveOwner(t, paths, ownID)
-
-	listed, err := callNativePeerTool("list_peers", map[string]any{}, ownID)
-	if err != nil || !strings.Contains(stringValue(listed["text"]), "peer-a") {
-		t.Fatalf("list result = %#v, %v", listed, err)
-	}
-	result, err := callNativePeerTool("send_message", map[string]any{
-		"session_id": ownID, "target": "peer-a", "message": "ROUNDTRIP",
-	}, ownID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(stringValue(result["text"]), "Message sent to peer-a") {
-		t.Fatalf("send result = %#v", result)
-	}
-	select {
-	case frame := <-received:
-		message := frame["message"].(map[string]any)
-		envelope := parsePeerMessage(stringValue(message["content"]))
-		if envelope.Message != "ROUNDTRIP" || envelope.FromProduct != "codex" || envelope.FromMode != "bypass" {
-			t.Fatalf("received envelope = %#v", envelope)
+	writeTestActiveCodexLane(t, resolveNativePaths(), ownID)
+	for _, call := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "list_peers", args: map[string]any{}, want: "ungrouped session"},
+		{name: "send_message", args: map[string]any{"session_id": ownID, "target": "peer-a", "message": "NO_FLAT_SEND"}, want: "ungrouped session"},
+		{name: "broadcast", args: map[string]any{"session_id": ownID, "group": "project", "message": "NO_GLOBAL_BROADCAST"}, want: "grouped host agent"},
+	} {
+		if _, err := callNativePeerTool(call.name, call.args, ownID); err == nil || !strings.Contains(err.Error(), call.want) {
+			t.Fatalf("%s flat-registry rejection = %v", call.name, err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for peer frame")
-	}
-	if err := writeJSONAtomic(laneStatePath(paths, ownID), laneState{
-		Type: "lane", ThreadID: ownID, SessionID: ownID, OwnerSessionID: "claude-session",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sendNativePeerMessage(paths, ownID, "peer-a", "OWNER_MESSAGE", "owned lane"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case frame := <-received:
-		message := frame["message"].(map[string]any)
-		envelope := parsePeerMessage(stringValue(message["content"]))
-		if envelope.Message != "OWNER_MESSAGE" || envelope.FromMode != "prompting" {
-			t.Fatalf("parent-owned lane envelope = %#v", envelope)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for parent-owned lane frame")
-	}
-	if _, err := sendNativePeerMessageWithTargetMode(resolveNativePaths(), ownID, "peer-a", "TERMINAL_POINTER", "terminal", true); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case frame := <-received:
-		message := frame["message"].(map[string]any)
-		envelope := parsePeerMessage(stringValue(message["content"]))
-		if envelope.Message != "TERMINAL_POINTER" || envelope.FromMode != "prompting" {
-			t.Fatalf("target-matched infrastructure envelope = %#v", envelope)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for target-matched peer frame")
-	}
-	if _, err := sendNativePeerMessageWithTargetMode(resolveNativePaths(), ownID, encodeNativeAddress(peerSocket), "RAW_TERMINAL_POINTER", "terminal", true); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case frame := <-received:
-		message := frame["message"].(map[string]any)
-		envelope := parsePeerMessage(stringValue(message["content"]))
-		if envelope.Message != "RAW_TERMINAL_POINTER" || envelope.FromMode != "prompting" {
-			t.Fatalf("raw-address target-matched envelope = %#v", envelope)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for raw-address target-matched frame")
-	}
-	if _, err := sendNativePeerMessageWithTargetMode(resolveNativePaths(), ownID, "uds:"+filepath.Join(root, "unregistered.sock"), "UNSAFE", "terminal", true); err == nil || !strings.Contains(err.Error(), "not a discoverable live peer") {
-		t.Fatalf("unregistered infrastructure target error = %v", err)
 	}
 }
 
@@ -342,79 +207,6 @@ func TestPermissionModeFromPeerCommand(t *testing.T) {
 				t.Fatalf("permissionModeFromArgs(%q) = %q, want %q", test.args, got, test.want)
 			}
 		})
-	}
-}
-
-func TestNativeSenderMatchingTargetModeRejectsUncorroboratedFederatedAttestation(t *testing.T) {
-	own := map[string]any{"permissionMode": "default", "name": "lane"}
-	resolved := &peerSession{
-		PID: 999999, Name: "remote-owner", FederatedBy: "peer-federator",
-		Version: "peer-federator/0.0.2", PermissionMode: "bypassPermissions",
-		MessagingSocketPath: "/unused",
-	}
-	if _, err := nativeSenderMatchingTargetMode(own, "remote-owner", "/unused", resolved, nil); err == nil {
-		t.Fatal("named target trusted an uncorroborated federated registry row")
-	}
-	if _, err := nativeSenderMatchingTargetMode(own, "uds:/unused", "/unused", nil, []peerSession{*resolved}); err == nil {
-		t.Fatal("raw UDS target trusted an uncorroborated federated registry row")
-	}
-	if got := stringValue(own["permissionMode"]); got != "default" {
-		t.Fatalf("original sender permissionMode mutated to %q", got)
-	}
-
-	resolved.PermissionMode = "invalid"
-	if _, err := nativeSenderMatchingTargetMode(own, "remote-owner", "/unused", resolved, nil); err == nil {
-		t.Fatal("federated target with an invalid permission assertion was accepted")
-	}
-}
-
-func TestValidatePeerFederatorShadowArgsRequiresLiveControlAndOwner(t *testing.T) {
-	control := filepath.Join(t.TempDir(), "agent.sock")
-	listener, err := net.Listen("unix", control)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
-	args := []string{
-		"/home/user/.local/bin/peer-federator", "shadow",
-		"--listen", "/run/user/1000/peer-federator/shadows/example.sock",
-		"--control", control, "--owner-pid", strconv.Itoa(os.Getpid()),
-	}
-	if err := validatePeerFederatorShadowArgs(args, "/run/user/1000/peer-federator/shadows/example.sock"); err != nil {
-		t.Fatal(err)
-	}
-	peer := peerSession{
-		PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()),
-		FederatedBy: "peer-federator", Version: "peer-federator/0.1.0", PermissionMode: "bypassPermissions",
-		MessagingSocketPath: "/run/user/1000/peer-federator/shadows/example.sock",
-	}
-	attempts := 0
-	mode, err := peerFederatorPermissionModeWithReader(peer, func(pid int, procStart string) ([]string, error) {
-		return readPeerProcessArgsWithReader(pid, procStart, func(int) ([]string, error) {
-			attempts++
-			if attempts == 1 {
-				return nil, syscall.EIO
-			}
-			return args, nil
-		}, func(time.Duration) {}, func(pid int, procStart string) bool {
-			return exactProcessIdentityStatus(pid, procStart).Status == processIdentityMatches
-		})
-	})
-	if err != nil || mode != "bypassPermissions" || attempts != 2 {
-		t.Fatalf("federated transient argv classification = mode %q, attempts %d, err %v", mode, attempts, err)
-	}
-	args[1] = "agent"
-	if err := validatePeerFederatorShadowArgs(args, "/run/user/1000/peer-federator/shadows/example.sock"); err == nil {
-		t.Fatal("non-shadow peer-federator process was accepted")
 	}
 }
 

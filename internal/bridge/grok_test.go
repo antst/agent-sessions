@@ -706,7 +706,8 @@ func TestInferGrokParentRequiresLiveLaunchCapabilityAndLeaderAncestry(t *testing
 	t.Setenv(grokSessionIDEnv, host.config.SessionID)
 
 	owner, ok := inferGrokParent(resolveNativePaths(), host.leader.cmd.Process.Pid)
-	if !ok || owner.PID != host.config.OwnerPID || owner.ProcStart != host.config.OwnerProcStart ||
+	live := liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID)
+	if !ok || live == nil || owner.PID != live.HostPID || owner.ProcStart != live.HostProcStart ||
 		owner.SessionID != host.config.SessionID || owner.PermissionMode != "default" {
 		t.Fatalf("Grok lane owner = %+v, %v", owner, ok)
 	}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Lane"
+  short_description: "Delegate durable work to a local or remote Codex lane"
+  default_prompt: "Spawn a named Codex lane on the requested host, collect its final answer, and archive it when finished."

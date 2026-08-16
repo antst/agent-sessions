@@ -1,46 +1,69 @@
-# Peer Federator
+# Host agent and federation
 
-`peer-federator` makes every live Claude-compatible peer on one trusted LAN host appear as a local
-peer on every other participating host. It is session-type agnostic: native interactive Claude
-sessions, interactive Codex sessions, and Codex lanes are all ordinary registry records and Unix
-socket endpoints to this daemon.
+`peer-federator agent` is the local authority for Agent Sessions discovery,
+group membership, routing, and the small durable session catalog. It works
+without a hub for local peers. Connecting agents to `peer-federator hub` adds
+cross-host discovery, messaging, and lane execution without changing the
+local protocol.
 
-It deliberately remains a separate binary and service from `agent-session-runtime`. The local
-runtime owns Codex/App Server and lane lifecycle; `peer-federator` only virtualizes the local
-Claude registry and peer socket protocol over the network.
+The public Claude registry contains exactly one synthetic Agent Sessions
+service row per running host agent. Participating `codex-peer`, `claude-peer`,
+`grok-peer`, and lane adapters register their real delivery sockets privately
+with that agent. Remote peers are never projected as per-peer Claude records or
+shadow processes.
 
-## Architecture
+Bare native CLIs are untouched and therefore opted out. In particular, bare
+`claude` remains an escape hatch that is neither catalogued nor group-routed.
 
-Each host agent reads its local `$CLAUDE_CONFIG_DIR/sessions` registry and sends a live snapshot to
-one hub. For every remote peer in the hub roster, the agent launches a tiny local shadow process.
-The shadow has a real PID, a numeric Claude registry record, and a connectable Unix socket, so
-unmodified Claude and Codex discovery treat it exactly like a local peer. Frames written to that
-socket travel through the hub to the actual peer socket on the destination host.
+## Groups and messages
 
-The contract is intentionally small:
+Every registered peer belongs to its automatic private group
+`session:<host>/<session>` and to zero or more explicit groups. A child lane
+always gets its own private group and its parent’s private group. The parent’s
+other groups are copied only when the parent chooses `--inherit-groups` for
+that launch.
 
-- trusted isolated network;
-- plain TCP and JSON lines;
-- live peers only;
-- no credentials, encryption, access policy, offline queue, or HA;
-- a hub disconnect removes all remote shadows, cancels active remote command proxies, and rejects
-  new remote spawns while local messaging remains untouched.
+Peers can discover or address only peers sharing at least one group. The first
+protocol supports direct sends, explicit-target multicast, and broadcast to
+one named group of which the sender is a member. There is no global broadcast
+and no implicit compatibility group. See [GROUPS.md](GROUPS.md).
 
-## Run
+For Claude-native transport the ordinary outer message is addressed to the
+single service row. Its body contains the complete Agent Sessions JSON frame.
+Within the same-user trust boundary, the service maps the outer message's
+claimed `from` address to one live registered native socket, performs group
+routing, and sends a new Claude-native outer message to each local destination.
+The connection itself does not prove ownership of the claimed socket. The
+service does not add attributes to Claude’s strict native envelope grammar.
 
-Build once on each host:
+## Run locally
 
 ```sh
-make build
+peer-federator agent --host workstation-a --name workstation-a
+
+codex-peer --group project-a -n reviewer
+claude-peer --group project-a -n implementer
+grok-peer --group project-a -n researcher
 ```
 
-Start a hub on one stable VLAN host:
+`peer-federator doctor` accepts this local-only topology. `peer-federator
+status` reports the registered local peers. The durable catalog remembers each
+stable session’s product, groups, parent/inheritance choice, and effective
+yolo status. An exact session can later be resumed without knowing its product:
+
+```sh
+peer resume 01234567-89ab-cdef-0123-456789abcdef
+```
+
+## Add a federation hub
+
+Start one hub on the trusted network:
 
 ```sh
 peer-federator hub --listen :7419
 ```
 
-Start one agent per user/Claude registry on every host, including the hub host:
+Connect one agent per participating OS user:
 
 ```sh
 peer-federator agent \
@@ -49,103 +72,53 @@ peer-federator agent \
   --name workstation-a
 ```
 
-Remote peer names are published as `name--host`. The double dash stays within Claude's bare
-teammate-name grammar; `@` cannot be used because native `SendMessage` interprets it as special
-mention syntax. Local peers retain their original short names.
-Only live, connectable records are exported, and records created by the federator are never
-re-exported.
+Agents send only explicitly registered live peers and their effective groups.
+The hub validates peer identities and private anchors, distributes snapshots,
+and forwards only deliveries whose source and destination share a group. A hub
+restart does not require peer restart: agents reconnect, republish, and retain
+local routing throughout the outage.
 
-The first native name-based send may return a confirmation address such as
-`reviewer--workstation-a [a1b2c3]`; resend once with that full value. This is the same confirmation
-step used for local peers. Replies through the `from` socket on an incoming message do not need
-that confirmation.
-
-Run the hub and agents under the host's normal process supervisor. Agents reconnect with bounded
-backoff after a hub restart. If the hub is unavailable, federated shadows disappear; local peers
-and local messaging continue normally.
-
-Check a host before enabling its service:
-
-```sh
-PEER_FEDERATOR_HUB=10.2.17.1:7419 peer-federator doctor
-peer-federator status
-```
-
-`doctor` reports live sessions that lack messaging sockets. Those sessions cannot be federated:
-interactive Codex requires the `agent-sessions` integration, and Claude Code must be launched with
-its peer-messaging feature enabled. See [federation/OPERATIONS.md](federation/OPERATIONS.md) for installation,
-systemd/launchd examples, failure behavior, and rolling upgrades.
+The transport is plain newline-delimited JSON over TCP and assumes a trusted,
+isolated network. It intentionally has no authentication, encryption, offline
+queue, or high-availability protocol yet.
 
 ## Remote lanes
 
-Remote execution is disabled by default. Enabling it authorizes every host connected to this
-trusted hub to execute native lane commands as the agent's OS user; those commands can run tools
-and read files allowed by the selected lane policy. Enable it only where that trust is intended:
+Remote execution is disabled by default. Enable it only on destinations where
+every connected hub host is trusted to execute the installed lane launchers as
+that OS user:
 
 ```sh
 peer-federator agent ... --enable-remote-lanes
-# or PEER_FEDERATOR_ENABLE_REMOTE_LANES=true in agent.env
-```
-
-Enabled agents advertise the native lane launchers they can execute. List connected destinations:
-
-```sh
 peer-federator hosts
 ```
 
-Run any native lane command on one of them while preserving its stdout, stderr, and exit code:
+The parent product and target product are independent. A Codex, Claude, or Grok
+parent may launch a Codex, Claude, or Grok lane, locally or remotely. The target
+is selected explicitly:
 
 ```sh
-printf '%s\n' 'Inspect the repository and report the failing tests.' |
-  peer-federator lane --host workstation-b --product codex -- \
+printf '%s\n' 'Inspect the repository.' |
+  peer-federator lane --host workstation-b --product grok -- \
     start --name remote-review -C /srv/project -
-
-peer-federator lane --host workstation-b --product codex -- \
-  wait remote-review --timeout 300
 ```
 
-Use `--product claude` for `claude-peer-lane`. Remote `run`, `start`, and `resume` are made
-persistent and receive a notify target pointing back to the originating live Codex/Claude session.
-Do not pass `--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` yourself on those
-three commands. The destination cleanup fuse cannot be disabled remotely. Other native flags and
-subcommands pass through unchanged. Remote auto-archive delays are capped at 86,400 seconds and
-each destination runs at most 32 remote lane CLI processes concurrently. Pass the native
-`-C`/`--cd` option on `run` or `start` when the remote working directory matters; otherwise the
-command inherits the destination agent service's working directory. `resume` retains its lane's
-established cwd. Remote stdin is capped at 1 MiB; `--prompt-file` refers to an already-existing
-destination file and does not transfer a local file.
+The source agent supplies an attested parent context. The destination stores
+the source-host private parent anchor, gives the child its destination private
+anchor, and copies optional parent groups only when launch requested
+`--inherit-groups`. Terminal notices are ordinary grouped Agent Sessions
+frames, not shadow-socket callbacks.
 
-The originating session is inferred only when a live Codex or Claude process is corroborated in
-the caller's ancestry. Detached or non-agent automation must pass `--source-session` explicitly.
+The installed `codex-peer-lane`, `claude-peer-lane`, and `grok-peer-lane`
+remain the target-specific lifecycle adapters. The shared parent/group layer
+selects the parent context; it does not merge their native runtimes.
 
-The product path never uses SSH and destination agents expose no spawn listener. Every request is
-local CLI → local Unix socket → connected hub → destination agent. If the local agent cannot see
-the hub, the command fails closed. Losing the hub cancels a still-blocking proxy; a detached lane
-whose `start` already returned may continue under its native local supervisor, but it cannot
-receive cross-host messages or controls until federation reconnects.
+Remote stdin is capped at 1 MiB, remote auto-archive delays are capped at
+86,400 seconds, and each destination accepts at most 32 concurrent remote lane
+CLI processes. There is no SSH or direct agent listener fallback. Hub loss
+cancels an in-flight remote CLI proxy; an already-started persistent lane keeps
+its local target lifecycle but cannot communicate cross-host until federation
+returns.
 
-The proxy buffers a bounded amount of output per request. A caller that stops reading
-stdout/stderr is cancelled rather than allowing one command to consume unbounded memory.
-
-## Development and releases
-
-```sh
-make lint
-make test
-make test-race
-```
-
-Forgejo CI runs lint, normal tests, race tests, and all four Linux/macOS architecture builds
-concurrently, then publishes archives plus `SHA256SUMS` for version tags only after every job
-passes. `make install-systemd-user` also installs both environment templates under
-`~/.config/peer-federator/` without replacing active `.env` files. On macOS,
-`make install-launchd-user` installs the binary and both `.plist.example` templates under
-`~/Library/LaunchAgents` without replacing or loading active `.plist` files. The repository
-version is in `VERSION`; a release tag must be exactly `v$(cat VERSION)`.
-
-## Scope
-
-The daemon federates discovery, messaging, and native lane CLI streams. It does not implement
-Codex App Server or Claude worker semantics itself: the installed `codex-peer-lane` and
-`claude-peer-lane` commands remain authoritative on the destination. A remote lane also appears as
-an ordinary federated peer and can be messaged through the hub.
+See [federation/OPERATIONS.md](federation/OPERATIONS.md) for service examples
+and [federation/PROTOCOL.md](federation/PROTOCOL.md) for the wire contract.

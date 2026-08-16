@@ -17,8 +17,8 @@ peer-federator lane --host HOST --product grok -- list --all
 ```
 
 Require capability `grok-lane` and doctor contract 1. Replace every local invocation below with
-`peer-federator lane --host HOST --product grok --`. Federation injects `--persistent` and the
-source-shadow notify target for remote `run`, `start`, and `resume`; never pass `--persistent`,
+`peer-federator lane --host HOST --product grok --`. Federation carries this Claude parent’s
+attested context and returns terminal notices through grouped routing; never pass `--persistent`,
 `--notify`, `--no-notify`, or `--no-auto-archive` remotely. Use a remote absolute `-C` when cwd
 matters. Hub disconnect is a hard failure; never fall back to SSH or local execution.
 
@@ -33,7 +33,8 @@ Run the bundled read-only preflight:
 Require contract version 1, `runtime_ready: true`, `grok_available: true`, and no `grok_error`.
 The nested `supervisor_reachable` field is diagnostic only because the Grok manager directly owns
 ACP. Use the exact `invocation` reported by preflight. Check its `list --all` output plus current
-peers for name collisions.
+Agent Sessions discovery, and retain the exact lane ID. Messaging names are group-scoped; bare
+lifecycle names can still be ambiguous in host-local lane state.
 
 Headless Grok cannot approve prompts. Every lane is explicit `always-approve`
 (`bypassPermissions`). Start it only when the user's task authorizes autonomous execution in the
@@ -53,9 +54,10 @@ grok-peer-lane wait review-a --timeout 300 > lane.jsonl
 does not interrupt the turn. From the collected JSONL, select the `agent_message` final answer with
 the same `turn_id` as the last `turn.completed`, and report `outcome` and `exit`.
 
-The lane is a normal peer. Use Claude's Agent Sessions messaging to send it a follow-up or wake it
-while idle, then collect the resulting serialized turn with `wait`. A message during active work is
-durably queued for the next turn; it never creates a competing ACP driver.
+The lane is a grouped peer. Use the `agent-sessions` skill and send a complete AgentFrame JSON body
+to Claude's one host-agent service; do not address a synthetic Grok row in Claude's registry. Then
+collect the resulting serialized turn with `wait`. A message during active work is durably queued
+for the next turn; it never creates a competing ACP driver.
 
 For an explicit CLI-owned follow-up:
 
@@ -77,6 +79,9 @@ grok-peer-lane archive review-a
 Default lanes are owned by this corroborated Claude process and archive when it exits. Use
 `--persistent` only when the lane must survive; use `--no-auto-archive` only with an explicit later
 archive. Normal terminal grace is 60 seconds. Archive persistent lanes when finished.
+
+Every child retains this immediate parent’s private group. Add `--inherit-groups` only when this
+parent intentionally propagates its other groups; repeat `--group NAME` for child-specific groups.
 
 Read [references/contract.md](references/contract.md) for the complete contract and
 [references/install.md](references/install.md) when preflight reports a missing or incompatible

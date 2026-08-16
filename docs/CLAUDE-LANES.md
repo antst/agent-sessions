@@ -37,7 +37,7 @@ While idle, the lane appears in both Claude and Codex peer discovery and accepts
 
 ## Remote hosts
 
-With `peer-federator` protocol 2 connected on both hosts, the same native CLI can run on a named
+With `peer-federator` protocol 3 connected on both hosts, the same native CLI can run on a named
 destination without SSH:
 
 ```bash
@@ -126,9 +126,9 @@ controls lifecycle and automatic terminal notices. Explicit `--tools` or `--disa
 policy can still remove those capabilities. The SDK worker publishes and authors messages under
 the lane name, owns the address reported by `lane.ready`, and accepts inbound peer turns directly.
 
-For a federated notify target, the destination shadow carries the originating peer's source-asserted
-permission class under the trusted-VLAN assumption. Infrastructure notices can therefore match
-their remote owner without changing the Claude worker's actual permission mode.
+For a federated parent, the destination receives an agent-attested source context and sends the
+terminal pointer back as an ordinary grouped Agent Sessions frame. No per-peer shadow or
+source-asserted native registry row is created.
 
 Claude emits real cost data. Autonomous callers should set `--max-budget-usd`; trivial turns can
 still be expensive because project instructions, plugins, skills, hooks, and MCP context load for

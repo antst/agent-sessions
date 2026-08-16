@@ -31,6 +31,12 @@ type Info struct {
 	Parent      int
 }
 
+// Process is one exact identity from a host process-table snapshot.
+type Process struct {
+	PID int
+	Info
+}
+
 // LooksLikeCodexHost recognizes the native and Node-hosted Codex entrypoints
 // used when walking a prospective lane owner's process ancestry.
 func LooksLikeCodexHost(args []string) bool {

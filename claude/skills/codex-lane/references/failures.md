@@ -19,7 +19,7 @@ the main way an orchestrator turns a recoverable condition into a duplicated or 
 |---|---|---|
 | `codex-peer-lane` not found and no resolvable runtime path | The bridge is not installed on this host | Print the install commands and stop. Never install, build, or start a daemon. |
 | Runtime present but no `contract_version` / no `doctor --json` | Runtime predates contract 2 | Report the version gap and stop. Do not guess the event shape. |
-| `error` at `start`, name already in use | Another live lane holds that name | Choose a different name, or address the existing lane. Do not pass `--allow-duplicate-name` unless the caller asked. |
+| bare name is ambiguous | Agent Sessions messaging found multiple group-visible peers, or a lane lifecycle command found multiple host-local lanes | Use the exact lane/session ID. |
 | `error` at `start`, supervisor or App Server unreachable | Runtime is not running | Report it. Recovery is a host-level operation, not an orchestrator's. |
 | `error` at `start`, bad `--cd` | Directory missing or not permitted | Fix the path with the caller; do not silently substitute another directory. |
 | `wait` exits 124 | The **collection call** timed out | Not a lane failure. Re-`wait`, or `status` to check. |

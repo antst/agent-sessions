@@ -71,7 +71,7 @@ endif
 PLATFORM := $(GOOS)-$(PLATFORM_ARCH)
 BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
-BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator
+BINARY_NAMES := agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator
 
 .PHONY: all lint test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
 	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
@@ -103,7 +103,9 @@ build:
 		printf 'Using packaged prebuilt binaries in %s\n' "$(BIN_DIR)"; \
 	elif command -v go >/dev/null 2>&1; then \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/agent-session-runtime" ./cmd/agent-session-runtime; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/peer" ./cmd/peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer" ./cmd/codex-peer; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer" ./cmd/claude-peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer-lane" ./cmd/codex-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer-lane" ./cmd/claude-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer" ./cmd/grok-peer; \
@@ -196,8 +198,10 @@ install: install-preflight
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer" "$(PREFIX)/bin/peer"
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer" "$(PREFIX)/bin/codex-peer"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer" "$(PREFIX)/bin/claude-peer"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
@@ -232,8 +236,10 @@ install: install-preflight
 dev-install: install-preflight
 	mkdir -p "$(PREFIX)/bin"
 	ln -sfn "$(abspath $(BIN_DIR))/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
+	ln -sfn "$(abspath $(BIN_DIR))/peer" "$(PREFIX)/bin/peer"
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer" "$(PREFIX)/bin/codex-peer"
+	ln -sfn "$(abspath $(BIN_DIR))/claude-peer" "$(PREFIX)/bin/claude-peer"
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"

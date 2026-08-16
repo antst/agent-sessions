@@ -100,9 +100,9 @@ if grep -Rq '\[TODO' "$plugin_root/skills/grok-lane" ||
 fi
 if [[ ! -f "$plugin_root/grok/skills/agent-lanes/SKILL.md" ]] ||
    ! grep -Fq 'Codex lanes require contract version **2**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
-   ! grep -Fq 'Claude lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
+   ! grep -Fq 'Claude and Grok lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
    ! grep -Fq 'report the lane cell as blocked; never "try anyway."' "$plugin_root/grok/skills/agent-lanes/SKILL.md"; then
-  printf 'Grok agent-lanes skill does not distinguish Codex and Claude contracts\n' >&2
+  printf 'Grok agent-lanes skill does not distinguish all target contracts\n' >&2
   exit 1
 fi
 for skill in "$plugin_root/skills/claude-lane/SKILL.md" "$plugin_root/claude/skills/codex-lane/SKILL.md"; do
@@ -137,7 +137,12 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 temporary_parent="$(cd -P -- "$temporary_parent" && pwd)"
 temporary_root="$(mktemp -d "$temporary_parent/codex-peer-test.XXXXXX")"
+agent_pid=
 cleanup() {
+	if [[ -n "$agent_pid" ]]; then
+		kill "$agent_pid" 2>/dev/null || true
+		wait "$agent_pid" 2>/dev/null || true
+	fi
   rm -rf -- "$temporary_root"
 }
 trap cleanup EXIT
@@ -150,6 +155,22 @@ launcher_binary="$temporary_root/codex-peer"
 go build -o "$launcher_binary" "$plugin_root/cmd/codex-peer"
 runtime_binary="$temporary_root/agent-session-runtime"
 go build -o "$runtime_binary" "$plugin_root/cmd/agent-session-runtime"
+federator_binary="$temporary_root/peer-federator"
+go build -o "$federator_binary" "$plugin_root/cmd/peer-federator"
+agent_runtime="$temporary_root/agent-runtime"
+"$federator_binary" agent --host launcher-test --runtime-dir "$agent_runtime" \
+  --state-dir "$temporary_root/agent-state" --claude-config-dir "$temporary_root/agent-claude" \
+  >"$temporary_root/agent.out" 2>"$temporary_root/agent.err" &
+agent_pid=$!
+for _ in {1..100}; do
+	[[ -S "$agent_runtime/agent.sock" ]] && break
+	sleep 0.01
+done
+if [[ ! -S "$agent_runtime/agent.sock" ]]; then
+	printf 'grouped host agent did not start for launcher contract tests\n' >&2
+	exit 1
+fi
+export AGENT_SESSIONS_AGENT_RUNTIME_DIR="$agent_runtime"
 
 informational="$({
   CODEX_PEER_CODEX_BIN="$fake_codex" \
@@ -429,7 +450,7 @@ done
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in codex-peer codex-peer-lane claude-peer-lane grok-peer; do
+for launcher in peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer; do
   if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
     printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
     exit 1
@@ -465,11 +486,14 @@ installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
 if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
    [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
    [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
+   [[ ! -f "$custom_install_root/skills/codex-lane/SKILL.md" ]] ||
    [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
    [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
    [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
+	[[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
+	[[ "$(readlink "$custom_prefix/bin/peer")" != "$installed_binary_dir/peer" ]] ||
+	[[ "$(readlink "$custom_prefix/bin/claude-peer")" != "$installed_binary_dir/claude-peer" ]] ||
    [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
    [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
@@ -478,7 +502,7 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+for installed_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
     printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
     exit 1
@@ -725,7 +749,7 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1
@@ -906,6 +930,12 @@ PY
   fi
 fi
 
+if [[ -n "$agent_pid" ]]; then
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  agent_pid=
+fi
+unset AGENT_SESSIONS_AGENT_RUNTIME_DIR
 cd -- "$plugin_root"
 if [[ "${RACE:-0}" == "1" ]]; then
   go test -race ./...

@@ -16,6 +16,50 @@ type testHubClient struct {
 	errors   chan error
 }
 
+func groupedHubTestPeer(host, session string, groups ...string) Peer {
+	groups = append(groups, privateGroupPrefix+host+"/"+session)
+	return Peer{
+		ID: host + "/" + session, HostID: host, HostName: host, SessionID: session,
+		GlobalID: globalSessionID(host, session), Name: session, Entrypoint: "codex",
+		PeerProtocol: GroupProtocolVersion, InstanceID: "instance-" + host + "-" + session,
+		Groups: sortedUnique(groups),
+	}
+}
+
+func groupedHubTestParent(peer Peer) *ParentContext {
+	return &ParentContext{
+		HostID: peer.HostID, SessionID: peer.SessionID, Product: peer.Entrypoint,
+		InstanceID: peer.InstanceID, Groups: append([]string(nil), peer.Groups...),
+	}
+}
+
+func TestHubRejectsInvalidGroupedSnapshotWithoutReplacingPrevious(t *testing.T) {
+	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}}
+	hubSide, peerSide := net.Pipe()
+	t.Cleanup(func() { _ = hubSide.Close(); _ = peerSide.Close() })
+	go func() { _, _ = io.Copy(io.Discard, peerSide) }()
+	client := &hubClient{hostID: "host-a", peers: map[string]Peer{}, wire: newWireConn(hubSide)}
+	hub.clients[client.hostID] = client
+	valid := groupedHubTestPeer("host-a", "valid", "project")
+	if err := hub.handleClientMessage(client, Message{Type: "snapshot", Peers: []Peer{valid}}); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.SessionID, invalid.ID, invalid.GlobalID = "forged", "host-a/forged", globalSessionID("host-a", "forged")
+	invalid.Groups = []string{""}
+	if err := hub.handleClientMessage(client, Message{Type: "snapshot", Peers: []Peer{invalid}}); err == nil {
+		t.Fatal("invalid snapshot was accepted")
+	}
+	if len(client.peers) != 1 || client.peers[valid.ID].SessionID != valid.SessionID {
+		t.Fatalf("invalid snapshot replaced previous peers: %+v", client.peers)
+	}
+	duplicate := groupedHubTestPeer("host-a", "valid", "project")
+	duplicate.Name = "duplicate"
+	if err := hub.handleClientMessage(client, Message{Type: "snapshot", Peers: []Peer{valid, duplicate}}); err == nil {
+		t.Fatal("duplicate snapshot identity was accepted")
+	}
+}
+
 func newTestHubClient(t *testing.T, hub *hub, host string, capabilities ...string) *testHubClient {
 	t.Helper()
 	server, client := net.Pipe()
@@ -43,7 +87,7 @@ func TestHubRoutesRemoteLaneOnlyThroughConnectedCapableHosts(t *testing.T) {
 	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}}
 	source := newTestHubClient(t, hub, "host-a")
 	defer func() { _ = source.conn.Close() }()
-	sourcePeer := Peer{ID: "host-a/source", HostID: "host-a", SessionID: "source"}
+	sourcePeer := groupedHubTestPeer("host-a", "source")
 	if err := source.wire.Send(Message{Type: "snapshot", Peers: []Peer{sourcePeer}}); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +102,7 @@ func TestHubRoutesRemoteLaneOnlyThroughConnectedCapableHosts(t *testing.T) {
 
 	request := Message{
 		Type: "lane_exec", RequestID: "request-1", SourceID: sourcePeer.ID,
-		TargetHostID: "host-b", Product: "codex", Args: []string{"list"},
+		TargetHostID: "host-b", Product: "codex", Args: []string{"list"}, ParentContext: groupedHubTestParent(sourcePeer),
 	}
 	if err := source.wire.Send(request); err != nil {
 		t.Fatal(err)
@@ -88,7 +132,7 @@ func TestHubRoutesRemoteLaneOnlyThroughConnectedCapableHosts(t *testing.T) {
 
 	if err := source.wire.Send(Message{
 		Type: "lane_exec", RequestID: "request-2", SourceID: sourcePeer.ID,
-		TargetHostID: "host-b", Product: "claude", Args: []string{"list"},
+		TargetHostID: "host-b", Product: "claude", Args: []string{"list"}, ParentContext: groupedHubTestParent(sourcePeer),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +144,7 @@ func TestHubRoutesRemoteLaneOnlyThroughConnectedCapableHosts(t *testing.T) {
 func TestHubCancelsRemoteLaneWhenSourceDisconnects(t *testing.T) {
 	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}}
 	source := newTestHubClient(t, hub, "host-a")
-	sourcePeer := Peer{ID: "host-a/source", HostID: "host-a", SessionID: "source"}
+	sourcePeer := groupedHubTestPeer("host-a", "source")
 	if err := source.wire.Send(Message{Type: "snapshot", Peers: []Peer{sourcePeer}}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +154,7 @@ func TestHubCancelsRemoteLaneWhenSourceDisconnects(t *testing.T) {
 	source.waitType(t, "roster")
 	if err := source.wire.Send(Message{
 		Type: "lane_exec", RequestID: "request-loss", SourceID: sourcePeer.ID,
-		TargetHostID: "host-b", Product: "codex", Args: []string{"wait", "lane"},
+		TargetHostID: "host-b", Product: "codex", Args: []string{"wait", "lane"}, ParentContext: groupedHubTestParent(sourcePeer),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +270,7 @@ func TestHubRoutesOnlyAdvertisedPeers(t *testing.T) {
 	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}}
 	a := newTestHubClient(t, hub, "host-a")
 	defer func() { _ = a.conn.Close() }()
-	peerA := Peer{ID: "host-a/a", HostID: "host-a", HostName: "a", SessionID: "a"}
+	peerA := groupedHubTestPeer("host-a", "a", "team")
 	if err := a.wire.Send(Message{Type: "snapshot", Peers: []Peer{peerA}}); err != nil {
 		t.Fatal(err)
 	}
@@ -234,20 +278,108 @@ func TestHubRoutesOnlyAdvertisedPeers(t *testing.T) {
 
 	b := newTestHubClient(t, hub, "host-b")
 	defer func() { _ = b.conn.Close() }()
-	peerB := Peer{ID: "host-b/b", HostID: "host-b", HostName: "b", SessionID: "b"}
+	peerB := groupedHubTestPeer("host-b", "b", "team")
 	if err := b.wire.Send(Message{Type: "snapshot", Peers: []Peer{peerB}}); err != nil {
 		t.Fatal(err)
 	}
 	a.waitType(t, "roster")
 	b.waitType(t, "roster")
 
-	frame := json.RawMessage(`{"type":"user","from":"uds:/tmp/a.sock"}`)
-	if err := a.wire.Send(Message{Type: "deliver", SourceID: peerA.ID, TargetID: peerB.ID, Frame: frame}); err != nil {
+	frame, err := json.Marshal(AgentFrame{
+		Version: AgentFrameVersion, Type: "delivery", MessageID: "m1",
+		SourceSessionID: peerA.SessionID, Source: &peerA, Content: "hello",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	got := b.waitType(t, "deliver")
+	if err := a.wire.Send(Message{
+		Type: "group_deliver", RequestID: "delivery-1",
+		SourceID: peerA.ID, TargetID: peerB.ID, Frame: frame,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := b.waitType(t, "group_deliver")
 	if got.SourceID != peerA.ID || got.TargetID != peerB.ID || string(got.Frame) != string(frame) {
 		t.Fatalf("delivery = %#v", got)
+	}
+	if err := b.wire.Send(Message{
+		Type: "delivery_ack", RequestID: got.RequestID,
+		SourceID: got.SourceID, TargetID: got.TargetID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack := a.waitType(t, "delivery_ack"); ack.RequestID != got.RequestID {
+		t.Fatalf("delivery acknowledgement = %#v", ack)
+	}
+}
+
+func TestHubDestinationDisconnectFailsPendingDelivery(t *testing.T) {
+	sourceHub, sourcePeer := net.Pipe()
+	destinationHub, destinationPeer := net.Pipe()
+	defer func() {
+		_ = sourceHub.Close()
+		_ = sourcePeer.Close()
+		_ = destinationHub.Close()
+		_ = destinationPeer.Close()
+	}()
+	source := &hubClient{hostID: "source", wire: newWireConn(sourceHub)}
+	destination := &hubClient{hostID: "destination", wire: newWireConn(destinationHub)}
+	hub := &hub{
+		logger: discardLogger(), clients: map[string]*hubClient{},
+		deliveryRoutes: map[string]*deliveryRoute{
+			"pending": {source: source, destination: destination, sourceID: "source/a", targetID: "destination/b"},
+		},
+	}
+	received := make(chan Message, 1)
+	go func() {
+		_ = scanMessages(sourcePeer, func(message Message) error {
+			received <- message
+			return nil
+		})
+	}()
+	hub.dropDeliveryRoutes(destination)
+	select {
+	case message := <-received:
+		if message.Type != "delivery_error" || message.RequestID != "pending" {
+			t.Fatalf("disconnect outcome = %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("source did not receive destination disconnect outcome")
+	}
+	if len(hub.deliveryRoutes) != 0 {
+		t.Fatalf("delivery route survived destination disconnect: %#v", hub.deliveryRoutes)
+	}
+}
+
+func TestHubSourceDisconnectDropsPendingDeliveryAndIgnoresLateOutcome(t *testing.T) {
+	source := &hubClient{hostID: "source"}
+	destination := &hubClient{hostID: "destination"}
+	hub := &hub{deliveryRoutes: map[string]*deliveryRoute{
+		"pending": {source: source, destination: destination, sourceID: "source/a", targetID: "destination/b"},
+	}}
+	hub.dropDeliveryRoutes(source)
+	if len(hub.deliveryRoutes) != 0 {
+		t.Fatalf("source disconnect retained routes: %#v", hub.deliveryRoutes)
+	}
+	if err := hub.routeDeliveryOutcome(destination, Message{
+		Type: "delivery_ack", RequestID: "pending", SourceID: "source/a", TargetID: "destination/b",
+	}); err != nil {
+		t.Fatalf("late destination outcome disconnected the surviving host: %v", err)
+	}
+}
+
+func TestHubRejectsStaleBroadcastThroughDifferentSharedGroup(t *testing.T) {
+	sourcePeer := groupedHubTestPeer("host-a", "a", "remaining")
+	targetPeer := groupedHubTestPeer("host-b", "b", "remaining")
+	source := &hubClient{hostID: "host-a", peers: map[string]Peer{sourcePeer.ID: sourcePeer}}
+	target := &hubClient{hostID: "host-b", peers: map[string]Peer{targetPeer.ID: targetPeer}}
+	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{"host-a": source, "host-b": target}}
+	frame, _ := json.Marshal(AgentFrame{
+		Version: AgentFrameVersion, Type: "delivery", MessageID: "stale-broadcast", SourceSessionID: sourcePeer.SessionID,
+		Source: &sourcePeer, Group: "removed", Content: "must not cross",
+	})
+	if err := hub.routeGrouped(source, Message{Type: "group_deliver", SourceID: sourcePeer.ID, TargetID: targetPeer.ID, Frame: frame}); err == nil {
+		t.Fatal("hub forwarded a stale broadcast through an unrelated shared group")
 	}
 }
 
@@ -255,14 +387,14 @@ func TestHubDeliveryFailureDoesNotDisconnectSourceHost(t *testing.T) {
 	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}}
 	a := newTestHubClient(t, hub, "host-a")
 	defer func() { _ = a.conn.Close() }()
-	peerA := Peer{ID: "host-a/a", HostID: "host-a", HostName: "a", SessionID: "a"}
+	peerA := groupedHubTestPeer("host-a", "a", "team")
 	if err := a.wire.Send(Message{Type: "snapshot", Peers: []Peer{peerA}}); err != nil {
 		t.Fatal(err)
 	}
 	a.waitType(t, "roster")
 
-	frame := json.RawMessage(`{"type":"user","from":"uds:/tmp/a.sock"}`)
-	if err := a.wire.Send(Message{Type: "deliver", SourceID: peerA.ID, TargetID: "gone/peer", Frame: frame}); err != nil {
+	frame := json.RawMessage(`{"version":1,"type":"delivery","message_id":"m1","source_session_id":"a","source":{"id":"host-a/a"},"content":"hello"}`)
+	if err := a.wire.Send(Message{Type: "group_deliver", SourceID: peerA.ID, TargetID: "gone/peer", Frame: frame}); err != nil {
 		t.Fatal(err)
 	}
 	failure := a.waitType(t, "delivery_error")
