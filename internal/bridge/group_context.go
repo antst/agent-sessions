@@ -123,7 +123,14 @@ func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGrou
 	}
 	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
 	claimedProduct := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT"))
-	if nativeThreadID := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); nativeThreadID != "" &&
+	// A product-specific ancestry proof is stronger than ambient process
+	// environment. In particular, Grok tool shells can retain the outer Codex
+	// process's CODEX_THREAD_ID while deliberately exposing only their private
+	// Grok launch capability. Do not let that stale ambient ID replace the
+	// corroborated immediate parent.
+	if owner.SessionID != "" {
+		sessionID = owner.SessionID
+	} else if nativeThreadID := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); nativeThreadID != "" &&
 		(claimedProduct == "" || claimedProduct == "codex") {
 		sessionID = nativeThreadID
 	}

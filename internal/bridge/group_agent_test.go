@@ -16,11 +16,15 @@ import (
 )
 
 func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.T) {
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "ga-")
 	configDir := filepath.Join(root, "claude")
 	runtimeDir := filepath.Join(root, "agent-runtime")
+	peerRuntimeDir := filepath.Join(root, "peer-runtime")
 	stateDir := filepath.Join(root, "agent-state")
 	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(peerRuntimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", configDir)
 	t.Setenv("CLAUDE_PEER_DATA_DIR", dataDir)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
@@ -97,7 +101,7 @@ func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.
 	target := newDaemon(map[string]string{
 		"session-id": "target-session", "cwd": root, "name": "target", "entrypoint": "codex",
 		"data-dir": filepath.Join(root, "data"), "claude-config-dir": configDir,
-		"codex-home": filepath.Join(root, "codex"), "runtime-dir": filepath.Join(root, "peer-runtime"),
+		"codex-home": filepath.Join(root, "codex"), "runtime-dir": peerRuntimeDir,
 		"agent-runtime-dir": runtimeDir,
 	})
 	if err := target.start(); err != nil {
@@ -303,6 +307,47 @@ func TestEveryParentProductComposesWithEveryTargetGroupLayer(t *testing.T) {
 	}
 }
 
+func TestCorroboratedNativeParentWinsLeakedCodexThreadID(t *testing.T) {
+	root, runtimeDir := startLaneContextTestAgent(t)
+	procStart := readProcStart(os.Getpid())
+	socket := filepath.Join(root, "grok-parent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go drainTestListener(listener)
+
+	const parentID = "corroborated-grok-parent"
+	if _, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
+		SessionID: parentID, Product: "grok", Groups: []string{"grok-project"}, GroupsSpecified: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registration := federator.PeerRegistration{
+		Version: federator.GroupProtocolVersion, SessionID: parentID, Product: "grok",
+		Name: parentID, PID: os.Getpid(), ProcStart: procStart, Socket: socket,
+	}
+	if _, err := federator.RegisterPeer(runtimeDir, registration); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = federator.UnregisterPeer(runtimeDir, registration) })
+	t.Setenv(agentRuntimeDirEnvironment, runtimeDir)
+	t.Setenv(remoteParentEnvironment, "")
+	t.Setenv(peerSessionIDEnvironment, "")
+	t.Setenv("AGENT_SESSIONS_PRODUCT", "")
+	t.Setenv("CODEX_THREAD_ID", "unrelated-outer-codex-thread")
+	owner := laneOwner{PID: os.Getpid(), ProcStart: procStart, SessionID: parentID, PermissionMode: "bypassPermissions"}
+
+	for _, targetProduct := range []string{"codex", "claude", "grok"} {
+		launch := resolvedTargetLaunch(targetProduct, false, laneGroupOptions{}, owner)
+		if launch.groups.parentErr != nil {
+			t.Fatalf("%s target rejected corroborated Grok parent: %v", targetProduct, launch.groups.parentErr)
+		}
+		assertResolvedTargetParent(t, launch, parentID, os.Getpid(), procStart, true)
+	}
+}
+
 func TestRemoteParentTargetThenNestedLaneUsesImmediateParent(t *testing.T) {
 	root, runtimeDir := startLaneContextTestAgent(t)
 	procStart := readProcStart(os.Getpid())
@@ -453,7 +498,7 @@ func assertTargetWorkerDropsRemoteParent(t *testing.T, product, sessionID, remot
 
 func startLaneContextTestAgent(t *testing.T) (string, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "gc-")
 	runtimeDir := filepath.Join(root, "agent-runtime")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -477,6 +522,23 @@ func startLaneContextTestAgent(t *testing.T) (string, string) {
 		t.Fatal("host agent did not become ready")
 	}
 	return root, runtimeDir
+}
+
+// shortSocketTestRoot avoids including the test name in Unix socket paths.
+// Darwin limits sockaddr_un.sun_path to 104 bytes, and testing.T.TempDir uses
+// the full test name even when TMPDIR itself is already compact.
+func shortSocketTestRoot(t *testing.T, pattern string) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove short socket test root: %v", err)
+		}
+	})
+	return root
 }
 
 func equalStringSlices(left, right []string) bool {

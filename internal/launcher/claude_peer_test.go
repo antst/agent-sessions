@@ -84,8 +84,107 @@ func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 	}
 }
 
-func TestClaudePeerPrivateRegistryRegistersAndRestoresPreferences(t *testing.T) {
+func TestPrepareClaudePeerProfileSeedsOnlyOnboardingState(t *testing.T) {
 	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	publicRoot := filepath.Join(home, ".claude")
+	privateRoot := filepath.Join(root, "private")
+	if err := os.MkdirAll(publicRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	public := map[string]any{
+		"hasCompletedOnboarding": true,
+		"lastOnboardingVersion":  "2.1.233",
+		"theme":                  "dark",
+		"installMethod":          "native",
+		"oauthAccount":           map[string]any{"emailAddress": "private@example.invalid"},
+		"projects":               map[string]any{"/secret": map[string]any{}},
+	}
+	body, _ := json.Marshal(public)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(privateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateRoot, ".claude.json"), []byte(`{"theme":"light"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareClaudePeerProfile(privateRoot, publicRoot); err != nil {
+		t.Fatal(err)
+	}
+	privateBody, err := os.ReadFile(filepath.Join(privateRoot, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var private map[string]any
+	if err := json.Unmarshal(privateBody, &private); err != nil {
+		t.Fatal(err)
+	}
+	completedOnboarding, completedOnboardingOK := private["hasCompletedOnboarding"].(bool)
+	if !completedOnboardingOK || !completedOnboarding || private["lastOnboardingVersion"] != "2.1.233" ||
+		private["theme"] != "light" || private["installMethod"] != "native" {
+		t.Fatalf("private onboarding state = %#v", private)
+	}
+	if _, copied := private["oauthAccount"]; copied {
+		t.Fatal("private onboarding seed copied OAuth account metadata")
+	}
+	if _, copied := private["projects"]; copied {
+		t.Fatal("private onboarding seed copied project metadata")
+	}
+}
+
+func TestPrepareClaudePeerProfileRejectsNullPrivateOnboardingState(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	publicRoot := filepath.Join(home, ".claude")
+	privateRoot := filepath.Join(root, "private")
+	if err := os.MkdirAll(publicRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(privateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"hasCompletedOnboarding":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateRoot, ".claude.json"), []byte("null\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareClaudePeerProfile(privateRoot, publicRoot); err == nil {
+		t.Fatal("null private Claude onboarding state was accepted")
+	}
+}
+
+func TestClaudePeerEnvironmentUsesPrivateRegistryForNestedLanes(t *testing.T) {
+	t.Setenv(agentRuntimeDirEnv, "/agent-runtime")
+	environment := claudePeerEnvironment([]string{
+		"CLAUDE_CONFIG_DIR=/public-native",
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR=/public-bridge",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/public-secure",
+	}, "/private", "/secure", "session-1")
+	for _, expected := range []string{
+		"CLAUDE_CONFIG_DIR=/private",
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR=/private",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/secure",
+		"AGENT_SESSIONS_SESSION_ID=session-1",
+		"AGENT_SESSIONS_PRODUCT=claude",
+	} {
+		if !slices.Contains(environment, expected) {
+			t.Fatalf("Claude peer environment missing %q: %v", expected, environment)
+		}
+	}
+}
+
+func TestClaudePeerPrivateRegistryRegistersAndRestoresPreferences(t *testing.T) {
+	root := shortClaudePeerTestRoot(t)
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	runtimeDir := filepath.Join(root, "runtime")
 	stateDir := filepath.Join(root, "agent-state")
 	publicConfig := filepath.Join(root, "public-claude")
@@ -194,13 +293,13 @@ func TestClaudePeerPrivateRegistryRegistersAndRestoresPreferences(t *testing.T) 
 }
 
 func TestReadClaudeNativePeerRecordRequiresExactLiveIdentityAndSocket(t *testing.T) {
-	root := t.TempDir()
+	root := shortClaudePeerTestRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, "sessions"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	pid := os.Getpid()
 	start := federator.ProcessStart(pid)
-	socket := filepath.Join(t.TempDir(), strconv.Itoa(pid)+".sock")
+	socket := filepath.Join(shortClaudePeerTestRoot(t), strconv.Itoa(pid)+".sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -228,12 +327,12 @@ func TestReadClaudeNativePeerRecordRequiresExactLiveIdentityAndSocket(t *testing
 }
 
 func TestCleanupClaudePeerArtifactsRequiresPIDAbsence(t *testing.T) {
-	root := t.TempDir()
+	root := shortClaudePeerTestRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, "sessions"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	pid := os.Getpid()
-	socket := filepath.Join(t.TempDir(), strconv.Itoa(pid)+".sock")
+	socket := filepath.Join(shortClaudePeerTestRoot(t), strconv.Itoa(pid)+".sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +359,7 @@ func TestCleanupClaudePeerArtifactsRequiresPIDAbsence(t *testing.T) {
 }
 
 func TestClaudePeerProfileLockSerializesAttachments(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "config")
+	root := filepath.Join(shortClaudePeerTestRoot(t), "config")
 	first, err := acquireClaudePeerProfileLock(root)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +377,7 @@ func TestClaudePeerProfileLockSerializesAttachments(t *testing.T) {
 }
 
 func TestPrepareClaudePeerAttachmentRejectsOrphanedLiveNativeRow(t *testing.T) {
-	root := t.TempDir()
+	root := shortClaudePeerTestRoot(t)
 	directory := filepath.Join(root, "sessions")
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
@@ -286,7 +385,7 @@ func TestPrepareClaudePeerAttachmentRejectsOrphanedLiveNativeRow(t *testing.T) {
 	pid := os.Getpid()
 	row := claudeNativePeerRecord{
 		PID: pid, SessionID: "stable-session", ProcStart: federator.ProcessStart(pid),
-		MessagingSocketPath: filepath.Join(t.TempDir(), strconv.Itoa(pid)+".sock"),
+		MessagingSocketPath: filepath.Join(shortClaudePeerTestRoot(t), strconv.Itoa(pid)+".sock"),
 	}
 	body, _ := json.Marshal(row)
 	if err := os.WriteFile(filepath.Join(directory, strconv.Itoa(pid)+".json"), body, 0600); err != nil {
@@ -298,13 +397,13 @@ func TestPrepareClaudePeerAttachmentRejectsOrphanedLiveNativeRow(t *testing.T) {
 }
 
 func TestCleanupClaudePeerArtifactsRemovesPreReadyUnknownModeRow(t *testing.T) {
-	root := t.TempDir()
+	root := shortClaudePeerTestRoot(t)
 	directory := filepath.Join(root, "sessions")
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
 	const pid = 1_000_000_001
-	socket := filepath.Join(t.TempDir(), strconv.Itoa(pid)+".sock")
+	socket := filepath.Join(shortClaudePeerTestRoot(t), strconv.Itoa(pid)+".sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -330,13 +429,13 @@ func TestCleanupClaudePeerArtifactsRemovesPreReadyUnknownModeRow(t *testing.T) {
 }
 
 func TestCleanupClaudePeerArtifactsRemovesExactTokenSidecars(t *testing.T) {
-	root := t.TempDir()
+	root := shortClaudePeerTestRoot(t)
 	directory := filepath.Join(root, "sessions")
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
 	const pid = 1_000_000_000
-	socket := filepath.Join(t.TempDir(), strconv.Itoa(pid)+".sock")
+	socket := filepath.Join(shortClaudePeerTestRoot(t), strconv.Itoa(pid)+".sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -366,4 +465,18 @@ func TestCleanupClaudePeerArtifactsRemovesExactTokenSidecars(t *testing.T) {
 	if _, err := os.Lstat(invalidKey); err != nil {
 		t.Fatalf("unrecognized sidecar was removed: %v", err)
 	}
+}
+
+func shortClaudePeerTestRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "cp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove short Claude peer test root: %v", err)
+		}
+	})
+	return root
 }

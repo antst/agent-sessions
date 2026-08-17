@@ -383,28 +383,48 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var lastFailure string
 	for {
 		m.mu.Lock()
-		client, worker, grokSessionID := m.client, m.worker, m.state.GrokSessionID
+		client, worker := m.client, m.worker
+		grokSessionID, bridgeSessionID := m.state.GrokSessionID, m.state.SessionID
 		m.mu.Unlock()
 		if client == nil || worker == nil || grokSessionID == "" {
 			return errors.New("headless Grok lane ACP session is unavailable")
 		}
 		roster, rosterErr := client.request(ctx, "_x.ai/sessions/list", map[string]any{})
-		if rosterErr == nil {
+		switch {
+		case rosterErr != nil:
+			lastFailure = rosterErr.Error()
+		default:
 			state, stateErr := grokRosterStateFromResponse(roster, grokSessionID)
-			if stateErr == nil && state.permissionMode == "bypassPermissions" {
+			switch {
+			case stateErr != nil:
+				lastFailure = stateErr.Error()
+			case state.permissionMode != "bypassPermissions":
+				lastFailure = "Grok session is not in bypassPermissions mode"
+			default:
 				result, callErr := client.request(ctx, "_x.ai/mcp/call", map[string]any{
-					"sessionId": grokSessionID, "server": "agent_sessions", "tool": "list_peers", "arguments": map[string]any{},
+					"sessionId": grokSessionID, "server": "agent_sessions", "tool": "identity",
+					"arguments": map[string]any{"session_id": bridgeSessionID},
 				})
-				if callErr == nil && grokAgentSessionsMCPCallReady(result) == nil {
+				var readyErr error
+				if callErr == nil {
+					readyErr = grokAgentSessionsMCPIdentityReady(result, bridgeSessionID)
+				}
+				switch {
+				case callErr != nil:
+					lastFailure = callErr.Error()
+				case readyErr != nil:
+					lastFailure = readyErr.Error()
+				default:
 					return nil
 				}
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return errors.New("timed out waiting for the Grok lane agent_sessions MCP")
+			return fmt.Errorf("timed out waiting for the Grok lane agent_sessions MCP: %s", lastFailure)
 		case <-worker.done:
 			return worker.attributedError("headless Grok lane ACP worker exited during MCP startup", nil)
 		case <-ticker.C:

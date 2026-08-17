@@ -410,6 +410,16 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		}
 		state, err := readOwnNativeState(paths, sessionID)
 		if err != nil {
+			// A Grok host must prove that its plugin MCP is usable before it can
+			// publish and register the peer. The exact live launch capability and
+			// process ancestry already authorize this narrow bootstrap identity;
+			// grouped discovery and delivery remain unavailable until publication.
+			if activeGrokLaunchForSession(paths, sessionID) != nil {
+				return map[string]any{
+					"text": "Grok peer startup is process-attested.",
+					"data": map[string]any{"sessionId": sessionID, "status": "starting"},
+				}, nil
+			}
 			return nil, err
 		}
 		address := encodeNativeAddress(stringValue(state["socketPath"]))

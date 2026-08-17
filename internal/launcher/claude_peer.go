@@ -259,6 +259,9 @@ func prepareClaudePeerProfile(privateRoot, publicRoot string) error {
 	if err := os.MkdirAll(filepath.Join(privateRoot, "sessions"), 0o700); err != nil {
 		return fmt.Errorf("create private Claude registry: %w", err)
 	}
+	if err := seedClaudePeerOnboarding(privateRoot); err != nil {
+		return err
+	}
 	for _, name := range []string{"settings.json", "settings.local.json", "CLAUDE.md"} {
 		body, err := os.ReadFile(filepath.Join(publicRoot, name)) //nolint:gosec // configured local Claude profile.
 		if os.IsNotExist(err) {
@@ -286,6 +289,68 @@ func prepareClaudePeerProfile(privateRoot, publicRoot string) error {
 		if err := os.Symlink(target, link); err != nil {
 			return fmt.Errorf("link Claude profile %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// seedClaudePeerOnboarding carries only native first-run presentation state
+// into a new private registry. Authentication remains in the separately
+// configured secure-storage root, while project history and session metadata
+// remain isolated. Existing private choices always win on resume.
+//
+//nolint:gocyclo // Each profile read and validation failure is deliberately surfaced with its own context.
+func seedClaudePeerOnboarding(privateRoot string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve Claude onboarding profile: %w", err)
+	}
+	publicPath := filepath.Join(home, ".claude.json")
+	body, err := os.ReadFile(publicPath) //nolint:gosec // current user's native Claude presentation state.
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read Claude onboarding profile: %w", err)
+	}
+	var public map[string]any
+	if err := json.Unmarshal(body, &public); err != nil {
+		return fmt.Errorf("parse Claude onboarding profile: %w", err)
+	}
+	if public == nil {
+		return nil
+	}
+	privatePath := filepath.Join(privateRoot, ".claude.json")
+	private := map[string]any{}
+	if body, readErr := os.ReadFile(privatePath); readErr == nil { //nolint:gosec // deterministic private profile.
+		if err := json.Unmarshal(body, &private); err != nil {
+			return fmt.Errorf("parse private Claude onboarding profile: %w", err)
+		}
+		if private == nil {
+			return errors.New("parse private Claude onboarding profile: expected a JSON object")
+		}
+	} else if !os.IsNotExist(readErr) {
+		return fmt.Errorf("read private Claude onboarding profile: %w", readErr)
+	}
+	changed := false
+	for _, key := range []string{"hasCompletedOnboarding", "lastOnboardingVersion", "theme", "installMethod"} {
+		if _, exists := private[key]; exists {
+			continue
+		}
+		if value, exists := public[key]; exists {
+			private[key] = value
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	encoded, err := json.MarshalIndent(private, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode private Claude onboarding profile: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := writeLauncherFileAtomic(privatePath, encoded, 0o600); err != nil {
+		return fmt.Errorf("write private Claude onboarding profile: %w", err)
 	}
 	return nil
 }
@@ -339,7 +404,8 @@ func prepareClaudePeerAttachment(privateRoot, sessionID string) error {
 
 func claudePeerEnvironment(environment []string, privateRoot, publicRoot, sessionID string) []string {
 	values := map[string]string{
-		"CLAUDE_CONFIG_DIR": privateRoot, "CLAUDE_SECURESTORAGE_CONFIG_DIR": publicRoot,
+		"CLAUDE_CONFIG_DIR": privateRoot, "CLAUDE_PEER_CLAUDE_CONFIG_DIR": privateRoot,
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR":      publicRoot,
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", agentRuntimeDirEnv: agentRuntimeDir(),
 		peerSessionIDEnv: sessionID, peerProductEnv: "claude",
 	}

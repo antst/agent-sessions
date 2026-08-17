@@ -1823,7 +1823,8 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": true,
 		peerSessionIDEnvironment:               true, "AGENT_SESSIONS_PRODUCT": true, agentRuntimeDirEnvironment: true,
 		remoteParentEnvironment: true,
-		"CLAUDE_CONFIG_DIR":     true, "CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
+		"CLAUDE_CONFIG_DIR":     true, "CLAUDE_PEER_CLAUDE_CONFIG_DIR": true,
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
 	}
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {
@@ -1840,7 +1841,11 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 	result = append(result, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
 	result = append(result, peerSessionIDEnvironment+"="+sessionID, "AGENT_SESSIONS_PRODUCT=claude")
 	result = append(result, agentRuntimeDirEnvironment+"="+laneAgentRuntimeDir())
-	result = append(result, "CLAUDE_CONFIG_DIR="+privateConfig, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+secureConfig)
+	result = append(result,
+		"CLAUDE_CONFIG_DIR="+privateConfig,
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR="+privateConfig,
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR="+secureConfig,
+	)
 	return result
 }
 

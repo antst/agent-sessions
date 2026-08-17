@@ -1319,18 +1319,19 @@ func (h *grokHost) requestStop() {
 func (h *grokHost) ensureAgentSessionsMCPReadyLocked(ctx context.Context) error {
 	// Grok 1.0.4 starts trusted plugin MCPs in the resident session, but its
 	// x.ai/mcp/list catalog omits those plugin-only clients. Exercise the exact
-	// server and a read-only tool instead; success proves discovery, process
-	// startup, MCP initialization, and launch attestation end to end.
+	// server and its identity tool instead; the exact process-attested launch may
+	// report a starting identity before publication. Group discovery cannot run
+	// until that same publication has registered the source with the host agent.
 	result, err := h.acp.request(ctx, "_x.ai/mcp/call", map[string]any{
 		"sessionId": h.config.SessionID,
 		"server":    "agent_sessions",
-		"tool":      "list_peers",
-		"arguments": map[string]any{},
+		"tool":      "identity",
+		"arguments": map[string]any{"session_id": h.config.SessionID},
 	})
 	if err != nil {
 		return fmt.Errorf("probe live Grok agent_sessions MCP: %w", err)
 	}
-	return grokAgentSessionsMCPCallReady(result)
+	return grokAgentSessionsMCPIdentityReady(result, h.config.SessionID)
 }
 
 func grokAgentSessionsMCPCallReady(response map[string]any) error {
@@ -1341,6 +1342,25 @@ func grokAgentSessionsMCPCallReady(response map[string]any) error {
 	content, ok := result["content"].([]any)
 	if !ok || len(content) == 0 {
 		return errors.New("grok agent_sessions MCP readiness tool returned no content")
+	}
+	return nil
+}
+
+func grokAgentSessionsMCPIdentityReady(response map[string]any, sessionID string) error {
+	if err := grokAgentSessionsMCPCallReady(response); err != nil {
+		return err
+	}
+	result, _ := response["result"].(map[string]any)
+	identity, _ := result["structuredContent"].(map[string]any)
+	// Grok 1.0.4 can omit MCP structuredContent while preserving the successful
+	// text result. The ACP session, launch token, and MCP process ancestry have
+	// already attested the caller; validate the structured identity when the
+	// client forwards it, but do not make that optional transport field a gate.
+	if len(identity) == 0 {
+		return nil
+	}
+	if stringValue(identity["sessionId"]) != sessionID {
+		return errors.New("grok agent_sessions MCP readiness tool returned the wrong session identity")
 	}
 	return nil
 }
