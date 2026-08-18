@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -84,8 +85,8 @@ func RunClaudePeer(args []string) error {
 		// argv omission: a user's Claude settings may otherwise enable bypass.
 		plan.args = append(plan.args, "--permission-mode", "default")
 	}
-	publicRoot := claudePublicConfigRoot()
-	if err := prepareClaudePeerProfile(privateRoot, publicRoot); err != nil {
+	source, err := prepareClaudePeerProfileFromCurrent(privateRoot)
+	if err != nil {
 		return err
 	}
 	if err := prepareClaudePeerAttachment(privateRoot, plan.sessionID); err != nil {
@@ -94,7 +95,7 @@ func RunClaudePeer(args []string) error {
 	if err := projectAgentServiceRecord(privateRoot); err != nil {
 		return fmt.Errorf("project host agent into Claude registry: %w", err)
 	}
-	environment := claudePeerEnvironment(os.Environ(), privateRoot, publicRoot, plan.sessionID)
+	environment := claudePeerEnvironment(os.Environ(), privateRoot, source.SecureConfig, plan.sessionID)
 	command := exec.Command(claude, append(plan.args, "--settings", `{"crossSessionInbound":"accept"}`)...) //nolint:gosec // executable and argv are direct native CLI values.
 	command.Env, command.Stdin, command.Stdout, command.Stderr = environment, os.Stdin, os.Stdout, os.Stderr
 	if err := command.Start(); err != nil {
@@ -250,22 +251,15 @@ func releaseClaudePeerProfileLock(lock *os.File) {
 	_ = lock.Close()
 }
 
-func claudePublicConfigRoot() string {
-	if root := strings.TrimSpace(os.Getenv("CLAUDE_SECURESTORAGE_CONFIG_DIR")); root != "" {
-		return root
-	}
-	return federator.DefaultClaudeConfigDir()
-}
-
-func prepareClaudePeerProfile(privateRoot, publicRoot string) error {
+func prepareClaudePeerProfile(privateRoot string, source claudeprofile.Source) error {
 	if err := os.MkdirAll(filepath.Join(privateRoot, "sessions"), 0o700); err != nil {
 		return fmt.Errorf("create private Claude registry: %w", err)
 	}
-	if err := seedClaudePeerOnboarding(privateRoot); err != nil {
+	if err := claudeprofile.Seed(privateRoot, source.StatePath); err != nil {
 		return err
 	}
 	for _, name := range []string{"settings.json", "settings.local.json", "CLAUDE.md"} {
-		body, err := os.ReadFile(filepath.Join(publicRoot, name)) //nolint:gosec // configured local Claude profile.
+		body, err := os.ReadFile(filepath.Join(source.ConfigRoot, name)) //nolint:gosec // configured local Claude profile.
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -277,7 +271,7 @@ func prepareClaudePeerProfile(privateRoot, publicRoot string) error {
 		}
 	}
 	for _, name := range []string{"plugins", "skills", "commands", "agents"} {
-		target := filepath.Join(publicRoot, name)
+		target := filepath.Join(source.ConfigRoot, name)
 		if info, err := os.Stat(target); err != nil || !info.IsDir() {
 			continue
 		}
@@ -295,66 +289,15 @@ func prepareClaudePeerProfile(privateRoot, publicRoot string) error {
 	return nil
 }
 
-// seedClaudePeerOnboarding carries only native first-run presentation state
-// into a new private registry. Authentication remains in the separately
-// configured secure-storage root, while project history and session metadata
-// remain isolated. Existing private choices always win on resume.
-//
-//nolint:gocyclo // Each profile read and validation failure is deliberately surfaced with its own context.
-func seedClaudePeerOnboarding(privateRoot string) error {
-	home, err := os.UserHomeDir()
+func prepareClaudePeerProfileFromCurrent(privateRoot string) (claudeprofile.Source, error) {
+	source, err := claudeprofile.CurrentSource()
 	if err != nil {
-		return fmt.Errorf("resolve Claude onboarding profile: %w", err)
+		return claudeprofile.Source{}, err
 	}
-	publicPath := filepath.Join(home, ".claude.json")
-	body, err := os.ReadFile(publicPath) //nolint:gosec // current user's native Claude presentation state.
-	if os.IsNotExist(err) {
-		return nil
+	if err := prepareClaudePeerProfile(privateRoot, source); err != nil {
+		return claudeprofile.Source{}, err
 	}
-	if err != nil {
-		return fmt.Errorf("read Claude onboarding profile: %w", err)
-	}
-	var public map[string]any
-	if err := json.Unmarshal(body, &public); err != nil {
-		return fmt.Errorf("parse Claude onboarding profile: %w", err)
-	}
-	if public == nil {
-		return nil
-	}
-	privatePath := filepath.Join(privateRoot, ".claude.json")
-	private := map[string]any{}
-	if body, readErr := os.ReadFile(privatePath); readErr == nil { //nolint:gosec // deterministic private profile.
-		if err := json.Unmarshal(body, &private); err != nil {
-			return fmt.Errorf("parse private Claude onboarding profile: %w", err)
-		}
-		if private == nil {
-			return errors.New("parse private Claude onboarding profile: expected a JSON object")
-		}
-	} else if !os.IsNotExist(readErr) {
-		return fmt.Errorf("read private Claude onboarding profile: %w", readErr)
-	}
-	changed := false
-	for _, key := range []string{"hasCompletedOnboarding", "lastOnboardingVersion", "theme", "installMethod"} {
-		if _, exists := private[key]; exists {
-			continue
-		}
-		if value, exists := public[key]; exists {
-			private[key] = value
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-	encoded, err := json.MarshalIndent(private, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode private Claude onboarding profile: %w", err)
-	}
-	encoded = append(encoded, '\n')
-	if err := writeLauncherFileAtomic(privatePath, encoded, 0o600); err != nil {
-		return fmt.Errorf("write private Claude onboarding profile: %w", err)
-	}
-	return nil
+	return source, nil
 }
 
 // prepareClaudePeerAttachment runs while the deterministic profile lock is

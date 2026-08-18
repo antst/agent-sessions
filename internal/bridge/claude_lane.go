@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -120,49 +121,51 @@ type claudeLaneState struct {
 	StartupID        string `json:"startupId,omitempty"`
 	// Legacy proxy fields are read only so upgrades can retire <=0.0.5 lane
 	// shims and aliases. New Claude lanes never populate them.
-	ShimPID               int                `json:"shimPid,omitempty"`
-	ShimProcStart         string             `json:"shimProcStart,omitempty"`
-	ShimSocket            string             `json:"shimSocket,omitempty"`
-	WorkerPID             int                `json:"workerPid,omitempty"`
-	WorkerProcStart       string             `json:"workerProcStart,omitempty"`
-	WorkerSocket          string             `json:"workerSocket,omitempty"`
-	WorkerConfigDir       string             `json:"workerConfigDir,omitempty"`
-	WorkerSecureConfigDir string             `json:"workerSecureConfigDir,omitempty"`
-	WorkerSessionStarted  bool               `json:"workerSessionStarted,omitempty"`
-	WorkerSocketAlias     string             `json:"workerSocketAlias,omitempty"`
-	OwnerPID              int                `json:"ownerPid,omitempty"`
-	OwnerProcStart        string             `json:"ownerProcStart,omitempty"`
-	OwnerSessionID        string             `json:"ownerSessionId,omitempty"`
-	NotifyTarget          string             `json:"notifyTarget,omitempty"`
-	Persistent            bool               `json:"persistent,omitempty"`
-	AutoArchive           bool               `json:"autoArchive,omitempty"`
-	AutoArchiveDelayMS    int64              `json:"autoArchiveDelayMs,omitempty"`
-	AutoArchiveAt         int64              `json:"autoArchiveAt,omitempty"`
-	PermissionMode        string             `json:"permissionMode"`
-	Model                 string             `json:"model,omitempty"`
-	Effort                string             `json:"effort,omitempty"`
-	MaxBudgetUSD          string             `json:"maxBudgetUsd,omitempty"`
-	Tools                 string             `json:"tools,omitempty"`
-	ToolsSet              bool               `json:"toolsSet,omitempty"`
-	AllowedTools          string             `json:"allowedTools,omitempty"`
-	AllowedToolsSet       bool               `json:"allowedToolsSet,omitempty"`
-	DisallowedTools       string             `json:"disallowedTools,omitempty"`
-	DisallowedToolsSet    bool               `json:"disallowedToolsSet,omitempty"`
-	OutputSchema          json.RawMessage    `json:"outputSchema,omitempty"`
-	Bare                  bool               `json:"bare,omitempty"`
-	Turns                 []claudeLaneTurn   `json:"turns,omitempty"`
-	TurnID                string             `json:"turnId,omitempty"`
-	LatestTurnID          string             `json:"latestTurnId,omitempty"`
-	CollectedTurnID       string             `json:"collectedTurnId,omitempty"`
-	TerminalOutcome       string             `json:"terminalOutcome,omitempty"`
-	Groups                []string           `json:"groups,omitempty"`
-	ExplicitGroups        []string           `json:"explicitGroups,omitempty"`
-	ParentSessionID       string             `json:"parentSessionId,omitempty"`
-	ParentHostID          string             `json:"parentHostId,omitempty"`
-	InheritParentGroups   bool               `json:"inheritParentGroups,omitempty"`
-	Notices               []claudeLaneNotice `json:"notices,omitempty"`
-	CreatedAt             int64              `json:"createdAt"`
-	UpdatedAt             int64              `json:"updatedAt"`
+	ShimPID                 int                `json:"shimPid,omitempty"`
+	ShimProcStart           string             `json:"shimProcStart,omitempty"`
+	ShimSocket              string             `json:"shimSocket,omitempty"`
+	WorkerPID               int                `json:"workerPid,omitempty"`
+	WorkerProcStart         string             `json:"workerProcStart,omitempty"`
+	WorkerSocket            string             `json:"workerSocket,omitempty"`
+	WorkerConfigDir         string             `json:"workerConfigDir,omitempty"`
+	WorkerSecureConfigDir   string             `json:"workerSecureConfigDir,omitempty"`
+	WorkerProfileStatePath  string             `json:"workerProfileStatePath,omitempty"`
+	WorkerProfileConfigured bool               `json:"workerProfileConfigured,omitempty"`
+	WorkerSessionStarted    bool               `json:"workerSessionStarted,omitempty"`
+	WorkerSocketAlias       string             `json:"workerSocketAlias,omitempty"`
+	OwnerPID                int                `json:"ownerPid,omitempty"`
+	OwnerProcStart          string             `json:"ownerProcStart,omitempty"`
+	OwnerSessionID          string             `json:"ownerSessionId,omitempty"`
+	NotifyTarget            string             `json:"notifyTarget,omitempty"`
+	Persistent              bool               `json:"persistent,omitempty"`
+	AutoArchive             bool               `json:"autoArchive,omitempty"`
+	AutoArchiveDelayMS      int64              `json:"autoArchiveDelayMs,omitempty"`
+	AutoArchiveAt           int64              `json:"autoArchiveAt,omitempty"`
+	PermissionMode          string             `json:"permissionMode"`
+	Model                   string             `json:"model,omitempty"`
+	Effort                  string             `json:"effort,omitempty"`
+	MaxBudgetUSD            string             `json:"maxBudgetUsd,omitempty"`
+	Tools                   string             `json:"tools,omitempty"`
+	ToolsSet                bool               `json:"toolsSet,omitempty"`
+	AllowedTools            string             `json:"allowedTools,omitempty"`
+	AllowedToolsSet         bool               `json:"allowedToolsSet,omitempty"`
+	DisallowedTools         string             `json:"disallowedTools,omitempty"`
+	DisallowedToolsSet      bool               `json:"disallowedToolsSet,omitempty"`
+	OutputSchema            json.RawMessage    `json:"outputSchema,omitempty"`
+	Bare                    bool               `json:"bare,omitempty"`
+	Turns                   []claudeLaneTurn   `json:"turns,omitempty"`
+	TurnID                  string             `json:"turnId,omitempty"`
+	LatestTurnID            string             `json:"latestTurnId,omitempty"`
+	CollectedTurnID         string             `json:"collectedTurnId,omitempty"`
+	TerminalOutcome         string             `json:"terminalOutcome,omitempty"`
+	Groups                  []string           `json:"groups,omitempty"`
+	ExplicitGroups          []string           `json:"explicitGroups,omitempty"`
+	ParentSessionID         string             `json:"parentSessionId,omitempty"`
+	ParentHostID            string             `json:"parentHostId,omitempty"`
+	InheritParentGroups     bool               `json:"inheritParentGroups,omitempty"`
+	Notices                 []claudeLaneNotice `json:"notices,omitempty"`
+	CreatedAt               int64              `json:"createdAt"`
+	UpdatedAt               int64              `json:"updatedAt"`
 }
 
 type claudeLaneNotice struct {
@@ -777,6 +780,10 @@ func startClaudeLane(o claudeLaneOptions, wait bool) (int, error) {
 		return 1, err
 	}
 	paths := resolveNativePaths()
+	profileSource, err := claudeprofile.CurrentSource()
+	if err != nil {
+		return 1, err
+	}
 	name := sanitizeName(o.name)
 	nameLock, err := lockLaneNames(paths)
 	if err != nil {
@@ -815,8 +822,9 @@ func startClaudeLane(o claudeLaneOptions, wait bool) (int, error) {
 		ControlSocket: claudeLaneControlSocket(paths, sessionID), StartupID: randomID(),
 		ManagerLog: filepath.Join(profileDataRoot(paths), "claude-lane-logs", sessionKey(sessionID)+".log"), OwnerPID: o.ownerPID,
 		WorkerConfigDir:       filepath.Join(profileDataRoot(paths), "claude-lane-profiles", sessionKey(sessionID), "config"),
-		WorkerSecureConfigDir: claudeLaneSecureStorageRoot(paths.claudeRoot),
-		OwnerProcStart:        o.ownerProcStart, OwnerSessionID: o.ownerSessionID,
+		WorkerSecureConfigDir: profileSource.SecureConfig, WorkerProfileStatePath: profileSource.StatePath,
+		WorkerProfileConfigured: true,
+		OwnerProcStart:          o.ownerProcStart, OwnerSessionID: o.ownerSessionID,
 		NotifyTarget: o.notifyTarget, Persistent: o.persistent, AutoArchive: o.autoArchive,
 		AutoArchiveDelayMS: o.autoArchiveDelay.Milliseconds(), PermissionMode: o.permissionMode,
 		Model: o.model, Effort: o.effort, MaxBudgetUSD: o.maxBudgetUSD, Tools: o.tools, ToolsSet: o.toolsSet,
@@ -1455,7 +1463,7 @@ func doctorClaudeLane() (int, error) {
 		if versionErr == nil {
 			version = strings.TrimSpace(string(body))
 		}
-		status, statusErr := inspectClaudeAuthentication(claudeBin)
+		status, statusErr := inspectClaudeLaneAuthentication(claudeBin, paths)
 		authenticated = status.LoggedIn && statusErr == nil
 		authMethod = status.AuthMethod
 		authProvider = status.APIProvider
@@ -1489,9 +1497,39 @@ type claudeAuthenticationStatus struct {
 }
 
 func inspectClaudeAuthentication(claudeBin string) (claudeAuthenticationStatus, error) {
+	return inspectClaudeAuthenticationWithEnvironment(claudeBin, nil)
+}
+
+func inspectClaudeLaneAuthentication(claudeBin string, paths nativePaths) (claudeAuthenticationStatus, error) {
+	root := profileDataRoot(paths)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return claudeAuthenticationStatus{}, fmt.Errorf("prepare Claude authentication profile root: %w", err)
+	}
+	privateRoot, err := os.MkdirTemp(root, ".claude-doctor-")
+	if err != nil {
+		return claudeAuthenticationStatus{}, fmt.Errorf("prepare Claude authentication profile: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(privateRoot) }()
+	source, err := claudeprofile.CurrentSource()
+	if err != nil {
+		return claudeAuthenticationStatus{}, err
+	}
+	if err := claudeprofile.Seed(privateRoot, source.StatePath); err != nil {
+		return claudeAuthenticationStatus{}, fmt.Errorf("seed Claude authentication profile: %w", err)
+	}
+	environment := claudeAuthenticationEnvironment(
+		os.Environ(), privateRoot, source.SecureConfig,
+	)
+	return inspectClaudeAuthenticationWithEnvironment(claudeBin, environment)
+}
+
+func inspectClaudeAuthenticationWithEnvironment(claudeBin string, environment []string) (claudeAuthenticationStatus, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, claudeBin, "auth", "status", "--json")
+	if environment != nil {
+		command.Env = environment
+	}
 	var stderr strings.Builder
 	command.Stderr = &stderr
 	body, commandErr := command.Output()
@@ -1520,6 +1558,36 @@ func inspectClaudeAuthentication(claudeBin string) (claudeAuthenticationStatus, 
 		}
 	}
 	return status, nil
+}
+
+func claudeAuthenticationEnvironment(environment []string, privateConfig, secureConfig string) []string {
+	result := make([]string, 0, len(environment)+3)
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if !claudePrivateEnvironmentBlocked(name) {
+			result = append(result, entry)
+		}
+	}
+	return append(result,
+		"CLAUDE_CONFIG_DIR="+privateConfig,
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR="+privateConfig,
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR="+secureConfig,
+	)
+}
+
+func claudePrivateEnvironmentBlocked(name string) bool {
+	switch name {
+	case "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET",
+		"CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION",
+		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "CLAUDE_CODE_HARBOR_KITE", "CLAUDE_CODE_SIMPLE",
+		"CLAUDE_CONFIG_DIR", "CLAUDE_PEER_CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR":
+		return true
+	default:
+		return false
+	}
 }
 
 func interruptClaudeLane(o claudeLaneOptions) (int, error) {
@@ -1716,10 +1784,16 @@ func (m *claudeLaneManager) startWorker() error {
 	if m.state.WorkerConfigDir == "" {
 		m.state.WorkerConfigDir = filepath.Join(profileDataRoot(m.paths), "claude-lane-profiles", sessionKey(m.state.SessionID), "config")
 	}
-	if m.state.WorkerSecureConfigDir == "" {
-		m.state.WorkerSecureConfigDir = claudeLaneSecureStorageRoot(m.paths.claudeRoot)
+	if !m.state.WorkerProfileConfigured {
+		source, sourceErr := claudeprofile.CurrentSource()
+		if sourceErr != nil {
+			return sourceErr
+		}
+		m.state.WorkerSecureConfigDir = source.SecureConfig
+		m.state.WorkerProfileStatePath = source.StatePath
+		m.state.WorkerProfileConfigured = true
 	}
-	if err := prepareClaudeLaneProfile(m.paths, m.state.WorkerConfigDir); err != nil {
+	if err := prepareClaudeLaneProfile(m.paths, m.state.WorkerConfigDir, m.state.WorkerProfileStatePath); err != nil {
 		return err
 	}
 	command := exec.Command(claudeBin, args...) //nolint:gosec // configured Claude executable and validated options.
@@ -1813,20 +1887,11 @@ func claudeLaneWorkerArgs(state claudeLaneState) []string {
 
 func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureConfig string) []string {
 	blocked := map[string]bool{
-		"CLAUDE_CODE_SESSION_ID": true, "CLAUDE_PID": true, "CLAUDE_CODE_MESSAGING_SOCKET": true,
-		"CLAUDE_CODE_ENTRYPOINT": true, "CLAUDECODE": true, "CLAUDE_CODE_CHILD_SESSION": true,
 		// A nested lane must derive its Codex owner from live ancestry and registry
 		// identity, never from the outer orchestrator's inherited thread ID.
-		"CODEX_THREAD_ID": true,
-		// Re-add this below with a controlled value. Inherited values are not
-		// authoritative for a detached lane worker.
-		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": true, "CLAUDE_CODE_HARBOR_KITE": true,
-		// Simple/bare mode deliberately suppresses Claude's native inbox.
-		"CLAUDE_CODE_SIMPLE":     true,
+		"CODEX_THREAD_ID":        true,
 		peerSessionIDEnvironment: true, "AGENT_SESSIONS_PRODUCT": true, agentRuntimeDirEnvironment: true,
 		remoteParentEnvironment: true,
-		"CLAUDE_CONFIG_DIR":     true, "CLAUDE_PEER_CLAUDE_CONFIG_DIR": true,
-		"CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
 	}
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {
@@ -1834,7 +1899,7 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 		if separator := strings.IndexByte(entry, '='); separator >= 0 {
 			name = entry[:separator]
 		}
-		if !blocked[name] {
+		if !blocked[name] && !claudePrivateEnvironmentBlocked(name) {
 			result = append(result, entry)
 		}
 	}
@@ -1851,13 +1916,12 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 	return result
 }
 
-func claudeLaneSecureStorageRoot(fallback string) string {
-	return firstEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR", fallback)
-}
-
-func prepareClaudeLaneProfile(paths nativePaths, privateRoot string) error {
+func prepareClaudeLaneProfile(paths nativePaths, privateRoot, profileStatePath string) error {
 	if err := os.MkdirAll(filepath.Join(privateRoot, "sessions"), 0700); err != nil {
 		return fmt.Errorf("create private Claude lane registry: %w", err)
+	}
+	if err := seedClaudeLaneProfile(privateRoot, profileStatePath); err != nil {
+		return fmt.Errorf("seed private Claude lane profile: %w", err)
 	}
 	for _, name := range []string{"settings.json", "settings.local.json", "CLAUDE.md"} {
 		body, err := os.ReadFile(filepath.Join(paths.claudeRoot, name)) //nolint:gosec // configured Claude profile.
@@ -1889,6 +1953,17 @@ func prepareClaudeLaneProfile(paths nativePaths, privateRoot string) error {
 		}
 	}
 	return projectClaudeLaneAgentService(privateRoot)
+}
+
+func seedClaudeLaneProfile(privateRoot, profileStatePath string) error {
+	if profileStatePath == "" {
+		source, err := claudeprofile.CurrentSource()
+		if err != nil {
+			return err
+		}
+		profileStatePath = source.StatePath
+	}
+	return claudeprofile.Seed(privateRoot, profileStatePath)
 }
 
 func projectClaudeLaneAgentService(privateRoot string) error {

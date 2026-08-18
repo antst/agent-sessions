@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -87,7 +88,7 @@ func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 	}
 }
 
-func TestPrepareClaudePeerProfileSeedsOnlyOnboardingState(t *testing.T) {
+func TestPrepareClaudePeerProfileSeedsAccountAndOnboardingState(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	publicRoot := filepath.Join(home, ".claude")
@@ -114,7 +115,9 @@ func TestPrepareClaudePeerProfileSeedsOnlyOnboardingState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(privateRoot, ".claude.json"), []byte(`{"theme":"light"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareClaudePeerProfile(privateRoot, publicRoot); err != nil {
+	if err := prepareClaudePeerProfile(privateRoot, claudeprofile.Source{
+		ConfigRoot: publicRoot, StatePath: filepath.Join(home, ".claude.json"),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	privateBody, err := os.ReadFile(filepath.Join(privateRoot, ".claude.json"))
@@ -130,8 +133,9 @@ func TestPrepareClaudePeerProfileSeedsOnlyOnboardingState(t *testing.T) {
 		private["theme"] != "light" || private["installMethod"] != "native" {
 		t.Fatalf("private onboarding state = %#v", private)
 	}
-	if _, copied := private["oauthAccount"]; copied {
-		t.Fatal("private onboarding seed copied OAuth account metadata")
+	account, _ := private["oauthAccount"].(map[string]any)
+	if account["emailAddress"] != "private@example.invalid" {
+		t.Fatalf("private profile account binding = %#v", private["oauthAccount"])
 	}
 	if _, copied := private["projects"]; copied {
 		t.Fatal("private onboarding seed copied project metadata")
@@ -156,7 +160,9 @@ func TestPrepareClaudePeerProfileRejectsNullPrivateOnboardingState(t *testing.T)
 	if err := os.WriteFile(filepath.Join(privateRoot, ".claude.json"), []byte("null\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareClaudePeerProfile(privateRoot, publicRoot); err == nil {
+	if err := prepareClaudePeerProfile(privateRoot, claudeprofile.Source{
+		ConfigRoot: publicRoot, StatePath: filepath.Join(home, ".claude.json"),
+	}); err == nil {
 		t.Fatal("null private Claude onboarding state was accepted")
 	}
 }
@@ -184,6 +190,24 @@ func TestClaudePeerEnvironmentUsesPrivateRegistryForNestedLanes(t *testing.T) {
 	}
 	if slices.Contains(environment, "CLAUDE_CODE_SIMPLE=1") || slices.Contains(environment, "CLAUDE_CODE_HARBOR_KITE=0") {
 		t.Fatalf("Claude peer environment retained inbox-suppressing values: %v", environment)
+	}
+}
+
+func TestClaudePeerEnvironmentKeepsDefaultSecureStorageSentinel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	source, err := claudeprofile.CurrentSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := claudePeerEnvironment([]string{
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong",
+	}, "/private", source.SecureConfig, "session-1")
+	if !slices.Contains(environment, "CLAUDE_SECURESTORAGE_CONFIG_DIR=") ||
+		slices.Contains(environment, "CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong") {
+		t.Fatalf("Claude peer secure-storage environment = %v", environment)
 	}
 }
 

@@ -120,6 +120,13 @@ func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
 			claudeBin := filepath.Join(root, "claude")
 			script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  --version) printf '%%s\\n' '2.1.233' ;;\n  'auth status --json') printf '%%s\\n' '%s'; exit %d ;;\n  *) exit 97 ;;\nesac\n", test.authStatus, test.authExit)
 			if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
@@ -161,6 +168,81 @@ func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
 				t.Fatalf("logged-out doctor report = %#v", report)
 			}
 		})
+	}
+}
+
+func TestClaudeLaneDoctorChecksSeededPrivateProfileAndDefaultCredentialNamespace(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{
+  "hasCompletedOnboarding": true,
+  "oauthAccount": {"accountUuid":"account-1","organizationUuid":"org-1"}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeBin := filepath.Join(root, "claude")
+	script := `#!/bin/sh
+case "$*" in
+  --version) printf '%s\n' '2.1.233' ;;
+  'auth status --json')
+    if test "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}:$CLAUDE_SECURESTORAGE_CONFIG_DIR" = 'x:' &&
+       test "$CLAUDE_CONFIG_DIR" = "$CLAUDE_PEER_CLAUDE_CONFIG_DIR" &&
+       test -z "${CLAUDECODE+x}${CLAUDE_CODE_SESSION_ID+x}${CLAUDE_PID+x}${CLAUDE_CODE_ENTRYPOINT+x}" &&
+       grep -q '"oauthAccount"' "$CLAUDE_CONFIG_DIR/.claude.json"; then
+      printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
+      exit 0
+    fi
+    printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
+    exit 1 ;;
+  *) exit 97 ;;
+esac
+`
+	if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	supervisorSocket := startAuthorizationControlServer(t, func(map[string]any) map[string]any {
+		return map[string]any{}
+	})
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "outer-session")
+	t.Setenv("CLAUDE_PID", "123")
+	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "outer")
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "isolated-registry"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = write
+	code, doctorErr := doctorClaudeLane()
+	_ = write.Close()
+	os.Stdout = original
+	body, _ := io.ReadAll(read)
+	_ = read.Close()
+	if doctorErr != nil || code != 0 {
+		t.Fatalf("private-profile doctor = code %d err %v, body %s", code, doctorErr, body)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !boolValue(report["claude_logged_in"]) || report["claude_auth_error"] != nil {
+		t.Fatalf("private-profile doctor report = %#v", report)
+	}
+	paths := resolveNativePaths()
+	matches, err := filepath.Glob(filepath.Join(profileDataRoot(paths), ".claude-doctor-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("doctor authentication profiles remain: %v, %v", matches, err)
 	}
 }
 
@@ -321,11 +403,50 @@ func TestClaudeLaneWorkerEnvDropsInheritedIdentityAndEnablesMessaging(t *testing
 	}
 }
 
-func TestClaudeLaneSecureStorageRootPrefersParentCredentialRoot(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", "/private/parent")
-	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/public/credentials")
-	if got := claudeLaneSecureStorageRoot("/private/parent"); got != "/public/credentials" {
-		t.Fatalf("secure storage root = %q", got)
+func TestClaudeLaneWorkerEnvKeepsDefaultSecureStorageSentinel(t *testing.T) {
+	environment := claudeLaneWorkerEnv([]string{
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong",
+	}, "child-session", "/private/config", "")
+	joined := strings.Join(environment, "\n")
+	if !strings.Contains(joined, "CLAUDE_SECURESTORAGE_CONFIG_DIR=") ||
+		strings.Contains(joined, "CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong") {
+		t.Fatalf("worker secure-storage environment = %#v", environment)
+	}
+}
+
+func TestPrepareClaudeLaneProfileSeedsAccountBinding(t *testing.T) {
+	root := t.TempDir()
+	publicRoot := filepath.Join(root, "public")
+	privateRoot := filepath.Join(root, "private")
+	statePath := filepath.Join(root, "source.json")
+	if err := os.MkdirAll(publicRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{
+  "hasCompletedOnboarding":true,
+  "oauthAccount":{"accountUuid":"account-1"},
+  "projects":{"secret":true}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(agentRuntimeDirEnvironment, filepath.Join(root, "no-agent"))
+	if err := prepareClaudeLaneProfile(nativePaths{claudeRoot: publicRoot}, privateRoot, statePath); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(privateRoot, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(body, &profile); err != nil {
+		t.Fatal(err)
+	}
+	account, _ := profile["oauthAccount"].(map[string]any)
+	if !boolValue(profile["hasCompletedOnboarding"]) || account["accountUuid"] != "account-1" {
+		t.Fatalf("private Claude lane profile = %#v", profile)
+	}
+	if _, copied := profile["projects"]; copied {
+		t.Fatalf("private Claude lane profile copied project state: %#v", profile)
 	}
 }
 
