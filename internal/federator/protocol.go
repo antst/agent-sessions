@@ -92,6 +92,7 @@ type Message struct {
 	Args                   []string            `json:"args,omitempty"`
 	Input                  []byte              `json:"input,omitempty"`
 	Data                   []byte              `json:"data,omitempty"`
+	ServicePeerToken       string              `json:"service_peer_token,omitempty"`
 	ExitCode               int                 `json:"exit_code,omitempty"`
 	Frame                  json.RawMessage     `json:"frame,omitempty"`
 	Error                  string              `json:"error,omitempty"`

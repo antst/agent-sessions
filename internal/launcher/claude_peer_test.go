@@ -82,6 +82,9 @@ func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 	if _, err := parseClaudePeerArgs([]string{"--resume", "not-a-uuid"}); err == nil {
 		t.Fatal("non-exact Claude resume target was accepted")
 	}
+	if _, err := parseClaudePeerArgs([]string{"--bare"}); err == nil || !strings.Contains(err.Error(), "use bare claude to opt out") {
+		t.Fatalf("messageable Claude peer accepted --bare: %v", err)
+	}
 }
 
 func TestPrepareClaudePeerProfileSeedsOnlyOnboardingState(t *testing.T) {
@@ -164,17 +167,23 @@ func TestClaudePeerEnvironmentUsesPrivateRegistryForNestedLanes(t *testing.T) {
 		"CLAUDE_CONFIG_DIR=/public-native",
 		"CLAUDE_PEER_CLAUDE_CONFIG_DIR=/public-bridge",
 		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/public-secure",
+		"CLAUDE_CODE_SIMPLE=1",
+		"CLAUDE_CODE_HARBOR_KITE=0",
 	}, "/private", "/secure", "session-1")
 	for _, expected := range []string{
 		"CLAUDE_CONFIG_DIR=/private",
 		"CLAUDE_PEER_CLAUDE_CONFIG_DIR=/private",
 		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/secure",
+		"CLAUDE_CODE_HARBOR_KITE=1",
 		"AGENT_SESSIONS_SESSION_ID=session-1",
 		"AGENT_SESSIONS_PRODUCT=claude",
 	} {
 		if !slices.Contains(environment, expected) {
 			t.Fatalf("Claude peer environment missing %q: %v", expected, environment)
 		}
+	}
+	if slices.Contains(environment, "CLAUDE_CODE_SIMPLE=1") || slices.Contains(environment, "CLAUDE_CODE_HARBOR_KITE=0") {
+		t.Fatalf("Claude peer environment retained inbox-suppressing values: %v", environment)
 	}
 }
 
@@ -272,8 +281,24 @@ func TestClaudePeerPrivateRegistryRegistersAndRestoresPreferences(t *testing.T) 
 		t.Fatal(err)
 	}
 	serviceRows := 0
+	serviceKeys := 0
 	nativeRows := 0
 	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".key") {
+			body, readErr := os.ReadFile(filepath.Join(privateRoot, "sessions", entry.Name()))
+			var key struct {
+				PeerToken string `json:"peerToken"`
+				ProcStart string `json:"procStart"`
+			}
+			if readErr != nil || json.Unmarshal(body, &key) != nil || len(key.PeerToken) != 32 || key.ProcStart == "" {
+				t.Fatalf("invalid projected host-agent key %s: %s, %v", entry.Name(), body, readErr)
+			}
+			serviceKeys++
+			continue
+		}
+		if filepath.Ext(entry.Name()) != ".json" {
+			t.Fatalf("unexpected private Claude registry artifact %s", entry.Name())
+		}
 		body, _ := os.ReadFile(filepath.Join(privateRoot, "sessions", entry.Name()))
 		var row map[string]any
 		_ = json.Unmarshal(body, &row)
@@ -283,8 +308,8 @@ func TestClaudePeerPrivateRegistryRegistersAndRestoresPreferences(t *testing.T) 
 			nativeRows++
 		}
 	}
-	if serviceRows != 1 || nativeRows != 0 {
-		t.Fatalf("private Claude registry has service=%d native=%d; entries=%v", serviceRows, nativeRows, entries)
+	if serviceRows != 1 || serviceKeys != 1 || nativeRows != 0 {
+		t.Fatalf("private Claude registry has service=%d keys=%d native=%d; entries=%v", serviceRows, serviceKeys, nativeRows, entries)
 	}
 	status, err := federator.ReadAgentStatus(runtimeDir)
 	if err != nil || status.LocalPeers != 0 {
@@ -425,6 +450,29 @@ func TestCleanupClaudePeerArtifactsRemovesPreReadyUnknownModeRow(t *testing.T) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("pre-ready artifact survived cleanup: %s (%v)", path, err)
 		}
+	}
+}
+
+func TestCleanupClaudePeerArtifactsRemovesProvisionalRowWithoutSocket(t *testing.T) {
+	root := shortClaudePeerTestRoot(t)
+	directory := filepath.Join(root, "sessions")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const pid = 1_000_000_002
+	row := claudeNativePeerRecord{
+		PID: pid, SessionID: "provisional", ProcStart: "old", Entrypoint: "cli", Kind: "interactive",
+	}
+	body, _ := json.Marshal(row)
+	record := filepath.Join(directory, strconv.Itoa(pid)+".json")
+	if err := os.WriteFile(record, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupClaudePeerNativeArtifacts(root, claudeNativePeerRecord{PID: pid}, row.ProcStart, row.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(record); !os.IsNotExist(err) {
+		t.Fatalf("provisional native row survived cleanup: %v", err)
 	}
 }
 

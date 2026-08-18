@@ -54,7 +54,7 @@ grok-peer-lane wait review-a --timeout 300 > lane.jsonl
 does not interrupt the turn. From the collected JSONL, select the `agent_message` final answer with
 the same `turn_id` as the last `turn.completed`, and report `outcome` and `exit`.
 
-The lane is a grouped peer. Use the `agent-sessions` skill and send a complete AgentFrame JSON body
+The lane is a grouped peer. Use the `agent-sessions` skill and send a complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body
 to Claude's one host-agent service; do not address a synthetic Grok row in Claude's registry. Then
 collect the resulting serialized turn with `wait`. A message during active work is durably queued
 for the next turn; it never creates a competing ACP driver.

@@ -3,6 +3,7 @@ package federator
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -224,7 +225,7 @@ func TestClaudeNativeDiscoverGetsProtocolResultThroughService(t *testing.T) {
 	}
 	outer, err := json.Marshal(map[string]any{
 		"type": "user", "from": encodeUDS(sourceSocket),
-		"message": map[string]any{"content": string(inner)},
+		"message": map[string]any{"content": claudeAgentFramePrefix + string(inner)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +247,81 @@ func TestClaudeNativeDiscoverGetsProtocolResultThroughService(t *testing.T) {
 	}
 }
 
+func TestDecodeAgentFrameBodyAcceptsPrefixedFrameInsideNativeEnvelope(t *testing.T) {
+	want := AgentFrame{Version: AgentFrameVersion, Type: "discover", MessageID: "wrapped-prefix"}
+	inner, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `<cross-session-message from="uds:/tmp/source.sock">` + "\n" +
+		claudeAgentFramePrefix + string(inner) + "\n</cross-session-message>"
+	got, err := DecodeAgentFrameBody(body)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("wrapped prefixed frame = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+func TestClaudeNativeAuthenticatedStreamClosesWithoutInlineReply(t *testing.T) {
+	root := t.TempDir()
+	sourceSocket, resultBodies := startNativeResultSink(t, filepath.Join(root, "source.sock"))
+	controlPath := filepath.Join(root, "agent.sock")
+	const token = "0123456789abcdef0123456789abcdef"
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "host-a"}, controlPath: controlPath,
+		routeRefresh: func() error { return nil }, serviceToken: token, remote: map[string]Peer{},
+		local: map[string]localPeer{
+			"host-a/source": {Peer: Peer{
+				ID: "host-a/source", HostID: "host-a", SessionID: "source", Name: "source",
+				Entrypoint: "claude", Groups: []string{"project"},
+			}, Socket: sourceSocket},
+		},
+	}
+	listener, err := net.Listen("unix", controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			agent.handleControl(conn)
+		}
+	}()
+	request := AgentFrame{Version: AgentFrameVersion, Type: "discover", MessageID: "native-stream"}
+	inner, _ := json.Marshal(request)
+	outer, _ := json.Marshal(map[string]any{
+		"type": "user", "from": encodeUDS(sourceSocket),
+		"message": map[string]any{"content": claudeAgentFramePrefix + string(inner)},
+	})
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: controlPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(append([]byte(`{"type":"auth","token":"`+token+`"}`+"\n"), append(outer, '\n')...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	inline, readErr := io.ReadAll(client)
+	_ = client.Close()
+	if readErr != nil || len(inline) != 0 {
+		t.Fatalf("Claude native stream inline response = %q, %v; want clean EOF", inline, readErr)
+	}
+	<-serverDone
+	select {
+	case body := <-resultBodies:
+		var result AgentFrameResult
+		if json.Unmarshal(body, &result) != nil || result.Type != "discover.result" || result.MessageID != "native-stream" {
+			t.Fatalf("pushed native stream result = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authenticated native stream did not push its result")
+	}
+}
+
 func TestClaudeNativeSendGetsPerTargetResultThroughService(t *testing.T) {
 	root := t.TempDir()
 	sourceSocket, resultBodies := startNativeResultSink(t, filepath.Join(root, "source.sock"))
@@ -260,7 +336,7 @@ func TestClaudeNativeSendGetsPerTargetResultThroughService(t *testing.T) {
 	request := AgentFrame{Version: AgentFrameVersion, Type: "send", MessageID: "send-native", Targets: []string{"gone"}, Content: "hello"}
 	inner, _ := json.Marshal(request)
 	outer, _ := json.Marshal(map[string]any{
-		"type": "user", "from": encodeUDS(sourceSocket), "message": map[string]any{"content": string(inner)},
+		"type": "user", "from": encodeUDS(sourceSocket), "message": map[string]any{"content": claudeAgentFramePrefix + string(inner)},
 	})
 	result, err := agent.handleNativeCarrierFrame(outer)
 	if err != nil || result.Type != "send.result" || len(result.Deliveries) != 1 || result.Deliveries[0].Status != "failed" {
@@ -274,6 +350,27 @@ func TestClaudeNativeSendGetsPerTargetResultThroughService(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("native send result was not pushed back through the service")
+	}
+}
+
+func TestClaudeNativeCarrierRejectsUnmarkedJSON(t *testing.T) {
+	root := t.TempDir()
+	sourceSocket, _ := startNativeResultSink(t, filepath.Join(root, "source.sock"))
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "host-a"}, routeRefresh: func() error { return nil },
+		local: map[string]localPeer{
+			"host-a/source": {Peer: Peer{
+				ID: "host-a/source", HostID: "host-a", SessionID: "source", Name: "source",
+				Entrypoint: "claude", Groups: []string{"project"},
+			}, Socket: sourceSocket},
+		}, remote: map[string]Peer{},
+	}
+	inner, _ := json.Marshal(AgentFrame{Version: AgentFrameVersion, Type: "discover", MessageID: "unmarked"})
+	outer, _ := json.Marshal(map[string]any{
+		"type": "user", "from": encodeUDS(sourceSocket), "message": map[string]any{"content": string(inner)},
+	})
+	if _, err := agent.handleNativeCarrierFrame(outer); err == nil || !strings.Contains(err.Error(), "frame marker") {
+		t.Fatalf("unmarked native carrier error = %v", err)
 	}
 }
 

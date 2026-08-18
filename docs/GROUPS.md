@@ -76,6 +76,11 @@ carrier. Its message body is one complete Agent Sessions protocol frame,
 including routing fields, correlation identifiers, service metadata, and the
 actual content.
 
+Claude-originated bodies begin with the literal text `AGENT_SESSIONS_FRAME `
+followed immediately by the compact JSON frame. This fixed carrier marker keeps
+Claude's `SendMessage` tool from coercing the JSON into one of Claude's own
+typed control messages; it is not a second routing protocol.
+
 Within the same-user trust boundary, the host agent maps the top-level native
 `from` address to one live registered Claude socket and replaces the inner
 source fields before routing. The native stream does not independently prove

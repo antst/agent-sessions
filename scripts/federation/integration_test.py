@@ -13,6 +13,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -158,8 +159,9 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} PEER_FEDERATOR")
     binary = os.path.abspath(sys.argv[1])
-    root = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"grouped-federation-{os.getpid()}"
-    root.mkdir(parents=True, exist_ok=False)
+    # AF_UNIX paths are capped at 103 characters on Darwin. Keep the socket
+    # hierarchy independent of that platform's long per-user TMPDIR.
+    root = pathlib.Path(tempfile.mkdtemp(prefix="gf-", dir="/tmp"))
     repo = pathlib.Path(__file__).resolve().parents[2]
     fixture = root / "grouped-peer-fixture"
     subprocess.run(

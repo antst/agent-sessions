@@ -13,8 +13,9 @@ import (
 
 const (
 	// AgentFrameVersion is the product-neutral body protocol carried by every adapter.
-	AgentFrameVersion = 1
-	maxAgentContent   = 1024 * 1024
+	AgentFrameVersion      = 1
+	maxAgentContent        = 1024 * 1024
+	claudeAgentFramePrefix = "AGENT_SESSIONS_FRAME "
 )
 
 // AgentFrame is the complete product-neutral protocol body carried by local
@@ -238,6 +239,13 @@ func (a *agent) handleNativeCarrierFrame(raw json.RawMessage) (AgentFrameResult,
 	}
 	message, _ := outer["message"].(map[string]any)
 	content, _ := message["content"].(string)
+	body, err := unwrapClaudeCarrierBody(content)
+	if err != nil {
+		return AgentFrameResult{}, err
+	}
+	if !strings.HasPrefix(body, claudeAgentFramePrefix) {
+		return AgentFrameResult{}, errors.New("claude carrier body is missing the Agent Sessions frame marker")
+	}
 	frame, err := DecodeAgentFrameBody(content)
 	if err != nil {
 		return AgentFrameResult{}, err
@@ -555,20 +563,29 @@ func wrapAgentFrameInClaudeEnvelope(socket, sessionID, name string, inner []byte
 // single Claude-native carrier. Product adapters use the result as their
 // trusted, product-neutral delivery input.
 func DecodeAgentFrameBody(content string) (AgentFrame, error) {
-	body := content
-	if strings.HasPrefix(content, "<cross-session-message") {
-		newline := strings.IndexByte(content, '\n')
-		const closeTag = "\n</cross-session-message>"
-		if newline < 0 || !strings.HasSuffix(content, closeTag) {
-			return AgentFrame{}, errors.New("invalid Claude carrier envelope")
-		}
-		body = content[newline+1 : len(content)-len(closeTag)]
+	body, err := unwrapClaudeCarrierBody(content)
+	if err != nil {
+		return AgentFrame{}, err
 	}
+	body = strings.TrimPrefix(body, claudeAgentFramePrefix)
 	var frame AgentFrame
 	if err := json.Unmarshal([]byte(body), &frame); err != nil {
 		return AgentFrame{}, fmt.Errorf("decode agent frame: %w", err)
 	}
 	return frame, nil
+}
+
+func unwrapClaudeCarrierBody(content string) (string, error) {
+	body := content
+	if strings.HasPrefix(body, "<cross-session-message") {
+		newline := strings.IndexByte(body, '\n')
+		const closeTag = "\n</cross-session-message>"
+		if newline < 0 || !strings.HasSuffix(body, closeTag) {
+			return "", errors.New("invalid Claude carrier envelope")
+		}
+		body = body[newline+1 : len(body)-len(closeTag)]
+	}
+	return body, nil
 }
 
 func escapeAgentEnvelopeJSON(body []byte) []byte {

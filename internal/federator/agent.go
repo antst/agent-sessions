@@ -3,6 +3,9 @@ package federator
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +46,8 @@ type agent struct {
 	controlPath   string
 	catalog       *sessionCatalog
 	serviceRecord string
+	serviceKey    string
+	serviceToken  string
 	routeRefresh  func() error
 
 	mu           sync.RWMutex
@@ -123,6 +128,10 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 		return err
 	}
 	defer releaseAgentInstanceLock(registryLock)
+	serviceTokenBytes := make([]byte, 16)
+	if _, err := rand.Read(serviceTokenBytes); err != nil {
+		return fmt.Errorf("create Claude service peer token: %w", err)
+	}
 	agent := &agent{
 		options: options, logger: defaultLogger(options.Logger), registryDir: registryDir,
 		controlPath: filepath.Join(options.RuntimeDir, "agent.sock"),
@@ -132,6 +141,7 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 		pendingDeliveries: map[string]chan error{},
 		localChanged:      make(chan struct{}, 1),
 		catalog:           catalog,
+		serviceToken:      hex.EncodeToString(serviceTokenBytes),
 	}
 	return agent.run(ctx)
 }
@@ -364,10 +374,22 @@ func (a *agent) publishServiceRecord() error {
 		UpdatedAt: now, StatusUpdatedAt: now,
 	}
 	path := filepath.Join(a.registryDir, strconv.Itoa(pid)+".json")
+	keyName, err := ClaudeServiceKeyName(pid, a.controlPath)
+	if err != nil {
+		return err
+	}
+	keyPath := filepath.Join(a.registryDir, keyName)
+	if err := writeJSONAtomic(keyPath, map[string]string{"peerToken": a.serviceToken, "procStart": procStart}); err != nil {
+		return err
+	}
+	// Publish the discoverable row only after its authentication capability is
+	// durable. A key without a row is inert; a row without a key is unusable.
 	if err := writeJSONAtomic(path, record); err != nil {
+		_ = os.Remove(keyPath)
 		return err
 	}
 	a.serviceRecord = path
+	a.serviceKey = keyPath
 	return nil
 }
 
@@ -377,30 +399,62 @@ func (a *agent) removeStaleServiceRecords(currentPID int) error {
 		return err
 	}
 	for _, entry := range entries {
-		pid := parsePID(entry.Name())
-		if pid <= 1 || pid == currentPID {
-			continue
-		}
-		path := filepath.Join(a.registryDir, entry.Name())
-		body, readErr := os.ReadFile(path) //nolint:gosec // exact configured registry entry.
-		if readErr != nil {
-			continue
-		}
-		var record registryRecord
-		if json.Unmarshal(body, &record) != nil || !record.AgentService {
-			continue
-		}
-		if record.PID != pid || record.Entrypoint != "agent-sessions" || record.ProcStart == "" {
-			return fmt.Errorf("invalid stale host-agent service record %s", entry.Name())
-		}
-		if processLive(pid) && processStart(pid) == record.ProcStart {
-			return fmt.Errorf("another live host-agent service record owns PID %d", pid)
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-			return errors.New("remove stale host-agent service record failed")
+		if err := a.removeStaleServiceRecord(entry.Name(), currentPID); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (a *agent) removeStaleServiceRecord(name string, currentPID int) error {
+	pid := parsePID(name)
+	if pid <= 1 || pid == currentPID {
+		return nil
+	}
+	path := filepath.Join(a.registryDir, name)
+	record, ok, err := readAgentServiceRecord(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if record.PID != pid || record.Entrypoint != "agent-sessions" || record.ProcStart == "" {
+		return fmt.Errorf("invalid stale host-agent service record %s", name)
+	}
+	if processLive(pid) && processStart(pid) == record.ProcStart {
+		return fmt.Errorf("another live host-agent service record owns PID %d", pid)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return errors.New("remove stale host-agent service record failed")
+	}
+	keyName, err := ClaudeServiceKeyName(pid, record.MessagingSocketPath)
+	if err != nil {
+		return fmt.Errorf("invalid stale host-agent service key identity %s", name)
+	}
+	if err := os.Remove(filepath.Join(a.registryDir, keyName)); err != nil && !os.IsNotExist(err) {
+		return errors.New("remove stale host-agent service key failed")
+	}
+	return nil
+}
+
+func readAgentServiceRecord(path string) (registryRecord, bool, error) {
+	body, err := os.ReadFile(path) //nolint:gosec // exact configured registry entry.
+	if os.IsNotExist(err) {
+		return registryRecord{}, false, nil
+	}
+	if err != nil {
+		return registryRecord{}, false, err
+	}
+	if !json.Valid(body) {
+		return registryRecord{}, false, nil
+	}
+	var record registryRecord
+	_ = json.Unmarshal(body, &record)
+	if !record.AgentService {
+		return registryRecord{}, false, nil
+	}
+	return record, true, nil
 }
 
 func (a *agent) removeServiceRecord() {
@@ -414,6 +468,9 @@ func (a *agent) removeServiceRecord() {
 	var record registryRecord
 	if json.Unmarshal(body, &record) == nil && record.AgentService && record.PID == os.Getpid() {
 		_ = os.Remove(a.serviceRecord)
+		if a.serviceKey != "" {
+			_ = os.Remove(a.serviceKey)
+		}
 	}
 }
 
@@ -440,22 +497,35 @@ func (a *agent) handleControl(conn net.Conn) {
 	response := Message{Type: "error", Error: "invalid agent control request"}
 	if scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
+		authenticatedNativePeer := false
+		var auth struct {
+			Type  string `json:"type"`
+			Token string `json:"token"`
+		}
+		if json.Unmarshal(line, &auth) == nil && auth.Type == "auth" {
+			if subtle.ConstantTimeCompare([]byte(auth.Token), []byte(a.serviceToken)) != 1 {
+				return
+			}
+			if !scanner.Scan() {
+				return
+			}
+			authenticatedNativePeer = true
+			line = append([]byte(nil), scanner.Bytes()...)
+		}
 		var message Message
 		if json.Unmarshal(line, &message) == nil {
 			if message.Type == "user" {
-				result, err := a.handleNativeCarrierFrame(line)
-				if err != nil {
-					response.Error = err.Error()
-				} else {
-					body, marshalErr := json.Marshal(result)
-					if marshalErr != nil {
-						response.Error = marshalErr.Error()
-					} else {
-						response = Message{Type: "agent_frame_result", Frame: body}
-					}
+				if !authenticatedNativePeer {
+					return
 				}
-				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				_ = newWireConn(conn).Send(response)
+				if _, err := a.handleNativeCarrierFrame(line); err != nil {
+					a.logger.Printf("Claude carrier request failed: %v", err)
+				}
+				// Claude's native sender writes one frame, half-closes, and treats a
+				// clean peer close as its transport acknowledgement. Results travel
+				// asynchronously to the registered sender socket.
+				for scanner.Scan() {
+				}
 				return
 			}
 			if message.Type == "lane_exec" {
@@ -482,7 +552,7 @@ func (a *agent) handleControl(conn net.Conn) {
 				if err != nil {
 					response.Error = "host agent service record is unavailable"
 				} else {
-					response = Message{Type: "service_record", Version: GroupProtocolVersion, Data: body}
+					response = Message{Type: "service_record", Version: GroupProtocolVersion, Data: body, ServicePeerToken: a.serviceToken}
 				}
 			case "hosts":
 				if hosts, ok := a.remoteHostSnapshot(); ok {

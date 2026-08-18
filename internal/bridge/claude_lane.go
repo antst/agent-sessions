@@ -1820,8 +1820,10 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 		"CODEX_THREAD_ID": true,
 		// Re-add this below with a controlled value. Inherited values are not
 		// authoritative for a detached lane worker.
-		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": true,
-		peerSessionIDEnvironment:               true, "AGENT_SESSIONS_PRODUCT": true, agentRuntimeDirEnvironment: true,
+		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": true, "CLAUDE_CODE_HARBOR_KITE": true,
+		// Simple/bare mode deliberately suppresses Claude's native inbox.
+		"CLAUDE_CODE_SIMPLE":     true,
+		peerSessionIDEnvironment: true, "AGENT_SESSIONS_PRODUCT": true, agentRuntimeDirEnvironment: true,
 		remoteParentEnvironment: true,
 		"CLAUDE_CONFIG_DIR":     true, "CLAUDE_PEER_CLAUDE_CONFIG_DIR": true,
 		"CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
@@ -1838,7 +1840,7 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 	}
 	// SendMessage, ListAgents, and native inbound peer turns are exposed only
 	// when Agent Teams is enabled. The SDK worker is the lane's sole peer.
-	result = append(result, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+	result = append(result, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1", "CLAUDE_CODE_HARBOR_KITE=1")
 	result = append(result, peerSessionIDEnvironment+"="+sessionID, "AGENT_SESSIONS_PRODUCT=claude")
 	result = append(result, agentRuntimeDirEnvironment+"="+laneAgentRuntimeDir())
 	result = append(result,
@@ -1893,27 +1895,71 @@ func projectClaudeLaneAgentService(privateRoot string) error {
 	if !laneAgentConfigured() {
 		return nil
 	}
-	body, err := federator.AgentServiceRecord(laneAgentRuntimeDir())
+	projection, err := federator.AgentService(laneAgentRuntimeDir())
 	if err != nil {
 		return fmt.Errorf("read host agent service record: %w", err)
 	}
 	var service map[string]any
-	if json.Unmarshal(body, &service) != nil || !boolValue(service["agentService"]) || intValue(service["pid"]) <= 1 {
+	if json.Unmarshal(projection.Record, &service) != nil || !boolValue(service["agentService"]) ||
+		intValue(service["pid"]) != projection.PID {
 		return errors.New("host agent returned an invalid Claude service record")
 	}
 	directory := filepath.Join(privateRoot, "sessions")
 	currentName := strconv.Itoa(intValue(service["pid"])) + ".json"
-	entries, _ := os.ReadDir(directory)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	staleServiceKeys := map[string]bool{}
 	for _, entry := range entries {
-		if entry.Name() == currentName || filepath.Ext(entry.Name()) != ".json" {
-			continue
+		keyName, stale, err := removeClaudeLaneProjectedServiceRecord(directory, entry, currentName)
+		if err != nil {
+			return err
 		}
-		path := filepath.Join(directory, entry.Name())
-		if boolValue(readJSONMap(path)["agentService"]) {
-			_ = os.Remove(path)
+		if stale {
+			staleServiceKeys[keyName] = true
 		}
 	}
+	for _, entry := range entries {
+		if staleServiceKeys[entry.Name()] {
+			if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	if err := writeJSONAtomic(filepath.Join(directory, projection.KeyName), map[string]string{
+		"peerToken": projection.PeerToken, "procStart": projection.ProcStart,
+	}); err != nil {
+		return err
+	}
 	return writeJSONAtomic(filepath.Join(directory, currentName), service)
+}
+
+func removeClaudeLaneProjectedServiceRecord(directory string, entry os.DirEntry, currentName string) (string, bool, error) {
+	if entry.Name() == currentName || filepath.Ext(entry.Name()) != ".json" {
+		return "", false, nil
+	}
+	path := filepath.Join(directory, entry.Name())
+	body, err := os.ReadFile(path) //nolint:gosec // private Claude session registry entry.
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	var old map[string]any
+	_ = json.Unmarshal(body, &old)
+	if !boolValue(old["agentService"]) {
+		return "", false, nil
+	}
+	keyName, err := federator.ClaudeServiceKeyName(intValue(old["pid"]), stringValue(old["messagingSocketPath"]))
+	if err != nil {
+		return "", false, errors.New("invalid stale host-agent service projection")
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return "", false, err
+	}
+	return keyName, true, nil
 }
 
 // captureWorkerPeer verifies Claude's native SDK registry row and records its

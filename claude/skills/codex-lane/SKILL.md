@@ -163,7 +163,7 @@ Exit codes: `0` completed, `124` timed out, `130` interrupted, `1` everything el
 
 ### 3. Talk to a running lane
 
-Use the `agent-sessions` skill and send a complete AgentFrame JSON body to the one host-agent
+Use the `agent-sessions` skill and send a complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the one host-agent
 service. Address the lane by its current visible name or exact host-qualified identity. A message
 wakes an idle lane or steers a turn already in flight. Message delivery does not return the result;
 a turn started by an inbound message is collected by a later `wait`.

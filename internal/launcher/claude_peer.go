@@ -124,6 +124,8 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 	for index := 0; index < len(forwarded); index++ {
 		argument := forwarded[index]
 		switch {
+		case argument == "--bare":
+			return claudePeerPlan{}, usageError("claude-peer requires native messaging; use bare claude to opt out")
 		case argument == "--session-id":
 			if index+1 >= len(forwarded) {
 				return claudePeerPlan{}, usageError("--session-id requires a value")
@@ -403,11 +405,23 @@ func prepareClaudePeerAttachment(privateRoot, sessionID string) error {
 }
 
 func claudePeerEnvironment(environment []string, privateRoot, publicRoot, sessionID string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if name != "CLAUDE_CODE_SIMPLE" && name != "CLAUDE_CODE_HARBOR_KITE" {
+			filtered = append(filtered, entry)
+		}
+	}
+	environment = filtered
 	values := map[string]string{
 		"CLAUDE_CONFIG_DIR": privateRoot, "CLAUDE_PEER_CLAUDE_CONFIG_DIR": privateRoot,
 		"CLAUDE_SECURESTORAGE_CONFIG_DIR":      publicRoot,
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", agentRuntimeDirEnv: agentRuntimeDir(),
-		peerSessionIDEnv: sessionID, peerProductEnv: "claude",
+		"CLAUDE_CODE_HARBOR_KITE": "1",
+		peerSessionIDEnv:          sessionID, peerProductEnv: "claude",
 	}
 	for key, value := range values {
 		environment = replaceLaneEnvironment(environment, key, value)
@@ -657,8 +671,14 @@ func cleanupClaudePeerNativeArtifacts(
 
 func parseClaudeNativePeerRecordForCleanup(body []byte, pid int, sessionID string) (claudeNativePeerRecord, error) {
 	var row claudeNativePeerRecord
-	if json.Unmarshal(body, &row) != nil || row.PID != pid || row.SessionID != sessionID || row.ProcStart == "" ||
-		row.MessagingSocketPath == "" || filepath.Base(row.MessagingSocketPath) != strconv.Itoa(pid)+".sock" {
+	if json.Unmarshal(body, &row) != nil || row.PID != pid || row.SessionID != sessionID || row.ProcStart == "" {
+		return claudeNativePeerRecord{}, errors.New("invalid native Claude cleanup record")
+	}
+	// Native Claude publishes its PID row before its messaging inbox. A child
+	// may exit in that provisional state, so cleanup must accept an absent
+	// socket while still requiring exact PID/session/start identity. Once a
+	// socket is present it remains strictly PID-bound.
+	if row.MessagingSocketPath != "" && filepath.Base(row.MessagingSocketPath) != strconv.Itoa(pid)+".sock" {
 		return claudeNativePeerRecord{}, errors.New("invalid native Claude cleanup record")
 	}
 	return row, nil
@@ -695,34 +715,87 @@ func removeClaudePeerKeySidecars(directory string, pid int) error {
 }
 
 func projectAgentServiceRecord(privateRoot string) error {
-	body, err := federator.AgentServiceRecord(agentRuntimeDir())
+	projection, err := federator.AgentService(agentRuntimeDir())
 	if err != nil {
 		return err
 	}
 	var record struct {
-		PID          int  `json:"pid"`
-		AgentService bool `json:"agentService"`
+		PID          int    `json:"pid"`
+		ProcStart    string `json:"procStart"`
+		AgentService bool   `json:"agentService"`
 	}
-	if json.Unmarshal(body, &record) != nil || !record.AgentService || record.PID <= 1 {
+	if json.Unmarshal(projection.Record, &record) != nil || !record.AgentService || record.PID != projection.PID ||
+		record.ProcStart != projection.ProcStart {
 		return errors.New("host agent returned an invalid Claude service record")
 	}
 	directory := filepath.Join(privateRoot, "sessions")
-	entries, _ := os.ReadDir(directory)
+	if err := removeProjectedAgentServiceRecords(directory, record.PID); err != nil {
+		return err
+	}
+	keyBody, err := json.Marshal(map[string]string{"peerToken": projection.PeerToken, "procStart": projection.ProcStart})
+	if err != nil {
+		return err
+	}
+	if err := writeLauncherFileAtomic(filepath.Join(directory, projection.KeyName), append(keyBody, '\n'), 0o600); err != nil {
+		return err
+	}
+	return writeLauncherFileAtomic(filepath.Join(directory, strconv.Itoa(record.PID)+".json"), projection.Record, 0o644)
+}
+
+func removeProjectedAgentServiceRecords(directory string, currentPID int) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	staleServiceKeys := map[string]bool{}
 	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) != ".json" || entry.Name() == strconv.Itoa(record.PID)+".json" {
-			continue
+		keyName, stale, err := removeProjectedAgentServiceRecord(directory, entry, currentPID)
+		if err != nil {
+			return err
 		}
-		old, readErr := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // private directory entry.
-		if readErr == nil {
-			var marker struct {
-				AgentService bool `json:"agentService"`
-			}
-			if json.Unmarshal(old, &marker) == nil && marker.AgentService {
-				_ = os.Remove(filepath.Join(directory, entry.Name()))
+		if stale {
+			staleServiceKeys[keyName] = true
+		}
+	}
+	for _, entry := range entries {
+		if staleServiceKeys[entry.Name()] {
+			if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
+				return err
 			}
 		}
 	}
-	return writeLauncherFileAtomic(filepath.Join(directory, strconv.Itoa(record.PID)+".json"), body, 0o644)
+	return nil
+}
+
+func removeProjectedAgentServiceRecord(directory string, entry os.DirEntry, currentPID int) (string, bool, error) {
+	if filepath.Ext(entry.Name()) != ".json" || entry.Name() == strconv.Itoa(currentPID)+".json" {
+		return "", false, nil
+	}
+	path := filepath.Join(directory, entry.Name())
+	body, err := os.ReadFile(path) //nolint:gosec // private directory entry.
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	var marker struct {
+		PID                 int    `json:"pid"`
+		MessagingSocketPath string `json:"messagingSocketPath"`
+		AgentService        bool   `json:"agentService"`
+	}
+	_ = json.Unmarshal(body, &marker)
+	if !marker.AgentService {
+		return "", false, nil
+	}
+	keyName, err := federator.ClaudeServiceKeyName(marker.PID, marker.MessagingSocketPath)
+	if err != nil {
+		return "", false, errors.New("invalid stale host-agent service projection")
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return "", false, err
+	}
+	return keyName, true, nil
 }
 
 func defaultClaudePeerName(explicit string, row claudeNativePeerRecord) string {

@@ -177,16 +177,44 @@ func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.
 		}
 	}
 	registryEntries, err := os.ReadDir(filepath.Join(configDir, "sessions"))
-	if err != nil || len(registryEntries) != 1 {
-		t.Fatalf("Claude registry entries = %d, %v; want the single host agent", len(registryEntries), err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	registryBody, err := os.ReadFile(filepath.Join(configDir, "sessions", registryEntries[0].Name()))
+	var registryName, keyName string
+	for _, entry := range registryEntries {
+		switch {
+		case strings.HasSuffix(entry.Name(), ".json"):
+			if registryName != "" {
+				t.Fatalf("multiple Claude registry rows: %v", registryEntries)
+			}
+			registryName = entry.Name()
+		case strings.HasSuffix(entry.Name(), ".key"):
+			if keyName != "" {
+				t.Fatalf("multiple Claude service keys: %v", registryEntries)
+			}
+			keyName = entry.Name()
+		default:
+			t.Fatalf("unexpected Claude registry artifact %s", entry.Name())
+		}
+	}
+	if registryName == "" || keyName == "" {
+		t.Fatalf("Claude registry entries = %v; want one host-agent row and its key", registryEntries)
+	}
+	registryBody, err := os.ReadFile(filepath.Join(configDir, "sessions", registryName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var registry map[string]any
 	if json.Unmarshal(registryBody, &registry) != nil || !boolValue(registry["agentService"]) {
-		t.Fatalf("sole Claude registry row is not the host agent: %s", registryBody)
+		t.Fatalf("Claude registry row is not the host agent: %s", registryBody)
+	}
+	keyBody, err := os.ReadFile(filepath.Join(configDir, "sessions", keyName))
+	var key struct {
+		PeerToken string `json:"peerToken"`
+		ProcStart string `json:"procStart"`
+	}
+	if err != nil || json.Unmarshal(keyBody, &key) != nil || len(key.PeerToken) != 32 || key.ProcStart == "" {
+		t.Fatalf("invalid projected host-agent key %s: %s, %v", keyName, keyBody, err)
 	}
 }
 

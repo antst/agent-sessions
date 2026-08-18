@@ -35,8 +35,10 @@ sender to belong to the named group and snapshots current members at admission.
 The host agent publishes one service record and Unix socket. A Claude-native
 `user` frame sent to that socket is only an outer carrier. The complete
 `AgentFrame` JSON is encoded in the message body after the normal strict Claude
-envelope. The agent derives the source from the outer `from` socket and rejects
-a conflicting inner source.
+envelope. Claude-originated requests prefix that compact JSON with the literal
+text `AGENT_SESSIONS_FRAME ` so Claude does not coerce the frame into its own
+typed control-message schema. The agent derives the source from the outer
+`from` socket and rejects a conflicting inner source.
 
 Deliveries use a new native outer frame from the service endpoint. Origin
 identity, group, message ID, and content are carried in the inner frame. No

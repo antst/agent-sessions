@@ -22,7 +22,7 @@ parent’s other groups; use repeatable `--group NAME` for child-specific groups
 Omitted resume flags restore the durable choice.
 
 Discover and message the child through the `agent-sessions` skill: send the
-complete AgentFrame JSON body to the single host-agent service projected into
+complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the single host-agent service projected into
 this private Claude profile. Claude lanes are not projected as separate native
 Claude registry rows.
 

@@ -1,6 +1,7 @@
 package federator
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -246,14 +247,35 @@ func TestPublishServiceRecordRemovesOnlyAttestedStaleServiceRows(t *testing.T) {
 	agent := &agent{
 		options:     AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: root},
 		registryDir: registryDir, controlPath: filepath.Join(root, "agent.sock"),
+		serviceToken: strings.Repeat("a", 32),
 	}
 	if err := agent.publishServiceRecord(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(agent.removeServiceRecord)
 	entries, err := os.ReadDir(registryDir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != strconv.Itoa(os.Getpid())+".json" {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("service registry = %v, %v", entries, err)
+	}
+	rowName := strconv.Itoa(os.Getpid()) + ".json"
+	keyName, keyErr := ClaudeServiceKeyName(os.Getpid(), agent.controlPath)
+	if keyErr != nil || entries[0].Name() != keyName && entries[1].Name() != keyName ||
+		entries[0].Name() != rowName && entries[1].Name() != rowName {
+		t.Fatalf("authenticated service projection = %v, %v", entries, keyErr)
+	}
+	keyPath := filepath.Join(registryDir, keyName)
+	keyBody, readErr := os.ReadFile(keyPath)
+	keyInfo, statErr := os.Stat(keyPath)
+	var key struct {
+		PeerToken string `json:"peerToken"`
+		ProcStart string `json:"procStart"`
+	}
+	if readErr != nil || statErr != nil || json.Unmarshal(keyBody, &key) != nil ||
+		key.PeerToken != agent.serviceToken || key.ProcStart != processStart(os.Getpid()) {
+		t.Fatalf("service key = %s, read=%v stat=%v", keyBody, readErr, statErr)
+	}
+	if keyInfo.Mode().Perm() != 0600 {
+		t.Fatalf("service key mode = %v, want 0600", keyInfo.Mode())
 	}
 	if err := writeJSONAtomic(filepath.Join(registryDir, "1000000000.json"), registryRecord{
 		PID: stalePID, AgentService: true,
@@ -262,6 +284,34 @@ func TestPublishServiceRecordRemovesOnlyAttestedStaleServiceRows(t *testing.T) {
 	}
 	if err := agent.removeStaleServiceRecords(os.Getpid()); err == nil {
 		t.Fatal("malformed service marker was silently removed")
+	}
+}
+
+func TestAgentControlAcceptsOnlyExactNativeServiceAuth(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "Host A"},
+		local:   map[string]localPeer{}, remote: map[string]Peer{}, remoteHosts: map[string]Host{},
+		serviceToken: token,
+	}
+	request := func(authToken string) (Message, error) {
+		server, client := net.Pipe()
+		go agent.handleControl(server)
+		defer func() { _ = client.Close() }()
+		_ = client.SetDeadline(time.Now().Add(time.Second))
+		if _, err := client.Write([]byte(`{"type":"auth","token":"` + authToken + `"}` + "\n" + `{"type":"status"}` + "\n")); err != nil {
+			return Message{}, err
+		}
+		var response Message
+		err := json.NewDecoder(client).Decode(&response)
+		return response, err
+	}
+	response, err := request(token)
+	if err != nil || response.Type != "status" || len(response.Frame) == 0 {
+		t.Fatalf("authenticated native control response = %+v, %v", response, err)
+	}
+	if response, err = request("ffffffffffffffffffffffffffffffff"); err == nil {
+		t.Fatalf("wrong native auth unexpectedly returned %+v", response)
 	}
 }
 

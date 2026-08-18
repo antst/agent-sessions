@@ -299,11 +299,13 @@ func TestClaudeLaneWorkerEnvDropsInheritedIdentityAndEnablesMessaging(t *testing
 	environment := claudeLaneWorkerEnv([]string{
 		"PATH=/bin", "CLAUDE_PID=123", "CLAUDE_CODE_SESSION_ID=wrong",
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0", "CODEX_THREAD_ID=outer", "KEEP=yes",
+		"CLAUDE_CODE_SIMPLE=1", "CLAUDE_CODE_HARBOR_KITE=0",
 		"CLAUDE_PEER_CLAUDE_CONFIG_DIR=/outer/config",
 	}, "child-session", "/private/config", "/public/config")
 	joined := strings.Join(environment, "\n")
 	for _, expected := range []string{
 		"PATH=/bin", "KEEP=yes", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1",
+		"CLAUDE_CODE_HARBOR_KITE=1",
 		"AGENT_SESSIONS_SESSION_ID=child-session", "AGENT_SESSIONS_PRODUCT=claude",
 		"AGENT_SESSIONS_AGENT_RUNTIME_DIR=" + laneAgentRuntimeDir(),
 		"CLAUDE_CONFIG_DIR=/private/config", "CLAUDE_PEER_CLAUDE_CONFIG_DIR=/private/config",
@@ -313,7 +315,8 @@ func TestClaudeLaneWorkerEnvDropsInheritedIdentityAndEnablesMessaging(t *testing
 			t.Fatalf("worker environment = %#v; missing %s", environment, expected)
 		}
 	}
-	if strings.Contains(joined, "CODEX_THREAD_ID=outer") || strings.Contains(joined, "CLAUDE_PEER_CLAUDE_CONFIG_DIR=/outer/config") {
+	if strings.Contains(joined, "CODEX_THREAD_ID=outer") || strings.Contains(joined, "CLAUDE_PEER_CLAUDE_CONFIG_DIR=/outer/config") ||
+		strings.Contains(joined, "CLAUDE_CODE_SIMPLE=1") || strings.Contains(joined, "CLAUDE_CODE_HARBOR_KITE=0") {
 		t.Fatalf("worker environment = %#v", environment)
 	}
 }

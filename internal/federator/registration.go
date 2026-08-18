@@ -1,28 +1,71 @@
 package federator
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
+// AgentServiceProjection is the one native Claude service row plus its
+// socket-bound authentication sidecar. Private Claude profiles copy both;
+// they do not create another router identity.
+type AgentServiceProjection struct {
+	Record    []byte
+	PID       int
+	ProcStart string
+	KeyName   string
+	PeerToken string
+}
+
+// AgentService projects the host agent into one Claude-native registry.
+func AgentService(runtimeDir string) (AgentServiceProjection, error) {
+	response, err := requestAgentControl(runtimeDir, Message{Type: "service_record", Version: GroupProtocolVersion})
+	if err != nil {
+		return AgentServiceProjection{}, err
+	}
+	if len(response.Data) == 0 || response.ServicePeerToken == "" {
+		return AgentServiceProjection{}, errors.New("agent returned no authenticated service record")
+	}
+	var record registryRecord
+	if json.Unmarshal(response.Data, &record) != nil || !record.AgentService || record.PID <= 1 ||
+		record.ProcStart == "" || record.MessagingSocketPath == "" {
+		return AgentServiceProjection{}, errors.New("agent returned an invalid authenticated service record")
+	}
+	keyName, err := ClaudeServiceKeyName(record.PID, record.MessagingSocketPath)
+	if err != nil {
+		return AgentServiceProjection{}, err
+	}
+	return AgentServiceProjection{
+		Record: append([]byte(nil), response.Data...), PID: record.PID, ProcStart: record.ProcStart,
+		KeyName: keyName, PeerToken: response.ServicePeerToken,
+	}, nil
+}
+
 // AgentServiceRecord returns the one Claude-native service record published
 // by the host agent. Private Claude profiles project this same record; they do
 // not create per-peer router identities.
 func AgentServiceRecord(runtimeDir string) ([]byte, error) {
-	response, err := requestAgentControl(runtimeDir, Message{Type: "service_record", Version: GroupProtocolVersion})
+	projection, err := AgentService(runtimeDir)
 	if err != nil {
 		return nil, err
 	}
-	if len(response.Data) == 0 {
-		return nil, errors.New("agent returned no service record")
+	return projection.Record, nil
+}
+
+// ClaudeServiceKeyName returns Claude's socket-bound native peer-key filename.
+func ClaudeServiceKeyName(pid int, socket string) (string, error) {
+	if pid <= 1 || !filepath.IsAbs(socket) {
+		return "", errors.New("invalid Claude service key identity")
 	}
-	return append([]byte(nil), response.Data...), nil
+	digest := sha256.Sum256([]byte(filepath.Clean(socket)))
+	return strconv.Itoa(pid) + "." + fmt.Sprintf("%x", digest[:]) + ".key", nil
 }
 
 // ProcessStart returns the platform process-start identity used by live peer
