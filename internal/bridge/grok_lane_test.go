@@ -243,6 +243,51 @@ func TestGrokLaneInfrastructureFailuresUseFailedTerminalTaxonomy(t *testing.T) {
 	}
 }
 
+func TestGrokLaneStartupShutdownKeepsFirstSignalOrArchiveCause(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
+	paths := resolveNativePaths()
+	for _, test := range []struct {
+		name   string
+		reason string
+	}{
+		{name: "signal", reason: "manager signalled: hangup"},
+		{name: "archive", reason: "explicit archive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			turn := newGrokLaneTurn("work", 0)
+			startupDone := make(chan struct{})
+			close(startupDone)
+			manager := &grokLaneManager{
+				paths: paths,
+				state: grokLaneState{
+					SessionID: randomID(), Status: "starting", RuntimeDir: paths.runtimeDir,
+					Turns: []grokLaneTurn{turn},
+				},
+				done: make(chan struct{}), startupDone: startupDone,
+				persistOverride: func(grokLaneState) error { return nil },
+			}
+			manager.beginShutdown(test.reason, true)
+
+			// Reproduce the startup goroutine reaching its generic cleanup before
+			// the original signal/archive goroutine gets cleanupOnce.
+			manager.shutdown("manager startup failed", false)
+			manager.shutdown(test.reason, true)
+
+			got := manager.state.Turns[0]
+			if got.Status != "interrupted" || got.Outcome != "interrupted" || got.Exit != 130 || got.Error != test.reason {
+				t.Fatalf("first shutdown cause %q taxonomy = %+v", test.reason, got)
+			}
+			if err := manager.closingError("grok lane manager is closing before publication"); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("private closing diagnostic = %v; want cause %q", err, test.reason)
+			}
+		})
+	}
+}
+
 func TestGrokLaneFinalOwnershipPersistFailureRemainsReconcileable(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))

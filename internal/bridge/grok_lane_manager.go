@@ -21,32 +21,35 @@ import (
 )
 
 type grokLaneManager struct {
-	mu              sync.Mutex
-	noticeMu        sync.Mutex
-	paths           nativePaths
-	state           grokLaneState
-	launchToken     string
-	hostPaths       grokHostPaths
-	listener        net.Listener
-	controlWG       sync.WaitGroup
-	controlClosed   bool
-	lifecycleLock   *os.File
-	launchLease     *os.File
-	diagnostics     *grokDiagnosticSink
-	toolShellPath   string
-	toolRealShell   string
-	worker          *grokManagedProcess
-	client          *grokACPClient
-	peer            *daemon
-	activeAnswer    strings.Builder
-	activeTurnID    string
-	interruptedID   string
-	turnNotify      chan struct{}
-	done            chan struct{}
-	startupDone     chan struct{}
-	closing         bool
-	cleanupOnce     sync.Once
-	persistOverride func(grokLaneState) error
+	mu                sync.Mutex
+	noticeMu          sync.Mutex
+	paths             nativePaths
+	state             grokLaneState
+	launchToken       string
+	hostPaths         grokHostPaths
+	listener          net.Listener
+	controlWG         sync.WaitGroup
+	controlClosed     bool
+	lifecycleLock     *os.File
+	launchLease       *os.File
+	diagnostics       *grokDiagnosticSink
+	toolShellPath     string
+	toolRealShell     string
+	worker            *grokManagedProcess
+	client            *grokACPClient
+	peer              *daemon
+	activeAnswer      strings.Builder
+	activeTurnID      string
+	interruptedID     string
+	turnNotify        chan struct{}
+	done              chan struct{}
+	startupDone       chan struct{}
+	closing           bool
+	shutdownReason    string
+	shutdownInterrupt bool
+	startupPhase      string
+	cleanupOnce       sync.Once
+	persistOverride   func(grokLaneState) error
 }
 
 func runGrokLaneManager(argv []string) int {
@@ -66,18 +69,23 @@ func runGrokLaneManager(argv []string) int {
 		paths: paths, state: state,
 		launchToken: strings.TrimSpace(os.Getenv(grokLaunchTokenEnv)),
 		turnNotify:  make(chan struct{}, 1), done: make(chan struct{}), startupDone: make(chan struct{}),
+		startupPhase: "initializing",
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	go func() {
 		select {
-		case <-signals:
-			manager.shutdown("manager signalled", true)
+		case caught := <-signals:
+			reason := "manager signalled: " + caught.String()
+			manager.beginShutdown(reason, true)
+			manager.logShutdownTrigger("signal=" + caught.String())
+			manager.shutdown(reason, true)
 		case <-manager.done:
 		}
 	}()
 	if err := manager.start(); err != nil {
+		manager.beginShutdown("manager startup failed", false)
 		// The manager's stderr is a private 0600 per-lane log, never the calling
 		// model/TUI stream. Retain the actionable startup cause there while the
 		// public launcher continues to return a bounded generic failure.
@@ -108,6 +116,61 @@ func (m *grokLaneManager) closingState() bool {
 	return m.closing
 }
 
+func (m *grokLaneManager) setStartupPhase(phase string) {
+	m.mu.Lock()
+	m.startupPhase = phase
+	m.mu.Unlock()
+}
+
+// beginShutdown records the first accepted shutdown cause before waiting for
+// startup. The startup goroutine can then report an error and race cleanup
+// without replacing a signal/archive terminal disposition with a generic
+// infrastructure failure.
+func (m *grokLaneManager) beginShutdown(reason string, interrupt bool) <-chan struct{} {
+	m.mu.Lock()
+	startupDone := m.beginShutdownLocked(reason, interrupt)
+	m.mu.Unlock()
+	return startupDone
+}
+
+func (m *grokLaneManager) beginShutdownLocked(reason string, interrupt bool) <-chan struct{} {
+	if m.shutdownReason == "" {
+		m.shutdownReason, m.shutdownInterrupt = reason, interrupt
+	}
+	m.closing = true
+	return m.startupDone
+}
+
+func (m *grokLaneManager) recordedShutdown(fallbackReason string, fallbackInterrupt bool) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.shutdownReason == "" {
+		m.shutdownReason, m.shutdownInterrupt = fallbackReason, fallbackInterrupt
+	}
+	return m.shutdownReason, m.shutdownInterrupt
+}
+
+func (m *grokLaneManager) closingError(message string) error {
+	m.mu.Lock()
+	reason := m.shutdownReason
+	m.mu.Unlock()
+	if reason == "" {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %s", message, reason)
+}
+
+func (m *grokLaneManager) logShutdownTrigger(trigger string) {
+	m.mu.Lock()
+	phase, startupID, sessionID := m.startupPhase, m.state.StartupID, m.state.SessionID
+	m.mu.Unlock()
+	if phase == "" {
+		phase = "unknown"
+	}
+	fmt.Fprintf(os.Stderr, "grok-lane-manager: shutdown trigger %s pid=%d session=%s startup=%s phase=%s\n",
+		trigger, os.Getpid(), sessionID, startupID, phase)
+}
+
 //nolint:gocyclo // Startup is one ownership transaction: state, socket, launch record, ACP, MCP, and publication.
 func (m *grokLaneManager) start() error {
 	if m.startupDone != nil {
@@ -116,6 +179,7 @@ func (m *grokLaneManager) start() error {
 	if !validGrokLaunchToken(m.launchToken) || subtle.ConstantTimeCompare([]byte(m.state.LaunchTokenHash), []byte(grokTokenHash(m.launchToken))) != 1 {
 		return errors.New("grok lane launch capability is unavailable")
 	}
+	m.setStartupPhase("lifecycle")
 	lifecycle, err := lockLaneLifecycle(m.paths, "grok-"+m.state.SessionID)
 	if err != nil {
 		return err
@@ -161,7 +225,7 @@ func (m *grokLaneManager) start() error {
 	if m.closing {
 		m.mu.Unlock()
 		_ = listener.Close()
-		return errors.New("grok lane manager is closing during startup")
+		return m.closingError("grok lane manager is closing during startup")
 	}
 	m.listener = listener
 	m.state.ManagerPID, m.state.ManagerProcStart = os.Getpid(), managerProcStart
@@ -171,6 +235,7 @@ func (m *grokLaneManager) start() error {
 		return err
 	}
 	go m.acceptLoop(listener)
+	m.setStartupPhase("worker")
 	lease, err := acquireGrokLaunchLease(m.paths, m.state.SessionID)
 	if err != nil {
 		return err
@@ -193,12 +258,14 @@ func (m *grokLaneManager) start() error {
 	if err := writeJSONAtomic(grokLaunchRecordPath(m.paths, m.state.SessionID), record); err != nil {
 		return fmt.Errorf("persist Grok lane worker ownership: %w", err)
 	}
+	m.setStartupPhase("acp")
 	ctx, cancel := context.WithTimeout(context.Background(), grokACPStartupTimeout)
 	err = m.initializeACP(ctx)
 	cancel()
 	if err != nil {
 		return err
 	}
+	m.setStartupPhase("mcp")
 	ctx, cancel = context.WithTimeout(context.Background(), grokLaneMCPReadyTimeout)
 	err = m.waitForAgentSessionsMCP(ctx)
 	cancel()
@@ -206,7 +273,7 @@ func (m *grokLaneManager) start() error {
 		return err
 	}
 	if m.closingState() {
-		return errors.New("grok lane manager is closing before publication")
+		return m.closingError("grok lane manager is closing before publication")
 	}
 	m.mu.Lock()
 	persistent, ownerPID, ownerProcStart := m.state.Persistent, m.state.OwnerPID, m.state.OwnerProcStart
@@ -225,6 +292,7 @@ func (m *grokLaneManager) start() error {
 	if laneAgentConfigured() {
 		peerOptions["agent-runtime-dir"] = laneAgentRuntimeDir()
 	}
+	m.setStartupPhase("publication")
 	peer := newDaemon(peerOptions)
 	if err := peer.start(); err != nil {
 		return fmt.Errorf("publish Grok lane peer: %w", err)
@@ -233,7 +301,7 @@ func (m *grokLaneManager) start() error {
 	if m.closing {
 		m.mu.Unlock()
 		peer.shutdown()
-		return errors.New("grok lane manager is closing before publication")
+		return m.closingError("grok lane manager is closing before publication")
 	}
 	m.peer = peer
 	m.state.MessagingSocket = peer.stableSocket
@@ -247,6 +315,7 @@ func (m *grokLaneManager) start() error {
 		peer.shutdown()
 		return err
 	}
+	m.setStartupPhase("published")
 	go m.turnLoop()
 	go m.maintenanceLoop()
 	m.signalTurn()
@@ -287,7 +356,7 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	if m.closing {
 		m.mu.Unlock()
 		stopGrokManagedProcess(worker, 2*time.Second)
-		return errors.New("grok lane manager is closing during worker startup")
+		return m.closingError("grok lane manager is closing during worker startup")
 	}
 	m.worker = worker
 	m.state.WorkerPID, m.state.WorkerProcStart = worker.cmd.Process.Pid, worker.procStart
@@ -317,7 +386,7 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	if m.closing {
 		m.mu.Unlock()
 		client.close()
-		return errors.New("grok lane manager is closing during ACP startup")
+		return m.closingError("grok lane manager is closing during ACP startup")
 	}
 	m.client = client
 	m.mu.Unlock()
@@ -655,8 +724,13 @@ func (m *grokLaneManager) handleControlConn(conn net.Conn) {
 		return
 	}
 	response, err := m.handleControl(request)
+	archiveAccepted := err == nil && stringValue(request["action"]) == "archive"
+	if archiveAccepted {
+		m.beginShutdown("explicit archive", true)
+		m.logShutdownTrigger("control=archive")
+	}
 	writeClaudeLaneControlResponse(conn, response, err)
-	if err == nil && stringValue(request["action"]) == "archive" {
+	if archiveAccepted {
 		go m.shutdown("explicit archive", true)
 	}
 }
@@ -932,8 +1006,11 @@ func (m *grokLaneManager) maintenanceLoop() {
 			ownerDead := !m.state.Persistent && cleanupProcessIdentityStatus(m.state.OwnerPID, m.state.OwnerProcStart).Status == processIdentityStale
 			autoArchive := m.state.AutoArchiveAt > 0 && time.Now().UnixMilli() >= m.state.AutoArchiveAt
 			pendingNotices := grokLaneHasUnsentNotices(m.state)
-			if ownerDead || autoArchive {
-				m.closing = true
+			switch {
+			case ownerDead:
+				m.beginShutdownLocked("lifecycle owner exited", true)
+			case autoArchive:
+				m.beginShutdownLocked("auto-archive delay elapsed", true)
 			}
 			m.mu.Unlock()
 			if ownerDead {
@@ -1182,14 +1259,12 @@ func (m *grokLaneManager) persistLocked() error {
 
 //nolint:gocyclo // Shutdown quiesces admission, terminalizes debt, stops the process session, and proves cleanup.
 func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
-	m.mu.Lock()
-	m.closing = true
-	startupDone := m.startupDone
-	m.mu.Unlock()
+	startupDone := m.beginShutdown(reason, interrupt)
 	if startupDone != nil {
 		<-startupDone
 	}
 	m.cleanupOnce.Do(func() {
+		reason, interrupt = m.recordedShutdown(reason, interrupt)
 		// Withdraw and drain peer admission while the manager control socket is
 		// still available. Every user frame whose transport write succeeded can
 		// therefore reach queueWake and acquire a durable terminal disposition.
