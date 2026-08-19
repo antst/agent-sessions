@@ -84,6 +84,7 @@ scripts/package-release darwin-arm64 "$VERSION" bin/darwin-arm64 dist
 | S-05 | PID reuse, process-start mismatch, stale lock/socket/record, duplicate name, and provisional cleanup regressions pass. |
 | S-06 | Repository and install plans contain no obsolete canonical-host or binary names. |
 | S-07 | Gates leave the checkout clean except for the tested patch; user files and stashes are unchanged. |
+| S-08 | Launcher drift runs against both the oldest supported and current accepted Codex CLI versions, records each exact version, and passes every discovered non-interactive command through byte-for-byte. An upstream Codex version change invalidates later live evidence until this cell is rerun. |
 
 ## Installation and upgrade (`I/U`)
 

@@ -315,7 +315,7 @@ func classifyCodexMode(args []string) (codexMode, int, error) {
 			return modeResume, index, nil
 		case "fork":
 			return modeFork, index, nil
-		case "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "cloud", "app", "exec-server", "features", "help":
+		case "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "cloud", "app", "exec-server", "features", "help", "migrate-rollouts":
 			return modePassthrough, index, nil
 		default:
 			return modeFresh, index, nil

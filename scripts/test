@@ -391,6 +391,8 @@ run_launcher_case noninteractive-exec exec -C "$launcher_cwd/two" -- echo ok
 assert_launcher_argv "$launcher_record" exec -C "$launcher_cwd/two" -- echo ok
 run_launcher_case noninteractive-app app
 assert_launcher_argv "$launcher_record" app
+run_launcher_case noninteractive-migrate-rollouts migrate-rollouts
+assert_launcher_argv "$launcher_record" migrate-rollouts
 run_launcher_case global-cd-before-subcommand -C "$launcher_cwd/two" completion bash
 assert_launcher_argv "$launcher_record" -C "$launcher_cwd/two" completion bash
 run_launcher_case informational-invalid-cd -C /definitely/not/here --version
