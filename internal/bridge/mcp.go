@@ -587,7 +587,13 @@ func attestStdioMCPCaller(params json.RawMessage) (string, error) {
 	threadID := stringValue(meta["threadId"])
 	sessionID := stringValue(turnMeta["session_id"])
 	turnThreadID := stringValue(turnMeta["thread_id"])
-	if !validSessionID(threadID) || sessionID != threadID || turnThreadID != threadID {
+	// Codex owns two distinct identifiers: the exact App Server thread and a
+	// session-family id restored from rollout metadata. The thread is the peer
+	// capability; session_id is required host context but can differ on a
+	// resumed/migrated root or a child thread. Never let that family id borrow
+	// another thread's Agent Sessions authority.
+	if !validSessionID(threadID) || !validSessionID(sessionID) ||
+		!validSessionID(turnThreadID) || turnThreadID != threadID {
 		return "", errors.New("claude_peer is inactive outside an attested peer session")
 	}
 	return threadID, nil

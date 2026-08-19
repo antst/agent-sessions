@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 type hookInput struct {
 	Event          string `json:"hook_event_name"`
 	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
 	Cwd            string `json:"cwd"`
 	PermissionMode string `json:"permission_mode"`
 }
@@ -60,7 +63,17 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 	if input.Event != "SessionStart" && input.Event != "UserPromptSubmit" && input.Event != "Stop" {
 		return nil, nil
 	}
+	threadID, err := codexHookThreadID(paths, input)
+	if err != nil {
+		return nil, err
+	}
+	// Codex hook session_id is a session-family identifier. The rollout's
+	// session_meta record binds that family to the exact App Server thread that
+	// owns peer authority. They are normally equal for a fresh root but may
+	// differ after resume, migration, or in an internal child thread.
+	input.SessionID = threadID
 	var owner *interactiveOwnerRecord
+	lateAttached := false
 	if input.Event == "SessionStart" {
 		owner = liveAuthorizedInteractiveOwnerRecord(paths, input.SessionID)
 		if owner == nil && !activeCodexLaneThreadNative(paths, input.SessionID) {
@@ -77,6 +90,13 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 		}
 	} else {
 		owner = liveInteractiveOwnerRecord(paths, input.SessionID)
+		if input.Event == "UserPromptSubmit" && owner == nil {
+			var err error
+			owner, lateAttached, err = attachPreparedOwnerFromUserPrompt(paths, input.SessionID)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	if !authorizedPeerThreadNative(paths, input.SessionID) {
 		// Codex installs hooks daemon-wide. An ordinary thread is a silent
@@ -102,15 +122,26 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 		}
 		updateHookShim(state, "busy")
 		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID, hookAdditionalContextLimit)
-		if err != nil || (len(messages) == 0 && !queued) {
+		if err != nil {
 			return map[string]any{}, err
 		}
-		context := formatNativeHookMessages(messages)
-		if len(messages) == 0 && queued {
-			context = nativeInboxOverflowNotice()
+		contexts := make([]string, 0, 2)
+		if lateAttached {
+			// Recover a prepared owner that remained pending after SessionStart.
+			// The first prompt is the next hook that can prove the TUI exec and
+			// return the session-scoped MCP instructions.
+			contexts = append(contexts, hookStartupContext(state))
+		}
+		if len(messages) > 0 {
+			contexts = append(contexts, formatNativeHookMessages(messages))
+		} else if queued {
+			contexts = append(contexts, nativeInboxOverflowNotice())
+		}
+		if len(contexts) == 0 {
+			return map[string]any{}, nil
 		}
 		return map[string]any{"hookSpecificOutput": map[string]any{
-			"hookEventName": "UserPromptSubmit", "additionalContext": context,
+			"hookEventName": "UserPromptSubmit", "additionalContext": strings.Join(contexts, "\n\n"),
 		}}, nil
 	case "Stop":
 		state, err := ensureHookShim(paths, input, owner)
@@ -130,6 +161,140 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 	default:
 		return nil, nil
 	}
+}
+
+// preparedOwnerProcessArgs is a test seam around the PID/start-attested argv
+// reader. Production calls always recheck the immutable process identity before
+// and after reading argv.
+var preparedOwnerProcessArgs = readPeerProcessArgs
+
+// attachPreparedOwnerFromUserPrompt recovers the Codex 0.148 pending-owner case
+// without granting pending owners general MCP authority. A prompt promotes only
+// the exact live launcher process after it has exec'd the managed `--remote
+// unix:// resume <thread>` attachment. A failed exec, stale/reused PID, unrelated
+// daemon thread, or merely published prepared owner remains pending.
+func attachPreparedOwnerFromUserPrompt(paths nativePaths, threadID string) (*interactiveOwnerRecord, bool, error) {
+	record := liveAuthorizedInteractiveOwnerRecord(paths, threadID)
+	if record == nil || !record.Pending || !record.Prepared {
+		return nil, false, nil
+	}
+	args, err := preparedOwnerProcessArgs(record.OwnerPID, record.OwnerProcStart)
+	if err != nil {
+		return nil, false, fmt.Errorf("read prepared Codex owner argv: %w", err)
+	}
+	if !managedCodexResumeArgv(args, threadID) {
+		return nil, false, nil
+	}
+	attached, err := markPreparedLaunchAttached(paths, threadID)
+	if err != nil {
+		return nil, false, err
+	}
+	return attached, attached != nil && !attached.Pending, nil
+}
+
+func managedCodexResumeArgv(args []string, threadID string) bool {
+	if !validSessionID(threadID) {
+		return false
+	}
+	for index := 0; index+3 < len(args); index++ {
+		if args[index] == "--" {
+			return false
+		}
+		if args[index] == "--remote" && args[index+1] == "unix://" &&
+			args[index+2] == "resume" && args[index+3] == threadID {
+			return true
+		}
+	}
+	return false
+}
+
+// codexHookThreadID resolves the exact thread represented by a Codex hook.
+// Modern Codex hooks carry a materialized local rollout path. Its first
+// session_meta record is the host-owned binding between the hook's session
+// family and the exact thread; neither model arguments nor a family id alone
+// can grant another thread's peer capability.
+func codexHookThreadID(paths nativePaths, input hookInput) (string, error) {
+	sessionID := strings.TrimSpace(input.SessionID)
+	if !validSessionID(sessionID) {
+		return "", errors.New("codex hook input did not include a valid session_id")
+	}
+	transcriptPath := strings.TrimSpace(input.TranscriptPath)
+	if transcriptPath == "" {
+		// Compatibility with Codex versions that predate transcript_path. Their
+		// hook session_id was the exact root thread id.
+		return sessionID, nil
+	}
+
+	resolvedTranscript, err := confinedCodexHookTranscript(paths, transcriptPath)
+	if err != nil {
+		return "", err
+	}
+	threadID, metadataSessionID, err := readCodexHookSessionMeta(resolvedTranscript)
+	if err != nil {
+		return "", err
+	}
+	if metadataSessionID == "" {
+		metadataSessionID = threadID
+	}
+	if !validSessionID(threadID) || !validSessionID(metadataSessionID) || metadataSessionID != sessionID {
+		return "", errors.New("codex hook transcript identity does not match the hook")
+	}
+	return threadID, nil
+}
+
+func confinedCodexHookTranscript(paths nativePaths, transcriptPath string) (string, error) {
+	resolvedTranscript, err := filepath.EvalSymlinks(transcriptPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex hook transcript: %w", err)
+	}
+	resolvedSessions, err := filepath.EvalSymlinks(filepath.Join(paths.codexHome, "sessions"))
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex sessions directory: %w", err)
+	}
+	relative, err := filepath.Rel(resolvedSessions, resolvedTranscript)
+	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("codex hook transcript is outside the configured session store")
+	}
+	return resolvedTranscript, nil
+}
+
+func readCodexHookSessionMeta(transcriptPath string) (string, string, error) {
+	file, err := os.Open(transcriptPath) //nolint:gosec // caller supplies the canonical path confined beneath CODEX_HOME/sessions.
+	if err != nil {
+		return "", "", fmt.Errorf("open Codex hook transcript: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", "", errors.New("codex hook transcript is not a regular file")
+	}
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), maxFrameBytes)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var record struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID        string `json:"id"`
+				SessionID string `json:"session_id"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &record) != nil || record.Type != "session_meta" {
+			return "", "", errors.New("codex hook transcript does not start with session metadata")
+		}
+		threadID := strings.TrimSpace(record.Payload.ID)
+		metadataSessionID := strings.TrimSpace(record.Payload.SessionID)
+		return threadID, metadataSessionID, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", fmt.Errorf("read Codex hook transcript metadata: %w", err)
+	}
+	return "", "", errors.New("codex hook transcript is empty")
 }
 
 func ensureHookSupervisorCurrent(paths nativePaths) error {

@@ -142,8 +142,11 @@ roots are publishable in a distinct prepared-pending phase only while that exact
 live. A fresh root is delete-on-abort until publication commits; after commit, definite wrapper death
 unpublishes it while preserving the still-loaded zero-turn transcript and its exact stale owner as a
 one-use takeover proof. The replacement resume consumes that proof without archive/unarchive.
-SessionStart promotes either
-kind to attached. No cwd/time heuristic participates. The native launcher consumes only its peer-name
+SessionStart promotes either kind to attached. If a prepared owner is still pending at the first
+`UserPromptSubmit`, recovery additionally requires the hook's local rollout `session_meta` to bind
+its session-family id to the exact prepared thread, and requires the live PID/process-start argv to
+contain the managed `--remote unix:// resume <thread>` tuple. No cwd/time heuristic participates.
+The native launcher consumes only its peer-name
 option and explicit resume selector, resolves the selector to one UUID, then prefixes the unchanged
 remaining Codex argv with the managed remote/resume target and a missing cwd. This preserves relative
 option order and cannot splice into a variadic option's values. Explicit `--yolo` is additionally
@@ -291,8 +294,10 @@ client handles bridge-owned `claude_peer` tools directly only after the App Serv
 matches an authorized peer thread; other dynamic MCP names continue through `mcpServer/tool/call`.
 For stdio MCP calls, the MCP process must be an exact child (PID plus process-start identity) of the
 App Server process corroborated over its Unix socket by the supervisor. Codex's host-owned
-`_meta.threadId`, turn `session_id`, and turn `thread_id` must then all be present and identical, and
-that exact thread must carry an active owner/lane capability.
+`_meta.threadId`, turn `session_id`, and turn `thread_id` must all be present and valid. The outer
+and turn `thread_id` values must be identical, and that exact thread must carry an active owner/lane
+capability. Codex may restore a distinct session-family `session_id`; it is context only and cannot
+borrow another thread's capability.
 The model-supplied `session_id` may only corroborate the attested caller; it never grants authority.
 Even `list_peers` passes this gate. Because Codex activates plugin MCP inventory daemon-wide,
 ordinary threads can see the tool names, but calls return a bounded inactive result before roster,
