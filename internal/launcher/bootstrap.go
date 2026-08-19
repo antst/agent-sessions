@@ -85,9 +85,11 @@ func ensureCodexHome() error {
 		}
 		codexHome = filepath.Join(home, ".codex")
 	}
+	// #nosec G703 -- CODEX_HOME is the caller-selected profile root, not an untrusted filename joined beneath another authority.
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return fmt.Errorf("create Codex home: %w", err)
 	}
+	// #nosec G703 -- inspect the same caller-selected profile root after creating it.
 	info, err := os.Stat(codexHome)
 	if err != nil || !info.IsDir() {
 		return fmt.Errorf("codex home is not a directory: %s", codexHome)
