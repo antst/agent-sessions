@@ -97,7 +97,11 @@ func TestUserPromptLateAttachesPreparedCodex0148OwnerWithDistinctSessionFamily(t
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	codexHome := filepath.Join(root, "codex")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
 	threadID := "00000000-0000-0000-0000-000000000148"
 	sessionID := "00000000-0000-0000-0000-000000000147"
 	paths := resolveNativePaths()

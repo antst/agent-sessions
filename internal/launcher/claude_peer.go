@@ -61,9 +61,9 @@ func RunClaudePeer(args []string) error {
 	if plan.informational {
 		return Exec(claude, plan.args, nil)
 	}
-	status, err := federator.ReadAgentStatus(agentRuntimeDir())
+	status, err := claudePeerAgentStatus()
 	if err != nil {
-		return fmt.Errorf("host agent is required for claude-peer; bare claude remains available: %w", err)
+		return err
 	}
 	privateRoot := claudePeerPrivateRoot(status.HostID, plan.sessionID)
 	profileLock, err := acquireClaudePeerProfileLock(privateRoot)
@@ -102,6 +102,17 @@ func RunClaudePeer(args []string) error {
 		return err
 	}
 	return superviseClaudePeer(command, privateRoot, plan, resolved.Preference.AlwaysApprove)
+}
+
+func claudePeerAgentStatus() (federator.AgentStatus, error) {
+	if err := ensureCodexHome(); err != nil {
+		return federator.AgentStatus{}, fmt.Errorf("prepare Agent Sessions profile: %w", err)
+	}
+	status, err := federator.ReadAgentStatus(agentRuntimeDir())
+	if err != nil {
+		return federator.AgentStatus{}, fmt.Errorf("host agent is required for claude-peer; bare claude remains available: %w", err)
+	}
+	return status, nil
 }
 
 //nolint:gocyclo // CLI parsing preserves native Claude flags while extracting the shared peer layer.

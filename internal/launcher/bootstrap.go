@@ -46,6 +46,13 @@ func EnsureRuntime() (Runtime, error) {
 	if err := ensureRuntimeEnvironment(); err != nil {
 		return Runtime{}, err
 	}
+	// Profile identity canonicalizes CODEX_HOME through filesystem aliases.
+	// Establish a fresh home before asking the runtime for that identity so its
+	// key cannot change when Codex creates the directory later (notably across
+	// Darwin's /tmp -> /private/tmp alias).
+	if err := ensureCodexHome(); err != nil {
+		return Runtime{}, err
+	}
 	profileRoot, versionMarker, err := runtimeProfile(selected)
 	if err != nil {
 		return Runtime{}, err
@@ -67,6 +74,25 @@ func EnsureRuntime() (Runtime, error) {
 		return Runtime{}, err
 	}
 	return selected, nil
+}
+
+func ensureCodexHome() error {
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		return fmt.Errorf("create Codex home: %w", err)
+	}
+	info, err := os.Stat(codexHome)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("codex home is not a directory: %s", codexHome)
+	}
+	return nil
 }
 
 func runtimeProfile(selected Runtime) (string, string, error) {
