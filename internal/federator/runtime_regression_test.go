@@ -27,6 +27,40 @@ func TestAgentInstanceLockRejectsSecondOwner(t *testing.T) {
 	}
 }
 
+func TestAgentStatusPublishesExactClaudeProfileEnvironment(t *testing.T) {
+	root := t.TempDir()
+	configRoot := filepath.Join(root, "claude")
+	rawConfig := filepath.Join(root, "x", "..", "claude")
+	if err := os.MkdirAll(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", rawConfig)
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	runtimeDir := filepath.Join(root, "runtime")
+	go func() {
+		done <- RunAgent(ctx, AgentOptions{
+			HostID: "profile-test", ClaudeConfigDir: configRoot,
+			RuntimeDir: runtimeDir, StateDir: filepath.Join(root, "state"), Logger: discardLogger(),
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("agent: %v", err)
+		}
+	})
+	if !waitFor(func() bool {
+		status, err := ReadAgentStatus(runtimeDir)
+		return err == nil && status.ClaudeConfigEnvSet && status.ClaudeConfigEnvValue == rawConfig &&
+			status.ClaudeSecureEnvSet && status.ClaudeSecureConfig == ""
+	}, 2*time.Second) {
+		status, err := ReadAgentStatus(runtimeDir)
+		t.Fatalf("agent profile status = %+v, %v", status, err)
+	}
+}
+
 func TestWireSendHasBoundedWriteDeadline(t *testing.T) {
 	server, client := net.Pipe()
 	defer func() { _ = server.Close() }()

@@ -52,7 +52,8 @@ Claude's SDK worker is the lane's sole discoverable identity and owns the addres
 `lane.ready`. It receives native peer messages directly. The manager observes peer-origin user and
 result frames and records them as lane turns; it does not proxy the message or rewrite the worker's
 registry row. Workers pass `--settings '{"crossSessionInbound":"accept"}'` because a headless lane
-has no approval UI for native inbound messages. Their outbound messages still author under the
+has no approval UI for native inbound messages. The override is process-local and never rewrites
+the host profile's default. Their outbound messages still author under the
 lane's real permission class. A corroborated bypass owner is inherited only when the caller did not
 explicitly select another permission mode.
 

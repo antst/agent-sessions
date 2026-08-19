@@ -13,18 +13,23 @@ import (
 
 // AgentStatus is the live status returned by an agent's local control socket.
 type AgentStatus struct {
-	RuntimeVersion  string   `json:"runtime_version"`
-	ProtocolVersion int      `json:"protocol_version"`
-	HostID          string   `json:"host_id"`
-	HostName        string   `json:"host_name"`
-	Hub             string   `json:"hub"`
-	Connected       bool     `json:"connected"`
-	LocalPeers      int      `json:"local_peers"`
-	RemotePeers     int      `json:"remote_peers"`
-	RemoteHosts     int      `json:"remote_hosts"`
-	Capabilities    []string `json:"capabilities,omitempty"`
-	RegistryDir     string   `json:"registry_dir"`
-	RuntimeDir      string   `json:"runtime_dir"`
+	RuntimeVersion       string   `json:"runtime_version"`
+	ProtocolVersion      int      `json:"protocol_version"`
+	HostID               string   `json:"host_id"`
+	HostName             string   `json:"host_name"`
+	Hub                  string   `json:"hub"`
+	Connected            bool     `json:"connected"`
+	LocalPeers           int      `json:"local_peers"`
+	RemotePeers          int      `json:"remote_peers"`
+	RemoteHosts          int      `json:"remote_hosts"`
+	Capabilities         []string `json:"capabilities,omitempty"`
+	RegistryDir          string   `json:"registry_dir"`
+	RuntimeDir           string   `json:"runtime_dir"`
+	StateDir             string   `json:"state_dir"`
+	ClaudeConfigEnvSet   bool     `json:"claude_config_env_set"`
+	ClaudeConfigEnvValue string   `json:"claude_config_env_value,omitempty"`
+	ClaudeSecureConfig   string   `json:"claude_secure_config,omitempty"`
+	ClaudeSecureEnvSet   bool     `json:"claude_secure_env_set"`
 }
 
 // ResolvePreferencesRequest applies explicit launch overrides or restores the
@@ -171,6 +176,16 @@ func ReadAgentStatus(runtimeDir string) (AgentStatus, error) {
 
 // ResolveSessionPreferences updates or restores one durable session catalog entry.
 func ResolveSessionPreferences(runtimeDir string, request ResolvePreferencesRequest) (ResolvedPreferences, error) {
+	return requestSessionPreferences(runtimeDir, "session_preferences", request)
+}
+
+// PreviewSessionPreferences applies the same validation and inheritance rules
+// without adopting or modifying the durable catalog row.
+func PreviewSessionPreferences(runtimeDir string, request ResolvePreferencesRequest) (ResolvedPreferences, error) {
+	return requestSessionPreferences(runtimeDir, "session_preferences_preview", request)
+}
+
+func requestSessionPreferences(runtimeDir, requestType string, request ResolvePreferencesRequest) (ResolvedPreferences, error) {
 	if runtimeDir == "" {
 		runtimeDir = DefaultRuntimeDir()
 	}
@@ -180,8 +195,22 @@ func ResolveSessionPreferences(runtimeDir string, request ResolvePreferencesRequ
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	if err := newWireConn(conn).Send(Message{
-		Type: "session_preferences", Version: GroupProtocolVersion,
+	if err := newWireConn(conn).Send(preferenceMessage(requestType, request)); err != nil {
+		return ResolvedPreferences{}, err
+	}
+	var response Message
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return ResolvedPreferences{}, err
+	}
+	if response.Type != requestType || response.Preference == nil {
+		return ResolvedPreferences{}, fmt.Errorf("resolve session preferences failed: %s", response.Error)
+	}
+	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
+}
+
+func preferenceMessage(requestType string, request ResolvePreferencesRequest) Message {
+	return Message{
+		Type: requestType, Version: GroupProtocolVersion,
 		SessionID: request.SessionID, Product: request.Product,
 		SessionKind: request.Kind,
 		Groups:      request.Groups, GroupsSpecified: request.GroupsSpecified,
@@ -189,17 +218,7 @@ func ResolveSessionPreferences(runtimeDir string, request ResolvePreferencesRequ
 		ParentHostID: request.ParentHostID, ParentGroups: request.ParentGroups,
 		InheritParentGroups: request.InheritParentGroups, InheritGroupsSpecified: request.InheritGroupsSpecified,
 		AlwaysApprove: request.AlwaysApprove, AlwaysApproveSpecified: request.AlwaysApproveSpecified,
-	}); err != nil {
-		return ResolvedPreferences{}, err
 	}
-	var response Message
-	if err := json.NewDecoder(conn).Decode(&response); err != nil {
-		return ResolvedPreferences{}, err
-	}
-	if response.Type != "session_preferences" || response.Preference == nil {
-		return ResolvedPreferences{}, fmt.Errorf("resolve session preferences failed: %s", response.Error)
-	}
-	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
 }
 
 // RouteAgentFrame sends one product-neutral request through the local host agent.

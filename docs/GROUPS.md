@@ -67,8 +67,8 @@ adapter continues to own its native thread/process/ACP semantics.
 
 The host agent publishes exactly one additional Claude-compatible service
 session in Claude's native session registry. Consequently, `claude agents
---json` shows ordinary local Claude sessions plus one Agent Sessions service
-session.
+--json` shows ordinary and managed local Claude sessions plus one Agent
+Sessions service session.
 
 Participating Claude sessions send messages to that service through Claude's
 native communication protocol. The native Claude envelope is only the outer
@@ -97,6 +97,11 @@ and never upgrades the outer permission class.
 The service session is not a group member and is never a broadcast recipient.
 There is one service session per host/profile, not one service session per
 group or remote peer.
+
+Installation does not change the profile's default `crossSessionInbound`
+policy. Each managed Claude peer or lane supplies `accept` only as a launch
+override; ordinary Claude keeps the operator's `reject`, `prompt`, or `accept`
+choice unchanged.
 
 ## Minimal protocol operations
 

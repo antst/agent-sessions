@@ -162,7 +162,8 @@ claude-peer-lane archive review-api
 
 Claude headless workers cannot answer approval prompts. The default is `--permission-mode dontAsk`.
 Workers explicitly set `crossSessionInbound` to `accept` so native peer messages do not wait for a
-headless approval UI.
+headless approval UI. This is a per-launch override; Agent Sessions installation and lifecycle
+commands never change the operator's profile default.
 If a corroborated owner is already in bypass mode and no explicit mode was supplied, its Claude
 lane inherits `bypassPermissions` so its outbound native messages remain within the owner's
 permission class.

@@ -121,51 +121,54 @@ type claudeLaneState struct {
 	StartupID        string `json:"startupId,omitempty"`
 	// Legacy proxy fields are read only so upgrades can retire <=0.0.5 lane
 	// shims and aliases. New Claude lanes never populate them.
-	ShimPID                 int                `json:"shimPid,omitempty"`
-	ShimProcStart           string             `json:"shimProcStart,omitempty"`
-	ShimSocket              string             `json:"shimSocket,omitempty"`
-	WorkerPID               int                `json:"workerPid,omitempty"`
-	WorkerProcStart         string             `json:"workerProcStart,omitempty"`
-	WorkerSocket            string             `json:"workerSocket,omitempty"`
-	WorkerConfigDir         string             `json:"workerConfigDir,omitempty"`
-	WorkerSecureConfigDir   string             `json:"workerSecureConfigDir,omitempty"`
-	WorkerProfileStatePath  string             `json:"workerProfileStatePath,omitempty"`
-	WorkerProfileConfigured bool               `json:"workerProfileConfigured,omitempty"`
-	WorkerSessionStarted    bool               `json:"workerSessionStarted,omitempty"`
-	WorkerSocketAlias       string             `json:"workerSocketAlias,omitempty"`
-	OwnerPID                int                `json:"ownerPid,omitempty"`
-	OwnerProcStart          string             `json:"ownerProcStart,omitempty"`
-	OwnerSessionID          string             `json:"ownerSessionId,omitempty"`
-	NotifyTarget            string             `json:"notifyTarget,omitempty"`
-	Persistent              bool               `json:"persistent,omitempty"`
-	AutoArchive             bool               `json:"autoArchive,omitempty"`
-	AutoArchiveDelayMS      int64              `json:"autoArchiveDelayMs,omitempty"`
-	AutoArchiveAt           int64              `json:"autoArchiveAt,omitempty"`
-	PermissionMode          string             `json:"permissionMode"`
-	Model                   string             `json:"model,omitempty"`
-	Effort                  string             `json:"effort,omitempty"`
-	MaxBudgetUSD            string             `json:"maxBudgetUsd,omitempty"`
-	Tools                   string             `json:"tools,omitempty"`
-	ToolsSet                bool               `json:"toolsSet,omitempty"`
-	AllowedTools            string             `json:"allowedTools,omitempty"`
-	AllowedToolsSet         bool               `json:"allowedToolsSet,omitempty"`
-	DisallowedTools         string             `json:"disallowedTools,omitempty"`
-	DisallowedToolsSet      bool               `json:"disallowedToolsSet,omitempty"`
-	OutputSchema            json.RawMessage    `json:"outputSchema,omitempty"`
-	Bare                    bool               `json:"bare,omitempty"`
-	Turns                   []claudeLaneTurn   `json:"turns,omitempty"`
-	TurnID                  string             `json:"turnId,omitempty"`
-	LatestTurnID            string             `json:"latestTurnId,omitempty"`
-	CollectedTurnID         string             `json:"collectedTurnId,omitempty"`
-	TerminalOutcome         string             `json:"terminalOutcome,omitempty"`
-	Groups                  []string           `json:"groups,omitempty"`
-	ExplicitGroups          []string           `json:"explicitGroups,omitempty"`
-	ParentSessionID         string             `json:"parentSessionId,omitempty"`
-	ParentHostID            string             `json:"parentHostId,omitempty"`
-	InheritParentGroups     bool               `json:"inheritParentGroups,omitempty"`
-	Notices                 []claudeLaneNotice `json:"notices,omitempty"`
-	CreatedAt               int64              `json:"createdAt"`
-	UpdatedAt               int64              `json:"updatedAt"`
+	ShimPID               int                `json:"shimPid,omitempty"`
+	ShimProcStart         string             `json:"shimProcStart,omitempty"`
+	ShimSocket            string             `json:"shimSocket,omitempty"`
+	WorkerPID             int                `json:"workerPid,omitempty"`
+	WorkerProcStart       string             `json:"workerProcStart,omitempty"`
+	WorkerSocket          string             `json:"workerSocket,omitempty"`
+	WorkerConfigDir       string             `json:"workerConfigDir,omitempty"`
+	WorkerSecureConfigDir string             `json:"workerSecureConfigDir,omitempty"`
+	WorkerSharedProfile   bool               `json:"workerSharedProfile,omitempty"`
+	WorkerConfigEnvSet    bool               `json:"workerConfigEnvSet,omitempty"`
+	WorkerConfigEnvValue  string             `json:"workerConfigEnvValue,omitempty"`
+	WorkerSecureEnvSet    bool               `json:"workerSecureEnvSet,omitempty"`
+	WorkerSessionStarted  bool               `json:"workerSessionStarted,omitempty"`
+	WorkerSocketAlias     string             `json:"workerSocketAlias,omitempty"`
+	OwnerPID              int                `json:"ownerPid,omitempty"`
+	OwnerProcStart        string             `json:"ownerProcStart,omitempty"`
+	OwnerSessionID        string             `json:"ownerSessionId,omitempty"`
+	NotifyTarget          string             `json:"notifyTarget,omitempty"`
+	Persistent            bool               `json:"persistent,omitempty"`
+	AutoArchive           bool               `json:"autoArchive,omitempty"`
+	AutoArchiveDelayMS    int64              `json:"autoArchiveDelayMs,omitempty"`
+	AutoArchiveAt         int64              `json:"autoArchiveAt,omitempty"`
+	PermissionMode        string             `json:"permissionMode"`
+	Model                 string             `json:"model,omitempty"`
+	Effort                string             `json:"effort,omitempty"`
+	MaxBudgetUSD          string             `json:"maxBudgetUsd,omitempty"`
+	Tools                 string             `json:"tools,omitempty"`
+	ToolsSet              bool               `json:"toolsSet,omitempty"`
+	AllowedTools          string             `json:"allowedTools,omitempty"`
+	AllowedToolsSet       bool               `json:"allowedToolsSet,omitempty"`
+	DisallowedTools       string             `json:"disallowedTools,omitempty"`
+	DisallowedToolsSet    bool               `json:"disallowedToolsSet,omitempty"`
+	OutputSchema          json.RawMessage    `json:"outputSchema,omitempty"`
+	Bare                  bool               `json:"bare,omitempty"`
+	Turns                 []claudeLaneTurn   `json:"turns,omitempty"`
+	TurnID                string             `json:"turnId,omitempty"`
+	LatestTurnID          string             `json:"latestTurnId,omitempty"`
+	CollectedTurnID       string             `json:"collectedTurnId,omitempty"`
+	TerminalOutcome       string             `json:"terminalOutcome,omitempty"`
+	CleanupError          string             `json:"cleanupError,omitempty"`
+	Groups                []string           `json:"groups,omitempty"`
+	ExplicitGroups        []string           `json:"explicitGroups,omitempty"`
+	ParentSessionID       string             `json:"parentSessionId,omitempty"`
+	ParentHostID          string             `json:"parentHostId,omitempty"`
+	InheritParentGroups   bool               `json:"inheritParentGroups,omitempty"`
+	Notices               []claudeLaneNotice `json:"notices,omitempty"`
+	CreatedAt             int64              `json:"createdAt"`
+	UpdatedAt             int64              `json:"updatedAt"`
 }
 
 type claudeLaneNotice struct {
@@ -780,7 +783,7 @@ func startClaudeLane(o claudeLaneOptions, wait bool) (int, error) {
 		return 1, err
 	}
 	paths := resolveNativePaths()
-	profileSource, err := claudeprofile.CurrentSource()
+	profileSource, err := sharedClaudeLaneSource(paths)
 	if err != nil {
 		return 1, err
 	}
@@ -821,10 +824,11 @@ func startClaudeLane(o claudeLaneOptions, wait bool) (int, error) {
 		Cwd: cwd, OriginalCwd: originalCwd, WorktreePath: worktreePath, Status: "starting",
 		ControlSocket: claudeLaneControlSocket(paths, sessionID), StartupID: randomID(),
 		ManagerLog: filepath.Join(profileDataRoot(paths), "claude-lane-logs", sessionKey(sessionID)+".log"), OwnerPID: o.ownerPID,
-		WorkerConfigDir:       filepath.Join(profileDataRoot(paths), "claude-lane-profiles", sessionKey(sessionID), "config"),
-		WorkerSecureConfigDir: profileSource.SecureConfig, WorkerProfileStatePath: profileSource.StatePath,
-		WorkerProfileConfigured: true,
-		OwnerProcStart:          o.ownerProcStart, OwnerSessionID: o.ownerSessionID,
+		WorkerConfigDir: profileSource.ConfigRoot, WorkerSecureConfigDir: profileSource.SecureConfig,
+		WorkerSharedProfile: true,
+		WorkerConfigEnvSet:  profileSource.ConfigEnvSet, WorkerConfigEnvValue: profileSource.ConfigEnvValue,
+		WorkerSecureEnvSet: profileSource.SecureEnvSet,
+		OwnerProcStart:     o.ownerProcStart, OwnerSessionID: o.ownerSessionID,
 		NotifyTarget: o.notifyTarget, Persistent: o.persistent, AutoArchive: o.autoArchive,
 		AutoArchiveDelayMS: o.autoArchiveDelay.Milliseconds(), PermissionMode: o.permissionMode,
 		Model: o.model, Effort: o.effort, MaxBudgetUSD: o.maxBudgetUSD, Tools: o.tools, ToolsSet: o.toolsSet,
@@ -1152,6 +1156,35 @@ func sessionRuntimeBasename(base string) bool {
 func validateClaudeLaneResumeState(state claudeLaneState) error {
 	if state.Bare {
 		return errors.New("this legacy lane used --bare and cannot publish the native peer socket required by current Claude lanes; archive it and start a new lane")
+	}
+	if !state.WorkerSharedProfile {
+		return errors.New("legacy private Claude lane cannot resume in shared-profile mode; archive it and start a new lane")
+	}
+	if laneAgentConfigured() {
+		status, err := federator.ReadAgentStatus(laneAgentRuntimeDir())
+		if err != nil {
+			return fmt.Errorf("read host agent shared Claude registry: %w", err)
+		}
+		if err := validateClaudeLaneAgentProfile(state, status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateClaudeLaneAgentProfile(state claudeLaneState, status federator.AgentStatus) error {
+	if !samePath(filepath.Join(state.WorkerConfigDir, "sessions"), status.RegistryDir) {
+		return fmt.Errorf(
+			"archived Claude lane profile %s does not match host agent registry %s",
+			state.WorkerConfigDir, status.RegistryDir,
+		)
+	}
+	profile := claudeLaneAgentProfile(status)
+	if state.WorkerConfigEnvSet != profile.ConfigEnvSet ||
+		(state.WorkerConfigEnvSet && state.WorkerConfigEnvValue != profile.ConfigEnvValue) ||
+		state.WorkerSecureEnvSet != profile.SecureEnvSet ||
+		(state.WorkerSecureEnvSet && state.WorkerSecureConfigDir != profile.SecureConfig) {
+		return errors.New("archived Claude lane credential namespace does not match the running host agent")
 	}
 	return nil
 }
@@ -1501,25 +1534,11 @@ func inspectClaudeAuthentication(claudeBin string) (claudeAuthenticationStatus, 
 }
 
 func inspectClaudeLaneAuthentication(claudeBin string, paths nativePaths) (claudeAuthenticationStatus, error) {
-	root := profileDataRoot(paths)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return claudeAuthenticationStatus{}, fmt.Errorf("prepare Claude authentication profile root: %w", err)
-	}
-	privateRoot, err := os.MkdirTemp(root, ".claude-doctor-")
-	if err != nil {
-		return claudeAuthenticationStatus{}, fmt.Errorf("prepare Claude authentication profile: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(privateRoot) }()
-	source, err := claudeprofile.CurrentSource()
+	source, err := sharedClaudeLaneSource(paths)
 	if err != nil {
 		return claudeAuthenticationStatus{}, err
 	}
-	if err := claudeprofile.Seed(privateRoot, source.StatePath); err != nil {
-		return claudeAuthenticationStatus{}, fmt.Errorf("seed Claude authentication profile: %w", err)
-	}
-	environment := claudeAuthenticationEnvironment(
-		os.Environ(), privateRoot, source.SecureConfig,
-	)
+	environment := claudeAuthenticationEnvironment(os.Environ(), source)
 	return inspectClaudeAuthenticationWithEnvironment(claudeBin, environment)
 }
 
@@ -1560,7 +1579,7 @@ func inspectClaudeAuthenticationWithEnvironment(claudeBin string, environment []
 	return status, nil
 }
 
-func claudeAuthenticationEnvironment(environment []string, privateConfig, secureConfig string) []string {
+func claudeAuthenticationEnvironment(environment []string, source claudeprofile.Source) []string {
 	result := make([]string, 0, len(environment)+3)
 	for _, entry := range environment {
 		name := entry
@@ -1571,11 +1590,45 @@ func claudeAuthenticationEnvironment(environment []string, privateConfig, secure
 			result = append(result, entry)
 		}
 	}
-	return append(result,
-		"CLAUDE_CONFIG_DIR="+privateConfig,
-		"CLAUDE_PEER_CLAUDE_CONFIG_DIR="+privateConfig,
-		"CLAUDE_SECURESTORAGE_CONFIG_DIR="+secureConfig,
-	)
+	result = append(result, "CLAUDE_PEER_CLAUDE_CONFIG_DIR="+source.ConfigRoot)
+	if source.ConfigEnvSet {
+		result = append(result, "CLAUDE_CONFIG_DIR="+source.ConfigEnvValue)
+	}
+	if source.SecureEnvSet {
+		result = append(result, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+source.SecureConfig)
+	}
+	return result
+}
+
+func sharedClaudeLaneSource(paths nativePaths) (claudeprofile.Source, error) {
+	if !laneAgentConfigured() {
+		return claudeprofile.SharedSource(paths.claudeRoot)
+	}
+	status, err := federator.ReadAgentStatus(laneAgentRuntimeDir())
+	if err != nil {
+		return claudeprofile.Source{}, fmt.Errorf("read host agent shared Claude registry: %w", err)
+	}
+	source := claudeLaneAgentProfile(status)
+	if !samePath(filepath.Join(source.ConfigRoot, "sessions"), status.RegistryDir) {
+		return claudeprofile.Source{}, fmt.Errorf(
+			"claude lane profile %s does not match host agent registry %s", source.ConfigRoot, status.RegistryDir,
+		)
+	}
+	return source, nil
+}
+
+func claudeLaneAgentProfile(status federator.AgentStatus) claudeprofile.Source {
+	root := filepath.Dir(status.RegistryDir)
+	statePath := filepath.Join(root, ".claude.json")
+	if !status.ClaudeConfigEnvSet || status.ClaudeConfigEnvValue == "" {
+		home, _ := os.UserHomeDir()
+		statePath = filepath.Join(home, ".claude.json")
+	}
+	return claudeprofile.Source{
+		ConfigRoot: root, StatePath: statePath, SecureConfig: status.ClaudeSecureConfig,
+		ConfigEnvSet: status.ClaudeConfigEnvSet, ConfigEnvValue: status.ClaudeConfigEnvValue,
+		SecureEnvSet: status.ClaudeSecureEnvSet,
+	}
 }
 
 func claudePrivateEnvironmentBlocked(name string) bool {
@@ -1612,6 +1665,11 @@ func archiveClaudeLane(o claudeLaneOptions) (int, error) {
 		return 1, err
 	}
 	if state.Status == "archived" {
+		if state.CleanupError != "" {
+			if err := forceArchiveClaudeLane(paths, state.SessionID, "retry failed cleanup"); err != nil {
+				return 1, fmt.Errorf("retry Claude lane cleanup after %s: %w", state.CleanupError, err)
+			}
+		}
 		return 0, emitLane(map[string]any{"type": "lane.archived", "product": "claude", "name": state.Name, "thread_id": state.SessionID, "already_archived": true})
 	}
 	if probeUnixSocket(state.ControlSocket, 250*time.Millisecond) {
@@ -1631,10 +1689,11 @@ func waitClaudeLaneArchived(paths nativePaths, sessionID string, timeout time.Du
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		state, err := readClaudeLaneState(paths, sessionID)
+		if err == nil && state.CleanupError != "" {
+			return fmt.Errorf("claude lane cleanup failed: %s", state.CleanupError)
+		}
 		if err == nil && state.Status == "archived" &&
-			processIdentityStoppedOrUnset(state.ManagerPID, state.ManagerProcStart) &&
-			processIdentityStoppedOrUnset(state.WorkerPID, state.WorkerProcStart) &&
-			!probeUnixSocket(state.WorkerSocket, 100*time.Millisecond) {
+			state.ManagerPID == 0 && state.WorkerPID == 0 && state.WorkerSocket == "" {
 			return nil
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -1781,24 +1840,17 @@ func (m *claudeLaneManager) startWorker() error {
 		return fmt.Errorf("find Claude Code: %w", err)
 	}
 	args := claudeLaneWorkerArgs(m.state)
-	if m.state.WorkerConfigDir == "" {
-		m.state.WorkerConfigDir = filepath.Join(profileDataRoot(m.paths), "claude-lane-profiles", sessionKey(m.state.SessionID), "config")
+	if !m.state.WorkerSharedProfile {
+		return errors.New("legacy private Claude lane cannot resume in shared-profile mode; archive it and start a new lane")
 	}
-	if !m.state.WorkerProfileConfigured {
-		source, sourceErr := claudeprofile.CurrentSource()
-		if sourceErr != nil {
-			return sourceErr
-		}
-		m.state.WorkerSecureConfigDir = source.SecureConfig
-		m.state.WorkerProfileStatePath = source.StatePath
-		m.state.WorkerProfileConfigured = true
-	}
-	if err := prepareClaudeLaneProfile(m.paths, m.state.WorkerConfigDir, m.state.WorkerProfileStatePath); err != nil {
-		return err
+	source := claudeprofile.Source{
+		ConfigRoot: m.state.WorkerConfigDir, ConfigEnvSet: m.state.WorkerConfigEnvSet,
+		ConfigEnvValue: m.state.WorkerConfigEnvValue, SecureConfig: m.state.WorkerSecureConfigDir,
+		SecureEnvSet: m.state.WorkerSecureEnvSet,
 	}
 	command := exec.Command(claudeBin, args...) //nolint:gosec // configured Claude executable and validated options.
 	command.Dir = m.state.Cwd
-	command.Env = claudeLaneWorkerEnv(os.Environ(), m.state.SessionID, m.state.WorkerConfigDir, m.state.WorkerSecureConfigDir)
+	command.Env = claudeLaneWorkerEnv(os.Environ(), m.state.SessionID, source)
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return err
@@ -1885,7 +1937,7 @@ func claudeLaneWorkerArgs(state claudeLaneState) []string {
 	return args
 }
 
-func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureConfig string) []string {
+func claudeLaneWorkerEnv(environment []string, sessionID string, source claudeprofile.Source) []string {
 	blocked := map[string]bool{
 		// A nested lane must derive its Codex owner from live ancestry and registry
 		// identity, never from the outer orchestrator's inherited thread ID.
@@ -1904,137 +1956,19 @@ func claudeLaneWorkerEnv(environment []string, sessionID, privateConfig, secureC
 		}
 	}
 	// SendMessage, ListAgents, and native inbound peer turns are exposed only
-	// when Agent Teams is enabled. The SDK worker is the lane's sole peer.
+	// when Agent Teams is enabled. The SDK worker remains an ordinary native
+	// Claude row in the shared profile as well as a grouped Agent Sessions peer.
 	result = append(result, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1", "CLAUDE_CODE_HARBOR_KITE=1")
 	result = append(result, peerSessionIDEnvironment+"="+sessionID, "AGENT_SESSIONS_PRODUCT=claude")
 	result = append(result, agentRuntimeDirEnvironment+"="+laneAgentRuntimeDir())
-	result = append(result,
-		"CLAUDE_CONFIG_DIR="+privateConfig,
-		"CLAUDE_PEER_CLAUDE_CONFIG_DIR="+privateConfig,
-		"CLAUDE_SECURESTORAGE_CONFIG_DIR="+secureConfig,
-	)
+	result = append(result, "CLAUDE_PEER_CLAUDE_CONFIG_DIR="+source.ConfigRoot)
+	if source.ConfigEnvSet {
+		result = append(result, "CLAUDE_CONFIG_DIR="+source.ConfigEnvValue)
+	}
+	if source.SecureEnvSet {
+		result = append(result, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+source.SecureConfig)
+	}
 	return result
-}
-
-func prepareClaudeLaneProfile(paths nativePaths, privateRoot, profileStatePath string) error {
-	if err := os.MkdirAll(filepath.Join(privateRoot, "sessions"), 0700); err != nil {
-		return fmt.Errorf("create private Claude lane registry: %w", err)
-	}
-	if err := seedClaudeLaneProfile(privateRoot, profileStatePath); err != nil {
-		return fmt.Errorf("seed private Claude lane profile: %w", err)
-	}
-	for _, name := range []string{"settings.json", "settings.local.json", "CLAUDE.md"} {
-		body, err := os.ReadFile(filepath.Join(paths.claudeRoot, name)) //nolint:gosec // configured Claude profile.
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		// #nosec G703 -- name comes from the fixed allowlist above.
-		if err := os.WriteFile(filepath.Join(privateRoot, name), body, 0600); err != nil {
-			return err
-		}
-	}
-	for _, name := range []string{"plugins", "skills", "commands", "agents"} {
-		target := filepath.Join(paths.claudeRoot, name)
-		if info, err := os.Stat(target); err != nil || !info.IsDir() {
-			continue
-		}
-		link := filepath.Join(privateRoot, name)
-		if current, err := os.Readlink(link); err == nil && samePath(current, target) {
-			continue
-		}
-		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if err := os.Symlink(target, link); err != nil {
-			return err
-		}
-	}
-	return projectClaudeLaneAgentService(privateRoot)
-}
-
-func seedClaudeLaneProfile(privateRoot, profileStatePath string) error {
-	if profileStatePath == "" {
-		source, err := claudeprofile.CurrentSource()
-		if err != nil {
-			return err
-		}
-		profileStatePath = source.StatePath
-	}
-	return claudeprofile.Seed(privateRoot, profileStatePath)
-}
-
-func projectClaudeLaneAgentService(privateRoot string) error {
-	if !laneAgentConfigured() {
-		return nil
-	}
-	projection, err := federator.AgentService(laneAgentRuntimeDir())
-	if err != nil {
-		return fmt.Errorf("read host agent service record: %w", err)
-	}
-	var service map[string]any
-	if json.Unmarshal(projection.Record, &service) != nil || !boolValue(service["agentService"]) ||
-		intValue(service["pid"]) != projection.PID {
-		return errors.New("host agent returned an invalid Claude service record")
-	}
-	directory := filepath.Join(privateRoot, "sessions")
-	currentName := strconv.Itoa(intValue(service["pid"])) + ".json"
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return err
-	}
-	staleServiceKeys := map[string]bool{}
-	for _, entry := range entries {
-		keyName, stale, err := removeClaudeLaneProjectedServiceRecord(directory, entry, currentName)
-		if err != nil {
-			return err
-		}
-		if stale {
-			staleServiceKeys[keyName] = true
-		}
-	}
-	for _, entry := range entries {
-		if staleServiceKeys[entry.Name()] {
-			if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-	}
-	if err := writeJSONAtomic(filepath.Join(directory, projection.KeyName), map[string]string{
-		"peerToken": projection.PeerToken, "procStart": projection.ProcStart,
-	}); err != nil {
-		return err
-	}
-	return writeJSONAtomic(filepath.Join(directory, currentName), service)
-}
-
-func removeClaudeLaneProjectedServiceRecord(directory string, entry os.DirEntry, currentName string) (string, bool, error) {
-	if entry.Name() == currentName || filepath.Ext(entry.Name()) != ".json" {
-		return "", false, nil
-	}
-	path := filepath.Join(directory, entry.Name())
-	body, err := os.ReadFile(path) //nolint:gosec // private Claude session registry entry.
-	if os.IsNotExist(err) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	var old map[string]any
-	_ = json.Unmarshal(body, &old)
-	if !boolValue(old["agentService"]) {
-		return "", false, nil
-	}
-	keyName, err := federator.ClaudeServiceKeyName(intValue(old["pid"]), stringValue(old["messagingSocketPath"]))
-	if err != nil {
-		return "", false, errors.New("invalid stale host-agent service projection")
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", false, err
-	}
-	return keyName, true, nil
 }
 
 // captureWorkerPeer verifies Claude's native SDK registry row and records its
@@ -2089,16 +2023,14 @@ func (m *claudeLaneManager) agentPeerRegistration() federator.PeerRegistration {
 		PermissionMode: permissionMode, Cwd: m.state.Cwd,
 		PID: m.state.WorkerPID, ProcStart: m.state.WorkerProcStart, Socket: m.state.WorkerSocket,
 		LifecyclePID: m.state.WorkerPID, LifecycleProcStart: m.state.WorkerProcStart,
-		StartedAt: m.state.CreatedAt,
+		ClaudeConfigRoot: m.state.WorkerConfigDir,
+		StartedAt:        m.state.CreatedAt,
 	}
 }
 
 func (m *claudeLaneManager) registerAgentPeer() error {
 	if !laneAgentConfigured() {
 		return nil
-	}
-	if err := projectClaudeLaneAgentService(m.state.WorkerConfigDir); err != nil {
-		return err
 	}
 	_, err := federator.RegisterPeer(laneAgentRuntimeDir(), m.agentPeerRegistration())
 	if err == nil {
@@ -3159,13 +3091,17 @@ func (m *claudeLaneManager) finishShutdown(interrupt bool) {
 		}
 		workerStopped := processIdentityStoppedOrUnset(workerPID, workerProcStart)
 		shimStopped := processIdentityStoppedOrUnset(shimPID, shimProcStart)
+		var workerCleanupErr error
 		if workerStopped {
-			cleanupClaudeNativeWorkerPeer(m.paths, workerPeerState)
+			workerCleanupErr = cleanupClaudeNativeWorkerPeer(m.paths, workerPeerState)
 		}
 		m.mu.Lock()
 		m.state.ManagerPID, m.state.ManagerProcStart = 0, ""
-		if workerStopped {
+		if workerStopped && workerCleanupErr == nil {
 			m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerSocket, m.state.WorkerSocketAlias = 0, "", "", ""
+			m.state.CleanupError = ""
+		} else if workerCleanupErr != nil {
+			m.state.CleanupError = workerCleanupErr.Error()
 		}
 		if shimStopped {
 			m.state.ShimPID, m.state.ShimProcStart, m.state.ShimSocket = 0, "", ""
@@ -3181,35 +3117,107 @@ func (m *claudeLaneManager) finishShutdown(interrupt bool) {
 	})
 }
 
-func cleanupClaudeNativeWorkerPeer(paths nativePaths, state claudeLaneState) {
+//nolint:gocyclo // Shared-registry cleanup re-attests every PID-bound row, socket, and key before removal.
+func cleanupClaudeNativeWorkerPeer(paths nativePaths, state claudeLaneState) error {
+	if state.WorkerPID <= 1 {
+		return nil
+	}
 	if !processIdentityStoppedOrUnset(state.WorkerPID, state.WorkerProcStart) {
-		return
+		return errors.New("native Claude worker PID is not absent during cleanup")
 	}
 	registryRoot := state.WorkerConfigDir
 	if registryRoot == "" {
 		registryRoot = paths.claudeRoot
 	}
 	registry := filepath.Join(registryRoot, "sessions", strconv.Itoa(state.WorkerPID)+".json")
-	row := readJSONMap(registry)
-	if row != nil {
-		if !claudeNativeWorkerRowOwned(row, state) {
-			return
+	workerSocket := state.WorkerSocket
+	rowPresent := false
+	body, err := os.ReadFile(registry) //nolint:gosec // exact PID row in the selected shared Claude registry.
+	if err == nil {
+		var row map[string]any
+		if json.Unmarshal(body, &row) != nil || !claudeNativeWorkerRowOwned(row, state) {
+			return errors.New("native Claude worker row changed before cleanup")
 		}
-		removeJSONIf(registry, func(current map[string]any) bool {
-			return claudeNativeWorkerRowOwned(current, state)
-		})
+		rowPresent = true
+		rowSocket := stringValue(row["messagingSocketPath"])
+		if workerSocket == "" {
+			workerSocket = rowSocket
+		} else if rowSocket != workerSocket {
+			return errors.New("native Claude worker row changed its messaging socket before cleanup")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if workerSocket == "" {
+		if rowPresent {
+			if !processIdentityStoppedOrUnset(state.WorkerPID, state.WorkerProcStart) {
+				return errors.New("native Claude worker PID reappeared before row cleanup")
+			}
+			if err := os.Remove(registry); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
 	}
 	// Do not touch a recyclable PID path unless the kernel proves that no
 	// process currently owns it. Unknown observations and PID reuse preserve it.
 	if !processIdentityAllowsPIDPathRemoval(observeProcessIdentity(state.WorkerPID, "")) {
-		return
+		return errors.New("native Claude worker PID is not absent before transport cleanup")
 	}
-	if !ownedClaudeWorkerSocketPath(state.WorkerSocket, paths.runtimeDir, state.WorkerPID) {
-		return
+	if !ownedClaudeWorkerSocketPath(workerSocket, paths.runtimeDir, state.WorkerPID) {
+		return errors.New("native Claude worker socket is not PID-bound")
 	}
-	if info, err := os.Lstat(state.WorkerSocket); err == nil && info.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(state.WorkerSocket)
+	keyName, err := federator.ClaudeServiceKeyName(state.WorkerPID, workerSocket)
+	if err != nil {
+		return errors.New("native Claude worker peer-token sidecar path is invalid")
 	}
+	keyPath := filepath.Join(registryRoot, "sessions", keyName)
+	keyPresent := false
+	if info, statErr := os.Lstat(keyPath); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("native Claude worker peer-token sidecar changed type")
+		}
+		keyPresent = true
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+	socketPresent := false
+	if info, statErr := os.Lstat(workerSocket); statErr == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return errors.New("native Claude worker socket changed type")
+		}
+		socketPresent = true
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+	// Remove transports before the registry row. If an unlink fails, the exact
+	// row remains a durable source for a later cleanup retry even when startup
+	// failed before WorkerSocket was captured into lane state.
+	if socketPresent {
+		if !processIdentityAllowsPIDPathRemoval(observeProcessIdentity(state.WorkerPID, "")) {
+			return errors.New("native Claude worker PID reappeared before socket cleanup")
+		}
+		if err := os.Remove(workerSocket); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if keyPresent {
+		if !processIdentityAllowsPIDPathRemoval(observeProcessIdentity(state.WorkerPID, "")) {
+			return errors.New("native Claude worker PID reappeared before key cleanup")
+		}
+		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if rowPresent {
+		if !processIdentityStoppedOrUnset(state.WorkerPID, state.WorkerProcStart) {
+			return errors.New("native Claude worker PID reappeared before row cleanup")
+		}
+		if err := os.Remove(registry); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *claudeLaneManager) captureProcessStart(pid int) (string, error) {
@@ -3228,7 +3236,8 @@ func ownedClaudeWorkerSocketPath(path, runtimeRoot string, pid int) bool {
 
 func claudeNativeWorkerRowOwned(row map[string]any, state claudeLaneState) bool {
 	if intValue(row["pid"]) != state.WorkerPID || stringValue(row["sessionId"]) != state.SessionID ||
-		stringValue(row["entrypoint"]) != "sdk-cli" {
+		stringValue(row["entrypoint"]) != "sdk-cli" ||
+		(state.WorkerSocket != "" && stringValue(row["messagingSocketPath"]) != state.WorkerSocket) {
 		return false
 	}
 	if state.WorkerProcStart == "" {
@@ -3331,7 +3340,9 @@ func cleanupClaudeLaneResidue(paths nativePaths, state claudeLaneState, excluded
 		}
 	stopped:
 	}
-	cleanupClaudeNativeWorkerPeer(paths, state)
+	if err := cleanupClaudeNativeWorkerPeer(paths, state); err != nil {
+		return err
+	}
 	if state.WorkerSocketAlias != "" {
 		removeClaudeWorkerAlias(state.WorkerSocketAlias, state.ShimSocket)
 	}
@@ -3388,6 +3399,7 @@ func forceArchiveClaudeLane(paths nativePaths, sessionID, reason string) error {
 	state.ManagerPID, state.ManagerProcStart = 0, ""
 	state.WorkerPID, state.WorkerProcStart, state.WorkerSocket, state.WorkerSocketAlias = 0, "", "", ""
 	state.ShimPID, state.ShimProcStart, state.ShimSocket = 0, "", ""
+	state.CleanupError = ""
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		return err
 	}

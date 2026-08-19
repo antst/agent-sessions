@@ -144,11 +144,31 @@ func resolvePeerLaunchContext(
 	context peerLaunchContext,
 	alwaysApprove, alwaysApproveSpecified bool,
 ) (federator.ResolvedPreferences, error) {
-	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
+	return federator.ResolveSessionPreferences(agentRuntimeDir(), peerPreferenceRequest(
+		sessionID, product, context, alwaysApprove, alwaysApproveSpecified,
+	))
+}
+
+func previewPeerLaunchContext(
+	sessionID, product string,
+	context peerLaunchContext,
+	alwaysApprove, alwaysApproveSpecified bool,
+) (federator.ResolvedPreferences, federator.ResolvePreferencesRequest, error) {
+	request := peerPreferenceRequest(sessionID, product, context, alwaysApprove, alwaysApproveSpecified)
+	resolved, err := federator.PreviewSessionPreferences(agentRuntimeDir(), request)
+	return resolved, request, err
+}
+
+func peerPreferenceRequest(
+	sessionID, product string,
+	context peerLaunchContext,
+	alwaysApprove, alwaysApproveSpecified bool,
+) federator.ResolvePreferencesRequest {
+	return federator.ResolvePreferencesRequest{
 		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
 		Groups: context.groups, GroupsSpecified: context.groupsSpecified,
 		ParentSessionID: context.parentSession, ParentSpecified: context.parentSpecified,
 		InheritParentGroups: context.inheritParentGroups, InheritGroupsSpecified: context.inheritGroupsSpecified,
 		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,
-	})
+	}
 }

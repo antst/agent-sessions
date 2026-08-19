@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -531,7 +532,10 @@ func assertTargetWorkerDropsRemoteParent(t *testing.T, product, sessionID, remot
 		// persistentRuntimeEnvironment unit test covers the same scrub contract.
 		return
 	case "claude":
-		environment = claudeLaneWorkerEnv(input, sessionID, "/private", "/secure")
+		environment = claudeLaneWorkerEnv(input, sessionID, claudeprofile.Source{
+			ConfigRoot: "/shared", ConfigEnvSet: true, ConfigEnvValue: "/shared",
+			SecureConfig: "/secure", SecureEnvSet: true,
+		})
 	case "grok":
 		environment = grokLaneWorkerEnvironment(input, strings.Repeat("a", 64), grokLaneState{SessionID: sessionID}, "/tmp/grok-shell", "/bin/bash")
 	}

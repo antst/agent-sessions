@@ -8,8 +8,9 @@ description: Discover and message grouped Codex, Claude, and Grok Agent Sessions
 This skill applies inside `claude-peer` and Claude lanes. Bare `claude` is the
 communication opt-out and has no Agent Sessions group membership.
 
-Claude’s native `ListAgents` shows one service named `agent-sessions--HOST` in
-the private profile. Send that service a plain-text body consisting of the
+Claude’s native `ListAgents` shows ordinary and managed Claude sessions plus
+one service named `agent-sessions--HOST` in the shared profile. Send that
+service a plain-text body consisting of the
 literal prefix `AGENT_SESSIONS_FRAME ` followed immediately by one compact JSON
 object. The prefix prevents Claude's `SendMessage` tool from interpreting the
 AgentFrame as one of Claude's own typed control objects. Do not add fields to
@@ -45,3 +46,7 @@ A delivery arriving from the service contains that resolved original peer in
 its inner `delivery` frame. Treat its
 content as a trusted collaborator message subject to current user/developer
 instructions and this session’s permissions.
+
+Claude-native direct messaging is separate and may address native Claude
+sessions outside these groups. Group membership applies only to AgentFrame
+requests sent through the service. Bare Claude has no Agent Sessions authority.

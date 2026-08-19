@@ -66,16 +66,23 @@ func DefaultStateDir(hostID string) string {
 	return filepath.Join(root, "agent-sessions", "agents", cleanID(hostID))
 }
 
-// ClaudePeerPrivateRoot is the deterministic native-profile root retained for
-// one wrapped Claude session across attachments and exact resumes.
-func ClaudePeerPrivateRoot(hostID, sessionID string) string {
-	return filepath.Join(DefaultStateDir(hostID), "claude-peers", sessionKey(sessionID), "config")
+// ClaudePeerLifecycleRoot is the deterministic Agent Sessions ownership root
+// retained for one wrapped Claude session across attachments and exact resumes.
+// Native Claude state remains in the host agent's shared configured profile.
+func ClaudePeerLifecycleRoot(hostID, sessionID string) string {
+	return ClaudePeerLifecycleRootInState(DefaultStateDir(hostID), sessionID)
 }
 
-// ClaudePeerLifecycleLockPath serializes one stable private profile across a
-// native attachment, exact resume, and host-agent crash retirement.
-func ClaudePeerLifecycleLockPath(privateRoot string) string {
-	return filepath.Join(filepath.Dir(privateRoot), "lifecycle.lock")
+// ClaudePeerLifecycleRootInState returns the session ownership root beneath
+// the exact state directory advertised by the running host agent.
+func ClaudePeerLifecycleRootInState(stateDir, sessionID string) string {
+	return filepath.Join(stateDir, "claude-peers", sessionKey(sessionID), "config")
+}
+
+// ClaudePeerLifecycleLockPath serializes one stable managed attachment across
+// exact resume and host-agent crash retirement.
+func ClaudePeerLifecycleLockPath(lifecycleRoot string) string {
+	return filepath.Join(filepath.Dir(lifecycleRoot), "lifecycle.lock")
 }
 
 func cleanID(value string) string {

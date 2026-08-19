@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -166,10 +165,10 @@ func stopPeerAdapterTree(peer localPeer) error {
 }
 
 func withClaudePeerRetirementLock(peer localPeer, action func() error) error {
-	if peer.PrivateConfigRoot == "" {
+	if peer.LifecycleRoot == "" {
 		return action()
 	}
-	lockPath := ClaudePeerLifecycleLockPath(peer.PrivateConfigRoot)
+	lockPath := ClaudePeerLifecycleLockPath(peer.LifecycleRoot)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
@@ -203,7 +202,7 @@ func retirePeerAdapter(peer localPeer) error {
 
 //nolint:gocyclo // Every owned artifact is independently re-attested before removal.
 func cleanupClaudePeerArtifactsLocked(peer localPeer) error {
-	if peer.PrivateConfigRoot == "" {
+	if peer.ClaudeConfigRoot == "" {
 		return nil
 	}
 	// A recycled PID is not absence: never unlink its PID-bound socket merely
@@ -211,79 +210,85 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer) error {
 	if procinfo.Read(peer.PID).Status != procinfo.Absent {
 		return errors.New("native Claude PID is not absent after retirement")
 	}
-	recordPath := filepath.Join(peer.PrivateConfigRoot, "sessions", strconv.Itoa(peer.PID)+".json")
-	body, err := os.ReadFile(recordPath) //nolint:gosec // deterministic agent-owned private profile.
+	recordPath := filepath.Join(peer.ClaudeConfigRoot, "sessions", strconv.Itoa(peer.PID)+".json")
+	recordPresent := false
+	body, err := os.ReadFile(recordPath) //nolint:gosec // exact PID row in the configured shared Claude registry.
 	if err == nil {
 		var record registryRecord
 		if json.Unmarshal(body, &record) != nil || record.PID != peer.PID || record.SessionID != peer.SessionID ||
-			record.ProcStart != peer.ProcStart || record.MessagingSocketPath != peer.Socket {
+			record.ProcStart != peer.ProcStart || peer.Socket != "" && record.MessagingSocketPath != peer.Socket {
 			return errors.New("native Claude record changed before cleanup")
 		}
+		if peer.Socket == "" {
+			peer.Socket = record.MessagingSocketPath
+		}
+		recordPresent = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	keyPath := ""
+	keyPresent := false
+	if peer.Socket != "" {
+		if filepath.Base(peer.Socket) != strconv.Itoa(peer.PID)+".sock" {
+			return errors.New("native Claude socket is not PID-bound")
+		}
+		keyName, keyErr := ClaudeServiceKeyName(peer.PID, peer.Socket)
+		if keyErr != nil {
+			return errors.New("native Claude peer-token sidecar path is invalid")
+		}
+		keyPath = filepath.Join(peer.ClaudeConfigRoot, "sessions", keyName)
+		if info, statErr := os.Lstat(keyPath); statErr == nil {
+			if !info.Mode().IsRegular() {
+				return errors.New("native Claude peer-token sidecar changed type")
+			}
+			keyPresent = true
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+	}
+	socketPresent := false
+	if peer.Socket != "" {
+		if info, err := os.Lstat(peer.Socket); err == nil {
+			if info.Mode()&os.ModeSocket == 0 {
+				return errors.New("native Claude socket path changed type")
+			}
+			socketPresent = true
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if socketPresent {
+		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before socket cleanup")
+		}
+		if err := os.Remove(peer.Socket); err != nil {
+			return err
+		}
+	}
+	if keyPresent {
+		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before key removal")
+		}
+		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if recordPresent {
 		if procinfo.Read(peer.PID).Status != procinfo.Absent {
 			return errors.New("native Claude PID reappeared before record cleanup")
 		}
 		if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return err
 	}
-	if err := removeClaudePeerSidecars(peer.PrivateConfigRoot, peer.PID); err != nil {
-		return err
-	}
-	if filepath.Base(peer.Socket) != strconv.Itoa(peer.PID)+".sock" {
-		return errors.New("native Claude socket is not PID-bound")
-	}
-	if info, err := os.Lstat(peer.Socket); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return errors.New("native Claude socket path changed type")
-		}
-		if procinfo.Read(peer.PID).Status != procinfo.Absent {
-			return errors.New("native Claude PID reappeared before socket cleanup")
-		}
-		return os.Remove(peer.Socket)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-func removeClaudePeerSidecars(privateRoot string, pid int) error {
-	directory := filepath.Join(privateRoot, "sessions")
-	prefix := strconv.Itoa(pid) + "."
-	entries, err := os.ReadDir(directory)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".key") {
-			continue
-		}
-		digest := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".key")
-		if len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
-			continue
-		}
-		if procinfo.Read(pid).Status != procinfo.Absent {
-			return errors.New("native Claude PID reappeared before key cleanup")
-		}
-		path := filepath.Join(directory, name)
-		info, statErr := os.Lstat(path)
-		if statErr != nil {
-			if os.IsNotExist(statErr) {
-				continue
-			}
-			return statErr
-		}
+	settingsPath := filepath.Join(peer.LifecycleRoot, "launch-settings.json")
+	if info, err := os.Lstat(settingsPath); err == nil {
 		if !info.Mode().IsRegular() {
-			return errors.New("native Claude peer-token sidecar changed type")
+			return errors.New("managed Claude launch settings changed type")
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+		return os.Remove(settingsPath)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

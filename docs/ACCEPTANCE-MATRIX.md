@@ -133,14 +133,15 @@ must refuse when a process it would replace is still live.
 | ID | Platforms | Cell |
 |---|---|---|
 | CL-01 | Linux, macOS | Bare `claude` remains an opt-out and changes neither the Agent Sessions catalog nor registration set. |
-| CL-02 | Linux, macOS | `claude-peer` starts a real native TUI in a deterministic private profile containing only its exact native row and one projected host-agent service row. |
-| CL-03 | Linux, macOS | Two Claude peers use distinct private registries/sockets and discover one another only through group-filtered Agent Sessions routing. |
-| CL-04 | Linux, macOS | Exact UUID resume retains transcript, private profile, explicit groups, inheritance snapshot, name, cwd, and effective durable YOLO choice; explicit overrides replace only their selected fields. |
+| CL-02 | Linux, macOS | `claude-peer` starts a real native TUI in the configured shared Claude profile; ordinary, peer, and lane rows coexist with exactly one host-agent service row. |
+| CL-03 | Linux, macOS | Two Claude peers use distinct PID-bound sockets and discover one another through group-filtered AgentFrame routing; native Claude direct messaging remains independently available. |
+| CL-04 | Linux, macOS | Exact UUID ordinary→peer→ordinary→generic-peer resume retains one shared transcript plus explicit groups, inheritance snapshot, name, cwd, and effective durable YOLO choice; explicit overrides replace only selected fields. |
 | CL-05 | Linux, macOS | Native name/status/permission changes refresh the host-agent registration without duplicating the service row. |
 | CL-06 | Linux, macOS | Host-agent restart republishes one service row and every idle Claude supershim re-registers without restarting Claude. |
-| CL-07 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, supershim crash, stale native row, PID reuse, and socket mismatch retire only the exact owned Claude process/registration/artifacts. |
-| CL-08 | Linux, macOS | Native carrier discover/direct/multicast/broadcast returns correlated results; the outer envelope remains native-strict and the entire AgentFrame stays in its body. |
+| CL-07 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, supershim crash, stale native row, PID reuse, and socket mismatch retire only the exact owned Claude process/registration/artifacts, preserving unrelated shared rows and the service. |
+| CL-08 | Linux, macOS | Native carrier discover/direct/multicast/broadcast returns correlated group-filtered results; bare callers are rejected, while independent native direct traffic can cross Agent Sessions groups. |
 | CL-09 | Linux, macOS | Claude→Codex, Claude→Claude, and Claude→Grok lane launches all bind the immediate Claude parent, including nested and persistent children. |
+| CL-10 | Linux, macOS | Profile/credential mismatch, live exact-UUID attachment, invalid launch settings, launcher crash, and native startup failure do not adopt or alter the ordinary session's catalog row; a durable gated-launch journal rolls back groups and YOLO before retry. |
 
 ## Grok interactive peer (`T/F`)
 

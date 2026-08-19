@@ -40,10 +40,16 @@ Use `codex-peer`, `claude-peer`, or `grok-peer` to opt in. Pass repeatable
 restores the catalog; explicit values replace it. `peer resume SESSION_UUID`
 uses the catalogued product adapter.
 
-`claude-peer` uses a deterministic private `CLAUDE_CONFIG_DIR` for its native
-session registry and projects the one host-agent service row there. Secure
-credential storage remains rooted at the user’s public Claude config. Bare
-`claude` is not modified or registered.
+`claude-peer` uses the same configured native Claude profile as ordinary
+Claude. Its exact UUID can move between ordinary and managed attachments
+without transcript copying. The host agent is the sole writer of the one
+service row. Bare `claude` is not registered with Agent Sessions, and install
+never changes the operator's default `crossSessionInbound` policy.
+Managed Claude profiles and secure-storage overrides must use absolute paths so
+detached, local, and remote workers cannot reinterpret them under another cwd.
+Unreleased development builds that stored Claude transcripts in an Agent
+Sessions-private native profile are not copied into the shared profile; there
+is no collision-safe automatic migration for those development-only sessions.
 
 ## Remote lane execution
 

@@ -7,8 +7,8 @@ description: Orchestrate named, messageable local or remote Codex lanes — star
 
 A lane is a named Codex thread on the local shared App Server. It registers with
 the Agent Sessions host agent and is visible only to peers sharing one of its groups. Claude's
-private native registry contains the single host-agent service, not one synthetic Claude row per
-lane. `--persistent` is an explicit opt-in for a lane that must survive its owner.
+shared native registry contains ordinary/managed Claude rows and the single host-agent service,
+not synthetic Codex rows. `--persistent` is an explicit opt-in for a lane that must survive its owner.
 
 This skill is a pass-through to one CLI. It owns no policy: model, reasoning effort, sandbox,
 approval, web access, config overlays, output schema, and worktree isolation are all decided by

@@ -6,11 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 func TestPeerRegistrationRequiresCatalogAndRestoresGroups(t *testing.T) {
@@ -100,6 +104,382 @@ func TestReconcileRetiresAdapterWhenSupershimLifecycleExits(t *testing.T) {
 	}
 }
 
+func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-state")
+	configRoot := filepath.Join(root, "claude")
+	if err := os.MkdirAll(filepath.Join(configRoot, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := openSessionCatalog(filepath.Join(stateDir, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-0000-0000-000000000cab"
+	if _, _, err := catalog.update(SessionPreferenceUpdate{
+		SessionID: sessionID, Product: "claude", ExplicitGroups: []string{"before"}, GroupsSpecified: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := exec.Command("sleep", "30")
+	lifecycle := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(); err != nil {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		_ = lifecycle.Process.Kill()
+		_ = lifecycle.Wait()
+	})
+	socket := filepath.Join(root, strconv.Itoa(adapter.Process.Pid)+".sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	lifecycleRoot := ClaudePeerLifecycleRootInState(stateDir, sessionID)
+	if err := os.MkdirAll(lifecycleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(lifecycleRoot, "launch-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"crossSessionInbound":"accept"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude", Name: "prepared",
+		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
+		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
+		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
+	}
+	newAgent := func() *agent {
+		return &agent{
+			options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
+			catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
+			preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(stateDir, "claude-peer-preparations"),
+			localChanged: make(chan struct{}, 1),
+		}
+	}
+	first := newAgent()
+	if err := first.loadPeerPreparations(); err != nil {
+		t.Fatal(err)
+	}
+	update := SessionPreferenceUpdate{
+		SessionID: sessionID, Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"after"}, GroupsSpecified: true, AlwaysApprove: true, AlwaysApproveSpecified: true,
+	}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := first.preparePeerLaunch(registration, update, expected); err != nil {
+		t.Fatal(err)
+	}
+	// A restarted agent recovers the preparation before the native adapter has
+	// ever published or completed a full peer registration.
+	restarted := newAgent()
+	if err := restarted.loadPeerPreparations(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.preparations) != 1 {
+		t.Fatalf("durable preparation count = %d", len(restarted.preparations))
+	}
+	if err := writeJSONAtomic(filepath.Join(configRoot, "sessions", strconv.Itoa(adapter.Process.Pid)+".json"), registryRecord{
+		PID: adapter.Process.Pid, ProcStart: registration.ProcStart, SessionID: sessionID,
+		MessagingSocketPath: socket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keyName, err := ClaudeServiceKeyName(adapter.Process.Pid, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configRoot, "sessions", keyName), []byte(`{"peerToken":"0123456789abcdef0123456789abcdef"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = lifecycle.Wait()
+	restarted.reconcileRegisteredPeers()
+	_ = adapter.Wait()
+	restarted.reconcileRegisteredPeers()
+	for _, path := range []string{
+		settingsPath, socket, filepath.Join(configRoot, "sessions", strconv.Itoa(adapter.Process.Pid)+".json"),
+		filepath.Join(configRoot, "sessions", keyName), restarted.preparationPath(sessionID),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("prepared-crash artifact survived: %s (%v)", path, err)
+		}
+	}
+	if len(restarted.preparations) != 0 || processLive(adapter.Process.Pid) {
+		t.Fatalf("prepared adapter survived: preparations=%d live=%v", len(restarted.preparations), processLive(adapter.Process.Pid))
+	}
+	restored, groups, exists, err := catalog.get(sessionID)
+	if err != nil || !exists || restored.AlwaysApprove || !slices.Equal(restored.ExplicitGroups, []string{"before"}) ||
+		slices.Contains(groups, "after") {
+		t.Fatalf("failed prepared launch catalog rollback = %+v groups=%v exists=%v err=%v", restored, groups, exists, err)
+	}
+}
+
+func TestPreparedClaudePeerRecoveryRejectsSameDisplayStartWithDifferentStrongStart(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	configRoot := filepath.Join(root, "claude")
+	if err := os.MkdirAll(filepath.Join(configRoot, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	current := procinfo.Read(os.Getpid())
+	if current.Status != procinfo.Known || current.Start == "" || current.StrongStart == "" {
+		t.Skip("strong process-start identity unavailable")
+	}
+	const sessionID = "00000000-0000-0000-0000-000000000cac"
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: os.Getpid(), ProcStart: current.Start, AdapterStrongStart: current.StrongStart + "-reused",
+		LifecyclePID: os.Getpid(), LifecycleProcStart: current.Start,
+		LifecycleStrongStart: current.StrongStart + "-reused",
+		LifecycleRoot:        ClaudePeerLifecycleRootInState(stateDir, sessionID), ClaudeConfigRoot: configRoot,
+	}
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", StateDir: stateDir, ClaudeConfigDir: configRoot},
+		local:   map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations:   map[string]peerPreparation{sessionID: {Registration: registration}},
+		preparationDir: filepath.Join(stateDir, "claude-peer-preparations"), localChanged: make(chan struct{}, 1),
+	}
+	if err := os.MkdirAll(agent.preparationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(agent.preparationPath(sessionID), peerPreparation{Registration: registration}); err != nil {
+		t.Fatal(err)
+	}
+	agent.reconcileRegisteredPeers()
+	if _, ok := agent.preparations[sessionID]; !ok {
+		t.Fatal("same-second recycled identity was retired")
+	}
+	if procinfo.Read(os.Getpid()).Status != procinfo.Known {
+		t.Fatal("recovery signalled the unrelated recycled process")
+	}
+}
+
+func TestLoadLegacyRawClaudePeerPreparation(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "00000000-0000-4000-8000-000000000208"
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: 2001, ProcStart: "adapter-start", AdapterStrongStart: "adapter-strong",
+		LifecyclePID: 2002, LifecycleProcStart: "lifecycle-start", LifecycleStrongStart: "lifecycle-strong",
+	}
+	agent := &agent{
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(root, "preparations"),
+	}
+	if err := os.MkdirAll(agent.preparationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(agent.preparationPath(sessionID), registration); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.loadPeerPreparations(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := agent.preparations[sessionID]
+	if !ok || !samePreparedRegistration(loaded.Registration, registration) || loaded.RollbackPreferences {
+		t.Fatalf("legacy preparation was not recovered: %+v", loaded)
+	}
+}
+
+func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	configRoot := filepath.Join(root, "claude")
+	if err := os.MkdirAll(filepath.Join(configRoot, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := openSessionCatalog(filepath.Join(stateDir, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-000000000207"
+	adapter := exec.Command("sleep", "30")
+	lifecycle := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(); err != nil {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		_ = lifecycle.Process.Kill()
+		_ = lifecycle.Wait()
+	})
+	socket, listener := registrationSocket(t, root, "prepared-race.sock")
+	defer func() { _ = listener.Close() }()
+	lifecycleRoot := ClaudePeerLifecycleRootInState(stateDir, sessionID)
+	if err := os.MkdirAll(lifecycleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	preparation := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
+		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
+		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
+	}
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
+		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(stateDir, "claude-peer-preparations"),
+		localChanged: make(chan struct{}, 1),
+	}
+	update := SessionPreferenceUpdate{SessionID: sessionID, Product: "claude", Kind: SessionKindInteractive}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := agent.preparePeerLaunch(preparation, update, expected); err != nil {
+		t.Fatal(err)
+	}
+	registration := preparation
+	registration.Name = "prepared-race"
+	registration.Status = "idle"
+	registration.PermissionMode = "default"
+	registration.Socket = socket
+	start := make(chan struct{})
+	var registerErr, cancelErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		_, registerErr = agent.registerPeer(registration, false)
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		cancelErr = agent.cancelPeerPreparation(preparation)
+	}()
+	close(start)
+	wait.Wait()
+	preference, _, exists, err := catalog.get(sessionID)
+	if err != nil || cancelErr != nil || len(agent.preparations) != 0 {
+		t.Fatalf("register/cancel transaction errors: register=%v cancel=%v catalog=%v preparations=%d", registerErr, cancelErr, err, len(agent.preparations))
+	}
+	if registerErr == nil {
+		if !exists || preference.Product != "claude" || len(agent.local) != 1 {
+			t.Fatalf("registered transaction lost catalog: preference=%+v exists=%v local=%d", preference, exists, len(agent.local))
+		}
+	} else if exists || len(agent.local) != 0 {
+		t.Fatalf("canceled transaction left partial commit: register=%v preference=%+v exists=%v local=%d", registerErr, preference, exists, len(agent.local))
+	}
+}
+
+func TestCommittedClaudePeerCleanupDebtSurvivesAndRetries(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	configRoot := filepath.Join(root, "claude")
+	if err := os.MkdirAll(filepath.Join(configRoot, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := openSessionCatalog(filepath.Join(stateDir, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-000000000209"
+	adapter := exec.Command("sleep", "30")
+	lifecycle := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(); err != nil {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		_ = lifecycle.Process.Kill()
+		_ = lifecycle.Wait()
+	})
+	socket, listener := registrationSocket(t, root, strconv.Itoa(adapter.Process.Pid)+".sock")
+	lifecycleRoot := ClaudePeerLifecycleRootInState(stateDir, sessionID)
+	if err := os.MkdirAll(lifecycleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	preparation := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
+		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
+		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
+	}
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
+		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(stateDir, "claude-peer-preparations"),
+		localChanged: make(chan struct{}, 1),
+	}
+	update := SessionPreferenceUpdate{SessionID: sessionID, Product: "claude", Kind: SessionKindInteractive}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := agent.preparePeerLaunch(preparation, update, expected); err != nil {
+		t.Fatal(err)
+	}
+	registration := preparation
+	registration.Name, registration.Status, registration.PermissionMode, registration.Socket = "cleanup-debt", "idle", "default", socket
+	if _, err := agent.registerPeer(registration, false); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(configRoot, "sessions", strconv.Itoa(adapter.Process.Pid)+".json")
+	if err := writeJSONAtomic(recordPath, registryRecord{
+		PID: adapter.Process.Pid, ProcStart: preparation.ProcStart, SessionID: sessionID,
+		MessagingSocketPath: socket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.Close()
+	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(socket, []byte("changed type"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = adapter.Process.Kill()
+	_ = adapter.Wait()
+	_ = lifecycle.Process.Kill()
+	_ = lifecycle.Wait()
+	agent.reconcileRegisteredPeers()
+	if _, ok := agent.preparations[sessionID]; !ok {
+		t.Fatal("failed exact cleanup discarded the durable preparation")
+	}
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("failed cleanup removed its source row: %v", err)
+	}
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	agent.reconcileRegisteredPeers()
+	if _, ok := agent.preparations[sessionID]; ok {
+		t.Fatal("successful cleanup retry retained the preparation")
+	}
+	if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+		t.Fatalf("cleanup retry retained native row: %v", err)
+	}
+	preference, _, exists, err := catalog.get(sessionID)
+	if err != nil || !exists || preference.Product != "claude" {
+		t.Fatalf("committed cleanup debt rolled back catalog: preference=%+v exists=%v err=%v", preference, exists, err)
+	}
+}
+
 func TestReconcileRetiresAdapterDescendantsBeforeTheyReparent(t *testing.T) {
 	root := t.TempDir()
 	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-a")
@@ -161,8 +541,9 @@ func TestReconcileRetiresAdapterDescendantsBeforeTheyReparent(t *testing.T) {
 
 func TestRetirementAcquiresProfileLockBeforeStoppingAdapter(t *testing.T) {
 	root := t.TempDir()
-	privateRoot := filepath.Join(root, "config")
-	if err := os.MkdirAll(filepath.Join(privateRoot, "sessions"), 0700); err != nil {
+	lifecycleRoot := filepath.Join(root, "lifecycle")
+	configRoot := filepath.Join(root, "config")
+	if err := os.MkdirAll(filepath.Join(configRoot, "sessions"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	adapter := exec.Command("sleep", "30")
@@ -183,15 +564,22 @@ func TestRetirementAcquiresProfileLockBeforeStoppingAdapter(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 	peer := localPeer{
 		Peer: Peer{SessionID: "stable-session"}, PID: pid, ProcStart: start,
-		Socket: socket, PrivateConfigRoot: privateRoot,
+		Socket: socket, LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
 	}
-	if err := writeJSONAtomic(filepath.Join(privateRoot, "sessions", strconv.Itoa(pid)+".json"), registryRecord{
+	if err := writeJSONAtomic(filepath.Join(configRoot, "sessions", strconv.Itoa(pid)+".json"), registryRecord{
 		PID: pid, SessionID: peer.SessionID, ProcStart: start, MessagingSocketPath: socket,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	lockPath := ClaudePeerLifecycleLockPath(privateRoot)
+	lockPath := ClaudePeerLifecycleLockPath(lifecycleRoot)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(lifecycleRoot, "launch-settings.json")
+	if err := os.MkdirAll(lifecycleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"crossSessionInbound":"accept"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
@@ -224,7 +612,7 @@ func TestRetirementAcquiresProfileLockBeforeStoppingAdapter(t *testing.T) {
 	if processLive(pid) {
 		t.Fatal("adapter survived serialized retirement")
 	}
-	for _, path := range []string{socket, filepath.Join(privateRoot, "sessions", strconv.Itoa(pid)+".json")} {
+	for _, path := range []string{socket, filepath.Join(configRoot, "sessions", strconv.Itoa(pid)+".json"), settingsPath} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("retirement artifact survived: %s (%v)", path, err)
 		}

@@ -46,9 +46,11 @@ type claudeNativePeerRecord struct {
 	Status              string `json:"status"`
 }
 
-// RunClaudePeer launches one native Claude session in a private registry and
-// registers its real native socket with the host agent. Bare `claude` remains
-// the communication opt-out and is never modified by this launcher.
+// RunClaudePeer launches one native Claude session in the host agent's shared
+// Claude profile and registers its real native socket. Bare `claude` remains
+// the Agent Sessions opt-out and host settings are never modified.
+//
+//nolint:gocyclo // Launch keeps validation, gated ownership, publication, and cleanup in one transaction.
 func RunClaudePeer(args []string) error {
 	plan, err := parseClaudePeerArgs(args)
 	if err != nil {
@@ -65,43 +67,138 @@ func RunClaudePeer(args []string) error {
 	if err != nil {
 		return err
 	}
-	privateRoot := claudePeerPrivateRoot(status.HostID, plan.sessionID)
-	profileLock, err := acquireClaudePeerProfileLock(privateRoot)
+	lifecycleRoot := claudePeerLifecycleRoot(status.StateDir, status.HostID, plan.sessionID)
+	profileLock, err := acquireClaudePeerProfileLock(lifecycleRoot)
 	if err != nil {
 		return err
 	}
 	defer releaseClaudePeerProfileLock(profileLock)
-	resolved, err := resolvePeerLaunchContext(
+	sharedRoot := filepath.Dir(status.RegistryDir)
+	source, err := claudeprofile.CurrentSource()
+	if err != nil {
+		return err
+	}
+	if err := requireClaudePeerProfileMatch(source, status); err != nil {
+		return err
+	}
+	if err := prepareClaudePeerAttachment(sharedRoot, plan.sessionID); err != nil {
+		return err
+	}
+	var settingsBody []byte
+	plan.args, settingsBody, err = planClaudePeerLaunchSettings(plan.args, lifecycleRoot)
+	if err != nil {
+		return err
+	}
+	settingsPath := filepath.Join(lifecycleRoot, "launch-settings.json")
+	resolved, preferenceRequest, err := previewPeerLaunchContext(
 		plan.sessionID, "claude", plan.context, plan.alwaysApprove, plan.yoloSpecified,
 	)
 	if err != nil {
-		return fmt.Errorf("resolve Agent Sessions peer preferences: %w", err)
+		return errors.Join(fmt.Errorf("preview Agent Sessions peer preferences: %w", err), removeClaudePeerLaunchSettings(settingsPath))
 	}
 	if resolved.Preference.AlwaysApprove && !plan.alwaysApprove {
 		plan.alwaysApprove = true
-		plan.args = append(plan.args, "--dangerously-skip-permissions")
+		plan.args = insertClaudeManagedArgs(plan.args, "--dangerously-skip-permissions")
 	} else if !resolved.Preference.AlwaysApprove && !claudePeerHasPermissionMode(plan.args) {
 		// The durable default is an effective runtime decision, not merely an
 		// argv omission: a user's Claude settings may otherwise enable bypass.
-		plan.args = append(plan.args, "--permission-mode", "default")
+		plan.args = insertClaudeManagedArgs(plan.args, "--permission-mode", "default")
 	}
-	source, err := prepareClaudePeerProfileFromCurrent(privateRoot)
+	environment := claudePeerEnvironment(os.Environ(), sharedRoot, source, plan.sessionID)
+	gateReader, gateWriter, err := os.Pipe()
 	if err != nil {
-		return err
+		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
 	}
-	if err := prepareClaudePeerAttachment(privateRoot, plan.sessionID); err != nil {
-		return err
-	}
-	if err := projectAgentServiceRecord(privateRoot); err != nil {
-		return fmt.Errorf("project host agent into Claude registry: %w", err)
-	}
-	environment := claudePeerEnvironment(os.Environ(), privateRoot, source.SecureConfig, plan.sessionID)
-	command := exec.Command(claude, append(plan.args, "--settings", `{"crossSessionInbound":"accept"}`)...) //nolint:gosec // executable and argv are direct native CLI values.
+	defer func() {
+		_ = gateReader.Close()
+		_ = gateWriter.Close()
+	}()
+	gateArgs := make([]string, 0, 4+len(plan.args))
+	gateArgs = append(gateArgs, "-c", `IFS= read -r gate <&3 || exit 125; test "$gate" = agent-sessions-go || exit 125; exec 3<&-; exec "$@"`, "claude-peer-gate", claude)
+	gateArgs = append(gateArgs, plan.args...)
+	command := exec.Command("/bin/sh", gateArgs...) //nolint:gosec // fixed gate script execs the native executable with an argv vector.
 	command.Env, command.Stdin, command.Stdout, command.Stderr = environment, os.Stdin, os.Stdout, os.Stderr
+	command.ExtraFiles = []*os.File{gateReader}
 	if err := command.Start(); err != nil {
+		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
+	}
+	_ = gateReader.Close()
+	adapterStart, err := waitClaudePeerProcessStart(command.Process.Pid)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
+	}
+	preparation := federator.PeerRegistration{
+		Version: federator.GroupProtocolVersion, SessionID: plan.sessionID, Product: "claude", Name: plan.peerName,
+		PID: command.Process.Pid, ProcStart: adapterStart,
+		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
+		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: sharedRoot,
+	}
+	prepared, err := federator.PreparePeerLaunch(
+		agentRuntimeDir(), preparation, preferenceRequest, resolved.Preference,
+	)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
+	}
+	resolved = prepared
+	if err := writeClaudePeerLaunchSettings(settingsPath, settingsBody); err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		settingsCleanupErr := removeClaudePeerLaunchSettings(settingsPath)
+		var cancelErr error
+		if settingsCleanupErr == nil {
+			cancelErr = federator.CancelPeerPreparation(agentRuntimeDir(), preparation)
+		}
+		return errors.Join(err, settingsCleanupErr, cancelErr)
+	}
+	if _, err := gateWriter.Write([]byte("agent-sessions-go\n")); err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		settingsCleanupErr := removeClaudePeerLaunchSettings(settingsPath)
+		var cancelErr error
+		if settingsCleanupErr == nil {
+			cancelErr = federator.CancelPeerPreparation(agentRuntimeDir(), preparation)
+		}
+		return errors.Join(err, settingsCleanupErr, cancelErr)
+	}
+	_ = gateWriter.Close()
+	var cleanupErr error
+	runErr := superviseClaudePeer(command, lifecycleRoot, sharedRoot, plan, resolved.Preference.AlwaysApprove, &cleanupErr)
+	settingsCleanupErr := removeClaudePeerLaunchSettings(settingsPath)
+	var cancelErr error
+	if cleanupErr == nil && settingsCleanupErr == nil {
+		cancelErr = federator.CancelPeerPreparation(agentRuntimeDir(), preparation)
+	}
+	return errors.Join(
+		runErr, cleanupErr, settingsCleanupErr, cancelErr,
+	)
+}
+
+func requireClaudePeerProfileMatch(source claudeprofile.Source, status federator.AgentStatus) error {
+	if err := requireClaudePeerSharedRegistry(source.ConfigRoot, status.RegistryDir); err != nil {
 		return err
 	}
-	return superviseClaudePeer(command, privateRoot, plan, resolved.Preference.AlwaysApprove)
+	if source.ConfigEnvSet != status.ClaudeConfigEnvSet ||
+		(source.ConfigEnvSet && source.ConfigEnvValue != status.ClaudeConfigEnvValue) ||
+		source.SecureEnvSet != status.ClaudeSecureEnvSet ||
+		(source.SecureEnvSet && source.SecureConfig != status.ClaudeSecureConfig) {
+		return errors.New("claude-peer native profile environment does not match the running host agent; restart the agent from the intended Claude environment")
+	}
+	return nil
+}
+
+func waitClaudePeerProcessStart(pid int) (string, error) {
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if start := federator.ProcessStart(pid); start != "" {
+			return start, nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return "", errors.New("capture gated Claude adapter process identity")
 }
 
 func claudePeerAgentStatus() (federator.AgentStatus, error) {
@@ -133,31 +230,32 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 		}
 	}
 	resume := false
-	for index := 0; index < len(forwarded); index++ {
-		argument := forwarded[index]
+	scanned := beforeDoubleDash(forwarded)
+	for index := 0; index < len(scanned); index++ {
+		argument := scanned[index]
 		switch {
 		case argument == "--bare":
 			return claudePeerPlan{}, usageError("claude-peer requires native messaging; use bare claude to opt out")
 		case argument == "--session-id":
-			if index+1 >= len(forwarded) {
+			if index+1 >= len(scanned) {
 				return claudePeerPlan{}, usageError("--session-id requires a value")
 			}
-			plan.sessionID = forwarded[index+1]
+			plan.sessionID = scanned[index+1]
 			index++
 		case strings.HasPrefix(argument, "--session-id="):
 			plan.sessionID = strings.TrimPrefix(argument, "--session-id=")
 		case argument == "--resume" || argument == "-r":
-			if index+1 >= len(forwarded) {
+			if index+1 >= len(scanned) {
 				return claudePeerPlan{}, usageError(argument + " requires an exact session UUID")
 			}
-			plan.sessionID, resume = forwarded[index+1], true
+			plan.sessionID, resume = scanned[index+1], true
 			index++
 		case strings.HasPrefix(argument, "--resume="):
 			plan.sessionID, resume = strings.TrimPrefix(argument, "--resume="), true
 		case argument == "--dangerously-skip-permissions":
 			plan.alwaysApprove, plan.yoloSpecified = true, true
-		case argument == "--permission-mode" && index+1 < len(forwarded):
-			plan.alwaysApprove = forwarded[index+1] == "bypassPermissions"
+		case argument == "--permission-mode" && index+1 < len(scanned):
+			plan.alwaysApprove = scanned[index+1] == "bypassPermissions"
 			plan.yoloSpecified = true
 			index++
 		case strings.HasPrefix(argument, "--permission-mode="):
@@ -176,16 +274,31 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 		if err != nil {
 			return claudePeerPlan{}, err
 		}
-		plan.args = append(plan.args, "--session-id", plan.sessionID)
+		plan.args = insertClaudeManagedArgs(plan.args, "--session-id", plan.sessionID)
 	} else if !threadIDPattern.MatchString(plan.sessionID) {
 		return claudePeerPlan{}, usageError("claude-peer requires an exact session UUID")
 	}
 	if resume && peerName != "" {
-		plan.args = append(plan.args, "--name", peerName)
+		plan.args = insertClaudeManagedArgs(plan.args, "--name", peerName)
 	} else if !resume && peerName != "" {
-		plan.args = append(plan.args, "--name", peerName)
+		plan.args = insertClaudeManagedArgs(plan.args, "--name", peerName)
 	}
 	return plan, nil
+}
+
+func insertClaudeManagedArgs(args []string, managed ...string) []string {
+	insert := len(args)
+	for index, argument := range args {
+		if argument == "--" {
+			insert = index
+			break
+		}
+	}
+	result := make([]string, 0, len(args)+len(managed))
+	result = append(result, args[:insert]...)
+	result = append(result, managed...)
+	result = append(result, args[insert:]...)
+	return result
 }
 
 func claudeOptionConsumesNext(option string) bool {
@@ -212,6 +325,139 @@ func claudePeerHasPermissionMode(args []string) bool {
 	return false
 }
 
+func requireClaudePeerSharedRegistry(configRoot, registryDir string) error {
+	want := filepath.Join(configRoot, "sessions")
+	if !sameLauncherPath(want, registryDir) {
+		return fmt.Errorf("claude-peer profile %s does not match host agent registry %s", configRoot, registryDir)
+	}
+	return nil
+}
+
+func sameLauncherPath(left, right string) bool {
+	leftAbsolute, leftErr := filepath.Abs(left)
+	rightAbsolute, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	leftResolved, leftErr := filepath.EvalSymlinks(leftAbsolute)
+	rightResolved, rightErr := filepath.EvalSymlinks(rightAbsolute)
+	if leftErr == nil && rightErr == nil {
+		return filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
+	}
+	return filepath.Clean(leftAbsolute) == filepath.Clean(rightAbsolute)
+}
+
+// prepareClaudePeerLaunchSettings merges the caller's effective settings with
+// the one managed-session override. The host settings files are never written.
+func prepareClaudePeerLaunchSettings(args []string, lifecycleRoot string) ([]string, error) {
+	result, body, err := planClaudePeerLaunchSettings(args, lifecycleRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeClaudePeerLaunchSettings(filepath.Join(lifecycleRoot, "launch-settings.json"), body); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func planClaudePeerLaunchSettings(args []string, lifecycleRoot string) ([]string, []byte, error) {
+	settings := map[string]json.RawMessage{}
+	settingsValue := ""
+	settingsSet := false
+	without := make([]string, 0, len(args)+2)
+	afterDoubleDash := false
+	for len(args) > 0 {
+		argument := args[0]
+		args = args[1:]
+		if argument == "--" {
+			afterDoubleDash = true
+			without = append(without, argument)
+			continue
+		}
+		if afterDoubleDash {
+			without = append(without, argument)
+			continue
+		}
+		var value string
+		switch {
+		case argument == "--settings":
+			if len(args) == 0 {
+				return nil, nil, usageError("--settings requires a JSON object or file path")
+			}
+			value = args[0]
+			args = args[1:]
+		case strings.HasPrefix(argument, "--settings="):
+			value = strings.TrimPrefix(argument, "--settings=")
+		default:
+			without = append(without, argument)
+			continue
+		}
+		settingsValue, settingsSet = value, true // Claude treats the last singular --settings as effective.
+	}
+	if settingsSet {
+		parsed, err := readClaudePeerSettings(settingsValue)
+		if err != nil {
+			return nil, nil, err
+		}
+		settings = parsed
+	}
+	settings["crossSessionInbound"] = json.RawMessage(`"accept"`)
+	body, err := json.Marshal(settings)
+	if err != nil {
+		return nil, nil, err
+	}
+	path := filepath.Join(lifecycleRoot, "launch-settings.json")
+	insert := len(without)
+	for index, argument := range without {
+		if argument == "--" {
+			insert = index
+			break
+		}
+	}
+	result := make([]string, 0, len(without)+2)
+	result = append(result, without[:insert]...)
+	result = append(result, "--settings", path)
+	result = append(result, without[insert:]...)
+	return result, append(body, '\n'), nil
+}
+
+func writeClaudePeerLaunchSettings(path string, body []byte) error {
+	if err := writeLauncherFileAtomic(path, body, 0o600); err != nil {
+		return fmt.Errorf("write managed Claude launch settings: %w", err)
+	}
+	return nil
+}
+
+func readClaudePeerSettings(value string) (map[string]json.RawMessage, error) {
+	body := []byte(value)
+	if !strings.HasPrefix(strings.TrimSpace(value), "{") {
+		var err error
+		body, err = os.ReadFile(value) //nolint:gosec // explicit native --settings path supplied by the operator.
+		if err != nil {
+			return nil, fmt.Errorf("read Claude --settings: %w", err)
+		}
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(body, &settings); err != nil || settings == nil {
+		return nil, errors.New("claude --settings must contain a JSON object")
+	}
+	return settings, nil
+}
+
+func removeClaudePeerLaunchSettings(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("managed Claude launch settings changed type")
+	}
+	return os.Remove(path)
+}
+
 func claudeExecutable() (string, error) {
 	if path := strings.TrimSpace(os.Getenv("CLAUDE_PEER_CLAUDE_BIN")); path != "" {
 		return path, nil
@@ -234,12 +480,15 @@ func newClaudePeerSessionID() (string, error) {
 	return hexID[:8] + "-" + hexID[8:12] + "-" + hexID[12:16] + "-" + hexID[16:20] + "-" + hexID[20:], nil
 }
 
-func claudePeerPrivateRoot(hostID, sessionID string) string {
-	return federator.ClaudePeerPrivateRoot(hostID, sessionID)
+func claudePeerLifecycleRoot(stateDir, hostID, sessionID string) string {
+	if stateDir != "" {
+		return federator.ClaudePeerLifecycleRootInState(stateDir, sessionID)
+	}
+	return federator.ClaudePeerLifecycleRoot(hostID, sessionID)
 }
 
-func acquireClaudePeerProfileLock(privateRoot string) (*os.File, error) {
-	lockPath := federator.ClaudePeerLifecycleLockPath(privateRoot)
+func acquireClaudePeerProfileLock(lifecycleRoot string) (*os.File, error) {
+	lockPath := federator.ClaudePeerLifecycleLockPath(lifecycleRoot)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
 	}
@@ -262,60 +511,12 @@ func releaseClaudePeerProfileLock(lock *os.File) {
 	_ = lock.Close()
 }
 
-func prepareClaudePeerProfile(privateRoot string, source claudeprofile.Source) error {
-	if err := os.MkdirAll(filepath.Join(privateRoot, "sessions"), 0o700); err != nil {
-		return fmt.Errorf("create private Claude registry: %w", err)
-	}
-	if err := claudeprofile.Seed(privateRoot, source.StatePath); err != nil {
-		return err
-	}
-	for _, name := range []string{"settings.json", "settings.local.json", "CLAUDE.md"} {
-		body, err := os.ReadFile(filepath.Join(source.ConfigRoot, name)) //nolint:gosec // configured local Claude profile.
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("read Claude profile %s: %w", name, err)
-		}
-		if err := writeLauncherFileAtomic(filepath.Join(privateRoot, name), body, 0o600); err != nil {
-			return err
-		}
-	}
-	for _, name := range []string{"plugins", "skills", "commands", "agents"} {
-		target := filepath.Join(source.ConfigRoot, name)
-		if info, err := os.Stat(target); err != nil || !info.IsDir() {
-			continue
-		}
-		link := filepath.Join(privateRoot, name)
-		if current, err := os.Readlink(link); err == nil && filepath.Clean(current) == filepath.Clean(target) {
-			continue
-		}
-		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("replace private Claude profile link %s: %w", name, err)
-		}
-		if err := os.Symlink(target, link); err != nil {
-			return fmt.Errorf("link Claude profile %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
-func prepareClaudePeerProfileFromCurrent(privateRoot string) (claudeprofile.Source, error) {
-	source, err := claudeprofile.CurrentSource()
-	if err != nil {
-		return claudeprofile.Source{}, err
-	}
-	if err := prepareClaudePeerProfile(privateRoot, source); err != nil {
-		return claudeprofile.Source{}, err
-	}
-	return source, nil
-}
-
 // prepareClaudePeerAttachment runs while the deterministic profile lock is
-// held. It prevents a resume from starting beside an orphaned native adapter
-// and retires only exact, provably stale rows from an earlier attachment.
-func prepareClaudePeerAttachment(privateRoot, sessionID string) error {
-	directory := filepath.Join(privateRoot, "sessions")
+// held. In the shared registry it ignores unrelated native/service rows,
+// rejects only a live attachment of the same UUID, and retires only an exact
+// stale row from that UUID.
+func prepareClaudePeerAttachment(configRoot, sessionID string) error {
+	directory := filepath.Join(configRoot, "sessions")
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
@@ -331,17 +532,18 @@ func prepareClaudePeerAttachment(privateRoot, sessionID string) error {
 			continue
 		}
 		path := filepath.Join(directory, name)
-		body, readErr := os.ReadFile(path) //nolint:gosec // locked deterministic private profile.
+		body, readErr := os.ReadFile(path) //nolint:gosec // locked exact row in the shared registry.
 		if readErr != nil {
 			return readErr
 		}
 		var marker struct {
-			AgentService bool `json:"agentService"`
+			AgentService bool   `json:"agentService"`
+			SessionID    string `json:"sessionId"`
 		}
 		if json.Unmarshal(body, &marker) != nil {
-			return fmt.Errorf("invalid native Claude record %s", path)
+			continue
 		}
-		if marker.AgentService {
+		if marker.AgentService || marker.SessionID != sessionID {
 			continue
 		}
 		row, rowErr := parseClaudeNativePeerRecordForCleanup(body, pid, sessionID)
@@ -351,28 +553,32 @@ func prepareClaudePeerAttachment(privateRoot, sessionID string) error {
 		if procinfo.Read(pid).Status != procinfo.Absent {
 			return errors.New("this Claude peer session still has a live native attachment")
 		}
-		if err := cleanupClaudePeerNativeArtifacts(privateRoot, row, row.ProcStart, sessionID); err != nil {
+		if err := cleanupClaudePeerNativeArtifacts(configRoot, row, row.ProcStart, sessionID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func claudePeerEnvironment(environment []string, privateRoot, publicRoot, sessionID string) []string {
+func claudePeerEnvironment(environment []string, sharedRoot string, source claudeprofile.Source, sessionID string) []string {
 	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name := entry
 		if separator := strings.IndexByte(entry, '='); separator >= 0 {
 			name = entry[:separator]
 		}
-		if name != "CLAUDE_CODE_SIMPLE" && name != "CLAUDE_CODE_HARBOR_KITE" {
+		switch name {
+		case "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET",
+			"CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION",
+			"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_HARBOR_KITE",
+			"CLAUDE_PEER_CLAUDE_CONFIG_DIR":
+		default:
 			filtered = append(filtered, entry)
 		}
 	}
 	environment = filtered
 	values := map[string]string{
-		"CLAUDE_CONFIG_DIR": privateRoot, "CLAUDE_PEER_CLAUDE_CONFIG_DIR": privateRoot,
-		"CLAUDE_SECURESTORAGE_CONFIG_DIR":      publicRoot,
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        sharedRoot,
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", agentRuntimeDirEnv: agentRuntimeDir(),
 		"CLAUDE_CODE_HARBOR_KITE": "1",
 		peerSessionIDEnv:          sessionID, peerProductEnv: "claude",
@@ -380,11 +586,39 @@ func claudePeerEnvironment(environment []string, privateRoot, publicRoot, sessio
 	for key, value := range values {
 		environment = replaceLaneEnvironment(environment, key, value)
 	}
+	environment = applyClaudeProfileEnvironment(environment, source)
 	return environment
 }
 
+func applyClaudeProfileEnvironment(environment []string, source claudeprofile.Source) []string {
+	result := make([]string, 0, len(environment)+2)
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if name != "CLAUDE_CONFIG_DIR" && name != "CLAUDE_SECURESTORAGE_CONFIG_DIR" {
+			result = append(result, entry)
+		}
+	}
+	if source.ConfigEnvSet {
+		result = append(result, "CLAUDE_CONFIG_DIR="+source.ConfigEnvValue)
+	}
+	if source.SecureEnvSet {
+		result = append(result, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+source.SecureConfig)
+	}
+	return result
+}
+
 //nolint:gocyclo // Supervision combines native publication, agent registration, refresh, and cleanup.
-func superviseClaudePeer(command *exec.Cmd, privateRoot string, plan claudePeerPlan, durableYolo bool) (resultErr error) {
+func superviseClaudePeer(
+	command *exec.Cmd,
+	lifecycleRoot string,
+	sharedRoot string,
+	plan claudePeerPlan,
+	durableYolo bool,
+	cleanupErr *error,
+) (resultErr error) {
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
 	childPID := command.Process.Pid
@@ -420,9 +654,9 @@ func superviseClaudePeer(command *exec.Cmd, privateRoot string, plan claudePeerP
 		if nativeRow.PID <= 1 {
 			nativeRow.PID = childPID
 		}
-		resultErr = errors.Join(resultErr, cleanupClaudePeerNativeArtifacts(
-			privateRoot, nativeRow, childStart, plan.sessionID,
-		))
+		*cleanupErr = cleanupClaudePeerNativeArtifacts(
+			sharedRoot, nativeRow, childStart, plan.sessionID,
+		)
 	}()
 	for registration.SessionID == "" {
 		select {
@@ -430,7 +664,7 @@ func superviseClaudePeer(command *exec.Cmd, privateRoot string, plan claudePeerP
 			return waitErr
 		case <-time.After(100 * time.Millisecond):
 		}
-		row, err := readClaudeNativePeerRecord(privateRoot, childPID, childStart)
+		row, err := readClaudeNativePeerRecord(sharedRoot, childPID, childStart)
 		if err != nil {
 			if time.Now().After(deadline) {
 				_ = command.Process.Kill()
@@ -451,17 +685,15 @@ func superviseClaudePeer(command *exec.Cmd, privateRoot string, plan claudePeerP
 			return errors.New("Claude published a permission mode that disagrees with the explicit claude-peer launch policy") //nolint:staticcheck // Claude is a product name.
 		}
 		if !plan.yoloSpecified && actualYolo != durableYolo {
-			if _, err := resolvePeerLaunchContext(plan.sessionID, "claude", plan.context, actualYolo, true); err != nil {
-				_ = command.Process.Kill()
-				<-done
-				return err
-			}
-			durableYolo = actualYolo
+			_ = command.Process.Kill()
+			<-done
+			return errors.New("Claude published a permission mode that disagrees with the prepared durable launch policy") //nolint:staticcheck // Claude is a product name.
 		}
 		registration = claudePeerRegistration(row, plan, actualYolo, childPID, childStart)
 		registration.LifecyclePID = os.Getpid()
 		registration.LifecycleProcStart = federator.ProcessStart(os.Getpid())
-		registration.PrivateConfigRoot = privateRoot
+		registration.LifecycleRoot = lifecycleRoot
+		registration.ClaudeConfigRoot = sharedRoot
 		nativeRow = row
 		if registration.LifecycleProcStart == "" {
 			_ = command.Process.Kill()
@@ -492,8 +724,7 @@ func superviseClaudePeer(command *exec.Cmd, privateRoot string, plan claudePeerP
 			}
 			return waitErr
 		case <-ticker.C:
-			_ = projectAgentServiceRecord(privateRoot)
-			row, rowErr := readClaudeNativePeerRecord(privateRoot, childPID, childStart)
+			row, rowErr := readClaudeNativePeerRecord(sharedRoot, childPID, childStart)
 			if rowErr != nil || row.SessionID != plan.sessionID {
 				continue
 			}
@@ -508,7 +739,8 @@ func superviseClaudePeer(command *exec.Cmd, privateRoot string, plan claudePeerP
 			registration = claudePeerRegistration(row, plan, durableYolo, childPID, childStart)
 			registration.LifecyclePID = os.Getpid()
 			registration.LifecycleProcStart = federator.ProcessStart(os.Getpid())
-			registration.PrivateConfigRoot = privateRoot
+			registration.LifecycleRoot = lifecycleRoot
+			registration.ClaudeConfigRoot = sharedRoot
 			nativeRow = row
 			_, _ = federator.RegisterPeer(agentRuntimeDir(), registration)
 		}
@@ -546,8 +778,8 @@ func defaultClaudePeerStatus(status string) string {
 	}
 }
 
-func readClaudeNativePeerRecord(privateRoot string, pid int, expectedStart string) (claudeNativePeerRecord, error) {
-	body, err := os.ReadFile(filepath.Join(privateRoot, "sessions", strconv.Itoa(pid)+".json")) //nolint:gosec // exact child PID and private profile.
+func readClaudeNativePeerRecord(configRoot string, pid int, expectedStart string) (claudeNativePeerRecord, error) {
+	body, err := os.ReadFile(filepath.Join(configRoot, "sessions", strconv.Itoa(pid)+".json")) //nolint:gosec // exact child PID in the shared profile.
 	if err != nil {
 		return claudeNativePeerRecord{}, err
 	}
@@ -574,7 +806,7 @@ func readClaudeNativePeerRecord(privateRoot string, pid int, expectedStart strin
 
 //nolint:gocyclo // Provisional and validated native artifacts are independently re-attested.
 func cleanupClaudePeerNativeArtifacts(
-	privateRoot string,
+	configRoot string,
 	row claudeNativePeerRecord,
 	expectedStart string,
 	expectedSessionID string,
@@ -590,34 +822,78 @@ func cleanupClaudePeerNativeArtifacts(
 	if procinfo.Read(pid).Status != procinfo.Absent {
 		return errors.New("native Claude PID is not absent during cleanup")
 	}
-	recordPath := filepath.Join(privateRoot, "sessions", strconv.Itoa(row.PID)+".json")
+	recordPath := filepath.Join(configRoot, "sessions", strconv.Itoa(row.PID)+".json")
+	recordPresent := false
 	current, err := os.ReadFile(recordPath) //nolint:gosec // exact private child record.
 	if err == nil {
 		candidate, parseErr := parseClaudeNativePeerRecordForCleanup(current, pid, expectedSessionID)
 		if parseErr != nil || candidate.ProcStart != expectedStart {
 			return errors.New("native Claude record changed before cleanup")
 		}
+		if row.MessagingSocketPath != "" && candidate.MessagingSocketPath != row.MessagingSocketPath {
+			return errors.New("native Claude record changed its messaging socket before cleanup")
+		}
 		row = candidate
+		recordPresent = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	keyPath := ""
+	keyPresent := false
+	if row.MessagingSocketPath != "" {
+		if filepath.Base(row.MessagingSocketPath) != strconv.Itoa(row.PID)+".sock" {
+			return errors.New("native Claude socket is not PID-bound")
+		}
+		keyName, keyErr := federator.ClaudeServiceKeyName(row.PID, row.MessagingSocketPath)
+		if keyErr != nil {
+			return errors.New("native Claude peer-token sidecar path is invalid")
+		}
+		keyPath = filepath.Join(configRoot, "sessions", keyName)
+		if info, statErr := os.Lstat(keyPath); statErr == nil {
+			if !info.Mode().IsRegular() {
+				return errors.New("native Claude peer-token sidecar changed type")
+			}
+			keyPresent = true
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+	}
+	socketPresent := false
+	if row.MessagingSocketPath != "" {
+		info, statErr := os.Lstat(row.MessagingSocketPath)
+		if statErr == nil {
+			if info.Mode()&os.ModeSocket == 0 {
+				return errors.New("native Claude socket path changed type")
+			}
+			socketPresent = true
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+	}
+	// Keep the registry row until transport cleanup succeeds so a failed
+	// attempt retains the exact socket identity for agent reconciliation.
+	if socketPresent {
+		if procinfo.Read(row.PID).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before socket cleanup")
+		}
+		if err := os.Remove(row.MessagingSocketPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if keyPresent {
+		if procinfo.Read(row.PID).Status != procinfo.Absent {
+			return errors.New("native Claude PID reappeared before key removal")
+		}
+		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if recordPresent {
 		if procinfo.Read(pid).Status != procinfo.Absent {
 			return errors.New("native Claude PID reappeared before record cleanup")
 		}
 		if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := removeClaudePeerKeySidecars(filepath.Join(privateRoot, "sessions"), row.PID); err != nil {
-		return err
-	}
-	if row.MessagingSocketPath != "" && filepath.Base(row.MessagingSocketPath) == strconv.Itoa(row.PID)+".sock" {
-		if info, statErr := os.Lstat(row.MessagingSocketPath); statErr == nil && info.Mode()&os.ModeSocket != 0 &&
-			procinfo.Read(row.PID).Status == procinfo.Absent {
-			if err := os.Remove(row.MessagingSocketPath); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		} else if statErr != nil && !os.IsNotExist(statErr) {
-			return statErr
 		}
 	}
 	return nil
@@ -636,120 +912,6 @@ func parseClaudeNativePeerRecordForCleanup(body []byte, pid int, sessionID strin
 		return claudeNativePeerRecord{}, errors.New("invalid native Claude cleanup record")
 	}
 	return row, nil
-}
-
-func removeClaudePeerKeySidecars(directory string, pid int) error {
-	prefix := strconv.Itoa(pid) + "."
-	entries, err := os.ReadDir(directory)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".key") {
-			continue
-		}
-		digest := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".key")
-		if len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" || procinfo.Read(pid).Status != procinfo.Absent {
-			continue
-		}
-		path := filepath.Join(directory, name)
-		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		} else if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-func projectAgentServiceRecord(privateRoot string) error {
-	projection, err := federator.AgentService(agentRuntimeDir())
-	if err != nil {
-		return err
-	}
-	var record struct {
-		PID          int    `json:"pid"`
-		ProcStart    string `json:"procStart"`
-		AgentService bool   `json:"agentService"`
-	}
-	if json.Unmarshal(projection.Record, &record) != nil || !record.AgentService || record.PID != projection.PID ||
-		record.ProcStart != projection.ProcStart {
-		return errors.New("host agent returned an invalid Claude service record")
-	}
-	directory := filepath.Join(privateRoot, "sessions")
-	if err := removeProjectedAgentServiceRecords(directory, record.PID); err != nil {
-		return err
-	}
-	keyBody, err := json.Marshal(map[string]string{"peerToken": projection.PeerToken, "procStart": projection.ProcStart})
-	if err != nil {
-		return err
-	}
-	if err := writeLauncherFileAtomic(filepath.Join(directory, projection.KeyName), append(keyBody, '\n'), 0o600); err != nil {
-		return err
-	}
-	return writeLauncherFileAtomic(filepath.Join(directory, strconv.Itoa(record.PID)+".json"), projection.Record, 0o644)
-}
-
-func removeProjectedAgentServiceRecords(directory string, currentPID int) error {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return err
-	}
-	staleServiceKeys := map[string]bool{}
-	for _, entry := range entries {
-		keyName, stale, err := removeProjectedAgentServiceRecord(directory, entry, currentPID)
-		if err != nil {
-			return err
-		}
-		if stale {
-			staleServiceKeys[keyName] = true
-		}
-	}
-	for _, entry := range entries {
-		if staleServiceKeys[entry.Name()] {
-			if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func removeProjectedAgentServiceRecord(directory string, entry os.DirEntry, currentPID int) (string, bool, error) {
-	if filepath.Ext(entry.Name()) != ".json" || entry.Name() == strconv.Itoa(currentPID)+".json" {
-		return "", false, nil
-	}
-	path := filepath.Join(directory, entry.Name())
-	body, err := os.ReadFile(path) //nolint:gosec // private directory entry.
-	if os.IsNotExist(err) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	var marker struct {
-		PID                 int    `json:"pid"`
-		MessagingSocketPath string `json:"messagingSocketPath"`
-		AgentService        bool   `json:"agentService"`
-	}
-	_ = json.Unmarshal(body, &marker)
-	if !marker.AgentService {
-		return "", false, nil
-	}
-	keyName, err := federator.ClaudeServiceKeyName(marker.PID, marker.MessagingSocketPath)
-	if err != nil {
-		return "", false, errors.New("invalid stale host-agent service projection")
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", false, err
-	}
-	return keyName, true, nil
 }
 
 func defaultClaudePeerName(explicit string, row claudeNativePeerRecord) string {

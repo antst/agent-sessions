@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 )
 
 func TestHubLossCannotBeHiddenByFullLaneOutputQueue(t *testing.T) {
@@ -180,6 +182,31 @@ func TestRemoteLaneArgBounds(t *testing.T) {
 	}
 	if err := validateRemoteLaneArgBounds([]string{strings.Repeat("x", maxRemoteLaneArgBytes+1)}); err == nil {
 		t.Fatal("oversized argv bytes were accepted")
+	}
+}
+
+func TestRemoteLaneUsesAgentClaudeCredentialNamespaceExactly(t *testing.T) {
+	profile := claudeprofile.Source{
+		ConfigRoot: "/shared", ConfigEnvSet: true, ConfigEnvValue: "/shared/../shared",
+		SecureEnvSet: true, SecureConfig: "",
+	}
+	environment := claudeProfileEnvironment([]string{
+		"PATH=/bin", "CLAUDE_CONFIG_DIR=/wrong", "CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong-secure",
+	}, profile)
+	for _, expected := range []string{"PATH=/bin", "CLAUDE_CONFIG_DIR=/shared/../shared", "CLAUDE_SECURESTORAGE_CONFIG_DIR="} {
+		found := false
+		for _, entry := range environment {
+			found = found || entry == expected
+		}
+		if !found {
+			t.Fatalf("remote lane environment missing %q: %v", expected, environment)
+		}
+	}
+	unset := claudeProfileEnvironment(environment, claudeprofile.Source{ConfigRoot: "/default"})
+	for _, entry := range unset {
+		if strings.HasPrefix(entry, "CLAUDE_CONFIG_DIR=") || strings.HasPrefix(entry, "CLAUDE_SECURESTORAGE_CONFIG_DIR=") {
+			t.Fatalf("unset agent namespace retained %q", entry)
+		}
 	}
 }
 

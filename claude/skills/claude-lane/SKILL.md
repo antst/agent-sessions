@@ -23,8 +23,8 @@ Omitted resume flags restore the durable choice.
 
 Discover and message the child through the `agent-sessions` skill: send the
 complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the single host-agent service projected into
-this private Claude profile. Claude lanes are not projected as separate native
-Claude registry rows.
+the shared Claude profile. The lane is also a real native Claude registry row;
+only AgentFrame discovery and routing are group-filtered.
 
 For a remote target use `peer-federator lane --host HOST --product claude --`
 after `status`, `hosts`, and remote doctor. Never fall back to SSH. Federation

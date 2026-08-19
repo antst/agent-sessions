@@ -10,11 +10,10 @@ record has a live `pid` and a connectable `messagingSocketPath`. The bridge corr
 identity through `/proc/<pid>/stat` on Linux and the kernel process table on macOS; an observation
 failure is distinct from proof that a process is stale.
 
-The host agent publishes exactly one public service record using this
-compatible subset. Product adapters register their real sockets privately with
-the host agent; remote peers are never projected into Claude's registry.
-`claude-peer` and Claude lanes use private config roots containing their native
-self row plus a projection of this same one service record:
+The host agent publishes exactly one service record using this compatible
+subset. Product adapters register their real sockets with the host agent;
+remote peers are never projected into Claude's registry. Ordinary Claude,
+`claude-peer`, and Claude lane rows coexist in the configured shared profile:
 
 ```json
 {
@@ -35,7 +34,7 @@ self row plus a projection of this same one service record:
 ```
 
 Claude's `agents --json` command is the independent smoke test: a running host
-agent adds one row regardless of local or remote peer count.
+agent adds exactly one service row regardless of native session or remote peer count.
 
 Agent Sessions discovery is an AgentFrame request to that service, not a scan
 of the Claude registry. It returns only peers sharing a group with the caller.
@@ -44,8 +43,8 @@ exact session ID. Hidden duplicate names do not participate in resolution.
 
 Codex and Grok adapters own stable per-session UDS paths. A wrapped Claude
 attachment instead registers Claude's native PID-bound socket; that socket can
-rotate across exact resume while the Agent Sessions session ID, catalog row,
-groups, and private profile remain stable.
+rotate across exact resume while the shared transcript, Agent Sessions session
+ID, catalog row, and groups remain stable.
 The host agent routes to that socket only after group admission. Claude's
 native sender addresses the service row and puts the complete AgentFrame JSON
 in the message body.

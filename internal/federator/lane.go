@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -457,10 +458,16 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: marshalErr.Error()})
 		return
 	}
-	command.Env = replaceEnvironment(os.Environ(), map[string]string{
+	claudeProfile, profileErr := a.resolvedClaudeProfile()
+	if profileErr != nil {
+		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: profileErr.Error()})
+		return
+	}
+	command.Env = claudeProfileEnvironment(replaceEnvironment(os.Environ(), map[string]string{
 		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     a.options.RuntimeDir,
 		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": string(parentBody),
-	})
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        a.options.ClaudeConfigDir,
+	}), claudeProfile)
 	command.Stdin = bytes.NewReader(request.Input)
 	livenessReader, livenessWriter, err := os.Pipe()
 	if err != nil {
@@ -518,6 +525,26 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		}
 	}
 	_ = a.sendLaneMessage(Message{Type: "lane_exit", RequestID: request.RequestID, ExitCode: exitCode})
+}
+
+func claudeProfileEnvironment(environment []string, profile claudeprofile.Source) []string {
+	result := make([]string, 0, len(environment)+2)
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if name != "CLAUDE_CONFIG_DIR" && name != "CLAUDE_SECURESTORAGE_CONFIG_DIR" {
+			result = append(result, entry)
+		}
+	}
+	if profile.ConfigEnvSet {
+		result = append(result, "CLAUDE_CONFIG_DIR="+profile.ConfigEnvValue)
+	}
+	if profile.SecureEnvSet {
+		result = append(result, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+profile.SecureConfig)
+	}
+	return result
 }
 
 func (a *agent) streamLaneOutput(requestID, kind string, reader io.Reader, run *laneRun) {

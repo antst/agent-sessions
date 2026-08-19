@@ -12,7 +12,7 @@ separate native executables:
 - `codex-peer` — an interactive Codex TUI on the shared App Server;
 - `codex-peer-lane` — project-neutral lifecycle commands for named orchestrated lanes (`run`,
   `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and `doctor`).
-- `claude-peer` — a native Claude TUI in a private registry, registered with the host agent;
+- `claude-peer` — a native Claude TUI in the shared Claude profile, registered with the host agent;
 - `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers.
 - `grok-peer` — an interactive Grok TUI backed by a private leader and an ACP wake client.
 - `grok-peer-lane` — durable named headless Grok ACP workers with messaging, collection, resume,
@@ -93,6 +93,8 @@ row while preserving data, and fails unless `grok inspect --json` resolves the e
 plugin and MCP executable. Start a new Grok session or reload plugins after installing.
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
 the TUI's native policy and its effective live mode is attested before publication.
+Installation never changes Claude's profile-level `crossSessionInbound` value. Managed Claude peers
+and lanes opt into inbound native messages only for their own launch.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok
@@ -109,18 +111,22 @@ marker makes the installer use the bundled binary even if Go is installed.
 
 - One host agent owns the durable product/group catalog and group-filtered local routing. An
   optional hub federates the same protocol; there is no global flat namespace.
-- The public Claude registry contains one Agent Sessions service row, never one remote row per
-  peer. `claude-peer` and each Claude lane use a private native registry containing that service.
+- The shared Claude registry contains ordinary Claude sessions, managed Claude peers and lanes,
+  and exactly one Agent Sessions service row—never one remote row per peer. Native Claude direct
+  messaging remains independent; groups constrain only AgentFrame discovery and routing.
 - Incoming grouped messages wake idle peers or steer/queue work according to the target adapter.
 - Product adapters and the Claude host-agent carrier provide group-filtered discovery, direct send, explicit
   multicast, group broadcast, identity, inbox recovery, and rename operations.
 - Peer delivery is push-based; active orchestrators should continue useful work rather than poll.
   `check_inbox` is only for messages queued past an automatic delivery boundary.
-- TUI `/rename` changes flow immediately into Agent Sessions discovery; Claude's public native
-  listing continues to show only ordinary native sessions plus the one host-agent service.
+- TUI `/rename` changes flow immediately into Agent Sessions discovery; Claude's native listing
+  naturally shows ordinary and managed Claude sessions plus the one host-agent service.
 - Stable Agent Sessions IDs are re-registered when a TUI resumes the same thread. Codex/Grok
   adapters keep stable session sockets; Claude attachments use exact native PID-bound sockets that
   may rotate on resume. Normal TUI exit removes the live registration and owned children.
+- A native transcript can move between ordinary and peer mode by exact UUID. Use the product
+  wrapper once to adopt an ordinary session into the catalog; later `peer resume UUID` restores its
+  product/groups while an ordinary native resume remains an unregistered Agent Sessions opt-out.
 - Dead shim transports are replaced and garbage-collected without deleting queued messages.
 - Child Codex subagents remain private to their parent while the root is a published peer.
 - Generic lanes inherit normal user configuration and impose no model, reasoning, sandbox,

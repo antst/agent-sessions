@@ -44,7 +44,8 @@ type localPeer struct {
 	LifecycleProcStart   string
 	AdapterStrongStart   string
 	LifecycleStrongStart string
-	PrivateConfigRoot    string
+	LifecycleRoot        string
+	ClaudeConfigRoot     string
 	GroupProtocol        int
 	AgentService         bool
 }

@@ -1,10 +1,13 @@
 package federator
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +45,7 @@ type SessionPreferences struct {
 	InheritParentGroups bool     `json:"inherit_parent_groups"`
 	AlwaysApprove       bool     `json:"always_approve"`
 	UpdatedAt           int64    `json:"updated_at"`
+	Revision            string   `json:"revision,omitempty"`
 }
 
 // SessionPreferenceUpdate distinguishes omitted resume flags from explicit
@@ -73,6 +77,7 @@ type sessionCatalog struct {
 	hostID   string
 	sessions map[string]SessionPreferences
 	now      func() int64
+	revision func() (string, error)
 }
 
 //nolint:gocyclo // Catalog reopening validates every durable invariant before use.
@@ -83,7 +88,8 @@ func openSessionCatalog(path, hostID string) (*sessionCatalog, error) {
 	}
 	catalog := &sessionCatalog{
 		path: path, hostID: hostID, sessions: map[string]SessionPreferences{},
-		now: func() int64 { return time.Now().UnixMilli() },
+		now:      func() int64 { return time.Now().UnixMilli() },
+		revision: newSessionPreferenceRevision,
 	}
 	body, err := os.ReadFile(path) //nolint:gosec // path is the configured bridge-owned catalog.
 	if os.IsNotExist(err) {
@@ -132,10 +138,24 @@ func openSessionCatalog(path, hostID string) (*sessionCatalog, error) {
 	return catalog, nil
 }
 
-//nolint:gocyclo // One transaction applies presence-sensitive resume and parent rules atomically.
 func (c *sessionCatalog) update(update SessionPreferenceUpdate) (SessionPreferences, []string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.updateLocked(update, true)
+}
+
+// preview applies every validation and inheritance rule without writing the
+// catalog. Launchers use the result to construct native argv before a gated
+// adapter exists; the agent re-evaluates the same update when it durably owns
+// that adapter.
+func (c *sessionCatalog) preview(update SessionPreferenceUpdate) (SessionPreferences, []string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updateLocked(update, false)
+}
+
+//nolint:gocyclo // One transaction applies presence-sensitive resume and parent rules atomically.
+func (c *sessionCatalog) updateLocked(update SessionPreferenceUpdate, persist bool) (SessionPreferences, []string, error) {
 	if !validCatalogSessionID(update.SessionID) {
 		return SessionPreferences{}, nil, errors.New("invalid session id")
 	}
@@ -227,15 +247,84 @@ func (c *sessionCatalog) update(update SessionPreferenceUpdate) (SessionPreferen
 	if update.AlwaysApproveSpecified {
 		preference.AlwaysApprove = update.AlwaysApprove
 	}
-	preference.UpdatedAt = c.now()
+	revision, err := c.revision()
+	if err != nil {
+		return SessionPreferences{}, nil, fmt.Errorf("create session preference revision: %w", err)
+	}
+	preference.Revision = revision
+	now := c.now()
+	if now <= preference.UpdatedAt {
+		now = preference.UpdatedAt + 1
+	}
+	preference.UpdatedAt = now
 	candidate := clonePreferences(c.sessions)
 	candidate[update.SessionID] = preference
 	groups := c.effectiveGroups(preference)
+	if !persist {
+		return preference, groups, nil
+	}
 	if err := c.write(candidate); err != nil {
 		return SessionPreferences{}, nil, err
 	}
 	c.sessions = candidate
 	return preference, groups, nil
+}
+
+// prepare writes a rollback journal before committing the previewed catalog
+// decision. A crash can therefore restore an ordinary session's prior catalog
+// state instead of leaving a failed peer opt-in adopted or modified.
+func (c *sessionCatalog) prepare(
+	update SessionPreferenceUpdate,
+	expected SessionPreferences,
+	persistJournal func(prior *SessionPreferences, desired SessionPreferences) error,
+	discardJournal func() error,
+) (SessionPreferences, []string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	desired, groups, err := c.updateLocked(update, false)
+	if err != nil {
+		return SessionPreferences{}, nil, err
+	}
+	if !samePreferenceDecision(desired, expected) {
+		return SessionPreferences{}, nil, errors.New("session preferences changed before peer preparation")
+	}
+	var prior *SessionPreferences
+	if current, ok := c.sessions[update.SessionID]; ok {
+		priorPreference := clonePreference(current)
+		prior = &priorPreference
+	}
+	if err := persistJournal(prior, desired); err != nil {
+		return SessionPreferences{}, nil, err
+	}
+	candidate := clonePreferences(c.sessions)
+	candidate[update.SessionID] = desired
+	if err := c.write(candidate); err != nil {
+		return SessionPreferences{}, nil, errors.Join(err, discardJournal())
+	}
+	c.sessions = candidate
+	return desired, groups, nil
+}
+
+// restorePrepared rolls back only the exact decision owned by a failed gated
+// launch. A later explicit catalog change is never overwritten.
+func (c *sessionCatalog) restorePrepared(desired SessionPreferences, prior *SessionPreferences) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, ok := c.sessions[desired.SessionID]
+	if !ok || !samePreferenceRevision(current, desired) {
+		return false, nil
+	}
+	candidate := clonePreferences(c.sessions)
+	if prior == nil {
+		delete(candidate, desired.SessionID)
+	} else {
+		candidate[desired.SessionID] = clonePreference(*prior)
+	}
+	if err := c.write(candidate); err != nil {
+		return false, err
+	}
+	c.sessions = candidate
+	return true, nil
 }
 
 func validSessionKind(kind string) bool {
@@ -361,4 +450,28 @@ func clonePreferences(source map[string]SessionPreferences) map[string]SessionPr
 		result[key] = value
 	}
 	return result
+}
+
+func clonePreference(value SessionPreferences) SessionPreferences {
+	value.ExplicitGroups = append([]string(nil), value.ExplicitGroups...)
+	value.InheritedGroups = append([]string(nil), value.InheritedGroups...)
+	return value
+}
+
+func samePreferenceDecision(left, right SessionPreferences) bool {
+	left.UpdatedAt, right.UpdatedAt = 0, 0
+	left.Revision, right.Revision = "", ""
+	return reflect.DeepEqual(clonePreference(left), clonePreference(right))
+}
+
+func samePreferenceRevision(left, right SessionPreferences) bool {
+	return reflect.DeepEqual(clonePreference(left), clonePreference(right))
+}
+
+func newSessionPreferenceRevision() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
 }

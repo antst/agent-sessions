@@ -63,8 +63,9 @@ incoming message's `from` UDS; its destination-local name and session ID are lif
 
 ## Why there is a manager
 
-Claude Code's `--print --input-format stream-json` process is itself the lane's sole discoverable
-peer. Native peer messages start Claude turns directly; the bridge does not proxy, rewrite, or
+Claude Code's `--print --input-format stream-json` process is the lane's one managed worker and an
+ordinary row in the shared native Claude profile. Native peer messages start Claude turns directly;
+the bridge does not proxy, rewrite, or
 queue them through another peer socket. The manager observes those stream turns and their
 authoritative `result` frames so the same collection, notice, and accounting contract applies to
 both launcher-submitted and peer-submitted work. A `run`/`start`/`resume --timeout` applies to that
@@ -105,13 +106,20 @@ have no owner and are therefore excluded; use `--mine --all` to include owned ar
 query fails if no live Codex or Claude owner can be corroborated rather than silently falling back
 to a transient shell process.
 
+Development builds that created Claude lanes in an Agent Sessions-private native profile are not
+silently migrated into the shared Claude profile. Their archived state is rejected before resume
+mutation or process launch; archive it and start a new shared-profile lane. Shared-profile lanes
+retain the exact registry and macOS secure-storage namespace advertised by the host agent and
+refuse resume after that agent profile changes.
+
 ## Claude-specific policy
 
 Claude has no Codex sandbox axis. The launcher passes through Claude's `--permission-mode`, tool allow/deny lists, `--model`, `--effort`, `--json-schema`, and `--max-budget-usd` without pretending they are equivalent to Codex sandbox policy.
 
 The default permission mode is `dontAsk`, because a headless worker cannot answer an interactive
 approval. Workers start with `--settings '{"crossSessionInbound":"accept"}'` so native peer input
-does not wait for an approval UI the lane does not have. When the launcher
+does not wait for an approval UI the lane does not have. This is a per-process
+override; installation and lane lifecycle never modify the host default. When the launcher
 corroborates a bypass-mode Codex or Claude owner and the caller did not explicitly choose a mode,
 the lane inherits `bypassPermissions`; an explicit `--permission-mode` always wins. The launcher
 never trusts an inherited thread ID alone: it requires a live Codex-host ancestor as a launch-context

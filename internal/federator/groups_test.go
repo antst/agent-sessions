@@ -1,8 +1,10 @@
 package federator
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -51,6 +53,91 @@ func TestSessionCatalogRestoresAndReplacesGroupsAndYolo(t *testing.T) {
 	}
 	if preference.AlwaysApprove || !reflect.DeepEqual(groups, []string{"project-b", "session:host-a/session-a"}) {
 		t.Fatalf("explicit resume did not replace preferences: %+v groups=%v", preference, groups)
+	}
+}
+
+func TestSessionCatalogPreviewDoesNotAdoptOrModifySession(t *testing.T) {
+	root := t.TempDir()
+	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-000000000204"
+	preview, groups, err := catalog.preview(SessionPreferenceUpdate{
+		SessionID: sessionID, Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"preview-only"}, GroupsSpecified: true,
+		AlwaysApprove: true, AlwaysApproveSpecified: true,
+	})
+	if err != nil || !preview.AlwaysApprove || !slices.Contains(groups, "preview-only") {
+		t.Fatalf("catalog preview = %+v groups=%v err=%v", preview, groups, err)
+	}
+	if _, _, exists, err := catalog.get(sessionID); err != nil || exists {
+		t.Fatalf("catalog preview persisted: exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sessions.json")); !os.IsNotExist(err) {
+		t.Fatalf("catalog preview wrote durable state: %v", err)
+	}
+}
+
+func TestSessionCatalogPreparedAdoptionRollsBackToAbsence(t *testing.T) {
+	catalog, err := openSessionCatalog(filepath.Join(t.TempDir(), "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := SessionPreferenceUpdate{
+		SessionID: "00000000-0000-4000-8000-000000000205", Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"temporary"}, GroupsSpecified: true,
+	}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journalPrior *SessionPreferences
+	desired, _, err := catalog.prepare(update, expected, func(prior *SessionPreferences, _ SessionPreferences) error {
+		journalPrior = prior
+		return nil
+	}, func() error { return nil })
+	if err != nil || journalPrior != nil {
+		t.Fatalf("prepared adoption = %+v prior=%+v err=%v", desired, journalPrior, err)
+	}
+	if restored, err := catalog.restorePrepared(desired, journalPrior); err != nil || !restored {
+		t.Fatalf("rollback prepared adoption: restored=%v err=%v", restored, err)
+	}
+	if _, _, exists, err := catalog.get(update.SessionID); err != nil || exists {
+		t.Fatalf("rolled-back adoption remains: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestSessionCatalogRollbackDoesNotOverwriteLaterSameValueRevision(t *testing.T) {
+	catalog, err := openSessionCatalog(filepath.Join(t.TempDir(), "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.now = func() int64 { return 50 }
+	update := SessionPreferenceUpdate{
+		SessionID: "00000000-0000-4000-8000-000000000206", Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"same-value"}, GroupsSpecified: true,
+	}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, _, err := catalog.prepare(update, expected, func(*SessionPreferences, SessionPreferences) error {
+		return nil
+	}, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, _, err := catalog.update(update)
+	if err != nil || later.UpdatedAt <= desired.UpdatedAt || later.Revision == desired.Revision {
+		t.Fatalf("later same-value update revision = %d/%s, desired = %d/%s, err=%v", later.UpdatedAt, later.Revision, desired.UpdatedAt, desired.Revision, err)
+	}
+	if restored, err := catalog.restorePrepared(desired, nil); err != nil || restored {
+		t.Fatalf("rollback overwrote later same-value revision: restored=%v err=%v", restored, err)
+	}
+	current, _, exists, err := catalog.get(update.SessionID)
+	if err != nil || !exists || current.UpdatedAt != later.UpdatedAt {
+		t.Fatalf("later revision changed: current=%+v exists=%v err=%v", current, exists, err)
 	}
 }
 

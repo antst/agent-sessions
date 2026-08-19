@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 )
 
 // AgentOptions configures one host agent and its local Claude registry.
@@ -48,21 +50,43 @@ type agent struct {
 	serviceRecord string
 	serviceKey    string
 	serviceToken  string
+	claudeProfile claudeprofile.Source
 	routeRefresh  func() error
 
-	mu           sync.RWMutex
-	local        map[string]localPeer
-	retirements  map[string]localPeer
-	remote       map[string]Peer
-	remoteHosts  map[string]Host
-	network      *wireConn
-	localChanged chan struct{}
+	mu             sync.RWMutex
+	preparationMu  sync.Mutex
+	local          map[string]localPeer
+	retirements    map[string]localPeer
+	preparations   map[string]peerPreparation
+	preparationDir string
+	remote         map[string]Peer
+	remoteHosts    map[string]Host
+	network        *wireConn
+	localChanged   chan struct{}
 
 	laneMu            sync.Mutex
 	pendingLanes      map[string]*pendingLane
 	laneRuns          map[string]*laneRun
 	deliveryMu        sync.Mutex
 	pendingDeliveries map[string]chan error
+}
+
+func preferenceUpdateFromMessage(message Message) SessionPreferenceUpdate {
+	return SessionPreferenceUpdate{
+		SessionID: message.SessionID, Product: message.Product, Kind: message.SessionKind,
+		ExplicitGroups: message.Groups, GroupsSpecified: message.GroupsSpecified,
+		ParentSession: message.ParentSessionID, ParentHostID: message.ParentHostID,
+		ParentGroups: message.ParentGroups, ParentSpecified: message.ParentSpecified,
+		InheritParentGroups: message.InheritParentGroups, InheritGroupsSpecified: message.InheritGroupsSpecified,
+		AlwaysApprove: message.AlwaysApprove, AlwaysApproveSpecified: message.AlwaysApproveSpecified,
+	}
+}
+
+func (a *agent) resolvedClaudeProfile() (claudeprofile.Source, error) {
+	if a.claudeProfile.ConfigRoot != "" {
+		return a.claudeProfile, nil
+	}
+	return claudeprofile.SharedSource(a.options.ClaudeConfigDir)
 }
 
 // RunAgent connects one local Claude registry to a federation hub until ctx is canceled.
@@ -104,6 +128,10 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 	if err := configureLaneExecutables(&options); err != nil {
 		return err
 	}
+	claudeProfile, err := claudeprofile.SharedSource(options.ClaudeConfigDir)
+	if err != nil {
+		return fmt.Errorf("resolve agent Claude profile: %w", err)
+	}
 	if err := ensureDir(options.RuntimeDir); err != nil {
 		return err
 	}
@@ -134,14 +162,19 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 	}
 	agent := &agent{
 		options: options, logger: defaultLogger(options.Logger), registryDir: registryDir,
-		controlPath: filepath.Join(options.RuntimeDir, "agent.sock"),
-		local:       map[string]localPeer{}, retirements: map[string]localPeer{},
+		claudeProfile: claudeProfile,
+		controlPath:   filepath.Join(options.RuntimeDir, "agent.sock"),
+		local:         map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(options.StateDir, "claude-peer-preparations"),
 		remote: map[string]Peer{}, remoteHosts: map[string]Host{},
 		pendingLanes: map[string]*pendingLane{}, laneRuns: map[string]*laneRun{},
 		pendingDeliveries: map[string]chan error{},
 		localChanged:      make(chan struct{}, 1),
 		catalog:           catalog,
 		serviceToken:      hex.EncodeToString(serviceTokenBytes),
+	}
+	if err := agent.loadPeerPreparations(); err != nil {
+		return err
 	}
 	return agent.run(ctx)
 }
@@ -560,7 +593,7 @@ func (a *agent) handleControl(conn net.Conn) {
 				} else {
 					response.Error = "hub is disconnected"
 				}
-			case "session_preferences":
+			case "session_preferences", "session_preferences_preview":
 				if message.Version != GroupProtocolVersion {
 					response.Error = "group protocol is incompatible"
 					break
@@ -569,20 +602,20 @@ func (a *agent) handleControl(conn net.Conn) {
 					response.Error = err.Error()
 					break
 				}
-				preference, groups, err := a.catalog.update(SessionPreferenceUpdate{
-					SessionID: message.SessionID, Product: message.Product,
-					Kind:           message.SessionKind,
-					ExplicitGroups: message.Groups, GroupsSpecified: message.GroupsSpecified,
-					ParentSession: message.ParentSessionID, ParentHostID: message.ParentHostID,
-					ParentGroups: message.ParentGroups, ParentSpecified: message.ParentSpecified,
-					InheritParentGroups: message.InheritParentGroups, InheritGroupsSpecified: message.InheritGroupsSpecified,
-					AlwaysApprove: message.AlwaysApprove, AlwaysApproveSpecified: message.AlwaysApproveSpecified,
-				})
+				update := preferenceUpdateFromMessage(message)
+				var preference SessionPreferences
+				var groups []string
+				var err error
+				if message.Type == "session_preferences_preview" {
+					preference, groups, err = a.catalog.preview(update)
+				} else {
+					preference, groups, err = a.catalog.update(update)
+				}
 				if err != nil {
 					response.Error = err.Error()
 				} else {
 					response = Message{
-						Type: "session_preferences", Version: GroupProtocolVersion,
+						Type: message.Type, Version: GroupProtocolVersion,
 						SessionID: message.SessionID, Preference: &preference, Groups: groups,
 					}
 				}
@@ -640,6 +673,46 @@ func (a *agent) handleControl(conn net.Conn) {
 					response.Error = err.Error()
 				} else {
 					response = Message{Type: message.Type, Version: GroupProtocolVersion, Peers: []Peer{peer}}
+				}
+			case "peer_prepare":
+				if message.Registration == nil {
+					response.Error = "peer preparation is required"
+					break
+				}
+				if err := a.preparePeer(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_prepare", Version: GroupProtocolVersion}
+				}
+			case "peer_prepare_launch":
+				if message.Registration == nil || message.Preference == nil {
+					response.Error = "peer preparation and previewed preferences are required"
+					break
+				}
+				if err := a.validatePreferenceParentUpdate(message); err != nil {
+					response.Error = err.Error()
+					break
+				}
+				preference, groups, err := a.preparePeerLaunch(
+					*message.Registration, preferenceUpdateFromMessage(message), *message.Preference,
+				)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: "peer_prepare_launch", Version: GroupProtocolVersion,
+						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+					}
+				}
+			case "peer_prepare_cancel":
+				if message.Registration == nil {
+					response.Error = "peer preparation is required"
+					break
+				}
+				if err := a.cancelPeerPreparation(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_prepare_cancel", Version: GroupProtocolVersion}
 				}
 			case "peer_unregister":
 				if message.Registration == nil {
@@ -714,20 +787,26 @@ func (a *agent) validatePreferenceParentUpdate(message Message) error {
 }
 
 func (a *agent) status() AgentStatus {
+	claudeProfile, _ := a.resolvedClaudeProfile()
 	a.mu.RLock()
 	status := AgentStatus{
-		RuntimeVersion:  RuntimeVersion,
-		ProtocolVersion: ProtocolVersion,
-		HostID:          a.options.HostID,
-		HostName:        a.options.HostName,
-		Hub:             a.options.Hub,
-		Connected:       a.network != nil,
-		LocalPeers:      len(a.local),
-		RemotePeers:     len(a.remote),
-		RemoteHosts:     len(a.remoteHosts),
-		Capabilities:    a.laneCapabilities(),
-		RegistryDir:     a.registryDir,
-		RuntimeDir:      a.options.RuntimeDir,
+		RuntimeVersion:       RuntimeVersion,
+		ProtocolVersion:      ProtocolVersion,
+		HostID:               a.options.HostID,
+		HostName:             a.options.HostName,
+		Hub:                  a.options.Hub,
+		Connected:            a.network != nil,
+		LocalPeers:           len(a.local),
+		RemotePeers:          len(a.remote),
+		RemoteHosts:          len(a.remoteHosts),
+		Capabilities:         a.laneCapabilities(),
+		RegistryDir:          a.registryDir,
+		RuntimeDir:           a.options.RuntimeDir,
+		StateDir:             a.options.StateDir,
+		ClaudeConfigEnvSet:   claudeProfile.ConfigEnvSet,
+		ClaudeConfigEnvValue: claudeProfile.ConfigEnvValue,
+		ClaudeSecureConfig:   claudeProfile.SecureConfig,
+		ClaudeSecureEnvSet:   claudeProfile.SecureEnvSet,
 	}
 	a.mu.RUnlock()
 	return status

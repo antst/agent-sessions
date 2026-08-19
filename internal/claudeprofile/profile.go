@@ -1,33 +1,29 @@
-// Package claudeprofile prepares the minimum native Claude profile state that
-// a private Agent Sessions registry needs without copying transcripts or
-// credentials.
+// Package claudeprofile resolves Claude's native profile and credential
+// namespace without changing either one.
 package claudeprofile
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
-
-	"github.com/antst/agent-sessions/internal/fileutil"
 )
 
-// Source describes the native Claude profile that a private attachment derives
-// from. SecureConfig is deliberately allowed to be empty: on macOS that exact
-// value selects Claude's ordinary, unsuffixed Keychain service while ConfigRoot
-// can still be replaced with a private registry.
+// Source describes Claude's effective shared native profile. SecureConfig is
+// deliberately allowed to be empty: on macOS that exact value selects
+// Claude's ordinary, unsuffixed Keychain service.
 type Source struct {
-	ConfigRoot   string
-	StatePath    string
-	SecureConfig string
+	ConfigRoot     string
+	StatePath      string
+	SecureConfig   string
+	ConfigEnvSet   bool
+	ConfigEnvValue string
+	SecureEnvSet   bool
 }
 
-// CurrentSource resolves Claude's effective native profile before Agent
-// Sessions replaces CLAUDE_CONFIG_DIR with a private registry. A custom secure
-// storage spelling is preserved byte-for-byte because native Claude hashes that
-// spelling into its macOS Keychain service name.
+// CurrentSource resolves Claude's effective native profile. Environment
+// presence and spelling are preserved because native Claude uses them when it
+// selects its macOS Keychain namespace.
 func CurrentSource() (Source, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -35,118 +31,71 @@ func CurrentSource() (Source, error) {
 	}
 	defaultRoot := filepath.Join(home, ".claude")
 	configRoot := defaultRoot
-	configuredRoot := ""
-	if value, exists := os.LookupEnv("CLAUDE_CONFIG_DIR"); exists && value != "" {
-		configRoot = value
-		configuredRoot = value
+	configuredRoot, configEnvSet := os.LookupEnv("CLAUDE_CONFIG_DIR")
+	if configuredRoot != "" && !filepath.IsAbs(configuredRoot) {
+		return Source{}, errors.New("CLAUDE_CONFIG_DIR must be absolute for managed Claude sessions")
+	}
+	if configuredRoot != "" {
+		configRoot = configuredRoot
+	}
+	if !filepath.IsAbs(configRoot) {
+		return Source{}, errors.New("claude profile root must be absolute for managed Claude sessions")
 	}
 	statePath := filepath.Join(home, ".claude.json")
 	if configuredRoot != "" {
 		statePath = filepath.Join(configuredRoot, ".claude.json")
 	}
 	secureConfig, secureConfigured := os.LookupEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+	if secureConfig != "" && !filepath.IsAbs(secureConfig) {
+		return Source{}, errors.New("CLAUDE_SECURESTORAGE_CONFIG_DIR must be absolute for managed Claude sessions")
+	}
 	if !secureConfigured {
 		secureConfig = ""
 		if configuredRoot != "" {
 			secureConfig = configuredRoot
 		}
 	}
-	return Source{ConfigRoot: configRoot, StatePath: statePath, SecureConfig: secureConfig}, nil
+	return Source{
+		ConfigRoot: configRoot, StatePath: statePath, SecureConfig: secureConfig,
+		ConfigEnvSet: configEnvSet, ConfigEnvValue: configuredRoot, SecureEnvSet: secureConfigured,
+	}, nil
 }
 
-// SeedFromCurrent carries native account binding and first-run presentation
-// state from the current effective Claude profile into privateRoot. OAuth tokens
-// remain in Claude's separately configured secure storage; oauthAccount is only
-// the native account metadata that tells Claude which secure credential applies.
-// Presentation choices already made in the private profile continue to win.
-func SeedFromCurrent(privateRoot string) error {
+// SharedSource resolves the exact native environment for sharedRoot. When the
+// caller already selected that profile, its original env spelling (including
+// explicit empty values) is preserved. A host agent configured for another
+// profile makes that profile explicit without copying any state or credential.
+func SharedSource(sharedRoot string) (Source, error) {
+	if !filepath.IsAbs(sharedRoot) {
+		return Source{}, errors.New("shared Claude profile root must be absolute")
+	}
 	source, err := CurrentSource()
 	if err != nil {
-		return err
+		return Source{}, err
 	}
-	return Seed(privateRoot, source.StatePath)
+	if sameProfilePath(source.ConfigRoot, sharedRoot) {
+		return source, nil
+	}
+	source.ConfigRoot = sharedRoot
+	source.StatePath = filepath.Join(sharedRoot, ".claude.json")
+	source.ConfigEnvSet = true
+	source.ConfigEnvValue = sharedRoot
+	if !source.SecureEnvSet {
+		source.SecureConfig = sharedRoot
+	}
+	return source, nil
 }
 
-// Seed applies the private-profile state from publicPath. It is exported so
-// callers can exercise the exact profile transaction without changing HOME.
-func Seed(privateRoot, publicPath string) error {
-	public, found, err := readProfileObject(publicPath, "Claude profile state", true)
-	if err != nil {
-		return err
+func sameProfilePath(left, right string) bool {
+	leftAbsolute, leftErr := filepath.Abs(left)
+	rightAbsolute, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
 	}
-	if !found {
-		return nil
+	leftResolved, leftErr := filepath.EvalSymlinks(leftAbsolute)
+	rightResolved, rightErr := filepath.EvalSymlinks(rightAbsolute)
+	if leftErr == nil && rightErr == nil {
+		return filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
 	}
-	privatePath := filepath.Join(privateRoot, ".claude.json")
-	private, found, err := readProfileObject(privatePath, "private Claude profile state", true)
-	if err != nil {
-		return err
-	}
-	if !found {
-		private = map[string]any{}
-	}
-	changed := seedPresentation(private, public)
-	accountChanged, err := syncAccount(private, public)
-	if err != nil {
-		return err
-	}
-	changed = changed || accountChanged
-	if !changed {
-		return nil
-	}
-	if err := fileutil.WriteJSONAtomic(privatePath, private); err != nil {
-		return fmt.Errorf("write private Claude profile state: %w", err)
-	}
-	return nil
-}
-
-func readProfileObject(path, label string, allowMissing bool) (map[string]any, bool, error) {
-	body, err := os.ReadFile(path) //nolint:gosec // caller supplies the current user's profile or a deterministic private profile.
-	if os.IsNotExist(err) && allowMissing {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("read %s: %w", label, err)
-	}
-	var profile map[string]any
-	if err := json.Unmarshal(body, &profile); err != nil {
-		return nil, false, fmt.Errorf("parse %s: %w", label, err)
-	}
-	if profile == nil {
-		return nil, false, fmt.Errorf("parse %s: expected a JSON object", label)
-	}
-	return profile, true, nil
-}
-
-func seedPresentation(private, public map[string]any) bool {
-	changed := false
-	for _, key := range []string{"hasCompletedOnboarding", "lastOnboardingVersion", "theme", "installMethod"} {
-		if _, exists := private[key]; exists {
-			continue
-		}
-		if value, exists := public[key]; exists {
-			private[key] = value
-			changed = true
-		}
-	}
-	return changed
-}
-
-func syncAccount(private, public map[string]any) (bool, error) {
-	// Account binding is runtime state, not a private presentation choice. Keep
-	// it synchronized so account switches and logout cannot leave a private
-	// attachment claiming a stale identity.
-	if account, exists := public["oauthAccount"]; exists {
-		if _, valid := account.(map[string]any); !valid {
-			return false, errors.New("parse Claude profile state: oauthAccount must be a JSON object")
-		}
-		if current, present := private["oauthAccount"]; !present || !reflect.DeepEqual(current, account) {
-			private["oauthAccount"] = account
-			return true, nil
-		}
-	} else if _, exists := private["oauthAccount"]; exists {
-		delete(private, "oauthAccount")
-		return true, nil
-	}
-	return false, nil
+	return filepath.Clean(leftAbsolute) == filepath.Clean(rightAbsolute)
 }
