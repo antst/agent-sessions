@@ -35,7 +35,11 @@ func TestEnsureCodexHomeCreatesConfiguredDirectoryBeforeProfileResolution(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(realRoot, "missing", "codex")
+	resolvedRealRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(resolvedRealRoot, "missing", "codex")
 	if resolved != want {
 		t.Fatalf("fresh aliased CODEX_HOME resolved to %q, want %q", resolved, want)
 	}
