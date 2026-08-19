@@ -16,9 +16,9 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
-const mcpInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. Tool calls are active only when Codex supplies host-owned metadata for an attested grouped peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const mcpInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls are active only when Codex supplies host-owned metadata for an attested grouped peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
-const grokMCPInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. This MCP process is authorized only by the live process-attested grok-peer launch and grouped host-agent registration. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const grokMCPInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a shell-executed lane launcher. This MCP process is authorized only by the live process-attested grok-peer launch and grouped host-agent registration. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
 var nativeToolDefinitions = []map[string]any{
 	{
@@ -73,6 +73,20 @@ var nativeToolDefinitions = []map[string]any{
 				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
 				"name":       map[string]any{"type": "string", "minLength": 1, "maxLength": 80},
 			}, "required": []string{"session_id", "name"}, "additionalProperties": false,
+		},
+	},
+	{
+		"name": "lane", "description": "Run one exact local or federated Codex, Claude, or Grok lane lifecycle command for this attested parent. Use this instead of invoking a lane executable from a sandboxed shell.",
+		"inputSchema": map[string]any{
+			"type": "object", "properties": map[string]any{
+				"product":    map[string]any{"type": "string", "enum": []string{"codex", "claude", "grok"}},
+				"command":    map[string]any{"type": "string", "enum": []string{"doctor", "list", "run", "start", "resume", "wait", "status", "interrupt", "archive"}},
+				"arguments":  map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": 4096}, "maxItems": 256, "description": "Native arguments after the lifecycle command."},
+				"input":      map[string]any{"type": "string", "maxLength": maxFrameBytes, "description": "Optional stdin briefing for run, start, or resume."},
+				"host":       map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."},
+				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
+			},
+			"required": []string{"product", "command", "session_id"}, "additionalProperties": false,
 		},
 	},
 }
@@ -453,6 +467,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		return map[string]any{
 			"text": "Peer session renamed to " + newName + ".", "data": map[string]any{"name": newName},
 		}, nil
+	case "lane":
+		return callMCPParentLane(paths, args, callerSessionID)
 	default:
 		return nil, errors.New("unknown tool: " + name)
 	}

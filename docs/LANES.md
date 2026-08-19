@@ -5,6 +5,24 @@ named persistent Codex App Server thread and publishes that thread in Claude's n
 It owns no project packet format, briefing, model, reasoning, sandbox, approval, web, artifact, or
 postflight policy.
 
+Managed Codex peers invoke local and federated lane lifecycle operations through
+the attested `claude_peer.lane` MCP tool. Codex shell tools run inside an OS sandbox
+that may correctly deny the App Server, supervisor, and host-agent Unix sockets;
+granting broader shell access is not a prerequisite for launching a lane. The MCP
+tool executes the exact packaged runtime outside that shell sandbox, binds the live
+registered Codex session as parent, and returns the native exit code, stdout, and
+stderr. Host-shell operators and Claude/Grok parents may continue to use the product
+lane CLIs directly.
+
+The MCP transport permits one blocking `run`, `resume`, or `wait` call for at most
+24 hours. A positive native `--timeout` below that ceiling receives an additional
+one-minute transport margin, so documented long waits such as 2700 seconds remain
+valid. An omitted or zero timeout uses the 24-hour transport bound; if that bound is
+reached the tool returns exit 124 plus captured tail output and does not claim a turn
+was collected. Use `start` followed by bounded `wait` calls for longer work. Output
+caps retain the tail, where lane JSONL emits the final answer and `turn.completed`,
+and report truncation explicitly.
+
 ## Foreground compatibility
 
 `run` accepts the prompt on stdin and emits JSONL compatible with the useful `codex exec --json`

@@ -771,7 +771,14 @@ if (( wrong_release_status == 0 )) ||
   exit 1
 fi
 for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$release_root/.mcp.json"; do
-  for required_mcp_env in CODEX_HOME TMPDIR XDG_RUNTIME_DIR XDG_STATE_HOME; do
+  for required_mcp_env in \
+    AGENT_SESSIONS_AGENT_RUNTIME_DIR \
+    CLAUDE_PEER_CLAUDE_BIN \
+    CODEX_HOME \
+    GROK_PEER_GROK_BIN \
+    TMPDIR \
+    XDG_RUNTIME_DIR \
+    XDG_STATE_HOME; do
     if ! grep -Fq "\"$required_mcp_env\"" "$packaged_mcp"; then
       printf 'MCP launch does not preserve required caller/runtime environment %s in %s\n' \
         "$required_mcp_env" "$packaged_mcp" >&2

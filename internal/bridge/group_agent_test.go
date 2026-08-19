@@ -140,6 +140,25 @@ func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.
 	}, "source-session"); err != nil {
 		t.Fatal(err)
 	}
+	fakeRuntime := filepath.Join(root, "mcp-runtime")
+	if err := os.WriteFile(fakeRuntime, []byte("#!/bin/sh\nprintf 'role=%s session=%s product=%s\\n' \"$1\" \"$AGENT_SESSIONS_SESSION_ID\" \"$AGENT_SESSIONS_PRODUCT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousRuntime := mcpLaneRuntimeExecutable
+	mcpLaneRuntimeExecutable = func() (string, error) { return fakeRuntime, nil }
+	t.Cleanup(func() { mcpLaneRuntimeExecutable = previousRuntime })
+	laneResult, err := callNativePeerTool("lane", map[string]any{
+		"session_id": "source-session", "product": "claude", "command": "doctor",
+		"arguments": []any{"--json"},
+	}, "source-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	laneData, _ := laneResult["data"].(map[string]any)
+	if intValue(laneData["exit"]) != 0 ||
+		!strings.Contains(stringValue(laneData["stdout"]), "role=claude-lane session=source-session product=codex") {
+		t.Fatalf("attested MCP lane result = %#v", laneResult)
+	}
 
 	result, err := federator.RouteAgentFrame(runtimeDir, "source-session", federator.AgentFrame{
 		Version: federator.AgentFrameVersion, Type: "send", MessageID: "group-message-1",

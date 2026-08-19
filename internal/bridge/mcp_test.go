@@ -118,6 +118,7 @@ func TestNativeMCPRejectsFlatRegistryForUngroupedSession(t *testing.T) {
 		{name: "list_peers", args: map[string]any{}, want: "ungrouped session"},
 		{name: "send_message", args: map[string]any{"session_id": ownID, "target": "peer-a", "message": "NO_FLAT_SEND"}, want: "ungrouped session"},
 		{name: "broadcast", args: map[string]any{"session_id": ownID, "group": "project", "message": "NO_GLOBAL_BROADCAST"}, want: "grouped host agent"},
+		{name: "lane", args: map[string]any{"session_id": ownID, "product": "claude", "command": "doctor"}, want: "ungrouped session"},
 	} {
 		if _, err := callNativePeerTool(call.name, call.args, ownID); err == nil || !strings.Contains(err.Error(), call.want) {
 			t.Fatalf("%s flat-registry rejection = %v", call.name, err)

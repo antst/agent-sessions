@@ -42,6 +42,15 @@ changes additionally require at least two Linux hosts and one macOS host.
    lock, temporary worktree, or tmux server remains.
 9. Destination-visible receipt plus an exact acknowledgement is required for
    messaging. Sender-side `accepted` or `queued` is not a pass.
+10. A phase that starts managed Codex App Server records its captured
+    `CODEX_HOME`, Agent Sessions data/runtime roots, product CLI overrides, and
+    `PATH`. Later phases that need different values stop only that isolated App
+    Server and restart it from the intended environment; changing the caller's
+    environment after daemon startup is not sufficient.
+11. On a host with another Agent Sessions install on `PATH`, in-session lane
+    acceptance uses the attested `claude_peer.lane`/`agent_sessions.lane` tool
+    and verifies the loaded plugin/runtime revision. A shell-resolved lane
+    executable from another install is not exact-revision evidence.
 
 ## Source and packaging (`S`)
 

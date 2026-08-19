@@ -7,6 +7,26 @@ description: Spawn, supervise, message, collect, resume, and archive durable loc
 
 Use `claude-peer-lane` to run Claude Code as a named peer with durable lifecycle state. The lane remains addressable between turns, accepts ordinary peer messages, and returns machine-readable JSONL.
 
+## Managed Codex execution boundary
+
+From a managed Codex peer, run every lifecycle operation through the attested
+`claude_peer.lane` MCP tool. Do not invoke `claude-peer-lane` from a shell tool:
+the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
+Unix sockets even when their directories are writable. The MCP tool retains this
+session as the exact parent and returns `exit`, `stdout`, and `stderr`.
+
+Set `product` to `claude`, put the lifecycle verb in `command`, and pass only the
+arguments after that verb in `arguments`. Pass the briefing as `input`; do not use
+shell redirection. Supply the current session ID injected by SessionStart. Example:
+
+```json
+{"product":"claude","command":"start","arguments":["--name","review-api","--permission-mode","dontAsk","-"],"input":"Review the API and return a concise finding.","session_id":"CURRENT_SESSION_ID"}
+```
+
+For federation, add `"host":"HOST"` to the same call. The CLI examples below
+define native arguments for host-shell use; translate them to this MCP shape when
+operating as a Codex peer.
+
 ## Remote host
 
 When the user requests another host, use federation instead of SSH. First run:
