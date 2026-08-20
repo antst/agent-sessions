@@ -1,6 +1,7 @@
 package federator
 
 import (
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,92 @@ import (
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 )
+
+func TestLaneRelayMetadataSurvivesLegacyHubParentContext(t *testing.T) {
+	parent := groupedRemoteLaneParentContext(groupedRemoteLaneParent("host-a", "source", "claude"))
+	parent.AgentRuntimeDir = "/source runtime/agent"
+	request := Message{Type: "lane_exec", Data: []byte("caller-controlled")}
+	if err := attachLaneRelayMetadata(&request, *parent); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an older protocol-3 hub: it knows Message.Data but its typed
+	// ParentContext does not know agent_runtime_dir, so that one field is lost
+	// while the opaque relay body survives its JSON round trip.
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var legacyParent map[string]json.RawMessage
+	if err := json.Unmarshal(wire["parent_context"], &legacyParent); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacyParent, "agent_runtime_dir")
+	wire["parent_context"], err = json.Marshal(legacyParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forwarded Message
+	if err := json.Unmarshal(body, &forwarded); err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.ParentContext.AgentRuntimeDir != "" {
+		t.Fatalf("legacy hub retained unknown parent field: %#v", forwarded.ParentContext)
+	}
+	if err := restoreLaneRelayMetadata(&forwarded); err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.ParentContext.AgentRuntimeDir != parent.AgentRuntimeDir {
+		t.Fatalf("restored runtime = %q, want %q", forwarded.ParentContext.AgentRuntimeDir, parent.AgentRuntimeDir)
+	}
+}
+
+func TestLaneRelayMetadataRejectsRuntimeChange(t *testing.T) {
+	parent := groupedRemoteLaneParentContext(groupedRemoteLaneParent("host-a", "source", "codex"))
+	parent.AgentRuntimeDir = "/source/agent"
+	body, err := json.Marshal(laneRelayMetadata{
+		Version: 1, ParentHostID: parent.HostID, ParentSessionID: parent.SessionID,
+		ParentProduct: parent.Product, ParentInstanceID: parent.InstanceID,
+		ParentAgentRuntimeDir: "/changed/agent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Message{ParentContext: parent, Data: body}
+	if err := restoreLaneRelayMetadata(&request); err == nil || !strings.Contains(err.Error(), "changed in transit") {
+		t.Fatalf("runtime mismatch error = %v", err)
+	}
+}
+
+func TestLaneRelayMetadataRejectsUnattestedIdentity(t *testing.T) {
+	parent := groupedRemoteLaneParentContext(groupedRemoteLaneParent("host-a", "source", "claude"))
+	parent.AgentRuntimeDir = "/source/agent"
+	request := Message{}
+	if err := attachLaneRelayMetadata(&request, *parent); err != nil {
+		t.Fatal(err)
+	}
+	var metadata laneRelayMetadata
+	if err := json.Unmarshal(request.Data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	metadata.ParentSessionID = "forged"
+	body, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Data = body
+	if err := restoreLaneRelayMetadata(&request); err == nil || !strings.Contains(err.Error(), "attested parent") {
+		t.Fatalf("identity mismatch error = %v", err)
+	}
+}
 
 func TestHubLossCannotBeHiddenByFullLaneOutputQueue(t *testing.T) {
 	pending := &pendingLane{responses: make(chan Message, 1), failed: make(chan string, 1)}

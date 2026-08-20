@@ -50,6 +50,19 @@ type pendingLane struct {
 	cancelOnce sync.Once
 }
 
+// laneRelayMetadata carries source-agent-owned fields through protocol-3 hubs
+// that predate the corresponding typed ParentContext fields. Message.Data is
+// already an opaque relay field in that protocol, so older hubs preserve it
+// byte-for-byte while decoding and re-encoding lane_exec.
+type laneRelayMetadata struct {
+	Version               int    `json:"version"`
+	ParentHostID          string `json:"parent_host_id"`
+	ParentSessionID       string `json:"parent_session_id"`
+	ParentProduct         string `json:"parent_product"`
+	ParentInstanceID      string `json:"parent_instance_id"`
+	ParentAgentRuntimeDir string `json:"parent_agent_runtime_dir,omitempty"`
+}
+
 type laneRun struct {
 	mu        sync.Mutex
 	process   *os.Process
@@ -219,6 +232,56 @@ func randomLaneRequestID(hostID string) (string, error) {
 	return cleanID(hostID) + "-" + hex.EncodeToString(body), nil
 }
 
+func attachLaneRelayMetadata(request *Message, parent ParentContext) error {
+	if request == nil {
+		return errors.New("remote lane request is nil")
+	}
+	if parent.AgentRuntimeDir != "" && !filepath.IsAbs(parent.AgentRuntimeDir) {
+		return errors.New("source agent runtime directory is not absolute")
+	}
+	body, err := json.Marshal(laneRelayMetadata{
+		Version: 1, ParentHostID: parent.HostID, ParentSessionID: parent.SessionID,
+		ParentProduct: parent.Product, ParentInstanceID: parent.InstanceID,
+		ParentAgentRuntimeDir: parent.AgentRuntimeDir,
+	})
+	if err != nil {
+		return fmt.Errorf("encode remote lane relay metadata: %w", err)
+	}
+	request.ParentContext = &parent
+	request.Data = body
+	return nil
+}
+
+func restoreLaneRelayMetadata(request *Message) error {
+	if request == nil || request.ParentContext == nil {
+		return errors.New("remote lane request has no attested parent context")
+	}
+	var metadata laneRelayMetadata
+	if len(request.Data) != 0 {
+		if err := json.Unmarshal(request.Data, &metadata); err != nil {
+			return fmt.Errorf("decode remote lane relay metadata: %w", err)
+		}
+		parent := request.ParentContext
+		if metadata.Version != 1 || metadata.ParentHostID != parent.HostID ||
+			metadata.ParentSessionID != parent.SessionID || metadata.ParentProduct != parent.Product ||
+			metadata.ParentInstanceID != parent.InstanceID {
+			return errors.New("remote lane relay metadata does not match the attested parent")
+		}
+	}
+	direct := request.ParentContext.AgentRuntimeDir
+	relayed := metadata.ParentAgentRuntimeDir
+	if (direct != "" && !filepath.IsAbs(direct)) || (relayed != "" && !filepath.IsAbs(relayed)) {
+		return errors.New("source agent runtime directory is not absolute")
+	}
+	if direct != "" && relayed != "" && direct != relayed {
+		return errors.New("source agent runtime directory changed in transit")
+	}
+	if direct == "" {
+		request.ParentContext.AgentRuntimeDir = relayed
+	}
+	return nil
+}
+
 //nolint:gocyclo // Validation and the bounded stream relay are clearer as one request lifecycle.
 func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 	capability := capabilityForProduct(request.Product)
@@ -252,7 +315,10 @@ func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 	}
 	request.RequestID = requestID
 	request.SourceID = source.ID
-	request.ParentContext = &parent
+	if err := attachLaneRelayMetadata(&request, parent); err != nil {
+		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: err.Error()})
+		return
+	}
 	request.TargetHostID = host.ID
 	pending := &pendingLane{responses: make(chan Message, 256), failed: make(chan string, 1)}
 	a.laneMu.Lock()
@@ -443,6 +509,10 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		a.laneMu.Unlock()
 		close(run.done)
 	}()
+	if err := restoreLaneRelayMetadata(&request); err != nil {
+		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})
+		return
+	}
 	executable, args, err := a.prepareRemoteLane(request)
 	if err != nil {
 		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})

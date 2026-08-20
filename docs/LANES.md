@@ -121,6 +121,9 @@ An explicit `archive` makes one last delivery attempt, then cancels any still-un
 and reports `notices_dropped` instead of allowing a hint to block authoritative cleanup.
 For a remote lane, the pointer retains the source agent's effective `-runtime-dir`, so its printed
 `peer-federator lane ... wait` command remains directly runnable from a non-default isolated estate.
+The source duplicates that path into an identity-bound opaque protocol-3 relay envelope so hubs
+that predate the typed parent field preserve it; the destination accepts the fallback only when
+its host, session, product, and instance still match the hub-attested parent context.
 
 The default lifecycle is parent-scoped. A direct Claude caller is identified only when its
 environment hints, current process ancestry, PID, available process-start identity, session ID,
