@@ -1,6 +1,6 @@
 {
   "name": "codex-peer",
-  "version": "0.1.1+codex.20260820184418",
+  "version": "0.2.0+codex.20260820203535",
   "description": "Start, collect, message, resume, and archive named Codex, Claude, and Grok lanes.",
   "author": {
     "name": "Agent Sessions contributors"
