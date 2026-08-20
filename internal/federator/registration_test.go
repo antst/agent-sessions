@@ -299,9 +299,20 @@ func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T
 		t.Fatal(err)
 	}
 	_ = lifecycle.Wait()
-	agent.reconcileRegisteredPeers()
+	// Darwin can transiently report a just-reaped PID as unknown between the
+	// kill(2) absence check and the kernel process-table lookup. Reconciliation
+	// must fail closed for that observation, so retry the normal maintenance
+	// pass instead of blocking on the still-live adapter after one pass.
+	if !waitFor(func() bool {
+		agent.reconcileRegisteredPeers()
+		agent.mu.RLock()
+		_, prepared := agent.preparations[sessionID]
+		agent.mu.RUnlock()
+		return !prepared
+	}, 5*time.Second) {
+		t.Fatal("prepared Claude peer was not retired after lifecycle exit")
+	}
 	_ = adapter.Wait()
-	agent.reconcileRegisteredPeers()
 	if _, err := os.Lstat(filepath.Join(registryDir, newName)); !os.IsNotExist(err) {
 		t.Fatalf("token-only launch sidecar survived crash recovery: %v", err)
 	}
