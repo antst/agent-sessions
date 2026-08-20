@@ -221,6 +221,7 @@ implemented. Use real turns and unique names.
 | L-23 | Codex and Claude plugins ship a valid Grok-lane skill; its executable Claude preflight and linked contract/install references survive staging and packaging; the Grok plugin ships an agent-lanes skill that distinguishes Codex contract 2 from Claude contract 1. |
 | L-24 | Grok `lane.status`/`lane.list` report stable and native identities, lifecycle state, collection debt, owner/persistence, and auto-archive policy; every collected terminal result is `turn.completed` with explicit status/outcome/exit. |
 | L-25 | Grok normal archive and crash reconciliation remove the real ACP worker and all attributable MCP/tool descendants on Linux and macOS. The macOS cell must exercise a registered restricted shell in its own session after manager SIGKILL. Unmanaged restricted daemons that create a new session and reparent after their registered shell has exited are explicitly unsupported and excluded from a green cleanup claim, never guessed or killed heuristically. |
+| L-26 | A Codex lane that fails before its first rollout exists remains archivable by exact thread ID. Only an authoritative missing-rollout response plus a local failed record with no turn evidence permits `thread/delete`; transport ambiguity or any turn evidence fails closed. |
 
 ## Federation (`X/F`)
 

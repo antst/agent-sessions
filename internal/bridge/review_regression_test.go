@@ -368,6 +368,58 @@ func TestLaneSetupRetainsManageableStateWhenRollbackArchiveFails(t *testing.T) {
 	}
 }
 
+func TestLaneSetupDeletesUnmaterializedThreadWhenRollbackFindsNoRollout(t *testing.T) {
+	useBridgeTestAgent(t)
+	root := t.TempDir()
+	threadID := "00000000-0000-4000-8000-000000000041"
+	deleted := make(chan string, 1)
+	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/start":
+			return map[string]any{"thread": map[string]any{"id": threadID, "sessionId": threadID, "cwd": root}}, nil
+		case "thread/name/set":
+			return nil, errors.New("name rejected")
+		case "thread/archive":
+			return nil, errors.New("no rollout found for thread id " + threadID)
+		case "thread/delete":
+			params := request["params"].(map[string]any)
+			deleted <- stringValue(params["threadId"])
+			return map[string]any{}, nil
+		default:
+			return map[string]any{}, nil
+		}
+	})
+	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	prompt := filepath.Join(root, "prompt")
+	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "no-rollout", cwd: root, promptFile: prompt}), false); err == nil {
+		t.Fatal("name failure unexpectedly succeeded")
+	}
+	select {
+	case got := <-deleted:
+		if got != threadID {
+			t.Fatalf("deleted thread = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unmaterialized lane thread was not deleted")
+	}
+	paths := resolveNativePaths()
+	if _, err := os.Stat(laneStatePath(paths, threadID)); !os.IsNotExist(err) {
+		t.Fatalf("unmaterialized lane retained active state: %v", err)
+	}
+	if !readRetiredThreads(paths)[threadID] {
+		t.Fatal("unmaterialized lane deletion did not persist retirement")
+	}
+}
+
 func TestFailedLaneStartRemovesProvisionalWorktree(t *testing.T) {
 	useBridgeTestAgent(t)
 	repository := t.TempDir()

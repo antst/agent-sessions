@@ -475,17 +475,21 @@ func startLaneNative(options laneOptions, wait bool) (int, error) {
 		if setupReady || state.ThreadID == "" {
 			return
 		}
+		state.Status = "failed"
+		state.TerminalOutcome = "failed"
+		state.TerminalTurnID = state.TurnID
 		if state.TurnID != "" {
 			_ = requestWithTimeout(client, 10*time.Second, "turn/interrupt", map[string]any{
 				"threadId": state.ThreadID, "turnId": state.TurnID,
 			}, nil)
 		}
-		if archiveErr := requestWithTimeout(client, 10*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil); archiveErr != nil {
+		archiveErr := requestWithTimeout(client, 10*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil)
+		if archiveErr != nil && unmaterializedLaneRolloutMissing(state, archiveErr) {
+			archiveErr = deletePreparedThread(client, state.ThreadID)
+		}
+		if archiveErr != nil {
 			// Never make a failed rollback invisible. Retaining the requested name
 			// and thread id lets the caller retry archive through the lane API.
-			state.Status = "failed"
-			state.TerminalOutcome = "failed"
-			state.TerminalTurnID = state.TurnID
 			_ = recordLaneState(paths, state)
 			return
 		}
@@ -1191,9 +1195,13 @@ func archiveLaneNative(options laneOptions) (int, error) {
 		return 1, err
 	}
 	defer client.close()
+	unmaterialized := false
 	if state.Type == "codex-peer-lane" {
 		if err := settleLaneTurnBeforeArchive(client, paths, state); err != nil {
-			return 1, fmt.Errorf("refuse to archive before active turn is terminal: %w", err)
+			if !unmaterializedLaneRolloutMissing(state, err) {
+				return 1, fmt.Errorf("refuse to archive before active turn is terminal: %w", err)
+			}
+			unmaterialized = true
 		}
 	}
 	flushed, err := requestControl(paths.supervisorSock, map[string]any{
@@ -1209,7 +1217,11 @@ func archiveLaneNative(options laneOptions) (int, error) {
 			return 1, fmt.Errorf("cancel undeliverable terminal notices before archive: %w", err)
 		}
 	}
-	if err := requestWithTimeout(client, 30*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil); err != nil {
+	if unmaterialized {
+		if err := deletePreparedThread(client, state.ThreadID); err != nil {
+			return 1, fmt.Errorf("delete unmaterialized lane thread: %w", err)
+		}
+	} else if err := requestWithTimeout(client, 30*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil); err != nil {
 		return 1, err
 	}
 	if err := markRetiredThread(paths, state.ThreadID); err != nil {
@@ -1237,6 +1249,22 @@ func archiveLaneNative(options laneOptions) (int, error) {
 		"notices_dropped": droppedNotices,
 	})
 	return 0, nil
+}
+
+func unmaterializedLaneRolloutMissing(state laneState, err error) bool {
+	if err == nil || state.Type != "codex-peer-lane" || state.Status != "failed" ||
+		state.TurnID != "" || state.LatestTurnID != "" || len(state.PendingTurnIDs) != 0 ||
+		state.CollectedTurnID != "" || state.TerminalTurnID != "" ||
+		(state.TerminalOutcome != "" && state.TerminalOutcome != "failed") {
+		return false
+	}
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	message := strings.ToLower(rpcErr.Message)
+	return strings.Contains(message, "rollout") &&
+		(strings.Contains(message, "no rollout") || strings.Contains(message, "not found"))
 }
 
 func settleLaneTurnBeforeArchive(client *appServerClient, paths nativePaths, state laneState) error {

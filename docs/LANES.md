@@ -215,6 +215,13 @@ the small local lane record so the archived thread remains addressable by lane n
 follow-up resume. On supervisor startup, loaded threads are compared with the non-archived thread
 list so a legacy archived-but-loaded thread cannot be republished.
 
+If initial authentication or another authoritative App Server rejection occurs before Codex creates
+the first rollout, there is no transcript to preserve or resume. In that narrow case, `archive`
+accepts an App Server `no rollout found` response only when the local failed record contains no turn
+ID, pending turn, collected turn, or terminal-turn evidence. It deletes that unmaterialized thread
+and writes the ordinary retirement tombstone. A transport error or any local turn evidence remains
+ambiguous and is refused rather than guessed away.
+
 ## Follow-up turns on the same transcript
 
 Use `resume` to question or correct a completed lane without re-briefing a new model context:
