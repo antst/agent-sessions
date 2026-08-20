@@ -454,18 +454,9 @@ func planClaudePeerLaunchSettings(args []string, lifecycleRoot string, constrain
 	}
 	settings["crossSessionInbound"] = json.RawMessage(`"accept"`)
 	if constrainPermissions {
-		permissions := map[string]json.RawMessage{}
-		if raw, exists := settings["permissions"]; exists {
-			if json.Unmarshal(raw, &permissions) != nil || permissions == nil {
-				return nil, nil, errors.New("claude --settings permissions must contain a JSON object")
-			}
-		}
-		permissions["disableBypassPermissionsMode"] = json.RawMessage(`"disable"`)
-		body, err := json.Marshal(permissions)
-		if err != nil {
+		if err := constrainClaudePeerPermissions(settings); err != nil {
 			return nil, nil, err
 		}
-		settings["permissions"] = body
 	}
 	body, err := json.Marshal(settings)
 	if err != nil {
@@ -484,6 +475,22 @@ func planClaudePeerLaunchSettings(args []string, lifecycleRoot string, constrain
 	result = append(result, "--settings", path)
 	result = append(result, without[insert:]...)
 	return result, append(body, '\n'), nil
+}
+
+func constrainClaudePeerPermissions(settings map[string]json.RawMessage) error {
+	permissions := map[string]json.RawMessage{}
+	if raw, exists := settings["permissions"]; exists {
+		if json.Unmarshal(raw, &permissions) != nil || permissions == nil {
+			return errors.New("claude --settings permissions must contain a JSON object")
+		}
+	}
+	permissions["disableBypassPermissionsMode"] = json.RawMessage(`"disable"`)
+	body, err := json.Marshal(permissions)
+	if err != nil {
+		return err
+	}
+	settings["permissions"] = body
+	return nil
 }
 
 func writeClaudePeerLaunchSettings(path string, body []byte) error {
