@@ -110,6 +110,17 @@ func TestParseGrokLaneArgsCommandContract(t *testing.T) {
 	}
 }
 
+func TestGrokLaneUsageAdvertisesGroupOptions(t *testing.T) {
+	t.Parallel()
+
+	usage := grokLaneUsage()
+	for _, option := range []string{"--group GROUP", "--inherit-groups", "--no-inherit-groups"} {
+		if !strings.Contains(usage, option) {
+			t.Fatalf("Grok lane usage does not advertise %s", option)
+		}
+	}
+}
+
 func TestParseGrokLaneArgsRejectsUnknownOrMissingTarget(t *testing.T) {
 	t.Parallel()
 

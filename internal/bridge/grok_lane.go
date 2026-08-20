@@ -152,6 +152,9 @@ Options:
       --auto-archive-after SECONDS
       --no-auto-archive
       --prompt-file FILE
+	  --group GROUP           add a child group; repeatable
+	  --inherit-groups        also inherit the parent's non-private groups
+	  --no-inherit-groups     retain only the mandatory parent anchor
       --all
       --mine
 
