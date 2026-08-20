@@ -105,6 +105,12 @@ if [[ ! -f "$plugin_root/grok/skills/agent-lanes/SKILL.md" ]] ||
   printf 'Grok agent-lanes skill does not distinguish all target contracts\n' >&2
   exit 1
 fi
+if [[ ! -f "$plugin_root/grok/skills/agent-sessions/SKILL.md" ]] ||
+   ! grep -Fq 'agent_sessions.send_message' "$plugin_root/grok/skills/agent-sessions/SKILL.md" ||
+   ! grep -Fq 'Use `/agent-lanes`' "$plugin_root/grok/skills/agent-sessions/SKILL.md"; then
+  printf 'Grok agent-sessions messaging skill is incomplete\n' >&2
+  exit 1
+fi
 for skill in "$plugin_root/skills/claude-lane/SKILL.md" "$plugin_root/claude/skills/codex-lane/SKILL.md"; do
   if ! grep -Fq 'peer-federator lane --host HOST' "$skill" ||
      ! grep -Fq 'never fall back to SSH' "$skill"; then
@@ -544,6 +550,7 @@ done
 if [[ ! -f "$custom_install_root/grok/.grok-plugin/plugin.json" ]] ||
    [[ ! -f "$custom_install_root/grok/.mcp.json" ]] ||
    [[ ! -f "$custom_install_root/grok/skills/agent-lanes/SKILL.md" ]] ||
+   [[ ! -f "$custom_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -x "$custom_install_root/grok/scripts/native-entry" ]] ||
    ! grep -Fq '"grok-mcp"' "$custom_install_root/grok/.mcp.json" ||
    ! grep -Fq '${GROK_PLUGIN_ROOT}/scripts/native-entry' "$custom_install_root/grok/.mcp.json"; then
@@ -615,7 +622,7 @@ if [ "$1" = "plugin" ] && { [ "$2" = "validate" ] || [ "$2" = "install" ] || [ "
   exit 0
 fi
 if [ "$1" = "inspect" ] && [ "$2" = "--json" ]; then
-  printf '{"plugins":[{"name":"agent-sessions","scope":"user","path":"%s","enabled":true,"provides":{"mcpServers":1}}],"mcpServers":[{"name":"agent_sessions","transport":"stdio","target":"%s/scripts/native-entry","source":{"type":"plugin","plugin_name":"agent-sessions","path":"%s"}}]}\n' \
+  printf '{"plugins":[{"name":"agent-sessions","scope":"user","path":"%s","enabled":true,"provides":{"skills":2,"mcpServers":1}}],"mcpServers":[{"name":"agent_sessions","transport":"stdio","target":"%s/scripts/native-entry","source":{"type":"plugin","plugin_name":"agent-sessions","path":"%s"}}]}\n' \
     "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT"
   exit "${GROK_PLUGIN_TEST_INSPECT_STATUS:-0}"
 fi
@@ -632,6 +639,7 @@ CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
 if [[ ! -f "$grok_user_plugin_root/.grok-plugin/plugin.json" ]] ||
    [[ ! -f "$grok_user_plugin_root/.mcp.json" ]] ||
    [[ ! -f "$grok_user_plugin_root/skills/agent-lanes/SKILL.md" ]] ||
+   [[ ! -f "$grok_user_plugin_root/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -x "$grok_user_plugin_root/scripts/native-entry" ]] ||
    ! grep -Fq 'plugin validate' "$grok_plugin_log" ||
    ! grep -Fq "plugin install $custom_install_root/grok --trust" "$grok_plugin_log" ||
@@ -776,6 +784,7 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
    [[ ! -f "$release_root/claude/skills/grok-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
    [[ ! -f "$release_root/grok/skills/agent-lanes/SKILL.md" ]] ||
+   [[ ! -f "$release_root/grok/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.mcp.json" ]] ||
    [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
@@ -804,6 +813,43 @@ if (( wrong_release_status == 0 )) ||
   printf 'release archive did not reject a mismatched host platform\n' >&2
   exit 1
 fi
+
+# Exercise the extracted prebuilt archive's real native/Codex installation,
+# not only its build selector. The fake Codex client confines plugin registry
+# writes to this fixture while the custom prefix proves every installed path.
+release_prefix="$temporary_root/release-prefix"
+release_install_root="$temporary_root/release-install"
+: >"$install_codex_record"
+rm -f -- "$install_codex_state"
+FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
+  make -s -C "$release_root" install START_RUNTIME=0 CODEX="$install_codex" \
+    PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
+for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+  release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"
+  if [[ ! -x "$release_install_root/bin/linux-x64/$packaged_binary" ]] ||
+     [[ "$release_installed_link" != "$release_install_root/bin/linux-x64/$packaged_binary" ]]; then
+    printf 'prebuilt release install omitted or mislinked %s\n' "$packaged_binary" >&2
+    exit 1
+  fi
+done
+for packaged_doc in \
+  ADAPTER-PROTOCOL.md \
+  CODEX-ADAPTER.md CODEX-INSTALL.md CODEX-LANES.md \
+  CLAUDE-ADAPTER.md CLAUDE-INSTALL.md CLAUDE-LANES.md \
+  GROK-ADAPTER.md GROK-INSTALL.md GROK-LANES.md \
+  README.md designs/QWEN-ADAPTER.md; do
+  if [[ ! -f "$release_install_root/docs/$packaged_doc" ]]; then
+    printf 'prebuilt release install omitted documentation %s\n' "$packaged_doc" >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
+   ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
+  printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
+  exit 1
+fi
+
 for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$release_root/.mcp.json"; do
   for required_mcp_env in \
     AGENT_SESSIONS_AGENT_RUNTIME_DIR \

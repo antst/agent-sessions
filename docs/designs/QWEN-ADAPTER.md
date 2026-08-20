@@ -1,4 +1,4 @@
-# Qwen Code adapter design
+# Qwen Code adapter (future design)
 
 Status: future work. Nothing described here is implemented or advertised as a
 current capability.

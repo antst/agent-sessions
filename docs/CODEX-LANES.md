@@ -1,4 +1,4 @@
-# Generic messageable Codex lanes
+# Codex worker lanes
 
 `codex-peer-lane` is the integration surface for any local orchestrator. It creates and controls a
 named persistent Codex App Server thread and publishes that thread in Claude's native peer registry.

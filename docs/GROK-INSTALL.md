@@ -1,4 +1,4 @@
-# Grok interactive peers
+# Grok installation and interactive peers
 
 `grok-peer` runs the ordinary Grok TUI while keeping that exact conversation
 reachable by Agent Sessions. It uses a private Grok leader and Grok's official
@@ -108,6 +108,9 @@ official `x.ai/interject` extension; the wake client deliberately does not
 resident actor while the TUI is still starting its MCP processes. The installed `agent_sessions` MCP
 server lets Grok list/message peers and invoke the existing `codex-peer-lane`
 and `claude-peer-lane` launchers with process-attested lifecycle ownership.
+The plugin exposes `/agent-sessions` for peer discovery, send, reply, multicast, and broadcast,
+and `/agent-lanes` for worker-lane lifecycle. Natural-language requests may invoke the same
+structured MCP tools without an explicit slash command.
 The launcher pins that plugin process to the same selected native-runtime
 binary as the private host, preventing mixed-revision host/MCP operation.
 Native headless Grok worker lanes are provided through `grok-peer-lane`; they own separate ACP
@@ -161,4 +164,5 @@ verify its full command, PID, and process start identity, then send that exact
 orphan `SIGTERM`; reserve `SIGKILL` for a process that does not terminate.
 
 Implementation and verification details are recorded in
-[`GROK-ADAPTER.md`](GROK-ADAPTER.md) and [`PROTOCOL.md`](PROTOCOL.md).
+[`GROK-ADAPTER.md`](GROK-ADAPTER.md) and
+[`ADAPTER-PROTOCOL.md`](ADAPTER-PROTOCOL.md).

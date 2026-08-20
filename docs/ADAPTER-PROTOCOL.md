@@ -1,4 +1,4 @@
-# Claude carrier and product-adapter protocol notes
+# Native carrier and product-adapter protocol
 
 These notes describe behavior observed in the installed Claude Code 2.1.226 Linux executable. This
 is not a public Anthropic protocol specification.
@@ -29,7 +29,7 @@ are never swept by PID or liveness alone.
   "cwd": "/agent-state",
   "startedAt": 1786000000000,
   "procStart": "123456789",
-  "version": "agent-sessions/0.1.1",
+  "version": "agent-sessions/0.2.0",
   "peerProtocol": 1,
   "kind": "service",
   "entrypoint": "agent-sessions",

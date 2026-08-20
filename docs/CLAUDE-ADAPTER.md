@@ -257,5 +257,5 @@ supervisor interrupts active work and archives the lane. A persistent lane outli
 
 ## Related
 
-- [LANES.md](./LANES.md) — the runtime-side description of lanes.
+- [CODEX-LANES.md](./CODEX-LANES.md) — the Codex lane contract.
 - [CLAUDE-INSTALL.md](./CLAUDE-INSTALL.md) — installing the Claude-side plugin.

@@ -84,6 +84,14 @@ if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$grok_skill" | head -1)" != grok-lane
   printf 'Claude Grok skill frontmatter is incomplete or mismatched\n' >&2
   exit 1
 fi
+grok_messaging_skill="$plugin_root/grok/skills/agent-sessions/SKILL.md"
+if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$grok_messaging_skill" | head -1)" != agent-sessions ]] ||
+   ! grep -Fq 'agent_sessions.list_peers' "$grok_messaging_skill" ||
+   ! grep -Fq 'agent_sessions.send_message' "$grok_messaging_skill" ||
+   ! grep -Fq 'agent_sessions.broadcast' "$grok_messaging_skill"; then
+  printf 'Grok grouped messaging skill is incomplete\n' >&2
+  exit 1
+fi
 self_skill="$plugin_root/claude/skills/claude-lane/SKILL.md"
 if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$self_skill" | head -1)" != claude-lane ]] ||
    [[ -z "$(sed -n 's/^description:[[:space:]]*//p' "$self_skill" | head -1)" ]]; then

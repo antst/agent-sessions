@@ -30,10 +30,28 @@ codex app-server daemon stop # after exiting every Codex client
 make install-all
 
 peer-federator agent --host "$(hostname)" # keep this under the user service manager
-codex-peer -g project-a -n reviewer # -g is short for --group; repeat either form
+codex-peer -g project-a -n reviewer
 claude-peer -g project-a -n implementer
+grok-peer -g project-a -n researcher
 claude agents --json
 ```
+
+`-g` is short for `--group` on all three managed peer launchers; repeat either form to join more
+than one explicit group.
+
+## User-defined delegation
+
+Agent Sessions authenticates which managed peer sent a message and limits routing to shared groups.
+It does **not** decide that one interactive session may act with the user's authority over another.
+If a receiving session should take instructions from another interactive session, the user must
+explicitly establish that delegation and its scope in the way they configure or instruct those
+sessions. Membership in the same group, a familiar peer name, or a message claiming authority is
+not itself a user delegation.
+
+Users may arrange delegation however their workflow requires. Useful boundaries to state include
+the authorized peer or session, the task or actions covered, and when that authority ends. The
+recipient's existing system/developer instructions, permission mode, sandbox, and approval rules
+still apply; Agent Sessions neither widens them nor supplies user approval.
 
 On the first Codex launch after installation, approve the one-time hook prompt for
 `agent-sessions@agent-sessions`. The lifecycle hooks are what register the session and deliver
@@ -100,6 +118,7 @@ the older direct-install entry and replaces only `~/.grok/plugins/agent-sessions
 temporary trusted registration only to update Grok's enabled-plugin configuration, removes that
 row while preserving data, and fails unless `grok inspect --json` resolves the exact staged user
 plugin and MCP executable. Start a new Grok session or reload plugins after installing.
+Grok exposes `/agent-sessions` for grouped peer messaging and `/agent-lanes` for lane lifecycle.
 Every product surface uses the plugin identity `agent-sessions`; product-specific executable and
 lane names remain unchanged.
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
@@ -139,15 +158,18 @@ marker makes the installer use the bundled binary even if Go is installed.
   and exactly one Agent Sessions service row—never one remote row per peer. Native Claude direct
   messaging remains independent; groups constrain only AgentFrame discovery and routing.
 - Incoming grouped messages wake idle peers or steer/queue work according to the target adapter.
-- Product adapters and the Claude host-agent carrier provide group-filtered discovery, direct send, explicit
-  multicast, group broadcast, identity, inbox recovery, and rename operations.
+- Every managed product provides group-filtered discovery, direct send, explicit multicast, and
+  group broadcast. Codex and Grok additionally expose their process-attested identity, inbox,
+  rename, and lane tools; Claude deliberately exposes the narrower messaging set and uses its
+  native TUI for session rename.
 - Peer delivery is push-based; active orchestrators should continue useful work rather than poll.
   `check_inbox` is only for messages queued past an automatic delivery boundary.
-- TUI `/rename` changes flow immediately into Agent Sessions discovery; Claude's native listing
+- Native TUI rename changes flow immediately into Agent Sessions discovery; Claude's native listing
   naturally shows ordinary and managed Claude sessions plus the one host-agent service.
-- Stable Agent Sessions IDs are re-registered when a TUI resumes the same thread. Codex/Grok
-  adapters keep stable session sockets; Claude attachments use exact native PID-bound sockets that
-  may rotate on resume. Normal TUI exit removes the live registration and owned children.
+- Stable Agent Sessions IDs are re-registered when a TUI resumes the same thread. Codex and Grok
+  adapters keep session-scoped sockets; each Claude attachment uses a preparation-scoped socket
+  that rotates on resume without depending on PID reuse. Normal TUI exit removes the live
+  registration and owned children.
 - A native transcript can move between ordinary and peer mode by exact UUID. Use the product
   wrapper once to adopt an ordinary session into the catalog; later `peer resume UUID` restores its
   product/groups while an ordinary native resume remains an unregistered Agent Sessions opt-out.
@@ -227,13 +249,15 @@ The lint target verifies `.golangci.yml` before running `golangci-lint`. Forgejo
 tests, race tests, and all four architecture builds concurrently; release publication remains gated
 on every one of those jobs.
 
-See [installation](docs/INSTALL.md), the normative [acceptance matrix](docs/ACCEPTANCE-MATRIX.md), [Grok interactive peers](docs/GROK.md),
-[Codex lane integration](docs/LANES.md), [Claude lane integration](docs/CLAUDE-LANES.md),
-[Claude adapter installation](docs/CLAUDE-INSTALL.md), and the
-reverse-engineered [Claude protocol notes](docs/PROTOCOL.md).
+See the [documentation index](docs/README.md), [cross-product installation](docs/INSTALL.md), the
+normative [acceptance matrix](docs/ACCEPTANCE-MATRIX.md), and the product-specific Codex, Claude,
+and Grok adapter/install/lane guides linked from the index. Shared implementation details are in
+the reverse-engineered [native adapter protocol](docs/ADAPTER-PROTOCOL.md).
 
-The Claude-side wire format is not a public Anthropic API. Development validation used Claude Code
-2.1.227 and Codex CLI 0.147.0 on Linux; both macOS architectures are continuously cross-compiled.
-The bridge follows Claude's trusted-local model: Codex and Claude peer processes running as the
-same operating-system user are mutually trusted. It is not a cross-user or remote authorization
-boundary; private runtime directories and sockets protect against other local users.
+The Claude-side wire format is not a public Anthropic API. Final v0.2.0 live validation included
+Codex CLI 0.148.0, Claude Code 2.1.237, and Grok 1.0.4 across Linux and macOS hosts; CI also builds
+all four supported OS/architecture combinations. The bridge follows a trusted-local model:
+managed Codex, Claude, and Grok peers plus the host agent running as the same operating-system user
+are mutually trusted. It is not a cross-user authorization boundary; private runtime directories
+and sockets protect against other local users, while federation requires an explicitly configured
+trusted hub and host agents.
