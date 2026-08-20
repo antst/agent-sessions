@@ -26,6 +26,7 @@ func TestVerifyGrokPluginInspectionRequiresExactUserPluginAndMCP(t *testing.T) {
 			"path":    root,
 			"enabled": true,
 			"provides": map[string]any{
+				"skills":     2,
 				"mcpServers": 1,
 			},
 		}},
@@ -81,6 +82,13 @@ func TestVerifyGrokPluginInspectionRequiresExactUserPluginAndMCP(t *testing.T) {
 			name: "project plugin",
 			mutate: func(inspection map[string]any) {
 				inspection["plugins"].([]any)[0].(map[string]any)["scope"] = "project"
+			},
+			want: "not the enabled user plugin",
+		},
+		{
+			name: "missing messaging skill",
+			mutate: func(inspection map[string]any) {
+				inspection["plugins"].([]any)[0].(map[string]any)["provides"].(map[string]any)["skills"] = 1
 			},
 			want: "not the enabled user plugin",
 		},

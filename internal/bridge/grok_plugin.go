@@ -60,7 +60,8 @@ func verifyGrokUserPlugin(rawPlugins any, root string) error {
 		enabled, enabledOK := plugin["enabled"].(bool)
 		provides, _ := plugin["provides"].(map[string]any)
 		if pathErr != nil || path != root || stringValue(plugin["scope"]) != "user" ||
-			!enabledOK || !enabled || intValue(provides["mcpServers"]) != 1 {
+			!enabledOK || !enabled || intValue(provides["skills"]) != 2 ||
+			intValue(provides["mcpServers"]) != 1 {
 			return errors.New("agent-sessions is not the enabled user plugin at the expected path")
 		}
 	}

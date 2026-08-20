@@ -100,6 +100,7 @@ the older direct-install entry and replaces only `~/.grok/plugins/agent-sessions
 temporary trusted registration only to update Grok's enabled-plugin configuration, removes that
 row while preserving data, and fails unless `grok inspect --json` resolves the exact staged user
 plugin and MCP executable. Start a new Grok session or reload plugins after installing.
+Grok exposes `/agent-sessions` for grouped peer messaging and `/agent-lanes` for lane lifecycle.
 Every product surface uses the plugin identity `agent-sessions`; product-specific executable and
 lane names remain unchanged.
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
