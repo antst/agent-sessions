@@ -1018,12 +1018,35 @@ func TestGrokHostDoesNotPublishWithoutCachedAuthenticationMethod(t *testing.T) {
 	t.Setenv("GROK_FAKE_NO_CACHED_TOKEN", "1")
 	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-no-cached-auth")
 	defer stopTestGrokHost(t, host, cancel, result)
-	time.Sleep(300 * time.Millisecond)
-	_, err := requestControl(host.paths.ControlSocket, map[string]any{
-		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
-	}, time.Second)
-	if err == nil || host.peer != nil {
-		t.Fatalf("host accepted missing cached auth: err=%v peer=%v", err, host.peer)
+	deadline := time.Now().Add(2 * time.Second)
+	sawAuthFailure := false
+	for time.Now().Before(deadline) {
+		status, err := requestControl(host.paths.ControlSocket, map[string]any{
+			"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+		}, 500*time.Millisecond)
+		if err != nil {
+			if strings.Contains(err.Error(), "authenticate official Grok ACP observer") {
+				sawAuthFailure = true
+				break
+			}
+			t.Fatalf("missing cached auth returned an unrelated control error: %v", err)
+		}
+		if ready, _ := status["ready"].(bool); ready || stringValue(status["permissionMode"]) != "" {
+			t.Fatalf("host reported readiness without cached auth: %#v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawAuthFailure {
+		t.Fatal("host did not report the missing cached authentication method")
+	}
+	host.peerMu.Lock()
+	peer := host.peer
+	host.peerMu.Unlock()
+	if peer != nil {
+		t.Fatalf("host published without cached auth: %#v", peer)
+	}
+	if live := liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID); live != nil {
+		t.Fatalf("missing cached auth published live peer: %#v", live)
 	}
 }
 
