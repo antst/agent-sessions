@@ -813,6 +813,43 @@ if (( wrong_release_status == 0 )) ||
   printf 'release archive did not reject a mismatched host platform\n' >&2
   exit 1
 fi
+
+# Exercise the extracted prebuilt archive's real native/Codex installation,
+# not only its build selector. The fake Codex client confines plugin registry
+# writes to this fixture while the custom prefix proves every installed path.
+release_prefix="$temporary_root/release-prefix"
+release_install_root="$temporary_root/release-install"
+: >"$install_codex_record"
+rm -f -- "$install_codex_state"
+FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
+  make -s -C "$release_root" install START_RUNTIME=0 CODEX="$install_codex" \
+    PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
+for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+  release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"
+  if [[ ! -x "$release_install_root/bin/linux-x64/$packaged_binary" ]] ||
+     [[ "$release_installed_link" != "$release_install_root/bin/linux-x64/$packaged_binary" ]]; then
+    printf 'prebuilt release install omitted or mislinked %s\n' "$packaged_binary" >&2
+    exit 1
+  fi
+done
+for packaged_doc in \
+  ADAPTER-PROTOCOL.md \
+  CODEX-ADAPTER.md CODEX-INSTALL.md CODEX-LANES.md \
+  CLAUDE-ADAPTER.md CLAUDE-INSTALL.md CLAUDE-LANES.md \
+  GROK-ADAPTER.md GROK-INSTALL.md GROK-LANES.md \
+  README.md designs/QWEN-ADAPTER.md; do
+  if [[ ! -f "$release_install_root/docs/$packaged_doc" ]]; then
+    printf 'prebuilt release install omitted documentation %s\n' "$packaged_doc" >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
+   ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
+  printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
+  exit 1
+fi
+
 for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$release_root/.mcp.json"; do
   for required_mcp_env in \
     AGENT_SESSIONS_AGENT_RUNTIME_DIR \
