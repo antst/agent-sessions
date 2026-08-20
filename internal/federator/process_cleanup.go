@@ -253,7 +253,7 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer, observedKeys []ClaudeKeyBa
 	keyPath := ""
 	keyPresent := false
 	if peer.Socket != "" {
-		if filepath.Base(peer.Socket) != strconv.Itoa(peer.PID)+".sock" {
+		if filepath.Base(peer.Socket) != strconv.Itoa(peer.PID)+".sock" && !peer.ClaudeKeyBaselineSet {
 			return errors.New("native Claude socket is not PID-bound")
 		}
 		keyName, keyErr := ClaudeServiceKeyName(peer.PID, peer.Socket)
@@ -282,6 +282,17 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer, observedKeys []ClaudeKeyBa
 		}
 	}
 	if socketPresent {
+		if !recordPresent {
+			if !peer.ClaudeKeyBaselineSet {
+				return errors.New("native Claude socket has no row or durable key baseline")
+			}
+			if err := ValidateClaudePeerObservedSocketKey(
+				peer.ClaudeConfigRoot, peer.PID, peer.ProcStart, peer.AdapterStrongStart,
+				peer.Socket, peer.ClaudeKeyBaseline, observedKeys,
+			); err != nil {
+				return err
+			}
+		}
 		if !pidNamespaceAbsent(peer.PID) {
 			return errors.New("native Claude PID reappeared before socket cleanup")
 		}
@@ -323,6 +334,39 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer, observedKeys []ClaudeKeyBa
 		return err
 	}
 	return nil
+}
+
+// ValidateClaudePeerObservedSocketKey binds a no-row socket to a strict
+// launch-owned key that was fingerprinted while the exact strong adapter was
+// still live. Native Claude hashes the socket path into the key filename, so
+// this supplies the missing ownership edge during key-before-row startup.
+func ValidateClaudePeerObservedSocketKey(
+	configRoot string,
+	pid int,
+	expectedStart string,
+	expectedStrongStart string,
+	socket string,
+	baseline []ClaudeKeyBaselineEntry,
+	observed []ClaudeKeyBaselineEntry,
+) error {
+	keyName, err := ClaudeServiceKeyName(pid, socket)
+	if err != nil {
+		return errors.New("native Claude provisional socket path is invalid")
+	}
+	owned, err := claudePeerChangedKeySidecars(configRoot, pid, expectedStart, expectedStrongStart, baseline)
+	if err != nil {
+		return err
+	}
+	observedSet := make(map[string]string, len(observed))
+	for _, entry := range observed {
+		observedSet[entry.Name] = entry.Fingerprint
+	}
+	for _, key := range owned {
+		if key.entry.Name == keyName && observedSet[keyName] == key.entry.Fingerprint {
+			return nil
+		}
+	}
+	return errors.New("native Claude provisional socket was not bound to an observed launch key")
 }
 
 type claudePeerKeyFile struct {

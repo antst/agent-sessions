@@ -23,8 +23,18 @@ import (
 
 const claudePeerNativeHelperEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_NATIVE"
 const claudePeerNativeFailBeforeRowEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_BEFORE_ROW"
+const claudePeerNativeFailAfterSocketEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_AFTER_SOCKET"
 const claudePeerNativeFailCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_CLEANUP"
 const claudePeerNativeFailSettingsCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_SETTINGS_CLEANUP"
+
+func directoryEntryNames(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	slices.Sort(names)
+	return names
+}
 
 func TestClaudePeerNativeHelper(_ *testing.T) {
 	if os.Getenv(claudePeerNativeHelperEnv) != "1" {
@@ -35,6 +45,7 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 	}
 	sessionID := ""
 	permissionMode := "default"
+	messagingSocket := ""
 	nativeArgs := false
 	for index, argument := range os.Args {
 		if argument == "--" {
@@ -56,9 +67,15 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		if argument == "--dangerously-skip-permissions" {
 			permissionMode = "bypassPermissions"
 		}
+		if argument == "--messaging-socket-path" && index+1 < len(os.Args) {
+			messagingSocket = os.Args[index+1]
+		}
 	}
 	config := os.Getenv("CLAUDE_CONFIG_DIR")
-	socket := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), strconv.Itoa(os.Getpid())+".sock")
+	socket := messagingSocket
+	if socket == "" {
+		socket = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), strconv.Itoa(os.Getpid())+".sock")
+	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		os.Exit(71)
@@ -72,6 +89,24 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 			_ = conn.Close()
 		}
 	}()
+	if os.Getenv(claudePeerNativeFailAfterSocketEnv) == "1" {
+		if err := os.MkdirAll(filepath.Join(config, "sessions"), 0700); err != nil {
+			os.Exit(72)
+		}
+		keyName, keyErr := federator.ClaudeServiceKeyName(os.Getpid(), socket)
+		if keyErr != nil {
+			os.Exit(75)
+		}
+		keyBody, _ := json.Marshal(map[string]string{
+			"peerToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"procStart": federator.ProcessStart(os.Getpid()),
+		})
+		if err := os.WriteFile(filepath.Join(config, "sessions", keyName), keyBody, 0600); err != nil {
+			os.Exit(76)
+		}
+		time.Sleep(400 * time.Millisecond)
+		os.Exit(74)
+	}
 	row := map[string]any{
 		"pid": os.Getpid(), "sessionId": sessionID, "cwd": config, "name": "native-test",
 		"permissionMode": permissionMode, "messagingSocketPath": socket, "startedAt": time.Now().UnixMilli(),
@@ -441,6 +476,47 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	if entries, err := os.ReadDir(failedLifecycleRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("failed Claude startup retained lifecycle residue: entries=%v err=%v", entries, err)
 	}
+
+	const socketFailureID = "00000000-0000-4000-8000-000000000205"
+	sessionsBefore, err := os.ReadDir(filepath.Join(publicConfig, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(claudePeerNativeFailAfterSocketEnv, "1")
+	if err := RunClaudePeer([]string{
+		"--session-id", socketFailureID, "--group", "must-roll-back",
+	}); err == nil {
+		t.Fatal("Claude socket-before-row startup failure unexpectedly succeeded")
+	}
+	t.Setenv(claudePeerNativeFailAfterSocketEnv, "")
+	assertCatalogAbsent(socketFailureID)
+	managedSocket := federator.ClaudePeerMessagingSocketPath(runtimeDir, socketFailureID)
+	if _, err := os.Lstat(managedSocket); !os.IsNotExist(err) {
+		t.Fatalf("socket-before-row failure retained managed socket: %v", err)
+	}
+	sessionsAfter, err := os.ReadDir(filepath.Join(publicConfig, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if namesBefore, namesAfter := directoryEntryNames(sessionsBefore), directoryEntryNames(sessionsAfter); !slices.Equal(namesBefore, namesAfter) {
+		t.Fatalf("socket-before-row failure changed shared registry: before=%v after=%v", namesBefore, namesAfter)
+	}
+
+	const collisionID = "00000000-0000-4000-8000-000000000206"
+	collisionSocket := federator.ClaudePeerMessagingSocketPath(runtimeDir, collisionID)
+	collisionListener, err := net.Listen("unix", collisionSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunClaudePeer([]string{"--session-id", collisionID, "--group", "must-not-persist"}); err == nil || !strings.Contains(err.Error(), "socket path already exists") {
+		t.Fatalf("pre-existing managed socket launch = %v", err)
+	}
+	assertCatalogAbsent(collisionID)
+	if info, err := os.Lstat(collisionSocket); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("pre-existing managed socket was changed: info=%v err=%v", info, err)
+	}
+	_ = collisionListener.Close()
+	_ = os.Remove(collisionSocket)
 	plan, err := parseClaudePeerArgs([]string{"--group", "project", "--peer-name", "worker", "--dangerously-skip-permissions"})
 	if err != nil {
 		t.Fatal(err)
@@ -588,7 +664,7 @@ func TestReadClaudeNativePeerRecordRequiresExactLiveIdentityAndSocket(t *testing
 	if err := os.WriteFile(path, body, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readClaudeNativePeerRecord(root, pid, start); err != nil {
+	if _, err := readClaudeNativePeerRecord(root, pid, start, socket); err != nil {
 		t.Fatal(err)
 	}
 	row.ProcStart = "reused"
@@ -596,7 +672,7 @@ func TestReadClaudeNativePeerRecordRequiresExactLiveIdentityAndSocket(t *testing
 	if err := os.WriteFile(path, body, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readClaudeNativePeerRecord(root, pid, start); err == nil {
+	if _, err := readClaudeNativePeerRecord(root, pid, start, socket); err == nil {
 		t.Fatal("stale native Claude row was accepted")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -91,6 +92,8 @@ type PeerRegistration struct {
 	ClaudeConfigRoot     string                   `json:"claude_config_root,omitempty"`
 	ClaudeKeyBaseline    []ClaudeKeyBaselineEntry `json:"claude_key_baseline,omitempty"`
 	ClaudeKeyBaselineSet bool                     `json:"claude_key_baseline_set,omitempty"`
+	ClaudeSocketPath     string                   `json:"claude_socket_path,omitempty"`
+	ClaudeSocketPathSet  bool                     `json:"claude_socket_path_set,omitempty"`
 	AdapterStrongStart   string                   `json:"adapter_strong_start,omitempty"`
 	LifecycleStrongStart string                   `json:"lifecycle_strong_start,omitempty"`
 	StartedAt            int64                    `json:"started_at,omitempty"`
@@ -275,6 +278,7 @@ func (a *agent) loadPeerPreparations() error {
 		if !validCatalogSessionID(registration.SessionID) || entry.Name() != sessionKey(registration.SessionID)+".json" ||
 			registration.AdapterStrongStart == "" || registration.LifecycleStrongStart == "" ||
 			!validClaudeKeyBaseline(registration.PID, registration.ClaudeKeyBaselineSet, registration.ClaudeKeyBaseline) ||
+			!validLoadedClaudePeerSocket(a.options.RuntimeDir, registration) ||
 			(preparation.RollbackPreferences && preparation.DesiredPreference.SessionID != registration.SessionID) {
 			return errors.New("invalid durable Claude peer preparation")
 		}
@@ -315,6 +319,17 @@ func (a *agent) validateClaudePreparationIdentity(registration PeerRegistration)
 	}
 	if !registration.ClaudeKeyBaselineSet {
 		return errors.New("claude peer preparation key baseline is missing")
+	}
+	if registration.ClaudeSocketPathSet {
+		expectedSocket := ClaudePeerMessagingSocketPath(a.options.RuntimeDir, registration.SessionID)
+		if registration.ClaudeSocketPath != expectedSocket || ValidateClaudePeerMessagingSocketPath(expectedSocket) != nil {
+			return errors.New("claude peer preparation socket is not agent-owned")
+		}
+		if _, err := os.Lstat(expectedSocket); err == nil || !os.IsNotExist(err) {
+			return errors.New("claude peer preparation socket path already exists")
+		}
+	} else if registration.ClaudeSocketPath != "" {
+		return errors.New("invalid Claude peer preparation socket")
 	}
 	baseline, err := ClaudePeerKeySidecars(registration.ClaudeConfigRoot, registration.PID)
 	if err != nil || !slices.Equal(baseline, registration.ClaudeKeyBaseline) {
@@ -457,6 +472,7 @@ func samePreparedRegistration(left, right PeerRegistration) bool {
 		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart &&
 		left.AdapterStrongStart == right.AdapterStrongStart && left.LifecycleStrongStart == right.LifecycleStrongStart &&
 		left.ClaudeKeyBaselineSet == right.ClaudeKeyBaselineSet &&
+		left.ClaudeSocketPathSet == right.ClaudeSocketPathSet && left.ClaudeSocketPath == right.ClaudeSocketPath &&
 		slices.Equal(left.ClaudeKeyBaseline, right.ClaudeKeyBaseline)
 }
 
@@ -464,7 +480,24 @@ func samePreparedRegistrationWeak(left, right PeerRegistration) bool {
 	return left.PID == right.PID && left.ProcStart == right.ProcStart &&
 		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart &&
 		left.ClaudeKeyBaselineSet == right.ClaudeKeyBaselineSet &&
+		left.ClaudeSocketPathSet == right.ClaudeSocketPathSet && left.ClaudeSocketPath == right.ClaudeSocketPath &&
 		slices.Equal(left.ClaudeKeyBaseline, right.ClaudeKeyBaseline)
+}
+
+// ValidateClaudePeerMessagingSocketPath enforces the sockaddr_un limit before
+// a managed Claude adapter is released.
+func ValidateClaudePeerMessagingSocketPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("managed Claude messaging socket path is not absolute and clean")
+	}
+	limit := 107
+	if runtime.GOOS == "darwin" {
+		limit = 103
+	}
+	if len([]byte(path)) > limit {
+		return fmt.Errorf("managed Claude messaging socket path is %d bytes; platform limit is %d", len([]byte(path)), limit)
+	}
+	return nil
 }
 
 // ClaudePeerKeySidecars snapshots every PID-prefixed key name before a gated
@@ -621,7 +654,8 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	preparedRegistration := prepared.Registration
 	if preparedExists && (preparedRegistration.PID != registration.PID || preparedRegistration.ProcStart != registration.ProcStart ||
 		preparedRegistration.LifecyclePID != lifecyclePID || preparedRegistration.LifecycleProcStart != lifecycleProcStart ||
-		preparedRegistration.AdapterStrongStart != adapterInfo.StrongStart || preparedRegistration.LifecycleStrongStart != lifecycleInfo.StrongStart) {
+		preparedRegistration.AdapterStrongStart != adapterInfo.StrongStart || preparedRegistration.LifecycleStrongStart != lifecycleInfo.StrongStart ||
+		preparedRegistration.ClaudeSocketPathSet && preparedRegistration.ClaudeSocketPath != registration.Socket) {
 		a.mu.Unlock()
 		return Peer{}, errors.New("claude peer registration does not match its prepared attachment")
 	}
@@ -669,6 +703,17 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	a.mu.Unlock()
 	a.signalLocalChanged()
 	return peer, nil
+}
+
+func validLoadedClaudePeerSocket(runtimeDir string, registration PeerRegistration) bool {
+	if !registration.ClaudeSocketPathSet {
+		return registration.ClaudeSocketPath == ""
+	}
+	if ValidateClaudePeerMessagingSocketPath(registration.ClaudeSocketPath) != nil {
+		return false
+	}
+	expectedName := filepath.Base(ClaudePeerMessagingSocketPath(runtimeDir, registration.SessionID))
+	return filepath.Base(registration.ClaudeSocketPath) == expectedName
 }
 
 func (a *agent) unregisterPeer(registration PeerRegistration) error {
@@ -799,7 +844,7 @@ func (a *agent) reconcilePeerPreparations(logger interface{ Printf(string, ...an
 				ID: a.options.HostID + "/" + sessionID, HostID: a.options.HostID, HostName: a.options.HostName,
 				SessionID: sessionID, Entrypoint: "claude",
 			},
-			PID: registration.PID, ProcStart: registration.ProcStart, Socket: registration.Socket,
+			PID: registration.PID, ProcStart: registration.ProcStart, Socket: registration.ClaudeSocketPath,
 			LifecyclePID: registration.LifecyclePID, LifecycleProcStart: registration.LifecycleProcStart,
 			AdapterStrongStart: registration.AdapterStrongStart, LifecycleStrongStart: registration.LifecycleStrongStart,
 			LifecycleRoot: registration.LifecycleRoot, ClaudeConfigRoot: registration.ClaudeConfigRoot,

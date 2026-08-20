@@ -15,6 +15,13 @@ subset. Product adapters register their real sockets with the host agent;
 remote peers are never projected into Claude's registry. Ordinary Claude,
 `claude-peer`, and Claude lane rows coexist in the configured shared profile:
 
+Managed interactive Claude launches use a per-session socket below the host
+agent's private runtime directory. The gated launch journal records that exact
+path before native startup. If Claude creates its socket and socket-bound key
+but stops before publishing the PID row, retirement still requires the key
+fingerprinted under the exact live adapter; unrelated shared-profile sockets
+are never swept by PID or liveness alone.
+
 ```json
 {
   "pid": 12345,

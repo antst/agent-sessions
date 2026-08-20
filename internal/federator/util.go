@@ -85,6 +85,15 @@ func ClaudePeerLifecycleLockPath(lifecycleRoot string) string {
 	return filepath.Join(filepath.Dir(lifecycleRoot), "lifecycle.lock")
 }
 
+// ClaudePeerMessagingSocketPath returns the exact agent-runtime-owned socket
+// used by one managed interactive Claude session. Native Claude normally picks
+// a PID socket before publishing its registry row. Giving managed launches a
+// stable path lets the durable preparation retain cleanup authority even when
+// native startup stops between binding the socket and publishing that row.
+func ClaudePeerMessagingSocketPath(runtimeDir, sessionID string) string {
+	return filepath.Join(runtimeDir, "cp-"+sessionKey(sessionID)+".sock")
+}
+
 func cleanID(value string) string {
 	var output strings.Builder
 	for _, r := range value {

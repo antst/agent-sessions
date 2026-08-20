@@ -68,6 +68,13 @@ func RunClaudePeer(args []string) error {
 		return err
 	}
 	lifecycleRoot := claudePeerLifecycleRoot(status.StateDir, status.HostID, plan.sessionID)
+	managedSocket := federator.ClaudePeerMessagingSocketPath(status.RuntimeDir, plan.sessionID)
+	if err := federator.ValidateClaudePeerMessagingSocketPath(managedSocket); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(managedSocket); err == nil || !os.IsNotExist(err) {
+		return errors.New("managed Claude messaging socket path already exists")
+	}
 	profileLock, err := acquireClaudePeerProfileLock(lifecycleRoot)
 	if err != nil {
 		return err
@@ -84,6 +91,12 @@ func RunClaudePeer(args []string) error {
 	if err := prepareClaudePeerAttachment(sharedRoot, plan.sessionID); err != nil {
 		return err
 	}
+	// Native Claude binds its messaging socket before publishing the PID row.
+	// Force an agent-owned exact path so crash cleanup does not have to infer a
+	// transport path from an absent row. This final managed occurrence also
+	// overrides a caller-provided native socket option without touching prompts
+	// after `--`.
+	plan.args = insertClaudeManagedArgs(plan.args, "--messaging-socket-path", managedSocket)
 	var settingsBody []byte
 	plan.args, settingsBody, err = planClaudePeerLaunchSettings(plan.args, lifecycleRoot)
 	if err != nil {
@@ -147,6 +160,7 @@ func RunClaudePeer(args []string) error {
 		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: sharedRoot,
 		ClaudeKeyBaseline: keyBaseline, ClaudeKeyBaselineSet: true,
+		ClaudeSocketPath: managedSocket, ClaudeSocketPathSet: true,
 	}
 	prepared, err := federator.PreparePeerLaunch(
 		agentRuntimeDir(), preparation, preferenceRequest, resolved.Preference,
@@ -180,7 +194,7 @@ func RunClaudePeer(args []string) error {
 	_ = gateWriter.Close()
 	var cleanupErr error
 	runErr := superviseClaudePeer(
-		command, lifecycleRoot, sharedRoot, keyBaseline, adapterStrongStart,
+		command, lifecycleRoot, sharedRoot, managedSocket, keyBaseline, adapterStrongStart,
 		plan, resolved.Preference.AlwaysApprove, &cleanupErr,
 	)
 	settingsCleanupErr := removeClaudePeerLaunchSettings(settingsPath)
@@ -578,7 +592,7 @@ func prepareClaudePeerAttachment(configRoot, sessionID string) error {
 		if marker.AgentService || marker.SessionID != sessionID {
 			continue
 		}
-		row, rowErr := parseClaudeNativePeerRecordForCleanup(body, pid, sessionID)
+		row, rowErr := parseClaudeNativePeerRecordForCleanup(body, pid, sessionID, "")
 		if rowErr != nil {
 			return fmt.Errorf("inspect prior Claude attachment: %w", rowErr)
 		}
@@ -647,6 +661,7 @@ func superviseClaudePeer(
 	command *exec.Cmd,
 	lifecycleRoot string,
 	sharedRoot string,
+	managedSocket string,
 	keyBaseline []federator.ClaudeKeyBaselineEntry,
 	adapterStrongStart string,
 	plan claudePeerPlan,
@@ -683,7 +698,7 @@ func superviseClaudePeer(
 	}()
 	deadline := time.Now().Add(claudePeerReadyTimeout)
 	var registration federator.PeerRegistration
-	var nativeRow claudeNativePeerRecord
+	nativeRow := claudeNativePeerRecord{PID: childPID, MessagingSocketPath: managedSocket}
 	var observedKeys []federator.ClaudeKeyBaselineEntry
 	observeKeys := func() error {
 		identity := procinfo.Read(childPID)
@@ -717,7 +732,7 @@ func superviseClaudePeer(
 			<-done
 			return fmt.Errorf("observe native Claude publication key: %w", err)
 		}
-		row, err := readClaudeNativePeerRecord(sharedRoot, childPID, childStart)
+		row, err := readClaudeNativePeerRecord(sharedRoot, childPID, childStart, managedSocket)
 		if err != nil {
 			if time.Now().After(deadline) {
 				_ = command.Process.Kill()
@@ -779,7 +794,7 @@ func superviseClaudePeer(
 			}
 			return waitErr
 		case <-ticker.C:
-			row, rowErr := readClaudeNativePeerRecord(sharedRoot, childPID, childStart)
+			row, rowErr := readClaudeNativePeerRecord(sharedRoot, childPID, childStart, managedSocket)
 			if rowErr != nil || row.SessionID != plan.sessionID {
 				continue
 			}
@@ -835,7 +850,7 @@ func defaultClaudePeerStatus(status string) string {
 	}
 }
 
-func readClaudeNativePeerRecord(configRoot string, pid int, expectedStart string) (claudeNativePeerRecord, error) {
+func readClaudeNativePeerRecord(configRoot string, pid int, expectedStart string, expectedSocket string) (claudeNativePeerRecord, error) {
 	body, err := os.ReadFile(filepath.Join(configRoot, "sessions", strconv.Itoa(pid)+".json")) //nolint:gosec // exact child PID in the shared profile.
 	if err != nil {
 		return claudeNativePeerRecord{}, err
@@ -843,7 +858,8 @@ func readClaudeNativePeerRecord(configRoot string, pid int, expectedStart string
 	var row claudeNativePeerRecord
 	if json.Unmarshal(body, &row) != nil || row.PID != pid || row.SessionID == "" || row.MessagingSocketPath == "" ||
 		row.ProcStart == "" || row.ProcStart != expectedStart || federator.ProcessStart(pid) != expectedStart ||
-		row.Entrypoint != "cli" || row.Kind != "interactive" {
+		row.Entrypoint != "cli" || row.Kind != "interactive" ||
+		expectedSocket != "" && row.MessagingSocketPath != expectedSocket {
 		return claudeNativePeerRecord{}, errors.New("invalid native Claude session record")
 	}
 	switch row.PermissionMode {
@@ -851,7 +867,7 @@ func readClaudeNativePeerRecord(configRoot string, pid int, expectedStart string
 	default:
 		return claudeNativePeerRecord{}, errors.New("native Claude session published an unknown permission mode")
 	}
-	if filepath.Base(row.MessagingSocketPath) != strconv.Itoa(pid)+".sock" {
+	if expectedSocket == "" && filepath.Base(row.MessagingSocketPath) != strconv.Itoa(pid)+".sock" {
 		return claudeNativePeerRecord{}, errors.New("native Claude session socket is not PID-bound")
 	}
 	info, statErr := os.Lstat(row.MessagingSocketPath)
@@ -886,7 +902,9 @@ func cleanupClaudePeerNativeArtifacts(
 	recordPresent := false
 	current, err := os.ReadFile(recordPath) //nolint:gosec // exact private child record.
 	if err == nil {
-		candidate, parseErr := parseClaudeNativePeerRecordForCleanup(current, pid, expectedSessionID)
+		candidate, parseErr := parseClaudeNativePeerRecordForCleanup(
+			current, pid, expectedSessionID, row.MessagingSocketPath,
+		)
 		if parseErr != nil || candidate.ProcStart != expectedStart {
 			return errors.New("native Claude record changed before cleanup")
 		}
@@ -901,7 +919,7 @@ func cleanupClaudePeerNativeArtifacts(
 	keyPath := ""
 	keyPresent := false
 	if row.MessagingSocketPath != "" {
-		if filepath.Base(row.MessagingSocketPath) != strconv.Itoa(row.PID)+".sock" {
+		if filepath.Base(row.MessagingSocketPath) != strconv.Itoa(row.PID)+".sock" && keyBaseline == nil {
 			return errors.New("native Claude socket is not PID-bound")
 		}
 		keyName, keyErr := federator.ClaudeServiceKeyName(row.PID, row.MessagingSocketPath)
@@ -933,6 +951,14 @@ func cleanupClaudePeerNativeArtifacts(
 	// Keep the registry row until transport cleanup succeeds so a failed
 	// attempt retains the exact socket identity for agent reconciliation.
 	if socketPresent {
+		if !recordPresent && keyBaseline != nil {
+			if err := federator.ValidateClaudePeerObservedSocketKey(
+				configRoot, pid, expectedStart, expectedStrongStart,
+				row.MessagingSocketPath, keyBaseline, observedKeys,
+			); err != nil {
+				return err
+			}
+		}
 		if procinfo.Read(row.PID).Status != procinfo.Absent {
 			return errors.New("native Claude PID reappeared before socket cleanup")
 		}
@@ -966,16 +992,22 @@ func cleanupClaudePeerNativeArtifacts(
 	return nil
 }
 
-func parseClaudeNativePeerRecordForCleanup(body []byte, pid int, sessionID string) (claudeNativePeerRecord, error) {
+func parseClaudeNativePeerRecordForCleanup(
+	body []byte,
+	pid int,
+	sessionID string,
+	expectedSocket string,
+) (claudeNativePeerRecord, error) {
 	var row claudeNativePeerRecord
 	if json.Unmarshal(body, &row) != nil || row.PID != pid || row.SessionID != sessionID || row.ProcStart == "" {
 		return claudeNativePeerRecord{}, errors.New("invalid native Claude cleanup record")
 	}
-	// Native Claude publishes its PID row before its messaging inbox. A child
-	// may exit in that provisional state, so cleanup must accept an absent
-	// socket while still requiring exact PID/session/start identity. Once a
-	// socket is present it remains strictly PID-bound.
-	if row.MessagingSocketPath != "" && filepath.Base(row.MessagingSocketPath) != strconv.Itoa(pid)+".sock" {
+	// Native Claude publishes its PID row after binding its messaging inbox. A
+	// child may exit with either field absent, so cleanup accepts a provisional
+	// row while still requiring exact PID/session/start identity. A socket must
+	// be either the prepared managed path or the legacy PID-bound native path.
+	if row.MessagingSocketPath != "" && row.MessagingSocketPath != expectedSocket &&
+		filepath.Base(row.MessagingSocketPath) != strconv.Itoa(pid)+".sock" {
 		return claudeNativePeerRecord{}, errors.New("invalid native Claude cleanup record")
 	}
 	return row, nil

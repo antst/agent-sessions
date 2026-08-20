@@ -231,11 +231,19 @@ func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *test
 }
 
 func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T) {
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "as-prepared-socket-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	stateDir := filepath.Join(root, "state")
+	runtimeDir := filepath.Join(root, "runtime")
 	configRoot := filepath.Join(root, "claude")
 	registryDir := filepath.Join(configRoot, "sessions")
 	if err := os.MkdirAll(registryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := openSessionCatalog(filepath.Join(stateDir, "sessions.json"), "host-a")
@@ -261,7 +269,11 @@ func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T
 	})
 	prefix := strconv.Itoa(adapter.Process.Pid) + "."
 	preexistingName := prefix + strings.Repeat("b", 64) + ".key"
-	newName := prefix + strings.Repeat("a", 64) + ".key"
+	managedSocket := ClaudePeerMessagingSocketPath(runtimeDir, sessionID)
+	newName, err := ClaudeServiceKeyName(adapter.Process.Pid, managedSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, body := range map[string]string{
 		preexistingName: `{"peerToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","procStart":"older"}`,
 		newName:         `{"peerToken":"dddddddddddddddddddddddddddddddd","procStart":"older"}`,
@@ -275,9 +287,13 @@ func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T
 		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
 		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
 		LifecycleRoot: ClaudePeerLifecycleRootInState(stateDir, sessionID), ClaudeConfigRoot: configRoot,
+		ClaudeSocketPath: managedSocket, ClaudeSocketPathSet: true,
 	})
 	agent := &agent{
-		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
+		options: AgentOptions{
+			HostID: "host-a", HostName: "Host A", RuntimeDir: runtimeDir,
+			StateDir: stateDir, ClaudeConfigDir: configRoot,
+		},
 		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
 		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(stateDir, "claude-peer-preparations"),
 		localChanged: make(chan struct{}, 1),
@@ -290,6 +306,11 @@ func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T
 	if _, _, err := agent.preparePeerLaunch(registration, update, expected); err != nil {
 		t.Fatal(err)
 	}
+	listener, err := net.Listen("unix", managedSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
 	if err := os.WriteFile(filepath.Join(registryDir, newName), []byte(
 		`{"peerToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","procStart":"`+registration.ProcStart+`"}`,
 	), 0o600); err != nil {
@@ -315,6 +336,9 @@ func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T
 	_ = adapter.Wait()
 	if _, err := os.Lstat(filepath.Join(registryDir, newName)); !os.IsNotExist(err) {
 		t.Fatalf("token-only launch sidecar survived crash recovery: %v", err)
+	}
+	if _, err := os.Lstat(managedSocket); !os.IsNotExist(err) {
+		t.Fatalf("socket-before-row artifact survived crash recovery: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(registryDir, preexistingName)); err != nil {
 		t.Fatalf("pre-release sidecar was removed: %v", err)
