@@ -850,6 +850,7 @@ func defaultClaudePeerStatus(status string) string {
 	}
 }
 
+//nolint:gocyclo // A native row must pass every independent process, mode, and socket attestation.
 func readClaudeNativePeerRecord(configRoot string, pid int, expectedStart string, expectedSocket string) (claudeNativePeerRecord, error) {
 	body, err := os.ReadFile(filepath.Join(configRoot, "sessions", strconv.Itoa(pid)+".json")) //nolint:gosec // exact child PID in the shared profile.
 	if err != nil {
