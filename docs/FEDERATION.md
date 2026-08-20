@@ -41,9 +41,9 @@ service does not add attributes to Claude’s strict native envelope grammar.
 ```sh
 peer-federator agent --host workstation-a --name workstation-a
 
-codex-peer --group project-a -n reviewer
-claude-peer --group project-a -n implementer
-grok-peer --group project-a -n researcher
+codex-peer -g project-a -n reviewer
+claude-peer -g project-a -n implementer
+grok-peer -g project-a -n researcher
 ```
 
 `peer-federator doctor` accepts this local-only topology. `peer-federator

@@ -310,6 +310,22 @@ ordinary threads can see the tool names, but calls return a bounded inactive res
 inbox, rename, or send access.
 The plugin's default MCP approval mode lets calls reach this authorization boundary without a
 daemon-wide pre-dispatch prompt; it grants no peer capability by itself.
+Managed Claude uses the same public `claude_peer` tool name through the Claude plugin, but a
+different caller proof. The stdio MCP process must descend from both the exact live native Claude
+adapter and its launcher lifecycle owner. The host agent must independently return the same
+interactive Claude UUID, adapter/lifecycle process starts, and adapter socket; the native registry
+row must repeat that UUID, PID, process start, `cli`/`interactive` classification, and socket, and
+the socket must be live. Claude does not supply a Codex `session_id`; exact process ancestry is the
+authority. The Claude inventory deliberately exposes only grouped discovery, send/multicast, and
+broadcast. Bare Claude, a copied environment, a recycled PID, a different registered Claude peer,
+or a mismatched row/socket receives no roster or send authority.
+
+Interactive Claude names are indexed durably by session UUID in host-agent state. Resume-by-name
+selects one live interactive product match first, otherwise one historical interactive match.
+Multiple live or historical UUIDs are ambiguous and require an exact UUID. The launcher resolves a
+name through the local host-agent control socket before acquiring a lifecycle path or changing the
+catalog, then rewrites only the native pre-`--` resume selector to the exact UUID.
+
 The bridge accepts MCP approval elicitations only for the bridge-owned `claude_peer`
 server; foreign
 MCP approvals and ordinary elicitations are not trusted.

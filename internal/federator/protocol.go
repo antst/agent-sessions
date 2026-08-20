@@ -70,6 +70,7 @@ type Message struct {
 	SourceID               string              `json:"source_id,omitempty"`
 	SourceSessionID        string              `json:"source_session_id,omitempty"`
 	SessionID              string              `json:"session_id,omitempty"`
+	Name                   string              `json:"name,omitempty"`
 	ParentSessionID        string              `json:"parent_session_id,omitempty"`
 	ParentHostID           string              `json:"parent_host_id,omitempty"`
 	ParentGroups           []string            `json:"parent_groups,omitempty"`

@@ -36,7 +36,7 @@ disconnected instead of returning stale data.
 ## Product sessions
 
 Use `codex-peer`, `claude-peer`, or `grok-peer` to opt in. Pass repeatable
-`--group NAME` options on a fresh launch. Resume without group/yolo overrides
+`-g NAME` or `--group NAME` options on a fresh launch. Resume without group/yolo overrides
 restores the catalog; explicit values replace it. `peer resume SESSION_UUID`
 uses the catalogued product adapter.
 

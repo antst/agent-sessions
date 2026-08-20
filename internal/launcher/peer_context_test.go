@@ -7,7 +7,7 @@ import (
 
 func TestPeerLaunchContextSeparatesGroupLayerFromCodexTargetArgs(t *testing.T) {
 	forwarded, context, err := extractPeerLaunchContext([]string{
-		"--group", "project", "--group=review", "--inherit-groups",
+		"-g", "project", "-g=review", "--group", "release", "--group=docs", "--inherit-groups",
 		"resume", "thread-id", "--model", "gpt-test",
 	}, codexOptionConsumesNext)
 	if err != nil {
@@ -17,7 +17,7 @@ func TestPeerLaunchContextSeparatesGroupLayerFromCodexTargetArgs(t *testing.T) {
 	if !reflect.DeepEqual(forwarded, want) {
 		t.Fatalf("target argv = %q, want %q", forwarded, want)
 	}
-	if !reflect.DeepEqual(context.groups, []string{"project", "review"}) || !context.groupsSpecified ||
+	if !reflect.DeepEqual(context.groups, []string{"project", "review", "release", "docs"}) || !context.groupsSpecified ||
 		context.parentSession != "" || context.parentSpecified ||
 		!context.inheritParentGroups || !context.inheritGroupsSpecified {
 		t.Fatalf("parent context = %+v", context)
@@ -29,15 +29,38 @@ func TestPeerLaunchContextSeparatesGroupLayerFromCodexTargetArgs(t *testing.T) {
 
 func TestPeerLaunchContextDoesNotInterpretNativeOptionValue(t *testing.T) {
 	forwarded, context, err := extractPeerLaunchContext([]string{
-		"--model", "--group", "--group", "actual", "--no-inherit-groups", "--no-yolo",
+		"--model", "-g", "-g", "actual", "--no-inherit-groups", "--no-yolo",
 	}, codexOptionConsumesNext)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--model", "--group"}
+	want := []string{"--model", "-g"}
 	if !reflect.DeepEqual(forwarded, want) || !reflect.DeepEqual(context.groups, []string{"actual"}) ||
 		context.inheritParentGroups || !context.inheritGroupsSpecified || !context.forceNoYolo {
 		t.Fatalf("forwarded=%q context=%+v", forwarded, context)
+	}
+}
+
+func TestPeerLaunchContextShortGroupAliasAppliesToEveryProduct(t *testing.T) {
+	products := map[string]func(string) bool{
+		"codex":  codexOptionConsumesNext,
+		"claude": claudeOptionConsumesNext,
+		"grok":   grokOptionConsumesNext,
+	}
+	for product, consumesNext := range products {
+		t.Run(product, func(t *testing.T) {
+			forwarded, context, err := extractPeerLaunchContext([]string{
+				"-g", "project", "-g=review", "--", "prompt", "-g", "not-a-group",
+			}, consumesNext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantForwarded := []string{"--", "prompt", "-g", "not-a-group"}
+			if !reflect.DeepEqual(forwarded, wantForwarded) ||
+				!reflect.DeepEqual(context.groups, []string{"project", "review"}) || !context.groupsSpecified {
+				t.Fatalf("forwarded=%q context=%+v", forwarded, context)
+			}
+		})
 	}
 }
 

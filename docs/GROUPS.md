@@ -35,7 +35,7 @@ need.
 ## Membership
 
 `codex-peer`, `claude-peer`, and `grok-peer` accept repeatable
-`--group NAME` arguments. Group names are opaque, case-sensitive strings after
+`-g NAME` or `--group NAME` arguments. Group names are opaque, case-sensitive strings after
 basic length and character validation.
 
 Every participating session also belongs to an automatic private group:

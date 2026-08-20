@@ -75,6 +75,25 @@ func LookupSessionPreferences(runtimeDir, sessionID string) (ResolvedPreferences
 	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
 }
 
+// ResolveSessionName maps one unique durable product peer name to its stable
+// session ID. A unique live registration wins over historical records; all
+// other collisions require the caller to use an exact session ID.
+func ResolveSessionName(runtimeDir, product, name string) (string, error) {
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir()
+	}
+	response, err := requestAgentControl(runtimeDir, Message{
+		Type: "session_name_lookup", Version: GroupProtocolVersion, Product: product, Name: name,
+	})
+	if err != nil {
+		return "", err
+	}
+	if response.Type != "session_name_lookup" || response.SessionID == "" {
+		return "", errors.New("agent returned no session name match")
+	}
+	return response.SessionID, nil
+}
+
 // DoctorOptions selects the hub and local registry inspected by Doctor.
 type DoctorOptions struct {
 	Hub             string

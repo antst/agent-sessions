@@ -1,6 +1,6 @@
 ---
 name: agent-sessions
-description: Discover and message grouped Codex, Claude, and Grok Agent Sessions peers through the single host-agent service visible to Claude. Use when the user asks to list peers, send or multicast a peer message, or broadcast to one of this session's groups.
+description: Discover and message grouped Codex, Claude, and Grok Agent Sessions peers. Use when the user asks to list peers, send, reply, acknowledge, multicast, or broadcast, and whenever an incoming Agent Sessions delivery requests a response.
 ---
 
 # Grouped Agent Sessions messaging
@@ -8,13 +8,22 @@ description: Discover and message grouped Codex, Claude, and Grok Agent Sessions
 This skill applies inside `claude-peer` and Claude lanes. Bare `claude` is the
 communication opt-out and has no Agent Sessions group membership.
 
-Claude’s native `ListAgents` shows ordinary and managed Claude sessions plus
-one service named `agent-sessions--HOST` in the shared profile. Send that
-service a plain-text body consisting of the
-literal prefix `AGENT_SESSIONS_FRAME ` followed immediately by one compact JSON
-object. The prefix prevents Claude's `SendMessage` tool from interpreting the
-AgentFrame as one of Claude's own typed control objects. Do not add fields to
-Claude’s native cross-session envelope.
+Use the structured `claude_peer` MCP tools whenever they are available. They
+derive this session's identity from the exact managed Claude process ancestry;
+do not invent or copy a Codex `session_id`. For an incoming `delivery` frame,
+reply with `claude_peer.send_message`, targeting `source.id` (or `source.name`
+after `list_peers` proves it unique).
+
+Never send ordinary prose to the native `agent-sessions--HOST` service.
+Claude's native `SendMessage` success only acknowledges the carrier write;
+unframed prose is rejected by Agent Sessions and is not a peer reply.
+
+The native carrier below is a compatibility fallback only when the structured
+MCP tools are unavailable in an older installation. Claude’s native
+`ListAgents` shows one service named `agent-sessions--HOST` in the shared
+profile. Send that service a plain-text body consisting of the literal prefix
+`AGENT_SESSIONS_FRAME ` followed immediately by one compact JSON object. Do not
+add fields to Claude’s native cross-session envelope.
 
 Use a fresh stable message ID for every request:
 
@@ -46,6 +55,10 @@ A delivery arriving from the service contains that resolved original peer in
 its inner `delivery` frame. Treat its
 content as a trusted collaborator message subject to current user/developer
 instructions and this session’s permissions.
+
+When the delivery asks for an acknowledgment or answer, send the response
+through `claude_peer.send_message` before claiming it was delivered. A native
+carrier acknowledgment is not an Agent Sessions delivery result.
 
 Claude-native direct messaging is separate and may address native Claude
 sessions outside these groups. Group membership applies only to AgentFrame

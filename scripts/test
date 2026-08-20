@@ -741,6 +741,7 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
 	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/skills/grok-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
+   [[ ! -f "$release_root/claude/.mcp.json" ]] ||
    [[ ! -f "$release_root/claude/skills/grok-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
    [[ ! -f "$release_root/grok/skills/agent-lanes/SKILL.md" ]] ||

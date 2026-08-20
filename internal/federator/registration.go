@@ -1,6 +1,7 @@
 package federator
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -97,6 +99,222 @@ type PeerRegistration struct {
 	AdapterStrongStart   string                   `json:"adapter_strong_start,omitempty"`
 	LifecycleStrongStart string                   `json:"lifecycle_strong_start,omitempty"`
 	StartedAt            int64                    `json:"started_at,omitempty"`
+}
+
+const sessionNameRecordVersion = 1
+
+type sessionNameRecord struct {
+	Version   int    `json:"version"`
+	SessionID string `json:"session_id"`
+	Product   string `json:"product"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+func (a *agent) sessionNameDirectory() string {
+	if a.options.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(a.options.StateDir, "session-names")
+}
+
+func (a *agent) persistSessionName(peer Peer, kind string) error {
+	directory := a.sessionNameDirectory()
+	if directory == "" {
+		return nil
+	}
+	path := filepath.Join(directory, sessionKey(peer.SessionID)+".json")
+	var current sessionNameRecord
+	if body, err := os.ReadFile(path); //nolint:gosec // hashed session ID below the agent-owned state directory.
+	err == nil && json.Unmarshal(body, &current) == nil &&
+		current.Version == sessionNameRecordVersion && current.SessionID == peer.SessionID &&
+		current.Product == peer.Entrypoint && current.Kind == kind && current.Name == peer.Name {
+		return nil
+	}
+	record := sessionNameRecord{
+		Version: sessionNameRecordVersion, SessionID: peer.SessionID,
+		Product: peer.Entrypoint, Kind: kind, Name: peer.Name, UpdatedAt: time.Now().UnixMilli(),
+	}
+	return writeJSONAtomic(path, record)
+}
+
+//nolint:gocyclo // Live priority, durable validation, and explicit ambiguity errors form one lookup policy.
+func (a *agent) resolveSessionName(product, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if !validProduct(product) || requested == "" {
+		return "", errors.New("session name lookup requires a product and non-empty name")
+	}
+	a.mu.RLock()
+	liveCandidates := []string{}
+	for _, peer := range a.local {
+		if peer.Entrypoint == product && strings.EqualFold(peer.Name, requested) {
+			liveCandidates = append(liveCandidates, peer.SessionID)
+		}
+	}
+	a.mu.RUnlock()
+	live := []string{}
+	for _, sessionID := range liveCandidates {
+		preference, _, ok, err := a.catalog.get(sessionID)
+		if err != nil {
+			return "", err
+		}
+		if ok && preference.Kind == SessionKindInteractive {
+			live = append(live, sessionID)
+		}
+	}
+	sort.Strings(live)
+	if len(live) == 1 {
+		return live[0], nil
+	}
+	if len(live) > 1 {
+		return "", fmt.Errorf("session name %q is ambiguous; use an exact session UUID: %s", requested, strings.Join(live, ", "))
+	}
+	historical, err := a.historicalSessionNames(product)
+	if err != nil {
+		return "", err
+	}
+	matches := []string{}
+	for sessionID, name := range historical {
+		if strings.EqualFold(name, requested) {
+			matches = append(matches, sessionID)
+		}
+	}
+	sort.Strings(matches)
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("session name %q is ambiguous; use an exact session UUID: %s", requested, strings.Join(matches, ", "))
+	}
+	return "", fmt.Errorf("no managed %s session is named %q", product, requested)
+}
+
+//nolint:gocyclo // Durable index validation and Claude transcript migration deliberately fail closed per session.
+func (a *agent) historicalSessionNames(product string) (map[string]string, error) {
+	candidates := map[string]bool{}
+	a.catalog.mu.Lock()
+	for sessionID, preference := range a.catalog.sessions {
+		if preference.Product == product && (preference.Kind == "" || preference.Kind == SessionKindInteractive) {
+			candidates[sessionID] = true
+		}
+	}
+	a.catalog.mu.Unlock()
+	names := map[string]string{}
+	directory := a.sessionNameDirectory()
+	if directory != "" {
+		entries, err := os.ReadDir(directory)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			body, readErr := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // agent-owned directory entry.
+			var record sessionNameRecord
+			if readErr != nil || json.Unmarshal(body, &record) != nil || record.Version != sessionNameRecordVersion ||
+				!validCatalogSessionID(record.SessionID) || entry.Name() != sessionKey(record.SessionID)+".json" ||
+				record.Product != product || record.Kind != SessionKindInteractive || record.Name == "" {
+				continue
+			}
+			_, managed := candidates[record.SessionID]
+			if managed {
+				names[record.SessionID] = record.Name
+			}
+		}
+	}
+	if product != "claude" {
+		return names, nil
+	}
+	transcriptNames, invalid := a.claudeTranscriptSessionNames(candidates)
+	for sessionID := range invalid {
+		delete(names, sessionID)
+	}
+	for sessionID, name := range transcriptNames {
+		if _, bad := invalid[sessionID]; !bad {
+			names[sessionID] = name
+		}
+	}
+	return names, nil
+}
+
+func (a *agent) claudeTranscriptSessionNames(
+	candidates map[string]bool,
+) (map[string]string, map[string]bool) {
+	names := map[string]string{}
+	invalid := map[string]bool{}
+	projects := filepath.Join(a.options.ClaudeConfigDir, "projects")
+	projectEntries, err := os.ReadDir(projects)
+	if err != nil {
+		return names, invalid
+	}
+	for _, project := range projectEntries {
+		if !project.IsDir() {
+			continue
+		}
+		for sessionID := range candidates {
+			if _, bad := invalid[sessionID]; bad {
+				continue
+			}
+			path := filepath.Join(projects, project.Name(), sessionID+".jsonl")
+			info, statErr := os.Lstat(path)
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			if statErr != nil || !info.Mode().IsRegular() {
+				invalid[sessionID] = true
+				continue
+			}
+			title, titleErr := readClaudeTranscriptTitle(path, sessionID)
+			if titleErr != nil {
+				invalid[sessionID] = true
+				continue
+			}
+			if title == "" {
+				continue
+			}
+			if previous, exists := names[sessionID]; exists && previous != title {
+				delete(names, sessionID)
+				invalid[sessionID] = true
+				continue
+			}
+			names[sessionID] = title
+		}
+	}
+	return names, invalid
+}
+
+func readClaudeTranscriptTitle(path, expectedSessionID string) (string, error) {
+	file, err := os.Open(path) //nolint:gosec // exact catalog session filename below the configured Claude projects root.
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	title := ""
+	for scanner.Scan() {
+		var event struct {
+			Type        string `json:"type"`
+			SessionID   string `json:"sessionId"`
+			CustomTitle string `json:"customTitle"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Type != "custom-title" {
+			continue
+		}
+		if event.SessionID != expectedSessionID {
+			return "", errors.New("Claude transcript title identity does not match its catalog session") //nolint:staticcheck // Claude is a product name.
+		}
+		title = strings.TrimSpace(event.CustomTitle)
+		if title == "" || len(title) > 512 {
+			return "", errors.New("Claude transcript contains an invalid session title") //nolint:staticcheck // Claude is a product name.
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return title, nil
 }
 
 // ClaudeKeyBaselineEntry fingerprints one PID-prefixed native key artifact
@@ -684,6 +902,10 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 		InstanceID: sessionKey(fmt.Sprintf("%s\x00%d\x00%s", a.options.HostID, registration.PID, registration.ProcStart)),
 		Groups:     groups, ParentSessionID: preference.ParentSession,
 	}
+	preferenceKind := preference.Kind
+	if preferenceKind == "" {
+		preferenceKind = SessionKindInteractive
+	}
 	if preparedExists && !prepared.Committed {
 		prepared.Committed = true
 		if err := writeJSONAtomic(a.preparationPath(registration.SessionID), prepared); err != nil {
@@ -702,6 +924,9 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 		ClaudeKeyBaselineSet: preparedRegistration.ClaudeKeyBaselineSet,
 	}
 	a.mu.Unlock()
+	if err := a.persistSessionName(peer, preferenceKind); err != nil {
+		defaultLogger(a.logger).Printf("persist peer session name %s: %v", registration.SessionID, err)
+	}
 	a.signalLocalChanged()
 	return peer, nil
 }

@@ -636,6 +636,20 @@ func (a *agent) handleControl(conn net.Conn) {
 						SessionID: message.SessionID, Preference: &preference, Groups: groups,
 					}
 				}
+			case "session_name_lookup":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				sessionID, err := a.resolveSessionName(message.Product, message.Name)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: "session_name_lookup", Version: GroupProtocolVersion,
+						Product: message.Product, Name: message.Name, SessionID: sessionID,
+					}
+				}
 			case "parent_context":
 				if message.Version != GroupProtocolVersion {
 					response.Error = "group protocol is incompatible"

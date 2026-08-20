@@ -3,12 +3,17 @@ package bridge
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 func TestNativeEnvelopeKeepsExtensionsOutOfAttestedAttributes(t *testing.T) {
@@ -56,6 +61,116 @@ func TestGrokMCPToolsUseAttestedSessionWithoutRequiringModelID(t *testing.T) {
 		if !containsString(required, "session_id") {
 			t.Fatal("Codex identity tool stopped requiring session_id")
 		}
+	}
+}
+
+func TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity(t *testing.T) {
+	want := []string{"list_peers", "send_message", "broadcast"}
+	if len(claudeToolDefinitions) != len(want) {
+		t.Fatalf("Claude MCP tools = %d, want %d", len(claudeToolDefinitions), len(want))
+	}
+	for index, definition := range claudeToolDefinitions {
+		if got := stringValue(definition["name"]); got != want[index] {
+			t.Fatalf("Claude MCP tool %d = %q, want %q", index, got, want[index])
+		}
+		schema, _ := definition["inputSchema"].(map[string]any)
+		required, _ := schema["required"].([]any)
+		for _, value := range required {
+			if stringValue(value) == "session_id" {
+				t.Fatalf("Claude tool %q requires model-supplied session_id", definition["name"])
+			}
+		}
+		if strings.Contains(stringValue(definition["description"]), "this Codex session") {
+			t.Fatalf("Claude tool %q retained Codex-only description", definition["name"])
+		}
+	}
+	if !strings.Contains(claudeMCPInstructions, "Never send plain text") ||
+		!strings.Contains(claudeMCPInstructions, "source.id") {
+		t.Fatalf("Claude MCP reply instructions are incomplete: %s", claudeMCPInstructions)
+	}
+}
+
+func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *testing.T) {
+	root, runtimeDir := startLaneContextTestAgent(t)
+	configDir := filepath.Join(root, "claude")
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(filepath.Join(configDir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("CLAUDE_PEER_DATA_DIR", dataDir)
+	t.Setenv(agentRuntimeDirEnvironment, runtimeDir)
+	t.Setenv("AGENT_SESSIONS_PRODUCT", "claude")
+
+	register := func(sessionID string, pid int, socket string) {
+		t.Helper()
+		if _, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
+			SessionID: sessionID, Product: "claude", Groups: []string{"project"}, GroupsSpecified: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		procStart := readProcStart(pid)
+		row, _ := json.Marshal(map[string]any{
+			"pid": pid, "sessionId": sessionID, "cwd": root, "name": "claude-parent",
+			"messagingSocketPath": socket, "procStart": procStart,
+			"entrypoint": "cli", "kind": "interactive", "status": "idle",
+		})
+		if err := os.WriteFile(filepath.Join(configDir, "sessions", strconv.Itoa(pid)+".json"), row, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		registration := federator.PeerRegistration{
+			Version: federator.GroupProtocolVersion, SessionID: sessionID, Product: "claude", Name: "claude-parent",
+			PermissionMode: "default", PID: pid, ProcStart: procStart, Socket: socket,
+		}
+		if _, err := federator.RegisterPeer(runtimeDir, registration); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = federator.UnregisterPeer(runtimeDir, registration) })
+	}
+
+	ownSocket := filepath.Join(root, "own.sock")
+	ownListener, err := net.Listen("unix", ownSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ownListener.Close() })
+	const ownID = "00000000-0000-4000-8000-0000000000c1"
+	register(ownID, os.Getpid(), ownSocket)
+	t.Setenv(peerSessionIDEnvironment, ownID)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", ownSocket)
+	paths := resolveNativePaths()
+	if caller, err := attestClaudeMCPCaller(paths, os.Getpid()); err != nil || caller != ownID {
+		t.Fatalf("exact Claude MCP caller = %q, %v", caller, err)
+	}
+	if sessionID, err := requireMCPCallerSession(paths, map[string]any{}, ownID); err != nil || sessionID != ownID {
+		t.Fatalf("Claude MCP omitted session_id = %q, %v", sessionID, err)
+	}
+	if listed, err := callNativePeerTool("list_peers", map[string]any{}, ownID); err != nil ||
+		stringValue(listed["text"]) != "No live peers share a group with this session." {
+		t.Fatalf("Claude structured peer discovery = %#v, %v", listed, err)
+	}
+
+	foreign := exec.Command("sleep", "30")
+	if err := foreign.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = foreign.Process.Kill()
+		_ = foreign.Wait()
+	})
+	foreignSocket := filepath.Join(root, "foreign.sock")
+	foreignListener, err := net.Listen("unix", foreignSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = foreignListener.Close() })
+	const foreignID = "00000000-0000-4000-8000-0000000000c2"
+	register(foreignID, foreign.Process.Pid, foreignSocket)
+	t.Setenv(peerSessionIDEnvironment, foreignID)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", foreignSocket)
+	if caller, err := attestClaudeMCPCaller(paths, os.Getpid()); err == nil || caller != "" ||
+		!strings.Contains(err.Error(), "ancestry") {
+		t.Fatalf("unrelated registered Claude process was authorized: caller=%q err=%v", caller, err)
 	}
 }
 

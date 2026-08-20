@@ -8,6 +8,7 @@ steer it while it runs, resume the same transcript, and archive it.
 
 ```text
 .claude-plugin/plugin.json     plugin manifest
+.mcp.json                      process-attested structured peer messaging
 skills/codex-lane/             the Codex lane skill and its references
 skills/claude-lane/            the Claude self-lane skill
 skills/grok-lane/              the Grok lane skill and its references
@@ -31,8 +32,9 @@ A user-scope marketplace installation is loaded by new interactive sessions and 
 
 ## What it deliberately does not do
 
-- **No MCP server.** Claude discovers and messages Codex lanes through its own native local session
-  registry. Nothing needs to be brokered.
+- **One process-attested MCP server.** Managed Claude peers get structured grouped discovery and
+  messaging. The server remains inactive unless its process descends from the exact live Claude
+  adapter and the host agent corroborates the same UUID, socket, and lifecycle owner.
 - **No hooks.** Nothing runs on SessionStart, UserPromptSubmit, Stop, or SessionEnd.
 - **No subagent.** A subagent boundary would hide a running lane from the orchestrator that needs to
   message it.
@@ -43,8 +45,8 @@ A user-scope marketplace installation is loaded by new interactive sessions and 
 - **No policy defaults.** Model, effort, sandbox, approval, web access, config overlays, output
   schema, and worktree isolation are supplied by the caller or not at all.
 
-That leaves the plugin as documentation plus one read-only preflight script, which is what makes it
-portable to any repository or host.
+The MCP entry invokes the separately installed Agent Sessions runtime from `PATH`; the plugin still
+ships no binary and remains portable across supported hosts.
 
 ## Contract
 

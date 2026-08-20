@@ -82,12 +82,19 @@ for reference in contract install; do
   fi
 done
 
-for forbidden in hooks .mcp.json agents settings.json; do
+for forbidden in hooks agents settings.json; do
   if [[ -e "$plugin_root/claude/$forbidden" ]]; then
     printf 'Claude plugin isolation violated by %s\n' "$forbidden" >&2
     exit 1
   fi
 done
+if [[ ! -f "$plugin_root/claude/.mcp.json" ]] ||
+   ! grep -Fq '"claude_peer"' "$plugin_root/claude/.mcp.json" ||
+   ! grep -Fq '"agent-session-runtime"' "$plugin_root/claude/.mcp.json" ||
+   ! grep -Fq '"mcp"' "$plugin_root/claude/.mcp.json"; then
+  printf 'Claude structured messaging MCP inventory is incomplete\n' >&2
+  exit 1
+fi
 if find "$plugin_root/claude" -type l -print -quit | grep -q .; then
   printf 'Claude plugin must be self-contained and may not rely on symlinks\n' >&2
   exit 1
@@ -175,6 +182,7 @@ make -s -C "$plugin_root" stage-claude PREFIX="$temporary_root/prefix" \
 staged_marketplace="$claude_release_root/$claude_version"
 if [[ ! -f "$staged_marketplace/.claude-plugin/marketplace.json" ]] ||
    [[ ! -f "$staged_marketplace/claude/.claude-plugin/plugin.json" ]] ||
+   [[ ! -f "$staged_marketplace/claude/.mcp.json" ]] ||
    [[ ! -f "$staged_marketplace/claude/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -f "$staged_marketplace/claude/skills/claude-lane/SKILL.md" ]] ||
    [[ ! -f "$staged_marketplace/claude/skills/grok-lane/SKILL.md" ]] ||

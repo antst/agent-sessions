@@ -24,6 +24,8 @@ const claudePeerReadyTimeout = 30 * time.Second
 
 type claudePeerPlan struct {
 	sessionID     string
+	resumeTarget  string
+	resume        bool
 	peerName      string
 	context       peerLaunchContext
 	args          []string
@@ -67,6 +69,21 @@ func RunClaudePeer(args []string) error {
 	if err != nil {
 		return err
 	}
+	sharedRoot := filepath.Dir(status.RegistryDir)
+	source, err := claudeprofile.CurrentSource()
+	if err != nil {
+		return err
+	}
+	if err := requireClaudePeerProfileMatch(source, status); err != nil {
+		return err
+	}
+	if plan.sessionID == "" {
+		plan.sessionID, err = federator.ResolveSessionName(status.RuntimeDir, "claude", plan.resumeTarget)
+		if err != nil {
+			return fmt.Errorf("resolve Claude resume target %q: %w", plan.resumeTarget, err)
+		}
+		plan.args = replaceClaudeResumeTarget(plan.args, plan.sessionID)
+	}
 	lifecycleRoot := claudePeerLifecycleRoot(status.StateDir, status.HostID, plan.sessionID)
 	managedSocket := federator.ClaudePeerMessagingSocketPath(status.RuntimeDir, plan.sessionID)
 	if err := federator.ValidateClaudePeerMessagingSocketPath(managedSocket); err != nil {
@@ -80,14 +97,6 @@ func RunClaudePeer(args []string) error {
 		return err
 	}
 	defer releaseClaudePeerProfileLock(profileLock)
-	sharedRoot := filepath.Dir(status.RegistryDir)
-	source, err := claudeprofile.CurrentSource()
-	if err != nil {
-		return err
-	}
-	if err := requireClaudePeerProfileMatch(source, status); err != nil {
-		return err
-	}
 	if err := prepareClaudePeerAttachment(sharedRoot, plan.sessionID); err != nil {
 		return err
 	}
@@ -250,6 +259,18 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 	if err != nil {
 		return claudePeerPlan{}, err
 	}
+	// --yolo is a peer-level convenience shared with the other product
+	// launchers. Translate it in place so native Claude receives its canonical
+	// spelling and option order remains authoritative. Prompt text after `--`
+	// is never interpreted as a wrapper option.
+	for index, argument := range contextArgs {
+		if argument == "--" {
+			break
+		}
+		if argument == "--yolo" {
+			contextArgs[index] = "--dangerously-skip-permissions"
+		}
+	}
 	forwarded, peerName, err := extractPeerNameArgs(contextArgs)
 	if err != nil {
 		return claudePeerPlan{}, err
@@ -261,7 +282,6 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 			return plan, nil
 		}
 	}
-	resume := false
 	scanned := beforeDoubleDash(forwarded)
 	for index := 0; index < len(scanned); index++ {
 		argument := scanned[index]
@@ -281,12 +301,12 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 			plan.sessionID = strings.TrimPrefix(argument, "--session-id=")
 		case argument == "--resume" || argument == "-r":
 			if index+1 >= len(scanned) {
-				return claudePeerPlan{}, usageError(argument + " requires an exact session UUID")
+				return claudePeerPlan{}, usageError(argument + " requires a session UUID or unique managed name")
 			}
-			plan.sessionID, resume = scanned[index+1], true
+			plan.resumeTarget, plan.resume = scanned[index+1], true
 			index++
 		case strings.HasPrefix(argument, "--resume="):
-			plan.sessionID, resume = strings.TrimPrefix(argument, "--resume="), true
+			plan.resumeTarget, plan.resume = strings.TrimPrefix(argument, "--resume="), true
 		case argument == "--dangerously-skip-permissions":
 			plan.alwaysApprove, plan.yoloSpecified = true, true
 		case argument == "--permission-mode" && index+1 < len(scanned):
@@ -304,18 +324,26 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 		}
 		plan.yoloSpecified = true
 	}
-	if plan.sessionID == "" {
+	switch {
+	case plan.resume:
+		if strings.TrimSpace(plan.resumeTarget) == "" {
+			return claudePeerPlan{}, usageError("--resume requires a session UUID or unique managed name")
+		}
+		if threadIDPattern.MatchString(plan.resumeTarget) {
+			plan.sessionID = plan.resumeTarget
+		} else {
+			plan.sessionID = ""
+		}
+	case plan.sessionID == "":
 		plan.sessionID, err = newClaudePeerSessionID()
 		if err != nil {
 			return claudePeerPlan{}, err
 		}
 		plan.args = insertClaudeManagedArgs(plan.args, "--session-id", plan.sessionID)
-	} else if !threadIDPattern.MatchString(plan.sessionID) {
-		return claudePeerPlan{}, usageError("claude-peer requires an exact session UUID")
+	case !threadIDPattern.MatchString(plan.sessionID):
+		return claudePeerPlan{}, usageError("--session-id requires an exact session UUID")
 	}
-	if resume && peerName != "" {
-		plan.args = insertClaudeManagedArgs(plan.args, "--name", peerName)
-	} else if !resume && peerName != "" {
+	if peerName != "" {
 		plan.args = insertClaudeManagedArgs(plan.args, "--name", peerName)
 	}
 	// A detected Chrome extension can otherwise raise a first-run dialog before
@@ -325,6 +353,26 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 		plan.args = insertClaudeManagedArgs(plan.args, "--no-chrome")
 	}
 	return plan, nil
+}
+
+func replaceClaudeResumeTarget(args []string, sessionID string) []string {
+	result := append([]string(nil), args...)
+	for index := 0; index < len(result); index++ {
+		argument := result[index]
+		if argument == "--" {
+			break
+		}
+		switch {
+		case argument == "--resume" || argument == "-r":
+			if index+1 < len(result) {
+				result[index+1] = sessionID
+				index++
+			}
+		case strings.HasPrefix(argument, "--resume="):
+			result[index] = "--resume=" + sessionID
+		}
+	}
+	return result
 }
 
 func insertClaudeManagedArgs(args []string, managed ...string) []string {

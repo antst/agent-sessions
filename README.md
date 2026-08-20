@@ -30,8 +30,8 @@ codex app-server daemon stop # after exiting every Codex client
 make install-all
 
 peer-federator agent --host "$(hostname)" # keep this under the user service manager
-codex-peer --group project-a -n reviewer # approve the plugin hooks when Codex asks the first time
-claude-peer --group project-a -n implementer
+codex-peer -g project-a -n reviewer # -g is short for --group; repeat either form
+claude-peer -g project-a -n implementer
 claude agents --json
 ```
 
@@ -63,6 +63,15 @@ distinguishable without an upstream per-attachment token.
 The plugin requests daemon-side approval for `claude_peer` dispatch so ordinary calls reach that
 fail-closed authorization check instead of hanging at a global pre-dispatch prompt. This approves
 dispatch only; it does not grant a thread peer authority or change its sandbox/approval policy.
+
+The Claude plugin installs a narrower `claude_peer` MCP inventory for managed `claude-peer`
+sessions. It exposes structured grouped discovery, direct/multicast send, and broadcast; replies to
+an incoming delivery target the frame's `source.id`. The MCP process receives no model-selected
+identity: the runtime requires exact ancestry beneath the live native Claude adapter and lifecycle
+owner, then corroborates the same UUID, process starts, native registry row, messaging socket, and
+host-agent registration. Bare Claude and an unrelated process fail closed. Native Claude
+`SendMessage` to `agent-sessions--HOST` remains only a framed compatibility carrier; its carrier
+acknowledgment is not evidence that an unframed peer reply was delivered.
 
 The launcher removes only its own `-n/--peer-name` and, for resume, the selector it resolves to one
 UUID. It invokes the managed `--remote unix:// resume UUID` target, supplies a canonical cwd when the
@@ -100,8 +109,14 @@ first-run dialog cannot block native messaging-socket publication. Claude's nati
 not publish live Shift+Tab permission changes, so a managed peer uses one conservative permission
 class for its lifetime: constrained launches disable in-session bypass in their per-launch settings,
 and explicit bypass launches remain advertised as bypass until restart. Use
-`--dangerously-skip-permissions` to opt in at launch; `--allow-dangerously-skip-permissions` is
+`--yolo` (translated to native `--dangerously-skip-permissions`) or the native long option to opt in
+at launch; `--allow-dangerously-skip-permissions` is
 rejected because it would create an unattestable privilege change. Host settings remain untouched.
+`claude-peer --resume UUID_OR_NAME` accepts an exact UUID or a unique durable managed-peer name. A
+single live exact-name match takes precedence over history; ambiguous live or historical names are
+rejected with the matching UUIDs so the operator can select explicitly. Name resolution occurs
+before catalog mutation, socket creation, or native Claude launch, and the native CLI receives only
+the resolved exact UUID.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok

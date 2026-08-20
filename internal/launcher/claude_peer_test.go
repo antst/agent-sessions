@@ -44,6 +44,7 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		os.Exit(74)
 	}
 	sessionID := ""
+	peerName := "native-test"
 	permissionMode := "default"
 	messagingSocket := ""
 	nativeArgs := false
@@ -63,6 +64,9 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		}
 		if argument == "--resume" && index+1 < len(os.Args) {
 			sessionID = os.Args[index+1]
+		}
+		if argument == "--name" && index+1 < len(os.Args) {
+			peerName = os.Args[index+1]
 		}
 		if argument == "--dangerously-skip-permissions" {
 			permissionMode = "bypassPermissions"
@@ -108,7 +112,7 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		os.Exit(74)
 	}
 	row := map[string]any{
-		"pid": os.Getpid(), "sessionId": sessionID, "cwd": config, "name": "native-test",
+		"pid": os.Getpid(), "sessionId": sessionID, "cwd": config, "name": peerName,
 		"permissionMode": permissionMode, "messagingSocketPath": socket, "startedAt": time.Now().UnixMilli(),
 		"procStart": federator.ProcessStart(os.Getpid()), "entrypoint": "cli", "kind": "interactive", "status": "idle",
 	}
@@ -133,7 +137,7 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 
 func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 	plan, err := parseClaudePeerArgs([]string{
-		"--group", "project", "--group=review", "--peer-name", "worker", "--dangerously-skip-permissions",
+		"-g", "project", "--group=review", "--peer-name", "worker", "--yolo",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -143,8 +147,9 @@ func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 		!plan.alwaysApprove || !plan.yoloSpecified {
 		t.Fatalf("Claude peer plan = %+v", plan)
 	}
-	if _, err := parseClaudePeerArgs([]string{"--resume", "not-a-uuid"}); err == nil {
-		t.Fatal("non-exact Claude resume target was accepted")
+	byName, err := parseClaudePeerArgs([]string{"--resume", "worker"})
+	if err != nil || byName.sessionID != "" || byName.resumeTarget != "worker" || !byName.resume {
+		t.Fatalf("Claude name resume plan = %+v, %v", byName, err)
 	}
 	if _, err := parseClaudePeerArgs([]string{"--bare"}); err == nil || !strings.Contains(err.Error(), "use bare claude to opt out") {
 		t.Fatalf("messageable Claude peer accepted --bare: %v", err)
@@ -152,6 +157,41 @@ func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 	if _, err := parseClaudePeerArgs([]string{"--allow-dangerously-skip-permissions"}); err == nil ||
 		!strings.Contains(err.Error(), "cannot attest mutable in-session bypass") {
 		t.Fatalf("messageable Claude peer accepted mutable bypass: %v", err)
+	}
+	if slices.Contains(plan.args, "--yolo") || !slices.Contains(plan.args, "--dangerously-skip-permissions") {
+		t.Fatalf("Claude --yolo alias was not translated for native argv: %v", plan.args)
+	}
+}
+
+func TestClaudePeerYoloAliasPreservesOrderAndPromptDelimiter(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "alias", args: []string{"--yolo"}, want: true},
+		{name: "later default", args: []string{"--yolo", "--permission-mode", "default"}, want: false},
+		{name: "later alias", args: []string{"--permission-mode", "default", "--yolo"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, err := parseClaudePeerArgs(append(test.args, "--", "prompt", "--yolo"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.alwaysApprove != test.want || !plan.yoloSpecified {
+				t.Fatalf("permission plan = %+v", plan)
+			}
+			delimiter := slices.Index(plan.args, "--")
+			if delimiter < 0 || slices.Contains(plan.args[:delimiter], "--yolo") ||
+				!slices.Contains(plan.args[:delimiter], "--dangerously-skip-permissions") ||
+				!slices.Contains(plan.args[delimiter+1:], "--yolo") {
+				t.Fatalf("translated argv = %v", plan.args)
+			}
+		})
+	}
+	if _, err := parseClaudePeerArgs([]string{"--no-yolo", "--yolo"}); err == nil ||
+		!strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("Claude peer accepted conflicting yolo aliases: %v", err)
 	}
 }
 
@@ -185,6 +225,28 @@ func TestClaudePeerManagedOptionsStayBeforePromptDelimiter(t *testing.T) {
 	promptPlan, err := parseClaudePeerArgs([]string{"--", "prompt", "--chrome"})
 	if err != nil || !slices.Contains(beforeDoubleDash(promptPlan.args), "--no-chrome") {
 		t.Fatalf("prompt text incorrectly opted into Chrome: %v, %v", promptPlan.args, err)
+	}
+}
+
+func TestClaudePeerNameResumeReplacementStaysBeforePromptDelimiter(t *testing.T) {
+	const sessionID = "00000000-0000-4000-8000-0000000000ca"
+	for _, args := range [][]string{
+		{"--resume", "worker", "--", "prompt", "--resume", "leave-this-alone"},
+		{"-r", "worker", "--", "prompt"},
+		{"--resume=worker", "--", "prompt"},
+	} {
+		replaced := replaceClaudeResumeTarget(args, sessionID)
+		delimiter := slices.Index(replaced, "--")
+		if delimiter < 0 || replaced[delimiter+1] != "prompt" {
+			t.Fatalf("resume replacement changed prompt delimiter: %v", replaced)
+		}
+		before := strings.Join(replaced[:delimiter], " ")
+		if !strings.Contains(before, sessionID) || strings.Contains(before, "worker") {
+			t.Fatalf("resume replacement did not select exact UUID: %v", replaced)
+		}
+		if len(replaced) > delimiter+2 && replaced[delimiter+2] != "--resume" {
+			t.Fatalf("resume replacement changed prompt text: %v", replaced)
+		}
 	}
 }
 
@@ -549,8 +611,8 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	if err != nil || !resolved.Preference.AlwaysApprove || !slices.Contains(resolved.EffectiveGroups, "project") {
 		t.Fatalf("restored Claude preferences = %+v, %v", resolved, err)
 	}
-	if err := RunClaudePeer([]string{"--resume", plan.sessionID, "--", "prompt text"}); err != nil {
-		t.Fatalf("resume with durable yolo and prompt delimiter: %v", err)
+	if err := RunClaudePeer([]string{"--resume", "worker", "--", "prompt text"}); err != nil {
+		t.Fatalf("name resume with durable yolo and prompt delimiter: %v", err)
 	}
 	lifecycleRoot := claudePeerLifecycleRoot(stateDir, "host-test", plan.sessionID)
 	attachmentLock, err := acquireClaudePeerProfileLock(lifecycleRoot)

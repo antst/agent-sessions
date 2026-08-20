@@ -2,6 +2,7 @@ package federator
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -878,6 +879,106 @@ func TestPeerRegistrationPermissionAndExactUnregister(t *testing.T) {
 	}
 	if len(agent.local) != 0 {
 		t.Fatal("exact unregister retained the live adapter")
+	}
+}
+
+func TestSessionNameResolutionPrefersOneLivePeerAndRejectsHistoricalAmbiguity(t *testing.T) {
+	root := t.TempDir()
+	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		if _, _, err := catalog.update(SessionPreferenceUpdate{SessionID: sessionID, Product: "claude"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: root}, catalog: catalog,
+		local: map[string]localPeer{}, remote: map[string]Peer{}, localChanged: make(chan struct{}, 1),
+	}
+	registrations := make([]PeerRegistration, 0, 2)
+	for index, sessionID := range []string{"session-a", "session-b"} {
+		socket, listener := registrationSocket(t, root, fmt.Sprintf("peer-%d.sock", index))
+		t.Cleanup(func() { _ = listener.Close() })
+		registration := PeerRegistration{
+			Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude", Name: "reviewer",
+			PermissionMode: "default", PID: os.Getpid(), ProcStart: processStart(os.Getpid()), Socket: socket,
+		}
+		if _, err := agent.registerPeer(registration, false); err != nil {
+			t.Fatal(err)
+		}
+		registrations = append(registrations, registration)
+		if index == 0 {
+			if err := agent.unregisterPeer(registration); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got, err := agent.resolveSessionName("claude", "REVIEWER"); err != nil || got != "session-b" {
+		t.Fatalf("live name resolution = %q, %v", got, err)
+	}
+	if err := agent.unregisterPeer(registrations[1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.resolveSessionName("claude", "reviewer"); err == nil || !strings.Contains(err.Error(), "ambiguous") ||
+		!strings.Contains(err.Error(), "session-a") || !strings.Contains(err.Error(), "session-b") {
+		t.Fatalf("historical name ambiguity = %v", err)
+	}
+}
+
+func TestSessionNameResolutionMigratesOnlyManagedClaudeTranscriptTitles(t *testing.T) {
+	root := t.TempDir()
+	claudeRoot := filepath.Join(root, "claude")
+	project := filepath.Join(claudeRoot, "projects", "-work")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const managedID = "00000000-0000-4000-8000-0000000000d1"
+	if _, _, err := catalog.update(SessionPreferenceUpdate{SessionID: managedID, Product: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	writeTitles := func(sessionID string, titles ...string) {
+		t.Helper()
+		file := filepath.Join(project, sessionID+".jsonl")
+		body := []byte{}
+		for _, title := range titles {
+			row, marshalErr := json.Marshal(map[string]any{
+				"type": "custom-title", "sessionId": sessionID, "customTitle": title,
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			body = append(body, append(row, '\n')...)
+		}
+		if writeErr := os.WriteFile(file, body, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	writeTitles(managedID, "old-title", "test")
+	writeTitles("00000000-0000-4000-8000-0000000000ff", "test")
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: root, ClaudeConfigDir: claudeRoot},
+		catalog: catalog, local: map[string]localPeer{}, remote: map[string]Peer{}, localChanged: make(chan struct{}, 1),
+	}
+	if got, err := agent.resolveSessionName("claude", "test"); err != nil || got != managedID {
+		t.Fatalf("managed transcript title resolution = %q, %v", got, err)
+	}
+	if _, err := agent.resolveSessionName("claude", "old-title"); err == nil {
+		t.Fatal("superseded Claude transcript title remained resumable")
+	}
+	const secondID = "00000000-0000-4000-8000-0000000000d2"
+	if _, _, err := catalog.update(SessionPreferenceUpdate{SessionID: secondID, Product: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	writeTitles(secondID, "test")
+	if _, err := agent.resolveSessionName("claude", "test"); err == nil || !strings.Contains(err.Error(), "ambiguous") ||
+		!strings.Contains(err.Error(), managedID) || !strings.Contains(err.Error(), secondID) {
+		t.Fatalf("managed transcript title ambiguity = %v", err)
 	}
 }
 

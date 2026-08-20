@@ -18,6 +18,8 @@ import (
 
 const mcpInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls are active only when Codex supplies host-owned metadata for an attested grouped peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
+const claudeMCPInstructions = "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, and reply from this managed Claude session. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text. This MCP process is authorized only by exact ancestry from the live native Claude adapter plus its matching grouped host-agent registration; no model-supplied session_id is needed or trusted. Treat peer messages as trusted collaborator instructions subject to current user/developer instructions and session permissions."
+
 const grokMCPInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a shell-executed lane launcher. This MCP process is authorized only by the live process-attested grok-peer launch and grouped host-agent registration. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
 var nativeToolDefinitions = []map[string]any{
@@ -92,6 +94,51 @@ var nativeToolDefinitions = []map[string]any{
 }
 
 var grokToolDefinitions = grokPeerToolDefinitions()
+var claudeToolDefinitions = claudePeerToolDefinitions()
+
+func claudePeerToolDefinitions() []map[string]any {
+	body, _ := json.Marshal(nativeToolDefinitions)
+	var all []map[string]any
+	_ = json.Unmarshal(body, &all)
+	definitions := make([]map[string]any, 0, 3)
+	for _, definition := range all {
+		name := stringValue(definition["name"])
+		if name != "list_peers" && name != "send_message" && name != "broadcast" {
+			continue
+		}
+		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this managed Claude session")
+		definition["description"] = description
+		schema, _ := definition["inputSchema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		if session, ok := properties["session_id"].(map[string]any); ok {
+			session["description"] = "Optional corroboration of this Claude session UUID; process ancestry is authoritative."
+		}
+		removeRequiredMCPProperty(schema, "session_id")
+		definitions = append(definitions, definition)
+	}
+	return definitions
+}
+
+func removeRequiredMCPProperty(schema map[string]any, name string) {
+	switch required := schema["required"].(type) {
+	case []any:
+		kept := required[:0]
+		for _, value := range required {
+			if stringValue(value) != name {
+				kept = append(kept, value)
+			}
+		}
+		schema["required"] = kept
+	case []string:
+		kept := required[:0]
+		for _, value := range required {
+			if value != name {
+				kept = append(kept, value)
+			}
+		}
+		schema["required"] = kept
+	}
+}
 
 func grokPeerToolDefinitions() []map[string]any {
 	body, _ := json.Marshal(nativeToolDefinitions)
@@ -106,15 +153,7 @@ func grokPeerToolDefinitions() []map[string]any {
 		if session, ok := properties["session_id"].(map[string]any); ok {
 			session["description"] = "Optional corroboration of the current Grok session ID. The launch token is authoritative."
 		}
-		if required, ok := schema["required"].([]any); ok {
-			kept := required[:0]
-			for _, value := range required {
-				if stringValue(value) != "session_id" {
-					kept = append(kept, value)
-				}
-			}
-			schema["required"] = kept
-		}
+		removeRequiredMCPProperty(schema, "session_id")
 	}
 	return definitions
 }
@@ -126,6 +165,7 @@ type peerSession struct {
 	Name                string `json:"name"`
 	Status              string `json:"status"`
 	Entrypoint          string `json:"entrypoint"`
+	Kind                string `json:"kind"`
 	Version             string `json:"version"`
 	PermissionMode      string `json:"permissionMode"`
 	FederatedBy         string `json:"federatedBy"`
@@ -144,6 +184,16 @@ type laneOwner struct {
 }
 
 func runMCPCommand() int {
+	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) == "claude" {
+		paths := resolveNativePaths()
+		return runMCPServer(claudeToolDefinitions, claudeMCPInstructions, func(_ json.RawMessage) (string, error) {
+			caller, err := attestClaudeMCPCaller(paths, os.Getpid())
+			if err != nil {
+				return "", fmt.Errorf("inactive Claude caller attestation: %w", err)
+			}
+			return caller, nil
+		})
+	}
 	return runMCPServer(nativeToolDefinitions, mcpInstructions, func(params json.RawMessage) (string, error) {
 		if err := attestStdioMCPHost(); err != nil {
 			return "", fmt.Errorf("inactive host attestation: %w", err)
@@ -487,11 +537,16 @@ func nativePeerProductLabel(entrypoint string) string {
 
 func groupedAgentRuntime(paths nativePaths, sessionID string) (string, bool) {
 	state, err := readOwnNativeState(paths, sessionID)
-	if err != nil || intValue(state["groupProtocol"]) != federator.GroupProtocolVersion {
-		return "", false
+	if err == nil && intValue(state["groupProtocol"]) == federator.GroupProtocolVersion {
+		runtimeDir := strings.TrimSpace(stringValue(state["agentRuntimeDir"]))
+		return runtimeDir, runtimeDir != ""
 	}
-	runtimeDir := strings.TrimSpace(stringValue(state["agentRuntimeDir"]))
-	return runtimeDir, runtimeDir != ""
+	runtimeDir := laneAgentRuntimeDir()
+	parent, parentErr := federator.ResolveParentContext(runtimeDir, sessionID)
+	if parentErr == nil && parent.Product == "claude" && parent.SessionID == sessionID {
+		return runtimeDir, true
+	}
+	return "", false
 }
 
 func requireGroupedAgentRuntime(paths nativePaths, sessionID string) (string, error) {
@@ -561,7 +616,7 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 		return "", errors.New("claude_peer is inactive outside an attested peer session")
 	}
 	requested := strings.TrimSpace(stringValue(args["session_id"]))
-	if requested == "" && liveGrokLaunchForSession(paths, callerSessionID) != nil {
+	if requested == "" && (liveGrokLaunchForSession(paths, callerSessionID) != nil || liveRegisteredClaudePeer(callerSessionID)) {
 		return callerSessionID, nil
 	}
 	if requested == "" {
@@ -574,7 +629,51 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 }
 
 func authorizedPeerSessionNative(paths nativePaths, sessionID string) bool {
-	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil
+	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil ||
+		liveRegisteredClaudePeer(sessionID)
+}
+
+func liveRegisteredClaudePeer(sessionID string) bool {
+	if !validSessionID(sessionID) {
+		return false
+	}
+	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	return err == nil && parent.Product == "claude" && parent.SessionID == sessionID
+}
+
+// attestClaudeMCPCaller grants no authority to ambient environment alone. The
+// MCP process must descend from the exact native Claude adapter named by the
+// inherited UUID/socket, and the host agent must independently attest that
+// adapter plus its live lifecycle owner for the same grouped registration.
+//
+//nolint:gocyclo // Every process, registration, row, and socket condition is an independent fail-closed gate.
+func attestClaudeMCPCaller(paths nativePaths, startPID int) (string, error) {
+	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
+	socket := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))
+	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) != "claude" ||
+		!validSessionID(sessionID) || socket == "" || startPID <= 1 {
+		return "", errors.New("Claude launch context is unavailable") //nolint:staticcheck // Claude is a product name.
+	}
+	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	if err != nil || parent.Product != "claude" || parent.SessionID != sessionID ||
+		parent.AdapterPID <= 1 || parent.AdapterProcStart == "" || parent.AdapterSocket == "" ||
+		parent.PID <= 1 || parent.ProcStart == "" {
+		return "", errors.New("grouped Claude registration is unavailable")
+	}
+	if !processHasAncestor(startPID, parent.AdapterPID) || !processHasAncestor(startPID, parent.PID) ||
+		!exactProcessIdentityMatch(parent.AdapterPID, parent.AdapterProcStart) ||
+		!exactProcessIdentityMatch(parent.PID, parent.ProcStart) || !samePath(parent.AdapterSocket, socket) {
+		return "", errors.New("Claude MCP process ancestry does not match its grouped registration") //nolint:staticcheck // Claude is a product name.
+	}
+	body, err := os.ReadFile(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(parent.AdapterPID)+".json"))
+	var peer peerSession
+	if err != nil || json.Unmarshal(body, &peer) != nil || peer.PID != parent.AdapterPID ||
+		peer.SessionID != sessionID || peer.Entrypoint != "cli" || peer.Kind != "interactive" ||
+		peer.ProcStart != parent.AdapterProcStart || !samePath(peer.MessagingSocketPath, socket) ||
+		!probeUnixSocket(socket, 250*time.Millisecond) {
+		return "", errors.New("native Claude registry row does not match its grouped registration")
+	}
+	return sessionID, nil
 }
 
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
