@@ -96,7 +96,12 @@ the TUI's native policy and its effective live mode is attested before publicati
 Installation never changes Claude's profile-level `crossSessionInbound` value. Managed Claude peers
 and lanes opt into inbound native messages only for their own launch. They also pass `--no-chrome`
 unless an interactive peer operator explicitly supplied `--chrome`, so a browser-extension
-first-run dialog cannot block native messaging-socket publication.
+first-run dialog cannot block native messaging-socket publication. Claude's native session row does
+not publish live Shift+Tab permission changes, so a managed peer uses one conservative permission
+class for its lifetime: constrained launches disable in-session bypass in their per-launch settings,
+and explicit bypass launches remain advertised as bypass until restart. Use
+`--dangerously-skip-permissions` to opt in at launch; `--allow-dangerously-skip-permissions` is
+rejected because it would create an unattestable privilege change. Host settings remain untouched.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok

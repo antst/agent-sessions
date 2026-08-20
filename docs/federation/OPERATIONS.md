@@ -45,6 +45,10 @@ Claude. Its exact UUID can move between ordinary and managed attachments
 without transcript copying. The host agent is the sole writer of the one
 service row. Bare `claude` is not registered with Agent Sessions, and install
 never changes the operator's default `crossSessionInbound` policy.
+Claude does not publish live Shift+Tab permission changes in its native row.
+Consequently a managed peer's advertised permission class is fixed at launch:
+constrained peers disable in-session bypass through a launch-only overlay, and
+explicit bypass peers remain conservatively labelled bypass until restart.
 Managed Claude profiles and secure-storage overrides must use absolute paths so
 detached, local, and remote workers cannot reinterpret them under another cwd.
 Unreleased development builds that stored Claude transcripts in an Agent

@@ -97,11 +97,6 @@ func RunClaudePeer(args []string) error {
 	// overrides a caller-provided native socket option without touching prompts
 	// after `--`.
 	plan.args = insertClaudeManagedArgs(plan.args, "--messaging-socket-path", managedSocket)
-	var settingsBody []byte
-	plan.args, settingsBody, err = planClaudePeerLaunchSettings(plan.args, lifecycleRoot)
-	if err != nil {
-		return err
-	}
 	settingsPath := filepath.Join(lifecycleRoot, "launch-settings.json")
 	resolved, preferenceRequest, err := previewPeerLaunchContext(
 		plan.sessionID, "claude", plan.context, plan.alwaysApprove, plan.yoloSpecified,
@@ -116,6 +111,13 @@ func RunClaudePeer(args []string) error {
 		// The durable default is an effective runtime decision, not merely an
 		// argv omission: a user's Claude settings may otherwise enable bypass.
 		plan.args = insertClaudeManagedArgs(plan.args, "--permission-mode", "default")
+	}
+	var settingsBody []byte
+	plan.args, settingsBody, err = planClaudePeerLaunchSettings(
+		plan.args, lifecycleRoot, !resolved.Preference.AlwaysApprove,
+	)
+	if err != nil {
+		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
 	}
 	environment := claudePeerEnvironment(os.Environ(), sharedRoot, source, plan.sessionID)
 	gateReader, gateWriter, err := os.Pipe()
@@ -266,6 +268,9 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 		switch {
 		case argument == "--bare":
 			return claudePeerPlan{}, usageError("claude-peer requires native messaging; use bare claude to opt out")
+		case argument == "--allow-dangerously-skip-permissions" ||
+			strings.HasPrefix(argument, "--allow-dangerously-skip-permissions="):
+			return claudePeerPlan{}, usageError("claude-peer cannot attest mutable in-session bypass; launch with --dangerously-skip-permissions instead")
 		case argument == "--session-id":
 			if index+1 >= len(scanned) {
 				return claudePeerPlan{}, usageError("--session-id requires a value")
@@ -394,9 +399,9 @@ func sameLauncherPath(left, right string) bool {
 }
 
 // prepareClaudePeerLaunchSettings merges the caller's effective settings with
-// the one managed-session override. The host settings files are never written.
+// the constrained managed-session overrides. The host settings files are never written.
 func prepareClaudePeerLaunchSettings(args []string, lifecycleRoot string) ([]string, error) {
-	result, body, err := planClaudePeerLaunchSettings(args, lifecycleRoot)
+	result, body, err := planClaudePeerLaunchSettings(args, lifecycleRoot, true)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +411,7 @@ func prepareClaudePeerLaunchSettings(args []string, lifecycleRoot string) ([]str
 	return result, nil
 }
 
-func planClaudePeerLaunchSettings(args []string, lifecycleRoot string) ([]string, []byte, error) {
+func planClaudePeerLaunchSettings(args []string, lifecycleRoot string, constrainPermissions bool) ([]string, []byte, error) {
 	settings := map[string]json.RawMessage{}
 	settingsValue := ""
 	settingsSet := false
@@ -448,6 +453,20 @@ func planClaudePeerLaunchSettings(args []string, lifecycleRoot string) ([]string
 		settings = parsed
 	}
 	settings["crossSessionInbound"] = json.RawMessage(`"accept"`)
+	if constrainPermissions {
+		permissions := map[string]json.RawMessage{}
+		if raw, exists := settings["permissions"]; exists {
+			if json.Unmarshal(raw, &permissions) != nil || permissions == nil {
+				return nil, nil, errors.New("claude --settings permissions must contain a JSON object")
+			}
+		}
+		permissions["disableBypassPermissionsMode"] = json.RawMessage(`"disable"`)
+		body, err := json.Marshal(permissions)
+		if err != nil {
+			return nil, nil, err
+		}
+		settings["permissions"] = body
+	}
 	body, err := json.Marshal(settings)
 	if err != nil {
 		return nil, nil, err
@@ -798,13 +817,10 @@ func superviseClaudePeer(
 			if rowErr != nil || row.SessionID != plan.sessionID {
 				continue
 			}
-			actualYolo := effectiveClaudePeerYolo(row.PermissionMode, durableYolo)
-			if actualYolo != durableYolo {
-				if resolved, resolveErr := resolvePeerLaunchContext(plan.sessionID, "claude", plan.context, actualYolo, true); resolveErr == nil {
-					durableYolo = resolved.Preference.AlwaysApprove
-				} else {
-					continue
-				}
+			if effectiveClaudePeerYolo(row.PermissionMode, durableYolo) && !durableYolo {
+				_ = command.Process.Kill()
+				<-done
+				return errors.New("Claude entered bypass permissions outside the durable managed launch policy") //nolint:staticcheck // Claude is a product name.
 			}
 			registration = claudePeerRegistration(row, plan, durableYolo, childPID, childStart)
 			registration.LifecyclePID = os.Getpid()

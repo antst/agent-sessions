@@ -101,7 +101,11 @@ group or remote peer.
 Installation does not change the profile's default `crossSessionInbound`
 policy. Each managed Claude peer or lane supplies `accept` only as a launch
 override; ordinary Claude keeps the operator's `reject`, `prompt`, or `accept`
-choice unchanged.
+choice unchanged. A managed interactive Claude peer also has one durable
+permission class for its lifetime. Constrained peers disable Claude's
+unpublished in-session bypass toggle in that same launch-only settings overlay;
+an explicitly bypassed peer is conservatively advertised as bypass until it is
+restarted. This never changes the shared profile's permission defaults.
 
 ## Minimal protocol operations
 

@@ -149,6 +149,10 @@ func TestParseClaudePeerArgsSeparatesGroupsAndStableSession(t *testing.T) {
 	if _, err := parseClaudePeerArgs([]string{"--bare"}); err == nil || !strings.Contains(err.Error(), "use bare claude to opt out") {
 		t.Fatalf("messageable Claude peer accepted --bare: %v", err)
 	}
+	if _, err := parseClaudePeerArgs([]string{"--allow-dangerously-skip-permissions"}); err == nil ||
+		!strings.Contains(err.Error(), "cannot attest mutable in-session bypass") {
+		t.Fatalf("messageable Claude peer accepted mutable bypass: %v", err)
+	}
 }
 
 func TestClaudePeerManagedOptionsStayBeforePromptDelimiter(t *testing.T) {
@@ -206,7 +210,7 @@ func containsClaudeArgValue(args []string, flag, value string) bool {
 func TestPrepareClaudePeerLaunchSettingsMergesWithoutChangingSource(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "operator-settings.json")
-	if err := os.WriteFile(source, []byte(`{"theme":"dark","crossSessionInbound":"reject"}`), 0o600); err != nil {
+	if err := os.WriteFile(source, []byte(`{"theme":"dark","crossSessionInbound":"reject","permissions":{"defaultMode":"plan"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(source)
@@ -225,7 +229,12 @@ func TestPrepareClaudePeerLaunchSettingsMergesWithoutChangingSource(t *testing.T
 		t.Fatal(err)
 	}
 	var settings map[string]any
-	if json.Unmarshal(body, &settings) != nil || settings["theme"] != "dark" || settings["crossSessionInbound"] != "accept" {
+	if json.Unmarshal(body, &settings) != nil {
+		t.Fatalf("managed launch settings = %s", body)
+	}
+	permissions, _ := settings["permissions"].(map[string]any)
+	if settings["theme"] != "dark" || settings["crossSessionInbound"] != "accept" ||
+		permissions["defaultMode"] != "plan" || permissions["disableBypassPermissionsMode"] != "disable" {
 		t.Fatalf("managed launch settings = %s", body)
 	}
 	info, _ := os.Stat(settingsPath)
@@ -237,12 +246,18 @@ func TestPrepareClaudePeerLaunchSettingsMergesWithoutChangingSource(t *testing.T
 
 func TestPlanClaudePeerLaunchSettingsDoesNotMaterializeBeforePreparation(t *testing.T) {
 	root := t.TempDir()
-	args, body, err := planClaudePeerLaunchSettings([]string{"--settings", `{"theme":"dark"}`}, root)
+	args, body, err := planClaudePeerLaunchSettings([]string{"--settings", `{"theme":"dark"}`}, root, true)
 	if err != nil || len(body) == 0 || !slices.Contains(args, filepath.Join(root, "launch-settings.json")) {
 		t.Fatalf("planned settings = args=%v body=%s err=%v", args, body, err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "launch-settings.json")); !os.IsNotExist(err) {
 		t.Fatalf("settings were materialized before durable preparation: %v", err)
+	}
+	_, bypassBody, err := planClaudePeerLaunchSettings([]string{
+		"--settings", `{"permissions":{"defaultMode":"bypassPermissions"}}`,
+	}, root, false)
+	if err != nil || bytes.Contains(bypassBody, []byte("disableBypassPermissionsMode")) {
+		t.Fatalf("explicit bypass launch was constrained: body=%s err=%v", bypassBody, err)
 	}
 }
 
