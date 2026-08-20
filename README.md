@@ -94,7 +94,9 @@ plugin and MCP executable. Start a new Grok session or reload plugins after inst
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
 the TUI's native policy and its effective live mode is attested before publication.
 Installation never changes Claude's profile-level `crossSessionInbound` value. Managed Claude peers
-and lanes opt into inbound native messages only for their own launch.
+and lanes opt into inbound native messages only for their own launch. They also pass `--no-chrome`
+unless an interactive peer operator explicitly supplied `--chrome`, so a browser-extension
+first-run dialog cannot block native messaging-socket publication.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok

@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
@@ -73,23 +75,32 @@ func ProcessStart(pid int) string { return processStart(pid) }
 
 // PeerRegistration binds one live product-owned session to its delivery adapter.
 type PeerRegistration struct {
-	Version              int    `json:"version"`
-	SessionID            string `json:"session_id"`
-	Product              string `json:"product"`
-	Name                 string `json:"name"`
-	Status               string `json:"status,omitempty"`
-	PermissionMode       string `json:"permission_mode,omitempty"`
-	Cwd                  string `json:"cwd,omitempty"`
-	PID                  int    `json:"pid"`
-	ProcStart            string `json:"proc_start"`
-	Socket               string `json:"socket"`
-	LifecyclePID         int    `json:"lifecycle_pid,omitempty"`
-	LifecycleProcStart   string `json:"lifecycle_proc_start,omitempty"`
-	LifecycleRoot        string `json:"lifecycle_root,omitempty"`
-	ClaudeConfigRoot     string `json:"claude_config_root,omitempty"`
-	AdapterStrongStart   string `json:"adapter_strong_start,omitempty"`
-	LifecycleStrongStart string `json:"lifecycle_strong_start,omitempty"`
-	StartedAt            int64  `json:"started_at,omitempty"`
+	Version              int                      `json:"version"`
+	SessionID            string                   `json:"session_id"`
+	Product              string                   `json:"product"`
+	Name                 string                   `json:"name"`
+	Status               string                   `json:"status,omitempty"`
+	PermissionMode       string                   `json:"permission_mode,omitempty"`
+	Cwd                  string                   `json:"cwd,omitempty"`
+	PID                  int                      `json:"pid"`
+	ProcStart            string                   `json:"proc_start"`
+	Socket               string                   `json:"socket"`
+	LifecyclePID         int                      `json:"lifecycle_pid,omitempty"`
+	LifecycleProcStart   string                   `json:"lifecycle_proc_start,omitempty"`
+	LifecycleRoot        string                   `json:"lifecycle_root,omitempty"`
+	ClaudeConfigRoot     string                   `json:"claude_config_root,omitempty"`
+	ClaudeKeyBaseline    []ClaudeKeyBaselineEntry `json:"claude_key_baseline,omitempty"`
+	ClaudeKeyBaselineSet bool                     `json:"claude_key_baseline_set,omitempty"`
+	AdapterStrongStart   string                   `json:"adapter_strong_start,omitempty"`
+	LifecycleStrongStart string                   `json:"lifecycle_strong_start,omitempty"`
+	StartedAt            int64                    `json:"started_at,omitempty"`
+}
+
+// ClaudeKeyBaselineEntry fingerprints one PID-prefixed native key artifact
+// before a gated Claude adapter can replace it.
+type ClaudeKeyBaselineEntry struct {
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 type peerPreparation struct {
@@ -263,6 +274,7 @@ func (a *agent) loadPeerPreparations() error {
 		registration := preparation.Registration
 		if !validCatalogSessionID(registration.SessionID) || entry.Name() != sessionKey(registration.SessionID)+".json" ||
 			registration.AdapterStrongStart == "" || registration.LifecycleStrongStart == "" ||
+			!validClaudeKeyBaseline(registration.PID, registration.ClaudeKeyBaselineSet, registration.ClaudeKeyBaseline) ||
 			(preparation.RollbackPreferences && preparation.DesiredPreference.SessionID != registration.SessionID) {
 			return errors.New("invalid durable Claude peer preparation")
 		}
@@ -300,6 +312,13 @@ func (a *agent) validateClaudePreparationIdentity(registration PeerRegistration)
 	if filepath.Clean(registration.LifecycleRoot) != filepath.Clean(expectedRoot) ||
 		!sameRegistryRoot(registration.ClaudeConfigRoot, a.options.ClaudeConfigDir) {
 		return errors.New("claude peer preparation roots are not agent-owned")
+	}
+	if !registration.ClaudeKeyBaselineSet {
+		return errors.New("claude peer preparation key baseline is missing")
+	}
+	baseline, err := ClaudePeerKeySidecars(registration.ClaudeConfigRoot, registration.PID)
+	if err != nil || !slices.Equal(baseline, registration.ClaudeKeyBaseline) {
+		return errors.New("claude peer preparation key baseline changed before persistence")
 	}
 	adapter := procinfo.Read(registration.PID)
 	lifecycle := procinfo.Read(registration.LifecyclePID)
@@ -436,12 +455,109 @@ func (a *agent) cancelPeerPreparation(registration PeerRegistration) error {
 func samePreparedRegistration(left, right PeerRegistration) bool {
 	return left.PID == right.PID && left.ProcStart == right.ProcStart &&
 		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart &&
-		left.AdapterStrongStart == right.AdapterStrongStart && left.LifecycleStrongStart == right.LifecycleStrongStart
+		left.AdapterStrongStart == right.AdapterStrongStart && left.LifecycleStrongStart == right.LifecycleStrongStart &&
+		left.ClaudeKeyBaselineSet == right.ClaudeKeyBaselineSet &&
+		slices.Equal(left.ClaudeKeyBaseline, right.ClaudeKeyBaseline)
 }
 
 func samePreparedRegistrationWeak(left, right PeerRegistration) bool {
 	return left.PID == right.PID && left.ProcStart == right.ProcStart &&
-		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart
+		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart &&
+		left.ClaudeKeyBaselineSet == right.ClaudeKeyBaselineSet &&
+		slices.Equal(left.ClaudeKeyBaseline, right.ClaudeKeyBaseline)
+}
+
+// ClaudePeerKeySidecars snapshots every PID-prefixed key name before a gated
+// Claude adapter is released. Cleanup may then distinguish artifacts created
+// by that exact launch from stale files left by an earlier use of the PID.
+func ClaudePeerKeySidecars(configRoot string, pid int) ([]ClaudeKeyBaselineEntry, error) {
+	if pid <= 1 {
+		return nil, errors.New("invalid Claude peer key baseline PID")
+	}
+	entries, err := os.ReadDir(filepath.Join(configRoot, "sessions"))
+	if err != nil {
+		return nil, err
+	}
+	prefix := strconv.Itoa(pid) + "."
+	result := make([]ClaudeKeyBaselineEntry, 0)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".key") {
+			fingerprint, fingerprintErr := claudeKeySidecarFingerprint(
+				filepath.Join(configRoot, "sessions", entry.Name()),
+			)
+			if fingerprintErr != nil {
+				return nil, fingerprintErr
+			}
+			result = append(result, ClaudeKeyBaselineEntry{Name: entry.Name(), Fingerprint: fingerprint})
+		}
+	}
+	slices.SortFunc(result, func(left, right ClaudeKeyBaselineEntry) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+	return result, nil
+}
+
+func claudeKeySidecarFingerprint(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Sprintf("type:%#x", uint32(info.Mode().Type())), nil
+	}
+	if info.Size() > 4096 {
+		return fmt.Sprintf("oversized:%d", info.Size()), nil
+	}
+	body, err := os.ReadFile(path) //nolint:gosec // bounded PID-prefixed key below the configured native registry.
+	if err != nil {
+		return "", err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, current) {
+		return "", errors.New("native Claude peer-token sidecar changed during snapshot")
+	}
+	digest := sha256.Sum256(body)
+	return "sha256:" + fmt.Sprintf("%x", digest[:]), nil
+}
+
+func validClaudeKeyBaseline(pid int, set bool, baseline []ClaudeKeyBaselineEntry) bool {
+	if !set {
+		return len(baseline) == 0 // legacy preparations did not own token-only cleanup.
+	}
+	previous := ""
+	prefix := strconv.Itoa(pid) + "."
+	for _, entry := range baseline {
+		if entry.Name <= previous || filepath.Base(entry.Name) != entry.Name ||
+			!strings.HasPrefix(entry.Name, prefix) || !strings.HasSuffix(entry.Name, ".key") ||
+			!validClaudeKeyFingerprint(entry.Fingerprint) {
+			return false
+		}
+		previous = entry.Name
+	}
+	return true
+}
+
+func validClaudeKeyFingerprint(fingerprint string) bool {
+	if digest, ok := strings.CutPrefix(fingerprint, "sha256:"); ok {
+		if len(digest) != 64 {
+			return false
+		}
+		for _, character := range digest {
+			if character < '0' || character > '9' && (character < 'a' || character > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	if mode, ok := strings.CutPrefix(fingerprint, "type:"); ok {
+		_, err := strconv.ParseUint(mode, 0, 32)
+		return err == nil
+	}
+	if size, ok := strings.CutPrefix(fingerprint, "oversized:"); ok {
+		parsed, err := strconv.ParseInt(size, 10, 64)
+		return err == nil && parsed > 4096
+	}
+	return false
 }
 
 //nolint:gocyclo // Registration validates adapter, lifecycle, catalog, and replacement identity together.
@@ -547,6 +663,8 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 		LifecyclePID: lifecyclePID, LifecycleProcStart: lifecycleProcStart,
 		AdapterStrongStart: adapterInfo.StrongStart, LifecycleStrongStart: lifecycleInfo.StrongStart,
 		LifecycleRoot: registration.LifecycleRoot, ClaudeConfigRoot: registration.ClaudeConfigRoot,
+		ClaudeKeyBaseline:    append([]ClaudeKeyBaselineEntry(nil), preparedRegistration.ClaudeKeyBaseline...),
+		ClaudeKeyBaselineSet: preparedRegistration.ClaudeKeyBaselineSet,
 	}
 	a.mu.Unlock()
 	a.signalLocalChanged()
@@ -685,6 +803,8 @@ func (a *agent) reconcilePeerPreparations(logger interface{ Printf(string, ...an
 			LifecyclePID: registration.LifecyclePID, LifecycleProcStart: registration.LifecycleProcStart,
 			AdapterStrongStart: registration.AdapterStrongStart, LifecycleStrongStart: registration.LifecycleStrongStart,
 			LifecycleRoot: registration.LifecycleRoot, ClaudeConfigRoot: registration.ClaudeConfigRoot,
+			ClaudeKeyBaseline:    append([]ClaudeKeyBaselineEntry(nil), registration.ClaudeKeyBaseline...),
+			ClaudeKeyBaselineSet: registration.ClaudeKeyBaselineSet,
 		}
 		if err := retirePeerAdapter(peer); err != nil {
 			logger.Printf("clean prepared Claude peer %s failed: %v", sessionID, err)

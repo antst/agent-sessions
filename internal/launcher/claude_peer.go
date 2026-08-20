@@ -129,11 +129,24 @@ func RunClaudePeer(args []string) error {
 		_ = command.Wait()
 		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
 	}
+	adapterStrongStart := procinfo.Read(command.Process.Pid).StrongStart
+	if adapterStrongStart == "" {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return errors.Join(errors.New("capture gated Claude adapter strong process identity"), removeClaudePeerLaunchSettings(settingsPath))
+	}
+	keyBaseline, err := federator.ClaudePeerKeySidecars(sharedRoot, command.Process.Pid)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return errors.Join(fmt.Errorf("snapshot gated Claude peer keys: %w", err), removeClaudePeerLaunchSettings(settingsPath))
+	}
 	preparation := federator.PeerRegistration{
 		Version: federator.GroupProtocolVersion, SessionID: plan.sessionID, Product: "claude", Name: plan.peerName,
 		PID: command.Process.Pid, ProcStart: adapterStart,
 		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: sharedRoot,
+		ClaudeKeyBaseline: keyBaseline, ClaudeKeyBaselineSet: true,
 	}
 	prepared, err := federator.PreparePeerLaunch(
 		agentRuntimeDir(), preparation, preferenceRequest, resolved.Preference,
@@ -166,7 +179,10 @@ func RunClaudePeer(args []string) error {
 	}
 	_ = gateWriter.Close()
 	var cleanupErr error
-	runErr := superviseClaudePeer(command, lifecycleRoot, sharedRoot, plan, resolved.Preference.AlwaysApprove, &cleanupErr)
+	runErr := superviseClaudePeer(
+		command, lifecycleRoot, sharedRoot, keyBaseline, adapterStrongStart,
+		plan, resolved.Preference.AlwaysApprove, &cleanupErr,
+	)
 	settingsCleanupErr := removeClaudePeerLaunchSettings(settingsPath)
 	var cancelErr error
 	if cleanupErr == nil && settingsCleanupErr == nil {
@@ -283,6 +299,12 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 	} else if !resume && peerName != "" {
 		plan.args = insertClaudeManagedArgs(plan.args, "--name", peerName)
 	}
+	// A detected Chrome extension can otherwise raise a first-run dialog before
+	// native Claude publishes its messaging row. Managed peers must not stall on
+	// an unrelated browser prompt, but an operator's explicit choice still wins.
+	if !claudePeerHasChromeMode(plan.args) {
+		plan.args = insertClaudeManagedArgs(plan.args, "--no-chrome")
+	}
 	return plan, nil
 }
 
@@ -319,6 +341,16 @@ func claudePeerHasPermissionMode(args []string) bool {
 	for _, argument := range beforeDoubleDash(args) {
 		if argument == "--permission-mode" || strings.HasPrefix(argument, "--permission-mode=") ||
 			argument == "--dangerously-skip-permissions" {
+			return true
+		}
+	}
+	return false
+}
+
+func claudePeerHasChromeMode(args []string) bool {
+	for _, argument := range beforeDoubleDash(args) {
+		if argument == "--chrome" || argument == "--no-chrome" ||
+			strings.HasPrefix(argument, "--chrome=") || strings.HasPrefix(argument, "--no-chrome=") {
 			return true
 		}
 	}
@@ -553,7 +585,7 @@ func prepareClaudePeerAttachment(configRoot, sessionID string) error {
 		if procinfo.Read(pid).Status != procinfo.Absent {
 			return errors.New("this Claude peer session still has a live native attachment")
 		}
-		if err := cleanupClaudePeerNativeArtifacts(configRoot, row, row.ProcStart, sessionID); err != nil {
+		if err := cleanupClaudePeerNativeArtifacts(configRoot, row, row.ProcStart, "", sessionID, nil, nil); err != nil {
 			return err
 		}
 	}
@@ -615,6 +647,8 @@ func superviseClaudePeer(
 	command *exec.Cmd,
 	lifecycleRoot string,
 	sharedRoot string,
+	keyBaseline []federator.ClaudeKeyBaselineEntry,
+	adapterStrongStart string,
 	plan claudePeerPlan,
 	durableYolo bool,
 	cleanupErr *error,
@@ -650,12 +684,26 @@ func superviseClaudePeer(
 	deadline := time.Now().Add(claudePeerReadyTimeout)
 	var registration federator.PeerRegistration
 	var nativeRow claudeNativePeerRecord
+	var observedKeys []federator.ClaudeKeyBaselineEntry
+	observeKeys := func() error {
+		identity := procinfo.Read(childPID)
+		if identity.Status != procinfo.Known || identity.Start != childStart || identity.StrongStart != adapterStrongStart {
+			return errors.New("native Claude process identity changed before key observation")
+		}
+		keys, err := federator.ObserveClaudePeerNewKeySidecars(
+			sharedRoot, childPID, childStart, adapterStrongStart, keyBaseline,
+		)
+		if err == nil {
+			observedKeys = keys
+		}
+		return err
+	}
 	defer func() {
 		if nativeRow.PID <= 1 {
 			nativeRow.PID = childPID
 		}
 		*cleanupErr = cleanupClaudePeerNativeArtifacts(
-			sharedRoot, nativeRow, childStart, plan.sessionID,
+			sharedRoot, nativeRow, childStart, adapterStrongStart, plan.sessionID, keyBaseline, observedKeys,
 		)
 	}()
 	for registration.SessionID == "" {
@@ -663,6 +711,11 @@ func superviseClaudePeer(
 		case waitErr := <-done:
 			return waitErr
 		case <-time.After(100 * time.Millisecond):
+		}
+		if err := observeKeys(); err != nil {
+			_ = command.Process.Kill()
+			<-done
+			return fmt.Errorf("observe native Claude publication key: %w", err)
 		}
 		row, err := readClaudeNativePeerRecord(sharedRoot, childPID, childStart)
 		if err != nil {
@@ -694,6 +747,8 @@ func superviseClaudePeer(
 		registration.LifecycleProcStart = federator.ProcessStart(os.Getpid())
 		registration.LifecycleRoot = lifecycleRoot
 		registration.ClaudeConfigRoot = sharedRoot
+		registration.ClaudeKeyBaseline = append([]federator.ClaudeKeyBaselineEntry(nil), keyBaseline...)
+		registration.ClaudeKeyBaselineSet = true
 		nativeRow = row
 		if registration.LifecycleProcStart == "" {
 			_ = command.Process.Kill()
@@ -741,6 +796,8 @@ func superviseClaudePeer(
 			registration.LifecycleProcStart = federator.ProcessStart(os.Getpid())
 			registration.LifecycleRoot = lifecycleRoot
 			registration.ClaudeConfigRoot = sharedRoot
+			registration.ClaudeKeyBaseline = append([]federator.ClaudeKeyBaselineEntry(nil), keyBaseline...)
+			registration.ClaudeKeyBaselineSet = true
 			nativeRow = row
 			_, _ = federator.RegisterPeer(agentRuntimeDir(), registration)
 		}
@@ -809,7 +866,10 @@ func cleanupClaudePeerNativeArtifacts(
 	configRoot string,
 	row claudeNativePeerRecord,
 	expectedStart string,
+	expectedStrongStart string,
 	expectedSessionID string,
+	keyBaseline []federator.ClaudeKeyBaselineEntry,
+	observedKeys []federator.ClaudeKeyBaselineEntry,
 ) error {
 	pid := row.PID
 	if pid <= 1 {
@@ -880,11 +940,18 @@ func cleanupClaudePeerNativeArtifacts(
 			return err
 		}
 	}
-	if keyPresent {
+	if keyPresent && keyBaseline == nil {
 		if procinfo.Read(row.PID).Status != procinfo.Absent {
 			return errors.New("native Claude PID reappeared before key removal")
 		}
 		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if keyBaseline != nil {
+		if err := federator.CleanupClaudePeerNewKeySidecars(
+			configRoot, pid, expectedStart, expectedStrongStart, keyBaseline, observedKeys, recordPresent,
+		); err != nil {
 			return err
 		}
 	}

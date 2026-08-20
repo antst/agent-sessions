@@ -142,6 +142,7 @@ must refuse when a process it would replace is still live.
 | CL-08 | Linux, macOS | Native carrier discover/direct/multicast/broadcast returns correlated group-filtered results; bare callers are rejected, while independent native direct traffic can cross Agent Sessions groups. |
 | CL-09 | Linux, macOS | Claude→Codex, Claude→Claude, and Claude→Grok lane launches all bind the immediate Claude parent, including nested and persistent children. |
 | CL-10 | Linux, macOS | Profile/credential mismatch, live exact-UUID attachment, invalid launch settings, launcher crash, and native startup failure do not adopt or alter the ordinary session's catalog row; a durable gated-launch journal rolls back groups and YOLO before retry. |
+| CL-11 | Linux, macOS with Claude in Chrome installed | Ordinary shared-profile use may cache extension discovery; a later managed peer or lane still publishes its native row/socket without an interstitial. Peers preserve explicit `--chrome`/`--no-chrome`, while the managed default and all headless lanes use `--no-chrome`; host profile settings remain unchanged. |
 
 ## Grok interactive peer (`T/F`)
 

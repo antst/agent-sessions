@@ -1,12 +1,15 @@
 package federator
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +34,11 @@ func exactProcessStatus(process exactProcess) procinfo.Status {
 		return procinfo.Absent
 	}
 	return procinfo.Known
+}
+
+func pidNamespaceAbsent(pid int) bool {
+	info := procinfo.Read(pid)
+	return info.Status == procinfo.Absent || info.Status == procinfo.Known && (info.State == "Z" || info.State == "X")
 }
 
 func peerAdapterRoot(peer localPeer) exactProcess {
@@ -81,7 +89,7 @@ func discoverExactProcessTree(root exactProcess) ([]exactProcess, error) {
 // terminal survey, and PID reuse is rechecked before every signal.
 //
 //nolint:gocyclo // Exact freeze, discovery, signalling, and retry states are deliberately explicit.
-func stopPeerAdapterTree(peer localPeer) error {
+func stopPeerAdapterTree(peer localPeer, beforeTerminate func() error) error {
 	root := peerAdapterRoot(peer)
 	switch exactProcessStatus(root) {
 	case procinfo.Absent:
@@ -138,6 +146,11 @@ func stopPeerAdapterTree(peer localPeer) error {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+	if beforeTerminate != nil {
+		if err := beforeTerminate(); err != nil {
+			return err
+		}
+	}
 	for pid, member := range known {
 		if pid != root.PID && exactProcessStatus(member) == procinfo.Known {
 			_ = syscall.Kill(member.PID, syscall.SIGKILL)
@@ -191,23 +204,34 @@ func withClaudePeerRetirementLock(peer localPeer, action func() error) error {
 // gap between stopping an orphaned adapter and cleaning its PID-bound files.
 func retirePeerAdapter(peer localPeer) error {
 	return withClaudePeerRetirementLock(peer, func() error {
-		if exactProcessStatus(peerAdapterRoot(peer)) == procinfo.Known {
-			if err := stopPeerAdapterTree(peer); err != nil {
+		adapterOwnedDeath := exactProcessStatus(peerAdapterRoot(peer)) == procinfo.Known
+		var observedKeys []ClaudeKeyBaselineEntry
+		if adapterOwnedDeath {
+			if err := stopPeerAdapterTree(peer, func() error {
+				if !peer.ClaudeKeyBaselineSet {
+					return nil
+				}
+				var err error
+				observedKeys, err = ObserveClaudePeerNewKeySidecars(
+					peer.ClaudeConfigRoot, peer.PID, peer.ProcStart, peer.AdapterStrongStart, peer.ClaudeKeyBaseline,
+				)
+				return err
+			}); err != nil {
 				return err
 			}
 		}
-		return cleanupClaudePeerArtifactsLocked(peer)
+		return cleanupClaudePeerArtifactsLocked(peer, observedKeys)
 	})
 }
 
 //nolint:gocyclo // Every owned artifact is independently re-attested before removal.
-func cleanupClaudePeerArtifactsLocked(peer localPeer) error {
+func cleanupClaudePeerArtifactsLocked(peer localPeer, observedKeys []ClaudeKeyBaselineEntry) error {
 	if peer.ClaudeConfigRoot == "" {
 		return nil
 	}
 	// A recycled PID is not absence: never unlink its PID-bound socket merely
 	// because it no longer matches the old adapter identity.
-	if procinfo.Read(peer.PID).Status != procinfo.Absent {
+	if !pidNamespaceAbsent(peer.PID) {
 		return errors.New("native Claude PID is not absent after retirement")
 	}
 	recordPath := filepath.Join(peer.ClaudeConfigRoot, "sessions", strconv.Itoa(peer.PID)+".json")
@@ -258,23 +282,31 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer) error {
 		}
 	}
 	if socketPresent {
-		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+		if !pidNamespaceAbsent(peer.PID) {
 			return errors.New("native Claude PID reappeared before socket cleanup")
 		}
 		if err := os.Remove(peer.Socket); err != nil {
 			return err
 		}
 	}
-	if keyPresent {
-		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+	if keyPresent && !peer.ClaudeKeyBaselineSet {
+		if !pidNamespaceAbsent(peer.PID) {
 			return errors.New("native Claude PID reappeared before key removal")
 		}
 		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
+	if peer.ClaudeKeyBaselineSet {
+		if err := CleanupClaudePeerNewKeySidecars(
+			peer.ClaudeConfigRoot, peer.PID, peer.ProcStart, peer.AdapterStrongStart,
+			peer.ClaudeKeyBaseline, observedKeys, recordPresent,
+		); err != nil {
+			return err
+		}
+	}
 	if recordPresent {
-		if procinfo.Read(peer.PID).Status != procinfo.Absent {
+		if !pidNamespaceAbsent(peer.PID) {
 			return errors.New("native Claude PID reappeared before record cleanup")
 		}
 		if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
@@ -291,4 +323,160 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer) error {
 		return err
 	}
 	return nil
+}
+
+type claudePeerKeyFile struct {
+	PeerToken   string `json:"peerToken"`
+	ProcStart   string `json:"procStart"`
+	ProcStartFT string `json:"procStartFt"`
+}
+
+type claudePeerOwnedKey struct {
+	entry ClaudeKeyBaselineEntry
+	path  string
+	body  []byte
+	info  os.FileInfo
+}
+
+// ObserveClaudePeerNewKeySidecars fingerprints strictly valid changed keys
+// while the exact strong-identity adapter is still live (and, in retirement,
+// frozen). A later cleanup may unlink only these unchanged observations.
+func ObserveClaudePeerNewKeySidecars(
+	configRoot string,
+	pid int,
+	expectedStart string,
+	expectedStrongStart string,
+	baseline []ClaudeKeyBaselineEntry,
+) ([]ClaudeKeyBaselineEntry, error) {
+	adapter := exactProcess{PID: pid, Start: expectedStart, StrongStart: expectedStrongStart}
+	if expectedStrongStart == "" || exactProcessStatus(adapter) != procinfo.Known {
+		return nil, errors.New("cannot observe Claude peer keys without an exact live adapter")
+	}
+	owned, err := claudePeerChangedKeySidecars(configRoot, pid, expectedStart, expectedStrongStart, baseline)
+	if err != nil {
+		return nil, err
+	}
+	if exactProcessStatus(adapter) != procinfo.Known {
+		return nil, errors.New("native Claude adapter changed during key observation")
+	}
+	result := make([]ClaudeKeyBaselineEntry, 0, len(owned))
+	for _, key := range owned {
+		result = append(result, key.entry)
+	}
+	return result, nil
+}
+
+// CleanupClaudePeerNewKeySidecars removes only strict PID-bound sidecars that
+// appeared after the gated adapter's durable pre-release snapshot. This covers
+// native Claude's key-before-row publication order without guessing at stale
+// files from an earlier use of the PID.
+func CleanupClaudePeerNewKeySidecars(
+	configRoot string,
+	pid int,
+	expectedStart string,
+	expectedStrongStart string,
+	baseline []ClaudeKeyBaselineEntry,
+	observed []ClaudeKeyBaselineEntry,
+	rowBound bool,
+) error {
+	owned, err := claudePeerChangedKeySidecars(configRoot, pid, expectedStart, expectedStrongStart, baseline)
+	if err != nil {
+		return err
+	}
+	observedSet := make(map[string]string, len(observed))
+	for _, entry := range observed {
+		observedSet[entry.Name] = entry.Fingerprint
+	}
+	for _, key := range owned {
+		if fingerprint, ok := observedSet[key.entry.Name]; !rowBound && (!ok || fingerprint != key.entry.Fingerprint) {
+			return errors.New("token-only native Claude sidecar was not observed under the exact live adapter")
+		}
+	}
+	for _, key := range owned {
+		if !pidNamespaceAbsent(pid) {
+			return errors.New("native Claude PID reappeared before provisional key removal")
+		}
+		info, statErr := os.Lstat(key.path)
+		body, readErr := os.ReadFile(key.path)
+		if statErr != nil || readErr != nil || !os.SameFile(key.info, info) || !bytes.Equal(body, key.body) {
+			return errors.New("new native Claude peer-token sidecar changed before removal")
+		}
+		if err := os.Remove(key.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+//nolint:gocyclo // Every baseline/type/schema/process ownership condition fails closed independently.
+func claudePeerChangedKeySidecars(
+	configRoot string,
+	pid int,
+	expectedStart string,
+	expectedStrongStart string,
+	baseline []ClaudeKeyBaselineEntry,
+) ([]claudePeerOwnedKey, error) {
+	current, err := ClaudePeerKeySidecars(configRoot, pid)
+	if err != nil {
+		return nil, err
+	}
+	baselineSet := make(map[string]string, len(baseline))
+	for _, entry := range baseline {
+		baselineSet[entry.Name] = entry.Fingerprint
+	}
+	owned := make([]claudePeerOwnedKey, 0)
+	for _, entry := range current {
+		if prior, existed := baselineSet[entry.Name]; existed && prior == entry.Fingerprint {
+			continue
+		}
+		name := entry.Name
+		if !validClaudePeerKeySidecarName(pid, name) {
+			continue
+		}
+		path := filepath.Join(configRoot, "sessions", name)
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("new native Claude peer-token sidecar changed type")
+		}
+		body, readErr := os.ReadFile(path) //nolint:gosec // exact strict sidecar below an agent-attested shared registry.
+		if readErr != nil {
+			return nil, readErr
+		}
+		var key claudePeerKeyFile
+		if json.Unmarshal(body, &key) != nil || !validClaudePeerToken(key.PeerToken) || key.ProcStart != expectedStart ||
+			(key.ProcStartFT != "" && (expectedStrongStart == "" || key.ProcStartFT != expectedStrongStart)) {
+			return nil, errors.New("new native Claude peer-token sidecar failed ownership validation")
+		}
+		owned = append(owned, claudePeerOwnedKey{entry: entry, path: path, body: body, info: info})
+	}
+	return owned, nil
+}
+
+func validClaudePeerKeySidecarName(pid int, name string) bool {
+	prefix := strconv.Itoa(pid) + "."
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".key") {
+		return false
+	}
+	digest := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".key")
+	if len(digest) != 64 {
+		return false
+	}
+	for _, character := range digest {
+		if character < '0' || character > '9' && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validClaudePeerToken(token string) bool {
+	if len(token) != 32 || token != strings.ToLower(token) {
+		return false
+	}
+	return !slices.ContainsFunc([]byte(token), func(character byte) bool {
+		return character < '0' || character > '9' && (character < 'a' || character > 'f')
+	})
 }

@@ -119,7 +119,9 @@ Claude has no Codex sandbox axis. The launcher passes through Claude's `--permis
 The default permission mode is `dontAsk`, because a headless worker cannot answer an interactive
 approval. Workers start with `--settings '{"crossSessionInbound":"accept"}'` so native peer input
 does not wait for an approval UI the lane does not have. This is a per-process
-override; installation and lane lifecycle never modify the host default. When the launcher
+override; installation and lane lifecycle never modify the host default. Workers also start with
+`--no-chrome`: a headless lane cannot answer Claude in Chrome's first-run dialog, and browser
+integration is outside the lane lifecycle contract. When the launcher
 corroborates a bypass-mode Codex or Claude owner and the caller did not explicitly choose a mode,
 the lane inherits `bypassPermissions`; an explicit `--permission-mode` always wins. The launcher
 never trusts an inherited thread ID alone: it requires a live Codex-host ancestor as a launch-context

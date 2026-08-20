@@ -1194,6 +1194,9 @@ func TestClaudeLaneEmptyToolsFlagIsPreservedInWorkerArgv(t *testing.T) {
 	if !containsArgValue(args, "--settings", `{"crossSessionInbound":"accept"}`) {
 		t.Fatalf("worker argv did not accept native inbound lane messages: %#v", args)
 	}
+	if !containsString(args, "--no-chrome") {
+		t.Fatalf("worker argv can block on the Chrome extension interstitial: %#v", args)
+	}
 	if !containsArgValue(args, "--name", "tool-free") {
 		t.Fatalf("worker argv did not preserve the lane's outbound sender name: %#v", args)
 	}

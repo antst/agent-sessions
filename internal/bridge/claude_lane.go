@@ -1900,6 +1900,7 @@ func (m *claudeLaneManager) startWorker() error {
 func claudeLaneWorkerArgs(state claudeLaneState) []string {
 	args := []string{
 		"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--verbose",
+		"--no-chrome",
 		"--settings", `{"crossSessionInbound":"accept"}`,
 	}
 	if state.WorkerSessionStarted {

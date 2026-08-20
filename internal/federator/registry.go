@@ -46,6 +46,8 @@ type localPeer struct {
 	LifecycleStrongStart string
 	LifecycleRoot        string
 	ClaudeConfigRoot     string
+	ClaudeKeyBaseline    []ClaudeKeyBaselineEntry
+	ClaudeKeyBaselineSet bool
 	GroupProtocol        int
 	AgentService         bool
 }

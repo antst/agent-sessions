@@ -18,6 +18,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 const claudePeerNativeHelperEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_NATIVE"
@@ -121,9 +122,10 @@ func TestClaudePeerManagedOptionsStayBeforePromptDelimiter(t *testing.T) {
 		t.Fatal(err)
 	}
 	delimiter := slices.Index(plan.args, "--")
-	if delimiter < 4 || plan.args[delimiter+1] != "prompt" ||
-		!threadIDPattern.MatchString(plan.args[delimiter-3]) ||
-		strings.Join(plan.args[delimiter-4:delimiter], " ") != "--session-id "+plan.sessionID+" --name worker" {
+	if delimiter < 5 || plan.args[delimiter+1] != "prompt" ||
+		!containsClaudeArgValue(plan.args[:delimiter], "--session-id", plan.sessionID) ||
+		!containsClaudeArgValue(plan.args[:delimiter], "--name", "worker") ||
+		!slices.Contains(plan.args[:delimiter], "--no-chrome") {
 		t.Fatalf("managed Claude args crossed prompt delimiter: %v", plan.args)
 	}
 	withPermission := insertClaudeManagedArgs(plan.args, "--permission-mode", "default")
@@ -131,6 +133,39 @@ func TestClaudePeerManagedOptionsStayBeforePromptDelimiter(t *testing.T) {
 	if permissionIndex < 0 || permissionIndex >= slices.Index(withPermission, "--") {
 		t.Fatalf("managed Claude permission crossed prompt delimiter: %v", withPermission)
 	}
+	for _, explicit := range []string{"--chrome", "--no-chrome"} {
+		explicitPlan, parseErr := parseClaudePeerArgs([]string{explicit})
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if countString(explicitPlan.args, explicit) != 1 ||
+			(explicit == "--chrome" && slices.Contains(explicitPlan.args, "--no-chrome")) {
+			t.Fatalf("explicit Chrome mode was not preserved: %v", explicitPlan.args)
+		}
+	}
+	promptPlan, err := parseClaudePeerArgs([]string{"--", "prompt", "--chrome"})
+	if err != nil || !slices.Contains(beforeDoubleDash(promptPlan.args), "--no-chrome") {
+		t.Fatalf("prompt text incorrectly opted into Chrome: %v, %v", promptPlan.args, err)
+	}
+}
+
+func countString(values []string, wanted string) int {
+	count := 0
+	for _, value := range values {
+		if value == wanted {
+			count++
+		}
+	}
+	return count
+}
+
+func containsClaudeArgValue(args []string, flag, value string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == flag && args[index+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPrepareClaudePeerLaunchSettingsMergesWithoutChangingSource(t *testing.T) {
@@ -587,7 +622,7 @@ func TestCleanupClaudePeerArtifactsRequiresPIDAbsence(t *testing.T) {
 	if err := os.WriteFile(record, body, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanupClaudePeerNativeArtifacts(root, row, row.ProcStart, row.SessionID); err == nil {
+	if err := cleanupClaudePeerNativeArtifacts(root, row, row.ProcStart, "", row.SessionID, nil, nil); err == nil {
 		t.Fatal("cleanup accepted a live or reused native PID")
 	}
 	if _, err := os.Lstat(record); err != nil {
@@ -687,7 +722,7 @@ func TestCleanupClaudePeerArtifactsRemovesPreReadyUnknownModeRow(t *testing.T) {
 	if err := os.WriteFile(record, body, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanupClaudePeerNativeArtifacts(root, claudeNativePeerRecord{PID: pid}, row.ProcStart, row.SessionID); err != nil {
+	if err := cleanupClaudePeerNativeArtifacts(root, claudeNativePeerRecord{PID: pid}, row.ProcStart, "", row.SessionID, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{record, socket} {
@@ -712,7 +747,7 @@ func TestCleanupClaudePeerArtifactsRemovesProvisionalRowWithoutSocket(t *testing
 	if err := os.WriteFile(record, body, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanupClaudePeerNativeArtifacts(root, claudeNativePeerRecord{PID: pid}, row.ProcStart, row.SessionID); err != nil {
+	if err := cleanupClaudePeerNativeArtifacts(root, claudeNativePeerRecord{PID: pid}, row.ProcStart, "", row.SessionID, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(record); !os.IsNotExist(err) {
@@ -750,7 +785,7 @@ func TestCleanupClaudePeerArtifactsRemovesExactTokenSidecars(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := cleanupClaudePeerNativeArtifacts(root, row, row.ProcStart, row.SessionID); err != nil {
+	if err := cleanupClaudePeerNativeArtifacts(root, row, row.ProcStart, "", row.SessionID, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{record, validKey, socket} {
@@ -760,6 +795,99 @@ func TestCleanupClaudePeerArtifactsRemovesExactTokenSidecars(t *testing.T) {
 	}
 	if _, err := os.Lstat(invalidKey); err != nil {
 		t.Fatalf("unrecognized sidecar was removed: %v", err)
+	}
+}
+
+func TestCleanupClaudePeerArtifactsRemovesOnlyNewTokenBeforeNativeRow(t *testing.T) {
+	root := shortClaudePeerTestRoot(t)
+	directory := filepath.Join(root, "sessions")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+	})
+	pid := adapter.Process.Pid
+	identity := procinfo.Read(pid)
+	if identity.Status != procinfo.Known || identity.Start == "" || identity.StrongStart == "" {
+		t.Fatal("test adapter has no exact process identity")
+	}
+	expectedStart := identity.Start
+	preexistingName := strconv.Itoa(pid) + "." + strings.Repeat("b", 64) + ".key"
+	replacedName := strconv.Itoa(pid) + "." + strings.Repeat("a", 64) + ".key"
+	malformedName := strconv.Itoa(pid) + ".not-native.key"
+	for name, body := range map[string]string{
+		preexistingName: `{"peerToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","procStart":"older"}`,
+		replacedName:    `{"peerToken":"dddddddddddddddddddddddddddddddd","procStart":"older"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline, err := federator.ClaudePeerKeySidecars(root, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		replacedName:  `{"peerToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","procStart":"` + expectedStart + `"}`,
+		malformedName: `{"peerToken":"cccccccccccccccccccccccccccccccc","procStart":"` + expectedStart + `"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observed, err := federator.ObserveClaudePeerNewKeySidecars(
+		root, pid, expectedStart, identity.StrongStart, baseline,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = adapter.Wait()
+	if err := cleanupClaudePeerNativeArtifacts(
+		root,
+		claudeNativePeerRecord{PID: pid},
+		expectedStart,
+		identity.StrongStart,
+		"token-only",
+		baseline,
+		observed,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, replacedName)); !os.IsNotExist(err) {
+		t.Fatalf("launch-owned token-only sidecar survived cleanup: %v", err)
+	}
+	// A same-PID key that appears only after the observed adapter has exited is
+	// ambiguous on Darwin's second-resolution native procStart. Preserve it
+	// unless it was fingerprinted while the exact strong adapter was live.
+	if err := os.WriteFile(
+		filepath.Join(directory, replacedName),
+		[]byte(`{"peerToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","procStart":"`+expectedStart+`"}`),
+		0600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupClaudePeerNativeArtifacts(
+		root, claudeNativePeerRecord{PID: pid}, expectedStart, identity.StrongStart,
+		"token-only", baseline, nil,
+	); err == nil {
+		t.Fatal("unobserved token-only sidecar was removed after PID reuse")
+	}
+	if _, err := os.Lstat(filepath.Join(directory, replacedName)); err != nil {
+		t.Fatalf("ambiguous post-exit sidecar was not preserved: %v", err)
+	}
+	for _, name := range []string{preexistingName, malformedName} {
+		if _, err := os.Lstat(filepath.Join(directory, name)); err != nil {
+			t.Fatalf("unowned sidecar %s was removed: %v", name, err)
+		}
 	}
 }
 

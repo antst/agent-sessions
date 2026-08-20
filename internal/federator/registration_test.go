@@ -157,6 +157,7 @@ func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *test
 		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
 	}
+	registration = registrationWithClaudeKeyBaseline(t, registration)
 	newAgent := func() *agent {
 		return &agent{
 			options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
@@ -199,7 +200,9 @@ func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configRoot, "sessions", keyName), []byte(`{"peerToken":"0123456789abcdef0123456789abcdef"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configRoot, "sessions", keyName), []byte(
+		`{"peerToken":"0123456789abcdef0123456789abcdef","procStart":"`+registration.ProcStart+`"}`,
+	), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := lifecycle.Process.Kill(); err != nil {
@@ -224,6 +227,89 @@ func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *test
 	if err != nil || !exists || restored.AlwaysApprove || !slices.Equal(restored.ExplicitGroups, []string{"before"}) ||
 		slices.Contains(groups, "after") {
 		t.Fatalf("failed prepared launch catalog rollback = %+v groups=%v exists=%v err=%v", restored, groups, exists, err)
+	}
+}
+
+func TestPreparedClaudePeerCrashRemovesOnlyLaunchKeyBeforeNativeRow(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	configRoot := filepath.Join(root, "claude")
+	registryDir := filepath.Join(configRoot, "sessions")
+	if err := os.MkdirAll(registryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := openSessionCatalog(filepath.Join(stateDir, "sessions.json"), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-000000000cad"
+	adapter := exec.Command("sleep", "30")
+	lifecycle := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(); err != nil {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		_ = lifecycle.Process.Kill()
+		_ = lifecycle.Wait()
+	})
+	prefix := strconv.Itoa(adapter.Process.Pid) + "."
+	preexistingName := prefix + strings.Repeat("b", 64) + ".key"
+	newName := prefix + strings.Repeat("a", 64) + ".key"
+	for name, body := range map[string]string{
+		preexistingName: `{"peerToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","procStart":"older"}`,
+		newName:         `{"peerToken":"dddddddddddddddddddddddddddddddd","procStart":"older"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(registryDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registration := registrationWithClaudeKeyBaseline(t, PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
+		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
+		LifecycleRoot: ClaudePeerLifecycleRootInState(stateDir, sessionID), ClaudeConfigRoot: configRoot,
+	})
+	agent := &agent{
+		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
+		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(stateDir, "claude-peer-preparations"),
+		localChanged: make(chan struct{}, 1),
+	}
+	update := SessionPreferenceUpdate{SessionID: sessionID, Product: "claude", Kind: SessionKindInteractive}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := agent.preparePeerLaunch(registration, update, expected); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(registryDir, newName), []byte(
+		`{"peerToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","procStart":"`+registration.ProcStart+`"}`,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = lifecycle.Wait()
+	agent.reconcileRegisteredPeers()
+	_ = adapter.Wait()
+	agent.reconcileRegisteredPeers()
+	if _, err := os.Lstat(filepath.Join(registryDir, newName)); !os.IsNotExist(err) {
+		t.Fatalf("token-only launch sidecar survived crash recovery: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(registryDir, preexistingName)); err != nil {
+		t.Fatalf("pre-release sidecar was removed: %v", err)
+	}
+	if len(agent.preparations) != 0 {
+		t.Fatalf("token-only cleanup retained preparations: %d", len(agent.preparations))
 	}
 }
 
@@ -333,6 +419,7 @@ func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
 		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
 	}
+	preparation = registrationWithClaudeKeyBaseline(t, preparation)
 	agent := &agent{
 		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
 		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
@@ -420,6 +507,7 @@ func TestCommittedClaudePeerCleanupDebtSurvivesAndRetries(t *testing.T) {
 		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: configRoot,
 	}
+	preparation = registrationWithClaudeKeyBaseline(t, preparation)
 	agent := &agent{
 		options: AgentOptions{HostID: "host-a", HostName: "Host A", StateDir: stateDir, ClaudeConfigDir: configRoot},
 		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
@@ -701,6 +789,17 @@ func TestAgentControlAcceptsOnlyExactNativeServiceAuth(t *testing.T) {
 	if response, err = request("ffffffffffffffffffffffffffffffff"); err == nil {
 		t.Fatalf("wrong native auth unexpectedly returned %+v", response)
 	}
+}
+
+func registrationWithClaudeKeyBaseline(t *testing.T, registration PeerRegistration) PeerRegistration {
+	t.Helper()
+	baseline, err := ClaudePeerKeySidecars(registration.ClaudeConfigRoot, registration.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration.ClaudeKeyBaseline = baseline
+	registration.ClaudeKeyBaselineSet = true
+	return registration
 }
 
 func TestPeerRegistrationPermissionAndExactUnregister(t *testing.T) {
