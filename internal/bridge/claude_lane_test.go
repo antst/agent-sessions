@@ -251,6 +251,17 @@ esac
 	}
 }
 
+func TestClaudeLaneUsageAdvertisesGroupOptions(t *testing.T) {
+	t.Parallel()
+
+	usage := claudeLaneUsage()
+	for _, option := range []string{"--group GROUP", "--inherit-groups", "--no-inherit-groups"} {
+		if !strings.Contains(usage, option) {
+			t.Fatalf("Claude lane usage does not advertise %s", option)
+		}
+	}
+}
+
 func TestParseClaudeLaneArgsLifecycleAndPolicy(t *testing.T) {
 	options, err := parseClaudeLaneArgs([]string{
 		"start", "--name", "reviewer", "--permission-mode", "dontAsk",

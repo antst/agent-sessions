@@ -218,6 +218,9 @@ Claude policy options are passed through without inventing a Codex sandbox mappi
       --notify PEER            persistent lanes: send terminal pointers here
       --no-notify              parent-owned lanes: suppress owner notification
       --worktree               create a detached git worktree for this lane
+	  --group GROUP           add a child group; repeatable
+	  --inherit-groups        also inherit the parent's non-private groups
+	  --no-inherit-groups     retain only the mandatory parent anchor
       --prompt-file FILE
       --all                    include archived lanes in list
       --mine                   list only lanes owned by this orchestrator
