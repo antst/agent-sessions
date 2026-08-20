@@ -20,12 +20,12 @@ Each platform directory also contains the distinct `peer`, `codex-peer`, `claude
 executables. `peer-federator` remains a separately
 operated process; installing the binary does not enable or load a federation service.
 
-Linux is end-to-end tested on the development host. Both macOS architectures cross-compile in CI;
-a real macOS host test is still recommended before certifying a release for production use there.
+The v0.2.0 peer, lane, cleanup, and bidirectional federation matrix was exercised on real Linux and
+macOS hosts. CI additionally cross-builds every release for Linux and macOS on x86-64 and arm64.
 
 ## Release archive installation
 
-A `vX.Y.Z` tag whose base version matches the plugin manifest creates a GitHub Release containing
+A `vX.Y.Z` tag whose base version matches the plugin manifest creates a Forgejo Release containing
 four archives and `SHA256SUMS`. Choose exactly one archive for the destination host. Each archive
 has one top-level directory and contains the matching native executable plus the Codex, Claude, and Grok
 plugin payloads, launchers, documentation, and installer; it deliberately omits Go source.
@@ -93,7 +93,8 @@ The installer refuses to replace any running App Server—even an idle one—bec
 quiescence check followed by restart has an unavoidable race with native clients starting work.
 It also refuses while a managed Grok launch record has any live or unverifiable
 owner, host, private leader, or observer identity. Normal Grok TUI exit removes
-that private process group automatically; see [Grok leader shutdown](GROK.md#stop-leaders-safely).
+that private process group automatically; see
+[Grok leader shutdown](GROK-INSTALL.md#stop-leaders-safely).
 Packagers can use `START_RUNTIME=0` to stage files without starting host services.
 
 `make install` deliberately changes only the Codex/runtime side. To install the reusable Claude
@@ -115,7 +116,7 @@ official trusted installer is used only to update the enabled-plugin setting;
 that temporary registry row is then removed with `--keep-data`. Installation
 fails unless `grok inspect --json` resolves exactly one enabled user plugin and
 the exact staged `agent_sessions` MCP executable. See
-[GROK.md](./GROK.md).
+[GROK-INSTALL.md](./GROK-INSTALL.md).
 
 The equivalent source-linked development command is:
 
@@ -275,4 +276,5 @@ codex-peer -n reviewer
 claude agents --json
 ```
 
-See [LANES.md](./LANES.md) for orchestrator integration.
+See [CODEX-LANES.md](./CODEX-LANES.md) for Codex lane integration and the
+[documentation index](./README.md) for the other product and operator guides.

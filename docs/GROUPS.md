@@ -58,6 +58,19 @@ group list into its own registry row.
 A bare product CLI that does not register with the host agent is not an Agent
 Sessions peer. This is the Agent Sessions communication opt-out.
 
+## Delegation is separate from membership
+
+Groups answer who can discover and route messages to whom. They do not establish that one peer may
+issue instructions with the user's authority. A user who wants one interactive session to take
+orders from another must explicitly establish that relationship and decide its scope. Agent
+Sessions deliberately does not prescribe a delegation format or hierarchy.
+
+Group membership, a mutable peer name, transport-authenticated source metadata, or a peer's own
+claim of authority is not a substitute for that user decision. Operators may identify delegates by
+whatever convention fits their workflow; an exact Agent Sessions source ID avoids ambiguity when
+names can be reused or changed. Delegation does not override the receiving session's higher-priority
+instructions, permission mode, sandbox, or approval requirements.
+
 The parent layer and target layer are independent. Any registered Codex,
 Claude, or Grok parent can launch any supported Codex, Claude, or Grok lane.
 Parent resolution supplies lifecycle and group context; the selected target

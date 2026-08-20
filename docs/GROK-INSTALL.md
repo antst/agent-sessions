@@ -1,4 +1,4 @@
-# Grok interactive peers
+# Grok installation and interactive peers
 
 `grok-peer` runs the ordinary Grok TUI while keeping that exact conversation
 reachable by Agent Sessions. It uses a private Grok leader and Grok's official
@@ -164,4 +164,5 @@ verify its full command, PID, and process start identity, then send that exact
 orphan `SIGTERM`; reserve `SIGKILL` for a process that does not terminate.
 
 Implementation and verification details are recorded in
-[`GROK-ADAPTER.md`](GROK-ADAPTER.md) and [`PROTOCOL.md`](PROTOCOL.md).
+[`GROK-ADAPTER.md`](GROK-ADAPTER.md) and
+[`ADAPTER-PROTOCOL.md`](ADAPTER-PROTOCOL.md).
