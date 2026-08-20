@@ -46,6 +46,13 @@ func EnsureRuntime() (Runtime, error) {
 	if err := ensureRuntimeEnvironment(); err != nil {
 		return Runtime{}, err
 	}
+	// Profile identity canonicalizes CODEX_HOME through filesystem aliases.
+	// Establish a fresh home before asking the runtime for that identity so its
+	// key cannot change when Codex creates the directory later (notably across
+	// Darwin's /tmp -> /private/tmp alias).
+	if err := ensureCodexHome(); err != nil {
+		return Runtime{}, err
+	}
 	profileRoot, versionMarker, err := runtimeProfile(selected)
 	if err != nil {
 		return Runtime{}, err
@@ -67,6 +74,27 @@ func EnsureRuntime() (Runtime, error) {
 		return Runtime{}, err
 	}
 	return selected, nil
+}
+
+func ensureCodexHome() error {
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	// #nosec G703 -- CODEX_HOME is the caller-selected profile root, not an untrusted filename joined beneath another authority.
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		return fmt.Errorf("create Codex home: %w", err)
+	}
+	// #nosec G703 -- inspect the same caller-selected profile root after creating it.
+	info, err := os.Stat(codexHome)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("codex home is not a directory: %s", codexHome)
+	}
+	return nil
 }
 
 func runtimeProfile(selected Runtime) (string, string, error) {
@@ -99,7 +127,8 @@ func preflightVersionChange(selected Runtime, loadedVersion string) error {
 }
 
 func activateRuntime(selected Runtime, versionMarker string) error {
-	if err := runQuiet(selected.Codex, "app-server", "daemon", "start"); err != nil {
+	persistentEnvironment := persistentRuntimeEnvironment(os.Environ())
+	if err := runQuietWithEnvironment(persistentEnvironment, selected.Codex, "app-server", "daemon", "start"); err != nil {
 		return fmt.Errorf("start Codex App Server: %w", err)
 	}
 	if err := writeAtomic(filepath.Join(selected.StateRoot, "native-runtime-path"), selected.Path); err != nil {
@@ -108,7 +137,7 @@ func activateRuntime(selected Runtime, versionMarker string) error {
 	if err := writeAtomic(versionMarker, selected.PluginVersion); err != nil {
 		return fmt.Errorf("publish plugin version: %w", err)
 	}
-	if err := runQuiet(selected.Path, "supervisor", "start", "--plugin-version", selected.PluginVersion); err != nil {
+	if err := runQuietWithEnvironment(persistentEnvironment, selected.Path, "supervisor", "start", "--plugin-version", selected.PluginVersion); err != nil {
 		return errors.New("app Server started, but peer supervisor replacement failed; rerun the launcher to retry it")
 	}
 	return nil
@@ -265,16 +294,19 @@ func processAbsent(pid int) bool {
 }
 
 func capture(path string, args ...string) (string, error) {
-	// #nosec G204 -- path is the selected Codex or installed runtime executable.
+	// #nosec G204 G702 -- path is the selected Codex or installed runtime executable.
 	command := exec.Command(path, args...)
 	command.Stderr = os.Stderr
 	payload, err := command.Output()
 	return string(payload), err
 }
 
-func runQuiet(path string, args ...string) error {
+func runQuietWithEnvironment(environment []string, path string, args ...string) error {
 	// #nosec G204 -- path is the selected Codex or installed runtime executable.
 	command := exec.Command(path, args...)
+	if environment != nil {
+		command.Env = environment
+	}
 	command.Stdin = nil
 	command.Stdout = io.Discard
 	command.Stderr = os.Stderr

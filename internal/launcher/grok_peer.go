@@ -50,26 +50,29 @@ var grokCLIHelpMarkers = []string{
 }
 
 type grokPlan struct {
-	mode              grokMode
-	peerName          string
-	requestedCwd      string
-	cwdExplicit       bool
-	sessionID         string
-	permissionMode    string
-	originalArgs      []string
-	interactiveArgs   []string
-	informationalPass bool
+	mode                grokMode
+	peerName            string
+	requestedCwd        string
+	cwdExplicit         bool
+	sessionID           string
+	permissionMode      string
+	permissionSpecified bool
+	peerContext         peerLaunchContext
+	originalArgs        []string
+	interactiveArgs     []string
+	informationalPass   bool
 }
 
 type grokHostRequest struct {
-	SessionID      string
-	Cwd            string
-	Name           string
-	OwnerPID       int
-	OwnerProcStart string
-	LaunchToken    string
-	PermissionMode string
-	GrokBin        string
+	SessionID       string
+	Cwd             string
+	Name            string
+	OwnerPID        int
+	OwnerProcStart  string
+	LaunchToken     string
+	PermissionMode  string
+	GrokBin         string
+	AgentRuntimeDir string
 }
 
 type grokHostReady struct {
@@ -114,6 +117,17 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 	if err != nil {
 		return err
 	}
+	resolved, err := resolvePeerLaunchContext(
+		plan.sessionID, "grok", plan.peerContext,
+		plan.permissionMode == "bypassPermissions", plan.permissionSpecified,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve Agent Sessions peer preferences: %w", err)
+	}
+	if resolved.Preference.AlwaysApprove && plan.permissionMode != "bypassPermissions" {
+		plan.permissionMode = "bypassPermissions"
+		plan.interactiveArgs = append(plan.interactiveArgs, "--always-approve")
+	}
 	ownerPID := os.Getpid()
 	ownerStart, err := capture(runtimePath, "launch", "proc-start", strconv.Itoa(ownerPID))
 	if err != nil {
@@ -127,6 +141,7 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 		SessionID: plan.sessionID, Cwd: plan.requestedCwd, Name: plan.peerName,
 		OwnerPID: ownerPID, OwnerProcStart: strings.TrimSpace(ownerStart),
 		LaunchToken: launchToken, PermissionMode: plan.permissionMode, GrokBin: grok,
+		AgentRuntimeDir: agentRuntimeDir(),
 	}
 	host, err := startHost(runtimePath, request)
 	if err != nil {
@@ -134,6 +149,7 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 	}
 	managed := grokInteractiveArguments(plan, host.ready)
 	environment := replaceGrokLaunchEnvironment(os.Environ(), launchToken, plan.sessionID, runtimePath)
+	environment = peerEnvironment(environment, plan.sessionID, "grok")
 	if err := Exec(grok, managed, environment); err != nil {
 		if host.process != nil {
 			_ = host.process.Kill()
@@ -143,17 +159,23 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 	return nil
 }
 
+//nolint:gocyclo // CLI parsing preserves Grok arguments while extracting the shared peer layer.
 func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 	plan := grokPlan{mode: grokModeFresh, requestedCwd: cwd, permissionMode: "default"}
-	mode, commandIndex, informational, err := classifyGrokMode(args)
+	contextArgs, peerContext, err := extractPeerLaunchContext(args, grokOptionConsumesNext)
 	if err != nil {
 		return grokPlan{}, err
 	}
-	peerLimit := len(args)
+	plan.peerContext = peerContext
+	mode, commandIndex, informational, err := classifyGrokMode(contextArgs)
+	if err != nil {
+		return grokPlan{}, err
+	}
+	peerLimit := len(contextArgs)
 	if mode == grokModePassthrough && commandIndex >= 0 {
 		peerLimit = commandIndex
 	}
-	forwarded, peerName, err := extractGrokPeerName(args, peerLimit)
+	forwarded, peerName, err := extractGrokPeerName(contextArgs, peerLimit)
 	if err != nil {
 		return grokPlan{}, err
 	}
@@ -176,6 +198,10 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 	}
 	plan.interactiveArgs = interactive
 	plan.permissionMode = permission
+	plan.permissionSpecified = grokPermissionSpecified(forwarded) || plan.peerContext.forceNoYolo
+	if plan.peerContext.forceNoYolo && permission == "bypassPermissions" {
+		return grokPlan{}, usageError("--no-yolo conflicts with a Grok always-approve option")
+	}
 	if resume {
 		plan.mode = grokModeResume
 		plan.sessionID = sessionID
@@ -322,6 +348,16 @@ func inspectManagedGrokArgs(args []string) ([]string, string, bool, string, erro
 		return nil, "", false, "", usageError("managed Grok resume requires an exact session UUID")
 	}
 	return forwarded, identity.sessionID, identity.resume, permissionMode, nil
+}
+
+func grokPermissionSpecified(args []string) bool {
+	for _, argument := range beforeDoubleDash(args) {
+		if argument == "--always-approve" || argument == "--yolo" || argument == "--permission-mode" ||
+			strings.HasPrefix(argument, "--permission-mode=") {
+			return true
+		}
+	}
+	return false
 }
 
 type grokManagedIdentity struct {
@@ -526,6 +562,9 @@ func grokExecutable() (string, error) {
 // bootstrapping Codex App Server or the Codex supervisor. Grok owns its own
 // private leader lifecycle and must remain usable on a host without Codex.
 func grokRuntimeExecutable() (string, error) {
+	if err := ensureCodexHome(); err != nil {
+		return "", err
+	}
 	runtimePath := strings.TrimSpace(os.Getenv("GROK_PEER_NATIVE_RUNTIME"))
 	if runtimePath == "" {
 		runtimePath = strings.TrimSpace(os.Getenv("CODEX_PEER_NATIVE_RUNTIME"))
@@ -655,6 +694,7 @@ func startGrokHost(runtimePath string, request grokHostRequest) (grokHostProcess
 	// and exits as soon as that exec-preserved owner disappears.
 	configureGrokHostProcess(command)
 	command.Env = replaceGrokLaunchEnvironment(os.Environ(), request.LaunchToken, request.SessionID, runtimePath)
+	command.Env = replaceLaneEnvironment(command.Env, agentRuntimeDirEnv, request.AgentRuntimeDir)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return grokHostProcess{}, fmt.Errorf("capture Grok host readiness: %w", err)
@@ -706,6 +746,9 @@ func grokHostArguments(request grokHostRequest) []string {
 		"grok-host", "--session-id", request.SessionID, "--cwd", request.Cwd,
 		"--owner-pid", strconv.Itoa(request.OwnerPID), "--owner-proc-start", request.OwnerProcStart,
 		"--permission-mode", request.PermissionMode, "--grok-bin", request.GrokBin,
+	}
+	if request.AgentRuntimeDir != "" {
+		args = append(args, "--agent-runtime-dir", request.AgentRuntimeDir)
 	}
 	if request.Name != "" {
 		args = append(args, "--name", request.Name)

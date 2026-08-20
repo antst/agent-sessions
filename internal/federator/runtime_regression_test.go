@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,79 +27,37 @@ func TestAgentInstanceLockRejectsSecondOwner(t *testing.T) {
 	}
 }
 
-func TestReplacementShadowWaitsForOldSocketOwner(t *testing.T) {
+func TestAgentStatusPublishesExactClaudeProfileEnvironment(t *testing.T) {
 	root := t.TempDir()
-	socket := filepath.Join(root, "shadow.sock")
-	oldCtx, cancelOld := context.WithCancel(context.Background())
-	oldDone := make(chan error, 1)
+	configRoot := filepath.Join(root, "claude")
+	rawConfig := filepath.Join(root, "x", "..", "claude")
+	if err := os.MkdirAll(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", rawConfig)
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	runtimeDir := filepath.Join(root, "runtime")
 	go func() {
-		oldDone <- RunShadow(oldCtx, ShadowOptions{
-			Listen: socket, Control: filepath.Join(root, "missing-control.sock"),
-			TargetID: "remote/peer", Logger: discardLogger(),
+		done <- RunAgent(ctx, AgentOptions{
+			HostID: "profile-test", ClaudeConfigDir: configRoot,
+			RuntimeDir: runtimeDir, StateDir: filepath.Join(root, "state"), Logger: discardLogger(),
 		})
 	}()
-	if !waitFor(func() bool { return probeUnix(socket, 50*time.Millisecond) }, time.Second) {
-		cancelOld()
-		t.Fatal("first shadow did not become ready")
-	}
-	oldInfo, err := os.Lstat(socket)
-	if err != nil {
-		cancelOld()
-		t.Fatal(err)
-	}
-
-	newCtx, cancelNew := context.WithCancel(context.Background())
-	newDone := make(chan error, 1)
-	go func() {
-		newDone <- RunShadow(newCtx, ShadowOptions{
-			Listen: socket, Control: filepath.Join(root, "missing-control.sock"),
-			TargetID: "remote/peer", Logger: discardLogger(),
-		})
-	}()
-	time.Sleep(75 * time.Millisecond)
-	currentInfo, err := os.Lstat(socket)
-	if err != nil || !os.SameFile(oldInfo, currentInfo) {
-		cancelOld()
-		cancelNew()
-		t.Fatalf("replacement rebound the socket before the old owner exited: %v", err)
-	}
-
-	cancelOld()
-	if err := <-oldDone; err != nil {
-		cancelNew()
-		t.Fatal(err)
-	}
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	var lastStatErr, lastDialErr error
-	for {
-		_, lastStatErr = os.Lstat(socket)
-		conn, dialErr := net.DialTimeout("unix", socket, 50*time.Millisecond)
-		lastDialErr = dialErr
-		if dialErr == nil {
-			_ = conn.Close()
-			break
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("agent: %v", err)
 		}
-		select {
-		case err := <-newDone:
-			cancelNew()
-			t.Fatalf("replacement shadow exited before retaining its socket: %v", err)
-		case <-deadline.C:
-			cancelNew()
-			t.Fatalf("replacement shadow stayed live but did not retain a reachable socket: lstat=%v dial=%v", lastStatErr, lastDialErr)
-		case <-ticker.C:
-		}
-	}
-	select {
-	case err := <-newDone:
-		t.Fatalf("replacement shadow exited early: %v", err)
-	default:
-	}
-	cancelNew()
-	if err := <-newDone; err != nil {
-		t.Fatal(err)
+	})
+	if !waitFor(func() bool {
+		status, err := ReadAgentStatus(runtimeDir)
+		return err == nil && status.ClaudeConfigEnvSet && status.ClaudeConfigEnvValue == rawConfig &&
+			status.ClaudeSecureEnvSet && status.ClaudeSecureConfig == ""
+	}, 2*time.Second) {
+		status, err := ReadAgentStatus(runtimeDir)
+		t.Fatalf("agent profile status = %+v, %v", status, err)
 	}
 }
 
@@ -192,21 +149,23 @@ func TestHubExpiresSilentAgent(t *testing.T) {
 	}
 }
 
-func TestLocalDeliveryFailureDoesNotDisconnectAgent(t *testing.T) {
+func TestGroupedLocalDeliveryFailureDoesNotDisconnectAgent(t *testing.T) {
 	registry := filepath.Join(t.TempDir(), "sessions")
 	if err := os.MkdirAll(registry, 0700); err != nil {
 		t.Fatal(err)
 	}
 	agent := &agent{
 		logger: discardLogger(), registryDir: registry,
-		local: map[string]localPeer{}, remote: map[string]Peer{}, shadows: map[string]*shadowHandle{},
+		local: map[string]localPeer{}, remote: map[string]Peer{
+			"remote/source": groupedRemoteLaneParent("remote", "source", "claude"),
+		},
 	}
 	frame, err := json.Marshal(map[string]any{"type": "user"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := agent.handleHubMessage(Message{
-		Type: "deliver", SourceID: "remote/source", TargetID: "gone/target", Frame: frame,
+		Type: "group_deliver", SourceID: "remote/source", TargetID: "gone/target", Frame: frame,
 	}); err != nil {
 		t.Fatalf("one stale peer disconnected its host agent: %v", err)
 	}
@@ -232,8 +191,9 @@ func TestAgentRefreshesLocalPeersWhileHubIsDisconnected(t *testing.T) {
 	go func() {
 		done <- RunAgent(ctx, AgentOptions{
 			Hub: hubAddress, HostID: "offline-host", HostName: "offline-host",
-			ClaudeConfigDir: configDir, RuntimeDir: runtimeDir, ScanInterval: 20 * time.Millisecond,
-			Logger: discardLogger(),
+			ClaudeConfigDir: configDir, RuntimeDir: runtimeDir, StateDir: filepath.Join(root, "state"),
+			ScanInterval: 20 * time.Millisecond,
+			Logger:       discardLogger(),
 		})
 	}()
 	t.Cleanup(func() {
@@ -245,6 +205,11 @@ func TestAgentRefreshesLocalPeersWhileHubIsDisconnected(t *testing.T) {
 		return statusErr == nil && !status.Connected && status.LocalPeers == 0
 	}, 2*time.Second) {
 		t.Fatal("disconnected agent control socket did not become ready")
+	}
+	if _, err := ResolveSessionPreferences(runtimeDir, ResolvePreferencesRequest{
+		SessionID: "offline-session", Product: "codex", Groups: []string{"project"}, GroupsSpecified: true,
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	peerSocket := filepath.Join(root, "local-peer.sock")
@@ -262,11 +227,11 @@ func TestAgentRefreshesLocalPeersWhileHubIsDisconnected(t *testing.T) {
 			_ = conn.Close()
 		}
 	}()
-	recordPath := filepath.Join(registryDir, strconv.Itoa(os.Getpid())+".json")
-	if err := writeJSONAtomic(recordPath, registryRecord{
-		PID: os.Getpid(), SessionID: "offline-session", Name: "offline-peer",
-		ProcStart: processStart(os.Getpid()), MessagingSocketPath: peerSocket,
-	}); err != nil {
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: "offline-session", Product: "codex", Name: "offline-peer",
+		PID: os.Getpid(), ProcStart: processStart(os.Getpid()), Socket: peerSocket,
+	}
+	if _, err := RegisterPeer(runtimeDir, registration); err != nil {
 		t.Fatal(err)
 	}
 	if !waitFor(func() bool {
@@ -275,7 +240,7 @@ func TestAgentRefreshesLocalPeersWhileHubIsDisconnected(t *testing.T) {
 	}, 2*time.Second) {
 		t.Fatal("local peer count did not refresh while the hub was disconnected")
 	}
-	if err := os.Remove(recordPath); err != nil {
+	if err := UnregisterPeer(runtimeDir, registration); err != nil {
 		t.Fatal(err)
 	}
 	if !waitFor(func() bool {

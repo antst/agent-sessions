@@ -1,7 +1,7 @@
 {
   "name": "claude-code-peer",
-  "version": "0.1.1+codex.20260816120714",
-  "description": "Give Codex, Claude, and Grok sessions a durable lifecycle and cross-session messaging.",
+  "version": "0.1.1+codex.20260820184418",
+  "description": "Give grouped Codex, Claude, and Grok sessions a durable lifecycle, all-target lanes, and local or federated messaging.",
   "author": {
     "name": "Agent Sessions contributors"
   },

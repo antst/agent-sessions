@@ -144,7 +144,9 @@ func grokLaneWorkerEnvironment(environment []string, launchToken string, state g
 	blocked := map[string]bool{
 		"SHELL": true, "GROK_SHELL": true,
 		grokToolWrapperModeEnv: true, grokToolRealShellEnv: true,
-		grokToolWrapperPathEnv: true,
+		grokToolWrapperPathEnv:   true,
+		peerSessionIDEnvironment: true, "AGENT_SESSIONS_PRODUCT": true, agentRuntimeDirEnvironment: true,
+		remoteParentEnvironment: true,
 	}
 	result := grokLaneManagerEnvironment(environment, launchToken, state.SessionID)
 	filtered := result[:0]
@@ -161,6 +163,8 @@ func grokLaneWorkerEnvironment(environment []string, launchToken string, state g
 		"SHELL="+wrapperPath, "GROK_SHELL="+wrapperPath,
 		grokToolWrapperModeEnv+"=1", grokToolRealShellEnv+"="+realShell,
 		grokToolWrapperPathEnv+"="+wrapperPath,
+		peerSessionIDEnvironment+"="+state.SessionID, "AGENT_SESSIONS_PRODUCT=grok",
+		agentRuntimeDirEnvironment+"="+laneAgentRuntimeDir(),
 	)
 }
 

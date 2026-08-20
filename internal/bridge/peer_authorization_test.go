@@ -93,6 +93,189 @@ func TestSupervisorAuthorizationRequiresExplicitPeerCapability(t *testing.T) {
 	}
 }
 
+func TestUserPromptLateAttachesPreparedCodex0148OwnerWithDistinctSessionFamily(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	codexHome := filepath.Join(root, "codex")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	threadID := "00000000-0000-0000-0000-000000000148"
+	sessionID := "00000000-0000-0000-0000-000000000147"
+	paths := resolveNativePaths()
+	transcriptPath := writeTestCodexHookTranscript(t, paths, threadID, sessionID)
+	if err := writeInteractiveOwnerRecord(paths, interactiveOwnerRecord{
+		ThreadID: threadID, RequestID: "codex-0148-early-session-start", OwnerPID: os.Getpid(),
+		OwnerProcStart: readProcStart(os.Getpid()), Pending: true, Prepared: true,
+		Cwd: root, Name: "codex-0148-parent", NameSource: "explicit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	originalReader := preparedOwnerProcessArgs
+	preparedOwnerProcessArgs = func(pid int, procStart string) ([]string, error) {
+		if pid != os.Getpid() || procStart != readProcStart(os.Getpid()) {
+			t.Fatalf("late attach read identity = %d/%q", pid, procStart)
+		}
+		return []string{"/opt/codex", "--remote", "unix://", "resume", threadID,
+			"-C", root, "--sandbox", "workspace-write"}, nil
+	}
+	t.Cleanup(func() { preparedOwnerProcessArgs = originalReader })
+	supervisorSocket := startAuthorizationControlServer(t, func(request map[string]any) map[string]any {
+		if stringValue(request["action"]) != "register" {
+			return map[string]any{}
+		}
+		return map[string]any{"state": map[string]any{
+			"sessionId": threadID, "name": "codex-0148-parent", "socketPath": "",
+		}}
+	})
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+
+	output, err := handleNativeHook(hookInput{
+		Event: "UserPromptSubmit", SessionID: sessionID, TranscriptPath: transcriptPath, Cwd: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := readInteractiveOwner(paths, threadID)
+	if owner == nil || owner.Pending || !authorizedPeerThreadNative(paths, threadID) {
+		t.Fatalf("late attached owner = %#v", owner)
+	}
+	specific, _ := output["hookSpecificOutput"].(map[string]any)
+	context := stringValue(specific["additionalContext"])
+	if !strings.Contains(context, "peer messaging is active") || !strings.Contains(context, threadID) {
+		t.Fatalf("late attach context = %#v", output)
+	}
+	if readInteractiveOwner(paths, sessionID) != nil || authorizedPeerThreadNative(paths, sessionID) {
+		t.Fatal("session-family id was promoted as a peer capability")
+	}
+}
+
+func TestCodexHookThreadIDRequiresAttestedRolloutBinding(t *testing.T) {
+	root := t.TempDir()
+	paths := nativePaths{codexHome: filepath.Join(root, "codex")}
+	threadID := "00000000-0000-0000-0000-000000000152"
+	sessionID := "00000000-0000-0000-0000-000000000153"
+	transcriptPath := writeTestCodexHookTranscript(t, paths, threadID, sessionID)
+
+	got, err := codexHookThreadID(paths, hookInput{SessionID: sessionID, TranscriptPath: transcriptPath})
+	if err != nil || got != threadID {
+		t.Fatalf("resolved hook thread = %q, %v; want %q", got, err, threadID)
+	}
+	if _, err := codexHookThreadID(paths, hookInput{
+		SessionID: "00000000-0000-0000-0000-000000000154", TranscriptPath: transcriptPath,
+	}); err == nil {
+		t.Fatal("hook family id mismatching session metadata was accepted")
+	}
+
+	outside := filepath.Join(root, "outside.jsonl")
+	body, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codexHookThreadID(paths, hookInput{SessionID: sessionID, TranscriptPath: outside}); err == nil {
+		t.Fatal("hook transcript outside CODEX_HOME sessions was accepted")
+	}
+
+	malformed := filepath.Join(filepath.Dir(transcriptPath), "malformed.jsonl")
+	if err := os.WriteFile(malformed, []byte(`{"type":"response_item","payload":{}}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codexHookThreadID(paths, hookInput{SessionID: sessionID, TranscriptPath: malformed}); err == nil {
+		t.Fatal("hook transcript without leading session metadata was accepted")
+	}
+}
+
+func writeTestCodexHookTranscript(t *testing.T, paths nativePaths, threadID, sessionID string) string {
+	t.Helper()
+	directory := filepath.Join(paths.codexHome, "sessions", "2026", "08", "19")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "rollout-test-"+threadID+".jsonl")
+	body, err := json.Marshal(map[string]any{
+		"timestamp": "2026-08-19T00:00:00Z", "type": "session_meta",
+		"payload": map[string]any{"id": threadID, "session_id": sessionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(body, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestPreparedOwnerLateAttachRequiresExactManagedResumeArgv(t *testing.T) {
+	threadID := "00000000-0000-0000-0000-000000000149"
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "exact with trailing user flags", args: []string{"codex", "--remote", "unix://", "resume", threadID, "--sandbox", "workspace-write"}, want: true},
+		{name: "script interpreter prefix", args: []string{"node", "/opt/codex.js", "--remote", "unix://", "resume", threadID}, want: true},
+		{name: "wrong thread", args: []string{"codex", "--remote", "unix://", "resume", "00000000-0000-0000-0000-000000000150"}},
+		{name: "ordinary resume", args: []string{"codex", "resume", threadID}},
+		{name: "prompt text after separator", args: []string{"codex", "--", "--remote", "unix://", "resume", threadID}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := managedCodexResumeArgv(test.args, threadID); got != test.want {
+				t.Fatalf("managed resume argv = %v, want %v for %q", got, test.want, test.args)
+			}
+		})
+	}
+}
+
+func TestPreparedOwnerLateAttachRejectsReusedPIDAndUnreadableArgv(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		staleStart bool
+		readErr    error
+		wantErr    bool
+	}{
+		{name: "reused pid", staleStart: true},
+		{name: "unreadable argv", readErr: errors.New("argv unavailable"), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			threadID := "00000000-0000-0000-0000-000000000151"
+			paths := nativePaths{dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "profile")}
+			record := interactiveOwnerRecord{
+				ThreadID: threadID, RequestID: "reject-late-attach", OwnerPID: os.Getpid(),
+				OwnerProcStart: readProcStart(os.Getpid()), Pending: true, Prepared: true,
+			}
+			if err := writeInteractiveOwnerRecord(paths, record); err != nil {
+				t.Fatal(err)
+			}
+			if test.staleStart {
+				record.OwnerProcStart += "-reused"
+				if err := writeJSONAtomic(interactiveOwnerPath(paths, threadID), record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			originalReader := preparedOwnerProcessArgs
+			called := false
+			preparedOwnerProcessArgs = func(_ int, _ string) ([]string, error) {
+				called = true
+				return []string{"codex", "--remote", "unix://", "resume", threadID}, test.readErr
+			}
+			t.Cleanup(func() { preparedOwnerProcessArgs = originalReader })
+			owner, attached, err := attachPreparedOwnerFromUserPrompt(paths, threadID)
+			if (err != nil) != test.wantErr || owner != nil || attached || authorizedPeerThreadNative(paths, threadID) {
+				t.Fatalf("rejected late attach = owner %#v attached %v err %v", owner, attached, err)
+			}
+			if called == test.staleStart {
+				t.Fatalf("argv reader called=%v, staleStart=%v", called, test.staleStart)
+			}
+		})
+	}
+}
+
 func TestUnauthorizedSupervisorOperationsFailBeforeMutation(t *testing.T) {
 	root := t.TempDir()
 	paths := nativePaths{
@@ -1267,9 +1450,20 @@ func TestStdioMCPRequiresHostAttestationBeforeEveryTool(t *testing.T) {
 	if result := call(peerID, peerID, peerID, peerID); mcpResultIsError(result) {
 		t.Fatalf("exact host-attested caller was rejected: %#v", result)
 	}
+	if result := call(peerID, ordinaryID, peerID, peerID); mcpResultIsError(result) {
+		t.Fatalf("distinct valid Codex session family rejected exact thread authority: %#v", result)
+	}
+	if result := call(peerID, "", peerID, peerID); !mcpResultIsError(result) ||
+		!strings.Contains(mcpResultText(result), "inactive outside an attested peer session") {
+		t.Fatalf("missing Codex session-family metadata was accepted: %#v", result)
+	}
 	if result := call(ordinaryID, ordinaryID, ordinaryID, peerID); !mcpResultIsError(result) ||
 		!strings.Contains(mcpResultText(result), "inactive outside an attested peer session") {
 		t.Fatalf("ordinary caller used a live peer route: %#v", result)
+	}
+	if result := call(ordinaryID, peerID, ordinaryID, peerID); !mcpResultIsError(result) ||
+		!strings.Contains(mcpResultText(result), "inactive outside an attested peer session") {
+		t.Fatalf("ordinary child borrowed its session-family peer authority: %#v", result)
 	}
 	if result := call(peerID, peerID, ordinaryID, peerID); !mcpResultIsError(result) ||
 		!strings.Contains(mcpResultText(result), "inactive outside an attested peer session") {

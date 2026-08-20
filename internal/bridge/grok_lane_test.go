@@ -110,6 +110,17 @@ func TestParseGrokLaneArgsCommandContract(t *testing.T) {
 	}
 }
 
+func TestGrokLaneUsageAdvertisesGroupOptions(t *testing.T) {
+	t.Parallel()
+
+	usage := grokLaneUsage()
+	for _, option := range []string{"--group GROUP", "--inherit-groups", "--no-inherit-groups"} {
+		if !strings.Contains(usage, option) {
+			t.Fatalf("Grok lane usage does not advertise %s", option)
+		}
+	}
+}
+
 func TestParseGrokLaneArgsRejectsUnknownOrMissingTarget(t *testing.T) {
 	t.Parallel()
 
@@ -240,6 +251,51 @@ func TestGrokLaneInfrastructureFailuresUseFailedTerminalTaxonomy(t *testing.T) {
 		if manager.state.Turns[0].Status != "failed" || manager.state.Turns[0].Outcome != "failed" || manager.state.Turns[0].Exit != 1 {
 			t.Fatalf("infrastructure failure %q taxonomy = %+v", reason, manager.state.Turns[0])
 		}
+	}
+}
+
+func TestGrokLaneStartupShutdownKeepsFirstSignalOrArchiveCause(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
+	paths := resolveNativePaths()
+	for _, test := range []struct {
+		name   string
+		reason string
+	}{
+		{name: "signal", reason: "manager signalled: hangup"},
+		{name: "archive", reason: "explicit archive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			turn := newGrokLaneTurn("work", 0)
+			startupDone := make(chan struct{})
+			close(startupDone)
+			manager := &grokLaneManager{
+				paths: paths,
+				state: grokLaneState{
+					SessionID: randomID(), Status: "starting", RuntimeDir: paths.runtimeDir,
+					Turns: []grokLaneTurn{turn},
+				},
+				done: make(chan struct{}), startupDone: startupDone,
+				persistOverride: func(grokLaneState) error { return nil },
+			}
+			manager.beginShutdown(test.reason, true)
+
+			// Reproduce the startup goroutine reaching its generic cleanup before
+			// the original signal/archive goroutine gets cleanupOnce.
+			manager.shutdown("manager startup failed", false)
+			manager.shutdown(test.reason, true)
+
+			got := manager.state.Turns[0]
+			if got.Status != "interrupted" || got.Outcome != "interrupted" || got.Exit != 130 || got.Error != test.reason {
+				t.Fatalf("first shutdown cause %q taxonomy = %+v", test.reason, got)
+			}
+			if err := manager.closingError("grok lane manager is closing before publication"); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("private closing diagnostic = %v; want cause %q", err, test.reason)
+			}
+		})
 	}
 }
 
@@ -403,6 +459,48 @@ func TestGrokLaneTerminalNoticeFramePreservesGrokProduct(t *testing.T) {
 	}
 	if stringValue(frame["msg_id"]) != "notice-id" || envelope.MessageID != "notice-id" {
 		t.Fatalf("Grok lane terminal notice did not retain its deduplication identity: %#v, %+v", frame, envelope)
+	}
+}
+
+func TestGrokLaneMaintenanceRetriesTerminalNotice(t *testing.T) {
+	runtimeDir := useBridgeTestAgent(t)
+	root := t.TempDir()
+	paths := nativePaths{profileRoot: filepath.Join(root, "profile")}
+	state := grokLaneState{
+		Type: "grok-peer-lane", Name: "worker", SessionID: "grok-notice-retry", Status: "idle", Persistent: true,
+		NotifyTarget: "session:target-session",
+		Notices: []claudeLaneNotice{{
+			ID: "notice-retry", TurnID: "turn-1", Target: "session:target-session", Message: "terminal", CreatedAt: 1,
+		}},
+	}
+	_, stopParent := registerBridgeTestParent(t, runtimeDir)
+	prepareBridgeTestLaneParentForProduct(t, runtimeDir, state.SessionID, "target-session", "grok")
+	stopParent()
+	if err := writeGrokLaneState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	manager := &grokLaneManager{paths: paths, state: state, done: make(chan struct{})}
+	manager.flushTerminalNotices()
+	latest, err := readGrokLaneState(paths, state.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Notices[0].SentAt != 0 || latest.Notices[0].Attempts == 0 {
+		t.Fatalf("failed first delivery was not retained for retry: %+v", latest.Notices[0])
+	}
+	received, _ := registerBridgeTestParent(t, runtimeDir)
+	go manager.maintenanceLoop()
+	defer close(manager.done)
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live Grok manager did not retry its terminal notice")
+	}
+	if !waitForCondition(time.Second, func() bool {
+		latest, readErr := readGrokLaneState(paths, state.SessionID)
+		return readErr == nil && latest.Notices[0].SentAt != 0
+	}) {
+		t.Fatal("retried Grok terminal notice was not acknowledged durably")
 	}
 }
 

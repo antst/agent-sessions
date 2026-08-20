@@ -3,20 +3,23 @@ package federator
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 )
 
 // AgentOptions configures one host agent and its local Claude registry.
@@ -26,6 +29,7 @@ type AgentOptions struct {
 	HostName             string
 	ClaudeConfigDir      string
 	RuntimeDir           string
+	StateDir             string
 	Executable           string
 	ScanInterval         time.Duration
 	HeartbeatInterval    time.Duration
@@ -38,42 +42,57 @@ type AgentOptions struct {
 }
 
 type agent struct {
-	options     AgentOptions
-	logger      *log.Logger
-	registryDir string
-	controlPath string
+	options       AgentOptions
+	logger        *log.Logger
+	registryDir   string
+	controlPath   string
+	catalog       *sessionCatalog
+	serviceRecord string
+	serviceKey    string
+	serviceToken  string
+	claudeProfile claudeprofile.Source
+	routeRefresh  func() error
 
-	mu           sync.RWMutex
-	local        map[string]localPeer
-	remote       map[string]Peer
-	remoteHosts  map[string]Host
-	network      *wireConn
-	localChanged chan struct{}
+	mu             sync.RWMutex
+	preparationMu  sync.Mutex
+	local          map[string]localPeer
+	retirements    map[string]localPeer
+	preparations   map[string]peerPreparation
+	preparationDir string
+	remote         map[string]Peer
+	remoteHosts    map[string]Host
+	network        *wireConn
+	localChanged   chan struct{}
 
-	laneMu       sync.Mutex
-	pendingLanes map[string]*pendingLane
-	laneRuns     map[string]*laneRun
-
-	shadowMu sync.Mutex
-	shadows  map[string]*shadowHandle
+	laneMu            sync.Mutex
+	pendingLanes      map[string]*pendingLane
+	laneRuns          map[string]*laneRun
+	deliveryMu        sync.Mutex
+	pendingDeliveries map[string]chan error
 }
 
-type shadowHandle struct {
-	peer         Peer
-	pid          int
-	socket       string
-	registryPath string
-	process      *os.Process
-	done         chan struct{}
+func preferenceUpdateFromMessage(message Message) SessionPreferenceUpdate {
+	return SessionPreferenceUpdate{
+		SessionID: message.SessionID, Product: message.Product, Kind: message.SessionKind,
+		ExplicitGroups: message.Groups, GroupsSpecified: message.GroupsSpecified,
+		ParentSession: message.ParentSessionID, ParentHostID: message.ParentHostID,
+		ParentGroups: message.ParentGroups, ParentSpecified: message.ParentSpecified,
+		InheritParentGroups: message.InheritParentGroups, InheritGroupsSpecified: message.InheritGroupsSpecified,
+		AlwaysApprove: message.AlwaysApprove, AlwaysApproveSpecified: message.AlwaysApproveSpecified,
+	}
+}
+
+func (a *agent) resolvedClaudeProfile() (claudeprofile.Source, error) {
+	if a.claudeProfile.ConfigRoot != "" {
+		return a.claudeProfile, nil
+	}
+	return claudeprofile.SharedSource(a.options.ClaudeConfigDir)
 }
 
 // RunAgent connects one local Claude registry to a federation hub until ctx is canceled.
 //
 //nolint:gocyclo // Startup validation remains linear so each operator error is explicit.
 func RunAgent(ctx context.Context, options AgentOptions) error {
-	if options.Hub == "" {
-		return errors.New("agent hub address is required")
-	}
 	options.HostID = cleanID(options.HostID)
 	if options.HostID == "" {
 		return errors.New("agent host id is required")
@@ -86,6 +105,9 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 	}
 	if options.RuntimeDir == "" {
 		options.RuntimeDir = DefaultRuntimeDir()
+	}
+	if options.StateDir == "" {
+		options.StateDir = DefaultStateDir(options.HostID)
 	}
 	if options.Executable == "" {
 		executable, err := os.Executable()
@@ -106,7 +128,18 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 	if err := configureLaneExecutables(&options); err != nil {
 		return err
 	}
+	claudeProfile, err := claudeprofile.SharedSource(options.ClaudeConfigDir)
+	if err != nil {
+		return fmt.Errorf("resolve agent Claude profile: %w", err)
+	}
 	if err := ensureDir(options.RuntimeDir); err != nil {
+		return err
+	}
+	if err := ensureDir(options.StateDir); err != nil {
+		return err
+	}
+	catalog, err := openSessionCatalog(filepath.Join(options.StateDir, "sessions.json"), options.HostID)
+	if err != nil {
 		return err
 	}
 	instanceLock, err := acquireAgentInstanceLock(options.RuntimeDir)
@@ -123,12 +156,25 @@ func RunAgent(ctx context.Context, options AgentOptions) error {
 		return err
 	}
 	defer releaseAgentInstanceLock(registryLock)
+	serviceTokenBytes := make([]byte, 16)
+	if _, err := rand.Read(serviceTokenBytes); err != nil {
+		return fmt.Errorf("create Claude service peer token: %w", err)
+	}
 	agent := &agent{
 		options: options, logger: defaultLogger(options.Logger), registryDir: registryDir,
-		controlPath: filepath.Join(options.RuntimeDir, "agent.sock"),
-		local:       map[string]localPeer{}, remote: map[string]Peer{}, remoteHosts: map[string]Host{}, shadows: map[string]*shadowHandle{},
+		claudeProfile: claudeProfile,
+		controlPath:   filepath.Join(options.RuntimeDir, "agent.sock"),
+		local:         map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(options.StateDir, "claude-peer-preparations"),
+		remote: map[string]Peer{}, remoteHosts: map[string]Host{},
 		pendingLanes: map[string]*pendingLane{}, laneRuns: map[string]*laneRun{},
-		localChanged: make(chan struct{}, 1),
+		pendingDeliveries: map[string]chan error{},
+		localChanged:      make(chan struct{}, 1),
+		catalog:           catalog,
+		serviceToken:      hex.EncodeToString(serviceTokenBytes),
+	}
+	if err := agent.loadPeerPreparations(); err != nil {
+		return err
 	}
 	return agent.run(ctx)
 }
@@ -168,12 +214,20 @@ func (a *agent) run(ctx context.Context) error {
 		_ = os.Remove(a.controlPath)
 		a.setNetwork(nil)
 		a.clearRemotePeers()
+		a.removeServiceRecord()
 	}()
+	if err := a.publishServiceRecord(); err != nil {
+		return err
+	}
 	go a.controlLoop(ctx, listener)
 	if err := a.refreshLocal(); err != nil {
 		a.logger.Printf("local discovery failed: %v", err)
 	}
 	go a.localDiscoveryLoop(ctx)
+	if a.options.Hub == "" {
+		<-ctx.Done()
+		return nil
+	}
 	backoff := 250 * time.Millisecond
 	for {
 		if ctx.Err() != nil {
@@ -247,7 +301,7 @@ func (a *agent) runHubSession(ctx context.Context) error {
 				previous = current
 			}
 		case <-scanTicker.C:
-			a.reconcileShadows()
+			a.reconcileRegisteredPeers()
 		case <-pingTicker.C:
 			lastActivity := time.Unix(0, lastHubActivity.Load())
 			if time.Since(lastActivity) > a.options.HeartbeatTimeout {
@@ -260,6 +314,7 @@ func (a *agent) runHubSession(ctx context.Context) error {
 	}
 }
 
+//nolint:gocyclo // Hub protocol variants are intentionally dispatched in one audited switch.
 func (a *agent) handleHubMessage(message Message) error {
 	switch message.Type {
 	case "hello_ok", "pong":
@@ -280,15 +335,28 @@ func (a *agent) handleHubMessage(message Message) error {
 			}
 		}
 		a.mu.Unlock()
-		a.reconcileShadows()
 		return nil
 	case "deliver":
-		if err := a.deliverLocal(message); err != nil {
-			a.logger.Printf("delivery %s -> %s failed: %v", message.SourceID, message.TargetID, err)
+		return errors.New("legacy flat delivery is not supported by protocol v3")
+	case "group_deliver":
+		err := a.deliverGroupedLocal(message)
+		if err != nil {
+			a.logger.Printf("grouped delivery %s -> %s failed: %v", message.SourceID, message.TargetID, err)
 		}
+		a.sendDeliveryOutcome(message, err)
 		return nil
-	case "delivery_error":
-		a.logger.Printf("delivery %s -> %s failed: %s", message.SourceID, message.TargetID, message.Error)
+	case "terminal_notice_deliver":
+		err := a.deliverTerminalNoticeLocal(message)
+		if err != nil {
+			a.logger.Printf("terminal notice %s -> %s failed: %v", message.SourceID, message.TargetID, err)
+		}
+		a.sendDeliveryOutcome(message, err)
+		return nil
+	case "delivery_ack", "delivery_error":
+		if message.Type == "delivery_error" {
+			a.logger.Printf("delivery %s -> %s failed: %s", message.SourceID, message.TargetID, message.Error)
+		}
+		a.completePendingDelivery(message)
 		return nil
 	case "lane_exec":
 		a.startRemoteLane(message)
@@ -319,6 +387,126 @@ func (a *agent) startControlListener() (net.Listener, error) {
 	return listener, nil
 }
 
+func (a *agent) publishServiceRecord() error {
+	pid := os.Getpid()
+	procStart := processStart(pid)
+	if procStart == "" {
+		return errors.New("cannot corroborate host agent process identity")
+	}
+	if err := a.removeStaleServiceRecords(pid); err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	record := registryRecord{
+		PID: pid, SessionID: "agent-" + sessionKey(a.options.HostID),
+		Cwd: a.options.StateDir, Name: "agent-sessions--" + cleanPeerName(a.options.HostName),
+		Status: "idle", Entrypoint: "agent-sessions", ProcStart: procStart,
+		MessagingSocketPath: a.controlPath, StartedAt: now,
+		Version: "agent-sessions/" + RuntimeVersion, PeerProtocol: GroupProtocolVersion,
+		Kind: "service", NameSource: "agent", AgentService: true,
+		UpdatedAt: now, StatusUpdatedAt: now,
+	}
+	path := filepath.Join(a.registryDir, strconv.Itoa(pid)+".json")
+	keyName, err := ClaudeServiceKeyName(pid, a.controlPath)
+	if err != nil {
+		return err
+	}
+	keyPath := filepath.Join(a.registryDir, keyName)
+	if err := writeJSONAtomic(keyPath, map[string]string{"peerToken": a.serviceToken, "procStart": procStart}); err != nil {
+		return err
+	}
+	// Publish the discoverable row only after its authentication capability is
+	// durable. A key without a row is inert; a row without a key is unusable.
+	if err := writeJSONAtomic(path, record); err != nil {
+		_ = os.Remove(keyPath)
+		return err
+	}
+	a.serviceRecord = path
+	a.serviceKey = keyPath
+	return nil
+}
+
+func (a *agent) removeStaleServiceRecords(currentPID int) error {
+	entries, err := os.ReadDir(a.registryDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := a.removeStaleServiceRecord(entry.Name(), currentPID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *agent) removeStaleServiceRecord(name string, currentPID int) error {
+	pid := parsePID(name)
+	if pid <= 1 || pid == currentPID {
+		return nil
+	}
+	path := filepath.Join(a.registryDir, name)
+	record, ok, err := readAgentServiceRecord(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if record.PID != pid || record.Entrypoint != "agent-sessions" || record.ProcStart == "" {
+		return fmt.Errorf("invalid stale host-agent service record %s", name)
+	}
+	if processLive(pid) && processStart(pid) == record.ProcStart {
+		return fmt.Errorf("another live host-agent service record owns PID %d", pid)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return errors.New("remove stale host-agent service record failed")
+	}
+	keyName, err := ClaudeServiceKeyName(pid, record.MessagingSocketPath)
+	if err != nil {
+		return fmt.Errorf("invalid stale host-agent service key identity %s", name)
+	}
+	if err := os.Remove(filepath.Join(a.registryDir, keyName)); err != nil && !os.IsNotExist(err) {
+		return errors.New("remove stale host-agent service key failed")
+	}
+	return nil
+}
+
+func readAgentServiceRecord(path string) (registryRecord, bool, error) {
+	body, err := os.ReadFile(path) //nolint:gosec // exact configured registry entry.
+	if os.IsNotExist(err) {
+		return registryRecord{}, false, nil
+	}
+	if err != nil {
+		return registryRecord{}, false, err
+	}
+	if !json.Valid(body) {
+		return registryRecord{}, false, nil
+	}
+	var record registryRecord
+	_ = json.Unmarshal(body, &record)
+	if !record.AgentService {
+		return registryRecord{}, false, nil
+	}
+	return record, true, nil
+}
+
+func (a *agent) removeServiceRecord() {
+	if a.serviceRecord == "" {
+		return
+	}
+	body, err := os.ReadFile(a.serviceRecord)
+	if err != nil {
+		return
+	}
+	var record registryRecord
+	if json.Unmarshal(body, &record) == nil && record.AgentService && record.PID == os.Getpid() {
+		_ = os.Remove(a.serviceRecord)
+		if a.serviceKey != "" {
+			_ = os.Remove(a.serviceKey)
+		}
+	}
+}
+
 func (a *agent) controlLoop(ctx context.Context, listener net.Listener) {
 	go func() {
 		<-ctx.Done()
@@ -333,6 +521,7 @@ func (a *agent) controlLoop(ctx context.Context, listener net.Listener) {
 	}
 }
 
+//nolint:gocyclo // One framed control dispatcher keeps protocol replies uniform.
 func (a *agent) handleControl(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -340,8 +529,38 @@ func (a *agent) handleControl(conn net.Conn) {
 	scanner.Buffer(make([]byte, 4096), maxWireBytes)
 	response := Message{Type: "error", Error: "invalid agent control request"}
 	if scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		authenticatedNativePeer := false
+		var auth struct {
+			Type  string `json:"type"`
+			Token string `json:"token"`
+		}
+		if json.Unmarshal(line, &auth) == nil && auth.Type == "auth" {
+			if subtle.ConstantTimeCompare([]byte(auth.Token), []byte(a.serviceToken)) != 1 {
+				return
+			}
+			if !scanner.Scan() {
+				return
+			}
+			authenticatedNativePeer = true
+			line = append([]byte(nil), scanner.Bytes()...)
+		}
 		var message Message
-		if json.Unmarshal(scanner.Bytes(), &message) == nil {
+		if json.Unmarshal(line, &message) == nil {
+			if message.Type == "user" {
+				if !authenticatedNativePeer {
+					return
+				}
+				if _, err := a.handleNativeCarrierFrame(line); err != nil {
+					a.logger.Printf("Claude carrier request failed: %v", err)
+				}
+				// Claude's native sender writes one frame, half-closes, and treats a
+				// clean peer close as its transport acknowledgement. Results travel
+				// asynchronously to the registered sender socket.
+				for scanner.Scan() {
+				}
+				return
+			}
 			if message.Type == "lane_exec" {
 				_ = conn.SetDeadline(time.Time{})
 				a.handleLaneControl(conn, message)
@@ -349,11 +568,7 @@ func (a *agent) handleControl(conn net.Conn) {
 			}
 			switch message.Type {
 			case "shadow_deliver":
-				if err := a.forwardShadowFrame(message.TargetID, message.Frame); err != nil {
-					response.Error = err.Error()
-				} else {
-					response = Message{Type: "accepted"}
-				}
+				response.Error = "legacy shadow delivery is not supported by protocol v3"
 			case "status":
 				body, err := json.Marshal(a.status())
 				if err != nil {
@@ -361,11 +576,181 @@ func (a *agent) handleControl(conn net.Conn) {
 				} else {
 					response = Message{Type: "status", Frame: body}
 				}
+			case "service_record":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				body, err := os.ReadFile(a.serviceRecord)
+				if err != nil {
+					response.Error = "host agent service record is unavailable"
+				} else {
+					response = Message{Type: "service_record", Version: GroupProtocolVersion, Data: body, ServicePeerToken: a.serviceToken}
+				}
 			case "hosts":
 				if hosts, ok := a.remoteHostSnapshot(); ok {
 					response = Message{Type: "hosts", Hosts: hosts}
 				} else {
 					response.Error = "hub is disconnected"
+				}
+			case "session_preferences", "session_preferences_preview":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				if err := a.validatePreferenceParentUpdate(message); err != nil {
+					response.Error = err.Error()
+					break
+				}
+				update := preferenceUpdateFromMessage(message)
+				var preference SessionPreferences
+				var groups []string
+				var err error
+				if message.Type == "session_preferences_preview" {
+					preference, groups, err = a.catalog.preview(update)
+				} else {
+					preference, groups, err = a.catalog.update(update)
+				}
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: message.Type, Version: GroupProtocolVersion,
+						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+					}
+				}
+			case "session_lookup":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				preference, groups, ok, err := a.catalog.get(message.SessionID)
+				switch {
+				case err != nil:
+					response.Error = err.Error()
+				case !ok:
+					response.Error = "session is not present in the catalog"
+				default:
+					response = Message{
+						Type: "session_lookup", Version: GroupProtocolVersion,
+						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+					}
+				}
+			case "session_name_lookup":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				sessionID, err := a.resolveSessionName(message.Product, message.Name)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: "session_name_lookup", Version: GroupProtocolVersion,
+						Product: message.Product, Name: message.Name, SessionID: sessionID,
+					}
+				}
+			case "parent_context":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				parent, err := a.parentContext(message.SessionID)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "parent_context", Version: GroupProtocolVersion, ParentContext: &parent}
+				}
+			case "terminal_notice":
+				if message.Version != GroupProtocolVersion {
+					response.Error = "group protocol is incompatible"
+					break
+				}
+				result, err := a.routeTerminalNotice(message.SourceSessionID, message.TargetID, message.Frame)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					body, marshalErr := json.Marshal(result)
+					if marshalErr != nil {
+						response.Error = marshalErr.Error()
+					} else {
+						response = Message{Type: "agent_frame_result", Version: GroupProtocolVersion, Frame: body}
+					}
+				}
+			case "peer_register", "peer_update":
+				if message.Registration == nil {
+					response.Error = "peer registration is required"
+					break
+				}
+				peer, err := a.registerPeer(*message.Registration, message.Type == "peer_update")
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: message.Type, Version: GroupProtocolVersion, Peers: []Peer{peer}}
+				}
+			case "peer_prepare":
+				if message.Registration == nil {
+					response.Error = "peer preparation is required"
+					break
+				}
+				if err := a.preparePeer(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_prepare", Version: GroupProtocolVersion}
+				}
+			case "peer_prepare_launch":
+				if message.Registration == nil || message.Preference == nil {
+					response.Error = "peer preparation and previewed preferences are required"
+					break
+				}
+				if err := a.validatePreferenceParentUpdate(message); err != nil {
+					response.Error = err.Error()
+					break
+				}
+				preference, groups, err := a.preparePeerLaunch(
+					*message.Registration, preferenceUpdateFromMessage(message), *message.Preference,
+				)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: "peer_prepare_launch", Version: GroupProtocolVersion,
+						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+					}
+				}
+			case "peer_prepare_cancel":
+				if message.Registration == nil {
+					response.Error = "peer preparation is required"
+					break
+				}
+				if err := a.cancelPeerPreparation(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_prepare_cancel", Version: GroupProtocolVersion}
+				}
+			case "peer_unregister":
+				if message.Registration == nil {
+					response.Error = "peer registration is required"
+					break
+				}
+				if err := a.unregisterPeer(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_unregister", Version: GroupProtocolVersion}
+				}
+			case "agent_frame":
+				var frame AgentFrame
+				if json.Unmarshal(message.Frame, &frame) != nil {
+					response.Error = "invalid agent frame"
+					break
+				}
+				result, err := a.handleAgentFrame(message.SourceSessionID, frame)
+				if err != nil {
+					response.Error = err.Error()
+				} else if body, marshalErr := json.Marshal(result); marshalErr != nil {
+					response.Error = marshalErr.Error()
+				} else {
+					response = Message{Type: "agent_frame_result", Frame: body}
 				}
 			}
 		}
@@ -374,98 +759,75 @@ func (a *agent) handleControl(conn net.Conn) {
 	_ = newWireConn(conn).Send(response)
 }
 
+//nolint:gocyclo // Parent attestation is an ordered fail-closed validation boundary.
+func (a *agent) validatePreferenceParentUpdate(message Message) error {
+	if !message.ParentSpecified && !message.InheritGroupsSpecified {
+		return nil
+	}
+	parentID := message.ParentSessionID
+	if parentID == "" {
+		if existing, _, ok, err := a.catalog.get(message.SessionID); err != nil {
+			return err
+		} else if ok {
+			parentID = existing.ParentSession
+		}
+	}
+	if parentID == "" {
+		if message.InheritParentGroups {
+			return errors.New("cannot inherit groups without a live parent")
+		}
+		return nil
+	}
+	if message.ParentHostID != "" && message.ParentHostID != a.options.HostID {
+		a.mu.RLock()
+		var remoteParent *Peer
+		for _, peer := range a.remote {
+			if peer.HostID == message.ParentHostID && peer.SessionID == parentID {
+				candidate := peer
+				remoteParent = &candidate
+				break
+			}
+		}
+		a.mu.RUnlock()
+		if remoteParent == nil || !reflect.DeepEqual(sortedUnique(message.ParentGroups), sortedUnique(remoteParent.Groups)) {
+			return errors.New("remote parent group decision does not match a live federated peer")
+		}
+		return nil
+	}
+	if _, err := a.parentContext(parentID); err != nil {
+		return fmt.Errorf("parent group decision requires a live registered parent: %w", err)
+	}
+	return nil
+}
+
 func (a *agent) status() AgentStatus {
+	claudeProfile, _ := a.resolvedClaudeProfile()
 	a.mu.RLock()
 	status := AgentStatus{
-		RuntimeVersion:  RuntimeVersion,
-		ProtocolVersion: ProtocolVersion,
-		HostID:          a.options.HostID,
-		HostName:        a.options.HostName,
-		Hub:             a.options.Hub,
-		Connected:       a.network != nil,
-		LocalPeers:      len(a.local),
-		RemotePeers:     len(a.remote),
-		RemoteHosts:     len(a.remoteHosts),
-		Capabilities:    a.laneCapabilities(),
-		RegistryDir:     a.registryDir,
-		RuntimeDir:      a.options.RuntimeDir,
+		RuntimeVersion:       RuntimeVersion,
+		ProtocolVersion:      ProtocolVersion,
+		HostID:               a.options.HostID,
+		HostName:             a.options.HostName,
+		Hub:                  a.options.Hub,
+		Connected:            a.network != nil,
+		LocalPeers:           len(a.local),
+		RemotePeers:          len(a.remote),
+		RemoteHosts:          len(a.remoteHosts),
+		Capabilities:         a.laneCapabilities(),
+		RegistryDir:          a.registryDir,
+		RuntimeDir:           a.options.RuntimeDir,
+		StateDir:             a.options.StateDir,
+		ClaudeConfigEnvSet:   claudeProfile.ConfigEnvSet,
+		ClaudeConfigEnvValue: claudeProfile.ConfigEnvValue,
+		ClaudeSecureConfig:   claudeProfile.SecureConfig,
+		ClaudeSecureEnvSet:   claudeProfile.SecureEnvSet,
 	}
 	a.mu.RUnlock()
-	a.shadowMu.Lock()
-	status.Shadows = len(a.shadows)
-	a.shadowMu.Unlock()
 	return status
 }
 
-func (a *agent) forwardShadowFrame(targetID string, frame json.RawMessage) error {
-	if err := a.refreshLocal(); err != nil {
-		return err
-	}
-	a.mu.RLock()
-	sourceID, err := sourcePeerID(frame, a.local)
-	wire := a.network
-	_, targetExists := a.remote[targetID]
-	a.mu.RUnlock()
-	if err != nil {
-		return err
-	}
-	if wire == nil {
-		return errors.New("hub is disconnected")
-	}
-	if !targetExists {
-		return errors.New("remote target is no longer live")
-	}
-	return wire.Send(Message{Type: "deliver", SourceID: sourceID, TargetID: targetID, Frame: frame})
-}
-
-func (a *agent) deliverLocal(message Message) error {
-	if err := a.refreshLocal(); err != nil {
-		return err
-	}
-	a.mu.RLock()
-	target, targetExists := a.local[message.TargetID]
-	source, sourceExists := a.remote[message.SourceID]
-	a.mu.RUnlock()
-	if !targetExists {
-		return fmt.Errorf("local target %s is no longer live", message.TargetID)
-	}
-	if !sourceExists {
-		return fmt.Errorf("remote source %s is not in the roster", message.SourceID)
-	}
-	a.shadowMu.Lock()
-	shadow := a.shadows[message.SourceID]
-	a.shadowMu.Unlock()
-	if shadow == nil || !processLive(shadow.pid) {
-		a.reconcileShadows()
-		a.shadowMu.Lock()
-		shadow = a.shadows[message.SourceID]
-		a.shadowMu.Unlock()
-	}
-	if shadow == nil {
-		return fmt.Errorf("remote source %s has no local shadow", message.SourceID)
-	}
-	rewritten, err := rewriteInboundFrame(message.Frame, target, source, shadow.socket)
-	if err != nil {
-		return err
-	}
-	return sendUnixFrame(target.Socket, rewritten, 5*time.Second)
-}
-
 func (a *agent) refreshLocal() error {
-	local, err := discoverLocalPeers(a.registryDir, a.options.HostID, a.options.HostName)
-	if err != nil {
-		return err
-	}
-	a.mu.Lock()
-	changed := !reflect.DeepEqual(a.local, local)
-	a.local = local
-	a.mu.Unlock()
-	if changed {
-		select {
-		case a.localChanged <- struct{}{}:
-		default:
-		}
-	}
+	a.reconcileRegisteredPeers()
 	return nil
 }
 
@@ -477,9 +839,7 @@ func (a *agent) localDiscoveryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := a.refreshLocal(); err != nil {
-				a.logger.Printf("local discovery failed: %v", err)
-			}
+			a.reconcileRegisteredPeers()
 		}
 	}
 }
@@ -496,8 +856,50 @@ func (a *agent) setNetwork(wire *wireConn) {
 	a.mu.Unlock()
 	if wire == nil {
 		a.failPendingLanes("hub is disconnected")
+		a.failPendingDeliveries("hub is disconnected")
 		a.cancelAllRemoteLanes()
 	}
+}
+
+func (a *agent) sendDeliveryOutcome(request Message, deliveryErr error) {
+	a.mu.RLock()
+	wire := a.network
+	a.mu.RUnlock()
+	if wire == nil || request.RequestID == "" {
+		return
+	}
+	result := Message{
+		Type: "delivery_ack", RequestID: request.RequestID,
+		SourceID: request.SourceID, TargetID: request.TargetID,
+	}
+	if deliveryErr != nil {
+		result.Type, result.Error = "delivery_error", deliveryErr.Error()
+	}
+	_ = wire.Send(result)
+}
+
+func (a *agent) completePendingDelivery(message Message) {
+	a.deliveryMu.Lock()
+	pending := a.pendingDeliveries[message.RequestID]
+	delete(a.pendingDeliveries, message.RequestID)
+	a.deliveryMu.Unlock()
+	if pending == nil {
+		return
+	}
+	if message.Type == "delivery_error" {
+		pending <- errors.New(defaultString(message.Error, "remote delivery failed"))
+	} else {
+		pending <- nil
+	}
+}
+
+func (a *agent) failPendingDeliveries(reason string) {
+	a.deliveryMu.Lock()
+	for id, pending := range a.pendingDeliveries {
+		delete(a.pendingDeliveries, id)
+		pending <- errors.New(reason)
+	}
+	a.deliveryMu.Unlock()
 }
 
 func (a *agent) clearRemotePeers() {
@@ -505,105 +907,6 @@ func (a *agent) clearRemotePeers() {
 	a.remote = map[string]Peer{}
 	a.remoteHosts = map[string]Host{}
 	a.mu.Unlock()
-	a.reconcileShadows()
-}
-
-func (a *agent) reconcileShadows() {
-	a.mu.RLock()
-	remote := make(map[string]Peer, len(a.remote))
-	for id, peer := range a.remote {
-		remote[id] = peer
-	}
-	a.mu.RUnlock()
-	a.shadowMu.Lock()
-	defer a.shadowMu.Unlock()
-	for id, shadow := range a.shadows {
-		peer, exists := remote[id]
-		if !exists || !processLive(shadow.pid) {
-			a.stopShadowLocked(id, shadow)
-			continue
-		}
-		if !reflect.DeepEqual(shadow.peer, peer) {
-			path, err := writeShadowRecord(a.registryDir, shadow.pid, shadow.socket, peer)
-			if err != nil {
-				a.logger.Printf("update shadow %s failed: %v", id, err)
-				continue
-			}
-			shadow.peer = peer
-			shadow.registryPath = path
-		}
-	}
-	ids := make([]string, 0, len(remote))
-	for id := range remote {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		if _, exists := a.shadows[id]; exists {
-			continue
-		}
-		shadow, err := a.startShadowLocked(remote[id])
-		if err != nil {
-			a.logger.Printf("start shadow %s failed: %v", id, err)
-			continue
-		}
-		a.shadows[id] = shadow
-	}
-}
-
-func (a *agent) startShadowLocked(peer Peer) (*shadowHandle, error) {
-	shadowID := defaultString(peer.InstanceID, peer.ID)
-	socket := filepath.Join(a.options.RuntimeDir, "shadows", sessionKey(shadowID)+".sock")
-	if err := ensureDir(filepath.Dir(socket)); err != nil {
-		return nil, err
-	}
-	// #nosec G204 -- the executable is the current installed binary and every argument is explicit.
-	cmd := exec.Command(a.options.Executable,
-		"shadow", "--listen", socket, "--control", a.controlPath,
-		"--target", peer.ID, "--owner-pid", strconv.Itoa(os.Getpid()),
-		"--registry-dir", a.registryDir,
-	)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	handle := &shadowHandle{
-		peer: peer, pid: cmd.Process.Pid, socket: socket, process: cmd.Process, done: make(chan struct{}),
-	}
-	go func() {
-		_ = cmd.Wait()
-		close(handle.done)
-	}()
-	if !waitFor(func() bool { return probeUnix(socket, 100*time.Millisecond) }, 3*time.Second) {
-		stopProcess(cmd.Process, time.Second)
-		return nil, errors.New("shadow socket did not become ready")
-	}
-	path, err := writeShadowRecord(a.registryDir, handle.pid, socket, peer)
-	if err != nil {
-		stopProcess(cmd.Process, time.Second)
-		return nil, err
-	}
-	handle.registryPath = path
-	a.logger.Printf("published %s as %s (pid %d)", peer.ID, peer.DisplayName, handle.pid)
-	return handle, nil
-}
-
-func (a *agent) stopShadowLocked(id string, shadow *shadowHandle) {
-	delete(a.shadows, id)
-	if shadow.registryPath != "" {
-		_ = os.Remove(shadow.registryPath)
-	}
-	if shadow.process != nil {
-		_ = shadow.process.Signal(os.Interrupt)
-		select {
-		case <-shadow.done:
-		case <-time.After(time.Second):
-			_ = shadow.process.Kill()
-			<-shadow.done
-		}
-	}
-	_ = os.Remove(shadow.socket)
-	a.logger.Printf("removed shadow %s", id)
 }
 
 func sendUnixFrame(socket string, frame json.RawMessage, timeout time.Duration) error {
@@ -626,7 +929,7 @@ func DefaultClaudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-// DefaultRuntimeDir returns the per-user ephemeral directory used by an agent and its shadows.
+// DefaultRuntimeDir returns the per-user ephemeral directory used by a host agent.
 func DefaultRuntimeDir() string {
 	if value := os.Getenv("XDG_RUNTIME_DIR"); value != "" {
 		return filepath.Join(value, "peer-federator")

@@ -56,6 +56,7 @@ type grokLaneOptions struct {
 	ownerProcStart     string
 	ownerSessionID     string
 	help               bool
+	groupOptions       laneGroupOptions
 }
 
 type grokLaneTurn struct {
@@ -115,6 +116,12 @@ type grokLaneState struct {
 	CollectedTurnID       string             `json:"collectedTurnId,omitempty"`
 	Notices               []claudeLaneNotice `json:"notices,omitempty"`
 	ArchiveDroppedNotices int                `json:"archiveDroppedNotices,omitempty"`
+	Groups                []string           `json:"groups,omitempty"`
+	ExplicitGroups        []string           `json:"explicitGroups,omitempty"`
+	ParentSessionID       string             `json:"parentSessionId,omitempty"`
+	ParentHostID          string             `json:"parentHostId,omitempty"`
+	ParentAgentRuntimeDir string             `json:"parentAgentRuntimeDir,omitempty"`
+	InheritParentGroups   bool               `json:"inheritParentGroups,omitempty"`
 	CreatedAt             int64              `json:"createdAt"`
 	UpdatedAt             int64              `json:"updatedAt"`
 }
@@ -145,8 +152,10 @@ Options:
       --persistent
       --auto-archive-after SECONDS
       --no-auto-archive
-      --allow-duplicate-name
       --prompt-file FILE
+	  --group GROUP           add a child group; repeatable
+	  --inherit-groups        also inherit the parent's non-private groups
+	  --no-inherit-groups     retain only the mandatory parent anchor
       --all
       --mine
 
@@ -231,6 +240,14 @@ func parseGrokLaneArgs(argv []string) (grokLaneOptions, error) {
 			}
 		case "--allow-duplicate-name":
 			o.allowDuplicateName = true
+		case "--group":
+			value, err = take()
+			o.groupOptions.groups = append(o.groupOptions.groups, value)
+			o.groupOptions.groupsSpecified = true
+		case "--inherit-groups":
+			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = true, true
+		case "--no-inherit-groups":
+			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = false, true
 		case "--all":
 			o.all = true
 		case "--mine":
@@ -266,6 +283,9 @@ func parseGrokLaneArgs(argv []string) (grokLaneOptions, error) {
 	}
 	if o.mine && o.command != "list" {
 		return o, fmt.Errorf("--mine is not valid for %s", o.command)
+	}
+	if err := validateLaneGroupCommand(o.command, o.groupOptions); err != nil {
+		return o, err
 	}
 	if err := validateGrokLaneCommandOptions(o); err != nil {
 		return o, err
@@ -397,12 +417,23 @@ func reportGrokLaneError(err error) int {
 
 func withGrokLaneLaunchContext(o grokLaneOptions) grokLaneOptions {
 	listMine := o.command == "list" && o.mine
-	if (!containsString([]string{"run", "start", "resume"}, o.command) && !listMine) || (o.persistent && !listMine) {
+	if !containsString([]string{"run", "start", "resume"}, o.command) && !listMine {
 		return o
 	}
-	if owner, ok := inferPeerParent(resolveNativePaths(), os.Getpid()); ok {
-		o.ownerPID, o.ownerProcStart, o.ownerSessionID = owner.PID, owner.ProcStart, owner.SessionID
-		if !listMine && !o.disableNotify && !o.notifyExplicit {
+	owner := inferPeerParent(resolveNativePaths(), os.Getpid())
+	return withGrokLaneResolvedParent(o, owner)
+}
+
+func withGrokLaneResolvedParent(o grokLaneOptions, owner laneOwner) grokLaneOptions {
+	listMine := o.command == "list" && o.mine
+	o.groupOptions = applyAgentParentContext(o.groupOptions, &owner)
+	ok := owner.SessionID != ""
+	if ok {
+		o.groupOptions.parentSessionID = owner.SessionID
+		if !o.persistent || listMine {
+			o.ownerPID, o.ownerProcStart, o.ownerSessionID = owner.PID, owner.ProcStart, owner.SessionID
+		}
+		if !listMine && !o.persistent && !o.disableNotify && !o.notifyExplicit {
 			o.notifyTarget = "session:" + owner.SessionID
 		}
 	}
@@ -487,38 +518,6 @@ func resolveGrokLaneState(paths nativePaths, target string) (grokLaneState, erro
 	return grokLaneState{}, fmt.Errorf("no Grok lane matching %q", target)
 }
 
-//nolint:gocyclo // Collision checks intentionally cover all three lane products and live peers.
-func assertGrokLaneNameAvailable(paths nativePaths, name string, allowDuplicate bool, sessionID string) error {
-	if allowDuplicate {
-		return nil
-	}
-	for _, state := range readGrokLaneStates(paths) {
-		if state.SessionID != sessionID && state.Status != "archived" && strings.EqualFold(state.Name, name) {
-			return fmt.Errorf("grok lane name %q already belongs to session %s", name, state.SessionID)
-		}
-	}
-	for _, state := range readClaudeLaneStates(paths) {
-		if state.Status != "archived" && strings.EqualFold(state.Name, name) {
-			return fmt.Errorf("lane name %q already belongs to Claude session %s", name, state.SessionID)
-		}
-	}
-	for _, state := range readLaneStates(paths) {
-		if state.Status != "archived" && strings.EqualFold(state.Name, name) {
-			return fmt.Errorf("lane name %q already belongs to Codex thread %s", name, state.ThreadID)
-		}
-	}
-	peers, err := listNativePeerSessions(paths)
-	if err != nil {
-		return err
-	}
-	for _, peer := range peers {
-		if peer.SessionID != sessionID && strings.EqualFold(peer.Name, name) {
-			return fmt.Errorf("live peer name %q already exists; choose a unique name or pass --allow-duplicate-name", name)
-		}
-	}
-	return nil
-}
-
 func newGrokLaneTurn(prompt string, timeout time.Duration) grokLaneTurn {
 	now := time.Now().UnixMilli()
 	return grokLaneTurn{ID: randomID(), Prompt: prompt, Status: "queued", CreatedAt: now, TimeoutMS: timeout.Milliseconds()}
@@ -543,9 +542,7 @@ func startGrokLane(o grokLaneOptions, wait bool) (int, error) {
 			unlockLaneStateFile(nameLock)
 		}
 	}()
-	if err := assertGrokLaneNameAvailable(paths, name, o.allowDuplicateName, ""); err != nil {
-		return 1, err
-	}
+	// Names are group-scoped selectors; exact session IDs own lifecycle state.
 	cwd, err := canonicalGrokLaneDirectory(o.cwd)
 	if err != nil {
 		return 1, err
@@ -566,6 +563,14 @@ func startGrokLane(o grokLaneOptions, wait bool) (int, error) {
 		PermissionMode: o.permissionMode, Model: o.model, ReasoningEffort: o.reasoningEffort,
 		Turns: []grokLaneTurn{turn}, TurnID: turn.ID, LatestTurnID: turn.ID, CreatedAt: now, UpdatedAt: now,
 	}
+	groupState, _, err := resolveLaneGroupState(sessionID, "grok", o.groupOptions, true, true)
+	if err != nil {
+		return 1, fmt.Errorf("resolve lane groups: %w", err)
+	}
+	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
+	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
+	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	if err := writeGrokLaneState(paths, state); err != nil {
 		return 1, err
 	}
@@ -699,6 +704,14 @@ func resumeGrokLane(o grokLaneOptions) (int, error) {
 	if debt := firstGrokLaneDebt(state); debt != "" {
 		return 1, fmt.Errorf("collect outstanding Grok lane turn %s before resume", debt)
 	}
+	groupState, _, err := resolveLaneGroupState(state.SessionID, "grok", o.groupOptions, true, o.permissionModeSet)
+	if err != nil {
+		return 1, fmt.Errorf("resolve lane groups: %w", err)
+	}
+	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
+	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
+	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	turn := newGrokLaneTurn(prompt, o.timeout)
 	if grokLaneManagerLive(state) {
 		return resumeLiveGrokLane(paths, state, turn, o, desiredPersistent)
@@ -711,6 +724,10 @@ func resumeLiveGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTur
 		"action": "resume", "sessionId": state.SessionID, "turn": turn,
 		"persistent": persistent, "ownerPid": o.ownerPID, "ownerProcStart": o.ownerProcStart,
 		"ownerSessionId": o.ownerSessionID,
+		"groups":         state.Groups, "explicitGroups": state.ExplicitGroups,
+		"parentSessionId": state.ParentSessionID, "parentHostId": state.ParentHostID,
+		"parentAgentRuntimeDir": state.ParentAgentRuntimeDir,
+		"inheritParentGroups":   state.InheritParentGroups,
 	}
 	switch {
 	case o.notifyExplicit:
@@ -742,6 +759,12 @@ func resumeLiveGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTur
 
 //nolint:gocyclo // Archived resume is one guarded state/ownership transaction with explicit rollback.
 func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTurn, o grokLaneOptions, persistent bool) (int, error) {
+	desiredGroups := append([]string(nil), state.Groups...)
+	desiredExplicitGroups := append([]string(nil), state.ExplicitGroups...)
+	desiredParentSessionID := state.ParentSessionID
+	desiredParentHostID := state.ParentHostID
+	desiredParentAgentRuntimeDir := state.ParentAgentRuntimeDir
+	desiredInheritParentGroups := state.InheritParentGroups
 	if state.Status != "archived" {
 		if err := forceArchiveGrokLane(paths, state.SessionID, "stale manager before resume"); err != nil {
 			return 1, err
@@ -758,9 +781,6 @@ func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLan
 	}()
 	state, err = readGrokLaneState(paths, state.SessionID)
 	if err != nil {
-		return 1, err
-	}
-	if err := assertGrokLaneNameAvailable(paths, state.Name, o.allowDuplicateName, state.SessionID); err != nil {
 		return 1, err
 	}
 	lifecycle, err := lockLaneLifecycle(paths, "grok-"+state.SessionID)
@@ -792,6 +812,10 @@ func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLan
 	state.ManagerPID, state.ManagerProcStart, state.WorkerPID, state.WorkerProcStart, state.WorkerStrongStart, state.WorkerSessionID, state.MessagingSocket = 0, "", 0, "", "", 0, ""
 	state.StartupID = startupID
 	state.Persistent = persistent
+	state.Groups, state.ExplicitGroups = desiredGroups, desiredExplicitGroups
+	state.ParentSessionID, state.InheritParentGroups = desiredParentSessionID, desiredInheritParentGroups
+	state.ParentHostID = desiredParentHostID
+	state.ParentAgentRuntimeDir = desiredParentAgentRuntimeDir
 	if persistent {
 		state.OwnerPID, state.OwnerProcStart, state.OwnerSessionID = 0, "", ""
 	} else {

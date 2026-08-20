@@ -13,10 +13,12 @@ import (
 
 const (
 	// ProtocolVersion identifies the compatible hub/agent wire contract.
-	ProtocolVersion   = 2
-	maxWireBytes      = 2 * 1024 * 1024
-	maxLaneInputBytes = 1024 * 1024
-	wireWriteTimeout  = 10 * time.Second
+	ProtocolVersion = 3
+	// GroupProtocolVersion identifies the local grouped-routing contract.
+	GroupProtocolVersion = 1
+	maxWireBytes         = 2 * 1024 * 1024
+	maxLaneInputBytes    = 1024 * 1024
+	wireWriteTimeout     = 10 * time.Second
 )
 
 const (
@@ -37,43 +39,64 @@ type Host struct {
 
 // Peer is one live, messageable session advertised by a host agent.
 type Peer struct {
-	ID             string `json:"id"`
-	HostID         string `json:"host_id"`
-	HostName       string `json:"host_name"`
-	SessionID      string `json:"session_id"`
-	GlobalID       string `json:"global_session_id"`
-	Name           string `json:"name"`
-	DisplayName    string `json:"display_name"`
-	Status         string `json:"status,omitempty"`
-	Cwd            string `json:"cwd,omitempty"`
-	Entrypoint     string `json:"entrypoint,omitempty"`
-	PermissionMode string `json:"permission_mode,omitempty"`
-	StartedAt      int64  `json:"started_at,omitempty"`
-	PeerProtocol   int    `json:"peer_protocol,omitempty"`
-	InstanceID     string `json:"instance_id,omitempty"`
+	ID              string   `json:"id"`
+	HostID          string   `json:"host_id"`
+	HostName        string   `json:"host_name"`
+	SessionID       string   `json:"session_id"`
+	GlobalID        string   `json:"global_session_id"`
+	Name            string   `json:"name"`
+	DisplayName     string   `json:"display_name"`
+	Status          string   `json:"status,omitempty"`
+	Cwd             string   `json:"cwd,omitempty"`
+	Entrypoint      string   `json:"entrypoint,omitempty"`
+	PermissionMode  string   `json:"permission_mode,omitempty"`
+	StartedAt       int64    `json:"started_at,omitempty"`
+	PeerProtocol    int      `json:"peer_protocol,omitempty"`
+	InstanceID      string   `json:"instance_id,omitempty"`
+	Groups          []string `json:"groups,omitempty"`
+	ParentSessionID string   `json:"parent_session_id,omitempty"`
 }
 
 // Message is one newline-delimited hub, agent, or local-control frame.
 type Message struct {
-	Type            string          `json:"type"`
-	Version         int             `json:"version,omitempty"`
-	HostID          string          `json:"host_id,omitempty"`
-	HostName        string          `json:"host_name,omitempty"`
-	TargetHostID    string          `json:"target_host_id,omitempty"`
-	Capabilities    []string        `json:"capabilities,omitempty"`
-	Hosts           []Host          `json:"hosts,omitempty"`
-	Peers           []Peer          `json:"peers,omitempty"`
-	SourceID        string          `json:"source_id,omitempty"`
-	SourceSessionID string          `json:"source_session_id,omitempty"`
-	TargetID        string          `json:"target_id,omitempty"`
-	RequestID       string          `json:"request_id,omitempty"`
-	Product         string          `json:"product,omitempty"`
-	Args            []string        `json:"args,omitempty"`
-	Input           []byte          `json:"input,omitempty"`
-	Data            []byte          `json:"data,omitempty"`
-	ExitCode        int             `json:"exit_code,omitempty"`
-	Frame           json.RawMessage `json:"frame,omitempty"`
-	Error           string          `json:"error,omitempty"`
+	Type                   string              `json:"type"`
+	Version                int                 `json:"version,omitempty"`
+	HostID                 string              `json:"host_id,omitempty"`
+	HostName               string              `json:"host_name,omitempty"`
+	TargetHostID           string              `json:"target_host_id,omitempty"`
+	Capabilities           []string            `json:"capabilities,omitempty"`
+	Hosts                  []Host              `json:"hosts,omitempty"`
+	Peers                  []Peer              `json:"peers,omitempty"`
+	SourceID               string              `json:"source_id,omitempty"`
+	SourceSessionID        string              `json:"source_session_id,omitempty"`
+	SessionID              string              `json:"session_id,omitempty"`
+	Name                   string              `json:"name,omitempty"`
+	ParentSessionID        string              `json:"parent_session_id,omitempty"`
+	ParentHostID           string              `json:"parent_host_id,omitempty"`
+	ParentGroups           []string            `json:"parent_groups,omitempty"`
+	ParentSpecified        bool                `json:"parent_specified,omitempty"`
+	InheritParentGroups    bool                `json:"inherit_parent_groups,omitempty"`
+	InheritGroupsSpecified bool                `json:"inherit_groups_specified,omitempty"`
+	TargetID               string              `json:"target_id,omitempty"`
+	TargetIDs              []string            `json:"target_ids,omitempty"`
+	Group                  string              `json:"group,omitempty"`
+	Groups                 []string            `json:"groups,omitempty"`
+	GroupsSpecified        bool                `json:"groups_specified,omitempty"`
+	AlwaysApprove          bool                `json:"always_approve,omitempty"`
+	AlwaysApproveSpecified bool                `json:"always_approve_specified,omitempty"`
+	Preference             *SessionPreferences `json:"preference,omitempty"`
+	Registration           *PeerRegistration   `json:"registration,omitempty"`
+	ParentContext          *ParentContext      `json:"parent_context,omitempty"`
+	RequestID              string              `json:"request_id,omitempty"`
+	Product                string              `json:"product,omitempty"`
+	SessionKind            string              `json:"session_kind,omitempty"`
+	Args                   []string            `json:"args,omitempty"`
+	Input                  []byte              `json:"input,omitempty"`
+	Data                   []byte              `json:"data,omitempty"`
+	ServicePeerToken       string              `json:"service_peer_token,omitempty"`
+	ExitCode               int                 `json:"exit_code,omitempty"`
+	Frame                  json.RawMessage     `json:"frame,omitempty"`
+	Error                  string              `json:"error,omitempty"`
 }
 
 type wireConn struct {

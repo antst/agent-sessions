@@ -53,45 +53,52 @@ type laneOptions struct {
 	all                bool
 	mine               bool
 	help               bool
+	groupOptions       laneGroupOptions
 }
 
 const laneContractVersion = 2
 const defaultLaneAutoArchiveDelay = time.Minute
 
 type laneState struct {
-	Type               string          `json:"type"`
-	Name               string          `json:"name"`
-	ThreadID           string          `json:"threadId"`
-	SessionID          string          `json:"sessionId"`
-	Cwd                string          `json:"cwd"`
-	Socket             string          `json:"socketPath,omitempty"`
-	Address            string          `json:"address,omitempty"`
-	Status             string          `json:"status"`
-	TurnID             string          `json:"turnId,omitempty"`
-	LatestTurnID       string          `json:"latestTurnId,omitempty"`
-	PendingTurnIDs     []string        `json:"pendingTurnIds,omitempty"`
-	PendingQueueVer    int             `json:"pendingQueueVersion,omitempty"`
-	CollectedTurnID    string          `json:"collectedTurnId,omitempty"`
-	CreatedAt          int64           `json:"createdAt"`
-	UpdatedAt          int64           `json:"updatedAt"`
-	NotifyTarget       string          `json:"notifyTarget,omitempty"`
-	Persistent         bool            `json:"persistent,omitempty"`
-	AutoArchive        bool            `json:"autoArchive,omitempty"`
-	AutoArchiveDelayMS int64           `json:"autoArchiveDelayMs,omitempty"`
-	AutoArchiveAt      int64           `json:"autoArchiveAt,omitempty"`
-	OwnerPID           int             `json:"ownerPid,omitempty"`
-	OwnerProcStart     string          `json:"ownerProcStart,omitempty"`
-	OwnerSessionID     string          `json:"ownerSessionId,omitempty"`
-	OutputSchema       json.RawMessage `json:"outputSchema,omitempty"`
-	SchemaAttempts     int             `json:"schemaAttempts,omitempty"`
-	SchemaRetryByID    map[string]int  `json:"schemaRetryById,omitempty"`
-	WorktreePath       string          `json:"worktreePath,omitempty"`
-	OriginalCwd        string          `json:"originalCwd,omitempty"`
-	PermissionMode     string          `json:"permissionMode,omitempty"`
-	DeadlineAt         int64           `json:"deadlineAt,omitempty"`
-	TimedOutTurnID     string          `json:"timedOutTurnId,omitempty"`
-	TerminalOutcome    string          `json:"terminalOutcome,omitempty"`
-	TerminalTurnID     string          `json:"terminalTurnId,omitempty"`
+	Type                  string          `json:"type"`
+	Name                  string          `json:"name"`
+	ThreadID              string          `json:"threadId"`
+	SessionID             string          `json:"sessionId"`
+	Cwd                   string          `json:"cwd"`
+	Socket                string          `json:"socketPath,omitempty"`
+	Address               string          `json:"address,omitempty"`
+	Status                string          `json:"status"`
+	TurnID                string          `json:"turnId,omitempty"`
+	LatestTurnID          string          `json:"latestTurnId,omitempty"`
+	PendingTurnIDs        []string        `json:"pendingTurnIds,omitempty"`
+	PendingQueueVer       int             `json:"pendingQueueVersion,omitempty"`
+	CollectedTurnID       string          `json:"collectedTurnId,omitempty"`
+	CreatedAt             int64           `json:"createdAt"`
+	UpdatedAt             int64           `json:"updatedAt"`
+	NotifyTarget          string          `json:"notifyTarget,omitempty"`
+	Persistent            bool            `json:"persistent,omitempty"`
+	AutoArchive           bool            `json:"autoArchive,omitempty"`
+	AutoArchiveDelayMS    int64           `json:"autoArchiveDelayMs,omitempty"`
+	AutoArchiveAt         int64           `json:"autoArchiveAt,omitempty"`
+	OwnerPID              int             `json:"ownerPid,omitempty"`
+	OwnerProcStart        string          `json:"ownerProcStart,omitempty"`
+	OwnerSessionID        string          `json:"ownerSessionId,omitempty"`
+	OutputSchema          json.RawMessage `json:"outputSchema,omitempty"`
+	SchemaAttempts        int             `json:"schemaAttempts,omitempty"`
+	SchemaRetryByID       map[string]int  `json:"schemaRetryById,omitempty"`
+	WorktreePath          string          `json:"worktreePath,omitempty"`
+	OriginalCwd           string          `json:"originalCwd,omitempty"`
+	PermissionMode        string          `json:"permissionMode,omitempty"`
+	DeadlineAt            int64           `json:"deadlineAt,omitempty"`
+	TimedOutTurnID        string          `json:"timedOutTurnId,omitempty"`
+	TerminalOutcome       string          `json:"terminalOutcome,omitempty"`
+	TerminalTurnID        string          `json:"terminalTurnId,omitempty"`
+	Groups                []string        `json:"groups,omitempty"`
+	ExplicitGroups        []string        `json:"explicitGroups,omitempty"`
+	ParentSessionID       string          `json:"parentSessionId,omitempty"`
+	ParentHostID          string          `json:"parentHostId,omitempty"`
+	ParentAgentRuntimeDir string          `json:"parentAgentRuntimeDir,omitempty"`
+	InheritParentGroups   bool            `json:"inheritParentGroups,omitempty"`
 }
 
 func laneAutoArchiveDelay(state laneState) time.Duration {
@@ -134,7 +141,6 @@ Policy options are optional pass-throughs; omitted values inherit Codex config:
   -c, --config KEY=VALUE       repeatable; dotted keys accepted
       --timeout SECONDS        run/start/resume: durable turn deadline
                                wait: collection-call bound; never interrupts
-      --allow-duplicate-name
       --all                    include archived lanes in list
       --mine                   list only lanes owned by this orchestrator
       --prompt-file FILE       otherwise read prompt from stdin
@@ -145,6 +151,9 @@ Policy options are optional pass-throughs; omitted values inherit Codex config:
       --no-notify              parent-owned lanes: suppress owner notification
       --schema FILE            constrain and validate the final answer as JSON
       --worktree               create a detached git worktree for this lane
+	  --group GROUP           add a child group; repeatable
+	  --inherit-groups        also inherit the parent's non-private groups
+	  --no-inherit-groups     retain only the mandatory parent anchor
       --json                   accepted for codex-exec compatibility
       --skip-git-repo-check    accepted compatibility no-op
 
@@ -243,6 +252,14 @@ func parseLaneArgs(argv []string) (laneOptions, error) {
 			options.schemaFile = value
 		case "--worktree":
 			options.worktree = true
+		case "--group":
+			value, err = take()
+			options.groupOptions.groups = append(options.groupOptions.groups, value)
+			options.groupOptions.groupsSpecified = true
+		case "--inherit-groups":
+			options.groupOptions.inheritParentGroups, options.groupOptions.inheritGroupsSpecified = true, true
+		case "--no-inherit-groups":
+			options.groupOptions.inheritParentGroups, options.groupOptions.inheritGroupsSpecified = false, true
 		case "-c", "--config":
 			value, err = take()
 			options.configs = append(options.configs, value)
@@ -284,6 +301,9 @@ func parseLaneArgs(argv []string) (laneOptions, error) {
 	}
 	if options.mine && options.command != "list" {
 		return options, fmt.Errorf("--mine is not valid for %s", options.command)
+	}
+	if err := validateLaneGroupCommand(options.command, options.groupOptions); err != nil {
+		return options, err
 	}
 	switch options.command {
 	case "run", "start":
@@ -366,15 +386,23 @@ func withLaneLaunchContext(options laneOptions) laneOptions {
 	if !containsString([]string{"run", "start", "resume"}, options.command) && !listMine {
 		return options
 	}
-	owner, peerOwner := inferPeerParent(resolveNativePaths(), os.Getpid())
+	owner := inferPeerParent(resolveNativePaths(), os.Getpid())
+	return withLaneResolvedParent(options, owner)
+}
+
+func withLaneResolvedParent(options laneOptions, owner laneOwner) laneOptions {
+	listMine := options.command == "list" && options.mine
+	options.groupOptions = applyAgentParentContext(options.groupOptions, &owner)
+	peerOwner := owner.SessionID != ""
 	if listMine {
 		if peerOwner {
 			options.ownerPID, options.ownerProcStart, options.ownerSessionID = owner.PID, owner.ProcStart, owner.SessionID
 		}
 		return options
 	}
-	if !options.persistent {
-		if peerOwner {
+	if peerOwner {
+		options.groupOptions.parentSessionID = owner.SessionID
+		if !options.persistent {
 			options.ownerPID = owner.PID
 			options.ownerProcStart = owner.ProcStart
 			options.ownerSessionID = owner.SessionID
@@ -432,16 +460,9 @@ func startLaneNative(options laneOptions, wait bool) (int, error) {
 		_ = nameLock.Close()
 		nameLock = nil
 	}
-	if !options.allowDuplicateName {
-		nameLock, err = lockLaneNames(paths)
-		if err != nil {
-			return 1, err
-		}
-		defer unlockNameLock()
-		if err := assertLaneNameAvailableExcept(paths, name, ""); err != nil {
-			return 1, err
-		}
-	}
+	// Names are selectors inside the caller's visible groups, not global
+	// ownership keys. Exact lane IDs remain the lifecycle authority, and an
+	// ambiguous visible name fails at routing/resolution time.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	client, err = dialAppServer(ctx, paths.appServerSock)
 	cancel()
@@ -455,17 +476,21 @@ func startLaneNative(options laneOptions, wait bool) (int, error) {
 		if setupReady || state.ThreadID == "" {
 			return
 		}
+		state.Status = "failed"
+		state.TerminalOutcome = "failed"
+		state.TerminalTurnID = state.TurnID
 		if state.TurnID != "" {
 			_ = requestWithTimeout(client, 10*time.Second, "turn/interrupt", map[string]any{
 				"threadId": state.ThreadID, "turnId": state.TurnID,
 			}, nil)
 		}
-		if archiveErr := requestWithTimeout(client, 10*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil); archiveErr != nil {
+		archiveErr := requestWithTimeout(client, 10*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil)
+		if archiveErr != nil && unmaterializedLaneRolloutMissing(state, archiveErr) {
+			archiveErr = deletePreparedThread(client, state.ThreadID)
+		}
+		if archiveErr != nil {
 			// Never make a failed rollback invisible. Retaining the requested name
 			// and thread id lets the caller retry archive through the lane API.
-			state.Status = "failed"
-			state.TerminalOutcome = "failed"
-			state.TerminalTurnID = state.TurnID
 			_ = recordLaneState(paths, state)
 			return
 		}
@@ -497,6 +522,20 @@ func startLaneNative(options laneOptions, wait bool) (int, error) {
 		OutputSchema: options.outputSchema, WorktreePath: worktreePath,
 		PermissionMode: permissionModeForApprovalPolicy(options.approvalPolicy),
 	}
+	groupState, alwaysApprove, err := resolveLaneGroupState(
+		state.SessionID, "codex", options.groupOptions,
+		permissionModeForApprovalPolicy(options.approvalPolicy) == "bypassPermissions", true,
+	)
+	if err != nil {
+		return 1, fmt.Errorf("resolve lane groups: %w", err)
+	}
+	if alwaysApprove {
+		options.approvalPolicy, options.sandbox, state.PermissionMode = "never", "danger-full-access", "bypassPermissions"
+	}
+	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
+	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
+	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	if worktreePath != "" {
 		state.OriginalCwd = originalCwd
 	}
@@ -526,12 +565,16 @@ func startLaneNative(options laneOptions, wait bool) (int, error) {
 	if err := recordLaneState(paths, state); err != nil {
 		return 1, err
 	}
-	registered, err := requestControl(paths.supervisorSock, map[string]any{
+	registerRequest := map[string]any{
 		"action": "register", "sessionId": thread.ID, "cwd": state.Cwd,
 		"name": name, "nameSource": "lane",
 		"permissionMode": permissionModeForApprovalPolicy(options.approvalPolicy),
 		"status":         "busy",
-	}, 15*time.Second)
+	}
+	if laneAgentConfigured() {
+		registerRequest["agentRuntimeDir"] = laneAgentRuntimeDir()
+	}
+	registered, err := requestControl(paths.supervisorSock, registerRequest, 15*time.Second)
 	if err != nil {
 		return 1, err
 	}
@@ -695,11 +738,6 @@ func resumeLaneNative(options laneOptions) (int, error) {
 		nameLock = nil
 	}
 	defer unlockNameLock()
-	if !options.allowDuplicateName {
-		if err := assertLaneNameAvailableExcept(paths, name, state.ThreadID); err != nil {
-			return 1, err
-		}
-	}
 	if thread.Name != name {
 		if err := requestWithTimeout(client, 30*time.Second, "thread/name/set", map[string]any{"threadId": state.ThreadID, "name": name}, nil); err != nil {
 			return 1, err
@@ -708,6 +746,20 @@ func resumeLaneNative(options laneOptions) (int, error) {
 	state.Name = name
 	state.SessionID = defaultString(thread.SessionID, defaultString(state.SessionID, state.ThreadID))
 	state.Cwd = defaultString(thread.Cwd, state.Cwd)
+	groupState, alwaysApprove, err := resolveLaneGroupState(
+		state.SessionID, "codex", options.groupOptions,
+		permissionModeForApprovalPolicy(options.approvalPolicy) == "bypassPermissions", options.approvalPolicy != "",
+	)
+	if err != nil {
+		return 1, fmt.Errorf("resolve lane groups: %w", err)
+	}
+	if alwaysApprove {
+		options.approvalPolicy, options.sandbox, state.PermissionMode = "never", "danger-full-access", "bypassPermissions"
+	}
+	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
+	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
+	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	applyLaneLifecycleOptions(&state, options)
 	state.Status = "starting"
 	state.TurnID = ""
@@ -743,10 +795,14 @@ func resumeLaneNative(options laneOptions) (int, error) {
 	if err := recordLaneState(paths, state); err != nil {
 		return 1, err
 	}
-	registered, err := requestControl(paths.supervisorSock, map[string]any{
+	registerRequest := map[string]any{
 		"action": "register", "sessionId": state.ThreadID, "cwd": state.Cwd,
 		"name": name, "nameSource": "lane", "permissionMode": defaultString(state.PermissionMode, "default"), "status": "busy",
-	}, 15*time.Second)
+	}
+	if laneAgentConfigured() {
+		registerRequest["agentRuntimeDir"] = laneAgentRuntimeDir()
+	}
+	registered, err := requestControl(paths.supervisorSock, registerRequest, 15*time.Second)
 	if err != nil {
 		return 1, err
 	}
@@ -1030,7 +1086,7 @@ func sameLaneOwner(leftPID int, leftProcStart string, rightPID int, rightProcSta
 	return leftPID > 1 && leftPID == rightPID && leftProcStart != "" && leftProcStart == rightProcStart
 }
 
-func inferPeerParent(paths nativePaths, startPID int) (laneOwner, bool) {
+func inferPeerParent(paths nativePaths, startPID int) laneOwner {
 	candidates := make([]laneOwner, 0, 3)
 	if owner, ok := inferCodexParent(paths, startPID); ok {
 		candidates = append(candidates, owner)
@@ -1042,7 +1098,7 @@ func inferPeerParent(paths nativePaths, startPID int) (laneOwner, bool) {
 		candidates = append(candidates, owner)
 	}
 	if len(candidates) == 0 {
-		return laneOwner{}, false
+		return laneOwner{}
 	}
 	deepest := candidates[0]
 	for _, candidate := range candidates[1:] {
@@ -1050,7 +1106,7 @@ func inferPeerParent(paths nativePaths, startPID int) (laneOwner, bool) {
 			deepest = candidate
 		}
 	}
-	return deepest, true
+	return deepest
 }
 
 func doctorLaneNative() (int, error) {
@@ -1142,9 +1198,13 @@ func archiveLaneNative(options laneOptions) (int, error) {
 		return 1, err
 	}
 	defer client.close()
+	unmaterialized := false
 	if state.Type == "codex-peer-lane" {
 		if err := settleLaneTurnBeforeArchive(client, paths, state); err != nil {
-			return 1, fmt.Errorf("refuse to archive before active turn is terminal: %w", err)
+			if !unmaterializedLaneRolloutMissing(state, err) {
+				return 1, fmt.Errorf("refuse to archive before active turn is terminal: %w", err)
+			}
+			unmaterialized = true
 		}
 	}
 	flushed, err := requestControl(paths.supervisorSock, map[string]any{
@@ -1160,7 +1220,11 @@ func archiveLaneNative(options laneOptions) (int, error) {
 			return 1, fmt.Errorf("cancel undeliverable terminal notices before archive: %w", err)
 		}
 	}
-	if err := requestWithTimeout(client, 30*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil); err != nil {
+	if unmaterialized {
+		if err := deletePreparedThread(client, state.ThreadID); err != nil {
+			return 1, fmt.Errorf("delete unmaterialized lane thread: %w", err)
+		}
+	} else if err := requestWithTimeout(client, 30*time.Second, "thread/archive", map[string]any{"threadId": state.ThreadID}, nil); err != nil {
 		return 1, err
 	}
 	if err := markRetiredThread(paths, state.ThreadID); err != nil {
@@ -1188,6 +1252,16 @@ func archiveLaneNative(options laneOptions) (int, error) {
 		"notices_dropped": droppedNotices,
 	})
 	return 0, nil
+}
+
+func unmaterializedLaneRolloutMissing(state laneState, err error) bool {
+	if err == nil || state.Type != "codex-peer-lane" || state.Status != "failed" ||
+		state.TurnID != "" || state.LatestTurnID != "" || len(state.PendingTurnIDs) != 0 ||
+		state.CollectedTurnID != "" || state.TerminalTurnID != "" ||
+		(state.TerminalOutcome != "" && state.TerminalOutcome != "failed") {
+		return false
+	}
+	return isRolloutMissingRPC(err)
 }
 
 func settleLaneTurnBeforeArchive(client *appServerClient, paths nativePaths, state laneState) error {
@@ -2064,45 +2138,6 @@ func assignDottedNative(target map[string]any, key string, value any) error {
 		cursor = next
 	}
 	cursor[parts[len(parts)-1]] = value
-	return nil
-}
-
-func assertLaneNameAvailableExcept(paths nativePaths, name, sessionID string) error {
-	for _, state := range readLaneStates(paths) {
-		if state.Type != "codex-peer-lane" || !strings.EqualFold(state.Name, name) || state.ThreadID == sessionID {
-			continue
-		}
-		return fmt.Errorf(
-			"lane name %q already belongs to thread %s; resume that lane, choose a unique name, or pass --allow-duplicate-name",
-			name, state.ThreadID,
-		)
-	}
-	entries, err := os.ReadDir(filepath.Join(paths.claudeRoot, "sessions"))
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		row := readJSONMap(filepath.Join(paths.claudeRoot, "sessions", entry.Name()))
-		if !strings.EqualFold(stringValue(row["name"]), name) {
-			continue
-		}
-		if sessionID != "" && stringValue(row["sessionId"]) == sessionID {
-			continue
-		}
-		pid := intValue(row["pid"])
-		identity := cleanupProcessIdentityStatus(pid, stringValue(row["procStart"]))
-		switch identity.Status {
-		case processIdentityMatches:
-			return fmt.Errorf("live peer name %q already exists; choose a unique name or pass --allow-duplicate-name", name)
-		case processIdentityUnknown:
-			return fmt.Errorf("cannot verify whether peer name %q is still owned by process %d; retry after its identity is observable", name, pid)
-		case processIdentityStale:
-			continue
-		}
-	}
 	return nil
 }
 

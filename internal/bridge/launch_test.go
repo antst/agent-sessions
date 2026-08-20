@@ -14,6 +14,24 @@ import (
 	"time"
 )
 
+func TestPreparedThreadNotFoundAcceptsCodexMissingRolloutVocabulary(t *testing.T) {
+	for name, test := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"thread not found": {err: &rpcError{Code: -32603, Message: "thread not found"}, want: true},
+		"no rollout found": {err: &rpcError{Code: -32603, Message: "no rollout found for thread id test"}, want: true},
+		"other rpc error":  {err: &rpcError{Code: -32603, Message: "thread is busy"}, want: false},
+		"transport text":   {err: errors.New("no rollout found for thread id test"), want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := isPreparedThreadNotFound(test.err); got != test.want {
+				t.Fatalf("isPreparedThreadNotFound(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
 func TestPreparedLaunchCreatesExactNamedOwner(t *testing.T) {
 	root := t.TempDir()
 	canonicalRoot, err := canonicalLaunchDirectory(root)

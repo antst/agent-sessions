@@ -4,15 +4,16 @@ Native, persistent session lifecycle for Codex, Claude Code, and Grok, plus loca
 cross-session messaging. Interactive sessions and durable worker lanes can be created, resumed,
 supervised, discovered, and messaged with nearly the same lifecycle on Linux and macOS.
 
-This repository is one Go module with shared implementation under `internal/`. It builds seven
+This repository is one Go module with shared implementation under `internal/`. It builds nine
 separate native executables:
 
 - `agent-session-runtime` — the shared diagnostic/runtime multicall used by the launchers;
+- `peer` — product-neutral exact-session resume using the durable host-agent catalog;
 - `codex-peer` — an interactive Codex TUI on the shared App Server;
 - `codex-peer-lane` — project-neutral lifecycle commands for named orchestrated lanes (`run`,
   `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and `doctor`).
-- `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers spawned
-  by Codex.
+- `claude-peer` — a native Claude TUI in the shared Claude profile, registered with the host agent;
+- `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers.
 - `grok-peer` — an interactive Grok TUI backed by a private leader and an ACP wake client.
 - `grok-peer-lane` — durable named headless Grok ACP workers with messaging, collection, resume,
   interrupt, and archive lifecycle.
@@ -28,7 +29,9 @@ make test-race
 codex app-server daemon stop # after exiting every Codex client
 make install-all
 
-codex-peer -n reviewer # approve the plugin hooks when Codex asks the first time
+peer-federator agent --host "$(hostname)" # keep this under the user service manager
+codex-peer -g project-a -n reviewer # -g is short for --group; repeat either form
+claude-peer -g project-a -n implementer
 claude agents --json
 ```
 
@@ -61,6 +64,15 @@ The plugin requests daemon-side approval for `claude_peer` dispatch so ordinary 
 fail-closed authorization check instead of hanging at a global pre-dispatch prompt. This approves
 dispatch only; it does not grant a thread peer authority or change its sandbox/approval policy.
 
+The Claude plugin installs a narrower `claude_peer` MCP inventory for managed `claude-peer`
+sessions. It exposes structured grouped discovery, direct/multicast send, and broadcast; replies to
+an incoming delivery target the frame's `source.id`. The MCP process receives no model-selected
+identity: the runtime requires exact ancestry beneath the live native Claude adapter and lifecycle
+owner, then corroborates the same UUID, process starts, native registry row, messaging socket, and
+host-agent registration. Bare Claude and an unrelated process fail closed. Native Claude
+`SendMessage` to `agent-sessions--HOST` remains only a framed compatibility carrier; its carrier
+acknowledgment is not evidence that an unframed peer reply was delivered.
+
 The launcher removes only its own `-n/--peer-name` and, for resume, the selector it resolves to one
 UUID. It invokes the managed `--remote unix:// resume UUID` target, supplies a canonical cwd when the
 caller did not provide one, then appends every remaining Codex argument unchanged and in its original
@@ -76,9 +88,9 @@ the newest usable exact-name session. Picker/`--last`, fork, caller-controlled r
 already-loaded targets without an exact stale zero-turn owner proof remain unsupported. Resume
 inherits the thread's canonical cwd; an explicit `-C` must resolve to that same directory.
 
-`make install` copies the native runtime payload and the Codex `claude-lane` skill under
+`make install` copies the native runtime payload and the three Codex lane skills under
 `${PREFIX:-~/.local}/libexec/agent-sessions`, registers that installed marketplace, installs the
-plugin, and links the native runtime plus all five launchers under `${PREFIX:-~/.local}/bin`.
+plugin, and links all nine commands under `${PREFIX:-~/.local}/bin`.
 `make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
 `make install-claude` independently installs the text-only Claude plugin. `make install-grok`
 validates and copies the local Grok plugin into Grok's auto-trusted user plugin directory; that
@@ -90,6 +102,21 @@ row while preserving data, and fails unless `grok inspect --json` resolves the e
 plugin and MCP executable. Start a new Grok session or reload plugins after installing.
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
 the TUI's native policy and its effective live mode is attested before publication.
+Installation never changes Claude's profile-level `crossSessionInbound` value. Managed Claude peers
+and lanes opt into inbound native messages only for their own launch. They also pass `--no-chrome`
+unless an interactive peer operator explicitly supplied `--chrome`, so a browser-extension
+first-run dialog cannot block native messaging-socket publication. Claude's native session row does
+not publish live Shift+Tab permission changes, so a managed peer uses one conservative permission
+class for its lifetime: constrained launches disable in-session bypass in their per-launch settings,
+and explicit bypass launches remain advertised as bypass until restart. Use
+`--yolo` (translated to native `--dangerously-skip-permissions`) or the native long option to opt in
+at launch; `--allow-dangerously-skip-permissions` is
+rejected because it would create an unattestable privilege change. Host settings remain untouched.
+`claude-peer --resume UUID_OR_NAME` accepts an exact UUID or a unique durable managed-peer name. A
+single live exact-name match takes precedence over history; ambiguous live or historical names are
+rejected with the matching UUIDs so the operator can select explicitly. Name resolution occurs
+before catalog mutation, socket creation, or native Claude launch, and the native CLI receives only
+the resolved exact UUID.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok
@@ -104,14 +131,24 @@ marker makes the installer use the bundled binary even if Go is installed.
 
 ## What it provides
 
-- Claude discovers root Codex threads through its native local session registry.
-- Incoming messages wake idle threads or steer an already-running turn.
-- `claude_peer` MCP tools provide list, send, identity, inbox, and rename operations.
+- One host agent owns the durable product/group catalog and group-filtered local routing. An
+  optional hub federates the same protocol; there is no global flat namespace.
+- The shared Claude registry contains ordinary Claude sessions, managed Claude peers and lanes,
+  and exactly one Agent Sessions service row—never one remote row per peer. Native Claude direct
+  messaging remains independent; groups constrain only AgentFrame discovery and routing.
+- Incoming grouped messages wake idle peers or steer/queue work according to the target adapter.
+- Product adapters and the Claude host-agent carrier provide group-filtered discovery, direct send, explicit
+  multicast, group broadcast, identity, inbox recovery, and rename operations.
 - Peer delivery is push-based; active orchestrators should continue useful work rather than poll.
   `check_inbox` is only for messages queued past an automatic delivery boundary.
-- TUI `/rename` changes flow immediately back to `claude agents --json`.
-- Stable per-session UDS reply addresses are republished when a TUI resumes the same thread.
-  Normal TUI exit removes the live address, discovery row, shim, and thread-scoped MCP children.
+- TUI `/rename` changes flow immediately into Agent Sessions discovery; Claude's native listing
+  naturally shows ordinary and managed Claude sessions plus the one host-agent service.
+- Stable Agent Sessions IDs are re-registered when a TUI resumes the same thread. Codex/Grok
+  adapters keep stable session sockets; Claude attachments use exact native PID-bound sockets that
+  may rotate on resume. Normal TUI exit removes the live registration and owned children.
+- A native transcript can move between ordinary and peer mode by exact UUID. Use the product
+  wrapper once to adopt an ordinary session into the catalog; later `peer resume UUID` restores its
+  product/groups while an ordinary native resume remains an unregistered Agent Sessions opt-out.
 - Dead shim transports are replaced and garbage-collected without deleting queued messages.
 - Child Codex subagents remain private to their parent while the root is a published peer.
 - Generic lanes inherit normal user configuration and impose no model, reasoning, sandbox,
@@ -129,14 +166,13 @@ marker makes the installer use the bundled binary even if Go is installed.
   permanently idle, messageable lane.
   JSON-Schema output enforcement, detached worktree isolation, and terminal accounting are
   available to orchestrators.
+- Versioned Codex, Claude, and Grok skills let every supported parent product select every
+  supported Codex, Claude, or Grok target lane without duplicating target lifecycle logic.
 - A versioned Claude Code plugin teaches any local orchestrator this generic lane contract without
   copying bridge logic or choosing model, effort, sandbox, approval, web, or project policy.
-- A Codex `claude-lane` skill provides the reverse direction: Codex can launch, message, collect,
-  resume, and clean up Claude Code workers through the same lifecycle vocabulary. Claude lane
-  workers receive `ListAgents` and `SendMessage` by default, so they can discover and initiate
-  ordinary messages to other local or federated peers. The native Claude worker is the lane's
-  discoverable peer and receives messages directly; the lifecycle manager does not proxy them.
-- With the separate `peer-federator` protocol-2 daemon installed, both skills can run their native
+- Parent groups are not propagated by default. Every lane gets its own private group and its
+  immediate parent anchor; `--inherit-groups` is the parent’s explicit opt-in for the rest.
+- With the separate `peer-federator` protocol-3 agent/hub installed, all skills can run their native
   lane CLI on a named connected host. Remote lifecycle traffic and ordinary peer messages remain
   hub-only; remote execution is an explicit destination opt-in, the cleanup fuse cannot be disabled
   remotely, the destination exposes no direct spawn listener, and there is no SSH fallback.
@@ -151,8 +187,8 @@ claude/                     self-contained Claude Code plugin and orchestration 
 grok/                       Grok plugin manifest and MCP registration
 .mcp.json                   MCP registration
 hooks/                      Codex lifecycle hook registration
-skills/                     Codex skills for orchestrating Claude Code and Grok lanes
-cmd/                        seven executable entry points
+skills/                     Codex skills for orchestrating Codex, Claude, and Grok lanes
+cmd/                        nine executable entry points
 internal/bridge/            local session lifecycle and messaging runtime
 internal/launcher/          native launcher argument and bootstrap logic
 internal/federator/         independent cross-host federation runtime

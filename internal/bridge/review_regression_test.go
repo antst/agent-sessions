@@ -287,6 +287,7 @@ func TestInteractivePeerToolUsesAttestedInteractiveOwner(t *testing.T) {
 }
 
 func TestLaneSetupArchivesThreadWhenNamingFails(t *testing.T) {
+	useBridgeTestAgent(t)
 	archived := make(chan string, 1)
 	fake, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
 		switch stringValue(request["method"]) {
@@ -332,6 +333,7 @@ func TestLaneSetupArchivesThreadWhenNamingFails(t *testing.T) {
 }
 
 func TestLaneSetupRetainsManageableStateWhenRollbackArchiveFails(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	threadID := "thread-rollback-fail"
 	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -366,7 +368,60 @@ func TestLaneSetupRetainsManageableStateWhenRollbackArchiveFails(t *testing.T) {
 	}
 }
 
-func TestDuplicateLaneNameRemovesProvisionalWorktree(t *testing.T) {
+func TestLaneSetupDeletesUnmaterializedThreadWhenRollbackFindsNoRollout(t *testing.T) {
+	useBridgeTestAgent(t)
+	root := t.TempDir()
+	threadID := "00000000-0000-4000-8000-000000000041"
+	deleted := make(chan string, 1)
+	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/start":
+			return map[string]any{"thread": map[string]any{"id": threadID, "sessionId": threadID, "cwd": root}}, nil
+		case "thread/name/set":
+			return nil, errors.New("name rejected")
+		case "thread/archive":
+			return nil, errors.New("no rollout found for thread id " + threadID)
+		case "thread/delete":
+			params := request["params"].(map[string]any)
+			deleted <- stringValue(params["threadId"])
+			return map[string]any{}, nil
+		default:
+			return map[string]any{}, nil
+		}
+	})
+	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	prompt := filepath.Join(root, "prompt")
+	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "no-rollout", cwd: root, promptFile: prompt}), false); err == nil {
+		t.Fatal("name failure unexpectedly succeeded")
+	}
+	select {
+	case got := <-deleted:
+		if got != threadID {
+			t.Fatalf("deleted thread = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unmaterialized lane thread was not deleted")
+	}
+	paths := resolveNativePaths()
+	if _, err := os.Stat(laneStatePath(paths, threadID)); !os.IsNotExist(err) {
+		t.Fatalf("unmaterialized lane retained active state: %v", err)
+	}
+	if !readRetiredThreads(paths)[threadID] {
+		t.Fatal("unmaterialized lane deletion did not persist retirement")
+	}
+}
+
+func TestFailedLaneStartRemovesProvisionalWorktree(t *testing.T) {
+	useBridgeTestAgent(t)
 	repository := t.TempDir()
 	for _, args := range [][]string{
 		{"init"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "Test"},
@@ -387,16 +442,12 @@ func TestDuplicateLaneNameRemovesProvisionalWorktree(t *testing.T) {
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	paths := resolveNativePaths()
-	if err := recordLaneState(paths, laneState{Type: "codex-peer-lane", Name: "duplicate", ThreadID: "existing-thread", SessionID: "existing-thread"}); err != nil {
-		t.Fatal(err)
-	}
 	prompt := filepath.Join(root, "prompt")
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "duplicate", cwd: repository, promptFile: prompt, worktree: true}), false); err == nil {
-		t.Fatal("duplicate lane name unexpectedly succeeded")
+		t.Fatal("lane start unexpectedly succeeded without an App Server")
 	}
 	output, err := exec.Command("git", "-C", repository, "worktree", "list", "--porcelain").Output()
 	if err != nil {
@@ -478,6 +529,7 @@ func TestWaitReloadsDurableTimeoutBeforeTerminalClassification(t *testing.T) {
 }
 
 func TestRunReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	waiting := make(chan struct{})
 	var waitingOnce sync.Once
@@ -563,6 +615,7 @@ func TestRunReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 }
 
 func TestResumeReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	threadID := "00000000-0000-0000-0000-000000000338"
 	waiting := make(chan struct{})
@@ -1071,66 +1124,6 @@ func TestLaneNameLockSerializesPublishWindow(t *testing.T) {
 	}
 }
 
-func TestArchivedLaneNameIsReservedForTranscriptResume(t *testing.T) {
-	paths := nativePaths{profileRoot: t.TempDir(), claudeRoot: filepath.Join(t.TempDir(), "claude")}
-	state := laneState{
-		Type: "codex-peer-lane", Name: "review-seat", ThreadID: "thread-archived-name",
-		SessionID: "thread-archived-name", Status: "archived",
-	}
-	if err := recordLaneState(paths, state); err != nil {
-		t.Fatal(err)
-	}
-	if err := assertLaneNameAvailableExcept(paths, state.Name, ""); err == nil {
-		t.Fatal("new lane reused an archived transcript name")
-	}
-	if err := assertLaneNameAvailableExcept(paths, state.Name, state.ThreadID); err != nil {
-		t.Fatalf("resume could not reclaim its own lane name: %v", err)
-	}
-}
-
-func TestClaudePeerNameCollisionHandlesProcessIdentity(t *testing.T) {
-	procStart := readProcStart(os.Getpid())
-	if procStart == "" {
-		t.Fatal("current process has no start token")
-	}
-	for _, test := range []struct {
-		name      string
-		pid       int
-		procStart string
-		want      string
-	}{
-		{name: "matching", procStart: procStart, want: "live peer name"},
-		{name: "unknown", want: "cannot verify whether peer name"},
-		{name: "stale", procStart: procStart + "-wrong"},
-		{name: "dead-tokenless", pid: 99999991},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			paths := nativePaths{profileRoot: filepath.Join(root, "profile"), claudeRoot: filepath.Join(root, "claude")}
-			pid := test.pid
-			if pid == 0 {
-				pid = os.Getpid()
-			}
-			registry := filepath.Join(paths.claudeRoot, "sessions", fmt.Sprintf("%d.json", pid))
-			if err := writeJSONAtomic(registry, map[string]any{
-				"pid": pid, "procStart": test.procStart, "sessionId": "peer-session", "name": "reserved-peer",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			err := assertLaneNameAvailableExcept(paths, "reserved-peer", "")
-			if test.want == "" {
-				if err != nil {
-					t.Fatalf("stale peer retained name reservation: %v", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("name collision error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
 func TestFastCompletedLaneReplaysFinalItem(t *testing.T) {
 	isolateNativeLaneTest(t)
 	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -1309,6 +1302,7 @@ func TestTerminalOutputFailureDoesNotAcknowledgeCollection(t *testing.T) {
 }
 
 func TestLaneReadyFollowsInitialTurnAndRegistration(t *testing.T) {
+	useBridgeTestAgent(t)
 	methods := make(chan string, 16)
 	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
 		method := stringValue(request["method"])
@@ -1739,6 +1733,7 @@ func TestSchemaCorrectionDoesNotRevertConcurrentAcknowledgement(t *testing.T) {
 }
 
 func TestResumeLaneStartsNewTurnOnSameTranscript(t *testing.T) {
+	useBridgeTestAgent(t)
 	methods := make(chan string, 16)
 	root := t.TempDir()
 	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -1824,6 +1819,7 @@ func TestResumeLaneStartsNewTurnOnSameTranscript(t *testing.T) {
 }
 
 func TestResumeStartFailureRestoresOriginalLaneState(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
 		switch stringValue(request["method"]) {
@@ -1871,6 +1867,7 @@ func TestResumeStartFailureRestoresOriginalLaneState(t *testing.T) {
 }
 
 func TestResumeUncertainStartPreservesObservedTurn(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	var observer *nativeSupervisor
 	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -3126,68 +3123,6 @@ func TestDetachedCollectorSignalDoesNotInterruptTurn(t *testing.T) {
 	status = laneWaitSignalStatus(state, true, func() { interrupts++ })
 	if status != "interrupted" || interrupts != 1 {
 		t.Fatalf("owned signal = status %q interrupts=%d", status, interrupts)
-	}
-}
-
-func TestArchivedResumeCollisionRestoresArchiveAndRetirement(t *testing.T) {
-	root := t.TempDir()
-	threadID := "00000000-0000-0000-0000-000000000901"
-	methods := make(chan string, 16)
-	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		method := stringValue(request["method"])
-		if method != "initialize" {
-			methods <- method
-		}
-		switch method {
-		case "initialize", "thread/unarchive", "thread/archive", "turn/interrupt":
-			return map[string]any{}, nil
-		case "thread/resume":
-			return map[string]any{"thread": map[string]any{
-				"id": threadID, "sessionId": threadID, "name": "resume-collision", "cwd": root,
-				"source": "appServer", "status": map[string]any{"type": "idle"},
-			}}, nil
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
-	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	paths := resolveNativePaths()
-	state := laneState{
-		Type: "codex-peer-lane", Name: "resume-collision", ThreadID: threadID,
-		SessionID: threadID, Cwd: root, Status: "archived",
-	}
-	if err := recordLaneState(paths, state); err != nil {
-		t.Fatal(err)
-	}
-	if err := markRetiredThread(paths, threadID); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSONAtomic(filepath.Join(paths.claudeRoot, "sessions", "foreign.json"), map[string]any{
-		"name": "resume-collision", "sessionId": "foreign-session", "pid": os.Getpid(), "procStart": readProcStart(os.Getpid()),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	prompt := filepath.Join(root, "prompt.txt")
-	if err := os.WriteFile(prompt, []byte("follow up\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	code, err := resumeLaneNative(withCurrentTestLaneOwner(laneOptions{command: "resume", target: state.Name, promptFile: prompt}))
-	if err == nil || code != 1 || !strings.Contains(err.Error(), "live peer name") {
-		t.Fatalf("resume collision = code %d err %v", code, err)
-	}
-	latest, readErr := readLaneStateFile(paths, threadID)
-	if readErr != nil || latest.Status != "archived" || !readRetiredThreads(paths)[threadID] {
-		t.Fatalf("rollback state = %+v retired=%v err=%v", latest, readRetiredThreads(paths)[threadID], readErr)
-	}
-	seen := map[string]bool{}
-	for len(methods) > 0 {
-		seen[<-methods] = true
-	}
-	if !seen["thread/unarchive"] || !seen["thread/archive"] || seen["turn/start"] {
-		t.Fatalf("rollback methods = %#v", seen)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
@@ -35,6 +36,8 @@ type daemon struct {
 	name             string
 	nameSource       string
 	permissionMode   string
+	agentRuntimeDir  string
+	agentManaged     bool
 	status           string
 	entrypoint       string
 	supervisorSocket string
@@ -205,10 +208,15 @@ func newDaemon(args map[string]string) *daemon {
 	default:
 		status = "idle"
 	}
+	agentRuntimeDir := strings.TrimSpace(args["agent-runtime-dir"])
+	if agentRuntimeDir == "" {
+		agentRuntimeDir = strings.TrimSpace(os.Getenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR"))
+	}
 	return &daemon{
 		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
 		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
-		entrypoint:       entrypoint,
+		entrypoint:      entrypoint,
+		agentRuntimeDir: agentRuntimeDir, agentManaged: agentRuntimeDir != "",
 		supervisorSocket: args["supervisor-socket"], supervisorToken: args["supervisor-token"], ownerPID: ownerPID,
 		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),
 		startedAt: time.Now().UnixMilli(), heartbeat: heartbeat,
@@ -283,7 +291,7 @@ func (d *daemon) start() error {
 	d.listener = listener
 	_ = os.Chmod(d.backendSocket, 0600)
 	if err := d.publishAlias(); err != nil {
-		_ = listener.Close()
+		d.shutdown()
 		return err
 	}
 	d.mu.Lock()
@@ -291,6 +299,7 @@ func (d *daemon) start() error {
 	err = d.writeRecordsLocked()
 	d.mu.Unlock()
 	if err != nil {
+		d.shutdown()
 		return err
 	}
 	go d.acceptLoop()
@@ -378,6 +387,7 @@ func (d *daemon) handleFrame(frame map[string]any) {
 	}
 }
 
+//nolint:gocyclo // Native carrier decoding keeps ordered compatibility checks in one admission boundary.
 func (d *daemon) handleUser(frame map[string]any) {
 	if target := stringValue(frame["session_id"]); target != "" && target != d.sessionID {
 		return
@@ -387,9 +397,19 @@ func (d *daemon) handleUser(frame map[string]any) {
 	if content == "" {
 		return
 	}
+	var grouped *federator.AgentFrame
+	if decoded, err := federator.DecodeAgentFrameBody(content); err == nil &&
+		decoded.Version == federator.AgentFrameVersion && decoded.Type == "delivery" &&
+		decoded.MessageID != "" && decoded.Source != nil && decoded.Content != "" {
+		grouped = &decoded
+		content = decoded.Content
+	}
 	id := stringValue(frame["msg_id"])
 	if id == "" {
 		id = stringValue(frame["uuid"])
+	}
+	if grouped != nil {
+		id = grouped.MessageID
 	}
 	if id == "" {
 		// Retried transports without an explicit id must still converge on one
@@ -415,6 +435,17 @@ func (d *daemon) handleUser(frame map[string]any) {
 		"receivedAt": time.Now().UTC().Format(time.RFC3339Nano),
 		"from":       defaultString(stringValue(frame["from"]), defaultString(env.From, "unknown")),
 		"message":    defaultString(env.Message, content),
+	}
+	if grouped != nil {
+		item["id"] = grouped.MessageID
+		item["from"] = grouped.Source.ID
+		item["message"] = grouped.Content
+		item["sentAt"] = grouped.SentAt
+		item["fromName"] = grouped.Source.Name
+		item["fromSession"] = grouped.Source.SessionID
+		item["fromProduct"] = grouped.Source.Entrypoint
+		item["fromMode"] = grouped.Source.PermissionMode
+		item["summary"] = grouped.Summary
 	}
 	putIf(item, "sentAt", env.SentAt)
 	putIf(item, "fromName", env.FromName)
@@ -607,7 +638,9 @@ func (d *daemon) writeRecordsLocked() error {
 		"sessionId": d.sessionID, "cwd": d.cwd, "name": d.name, "nameSource": d.nameSource,
 		"permissionMode": d.permissionMode, "socketPath": d.stableSocket, "backendSocketPath": d.backendSocket,
 		"registryFile": d.registryFile, "inboxDir": d.inboxDir, "startedAt": d.startedAt,
-		"status": d.status, "entrypoint": d.entrypoint, "supervisorSocket": d.supervisorSocket, "updatedAt": now,
+		"status": d.status, "entrypoint": d.entrypoint, "supervisorSocket": d.supervisorSocket,
+		"agentRuntimeDir": d.agentRuntimeDir, "groupProtocol": map[bool]int{true: federator.GroupProtocolVersion, false: 0}[d.agentManaged],
+		"updatedAt": now,
 	}
 	registry := map[string]any{
 		"pid": os.Getpid(), "sessionId": d.sessionID, "cwd": d.cwd, "startedAt": d.startedAt,
@@ -619,7 +652,23 @@ func (d *daemon) writeRecordsLocked() error {
 	if err := writeJSONAtomic(d.stateFile, state); err != nil {
 		return err
 	}
+	if d.agentManaged {
+		_, err := federator.RegisterPeer(d.agentRuntimeDir, d.agentRegistrationLocked())
+		return err
+	}
 	return writeJSONAtomic(d.registryFile, registry)
+}
+
+func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
+	return federator.PeerRegistration{
+		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, Product: d.entrypoint,
+		Name: d.name, Status: d.status, PermissionMode: d.permissionMode, Cwd: d.cwd,
+		PID: os.Getpid(), ProcStart: d.procStart, Socket: d.stableSocket,
+		// The per-session shim is the communication parent's lifetime. Its
+		// supervisor may host many unrelated sessions and must not keep children
+		// alive after this one is retired.
+		LifecyclePID: os.Getpid(), LifecycleProcStart: d.procStart, StartedAt: d.startedAt,
+	}
 }
 
 func (d *daemon) enqueue(item map[string]any) error {
@@ -701,6 +750,7 @@ func (d *daemon) shutdown() {
 	// stopped latch prevents that writer from recreating state after removal.
 	d.mu.Lock()
 	d.stopped = true
+	registration := d.agentRegistrationLocked()
 	removeJSONIf(d.registryFile, func(row map[string]any) bool {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
@@ -708,6 +758,9 @@ func (d *daemon) shutdown() {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
 	d.mu.Unlock()
+	if d.agentManaged {
+		_ = federator.UnregisterPeer(d.agentRuntimeDir, registration)
+	}
 	if target, err := os.Readlink(d.stableSocket); err == nil {
 		resolved := target
 		if !filepath.IsAbs(resolved) {
@@ -894,6 +947,20 @@ func defaultString(value, fallback string) string {
 	return fallback
 }
 func stringValue(value any) string { text, _ := value.(string); return text }
+func boolValue(value any) bool     { result, _ := value.(bool); return result }
+func stringSlice(value any) []string {
+	if values, ok := value.([]string); ok {
+		return append([]string(nil), values...)
+	}
+	values, _ := value.([]any)
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
 func intValue(value any) int {
 	switch v := value.(type) {
 	case float64:

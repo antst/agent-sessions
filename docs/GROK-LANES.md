@@ -137,15 +137,18 @@ Terminal turns durably queue a `GROK_LANE_TERMINAL` collection pointer for the c
 The pointer contains a stable notice ID and exact `wait` command; it is never the answer. Its native
 message ID is the same stable notice ID, so a retry after an ambiguous state write is deduplicated by
 the destination peer.
+Remote pointers retain the source agent's effective `-runtime-dir`, including for non-default
+isolated estates.
 
 ## Remote lanes
 
 An operator must explicitly enable remote lane execution on the destination federator. A healthy
 destination advertises `grok-lane` only when its exact `grok-peer-lane` launcher is available. Use
 `peer-federator lane --host HOST --product grok -- COMMAND ...`; every lifecycle command remains the
-native Grok JSONL contract. Federation injects `--persistent` and a notify target back through the
-source shadow for remote `run`, `start`, and `resume`, so callers must not override persistence or
-notification flags. Every operation requires the hub and fails closed on disconnect.
+native Grok JSONL contract. Federation carries an agent-attested parent context and returns
+terminal pointers through grouped routing. The child always receives the remote parent anchor;
+other parent groups are copied only after explicit `--inherit-groups`. Every remote operation
+requires the hub and fails closed on disconnect.
 
 ## Permissions
 

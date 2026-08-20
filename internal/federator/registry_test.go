@@ -10,46 +10,6 @@ import (
 	"time"
 )
 
-func TestWriteShadowRecordPublishesExactProcessStart(t *testing.T) {
-	started := processStart(os.Getpid())
-	if started == "" {
-		t.Skip("platform does not expose a supported process-start token")
-	}
-	path, err := writeShadowRecord(t.TempDir(), os.Getpid(), filepath.Join(t.TempDir(), "shadow.sock"), Peer{
-		GlobalID: "remote-session", DisplayName: "remote-peer",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var record registryRecord
-	if err := json.Unmarshal(body, &record); err != nil {
-		t.Fatal(err)
-	}
-	if record.PID != os.Getpid() || record.ProcStart != started {
-		t.Fatalf("shadow identity = pid %d start %q, want pid %d start %q", record.PID, record.ProcStart, os.Getpid(), started)
-	}
-}
-
-func TestWriteShadowRecordRefusesUnknownProcessIdentity(t *testing.T) {
-	registry := t.TempDir()
-	if _, err := writeShadowRecord(registry, 1<<30, filepath.Join(t.TempDir(), "shadow.sock"), Peer{
-		GlobalID: "remote-session", DisplayName: "remote-peer",
-	}); err == nil {
-		t.Fatal("shadow record with unknown process identity was published")
-	}
-	entries, err := os.ReadDir(registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("failed shadow publication left registry entries: %v", entries)
-	}
-}
-
 func TestDiscoverLocalPeersExportsRealAndSkipsFederatedRecords(t *testing.T) {
 	root := t.TempDir()
 	registry := filepath.Join(root, "sessions")
@@ -294,11 +254,11 @@ func TestRegistryDiagnosticsReportLiveSessionWithoutMessagingSocket(t *testing.T
 	if err := writeJSONAtomic(filepath.Join(registry, strconv.Itoa(pid)+".json"), record); err != nil {
 		t.Fatal(err)
 	}
-	ready, live, messageable, unmessageable, shadows := inspectRegistry(registry)
-	if !ready || live != 1 || messageable != 0 || unmessageable != 1 || shadows != 0 {
+	ready, live, messageable, unmessageable := inspectRegistry(registry)
+	if !ready || live != 1 || messageable != 0 || unmessageable != 1 {
 		t.Fatalf(
-			"registry diagnostics = ready:%v live:%d messageable:%d unmessageable:%d shadows:%d",
-			ready, live, messageable, unmessageable, shadows,
+			"registry diagnostics = ready:%v live:%d messageable:%d unmessageable:%d",
+			ready, live, messageable, unmessageable,
 		)
 	}
 }
