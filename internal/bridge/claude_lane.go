@@ -165,6 +165,7 @@ type claudeLaneState struct {
 	ExplicitGroups        []string           `json:"explicitGroups,omitempty"`
 	ParentSessionID       string             `json:"parentSessionId,omitempty"`
 	ParentHostID          string             `json:"parentHostId,omitempty"`
+	ParentAgentRuntimeDir string             `json:"parentAgentRuntimeDir,omitempty"`
 	InheritParentGroups   bool               `json:"inheritParentGroups,omitempty"`
 	Notices               []claudeLaneNotice `json:"notices,omitempty"`
 	CreatedAt             int64              `json:"createdAt"`
@@ -853,6 +854,7 @@ func startClaudeLane(o claudeLaneOptions, wait bool) (int, error) {
 	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
 	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		return 1, err
 	}
@@ -1050,6 +1052,7 @@ func resumeClaudeLane(o claudeLaneOptions) (int, error) {
 		state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 		state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
 		state.ParentHostID = groupState.ParentHostID
+		state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 		state.Turns = append(state.Turns, turn)
 		state.TurnID, state.LatestTurnID = oldestClaudeLaneDebt(state), turn.ID
 		if err := writeClaudeLaneState(paths, state); err != nil {
@@ -1078,7 +1081,8 @@ func resumeClaudeLane(o claudeLaneOptions) (int, error) {
 			"action": "resume", "sessionId": state.SessionID, "turn": turn,
 			"groups": groupState.Groups, "explicitGroups": groupState.ExplicitGroups,
 			"parentSessionId": groupState.ParentSessionID, "parentHostId": groupState.ParentHostID,
-			"inheritParentGroups": groupState.InheritParentGroups,
+			"parentAgentRuntimeDir": groupState.ParentAgentRuntimeDir,
+			"inheritParentGroups":   groupState.InheritParentGroups,
 		}
 		if o.autoArchiveCustom {
 			request["autoArchiveDelayMs"] = o.autoArchiveDelay.Milliseconds()
@@ -2560,6 +2564,7 @@ func (m *claudeLaneManager) handleControl(request map[string]any) (map[string]an
 		m.state.Groups, m.state.ExplicitGroups = groups, explicit
 		m.state.ParentSessionID = stringValue(request["parentSessionId"])
 		m.state.ParentHostID = stringValue(request["parentHostId"])
+		m.state.ParentAgentRuntimeDir = stringValue(request["parentAgentRuntimeDir"])
 		m.state.InheritParentGroups, _ = request["inheritParentGroups"].(bool)
 		m.state.Turns = append(m.state.Turns, turn)
 		m.state.AutoArchiveAt = 0
@@ -2752,7 +2757,7 @@ func queueClaudeLaneTerminalNotice(state *claudeLaneState, turn claudeLaneTurn) 
 		}
 	}
 	noticeID := sessionKey("claude-lane-terminal\x00" + state.SessionID + "\x00" + turn.ID)
-	collect := laneCollectionPointer("claude", state.SessionID, state.ParentHostID, state.Groups)
+	collect := laneCollectionPointer("claude", state.SessionID, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups)
 	message := fmt.Sprintf(
 		"CLAUDE_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
 		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,

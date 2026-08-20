@@ -903,7 +903,7 @@ func TestParentContextSeparatesAdapterAndLifecycleIdentity(t *testing.T) {
 		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
 	}
 	agent := &agent{
-		options: AgentOptions{HostID: "host-a", HostName: "Host A"}, catalog: catalog,
+		options: AgentOptions{HostID: "host-a", HostName: "Host A", RuntimeDir: filepath.Join(root, "agent-runtime")}, catalog: catalog,
 		local: map[string]localPeer{}, remote: map[string]Peer{}, localChanged: make(chan struct{}, 1),
 	}
 	if _, err := agent.registerPeer(registration, false); err != nil {
@@ -914,7 +914,8 @@ func TestParentContextSeparatesAdapterAndLifecycleIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if parent.AdapterPID != os.Getpid() || parent.AdapterSocket != socket ||
-		parent.PID != lifecycle.Process.Pid || parent.ProcStart != registration.LifecycleProcStart {
+		parent.PID != lifecycle.Process.Pid || parent.ProcStart != registration.LifecycleProcStart ||
+		parent.AgentRuntimeDir != filepath.Join(root, "agent-runtime") {
 		t.Fatalf("parent context = %+v", parent)
 	}
 }

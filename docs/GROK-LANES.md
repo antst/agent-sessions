@@ -137,6 +137,8 @@ Terminal turns durably queue a `GROK_LANE_TERMINAL` collection pointer for the c
 The pointer contains a stable notice ID and exact `wait` command; it is never the answer. Its native
 message ID is the same stable notice ID, so a retry after an ambiguous state write is deduplicated by
 the destination peer.
+Remote pointers retain the source agent's effective `-runtime-dir`, including for non-default
+isolated estates.
 
 ## Remote lanes
 

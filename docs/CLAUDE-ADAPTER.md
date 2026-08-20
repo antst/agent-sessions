@@ -146,6 +146,8 @@ Parent-owned lanes automatically register a durable supervisor-owned terminal jo
 owner. On any terminal outcome the owner receives a pointer carrying the lane name, thread ID,
 turn ID, raw status, normalized outcome, exit code, `collection=required`, and the exact `wait`
 command. `--no-notify` suppresses this pointer without changing ownership.
+Remote pointers include the source agent's effective `-runtime-dir`; an isolated parent can run the
+printed `peer-federator lane ... wait` command without reconstructing its agent socket path.
 
 Direct Claude ownership is accepted only when environment hints, the live registry row, socket,
 available process identity, and process ancestry all agree. The resulting owner is the corroborated

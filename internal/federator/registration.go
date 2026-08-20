@@ -124,6 +124,7 @@ type ParentContext struct {
 	InstanceID       string   `json:"instance_id"`
 	Groups           []string `json:"groups"`
 	AlwaysApprove    bool     `json:"always_approve"`
+	AgentRuntimeDir  string   `json:"agent_runtime_dir,omitempty"`
 	AdapterPID       int      `json:"adapter_pid,omitempty"`
 	AdapterProcStart string   `json:"adapter_proc_start,omitempty"`
 	AdapterSocket    string   `json:"adapter_socket,omitempty"`
@@ -767,11 +768,22 @@ func (a *agent) parentContext(sessionID string) (ParentContext, error) {
 	return ParentContext{
 		HostID: a.options.HostID, SessionID: sessionID, Product: preference.Product,
 		InstanceID: peer.InstanceID, Groups: groups,
-		AlwaysApprove: preference.AlwaysApprove,
-		AdapterPID:    peer.PID, AdapterProcStart: peer.ProcStart, AdapterSocket: peer.Socket,
+		AlwaysApprove: preference.AlwaysApprove, AgentRuntimeDir: absolutePathOrOriginal(a.options.RuntimeDir),
+		AdapterPID: peer.PID, AdapterProcStart: peer.ProcStart, AdapterSocket: peer.Socket,
 		PID: peer.LifecyclePID, ProcStart: peer.LifecycleProcStart,
 		PermissionMode: peer.PermissionMode,
 	}, nil
+}
+
+func absolutePathOrOriginal(path string) string {
+	if path == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return absolute
 }
 
 //nolint:gocyclo // Reconciliation keeps each identity and retirement transition explicit.

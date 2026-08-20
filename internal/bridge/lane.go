@@ -60,44 +60,45 @@ const laneContractVersion = 2
 const defaultLaneAutoArchiveDelay = time.Minute
 
 type laneState struct {
-	Type                string          `json:"type"`
-	Name                string          `json:"name"`
-	ThreadID            string          `json:"threadId"`
-	SessionID           string          `json:"sessionId"`
-	Cwd                 string          `json:"cwd"`
-	Socket              string          `json:"socketPath,omitempty"`
-	Address             string          `json:"address,omitempty"`
-	Status              string          `json:"status"`
-	TurnID              string          `json:"turnId,omitempty"`
-	LatestTurnID        string          `json:"latestTurnId,omitempty"`
-	PendingTurnIDs      []string        `json:"pendingTurnIds,omitempty"`
-	PendingQueueVer     int             `json:"pendingQueueVersion,omitempty"`
-	CollectedTurnID     string          `json:"collectedTurnId,omitempty"`
-	CreatedAt           int64           `json:"createdAt"`
-	UpdatedAt           int64           `json:"updatedAt"`
-	NotifyTarget        string          `json:"notifyTarget,omitempty"`
-	Persistent          bool            `json:"persistent,omitempty"`
-	AutoArchive         bool            `json:"autoArchive,omitempty"`
-	AutoArchiveDelayMS  int64           `json:"autoArchiveDelayMs,omitempty"`
-	AutoArchiveAt       int64           `json:"autoArchiveAt,omitempty"`
-	OwnerPID            int             `json:"ownerPid,omitempty"`
-	OwnerProcStart      string          `json:"ownerProcStart,omitempty"`
-	OwnerSessionID      string          `json:"ownerSessionId,omitempty"`
-	OutputSchema        json.RawMessage `json:"outputSchema,omitempty"`
-	SchemaAttempts      int             `json:"schemaAttempts,omitempty"`
-	SchemaRetryByID     map[string]int  `json:"schemaRetryById,omitempty"`
-	WorktreePath        string          `json:"worktreePath,omitempty"`
-	OriginalCwd         string          `json:"originalCwd,omitempty"`
-	PermissionMode      string          `json:"permissionMode,omitempty"`
-	DeadlineAt          int64           `json:"deadlineAt,omitempty"`
-	TimedOutTurnID      string          `json:"timedOutTurnId,omitempty"`
-	TerminalOutcome     string          `json:"terminalOutcome,omitempty"`
-	TerminalTurnID      string          `json:"terminalTurnId,omitempty"`
-	Groups              []string        `json:"groups,omitempty"`
-	ExplicitGroups      []string        `json:"explicitGroups,omitempty"`
-	ParentSessionID     string          `json:"parentSessionId,omitempty"`
-	ParentHostID        string          `json:"parentHostId,omitempty"`
-	InheritParentGroups bool            `json:"inheritParentGroups,omitempty"`
+	Type                  string          `json:"type"`
+	Name                  string          `json:"name"`
+	ThreadID              string          `json:"threadId"`
+	SessionID             string          `json:"sessionId"`
+	Cwd                   string          `json:"cwd"`
+	Socket                string          `json:"socketPath,omitempty"`
+	Address               string          `json:"address,omitempty"`
+	Status                string          `json:"status"`
+	TurnID                string          `json:"turnId,omitempty"`
+	LatestTurnID          string          `json:"latestTurnId,omitempty"`
+	PendingTurnIDs        []string        `json:"pendingTurnIds,omitempty"`
+	PendingQueueVer       int             `json:"pendingQueueVersion,omitempty"`
+	CollectedTurnID       string          `json:"collectedTurnId,omitempty"`
+	CreatedAt             int64           `json:"createdAt"`
+	UpdatedAt             int64           `json:"updatedAt"`
+	NotifyTarget          string          `json:"notifyTarget,omitempty"`
+	Persistent            bool            `json:"persistent,omitempty"`
+	AutoArchive           bool            `json:"autoArchive,omitempty"`
+	AutoArchiveDelayMS    int64           `json:"autoArchiveDelayMs,omitempty"`
+	AutoArchiveAt         int64           `json:"autoArchiveAt,omitempty"`
+	OwnerPID              int             `json:"ownerPid,omitempty"`
+	OwnerProcStart        string          `json:"ownerProcStart,omitempty"`
+	OwnerSessionID        string          `json:"ownerSessionId,omitempty"`
+	OutputSchema          json.RawMessage `json:"outputSchema,omitempty"`
+	SchemaAttempts        int             `json:"schemaAttempts,omitempty"`
+	SchemaRetryByID       map[string]int  `json:"schemaRetryById,omitempty"`
+	WorktreePath          string          `json:"worktreePath,omitempty"`
+	OriginalCwd           string          `json:"originalCwd,omitempty"`
+	PermissionMode        string          `json:"permissionMode,omitempty"`
+	DeadlineAt            int64           `json:"deadlineAt,omitempty"`
+	TimedOutTurnID        string          `json:"timedOutTurnId,omitempty"`
+	TerminalOutcome       string          `json:"terminalOutcome,omitempty"`
+	TerminalTurnID        string          `json:"terminalTurnId,omitempty"`
+	Groups                []string        `json:"groups,omitempty"`
+	ExplicitGroups        []string        `json:"explicitGroups,omitempty"`
+	ParentSessionID       string          `json:"parentSessionId,omitempty"`
+	ParentHostID          string          `json:"parentHostId,omitempty"`
+	ParentAgentRuntimeDir string          `json:"parentAgentRuntimeDir,omitempty"`
+	InheritParentGroups   bool            `json:"inheritParentGroups,omitempty"`
 }
 
 func laneAutoArchiveDelay(state laneState) time.Duration {
@@ -534,6 +535,7 @@ func startLaneNative(options laneOptions, wait bool) (int, error) {
 	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
 	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	if worktreePath != "" {
 		state.OriginalCwd = originalCwd
 	}
@@ -757,6 +759,7 @@ func resumeLaneNative(options laneOptions) (int, error) {
 	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
 	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	applyLaneLifecycleOptions(&state, options)
 	state.Status = "starting"
 	state.TurnID = ""

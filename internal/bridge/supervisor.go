@@ -2753,7 +2753,8 @@ func (s *nativeSupervisor) queueLaneTerminalNotice(threadID string, turn map[str
 		"noticeId": noticeID, "threadId": threadID, "turnId": turnID,
 		"name": state.Name, "target": state.NotifyTarget, "status": status,
 		"outcome": outcome, "exit": laneExitCode(outcome),
-		"createdAt": time.Now().UnixMilli(), "parentHostId": state.ParentHostID, "groups": state.Groups,
+		"createdAt": time.Now().UnixMilli(), "parentHostId": state.ParentHostID,
+		"parentAgentRuntimeDir": state.ParentAgentRuntimeDir, "groups": state.Groups,
 	}
 	directory := filepath.Join(profileDataRoot(s.paths), "notices")
 	if err := writeJSONAtomic(filepath.Join(directory, noticeID+".json"), job); err != nil {
@@ -2796,7 +2797,9 @@ func (s *nativeSupervisor) flushLaneNotices(threadFilter string) (int, error) {
 			continue
 		}
 		groups := stringSlice(job["groups"])
-		collect := laneCollectionPointer("codex", threadID, stringValue(job["parentHostId"]), groups)
+		collect := laneCollectionPointer(
+			"codex", threadID, stringValue(job["parentHostId"]), stringValue(job["parentAgentRuntimeDir"]), groups,
+		)
 		message := fmt.Sprintf(
 			"CODEX_LANE_TERMINAL notice=%s name=%s thread=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
 			stringValue(job["noticeId"]), stringValue(job["name"]), threadID,

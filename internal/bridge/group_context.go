@@ -26,12 +26,13 @@ type laneGroupOptions struct {
 	inheritGroupsSpecified bool
 	parentSessionID        string
 	parentHostID           string
+	parentAgentRuntimeDir  string
 	parentGroups           []string
 	parentProduct          string
 	parentErr              error
 }
 
-func laneCollectionPointer(product, sessionID, parentHostID string, groups []string) string {
+func laneCollectionPointer(product, sessionID, parentHostID, parentAgentRuntimeDir string, groups []string) string {
 	local := fmt.Sprintf("%s-peer-lane wait %s", product, sessionID)
 	if parentHostID == "" {
 		return local
@@ -41,12 +42,25 @@ func laneCollectionPointer(product, sessionID, parentHostID string, groups []str
 		if strings.HasPrefix(group, "session:") && strings.HasSuffix(group, suffix) {
 			hostID := strings.TrimSuffix(strings.TrimPrefix(group, "session:"), suffix)
 			if hostID != "" && hostID != parentHostID {
-				return fmt.Sprintf("peer-federator lane --host %s --product %s -- wait %s", hostID, product, sessionID)
+				runtimeOption := ""
+				if parentAgentRuntimeDir != "" {
+					runtimeOption = " -runtime-dir " + shellQuoteLanePointerArgument(parentAgentRuntimeDir)
+				}
+				return fmt.Sprintf("peer-federator lane%s --host %s --product %s -- wait %s", runtimeOption, hostID, product, sessionID)
 			}
 			break
 		}
 	}
 	return local
+}
+
+func shellQuoteLanePointerArgument(value string) string {
+	if value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("_./:-", r))
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func deliverGroupedLaneNotice(sourceSessionID, target, messageID, content string) error {
@@ -83,11 +97,12 @@ func deliverGroupedLaneNotice(sourceSessionID, target, messageID, content string
 }
 
 type laneGroupState struct {
-	Groups              []string `json:"groups,omitempty"`
-	ExplicitGroups      []string `json:"explicitGroups,omitempty"`
-	ParentSessionID     string   `json:"parentSessionId,omitempty"`
-	ParentHostID        string   `json:"parentHostId,omitempty"`
-	InheritParentGroups bool     `json:"inheritParentGroups,omitempty"`
+	Groups                []string `json:"groups,omitempty"`
+	ExplicitGroups        []string `json:"explicitGroups,omitempty"`
+	ParentSessionID       string   `json:"parentSessionId,omitempty"`
+	ParentHostID          string   `json:"parentHostId,omitempty"`
+	ParentAgentRuntimeDir string   `json:"parentAgentRuntimeDir,omitempty"`
+	InheritParentGroups   bool     `json:"inheritParentGroups,omitempty"`
 }
 
 func laneAgentRuntimeDir() string {
@@ -117,6 +132,7 @@ func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGrou
 			return groups
 		}
 		groups.parentSessionID, groups.parentHostID = parent.SessionID, parent.HostID
+		groups.parentAgentRuntimeDir = parent.AgentRuntimeDir
 		groups.parentGroups = append([]string(nil), parent.Groups...)
 		groups.parentProduct = parent.Product
 		return groups
@@ -152,6 +168,7 @@ func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGrou
 	}
 	groups.parentSessionID = parent.SessionID
 	groups.parentHostID = parent.HostID
+	groups.parentAgentRuntimeDir = parent.AgentRuntimeDir
 	groups.parentGroups = append([]string(nil), parent.Groups...)
 	groups.parentProduct = parent.Product
 	*owner = laneOwner{
@@ -205,11 +222,12 @@ func resolveLaneGroupState(
 		return laneGroupState{}, false, err
 	}
 	return laneGroupState{
-		Groups:              append([]string(nil), resolved.EffectiveGroups...),
-		ExplicitGroups:      append([]string(nil), resolved.Preference.ExplicitGroups...),
-		ParentSessionID:     resolved.Preference.ParentSession,
-		ParentHostID:        resolved.Preference.ParentHostID,
-		InheritParentGroups: resolved.Preference.InheritParentGroups,
+		Groups:                append([]string(nil), resolved.EffectiveGroups...),
+		ExplicitGroups:        append([]string(nil), resolved.Preference.ExplicitGroups...),
+		ParentSessionID:       resolved.Preference.ParentSession,
+		ParentHostID:          resolved.Preference.ParentHostID,
+		ParentAgentRuntimeDir: groups.parentAgentRuntimeDir,
+		InheritParentGroups:   resolved.Preference.InheritParentGroups,
 	}, resolved.Preference.AlwaysApprove, nil
 }
 

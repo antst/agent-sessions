@@ -120,6 +120,7 @@ type grokLaneState struct {
 	ExplicitGroups        []string           `json:"explicitGroups,omitempty"`
 	ParentSessionID       string             `json:"parentSessionId,omitempty"`
 	ParentHostID          string             `json:"parentHostId,omitempty"`
+	ParentAgentRuntimeDir string             `json:"parentAgentRuntimeDir,omitempty"`
 	InheritParentGroups   bool               `json:"inheritParentGroups,omitempty"`
 	CreatedAt             int64              `json:"createdAt"`
 	UpdatedAt             int64              `json:"updatedAt"`
@@ -569,6 +570,7 @@ func startGrokLane(o grokLaneOptions, wait bool) (int, error) {
 	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
 	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	if err := writeGrokLaneState(paths, state); err != nil {
 		return 1, err
 	}
@@ -709,6 +711,7 @@ func resumeGrokLane(o grokLaneOptions) (int, error) {
 	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
 	state.ParentHostID = groupState.ParentHostID
+	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
 	turn := newGrokLaneTurn(prompt, o.timeout)
 	if grokLaneManagerLive(state) {
 		return resumeLiveGrokLane(paths, state, turn, o, desiredPersistent)
@@ -723,7 +726,8 @@ func resumeLiveGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTur
 		"ownerSessionId": o.ownerSessionID,
 		"groups":         state.Groups, "explicitGroups": state.ExplicitGroups,
 		"parentSessionId": state.ParentSessionID, "parentHostId": state.ParentHostID,
-		"inheritParentGroups": state.InheritParentGroups,
+		"parentAgentRuntimeDir": state.ParentAgentRuntimeDir,
+		"inheritParentGroups":   state.InheritParentGroups,
 	}
 	switch {
 	case o.notifyExplicit:
@@ -759,6 +763,7 @@ func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLan
 	desiredExplicitGroups := append([]string(nil), state.ExplicitGroups...)
 	desiredParentSessionID := state.ParentSessionID
 	desiredParentHostID := state.ParentHostID
+	desiredParentAgentRuntimeDir := state.ParentAgentRuntimeDir
 	desiredInheritParentGroups := state.InheritParentGroups
 	if state.Status != "archived" {
 		if err := forceArchiveGrokLane(paths, state.SessionID, "stale manager before resume"); err != nil {
@@ -810,6 +815,7 @@ func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLan
 	state.Groups, state.ExplicitGroups = desiredGroups, desiredExplicitGroups
 	state.ParentSessionID, state.InheritParentGroups = desiredParentSessionID, desiredInheritParentGroups
 	state.ParentHostID = desiredParentHostID
+	state.ParentAgentRuntimeDir = desiredParentAgentRuntimeDir
 	if persistent {
 		state.OwnerPID, state.OwnerProcStart, state.OwnerSessionID = 0, "", ""
 	} else {

@@ -16,6 +16,19 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
+func TestRemoteLaneCollectionPointerCarriesSourceAgentRuntime(t *testing.T) {
+	groups := []string{"project", "session:destination/child", "session:source/parent"}
+	got := laneCollectionPointer("claude", "child", "source", "/tmp/source runtime", groups)
+	want := "peer-federator lane -runtime-dir '/tmp/source runtime' --host destination --product claude -- wait child"
+	if got != want {
+		t.Fatalf("remote collection pointer = %q, want %q", got, want)
+	}
+	legacy := laneCollectionPointer("claude", "child", "source", "", groups)
+	if strings.Contains(legacy, "-runtime-dir") {
+		t.Fatalf("legacy collection pointer invented a runtime directory: %q", legacy)
+	}
+}
+
 func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.T) {
 	root := shortSocketTestRoot(t, "ga-")
 	configDir := filepath.Join(root, "claude")
@@ -256,7 +269,7 @@ func TestAllLaneTargetParsersAcceptSharedGroupLayer(t *testing.T) {
 func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
 	parent := federator.ParentContext{
 		HostID: "source-host", SessionID: "source-session", Product: "claude",
-		Groups: []string{"project", "session:source-host/source-session"},
+		Groups: []string{"project", "session:source-host/source-session"}, AgentRuntimeDir: "/source/agent-runtime",
 	}
 	body, err := json.Marshal(parent)
 	if err != nil {
@@ -276,6 +289,7 @@ func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
 		"codex": codex.groupOptions, "claude": claude.groupOptions, "grok": grok.groupOptions,
 	} {
 		if state.parentSessionID != parent.SessionID || state.parentHostID != parent.HostID ||
+			state.parentAgentRuntimeDir != parent.AgentRuntimeDir ||
 			!equalStringSlices(state.parentGroups, parent.Groups) {
 			t.Fatalf("%s remote parent = %+v", product, state)
 		}

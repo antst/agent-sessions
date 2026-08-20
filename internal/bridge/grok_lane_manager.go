@@ -854,6 +854,7 @@ func (m *grokLaneManager) handleControl(request map[string]any) (map[string]any,
 		m.state.Groups, m.state.ExplicitGroups = groups, explicit
 		m.state.ParentSessionID = stringValue(request["parentSessionId"])
 		m.state.ParentHostID = stringValue(request["parentHostId"])
+		m.state.ParentAgentRuntimeDir = stringValue(request["parentAgentRuntimeDir"])
 		m.state.InheritParentGroups, _ = request["inheritParentGroups"].(bool)
 		m.state.Turns = append(m.state.Turns, turn)
 		m.state.TurnID, m.state.LatestTurnID, m.state.AutoArchiveAt = turn.ID, turn.ID, 0
@@ -1067,7 +1068,7 @@ func queueGrokLaneTerminalNotice(state *grokLaneState, turn grokLaneTurn) {
 		}
 	}
 	noticeID := sessionKey("grok-lane-terminal\x00" + state.SessionID + "\x00" + turn.ID)
-	collect := laneCollectionPointer("grok", state.SessionID, state.ParentHostID, state.Groups)
+	collect := laneCollectionPointer("grok", state.SessionID, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups)
 	message := fmt.Sprintf(
 		"GROK_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
 		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,

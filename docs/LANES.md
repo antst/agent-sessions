@@ -119,6 +119,8 @@ owner exit, to retire discovery permanently. Lanes created by older runtimes hav
 and are never adopted heuristically; archive those legacy lanes explicitly.
 An explicit `archive` makes one last delivery attempt, then cancels any still-undeliverable notice
 and reports `notices_dropped` instead of allowing a hint to block authoritative cleanup.
+For a remote lane, the pointer retains the source agent's effective `-runtime-dir`, so its printed
+`peer-federator lane ... wait` command remains directly runnable from a non-default isolated estate.
 
 The default lifecycle is parent-scoped. A direct Claude caller is identified only when its
 environment hints, current process ancestry, PID, available process-start identity, session ID,
