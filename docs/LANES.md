@@ -193,10 +193,10 @@ App Server and supervisor reachability, `CODEX_HOME`, and the profile state root
 events use contract version 2. A generic adapter should require a supported contract major before
 launching work.
 
-The repository also ships a self-contained Claude Code plugin, `codex-peer`, which teaches this
+The repository also ships a self-contained Claude Code plugin, `agent-sessions`, which teaches this
 contract to any Claude orchestrator without copying a project-specific adapter. It adds no runtime,
-hooks, MCP server, policy defaults, or permission grants; all behavior remains in
-`codex-peer-lane`.
+hooks, policy defaults, or permission grants. Its process-attested MCP declaration provides grouped
+messaging, while lane behavior remains in the native launchers.
 
 `wait` is a single-consumer cursor over the lane's persisted turn history. Its first successful
 call collects the initial turn; each later call blocks for and returns the oldest uncollected turn,

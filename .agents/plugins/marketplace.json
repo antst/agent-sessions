@@ -5,7 +5,7 @@
   },
   "plugins": [
     {
-      "name": "claude-code-peer",
+      "name": "agent-sessions",
       "source": {
         "source": "local",
         "path": "."

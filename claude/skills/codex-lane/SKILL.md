@@ -51,7 +51,7 @@ do not poll.
 
 ## Preflight (once per session)
 
-Run `/codex-peer:doctor`, or directly:
+Run `/agent-sessions:doctor`, or directly:
 
 ```
 "${CLAUDE_PLUGIN_ROOT}/skills/codex-lane/scripts/lane-preflight"

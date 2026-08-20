@@ -3,7 +3,7 @@
 **Contract version: 2**
 
 This document is the source of truth for what a Claude-side orchestrator may depend on when driving
-`codex-peer-lane`. The `codex-peer` plugin under [`claude/`](../claude) implements exactly this
+`codex-peer-lane`. The `agent-sessions` plugin under [`claude/`](../claude) implements exactly this
 contract; it summarizes the document and never restates it in conflicting words.
 
 An adapter that stays inside this surface keeps working across runtime updates. Anything not listed

@@ -1,4 +1,4 @@
-# codex-peer
+# agent-sessions
 
 The Claude Code side of this repository. It teaches a Claude orchestrator how to drive
 `codex-peer-lane`, `claude-peer-lane`, and `grok-peer-lane`: start a named lane, collect its final answer, message or
@@ -13,7 +13,7 @@ skills/codex-lane/             the Codex lane skill and its references
 skills/claude-lane/            the Claude self-lane skill
 skills/grok-lane/              the Grok lane skill and its references
 skills/agent-sessions/         grouped messaging through the one host-agent service
-commands/doctor.md             /codex-peer:doctor — read-only preflight
+commands/doctor.md             /agent-sessions:doctor — read-only preflight
 skills/codex-lane/scripts/     portable POSIX preflight included with the skill
 ```
 
@@ -21,7 +21,7 @@ Install it from the repository marketplace with:
 
 ```bash
 claude plugin marketplace add https://github.com/antst/agent-sessions.git
-claude plugin install codex-peer@agent-sessions
+claude plugin install agent-sessions@agent-sessions
 ```
 
 Or drop either skill directory into `~/.claude/skills/`. The Agent Sessions runtime must be

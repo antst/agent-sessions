@@ -36,7 +36,7 @@ claude agents --json
 ```
 
 On the first Codex launch after installation, approve the one-time hook prompt for
-`claude-code-peer@agent-sessions`. The lifecycle hooks are what register the session and deliver
+`agent-sessions@agent-sessions`. The lifecycle hooks are what register the session and deliver
 fallback inbox messages; declining them leaves the plugin installed but the peer bridge incomplete.
 This is Codex's plugin-hook trust prompt, not a request to loosen the session's sandbox or tool
 approval policy. Restart any Codex TUI that was already open during installation so it loads the
@@ -100,6 +100,8 @@ the older direct-install entry and replaces only `~/.grok/plugins/agent-sessions
 temporary trusted registration only to update Grok's enabled-plugin configuration, removes that
 row while preserving data, and fails unless `grok inspect --json` resolves the exact staged user
 plugin and MCP executable. Start a new Grok session or reload plugins after installing.
+Every product surface uses the plugin identity `agent-sessions`; product-specific executable and
+lane names remain unchanged.
 Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
 the TUI's native policy and its effective live mode is attested before publication.
 Installation never changes Claude's profile-level `crossSessionInbound` value. Managed Claude peers

@@ -1,8 +1,9 @@
 # Claude-side installation
 
-The Claude payload is the `codex-peer` plugin under [`claude/`](../claude). It contains one skill,
-one read-only preflight command, and no runtime: no MCP server, no hooks, no binary, no settings.
-Its only dependency is the `codex-peer-lane` launcher installed by the Codex side.
+The Claude payload is the `agent-sessions` plugin under [`claude/`](../claude). It contains the
+three lane skills, grouped messaging instructions, one read-only preflight command, and the
+process-attested structured messaging MCP declaration. It ships no runtime, hooks, binary, settings,
+or permission grants. Its native dependencies are installed by the Codex/runtime side.
 
 Install the Codex side first — see [INSTALL.md](./INSTALL.md). Without it there is no lane runtime
 to drive, and the preflight will say so.
@@ -11,14 +12,14 @@ to drive, and the preflight will say so.
 
 ```bash
 claude plugin marketplace add https://github.com/antst/agent-sessions.git
-claude plugin install codex-peer@agent-sessions
+claude plugin install agent-sessions@agent-sessions
 ```
 
 From a local checkout instead:
 
 ```bash
 claude plugin marketplace add ~/agent-sessions
-claude plugin install codex-peer@agent-sessions
+claude plugin install agent-sessions@agent-sessions
 ```
 
 The default user-scope installation is available to every new interactive Claude session and to
@@ -30,6 +31,8 @@ tree is already populated, `make install-claude` updates only Claude. Use
 installation stages each cache-busted Claude plugin version under
 `~/.local/share/agent-sessions/claude-marketplaces/`; the active version is immutable, so a later
 native-runtime-only install cannot change code beneath an already running Claude session.
+After the replacement is verified, the installer removes the historical `codex-peer` plugin IDs
+from the current and legacy marketplaces.
 
 Verify:
 
@@ -46,7 +49,7 @@ The skill is self-contained, so it can be copied into the user skills directory:
 cp -r ~/agent-sessions/claude/skills/codex-lane ~/.claude/skills/
 ```
 
-It then loads as `codex-lane@skills-dir` on the next session. The `/codex-peer:doctor` command is
+It then loads as `codex-lane@skills-dir` on the next session. The `/agent-sessions:doctor` command is
 not included in this route; run the copied
 `~/.claude/skills/codex-lane/scripts/lane-preflight` directly instead.
 
@@ -54,7 +57,7 @@ not included in this route; run the copied
 
 ```bash
 claude
-> /codex-peer:doctor
+> /agent-sessions:doctor
 ```
 
 Or directly, from the checkout:

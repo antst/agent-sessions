@@ -1,12 +1,12 @@
 {
-  "name": "claude-code-peer",
-  "version": "0.2.0+codex.20260820203535",
+  "name": "agent-sessions",
+  "version": "0.2.0+codex.20260820204747",
   "description": "Give grouped Codex, Claude, and Grok sessions a durable lifecycle, all-target lanes, and local or federated messaging.",
   "author": {
     "name": "Agent Sessions contributors"
   },
   "interface": {
-    "displayName": "Claude Code Peer",
+    "displayName": "Agent Sessions",
     "shortDescription": "Run and message durable agent sessions",
     "longDescription": "Runs explicitly owned Codex, Claude, and Grok sessions with durable lane lifecycle, local discovery, and bidirectional messaging while ordinary Codex threads remain inactive.",
     "developerName": "Agent Sessions contributors",

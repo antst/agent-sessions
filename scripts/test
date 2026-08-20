@@ -451,6 +451,23 @@ done
 # must point at that exact tree rather than a hard-coded libexec relative path.
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
+install_codex="$temporary_root/install-codex"
+install_codex_record="$temporary_root/install-codex-commands"
+install_codex_state="$temporary_root/install-codex-state"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >>"$FAKE_CODEX_RECORD"' \
+  'if [ "$1 $2 $3" = "plugin add agent-sessions@agent-sessions" ]; then : >"$FAKE_CODEX_STATE"; fi' \
+  'if [ "$1 $2 $3" = "plugin list --json" ]; then' \
+  '  if [ -f "$FAKE_CODEX_STATE" ]; then' \
+  '    printf "%s\n" '\''[{"pluginId":"agent-sessions@agent-sessions"},{"pluginId":"claude-code-peer@agent-sessions"},{"pluginId":"claude-code-peer@personal"},{"pluginId":"claude-code-peer@codex-messaging"},{"pluginId":"agent-sessions@codex-messaging"}]'\''' \
+  '  else' \
+  '    printf "%s\n" '\''[{"pluginId":"claude-code-peer@agent-sessions"},{"pluginId":"claude-code-peer@personal"},{"pluginId":"claude-code-peer@codex-messaging"},{"pluginId":"agent-sessions@codex-messaging"}]'\''' \
+  '  fi' \
+  'elif [ "$1 $2 $3 $4" = "plugin marketplace list --json" ]; then' \
+  '  printf "%s\n" '\''[{"name":"agent-sessions"},{"name":"codex-messaging"}]'\''' \
+  'fi' >"$install_codex"
+chmod 0700 "$install_codex"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
 for launcher in peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer; do
   if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
@@ -480,9 +497,23 @@ if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
   printf 'install preflight does not require clean managed Grok shutdown\n' >&2
   exit 1
 fi
+FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
 make -s -C "$plugin_root" install \
-  START_RUNTIME=0 CODEX="$fake_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
+  START_RUNTIME=0 CODEX="$install_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
   >"$temporary_root/install.out"
+replacement="$(grep -nFx 'plugin add agent-sessions@agent-sessions' "$install_codex_record" | head -1 | cut -d: -f1)"
+for legacy_id in \
+  claude-code-peer@agent-sessions \
+  claude-code-peer@personal \
+  claude-code-peer@codex-messaging \
+  agent-sessions@codex-messaging; do
+  removal="$(grep -nFx "plugin remove $legacy_id" "$install_codex_record" | head -1 | cut -d: -f1)"
+  if [[ -z "$replacement" || -z "$removal" ]] || (( replacement >= removal )); then
+    printf 'Codex migration removed %s before accepting agent-sessions@agent-sessions\n' "$legacy_id" >&2
+    cat "$install_codex_record" >&2
+    exit 1
+  fi
+done
 installed_runtimes=("$custom_install_root"/bin/*/agent-session-runtime)
 installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
 if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||

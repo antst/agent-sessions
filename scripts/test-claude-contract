@@ -30,6 +30,43 @@ if [[ -z "$codex_version" || "$claude_version" != "$codex_version" ]]; then
   printf 'Codex and Claude plugin versions differ: %s != %s\n' "$codex_version" "$claude_version" >&2
   exit 1
 fi
+for manifest in \
+  "$plugin_root/.codex-plugin/plugin.json" \
+  "$plugin_root/claude/.claude-plugin/plugin.json" \
+  "$plugin_root/grok/.grok-plugin/plugin.json"; do
+  if [[ "$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)" != agent-sessions ]]; then
+    printf 'Plugin manifest does not use the uniform agent-sessions identity: %s\n' "$manifest" >&2
+    exit 1
+  fi
+done
+marketplace_plugin_name="$(awk '
+  /"plugins"[[:space:]]*:/ { plugins = 1; next }
+  plugins && /"name"[[:space:]]*:/ {
+    line = $0
+    sub(/^[^:]*:[[:space:]]*"/, "", line)
+    sub(/".*/, "", line)
+    print line
+    exit
+  }
+' "$plugin_root/.claude-plugin/marketplace.json")"
+if [[ "$marketplace_plugin_name" != agent-sessions ]]; then
+  printf 'Claude marketplace plugin entry does not use the agent-sessions identity\n' >&2
+  exit 1
+fi
+codex_marketplace_plugin_name="$(awk '
+  /"plugins"[[:space:]]*:/ { plugins = 1; next }
+  plugins && /"name"[[:space:]]*:/ {
+    line = $0
+    sub(/^[^:]*:[[:space:]]*"/, "", line)
+    sub(/".*/, "", line)
+    print line
+    exit
+  }
+' "$plugin_root/.agents/plugins/marketplace.json")"
+if [[ "$codex_marketplace_plugin_name" != agent-sessions ]]; then
+  printf 'Codex marketplace plugin entry does not use the agent-sessions identity\n' >&2
+  exit 1
+fi
 if grep -Eq '"version"[[:space:]]*:' "$plugin_root/.claude-plugin/marketplace.json"; then
   printf 'Claude marketplace must not shadow the plugin manifest version\n' >&2
   exit 1
@@ -226,36 +263,48 @@ fi
 
 fake_claude="$temporary_root/bin/fake-claude"
 claude_record="$temporary_root/claude-commands"
+claude_state="$temporary_root/claude-installed"
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$*" >>"$FAKE_CLAUDE_RECORD"' \
+  'if [ "$1 $2" = "plugin install" ] || [ "$1 $2" = "plugin update" ]; then' \
+  '  if [ "${5-}" = "agent-sessions@agent-sessions" ]; then : >"$FAKE_CLAUDE_STATE"; fi' \
+  'fi' \
   'if [ "$1 $2 $3" = "plugin list --json" ]; then' \
-  '  if [ "${FAKE_CLAUDE_INSTALLED:-0}" = 1 ]; then' \
-  '    printf "%s\n" '\''[{"id":"codex-peer@agent-sessions","scope":"user"},{"id":"codex-peer@codex-messaging","scope":"user"}]'\''' \
+  '  if [ "${FAKE_CLAUDE_INSTALLED:-0}" = 1 ] || [ -f "$FAKE_CLAUDE_STATE" ]; then' \
+  '    printf "%s\n" '\''[{"id":"agent-sessions@agent-sessions","scope":"user"},{"id":"codex-peer@agent-sessions","scope":"user"},{"id":"codex-peer@codex-messaging","scope":"user"},{"id":"agent-sessions@codex-messaging","scope":"user"}]'\''' \
   '  else' \
-  '    printf "%s\n" '\''[{"id":"codex-peer@codex-messaging","scope":"user"}]'\''' \
+  '    printf "%s\n" '\''[{"id":"codex-peer@agent-sessions","scope":"user"},{"id":"codex-peer@codex-messaging","scope":"user"},{"id":"agent-sessions@codex-messaging","scope":"user"}]'\''' \
   '  fi' \
   'elif [ "$1 $2 $3 $4" = "plugin marketplace list --json" ]; then' \
   '  printf "%s\n" '\''[{"name":"codex-messaging"}]'\''' \
   'fi' >"$fake_claude"
 chmod 0700 "$fake_claude"
 assert_claude_migration_order() {
-  local replacement legacy_removal
-  replacement="$(grep -nFx 'plugin update --scope user codex-peer@agent-sessions' "$claude_record" | head -1 | cut -d: -f1)"
-  legacy_removal="$(grep -nFx 'plugin uninstall --scope user codex-peer@codex-messaging' "$claude_record" | head -1 | cut -d: -f1)"
-  if [[ -z "$replacement" || -z "$legacy_removal" ]] || (( replacement >= legacy_removal )); then
-    printf 'Claude marketplace migration removed the legacy plugin before accepting its replacement\n' >&2
-    cat "$claude_record" >&2
-    exit 1
-  fi
+  local replacement legacy_id legacy_removal
+  replacement="$(grep -nFx 'plugin update --scope user agent-sessions@agent-sessions' "$claude_record" | head -1 | cut -d: -f1)"
+  for legacy_id in \
+    codex-peer@agent-sessions \
+    codex-peer@codex-messaging \
+    agent-sessions@codex-messaging; do
+    legacy_removal="$(grep -nFx "plugin uninstall --scope user $legacy_id" "$claude_record" | head -1 | cut -d: -f1)"
+    if [[ -z "$replacement" || -z "$legacy_removal" ]] || (( replacement >= legacy_removal )); then
+      printf 'Claude marketplace migration removed %s before accepting its replacement\n' "$legacy_id" >&2
+      cat "$claude_record" >&2
+      exit 1
+    fi
+  done
 }
 : >"$claude_record"
-FAKE_CLAUDE_RECORD="$claude_record" FAKE_CLAUDE_INSTALLED=1 \
+rm -f -- "$claude_state"
+FAKE_CLAUDE_RECORD="$claude_record" FAKE_CLAUDE_STATE="$claude_state" FAKE_CLAUDE_INSTALLED=1 \
   make -s -C "$plugin_root" install-claude CLAUDE="$fake_claude" \
     CLAUDE_MARKETPLACE_ROOT="$plugin_root" CLAUDE_SCOPE=user
 if ! grep -Fxq "plugin marketplace add --scope user $plugin_root" "$claude_record" ||
-   ! grep -Fxq 'plugin update --scope user codex-peer@agent-sessions' "$claude_record" ||
+   ! grep -Fxq 'plugin update --scope user agent-sessions@agent-sessions' "$claude_record" ||
+   ! grep -Fxq 'plugin uninstall --scope user codex-peer@agent-sessions' "$claude_record" ||
    ! grep -Fxq 'plugin uninstall --scope user codex-peer@codex-messaging' "$claude_record" ||
+   ! grep -Fxq 'plugin uninstall --scope user agent-sessions@codex-messaging' "$claude_record" ||
    ! grep -Fxq 'plugin marketplace remove --scope user codex-messaging' "$claude_record"; then
   printf 'Claude plugin update is not add-before-replace at the selected scope:\n' >&2
   cat "$claude_record" >&2
@@ -263,12 +312,15 @@ if ! grep -Fxq "plugin marketplace add --scope user $plugin_root" "$claude_recor
 fi
 assert_claude_migration_order
 : >"$claude_record"
-FAKE_CLAUDE_RECORD="$claude_record" FAKE_CLAUDE_INSTALLED=0 \
+rm -f -- "$claude_state"
+FAKE_CLAUDE_RECORD="$claude_record" FAKE_CLAUDE_STATE="$claude_state" FAKE_CLAUDE_INSTALLED=0 \
   make -s -C "$plugin_root" install-claude CLAUDE="$fake_claude" \
     CLAUDE_MARKETPLACE_ROOT="$plugin_root" CLAUDE_SCOPE=user
-if ! grep -Fxq 'plugin install --scope user codex-peer@agent-sessions' "$claude_record" ||
-   ! grep -Fxq 'plugin update --scope user codex-peer@agent-sessions' "$claude_record" ||
+if ! grep -Fxq 'plugin install --scope user agent-sessions@agent-sessions' "$claude_record" ||
+   ! grep -Fxq 'plugin update --scope user agent-sessions@agent-sessions' "$claude_record" ||
+   ! grep -Fxq 'plugin uninstall --scope user codex-peer@agent-sessions' "$claude_record" ||
    ! grep -Fxq 'plugin uninstall --scope user codex-peer@codex-messaging' "$claude_record" ||
+   ! grep -Fxq 'plugin uninstall --scope user agent-sessions@codex-messaging' "$claude_record" ||
    ! grep -Fxq 'plugin marketplace remove --scope user codex-messaging' "$claude_record"; then
   printf 'Claude plugin fresh install did not use the selected scope:\n' >&2
   cat "$claude_record" >&2
