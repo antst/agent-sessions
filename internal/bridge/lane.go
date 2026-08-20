@@ -1258,13 +1258,7 @@ func unmaterializedLaneRolloutMissing(state laneState, err error) bool {
 		(state.TerminalOutcome != "" && state.TerminalOutcome != "failed") {
 		return false
 	}
-	var rpcErr *rpcError
-	if !errors.As(err, &rpcErr) {
-		return false
-	}
-	message := strings.ToLower(rpcErr.Message)
-	return strings.Contains(message, "rollout") &&
-		(strings.Contains(message, "no rollout") || strings.Contains(message, "not found"))
+	return isRolloutMissingRPC(err)
 }
 
 func settleLaneTurnBeforeArchive(client *appServerClient, paths nativePaths, state laneState) error {

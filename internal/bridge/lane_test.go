@@ -499,7 +499,7 @@ func TestArchiveDeletesFailedLaneThatNeverCreatedRollout(t *testing.T) {
 			if got := stringValue(params["threadId"]); got != threadID {
 				return nil, fmt.Errorf("delete thread id = %q", got)
 			}
-			return map[string]any{}, nil
+			return nil, errors.New("no rollout found for thread id " + threadID)
 		case "thread/archive":
 			return nil, errors.New("archive must not run for an unmaterialized thread")
 		default:

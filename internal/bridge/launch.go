@@ -497,8 +497,24 @@ func isPreparedThreadNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isRolloutMissingRPC(err) {
+		return true
+	}
 	var rpcErr *rpcError
 	return errors.As(err, &rpcErr) && strings.Contains(strings.ToLower(rpcErr.Message), "not found")
+}
+
+func isRolloutMissingRPC(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	message := strings.ToLower(rpcErr.Message)
+	return strings.Contains(message, "rollout") &&
+		(strings.Contains(message, "no rollout") || strings.Contains(message, "not found"))
 }
 
 // startPreparedLaunchNative creates only a fresh interactive root. Creation-time
