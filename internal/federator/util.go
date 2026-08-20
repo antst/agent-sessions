@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,6 +15,28 @@ import (
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
+
+func replaceEnvironment(environment []string, replacements map[string]string) []string {
+	result := make([]string, 0, len(environment)+len(replacements))
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if _, replaced := replacements[name]; !replaced {
+			result = append(result, entry)
+		}
+	}
+	keys := make([]string, 0, len(replacements))
+	for key := range replacements {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		result = append(result, key+"="+replacements[key])
+	}
+	return result
+}
 
 // RuntimeVersion is the build version published in federated registry rows.
 // The command sets it from link-time version metadata before starting a daemon.
@@ -31,6 +54,44 @@ func defaultString(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// DefaultStateDir returns the durable catalog directory for one host agent.
+func DefaultStateDir(hostID string) string {
+	root := os.Getenv("XDG_STATE_HOME")
+	if root == "" {
+		home, _ := os.UserHomeDir()
+		root = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(root, "agent-sessions", "agents", cleanID(hostID))
+}
+
+// ClaudePeerLifecycleRoot is the deterministic Agent Sessions ownership root
+// retained for one wrapped Claude session across attachments and exact resumes.
+// Native Claude state remains in the host agent's shared configured profile.
+func ClaudePeerLifecycleRoot(hostID, sessionID string) string {
+	return ClaudePeerLifecycleRootInState(DefaultStateDir(hostID), sessionID)
+}
+
+// ClaudePeerLifecycleRootInState returns the session ownership root beneath
+// the exact state directory advertised by the running host agent.
+func ClaudePeerLifecycleRootInState(stateDir, sessionID string) string {
+	return filepath.Join(stateDir, "claude-peers", sessionKey(sessionID), "config")
+}
+
+// ClaudePeerLifecycleLockPath serializes one stable managed attachment across
+// exact resume and host-agent crash retirement.
+func ClaudePeerLifecycleLockPath(lifecycleRoot string) string {
+	return filepath.Join(filepath.Dir(lifecycleRoot), "lifecycle.lock")
+}
+
+// ClaudePeerMessagingSocketPath returns the exact agent-runtime-owned socket
+// used by one managed interactive Claude session. Native Claude normally picks
+// a PID socket before publishing its registry row. Giving managed launches a
+// stable path lets the durable preparation retain cleanup authority even when
+// native startup stops between binding the socket and publishing that row.
+func ClaudePeerMessagingSocketPath(runtimeDir, sessionID string) string {
+	return filepath.Join(runtimeDir, "cp-"+sessionKey(sessionID)+".sock")
 }
 
 func cleanID(value string) string {

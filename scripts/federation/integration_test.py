@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Black-box two-host federation test using isolated registries and Unix peers."""
+"""Protocol-v3 grouped federation integration test.
 
-from __future__ import annotations
+This test deliberately uses the public host-agent registration and AgentFrame
+APIs. It asserts that federation creates no per-peer Claude shadows.
+"""
 
 import json
 import os
 import pathlib
 import queue
 import signal
-import shutil
 import socket
 import subprocess
 import sys
@@ -17,579 +18,234 @@ import threading
 import time
 
 
-def wait_for(predicate, timeout=10.0, description="condition"):
+def wait_for(predicate, description, timeout=10.0):
     deadline = time.monotonic() + timeout
+    last = None
     while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
+        try:
+            value = predicate()
+            if value:
+                return value
+        except Exception as exc:  # diagnostics retain the last transient error
+            last = exc
         time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {description}")
+    raise AssertionError(f"timed out waiting for {description}; last={last}")
 
 
-class FakePeer:
-    def __init__(self, root: pathlib.Path, session: str, name: str, bypass: bool = False):
-        self.root = root
-        self.session = session
-        self.name = name
-        self.socket_path = root / f"{session}.sock"
-        self.registry = root / "config" / "sessions"
-        self.registry.mkdir(parents=True, exist_ok=True)
-        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.listener.bind(str(self.socket_path))
-        self.listener.listen()
-        self.listener.settimeout(0.2)
-        self.frames: queue.Queue[dict] = queue.Queue()
-        self.closed = threading.Event()
-        self.thread = threading.Thread(target=self._serve, daemon=True)
-        self.thread.start()
-        self.identity_process = None
-        identity_pid = os.getpid()
-        if bypass:
-            self.identity_process = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(300)",
-                 "--permission-mode", "bypassPermissions"]
-            )
-            identity_pid = self.identity_process.pid
-        record = {
-            "pid": identity_pid,
-            "sessionId": session,
-            "cwd": f"/work/{session}",
-            "startedAt": int(time.time() * 1000),
-            "version": "integration-fixture/1",
-            "peerProtocol": 1,
-            "kind": "interactive",
-            "entrypoint": "claude" if session.endswith("a") else "codex",
-            "name": name,
-            "nameSource": "explicit",
-            "status": "idle",
-            "permissionMode": "bypassPermissions" if bypass else "default",
-            "messagingSocketPath": str(self.socket_path),
-        }
-        self.registry_file = self.registry / f"{identity_pid}.json"
-        self.registry_file.write_text(json.dumps(record))
+def reserve_port():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.close()
+    return port
 
-    def _serve(self):
-        while not self.closed.is_set():
-            try:
-                conn, _ = self.listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            with conn:
-                payload = b""
-                while True:
-                    chunk = conn.recv(65536)
-                    if not chunk:
-                        break
-                    payload += chunk
-                for line in payload.splitlines():
-                    if line.strip():
-                        self.frames.put(json.loads(line))
 
-    def send(self, target_socket: str, message_id: str, text: str):
-        address = "uds:" + str(self.socket_path)
-        content = (
-            f'<cross-session-message from="{address}" '
-            f'from-session="{self.session}" from-name="{self.name}" '
-            'from-mode="prompting">\n'
-            f"{text}\n</cross-session-message>"
+class Managed:
+    def __init__(self, argv, log_path, stdin=False, stdout=False):
+        self.log = open(log_path, "ab", buffering=0)
+        self.process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+            stdout=subprocess.PIPE if stdout else self.log,
+            stderr=self.log,
+            start_new_session=True,
         )
-        frame = {
-            "msgV": 1,
-            "msg_id": message_id,
-            "type": "user",
-            "message": {"role": "user", "content": content},
-            "priority": "next",
-            "from": address,
-        }
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.connect(target_socket)
-            conn.sendall(json.dumps(frame, separators=(",", ":")).encode() + b"\n")
 
-    def receive(self, timeout=10.0):
-        return self.frames.get(timeout=timeout)
+    def stop(self):
+        if self.process.poll() is None:
+            os.killpg(self.process.pid, signal.SIGTERM)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=5)
+        self.log.close()
 
-    def close(self):
-        if self.closed.is_set():
+
+class Peer(Managed):
+    def __init__(self, fixture, runtime_dir, session, product, name, groups, log_path):
+        super().__init__(
+            [fixture, "--runtime-dir", str(runtime_dir), "--session", session,
+             "--product", product, "--name", name, "--groups", ",".join(groups)],
+            log_path, stdin=True, stdout=True,
+        )
+        self.events = queue.Queue()
+        self.pending = []
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+        self.wait_event(lambda row: row.get("event") == "ready", "peer ready")
+
+    def _read(self):
+        for line in self.process.stdout:
+            try:
+                self.events.put(json.loads(line))
+            except Exception as exc:
+                self.events.put({"event": "decode_error", "error": str(exc), "line": line.decode(errors="replace")})
+
+    def command(self, command_id, frame):
+        body = json.dumps({"id": command_id, "frame": frame}, separators=(",", ":")) + "\n"
+        self.process.stdin.write(body.encode())
+        self.process.stdin.flush()
+        return self.wait_event(
+            lambda row: row.get("event") == "result" and row.get("id") == command_id,
+            f"result {command_id}",
+        )
+
+    def wait_delivery(self, message_id, timeout=5.0):
+        return self.wait_event(
+            lambda row: row.get("event") == "delivery" and row.get("frame", {}).get("message_id") == message_id,
+            f"delivery {message_id}", timeout,
+        )
+
+    def wait_event(self, predicate, description, timeout=10.0):
+        for index, row in enumerate(self.pending):
+            if predicate(row):
+                return self.pending.pop(index)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                row = self.events.get(timeout=min(0.2, deadline - time.monotonic()))
+            except queue.Empty:
+                if self.process.poll() is not None:
+                    raise AssertionError(f"{description}: peer exited {self.process.returncode}")
+                continue
+            if predicate(row):
+                return row
+            self.pending.append(row)
+        raise AssertionError(f"timed out waiting for {description}; pending={self.pending}")
+
+    def assert_no_delivery(self, message_id, duration=0.4):
+        try:
+            self.wait_delivery(message_id, duration)
+        except AssertionError:
             return
-        self.closed.set()
-        self.registry_file.unlink(missing_ok=True)
-        self.listener.close()
-        self.thread.join(timeout=1)
-        self.socket_path.unlink(missing_ok=True)
-        if self.identity_process is not None:
-            self.identity_process.terminate()
-            self.identity_process.wait(timeout=2)
+        raise AssertionError(f"unexpected delivery {message_id}")
 
 
-def shadow_for(registry: pathlib.Path, peer_id: str):
-    if not registry.exists():
-        return None
-    for path in registry.glob("*.json"):
+def agent_command(binary, hub, host, root):
+    return [
+        binary, "agent", "--hub", hub, "--host", host, "--name", host,
+        "--runtime-dir", str(root / "runtime"), "--state-dir", str(root / "state"),
+        "--claude-config-dir", str(root / "claude"),
+    ]
+
+
+def service_rows(config_root):
+    rows = []
+    for path in (config_root / "sessions").glob("*.json"):
         try:
             row = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
+        except Exception:
             continue
-        if row.get("federatedBy") == "peer-federator" and row.get("federatedPeerId") == peer_id:
-            return row, path
-    return None
+        if row.get("agentService"):
+            rows.append(row)
+        assert not row.get("federatedBy"), f"legacy shadow row survived: {row}"
+    return rows
 
 
-def frame_text(frame: dict) -> str:
-    return frame.get("message", {}).get("content", "")
+def frame(kind, message_id, **fields):
+    result = {"version": 1, "type": kind, "message_id": message_id}
+    result.update(fields)
+    return result
 
 
-def write_lane_fixture(root: pathlib.Path) -> pathlib.Path:
-    path = root / "lane-fixture.py"
-    path.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-import pathlib
-import signal
-import sys
-import time
-
-root = pathlib.Path(__file__).resolve().parent
-args = sys.argv[1:]
-body = sys.stdin.buffer.read()
-record = {"pid": os.getpid(), "args": args, "input": body.decode(errors="replace")}
-with (root / "fixture-invocations.jsonl").open("a") as stream:
-    stream.write(json.dumps(record, separators=(",", ":")) + "\\n")
-print(json.dumps(record, separators=(",", ":")), flush=True)
-print("fixture stderr", file=sys.stderr, flush=True)
-
-if "--fixture-block" in args:
-    def stop(_signum, _frame):
-        (root / f"fixture-cancelled-{os.getpid()}").write_text("cancelled\\n")
-        raise SystemExit(130)
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
-    while True:
-        time.sleep(0.1)
-
-raise SystemExit(7 if "--fixture-exit-7" in args else 0)
-"""
-    )
-    path.chmod(0o755)
-    return path
+def discovered_sessions(peer, command_id):
+    response = peer.command(command_id, frame("discover", command_id))
+    assert "error" not in response, response
+    return {item["session_id"] for item in response["result"].get("peers", [])}
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 2:
-        raise SystemExit("usage: integration_test.py PEER_FEDERATOR")
-    binary = str(pathlib.Path(sys.argv[1]).resolve())
-    root = pathlib.Path(tempfile.mkdtemp(prefix="peer-federator-it-", dir="/tmp"))
-    processes: list[subprocess.Popen] = []
-    peers: list[FakePeer] = []
-    logs = []
+        raise SystemExit(f"usage: {sys.argv[0]} PEER_FEDERATOR")
+    binary = os.path.abspath(sys.argv[1])
+    # AF_UNIX paths are capped at 103 characters on Darwin. Keep the socket
+    # hierarchy independent of that platform's long per-user TMPDIR.
+    root = pathlib.Path(tempfile.mkdtemp(prefix="gf-", dir="/tmp"))
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    fixture = root / "grouped-peer-fixture"
+    subprocess.run(
+        ["go", "build", "-o", str(fixture), "./scripts/federation/grouped_peer_fixture.go"],
+        cwd=repo, check=True,
+    )
+    port = reserve_port()
+    hub_address = f"127.0.0.1:{port}"
+    processes = []
+    success = False
     try:
-        lane_fixture = write_lane_fixture(root)
-        peer_a = FakePeer(root / "a", "session-a", "interactive-a", bypass=True)
-        peer_b = FakePeer(root / "b", "session-b", "interactive-b")
-        peers.extend([peer_a, peer_b])
+        hub = Managed([binary, "hub", "--listen", hub_address], root / "hub.log")
+        processes.append(hub)
+        wait_for(lambda: socket.create_connection(("127.0.0.1", port), timeout=0.2), "hub listener")
 
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-        probe.close()
+        host_a, host_b = root / "host-a", root / "host-b"
+        agent_a = Managed(agent_command(binary, hub_address, "host-a", host_a), root / "agent-a.log")
+        agent_b = Managed(agent_command(binary, hub_address, "host-b", host_b), root / "agent-b.log")
+        processes.extend([agent_a, agent_b])
+        wait_for(lambda: (host_a / "runtime" / "agent.sock").exists(), "host-a agent")
+        wait_for(lambda: (host_b / "runtime" / "agent.sock").exists(), "host-b agent")
 
-        def start(label, *args):
-            log_path = root / f"{label}.log"
-            log = log_path.open("wb")
-            logs.append(log)
-            process = subprocess.Popen([binary, *args], stdout=log, stderr=log)
-            processes.append(process)
-            return process
+        peer_a = Peer(str(fixture), host_a / "runtime", "session-a", "codex", "alpha", ["project"], root / "peer-a.log")
+        peer_b = Peer(str(fixture), host_b / "runtime", "session-b", "claude", "beta", ["project"], root / "peer-b.log")
+        peer_hidden = Peer(str(fixture), host_b / "runtime", "session-hidden", "grok", "hidden", ["other"], root / "peer-hidden.log")
+        processes.extend([peer_a, peer_b, peer_hidden])
 
-        hub = start("hub", "hub", "--listen", f"127.0.0.1:{port}")
+        wait_for(lambda: discovered_sessions(peer_a, "discover-initial") == {"session-b"}, "group-filtered remote discovery")
+        assert discovered_sessions(peer_hidden, "discover-hidden") == set()
+        wait_for(lambda: len(service_rows(host_a / "claude")) == 1, "one host-a service row")
+        wait_for(lambda: len(service_rows(host_b / "claude")) == 1, "one host-b service row")
 
-        def hub_ready():
-            if hub.poll() is not None:
-                return False
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                    return True
-            except OSError:
-                return False
+        sent = peer_a.command("send-a-b", frame("send", "send-a-b", targets=["beta"], content="HELLO_GROUPED"))
+        assert sent["result"]["deliveries"] == [{"target": "host-b/session-b", "session_id": "session-b", "status": "accepted"}], sent
+        delivered = peer_b.wait_delivery("send-a-b")["frame"]
+        assert delivered["content"] == "HELLO_GROUPED"
+        assert delivered["source"]["entrypoint"] == "codex"
 
-        wait_for(hub_ready, description="hub listener")
-        agent_a = start(
-            "agent-a",
-            "agent", "--hub", f"127.0.0.1:{port}", "--host", "host-a", "--name", "alpha",
-            "--enable-remote-lanes",
-            "--claude-config-dir", str(peer_a.root / "config"),
-            "--runtime-dir", str(root / "a-run"),
-            "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
-        )
-        agent_b = start(
-            "agent-b",
-            "agent", "--hub", f"127.0.0.1:{port}", "--host", "host-b", "--name", "beta",
-            "--enable-remote-lanes",
-            "--claude-config-dir", str(peer_b.root / "config"),
-            "--runtime-dir", str(root / "b-run"),
-            "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
-        )
+        denied = peer_a.command("atomic-denied", frame("send", "atomic-denied", targets=["beta", "hidden"], content="NO"))
+        assert "error" in denied, denied
+        peer_b.assert_no_delivery("atomic-denied")
+        peer_hidden.assert_no_delivery("atomic-denied")
 
-        shadow_b_match = wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b"),
-            description="host-b shadow on host-a",
-        )
-        shadow_b_on_a, old_shadow_record = shadow_b_match
-        shadow_a_on_b = wait_for(
-            lambda: shadow_for(peer_b.registry, "host-a/session-a"),
-            description="host-a shadow on host-b",
-        )[0]
-        assert shadow_b_on_a["name"] == "interactive-b--beta"
-        assert shadow_a_on_b["name"] == "interactive-a--alpha"
-        assert shadow_a_on_b["permissionMode"] == "bypassPermissions"
+        broadcast = peer_a.command("broadcast-project", frame("broadcast", "broadcast-project", group="project", content="ALL_PROJECT"))
+        assert len(broadcast["result"]["deliveries"]) == 1, broadcast
+        assert peer_b.wait_delivery("broadcast-project")["frame"]["content"] == "ALL_PROJECT"
+        peer_hidden.assert_no_delivery("broadcast-project")
 
-        hosts = json.loads(
-            subprocess.run(
-                [binary, "hosts", "--runtime-dir", str(root / "a-run")],
-                text=True,
-                capture_output=True,
-                timeout=3,
-                check=True,
-            ).stdout
-        )
-        assert hosts["protocol_version"] == 2
-        assert hosts["hosts"] == [
-            {"id": "host-b", "name": "beta", "capabilities": ["claude-lane", "codex-lane"]}
-        ]
+        # Restart the hub. Agents reconnect and grouped routing resumes without
+        # creating a shadow row or restarting either peer.
+        hub.stop()
+        processes.remove(hub)
+        hub = Managed([binary, "hub", "--listen", hub_address], root / "hub-restart.log")
+        processes.append(hub)
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-hub") == {"session-b"}, "roster after hub restart", 15)
+        peer_a.command("send-after-hub", frame("send", "send-after-hub", targets=["session-b"], content="AFTER_HUB"))
+        assert peer_b.wait_delivery("send-after-hub")["frame"]["content"] == "AFTER_HUB"
 
-        # Having launchers installed is not authority to execute them. A third
-        # agent without the explicit opt-in joins the roster with no lane
-        # capabilities even when both executable overrides are supplied.
-        agent_c = start(
-            "agent-c-disabled",
-            "agent", "--hub", f"127.0.0.1:{port}", "--host", "host-c", "--name", "gamma",
-            "--claude-config-dir", str(root / "c-config"),
-            "--runtime-dir", str(root / "c-run"),
-            "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
-        )
-        disabled_host = wait_for(
-            lambda: next(
-                (
-                    host
-                    for host in json.loads(
-                        subprocess.run(
-                            [binary, "hosts", "--runtime-dir", str(root / "a-run")],
-                            text=True, capture_output=True, timeout=3, check=True,
-                        ).stdout
-                    )["hosts"]
-                    if host["id"] == "host-c"
-                ),
-                None,
-            ),
-            description="disabled host in roster",
-        )
-        assert disabled_host == {"id": "host-c", "name": "gamma"}
-        agent_c.terminate()
-        # The race build can spend more than three seconds synchronously
-        # reaping the two remote discovery shadows during graceful shutdown.
-        agent_c.wait(timeout=8)
-        wait_for(
-            lambda: all(
-                host["id"] != "host-c"
-                for host in json.loads(
-                    subprocess.run(
-                        [binary, "hosts", "--runtime-dir", str(root / "a-run")],
-                        text=True, capture_output=True, timeout=3, check=True,
-                    ).stdout
-                )["hosts"]
-            ),
-            description="disabled host removal",
-        )
+        # Restart one host agent. The still-idle product fixture re-registers;
+        # the public registry again contains one service row and no shadows.
+        agent_b.stop()
+        processes.remove(agent_b)
+        agent_b = Managed(agent_command(binary, hub_address, "host-b", host_b), root / "agent-b-restart.log")
+        processes.append(agent_b)
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-agent") == {"session-b"}, "peer re-registration after agent restart", 15)
+        wait_for(lambda: len(service_rows(host_b / "claude")) == 1, "single service row after agent restart")
+        peer_a.command("send-after-agent", frame("send", "send-after-agent", targets=["beta"], content="AFTER_AGENT"))
+        assert peer_b.wait_delivery("send-after-agent")["frame"]["content"] == "AFTER_AGENT"
 
-        remote_start = subprocess.run(
-            [
-                binary, "lane", "--runtime-dir", str(root / "a-run"),
-                "--source-session", "session-a", "--host", "beta", "--product", "codex", "--",
-                "start", "--name", "remote-worker", "-",
-            ],
-            input="REMOTE_INPUT_TOKEN\n",
-            text=True,
-            capture_output=True,
-            timeout=5,
-            check=True,
-        )
-        remote_record = json.loads(remote_start.stdout)
-        assert remote_record["input"] == "REMOTE_INPUT_TOKEN\n"
-        assert remote_record["args"] == [
-            "start", "--name", "remote-worker", "-", "--persistent", "--notify",
-            "uds:" + shadow_a_on_b["messagingSocketPath"],
-        ]
-        assert "fixture stderr" in remote_start.stderr
-
-        duplicate = subprocess.run(
-            [
-                binary, "agent", "--hub", f"127.0.0.1:{port}",
-                "--host", "host-a-duplicate",
-                "--claude-config-dir", str(peer_a.root / "config"),
-                "--runtime-dir", str(root / "a-run"),
-            ],
-            text=True,
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-        assert duplicate.returncode != 0
-        assert "already owns" in duplicate.stderr
-
-        duplicate_registry = subprocess.run(
-            [
-                binary, "agent", "--hub", f"127.0.0.1:{port}",
-                "--host", "host-a-duplicate-registry",
-                "--claude-config-dir", str(peer_a.root / "config"),
-                "--runtime-dir", str(root / "a-other-run"),
-            ],
-            text=True,
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-        assert duplicate_registry.returncode != 0
-        assert "claude registry" in duplicate_registry.stderr
-
-        doctor = json.loads(
-            subprocess.run(
-                [
-                    binary, "doctor", "--hub", f"127.0.0.1:{port}",
-                    "--claude-config-dir", str(peer_a.root / "config"),
-                    "--runtime-dir", str(root / "a-run"),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=3,
-                check=True,
-            ).stdout
-        )
-        assert doctor["ok"] is True
-        assert doctor["hub_compatible"] is True
-        assert doctor["messageable_local_peers"] == 1
-        assert doctor["unmessageable_live_records"] == 0
-        assert doctor["agent_running"] is True
-
-        status = json.loads(
-            subprocess.run(
-                [binary, "status", "--runtime-dir", str(root / "a-run")],
-                text=True,
-                capture_output=True,
-                timeout=3,
-                check=True,
-            ).stdout
-        )
-        assert status["connected"] is True
-        assert status["local_peers"] == 1
-        assert status["remote_peers"] == 1
-        assert status["shadows"] == 1
-
-        # A shadow is independently supervised. Killing only that child must
-        # replace its PID and keep the socket reachable without restarting
-        # either host agent. Socket inodes may be reused after unlink.
-        old_shadow_pid = shadow_b_on_a["pid"]
-        os.kill(old_shadow_pid, signal.SIGKILL)
-        shadow_b_on_a = wait_for(
-            lambda: (
-                candidate
-                if (candidate := shadow_for(peer_a.registry, "host-b/session-b"))
-                and candidate[0].get("pid") != old_shadow_pid
-                else None
-            ),
-            description="independent shadow replacement",
-        )[0]
-        wait_for(lambda: not old_shadow_record.exists(), description="dead shadow registry cleanup")
-
-        peer_a.send(shadow_b_on_a["messagingSocketPath"], "a-to-b", "HELLO_FROM_A")
-        received_b = peer_b.receive()
-        assert "HELLO_FROM_A" in frame_text(received_b)
-        assert received_b["from"] == "uds:" + shadow_a_on_b["messagingSocketPath"]
-        assert f'from="uds:{shadow_a_on_b["messagingSocketPath"]}"' in frame_text(received_b)
-
-        peer_b.send(shadow_a_on_b["messagingSocketPath"], "b-to-a", "REPLY_FROM_B")
-        received_a = peer_a.receive()
-        assert "REPLY_FROM_B" in frame_text(received_a)
-        assert received_a["from"] == "uds:" + shadow_b_on_a["messagingSocketPath"]
-
-        # An abrupt destination-agent loss removes its shadows and host, and
-        # the liveness-pipe watchdog reaps a blocking native CLI that would
-        # otherwise be reparented indefinitely with its collection lock held.
-        crash_proxy = subprocess.Popen(
-            [
-                binary, "lane", "--runtime-dir", str(root / "a-run"),
-                "--source-session", "session-a", "--host", "host-b", "--product", "codex", "--",
-                "wait", "remote-worker", "--fixture-block",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert crash_proxy.stdout is not None
-        crash_record = json.loads(crash_proxy.stdout.readline())
-        crash_fixture_pid = crash_record["pid"]
-        agent_b.kill()
-        agent_b.wait(timeout=3)
-        crash_proxy.communicate(timeout=5)
-        assert crash_proxy.returncode != 0
-        wait_for(
-            lambda: (root / f"fixture-cancelled-{crash_fixture_pid}").exists(),
-            description="native lane cancellation after destination agent SIGKILL",
-        )
-        wait_for(
-            lambda: not pathlib.Path(f"/proc/{crash_fixture_pid}").exists(),
-            description="native lane process reaped after destination agent SIGKILL",
-        )
-        wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b") is None,
-            description="host-b shadow removal after agent SIGKILL",
-        )
-        wait_for(
-            lambda: shadow_for(peer_b.registry, "host-a/session-a") is None,
-            description="host-a shadow cleanup after owning agent SIGKILL",
-        )
-        agent_b = start(
-            "agent-b-restarted",
-            "agent", "--hub", f"127.0.0.1:{port}", "--host", "host-b", "--name", "beta",
-            "--enable-remote-lanes",
-            "--claude-config-dir", str(peer_b.root / "config"),
-            "--runtime-dir", str(root / "b-run"),
-            "--codex-lane", str(lane_fixture), "--claude-lane", str(lane_fixture),
-        )
-        shadow_b_on_a = wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b"),
-            description="host-b shadow after agent restart",
-        )[0]
-        wait_for(
-            lambda: shadow_for(peer_b.registry, "host-a/session-a"),
-            description="host-a shadow after agent restart",
-        )
-
-        # A hub loss cancels an active proxy and makes every new remote spawn
-        # fail closed. There is no agent-to-agent or destination-side fallback.
-        blocking = subprocess.Popen(
-            [
-                binary, "lane", "--runtime-dir", str(root / "a-run"),
-                "--source-session", "session-a", "--host", "host-b", "--product", "codex", "--",
-                "wait", "remote-worker", "--fixture-block",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert blocking.stdout is not None
-        blocking_record = json.loads(blocking.stdout.readline())
-        assert blocking_record["args"][-1] == "--fixture-block"
-        hub.terminate()
-        hub.wait(timeout=3)
-        _, blocking_stderr = blocking.communicate(timeout=5)
-        assert blocking.returncode != 0
-        assert "hub is disconnected" in blocking_stderr or "stream ended" in blocking_stderr
-        wait_for(
-            lambda: (root / f"fixture-cancelled-{blocking_record['pid']}").exists(),
-            description="remote lane cancellation after hub loss",
-        )
-        offline_hosts = subprocess.run(
-            [binary, "hosts", "--runtime-dir", str(root / "a-run")],
-            text=True,
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-        assert offline_hosts.returncode != 0
-        assert "hub is disconnected" in offline_hosts.stderr
-        offline_spawn = subprocess.run(
-            [
-                binary, "lane", "--runtime-dir", str(root / "a-run"),
-                "--source-session", "session-a", "--host", "host-b", "--product", "codex", "--",
-                "start", "--name", "must-not-run", "-",
-            ],
-            input="NO_SPAWN\n",
-            text=True,
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-        assert offline_spawn.returncode != 0
-        assert "hub is disconnected" in offline_spawn.stderr
-        fixture_rows = [
-            json.loads(line)
-            for line in (root / "fixture-invocations.jsonl").read_text().splitlines()
-            if line
-        ]
-        assert not any("must-not-run" in row["args"] for row in fixture_rows)
-
-        # A hub restart removes every federated row, then agents reconnect and
-        # republish without disturbing either real local peer.
-        wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b") is None,
-            description="host-b shadow removal after hub restart",
-        )
-        wait_for(
-            lambda: shadow_for(peer_b.registry, "host-a/session-a") is None,
-            description="host-a shadow removal after hub restart",
-        )
-        hub = start("hub-restarted", "hub", "--listen", f"127.0.0.1:{port}")
-        wait_for(hub_ready, description="restarted hub listener")
-        shadow_b_on_a = wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b"),
-            description="host-b shadow after hub restart",
-        )[0]
-        wait_for(
-            lambda: shadow_for(peer_b.registry, "host-a/session-a"),
-            description="host-a shadow after hub restart",
-        )
-        peer_a.send(shadow_b_on_a["messagingSocketPath"], "after-restart", "AFTER_HUB_RESTART")
-        assert "AFTER_HUB_RESTART" in frame_text(peer_b.receive())
-
-        old_shadow_path = pathlib.Path(shadow_b_on_a["messagingSocketPath"])
-        peer_b.close()
-        wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b") is None,
-            description="remote shadow removal after session exit",
-        )
-        wait_for(lambda: not old_shadow_path.exists(), description="remote shadow socket cleanup")
-
-        # Recreating the same peer exercises rapid registry churn and must
-        # produce a fresh, working shadow rather than retain stale state.
-        peer_b = FakePeer(root / "b", "session-b", "interactive-b")
-        peers.append(peer_b)
-        shadow_b_on_a = wait_for(
-            lambda: shadow_for(peer_a.registry, "host-b/session-b"),
-            description="host-b shadow after peer recreation",
-        )[0]
-        peer_a.send(shadow_b_on_a["messagingSocketPath"], "after-churn", "AFTER_PEER_CHURN")
-        assert "AFTER_PEER_CHURN" in frame_text(peer_b.receive())
-
-        assert agent_a.poll() is None and agent_b.poll() is None and hub.poll() is None
-        print(
-            "integration PASS: routing, remote lane proxy, hub-loss fail-closed, "
-            "agent crash, hub restart, peer churn, reply rewriting, and cleanup"
-        )
+        peer_b.stop()
+        processes.remove(peer_b)
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-exit") == set(), "remote peer removal")
+        print("grouped federation integration: PASS")
+        success = True
         return 0
-    except Exception:
-        for log in logs:
-            log.flush()
-        for path in sorted(root.glob("*.log")):
-            print(f"===== {path.name} =====", file=sys.stderr)
-            print(path.read_text(errors="replace"), file=sys.stderr)
-        raise
     finally:
-        for peer in peers:
-            peer.close()
         for process in reversed(processes):
-            if process.poll() is None:
-                process.terminate()
-        for process in reversed(processes):
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
-        for log in logs:
-            log.close()
+            process.stop()
+        if not success:
+            for path in sorted(root.rglob("*.log")):
+                if path.stat().st_size:
+                    print(f"===== {path.name} =====", file=sys.stderr)
+                    print(path.read_text(errors="replace"), file=sys.stderr)
+        import shutil
         shutil.rmtree(root, ignore_errors=True)
 
 

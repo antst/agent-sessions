@@ -2,11 +2,13 @@ package federator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,12 +21,18 @@ type HubOptions struct {
 }
 
 type hub struct {
-	logger        *log.Logger
-	mu            sync.Mutex
-	broadcastMu   sync.Mutex
-	clients       map[string]*hubClient
-	laneRoutes    map[string]*laneRoute
-	clientTimeout time.Duration
+	logger         *log.Logger
+	mu             sync.Mutex
+	broadcastMu    sync.Mutex
+	clients        map[string]*hubClient
+	laneRoutes     map[string]*laneRoute
+	deliveryRoutes map[string]*deliveryRoute
+	clientTimeout  time.Duration
+}
+
+type deliveryRoute struct {
+	source, destination *hubClient
+	sourceID, targetID  string
 }
 
 type hubClient struct {
@@ -125,19 +133,26 @@ func (h *hub) unregister(client *hubClient) {
 	}
 	h.mu.Unlock()
 	h.dropLaneRoutes(client)
+	h.dropDeliveryRoutes(client)
 	h.logger.Printf("host %s (%s) removed", client.hostName, client.hostID)
 	h.broadcastRoster()
 }
 
+//nolint:gocyclo // Hub protocol variants are intentionally dispatched in one audited switch.
 func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 	switch message.Type {
 	case "snapshot":
 		peers := make(map[string]Peer, len(message.Peers))
+		sessions := make(map[string]bool, len(message.Peers))
 		for _, peer := range message.Peers {
-			if peer.HostID != client.hostID || peer.ID == "" || peer.SessionID == "" {
-				return errors.New("snapshot contains a peer outside the sending host")
+			if err := validateGroupedSnapshotPeer(peer, client.hostID); err != nil {
+				return err
+			}
+			if _, exists := peers[peer.ID]; exists || sessions[peer.SessionID] {
+				return errors.New("snapshot contains a duplicate peer identity")
 			}
 			peers[peer.ID] = peer
+			sessions[peer.SessionID] = true
 		}
 		h.mu.Lock()
 		if h.clients[client.hostID] == client {
@@ -147,14 +162,27 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 		h.broadcastRoster()
 		return nil
 	case "deliver":
-		if err := h.route(client, message); err != nil {
-			h.logger.Printf("delivery %s -> %s dropped: %v", message.SourceID, message.TargetID, err)
+		return errors.New("legacy flat delivery is not supported by protocol v3")
+	case "group_deliver":
+		if err := h.routeGrouped(client, message); err != nil {
+			h.logger.Printf("grouped delivery %s -> %s dropped: %v", message.SourceID, message.TargetID, err)
 			return client.wire.Send(Message{
 				Type: "delivery_error", SourceID: message.SourceID,
-				TargetID: message.TargetID, Error: err.Error(),
+				TargetID: message.TargetID, RequestID: message.RequestID, Error: err.Error(),
 			})
 		}
 		return nil
+	case "terminal_notice_deliver":
+		if err := h.routeTerminalNotice(client, message); err != nil {
+			h.logger.Printf("terminal notice %s -> %s dropped: %v", message.SourceID, message.TargetID, err)
+			return client.wire.Send(Message{
+				Type: "delivery_error", SourceID: message.SourceID,
+				TargetID: message.TargetID, RequestID: message.RequestID, Error: err.Error(),
+			})
+		}
+		return nil
+	case "delivery_ack", "delivery_error":
+		return h.routeDeliveryOutcome(client, message)
 	case "ping":
 		return client.wire.Send(Message{Type: "pong"})
 	case "lane_exec":
@@ -168,16 +196,33 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 	}
 }
 
-func (h *hub) route(source *hubClient, message Message) error {
+func validateGroupedSnapshotPeer(peer Peer, hostID string) error {
+	if peer.HostID != hostID || !validCatalogSessionID(peer.SessionID) ||
+		peer.ID != hostID+"/"+peer.SessionID || peer.GlobalID != globalSessionID(hostID, peer.SessionID) {
+		return errors.New("snapshot contains an invalid peer identity")
+	}
+	if peer.PeerProtocol != GroupProtocolVersion || !validProduct(peer.Entrypoint) ||
+		strings.TrimSpace(peer.Name) == "" || strings.TrimSpace(peer.InstanceID) == "" {
+		return errors.New("snapshot contains an incompatible grouped peer")
+	}
+	groups, err := normalizeEffectiveGroups(peer.Groups)
+	if err != nil || len(groups) == 0 || !containsStringValue(groups, privateGroupPrefix+hostID+"/"+peer.SessionID) {
+		return errors.New("snapshot contains invalid peer groups")
+	}
+	return nil
+}
+
+func (h *hub) routeGrouped(source *hubClient, message Message) error {
 	if len(message.Frame) == 0 || message.SourceID == "" || message.TargetID == "" {
-		return errors.New("deliver requires source_id, target_id, and frame")
+		return errors.New("group_deliver requires source_id, target_id, and frame")
 	}
 	h.mu.Lock()
-	_, sourceExists := source.peers[message.SourceID]
-	var target *hubClient
+	sourcePeer, sourceExists := source.peers[message.SourceID]
+	var targetClient *hubClient
+	var targetPeer Peer
 	for _, candidate := range h.clients {
-		if _, exists := candidate.peers[message.TargetID]; exists {
-			target = candidate
+		if peer, exists := candidate.peers[message.TargetID]; exists {
+			targetClient, targetPeer = candidate, peer
 			break
 		}
 	}
@@ -185,12 +230,132 @@ func (h *hub) route(source *hubClient, message Message) error {
 	if !sourceExists {
 		return fmt.Errorf("source peer %s is not advertised by host %s", message.SourceID, source.hostID)
 	}
-	if target == nil {
+	if targetClient == nil {
 		return fmt.Errorf("target peer %s is not live", message.TargetID)
 	}
-	return target.wire.Send(Message{
-		Type: "deliver", SourceID: message.SourceID, TargetID: message.TargetID, Frame: message.Frame,
+	var frame AgentFrame
+	if json.Unmarshal(message.Frame, &frame) != nil || frame.Version != AgentFrameVersion || frame.Type != "delivery" ||
+		frame.Source == nil || frame.Source.ID != sourcePeer.ID || frame.SourceSessionID != sourcePeer.SessionID {
+		return errors.New("group_deliver contains an invalid agent frame")
+	}
+	if err := validateCurrentDeliveryGroups(sourcePeer, targetPeer, frame); err != nil {
+		return err
+	}
+	return h.forwardDelivery(source, targetClient, Message{
+		Type: "group_deliver", SourceID: message.SourceID, TargetID: message.TargetID, Frame: message.Frame,
+		RequestID: message.RequestID,
 	})
+}
+
+//nolint:gocyclo // Durable-source and live-target attestations are kept explicit.
+func (h *hub) routeTerminalNotice(source *hubClient, message Message) error {
+	if len(message.Frame) == 0 || message.SourceID == "" || message.TargetID == "" {
+		return errors.New("terminal_notice_deliver requires source_id, target_id, and frame")
+	}
+	var frame AgentFrame
+	if json.Unmarshal(message.Frame, &frame) != nil || frame.Version != AgentFrameVersion || frame.Type != "delivery" ||
+		frame.Source == nil || frame.Source.ID != message.SourceID || frame.SourceSessionID != frame.Source.SessionID {
+		return errors.New("terminal notice contains an invalid agent frame")
+	}
+	if frame.Source.HostID != source.hostID {
+		return errors.New("terminal notice source is not owned by the sending host")
+	}
+	if err := validateGroupedSnapshotPeer(*frame.Source, source.hostID); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	var targetClient *hubClient
+	var targetPeer Peer
+	for _, candidate := range h.clients {
+		if peer, exists := candidate.peers[message.TargetID]; exists {
+			targetClient, targetPeer = candidate, peer
+			break
+		}
+	}
+	h.mu.Unlock()
+	if targetClient == nil {
+		return fmt.Errorf("target peer %s is not live", message.TargetID)
+	}
+	if err := validateCurrentDeliveryGroups(*frame.Source, targetPeer, frame); err != nil {
+		return err
+	}
+	if targetPeer.HostID == source.hostID {
+		return errors.New("terminal notice target must be on another host")
+	}
+	return h.forwardDelivery(source, targetClient, Message{
+		Type: "terminal_notice_deliver", SourceID: message.SourceID, TargetID: message.TargetID, Frame: message.Frame,
+		RequestID: message.RequestID,
+	})
+}
+
+func (h *hub) forwardDelivery(source, destination *hubClient, message Message) error {
+	if message.RequestID == "" {
+		return errors.New("federated delivery requires request_id")
+	}
+	h.mu.Lock()
+	if h.deliveryRoutes == nil {
+		h.deliveryRoutes = map[string]*deliveryRoute{}
+	}
+	if _, exists := h.deliveryRoutes[message.RequestID]; exists {
+		h.mu.Unlock()
+		return errors.New("duplicate federated delivery request")
+	}
+	h.deliveryRoutes[message.RequestID] = &deliveryRoute{
+		source: source, destination: destination, sourceID: message.SourceID, targetID: message.TargetID,
+	}
+	h.mu.Unlock()
+	if err := destination.wire.Send(message); err != nil {
+		h.mu.Lock()
+		delete(h.deliveryRoutes, message.RequestID)
+		h.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (h *hub) routeDeliveryOutcome(destination *hubClient, message Message) error {
+	h.mu.Lock()
+	route := h.deliveryRoutes[message.RequestID]
+	if route != nil && route.destination == destination {
+		delete(h.deliveryRoutes, message.RequestID)
+	}
+	h.mu.Unlock()
+	if route == nil || route.destination != destination || message.SourceID != route.sourceID || message.TargetID != route.targetID {
+		// An endpoint may disconnect after delivery but before its outcome. The
+		// disconnect path already resolves or abandons that request; a late ACK
+		// must not disconnect the surviving host.
+		return nil
+	}
+	return route.source.wire.Send(message)
+}
+
+func (h *hub) dropDeliveryRoutes(client *hubClient) {
+	type failedRoute struct {
+		requestID string
+		route     *deliveryRoute
+	}
+	var failed []failedRoute
+	h.mu.Lock()
+	for requestID, route := range h.deliveryRoutes {
+		if route.source != client && route.destination != client {
+			continue
+		}
+		delete(h.deliveryRoutes, requestID)
+		if route.destination == client && route.source != client {
+			failed = append(failed, failedRoute{requestID: requestID, route: route})
+		}
+	}
+	h.mu.Unlock()
+	for _, item := range failed {
+		item := item
+		go func() {
+			_ = item.route.source.wire.Send(Message{
+				Type: "delivery_error", RequestID: item.requestID,
+				SourceID: item.route.sourceID, TargetID: item.route.targetID,
+				Error: "destination host disconnected before delivery acknowledgement",
+			})
+		}()
+	}
 }
 
 func (h *hub) broadcastRoster() {

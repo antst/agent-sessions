@@ -5,6 +5,24 @@ named persistent Codex App Server thread and publishes that thread in Claude's n
 It owns no project packet format, briefing, model, reasoning, sandbox, approval, web, artifact, or
 postflight policy.
 
+Managed Codex peers invoke local and federated lane lifecycle operations through
+the attested `claude_peer.lane` MCP tool. Codex shell tools run inside an OS sandbox
+that may correctly deny the App Server, supervisor, and host-agent Unix sockets;
+granting broader shell access is not a prerequisite for launching a lane. The MCP
+tool executes the exact packaged runtime outside that shell sandbox, binds the live
+registered Codex session as parent, and returns the native exit code, stdout, and
+stderr. Host-shell operators and Claude/Grok parents may continue to use the product
+lane CLIs directly.
+
+The MCP transport permits one blocking `run`, `resume`, or `wait` call for at most
+24 hours. A positive native `--timeout` below that ceiling receives an additional
+one-minute transport margin, so documented long waits such as 2700 seconds remain
+valid. An omitted or zero timeout uses the 24-hour transport bound; if that bound is
+reached the tool returns exit 124 plus captured tail output and does not claim a turn
+was collected. Use `start` followed by bounded `wait` calls for longer work. Output
+caps retain the tail, where lane JSONL emits the final answer and `turn.completed`,
+and report truncation explicitly.
+
 ## Foreground compatibility
 
 `run` accepts the prompt on stdin and emits JSONL compatible with the useful `codex exec --json`
@@ -62,7 +80,7 @@ use `--persistent` there or the command fails closed with an actionable owner er
 
 ## Remote hosts
 
-`peer-federator` protocol 2 can proxy this unchanged native contract through its hub:
+`peer-federator` protocol 3 can proxy this unchanged native contract through its hub:
 
 ```bash
 peer-federator hosts
@@ -72,21 +90,20 @@ peer-federator lane --host workstation-b --product codex -- \
   wait implementation-b --timeout 2700
 ```
 
-The proxy preserves stdout JSONL, stderr, and the native exit code. For remote `run`, `start`, and
-`resume`, it automatically adds `--persistent` and a notify target back to the originating live
-peer; do not pass `--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` yourself. The
-last flag is reserved so the destination cleanup fuse cannot be disabled. Remote lanes have
-no destination lifecycle owner and do not appear in `list --mine`; run plain `list` on that
-host. Every operation routes local UDS → hub → destination agent. Hub loss fails closed, removes
-federated shadows, and cancels a still-blocking proxy; there is no direct network or SSH fallback.
+The proxy preserves stdout JSONL, stderr, and the native exit code. The source agent supplies an
+attested parent context; the destination always gives the child the source-host parent anchor and
+copies other parent groups only after explicit `--inherit-groups`. Remote lanes are persistent on
+the destination and terminal pointers return as ordinary grouped Agent Sessions frames. Every
+operation routes local UDS → hub → destination agent. Hub loss fails closed and cancels a
+still-blocking proxy; there is no direct network, shadow-socket, or SSH fallback.
 Pass `-C`/`--cd` on remote `run` or `start` whenever the cwd matters; otherwise the launcher
 inherits the destination agent service's cwd. `resume` retains the established cwd. Remote stdin
 is capped at 1 MiB; `--prompt-file` refers to an existing destination file and transfers nothing.
 Remote auto-archive delays are capped at 86,400 seconds.
 The destination advertises its lane capability only after its operator explicitly enables remote
 execution in `peer-federator`.
-Message a remote lane through its qualified source-side discovery name (`name--host [ref]`) or an
-incoming message's `from` UDS; its destination-local name and thread ID are lifecycle addresses.
+Message a remote lane through the same group-filtered Agent Sessions protocol used locally; its
+destination-local name and thread ID remain lifecycle addresses.
 
 Parent-owned lanes automatically create a durable supervisor-owned terminal job for their owning
 Codex or Claude session. On completed, failed, or interrupted outcomes—or a bridge-enforced timeout—the
@@ -102,6 +119,8 @@ owner exit, to retire discovery permanently. Lanes created by older runtimes hav
 and are never adopted heuristically; archive those legacy lanes explicitly.
 An explicit `archive` makes one last delivery attempt, then cancels any still-undeliverable notice
 and reports `notices_dropped` instead of allowing a hint to block authoritative cleanup.
+For a remote lane, the pointer retains the source agent's effective `-runtime-dir`, so its printed
+`peer-federator lane ... wait` command remains directly runnable from a non-default isolated estate.
 
 The default lifecycle is parent-scoped. A direct Claude caller is identified only when its
 environment hints, current process ancestry, PID, available process-start identity, session ID,
@@ -118,9 +137,9 @@ the same established relationship; messages to every other peer retain the lane'
 class. Neither behavior changes the lane's Codex approval or sandbox policy.
 If the live target cannot be resolved and classified, delivery fails closed and the durable notice
 remains queued for retry rather than being recorded as sent.
-Federated shadows publish the remote target's source-asserted permission class under the trusted-VLAN
-assumption. The bridge corroborates that the local registry row belongs to a live peer-federator
-shadow before using it; protocol-1 shadows without a class retain the prompting default.
+Federated origin, product, and permission metadata live in the inner Agent Sessions frame and the
+attested hub roster. The Claude outer carrier describes the local host agent and never upgrades
+the source's permission class.
 
 `--persistent` is the explicit opt-out from parent cleanup. A persistent lane survives its launcher
 or orchestrator. Only a
@@ -174,10 +193,10 @@ App Server and supervisor reachability, `CODEX_HOME`, and the profile state root
 events use contract version 2. A generic adapter should require a supported contract major before
 launching work.
 
-The repository also ships a self-contained Claude Code plugin, `codex-peer`, which teaches this
+The repository also ships a self-contained Claude Code plugin, `agent-sessions`, which teaches this
 contract to any Claude orchestrator without copying a project-specific adapter. It adds no runtime,
-hooks, MCP server, policy defaults, or permission grants; all behavior remains in
-`codex-peer-lane`.
+hooks, policy defaults, or permission grants. Its process-attested MCP declaration provides grouped
+messaging, while lane behavior remains in the native launchers.
 
 `wait` is a single-consumer cursor over the lane's persisted turn history. Its first successful
 call collects the initial turn; each later call blocks for and returns the oldest uncollected turn,
@@ -197,6 +216,13 @@ server.
 the small local lane record so the archived thread remains addressable by lane name for an explicit
 follow-up resume. On supervisor startup, loaded threads are compared with the non-archived thread
 list so a legacy archived-but-loaded thread cannot be republished.
+
+If initial authentication or another authoritative App Server rejection occurs before Codex creates
+the first rollout, there is no transcript to preserve or resume. In that narrow case, `archive`
+accepts an App Server `no rollout found` response only when the local failed record contains no turn
+ID, pending turn, collected turn, or terminal-turn evidence. It deletes that unmaterialized thread
+and writes the ordinary retirement tombstone. A transport error or any local turn evidence remains
+ambiguous and is refused rather than guessed away.
 
 ## Follow-up turns on the same transcript
 
@@ -245,13 +271,15 @@ started turn as interrupted. A successful turn is not acknowledged until that pe
 `status` exposes the same durable `outcome` and `exit`, including `timed_out`/`124` after the
 terminal notice has passed.
 
-Use unique role-based names. Archived lane names remain reserved for transcript-preserving resume;
-check `list --all` for lanes and `claude agents --json` for other live peers before starting a new
-lane. Neither registry is complete alone. Codex senders resolve a unique bare name immediately before each send.
-Claude's native sender may require its current `name [ref]` confirmation token; copy the `from` UDS
-address for direct replies when available. Short refs are transient and must not be persisted. Raw
-thread IDs are accepted by lane lifecycle commands and Codex's sender, although Claude's native
-sender does not address peers by raw Codex UUID.
+Use stable role-based names, but do not treat them as ownership keys. Agent
+Sessions discovery and messaging resolve names only among peers visible through
+the sender's groups, so the same name may exist in disjoint groups. Lane CLI
+lifecycle commands (`wait`, `status`, `interrupt`, `archive`, and `resume`) read
+host-local lane state; a bare name can therefore be ambiguous even when the
+lanes are group-isolated. Persist and use exact lane IDs for lifecycle work.
+Agent Sessions discovery and messaging go through the host service; native
+Claude registry refs and direct UDS replies are not the cross-product routing
+contract.
 
 ## Configuration inheritance
 

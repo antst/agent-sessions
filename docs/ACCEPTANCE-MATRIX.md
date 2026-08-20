@@ -34,7 +34,7 @@ changes additionally require at least two Linux hosts and one macOS host.
 4. TUI output proves startup, response, status/permission mode, and exit.
 5. UUID, name, canonical cwd, archive state, permission class, PID, and
    process-start identity are recorded.
-6. Registry, owner, shim/host, lane, and federated-shadow state are captured
+6. Registry, owner, adapter/host-agent, lane, catalog, and group state are captured
    before, during, and after.
 7. Protocol method counts prove no duplicate archive, unarchive, prompt, turn,
    wake, or delivery.
@@ -42,6 +42,15 @@ changes additionally require at least two Linux hosts and one macOS host.
    lock, temporary worktree, or tmux server remains.
 9. Destination-visible receipt plus an exact acknowledgement is required for
    messaging. Sender-side `accepted` or `queued` is not a pass.
+10. A phase that starts managed Codex App Server records its captured
+    `CODEX_HOME`, Agent Sessions data/runtime roots, product CLI overrides, and
+    `PATH`. Later phases that need different values stop only that isolated App
+    Server and restart it from the intended environment; changing the caller's
+    environment after daemon startup is not sufficient.
+11. On a host with another Agent Sessions install on `PATH`, in-session lane
+    acceptance uses the attested `claude_peer.lane`/`agent_sessions.lane` tool
+    and verifies the loaded plugin/runtime revision. A shell-resolved lane
+    executable from another install is not exact-revision evidence.
 
 ## Source and packaging (`S`)
 
@@ -75,6 +84,7 @@ scripts/package-release darwin-arm64 "$VERSION" bin/darwin-arm64 dist
 | S-05 | PID reuse, process-start mismatch, stale lock/socket/record, duplicate name, and provisional cleanup regressions pass. |
 | S-06 | Repository and install plans contain no obsolete canonical-host or binary names. |
 | S-07 | Gates leave the checkout clean except for the tested patch; user files and stashes are unchanged. |
+| S-08 | Launcher drift runs against both the oldest supported and current accepted Codex CLI versions, records each exact version, and passes every discovered non-interactive command through byte-for-byte. An upstream Codex version change invalidates later live evidence until this cell is rerun. |
 
 ## Installation and upgrade (`I/U`)
 
@@ -118,6 +128,22 @@ must refuse when a process it would replace is still live.
 | C-17 | Explicit archive is idempotent; archived behavior is correct; resume performs one unarchive and retains transcript. |
 | C-18 | Missing sockets, stale owner, PID reuse, and interrupted publication recover without affecting another thread. |
 
+## Claude interactive peer (`T/F`)
+
+| ID | Platforms | Cell |
+|---|---|---|
+| CL-01 | Linux, macOS | Bare `claude` remains an opt-out and changes neither the Agent Sessions catalog nor registration set. |
+| CL-02 | Linux, macOS | `claude-peer` starts a real native TUI in the configured shared Claude profile; ordinary, peer, and lane rows coexist with exactly one host-agent service row. |
+| CL-03 | Linux, macOS | Two Claude peers use distinct preparation-bound sockets and discover one another through group-filtered AgentFrame routing; native Claude direct messaging remains independently available. |
+| CL-04 | Linux, macOS | Exact UUID ordinary→peer→ordinary→generic-peer resume retains one shared transcript plus explicit groups, inheritance snapshot, name, cwd, and effective durable YOLO choice. `claude-peer --resume UNIQUE_NAME` resolves a live or durable managed name to that exact UUID before mutation; ambiguous history fails closed and explicit overrides replace only selected fields. |
+| CL-05 | Linux, macOS | Native name/status changes refresh the host-agent registration without duplicating the service row. Permission class is a stable launch decision: constrained peers disable the unobservable in-session bypass surface, while explicit bypass peers remain conservatively advertised as bypass until restart. |
+| CL-06 | Linux, macOS | Host-agent restart republishes one service row and every idle Claude supershim re-registers without restarting Claude. |
+| CL-07 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, supershim crash, stale native row, key/socket-before-row startup failure, PID reuse, and socket mismatch retire only the exact owned Claude process/registration/artifacts, preserving unrelated shared rows and the service. |
+| CL-08 | Linux, macOS | Managed Claude's structured MCP discover/direct/multicast/broadcast returns correlated group-filtered results and replies to an incoming delivery through Agent Sessions. Exact adapter/lifecycle ancestry is accepted without a model-supplied Codex ID; copied environment, unrelated registered process, bare caller, and native unframed service prose fail closed. The framed native carrier remains a compatibility path, while independent native direct traffic can cross Agent Sessions groups. |
+| CL-09 | Linux, macOS | Claude→Codex, Claude→Claude, and Claude→Grok lane launches all bind the immediate Claude parent, including nested and persistent children. |
+| CL-10 | Linux, macOS | Profile/credential mismatch, live exact-UUID attachment, invalid launch settings, launcher crash, and native startup failure do not adopt or alter the ordinary session's catalog row; a durable gated-launch journal rolls back groups and YOLO before retry. |
+| CL-11 | Linux, macOS with Claude in Chrome installed | Ordinary shared-profile use may cache extension discovery; a later managed peer or lane still publishes its native row/socket without an interstitial. Peers preserve explicit `--chrome`/`--no-chrome`, while the managed default and all headless lanes use `--no-chrome`; host profile settings remain unchanged. |
+
 ## Grok interactive peer (`T/F`)
 
 | ID | Platforms | Cell |
@@ -151,19 +177,22 @@ busy, then require the exact return marker:
 
 | Source | Destinations |
 |---|---|
-| Codex peer | Codex peer, Grok peer, Codex lane, Claude lane |
-| Grok peer | Codex peer, Grok peer, Codex lane, Claude lane |
-| Codex lane | Codex peer, Grok peer, Codex lane, Claude lane |
-| Claude lane | Codex peer, Grok peer, Codex lane, Claude lane |
+| Codex peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Claude peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Grok peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Codex lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Claude lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Grok lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
 
 Repeat same-host, Linux→macOS, macOS→Linux, and Linux→Linux. Repeat with the
 destination offline then resumed and across federator reconnect. Enqueue-only
 evidence is `RED`.
 
-## Codex and Claude lanes (`L/F/X`)
+## Codex, Claude, and Grok lanes (`L/F/X`)
 
-Run every cell for local and remote Codex and Claude lanes, owned in turn by a
-live Codex peer and a live Grok peer. Use real turns and unique names.
+Run every applicable cell for local and remote Codex, Claude, and Grok lanes, owned in turn by a
+live Codex peer, a live Claude peer, and a live Grok peer. Grok lane federation is explicitly
+implemented. Use real turns and unique names.
 
 | ID | Cell |
 |---|---|
@@ -174,31 +203,57 @@ live Codex peer and a live Grok peer. Use real turns and unique names.
 | L-05 | Idle peer message starts one collectable follow-up; busy message follows product semantics. |
 | L-06 | Lane replies to owner and messages every applicable peer/lane destination. |
 | L-07 | `resume` reuses exact identity and refuses while prior work is owed. |
-| L-08 | `interrupt` yields correct raw status, normalized outcome, exit, notice, and collection. |
+| L-08 | `interrupt` yields correct raw status, normalized outcome, exit, collection, and a notice where that product supports notices. |
 | L-09 | Execution timeout yields `timed_out`/124; collection timeout does not mutate work. |
-| L-10 | Archive is idempotent, removes discovery, retains transcript, and reports dropped notices. |
+| L-10 | Archive is idempotent, removes discovery, retains transcript, and reports dropped notices where notices are supported. |
 | L-11 | Archived resume performs supported unarchive exactly once and preserves identity/transcript. |
 | L-12 | Auto-archive deadline, cancellation, custom grace, and no-auto-archive match docs. |
 | L-13 | Duplicate name and invalid owner/token/product remove provisional worktree/process/socket. |
 | L-14 | User dirty worktree and archived lane worktree are preserved. |
 | L-15 | Owner exit interrupts/archives parent-owned work; persistent lane and unrelated lanes survive. |
-| L-16 | Worker/manager/supervisor crash recovery restores terminal items, cursor, notice, and cleanup once. |
+| L-16 | Worker/manager/supervisor crash recovery restores terminal items, cursor, supported notices, and cleanup once. |
 | L-17 | Permission inheritance requires exact local owner; explicit lane policy always wins. |
 | L-18 | Remote run/start/resume/wait/status/interrupt/archive/list preserve streams, exit, cwd, notify, and cleanup fuse. |
 | L-19 | Remote stdin cap, prompt-file semantics, hub loss, and disabled destination capability fail closed. |
+| L-20 | Grok persists its ACP-created native UUID beside the stable lane UUID; `session/load` reuses that exact native identity under one sole ACP driver and never attaches to an interactive Grok conversation. |
+| L-21 | Grok idle/busy inbound messages serialize into collectable turns; duplicate message IDs are idempotent and conflicting reuse fails closed. |
+| L-22 | Grok headless policy is explicitly always-approve, published as bypass, and never inferred from an uncorroborated owner or downgraded to an unusable prompting mode. |
+| L-23 | Codex and Claude plugins ship a valid Grok-lane skill; its executable Claude preflight and linked contract/install references survive staging and packaging; the Grok plugin ships an agent-lanes skill that distinguishes Codex contract 2 from Claude contract 1. |
+| L-24 | Grok `lane.status`/`lane.list` report stable and native identities, lifecycle state, collection debt, owner/persistence, and auto-archive policy; every collected terminal result is `turn.completed` with explicit status/outcome/exit. |
+| L-25 | Grok normal archive and crash reconciliation remove the real ACP worker and all attributable MCP/tool descendants on Linux and macOS. The macOS cell must exercise a registered restricted shell in its own session after manager SIGKILL. Unmanaged restricted daemons that create a new session and reparent after their registered shell has exited are explicitly unsupported and excluded from a green cleanup claim, never guessed or killed heuristically. |
+| L-26 | A Codex lane that fails before its first rollout exists remains archivable by exact thread ID. Only an authoritative missing-rollout response plus a local failed record with no turn evidence permits `thread/delete`; transport ambiguity or any turn evidence fails closed. |
 
 ## Federation (`X/F`)
 
 | ID | Cell |
 |---|---|
-| X-01 | Startup, hub connectivity, local projection, and qualified remote discovery are correct. |
-| X-02 | Same-name peers on different hosts resolve only through exact qualified name/ref/address. |
-| X-03 | Pairwise messaging and lane lifecycle pass Linux↔macOS and Linux↔Linux. |
-| X-04 | Permission labels, including live Grok changes, are corroborated or conservative. |
-| X-05 | Federator/hub/host reconnect removes stale shadows and restores identities without duplicates. |
-| X-06 | Duplicate/replayed frames and invalid identity/token/product are rejected. |
-| X-07 | Remote owner death and archive remove only owned destination resources. |
-| X-08 | Install/tests never stop or reload an unrelated live federator. |
+| X-01 | Local-only startup publishes exactly one host service row; grouped discovery/direct/multicast/broadcast work without a hub. |
+| X-02 | Same-name visible peers are ambiguous, same-name peers in disjoint groups do not interfere, and hidden identities do not leak. |
+| X-03 | Pairwise messaging and lane lifecycle pass Linux↔macOS and Linux↔Linux without per-peer shadows. |
+| X-04 | Every snapshot peer has an exact host/session identity, protocol, product, instance, groups, and its own private anchor; malformed replacement snapshots retain the last valid roster. |
+| X-05 | Hub and host-agent restart restore one service row and peer registrations without duplicates or peer restart. |
+| X-06 | Legacy flat delivery, duplicate resolved multicast recipients, invalid source/product/group, and a broadcast to a non-member group are rejected before delivery. |
+| X-07 | Remote parent context retains the source-host private anchor; optional parent groups propagate only after explicit `--inherit-groups`. |
+| X-08 | Install/tests never stop or reload an unrelated live host agent or hub. |
+
+## Parent layer × target layer (`P/L/X`)
+
+Run every local pair and every supported federated pair, not just different-product pairs:
+
+| Parent | Codex lane | Claude lane | Grok lane |
+|---|---|---|---|
+| Codex | required | required | required |
+| Claude | required | required | required |
+| Grok | required | required | required |
+
+For every cell prove the child gets its own private group plus the immediate
+parent anchor, does not inherit other parent groups by default, inherits them
+only with explicit `--inherit-groups`, and restores that choice on resume. A
+three-level chain must bind a grandchild to its immediate parent rather than
+the original root. Each cell also covers parent↔child messaging, terminal
+notice/collection, interrupt, archive, exact resume, parent exit,
+`--persistent`, and target-owned cleanup. The target adapter remains
+product-specific; the parent/group layer is shared.
 
 ## Archive and unarchive contract
 

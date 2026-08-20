@@ -29,7 +29,6 @@ Map a caller's stated policy 1:1 onto flags. Nothing here has a default supplied
 | suppress owner notification | `--no-notify` |
 | structured output | `--schema FILE` |
 | isolated checkout | `--worktree` |
-| duplicate name is intended | `--allow-duplicate-name` |
 
 Prompts go on stdin (`-`) or in `--prompt-file FILE`. Never on argv.
 

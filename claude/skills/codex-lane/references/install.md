@@ -26,7 +26,7 @@ already has a compatible runtime, use `make install-claude`.
 
 ```bash
 claude plugin marketplace add https://github.com/antst/agent-sessions.git
-claude plugin install codex-peer@agent-sessions
+claude plugin install agent-sessions@agent-sessions
 ```
 
 For a local checkout, pass its path to `claude plugin marketplace add` instead. A colleague using
@@ -37,7 +37,7 @@ the SSH URL needs read access to the repository.
 Start a new Claude Code session, then run:
 
 ```text
-/codex-peer:doctor
+/agent-sessions:doctor
 ```
 
 Proceed only when its report has `summary: "ready"`, `contract_version: 2`, and

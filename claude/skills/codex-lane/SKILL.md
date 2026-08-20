@@ -5,10 +5,10 @@ description: Orchestrate named, messageable local or remote Codex lanes — star
 
 # Orchestrate Codex lanes
 
-A lane is a named Codex thread on the local shared App Server. It is published in
-Claude's native peer registry, so it is discoverable with `claude agents --json` and messageable
-with ordinary cross-session messaging while its owning orchestrator lives. `--persistent` is an
-explicit opt-in for a lane that must survive its owner.
+A lane is a named Codex thread on the local shared App Server. It registers with
+the Agent Sessions host agent and is visible only to peers sharing one of its groups. Claude's
+shared native registry contains ordinary/managed Claude rows and the single host-agent service,
+not synthetic Codex rows. `--persistent` is an explicit opt-in for a lane that must survive its owner.
 
 This skill is a pass-through to one CLI. It owns no policy: model, reasoning effort, sandbox,
 approval, web access, config overlays, output schema, and worktree isolation are all decided by
@@ -32,9 +32,9 @@ explicitly enables remote lane execution. For the rest of this skill, replace `c
 peer-federator lane --host HOST --product codex --
 ```
 
-Do not run the local lane-preflight for a remote destination. Federation automatically makes
-remote `run`, `start`, and `resume` persistent and supplies a notify target back to this live Claude
-session; never pass `--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` for those
+Do not run the local lane-preflight for a remote destination. Federation carries this live
+Claude parent’s attested context and returns terminal notices through grouped routing; never pass
+`--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` for those
 commands. Remote lanes have no lifecycle owner and are excluded from `--mine`; use the remote plain `list`, names, or IDs.
 The JSONL contract, one-consumer cursor, terminal notice, deadlines, and auto-archive grace remain
 native Codex lane behavior.
@@ -51,7 +51,7 @@ do not poll.
 
 ## Preflight (once per session)
 
-Run `/codex-peer:doctor`, or directly:
+Run `/agent-sessions:doctor`, or directly:
 
 ```
 "${CLAUDE_PLUGIN_ROOT}/skills/codex-lane/scripts/lane-preflight"
@@ -92,15 +92,16 @@ codex-peer-lane start \
 
 Only `--name` is required. Add policy flags **only** when the caller specified them.
 
-Pick a unique, stable, role-based kebab-case name and check **both** registries first:
-`codex-peer-lane list --all` covers active and archived lanes, while `claude agents --json`
-covers live non-lane peers. Neither is complete alone. Parse stdout JSONL until
+Pick a stable, role-based kebab-case name and check `codex-peer-lane list --all` plus an Agent
+Sessions `discover` request from this session. The same name may exist in disjoint groups; a
+messaging ambiguity matters only when it is visible to this sender. Parse stdout JSONL until
 `{"type":"lane.ready"}`; retain its `thread_id` and confirm
 `contract_version` is 2. Everything after `lane.ready` may be ignored for a detached lane.
 
 Use `codex-peer-lane list --mine` when only lanes owned by this Claude orchestrator are relevant.
 It matches process identity rather than the mutable Claude session ID and excludes persistent lanes;
-the unfiltered list remains the authoritative view for name-collision checks. `--mine` fails when
+the unfiltered list remains the authoritative view for host-local lifecycle state. Bare lifecycle
+names can be ambiguous across otherwise group-isolated lanes, so retain and use exact IDs. `--mine` fails when
 the caller is not a corroborated live Codex or Claude peer; it never guesses from a transient shell.
 
 The runtime records this Claude process as owner and notifies it automatically. Use mode A when
@@ -114,6 +115,10 @@ terminal turn it leaves a one-minute collection/message grace period. Pass
 persisted granularity are `0.001` seconds. Pass
 `--no-auto-archive` only when the caller explicitly wants indefinite retention; combine it with
 `--persistent` for a permanent lane. Never combine the two auto-archive flags.
+
+Every lane keeps this immediate parent’s private group. Add `--inherit-groups` only when this
+parent deliberately propagates its other groups; use repeatable `--group NAME` for child-specific
+membership. Persistence does not remove the communication anchor.
 
 ### 2. Collect
 Pick one mode. Modes A and B are both correct; C is a fallback.
@@ -158,13 +163,14 @@ Exit codes: `0` completed, `124` timed out, `130` interrupted, `1` everything el
 
 ### 3. Talk to a running lane
 
-Use ordinary cross-session messaging addressed to the lane name. A message wakes an idle lane or
-steers a turn already in flight. Message delivery does not return the result; a turn started by an
-inbound message is collected by a later `wait`.
+Use the `agent-sessions` skill and send a complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the one host-agent
+service. Address the lane by its current visible name or exact host-qualified identity. A message
+wakes an idle lane or steers a turn already in flight. Message delivery does not return the result;
+a turn started by an inbound message is collected by a later `wait`.
 
-For a remote lane, use its current source-side discovery identity—normally `name--host [ref]`—or
-reply to the `from` UDS on an incoming message. The destination-local lane name and session ID are
-only valid behind `peer-federator lane` for lifecycle commands.
+For a remote lane, use its current host-qualified identity from Agent Sessions discovery. The
+destination-local lane name and session ID are valid behind `peer-federator lane` for lifecycle
+commands; terminal notices include that remote collection command.
 
 If Claude asks for confirmation with a current `name [ref]`, use that token only for the immediate
 retry. Re-resolve immediately before every later send; short refs rotate and must never be stored.

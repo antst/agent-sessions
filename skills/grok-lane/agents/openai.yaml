@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grok Lane"
+  short_description: "Delegate durable work to a local Grok Build lane"
+  default_prompt: "Spawn a named Grok Build lane, collect its final answer, and archive it when finished."

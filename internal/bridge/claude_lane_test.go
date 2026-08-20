@@ -11,12 +11,16 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 type bufferWriteCloser struct {
@@ -120,6 +124,13 @@ func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
 			claudeBin := filepath.Join(root, "claude")
 			script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  --version) printf '%%s\\n' '2.1.233' ;;\n  'auth status --json') printf '%%s\\n' '%s'; exit %d ;;\n  *) exit 97 ;;\nesac\n", test.authStatus, test.authExit)
 			if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
@@ -131,6 +142,7 @@ func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
 			t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
 			t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 			t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+			t.Setenv(agentRuntimeDirEnvironment, filepath.Join(root, "no-agent"))
 
 			read, write, err := os.Pipe()
 			if err != nil {
@@ -161,6 +173,92 @@ func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
 				t.Fatalf("logged-out doctor report = %#v", report)
 			}
 		})
+	}
+}
+
+func TestClaudeLaneDoctorChecksSharedProfileAndDefaultCredentialNamespace(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	sharedRoot := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(sharedRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedRoot, ".claude.json"), []byte(`{
+  "hasCompletedOnboarding": true,
+  "oauthAccount": {"accountUuid":"account-1","organizationUuid":"org-1"}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeBin := filepath.Join(root, "claude")
+	script := `#!/bin/sh
+case "$*" in
+  --version) printf '%s\n' '2.1.233' ;;
+  'auth status --json')
+    if test "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}:$CLAUDE_SECURESTORAGE_CONFIG_DIR" = 'x:' &&
+       test "$CLAUDE_CONFIG_DIR" = "$CLAUDE_PEER_CLAUDE_CONFIG_DIR" &&
+       test -z "${CLAUDECODE+x}${CLAUDE_CODE_SESSION_ID+x}${CLAUDE_PID+x}${CLAUDE_CODE_ENTRYPOINT+x}" &&
+       grep -q '"oauthAccount"' "$CLAUDE_CONFIG_DIR/.claude.json"; then
+      printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
+      exit 0
+    fi
+    printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
+    exit 1 ;;
+  *) exit 97 ;;
+esac
+`
+	if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	supervisorSocket := startAuthorizationControlServer(t, func(map[string]any) map[string]any {
+		return map[string]any{}
+	})
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", sharedRoot)
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "outer-session")
+	t.Setenv("CLAUDE_PID", "123")
+	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "outer")
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", sharedRoot)
+	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv(agentRuntimeDirEnvironment, filepath.Join(root, "no-agent"))
+
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = write
+	code, doctorErr := doctorClaudeLane()
+	_ = write.Close()
+	os.Stdout = original
+	body, _ := io.ReadAll(read)
+	_ = read.Close()
+	if doctorErr != nil || code != 0 {
+		t.Fatalf("shared-profile doctor = code %d err %v, body %s", code, doctorErr, body)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !boolValue(report["claude_logged_in"]) || report["claude_auth_error"] != nil {
+		t.Fatalf("shared-profile doctor report = %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(root, "state", "claude-doctor")); !os.IsNotExist(err) {
+		t.Fatalf("doctor created private authentication state: %v", err)
+	}
+}
+
+func TestClaudeLaneUsageAdvertisesGroupOptions(t *testing.T) {
+	t.Parallel()
+
+	usage := claudeLaneUsage()
+	for _, option := range []string{"--group GROUP", "--inherit-groups", "--no-inherit-groups"} {
+		if !strings.Contains(usage, option) {
+			t.Fatalf("Claude lane usage does not advertise %s", option)
+		}
 	}
 }
 
@@ -299,10 +397,60 @@ func TestClaudeLaneWorkerEnvDropsInheritedIdentityAndEnablesMessaging(t *testing
 	environment := claudeLaneWorkerEnv([]string{
 		"PATH=/bin", "CLAUDE_PID=123", "CLAUDE_CODE_SESSION_ID=wrong",
 		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0", "CODEX_THREAD_ID=outer", "KEEP=yes",
+		"CLAUDE_CODE_SIMPLE=1", "CLAUDE_CODE_HARBOR_KITE=0",
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR=/outer/config",
+	}, "child-session", claudeprofile.Source{
+		ConfigRoot: "/shared/config", ConfigEnvSet: true, ConfigEnvValue: "/shared/config",
+		SecureConfig: "/secure/config", SecureEnvSet: true,
 	})
-	if len(environment) != 3 || environment[0] != "PATH=/bin" || environment[1] != "KEEP=yes" ||
-		environment[2] != "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" {
+	joined := strings.Join(environment, "\n")
+	for _, expected := range []string{
+		"PATH=/bin", "KEEP=yes", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1",
+		"CLAUDE_CODE_HARBOR_KITE=1",
+		"AGENT_SESSIONS_SESSION_ID=child-session", "AGENT_SESSIONS_PRODUCT=claude",
+		"AGENT_SESSIONS_AGENT_RUNTIME_DIR=" + laneAgentRuntimeDir(),
+		"CLAUDE_CONFIG_DIR=/shared/config", "CLAUDE_PEER_CLAUDE_CONFIG_DIR=/shared/config",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/secure/config",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("worker environment = %#v; missing %s", environment, expected)
+		}
+	}
+	if strings.Contains(joined, "CODEX_THREAD_ID=outer") || strings.Contains(joined, "CLAUDE_PEER_CLAUDE_CONFIG_DIR=/outer/config") ||
+		strings.Contains(joined, "CLAUDE_CODE_SIMPLE=1") || strings.Contains(joined, "CLAUDE_CODE_HARBOR_KITE=0") {
 		t.Fatalf("worker environment = %#v", environment)
+	}
+}
+
+func TestClaudeLaneWorkerEnvPreservesUnsetDefaultProfile(t *testing.T) {
+	environment := claudeLaneWorkerEnv([]string{
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong",
+	}, "child-session", claudeprofile.Source{ConfigRoot: "/shared/config"})
+	if slices.Contains(environment, "CLAUDE_CONFIG_DIR=") || slices.Contains(environment, "CLAUDE_SECURESTORAGE_CONFIG_DIR=") ||
+		slices.Contains(environment, "CLAUDE_SECURESTORAGE_CONFIG_DIR=/wrong") {
+		t.Fatalf("worker secure-storage environment = %#v", environment)
+	}
+}
+
+func TestSharedClaudeLaneSourceUsesNativeProfileWithoutCopyingState(t *testing.T) {
+	root := t.TempDir()
+	sharedRoot := filepath.Join(root, "shared")
+	if err := os.MkdirAll(filepath.Join(sharedRoot, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", sharedRoot)
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	t.Setenv(agentRuntimeDirEnvironment, filepath.Join(root, "no-agent"))
+	source, err := sharedClaudeLaneSource(nativePaths{claudeRoot: sharedRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.ConfigRoot != sharedRoot || !source.ConfigEnvSet || source.ConfigEnvValue != sharedRoot ||
+		!source.SecureEnvSet || source.SecureConfig != "" {
+		t.Fatalf("shared Claude source = %#v", source)
+	}
+	if _, err := os.Stat(filepath.Join(root, "claude-lane-profiles")); !os.IsNotExist(err) {
+		t.Fatalf("shared source created a private profile: %v", err)
 	}
 }
 
@@ -1057,6 +1205,9 @@ func TestClaudeLaneEmptyToolsFlagIsPreservedInWorkerArgv(t *testing.T) {
 	if !containsArgValue(args, "--settings", `{"crossSessionInbound":"accept"}`) {
 		t.Fatalf("worker argv did not accept native inbound lane messages: %#v", args)
 	}
+	if !containsString(args, "--no-chrome") {
+		t.Fatalf("worker argv can block on the Chrome extension interstitial: %#v", args)
+	}
 	if !containsArgValue(args, "--name", "tool-free") {
 		t.Fatalf("worker argv did not preserve the lane's outbound sender name: %#v", args)
 	}
@@ -1118,6 +1269,38 @@ func TestClaudeLaneWorkerNeverRestartsLegacyBareMode(t *testing.T) {
 	if err := validateClaudeLaneResumeState(claudeLaneState{Bare: true}); err == nil || !strings.Contains(err.Error(), "legacy lane used --bare") {
 		t.Fatalf("legacy bare resume did not fail with an actionable error: %v", err)
 	}
+	if err := validateClaudeLaneResumeState(claudeLaneState{}); err == nil ||
+		!strings.Contains(err.Error(), "legacy private Claude lane") {
+		t.Fatalf("legacy private-profile resume did not fail before mutation: %v", err)
+	}
+}
+
+func TestClaudeLaneResumeRejectsChangedAgentProfileOrCredentialNamespace(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+	status := federator.AgentStatus{
+		RegistryDir:        filepath.Join(shared, "sessions"),
+		ClaudeConfigEnvSet: true, ClaudeConfigEnvValue: shared,
+		ClaudeSecureEnvSet: true, ClaudeSecureConfig: "secure-a",
+	}
+	state := claudeLaneState{
+		WorkerSharedProfile: true, WorkerConfigDir: shared,
+		WorkerConfigEnvSet: true, WorkerConfigEnvValue: shared,
+		WorkerSecureEnvSet: true, WorkerSecureConfigDir: "secure-a",
+	}
+	if err := validateClaudeLaneAgentProfile(state, status); err != nil {
+		t.Fatalf("matching lane profile rejected: %v", err)
+	}
+	changedRoot := state
+	changedRoot.WorkerConfigDir = filepath.Join(root, "other")
+	if err := validateClaudeLaneAgentProfile(changedRoot, status); err == nil {
+		t.Fatal("changed agent registry was accepted")
+	}
+	changedSecure := state
+	changedSecure.WorkerSecureConfigDir = "secure-b"
+	if err := validateClaudeLaneAgentProfile(changedSecure, status); err == nil {
+		t.Fatal("changed agent credential namespace was accepted")
+	}
 }
 
 func TestClaudeLaneCompactsOnlyCollectedTurnHistory(t *testing.T) {
@@ -1173,14 +1356,17 @@ func TestClaudeLaneManagerMergesAcknowledgementsBeforeCompaction(t *testing.T) {
 
 func TestClaudeLaneCleanupRemovesOnlyItsDeadNativeWorkerPeer(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		mutate     func(map[string]any)
-		wantRemove bool
+		name         string
+		mutate       func(map[string]any)
+		workerSocket func(string) string
+		wantRemove   bool
 	}{
-		{name: "matching", mutate: func(map[string]any) {}, wantRemove: true},
+		{name: "matching", mutate: func(map[string]any) {}, workerSocket: func(value string) string { return value }, wantRemove: true},
+		{name: "capture-failed-before-socket-persisted", mutate: func(map[string]any) {}, workerSocket: func(string) string { return "" }, wantRemove: true},
 		{name: "foreign-session", mutate: func(row map[string]any) { row["sessionId"] = "other-session" }},
 		{name: "foreign-entrypoint", mutate: func(row map[string]any) { row["entrypoint"] = "interactive" }},
 		{name: "foreign-process-start", mutate: func(row map[string]any) { row["procStart"] = "other-start" }},
+		{name: "changed-socket", mutate: func(map[string]any) {}, workerSocket: func(string) string { return filepath.Join("/tmp", "other-worker.sock") }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -1216,17 +1402,38 @@ func TestClaudeLaneCleanupRemovesOnlyItsDeadNativeWorkerPeer(t *testing.T) {
 			if err := writeJSONAtomic(registry, row); err != nil {
 				t.Fatal(err)
 			}
-			cleanupClaudeNativeWorkerPeer(paths, claudeLaneState{
-				SessionID: "lane-session", WorkerPID: deadPID, WorkerProcStart: "old-start", WorkerSocket: socket,
+			keyName, err := federator.ClaudeServiceKeyName(deadPID, socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keyPath := filepath.Join(paths.claudeRoot, "sessions", keyName)
+			if err := os.WriteFile(keyPath, []byte(`{"peerToken":"00000000000000000000000000000000"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			workerSocket := socket
+			if test.workerSocket != nil {
+				workerSocket = test.workerSocket(socket)
+			}
+			cleanupErr := cleanupClaudeNativeWorkerPeer(paths, claudeLaneState{
+				SessionID: "lane-session", WorkerPID: deadPID, WorkerProcStart: "old-start", WorkerSocket: workerSocket,
 			})
 			_, registryErr := os.Stat(registry)
 			_, socketErr := os.Lstat(socket)
+			_, keyErr := os.Lstat(keyPath)
 			if test.wantRemove {
-				if !os.IsNotExist(registryErr) || !os.IsNotExist(socketErr) {
-					t.Fatalf("matching worker residue survived: registry=%v socket=%v", registryErr, socketErr)
+				if cleanupErr != nil {
+					t.Fatalf("matching cleanup failed: %v", cleanupErr)
 				}
-			} else if registryErr != nil || socketErr != nil {
-				t.Fatalf("foreign worker residue was removed: registry=%v socket=%v", registryErr, socketErr)
+				if !os.IsNotExist(registryErr) || !os.IsNotExist(socketErr) || !os.IsNotExist(keyErr) {
+					t.Fatalf("matching worker residue survived: registry=%v socket=%v key=%v", registryErr, socketErr, keyErr)
+				}
+			} else {
+				if cleanupErr == nil {
+					t.Fatal("foreign worker cleanup reported success")
+				}
+				if registryErr != nil || socketErr != nil || keyErr != nil {
+					t.Fatalf("foreign worker residue was removed: registry=%v socket=%v key=%v", registryErr, socketErr, keyErr)
+				}
 			}
 		})
 	}
@@ -1260,6 +1467,7 @@ func TestClaudeLaneManagerCaptureFailureDoesNotPersistOwner(t *testing.T) {
 }
 
 func TestClaudeLaneWorkerCaptureFailureReapsChildWithoutPersistence(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	claudeBin := filepath.Join(root, "fake-claude")
 	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0700); err != nil {
@@ -1279,6 +1487,7 @@ func TestClaudeLaneWorkerCaptureFailureReapsChildWithoutPersistence(t *testing.T
 		state: claudeLaneState{
 			Type: "claude-peer-lane", Name: "worker-capture-failure", ThreadID: "capture-worker",
 			SessionID: "capture-worker", Cwd: root, Status: "starting", PermissionMode: "dontAsk",
+			WorkerSharedProfile: true, WorkerConfigDir: filepath.Join(root, "claude"),
 		},
 		captureProcStart: func(pid int) (string, error) {
 			workerPID = pid
@@ -1538,11 +1747,17 @@ func TestClaudeLaneManagerCannotOverwriteArchivedState(t *testing.T) {
 }
 
 func TestClaudeLaneUnknownCleanupPreservesStateAndTransport(t *testing.T) {
+	useBridgeTestAgent(t)
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
+	agentStatus, err := federator.ReadAgentStatus(laneAgentRuntimeDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentProfile := claudeLaneAgentProfile(agentStatus)
 	process := exec.Command("/bin/sleep", "60")
 	if err := process.Start(); err != nil {
 		t.Fatal(err)
@@ -1566,6 +1781,9 @@ func TestClaudeLaneUnknownCleanupPreservesStateAndTransport(t *testing.T) {
 	state := claudeLaneState{
 		Type: "claude-peer-lane", Name: "unknown-cleanup", ThreadID: sessionID, SessionID: sessionID,
 		Status: "archived", Persistent: true, ManagerPID: process.Process.Pid,
+		WorkerSharedProfile: true, WorkerConfigDir: agentProfile.ConfigRoot,
+		WorkerConfigEnvSet: agentProfile.ConfigEnvSet, WorkerConfigEnvValue: agentProfile.ConfigEnvValue,
+		WorkerSecureEnvSet: agentProfile.SecureEnvSet, WorkerSecureConfigDir: agentProfile.SecureConfig,
 		// An empty start token is deliberately Unknown, never proof of death.
 		ControlSocket: controlSocket, ShimSocket: shimSocket, WorkerSocketAlias: workerAlias,
 	}
@@ -1846,6 +2064,7 @@ func TestClaudeLaneStatusBindsOutcomeToReportedTurn(t *testing.T) {
 }
 
 func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
+	runtimeDir := useBridgeTestAgent(t)
 	root := t.TempDir()
 	paths := nativePaths{
 		dataRoot: filepath.Join(root, "data"), profileRoot: filepath.Join(root, "profile"),
@@ -1856,6 +2075,9 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 		Status: "archived", PermissionMode: "dontAsk", WorkerSocket: filepath.Join(root, "dead-source.sock"), CreatedAt: 1,
 		Notices: []claudeLaneNotice{{ID: "notice-retry", TurnID: "turn-1", Target: "session:target-session", Message: "terminal", CreatedAt: 1}},
 	}
+	_, stopParent := registerBridgeTestParent(t, runtimeDir)
+	prepareBridgeTestLaneParent(t, runtimeDir, state.SessionID, "target-session")
+	stopParent()
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
@@ -1867,30 +2089,7 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 	if latest.Notices[0].SentAt != 0 {
 		t.Fatal("unreachable orphan notice was falsely acknowledged")
 	}
-	if err := os.MkdirAll(filepath.Join(paths.claudeRoot, "sessions"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	socket := filepath.Join(root, "retry-target.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
-	row := map[string]any{
-		"pid": os.Getpid(), "procStart": readProcStart(os.Getpid()), "sessionId": "target-session",
-		"name": "target", "messagingSocketPath": socket, "kind": "interactive", "peerProtocol": 1,
-	}
-	if err := writeJSONAtomic(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(os.Getpid())+".json"), row); err != nil {
-		t.Fatal(err)
-	}
-	received := make(chan struct{})
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			_ = conn.Close()
-			close(received)
-		}
-	}()
+	received, _ := registerBridgeTestParent(t, runtimeDir)
 	reconcileClaudeLaneManagers(paths)
 	select {
 	case <-received:
@@ -1907,44 +2106,23 @@ func TestClaudeLaneArchivedNoticeRetriesAcrossReconcileTicks(t *testing.T) {
 }
 
 func TestClaudeLaneOrphanNoticeUsesVirtualSender(t *testing.T) {
+	runtimeDir := useBridgeTestAgent(t)
 	root := t.TempDir()
 	paths := nativePaths{
 		dataRoot: filepath.Join(root, "data"), profileRoot: filepath.Join(root, "profile"),
 		claudeRoot: filepath.Join(root, "claude"), runtimeDir: filepath.Join(root, "runtime"),
 	}
-	if err := os.MkdirAll(filepath.Join(paths.claudeRoot, "sessions"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	socket := filepath.Join(root, "target.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
 	targetSession := "target-session"
-	row := map[string]any{
-		"pid": os.Getpid(), "procStart": readProcStart(os.Getpid()), "sessionId": targetSession,
-		"name": "target", "messagingSocketPath": socket, "kind": "interactive", "peerProtocol": 1,
-	}
-	if err := writeJSONAtomic(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(os.Getpid())+".json"), row); err != nil {
-		t.Fatal(err)
-	}
 	state := claudeLaneState{
 		Type: "claude-peer-lane", Name: "worker", ThreadID: "session-test", SessionID: "session-test",
 		Status: "idle", PermissionMode: "dontAsk", WorkerSocket: filepath.Join(root, "dead-source.sock"), CreatedAt: 1,
 		Notices: []claudeLaneNotice{{ID: "notice-1", TurnID: "turn-1", Target: "session:" + targetSession, Message: "terminal", CreatedAt: 1}},
 	}
+	received, _ := registerBridgeTestParent(t, runtimeDir)
+	prepareBridgeTestLaneParent(t, runtimeDir, state.SessionID, targetSession)
 	if err := writeClaudeLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
-	received := make(chan struct{})
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			_ = conn.Close()
-			close(received)
-		}
-	}()
 	flushOrphanClaudeLaneNotices(paths, state.SessionID)
 	select {
 	case <-received:

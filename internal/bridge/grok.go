@@ -42,16 +42,17 @@ const (
 // host never adopts Grok's default leader: every launch gets a new private
 // directory, leader, ACP bridge, and control socket.
 type grokHostConfig struct {
-	GrokBin        string
-	SessionID      string
-	Cwd            string
-	OwnerPID       int
-	OwnerProcStart string
-	LaunchToken    string
-	RuntimeDir     string
-	Name           string
-	PermissionMode string
-	readyWriter    io.Writer
+	GrokBin         string
+	SessionID       string
+	Cwd             string
+	OwnerPID        int
+	OwnerProcStart  string
+	LaunchToken     string
+	RuntimeDir      string
+	Name            string
+	PermissionMode  string
+	AgentRuntimeDir string
+	readyWriter     io.Writer
 
 	// command is overridden only by tests. Production always executes GrokBin.
 	command func(args ...string) *exec.Cmd
@@ -233,16 +234,14 @@ func runGrokSafetyCommand(argv []string) int {
 	return 0
 }
 
+//nolint:gocyclo // Installer inventory deliberately validates every durable ownership source fail-closed.
 func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
+	liveSet := map[string]bool{}
 	directory := filepath.Join(profileDataRoot(paths), "grok-launches")
 	entries, err := os.ReadDir(directory)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read Grok launch inventory: %w", err)
 	}
-	live := make([]string, 0)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -260,10 +259,48 @@ func activeGrokLaunchSessions(paths nativePaths) ([]string, error) {
 		}
 		for _, identity := range identities {
 			if identity.Status != processIdentityStale {
-				live = append(live, record.SessionID)
+				liveSet[record.SessionID] = true
 				break
 			}
 		}
+	}
+	laneDirectory := filepath.Join(profileDataRoot(paths), "grok-lanes")
+	laneEntries, laneErr := os.ReadDir(laneDirectory)
+	if laneErr != nil && !os.IsNotExist(laneErr) {
+		return nil, fmt.Errorf("read Grok lane inventory: %w", laneErr)
+	}
+	for _, entry := range laneEntries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(laneDirectory, entry.Name())
+		body, readErr := os.ReadFile(path) //nolint:gosec // path is a bridge-owned inventory entry under a fixed private directory.
+		if readErr != nil {
+			return nil, fmt.Errorf("read Grok lane inventory record: %w", readErr)
+		}
+		var state grokLaneState
+		if json.Unmarshal(body, &state) != nil || state.Type != "grok-peer-lane" || !validSessionID(state.SessionID) {
+			return nil, fmt.Errorf("refuse malformed Grok lane record: %s", path)
+		}
+		manager := cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart)
+		worker := cleanupProcessIdentityStatus(state.WorkerPID, state.WorkerProcStart)
+		registryGuard, cleanupRoots, registryErr := grokLaneCleanupRoots(state, false)
+		if registryErr != nil {
+			return nil, fmt.Errorf("read Grok lane tool ownership: %w", registryErr)
+		}
+		taggedRemain := grokTaggedProcessesRemain(state.LaunchTokenHash, 0, cleanupRoots...)
+		if registryGuard != nil {
+			registryGuard.close()
+		}
+		if state.Status != "archived" || manager.Status != processIdentityStale || worker.Status != processIdentityStale ||
+			grokProcessSessionHasMembers(state.WorkerSessionID, 0) ||
+			taggedRemain {
+			liveSet[state.SessionID] = true
+		}
+	}
+	live := make([]string, 0, len(liveSet))
+	for sessionID := range liveSet {
+		live = append(live, sessionID)
 	}
 	sort.Strings(live)
 	return live, nil
@@ -411,7 +448,7 @@ func inferGrokParent(paths nativePaths, startPID int) (laneOwner, bool) {
 		return laneOwner{}, false
 	}
 	return laneOwner{
-		PID: record.OwnerPID, ProcStart: record.OwnerProcStart,
+		PID: record.HostPID, ProcStart: record.HostProcStart,
 		SessionID: record.SessionID, PermissionMode: defaultString(record.PermissionMode, "default"),
 	}, true
 }
@@ -496,10 +533,13 @@ type grokACPClient struct {
 	stdin     io.WriteCloser
 	responses chan map[string]any
 	interject chan map[string]any
+	notifyMu  sync.RWMutex
+	notify    func(map[string]any)
 	readDone  chan struct{}
 	readMu    sync.Mutex
 	readErr   error
 	requestMu sync.Mutex
+	writeMu   sync.Mutex
 	nextID    int64
 }
 
@@ -558,6 +598,12 @@ func newGrokACPClient(
 				continue
 			}
 			if message["id"] == nil {
+				client.notifyMu.RLock()
+				notify := client.notify
+				client.notifyMu.RUnlock()
+				if notify != nil {
+					notify(message)
+				}
 				switch stringValue(message["method"]) {
 				case "_x.ai/session/interjection":
 					select {
@@ -585,6 +631,12 @@ func newGrokACPClient(
 		close(client.readDone)
 	}()
 	return client
+}
+
+func (c *grokACPClient) setNotificationHandler(handler func(map[string]any)) {
+	c.notifyMu.Lock()
+	c.notify = handler
+	c.notifyMu.Unlock()
 }
 
 func publishLatestGrokRosterState(updates chan grokRosterState, state grokRosterState) {
@@ -615,7 +667,10 @@ func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, mess
 	if err != nil {
 		return err
 	}
-	if _, err := c.stdin.Write(append(body, '\n')); err != nil {
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(body, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("write Grok ACP _x.ai/interject: %w", err)
 	}
 	for {
@@ -665,7 +720,10 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.stdin.Write(append(body, '\n')); err != nil {
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(body, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("write Grok ACP %s: %w", method, err)
 	}
 	for {
@@ -693,6 +751,22 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 			return nil, fmt.Errorf("grok ACP %s: %w", method, ctx.Err())
 		}
 	}
+}
+
+func (c *grokACPClient) notifyRequest(method string, params map[string]any) error {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": method, "params": params,
+	})
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(body, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("write Grok ACP %s notification: %w", method, err)
+	}
+	return nil
 }
 
 func (c *grokACPClient) close() {
@@ -1245,18 +1319,19 @@ func (h *grokHost) requestStop() {
 func (h *grokHost) ensureAgentSessionsMCPReadyLocked(ctx context.Context) error {
 	// Grok 1.0.4 starts trusted plugin MCPs in the resident session, but its
 	// x.ai/mcp/list catalog omits those plugin-only clients. Exercise the exact
-	// server and a read-only tool instead; success proves discovery, process
-	// startup, MCP initialization, and launch attestation end to end.
+	// server and its identity tool instead; the exact process-attested launch may
+	// report a starting identity before publication. Group discovery cannot run
+	// until that same publication has registered the source with the host agent.
 	result, err := h.acp.request(ctx, "_x.ai/mcp/call", map[string]any{
 		"sessionId": h.config.SessionID,
 		"server":    "agent_sessions",
-		"tool":      "list_peers",
-		"arguments": map[string]any{},
+		"tool":      "identity",
+		"arguments": map[string]any{"session_id": h.config.SessionID},
 	})
 	if err != nil {
 		return fmt.Errorf("probe live Grok agent_sessions MCP: %w", err)
 	}
-	return grokAgentSessionsMCPCallReady(result)
+	return grokAgentSessionsMCPIdentityReady(result, h.config.SessionID)
 }
 
 func grokAgentSessionsMCPCallReady(response map[string]any) error {
@@ -1267,6 +1342,25 @@ func grokAgentSessionsMCPCallReady(response map[string]any) error {
 	content, ok := result["content"].([]any)
 	if !ok || len(content) == 0 {
 		return errors.New("grok agent_sessions MCP readiness tool returned no content")
+	}
+	return nil
+}
+
+func grokAgentSessionsMCPIdentityReady(response map[string]any, sessionID string) error {
+	if err := grokAgentSessionsMCPCallReady(response); err != nil {
+		return err
+	}
+	result, _ := response["result"].(map[string]any)
+	identity, _ := result["structuredContent"].(map[string]any)
+	// Grok 1.0.4 can omit MCP structuredContent while preserving the successful
+	// text result. The ACP session, launch token, and MCP process ancestry have
+	// already attested the caller; validate the structured identity when the
+	// client forwards it, but do not make that optional transport field a gate.
+	if len(identity) == 0 {
+		return nil
+	}
+	if stringValue(identity["sessionId"]) != sessionID {
+		return errors.New("grok agent_sessions MCP readiness tool returned the wrong session identity")
 	}
 	return nil
 }
@@ -1681,7 +1775,7 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
-	err = h.acp.requestInterjection(ctx, h.config.SessionID, messageID, trustedPeerText(item))
+	err = h.acp.requestInterjection(ctx, h.config.SessionID, messageID, trustedPeerTextForProduct(item, "grok"))
 	cancel()
 	if err != nil {
 		h.clearActiveInterjectionPermissionSnapshot()
@@ -1857,6 +1951,7 @@ func (h *grokHost) ensurePeerPublished() error {
 		"owner-pid":         strconvItoa(h.config.OwnerPID), "owner-proc-start": h.config.OwnerProcStart,
 		"data-dir": paths.dataRoot, "claude-config-dir": paths.claudeRoot,
 		"codex-home": paths.codexHome, "runtime-dir": paths.runtimeDir,
+		"agent-runtime-dir": h.config.AgentRuntimeDir,
 	}
 	peer := newDaemon(args)
 	if err := peer.start(); err != nil {
@@ -1882,6 +1977,7 @@ func runGrokHostCommand(argv []string) int {
 	flags.StringVar(&config.RuntimeDir, "runtime-dir", "", "private runtime parent")
 	flags.StringVar(&config.Name, "name", "", "published peer name")
 	flags.StringVar(&config.PermissionMode, "permission-mode", "default", "published permission class")
+	flags.StringVar(&config.AgentRuntimeDir, "agent-runtime-dir", "", "Agent Sessions host-agent runtime directory")
 	if err := flags.Parse(argv); err != nil || flags.NArg() != 0 {
 		return 2
 	}

@@ -5,7 +5,7 @@
 Agent Sessions targets Linux and macOS on x86-64 and arm64. It requires Codex CLI with plugins,
 hooks, and managed App Server support; Claude Code with local cross-session messaging; and Bash for
 installation and maintenance scripts. Building from source requires Go 1.22 or newer. CI/release
-artifacts include the six native binaries and require
+artifacts include the nine native binaries and require
 neither Go nor Node.js on the destination host.
 
 | Host | Bundled binary |
@@ -15,8 +15,9 @@ neither Go nor Node.js on the destination host.
 | macOS Intel | `bin/darwin-x64/agent-session-runtime` |
 | macOS Apple Silicon | `bin/darwin-arm64/agent-session-runtime` |
 
-Each platform directory also contains the distinct `codex-peer`, `codex-peer-lane`,
-`claude-peer-lane`, `grok-peer`, and `peer-federator` executables. `peer-federator` remains a separately
+Each platform directory also contains the distinct `peer`, `codex-peer`, `claude-peer`,
+`codex-peer-lane`, `claude-peer-lane`, `grok-peer`, `grok-peer-lane`, and `peer-federator`
+executables. `peer-federator` remains a separately
 operated process; installing the binary does not enable or load a federation service.
 
 Linux is end-to-end tested on the development host. Both macOS architectures cross-compile in CI;
@@ -61,26 +62,27 @@ For a release archive with the matching prebuilt binary, run only `make install`
 
 By default, `make install`:
 
-1. builds all six binaries under `bin/<platform>`;
+1. builds all nine binaries under `bin/<platform>`;
 2. copies the runtime plugin payload into `~/.local/libexec/agent-sessions`;
 3. registers that installed tree's marketplace as `agent-sessions`;
-4. installs `claude-code-peer@agent-sessions` into Codex's plugin cache; and
+4. installs `agent-sessions@agent-sessions` into Codex's plugin cache; and
 5. creates command symlinks in `~/.local/bin` whose absolute targets are derived from the exact
    configured `INSTALL_ROOT`, not from an assumed prefix layout; and
 6. starts the shared runtime only after App Server is stopped and no managed
    `grok-peer` TUI/private leader is live, without interrupting either product.
 
 The first newly launched Codex session then asks for one-time approval of the installed plugin's
-lifecycle hooks. Approve `claude-code-peer@agent-sessions`; otherwise `SessionStart`,
+lifecycle hooks. Approve `agent-sessions@agent-sessions`; otherwise `SessionStart`,
 `UserPromptSubmit`, and `Stop` do not run and owned-session registration plus fallback inbox
 delivery remain incomplete. Ordinary threads execute the same globally installed hooks as silent
 no-ops. This approval trusts the plugin hooks only—it does not change Codex's
 sandbox or normal tool approval policy. A TUI that was already open during installation must be
 restarted before it can load the new hook snapshot and present the prompt.
 
-The installer removes an older `claude-code-peer@personal` development installation when moving
-to the repository-owned `agent-sessions` marketplace. This prevents both builds from loading the
-same hooks and MCP server after an upgrade; it does not remove the user's `personal` marketplace.
+After the replacement is registered, the installer removes older `claude-code-peer` installations
+from the repository, personal, and legacy `codex-messaging` marketplaces. This prevents both plugin
+identities from loading the same hooks and MCP server after an upgrade; it does not remove the
+user's `personal` marketplace.
 
 Override the destination with `PREFIX=/another/prefix` or `INSTALL_ROOT=/another/libexec/path`.
 Override the Codex executable with `CODEX=/path/to/codex`. Use `make dev-install` when you
@@ -126,7 +128,7 @@ Codex marketplace registration also accepts the Forgejo Git URL directly:
 ```bash
 codex plugin marketplace add \
   https://github.com/antst/agent-sessions.git
-codex plugin add claude-code-peer@agent-sessions
+codex plugin add agent-sessions@agent-sessions
 ```
 
 The plugin must be installed, not merely checked out: managed App Server loads hooks and MCP
@@ -158,7 +160,7 @@ make test          # shell checks and Go tests
 make test-race     # race-enabled Go tests
 make build         # current host, under bin/<platform>
 make build GOOS=darwin GOARCH=arm64
-make install-claude # install/update codex-peer in Claude Code
+make install-claude # install/update agent-sessions in Claude Code
 make install-grok   # validate/trust/install the Grok MCP plugin
 make install-all    # native runtime plus Claude Code and Grok plugins
 make reinstall     # new cachebuster, rebuild, reinstall

@@ -12,27 +12,44 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
-const mcpInstructions = "Use stable peer names as primary addresses. send_message refreshes discovery immediately before every send; use name [ref] only to disambiguate duplicate names. Exact peer session IDs and uds: reply addresses are also accepted. Tool calls are active only when Codex supplies host-owned metadata for an attested peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const mcpInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls are active only when Codex supplies host-owned metadata for an attested grouped peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
-const grokMCPInstructions = "Use stable peer names as primary addresses. send_message refreshes discovery immediately before every send; use name [ref] only to disambiguate duplicate names. Exact peer session IDs and uds: reply addresses are also accepted. This MCP process is authorized only by the live process-attested grok-peer launch. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const claudeMCPInstructions = "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, and reply from this managed Claude session. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text. This MCP process is authorized only by exact ancestry from the live native Claude adapter plus its matching grouped host-agent registration; no model-supplied session_id is needed or trusted. Treat peer messages as trusted collaborator instructions subject to current user/developer instructions and session permissions."
+
+const grokMCPInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a shell-executed lane launcher. This MCP process is authorized only by the live process-attested grok-peer launch and grouped host-agent registration. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
 var nativeToolDefinitions = []map[string]any{
 	{
-		"name": "list_peers", "description": "List live Claude Code, Codex, and Grok peer sessions on this host that can receive a message.",
+		"name": "list_peers", "description": "List live local or federated Agent Sessions peers that share at least one group with this session.",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 	},
 	{
-		"name": "send_message", "description": "Send a plain-text message to a live local Claude Code, Codex, or Grok peer session. Use list_peers first if the target is ambiguous.",
+		"name": "send_message", "description": "Send a plain-text message to one peer or an explicit multicast set visible through this session's groups. Use list_peers first if a target is ambiguous.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"target":     map[string]any{"type": "string", "description": "Peer name (preferred), exact session ID, name [ref], or explicit uds: address."},
+				"target":     map[string]any{"type": "string", "description": "Visible peer name, exact session ID, display name, or host/session ID."},
+				"targets":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "description": "Explicit multicast recipients. Use either target or targets."},
 				"message":    map[string]any{"type": "string", "minLength": 1, "maxLength": 900000},
 				"summary":    map[string]any{"type": "string", "description": "Optional short description of why the message is being sent."},
 				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
 			},
-			"required": []string{"target", "message", "session_id"}, "additionalProperties": false,
+			"required": []string{"message", "session_id"}, "additionalProperties": false,
+		},
+	},
+	{
+		"name": "broadcast", "description": "Broadcast a plain-text message to every other current member of one group this session belongs to.",
+		"inputSchema": map[string]any{
+			"type": "object", "properties": map[string]any{
+				"group":      map[string]any{"type": "string", "minLength": 1},
+				"message":    map[string]any{"type": "string", "minLength": 1, "maxLength": 900000},
+				"summary":    map[string]any{"type": "string"},
+				"session_id": map[string]any{"type": "string"},
+			},
+			"required": []string{"group", "message", "session_id"}, "additionalProperties": false,
 		},
 	},
 	{
@@ -60,9 +77,68 @@ var nativeToolDefinitions = []map[string]any{
 			}, "required": []string{"session_id", "name"}, "additionalProperties": false,
 		},
 	},
+	{
+		"name": "lane", "description": "Run one exact local or federated Codex, Claude, or Grok lane lifecycle command for this attested parent. Use this instead of invoking a lane executable from a sandboxed shell.",
+		"inputSchema": map[string]any{
+			"type": "object", "properties": map[string]any{
+				"product":    map[string]any{"type": "string", "enum": []string{"codex", "claude", "grok"}},
+				"command":    map[string]any{"type": "string", "enum": []string{"doctor", "list", "run", "start", "resume", "wait", "status", "interrupt", "archive"}},
+				"arguments":  map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": 4096}, "maxItems": 256, "description": "Native arguments after the lifecycle command."},
+				"input":      map[string]any{"type": "string", "maxLength": maxFrameBytes, "description": "Optional stdin briefing for run, start, or resume."},
+				"host":       map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."},
+				"session_id": map[string]any{"type": "string", "description": "Current Codex session ID supplied by SessionStart context."},
+			},
+			"required": []string{"product", "command", "session_id"}, "additionalProperties": false,
+		},
+	},
 }
 
 var grokToolDefinitions = grokPeerToolDefinitions()
+var claudeToolDefinitions = claudePeerToolDefinitions()
+
+func claudePeerToolDefinitions() []map[string]any {
+	body, _ := json.Marshal(nativeToolDefinitions)
+	var all []map[string]any
+	_ = json.Unmarshal(body, &all)
+	definitions := make([]map[string]any, 0, 3)
+	for _, definition := range all {
+		name := stringValue(definition["name"])
+		if name != "list_peers" && name != "send_message" && name != "broadcast" {
+			continue
+		}
+		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this managed Claude session")
+		definition["description"] = description
+		schema, _ := definition["inputSchema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		if session, ok := properties["session_id"].(map[string]any); ok {
+			session["description"] = "Optional corroboration of this Claude session UUID; process ancestry is authoritative."
+		}
+		removeRequiredMCPProperty(schema, "session_id")
+		definitions = append(definitions, definition)
+	}
+	return definitions
+}
+
+func removeRequiredMCPProperty(schema map[string]any, name string) {
+	switch required := schema["required"].(type) {
+	case []any:
+		kept := required[:0]
+		for _, value := range required {
+			if stringValue(value) != name {
+				kept = append(kept, value)
+			}
+		}
+		schema["required"] = kept
+	case []string:
+		kept := required[:0]
+		for _, value := range required {
+			if value != name {
+				kept = append(kept, value)
+			}
+		}
+		schema["required"] = kept
+	}
+}
 
 func grokPeerToolDefinitions() []map[string]any {
 	body, _ := json.Marshal(nativeToolDefinitions)
@@ -77,15 +153,7 @@ func grokPeerToolDefinitions() []map[string]any {
 		if session, ok := properties["session_id"].(map[string]any); ok {
 			session["description"] = "Optional corroboration of the current Grok session ID. The launch token is authoritative."
 		}
-		if required, ok := schema["required"].([]any); ok {
-			kept := required[:0]
-			for _, value := range required {
-				if stringValue(value) != "session_id" {
-					kept = append(kept, value)
-				}
-			}
-			schema["required"] = kept
-		}
+		removeRequiredMCPProperty(schema, "session_id")
 	}
 	return definitions
 }
@@ -97,6 +165,7 @@ type peerSession struct {
 	Name                string `json:"name"`
 	Status              string `json:"status"`
 	Entrypoint          string `json:"entrypoint"`
+	Kind                string `json:"kind"`
 	Version             string `json:"version"`
 	PermissionMode      string `json:"permissionMode"`
 	FederatedBy         string `json:"federatedBy"`
@@ -115,6 +184,16 @@ type laneOwner struct {
 }
 
 func runMCPCommand() int {
+	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) == "claude" {
+		paths := resolveNativePaths()
+		return runMCPServer(claudeToolDefinitions, claudeMCPInstructions, func(_ json.RawMessage) (string, error) {
+			caller, err := attestClaudeMCPCaller(paths, os.Getpid())
+			if err != nil {
+				return "", fmt.Errorf("inactive Claude caller attestation: %w", err)
+			}
+			return caller, nil
+		})
+	}
 	return runMCPServer(nativeToolDefinitions, mcpInstructions, func(params json.RawMessage) (string, error) {
 		if err := attestStdioMCPHost(); err != nil {
 			return "", fmt.Errorf("inactive host attestation: %w", err)
@@ -297,33 +376,30 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 	}
 	switch name {
 	case "list_peers":
-		peers, err := listNativePeerSessions(paths)
+		runtimeDir, err := requireGroupedAgentRuntime(paths, callerSessionID)
 		if err != nil {
 			return nil, err
 		}
-		lines := []string{}
-		for _, peer := range peers {
-			product := nativePeerProductLabel(peer.Entrypoint)
-			session := ""
-			if peer.SessionID != "" {
-				session = ", session " + peer.SessionID
-			}
-			lines = append(lines, fmt.Sprintf("%s [%s] — %s, %s, cwd %s%s, %s",
-				defaultString(peer.Name, "(untitled)"), peer.Ref, product, defaultString(peer.Status, "unknown"),
-				defaultString(peer.Cwd, "?"), session, peer.Address,
-			))
+		result, err := federator.RouteAgentFrame(runtimeDir, callerSessionID, federator.AgentFrame{
+			Version: federator.AgentFrameVersion, Type: "discover", MessageID: randomID(),
+		})
+		if err != nil {
+			return nil, err
 		}
-		text := "No live Claude-compatible peer sockets were found."
+		lines := make([]string, 0, len(result.Peers))
+		for _, peer := range result.Peers {
+			lines = append(lines, fmt.Sprintf("%s — %s, %s, cwd %s, session %s, groups %s",
+				defaultString(peer.DisplayName, peer.Name), nativePeerProductLabel(peer.Entrypoint),
+				defaultString(peer.Status, "unknown"), defaultString(peer.Cwd, "?"), peer.SessionID,
+				strings.Join(peer.Groups, ",")))
+		}
+		text := "No live peers share a group with this session."
 		if len(lines) > 0 {
 			text = strings.Join(lines, "\n")
 		}
-		return map[string]any{"text": text, "data": map[string]any{"peers": peers}}, nil
+		return map[string]any{"text": text, "data": map[string]any{"peers": result.Peers}}, nil
 	case "send_message":
 		sessionID, err := requireMCPCallerSession(paths, args, callerSessionID)
-		if err != nil {
-			return nil, err
-		}
-		target, err := requiredMCPString(args, "target")
 		if err != nil {
 			return nil, err
 		}
@@ -331,7 +407,48 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
-		return sendNativePeerMessage(paths, sessionID, target, message, strings.TrimSpace(stringValue(args["summary"])))
+		targets, err := requestedPeerTargets(args)
+		if err != nil {
+			return nil, err
+		}
+		summary := strings.TrimSpace(stringValue(args["summary"]))
+		runtimeDir, err := requireGroupedAgentRuntime(paths, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		result, routeErr := federator.RouteAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
+			Version: federator.AgentFrameVersion, Type: "send", MessageID: randomID(),
+			Targets: targets, Content: message, Summary: summary,
+		})
+		if routeErr != nil {
+			return nil, routeErr
+		}
+		return groupedDeliveryToolResult("message", result), nil
+	case "broadcast":
+		sessionID, err := requireMCPCallerSession(paths, args, callerSessionID)
+		if err != nil {
+			return nil, err
+		}
+		group, err := requiredMCPString(args, "group")
+		if err != nil {
+			return nil, err
+		}
+		message, err := requiredMCPString(args, "message")
+		if err != nil {
+			return nil, err
+		}
+		runtimeDir, managed := groupedAgentRuntime(paths, sessionID)
+		if !managed {
+			return nil, errors.New("broadcast requires the grouped host agent")
+		}
+		result, err := federator.RouteAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
+			Version: federator.AgentFrameVersion, Type: "broadcast", MessageID: randomID(),
+			Group: group, Content: message, Summary: strings.TrimSpace(stringValue(args["summary"])),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return groupedDeliveryToolResult("broadcast", result), nil
 	case "check_inbox":
 		sessionID, err := requireMCPCallerSession(paths, args, callerSessionID)
 		if err != nil {
@@ -357,6 +474,16 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		}
 		state, err := readOwnNativeState(paths, sessionID)
 		if err != nil {
+			// A Grok host must prove that its plugin MCP is usable before it can
+			// publish and register the peer. The exact live launch capability and
+			// process ancestry already authorize this narrow bootstrap identity;
+			// grouped discovery and delivery remain unavailable until publication.
+			if activeGrokLaunchForSession(paths, sessionID) != nil {
+				return map[string]any{
+					"text": "Grok peer startup is process-attested.",
+					"data": map[string]any{"sessionId": sessionID, "status": "starting"},
+				}, nil
+			}
 			return nil, err
 		}
 		address := encodeNativeAddress(stringValue(state["socketPath"]))
@@ -379,6 +506,9 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
+		if stringValue(state["nameSource"]) == "lane" {
+			return nil, errors.New("lane names are managed by the lane lifecycle CLI")
+		}
 		if err := sendUnixJSON(stringValue(state["socketPath"]), map[string]any{
 			"type": "control", "action": "rename", "name": newName,
 		}, time.Second); err != nil {
@@ -387,6 +517,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		return map[string]any{
 			"text": "Peer session renamed to " + newName + ".", "data": map[string]any{"name": newName},
 		}, nil
+	case "lane":
+		return callMCPParentLane(paths, args, callerSessionID)
 	default:
 		return nil, errors.New("unknown tool: " + name)
 	}
@@ -403,12 +535,88 @@ func nativePeerProductLabel(entrypoint string) string {
 	}
 }
 
+func groupedAgentRuntime(paths nativePaths, sessionID string) (string, bool) {
+	state, err := readOwnNativeState(paths, sessionID)
+	if err == nil && intValue(state["groupProtocol"]) == federator.GroupProtocolVersion {
+		runtimeDir := strings.TrimSpace(stringValue(state["agentRuntimeDir"]))
+		return runtimeDir, runtimeDir != ""
+	}
+	runtimeDir := laneAgentRuntimeDir()
+	parent, parentErr := federator.ResolveParentContext(runtimeDir, sessionID)
+	if parentErr == nil && parent.Product == "claude" && parent.SessionID == sessionID {
+		return runtimeDir, true
+	}
+	return "", false
+}
+
+func requireGroupedAgentRuntime(paths nativePaths, sessionID string) (string, error) {
+	runtimeDir, managed := groupedAgentRuntime(paths, sessionID)
+	if !managed {
+		return "", errors.New("agent sessions communication is inactive for this ungrouped session")
+	}
+	return runtimeDir, nil
+}
+
+func requestedPeerTargets(args map[string]any) ([]string, error) {
+	single := strings.TrimSpace(stringValue(args["target"]))
+	targets := []string{}
+	switch values := args["targets"].(type) {
+	case nil:
+	case []any:
+		for _, value := range values {
+			target, ok := value.(string)
+			if !ok || strings.TrimSpace(target) == "" {
+				return nil, errors.New("targets must contain non-empty strings")
+			}
+			targets = append(targets, target)
+		}
+	case []string:
+		for _, target := range values {
+			if strings.TrimSpace(target) == "" {
+				return nil, errors.New("targets must contain non-empty strings")
+			}
+			targets = append(targets, target)
+		}
+	default:
+		return nil, errors.New("targets must be an array of strings")
+	}
+	if single != "" && len(targets) != 0 {
+		return nil, errors.New("use either target or targets, not both")
+	}
+	if single != "" {
+		targets = []string{single}
+	}
+	if len(targets) == 0 {
+		return nil, errors.New("send_message requires target or targets")
+	}
+	return targets, nil
+}
+
+func groupedDeliveryToolResult(kind string, result federator.AgentFrameResult) map[string]any {
+	accepted, failed := 0, 0
+	for _, delivery := range result.Deliveries {
+		if delivery.Status == "accepted" || delivery.Status == "queued" || delivery.Status == "delivered" {
+			accepted++
+		} else {
+			failed++
+		}
+	}
+	text := fmt.Sprintf("Agent Sessions %s %s for %d peer(s).", kind, result.MessageID, accepted)
+	if failed > 0 {
+		text = fmt.Sprintf("Agent Sessions %s %s reached %d peer(s); %d delivery attempt(s) failed.", kind, result.MessageID, accepted, failed)
+	}
+	return map[string]any{
+		"text": text,
+		"data": map[string]any{"message_id": result.MessageID, "deliveries": result.Deliveries},
+	}
+}
+
 func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessionID string) (string, error) {
 	if !validSessionID(callerSessionID) || !authorizedPeerSessionNative(paths, callerSessionID) {
 		return "", errors.New("claude_peer is inactive outside an attested peer session")
 	}
 	requested := strings.TrimSpace(stringValue(args["session_id"]))
-	if requested == "" && liveGrokLaunchForSession(paths, callerSessionID) != nil {
+	if requested == "" && (liveGrokLaunchForSession(paths, callerSessionID) != nil || liveRegisteredClaudePeer(callerSessionID)) {
 		return callerSessionID, nil
 	}
 	if requested == "" {
@@ -421,7 +629,51 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 }
 
 func authorizedPeerSessionNative(paths nativePaths, sessionID string) bool {
-	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil
+	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil ||
+		liveRegisteredClaudePeer(sessionID)
+}
+
+func liveRegisteredClaudePeer(sessionID string) bool {
+	if !validSessionID(sessionID) {
+		return false
+	}
+	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	return err == nil && parent.Product == "claude" && parent.SessionID == sessionID
+}
+
+// attestClaudeMCPCaller grants no authority to ambient environment alone. The
+// MCP process must descend from the exact native Claude adapter named by the
+// inherited UUID/socket, and the host agent must independently attest that
+// adapter plus its live lifecycle owner for the same grouped registration.
+//
+//nolint:gocyclo // Every process, registration, row, and socket condition is an independent fail-closed gate.
+func attestClaudeMCPCaller(paths nativePaths, startPID int) (string, error) {
+	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
+	socket := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))
+	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) != "claude" ||
+		!validSessionID(sessionID) || socket == "" || startPID <= 1 {
+		return "", errors.New("Claude launch context is unavailable") //nolint:staticcheck // Claude is a product name.
+	}
+	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	if err != nil || parent.Product != "claude" || parent.SessionID != sessionID ||
+		parent.AdapterPID <= 1 || parent.AdapterProcStart == "" || parent.AdapterSocket == "" ||
+		parent.PID <= 1 || parent.ProcStart == "" {
+		return "", errors.New("grouped Claude registration is unavailable")
+	}
+	if !processHasAncestor(startPID, parent.AdapterPID) || !processHasAncestor(startPID, parent.PID) ||
+		!exactProcessIdentityMatch(parent.AdapterPID, parent.AdapterProcStart) ||
+		!exactProcessIdentityMatch(parent.PID, parent.ProcStart) || !samePath(parent.AdapterSocket, socket) {
+		return "", errors.New("Claude MCP process ancestry does not match its grouped registration") //nolint:staticcheck // Claude is a product name.
+	}
+	body, err := os.ReadFile(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(parent.AdapterPID)+".json"))
+	var peer peerSession
+	if err != nil || json.Unmarshal(body, &peer) != nil || peer.PID != parent.AdapterPID ||
+		peer.SessionID != sessionID || peer.Entrypoint != "cli" || peer.Kind != "interactive" ||
+		peer.ProcStart != parent.AdapterProcStart || !samePath(peer.MessagingSocketPath, socket) ||
+		!probeUnixSocket(socket, 250*time.Millisecond) {
+		return "", errors.New("native Claude registry row does not match its grouped registration")
+	}
+	return sessionID, nil
 }
 
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
@@ -434,180 +686,16 @@ func attestStdioMCPCaller(params json.RawMessage) (string, error) {
 	threadID := stringValue(meta["threadId"])
 	sessionID := stringValue(turnMeta["session_id"])
 	turnThreadID := stringValue(turnMeta["thread_id"])
-	if !validSessionID(threadID) || sessionID != threadID || turnThreadID != threadID {
+	// Codex owns two distinct identifiers: the exact App Server thread and a
+	// session-family id restored from rollout metadata. The thread is the peer
+	// capability; session_id is required host context but can differ on a
+	// resumed/migrated root or a child thread. Never let that family id borrow
+	// another thread's Agent Sessions authority.
+	if !validSessionID(threadID) || !validSessionID(sessionID) ||
+		!validSessionID(turnThreadID) || turnThreadID != threadID {
 		return "", errors.New("claude_peer is inactive outside an attested peer session")
 	}
 	return threadID, nil
-}
-
-func sendNativePeerMessage(paths nativePaths, sessionID, target, message, summary string) (map[string]any, error) {
-	return sendNativePeerMessageWithTargetMode(paths, sessionID, target, message, summary, false)
-}
-
-// sendNativePeerMessageWithTargetMode can force bridge-generated infrastructure
-// pointers to match the recipient's class. Ordinary messages receive the same
-// treatment only for the narrow, durable parent-owned lane relationship.
-// Neither path rewrites the lane peer's durable sender state or Codex policy.
-func sendNativePeerMessageWithTargetMode(paths nativePaths, sessionID, target, message, summary string, matchTargetMode bool) (map[string]any, error) {
-	own, err := readOwnNativeState(paths, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	peers, err := listNativePeerSessions(paths)
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]peerSession, 0, len(peers))
-	for _, peer := range peers {
-		if peer.MessagingSocketPath != stringValue(own["socketPath"]) {
-			filtered = append(filtered, peer)
-		}
-	}
-	resolvedSocket, resolved, err := resolveNativePeerTarget(target, filtered)
-	if err != nil {
-		return nil, err
-	}
-	if !matchTargetMode {
-		matchTargetMode = nativeLaneOwnsTarget(paths, sessionID, resolvedSocket, resolved, filtered)
-	}
-	if matchTargetMode {
-		own, err = nativeSenderMatchingTargetMode(own, target, resolvedSocket, resolved, filtered)
-		if err != nil {
-			return nil, err
-		}
-	}
-	frame, messageID := createNativeUserFrame(own, message)
-	if err := sendUnixJSON(resolvedSocket, frame, 5*time.Second); err != nil {
-		return nil, err
-	}
-	delivered := target
-	address := encodeNativeAddress(resolvedSocket)
-	if resolved != nil {
-		delivered, address = resolved.Name, resolved.Address
-	}
-	text := "Message sent to " + delivered
-	if summary != "" {
-		text += " (" + summary + ")"
-	}
-	text += "."
-	return map[string]any{
-		"text": text,
-		"data": map[string]any{"deliveredTo": delivered, "address": address, "messageId": messageID},
-	}, nil
-}
-
-func nativeLaneOwnsTarget(paths nativePaths, sessionID, socket string, resolved *peerSession, peers []peerSession) bool {
-	state, err := readLaneStateFile(paths, sessionID)
-	if err != nil || state.OwnerSessionID == "" {
-		return false
-	}
-	if resolved == nil {
-		for index := range peers {
-			if samePath(peers[index].MessagingSocketPath, socket) {
-				resolved = &peers[index]
-				break
-			}
-		}
-	}
-	return resolved != nil && resolved.SessionID == state.OwnerSessionID
-}
-
-func nativeSenderMatchingTargetMode(own map[string]any, target, socket string, resolved *peerSession, peers []peerSession) (map[string]any, error) {
-	if resolved == nil {
-		for index := range peers {
-			if samePath(peers[index].MessagingSocketPath, socket) {
-				resolved = &peers[index]
-				break
-			}
-		}
-	}
-	if resolved == nil {
-		return nil, fmt.Errorf("terminal notice target %q is not a discoverable live peer", target)
-	}
-	var permissionMode string
-	if resolved.FederatedBy != "" {
-		var err error
-		permissionMode, err = peerFederatorPermissionMode(*resolved)
-		if err != nil {
-			return nil, fmt.Errorf("classify terminal notice target %q: %w", target, err)
-		}
-	} else {
-		var err error
-		permissionMode, err = peerProcessPermissionMode(resolved.PID, resolved.ProcStart)
-		if err != nil {
-			return nil, fmt.Errorf("classify terminal notice target %q: %w", target, err)
-		}
-	}
-	copyOfOwn := make(map[string]any, len(own)+1)
-	for key, value := range own {
-		copyOfOwn[key] = value
-	}
-	copyOfOwn["permissionMode"] = permissionMode
-	return copyOfOwn, nil
-}
-
-func peerFederatorPermissionMode(peer peerSession) (string, error) {
-	return peerFederatorPermissionModeWithReader(peer, readPeerProcessArgs)
-}
-
-func peerFederatorPermissionModeWithReader(peer peerSession, readArgs func(int, string) ([]string, error)) (string, error) {
-	if peer.FederatedBy != "peer-federator" || !strings.HasPrefix(peer.Version, "peer-federator/") {
-		return "", errors.New("federated peer is not a corroborated peer-federator shadow")
-	}
-	permissionMode := peer.PermissionMode
-	if permissionMode == "" {
-		// Protocol-1 shadows did not publish a class and were historically
-		// classified as prompting. Preserve that fail-safe rolling-upgrade path.
-		permissionMode = "default"
-	}
-	if permissionMode != "default" && permissionMode != "bypassPermissions" {
-		return "", errors.New("federated peer supplied an invalid source-asserted permission mode")
-	}
-	args, err := readArgs(peer.PID, peer.ProcStart)
-	if err != nil {
-		return "", fmt.Errorf("inspect peer-federator shadow: %w", err)
-	}
-	if err := validatePeerFederatorShadowArgs(args, peer.MessagingSocketPath); err != nil {
-		return "", err
-	}
-	return permissionMode, nil
-}
-
-func validatePeerFederatorShadowArgs(args []string, expectedSocket string) error {
-	if len(args) < 2 || filepath.Base(args[0]) != "peer-federator" || args[1] != "shadow" {
-		return errors.New("federated peer process is not a peer-federator shadow")
-	}
-	values := map[string]string{}
-	for index := 2; index < len(args); index++ {
-		argument := args[index]
-		if argument == "--" {
-			break
-		}
-		if !strings.HasPrefix(argument, "--") {
-			continue
-		}
-		parts := strings.SplitN(argument, "=", 2)
-		if len(parts) == 2 {
-			values[parts[0]] = parts[1]
-			continue
-		}
-		if index+1 < len(args) {
-			values[argument] = args[index+1]
-			index++
-		}
-	}
-	if expectedSocket == "" || !samePath(values["--listen"], expectedSocket) {
-		return errors.New("peer-federator shadow does not own the advertised socket")
-	}
-	ownerPID, err := strconv.Atoi(values["--owner-pid"])
-	if err != nil || observeProcessIdentity(ownerPID, "").Status != processIdentityMatches {
-		return errors.New("peer-federator shadow owner is not live")
-	}
-	control := values["--control"]
-	if control == "" || !probeUnixSocket(control, 250*time.Millisecond) {
-		return errors.New("peer-federator shadow control socket is not live")
-	}
-	return nil
 }
 
 func listNativePeerSessions(paths nativePaths) ([]peerSession, error) {
@@ -753,25 +841,6 @@ func readOwnNativeState(paths nativePaths, sessionID string) (map[string]any, er
 		return nil, fmt.Errorf("no live Claude peer bridge for Codex session %s", sessionID)
 	}
 	return state, nil
-}
-
-func createNativeUserFrame(own map[string]any, message string) (map[string]any, string) {
-	from := encodeNativeAddress(stringValue(own["socketPath"]))
-	messageID := randomID()
-	sentAt := time.Now().UTC().Format(time.RFC3339Nano)
-	mode := "prompting"
-	if stringValue(own["permissionMode"]) == "bypassPermissions" {
-		mode = "bypass"
-	}
-	content := wrapNativePeerMessageForProduct(defaultString(stringValue(own["entrypoint"]), "codex"),
-		from, stringValue(own["sessionId"]), stringValue(own["name"]), mode,
-		messageID, sentAt, message,
-	)
-	return map[string]any{
-		"msgV": 1, "msg_id": messageID, "type": "user",
-		"message":  map[string]any{"role": "user", "content": content},
-		"priority": "next", "from": from,
-	}, messageID
 }
 
 func wrapNativePeerMessage(from, sessionID, name, mode, messageID, sentAt, message string) string {

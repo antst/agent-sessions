@@ -14,12 +14,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -79,7 +81,7 @@ func normalizeCapabilities(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
 	for _, value := range values {
-		if value != CapabilityCodexLane && value != CapabilityClaudeLane || seen[value] {
+		if value != CapabilityCodexLane && value != CapabilityClaudeLane && value != CapabilityGrokLane || seen[value] {
 			continue
 		}
 		seen[value] = true
@@ -121,6 +123,9 @@ func (a *agent) laneCapabilities() []string {
 	if a.options.ClaudeLaneExecutable != "" {
 		capabilities = append(capabilities, CapabilityClaudeLane)
 	}
+	if a.options.GrokLaneExecutable != "" {
+		capabilities = append(capabilities, CapabilityGrokLane)
+	}
 	return capabilities
 }
 
@@ -130,6 +135,8 @@ func capabilityForProduct(product string) string {
 		return CapabilityCodexLane
 	case "claude":
 		return CapabilityClaudeLane
+	case "grok":
+		return CapabilityGrokLane
 	default:
 		return ""
 	}
@@ -216,7 +223,7 @@ func randomLaneRequestID(hostID string) (string, error) {
 func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 	capability := capabilityForProduct(request.Product)
 	if capability == "" || len(request.Args) == 0 {
-		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: "lane request requires --product codex|claude and native lane arguments"})
+		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: "lane request requires --product codex|claude|grok and native lane arguments"})
 		return
 	}
 	if len(request.Input) > maxLaneInputBytes {
@@ -224,6 +231,11 @@ func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 		return
 	}
 	source, err := a.sourcePeerForSession(request.SourceSessionID)
+	if err != nil {
+		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: err.Error()})
+		return
+	}
+	parent, err := a.parentContext(source.SessionID)
 	if err != nil {
 		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: err.Error()})
 		return
@@ -240,6 +252,7 @@ func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 	}
 	request.RequestID = requestID
 	request.SourceID = source.ID
+	request.ParentContext = &parent
 	request.TargetHostID = host.ID
 	pending := &pendingLane{responses: make(chan Message, 256), failed: make(chan string, 1)}
 	a.laneMu.Lock()
@@ -353,6 +366,8 @@ func (a *agent) prepareRemoteLane(request Message) (string, []string, error) {
 		executable = a.options.CodexLaneExecutable
 	case "claude":
 		executable = a.options.ClaudeLaneExecutable
+	case "grok":
+		executable = a.options.GrokLaneExecutable
 	default:
 		return "", nil, fmt.Errorf("unsupported lane product %q", request.Product)
 	}
@@ -400,19 +415,10 @@ func (a *agent) prepareRemoteLane(request Message) (string, []string, error) {
 			}
 		}
 	}
-	a.shadowMu.Lock()
-	shadow := a.shadows[request.SourceID]
-	a.shadowMu.Unlock()
-	if shadow == nil || !processLive(shadow.pid) {
-		a.reconcileShadows()
-		a.shadowMu.Lock()
-		shadow = a.shadows[request.SourceID]
-		a.shadowMu.Unlock()
+	if request.ParentContext == nil || request.ParentContext.SessionID == "" {
+		return "", nil, errors.New("remote lane request has no attested parent context")
 	}
-	if shadow == nil {
-		return "", nil, errors.New("originating peer has no live local shadow")
-	}
-	args = append(args, "--persistent", "--notify", encodeUDS(shadow.socket))
+	args = append(args, "--persistent", "--notify", request.SourceID)
 	return executable, args, nil
 }
 
@@ -447,6 +453,21 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 	watchArgs = append(watchArgs, args...)
 	// #nosec G204 -- the executable is this agent binary and native argv remains a vector without a shell.
 	command := exec.Command(a.options.Executable, watchArgs...)
+	parentBody, marshalErr := json.Marshal(request.ParentContext)
+	if marshalErr != nil {
+		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: marshalErr.Error()})
+		return
+	}
+	claudeProfile, profileErr := a.resolvedClaudeProfile()
+	if profileErr != nil {
+		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: profileErr.Error()})
+		return
+	}
+	command.Env = claudeProfileEnvironment(replaceEnvironment(os.Environ(), map[string]string{
+		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     a.options.RuntimeDir,
+		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": string(parentBody),
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        a.options.ClaudeConfigDir,
+	}), claudeProfile)
 	command.Stdin = bytes.NewReader(request.Input)
 	livenessReader, livenessWriter, err := os.Pipe()
 	if err != nil {
@@ -504,6 +525,26 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		}
 	}
 	_ = a.sendLaneMessage(Message{Type: "lane_exit", RequestID: request.RequestID, ExitCode: exitCode})
+}
+
+func claudeProfileEnvironment(environment []string, profile claudeprofile.Source) []string {
+	result := make([]string, 0, len(environment)+2)
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		if name != "CLAUDE_CONFIG_DIR" && name != "CLAUDE_SECURESTORAGE_CONFIG_DIR" {
+			result = append(result, entry)
+		}
+	}
+	if profile.ConfigEnvSet {
+		result = append(result, "CLAUDE_CONFIG_DIR="+profile.ConfigEnvValue)
+	}
+	if profile.SecureEnvSet {
+		result = append(result, "CLAUDE_SECURESTORAGE_CONFIG_DIR="+profile.SecureConfig)
+	}
+	return result
 }
 
 func (a *agent) streamLaneOutput(requestID, kind string, reader io.Reader, run *laneRun) {
@@ -584,11 +625,15 @@ func (h *hub) routeLaneExec(source *hubClient, message Message) error {
 	if h.laneRoutes == nil {
 		h.laneRoutes = map[string]*laneRoute{}
 	}
-	_, sourceExists := source.peers[message.SourceID]
+	sourcePeer, sourceExists := source.peers[message.SourceID]
+	parentValid := sourceExists && message.ParentContext != nil &&
+		message.ParentContext.HostID == sourcePeer.HostID && message.ParentContext.SessionID == sourcePeer.SessionID &&
+		message.ParentContext.Product == sourcePeer.Entrypoint && message.ParentContext.InstanceID == sourcePeer.InstanceID &&
+		reflect.DeepEqual(sortedUnique(message.ParentContext.Groups), sortedUnique(sourcePeer.Groups))
 	destination := h.clients[message.TargetHostID]
 	_, duplicate := h.laneRoutes[message.RequestID]
 	var route *laneRoute
-	if sourceExists && destination != nil && !duplicate && containsString(destination.capabilities, capability) {
+	if sourceExists && parentValid && destination != nil && !duplicate && containsString(destination.capabilities, capability) {
 		route = newLaneRoute(source, destination, message.SourceID, message.TargetHostID)
 		h.laneRoutes[message.RequestID] = route
 	}
@@ -602,6 +647,8 @@ func (h *hub) routeLaneExec(source *hubClient, message Message) error {
 		return source.wire.Send(Message{Type: "lane_error", RequestID: message.RequestID, Error: "duplicate lane request id"})
 	case !containsString(destination.capabilities, capability):
 		return source.wire.Send(Message{Type: "lane_error", RequestID: message.RequestID, Error: "target host lacks the requested lane capability"})
+	case !parentValid:
+		return source.wire.Send(Message{Type: "lane_error", RequestID: message.RequestID, Error: "remote lane parent context does not match its source peer"})
 	}
 	go h.forwardLaneRoute(message.RequestID, route)
 	if err := destination.wire.Send(message); err != nil {
@@ -749,7 +796,7 @@ func RunRemoteLane(ctx context.Context, options RemoteLaneOptions, stdin io.Read
 		options.RuntimeDir = DefaultRuntimeDir()
 	}
 	if options.Host == "" || capabilityForProduct(options.Product) == "" || len(options.Args) == 0 {
-		return 1, errors.New("remote lane requires --host, --product codex|claude, and native lane arguments after --")
+		return 1, errors.New("remote lane requires --host, --product codex|claude|grok, and native lane arguments after --")
 	}
 	if options.SourceSession == "" {
 		options.SourceSession = inferRemoteLaneSourceSession(os.Getpid())
@@ -822,6 +869,9 @@ func RunRemoteLane(ctx context.Context, options RemoteLaneOptions, stdin io.Read
 }
 
 func inferRemoteLaneSourceSession(startPID int) string {
+	if sessionID := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_SESSION_ID")); sessionID != "" {
+		return sessionID
+	}
 	codexSession := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID"))
 	claudeSession := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID"))
 	claudePID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("CLAUDE_PID")))

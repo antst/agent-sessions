@@ -15,11 +15,12 @@ PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
 MARKETPLACE ?= agent-sessions
 LEGACY_MARKETPLACE ?= codex-messaging
-PLUGIN ?= claude-code-peer
-LEGACY_PLUGIN ?= $(PLUGIN)@personal
+PLUGIN ?= agent-sessions
+LEGACY_CODEX_PLUGIN ?= claude-code-peer
 CLAUDE_MARKETPLACE ?= agent-sessions
 LEGACY_CLAUDE_MARKETPLACE ?= codex-messaging
-CLAUDE_PLUGIN ?= codex-peer
+CLAUDE_PLUGIN ?= agent-sessions
+LEGACY_CLAUDE_PLUGIN ?= codex-peer
 CLAUDE_SCOPE ?= user
 CLAUDE_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' claude/.claude-plugin/plugin.json | head -1)
 CLAUDE_RELEASE_ROOT ?= $(PREFIX)/share/agent-sessions/claude-marketplaces
@@ -71,7 +72,7 @@ endif
 PLATFORM := $(GOOS)-$(PLATFORM_ARCH)
 BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
-BINARY_NAMES := agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator
+BINARY_NAMES := agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator
 
 .PHONY: all lint test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
 	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
@@ -103,10 +104,13 @@ build:
 		printf 'Using packaged prebuilt binaries in %s\n' "$(BIN_DIR)"; \
 	elif command -v go >/dev/null 2>&1; then \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/agent-session-runtime" ./cmd/agent-session-runtime; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/peer" ./cmd/peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer" ./cmd/codex-peer; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer" ./cmd/claude-peer; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer-lane" ./cmd/codex-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer-lane" ./cmd/claude-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer" ./cmd/grok-peer; \
+		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer-lane" ./cmd/grok-peer-lane; \
 		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='$(PEER_FEDERATOR_LDFLAGS)' -o "$(BIN_DIR)/peer-federator" ./cmd/peer-federator; \
 	else \
 		printf 'Go is required because this source tree has no authorized packaged %s binaries\n' "$(PLATFORM)" >&2; \
@@ -150,8 +154,10 @@ install-preflight: build
 		"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 		if [[ $$grok_status -eq 3 ]]; then \
 			printf '%s\n' \
-				'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
-				'Its private leader and ACP observer stop automatically with that TUI.' \
+				'A managed Grok peer or lane is still running.' \
+				'Exit every grok-peer TUI normally, then list and archive headless lanes with:' \
+				'  grok-peer-lane list' \
+				'  grok-peer-lane archive SESSION_OR_NAME' \
 				'After they stop, run make install again.' >&2; \
 			exit 75; \
 		elif [[ $$grok_status -ne 0 ]]; then \
@@ -165,8 +171,10 @@ grok-install-preflight: build
 	"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 	if [[ $$grok_status -eq 3 ]]; then \
 		printf '%s\n' \
-			'A managed Grok peer is still running. Exit every grok-peer TUI normally.' \
-			'Its private leader and ACP observer stop automatically with that TUI.' \
+			'A managed Grok peer or lane is still running.' \
+			'Exit every grok-peer TUI normally, then list and archive headless lanes with:' \
+			'  grok-peer-lane list' \
+			'  grok-peer-lane archive SESSION_OR_NAME' \
 			'After they stop, run make install-grok again.' >&2; \
 		exit 75; \
 	elif [[ $$grok_status -ne 0 ]]; then \
@@ -191,19 +199,18 @@ install: install-preflight
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer" "$(PREFIX)/bin/peer"
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer" "$(PREFIX)/bin/codex-peer"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer" "$(PREFIX)/bin/claude-peer"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
+	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
 		$(CODEX) plugin remove "$(PLUGIN)@$(MARKETPLACE)"; \
-	fi
-	@if [[ "$(MARKETPLACE)" != personal ]] && $(CODEX) plugin list --json | \
-		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(LEGACY_PLUGIN)"'; then \
-		$(CODEX) plugin remove "$(LEGACY_PLUGIN)"; \
 	fi
 	@if $(CODEX) plugin marketplace list --json | \
 		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(MARKETPLACE)"'; then \
@@ -211,10 +218,21 @@ install: install-preflight
 	fi
 	$(CODEX) plugin marketplace add "$(INSTALL_ROOT)"
 	$(CODEX) plugin add "$(PLUGIN)@$(MARKETPLACE)"
-	@if [[ "$(LEGACY_MARKETPLACE)" != "$(MARKETPLACE)" ]] && $(CODEX) plugin list --json | \
-		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(LEGACY_MARKETPLACE)"'; then \
-		$(CODEX) plugin remove "$(PLUGIN)@$(LEGACY_MARKETPLACE)"; \
-	fi
+	@$(CODEX) plugin list --json | \
+		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"' || { \
+		printf 'Codex did not register replacement plugin %s@%s\n' "$(PLUGIN)" "$(MARKETPLACE)" >&2; \
+		exit 1; \
+	}
+	@for legacy_id in \
+		"$(LEGACY_CODEX_PLUGIN)@$(MARKETPLACE)" \
+		"$(LEGACY_CODEX_PLUGIN)@personal" \
+		"$(LEGACY_CODEX_PLUGIN)@$(LEGACY_MARKETPLACE)" \
+		"$(PLUGIN)@$(LEGACY_MARKETPLACE)"; do \
+		[[ "$$legacy_id" == "$(PLUGIN)@$(MARKETPLACE)" ]] && continue; \
+		if $(CODEX) plugin list --json | grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"'"$$legacy_id"'"'; then \
+			$(CODEX) plugin remove "$$legacy_id"; \
+		fi; \
+	done
 	@if [[ "$(LEGACY_MARKETPLACE)" != "$(MARKETPLACE)" ]] && $(CODEX) plugin marketplace list --json | \
 		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(LEGACY_MARKETPLACE)"'; then \
 		$(CODEX) plugin marketplace remove "$(LEGACY_MARKETPLACE)"; \
@@ -226,19 +244,18 @@ install: install-preflight
 dev-install: install-preflight
 	mkdir -p "$(PREFIX)/bin"
 	ln -sfn "$(abspath $(BIN_DIR))/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
+	ln -sfn "$(abspath $(BIN_DIR))/peer" "$(PREFIX)/bin/peer"
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer" "$(PREFIX)/bin/codex-peer"
+	ln -sfn "$(abspath $(BIN_DIR))/claude-peer" "$(PREFIX)/bin/claude-peer"
 	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"
+	ln -sfn "$(abspath $(BIN_DIR))/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
 		$(CODEX) plugin remove "$(PLUGIN)@$(MARKETPLACE)"; \
-	fi
-	@if [[ "$(MARKETPLACE)" != personal ]] && $(CODEX) plugin list --json | \
-		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(LEGACY_PLUGIN)"'; then \
-		$(CODEX) plugin remove "$(LEGACY_PLUGIN)"; \
 	fi
 	@if $(CODEX) plugin marketplace list --json | \
 		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(MARKETPLACE)"'; then \
@@ -246,10 +263,21 @@ dev-install: install-preflight
 	fi
 	$(CODEX) plugin marketplace add "$(CURDIR)"
 	$(CODEX) plugin add "$(PLUGIN)@$(MARKETPLACE)"
-	@if [[ "$(LEGACY_MARKETPLACE)" != "$(MARKETPLACE)" ]] && $(CODEX) plugin list --json | \
-		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(LEGACY_MARKETPLACE)"'; then \
-		$(CODEX) plugin remove "$(PLUGIN)@$(LEGACY_MARKETPLACE)"; \
-	fi
+	@$(CODEX) plugin list --json | \
+		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"' || { \
+		printf 'Codex did not register replacement plugin %s@%s\n' "$(PLUGIN)" "$(MARKETPLACE)" >&2; \
+		exit 1; \
+	}
+	@for legacy_id in \
+		"$(LEGACY_CODEX_PLUGIN)@$(MARKETPLACE)" \
+		"$(LEGACY_CODEX_PLUGIN)@personal" \
+		"$(LEGACY_CODEX_PLUGIN)@$(LEGACY_MARKETPLACE)" \
+		"$(PLUGIN)@$(LEGACY_MARKETPLACE)"; do \
+		[[ "$$legacy_id" == "$(PLUGIN)@$(MARKETPLACE)" ]] && continue; \
+		if $(CODEX) plugin list --json | grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"'"$$legacy_id"'"'; then \
+			$(CODEX) plugin remove "$$legacy_id"; \
+		fi; \
+	done
 	@if [[ "$(LEGACY_MARKETPLACE)" != "$(MARKETPLACE)" ]] && $(CODEX) plugin marketplace list --json | \
 		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(LEGACY_MARKETPLACE)"'; then \
 		$(CODEX) plugin marketplace remove "$(LEGACY_MARKETPLACE)"; \
@@ -306,10 +334,24 @@ install-claude: validate-claude
 		$(CLAUDE) plugin install --scope "$(CLAUDE_SCOPE)" "$(CLAUDE_PLUGIN)@$(CLAUDE_MARKETPLACE)"; \
 		$(CLAUDE) plugin update --scope "$(CLAUDE_SCOPE)" "$(CLAUDE_PLUGIN)@$(CLAUDE_MARKETPLACE)"; \
 	fi
-	@if [[ "$(LEGACY_CLAUDE_MARKETPLACE)" != "$(CLAUDE_MARKETPLACE)" ]] && $(CLAUDE) plugin list --json | \
-		grep -Fq '"$(CLAUDE_PLUGIN)@$(LEGACY_CLAUDE_MARKETPLACE)"'; then \
-		$(CLAUDE) plugin uninstall --scope "$(CLAUDE_SCOPE)" "$(CLAUDE_PLUGIN)@$(LEGACY_CLAUDE_MARKETPLACE)"; \
-	fi
+	@$(CLAUDE) plugin list --json | awk \
+		-v id='$(CLAUDE_PLUGIN)@$(CLAUDE_MARKETPLACE)' -v scope='$(CLAUDE_SCOPE)' \
+		'index($$0, "\"id\"") { matching = index($$0, "\"" id "\"") > 0 } \
+		 matching && index($$0, "\"scope\"") { if (index($$0, "\"" scope "\"") > 0) found = 1; matching = 0 } \
+		 END { exit(found ? 0 : 1) }' || { \
+		printf 'Claude did not register replacement plugin %s@%s at scope %s\n' \
+			"$(CLAUDE_PLUGIN)" "$(CLAUDE_MARKETPLACE)" "$(CLAUDE_SCOPE)" >&2; \
+		exit 1; \
+	}
+	@for legacy_id in \
+		"$(LEGACY_CLAUDE_PLUGIN)@$(CLAUDE_MARKETPLACE)" \
+		"$(LEGACY_CLAUDE_PLUGIN)@$(LEGACY_CLAUDE_MARKETPLACE)" \
+		"$(CLAUDE_PLUGIN)@$(LEGACY_CLAUDE_MARKETPLACE)"; do \
+		[[ "$$legacy_id" == "$(CLAUDE_PLUGIN)@$(CLAUDE_MARKETPLACE)" ]] && continue; \
+		if $(CLAUDE) plugin list --json | grep -Fq '"'"$$legacy_id"'"'; then \
+			$(CLAUDE) plugin uninstall --scope "$(CLAUDE_SCOPE)" "$$legacy_id"; \
+		fi; \
+	done
 	@if [[ "$(LEGACY_CLAUDE_MARKETPLACE)" != "$(CLAUDE_MARKETPLACE)" ]] && $(CLAUDE) plugin marketplace list --json | \
 		grep -Eq '"name"[[:space:]]*:[[:space:]]*"$(LEGACY_CLAUDE_MARKETPLACE)"'; then \
 		$(CLAUDE) plugin marketplace remove --scope "$(CLAUDE_SCOPE)" "$(LEGACY_CLAUDE_MARKETPLACE)"; \

@@ -3,7 +3,7 @@
 **Contract version: 2**
 
 This document is the source of truth for what a Claude-side orchestrator may depend on when driving
-`codex-peer-lane`. The `codex-peer` plugin under [`claude/`](../claude) implements exactly this
+`codex-peer-lane`. The `agent-sessions` plugin under [`claude/`](../claude) implements exactly this
 contract; it summarizes the document and never restates it in conflicting words.
 
 An adapter that stays inside this surface keeps working across runtime updates. Anything not listed
@@ -146,6 +146,8 @@ Parent-owned lanes automatically register a durable supervisor-owned terminal jo
 owner. On any terminal outcome the owner receives a pointer carrying the lane name, thread ID,
 turn ID, raw status, normalized outcome, exit code, `collection=required`, and the exact `wait`
 command. `--no-notify` suppresses this pointer without changing ownership.
+Remote pointers include the source agent's effective `-runtime-dir`; an isolated parent can run the
+printed `peer-federator lane ... wait` command without reconstructing its agent socket path.
 
 Direct Claude ownership is accepted only when environment hints, the live registry row, socket,
 available process identity, and process ancestry all agree. The resulting owner is the corroborated
@@ -201,7 +203,7 @@ All policy flags are optional and every omitted flag inherits the user's normal 
 `CODEX_HOME` configuration: `-m/--model`, `--effort`, `--sandbox`, `--approval-policy`,
 `--web`/`--no-web`, repeated `-c KEY=VALUE`, the lane deadline `--timeout` on
 `run`/`start`/`resume`, `--schema`, `--worktree`,
-`--allow-duplicate-name`, `-C/--cd`.
+`-C/--cd`.
 
 The lane deadline defaults to zero (disabled). `wait --timeout` also defaults to zero and therefore
 waits without a bridge-imposed collection bound.
@@ -228,11 +230,12 @@ A detached lane cannot answer an interactive approval prompt, so unattended tool
 
 ## Naming
 
-Use unique, stable, role-based names and check both `list --all` (active and archived lanes) and
-`claude agents --json` (other live peers); neither registry is complete alone. Archived names stay
-reserved for transcript-preserving `resume`. Claude's native sender may require a transient `name [ref]`
-confirmation token; refs must never be persisted. Lane lifecycle commands accept raw thread IDs,
-but Claude's native sender does not address peers by Codex UUID.
+Use stable role-based names and retain exact IDs. Agent Sessions messaging names
+are resolved only among peers visible through a shared group, so the same name
+may exist in disjoint groups and a visible collision is reported as ambiguous.
+Lane lifecycle commands use host-local state, where bare names may still be
+ambiguous. The host Agent Sessions service, not `claude agents --json`, is the
+cross-product discovery and messaging surface.
 
 ## Failure handling
 
@@ -240,7 +243,7 @@ but Claude's native sender does not address peers by Codex UUID.
 |---|---|
 | Runtime absent | Report the install path and stop. An adapter never installs, builds, or starts host services. |
 | `contract_version` missing or unknown | Stop. Do not guess the event shape. |
-| `error` at `start` | Read `message`; name collision, unreachable supervisor, and bad `--cd` are distinct conditions. No blind retry. |
+| `error` at `start` | Read `message`; unreachable supervisor, invalid group context, and bad `--cd` are distinct conditions. No blind retry. |
 | `wait` exits 124 | Collection call ended, not lane failure. Re-`wait` or `status`. |
 | `final_answer` then `turn.schema_retry` | Discard the draft; keep reading to the terminal `turn_id`. |
 | Collector killed or pipe broken | Cursor unacknowledged; re-`wait` is safe. |

@@ -2,7 +2,6 @@ package federator
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,15 +28,31 @@ type registryRecord struct {
 	FederatedBy         string `json:"federatedBy,omitempty"`
 	FederatedPeerID     string `json:"federatedPeerId,omitempty"`
 	FederatedHost       string `json:"federatedHost,omitempty"`
+	AgentService        bool   `json:"agentService,omitempty"`
+	GroupProtocol       int    `json:"groupProtocol,omitempty"`
+	ParentSessionID     string `json:"parentSessionId,omitempty"`
+	UpdatedAt           int64  `json:"updatedAt,omitempty"`
+	StatusUpdatedAt     int64  `json:"statusUpdatedAt,omitempty"`
 }
 
 type localPeer struct {
 	Peer
-	PID    int
-	Socket string
+	PID                  int
+	ProcStart            string
+	Socket               string
+	LifecyclePID         int
+	LifecycleProcStart   string
+	AdapterStrongStart   string
+	LifecycleStrongStart string
+	LifecycleRoot        string
+	ClaudeConfigRoot     string
+	ClaudeKeyBaseline    []ClaudeKeyBaselineEntry
+	ClaudeKeyBaselineSet bool
+	GroupProtocol        int
+	AgentService         bool
 }
 
-//nolint:gocyclo // Discovery deliberately keeps all reject-and-skip validation in one read loop.
+//nolint:gocyclo,unparam // Legacy registry fixture keeps validation in one loop; hostID varies in external use.
 func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localPeer, error) {
 	entries, err := os.ReadDir(registryDir)
 	if os.IsNotExist(err) {
@@ -72,7 +87,7 @@ func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localP
 		if instanceIdentity == "" {
 			// Some native registry writers omit procStart. Their PID, startedAt,
 			// and socket remain process-stable when a live Claude process rotates
-			// sessionId, so keep the shadow address stable across that rotation.
+			// sessionId, so keep the native adapter identity stable across that rotation.
 			instanceIdentity = strconv.Itoa(pid) + "\x00" + strconv.FormatInt(record.StartedAt, 10) +
 				"\x00" + filepath.Clean(record.MessagingSocketPath)
 		} else {
@@ -97,7 +112,10 @@ func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localP
 			PeerProtocol: record.PeerProtocol,
 			InstanceID:   sessionKey(hostID + "\x00" + instanceIdentity),
 		}
-		result[id] = localPeer{Peer: peer, PID: pid, Socket: record.MessagingSocketPath}
+		result[id] = localPeer{
+			Peer: peer, PID: pid, Socket: record.MessagingSocketPath,
+			GroupProtocol: record.GroupProtocol, AgentService: record.AgentService,
+		}
 	}
 	return result, nil
 }
@@ -109,27 +127,6 @@ func peersFromLocal(local map[string]localPeer) []Peer {
 	}
 	sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
 	return peers
-}
-
-func writeShadowRecord(registryDir string, pid int, socket string, peer Peer) (string, error) {
-	if pid <= 0 || socket == "" {
-		return "", fmt.Errorf("invalid shadow process")
-	}
-	procStart := processStart(pid)
-	if procStart == "" {
-		return "", fmt.Errorf("cannot corroborate shadow process identity")
-	}
-	record := registryRecord{
-		PID: pid, SessionID: peer.GlobalID, Cwd: peer.Cwd, Name: peer.DisplayName,
-		Status: peer.Status, Entrypoint: peer.Entrypoint, ProcStart: procStart,
-		PermissionMode:      peer.PermissionMode,
-		MessagingSocketPath: socket, StartedAt: peer.StartedAt,
-		Version: "peer-federator/" + RuntimeVersion, PeerProtocol: 1, Kind: "interactive",
-		NameSource: "federated", FederatedBy: "peer-federator", FederatedPeerID: peer.ID,
-		FederatedHost: peer.HostName,
-	}
-	path := filepath.Join(registryDir, strconv.Itoa(pid)+".json")
-	return path, writeJSONAtomic(path, record)
 }
 
 func probeUnix(path string, timeout time.Duration) bool {

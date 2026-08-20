@@ -74,6 +74,44 @@ func TestNativeShimInitializesPublishedStatus(t *testing.T) {
 	}
 }
 
+func TestNativeShimAcceptsMultipleFramesOnOneStream(t *testing.T) {
+	root := t.TempDir()
+	d := newDaemon(map[string]string{
+		"session-id": "multi-frame-session", "cwd": root,
+		"data-dir": filepath.Join(root, "state"), "claude-config-dir": filepath.Join(root, "claude"),
+		"codex-home": filepath.Join(root, "codex"), "runtime-dir": filepath.Join(root, "run"),
+	})
+	if err := d.start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.shutdown)
+	conn, err := net.DialTimeout("unix", d.stableSocket, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := json.NewEncoder(conn)
+	for _, id := range []string{"stream-frame-one", "stream-frame-two"} {
+		if err := encoder.Encode(map[string]any{
+			"type": "user", "session_id": d.sessionID, "msg_id": id, "from": "peer-test",
+			"message": map[string]any{"content": "message " + id},
+		}); err != nil {
+			_ = conn.Close()
+			t.Fatal(err)
+		}
+	}
+	_ = conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		entries, _ := os.ReadDir(d.pendingDir)
+		if len(entries) == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entries, _ := os.ReadDir(d.pendingDir)
+	t.Fatalf("native shim retained %d/2 frames from one stream", len(entries))
+}
+
 func TestNativeShimShutdownCannotBeUndoneBySelectedHeartbeat(t *testing.T) {
 	root := t.TempDir()
 	runtimeDir := filepath.Join(root, "run")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -478,6 +479,113 @@ func TestArchiveInterruptsActiveLaneAndPersistsTerminalOutcome(t *testing.T) {
 				t.Fatalf("refused archive mutated active lane state = %#v", latest)
 			}
 		})
+	}
+}
+
+func TestArchiveDeletesFailedLaneThatNeverCreatedRollout(t *testing.T) {
+	root := t.TempDir()
+	threadID := "00000000-0000-4000-8000-000000000042"
+	methods := make(chan string, 8)
+	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+		method := stringValue(request["method"])
+		if method != "initialize" {
+			methods <- method
+		}
+		switch method {
+		case "thread/resume":
+			return nil, errors.New("no rollout found for thread id " + threadID)
+		case "thread/delete":
+			params := request["params"].(map[string]any)
+			if got := stringValue(params["threadId"]); got != threadID {
+				return nil, fmt.Errorf("delete thread id = %q", got)
+			}
+			return nil, errors.New("no rollout found for thread id " + threadID)
+		case "thread/archive":
+			return nil, errors.New("archive must not run for an unmaterialized thread")
+		default:
+			return map[string]any{}, nil
+		}
+	})
+	supervisorSocket := filepath.Join(root, "supervisor.sock")
+	listener, err := net.Listen("unix", supervisorSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = connection.Close() }()
+				line, _ := bufio.NewReader(connection).ReadBytes('\n')
+				var request map[string]any
+				_ = json.Unmarshal(line, &request)
+				response := map[string]any{"ok": true}
+				if stringValue(request["action"]) == "flush_notices" {
+					response["pending"] = 0
+				}
+				body, _ := json.Marshal(response)
+				_, _ = connection.Write(append(body, '\n'))
+			}()
+		}
+	}()
+	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	paths := resolveNativePaths()
+	state := laneState{
+		Type: "codex-peer-lane", Name: "failed-before-rollout", ThreadID: threadID, SessionID: threadID,
+		Status: "failed", TerminalOutcome: "failed", Persistent: true,
+	}
+	if err := recordLaneState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	code, archiveErr := archiveLaneNative(laneOptions{target: threadID})
+	if code != 0 || archiveErr != nil {
+		t.Fatalf("archive unmaterialized lane = code %d err %v", code, archiveErr)
+	}
+	seen := []string{}
+	for len(methods) > 0 {
+		seen = append(seen, <-methods)
+	}
+	if !containsString(seen, "thread/resume") || !containsString(seen, "thread/delete") || containsString(seen, "thread/archive") {
+		t.Fatalf("unmaterialized archive methods = %#v", seen)
+	}
+	latest, err := readLaneStateFile(paths, threadID)
+	if err != nil || latest.Status != "archived" || !readRetiredThreads(paths)[threadID] {
+		t.Fatalf("unmaterialized archived state = %+v, %v", latest, err)
+	}
+}
+
+func TestMissingRolloutNeverAuthorizesDeleteWhenLaneHasTurnEvidence(t *testing.T) {
+	err := &rpcError{Code: -32603, Message: "no rollout found for thread id test"}
+	base := laneState{Type: "codex-peer-lane", Status: "failed", TerminalOutcome: "failed"}
+	if !unmaterializedLaneRolloutMissing(base, err) {
+		t.Fatal("failed no-turn lane did not accept authoritative missing rollout")
+	}
+	for name, mutate := range map[string]func(*laneState){
+		"turn":        func(state *laneState) { state.TurnID = "turn" },
+		"latest":      func(state *laneState) { state.LatestTurnID = "turn" },
+		"pending":     func(state *laneState) { state.PendingTurnIDs = []string{"turn"} },
+		"collected":   func(state *laneState) { state.CollectedTurnID = "turn" },
+		"terminal":    func(state *laneState) { state.TerminalTurnID = "turn" },
+		"nonterminal": func(state *laneState) { state.Status = "in_progress" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := base
+			mutate(&state)
+			if unmaterializedLaneRolloutMissing(state, err) {
+				t.Fatalf("turn evidence authorized unmaterialized deletion: %+v", state)
+			}
+		})
+	}
+	if unmaterializedLaneRolloutMissing(base, errors.New("no rollout found for thread id test")) {
+		t.Fatal("untyped transport error authorized unmaterialized deletion")
 	}
 }
 

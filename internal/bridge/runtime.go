@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
@@ -35,6 +36,8 @@ type daemon struct {
 	name             string
 	nameSource       string
 	permissionMode   string
+	agentRuntimeDir  string
+	agentManaged     bool
 	status           string
 	entrypoint       string
 	supervisorSocket string
@@ -52,11 +55,15 @@ type daemon struct {
 	pendingDir       string
 	sessionIndex     string
 	listener         net.Listener
+	handlerWG        sync.WaitGroup
+	admissionClosed  bool
+	connections      map[net.Conn]struct{}
 	seen             map[string]struct{}
 	seenOrder        []string
 	stopped          bool
 	// maintenanceBeforeWrite is a test seam for terminal-write ordering.
 	maintenanceBeforeWrite func()
+	handleBeforeFrame      func()
 	closeOnce              sync.Once
 	done                   chan struct{}
 }
@@ -66,10 +73,18 @@ type envelope struct {
 }
 
 // Main dispatches one role of the agent-session-runtime executable.
+//
+//nolint:gocyclo // Runtime role dispatch is intentionally centralized.
 func Main() {
+	if isGrokToolWrapperInvocation() {
+		os.Exit(runGrokToolWrapper(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
+	}
+	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
+		os.Exit(code)
 	}
 	switch os.Args[1] {
 	case "shim":
@@ -78,12 +93,10 @@ func Main() {
 		os.Exit(runSupervisorCommand(os.Args[2:]))
 	case "appserver":
 		os.Exit(runAppServerCommand(os.Args[2:]))
-	case "lane":
-		os.Exit(runLaneCommand(os.Args[2:]))
-	case "claude-lane":
-		os.Exit(runClaudeLaneCommand(os.Args[2:]))
 	case "claude-lane-manager":
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
+	case "grok-lane-manager":
+		os.Exit(runGrokLaneManager(os.Args[2:]))
 	case "grok":
 		os.Exit(runGrokSafetyCommand(os.Args[2:]))
 	case "grok-host":
@@ -101,6 +114,19 @@ func Main() {
 	default:
 		fmt.Fprintf(os.Stderr, "agent-session-runtime: unknown command %q\n", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+func runNativeLaneRole(role string, args []string) (int, bool) {
+	switch role {
+	case "lane":
+		return runLaneCommand(args), true
+	case "claude-lane":
+		return runClaudeLaneCommand(args), true
+	case "grok-lane":
+		return runGrokLaneCommand(args), true
+	default:
+		return 0, false
 	}
 }
 
@@ -182,10 +208,15 @@ func newDaemon(args map[string]string) *daemon {
 	default:
 		status = "idle"
 	}
+	agentRuntimeDir := strings.TrimSpace(args["agent-runtime-dir"])
+	if agentRuntimeDir == "" {
+		agentRuntimeDir = strings.TrimSpace(os.Getenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR"))
+	}
 	return &daemon{
 		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
 		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
-		entrypoint:       entrypoint,
+		entrypoint:      entrypoint,
+		agentRuntimeDir: agentRuntimeDir, agentManaged: agentRuntimeDir != "",
 		supervisorSocket: args["supervisor-socket"], supervisorToken: args["supervisor-token"], ownerPID: ownerPID,
 		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),
 		startedAt: time.Now().UnixMilli(), heartbeat: heartbeat,
@@ -197,6 +228,7 @@ func newDaemon(args map[string]string) *daemon {
 		pendingDir:    filepath.Join(dataDir, "sessions", key, "inbox", "pending"),
 		sessionIndex:  filepath.Join(codexHome, "session_index.jsonl"),
 		seen:          map[string]struct{}{}, done: make(chan struct{}),
+		connections: map[net.Conn]struct{}{},
 	}
 }
 
@@ -259,7 +291,7 @@ func (d *daemon) start() error {
 	d.listener = listener
 	_ = os.Chmod(d.backendSocket, 0600)
 	if err := d.publishAlias(); err != nil {
-		_ = listener.Close()
+		d.shutdown()
 		return err
 	}
 	d.mu.Lock()
@@ -267,6 +299,7 @@ func (d *daemon) start() error {
 	err = d.writeRecordsLocked()
 	d.mu.Unlock()
 	if err != nil {
+		d.shutdown()
 		return err
 	}
 	go d.acceptLoop()
@@ -285,7 +318,24 @@ func (d *daemon) acceptLoop() {
 				continue
 			}
 		}
-		go d.handleConnection(conn)
+		d.mu.Lock()
+		if d.admissionClosed {
+			d.mu.Unlock()
+			_ = conn.Close()
+			continue
+		}
+		d.handlerWG.Add(1)
+		d.connections[conn] = struct{}{}
+		d.mu.Unlock()
+		go func() {
+			defer func() {
+				d.mu.Lock()
+				delete(d.connections, conn)
+				d.mu.Unlock()
+				d.handlerWG.Done()
+			}()
+			d.handleConnection(conn)
+		}()
 	}
 }
 
@@ -303,6 +353,9 @@ func (d *daemon) handleConnection(conn net.Conn) {
 			if stringValue(frame["type"]) == "control" && stringValue(frame["action"]) == "inspect" {
 				d.writeInspection(conn)
 				continue
+			}
+			if d.handleBeforeFrame != nil {
+				d.handleBeforeFrame()
 			}
 			d.handleFrame(frame)
 		}
@@ -334,6 +387,7 @@ func (d *daemon) handleFrame(frame map[string]any) {
 	}
 }
 
+//nolint:gocyclo // Native carrier decoding keeps ordered compatibility checks in one admission boundary.
 func (d *daemon) handleUser(frame map[string]any) {
 	if target := stringValue(frame["session_id"]); target != "" && target != d.sessionID {
 		return
@@ -343,9 +397,19 @@ func (d *daemon) handleUser(frame map[string]any) {
 	if content == "" {
 		return
 	}
+	var grouped *federator.AgentFrame
+	if decoded, err := federator.DecodeAgentFrameBody(content); err == nil &&
+		decoded.Version == federator.AgentFrameVersion && decoded.Type == "delivery" &&
+		decoded.MessageID != "" && decoded.Source != nil && decoded.Content != "" {
+		grouped = &decoded
+		content = decoded.Content
+	}
 	id := stringValue(frame["msg_id"])
 	if id == "" {
 		id = stringValue(frame["uuid"])
+	}
+	if grouped != nil {
+		id = grouped.MessageID
 	}
 	if id == "" {
 		// Retried transports without an explicit id must still converge on one
@@ -372,6 +436,17 @@ func (d *daemon) handleUser(frame map[string]any) {
 		"from":       defaultString(stringValue(frame["from"]), defaultString(env.From, "unknown")),
 		"message":    defaultString(env.Message, content),
 	}
+	if grouped != nil {
+		item["id"] = grouped.MessageID
+		item["from"] = grouped.Source.ID
+		item["message"] = grouped.Content
+		item["sentAt"] = grouped.SentAt
+		item["fromName"] = grouped.Source.Name
+		item["fromSession"] = grouped.Source.SessionID
+		item["fromProduct"] = grouped.Source.Entrypoint
+		item["fromMode"] = grouped.Source.PermissionMode
+		item["summary"] = grouped.Summary
+	}
 	putIf(item, "sentAt", env.SentAt)
 	putIf(item, "fromName", env.FromName)
 	putIf(item, "fromSession", env.FromSession)
@@ -387,7 +462,7 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 	response, err := requestControl(supervisor, map[string]any{
 		"action": "wake", "sessionId": d.sessionID, "launchToken": d.supervisorToken, "item": item,
 	}, 30*time.Second)
-	ownedStates := []string{"accepted", "in_flight", "actor_accepted", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict"}
+	ownedStates := []string{"accepted", "in_flight", "actor_accepted", "delivered", "queueing", "queued", "started", "steered", "observed", "conflict", "failed", "interrupted", "timed_out"}
 	if err == nil && containsString(ownedStates, stringValue(response["delivery"])) {
 		return true
 	}
@@ -405,7 +480,7 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 			"action": "wake_status", "sessionId": d.sessionID, "launchToken": d.supervisorToken,
 			"messageId": stringValue(item["id"]),
 		}, 2*time.Second)
-		if statusErr == nil && containsString([]string{"in_flight", "actor_accepted", "delivered", "queueing", "queued", "fallback_delivered"}, stringValue(status["delivery"])) {
+		if statusErr == nil && containsString([]string{"in_flight", "actor_accepted", "delivered", "queueing", "queued", "fallback_delivered", "failed", "interrupted", "timed_out"}, stringValue(status["delivery"])) {
 			return true
 		}
 		response, err = requestControl(supervisor, map[string]any{
@@ -563,7 +638,9 @@ func (d *daemon) writeRecordsLocked() error {
 		"sessionId": d.sessionID, "cwd": d.cwd, "name": d.name, "nameSource": d.nameSource,
 		"permissionMode": d.permissionMode, "socketPath": d.stableSocket, "backendSocketPath": d.backendSocket,
 		"registryFile": d.registryFile, "inboxDir": d.inboxDir, "startedAt": d.startedAt,
-		"status": d.status, "entrypoint": d.entrypoint, "supervisorSocket": d.supervisorSocket, "updatedAt": now,
+		"status": d.status, "entrypoint": d.entrypoint, "supervisorSocket": d.supervisorSocket,
+		"agentRuntimeDir": d.agentRuntimeDir, "groupProtocol": map[bool]int{true: federator.GroupProtocolVersion, false: 0}[d.agentManaged],
+		"updatedAt": now,
 	}
 	registry := map[string]any{
 		"pid": os.Getpid(), "sessionId": d.sessionID, "cwd": d.cwd, "startedAt": d.startedAt,
@@ -575,10 +652,31 @@ func (d *daemon) writeRecordsLocked() error {
 	if err := writeJSONAtomic(d.stateFile, state); err != nil {
 		return err
 	}
+	if d.agentManaged {
+		_, err := federator.RegisterPeer(d.agentRuntimeDir, d.agentRegistrationLocked())
+		return err
+	}
 	return writeJSONAtomic(d.registryFile, registry)
 }
 
+func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
+	return federator.PeerRegistration{
+		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, Product: d.entrypoint,
+		Name: d.name, Status: d.status, PermissionMode: d.permissionMode, Cwd: d.cwd,
+		PID: os.Getpid(), ProcStart: d.procStart, Socket: d.stableSocket,
+		// The per-session shim is the communication parent's lifetime. Its
+		// supervisor may host many unrelated sessions and must not keep children
+		// alive after this one is retired.
+		LifecyclePID: os.Getpid(), LifecycleProcStart: d.procStart, StartedAt: d.startedAt,
+	}
+}
+
 func (d *daemon) enqueue(item map[string]any) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped {
+		return errors.New("peer daemon is stopping")
+	}
 	if err := os.MkdirAll(d.pendingDir, 0700); err != nil {
 		return err
 	}
@@ -624,14 +722,35 @@ func (d *daemon) publishAlias() error {
 
 func (d *daemon) shutdown() {
 	d.closeOnce.Do(func() { close(d.done) })
-	if d.listener != nil {
-		_ = d.listener.Close()
+	// Stop admitting frames, then drain every frame whose transport write may
+	// already have succeeded. This gives each accepted user message exactly one
+	// chance to reach its supervisor or durable inbox before teardown removes
+	// either path.
+	d.mu.Lock()
+	d.admissionClosed = true
+	listener := d.listener
+	connections := make([]net.Conn, 0, len(d.connections))
+	for conn := range d.connections {
+		connections = append(connections, conn)
 	}
+	d.mu.Unlock()
+	if listener != nil {
+		_ = listener.Close()
+	}
+	// Existing streams may already contain more newline-delimited frames. Give
+	// their handlers a short bounded drain window; after it, closing the stream
+	// makes any later sender write observably fail instead of being silently
+	// accepted after teardown.
+	for _, conn := range connections {
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	}
+	d.handlerWG.Wait()
 	// Serialize the terminal state with every heartbeat and control update.
 	// A heartbeat may already have won its ticker select when done closes; the
 	// stopped latch prevents that writer from recreating state after removal.
 	d.mu.Lock()
 	d.stopped = true
+	registration := d.agentRegistrationLocked()
 	removeJSONIf(d.registryFile, func(row map[string]any) bool {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
@@ -639,6 +758,9 @@ func (d *daemon) shutdown() {
 		return intValue(row["pid"]) == os.Getpid() && stringValue(row["sessionId"]) == d.sessionID
 	})
 	d.mu.Unlock()
+	if d.agentManaged {
+		_ = federator.UnregisterPeer(d.agentRuntimeDir, registration)
+	}
 	if target, err := os.Readlink(d.stableSocket); err == nil {
 		resolved := target
 		if !filepath.IsAbs(resolved) {
@@ -825,6 +947,20 @@ func defaultString(value, fallback string) string {
 	return fallback
 }
 func stringValue(value any) string { text, _ := value.(string); return text }
+func boolValue(value any) bool     { result, _ := value.(bool); return result }
+func stringSlice(value any) []string {
+	if values, ok := value.([]string); ok {
+		return append([]string(nil), values...)
+	}
+	values, _ := value.([]any)
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
 func intValue(value any) int {
 	switch v := value.(type) {
 	case float64:

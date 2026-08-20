@@ -67,8 +67,6 @@ func run(args []string) error {
 		return runLane(ctx, args[1:])
 	case "lane-watch":
 		return runLaneWatch(ctx, args[1:])
-	case "shadow":
-		return runShadow(ctx, args[1:])
 	case "version", "--version", "-version":
 		fmt.Println(version)
 		return nil
@@ -91,23 +89,34 @@ func runHub(ctx context.Context, args []string) error {
 
 func runAgent(ctx context.Context, args []string) error {
 	set := flag.NewFlagSet("agent", flag.ContinueOnError)
-	hub := set.String("hub", os.Getenv("PEER_FEDERATOR_HUB"), "hub host:port")
-	host := set.String("host", os.Getenv("PEER_FEDERATOR_HOST"), "stable simple host identifier")
+	hub := set.String("hub", os.Getenv("PEER_FEDERATOR_HUB"), "optional hub host:port")
+	host := set.String("host", envDefault("PEER_FEDERATOR_HOST", defaultHostID()), "stable simple host identifier")
 	name := set.String("name", os.Getenv("PEER_FEDERATOR_NAME"), "human-readable host name (defaults to --host)")
 	claudeConfig := set.String("claude-config-dir", federator.DefaultClaudeConfigDir(), "Claude configuration directory")
 	runtimeDir := set.String("runtime-dir", federator.DefaultRuntimeDir(), "ephemeral runtime directory")
+	stateDir := set.String("state-dir", "", "durable grouped-session catalog directory")
 	enableRemoteLanes := set.Bool("enable-remote-lanes", envEnabled("PEER_FEDERATOR_ENABLE_REMOTE_LANES"), "allow hub peers to execute native lane commands on this host")
 	codexLane := set.String("codex-lane", os.Getenv("PEER_FEDERATOR_CODEX_LANE"), "codex-peer-lane executable")
 	claudeLane := set.String("claude-lane", os.Getenv("PEER_FEDERATOR_CLAUDE_LANE"), "claude-peer-lane executable")
+	grokLane := set.String("grok-lane", os.Getenv("PEER_FEDERATOR_GROK_LANE"), "grok-peer-lane executable")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	return federator.RunAgent(ctx, federator.AgentOptions{
 		Hub: *hub, HostID: *host, HostName: *name,
-		ClaudeConfigDir: *claudeConfig, RuntimeDir: *runtimeDir,
+		ClaudeConfigDir: *claudeConfig, RuntimeDir: *runtimeDir, StateDir: *stateDir,
 		EnableRemoteLanes:   *enableRemoteLanes,
 		CodexLaneExecutable: *codexLane, ClaudeLaneExecutable: *claudeLane,
+		GrokLaneExecutable: *grokLane,
 	})
+}
+
+func defaultHostID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		return "local"
+	}
+	return host
 }
 
 func runDoctor(ctx context.Context, args []string) error {
@@ -164,7 +173,7 @@ func runHosts(args []string) error {
 func runLane(ctx context.Context, args []string) error {
 	set := flag.NewFlagSet("lane", flag.ContinueOnError)
 	host := set.String("host", "", "connected destination host id or unique name")
-	product := set.String("product", "", "lane product: codex or claude")
+	product := set.String("product", "", "lane product: codex, claude, or grok")
 	sourceSession := set.String("source-session", "", "originating live local peer session (normally inferred)")
 	runtimeDir := set.String("runtime-dir", federator.DefaultRuntimeDir(), "ephemeral runtime directory")
 	if err := set.Parse(args); err != nil {
@@ -199,22 +208,6 @@ func runLaneWatch(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runShadow(ctx context.Context, args []string) error {
-	set := flag.NewFlagSet("shadow", flag.ContinueOnError)
-	listen := set.String("listen", "", "local shadow UDS")
-	control := set.String("control", "", "agent control UDS")
-	target := set.String("target", "", "remote peer id")
-	ownerPID := set.Int("owner-pid", 0, "owning agent pid")
-	registryDir := set.String("registry-dir", "", "Claude session registry")
-	if err := set.Parse(args); err != nil {
-		return err
-	}
-	return federator.RunShadow(ctx, federator.ShadowOptions{
-		Listen: *listen, Control: *control, TargetID: *target,
-		OwnerPID: *ownerPID, RegistryDir: *registryDir,
-	})
-}
-
 func envDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
@@ -232,7 +225,7 @@ func envEnabled(name string) bool {
 }
 
 func usage() string {
-	return `peer-federator — make local Claude-compatible peers visible across a trusted LAN
+	return `peer-federator — route grouped Agent Sessions peers locally and across a trusted LAN
 
 Usage:
   peer-federator hub   [--listen :7419]
@@ -240,10 +233,9 @@ Usage:
   peer-federator doctor --hub HOST:PORT
   peer-federator status
   peer-federator hosts
-  peer-federator lane --host HOST --product codex|claude -- COMMAND [ARGS...]
+  peer-federator lane --host HOST --product codex|claude|grok -- COMMAND [ARGS...]
   peer-federator version
 
 Remote lane execution is disabled by default. Run peer-federator COMMAND --help for all options.
-The shadow command is internal and is supervised by agent.
 `
 }

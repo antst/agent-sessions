@@ -166,8 +166,8 @@ The product is the leader + waker. Hooks are not the delivery path.
 - A process-attested Grok session may own `codex-peer-lane` and
   `claude-peer-lane` children. Use the same deepest-live-ancestor rule as Codex
   and Claude; a model-provided session ID is never authority.
-- `fromProduct` / entrypoint allowlist: add `"grok"` next to
-  `codex|claude` on this branch. Grep those strings. Do not add `agy`.
+- `fromProduct` / entrypoint allowlist is `codex|claude|grok`. Grep those strings when adding a
+  product; do not reuse an unrelated product identity.
 
 ### What not to build
 
@@ -177,8 +177,9 @@ The product is the leader + waker. Hooks are not the delivery path.
 - Inbox+Stop except as the Codex-style fallback after the waker has
   *not* claimed ownership. An accepted ACP wake must not also be
   Stop-injected.
-- `grok-peer-lane` and `--product grok` federation. Grok owning existing
-  Codex/Claude lanes is in scope; a native Grok lane product is not.
+- Reusing an interactive `grok-peer` conversation as a worker lane. Native
+  `grok-peer-lane` workers own separate headless ACP sessions; they never add a
+  second writer to a pager-owned conversation.
 - `grok -p --resume` against a live pager (dual writer).
 - Binding or adopting `~/.grok/leader.sock`.
 - Scraping `~/.grok/sessions` or parsing `grok sessions` human output to
@@ -245,9 +246,12 @@ correct.
 
 ---
 
-## Later, not this draft
+## Follow-on: native Grok lanes
 
-`grok-peer-lane` and Grok federation. Only after interactive wake is real.
+Interactive wake is proven on installed Linux and macOS builds. `grok-peer-lane` uses a separate
+sole-owner headless ACP process rather than changing this interactive adapter. Its contract and
+acceptance requirements live in [GROK-LANES.md](GROK-LANES.md). Grok federation remains disabled
+until the local lane lifecycle is independently accepted and a remote design is implemented.
 
 Do not substitute a hook adapter if a future Grok release breaks this contract.
 Fail the installed smoke and revisit the ACP/leader integration instead.

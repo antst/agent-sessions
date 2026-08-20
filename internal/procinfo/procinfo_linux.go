@@ -31,7 +31,7 @@ func Read(pid int) Info {
 		return Info{Status: Unknown}
 	}
 	parent, _ := strconv.Atoi(fields[1])
-	return Info{Status: Known, State: fields[0], Start: fields[19], Parent: parent}
+	return Info{Status: Known, State: fields[0], Start: fields[19], StrongStart: fields[19], Parent: parent}
 }
 
 // Args reads the process argument vector without losing argument boundaries.
@@ -46,4 +46,47 @@ func Args(pid int) ([]string, error) {
 		args = append(args, string(part))
 	}
 	return args, nil
+}
+
+// Environment reads the process environment without losing entry boundaries.
+func Environment(pid int) ([]string, error) {
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return nil, err
+	}
+	parts := bytes.Split(bytes.TrimRight(body, "\x00"), []byte{0})
+	environment := make([]string, 0, len(parts))
+	for _, part := range parts {
+		environment = append(environment, string(part))
+	}
+	return environment, nil
+}
+
+// List returns one best-effort coherent identity for every observable process.
+// A disappearing process is omitted; an unreadable live identity fails closed.
+func List() ([]Process, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Process, 0, len(entries))
+	for _, entry := range entries {
+		pid, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil || pid <= 1 {
+			continue
+		}
+		info := Read(pid)
+		switch info.Status {
+		case Absent:
+			continue
+		case Known:
+			if info.State == "Z" || info.State == "X" {
+				continue
+			}
+			result = append(result, Process{PID: pid, Info: info})
+		case Unknown:
+			return nil, fmt.Errorf("cannot identify live process %d", pid)
+		}
+	}
+	return result, nil
 }

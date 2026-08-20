@@ -1,48 +1,60 @@
-# Claude peer protocol notes
+# Claude carrier and product-adapter protocol notes
 
 These notes describe behavior observed in the installed Claude Code 2.1.226 Linux executable. This
 is not a public Anthropic protocol specification.
 
-## Discovery
+## Native registry and Agent Sessions discovery
 
 Claude enumerates JSON files in `$CLAUDE_CONFIG_DIR/sessions` or `~/.claude/sessions`. A messageable
 record has a live `pid` and a connectable `messagingSocketPath`. The bridge corroborates process-start
 identity through `/proc/<pid>/stat` on Linux and the kernel process table on macOS; an observation
 failure is distinct from proof that a process is stale.
 
-The bridge publishes this compatible subset. `entrypoint` is `codex` for an
-App-Server-backed peer and `grok` for a private-leader-backed Grok peer:
+The host agent publishes exactly one service record using this compatible
+subset. Product adapters register their real sockets with the host agent;
+remote peers are never projected into Claude's registry. Ordinary Claude,
+`claude-peer`, and Claude lane rows coexist in the configured shared profile:
+
+Managed interactive Claude launches use a per-session socket below the host
+agent's private runtime directory. The gated launch journal records that exact
+path before native startup. If Claude creates its socket and socket-bound key
+but stops before publishing the PID row, retirement still requires the key
+fingerprinted under the exact live adapter; unrelated shared-profile sockets
+are never swept by PID or liveness alone.
 
 ```json
 {
   "pid": 12345,
-  "sessionId": "codex-session-id",
-  "cwd": "/project",
+  "sessionId": "agent-host-key",
+  "cwd": "/agent-state",
   "startedAt": 1786000000000,
   "procStart": "123456789",
-  "version": "codex-claude-peer/0.1.0",
+  "version": "agent-sessions/0.1.1",
   "peerProtocol": 1,
-  "kind": "interactive",
-  "entrypoint": "codex",
-  "name": "codex-project-ab12cd34",
-  "nameSource": "generated",
+  "kind": "service",
+  "entrypoint": "agent-sessions",
+  "name": "agent-sessions--workstation",
+  "nameSource": "agent",
   "status": "idle",
   "messagingSocketPath": "/run/user/1000/codex-claude-peer-1000/session-0123456789abcdef0123.sock"
 }
 ```
 
-Claude's `agents --json` command was used as an independent smoke test and displayed the bridge
-record as an interactive session.
+Claude's `agents --json` command is the independent smoke test: a running host
+agent adds exactly one service row regardless of native session or remote peer count.
 
-The peer name is the primary durable address. The Codex MCP sender resolves it from fresh discovery
-immediately before every send. A short ref is only a transient duplicate-name disambiguator and
-must not be cached or persisted.
+Agent Sessions discovery is an AgentFrame request to that service, not a scan
+of the Claude registry. It returns only peers sharing a group with the caller.
+A visible peer can be addressed by name, display name, host/session ID, or
+exact session ID. Hidden duplicate names do not participate in resolution.
 
-The advertised UDS path is a stable per-Codex-session symlink to the current shim's private
-PID-named listener. Claude Code keys its conversation-local `name [ref]` identity by this path, so
-the bridge avoids gratuitous ref rotation when a shim process is replaced. The Codex MCP sender
-also accepts an exact full peer `sessionId` (or `session:<id>`), but Claude Code's native sender does
-not resolve raw session IDs and the discovery record has no alias field.
+Codex and Grok adapters own stable per-session UDS paths. A wrapped Claude
+attachment instead registers Claude's native PID-bound socket; that socket can
+rotate across exact resume while the shared transcript, Agent Sessions session
+ID, catalog row, and groups remain stable.
+The host agent routes to that socket only after group admission. Claude's
+native sender addresses the service row and puts the complete AgentFrame JSON
+in the message body.
 
 `nameSource` is `codex` when the name comes from Codex's session index, `explicit` when supplied by
 `CLAUDE_PEER_SESSION_NAME`, `launch` for a prepared interactive wrapper, `lane` for a durable lane,
@@ -79,9 +91,10 @@ Claude 2.1.226 strictly parses the recognized envelope attributes in grammar ord
 `from-session`, `hop-chain`, `from-name`, and `from-mode`. Native peers do not normally emit
 `from-session`, but controlled testing confirmed that it is grammar-recognized in this position.
 Unknown attributes before the closing `>` cause the inbound security gate to discard
-permission-mode attestation and hold the message for human approval. Codex therefore puts extension
-metadata on the first body line: transport `msg_id` as `messageId`, an ISO-8601 `sentAt`, and
-`fromProduct: "codex"` or `"grok"` according to the attested sender.
+permission-mode attestation and hold the message for human approval. The host
+agent therefore leaves the native attribute grammar unchanged and carries the
+complete AgentFrame JSON in the body. Its `delivery` frame contains the
+attested source, product, permission class, message ID, group, and content.
 The App Server and hook receive paths show message ID, send/receive times, and sender type in
 model-visible metadata. The parser remains backward-compatible with the short-lived attribute form
 used by earlier bridge builds.
@@ -135,8 +148,11 @@ roots are publishable in a distinct prepared-pending phase only while that exact
 live. A fresh root is delete-on-abort until publication commits; after commit, definite wrapper death
 unpublishes it while preserving the still-loaded zero-turn transcript and its exact stale owner as a
 one-use takeover proof. The replacement resume consumes that proof without archive/unarchive.
-SessionStart promotes either
-kind to attached. No cwd/time heuristic participates. The native launcher consumes only its peer-name
+SessionStart promotes either kind to attached. If a prepared owner is still pending at the first
+`UserPromptSubmit`, recovery additionally requires the hook's local rollout `session_meta` to bind
+its session-family id to the exact prepared thread, and requires the live PID/process-start argv to
+contain the managed `--remote unix:// resume <thread>` tuple. No cwd/time heuristic participates.
+The native launcher consumes only its peer-name
 option and explicit resume selector, resolves the selector to one UUID, then prefixes the unchanged
 remaining Codex argv with the managed remote/resume target and a missing cwd. This preserves relative
 option order and cannot splice into a variadic option's values. Explicit `--yolo` is additionally
@@ -275,23 +291,41 @@ the inherited token, and ancestry inside that leader tree. On owner death the
 host removes its discovery row and stops only its own leader and bridge process
 groups. Native Grok clients must not concurrently open the same UUID.
 
-The first release deliberately supports fresh sessions and exact-UUID resume.
-Title resolution, a bare resume picker, native Grok lanes, and Grok federation
-remain native-Grok or later-version concerns rather than private-store parsing.
+Interactive Grok supports fresh sessions and exact-UUID resume. Title resolution and a bare resume
+picker remain native-Grok concerns rather than private-store parsing. Separate sole-owner headless
+ACP sessions implement local or federated Grok lanes.
 
 Headless App Server turns can issue server-initiated `item/tool/call` JSON-RPC requests. The native
 client handles bridge-owned `claude_peer` tools directly only after the App Server-supplied `threadId`
 matches an authorized peer thread; other dynamic MCP names continue through `mcpServer/tool/call`.
 For stdio MCP calls, the MCP process must be an exact child (PID plus process-start identity) of the
 App Server process corroborated over its Unix socket by the supervisor. Codex's host-owned
-`_meta.threadId`, turn `session_id`, and turn `thread_id` must then all be present and identical, and
-that exact thread must carry an active owner/lane capability.
+`_meta.threadId`, turn `session_id`, and turn `thread_id` must all be present and valid. The outer
+and turn `thread_id` values must be identical, and that exact thread must carry an active owner/lane
+capability. Codex may restore a distinct session-family `session_id`; it is context only and cannot
+borrow another thread's capability.
 The model-supplied `session_id` may only corroborate the attested caller; it never grants authority.
 Even `list_peers` passes this gate. Because Codex activates plugin MCP inventory daemon-wide,
 ordinary threads can see the tool names, but calls return a bounded inactive result before roster,
 inbox, rename, or send access.
 The plugin's default MCP approval mode lets calls reach this authorization boundary without a
 daemon-wide pre-dispatch prompt; it grants no peer capability by itself.
+Managed Claude uses the same public `claude_peer` tool name through the Claude plugin, but a
+different caller proof. The stdio MCP process must descend from both the exact live native Claude
+adapter and its launcher lifecycle owner. The host agent must independently return the same
+interactive Claude UUID, adapter/lifecycle process starts, and adapter socket; the native registry
+row must repeat that UUID, PID, process start, `cli`/`interactive` classification, and socket, and
+the socket must be live. Claude does not supply a Codex `session_id`; exact process ancestry is the
+authority. The Claude inventory deliberately exposes only grouped discovery, send/multicast, and
+broadcast. Bare Claude, a copied environment, a recycled PID, a different registered Claude peer,
+or a mismatched row/socket receives no roster or send authority.
+
+Interactive Claude names are indexed durably by session UUID in host-agent state. Resume-by-name
+selects one live interactive product match first, otherwise one historical interactive match.
+Multiple live or historical UUIDs are ambiguous and require an exact UUID. The launcher resolves a
+name through the local host-agent control socket before acquiring a lifecycle path or changing the
+catalog, then rewrites only the native pre-`--` resume selector to the exact UUID.
+
 The bridge accepts MCP approval elicitations only for the bridge-owned `claude_peer`
 server; foreign
 MCP approvals and ordinary elicitations are not trusted.
@@ -316,6 +350,7 @@ type field that changes those behaviors. The bridge therefore exposes product ty
 Codex listing and message envelope, but cannot change native `ListAgents` labeling or make a raw
 Codex session UUID a Claude-native target.
 
-File transfer, remote-host Claude messaging, and Windows named pipes are not implemented. Immediate
+File transfer and Windows named pipes are not implemented. Remote-host grouped
+messaging uses protocol-3 host agents plus the optional hub. Immediate
 wake requires an App-Server-backed session; conventionally launched standalone Codex processes keep
 the hook-inbox fallback behavior.

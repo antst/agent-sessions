@@ -17,7 +17,7 @@ for component in "$platform" "$version"; do
 		exit 2
 	fi
 done
-for binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
+for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
 	if [[ ! -x "$binary_dir/$binary" ]]; then
 		printf 'release binary is missing or not executable: %s\n' "$binary_dir/$binary" >&2
 		exit 1
@@ -65,7 +65,7 @@ cp \
 	"$plugin_root/Makefile" \
 	"$plugin_root/README.md" \
 	"$package_root/"
-for binary in agent-session-runtime codex-peer codex-peer-lane claude-peer-lane grok-peer peer-federator; do
+for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
 	cp "$binary_dir/$binary" "$package_root/bin/$platform/$binary"
 	chmod 0755 "$package_root/bin/$platform/$binary"
 done

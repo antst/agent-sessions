@@ -1398,6 +1398,7 @@ func (s *nativeSupervisor) ensureShim(input map[string]any) (map[string]any, err
 	status := defaultString(stringValue(input["status"]), "idle")
 	statePath := filepath.Join(s.paths.dataRoot, "sessions", sessionKey(sessionID), "state.json")
 	previousState := readJSONMap(statePath)
+	agentRuntimeDir := defaultString(stringValue(input["agentRuntimeDir"]), stringValue(previousState["agentRuntimeDir"]))
 	// Reconciliation has no fresh permission attestation. Preserve the mode
 	// last supplied by a SessionStart or lane registration, and fail toward the
 	// ordinary prompting mode when no authoritative state exists.
@@ -1432,6 +1433,9 @@ func (s *nativeSupervisor) ensureShim(input map[string]any) (map[string]any, err
 		"--claude-config-dir", s.paths.claudeRoot, "--codex-home", s.paths.codexHome,
 		"--supervisor-socket", s.paths.supervisorSock, "--owner-pid", strconv.Itoa(os.Getpid()),
 		"--owner-proc-start", s.procStart, "--runtime-dir", s.paths.runtimeDir,
+	}
+	if agentRuntimeDir != "" {
+		args = append(args, "--agent-runtime-dir", agentRuntimeDir)
 	}
 	command := exec.Command(s.shimExecutable, args...) //nolint:gosec // executable is os.Executable and args are built from validated thread state.
 	command.Env = overrideNativeEnv(os.Environ(), "GOMAXPROCS", "1")
@@ -2447,16 +2451,20 @@ func (s *nativeSupervisor) reconcileLoop() {
 }
 
 func (s *nativeSupervisor) reconcile() error {
+	var reconcileErrors []error
 	cleanupStaleBridgeArtifacts(s.paths)
 	reconcileClaudeLaneManagers(s.paths)
+	if err := reconcileGrokLaneManagers(s.paths); err != nil {
+		reconcileErrors = append(reconcileErrors, err)
+	}
 	client, err := s.ensureClient()
 	if err != nil {
-		return err
+		return errors.Join(append(reconcileErrors, err)...)
 	}
 	s.reconcileExitedInteractiveOwners()
 	loadedSet, err := loadedPreparedThreads(client)
 	if err != nil {
-		return err
+		return errors.Join(append(reconcileErrors, err)...)
 	}
 	loaded := make([]string, 0, len(loadedSet))
 	for threadID := range loadedSet {
@@ -2466,7 +2474,6 @@ func (s *nativeSupervisor) reconcile() error {
 	if err := s.auditLoadedRetirement(client, loaded); err != nil {
 		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: archived-thread audit failed: %v\n", err)
 	}
-	var reconcileErrors []error
 	for _, threadID := range loaded {
 		if err := s.reconcileLoadedThread(client, threadID, releasing); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile loaded thread %s: %w", threadID, err))
@@ -2746,7 +2753,8 @@ func (s *nativeSupervisor) queueLaneTerminalNotice(threadID string, turn map[str
 		"noticeId": noticeID, "threadId": threadID, "turnId": turnID,
 		"name": state.Name, "target": state.NotifyTarget, "status": status,
 		"outcome": outcome, "exit": laneExitCode(outcome),
-		"createdAt": time.Now().UnixMilli(),
+		"createdAt": time.Now().UnixMilli(), "parentHostId": state.ParentHostID,
+		"parentAgentRuntimeDir": state.ParentAgentRuntimeDir, "groups": state.Groups,
 	}
 	directory := filepath.Join(profileDataRoot(s.paths), "notices")
 	if err := writeJSONAtomic(filepath.Join(directory, noticeID+".json"), job); err != nil {
@@ -2788,12 +2796,17 @@ func (s *nativeSupervisor) flushLaneNotices(threadFilter string) (int, error) {
 		if !validSessionID(threadID) || stringValue(job["noticeId"])+".json" != entry.Name() {
 			continue
 		}
-		message := fmt.Sprintf(
-			"CODEX_LANE_TERMINAL notice=%s name=%s thread=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: codex-peer-lane wait %s",
-			stringValue(job["noticeId"]), stringValue(job["name"]), threadID,
-			stringValue(job["turnId"]), stringValue(job["status"]), stringValue(job["outcome"]), intValue(job["exit"]), threadID,
+		groups := stringSlice(job["groups"])
+		collect := laneCollectionPointer(
+			"codex", threadID, stringValue(job["parentHostId"]), stringValue(job["parentAgentRuntimeDir"]), groups,
 		)
-		if _, sendErr := sendNativePeerMessageWithTargetMode(s.paths, threadID, stringValue(job["target"]), message, "Codex lane terminal", true); sendErr != nil {
+		message := fmt.Sprintf(
+			"CODEX_LANE_TERMINAL notice=%s name=%s thread=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
+			stringValue(job["noticeId"]), stringValue(job["name"]), threadID,
+			stringValue(job["turnId"]), stringValue(job["status"]), stringValue(job["outcome"]), intValue(job["exit"]), collect,
+		)
+		sendErr := deliverGroupedLaneNotice(threadID, stringValue(job["target"]), stringValue(job["noticeId"]), message)
+		if sendErr != nil {
 			pending++
 			continue
 		}
@@ -3179,6 +3192,7 @@ func printNativeResult(value map[string]any, err error) int {
 	return 0
 }
 
+//nolint:unparam // Keeping the timeout explicit makes the socket boundary reusable in focused tests and adapters.
 func sendUnixJSON(socket string, frame map[string]any, timeout time.Duration) error {
 	conn, err := net.DialTimeout("unix", socket, timeout)
 	if err != nil {
@@ -3216,12 +3230,16 @@ func readJSONMap(file string) map[string]any {
 }
 
 func trustedPeerText(item map[string]any) string {
+	return trustedPeerTextForProduct(item, "codex")
+}
+
+func trustedPeerTextForProduct(item map[string]any, recipientProduct string) string {
 	sender := stringValue(item["from"])
 	if name := stringValue(item["fromName"]); name != "" {
 		sender = fmt.Sprintf("%s (%s)", name, defaultString(sender, "unknown address"))
 	}
 	if sender == "" {
-		sender = "an unidentified Claude Code peer"
+		sender = "an unidentified peer"
 	}
 	metadata := []string{}
 	for _, pair := range [][2]string{
@@ -3237,7 +3255,11 @@ func trustedPeerText(item map[string]any) string {
 		parts = append(parts, "Message metadata: "+strings.Join(metadata, ", "))
 	}
 	parts = append(parts, stringValue(item["message"]))
-	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. Reply with claude_peer.send_message when useful.")
+	replyInstruction := "Reply with claude_peer.send_message when useful."
+	if recipientProduct == "grok" {
+		replyInstruction = "Reply with the Agent Sessions send_message tool when useful."
+	}
+	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. "+replyInstruction)
 	return strings.Join(parts, "\n\n")
 }
 

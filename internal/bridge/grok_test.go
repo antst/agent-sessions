@@ -134,6 +134,23 @@ func runGrokFakeACP() {
 				writeGrokFakeResponse(request["id"], nil, map[string]any{"code": -32001, "message": "bad cached token"})
 				continue
 			}
+		case "session/new", "session/load":
+			result["sessionId"] = defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv))
+		case "session/prompt":
+			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
+				time.Sleep(time.Duration(delay) * time.Millisecond)
+			}
+			params, _ := request["params"].(map[string]any)
+			writeGrokFakeNotification("session/update", map[string]any{
+				"sessionId": stringValue(params["sessionId"]),
+				"update": map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": defaultString(os.Getenv("GROK_FAKE_ANSWER"), "fake Grok lane answer")},
+				},
+			})
+			result["stopReason"] = "end_turn"
+		case "session/cancel":
+			continue
 		case "_x.ai/sessions/list":
 			if delay := time.Until(activeTurnUntil); delay > 0 {
 				time.Sleep(delay)
@@ -153,7 +170,8 @@ func runGrokFakeACP() {
 				activity = strings.TrimSpace(string(body))
 			}
 			result["result"] = map[string]any{"sessions": []any{map[string]any{
-				"sessionId": os.Getenv(grokSessionIDEnv), "resident": true, "yolo": yolo, "activity": activity,
+				"sessionId": defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv)),
+				"resident":  true, "yolo": yolo, "activity": activity,
 			}}}
 			if marker := os.Getenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE"); marker != "" {
 				file, createErr := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -169,9 +187,12 @@ func runGrokFakeACP() {
 				body, _ := os.ReadFile(path)
 				status = strings.TrimSpace(string(body))
 			}
+			params, _ := request["params"].(map[string]any)
+			arguments, _ := params["arguments"].(map[string]any)
 			result["result"] = map[string]any{
-				"content": []any{map[string]any{"type": "text", "text": "peer inventory ready"}},
-				"isError": status != "ready",
+				"content":           []any{map[string]any{"type": "text", "text": "peer inventory ready"}},
+				"structuredContent": map[string]any{"sessionId": stringValue(arguments["session_id"]), "status": "starting"},
+				"isError":           status != "ready",
 			}
 		case "_x.ai/interject":
 			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
@@ -585,7 +606,8 @@ func TestGrokHostACPWakeIsSerializedAndIdempotent(t *testing.T) {
 	}
 	if intValue(initialize["protocolVersion"]) != 1 || stringValue(authenticate["methodId"]) != "cached_token" ||
 		stringValue(mcpCall["sessionId"]) != host.config.SessionID || stringValue(mcpCall["server"]) != "agent_sessions" ||
-		stringValue(mcpCall["tool"]) != "list_peers" ||
+		stringValue(mcpCall["tool"]) != "identity" ||
+		stringValue(mcpCall["arguments"].(map[string]any)["session_id"]) != host.config.SessionID ||
 		stringValue(interject["sessionId"]) != host.config.SessionID ||
 		stringValue(interject["interjectionId"]) != "message-1" || !strings.Contains(stringValue(interject["text"]), "do exactly one turn") {
 		t.Fatalf("ACP bootstrap mismatch: initialize=%#v authenticate=%#v mcp=%#v interject=%#v", initialize, authenticate, mcpCall, interject)
@@ -649,10 +671,22 @@ func TestGrokMCPReadinessGatesPublicationNotLiveAttestation(t *testing.T) {
 
 func TestGrokAgentSessionsMCPReadinessRequiresSuccessfulToolResult(t *testing.T) {
 	response := map[string]any{"result": map[string]any{
-		"content": []any{map[string]any{"type": "text", "text": "ready"}},
+		"content":           []any{map[string]any{"type": "text", "text": "ready"}},
+		"structuredContent": map[string]any{"sessionId": "session-ready"},
 	}}
 	if err := grokAgentSessionsMCPCallReady(response); err != nil {
 		t.Fatalf("successful agent_sessions readiness call was rejected: %v", err)
+	}
+	if err := grokAgentSessionsMCPIdentityReady(response, "session-ready"); err != nil {
+		t.Fatalf("successful agent_sessions identity readiness call was rejected: %v", err)
+	}
+	delete(response["result"].(map[string]any), "structuredContent")
+	if err := grokAgentSessionsMCPIdentityReady(response, "session-ready"); err != nil {
+		t.Fatalf("successful text-only agent_sessions identity readiness call was rejected: %v", err)
+	}
+	response["result"].(map[string]any)["structuredContent"] = map[string]any{"sessionId": "session-ready"}
+	if err := grokAgentSessionsMCPIdentityReady(response, "session-other"); err == nil {
+		t.Fatal("wrong agent_sessions identity was accepted")
 	}
 	response["result"].(map[string]any)["isError"] = true
 	if err := grokAgentSessionsMCPCallReady(response); err == nil {
@@ -688,7 +722,8 @@ func TestInferGrokParentRequiresLiveLaunchCapabilityAndLeaderAncestry(t *testing
 	t.Setenv(grokSessionIDEnv, host.config.SessionID)
 
 	owner, ok := inferGrokParent(resolveNativePaths(), host.leader.cmd.Process.Pid)
-	if !ok || owner.PID != host.config.OwnerPID || owner.ProcStart != host.config.OwnerProcStart ||
+	live := liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID)
+	if !ok || live == nil || owner.PID != live.HostPID || owner.ProcStart != live.HostProcStart ||
 		owner.SessionID != host.config.SessionID || owner.PermissionMode != "default" {
 		t.Fatalf("Grok lane owner = %+v, %v", owner, ok)
 	}
@@ -983,12 +1018,35 @@ func TestGrokHostDoesNotPublishWithoutCachedAuthenticationMethod(t *testing.T) {
 	t.Setenv("GROK_FAKE_NO_CACHED_TOKEN", "1")
 	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "session-no-cached-auth")
 	defer stopTestGrokHost(t, host, cancel, result)
-	time.Sleep(300 * time.Millisecond)
-	_, err := requestControl(host.paths.ControlSocket, map[string]any{
-		"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
-	}, time.Second)
-	if err == nil || host.peer != nil {
-		t.Fatalf("host accepted missing cached auth: err=%v peer=%v", err, host.peer)
+	deadline := time.Now().Add(2 * time.Second)
+	sawAuthFailure := false
+	for time.Now().Before(deadline) {
+		status, err := requestControl(host.paths.ControlSocket, map[string]any{
+			"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+		}, 500*time.Millisecond)
+		if err != nil {
+			if strings.Contains(err.Error(), "authenticate official Grok ACP observer") {
+				sawAuthFailure = true
+				break
+			}
+			t.Fatalf("missing cached auth returned an unrelated control error: %v", err)
+		}
+		if ready, _ := status["ready"].(bool); ready || stringValue(status["permissionMode"]) != "" {
+			t.Fatalf("host reported readiness without cached auth: %#v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawAuthFailure {
+		t.Fatal("host did not report the missing cached authentication method")
+	}
+	host.peerMu.Lock()
+	peer := host.peer
+	host.peerMu.Unlock()
+	if peer != nil {
+		t.Fatalf("host published without cached auth: %#v", peer)
+	}
+	if live := liveGrokLaunchForSession(resolveNativePaths(), host.config.SessionID); live != nil {
+		t.Fatalf("missing cached auth published live peer: %#v", live)
 	}
 }
 
@@ -1512,6 +1570,36 @@ func TestActiveGrokLaunchSessionsBlocksLiveOrUnverifiableInstallState(t *testing
 	}
 	if _, err := activeGrokLaunchSessions(paths); err == nil || !strings.Contains(err.Error(), "malformed") {
 		t.Fatalf("malformed Grok inventory error = %v", err)
+	}
+}
+
+func TestActiveGrokLaunchSessionsIncludesLaneProcessSessionAndMalformedLaneState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	paths := resolveNativePaths()
+	sessionID := randomID()
+	processSessionID, err := grokProcessSessionID(os.Getpid())
+	if err != nil {
+		t.Skipf("process-session inventory is unsupported: %v", err)
+	}
+	state := grokLaneState{
+		Type: "grok-peer-lane", Name: "install-lane", SessionID: sessionID, Status: "archived",
+		WorkerSessionID: processSessionID, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli(),
+	}
+	if err := writeGrokLaneState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	live, err := activeGrokLaunchSessions(paths)
+	if err != nil || !reflect.DeepEqual(live, []string{sessionID}) {
+		t.Fatalf("Grok lane process-session inventory = %v, %v", live, err)
+	}
+	if err := os.WriteFile(grokLaneStatePath(paths, sessionID), []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activeGrokLaunchSessions(paths); err == nil || !strings.Contains(err.Error(), "malformed Grok lane") {
+		t.Fatalf("malformed Grok lane inventory error = %v", err)
 	}
 }
 

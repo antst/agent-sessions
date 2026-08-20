@@ -69,6 +69,7 @@ func TestCodexPeerInformationalAndPassthroughPreserveNativeArgv(t *testing.T) {
 		{"-n", "ignored", "--version"},
 		{"-C", root, "completion", "bash"},
 		{"app"},
+		{"migrate-rollouts"},
 	} {
 		plan, err := parseCodexPeerArgs(args, root, "")
 		if err != nil {
