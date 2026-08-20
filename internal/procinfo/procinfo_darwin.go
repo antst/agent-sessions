@@ -22,12 +22,6 @@ func Read(pid int) Info {
 	if pid <= 0 {
 		return Info{Status: Absent}
 	}
-	if err := unix.Kill(pid, 0); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return Info{Status: Absent}
-		}
-		return Info{Status: Unknown}
-	}
 	value, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil || value == nil {
 		if killErr := unix.Kill(pid, 0); errors.Is(killErr, syscall.ESRCH) {
@@ -35,6 +29,10 @@ func Read(pid int) Info {
 		}
 		return Info{Status: Unknown}
 	}
+	return infoFromKinfoProc(value)
+}
+
+func infoFromKinfoProc(value *unix.KinfoProc) Info {
 	state := "L"
 	if value.Proc.P_stat == zombieState {
 		state = "Z"
@@ -62,9 +60,11 @@ func Environment(pid int) ([]string, error) {
 	return environment, err
 }
 
-// List returns one exact identity for every process visible in one Darwin
-// kernel-table snapshot. Processes that disappear before identity capture are
-// omitted; unreadable live identities fail closed.
+// List returns one coherent identity for every non-zombie process in one
+// Darwin kernel-table snapshot. Do not preflight entries with kill(pid, 0):
+// EPERM is normal for foreign system processes even though kern.proc.all
+// already supplied their identity. Destructive callers re-attest each exact
+// process immediately before signalling it.
 func List() ([]Process, error) {
 	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
@@ -76,18 +76,11 @@ func List() ([]Process, error) {
 		if pid <= 1 {
 			continue
 		}
-		info := Read(pid)
-		switch info.Status {
-		case Absent:
+		info := infoFromKinfoProc(&process)
+		if info.State == "Z" || info.State == "X" {
 			continue
-		case Known:
-			if info.State == "Z" || info.State == "X" {
-				continue
-			}
-			result = append(result, Process{PID: pid, Info: info})
-		case Unknown:
-			return nil, fmt.Errorf("cannot identify live process %d", pid)
 		}
+		result = append(result, Process{PID: pid, Info: info})
 	}
 	return result, nil
 }
