@@ -20,7 +20,7 @@ import (
 // native registry or accidentally connecting to the developer's live agent.
 func useBridgeTestAgent(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "ba-")
 	runtimeDir := filepath.Join(root, "runtime")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
