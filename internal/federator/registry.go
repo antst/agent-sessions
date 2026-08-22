@@ -37,19 +37,20 @@ type registryRecord struct {
 
 type localPeer struct {
 	Peer
-	PID                  int
-	ProcStart            string
-	Socket               string
-	LifecyclePID         int
-	LifecycleProcStart   string
-	AdapterStrongStart   string
-	LifecycleStrongStart string
-	LifecycleRoot        string
-	ClaudeConfigRoot     string
-	ClaudeKeyBaseline    []ClaudeKeyBaselineEntry
-	ClaudeKeyBaselineSet bool
-	GroupProtocol        int
-	AgentService         bool
+	PID                     int
+	ProcStart               string
+	Socket                  string
+	LifecyclePID            int
+	LifecycleProcStart      string
+	AdapterStrongStart      string
+	LifecycleStrongStart    string
+	LifecycleRoot           string
+	ClaudeConfigRoot        string
+	ClaudeKeyBaseline       []ClaudeKeyBaselineEntry
+	ClaudeKeyBaselineSet    bool
+	ClaudeSessionUnresolved bool
+	GroupProtocol           int
+	AgentService            bool
 }
 
 //nolint:gocyclo,unparam // Legacy registry fixture keeps validation in one loop; hostID varies in external use.

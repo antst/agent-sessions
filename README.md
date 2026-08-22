@@ -133,11 +133,14 @@ and explicit bypass launches remain advertised as bypass until restart. Use
 `--yolo` (translated to native `--dangerously-skip-permissions`) or the native long option to opt in
 at launch; `--allow-dangerously-skip-permissions` is
 rejected because it would create an unattestable privilege change. Host settings remain untouched.
-`claude-peer --resume UUID_OR_NAME` accepts an exact UUID or a unique durable managed-peer name. A
-single live exact-name match takes precedence over history; ambiguous live or historical names are
-rejected with the matching UUIDs so the operator can select explicitly. Name resolution occurs
-before catalog mutation, socket creation, or native Claude launch, and the native CLI receives only
-the resolved exact UUID.
+`claude-peer --resume UUID_OR_NAME` uses Claude's native resume semantics. Exact UUIDs retain their
+pre-launch stable identity; every other target is passed to native Claude unchanged, including
+ordinary-session titles and duplicate titles that require Claude's interactive chooser. The wrapper
+owns cleanup through a provisional attachment ID, then atomically adopts the UUID in Claude's native
+session row without creating a provisional catalog session. Durable groups and parent choices are
+restored only after native selection and never replace it. Because the selected UUID is unknown
+before launch, a previously managed bypass session should be resumed by name with an explicit
+`--yolo`; exact-UUID resume can restore that permission policy before launch.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok

@@ -698,6 +698,16 @@ func (a *agent) handleControl(conn net.Conn) {
 				} else {
 					response = Message{Type: "peer_prepare", Version: GroupProtocolVersion}
 				}
+			case "peer_prepare_selection":
+				if message.Registration == nil {
+					response.Error = "peer preparation is required"
+					break
+				}
+				if err := a.prepareClaudePeerSelection(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_prepare_selection", Version: GroupProtocolVersion}
+				}
 			case "peer_prepare_launch":
 				if message.Registration == nil || message.Preference == nil {
 					response.Error = "peer preparation and previewed preferences are required"
@@ -715,6 +725,26 @@ func (a *agent) handleControl(conn net.Conn) {
 				} else {
 					response = Message{
 						Type: "peer_prepare_launch", Version: GroupProtocolVersion,
+						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+					}
+				}
+			case "peer_promote_selection":
+				if message.Registration == nil || message.Preference == nil {
+					response.Error = "peer preparation and previewed preferences are required"
+					break
+				}
+				if err := a.validatePreferenceParentUpdate(message); err != nil {
+					response.Error = err.Error()
+					break
+				}
+				preference, groups, err := a.promoteClaudePeerSelection(
+					*message.Registration, preferenceUpdateFromMessage(message), *message.Preference,
+				)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: "peer_promote_selection", Version: GroupProtocolVersion,
 						SessionID: message.SessionID, Preference: &preference, Groups: groups,
 					}
 				}
