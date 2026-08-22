@@ -239,7 +239,8 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer, observedKeys []ClaudeKeyBa
 	body, err := os.ReadFile(recordPath) //nolint:gosec // exact PID row in the configured shared Claude registry.
 	if err == nil {
 		var record registryRecord
-		if json.Unmarshal(body, &record) != nil || record.PID != peer.PID || record.SessionID != peer.SessionID ||
+		if json.Unmarshal(body, &record) != nil || record.PID != peer.PID ||
+			!claudeCleanupSessionMatches(peer, record.SessionID) ||
 			record.ProcStart != peer.ProcStart || peer.Socket != "" && record.MessagingSocketPath != peer.Socket {
 			return errors.New("native Claude record changed before cleanup")
 		}
@@ -334,6 +335,10 @@ func cleanupClaudePeerArtifactsLocked(peer localPeer, observedKeys []ClaudeKeyBa
 		return err
 	}
 	return nil
+}
+
+func claudeCleanupSessionMatches(peer localPeer, sessionID string) bool {
+	return sessionID == peer.SessionID || peer.ClaudeSessionUnresolved && validClaudeNativeSessionID(sessionID)
 }
 
 // ValidateClaudePeerObservedSocketKey binds a no-row socket to a strict

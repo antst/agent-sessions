@@ -26,6 +26,8 @@ const claudePeerNativeFailBeforeRowEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_B
 const claudePeerNativeFailAfterSocketEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_AFTER_SOCKET"
 const claudePeerNativeFailCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_CLEANUP"
 const claudePeerNativeFailSettingsCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_SETTINGS_CLEANUP"
+const claudePeerNativeSessionIDEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_SESSION_ID"
+const claudePeerNativeExpectedResumeEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_EXPECTED_RESUME"
 
 func directoryEntryNames(entries []os.DirEntry) []string {
 	names := make([]string, 0, len(entries))
@@ -44,6 +46,7 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		os.Exit(74)
 	}
 	sessionID := ""
+	resumeTarget := ""
 	peerName := "native-test"
 	permissionMode := "default"
 	messagingSocket := ""
@@ -63,7 +66,8 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 			sessionID = os.Args[index+1]
 		}
 		if argument == "--resume" && index+1 < len(os.Args) {
-			sessionID = os.Args[index+1]
+			resumeTarget = os.Args[index+1]
+			sessionID = resumeTarget
 		}
 		if argument == "--name" && index+1 < len(os.Args) {
 			peerName = os.Args[index+1]
@@ -74,6 +78,12 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		if argument == "--messaging-socket-path" && index+1 < len(os.Args) {
 			messagingSocket = os.Args[index+1]
 		}
+	}
+	if expected := os.Getenv(claudePeerNativeExpectedResumeEnv); expected != "" && resumeTarget != expected {
+		os.Exit(77)
+	}
+	if selected := os.Getenv(claudePeerNativeSessionIDEnv); selected != "" {
+		sessionID = selected
 	}
 	config := os.Getenv("CLAUDE_CONFIG_DIR")
 	socket := messagingSocket
@@ -228,24 +238,26 @@ func TestClaudePeerManagedOptionsStayBeforePromptDelimiter(t *testing.T) {
 	}
 }
 
-func TestClaudePeerNameResumeReplacementStaysBeforePromptDelimiter(t *testing.T) {
-	const sessionID = "00000000-0000-4000-8000-0000000000ca"
+func TestClaudePeerNameResumeStaysNativeBeforePromptDelimiter(t *testing.T) {
 	for _, args := range [][]string{
 		{"--resume", "worker", "--", "prompt", "--resume", "leave-this-alone"},
 		{"-r", "worker", "--", "prompt"},
 		{"--resume=worker", "--", "prompt"},
 	} {
-		replaced := replaceClaudeResumeTarget(args, sessionID)
-		delimiter := slices.Index(replaced, "--")
-		if delimiter < 0 || replaced[delimiter+1] != "prompt" {
-			t.Fatalf("resume replacement changed prompt delimiter: %v", replaced)
+		plan, err := parseClaudePeerArgs(args)
+		if err != nil {
+			t.Fatal(err)
 		}
-		before := strings.Join(replaced[:delimiter], " ")
-		if !strings.Contains(before, sessionID) || strings.Contains(before, "worker") {
-			t.Fatalf("resume replacement did not select exact UUID: %v", replaced)
+		delimiter := slices.Index(plan.args, "--")
+		if delimiter < 0 || plan.args[delimiter+1] != "prompt" {
+			t.Fatalf("native resume changed prompt delimiter: %v", plan.args)
 		}
-		if len(replaced) > delimiter+2 && replaced[delimiter+2] != "--resume" {
-			t.Fatalf("resume replacement changed prompt text: %v", replaced)
+		before := strings.Join(plan.args[:delimiter], " ")
+		if !strings.Contains(before, "worker") || plan.sessionID != "" || plan.attachmentID == "" {
+			t.Fatalf("native resume target was not preserved with a provisional attachment: %+v", plan)
+		}
+		if len(plan.args) > delimiter+2 && plan.args[delimiter+2] != "--resume" {
+			t.Fatalf("native resume changed prompt text: %v", plan.args)
 		}
 	}
 }
@@ -611,9 +623,13 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	if err != nil || !resolved.Preference.AlwaysApprove || !slices.Contains(resolved.EffectiveGroups, "project") {
 		t.Fatalf("restored Claude preferences = %+v, %v", resolved, err)
 	}
-	if err := RunClaudePeer([]string{"--resume", "worker", "--", "prompt text"}); err != nil {
+	t.Setenv(claudePeerNativeExpectedResumeEnv, "worker")
+	t.Setenv(claudePeerNativeSessionIDEnv, plan.sessionID)
+	if err := RunClaudePeer([]string{"--resume", "worker", "--yolo", "--", "prompt text"}); err != nil {
 		t.Fatalf("name resume with durable yolo and prompt delimiter: %v", err)
 	}
+	t.Setenv(claudePeerNativeExpectedResumeEnv, "")
+	t.Setenv(claudePeerNativeSessionIDEnv, "")
 	lifecycleRoot := claudePeerLifecycleRoot(stateDir, "host-test", plan.sessionID)
 	attachmentLock, err := acquireClaudePeerProfileLock(lifecycleRoot)
 	if err != nil {
@@ -675,6 +691,19 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	adopted, err := federator.LookupSessionPreferences(runtimeDir, ordinaryID)
 	if err != nil || adopted.Preference.Product != "claude" || adopted.Preference.Kind != "interactive" {
 		t.Fatalf("adopted Claude catalog row = %+v, %v", adopted, err)
+	}
+	const ordinaryNamedID = "00000000-0000-4000-8000-000000000124"
+	t.Setenv(claudePeerNativeExpectedResumeEnv, "ordinary-title")
+	t.Setenv(claudePeerNativeSessionIDEnv, ordinaryNamedID)
+	if err := RunClaudePeer([]string{"--resume", "ordinary-title", "--group", "adopted-by-name"}); err != nil {
+		t.Fatalf("adopt ordinary named Claude session through native resume: %v", err)
+	}
+	t.Setenv(claudePeerNativeExpectedResumeEnv, "")
+	t.Setenv(claudePeerNativeSessionIDEnv, "")
+	adoptedNamed, err := federator.LookupSessionPreferences(runtimeDir, ordinaryNamedID)
+	if err != nil || adoptedNamed.Preference.Product != "claude" ||
+		!slices.Contains(adoptedNamed.EffectiveGroups, "adopted-by-name") {
+		t.Fatalf("named ordinary Claude catalog row = %+v, %v", adoptedNamed, err)
 	}
 	if lifecycleEntries, err := os.ReadDir(lifecycleRoot); err != nil || len(lifecycleEntries) != 0 {
 		t.Fatalf("Agent Sessions lifecycle root retained native/settings artifacts: %v, %v", lifecycleEntries, err)
