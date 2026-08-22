@@ -1,6 +1,6 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.0+codex.20260820210410",
+  "version": "0.2.1+codex.20260822085148",
   "description": "Start, collect, message, resume, and archive named Codex, Claude, and Grok lanes.",
   "author": {
     "name": "Agent Sessions contributors"
