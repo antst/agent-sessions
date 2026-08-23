@@ -149,6 +149,21 @@ func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *tes
 		stringValue(listed["text"]) != "No live peers share a group with this session." {
 		t.Fatalf("Claude structured peer discovery = %#v, %v", listed, err)
 	}
+	const attachmentID = "00000000-0000-4000-8000-0000000000ca"
+	t.Setenv(peerSessionIDEnvironment, attachmentID)
+	resolvedParent := func(_ string, requested string) (federator.ParentContext, error) {
+		if requested != attachmentID {
+			return federator.ParentContext{}, errors.New("unexpected attachment")
+		}
+		return federator.ParentContext{
+			SessionID: ownID, Product: "claude", AdapterPID: os.Getpid(),
+			AdapterProcStart: readProcStart(os.Getpid()), AdapterSocket: ownSocket,
+			PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), PermissionMode: "default",
+		}, nil
+	}
+	if caller, err := attestClaudeMCPCallerWithResolver(paths, os.Getpid(), resolvedParent); err != nil || caller != ownID {
+		t.Fatalf("late-bound Claude attachment caller = %q, %v", caller, err)
+	}
 
 	foreign := exec.Command("sleep", "30")
 	if err := foreign.Start(); err != nil {

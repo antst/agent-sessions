@@ -55,6 +55,8 @@ type grokPlan struct {
 	requestedCwd        string
 	cwdExplicit         bool
 	sessionID           string
+	resumeTarget        string
+	lateBoundResume     bool
 	permissionMode      string
 	permissionSpecified bool
 	peerContext         peerLaunchContext
@@ -73,6 +75,10 @@ type grokHostRequest struct {
 	PermissionMode  string
 	GrokBin         string
 	AgentRuntimeDir string
+	LateBoundResume bool
+	NameSpecified   bool
+	PeerContext     peerLaunchContext
+	YoloSpecified   bool
 }
 
 type grokHostReady struct {
@@ -97,6 +103,7 @@ func RunGrokPeer(args []string) error {
 	return runGrokPeer(args, startGrokHost)
 }
 
+//nolint:gocyclo // Parse, preference, ownership, host-readiness, exec, and rollback failures require distinct diagnostics.
 func runGrokPeer(args []string, startHost grokHostStarter) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -117,16 +124,18 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := resolvePeerLaunchContext(
-		plan.sessionID, "grok", plan.peerContext,
-		plan.permissionMode == "bypassPermissions", plan.permissionSpecified,
-	)
-	if err != nil {
-		return fmt.Errorf("resolve Agent Sessions peer preferences: %w", err)
-	}
-	if resolved.Preference.AlwaysApprove && plan.permissionMode != "bypassPermissions" {
-		plan.permissionMode = "bypassPermissions"
-		plan.interactiveArgs = append(plan.interactiveArgs, "--always-approve")
+	if !plan.lateBoundResume {
+		resolved, resolveErr := resolvePeerLaunchContext(
+			plan.sessionID, "grok", plan.peerContext,
+			plan.permissionMode == "bypassPermissions", plan.permissionSpecified,
+		)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve Agent Sessions peer preferences: %w", resolveErr)
+		}
+		if resolved.Preference.AlwaysApprove && plan.permissionMode != "bypassPermissions" {
+			plan.permissionMode = "bypassPermissions"
+			plan.interactiveArgs = append(plan.interactiveArgs, "--always-approve")
+		}
 	}
 	ownerPID := os.Getpid()
 	ownerStart, err := capture(runtimePath, "launch", "proc-start", strconv.Itoa(ownerPID))
@@ -141,7 +150,12 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 		SessionID: plan.sessionID, Cwd: plan.requestedCwd, Name: plan.peerName,
 		OwnerPID: ownerPID, OwnerProcStart: strings.TrimSpace(ownerStart),
 		LaunchToken: launchToken, PermissionMode: plan.permissionMode, GrokBin: grok,
-		AgentRuntimeDir: agentRuntimeDir(),
+		AgentRuntimeDir: agentRuntimeDir(), LateBoundResume: plan.lateBoundResume,
+		NameSpecified: plan.peerName != "",
+		PeerContext:   plan.peerContext, YoloSpecified: plan.permissionSpecified,
+	}
+	if request.Name == "" && plan.lateBoundResume {
+		request.Name = plan.resumeTarget
 	}
 	host, err := startHost(runtimePath, request)
 	if err != nil {
@@ -204,7 +218,16 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 	}
 	if resume {
 		plan.mode = grokModeResume
-		plan.sessionID = sessionID
+		plan.resumeTarget = sessionID
+		if threadIDPattern.MatchString(sessionID) {
+			plan.sessionID = sessionID
+		} else {
+			plan.sessionID, err = newGrokSessionID()
+			if err != nil {
+				return grokPlan{}, fmt.Errorf("generate Grok attachment ID: %w", err)
+			}
+			plan.lateBoundResume = true
+		}
 		return plan, nil
 	}
 	if sessionID == "" {
@@ -344,9 +367,6 @@ func inspectManagedGrokArgs(args []string) ([]string, string, bool, string, erro
 		}
 		forwarded = append(forwarded, argument)
 	}
-	if identity.resume && identity.sessionID == "" {
-		return nil, "", false, "", usageError("managed Grok resume requires an exact session UUID")
-	}
 	return forwarded, identity.sessionID, identity.resume, permissionMode, nil
 }
 
@@ -428,9 +448,6 @@ func inspectGrokIdentity(args []string, index int, identity *grokManagedIdentity
 		if identity.resume || identity.fresh {
 			return true, next, usageError("Grok resume target was specified more than once")
 		}
-		if !threadIDPattern.MatchString(value) {
-			return true, next, usageError("managed Grok resume requires an exact session UUID; use native grok to resolve titles")
-		}
 		identity.sessionID, identity.resume = value, true
 		return true, next, nil
 	}
@@ -454,12 +471,16 @@ func grokResumeValue(args []string, index int) (string, int, bool, error) {
 	argument := args[index]
 	if argument == "--resume" || argument == "-r" || argument == "--load" {
 		if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
-			return "", index, true, usageError("managed Grok resume requires an explicit UUID; use native grok for the picker or title resolution")
+			return "", index, true, nil
 		}
 		return args[index+1], index + 1, true, nil
 	}
 	if strings.HasPrefix(argument, "--resume=") || strings.HasPrefix(argument, "--load=") {
-		return strings.SplitN(argument, "=", 2)[1], index, true, nil
+		value := strings.SplitN(argument, "=", 2)[1]
+		if strings.TrimSpace(value) == "" {
+			return "", index, true, usageError("--resume= requires a native Grok resume target")
+		}
+		return value, index, true, nil
 	}
 	if strings.HasPrefix(argument, "-r") && argument != "-r" {
 		return strings.TrimPrefix(argument, "-r"), index, true, nil
@@ -750,6 +771,21 @@ func grokHostArguments(request grokHostRequest) []string {
 	if request.AgentRuntimeDir != "" {
 		args = append(args, "--agent-runtime-dir", request.AgentRuntimeDir)
 	}
+	if request.LateBoundResume {
+		args = append(args, "--late-bound-resume")
+		groupsJSON, _ := json.Marshal(request.PeerContext.groups)
+		args = append(args,
+			"--groups-json", string(groupsJSON),
+			"--groups-specified="+boolString(request.PeerContext.groupsSpecified),
+			"--parent-session", request.PeerContext.parentSession,
+			"--parent-specified="+boolString(request.PeerContext.parentSpecified),
+			"--inherit-parent-groups="+boolString(request.PeerContext.inheritParentGroups),
+			"--inherit-groups-specified="+boolString(request.PeerContext.inheritGroupsSpecified),
+			"--always-approve="+boolString(request.PermissionMode == "bypassPermissions"),
+			"--always-approve-specified="+boolString(request.YoloSpecified),
+		)
+	}
+	args = append(args, "--name-specified="+boolString(request.NameSpecified))
 	if request.Name != "" {
 		args = append(args, "--name", request.Name)
 	}
@@ -761,7 +797,14 @@ func grokInteractiveArguments(plan grokPlan, ready grokHostReady) []string {
 	if plan.mode == grokModeFresh {
 		managed = append(managed, "--session-id", plan.sessionID)
 	} else {
-		managed = append(managed, "--resume", plan.sessionID)
+		resumeTarget := plan.sessionID
+		if plan.lateBoundResume {
+			resumeTarget = plan.resumeTarget
+		}
+		managed = append(managed, "--resume")
+		if resumeTarget != "" {
+			managed = append(managed, resumeTarget)
+		}
 	}
 	return append(managed, plan.interactiveArgs...)
 }

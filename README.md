@@ -145,6 +145,12 @@ Agent Sessions uses an explicit peer name or named resume target immediately, th
 display name from the latest validated native Claude `custom-title` event for the selected UUID.
 This keeps fresh peers, title-based resumes, exact-UUID resumes, and later native `/rename` changes
 aligned instead of exposing Claude's cwd-derived registry fallback.
+`grok-peer --resume [UUID_OR_TITLE]` likewise preserves Grok's native exact-UUID,
+case-insensitive title, ambiguity, and picker behavior. Its private live roster
+is authoritative for the selected UUID and title. For both Claude and Grok, a
+launch-scoped attachment ID exists only to own startup and cleanup before
+selection; structured messaging and lane ownership resolve that attachment to
+the live native UUID under exact process/socket attestation.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok
@@ -177,8 +183,9 @@ marker makes the installer use the bundled binary even if Go is installed.
   adapters keep session-scoped sockets; each Claude attachment uses a preparation-scoped socket
   that rotates on resume without depending on PID reuse. Normal TUI exit removes the live
   registration and owned children.
-- A native transcript can move between ordinary and peer mode by exact UUID. Use the product
-  wrapper once to adopt an ordinary session into the catalog; later `peer resume UUID` restores its
+- A native transcript can move between ordinary and peer mode. Exact UUIDs work for every product;
+  Claude and Grok wrappers also preserve their native title and chooser selectors. Use the product
+  wrapper once to adopt an ordinary session into the catalog; later managed resume restores its
   product/groups while an ordinary native resume remains an unregistered Agent Sessions opt-out.
 - Dead shim transports are replaced and garbage-collected without deleting queued messages.
 - Child Codex subagents remain private to their parent while the root is a published peer.

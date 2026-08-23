@@ -50,17 +50,21 @@ grok-peer -n reviewer
 grok-peer --always-approve -n trusted-reviewer
 grok-peer --yolo -n trusted-reviewer
 grok-peer --resume 12345678-1234-4234-8234-123456789abc
+grok-peer --resume reviewer
+grok-peer --resume
 ```
 
-`-n` / `--peer-name` is the only Agent Sessions option. Other options stay in
-their original order and are parsed by Grok. Fresh sessions receive a UUID
+Agent Sessions consumes `-n` / `--peer-name`, repeatable `-g` / `--group`,
+group-inheritance flags, and the `--yolo` convenience alias. Other options stay
+in their original order and are parsed by Grok. Fresh sessions receive a UUID
 before the TUI starts; the exit/session UI can be used to retain that UUID.
 
-The initial adapter deliberately accepts only an exact UUID for managed
-resume. Bare `--resume`, title resume, `--continue`, and `--fork-session` must
-be run with native `grok`; they are rejected rather than resolved by scraping
-Grok's private storage. Do not open the same UUID concurrently in another
-native Grok process.
+Managed `--resume` preserves Grok's native selector: an exact UUID, a title,
+or an omitted target for the native picker. The wrapper does not scrape Grok's
+private storage or parse `grok sessions`; its private leader attests the one
+selected resident UUID and native title, then atomically registers that
+identity. Do not open the same UUID concurrently in another native Grok
+process. `--continue` and `--fork-session` remain outside the managed contract.
 
 Managed peers require the private leader, so caller-supplied `--leader`,
 `--no-leader`, and `--leader-socket` are rejected. Grok leaders require

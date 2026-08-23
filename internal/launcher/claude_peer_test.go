@@ -27,6 +27,7 @@ const claudePeerNativeFailAfterSocketEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL
 const claudePeerNativeFailCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_CLEANUP"
 const claudePeerNativeFailSettingsCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_SETTINGS_CLEANUP"
 const claudePeerNativeSessionIDEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_SESSION_ID"
+const claudePeerNativeInitialSessionIDEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_INITIAL_SESSION_ID"
 const claudePeerNativeExpectedResumeEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_EXPECTED_RESUME"
 const claudePeerNativePublishedNameEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_PUBLISHED_NAME"
 
@@ -90,6 +91,18 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		peerName = publishedName
 	}
 	config := os.Getenv("CLAUDE_CONFIG_DIR")
+	if resumeTarget != "" && threadIDPattern.MatchString(sessionID) {
+		project := filepath.Join(config, "projects", "test-project")
+		if err := os.MkdirAll(project, 0o700); err != nil {
+			os.Exit(72)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"type": "custom-title", "sessionId": sessionID, "customTitle": resumeTarget,
+		})
+		if err := os.WriteFile(filepath.Join(project, sessionID+".jsonl"), append(body, '\n'), 0o600); err != nil {
+			os.Exit(72)
+		}
+	}
 	socket := messagingSocket
 	if socket == "" {
 		socket = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), strconv.Itoa(os.Getpid())+".sock")
@@ -125,18 +138,25 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 		time.Sleep(400 * time.Millisecond)
 		os.Exit(74)
 	}
-	row := map[string]any{
-		"pid": os.Getpid(), "sessionId": sessionID, "cwd": config, "name": peerName,
-		"permissionMode": permissionMode, "messagingSocketPath": socket, "startedAt": time.Now().UnixMilli(),
-		"procStart": federator.ProcessStart(os.Getpid()), "entrypoint": "cli", "kind": "interactive", "status": "idle",
-	}
-	body, _ := json.Marshal(row)
 	if err := os.MkdirAll(filepath.Join(config, "sessions"), 0700); err != nil {
 		os.Exit(72)
 	}
-	if err := os.WriteFile(filepath.Join(config, "sessions", strconv.Itoa(os.Getpid())+".json"), body, 0600); err != nil {
-		os.Exit(73)
+	writeRow := func(publishedSessionID string) {
+		row := map[string]any{
+			"pid": os.Getpid(), "sessionId": publishedSessionID, "cwd": config, "name": peerName,
+			"permissionMode": permissionMode, "messagingSocketPath": socket, "startedAt": time.Now().UnixMilli(),
+			"procStart": federator.ProcessStart(os.Getpid()), "entrypoint": "cli", "kind": "interactive", "status": "idle",
+		}
+		body, _ := json.Marshal(row)
+		if err := os.WriteFile(filepath.Join(config, "sessions", strconv.Itoa(os.Getpid())+".json"), body, 0600); err != nil {
+			os.Exit(73)
+		}
 	}
+	if initial := strings.TrimSpace(os.Getenv(claudePeerNativeInitialSessionIDEnv)); initial != "" {
+		writeRow(initial)
+		time.Sleep(250 * time.Millisecond)
+	}
+	writeRow(sessionID)
 	time.Sleep(700 * time.Millisecond)
 	_ = listener.Close()
 	if os.Getenv(claudePeerNativeFailCleanupEnv) == "1" {
@@ -702,14 +722,17 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 		t.Fatalf("adopted Claude catalog row = %+v, %v", adopted, err)
 	}
 	const ordinaryNamedID = "00000000-0000-4000-8000-000000000124"
+	const transientBootID = "00000000-0000-4000-8000-000000000125"
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "ordinary-title")
 	t.Setenv(claudePeerNativeSessionIDEnv, ordinaryNamedID)
+	t.Setenv(claudePeerNativeInitialSessionIDEnv, transientBootID)
 	t.Setenv(claudePeerNativePublishedNameEnv, "antst-d2")
 	if err := RunClaudePeer([]string{"--resume", "ordinary-title", "--group", "adopted-by-name"}); err != nil {
 		t.Fatalf("adopt ordinary named Claude session through native resume: %v", err)
 	}
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "")
 	t.Setenv(claudePeerNativeSessionIDEnv, "")
+	t.Setenv(claudePeerNativeInitialSessionIDEnv, "")
 	t.Setenv(claudePeerNativePublishedNameEnv, "")
 	adoptedNamed, err := federator.LookupSessionPreferences(runtimeDir, ordinaryNamedID)
 	if err != nil || adoptedNamed.Preference.Product != "claude" ||
@@ -718,6 +741,9 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	}
 	if resolvedID, resolveErr := federator.ResolveSessionName(runtimeDir, "claude", "ordinary-title"); resolveErr != nil || resolvedID != ordinaryNamedID {
 		t.Fatalf("named Claude resume display name = %q, %v", resolvedID, resolveErr)
+	}
+	if transient, transientErr := federator.LookupSessionPreferences(runtimeDir, transientBootID); transientErr == nil {
+		t.Fatalf("transient native boot identity entered the durable catalog: %+v", transient)
 	}
 	if lifecycleEntries, err := os.ReadDir(lifecycleRoot); err != nil || len(lifecycleEntries) != 0 {
 		t.Fatalf("Agent Sessions lifecycle root retained native/settings artifacts: %v, %v", lifecycleEntries, err)

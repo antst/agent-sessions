@@ -275,6 +275,19 @@ func TestAutomaticRemoteLaneSourceInferenceRejectsInheritedEnvironment(t *testin
 	}
 }
 
+func TestRemoteLaneSourceResolvesLateBoundAttachmentAlias(t *testing.T) {
+	const actual = "3c0c0831-9bd7-40db-9ee3-e108f315ea57"
+	const attachment = "019fe660-1c86-7700-b462-6ff16de00fc5"
+	want := localPeer{Peer: Peer{SessionID: actual, Name: "selected"}, AttachmentID: attachment}
+	peers := map[string]localPeer{"host/" + actual: want}
+	for _, sourceID := range []string{actual, attachment} {
+		got, ok := localPeerBySession(peers, sourceID)
+		if !ok || got.SessionID != actual || got.AttachmentID != attachment {
+			t.Fatalf("source %q resolved to %+v, %v", sourceID, got, ok)
+		}
+	}
+}
+
 func TestPermissionModeFromProcessArgsPreservesArgumentBoundaries(t *testing.T) {
 	tests := []struct {
 		args []string

@@ -483,7 +483,7 @@ func validateCurrentDeliveryGroups(source, target Peer, frame AgentFrame) error 
 
 func localPeerBySession(peers map[string]localPeer, sessionID string) (localPeer, bool) {
 	for _, peer := range peers {
-		if peer.SessionID == sessionID {
+		if peer.SessionID == sessionID || (peer.AttachmentID != "" && peer.AttachmentID == sessionID) {
 			return peer, true
 		}
 	}
