@@ -947,7 +947,7 @@ func claudePeerRegistration(row claudeNativePeerRecord, plan claudePeerPlan, yol
 	}
 	registration := federator.PeerRegistration{
 		Version: federator.GroupProtocolVersion, SessionID: row.SessionID, Product: "claude",
-		Name: defaultClaudePeerName(plan.peerName, row), Status: defaultClaudePeerStatus(row.Status),
+		Name: defaultClaudePeerName(plan, row), Status: defaultClaudePeerStatus(row.Status),
 		PermissionMode: permissionMode, Cwd: row.Cwd, PID: pid, ProcStart: procStart,
 		Socket: row.MessagingSocketPath, StartedAt: row.StartedAt,
 	}
@@ -1132,12 +1132,16 @@ func parseClaudeNativePeerRecordForCleanup(
 	return row, nil
 }
 
-func defaultClaudePeerName(explicit string, row claudeNativePeerRecord) string {
-	if strings.TrimSpace(row.Name) != "" {
-		return row.Name
-	}
-	if strings.TrimSpace(explicit) != "" {
+func defaultClaudePeerName(plan claudePeerPlan, row claudeNativePeerRecord) string {
+	if explicit := strings.TrimSpace(plan.peerName); explicit != "" {
 		return explicit
+	}
+	if target := strings.TrimSpace(plan.resumeTarget); plan.resume && target != "" &&
+		!threadIDPattern.MatchString(target) {
+		return target
+	}
+	if native := strings.TrimSpace(row.Name); native != "" {
+		return native
 	}
 	return "claude-" + row.SessionID[:8]
 }
