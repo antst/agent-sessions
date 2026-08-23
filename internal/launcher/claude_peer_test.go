@@ -28,6 +28,7 @@ const claudePeerNativeFailCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_CLE
 const claudePeerNativeFailSettingsCleanupEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_FAIL_SETTINGS_CLEANUP"
 const claudePeerNativeSessionIDEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_SESSION_ID"
 const claudePeerNativeExpectedResumeEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_EXPECTED_RESUME"
+const claudePeerNativePublishedNameEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_PUBLISHED_NAME"
 
 func directoryEntryNames(entries []os.DirEntry) []string {
 	names := make([]string, 0, len(entries))
@@ -84,6 +85,9 @@ func TestClaudePeerNativeHelper(_ *testing.T) {
 	}
 	if selected := os.Getenv(claudePeerNativeSessionIDEnv); selected != "" {
 		sessionID = selected
+	}
+	if publishedName := os.Getenv(claudePeerNativePublishedNameEnv); publishedName != "" {
+		peerName = publishedName
 	}
 	config := os.Getenv("CLAUDE_CONFIG_DIR")
 	socket := messagingSocket
@@ -612,10 +616,15 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	}
 	// Run the real public entry with the stable ID generated above so the test
 	// can inspect the exact retained profile and durable catalog entry.
+	t.Setenv(claudePeerNativePublishedNameEnv, "kernel-tdd-2c")
 	if err := RunClaudePeer([]string{
 		"--session-id", plan.sessionID, "--group", "project", "--peer-name", "worker", "--dangerously-skip-permissions",
 	}); err != nil {
 		t.Fatal(err)
+	}
+	t.Setenv(claudePeerNativePublishedNameEnv, "")
+	if resolvedID, resolveErr := federator.ResolveSessionName(runtimeDir, "claude", "worker"); resolveErr != nil || resolvedID != plan.sessionID {
+		t.Fatalf("explicit Claude peer name = %q, %v", resolvedID, resolveErr)
 	}
 	resolved, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
 		SessionID: plan.sessionID, Product: "claude",
@@ -695,15 +704,20 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	const ordinaryNamedID = "00000000-0000-4000-8000-000000000124"
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "ordinary-title")
 	t.Setenv(claudePeerNativeSessionIDEnv, ordinaryNamedID)
+	t.Setenv(claudePeerNativePublishedNameEnv, "antst-d2")
 	if err := RunClaudePeer([]string{"--resume", "ordinary-title", "--group", "adopted-by-name"}); err != nil {
 		t.Fatalf("adopt ordinary named Claude session through native resume: %v", err)
 	}
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "")
 	t.Setenv(claudePeerNativeSessionIDEnv, "")
+	t.Setenv(claudePeerNativePublishedNameEnv, "")
 	adoptedNamed, err := federator.LookupSessionPreferences(runtimeDir, ordinaryNamedID)
 	if err != nil || adoptedNamed.Preference.Product != "claude" ||
 		!slices.Contains(adoptedNamed.EffectiveGroups, "adopted-by-name") {
 		t.Fatalf("named ordinary Claude catalog row = %+v, %v", adoptedNamed, err)
+	}
+	if resolvedID, resolveErr := federator.ResolveSessionName(runtimeDir, "claude", "ordinary-title"); resolveErr != nil || resolvedID != ordinaryNamedID {
+		t.Fatalf("named Claude resume display name = %q, %v", resolvedID, resolveErr)
 	}
 	if lifecycleEntries, err := os.ReadDir(lifecycleRoot); err != nil || len(lifecycleEntries) != 0 {
 		t.Fatalf("Agent Sessions lifecycle root retained native/settings artifacts: %v, %v", lifecycleEntries, err)

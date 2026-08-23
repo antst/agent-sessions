@@ -141,6 +141,10 @@ session row without creating a provisional catalog session. Durable groups and p
 restored only after native selection and never replace it. Because the selected UUID is unknown
 before launch, a previously managed bypass session should be resumed by name with an explicit
 `--yolo`; exact-UUID resume can restore that permission policy before launch.
+Agent Sessions uses an explicit peer name or named resume target immediately, then refreshes the
+display name from the latest validated native Claude `custom-title` event for the selected UUID.
+This keeps fresh peers, title-based resumes, exact-UUID resumes, and later native `/rename` changes
+aligned instead of exposing Claude's cwd-derived registry fallback.
 `make install-all` installs all three surfaces. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok

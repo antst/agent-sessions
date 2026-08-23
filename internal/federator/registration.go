@@ -286,6 +286,15 @@ func (a *agent) claudeTranscriptSessionNames(
 	return names, invalid
 }
 
+func (a *agent) claudeTranscriptSessionTitle(sessionID string) (string, bool) {
+	names, invalid := a.claudeTranscriptSessionNames(map[string]bool{sessionID: true})
+	if invalid[sessionID] {
+		return "", false
+	}
+	title, ok := names[sessionID]
+	return title, ok && title != ""
+}
+
 func readClaudeTranscriptTitle(path, expectedSessionID string) (string, error) {
 	file, err := os.Open(path) //nolint:gosec // exact catalog session filename below the configured Claude projects root.
 	if err != nil {
@@ -1059,6 +1068,12 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	if preference.AlwaysApprove != (registration.PermissionMode == "bypassPermissions") {
 		return Peer{}, errors.New("peer permission mode does not match durable yolo preference")
 	}
+	peerName := registration.Name
+	if registration.Product == "claude" {
+		if title, ok := a.claudeTranscriptSessionTitle(registration.SessionID); ok {
+			peerName = title
+		}
+	}
 	id := a.options.HostID + "/" + registration.SessionID
 	preparationID := peerPreparationID(registration)
 	a.mu.Lock()
@@ -1099,7 +1114,7 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	peer := Peer{
 		ID: id, HostID: a.options.HostID, HostName: a.options.HostName,
 		SessionID: registration.SessionID, GlobalID: globalSessionID(a.options.HostID, registration.SessionID),
-		Name: cleanPeerName(registration.Name), DisplayName: qualifiedName(registration.Name, a.options.HostName),
+		Name: cleanPeerName(peerName), DisplayName: qualifiedName(peerName, a.options.HostName),
 		Status: defaultString(registration.Status, "idle"), Cwd: registration.Cwd,
 		Entrypoint: registration.Product, PermissionMode: defaultString(registration.PermissionMode, "default"),
 		StartedAt: startedAt, PeerProtocol: GroupProtocolVersion,
