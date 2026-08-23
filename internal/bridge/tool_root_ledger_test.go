@@ -128,6 +128,75 @@ func TestToolRootLedgerCrashRetryRetainsCleanupDebt(t *testing.T) {
 	}
 }
 
+func TestToolRootLedgerTreatsRetiredZombieAsNonExecutableCleanup(t *testing.T) {
+	root := toolRootProcessIdentity{PID: 2351, ProcStart: "root-start", StrongStart: "root-strong-start"}
+	observed := map[int]procinfo.Info{root.PID: knownToolRootProcess(root)}
+	ledger := prepareTestToolRootLedger(t, "qwen", observed, func(identity toolRootProcessIdentity) error {
+		if identity != root {
+			t.Fatalf("retire identity = %+v; want %+v", identity, root)
+		}
+		zombie := knownToolRootProcess(root)
+		zombie.State = "Z"
+		observed[root.PID] = zombie
+		return nil
+	})
+	if err := ledger.register(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.closeAdmission(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.reconcileCleanup(); err != nil {
+		t.Fatalf("retired zombie retained cleanup debt: %v", err)
+	}
+	snapshot, err := ledger.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CleanupState != "clean" || len(snapshot.Roots) != 0 {
+		t.Fatalf("retired zombie did not converge: %+v", snapshot)
+	}
+}
+
+func TestToolRootLedgerWaitsForBoundedPostSignalExit(t *testing.T) {
+	root := toolRootProcessIdentity{PID: 2371, ProcStart: "root-start", StrongStart: "root-strong-start"}
+	observed := map[int]procinfo.Info{root.PID: knownToolRootProcess(root)}
+	retiring, postRetireChecks := false, 0
+	config := testToolRootLedgerConfig(t, "qwen", observed, func(identity toolRootProcessIdentity) error {
+		if identity != root {
+			t.Fatalf("retire identity = %+v; want %+v", identity, root)
+		}
+		retiring = true
+		return nil
+	})
+	baseObserve := config.ObserveProcess
+	config.ObserveProcess = func(pid int) procinfo.Info {
+		if pid == root.PID && retiring {
+			postRetireChecks++
+			if postRetireChecks >= 3 {
+				return procinfo.Info{Status: procinfo.Absent}
+			}
+		}
+		return baseObserve(pid)
+	}
+	ledger, err := prepareToolRootLedger(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.register(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.closeAdmission(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.reconcileCleanup(); err != nil {
+		t.Fatalf("bounded post-signal exit retained cleanup debt: %v", err)
+	}
+	if postRetireChecks < 3 {
+		t.Fatalf("post-retire observations = %d, want at least 3", postRetireChecks)
+	}
+}
+
 func TestToolRootLedgerPreservesUnrelatedProcessAfterPIDReuse(t *testing.T) {
 	owned := toolRootProcessIdentity{PID: 2401, ProcStart: "same-display-start", StrongStart: "owned-strong-start"}
 	unrelated := toolRootProcessIdentity{PID: owned.PID, ProcStart: owned.ProcStart, StrongStart: "unrelated-strong-start"}

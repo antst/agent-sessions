@@ -62,7 +62,7 @@ Non-secret, non-session diagnostic result.
 | `dual_output_contract` | result | Parser and expected launch-time `session_start` contract. |
 | `acp_contract` | result | Initialize-only capability probe. |
 | `archive_contract` | result | Serve help/capability and native state model. |
-| `permission_contract` | result | Requested and corroborated initial native approval mode. |
+| `permission_contract` | result | Requested native approval mode and whether a trustworthy current observation exists. |
 | `supervisor_ready`, `runtime_ready` | boolean | Existing Agent Sessions infrastructure. |
 | `issues` | ordered list | Cause-specific, machine-readable failures. |
 
@@ -70,7 +70,7 @@ Validation:
 
 - Doctor creates no native session, transcript, model turn, MCP child, or integration mutation.
 - `ready=true` requires every operation-specific cell; `unknown` is not ready.
-- Admission fails when Qwen cannot honor or corroborate the requested initial native approval mode.
+- Admission fails when Qwen rejects the requested native approval-mode option.
 - Readiness does not promise that Qwen's mode remains fixed after publication.
 
 ## Qwen peer preparation
@@ -124,7 +124,7 @@ No externally discoverable participant exists before `committed/live`.
 | `cwd` | canonical path | Matches `session_start`. |
 | `profile` | Qwen profile identity | Matches preparation and resume request. |
 | `launch_permission_preference` | tagged value | Durable resume default: `native_default`, `non_yolo` (`--approval-mode default`), `yolo`, or exact admitted `native:<mode>`. |
-| `initial_native_approval_mode` | string | Corroborated before publication. |
+| `initial_native_approval_mode` | string | Exact requested/default launch contract; not a live observation. |
 | `current_native_approval_mode` | string/unknown | Best-effort native observation; Qwen may change it normally. |
 | `groups` | normalized set | Explicit plus mandatory private group. |
 | `delivery_endpoint` | socket address | Private, exact, live session-stable path; `lstat` is a Unix socket, never a symlink. |

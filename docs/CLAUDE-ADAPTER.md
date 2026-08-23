@@ -180,7 +180,7 @@ one-time archive rather than being guessed or adopted.
 `--persistent` is required when work must outlive the orchestrator. It disables owner cleanup but
 does not disable the default terminal grace timer.
 It is also required when the lane is launched from a plain shell, cron job, or CI runner rather than
-beneath a live Codex or Claude process; those callers have no stable lifecycle owner to corroborate.
+beneath a live managed Codex, Claude, Grok, or Qwen process; those callers have no stable lifecycle owner to corroborate.
 
 Auto-archive is independent of ownership and enabled by default. After the latest turn reaches its
 final terminal state, including any schema correction, the lane remains idle and messageable for one

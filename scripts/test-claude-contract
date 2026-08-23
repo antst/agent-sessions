@@ -134,7 +134,7 @@ for forbidden in hooks agents settings.json; do
   fi
 done
 if [[ ! -f "$plugin_root/claude/.mcp.json" ]] ||
-   ! grep -Fq '"claude_peer"' "$plugin_root/claude/.mcp.json" ||
+   ! grep -Fq '"agent_sessions"' "$plugin_root/claude/.mcp.json" ||
    ! grep -Fq '"agent-session-runtime"' "$plugin_root/claude/.mcp.json" ||
    ! grep -Fq '"mcp"' "$plugin_root/claude/.mcp.json"; then
   printf 'Claude structured messaging MCP inventory is incomplete\n' >&2
@@ -251,10 +251,12 @@ fi
 contract_binary_dir="$temporary_root/package-bin"
 contract_release_dir="$temporary_root/package-release"
 mkdir -p "$contract_binary_dir" "$contract_release_dir"
-for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+while IFS= read -r binary; do
   printf '%s\n' '#!/bin/sh' 'exit 0' >"$contract_binary_dir/$binary"
   chmod 0700 "$contract_binary_dir/$binary"
-done
+done < <("$plugin_root/scripts/release-inventory" binaries)
+rm -f -- "$contract_binary_dir/agent-session-runtime"
+go build -o "$contract_binary_dir/agent-session-runtime" "$plugin_root/cmd/agent-session-runtime"
 contract_archive="$("$plugin_root/scripts/package-release" contract-test contract-test \
   "$contract_binary_dir" "$contract_release_dir")"
 contract_extract="$temporary_root/package-extract"

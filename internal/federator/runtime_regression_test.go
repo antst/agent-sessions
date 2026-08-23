@@ -7,11 +7,100 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestAgentRestartRetainsQwenCleanupDebtForChangedArtifact(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	catalogPath := filepath.Join(stateDir, "sessions.json")
+	catalog, err := openSessionCatalog(catalogPath, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-0000000000d7"
+	initialAgent := qwenTestAgent(t, root, stateDir, catalog)
+	adapter := exec.Command("sleep", "30")
+	lifecycle := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(); err != nil {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		_ = lifecycle.Process.Kill()
+		_ = lifecycle.Wait()
+	})
+	registration := qwenTestPreparation(t, root, sessionID)
+	registration.LifecycleRoot = PeerLifecycleRootInState(stateDir, "qwen", sessionID)
+	registration.PID, registration.ProcStart = adapter.Process.Pid, processStart(adapter.Process.Pid)
+	registration.LifecyclePID, registration.LifecycleProcStart = lifecycle.Process.Pid, processStart(lifecycle.Process.Pid)
+	qwenRewritePreparationPaths(t, &registration)
+	update := SessionPreferenceUpdate{SessionID: sessionID, Product: "qwen", Kind: SessionKindInteractive}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := initialAgent.preparePeerLaunch(registration, update, expected); err != nil {
+		t.Fatal(err)
+	}
+
+	events := registration.QwenPreparation.Events.Path
+	preservedOriginal := filepath.Join(root, "preserved-events-original.jsonl")
+	if err := os.Rename(events, preservedOriginal); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(events, []byte("unrelated replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = lifecycle.Wait()
+
+	reopenAndReconcile := func() *agent {
+		reopenedCatalog, openErr := openSessionCatalog(catalogPath, "host-a")
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		restarted := qwenTestAgent(t, root, stateDir, reopenedCatalog)
+		if loadErr := restarted.loadPeerPreparations(); loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		restarted.reconcileRegisteredPeers()
+		return restarted
+	}
+	firstRestart := reopenAndReconcile()
+	if len(firstRestart.preparations) != 1 {
+		t.Fatalf("changed Qwen artifact did not retain cleanup debt: %#v", firstRestart.preparations)
+	}
+	if _, err := os.Lstat(registration.QwenPreparation.Input.Path); !os.IsNotExist(err) {
+		t.Fatalf("unchanged owned input survived partial cleanup: %v", err)
+	}
+	if body, err := os.ReadFile(events); err != nil || string(body) != "unrelated replacement\n" {
+		t.Fatalf("changed Qwen artifact was removed or modified: body=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(firstRestart.preparationPath(sessionID)); err != nil {
+		t.Fatalf("durable cleanup debt was not retained: %v", err)
+	}
+
+	secondRestart := reopenAndReconcile()
+	if len(secondRestart.preparations) != 1 {
+		t.Fatalf("cleanup debt disappeared after a second agent restart: %#v", secondRestart.preparations)
+	}
+	if body, err := os.ReadFile(events); err != nil || string(body) != "unrelated replacement\n" {
+		t.Fatalf("second restart touched changed artifact: body=%q err=%v", body, err)
+	}
+}
 
 func TestAgentInstanceLockRejectsSecondOwner(t *testing.T) {
 	runtimeDir := t.TempDir()
@@ -157,7 +246,7 @@ func TestGroupedLocalDeliveryFailureDoesNotDisconnectAgent(t *testing.T) {
 	agent := &agent{
 		logger: discardLogger(), registryDir: registry,
 		local: map[string]localPeer{}, remote: map[string]Peer{
-			"remote/source": groupedRemoteLaneParent("remote", "source", "claude"),
+			"remote/source": groupedRemoteLaneParent("remote", "claude"),
 		},
 	}
 	frame, err := json.Marshal(map[string]any{"type": "user"})

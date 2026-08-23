@@ -348,9 +348,9 @@ func TestSplitDynamicMCPName(t *testing.T) {
 		server    string
 		name      string
 	}{
-		{tool: "mcp__claude_peer__list_peers", server: "claude_peer", name: "list_peers"},
-		{tool: "tools.mcp__claude_peer__send_message", server: "claude_peer", name: "send_message"},
-		{namespace: "mcp__claude_peer", tool: "identity", server: "claude_peer", name: "identity"},
+		{tool: "mcp__agent_sessions__list_peers", server: "agent_sessions", name: "list_peers"},
+		{tool: "tools.mcp__agent_sessions__send_message", server: "agent_sessions", name: "send_message"},
+		{namespace: "mcp__agent_sessions", tool: "identity", server: "agent_sessions", name: "identity"},
 	}
 	for _, test := range tests {
 		server, name, ok := splitDynamicMCPName(test.namespace, test.tool)
@@ -365,7 +365,7 @@ func TestSplitDynamicMCPName(t *testing.T) {
 
 func TestNativePeerElicitationApprovalIsServerScoped(t *testing.T) {
 	trusted, _ := json.Marshal(map[string]any{
-		"serverName": "claude_peer", "mode": "form",
+		"serverName": "agent_sessions", "mode": "form",
 		"_meta": map[string]any{"codex_approval_kind": "mcp_tool_call", "tool_name": "send_message"},
 	})
 	response, ok := nativePeerElicitationResponse(trusted)
@@ -378,7 +378,7 @@ func TestNativePeerElicitationApprovalIsServerScoped(t *testing.T) {
 	if _, ok := nativePeerElicitationResponse(foreign); ok {
 		t.Fatal("foreign MCP server approval was trusted")
 	}
-	ordinary, _ := json.Marshal(map[string]any{"serverName": "claude_peer", "mode": "form", "_meta": map[string]any{}})
+	ordinary, _ := json.Marshal(map[string]any{"serverName": "agent_sessions", "mode": "form", "_meta": map[string]any{}})
 	if _, ok := nativePeerElicitationResponse(ordinary); ok {
 		t.Fatal("ordinary peer elicitation was auto-accepted")
 	}

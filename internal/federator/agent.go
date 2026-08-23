@@ -15,12 +15,48 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/qwenprofile"
+	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
+
+var evaluateQwenLaneReadiness = func(executable string) error {
+	profile, err := qwenprofile.Current()
+	if err != nil {
+		return err
+	}
+	workspace, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	report, err := qwenreadiness.Check(ctx, qwenreadiness.Request{
+		Executable: executable, Workspace: workspace, Profile: profile,
+		ExpectedIntegrationVersion: qwenreadiness.IntegrationVersion,
+		Source:                     qwenreadiness.NewNativeSource(os.Environ()),
+	})
+	if err != nil {
+		return err
+	}
+	if !report.Ready {
+		issues := make([]string, 0, len(report.Issues))
+		for _, issue := range report.Issues {
+			issues = append(issues, issue.Code+": "+issue.Message)
+		}
+		return fmt.Errorf("qwen lane readiness failed: %s", strings.Join(issues, "; "))
+	}
+	return nil
+}
 
 // AgentOptions configures one host agent and its local Claude registry.
 type AgentOptions struct {
@@ -80,6 +116,7 @@ func preferenceUpdateFromMessage(message Message) SessionPreferenceUpdate {
 		ParentGroups: message.ParentGroups, ParentSpecified: message.ParentSpecified,
 		InheritParentGroups: message.InheritParentGroups, InheritGroupsSpecified: message.InheritGroupsSpecified,
 		AlwaysApprove: message.AlwaysApprove, AlwaysApproveSpecified: message.AlwaysApproveSpecified,
+		Qwen: message.QwenSession,
 	}
 }
 
@@ -207,6 +244,14 @@ func configureLaneExecutables(options *AgentOptions) error {
 	}
 	if qwenConfigured != "" && options.QwenLaneExecutable == "" {
 		return fmt.Errorf("configured Qwen lane launcher %q is not executable", qwenConfigured)
+	}
+	if options.QwenLaneExecutable != "" {
+		if err := evaluateQwenLaneReadiness(options.QwenLaneExecutable); err != nil {
+			if qwenConfigured != "" {
+				return fmt.Errorf("configured Qwen lane launcher is not ready: %w", err)
+			}
+			options.QwenLaneExecutable = ""
+		}
 	}
 	return nil
 }
@@ -638,9 +683,11 @@ func (a *agent) handleControl(conn net.Conn) {
 				case !ok:
 					response.Error = "session is not present in the catalog"
 				default:
+					name, live := a.sessionProjection(message.SessionID, preference.Product)
 					response = Message{
 						Type: "session_lookup", Version: GroupProtocolVersion,
-						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+						SessionID: message.SessionID, Name: name, Preference: &preference, Groups: groups,
+						Peers: live,
 					}
 				}
 			case "session_name_lookup":

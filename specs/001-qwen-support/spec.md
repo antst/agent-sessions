@@ -21,7 +21,7 @@
 - Q: How should Qwen's archive ownership be decided? → A: Follow the Codex model if current Qwen
   supports equivalent native archive and unarchive operations; otherwise follow the Claude model.
 - Q: How should Agent Sessions handle an installed Qwen version that was not the exact version used
-  for the v0.2.1 release tests? → A: Require a minimum version plus live contract checks.
+  for the v0.2.4 release tests? → A: Require a minimum version plus live contract checks.
 - Q: Should Qwen follow this same installed-but-inactive-until-attested model? → A: Yes; use the
   same managed-session attestation model as Codex, Claude, and Grok.
 - Q: What should happen when an operator selects a non-default Qwen profile that does not have the
@@ -68,7 +68,7 @@ unmanaged Qwen session has no Agent Sessions identity or usable messaging or lan
 1. **Given** an authenticated Qwen installation and a running host agent, **When** an operator starts
    a named Qwen peer in one or more groups, **Then** exactly one live Qwen participant appears with
    the expected identity, working directory, groups, durable launch permission preference,
-   corroborated initial native mode, honest current-native-mode-or-unknown status, and messageable
+   exact initial native-mode request, honest current-native-mode-or-unknown status, and messageable
    status.
 2. **Given** two managed peers sharing a group, including one Qwen peer, **When** either peer sends a
    direct message, explicit multicast, or named-group broadcast, **Then** only authorized recipients
@@ -191,11 +191,11 @@ owner's native profile and credentials are unchanged.
 2. **Given** no Qwen session is running, **When** the operator runs the readiness check, **Then** it
    reports executable version, non-secret credential/provider configuration state, workspace trust,
    headless capability, and requested versus expected initial permission mode without creating a
-   session. Actual provider authentication and effective initial mode are first corroborated by the
-   intended managed launch before publication.
-3. **Given** Qwen cannot honor the initial native mode expected by the selected durable launch
-   permission preference, **When** a peer or lane starts, **Then** startup fails clearly before
-   publication rather than silently selecting another initial mode.
+   session. Actual provider authentication is first exercised by the intended managed launch. The
+   requested initial mode is retained exactly, while current mode is reported as unknown unless a
+   supported native event exposes it.
+3. **Given** Qwen rejects the requested native approval-mode option, **When** a peer or lane starts,
+   **Then** startup fails clearly before publication rather than silently selecting another option.
 4. **Given** an existing native Qwen profile, **When** Agent Sessions is installed, upgraded, used,
    and removed, **Then** credentials and unrelated native settings remain unchanged.
 
@@ -307,8 +307,8 @@ owner's native profile and credentials are unchanged.
   disconnected, unready, incompatible, or does not advertise Qwen capability; no alternate transport
   or local fallback is permitted.
 - **FR-022**: Agent Sessions MUST preserve Qwen's native initial approval behavior when the operator
-  supplies no permission option, map explicit common permission choices to Qwen's initial native
-  mode, and corroborate the effective initial mode before publication. `--yolo` MUST request native
+  supplies no permission option and map explicit common permission choices to Qwen's initial native
+  mode without claiming an observation unavailable from Qwen's public interactive protocol. `--yolo` MUST request native
   yolo at launch; `--no-yolo` MUST translate exactly to native `--approval-mode default`. With no
   wrapper permission choice, a supported native `--approval-mode MODE` MUST pass through unchanged
   and the exact requested mode MUST be retained as the resume default. Combining a wrapper permission
@@ -316,7 +316,8 @@ owner's native profile and credentials are unchanged.
   MUST fail with exit 2 before preparation, catalog, profile, or native-process mutation; the wrapper
   MUST NOT silently choose precedence even when the two choices are semantically equivalent. After
   publication, Qwen's normal in-session approval controls MAY change the native mode in either
-  direction, including entering or leaving yolo. Agent Sessions MUST NOT add a sandbox, hook,
+  direction, including entering or leaving yolo. The current mode MUST be reported as `unknown`
+  unless a supported native event exposes it. Agent Sessions MUST NOT add a sandbox, hook,
   deny-list, guard, input filter, or other enforcement layer whose purpose is to prevent that native
   transition. Documentation and status MUST distinguish the durable launch preference from Qwen's
   mutable current native mode and MUST NOT represent the launch preference as a lifetime security
@@ -345,8 +346,8 @@ owner's native profile and credentials are unchanged.
   and four plugin payloads, and MUST fail before publication when workflow, package, installer, or
   descriptor inventories drift. Candidate and tag-triggered builds from the same commit, declared
   release version, toolchain, and inventory MUST produce byte-identical archives whose SHA-256 values
-  match the signed evidence artifact; both stages MUST derive `0.2.1` from the authoritative version
-  file and independently validate tag `v0.2.1` rather than injecting different ref-dependent version
+  match the signed evidence artifact; both stages MUST derive `0.2.4` from the authoritative version
+  file and independently validate tag `v0.2.4` rather than injecting different ref-dependent version
   strings.
 - **FR-028**: Every Qwen command option accepted by the product MUST be visible in its corresponding
   help output, and failures MUST identify the actual unmet precondition.
@@ -355,7 +356,7 @@ owner's native profile and credentials are unchanged.
 - **FR-030**: The complete Qwen acceptance scope MUST pass on real Linux and macOS installations,
   including normal, adversarial, crash, restart, packaging, installation, and bidirectional federated
   scenarios. Final tagged-commit proof MUST be emitted by the release workflow as the versioned
-  `agent-sessions-v0.2.1-release-evidence.json` contract artifact, retained under an immutable
+  `agent-sessions-v0.2.4-release-evidence.json` contract artifact, retained under an immutable
   workflow-run identity, validated against the checked-in Draft 2020-12
   `release-evidence.schema.json`, and attached unchanged to the GitHub release. The signed annotated
   tag MUST identify that workflow run, artifact name, and SHA-256 digest. Tag creation MUST refuse a
@@ -372,6 +373,11 @@ owner's native profile and credentials are unchanged.
   against the published endpoint without caller-side symlink resolution or another path-rewriting
   workaround. Legacy-alias removal is local stale-artifact reconciliation only: current binaries
   MUST NOT publish aliases or interoperate with obsolete Agent Sessions binaries through that path.
+- **FR-032**: Every Codex, Claude, Grok, and Qwen plugin MUST expose the shared structured messaging
+  and lane tools under the single product-neutral MCP namespace `agent_sessions`. Public manifests,
+  model-facing skills, runtime instructions, dynamic-tool dispatch, documentation, and acceptance
+  evidence MUST NOT expose the historical vendor-specific `claude_peer` namespace or a compatibility
+  alias for it.
 
 ### Key Entities
 
@@ -436,7 +442,7 @@ owner's native profile and credentials are unchanged.
   executable and integration surface, and completes one isolated installation without a development
   toolchain. The real tag workflow, rather than a separate rehearsal-only command, produces all four
   archives from the authoritative eleven-executable/four-plugin inventory and publishes the exact
-  schema-valid `agent-sessions-v0.2.1-release-evidence.json` named by the signed tag.
+  schema-valid `agent-sessions-v0.2.4-release-evidence.json` named by the signed tag.
 - **SC-010**: For every intentionally unready state—missing executable, unauthenticated client,
   untrusted workspace, missing selected-profile integration, incompatible initial permission mode,
   disconnected host, or mixed Agent Sessions version—the operator receives a cause-specific failure
@@ -445,10 +451,13 @@ owner's native profile and credentials are unchanged.
   is observed as an actual Unix socket and not a symbolic link; correlated managed Claude-to-Codex and
   Claude-to-Grok messages succeed through those exact published paths, and normal exit, crash,
   restart, and legacy-symlink migration leave zero attributable socket residue or collateral removal.
+- **SC-012**: All four installed product plugins advertise exactly one `agent_sessions` MCP server,
+  every structured discover/send/broadcast/lane call uses that namespace, and repository completeness
+  tests find zero public `claude_peer` namespace references.
 
 ## Assumptions
 
-- Qwen support ships in Agent Sessions v0.2.1.
+- Qwen support ships in Agent Sessions v0.2.4.
 - The minimum supported Qwen Code version is 0.21.15. That version and every newer version are
   admitted only through the operation-specific live contract checks defined by this feature.
 - `docs/designs/QWEN-ADAPTER.md` is historical pre-design evidence prepared against Qwen Code 0.21.12

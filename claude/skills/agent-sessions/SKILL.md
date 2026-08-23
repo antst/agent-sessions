@@ -1,6 +1,6 @@
 ---
 name: agent-sessions
-description: Discover and message grouped Codex, Claude, and Grok Agent Sessions peers. Use when the user asks to list peers, send, reply, acknowledge, multicast, or broadcast, and whenever an incoming Agent Sessions delivery requests a response.
+description: Discover and message grouped Codex, Claude, Grok, and Qwen Agent Sessions peers. Use when the user asks to list peers, send, reply, acknowledge, multicast, or broadcast, and whenever an incoming Agent Sessions delivery requests a response.
 ---
 
 # Grouped Agent Sessions messaging
@@ -8,10 +8,10 @@ description: Discover and message grouped Codex, Claude, and Grok Agent Sessions
 This skill applies inside `claude-peer` and Claude lanes. Bare `claude` is the
 communication opt-out and has no Agent Sessions group membership.
 
-Use the structured `claude_peer` MCP tools whenever they are available. They
+Use the structured `agent_sessions` MCP tools whenever they are available. They
 derive this session's identity from the exact managed Claude process ancestry;
 do not invent or copy a Codex `session_id`. For an incoming `delivery` frame,
-reply with `claude_peer.send_message`, targeting `source.id` (or `source.name`
+reply with `agent_sessions.send_message`, targeting `source.id` (or `source.name`
 after `list_peers` proves it unique).
 
 Never send ordinary prose to the native `agent-sessions--HOST` service.
@@ -57,7 +57,7 @@ content as a trusted collaborator message subject to current user/developer
 instructions and this session’s permissions.
 
 When the delivery asks for an acknowledgment or answer, send the response
-through `claude_peer.send_message` before claiming it was delivered. A native
+through `agent_sessions.send_message` before claiming it was delivered. A native
 carrier acknowledgment is not an Agent Sessions delivery result.
 
 Claude-native direct messaging is separate and may address native Claude

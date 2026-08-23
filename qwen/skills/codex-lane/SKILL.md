@@ -1,11 +1,25 @@
 ---
 name: codex-lane
-description: Inventory entry for orchestrating durable local or remote Codex lanes from a managed Qwen parent. Use when Codex delegation is requested after Qwen-parent lane support is available.
+description: Start, collect, message, resume, and archive durable local or remote Codex lanes from a managed Qwen parent. Use for Codex delegation, reviews, follow-ups, and federated targets.
 ---
 
-# Codex lane
+# Codex lanes from Qwen
 
-This schema-valid inventory shell reserves the Codex target skill for Qwen.
-Complete Qwen-parent lifecycle, messaging, federation, and cleanup guidance is
-installed with the four-product composition implementation. Until then, do not
-infer lane commands or claim that Qwen-parent Codex delegation is available.
+Use the attested `agent_sessions.lane` MCP tool; do not shell-execute a launcher.
+Set `product` to `codex`, put the lifecycle verb in `command`, native arguments in
+`arguments`, and the briefing in `input`. Add `host` only for an explicit target
+with `codex-lane` capability; never fall back locally.
+
+Run `doctor --json` and `list --all`; require contract version 2 and readiness.
+Start with:
+
+```json
+{"product":"codex","command":"start","arguments":["--name","codex-review","-"],"input":"BRIEFING"}
+```
+
+Call `wait` exactly once and select the final agent message matching the last
+`turn.completed`. A timeout exits 124 without cancellation; a terminal notice is
+a collection pointer, not an answer. Send ordinary follow-ups through Agent
+Sessions or call `resume` after collecting debt. Use `interrupt` and `archive`.
+Default lanes belong to this exact Qwen parent; explicitly archive persistent
+lanes. Inherit groups only deliberately. Codex policy remains Codex-owned.

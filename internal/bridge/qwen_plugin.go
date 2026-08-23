@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
 
@@ -119,16 +120,30 @@ func readQwenPluginObject(path string) (map[string]any, error) {
 }
 
 func qwenPluginEnabled(statePath string) (bool, error) {
-	state, err := readQwenPluginObject(statePath)
+	present, enabled, err := qwenPluginPolicy(statePath)
 	if err != nil {
 		return false, err
 	}
+	if !present {
+		return false, errors.New("qwen extension store contains 0 agent-sessions policies")
+	}
+	return enabled, nil
+}
+
+func qwenPluginPolicy(statePath string) (bool, bool, error) {
+	state, err := readQwenPluginObject(statePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
 	if intValue(state["version"]) != 2 {
-		return false, errors.New("qwen extension store has an unsupported state version")
+		return false, false, errors.New("qwen extension store has an unsupported state version")
 	}
 	extensions, ok := state["extensions"].(map[string]any)
 	if !ok {
-		return false, errors.New("qwen extension store has no extensions inventory")
+		return false, false, errors.New("qwen extension store has no extensions inventory")
 	}
 	matches := 0
 	enabled := false
@@ -141,9 +156,12 @@ func qwenPluginEnabled(statePath string) (bool, error) {
 		enabled = stringValue(policy["defaultActivation"]) == "enabled"
 	}
 	if matches != 1 {
-		return false, fmt.Errorf("qwen extension store contains %d agent-sessions policies", matches)
+		if matches == 0 {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("qwen extension store contains %d agent-sessions policies", matches)
 	}
-	return enabled, nil
+	return true, enabled, nil
 }
 
 //nolint:gocyclo // Installation is one selected-profile native transaction with exact pre/post verification.
@@ -172,6 +190,10 @@ func runQwenPluginInstall(args []string) int {
 	if enabled, stateErr := qwenPluginEnabled(statePath); stateErr == nil &&
 		verifyQwenPluginInstallation(root, values.version, enabled) == nil {
 		return 0
+	}
+	if err := refuseLiveQwenPluginMutation(profile); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", err)
+		return 1
 	}
 
 	install, err := qwenPluginInstallCommand(values.qwen, values.pluginRoot, profile, os.Environ())
@@ -222,6 +244,119 @@ func runQwenPluginInstall(args []string) int {
 	return 0
 }
 
+// runQwenPluginRemove removes only Agent Sessions' native Qwen extension from
+// the exact selected profile. Native credentials, settings, other extensions,
+// and transcripts remain Qwen-owned and are never inspected or rewritten.
+func runQwenPluginRemove(args []string) int {
+	qwen, err := parseQwenPluginRemoveArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: %v\n", err)
+		return 2
+	}
+	profile, err := qwenprofile.Current()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: %v\n", err)
+		return 1
+	}
+	home, err := qwenprofile.EffectiveHome(profile, os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: %v\n", err)
+		return 1
+	}
+	root := filepath.Join(home, "extensions", qwenPluginName)
+	statePath := filepath.Join(home, "extension-store", "state.json")
+	present, _, stateErr := qwenPluginPolicy(statePath)
+	_, rootErr := os.Lstat(root)
+	if !present && errors.Is(rootErr, os.ErrNotExist) && stateErr == nil {
+		return 0
+	}
+	if stateErr != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: inspect selected-profile plugin state: %v\n", stateErr)
+		return 1
+	}
+	if rootErr != nil && !errors.Is(rootErr, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: inspect selected-profile plugin root: %v\n", rootErr)
+		return 1
+	}
+	if err := refuseLiveQwenPluginMutation(profile); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: %v\n", err)
+		return 1
+	}
+	command := exec.Command(qwen, "extensions", "uninstall", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
+	command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: native Qwen uninstaller failed: %v\n", err)
+		return 1
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: post-remove plugin root remains: %v\n", err)
+		return 1
+	}
+	if present, _, err := qwenPluginPolicy(statePath); err != nil || present {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: post-remove policy remains or is unreadable: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// refuseLiveQwenPluginMutation scans the host process table rather than
+// trusting stale registry files. A managed Qwen host or worker carries the
+// product tag and exact presence-sensitive profile in its environment. Any
+// unreadable matching Agent Sessions Qwen process fails closed.
+func refuseLiveQwenPluginMutation(selected qwenprofile.Identity) error {
+	processes, err := procinfo.List()
+	if err != nil {
+		return fmt.Errorf("cannot prove selected Qwen profile is idle: %w", err)
+	}
+	for _, process := range processes {
+		environment, environmentErr := procinfo.Environment(process.PID)
+		if environmentErr != nil {
+			arguments, argumentsErr := procinfo.Args(process.PID)
+			if argumentsErr == nil && looksLikeManagedQwenRuntime(arguments) {
+				return fmt.Errorf("cannot inspect live managed Qwen process %d before plugin mutation", process.PID)
+			}
+			continue
+		}
+		if environmentValue(environment, "AGENT_SESSIONS_PRODUCT") != "qwen" {
+			continue
+		}
+		candidate, resolveErr := qwenprofile.ResolveEnvironment(environmentLookup(environment))
+		if resolveErr != nil {
+			return fmt.Errorf("cannot identify live managed Qwen process %d profile: %w", process.PID, resolveErr)
+		}
+		if candidate.Fingerprint == selected.Fingerprint {
+			return fmt.Errorf("refuse Qwen plugin mutation while managed Qwen process %d uses the selected profile", process.PID)
+		}
+	}
+	return nil
+}
+
+func looksLikeManagedQwenRuntime(arguments []string) bool {
+	for _, argument := range arguments {
+		if argument == "qwen-host" || argument == "qwen-lane-manager" {
+			return true
+		}
+	}
+	return false
+}
+
+func environmentLookup(environment []string) qwenprofile.LookupEnv {
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	return func(name string) (string, bool) { value, ok := values[name]; return value, ok }
+}
+
+func environmentValue(environment []string, name string) string {
+	value, _ := environmentLookup(environment)(name)
+	return value
+}
+
 func installedQwenPluginSource(root string) (string, error) {
 	metadata, err := readQwenPluginObject(filepath.Join(root, ".qwen-extension-install.json"))
 	if err != nil {
@@ -267,4 +402,11 @@ func parseQwenPluginInstallArgs(args []string) (qwenPluginInstallArgs, error) {
 		return result, errors.New("usage: qwen-plugin-install --qwen PATH --plugin-root PATH --version VERSION")
 	}
 	return result, nil
+}
+
+func parseQwenPluginRemoveArgs(args []string) (string, error) {
+	if len(args) != 2 || args[0] != "--qwen" || strings.TrimSpace(args[1]) == "" {
+		return "", errors.New("usage: qwen-plugin-remove --qwen PATH")
+	}
+	return args[1], nil
 }

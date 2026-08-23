@@ -6,12 +6,12 @@ description: Spawn, supervise, message, collect, resume, and archive durable loc
 # Codex lane
 
 Use `codex-peer-lane` for the Codex target. Parent product and target product
-are independent: a Codex, Claude, or Grok parent may use this same target CLI.
+are independent: a Codex, Claude, Grok, or Qwen parent may use this same target CLI.
 
 ## Managed Codex execution boundary
 
 From a managed Codex peer, run every lifecycle operation through the attested
-`claude_peer.lane` MCP tool. Do not invoke `codex-peer-lane` from a shell tool:
+`agent_sessions.lane` MCP tool. Do not invoke `codex-peer-lane` from a shell tool:
 the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
 Unix sockets even when their directories are writable. The MCP tool retains this
 session as the exact parent and returns `exit`, `stdout`, and `stderr`.

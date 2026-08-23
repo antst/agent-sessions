@@ -99,6 +99,7 @@ func runAgent(ctx context.Context, args []string) error {
 	codexLane := set.String("codex-lane", os.Getenv("PEER_FEDERATOR_CODEX_LANE"), "codex-peer-lane executable")
 	claudeLane := set.String("claude-lane", os.Getenv("PEER_FEDERATOR_CLAUDE_LANE"), "claude-peer-lane executable")
 	grokLane := set.String("grok-lane", os.Getenv("PEER_FEDERATOR_GROK_LANE"), "grok-peer-lane executable")
+	qwenLane := set.String("qwen-lane", os.Getenv("PEER_FEDERATOR_QWEN_LANE"), "qwen-peer-lane executable")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -107,7 +108,7 @@ func runAgent(ctx context.Context, args []string) error {
 		ClaudeConfigDir: *claudeConfig, RuntimeDir: *runtimeDir, StateDir: *stateDir,
 		EnableRemoteLanes:   *enableRemoteLanes,
 		CodexLaneExecutable: *codexLane, ClaudeLaneExecutable: *claudeLane,
-		GrokLaneExecutable: *grokLane,
+		GrokLaneExecutable: *grokLane, QwenLaneExecutable: *qwenLane,
 	})
 }
 

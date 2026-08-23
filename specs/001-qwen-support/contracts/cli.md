@@ -25,8 +25,8 @@ Rules:
 - With no permission option, the wrapper preserves Qwen's native initial-mode behavior. `--yolo`
   requests native yolo and `--no-yolo` translates exactly to native `--approval-mode default`.
   With no wrapper permission choice, a supported native `--approval-mode MODE` passes through
-  unchanged and its exact requested mode is stored as the resume default. The wrapper corroborates
-  Qwen's effective initial mode before publication.
+  unchanged and its exact requested mode is stored as the resume default. Current mode remains
+  unknown unless Qwen publishes a supported native event.
 - Repeated or contradictory wrapper choices, and any combination of a wrapper permission choice
   with native `--approval-mode`, fail with exit 2 before preparation, catalog, profile, or native
   process mutation. Agent Sessions never silently chooses precedence, even when choices are
@@ -119,7 +119,7 @@ Doctor returns a stable object with at least:
 ```
 
 `auth_state` describes only non-secret credential/provider configuration evidence available without a
-session. It may remain `unknown`; actual provider authentication and `effective_initial_mode` are
+session. It may remain `unknown`; actual provider authentication and `current_native_approval_mode` are
 managed-launch admission facts and are not claimed by doctor. No secret value, token, credential
 body, or owner setting body is emitted.
 

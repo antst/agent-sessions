@@ -43,7 +43,7 @@ change the sandbox, or widen a thread's permission mode.
 
 ## Messaging
 
-The installed `agent-sessions` Codex plugin supplies the process-attested `claude_peer` MCP tools.
+The installed `agent-sessions` Codex plugin supplies the process-attested `agent_sessions` MCP tools.
 Only a live managed root thread can list visible peers, send or broadcast messages, or launch a
 lane through those tools. A model-provided session ID never grants authority; App Server thread
 identity, the TUI owner, hook context, shim, and host registration must corroborate it.

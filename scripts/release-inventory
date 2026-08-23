@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Single release inventory consumed by local builds, packaging, tests, evidence,
+# and CI. Do not transcribe these lists into workflow YAML or another script.
+binaries=(
+  agent-session-runtime
+  peer
+  codex-peer
+  claude-peer
+  grok-peer
+  qwen-peer
+  codex-peer-lane
+  claude-peer-lane
+  grok-peer-lane
+  qwen-peer-lane
+  peer-federator
+)
+plugins=(
+  'codex|.agents,.codex-plugin,.mcp.json,hooks,scripts,skills'
+  'claude|.claude-plugin,claude'
+  'grok|grok'
+  'qwen|qwen'
+)
+package_paths=(
+  .agents .claude-plugin .codex-plugin .mcp.json
+  claude deploy docs grok hooks qwen scripts skills Makefile README.md
+)
+platforms=(
+  'linux|amd64|linux-x64'
+  'linux|arm64|linux-arm64'
+  'darwin|amd64|darwin-x64'
+  'darwin|arm64|darwin-arm64'
+)
+
+json_string() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  printf '"%s"' "$value"
+}
+
+json_string_array() {
+  local first=true value
+  printf '['
+  for value in "$@"; do
+    if [[ "$first" == true ]]; then first=false; else printf ','; fi
+    json_string "$value"
+  done
+  printf ']'
+}
+
+case "${1:-}" in
+  binaries)
+    printf '%s\n' "${binaries[@]}"
+    ;;
+  plugins)
+    printf '%s\n' "${plugins[@]}"
+    ;;
+  package-paths)
+    printf '%s\n' "${package_paths[@]}"
+    ;;
+  platforms)
+    printf '%s\n' "${platforms[@]}"
+    ;;
+  matrix-json)
+    printf '{"include":['
+    first=true
+    for row in "${platforms[@]}"; do
+      IFS='|' read -r goos goarch platform <<<"$row"
+      if [[ "$first" == true ]]; then first=false; else printf ','; fi
+      printf '{"goos":'; json_string "$goos"
+      printf ',"goarch":'; json_string "$goarch"
+      printf ',"platform":'; json_string "$platform"
+      printf '}'
+    done
+    printf ']}\n'
+    ;;
+  package-inventory-json)
+    printf '{"executables":'
+    json_string_array "${binaries[@]}"
+    printf ',"plugin_payloads":['
+    first=true
+    for row in "${plugins[@]}"; do
+      IFS='|' read -r product paths <<<"$row"
+      IFS=',' read -r -a archive_paths <<<"$paths"
+      if [[ "$first" == true ]]; then first=false; else printf ','; fi
+      printf '{"product":'; json_string "$product"
+      printf ',"plugin_id":"agent-sessions","archive_paths":'
+      json_string_array "${archive_paths[@]}"
+      printf '}'
+    done
+    printf ']}\n'
+    ;;
+  *)
+    printf 'usage: %s binaries|plugins|package-paths|platforms|matrix-json|package-inventory-json\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac

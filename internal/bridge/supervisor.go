@@ -3255,7 +3255,7 @@ func trustedPeerTextForProduct(item map[string]any, recipientProduct string) str
 		parts = append(parts, "Message metadata: "+strings.Join(metadata, ", "))
 	}
 	parts = append(parts, stringValue(item["message"]))
-	replyInstruction := "Reply with claude_peer.send_message when useful."
+	replyInstruction := "Reply with agent_sessions.send_message when useful."
 	if recipientProduct == "grok" {
 		replyInstruction = "Reply with the Agent Sessions send_message tool when useful."
 	}

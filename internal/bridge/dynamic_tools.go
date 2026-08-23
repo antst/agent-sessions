@@ -52,9 +52,9 @@ func handleNativeServerRequest(client *appServerClient, request rpcServerRequest
 		respondDynamicToolFailure(client, request.ID, fmt.Errorf("unsupported headless dynamic tool %q", call.Tool))
 		return
 	}
-	if server == "claude_peer" {
+	if server == "agent_sessions" {
 		if !authorizedPeerThreadNative(resolveNativePaths(), call.ThreadID) {
-			respondDynamicToolFailure(client, request.ID, fmt.Errorf("claude_peer is inactive outside an attested peer session"))
+			respondDynamicToolFailure(client, request.ID, fmt.Errorf("agent_sessions is inactive outside an attested peer session"))
 			return
 		}
 		result, err := callNativePeerTool(tool, call.Arguments, call.ThreadID)
@@ -92,14 +92,14 @@ func handleNativeServerRequest(client *appServerClient, request rpcServerRequest
 
 func nativePeerElicitationResponse(params json.RawMessage) (map[string]any, bool) {
 	var request map[string]any
-	if json.Unmarshal(params, &request) != nil || stringValue(request["serverName"]) != "claude_peer" {
+	if json.Unmarshal(params, &request) != nil || stringValue(request["serverName"]) != "agent_sessions" {
 		return nil, false
 	}
 	meta, _ := request["_meta"].(map[string]any)
 	if stringValue(meta["codex_approval_kind"]) != "mcp_tool_call" {
 		return nil, false
 	}
-	// claude_peer is installed by this bridge and exposes only local session
+	// agent_sessions is installed by this bridge and exposes only local session
 	// discovery, inbox, rename, and message operations. The host owner opted
 	// into trusting these isolated peer-agent calls, so approve this server's
 	// tool gate without weakening approval handling for any other MCP server.

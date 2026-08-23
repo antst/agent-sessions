@@ -10,7 +10,7 @@ Use `claude-peer-lane` to run Claude Code as a named peer with durable lifecycle
 ## Managed Codex execution boundary
 
 From a managed Codex peer, run every lifecycle operation through the attested
-`claude_peer.lane` MCP tool. Do not invoke `claude-peer-lane` from a shell tool:
+`agent_sessions.lane` MCP tool. Do not invoke `claude-peer-lane` from a shell tool:
 the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
 Unix sockets even when their directories are writable. The MCP tool retains this
 session as the exact parent and returns `exit`, `stdout`, and `stderr`.
@@ -112,7 +112,7 @@ claude-peer-lane wait review-api --timeout 300
 ```
 
 Peer messages are pushed into the active Codex turn automatically. Do **not** poll
-`claude_peer.check_inbox`, sleep, or block waiting for a terminal pointer; continue other useful
+`agent_sessions.check_inbox`, sleep, or block waiting for a terminal pointer; continue other useful
 work and collect when the pointer arrives. `check_inbox` is only for recovery of content that was
 queued past a delivery boundary.
 

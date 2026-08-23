@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# < 1 || $# > 2 )); then
+  printf 'usage: %s TAG [REMOTE]\n' "${0##*/}" >&2
+  exit 2
+fi
+tag=$1
+remote=${2:-origin}
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+version="$(<"$root/deploy/peer-federator/VERSION")"
+if [[ "$tag" != "v$version" ]]; then
+  printf 'release tag %s does not match authoritative version v%s\n' "$tag" "$version" >&2
+  exit 1
+fi
+if git -C "$root" show-ref --verify --quiet "refs/tags/$tag"; then
+  printf 'local release tag %s already exists; refusing creation\n' "$tag" >&2
+  exit 1
+fi
+remote_rows="$(git -C "$root" ls-remote --tags "$remote" "refs/tags/$tag" "refs/tags/$tag^{}")" || {
+  printf 'cannot prove remote release tag %s is absent from %s\n' "$tag" "$remote" >&2
+  exit 1
+}
+if [[ -n "$remote_rows" ]]; then
+  printf 'remote release tag %s already exists on %s; refusing creation\n' "$tag" "$remote" >&2
+  exit 1
+fi
+printf 'release tag %s is absent locally and on %s\n' "$tag" "$remote"

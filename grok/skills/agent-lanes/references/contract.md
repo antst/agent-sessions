@@ -1,4 +1,4 @@
-# Codex, Claude, and Grok lane contracts
+# Codex, Claude, Grok, and Qwen lane contracts
 
 All products expose `run`, `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and
 `doctor`. Codex is contract 2; Claude and Grok are contract 1. All emit `lane.ready`, normalized

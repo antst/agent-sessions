@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "claude_peer": {
+    "agent_sessions": {
       "command": "agent-session-runtime",
       "args": [
         "mcp"

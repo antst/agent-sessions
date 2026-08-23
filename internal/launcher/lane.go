@@ -8,15 +8,28 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
+var (
+	ensureLaneRuntime   = EnsureRuntime
+	discoverLaneRuntime = discoverRuntime
+	execLaneRuntime     = Exec
+)
+
 // RunLane ensures the shared runtime and replaces the launcher with one of its
 // native lane clients.
 func RunLane(role string, args []string) error {
-	selected, err := EnsureRuntime()
-	if err != nil {
-		return err
-	}
 	if _, ok := launcherProductByLaneRole(role); !ok {
 		return fmt.Errorf("unsupported lane role %q", role)
+	}
+	resolve := ensureLaneRuntime
+	if laneHelpRequested(args) {
+		// Help is a read-only parser surface. It must remain available while a
+		// different installed plugin version is live and therefore cannot run
+		// activation, supervisor, or App Server bootstrap first.
+		resolve = discoverLaneRuntime
+	}
+	selected, err := resolve()
+	if err != nil {
+		return err
 	}
 	environment := replaceLaneEnvironment(os.Environ(), agentRuntimeDirEnv, agentRuntimeDir())
 	if role == "grok-lane" && grokLaneNeedsExecutable(args) {
@@ -27,7 +40,26 @@ func RunLane(role string, args []string) error {
 		environment = replaceLaneEnvironment(environment, "GROK_PEER_GROK_BIN", grok)
 		environment = replaceLaneEnvironment(environment, "GROK_PEER_NATIVE_RUNTIME", selected.Path)
 	}
-	return Exec(selected.Path, append([]string{role}, args...), environment)
+	if role == "qwen-lane" && qwenLaneNeedsExecutable(args) {
+		qwen, err := qwenExecutable()
+		if err != nil {
+			return err
+		}
+		environment = replaceLaneEnvironment(environment, "QWEN_PEER_QWEN_BIN", qwen)
+	}
+	return execLaneRuntime(selected.Path, append([]string{role}, args...), environment)
+}
+
+func laneHelpRequested(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	for _, argument := range args {
+		if argument == "-h" || argument == "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 func launcherProductByLaneRole(role string) (launcherProduct, bool) {
@@ -40,6 +72,15 @@ func launcherProductByLaneRole(role string) (launcherProduct, bool) {
 }
 
 func grokLaneNeedsExecutable(args []string) bool {
+	for _, argument := range args {
+		if argument == "-h" || argument == "--help" {
+			return false
+		}
+	}
+	return len(args) > 0 && (args[0] == "run" || args[0] == "start" || args[0] == "resume" || args[0] == "doctor")
+}
+
+func qwenLaneNeedsExecutable(args []string) bool {
 	for _, argument := range args {
 		if argument == "-h" || argument == "--help" {
 			return false

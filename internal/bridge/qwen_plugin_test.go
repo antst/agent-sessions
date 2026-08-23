@@ -3,13 +3,17 @@ package bridge
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/antst/agent-sessions/internal/qwenprofile"
+	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const (
@@ -17,7 +21,7 @@ const (
 	qwenTestMCPSchema     = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 	qwenTestPluginName    = "agent-sessions"
 	qwenTestMCPName       = "agent_sessions"
-	qwenTestPluginVersion = "0.2.1"
+	qwenTestPluginVersion = qwenreadiness.IntegrationVersion
 )
 
 var qwenTestPluginSkills = []string{
@@ -130,6 +134,182 @@ func TestVerifyQwenPluginInstallationRequiresExactEnabledInventory(t *testing.T)
 	}
 }
 
+func TestQwenPluginPolicyRejectsDuplicateAndMalformedState(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	for _, test := range []struct {
+		name  string
+		state map[string]any
+		want  string
+	}{
+		{name: "unsupported version", state: map[string]any{"version": 1, "extensions": map[string]any{}}, want: "version"},
+		{name: "missing inventory", state: map[string]any{"version": 2}, want: "inventory"},
+		{name: "duplicate policy", state: map[string]any{"version": 2, "extensions": map[string]any{
+			"one": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+			"two": map[string]any{"name": qwenPluginName, "defaultActivation": "disabled"},
+		}}, want: "2 agent-sessions"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			qwenTestWriteJSON(t, statePath, test.state)
+			if _, _, err := qwenPluginPolicy(statePath); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("policy error = %v, want text %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestQwenPluginMutationRefusesExactLiveProfileAndAllowsDifferentProfile(t *testing.T) {
+	root := t.TempDir()
+	selected := qwenTestProfileIdentity(t, map[string]string{
+		"HOME": root, "QWEN_HOME": filepath.Join(root, "selected"), "QWEN_RUNTIME_DIR": filepath.Join(root, "runtime"),
+	})
+	other := qwenTestProfileIdentity(t, map[string]string{
+		"HOME": root, "QWEN_HOME": filepath.Join(root, "other"), "QWEN_RUNTIME_DIR": filepath.Join(root, "other-runtime"),
+	})
+	start := func(profile qwenprofile.Identity) *exec.Cmd {
+		command := exec.Command("sleep", "30")
+		command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
+		command.Env = append(command.Env, "AGENT_SESSIONS_PRODUCT=qwen")
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
+		return command
+	}
+	otherProcess := start(other)
+	if err := refuseLiveQwenPluginMutation(selected); err != nil {
+		t.Fatalf("different Qwen profile blocked selected-profile mutation: %v (pid %d)", err, otherProcess.Process.Pid)
+	}
+	selectedProcess := start(selected)
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := refuseLiveQwenPluginMutation(selected)
+		if err != nil {
+			if !strings.Contains(err.Error(), "process "+strconv.Itoa(selectedProcess.Process.Pid)) {
+				t.Fatalf("live-profile refusal = %v", err)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exact live Qwen profile did not block plugin mutation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestQwenPluginRemoveIsProfileScopedIdempotentAndPreservesOwnerFiles(t *testing.T) {
+	root := t.TempDir()
+	qwenHome := filepath.Join(root, "qwen-home")
+	runtimeDir := filepath.Join(root, "qwen-runtime")
+	pluginRoot := filepath.Join(qwenHome, "extensions", qwenPluginName)
+	statePath := filepath.Join(qwenHome, "extension-store", "state.json")
+	ownerFile := filepath.Join(root, "owner-settings.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ownerFile, []byte("owner-state\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	qwenTestPluginFixtureAt(t, pluginRoot)
+	qwenTestWriteJSON(t, statePath, map[string]any{"version": 2, "extensions": map[string]any{
+		"agent-sessions": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+	}})
+	fakeQwen := filepath.Join(root, "qwen")
+	script := `#!/bin/sh
+set -eu
+[ "$1" = extensions ] && [ "$2" = uninstall ] && [ "$3" = agent-sessions ]
+/usr/bin/find "$QWEN_HOME/extensions/agent-sessions" -depth -delete
+printf '%s\n' '{"version":2,"extensions":{}}' >"$QWEN_HOME/extension-store/state.json"
+`
+	if err := os.WriteFile(fakeQwen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QWEN_HOME", qwenHome)
+	t.Setenv("QWEN_RUNTIME_DIR", runtimeDir)
+	if exit := runQwenPluginRemove([]string{"--qwen", fakeQwen}); exit != 0 {
+		t.Fatalf("Qwen plugin remove exit = %d", exit)
+	}
+	if exit := runQwenPluginRemove([]string{"--qwen", fakeQwen}); exit != 0 {
+		t.Fatalf("idempotent Qwen plugin remove exit = %d", exit)
+	}
+	if body, err := os.ReadFile(ownerFile); err != nil || string(body) != "owner-state\n" {
+		t.Fatalf("owner file changed: body=%q err=%v", body, err)
+	}
+}
+
+func TestQwenPluginUpgradeUsesNativeUpdateAndPreservesProfileState(t *testing.T) {
+	root := t.TempDir()
+	qwenHome := filepath.Join(root, "qwen-home")
+	qwenRuntime := filepath.Join(root, "qwen-runtime")
+	source := filepath.Join(root, "source")
+	installed := filepath.Join(qwenHome, "extensions", qwenPluginName)
+	statePath := filepath.Join(qwenHome, "extension-store", "state.json")
+	settingsPath := filepath.Join(qwenHome, "settings.json")
+	qwenTestPluginFixtureAt(t, source)
+	qwenTestPluginFixtureAt(t, installed)
+	qwenTestRewriteJSONObject(t, filepath.Join(installed, "plugin.json"), func(value map[string]any) {
+		value["version"] = "0.2.0"
+	})
+	qwenTestWriteJSON(t, filepath.Join(installed, ".qwen-extension-install.json"), map[string]any{
+		"type": "local", "source": source,
+	})
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	qwenTestWriteJSON(t, statePath, map[string]any{"version": 2, "extensions": map[string]any{
+		"agent-sessions": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+	}})
+	if err := os.WriteFile(settingsPath, []byte("{\"theme\":\"owner\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "qwen.log")
+	fakeQwen := filepath.Join(root, "qwen")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$QWEN_TEST_LOG"
+[ "$1" = extensions ] && [ "$2" = update ] && [ "$3" = agent-sessions ]
+/usr/bin/find "$QWEN_HOME/extensions/agent-sessions" -depth -delete
+/bin/mkdir -p "$QWEN_HOME/extensions/agent-sessions"
+/bin/cp -R "$QWEN_PLUGIN_SOURCE/." "$QWEN_HOME/extensions/agent-sessions/"
+`
+	if err := os.WriteFile(fakeQwen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QWEN_HOME", qwenHome)
+	t.Setenv("QWEN_RUNTIME_DIR", qwenRuntime)
+	t.Setenv("QWEN_PLUGIN_SOURCE", source)
+	t.Setenv("QWEN_TEST_LOG", logPath)
+	if exit := runQwenPluginInstall([]string{
+		"--qwen", fakeQwen, "--plugin-root", source, "--version", qwenTestPluginVersion,
+	}); exit != 0 {
+		t.Fatalf("Qwen plugin upgrade exit = %d", exit)
+	}
+	if body, err := os.ReadFile(logPath); err != nil || string(body) != "extensions update agent-sessions\n" {
+		t.Fatalf("Qwen upgrade command = %q, %v", body, err)
+	}
+	if err := verifyQwenPluginInstallation(installed, qwenTestPluginVersion, true); err != nil {
+		t.Fatalf("upgraded Qwen plugin = %v", err)
+	}
+	if body, err := os.ReadFile(settingsPath); err != nil || string(body) != "{\"theme\":\"owner\"}\n" {
+		t.Fatalf("Qwen owner settings changed: %q, %v", body, err)
+	}
+}
+
+func TestMakefileAggregatesQwenInstallAndUpgradeTargets(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"install-qwen: validate-qwen", "upgrade-qwen: install-qwen", "remove-qwen: build",
+		"install-all: install", "$(MAKE) install-qwen", "dev-install-all: dev-install", "$(MAKE) dev-install-qwen",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("Makefile omits Qwen install aggregation %q", required)
+		}
+	}
+}
+
 func assertQwenPluginPayload(t *testing.T, root string) {
 	t.Helper()
 	manifest := qwenTestReadJSONObject(t, filepath.Join(root, "plugin.json"))
@@ -183,6 +363,18 @@ func assertQwenPluginPayload(t *testing.T, root string) {
 func qwenTestPluginFixture(t *testing.T, mutate func(string)) string {
 	t.Helper()
 	root := t.TempDir()
+	qwenTestPluginFixtureAt(t, root)
+	if mutate != nil {
+		mutate(root)
+	}
+	return root
+}
+
+func qwenTestPluginFixtureAt(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	qwenTestWriteJSON(t, filepath.Join(root, "plugin.json"), map[string]any{
 		"$schema": qwenTestPluginSchema, "name": qwenTestPluginName, "version": qwenTestPluginVersion,
 	})
@@ -195,10 +387,6 @@ func qwenTestPluginFixture(t *testing.T, mutate func(string)) string {
 	for _, skill := range qwenTestPluginSkills {
 		qwenTestWriteSkill(t, root, skill)
 	}
-	if mutate != nil {
-		mutate(root)
-	}
-	return root
 }
 
 func qwenTestWriteSkill(t *testing.T, root, name string) {

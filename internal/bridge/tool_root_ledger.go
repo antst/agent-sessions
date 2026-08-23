@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -133,7 +134,7 @@ func (ledger *toolRootLedger) register(root toolRootProcessIdentity) error {
 		if !state.AdmissionOpen {
 			return errors.New("tool-root admission is closed")
 		}
-		if !knownToolRootIdentity(ledger.config.ObserveProcess(root.PID), root) {
+		if !liveToolRootIdentity(ledger.config.ObserveProcess(root.PID), root) {
 			return errors.New("detached tool-root identity is not live")
 		}
 		for index, existing := range state.Roots {
@@ -143,7 +144,7 @@ func (ledger *toolRootLedger) register(root toolRootProcessIdentity) error {
 			if existing == root {
 				return nil
 			}
-			if knownToolRootIdentity(ledger.config.ObserveProcess(existing.PID), existing) {
+			if liveToolRootIdentity(ledger.config.ObserveProcess(existing.PID), existing) {
 				return errors.New("live detached tool-root PID is already owned")
 			}
 			state.Roots[index] = root
@@ -168,6 +169,7 @@ func (ledger *toolRootLedger) closeAdmission() error {
 	})
 }
 
+//nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
 func (ledger *toolRootLedger) reconcileCleanup() error {
 	return ledger.withLock(func() error {
 		state, err := ledger.readState()
@@ -181,6 +183,10 @@ func (ledger *toolRootLedger) reconcileCleanup() error {
 			observed := ledger.config.ObserveProcess(root.PID)
 			switch {
 			case observed.Status == procinfo.Absent:
+				continue
+			case observed.Status == procinfo.Known && (observed.State == "Z" || observed.State == "X"):
+				// A zombie/terminal process cannot execute and safely occupies
+				// the PID namespace until its parent reaps it.
 				continue
 			case observed.Status == procinfo.Known && !knownToolRootIdentity(observed, root):
 				// PID reuse proves the recorded root is gone. Never signal the
@@ -196,8 +202,8 @@ func (ledger *toolRootLedger) reconcileCleanup() error {
 				cleanupErr = errors.Join(cleanupErr, err)
 				continue
 			}
-			after := ledger.config.ObserveProcess(root.PID)
-			if after.Status == procinfo.Known && knownToolRootIdentity(after, root) || after.Status == procinfo.Unknown {
+			after := ledger.observeRetiredRoot(root)
+			if liveToolRootIdentity(after, root) || after.Status == procinfo.Unknown {
 				remaining = append(remaining, root)
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("detached tool-root %d survived retirement", root.PID))
 			}
@@ -214,6 +220,22 @@ func (ledger *toolRootLedger) reconcileCleanup() error {
 	})
 }
 
+func (ledger *toolRootLedger) observeRetiredRoot(root toolRootProcessIdentity) procinfo.Info {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		observed := ledger.config.ObserveProcess(root.PID)
+		if observed.Status == procinfo.Absent ||
+			observed.Status == procinfo.Known && (observed.State == "Z" || observed.State == "X" ||
+				!knownToolRootIdentity(observed, root)) {
+			return observed
+		}
+		if time.Now().After(deadline) {
+			return observed
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func (ledger *toolRootLedger) snapshot() (toolRootLedgerState, error) {
 	var snapshot toolRootLedgerState
 	err := ledger.withLock(func() error {
@@ -228,7 +250,7 @@ func (ledger *toolRootLedger) snapshot() (toolRootLedgerState, error) {
 }
 
 func (ledger *toolRootLedger) readState() (toolRootLedgerState, error) {
-	body, err := os.ReadFile(ledger.statePath)
+	body, err := os.ReadFile(ledger.statePath) //nolint:gosec // statePath is derived from the validated private ledger root.
 	if err != nil {
 		return toolRootLedgerState{}, err
 	}
@@ -264,7 +286,7 @@ func (ledger *toolRootLedger) validState(state toolRootLedgerState) bool {
 }
 
 func (ledger *toolRootLedger) withLock(operation func() error) error {
-	lock, err := os.OpenFile(ledger.lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := os.OpenFile(ledger.lockPath, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // lockPath is derived from the validated private ledger root.
 	if err != nil {
 		return err
 	}
@@ -282,4 +304,8 @@ func validToolRootIdentity(identity toolRootProcessIdentity) bool {
 
 func knownToolRootIdentity(info procinfo.Info, identity toolRootProcessIdentity) bool {
 	return info.Status == procinfo.Known && info.Start == identity.ProcStart && info.StrongStart == identity.StrongStart
+}
+
+func liveToolRootIdentity(info procinfo.Info, identity toolRootProcessIdentity) bool {
+	return knownToolRootIdentity(info, identity) && info.State != "Z" && info.State != "X"
 }

@@ -284,8 +284,8 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 		case "initialize", "trigger/dynamic":
 			return map[string]any{}, nil
 		case "mcpServer/tool/call":
-			t.Fatal("claude_peer dynamic tools must be handled with the App Server-attested thread id")
-			return nil, errors.New("unexpected claude_peer MCP relay")
+			t.Fatal("agent_sessions dynamic tools must be handled with the App Server-attested thread id")
+			return nil, errors.New("unexpected agent_sessions MCP relay")
 		default:
 			return map[string]any{}, nil
 		}
@@ -298,7 +298,7 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 			"id": "dynamic-request-1", "method": "item/tool/call",
 			"params": map[string]any{
 				"threadId": threadID, "turnId": "turn-dynamic", "callId": "call-dynamic",
-				"namespace": nil, "tool": "mcp__claude_peer__list_peers", "arguments": map[string]any{},
+				"namespace": nil, "tool": "mcp__agent_sessions__list_peers", "arguments": map[string]any{},
 			},
 		})
 		_ = writeTestFrame(conn, body)
@@ -358,7 +358,7 @@ func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
 			"id": "dynamic-foreign-session", "method": "item/tool/call",
 			"params": map[string]any{
 				"threadId": "00000000-0000-0000-0000-000000000041", "turnId": "turn-dynamic", "callId": "call-dynamic",
-				"namespace": nil, "tool": "mcp__claude_peer__identity",
+				"namespace": nil, "tool": "mcp__agent_sessions__identity",
 				"arguments": map[string]any{"session_id": "00000000-0000-0000-0000-000000000042"},
 			},
 		})

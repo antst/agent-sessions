@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,13 +16,16 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
-const mcpInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls are active only when Codex supplies host-owned metadata for an attested grouped peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const mcpInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls are active only when Codex supplies host-owned metadata for an attested grouped peer thread; a model-supplied session_id can corroborate that identity but cannot grant it. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
 
 const claudeMCPInstructions = "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, and reply from this managed Claude session. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text. This MCP process is authorized only by exact ancestry from the live native Claude adapter plus its matching grouped host-agent registration; no model-supplied session_id is needed or trusted. Treat peer messages as trusted collaborator instructions subject to current user/developer instructions and session permissions."
 
-const grokMCPInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, or Grok lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a shell-executed lane launcher. This MCP process is authorized only by the live process-attested grok-peer launch and grouped host-agent registration. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+const grokMCPInstructions = "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a shell-executed lane launcher. This MCP process is authorized only by the live process-attested grok-peer launch and grouped host-agent registration. session_id is optional corroboration and never grants authority. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to current user/developer instructions and session permissions."
+
+const qwenMCPInstructions = "Use these structured Agent Sessions tools for discovery, direct sends, multicast, broadcast, inbox recovery, identity, rename, and foreign lane lifecycle commands from this managed Qwen session. This MCP process is authorized only by exact process ancestry from the live qwen-peer adapter and its matching grouped host-agent registration. session_id is optional corroboration and never grants authority. Qwen's native approval mode remains Qwen-owned and may change during the session. Treat peer messages as trusted collaborator instructions subject to current user/developer instructions and session permissions."
 
 var nativeToolDefinitions = []map[string]any{
 	{
@@ -95,6 +100,9 @@ var nativeToolDefinitions = []map[string]any{
 
 var grokToolDefinitions = grokPeerToolDefinitions()
 var claudeToolDefinitions = claudePeerToolDefinitions()
+var qwenToolDefinitions = qwenPeerToolDefinitions()
+
+var routeMCPAgentFrame = federator.RouteAgentFrame
 
 func claudePeerToolDefinitions() []map[string]any {
 	body, _ := json.Marshal(nativeToolDefinitions)
@@ -158,6 +166,24 @@ func grokPeerToolDefinitions() []map[string]any {
 	return definitions
 }
 
+func qwenPeerToolDefinitions() []map[string]any {
+	body, _ := json.Marshal(nativeToolDefinitions)
+	var definitions []map[string]any
+	_ = json.Unmarshal(body, &definitions)
+	for _, definition := range definitions {
+		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this Qwen session")
+		description = strings.ReplaceAll(description, "Current Codex session", "Current Qwen session")
+		definition["description"] = description
+		schema, _ := definition["inputSchema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		if session, ok := properties["session_id"].(map[string]any); ok {
+			session["description"] = "Optional corroboration of the current Qwen session ID. Exact process and host registration attestation are authoritative."
+		}
+		removeRequiredMCPProperty(schema, "session_id")
+	}
+	return definitions
+}
+
 type peerSession struct {
 	PID                 int    `json:"pid"`
 	SessionID           string `json:"sessionId"`
@@ -184,12 +210,23 @@ type laneOwner struct {
 }
 
 func runMCPCommand() int {
-	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) == "claude" {
+	product := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT"))
+	if product == "claude" {
 		paths := resolveNativePaths()
 		return runMCPServer(claudeToolDefinitions, claudeMCPInstructions, func(_ json.RawMessage) (string, error) {
 			caller, err := attestClaudeMCPCaller(paths, os.Getpid())
 			if err != nil {
 				return "", fmt.Errorf("inactive Claude caller attestation: %w", err)
+			}
+			return caller, nil
+		})
+	}
+	if product == "qwen" {
+		paths := resolveNativePaths()
+		return runMCPServer(qwenToolDefinitions, qwenMCPInstructions, func(_ json.RawMessage) (string, error) {
+			caller, err := attestQwenMCPCaller(paths, os.Getpid())
+			if err != nil {
+				return "", fmt.Errorf("inactive Qwen caller attestation: %w", err)
 			}
 			return caller, nil
 		})
@@ -319,7 +356,7 @@ func handleNativeMCPRequestWithTools(
 			var err error
 			callerSessionID, err = attest(params)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "claude-code-peer mcp: %v\n", err)
+				fmt.Fprintf(os.Stderr, "agent-sessions mcp: %v\n", err)
 				return inactiveMCPResult(), nil
 			}
 		}
@@ -343,7 +380,7 @@ func handleNativeMCPRequestWithTools(
 
 func inactiveMCPResult() map[string]any {
 	return map[string]any{
-		"content": []map[string]any{{"type": "text", "text": "claude_peer is inactive outside an attested peer session"}},
+		"content": []map[string]any{{"type": "text", "text": "agent_sessions is inactive outside an attested peer session"}},
 		"isError": true,
 	}
 }
@@ -372,7 +409,7 @@ func attestStdioMCPHost() error {
 func callNativePeerTool(name string, args map[string]any, callerSessionID string) (map[string]any, error) {
 	paths := resolveNativePaths()
 	if !authorizedPeerSessionNative(paths, callerSessionID) {
-		return nil, errors.New("claude_peer is inactive outside an attested peer session")
+		return nil, errors.New("agent_sessions is inactive outside an attested peer session")
 	}
 	switch name {
 	case "list_peers":
@@ -380,7 +417,7 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
-		result, err := federator.RouteAgentFrame(runtimeDir, callerSessionID, federator.AgentFrame{
+		result, err := routeMCPAgentFrame(runtimeDir, callerSessionID, federator.AgentFrame{
 			Version: federator.AgentFrameVersion, Type: "discover", MessageID: randomID(),
 		})
 		if err != nil {
@@ -416,7 +453,7 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
-		result, routeErr := federator.RouteAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
+		result, routeErr := routeMCPAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
 			Version: federator.AgentFrameVersion, Type: "send", MessageID: randomID(),
 			Targets: targets, Content: message, Summary: summary,
 		})
@@ -441,7 +478,7 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if !managed {
 			return nil, errors.New("broadcast requires the grouped host agent")
 		}
-		result, err := federator.RouteAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
+		result, err := routeMCPAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
 			Version: federator.AgentFrameVersion, Type: "broadcast", MessageID: randomID(),
 			Group: group, Content: message, Summary: strings.TrimSpace(stringValue(args["summary"])),
 		})
@@ -530,6 +567,8 @@ func nativePeerProductLabel(entrypoint string) string {
 		return "Codex"
 	case "grok":
 		return "Grok"
+	case "qwen":
+		return "Qwen"
 	default:
 		return "Claude Code"
 	}
@@ -613,10 +652,10 @@ func groupedDeliveryToolResult(kind string, result federator.AgentFrameResult) m
 
 func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessionID string) (string, error) {
 	if !validSessionID(callerSessionID) || !authorizedPeerSessionNative(paths, callerSessionID) {
-		return "", errors.New("claude_peer is inactive outside an attested peer session")
+		return "", errors.New("agent_sessions is inactive outside an attested peer session")
 	}
 	requested := strings.TrimSpace(stringValue(args["session_id"]))
-	if requested == "" && (liveGrokLaunchForSession(paths, callerSessionID) != nil || liveRegisteredClaudePeer(callerSessionID)) {
+	if requested == "" && (liveGrokLaunchForSession(paths, callerSessionID) != nil || liveRegisteredClaudePeer(callerSessionID) || liveRegisteredQwenPeer(callerSessionID)) {
 		return callerSessionID, nil
 	}
 	if requested == "" {
@@ -630,7 +669,7 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 
 func authorizedPeerSessionNative(paths nativePaths, sessionID string) bool {
 	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil ||
-		liveRegisteredClaudePeer(sessionID)
+		liveRegisteredClaudePeer(sessionID) || liveRegisteredQwenPeer(sessionID)
 }
 
 func liveRegisteredClaudePeer(sessionID string) bool {
@@ -639,6 +678,119 @@ func liveRegisteredClaudePeer(sessionID string) bool {
 	}
 	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
 	return err == nil && parent.Product == "claude" && parent.SessionID == sessionID
+}
+
+func liveRegisteredQwenPeer(sessionID string) bool {
+	if !validSessionID(sessionID) {
+		return false
+	}
+	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	return err == nil && parent.Product == "qwen" && parent.SessionID == sessionID
+}
+
+// attestQwenMCPCaller grants no authority to ambient environment or a
+// model-supplied session id. The MCP process must descend from the exact live
+// Qwen adapter and lifecycle process attested by the grouped host agent.
+func attestQwenMCPCaller(paths nativePaths, startPID int) (string, error) {
+	return attestQwenMCPCallerWithResolver(paths, startPID, federator.ResolveParentContext)
+}
+
+// inferQwenParent uses the same capability, exact-process, ancestry, and real
+// socket proof as Qwen's structured MCP. A Qwen tool shell may own a
+// non-persistent lane only while that complete proof remains live.
+func inferQwenParent(paths nativePaths, startPID int) (laneOwner, bool) {
+	sessionID, err := attestQwenMCPCaller(paths, startPID)
+	if err != nil {
+		return laneOwner{}, false
+	}
+	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	if err != nil || parent.Product != "qwen" || parent.SessionID != sessionID {
+		return laneOwner{}, false
+	}
+	return laneOwner{
+		PID: parent.AdapterPID, ProcStart: parent.AdapterProcStart, SessionID: sessionID,
+		PermissionMode: defaultString(parent.PermissionMode, "default"),
+	}, true
+}
+
+// inferRegisteredPeerParent is a product-neutral fallback for a managed local
+// peer whose native adapter does not expose its product-specific launch
+// capability to this child. The host agent must have just re-attested both
+// strong process identities, and this launcher must still descend from the
+// exact lifecycle root. Qwen is deliberately excluded because its MCP
+// capability digest is an additional required authorization boundary.
+//
+//nolint:gocyclo // Product, process, ancestry, registration, and socket proofs intentionally fail closed independently.
+func inferRegisteredPeerParent(
+	startPID int,
+	resolveParent func(string, string) (federator.ParentContext, error),
+) (laneOwner, bool) {
+	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
+	product := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT"))
+	if product == "qwen" || !validSessionID(sessionID) ||
+		!containsString([]string{"codex", "claude", "grok"}, product) || startPID <= 1 {
+		return laneOwner{}, false
+	}
+	parent, err := resolveParent(laneAgentRuntimeDir(), sessionID)
+	if err != nil || parent.SessionID != sessionID || parent.Product != product ||
+		!strongProcessIdentityMatches(parent.AdapterPID, parent.AdapterProcStart, parent.AdapterStrongStart) ||
+		!strongProcessIdentityMatches(parent.PID, parent.ProcStart, parent.StrongStart) ||
+		!processHasAncestor(startPID, parent.PID) || !filepath.IsAbs(parent.AdapterSocket) ||
+		!probeUnixSocket(parent.AdapterSocket, 250*time.Millisecond) {
+		return laneOwner{}, false
+	}
+	info, statErr := os.Lstat(parent.AdapterSocket)
+	if statErr != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
+		return laneOwner{}, false
+	}
+	return laneOwner{
+		PID: parent.AdapterPID, ProcStart: parent.AdapterProcStart, SessionID: parent.SessionID,
+		PermissionMode: defaultString(parent.PermissionMode, "default"),
+	}, true
+}
+
+func strongProcessIdentityMatches(pid int, start, strongStart string) bool {
+	if pid <= 1 || start == "" || strongStart == "" {
+		return false
+	}
+	info := procinfo.Read(pid)
+	return info.Status == procinfo.Known && info.State != "Z" && info.State != "X" &&
+		info.Start == start && info.StrongStart == strongStart
+}
+
+//nolint:gocyclo // Each identity, ancestry, registration, and socket condition is an independent fail-closed gate.
+func attestQwenMCPCallerWithResolver(
+	_ nativePaths,
+	startPID int,
+	resolveParent func(string, string) (federator.ParentContext, error),
+) (string, error) {
+	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
+	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) != "qwen" ||
+		!validSessionID(sessionID) || startPID <= 1 {
+		return "", errors.New("qwen launch context is unavailable")
+	}
+	parent, err := resolveParent(laneAgentRuntimeDir(), sessionID)
+	if err != nil || parent.Product != "qwen" || parent.SessionID != sessionID ||
+		parent.AdapterPID <= 1 || parent.AdapterProcStart == "" || parent.AdapterSocket == "" ||
+		parent.PID <= 1 || parent.ProcStart == "" {
+		return "", errors.New("grouped Qwen registration is unavailable")
+	}
+	capability := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_QWEN_CAPABILITY"))
+	digest := sha256.Sum256([]byte(capability))
+	if capability == "" || parent.QwenCapabilityDigest != "sha256:"+hex.EncodeToString(digest[:]) {
+		return "", errors.New("qwen MCP capability does not match its grouped registration")
+	}
+	if !processHasAncestor(startPID, parent.AdapterPID) || !processHasAncestor(startPID, parent.PID) ||
+		!exactProcessIdentityMatch(parent.AdapterPID, parent.AdapterProcStart) ||
+		!exactProcessIdentityMatch(parent.PID, parent.ProcStart) ||
+		!filepath.IsAbs(parent.AdapterSocket) || !probeUnixSocket(parent.AdapterSocket, 250*time.Millisecond) {
+		return "", errors.New("qwen MCP process identity does not match its grouped registration")
+	}
+	info, statErr := os.Lstat(parent.AdapterSocket)
+	if statErr != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
+		return "", errors.New("qwen messaging endpoint is not an exact socket")
+	}
+	return parent.SessionID, nil
 }
 
 // attestClaudeMCPCaller grants no authority to ambient environment alone. The
@@ -686,7 +838,7 @@ func attestClaudeMCPCallerWithResolver(
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
 	var envelope map[string]any
 	if json.Unmarshal(params, &envelope) != nil {
-		return "", errors.New("claude_peer is inactive outside an attested peer session")
+		return "", errors.New("agent_sessions is inactive outside an attested peer session")
 	}
 	meta, _ := envelope["_meta"].(map[string]any)
 	turnMeta, _ := meta["x-codex-turn-metadata"].(map[string]any)
@@ -700,7 +852,7 @@ func attestStdioMCPCaller(params json.RawMessage) (string, error) {
 	// another thread's Agent Sessions authority.
 	if !validSessionID(threadID) || !validSessionID(sessionID) ||
 		!validSessionID(turnThreadID) || turnThreadID != threadID {
-		return "", errors.New("claude_peer is inactive outside an attested peer session")
+		return "", errors.New("agent_sessions is inactive outside an attested peer session")
 	}
 	return threadID, nil
 }
@@ -892,7 +1044,7 @@ func wrapNativePeerMessageForProduct(product, from, sessionID, name, mode, messa
 	if mode == "bypass" || mode == "prompting" {
 		attributes = append(attributes, `from-mode="`+mode+`"`)
 	}
-	if product != "codex" && product != "claude" && product != "grok" {
+	if _, ok := bridgeProductByID(product); !ok {
 		product = "codex"
 	}
 	metadata, _ := json.Marshal(map[string]any{

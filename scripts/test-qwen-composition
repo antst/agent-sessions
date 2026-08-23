@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Run the seven live parent/target composition edges involving Qwen."""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import platform
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+TIMEOUT = 180.0
+PRODUCTS = ("codex", "claude", "grok", "qwen")
+
+
+def fail(message: str) -> None:
+    raise AssertionError(message)
+
+
+def platform_name() -> str:
+    value = f"{platform.system().lower()}-{platform.machine()}"
+    return {
+        "linux-x86_64": "linux-x64", "linux-aarch64": "linux-arm64",
+        "darwin-x86_64": "darwin-x64", "darwin-arm64": "darwin-arm64",
+    }.get(value, value)
+
+
+def rows(body: str) -> list[dict]:
+    result = []
+    for line in body.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            result.append(value)
+    return result
+
+
+def wait_for(predicate, description: str, timeout: float = TIMEOUT):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            value = predicate()
+            if value:
+                return value
+        except Exception as error:
+            last = error
+        time.sleep(0.05)
+    fail(f"timed out waiting for {description}; last={last}")
+
+
+def lane_record(data: pathlib.Path, thread_id: str) -> dict | None:
+    matches = []
+    for path in data.rglob("*.json"):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or not str(value.get("type", "")).endswith("-peer-lane"):
+            continue
+        identities = {
+            value.get("threadId"), value.get("thread_id"), value.get("sessionId"), value.get("session_id"),
+        }
+        if thread_id in identities:
+            matches.append(value)
+    if len(matches) > 1:
+        fail(f"multiple durable lane records match {thread_id}")
+    return matches[0] if matches else None
+
+
+def archived_record_is_clean(data: pathlib.Path, thread_id: str) -> dict | None:
+    record = lane_record(data, thread_id)
+    if record is None or record.get("status") != "archived":
+        return None
+    for field in ("managerPid", "manager_pid", "workerPid", "worker_pid"):
+        if record.get(field) not in (None, 0):
+            return None
+    for field in ("socket", "socketPath", "socket_path", "workerSocket", "worker_socket"):
+        path = record.get(field)
+        if isinstance(path, str) and path and pathlib.Path(path).exists():
+            return None
+    return record
+
+
+def lane_arguments(
+    product: str, name: str, qwen_home: pathlib.Path, repo: pathlib.Path, prompt: pathlib.Path,
+) -> list[str]:
+    arguments = [
+        f"{product}-peer-lane", "start", "--name", name,
+        "--no-auto-archive", "--inherit-groups", "-C", str(repo),
+        "--prompt-file", str(prompt),
+    ]
+    if product == "qwen":
+        arguments.extend(["--qwen-home", str(qwen_home), "--yolo"])
+    return arguments
+
+
+def read_fixture_events(process: subprocess.Popen, description: str) -> list[dict]:
+    if process.stdout is None:
+        fail(f"{description} fixture stdout is unavailable")
+    deadline = time.monotonic() + TIMEOUT
+    events: list[dict] = []
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        line = process.stdout.readline()
+        if not line:
+            break
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+            if value.get("event") == "child_exit":
+                return events
+    stderr = ""
+    if process.stderr is not None and process.poll() is not None:
+        stderr = process.stderr.read()
+    fail(f"{description} fixture did not report child exit: events={events!r} stderr={stderr!r}")
+
+
+def stop_fixture(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def stop_isolated_codex_app_server(codex_home: pathlib.Path, environment: dict[str, str]) -> None:
+    """Stop only the App Server rooted in the caller-supplied test CODEX_HOME."""
+    binary = codex_home / "packages" / "standalone" / "current" / "codex"
+    if not binary.exists():
+        return
+    subprocess.run(
+        [str(binary), "app-server", "daemon", "stop"],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+
+
+def main() -> int:
+    required = {
+        "QWEN_TEST_HOME": os.environ.get("QWEN_TEST_HOME", ""),
+        "QWEN_TEST_RUNTIME_DIR": os.environ.get("QWEN_TEST_RUNTIME_DIR", ""),
+        "CODEX_TEST_HOME": os.environ.get("CODEX_TEST_HOME", ""),
+        "CLAUDE_TEST_CONFIG_DIR": os.environ.get("CLAUDE_TEST_CONFIG_DIR", ""),
+        "CLAUDE_TEST_SECURE_CONFIG_DIR": os.environ.get("CLAUDE_TEST_SECURE_CONFIG_DIR", ""),
+    }
+    for name, raw in required.items():
+        path = pathlib.Path(raw)
+        if not raw or not path.is_absolute() or not path.is_dir():
+            fail(f"{name} must name an existing absolute test-owned directory")
+    qwen_home = pathlib.Path(required["QWEN_TEST_HOME"])
+    qwen_runtime = pathlib.Path(required["QWEN_TEST_RUNTIME_DIR"])
+    codex_home = pathlib.Path(required["CODEX_TEST_HOME"])
+    claude_config = pathlib.Path(required["CLAUDE_TEST_CONFIG_DIR"])
+    claude_secure_config = pathlib.Path(required["CLAUDE_TEST_SECURE_CONFIG_DIR"])
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    temporary_parent = pathlib.Path("/tmp") if platform.system() == "Darwin" else None
+    root = pathlib.Path(tempfile.mkdtemp(prefix="qwen-composition.", dir=temporary_parent))
+    environment = os.environ.copy()
+    launched: list[tuple[str, str]] = []
+    parents: list[subprocess.Popen] = []
+    agent: subprocess.Popen | None = None
+    success = False
+    try:
+        subprocess.run(["make", "-s", "build"], cwd=repo, check=True)
+        binary_root = repo / "bin" / platform_name()
+        fixture = root / "composition-parent"
+        subprocess.run([
+            "go", "build", "-o", str(fixture), "./scripts/federation/grouped_peer_fixture.go",
+        ], cwd=repo, check=True)
+        runtime, state, data, xdg_runtime = (
+            root / "agent-runtime", root / "agent-state", root / "data", root / "xdg-runtime",
+        )
+        for path in (runtime, state, data, xdg_runtime):
+            path.mkdir(mode=0o700)
+        for name in (
+            "CODEX_SESSION_ID", "CODEX_THREAD_ID", "AGENT_SESSIONS_SESSION_ID",
+            "AGENT_SESSIONS_PRODUCT", "AGENT_SESSIONS_QWEN_CAPABILITY",
+            "AGENT_SESSIONS_REMOTE_PARENT_CONTEXT",
+        ):
+            environment.pop(name, None)
+        environment.update({
+            "PATH": str(binary_root) + os.pathsep + environment.get("PATH", ""),
+            "CLAUDE_PEER_DATA_DIR": str(data),
+            "CLAUDE_PEER_CLAUDE_CONFIG_DIR": str(claude_config),
+            "CLAUDE_CONFIG_DIR": str(claude_config),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(claude_secure_config),
+            "CODEX_HOME": str(codex_home),
+            "QWEN_HOME": str(qwen_home),
+            "QWEN_RUNTIME_DIR": str(qwen_runtime),
+            "XDG_RUNTIME_DIR": str(xdg_runtime),
+            "XDG_STATE_HOME": str(root / "xdg-state"),
+            "AGENT_SESSIONS_AGENT_RUNTIME_DIR": str(runtime),
+        })
+        pathlib.Path(environment["XDG_STATE_HOME"]).mkdir(mode=0o700)
+        stop_isolated_codex_app_server(codex_home, environment)
+        federator = binary_root / "peer-federator"
+        runtime_binary = binary_root / "agent-session-runtime"
+        agent = subprocess.Popen([
+            str(federator), "agent", "--host", "qwen-composition", "--name", "qwen-composition",
+            "--runtime-dir", str(runtime), "--state-dir", str(state),
+            "--claude-config-dir", str(claude_config),
+        ], env=environment, stdout=subprocess.DEVNULL, stderr=(root / "agent.err").open("wb"),
+           start_new_session=True)
+        wait_for(lambda: (runtime / "agent.sock").is_socket(), "composition host agent")
+
+        edges = [("qwen", target) for target in PRODUCTS]
+        edges.extend((parent, "qwen") for parent in PRODUCTS if parent != "qwen")
+        evidence = []
+        for index, (parent, target) in enumerate(edges, start=1):
+            parent_id = str(uuid.uuid4())
+            name = f"qwen-compose-{parent}-to-{target}-{index}"
+            token = f"QWEN_COMPOSE_{parent.upper()}_TO_{target.upper()}_{index}_OK"
+            prompt = root / f"prompt-{index}.txt"
+            prompt.write_text(f"Return only the exact token {token} and nothing else.\n", encoding="utf-8")
+            prompt.chmod(0o600)
+            command = [
+                str(fixture), "--runtime-dir", str(runtime), "--session", parent_id,
+                "--product", parent, "--name", f"{parent}-composition-parent",
+                "--groups", "qwen-composition", "--stay-after-child", "--",
+                *lane_arguments(target, name, qwen_home, repo, prompt),
+            ]
+            parent_process = subprocess.Popen(
+                command, env=environment,
+                text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            parents.append(parent_process)
+            started_rows = read_fixture_events(parent_process, f"{parent}->{target}")
+            child_exit = next((row for row in started_rows if row.get("event") == "child_exit"), None)
+            ready = next((row for row in started_rows if row.get("type") == "lane.ready"), None)
+            if child_exit is None or child_exit.get("exit") != 0 or ready is None:
+                stop_fixture(parent_process)
+                parents.remove(parent_process)
+                diagnostic = parent_process.stderr.read() if parent_process.stderr is not None else ""
+                fail(f"{parent}->{target} start failed: events={started_rows!r} stderr={diagnostic!r}")
+            if parent_process.poll() is not None:
+                diagnostic = parent_process.stderr.read() if parent_process.stderr is not None else ""
+                fail(f"{parent}->{target} lifecycle fixture exited before collection: {diagnostic!r}")
+            thread_id = ready.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id:
+                fail(f"{parent}->{target} omitted thread identity: {ready}")
+            launched.append((target, thread_id))
+            lane = binary_root / f"{target}-peer-lane"
+            waited = subprocess.run(
+                [str(lane), "wait", thread_id, "--timeout", "150"], env=environment,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=TIMEOUT, check=False,
+            )
+            if waited.returncode != 0:
+                fail(f"{parent}->{target} wait failed: {waited.stdout!r} {waited.stderr!r}")
+            waited_rows = rows(waited.stdout)
+            answers = [
+                row.get("item", {}).get("text", "") for row in waited_rows
+                if isinstance(row.get("item"), dict) and row["item"].get("phase") == "final_answer"
+            ]
+            if not answers or answers[-1].strip() != token:
+                fail(f"{parent}->{target} final answer = {answers}")
+            record = wait_for(lambda: lane_record(data, thread_id), f"{parent}->{target} durable record")
+            groups = record.get("groups") or []
+            parent_recorded = record.get("parentSessionId") or record.get("parent_session_id")
+            owner_recorded = record.get("ownerSessionId") or record.get("owner_session_id")
+            notify_recorded = record.get("notifyTarget") or record.get("notify_target")
+            expected_groups = {
+                "qwen-composition", f"session:qwen-composition/{parent_id}",
+                f"session:qwen-composition/{thread_id}",
+            }
+            if (parent_recorded != parent_id or owner_recorded != parent_id or
+                    notify_recorded != "session:" + parent_id or record.get("persistent") or
+                    set(groups) != expected_groups):
+                fail(f"{parent}->{target} parent/groups = {record}")
+            archived = subprocess.run(
+                [str(lane), "archive", thread_id], env=environment, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT, check=False,
+            )
+            if archived.returncode != 0:
+                fail(f"{parent}->{target} archive failed: {archived.stdout!r} {archived.stderr!r}")
+            wait_for(
+                lambda: archived_record_is_clean(data, thread_id),
+                f"{parent}->{target} archived cleanup",
+            )
+            launched.remove((target, thread_id))
+            stop_fixture(parent_process)
+            parents.remove(parent_process)
+            evidence.append({"parent": parent, "target": target, "thread_id": thread_id, "token": token})
+
+        success = True
+        print(json.dumps({"type": "qwen.composition.passed", "edges": evidence}, sort_keys=True))
+        return 0
+    finally:
+        binary_root = repo / "bin" / platform_name()
+        for product, thread_id in reversed(launched):
+            subprocess.run(
+                [str(binary_root / f"{product}-peer-lane"), "archive", thread_id],
+                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=30, check=False,
+            )
+        for parent_process in reversed(parents):
+            stop_fixture(parent_process)
+        if agent is not None and agent.poll() is None:
+            os.killpg(agent.pid, signal.SIGTERM)
+            try:
+                agent.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(agent.pid, signal.SIGKILL)
+                agent.wait(timeout=5)
+        runtime_binary = binary_root / "agent-session-runtime"
+        if runtime_binary.exists():
+            subprocess.run([str(runtime_binary), "supervisor", "stop"], env=environment,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        stop_isolated_codex_app_server(codex_home, environment)
+        if not success:
+            error_log = root / "agent.err"
+            if error_log.exists() and error_log.stat().st_size:
+                print(error_log.read_text(errors="replace"), file=sys.stderr)
+        shutil.rmtree(root)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (AssertionError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        print(f"Qwen composition contract: FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)

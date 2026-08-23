@@ -79,6 +79,12 @@ func ClaudePeerLifecycleRootInState(stateDir, sessionID string) string {
 	return filepath.Join(stateDir, "claude-peers", sessionKey(sessionID), "config")
 }
 
+// PeerLifecycleRootInState returns the product-scoped private ownership root
+// for managed adapters whose native state is not stored in Claude's registry.
+func PeerLifecycleRootInState(stateDir, product, sessionID string) string {
+	return filepath.Join(stateDir, cleanID(product)+"-peers", sessionKey(sessionID), "config")
+}
+
 // ClaudePeerLifecycleLockPath serializes one stable managed attachment across
 // exact resume and host-agent crash retirement.
 func ClaudePeerLifecycleLockPath(lifecycleRoot string) string {

@@ -104,6 +104,49 @@ func TestPrivateRuntimeDirectoryRejectsSymlinkAndRepairsMode(t *testing.T) {
 	}
 }
 
+func TestStableSessionSocketRefusesSameNameSocketAndSymlinkSubstitution(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-collision.sock")
+	target := filepath.Join(root, "unrelated-target")
+	if err := os.WriteFile(target, []byte("preserve\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if listener, err := listenPrivateSessionSocket(path); err == nil {
+		_ = listener.Close()
+		t.Fatal("same-name symlink was replaced by a stable session socket")
+	}
+	if destination, err := os.Readlink(path); err != nil || destination != target {
+		t.Fatalf("same-name symlink changed: target=%q err=%v", destination, err)
+	}
+	if body, err := os.ReadFile(target); err != nil || string(body) != "preserve\n" {
+		t.Fatalf("symlink target changed: body=%q err=%v", body, err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = existing.Close() })
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listener, listenErr := listenPrivateSessionSocket(path); listenErr == nil {
+		_ = listener.Close()
+		t.Fatal("same-name live socket was replaced by a stable session socket")
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Mode()&os.ModeSocket == 0 || !os.SameFile(before, after) {
+		t.Fatalf("same-name live socket changed: before=%v after=%v err=%v", before, after, err)
+	}
+}
+
 func TestNativeProfilesUseDistinctSupervisorState(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))

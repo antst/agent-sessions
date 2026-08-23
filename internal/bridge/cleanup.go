@@ -164,7 +164,7 @@ func removeOwnedStableAlias(stable, backend, runtimeRoot string) bool {
 func ownedBridgeRegistry(row map[string]any, pid int, runtimeRoot string) bool {
 	entrypoint := stringValue(row["entrypoint"])
 	return row != nil && intValue(row["pid"]) == pid &&
-		(entrypoint == "codex" || entrypoint == "grok") &&
+		(entrypoint == "codex" || entrypoint == "grok" || entrypoint == "qwen") &&
 		strings.HasPrefix(stringValue(row["version"]), "codex-claude-peer/") &&
 		ownedRuntimePath(stringValue(row["messagingSocketPath"]), runtimeRoot)
 }

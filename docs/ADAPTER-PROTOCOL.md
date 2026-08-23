@@ -29,7 +29,7 @@ are never swept by PID or liveness alone.
   "cwd": "/agent-state",
   "startedAt": 1786000000000,
   "procStart": "123456789",
-  "version": "agent-sessions/0.2.0",
+  "version": "agent-sessions/0.2.4",
   "peerProtocol": 1,
   "kind": "service",
   "entrypoint": "agent-sessions",
@@ -48,10 +48,15 @@ of the Claude registry. It returns only peers sharing a group with the caller.
 A visible peer can be addressed by name, display name, host/session ID, or
 exact session ID. Hidden duplicate names do not participate in resolution.
 
-Codex and Grok adapters own stable per-session UDS paths. A wrapped Claude
+Codex, Grok, and Qwen adapters own stable per-session UDS paths. A wrapped Claude
 attachment instead registers Claude's native PID-bound socket; that socket can
 rotate across exact resume while the shared transcript, Agent Sessions session
 ID, catalog row, and groups remain stable.
+Every newly published stable endpoint is a real `0600` Unix socket, never a
+symlink to a PID-named backend. This is required because native senders may
+correctly reject symlink reply targets. Legacy aliases are stale-artifact input
+only: reconciliation removes one only after proving the exact dead owned
+backend and never advertises or recreates it.
 The host agent routes to that socket only after group admission. Claude's
 native sender addresses the service row and puts the complete AgentFrame JSON
 in the message body.
@@ -106,6 +111,59 @@ descendant that still carries the attachment ID; local and remote lane launch
 from that descendant; agent restart; normal exit and crash cleanup; and proof
 that no provisional catalog row, peer, socket, or credential/config mutation
 survives.
+
+## New-adapter acceptance checklist
+
+The historical design for a vendor is research input, not authority. Before a
+new adapter ships, its current installed native version and supported surfaces
+must be re-probed, then the adapter must satisfy all of these classes on Linux
+and macOS:
+
+1. **Native selection** — fresh, exact-UUID, native name/title, ambiguous
+   chooser, rename, cwd, archive/unarchive, and ordinary↔managed transcript
+   movement retain the product's normal behavior. Wrapper launch IDs never
+   become transcript IDs.
+2. **Attestation** — the selected native ID, name, PID plus strong start,
+   ancestry, profile, canonical cwd, real socket, capability, and host catalog
+   agree before messaging or lane ownership. A descendant carrying a
+   provisional attachment ID must resolve to the adopted native ID.
+3. **Permissions** — record what the native product can prove. Do not invent a
+   mode, silently widen it, or add policy duct tape. Native mode changes remain
+   product-owned unless the product exposes a supported immutable contract.
+4. **Messaging** — managed and bare sessions are distinguished; discovery,
+   direct send/reply, atomic multicast, named-group broadcast, idle/busy
+   delivery, deduplication, and agent restart work in both directions. Stable
+   endpoints are real sockets and no sender-side symlink workaround is needed.
+5. **Lifecycle** — normal exit, Ctrl+C, SIGTERM, wrapper/worker/manager crash,
+   pre-publication failure, PID/path reuse, partial cleanup, and retry debt
+   remove only exact owned processes and artifacts. Ordinary sessions and
+   unrelated profile state survive.
+6. **Lanes and federation** — all parent→target combinations, immediate-parent
+   anchors, explicit group inheritance, notices, collection, interrupt,
+   archive/resume, disconnected/unready negatives, and destination residue are
+   covered locally and in both federation directions.
+7. **Install and release** — exact selected-profile install/upgrade/remove,
+   readiness doctor, no-secret/nonmutation proof, prebuilt no-Go install,
+   authoritative inventory, and identical Linux/macOS release gates pass.
+
+If a native surface cannot prove one of these properties, fail closed or state
+the narrower supported contract. Do not copy a prior adapter's workaround merely
+because its process shape looks similar.
+
+## Qwen dual-output and input contract
+
+Managed interactive Qwen uses protocol-v2 `--json-file` for admission and
+activity plus `--input-file` for queued submits. A fresh wrapper supplies the
+same preallocated UUID through native `--session-id`; resume is allowed only
+after the Agent Sessions selector resolves to one exact managed UUID. The first
+`system/session_start` must corroborate that UUID, canonical cwd, Qwen version,
+protocol version, and required event inventory before publication.
+
+The Qwen plugin/MCP is authorized by an unguessable launch capability, exact
+process ancestry and strong start, selected presence-sensitive profile, real
+socket, and host registration. Native permission mode remains Qwen-owned and
+mutable; the adapter records the launch request and observed mode or `unknown`
+without converting either into Agent Sessions authority.
 
 ## Transport
 
@@ -285,7 +343,7 @@ On an inbound peer message:
 4. If direct delivery fails, the supervisor writes one deterministic fallback to the hook inbox.
    `Stop` or
    `UserPromptSubmit` injects only complete messages that fit its bounded context. Overflow remains
-   queued for a later boundary or `claude_peer.check_inbox`; a truncated message is never deleted.
+   queued for a later boundary or `agent_sessions.check_inbox`; a truncated message is never deleted.
 
 Direct peer messages are pushed into an active recipient turn automatically. Orchestrators should
 continue useful work rather than poll `check_inbox`, sleep, or block waiting for delivery;
@@ -346,7 +404,7 @@ parsing; the adapter adopts the resulting live roster UUID/title. Separate
 sole-owner headless ACP sessions implement local or federated Grok lanes.
 
 Headless App Server turns can issue server-initiated `item/tool/call` JSON-RPC requests. The native
-client handles bridge-owned `claude_peer` tools directly only after the App Server-supplied `threadId`
+client handles bridge-owned `agent_sessions` tools directly only after the App Server-supplied `threadId`
 matches an authorized peer thread; other dynamic MCP names continue through `mcpServer/tool/call`.
 For stdio MCP calls, the MCP process must be an exact child (PID plus process-start identity) of the
 App Server process corroborated over its Unix socket by the supervisor. Codex's host-owned
@@ -360,7 +418,7 @@ ordinary threads can see the tool names, but calls return a bounded inactive res
 inbox, rename, or send access.
 The plugin's default MCP approval mode lets calls reach this authorization boundary without a
 daemon-wide pre-dispatch prompt; it grants no peer capability by itself.
-Managed Claude uses the same public `claude_peer` tool name through the Claude plugin, but a
+Managed Claude uses the same public `agent_sessions` tool name through the Claude plugin, but a
 different caller proof. The stdio MCP process must descend from both the exact live native Claude
 adapter and its launcher lifecycle owner. The host agent must independently return the same
 interactive Claude UUID, adapter/lifecycle process starts, and adapter socket; the native registry
@@ -380,7 +438,7 @@ identify the selected UUID. The catalog is keyed by that selected UUID, while
 the attachment survives only as the strongly attested descendant alias
 described above.
 
-The bridge accepts MCP approval elicitations only for the bridge-owned `claude_peer`
+The bridge accepts MCP approval elicitations only for the bridge-owned `agent_sessions`
 server; foreign
 MCP approvals and ordinary elicitations are not trusted.
 

@@ -1,16 +1,20 @@
 // grouped_peer_fixture is a test-only product adapter used by the federation
 // integration suite. It exercises the same registration and AgentFrame APIs as
-// Codex, Claude, and Grok adapters without launching a model client.
+// Codex, Claude, Grok, and Qwen adapters without launching a model client.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -20,6 +24,8 @@ import (
 
 	"github.com/antst/agent-sessions/internal/federator"
 )
+
+const fixtureQwenCapability = "agent-sessions-grouped-qwen-fixture-capability"
 
 type fixtureOutput struct{ mu sync.Mutex }
 
@@ -35,6 +41,7 @@ func main() {
 	product := flag.String("product", "codex", "peer product")
 	name := flag.String("name", "fixture", "peer name")
 	groupsCSV := flag.String("groups", "", "comma-separated explicit groups")
+	stayAfterChild := flag.Bool("stay-after-child", false, "remain registered after the child exits")
 	flag.Parse()
 	if *runtimeDir == "" || *sessionID == "" {
 		fmt.Fprintln(os.Stderr, "runtime-dir and session are required")
@@ -71,14 +78,70 @@ func main() {
 		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
 		StartedAt: time.Now().UnixMilli(),
 	}
+	if *product == "qwen" {
+		// The production Qwen adapter attests the exact Agent Sessions MCP
+		// inventory at publication. This test adapter has no native plugin to
+		// inspect, but it must still exercise the same presence/shape contract
+		// rather than weakening Qwen registration validation for fixtures.
+		digest := sha256.Sum256([]byte(fixtureQwenCapability))
+		registration.QwenCapabilityDigest = "sha256:" + hex.EncodeToString(digest[:])
+	}
 	if err := registerUntil(ctx, *runtimeDir, registration); err != nil {
 		panic(err)
 	}
 	defer func() { _ = federator.UnregisterPeer(*runtimeDir, registration) }()
 	output.write(map[string]any{"event": "ready", "session_id": *sessionID})
 	go refreshRegistration(ctx, *runtimeDir, registration)
+	if childArgs := flag.Args(); len(childArgs) != 0 {
+		command := exec.CommandContext(ctx, childArgs[0], childArgs[1:]...) //nolint:gosec // test runner supplies the exact built lane executable and structured args.
+		command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+		command.Env = fixtureChildEnvironment(os.Environ(), *runtimeDir, *sessionID, *product)
+		err := command.Run()
+		exit := 0
+		if err != nil {
+			exit = 1
+			var result *exec.ExitError
+			if errors.As(err, &result) {
+				exit = result.ExitCode()
+			}
+		}
+		output.write(map[string]any{"event": "child_exit", "exit": exit})
+		if *stayAfterChild {
+			go func() { <-ctx.Done(); _ = os.Stdin.Close() }()
+			readCommands(ctx, *runtimeDir, *sessionID, output)
+			return
+		}
+		stop()
+		_ = federator.UnregisterPeer(*runtimeDir, registration)
+		return
+	}
 	go func() { <-ctx.Done(); _ = os.Stdin.Close() }()
 	readCommands(ctx, *runtimeDir, *sessionID, output)
+}
+
+func fixtureChildEnvironment(environment []string, runtimeDir, sessionID, product string) []string {
+	replacements := map[string]string{
+		"AGENT_SESSIONS_AGENT_RUNTIME_DIR": runtimeDir,
+		"AGENT_SESSIONS_SESSION_ID":        sessionID,
+		"AGENT_SESSIONS_PRODUCT":           product,
+	}
+	if product == "qwen" {
+		replacements["AGENT_SESSIONS_QWEN_CAPABILITY"] = fixtureQwenCapability
+	}
+	result := make([]string, 0, len(environment)+len(replacements))
+	for _, entry := range environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, replaced := replacements[name]; replaced {
+				continue
+			}
+		}
+		result = append(result, entry)
+	}
+	for name, value := range replacements {
+		result = append(result, name+"="+value)
+	}
+	return result
 }
 
 func acceptFrames(ctx context.Context, listener net.Listener, output *fixtureOutput) {

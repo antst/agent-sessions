@@ -340,6 +340,41 @@ func TestQwenFoundationHelpers(t *testing.T) {
 	}
 }
 
+func TestQwenFakeInteractiveExitsWhenTestParentDies(t *testing.T) {
+	fake := newFakeQwenProcess(t)
+	launcher := strings.Join([]string{
+		qwenTestShellQuote(fake.Paths.Executable), "--session-id", "11111111-2222-4333-8444-555555555555",
+		">/dev/null 2>&1 & child=$!;",
+		"while [ ! -f " + qwenTestShellQuote(fake.Paths.Ready) + " ]; do",
+		"kill -0 \"$child\" 2>/dev/null || exit 70; sleep 0.01; done;",
+		"printf '%s\\n' \"$child\"",
+	}, " ")
+	command := exec.Command("/bin/sh", "-c", launcher)
+	command.Env = qwenTestEnvironment(os.Environ(), map[string]string{
+		qwenTestFakeProcessEnv: "1",
+		qwenTestRecordEnv:      fake.Paths.Records,
+		qwenTestReadyEnv:       fake.Paths.Ready,
+		qwenTestStopEnv:        fake.Paths.Stop,
+	})
+	body, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("fake Qwen child PID = %q, %v", body, err)
+	}
+	process, _ := os.FindProcess(pid)
+	t.Cleanup(func() { _ = process.Kill() })
+	qwenTestPoll(t, 3*time.Second, "orphaned fake Qwen helper exit", func() (bool, error) {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return true, nil
+		}
+		return false, err
+	})
+}
+
 func qwenTestEnvironment(base []string, overrides map[string]string) []string {
 	result := make([]string, 0, len(base)+len(overrides))
 	for _, entry := range base {
@@ -446,9 +481,14 @@ func runQwenFakeACP(args []string) {
 		switch message.Method {
 		case "initialize":
 			_ = peer.respond(message.ID, map[string]any{
-				"protocolVersion":   1,
-				"agentCapabilities": map[string]any{"loadSession": true},
-				"authMethods":       []any{},
+				"protocolVersion": 1,
+				"agentInfo":       map[string]any{"name": "qwen-code", "version": qwenFakeVersion()},
+				"agentCapabilities": map[string]any{
+					"loadSession":         true,
+					"sessionCapabilities": map[string]any{"list": map[string]any{}, "resume": map[string]any{}},
+					"mcpCapabilities":     map[string]any{"stdio": true},
+				},
+				"authMethods": []any{},
 			})
 		case "session/new", "session/resume":
 			var params map[string]any
@@ -456,8 +496,28 @@ func runQwenFakeACP(args []string) {
 			if supplied, _ := params["sessionId"].(string); supplied != "" {
 				sessionID = supplied
 			}
-			_ = peer.respond(message.ID, map[string]any{"sessionId": sessionID})
+			_ = peer.respond(message.ID, map[string]any{
+				"sessionId": sessionID,
+				"modes": map[string]any{
+					"currentModeId": qwenFakeInitialMode(args),
+					"availableModes": []any{
+						map[string]any{"id": "default"}, map[string]any{"id": "plan"}, map[string]any{"id": "yolo"},
+					},
+				},
+			})
 		case "session/prompt":
+			var params map[string]any
+			_ = json.Unmarshal(message.Params, &params)
+			promptBody, _ := json.Marshal(params["prompt"])
+			if strings.Contains(string(promptBody), "BLOCK_QWEN_PROMPT") {
+				cancel, cancelErr := peer.read()
+				if cancelErr != nil || cancel.Method != "session/cancel" || cancel.ID != nil {
+					return
+				}
+				qwenFakeRecord(map[string]any{"kind": "rpc_request", "message": cancel})
+				_ = peer.respond(message.ID, map[string]any{"stopReason": "cancelled"})
+				continue
+			}
 			_ = peer.notify("session/update", map[string]any{
 				"sessionId": sessionID,
 				"update": map[string]any{
@@ -466,7 +526,11 @@ func runQwenFakeACP(args []string) {
 				},
 			})
 			_ = peer.respond(message.ID, map[string]any{"stopReason": "end_turn"})
-		case "session/cancel", "session/set_mode":
+		case "session/cancel":
+			if message.ID != nil {
+				_ = peer.respond(message.ID, map[string]any{})
+			}
+		case "session/set_mode":
 			_ = peer.respond(message.ID, map[string]any{})
 		default:
 			_ = peer.respondError(message.ID, -32601, "fake Qwen method not found: "+message.Method)
@@ -474,14 +538,25 @@ func runQwenFakeACP(args []string) {
 	}
 }
 
+func qwenFakeInitialMode(args []string) string {
+	if mode := qwenFakeArg(args, "--approval-mode"); mode != "" {
+		return mode
+	}
+	return "default"
+}
+
 func runQwenFakeInteractive(args []string) {
+	// A killed or interrupted `go test` process must not leave this helper
+	// occupying the operator's Qwen profile. The shell wrapper execs this test
+	// binary directly, so a parent change is authoritative test-harness death.
+	parentPID := os.Getppid()
 	writer, err := qwenFakeEventWriter(args)
 	if err != nil {
 		qwenFakeRecord(map[string]any{"kind": "event_open_error", "error": err.Error()})
 		os.Exit(71)
 	}
 	start := map[string]any{
-		"type": "system", "subtype": "session_start",
+		"type": "system", "subtype": "session_start", "session_id": qwenFakeSessionID(args),
 		"data": map[string]any{
 			"session_id": qwenFakeSessionID(args), "cwd": qwenFakeCWD(),
 			"protocol_version": 2, "version": qwenFakeVersion(),
@@ -506,6 +581,9 @@ func runQwenFakeInteractive(args []string) {
 	inputPath := qwenFakeArg(args, "--input-file")
 	var input qwenFakeInputCursor
 	for {
+		if os.Getppid() != parentPID {
+			return
+		}
 		if inputPath != "" {
 			if records, readErr := input.read(inputPath); readErr == nil {
 				for _, record := range records {

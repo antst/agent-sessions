@@ -26,14 +26,14 @@ authority.
 
 ## Native permission ownership
 
-Agent Sessions owns only launch-time mapping and corroboration:
+Agent Sessions owns only exact launch-time mapping and honest observation:
 
 | Launch preference | Initial native behavior |
 |---|---|
-| no permission option | Preserve Qwen's native default and corroborate the effective initial mode. |
-| explicit `--no-yolo` | Translate to and corroborate native `--approval-mode default`. |
-| explicit `--yolo` | Request and corroborate native Qwen yolo at launch. |
-| native `--approval-mode MODE` without a wrapper permission choice | Pass through unchanged, retain the exact mode for resume, and corroborate it. |
+| no permission option | Preserve Qwen's native default; current mode is unknown unless Qwen reports it. |
+| explicit `--no-yolo` | Translate exactly to native `--approval-mode default`. |
+| explicit `--yolo` | Translate exactly to native `--approval-mode yolo`. |
+| native `--approval-mode MODE` without a wrapper permission choice | Pass through unchanged and retain the exact mode for resume. |
 
 Repeated or contradictory wrapper choices, or any wrapper permission choice combined with native
 `--approval-mode`, fail with exit 2 before preparation or other mutation. No precedence rule is
@@ -55,8 +55,9 @@ handles native protocol permission requests required to drive the lane. It does 
 later native yolo transition as an Agent Sessions policy fault. Mode changes do not alter parent
 identity, group membership, routing authorization, persistence, or cleanup ownership.
 
-Initial-mode capability and behavior are live-probed against the selected Qwen version before
-publication.
+Approval-mode argument support is session-free probed against the selected Qwen version before
+launch. Native rejection fails before publication; absence of a public live-mode event remains
+`unknown`, never a copied launch preference.
 
 ## Messaging and lane authorization
 

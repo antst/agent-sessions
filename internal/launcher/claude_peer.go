@@ -570,14 +570,7 @@ func removeClaudePeerLaunchSettings(path string) error {
 }
 
 func claudeExecutable() (string, error) {
-	if path := strings.TrimSpace(os.Getenv("CLAUDE_PEER_CLAUDE_BIN")); path != "" {
-		return path, nil
-	}
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		return "", &ExitError{Code: 127, Err: errors.New("claude was not found on PATH")}
-	}
-	return path, nil
+	return productExecutable("CLAUDE_PEER_CLAUDE_BIN", "claude")
 }
 
 func newClaudePeerSessionID() (string, error) {

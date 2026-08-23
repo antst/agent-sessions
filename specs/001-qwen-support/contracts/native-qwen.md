@@ -30,8 +30,8 @@ The first structured event must be `system/session_start`. Admission requires:
 - dual-output protocol v2 and required event inventory;
 - exact lifecycle process still live;
 - selected profile and integration unchanged;
-- corroboration that Qwen's effective initial native approval mode matches the selected launch
-  preference, including an unmodified native default when no option was supplied.
+- exact preservation of the selected native approval-mode request, including an unmodified native
+  default when no option was supplied; current mode remains unknown unless Qwen exposes it.
 
 Input records are complete JSON objects, one per line. The writer opens only the attested regular
 file, serializes one delivery once, fsyncs/flushes according to the native contract, and rechecks

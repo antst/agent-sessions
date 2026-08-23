@@ -15,6 +15,10 @@ const (
 	MinimumVersion = "0.21.15"
 	// ExpectedPackage is the authoritative native package identity.
 	ExpectedPackage = "@qwen-code/qwen-code"
+	// IntegrationVersion is the exact Agent Sessions Qwen plugin contract
+	// shipped by this release. Interactive and lane admission share it so their
+	// readiness checks cannot drift from one another.
+	IntegrationVersion = "0.2.4"
 )
 
 // State describes whether a probed readiness contract is usable.
@@ -318,4 +322,10 @@ func versionAtLeast(value, floor string) bool {
 		}
 	}
 	return true
+}
+
+// VersionAtLeast reports whether a Qwen semantic version meets the requested
+// floor using the same parser as the authoritative readiness engine.
+func VersionAtLeast(value, floor string) bool {
+	return versionAtLeast(value, floor)
 }

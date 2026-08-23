@@ -1,11 +1,24 @@
 ---
 name: grok-lane
-description: Inventory entry for orchestrating durable local or remote Grok Build lanes from a managed Qwen parent. Use when Grok delegation is requested after Qwen-parent lane support is available.
+description: Start, collect, message, resume, and archive durable local or remote Grok Build lanes from a managed Qwen parent. Use for Grok delegation, reviews, follow-ups, and federated targets.
 ---
 
-# Grok lane
+# Grok lanes from Qwen
 
-This schema-valid inventory shell reserves the Grok target skill for Qwen.
-Complete Qwen-parent lifecycle, messaging, federation, and cleanup guidance is
-installed with the four-product composition implementation. Until then, do not
-infer lane commands or claim that Qwen-parent Grok delegation is available.
+Use the attested `agent_sessions.lane` MCP tool. Set `product` to `grok`, the
+lifecycle verb in `command`, native arguments in `arguments`, and the briefing in
+`input`. Add `host` only for a target advertising `grok-lane`; never use SSH or
+local fallback.
+
+Run `doctor --json` and `list --all`; require contract version 1,
+`grok_available: true`, and no `grok_error`. Headless Grok uses
+`bypassPermissions`, so launch only with autonomous execution authority. Start:
+
+```json
+{"product":"grok","command":"start","arguments":["--name","grok-review","-"],"input":"BRIEFING"}
+```
+
+Use one `wait` collector and match the final answer to the last terminal turn.
+Collect debt before `resume`; use `interrupt` and idempotent `archive`. Default
+lanes bind to this exact Qwen parent and persistent lanes require explicit
+archive. Inherit groups only deliberately.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 func isolateNativeLaneTest(t *testing.T) {
@@ -27,6 +28,65 @@ func isolateNativeLaneTest(t *testing.T) {
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+}
+
+func TestRegisteredPeerParentFallbackRequiresStrongLocalAttestation(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "parent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	const sessionID = "00000000-0000-4000-8000-0000000000e1"
+	identity := procinfo.Read(os.Getpid())
+	if identity.Status != procinfo.Known || identity.Start == "" || identity.StrongStart == "" {
+		t.Fatal("test process has no strong identity")
+	}
+	parent := federator.ParentContext{
+		SessionID: sessionID, AdapterPID: os.Getpid(), AdapterProcStart: identity.Start,
+		AdapterStrongStart: identity.StrongStart, AdapterSocket: socket,
+		PID: os.Getpid(), ProcStart: identity.Start, StrongStart: identity.StrongStart,
+		PermissionMode: "bypassPermissions",
+	}
+	resolver := func(_ string, requested string) (federator.ParentContext, error) {
+		if requested != sessionID {
+			return federator.ParentContext{}, errors.New("unexpected parent session")
+		}
+		return parent, nil
+	}
+	t.Setenv(peerSessionIDEnvironment, sessionID)
+	for _, product := range []string{"codex", "claude", "grok"} {
+		t.Run(product, func(t *testing.T) {
+			parent.Product = product
+			t.Setenv("AGENT_SESSIONS_PRODUCT", product)
+			owner, ok := inferRegisteredPeerParent(os.Getpid(), resolver)
+			if !ok || owner.PID != os.Getpid() || owner.ProcStart != identity.Start ||
+				owner.SessionID != sessionID || owner.PermissionMode != "bypassPermissions" {
+				t.Fatalf("registered %s owner = %+v, %v", product, owner, ok)
+			}
+		})
+	}
+	parent.Product = "qwen"
+	t.Setenv("AGENT_SESSIONS_PRODUCT", "qwen")
+	if owner, ok := inferRegisteredPeerParent(os.Getpid(), resolver); ok || owner.SessionID != "" {
+		t.Fatalf("Qwen bypassed its capability gate: %+v, %v", owner, ok)
+	}
+	parent.Product = "codex"
+	parent.AdapterStrongStart += "-reused"
+	t.Setenv("AGENT_SESSIONS_PRODUCT", "codex")
+	if owner, ok := inferRegisteredPeerParent(os.Getpid(), resolver); ok || owner.SessionID != "" {
+		t.Fatalf("reused adapter PID was authorized: %+v, %v", owner, ok)
+	}
+	parent.AdapterStrongStart = identity.StrongStart
+	symlink := filepath.Join(root, "parent-link.sock")
+	if err := os.Symlink(socket, symlink); err != nil {
+		t.Fatal(err)
+	}
+	parent.AdapterSocket = symlink
+	if owner, ok := inferRegisteredPeerParent(os.Getpid(), resolver); ok || owner.SessionID != "" {
+		t.Fatalf("symlinked adapter socket was authorized: %+v, %v", owner, ok)
+	}
 }
 
 func TestNativeLaneCLIRequiresNameAndLeavesPolicyOptional(t *testing.T) {

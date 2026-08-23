@@ -19,6 +19,11 @@ plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 bash -n \
   "$plugin_root/scripts/cachebuster" \
   "$plugin_root/scripts/package-release" \
+  "$plugin_root/scripts/release-final-gate" \
+  "$plugin_root/scripts/release-inventory" \
+  "$plugin_root/scripts/release-publication-preflight" \
+  "$plugin_root/scripts/release-tag-preflight" \
+  "$plugin_root/scripts/release-tag-verify" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
@@ -26,8 +31,23 @@ bash -n \
   "$plugin_root/grok/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
+python3 - "$plugin_root/scripts/release-gate-manifest" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+compile(path.read_bytes(), str(path), "exec")
+PY
+
 if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
   printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
+  exit 1
+fi
+
+release_matrix="$("$plugin_root/scripts/release-inventory" matrix-json)"
+release_package_inventory="$("$plugin_root/scripts/release-inventory" package-inventory-json)"
+if [[ "$(grep -o '"platform"' <<<"$release_matrix" | wc -l | tr -d ' ')" != 4 ]] ||
+   [[ "$(grep -o '"product"' <<<"$release_package_inventory" | wc -l | tr -d ' ')" != 4 ]] ||
+   [[ "$(grep -o 'qwen-peer' <<<"$release_package_inventory" | wc -l | tr -d ' ')" != 2 ]]; then
+  printf 'authoritative release JSON inventory is incomplete\n' >&2
   exit 1
 fi
 
@@ -100,7 +120,7 @@ if grep -Rq '\[TODO' "$plugin_root/skills/grok-lane" ||
 fi
 if [[ ! -f "$plugin_root/grok/skills/agent-lanes/SKILL.md" ]] ||
    ! grep -Fq 'Codex lanes require contract version **2**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
-   ! grep -Fq 'Claude and Grok lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
+   ! grep -Fq 'Claude, Grok, and Qwen lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
    ! grep -Fq 'report the lane cell as blocked; never "try anyway."' "$plugin_root/grok/skills/agent-lanes/SKILL.md"; then
   printf 'Grok agent-lanes skill does not distinguish all target contracts\n' >&2
   exit 1
@@ -775,6 +795,13 @@ fi
 release_output="$temporary_root/releases"
 release_archive="$("$plugin_root/scripts/package-release" \
   linux-x64 v0.1.0 "$installed_binary_dir" "$release_output")"
+release_output_second="$temporary_root/releases-second"
+release_archive_second="$("$plugin_root/scripts/package-release" \
+  linux-x64 v0.1.0 "$installed_binary_dir" "$release_output_second")"
+if ! cmp -s "$release_archive" "$release_archive_second"; then
+  printf 'identical release inputs did not produce byte-identical archives\n' >&2
+  exit 1
+fi
 release_extract="$temporary_root/release-extract"
 mkdir -p "$release_extract"
 tar -C "$release_extract" -xzf "$release_archive"
@@ -802,7 +829,14 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+release_binaries=()
+while IFS= read -r packaged_binary; do release_binaries+=("$packaged_binary"); done \
+  < <("$plugin_root/scripts/release-inventory" binaries)
+if (( ${#release_binaries[@]} != 11 )); then
+  printf 'authoritative release inventory has %s binaries, want 11\n' "${#release_binaries[@]}" >&2
+  exit 1
+fi
+for packaged_binary in "${release_binaries[@]}"; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1
@@ -834,7 +868,7 @@ rm -f -- "$install_codex_state"
 FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
   make -s -C "$release_root" install START_RUNTIME=0 CODEX="$install_codex" \
     PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
-for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+for packaged_binary in "${release_binaries[@]}"; do
   release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"
   if [[ ! -x "$release_install_root/bin/linux-x64/$packaged_binary" ]] ||
      [[ "$release_installed_link" != "$release_install_root/bin/linux-x64/$packaged_binary" ]]; then
@@ -847,6 +881,7 @@ for packaged_doc in \
   CODEX-ADAPTER.md CODEX-INSTALL.md CODEX-LANES.md \
   CLAUDE-ADAPTER.md CLAUDE-INSTALL.md CLAUDE-LANES.md \
   GROK-ADAPTER.md GROK-INSTALL.md GROK-LANES.md \
+  QWEN-ADAPTER.md QWEN-INSTALL.md QWEN-LANES.md \
   README.md designs/QWEN-ADAPTER.md; do
   if [[ ! -f "$release_install_root/docs/$packaged_doc" ]]; then
     printf 'prebuilt release install omitted documentation %s\n' "$packaged_doc" >&2

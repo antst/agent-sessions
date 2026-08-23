@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/antst/agent-sessions/specs/001-qwen-support/contracts/release-evidence.schema.json",
-  "title": "Agent Sessions v0.2.1 release evidence",
+  "title": "Agent Sessions v0.2.4 release evidence",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,10 +23,10 @@
       "const": 1
     },
     "release_version": {
-      "const": "0.2.1"
+      "const": "0.2.4"
     },
     "intended_tag": {
-      "const": "v0.2.1"
+      "const": "v0.2.4"
     },
     "commit_sha": {
       "$ref": "#/$defs/gitSha"
@@ -44,11 +44,11 @@
       ],
       "properties": {
         "file_name": {
-          "const": "agent-sessions-v0.2.1-release-evidence.json"
+          "const": "agent-sessions-v0.2.4-release-evidence.json"
         },
         "workflow_artifact_name": {
           "type": "string",
-          "pattern": "^agent-sessions-v0\\.2\\.1-release-evidence-[0-9a-f]{40}$"
+          "pattern": "^agent-sessions-v0\\.2\\.4-release-evidence-[0-9a-f]{40}$"
         },
         "retention_days": {
           "const": 90
@@ -152,7 +152,7 @@
                   "const": "linux-x64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.2.1-linux-x64.tar.gz"
+                  "const": "agent-sessions-0.2.4-linux-x64.tar.gz"
                 }
               }
             }
@@ -170,7 +170,7 @@
                   "const": "linux-arm64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.2.1-linux-arm64.tar.gz"
+                  "const": "agent-sessions-0.2.4-linux-arm64.tar.gz"
                 }
               }
             }
@@ -188,7 +188,7 @@
                   "const": "darwin-x64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.2.1-darwin-x64.tar.gz"
+                  "const": "agent-sessions-0.2.4-darwin-x64.tar.gz"
                 }
               }
             }
@@ -206,7 +206,7 @@
                   "const": "darwin-arm64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.2.1-darwin-arm64.tar.gz"
+                  "const": "agent-sessions-0.2.4-darwin-arm64.tar.gz"
                 }
               }
             }
@@ -430,7 +430,7 @@
         },
         "filename": {
           "type": "string",
-          "pattern": "^agent-sessions-0\\.2\\.1-(linux|darwin)-(x64|arm64)\\.tar\\.gz$"
+          "pattern": "^agent-sessions-0\\.2\\.4-(linux|darwin)-(x64|arm64)\\.tar\\.gz$"
         },
         "byte_size": {
           "type": "integer",

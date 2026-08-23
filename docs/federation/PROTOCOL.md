@@ -71,5 +71,12 @@ Disconnecting either agent drops the in-memory route and cancels its live CLI
 proxy. No agent-to-agent or SSH fallback exists; hub connectivity is mandatory
 only for cross-host operations. Local grouped routing continues without a hub.
 
+Current agents advertise one exact capability per ready target:
+`codex-lane`, `claude-lane`, `grok-lane`, and `qwen-lane`. Qwen capability
+advertisement consumes the same selected-profile readiness report as local
+doctor and launch admission; an absent, unready, or explicitly misconfigured
+Qwen launcher is never advertised and remote execution never falls back to a
+different product or host.
+
 The network is assumed trusted. Authentication, encryption, offline storage,
 delivery retry, global broadcast, and a policy language are outside protocol 3.

@@ -90,8 +90,8 @@ Validate:
    fail the cell unless launch, authorized discovery, one direct message/reply, and one named-group
    broadcast complete in under five minutes;
 2. one native `session_start` with exact UUID/cwd/version/protocol;
-3. one host participant with the selected launch preference and corroborated effective initial mode,
-   correct groups, endpoint, and exact process identity;
+3. one host participant with the selected launch preference, exact initial native-mode request,
+   honest current-mode-or-unknown state, correct groups, endpoint, and exact process identity;
 4. Qwen's normal approval-mode controls remain usable, including entering and leaving yolo, without
    changing Agent Sessions identity, group membership, or messaging authority;
 5. direct send/reply, explicit multicast, and named-group broadcast with correlated IDs, with
@@ -201,20 +201,20 @@ lane smoke cell from the installed archive. A test must fail if the workflow car
 hard-coded product list or can omit either Qwen executable or any plugin payload.
 
 At the exact signed release commit, the final workflow run must emit immutable workflow artifact
-`agent-sessions-v0.2.1-release-evidence-<full-commit-sha>` containing byte-stable
-`agent-sessions-v0.2.1-release-evidence.json`. Validate every required field and digest from
+`agent-sessions-v0.2.4-release-evidence-<full-commit-sha>` containing byte-stable
+`agent-sessions-v0.2.4-release-evidence.json`. Validate every required field and digest from
 [`contracts/release-evidence.md`](contracts/release-evidence.md) against normative
 [`contracts/release-evidence.schema.json`](contracts/release-evidence.schema.json), including the
 cross-field and canonical-byte rules, before creating the tag. Refuse tag creation if local or remote
-`v0.2.1` already exists. The signed tag annotation must identify the workflow run, artifact name, and
+`v0.2.4` already exists. The signed tag annotation must identify the workflow run, artifact name, and
 JSON SHA-256. The tag-release job must require and verify that exact existing signed tag, refuse an
 existing release or same-named release asset, retrieve the exact artifact by run identity, attach the
 unchanged JSON to the new GitHub release, and include it with all four archives in `SHA256SUMS`.
 
 Release only when:
 
-- initial-mode mapping and corroboration pass on Linux and macOS, including native mode changes after
-  publication;
+- exact interactive mode mapping/retention and ACP lane corroboration pass on Linux and macOS,
+  including native mode changes after publication;
 - every source/live/install/federation cell is green at one signed exact commit;
 - monitored owner credentials/settings/transcripts are unchanged;
 - the release tag points to that exact commit and contains the required evidence trailers;

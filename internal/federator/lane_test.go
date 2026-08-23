@@ -1,7 +1,9 @@
 package federator
 
 import (
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,7 +68,7 @@ func TestFullLaneOutputQueueFailsProxyInsteadOfDroppingTerminal(t *testing.T) {
 }
 
 func TestPrepareRemoteLaneInjectsPersistentGroupedParentNotice(t *testing.T) {
-	parent := groupedRemoteLaneParent("host-a", "source", "codex")
+	parent := groupedRemoteLaneParent("host-a", "codex")
 	agent := &agent{
 		options: AgentOptions{EnableRemoteLanes: true, CodexLaneExecutable: "/bin/true"},
 		remote:  map[string]Peer{"host-a/source": parent},
@@ -119,7 +121,7 @@ func TestPrepareRemoteLaneInjectsPersistentGroupedParentNotice(t *testing.T) {
 func TestPrepareRemoteGrokLaneUsesAdvertisedLauncher(t *testing.T) {
 	agent := &agent{
 		options: AgentOptions{EnableRemoteLanes: true, GrokLaneExecutable: "/bin/true"},
-		remote:  map[string]Peer{"host-a/source": groupedRemoteLaneParent("host-a", "source", "grok")}, network: &wireConn{},
+		remote:  map[string]Peer{"host-a/source": groupedRemoteLaneParent("host-a", "grok")}, network: &wireConn{},
 	}
 	parent := agent.remote["host-a/source"]
 	executable, args, err := agent.prepareRemoteLane(Message{
@@ -139,7 +141,50 @@ func TestPrepareRemoteGrokLaneUsesAdvertisedLauncher(t *testing.T) {
 	}
 }
 
-func groupedRemoteLaneParent(hostID, sessionID, product string) Peer {
+func TestPrepareRemoteQwenLaneUsesAdvertisedReadyLauncher(t *testing.T) {
+	agent := &agent{
+		options: AgentOptions{EnableRemoteLanes: true, QwenLaneExecutable: "/bin/true"},
+		remote:  map[string]Peer{"host-a/source": groupedRemoteLaneParent("host-a", "qwen")}, network: &wireConn{},
+	}
+	parent := agent.remote["host-a/source"]
+	executable, args, err := agent.prepareRemoteLane(Message{
+		Product: "qwen", SourceID: "host-a/source", Args: []string{"start", "--name", "qwen-worker", "--no-yolo", "-"},
+		ParentContext: groupedRemoteLaneParentContext(parent),
+	})
+	if err != nil || executable != "/bin/true" {
+		t.Fatalf("prepare remote Qwen lane = %q, %#v, %v", executable, args, err)
+	}
+	want := []string{"start", "--name", "qwen-worker", "--no-yolo", "-", "--persistent", "--notify", "host-a/source"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("remote Qwen args = %#v, want %#v", args, want)
+	}
+	capabilities := agent.laneCapabilities()
+	if len(capabilities) != 1 || capabilities[0] != CapabilityQwenLane {
+		t.Fatalf("remote Qwen capabilities = %#v", capabilities)
+	}
+}
+
+func TestConfiguredQwenRemoteLaneRequiresSoleReadinessEngine(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "qwen-peer-lane")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := evaluateQwenLaneReadiness
+	evaluateQwenLaneReadiness = func(got string) error {
+		if got != executable {
+			t.Fatalf("readiness executable = %q", got)
+		}
+		return errors.New("native archive unavailable")
+	}
+	t.Cleanup(func() { evaluateQwenLaneReadiness = previous })
+	options := AgentOptions{EnableRemoteLanes: true, QwenLaneExecutable: executable}
+	if err := configureLaneExecutables(&options); err == nil || !strings.Contains(err.Error(), "native archive unavailable") {
+		t.Fatalf("unready configured Qwen launcher = %v", err)
+	}
+}
+
+func groupedRemoteLaneParent(hostID, product string) Peer {
+	sessionID := "source"
 	return Peer{
 		ID: hostID + "/" + sessionID, HostID: hostID, SessionID: sessionID,
 		GlobalID: globalSessionID(hostID, sessionID), Name: product + "-parent", DisplayName: product + "-parent",
@@ -232,6 +277,29 @@ func TestResolveRemoteHostRequiresLiveHub(t *testing.T) {
 	}
 }
 
+func TestResolveRemoteQwenHostNeverFallsBack(t *testing.T) {
+	networkSide, peerSide := net.Pipe()
+	defer func() { _ = networkSide.Close(); _ = peerSide.Close() }()
+	agent := &agent{
+		network: newWireConn(networkSide),
+		remoteHosts: map[string]Host{
+			"selected":  {ID: "selected", Name: "selected", Capabilities: nil},
+			"alternate": {ID: "alternate", Name: "alternate", Capabilities: []string{CapabilityQwenLane}},
+		},
+	}
+	if _, err := agent.resolveRemoteHost("selected", CapabilityQwenLane); err == nil ||
+		!strings.Contains(err.Error(), "does not advertise") {
+		t.Fatalf("uncapable selected Qwen host = %v", err)
+	}
+	if _, err := agent.resolveRemoteHost("missing", CapabilityQwenLane); err == nil ||
+		!strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("missing selected Qwen host = %v", err)
+	}
+	if got, err := agent.resolveRemoteHost("alternate", CapabilityQwenLane); err != nil || got.ID != "alternate" {
+		t.Fatalf("explicit capable Qwen host = %+v, %v", got, err)
+	}
+}
+
 func TestPrepareRemoteLaneRequiresLiveHubForEverySubcommand(t *testing.T) {
 	agent := &agent{
 		options: AgentOptions{EnableRemoteLanes: true, CodexLaneExecutable: "/bin/true"},
@@ -254,6 +322,7 @@ func TestRemoteLaneStdinDetectionMatchesNativeLifecycle(t *testing.T) {
 		{product: "codex", args: []string{"run", "--name", "worker", "-"}, want: true},
 		{product: "claude", args: []string{"resume", "worker"}, want: true},
 		{product: "grok", args: []string{"resume", "worker"}, want: true},
+		{product: "qwen", args: []string{"resume", "worker"}, want: true},
 		{product: "claude", args: []string{"start", "--prompt-file", "brief.md"}, want: false},
 		{product: "codex", args: []string{"start", "--name", "--prompt-file"}, want: true},
 		{product: "claude", args: []string{"start", "--tools", "--prompt-file"}, want: true},

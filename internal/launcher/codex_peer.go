@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -166,14 +165,7 @@ func execInteractiveCodex(codex, threadID, cwd string, plan codexPlan) error {
 }
 
 func codexExecutable() (string, error) {
-	if path := os.Getenv("CODEX_PEER_CODEX_BIN"); path != "" {
-		return path, nil
-	}
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return "", &ExitError{Code: 127, Err: errors.New("codex was not found on PATH")}
-	}
-	return path, nil
+	return productExecutable("CODEX_PEER_CODEX_BIN", "codex")
 }
 
 func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, error) {

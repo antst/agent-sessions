@@ -65,6 +65,8 @@ type daemon struct {
 	// maintenanceBeforeWrite is a test seam for terminal-write ordering.
 	maintenanceBeforeWrite func()
 	handleBeforeFrame      func()
+	messageQueued          func(map[string]any)
+	registrationOverride   func(federator.PeerRegistration) federator.PeerRegistration
 	closeOnce              sync.Once
 	done                   chan struct{}
 }
@@ -77,11 +79,14 @@ type envelope struct {
 //
 //nolint:gocyclo // Runtime role dispatch is intentionally centralized.
 func Main() {
+	if isQwenToolWrapperInvocation() {
+		os.Exit(runQwenToolWrapper(os.Args[1:]))
+	}
 	if isGrokToolWrapperInvocation() {
 		os.Exit(runGrokToolWrapper(os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, qwen-plugin-install, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok, grok-host, grok-plugin-verify, qwen-host, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
 	}
 	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
@@ -98,6 +103,8 @@ func Main() {
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
 	case "grok-lane-manager":
 		os.Exit(runGrokLaneManager(os.Args[2:]))
+	case "qwen-lane-manager":
+		os.Exit(runQwenLaneManager(os.Args[2:]))
 	case "grok":
 		os.Exit(runGrokSafetyCommand(os.Args[2:]))
 	case "grok-host":
@@ -106,6 +113,14 @@ func Main() {
 		os.Exit(runGrokPluginVerify(os.Args[2:]))
 	case "qwen-plugin-install":
 		os.Exit(runQwenPluginInstall(os.Args[2:]))
+	case "qwen-plugin-remove":
+		os.Exit(runQwenPluginRemove(os.Args[2:]))
+	case "qwen-host":
+		os.Exit(runQwenHostCommand(os.Args[2:]))
+	case "release-package":
+		os.Exit(runReleasePackage(os.Args[2:]))
+	case "release-evidence":
+		os.Exit(runReleaseEvidence(os.Args[2:]))
 	case "hook":
 		runHookCommand()
 	case "mcp":
@@ -132,6 +147,8 @@ func runNativeLaneRole(role string, args []string) (int, bool) {
 		return runClaudeLaneCommand(args), true
 	case "grok":
 		return runGrokLaneCommand(args), true
+	case "qwen":
+		return runQwenLaneCommand(args), true
 	default:
 		return 0, false
 	}
@@ -488,7 +505,9 @@ func (d *daemon) handleUser(frame map[string]any) {
 	if supervisor != "" && d.supervisorOwnsWake(supervisor, item) {
 		return
 	}
-	_ = d.enqueue(item)
+	if err := d.enqueue(item); err == nil && d.messageQueued != nil {
+		d.messageQueued(item)
+	}
 }
 
 func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool {
@@ -536,6 +555,17 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 
 func (d *daemon) handleControl(frame map[string]any) {
 	action := stringValue(frame["action"])
+	if action == "permission_mode" {
+		mode := strings.TrimSpace(stringValue(frame["permissionMode"]))
+		if mode == "" {
+			return
+		}
+		d.mu.Lock()
+		d.permissionMode = mode
+		_ = d.writeRecordsLocked()
+		d.mu.Unlock()
+		return
+	}
 	if action == "shutdown" {
 		d.closeOnce.Do(func() { close(d.done) })
 		return
@@ -697,7 +727,7 @@ func (d *daemon) writeRecordsLocked() error {
 }
 
 func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
-	return federator.PeerRegistration{
+	registration := federator.PeerRegistration{
 		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, AttachmentID: d.attachmentID, Product: d.entrypoint,
 		Name: d.name, Status: d.status, PermissionMode: d.permissionMode, Cwd: d.cwd,
 		PID: os.Getpid(), ProcStart: d.procStart, Socket: d.stableSocket,
@@ -706,6 +736,10 @@ func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
 		// alive after this one is retired.
 		LifecyclePID: os.Getpid(), LifecycleProcStart: d.procStart, StartedAt: d.startedAt,
 	}
+	if d.registrationOverride != nil {
+		registration = d.registrationOverride(registration)
+	}
+	return registration
 }
 
 func (d *daemon) enqueue(item map[string]any) error {
@@ -878,7 +912,7 @@ func parsePeerMessage(content string) envelope {
 		}
 	}
 	product := defaultString(attrs["from-product"], stringValue(metadata["fromProduct"]))
-	if product != "codex" && product != "claude" && product != "grok" {
+	if _, ok := bridgeProductByID(product); !ok {
 		product = ""
 	}
 	mode := attrs["from-mode"]
@@ -893,7 +927,7 @@ func parsePeerMessage(content string) envelope {
 }
 
 func writeJSONAtomic(file string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return err
 	}
 	return fileutil.WriteJSONAtomic(file, value)

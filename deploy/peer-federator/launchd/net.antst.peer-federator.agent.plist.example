@@ -13,6 +13,14 @@
     <!-- Add the enable-remote-lanes command-line flag only when every host on the hub is
          trusted to execute native lane commands as this user. -->
   </array>
+  <!-- Optional exact Qwen profile/launcher. Omit these keys for Qwen's native
+       default profile; if supplied, paths must be absolute and non-symlinked. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PEER_FEDERATOR_QWEN_LANE</key><string>/Users/CHANGE_ME/.local/bin/qwen-peer-lane</string>
+    <key>QWEN_HOME</key><string>/Users/CHANGE_ME/.qwen</string>
+    <key>QWEN_RUNTIME_DIR</key><string>/Users/CHANGE_ME/Library/Caches/qwen</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/tmp/peer-federator-agent.log</string>

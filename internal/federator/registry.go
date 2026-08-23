@@ -47,6 +47,7 @@ type localPeer struct {
 	AdapterStrongStart      string
 	LifecycleStrongStart    string
 	LifecycleRoot           string
+	QwenCapabilityDigest    string
 	ClaudeConfigRoot        string
 	ClaudeKeyBaseline       []ClaudeKeyBaselineEntry
 	ClaudeKeyBaselineSet    bool

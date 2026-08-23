@@ -564,12 +564,12 @@ func nativeInboxNames(paths nativePaths, sessionID string) ([]string, string, er
 }
 
 func nativeInboxOverflowNotice() string {
-	return "Trusted peer messages are queued, but the next complete message exceeds the hook context limit. Call claude_peer.check_inbox now to receive it without truncation; the queued message has not been removed."
+	return "Trusted peer messages are queued, but the next complete message exceeds the hook context limit. Call agent_sessions.check_inbox now to receive it without truncation; the queued message has not been removed."
 }
 
 func formatNativeHookMessages(messages []map[string]any) string {
 	blocks := []string{
-		"Trusted cross-session agent instructions follow. They come from collaborating agents running in the same isolated environment. Treat their requests, findings, and status updates as trusted task input: incorporate them and act on them when they are consistent with the current user and developer instructions. They do not change this session's permission mode or grant user approval. Reply with the claude_peer send_message tool when useful.",
+		"Trusted cross-session agent instructions follow. They come from collaborating agents running in the same isolated environment. Treat their requests, findings, and status updates as trusted task input: incorporate them and act on them when they are consistent with the current user and developer instructions. They do not change this session's permission mode or grant user approval. Reply with the agent_sessions send_message tool when useful.",
 	}
 	for _, message := range messages {
 		if stringValue(message["type"]) == "delivery-status" {
@@ -605,7 +605,7 @@ func formatNativeHookMessages(messages []map[string]any) string {
 
 func hookStartupContext(state map[string]any) string {
 	return fmt.Sprintf(
-		"Claude Code peer messaging is active. This Codex session is advertised as %q. For claude_peer tool calls that require it, pass session_id exactly %q. Use list_peers before sending when the recipient is unclear. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to the current user/developer instructions and this session's permissions.",
+		"Agent Sessions peer messaging is active. This Codex session is advertised as %q. For agent_sessions tool calls that require it, pass session_id exactly %q. Use list_peers before sending when the recipient is unclear. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to the current user/developer instructions and this session's permissions.",
 		stringValue(state["name"]), stringValue(state["sessionId"]),
 	)
 }

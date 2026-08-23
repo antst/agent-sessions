@@ -197,8 +197,9 @@ option. Wrapper `--yolo` requests native yolo, while wrapper `--no-yolo` transla
 native `--approval-mode default`. With no wrapper permission choice, a supported native
 `--approval-mode MODE` passes through unchanged and its exact requested mode is retained for resume.
 Wrapper/native or repeated/contradictory wrapper permission choices fail with exit 2 before any
-mutation rather than using implicit precedence. The managed launch corroborates the requested
-initial mode before publication. After publication, `/approval-mode`,
+mutation rather than using implicit precedence. The managed launch retains and passes the exact
+request; Qwen's public interactive dual-output protocol does not expose an effective-mode event, so
+Agent Sessions does not fabricate one. After publication, `/approval-mode`,
 Shift+Tab, and ACP-native controls may change the mode in either direction, including entering or
 leaving yolo. Agent Sessions does not add a sandbox, hook, deny list, tool guard, PTY filter, or other
 permission-enforcement layer.
@@ -296,7 +297,8 @@ prebuilt installation. Real acceptance runs the complete Qwen matrix on Linux an
 composition edges involving Qwen, and bidirectional remote Qwen lanes. Every test inventories owner
 state and checks cleanup at return and +1/+5/+10/+30 seconds.
 
-Release is prohibited if initial-mode mapping/corroboration fails or either platform is waived.
+Release is prohibited if exact interactive mode mapping/retention, ACP lane corroboration, or either
+platform gate fails.
 
 **Rationale**: The dominant risk is native contract drift and detached process/artifact cleanup, not
 product-neutral routing or Qwen's own permission choices.

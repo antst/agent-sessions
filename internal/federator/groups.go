@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -35,17 +36,28 @@ const (
 // SessionPreferences is the small durable portion of one peer registration.
 // Live addresses, process identities, names, and status remain runtime state.
 type SessionPreferences struct {
-	SessionID           string   `json:"session_id"`
-	Product             string   `json:"product"`
-	Kind                string   `json:"kind,omitempty"`
-	ExplicitGroups      []string `json:"explicit_groups,omitempty"`
-	InheritedGroups     []string `json:"inherited_groups,omitempty"`
-	ParentSession       string   `json:"parent_session_id,omitempty"`
-	ParentHostID        string   `json:"parent_host_id,omitempty"`
-	InheritParentGroups bool     `json:"inherit_parent_groups"`
-	AlwaysApprove       bool     `json:"always_approve"`
-	UpdatedAt           int64    `json:"updated_at"`
-	Revision            string   `json:"revision,omitempty"`
+	SessionID           string               `json:"session_id"`
+	Product             string               `json:"product"`
+	Kind                string               `json:"kind,omitempty"`
+	ExplicitGroups      []string             `json:"explicit_groups,omitempty"`
+	InheritedGroups     []string             `json:"inherited_groups,omitempty"`
+	ParentSession       string               `json:"parent_session_id,omitempty"`
+	ParentHostID        string               `json:"parent_host_id,omitempty"`
+	InheritParentGroups bool                 `json:"inherit_parent_groups"`
+	AlwaysApprove       bool                 `json:"always_approve"`
+	Qwen                *QwenSessionMetadata `json:"qwen,omitempty"`
+	UpdatedAt           int64                `json:"updated_at"`
+	Revision            string               `json:"revision,omitempty"`
+}
+
+// QwenSessionMetadata is the non-secret durable launch context required to
+// resume one managed interactive Qwen transcript. Live transport and process
+// identity remain in the registration and preparation ledgers.
+type QwenSessionMetadata struct {
+	Cwd                string              `json:"cwd"`
+	Profile            QwenProfileIdentity `json:"profile"`
+	LaunchPreference   string              `json:"launch_permission_preference"`
+	InitialModeRequest string              `json:"initial_mode_request,omitempty"`
 }
 
 // SessionPreferenceUpdate distinguishes omitted resume flags from explicit
@@ -64,6 +76,7 @@ type SessionPreferenceUpdate struct {
 	InheritGroupsSpecified bool
 	AlwaysApprove          bool
 	AlwaysApproveSpecified bool
+	Qwen                   *QwenSessionMetadata
 }
 
 type sessionCatalogFile struct {
@@ -133,6 +146,9 @@ func openSessionCatalog(path, hostID string) (*sessionCatalog, error) {
 		if preference.InheritParentGroups && preference.ParentSession == "" {
 			return nil, fmt.Errorf("session %s inherits groups without a parent", key)
 		}
+		if err := validateCatalogQwenMetadata(preference.Product, preference.Qwen); err != nil {
+			return nil, fmt.Errorf("session %s: %w", key, err)
+		}
 		catalog.sessions[key] = preference
 	}
 	return catalog, nil
@@ -168,6 +184,19 @@ func (c *sessionCatalog) updateLocked(update SessionPreferenceUpdate, persist bo
 		preference.Product = update.Product
 	} else if update.Product != "" && update.Product != preference.Product {
 		return SessionPreferences{}, nil, errors.New("session product cannot change")
+	}
+	if update.Qwen != nil {
+		if preference.Product != "qwen" {
+			return SessionPreferences{}, nil, errors.New("qwen session metadata requires product qwen")
+		}
+		if err := validateCatalogQwenMetadata("qwen", update.Qwen); err != nil {
+			return SessionPreferences{}, nil, err
+		}
+		if preference.Qwen != nil && !sameQwenResumeIdentity(*preference.Qwen, *update.Qwen) {
+			return SessionPreferences{}, nil, errors.New("qwen resume profile or working directory cannot change")
+		}
+		qwen := *update.Qwen
+		preference.Qwen = &qwen
 	}
 	switch {
 	case !exists:
@@ -439,6 +468,10 @@ func clonePreferences(source map[string]SessionPreferences) map[string]SessionPr
 	for key, value := range source {
 		value.ExplicitGroups = append([]string(nil), value.ExplicitGroups...)
 		value.InheritedGroups = append([]string(nil), value.InheritedGroups...)
+		if value.Qwen != nil {
+			qwen := *value.Qwen
+			value.Qwen = &qwen
+		}
 		result[key] = value
 	}
 	return result
@@ -447,7 +480,56 @@ func clonePreferences(source map[string]SessionPreferences) map[string]SessionPr
 func clonePreference(value SessionPreferences) SessionPreferences {
 	value.ExplicitGroups = append([]string(nil), value.ExplicitGroups...)
 	value.InheritedGroups = append([]string(nil), value.InheritedGroups...)
+	if value.Qwen != nil {
+		qwen := *value.Qwen
+		value.Qwen = &qwen
+	}
 	return value
+}
+
+//nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
+func validateCatalogQwenMetadata(product string, metadata *QwenSessionMetadata) error {
+	if product != "qwen" {
+		if metadata != nil {
+			return errors.New("non-Qwen session contains Qwen metadata")
+		}
+		return nil
+	}
+	// Older catalogs created before first-class Qwen support have no managed
+	// Qwen rows. Keep nil readable for forward migration while requiring the
+	// payload on every new or updated managed Qwen launch.
+	if metadata == nil {
+		return nil
+	}
+	if !filepath.IsAbs(metadata.Cwd) || filepath.Clean(metadata.Cwd) != metadata.Cwd {
+		return errors.New("qwen session metadata has an invalid canonical cwd")
+	}
+	profile := metadata.Profile
+	if profile.Fingerprint == "" || (profile.QwenHomeSet && (!filepath.IsAbs(profile.QwenHome) || profile.QwenHome == "")) ||
+		(profile.QwenRuntimeSet && (!filepath.IsAbs(profile.QwenRuntimeDir) || profile.QwenRuntimeDir == "")) {
+		return errors.New("qwen session metadata has an invalid profile identity")
+	}
+	if metadata.LaunchPreference != "native_default" && metadata.LaunchPreference != "non_yolo" &&
+		metadata.LaunchPreference != "yolo" && !strings.HasPrefix(metadata.LaunchPreference, "native:") {
+		return errors.New("qwen session metadata has an invalid launch preference")
+	}
+	if strings.HasPrefix(metadata.LaunchPreference, "native:") && strings.TrimPrefix(metadata.LaunchPreference, "native:") == "" {
+		return errors.New("qwen session metadata has an empty native launch mode")
+	}
+	expectedMode := map[string]string{
+		"native_default": "native_default", "non_yolo": "default", "yolo": "yolo",
+	}[metadata.LaunchPreference]
+	if strings.HasPrefix(metadata.LaunchPreference, "native:") {
+		expectedMode = strings.TrimPrefix(metadata.LaunchPreference, "native:")
+	}
+	if metadata.InitialModeRequest != expectedMode {
+		return errors.New("qwen session metadata initial mode request does not match its launch preference")
+	}
+	return nil
+}
+
+func sameQwenResumeIdentity(left, right QwenSessionMetadata) bool {
+	return left.Cwd == right.Cwd && reflect.DeepEqual(left.Profile, right.Profile)
 }
 
 func samePreferenceDecision(left, right SessionPreferences) bool {

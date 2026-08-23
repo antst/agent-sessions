@@ -2,7 +2,7 @@
 
 ## Authoritative producer
 
-The final v0.2.1 evidence producer is `.github/workflows/ci.yml` running against the exact signed
+The final v0.2.4 evidence producer is `.github/workflows/ci.yml` running against the exact signed
 `main` release commit. A local rehearsal report, copied terminal transcript, or manually assembled
 release asset is not final release evidence.
 
@@ -16,19 +16,19 @@ payloads.
 The workflow emits one byte-stable JSON file:
 
 ```text
-agent-sessions-v0.2.1-release-evidence.json
+agent-sessions-v0.2.4-release-evidence.json
 ```
 
 The immutable workflow artifact containing it is named:
 
 ```text
-agent-sessions-v0.2.1-release-evidence-<full-commit-sha>
+agent-sessions-v0.2.4-release-evidence-<full-commit-sha>
 ```
 
 The workflow artifact uses a 90-day retention period. The same JSON bytes are later attached to the
 GitHub release for the lifetime of that release. `SHA256SUMS` includes the JSON file as well as every
 platform archive. Before tag creation, the release procedure must refuse if local or remote
-`refs/tags/v0.2.1` already exists. After that exact signed tag is created, the tag-triggered job must
+`refs/tags/v0.2.4` already exists. After that exact signed tag is created, the tag-triggered job must
 require it, verify its signature and target, and refuse an existing GitHub release or same-named
 release asset rather than replace either. The triggering tag itself is required state, not a
 publication collision. After publication, the signed tag's recorded digest detects any out-of-band
@@ -48,8 +48,8 @@ one LF byte, with no secret values. Its top-level shape is:
 ```json
 {
   "schema_version": 1,
-  "release_version": "0.2.1",
-  "intended_tag": "v0.2.1",
+  "release_version": "0.2.4",
+  "intended_tag": "v0.2.4",
   "commit_sha": "<40 lowercase hex>",
   "tree_sha": "<40 lowercase hex>",
   "artifact": {},
@@ -74,8 +74,8 @@ validated in addition because JSON Schema does not express them completely:
   in that run with the recorded SHA-256.
 - The exact package inventory from the schema exists in every archive at the declared paths.
 - RFC 8785 serialization of the parsed value plus one LF reproduces the evidence bytes exactly.
-- The exact-commit evidence run and tag-triggered release rebuild use version `0.2.1` from
-  `deploy/peer-federator/VERSION`; the signed tag is independently required to equal `v0.2.1`.
+- The exact-commit evidence run and tag-triggered release rebuild use version `0.2.4` from
+  `deploy/peer-federator/VERSION`; the signed tag is independently required to equal `v0.2.4`.
   Building any platform archive twice from the same commit, version, toolchain, and authoritative
   inventory produces byte-identical output and the SHA-256 recorded by the evidence artifact.
 
@@ -84,13 +84,13 @@ Changing any field, type, enum, inventory member, or canonicalization rule requi
 
 ## Signed-tag binding and publication
 
-The signed annotated `v0.2.1` tag is created only after the exact-commit workflow run succeeds and
+The signed annotated `v0.2.4` tag is created only after the exact-commit workflow run succeeds and
 the pre-tag local/remote absence check passes. Its
 annotation contains these exact trailers:
 
 ```text
 Agent-Sessions-Evidence-Run: <run URL>
-Agent-Sessions-Evidence-Artifact: agent-sessions-v0.2.1-release-evidence-<full-commit-sha>
+Agent-Sessions-Evidence-Artifact: agent-sessions-v0.2.4-release-evidence-<full-commit-sha>
 Agent-Sessions-Evidence-SHA256: <64 lowercase hex>
 ```
 

@@ -127,7 +127,7 @@ Pick one mode. Modes A and B are both correct; C is a fallback.
 terminal notice arrives as a peer message carrying `collection=required` and the exact `wait`
 command. That message is a *pointer, never a result*. On arrival:
 
-Peer delivery is push-based. Do **not** poll `claude_peer.check_inbox`, sleep, or block the
+Peer delivery is push-based. Do **not** poll `agent_sessions.check_inbox`, sleep, or block the
 orchestrator waiting for the notice; continue useful work and the message will be injected
 automatically. `check_inbox` is only a recovery tool for content queued past a delivery boundary.
 

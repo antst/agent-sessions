@@ -19,6 +19,8 @@ import (
 	"time"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 type laneOptions struct {
@@ -1077,7 +1079,7 @@ func validateLaneOwner(persistent bool, pid int, procStart string) error {
 		return nil
 	}
 	if !exactProcessIdentityMatch(pid, procStart) {
-		return errors.New("cannot corroborate a stable lifecycle owner; retry from a live Codex, Claude, or Grok session, or use --persistent")
+		return errors.New("cannot corroborate a stable lifecycle owner; retry from a live Codex, Claude, Grok, or Qwen session, or use --persistent")
 	}
 	return nil
 }
@@ -1087,7 +1089,7 @@ func sameLaneOwner(leftPID int, leftProcStart string, rightPID int, rightProcSta
 }
 
 func inferPeerParent(paths nativePaths, startPID int) laneOwner {
-	candidates := make([]laneOwner, 0, 3)
+	candidates := make([]laneOwner, 0, 4)
 	if owner, ok := inferCodexParent(paths, startPID); ok {
 		candidates = append(candidates, owner)
 	}
@@ -1096,6 +1098,14 @@ func inferPeerParent(paths nativePaths, startPID int) laneOwner {
 	}
 	if owner, ok := inferGrokParent(paths, startPID); ok {
 		candidates = append(candidates, owner)
+	}
+	if owner, ok := inferQwenParent(paths, startPID); ok {
+		candidates = append(candidates, owner)
+	}
+	if len(candidates) == 0 {
+		if owner, ok := inferRegisteredPeerParent(startPID, federator.ResolveParentContext); ok {
+			candidates = append(candidates, owner)
+		}
 	}
 	if len(candidates) == 0 {
 		return laneOwner{}

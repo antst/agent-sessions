@@ -206,7 +206,8 @@ differs from the existing Codex, Claude, and Grok payloads.
 ## Design Sequence
 
 1. **Shared product completeness**: introduce the product descriptor and table-driven completeness
-   gates before adding Qwen values. Refactor MCP inventories, runtime roles, parent inference,
+   gates before adding Qwen values. Refactor MCP inventories onto the single product-neutral
+   `agent_sessions` namespace, runtime roles, parent inference,
    federation capability/launcher selection, package lists, help, and docs/skill target inventories
    to consume or validate that source.
 2. **Shared lifecycle and transport primitives**: generalize the gated peer preparation with product
@@ -219,7 +220,7 @@ differs from the existing Codex, Claude, and Grok payloads.
    later operator doctor consume that engine. No probe claims that the selected launch preference
    remains the current mode after launch.
 4. **Interactive peer**: implement dual-output/input transaction, MCP attestation, exact resume,
-   initial native-mode corroboration, real session-stable delivery socket, delivery, and honest
+   exact native-mode request retention, real session-stable delivery socket, delivery, and honest
    current-mode reporting when observable. Do not interpose on Qwen's native in-session permission
    controls.
 5. **Qwen lane foundation**: implement stdio ACP manager, exact parent/groups/notices, serialized
@@ -233,7 +234,7 @@ differs from the existing Codex, Claude, and Grok payloads.
 8. **Operator diagnostics, packaging, documentation, acceptance, release**: expose the shared
    readiness evidence through stable doctor output; build eleven binaries; install all four plugin
    surfaces; make `.github/workflows/ci.yml` consume the same authoritative executable/plugin
-   inventory as local packaging; freeze symmetric docs/help and v0.2.1 metadata; run the full
+   inventory as local packaging; freeze symmetric docs/help and v0.2.4 metadata; run the full
    rehearsal matrix and commit its in-tree evidence in a signed `main` release commit; then, without
    changing that tree, rerun the complete automated, package, real Linux/macOS, federation, and
    prebuilt-install gates at the exact commit. Emit the exact external evidence artifact defined by
