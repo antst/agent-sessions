@@ -13,6 +13,7 @@ import (
 type registryRecord struct {
 	PID                 int    `json:"pid,omitempty"`
 	SessionID           string `json:"sessionId"`
+	AttachmentID        string `json:"attachmentId,omitempty"`
 	Cwd                 string `json:"cwd,omitempty"`
 	Name                string `json:"name"`
 	Status              string `json:"status,omitempty"`
@@ -37,6 +38,7 @@ type registryRecord struct {
 
 type localPeer struct {
 	Peer
+	AttachmentID            string
 	PID                     int
 	ProcStart               string
 	Socket                  string
@@ -114,7 +116,7 @@ func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localP
 			InstanceID:   sessionKey(hostID + "\x00" + instanceIdentity),
 		}
 		result[id] = localPeer{
-			Peer: peer, PID: pid, Socket: record.MessagingSocketPath,
+			Peer: peer, AttachmentID: record.AttachmentID, PID: pid, Socket: record.MessagingSocketPath,
 			GroupProtocol: record.GroupProtocol, AgentService: record.AgentService,
 		}
 	}

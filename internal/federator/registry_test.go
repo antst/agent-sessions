@@ -34,7 +34,7 @@ func TestDiscoverLocalPeersExportsRealAndSkipsFederatedRecords(t *testing.T) {
 	pid := os.Getpid()
 	path := filepath.Join(registry, strconv.Itoa(pid)+".json")
 	record := registryRecord{
-		PID: pid, SessionID: "session-a", Name: "reviewer", Status: "idle",
+		PID: pid, SessionID: "session-a", AttachmentID: "attachment-a", Name: "reviewer", Status: "idle",
 		MessagingSocketPath: socket, ProcStart: processStart(pid), StartedAt: time.Now().UnixMilli(),
 		PermissionMode: "bypassPermissions",
 	}
@@ -48,6 +48,9 @@ func TestDiscoverLocalPeersExportsRealAndSkipsFederatedRecords(t *testing.T) {
 	peer, ok := peers["host-a/session-a"]
 	if !ok || peer.DisplayName != "reviewer--alpha" || peer.GlobalID != globalSessionID("host-a", "session-a") {
 		t.Fatalf("peer = %#v, exists=%v", peer, ok)
+	}
+	if peer.AttachmentID != "attachment-a" {
+		t.Fatalf("late-bound attachment identity was not recovered from the native row: %#v", peer)
 	}
 	// A registry claim alone cannot elevate the exported permission class. This
 	// test process was not launched in bypass mode, so argv corroboration wins.

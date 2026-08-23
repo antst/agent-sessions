@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 func isolateNativeLaneTest(t *testing.T) {
@@ -218,6 +220,46 @@ func TestInferClaudeParentNotifyTargetRequiresLiveCorroboratedAncestor(t *testin
 	fallback := withLaneLaunchContext(laneOptions{command: "start"})
 	if fallback.ownerPID != 0 || fallback.ownerProcStart != "" {
 		t.Fatalf("ordinary shell unexpectedly became a lifecycle owner: %+v", fallback)
+	}
+}
+
+func TestInferClaudeParentResolvesLateBoundAttachmentAlias(t *testing.T) {
+	root := t.TempDir()
+	paths := nativePaths{claudeRoot: filepath.Join(root, "claude")}
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", paths.claudeRoot)
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("CODEX_THREAD_ID", "")
+	socket := filepath.Join(root, "claude.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	pid := os.Getpid()
+	attachmentID := "00000000-0000-4000-8000-000000000ca1"
+	actualID := "00000000-0000-4000-8000-000000000ca2"
+	procStart := readProcStart(pid)
+	if err := writeJSONAtomic(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(pid)+".json"), peerSession{
+		SessionID: actualID, ProcStart: procStart, MessagingSocketPath: socket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CODE_SESSION_ID", attachmentID)
+	t.Setenv(peerSessionIDEnvironment, attachmentID)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", socket)
+	t.Setenv("CLAUDE_PID", strconv.Itoa(pid))
+	owner, ok := inferClaudeParentWithResolver(paths, pid, func(_, requested string) (federator.ParentContext, error) {
+		if requested != attachmentID {
+			t.Fatalf("resolved attachment %q", requested)
+		}
+		return federator.ParentContext{
+			SessionID: actualID, Product: "claude", AdapterPID: pid, AdapterProcStart: procStart,
+			AdapterSocket: socket, PID: pid, ProcStart: procStart,
+		}, nil
+	})
+	if !ok || owner.SessionID != actualID || owner.PID != pid || owner.ProcStart != procStart {
+		t.Fatalf("late-bound Claude owner = %+v, ok=%v", owner, ok)
 	}
 }
 
