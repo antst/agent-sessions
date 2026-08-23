@@ -71,6 +71,8 @@ func TestCodexPeerInformationalAndPassthroughPreserveNativeArgv(t *testing.T) {
 		{"agents"},
 		{"queue", "thread", "message"},
 		{"app"},
+		{"agents"},
+		{"queue", "thread", "follow-up"},
 		{"migrate-rollouts"},
 	} {
 		plan, err := parseCodexPeerArgs(args, root, "")

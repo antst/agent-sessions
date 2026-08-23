@@ -24,6 +24,7 @@ const claudePeerReadyTimeout = 30 * time.Second
 
 type claudePeerPlan struct {
 	sessionID     string
+	attachmentID  string
 	resumeTarget  string
 	resume        bool
 	peerName      string
@@ -77,15 +78,9 @@ func RunClaudePeer(args []string) error {
 	if err := requireClaudePeerProfileMatch(source, status); err != nil {
 		return err
 	}
-	if plan.sessionID == "" {
-		plan.sessionID, err = federator.ResolveSessionName(status.RuntimeDir, "claude", plan.resumeTarget)
-		if err != nil {
-			return fmt.Errorf("resolve Claude resume target %q: %w", plan.resumeTarget, err)
-		}
-		plan.args = replaceClaudeResumeTarget(plan.args, plan.sessionID)
-	}
-	lifecycleRoot := claudePeerLifecycleRoot(status.StateDir, status.HostID, plan.sessionID)
-	managedSocket := federator.ClaudePeerMessagingSocketPath(status.RuntimeDir, plan.sessionID)
+	lateBoundSelection := plan.sessionID == ""
+	lifecycleRoot := claudePeerLifecycleRoot(status.StateDir, status.HostID, plan.attachmentID)
+	managedSocket := federator.ClaudePeerMessagingSocketPath(status.RuntimeDir, plan.attachmentID)
 	if err := federator.ValidateClaudePeerMessagingSocketPath(managedSocket); err != nil {
 		return err
 	}
@@ -97,7 +92,7 @@ func RunClaudePeer(args []string) error {
 		return err
 	}
 	defer releaseClaudePeerProfileLock(profileLock)
-	if err := prepareClaudePeerAttachment(sharedRoot, plan.sessionID); err != nil {
+	if err := prepareClaudePeerAttachment(sharedRoot, plan.attachmentID); err != nil {
 		return err
 	}
 	// Native Claude binds its messaging socket before publishing the PID row.
@@ -108,7 +103,7 @@ func RunClaudePeer(args []string) error {
 	plan.args = insertClaudeManagedArgs(plan.args, "--messaging-socket-path", managedSocket)
 	settingsPath := filepath.Join(lifecycleRoot, "launch-settings.json")
 	resolved, preferenceRequest, err := previewPeerLaunchContext(
-		plan.sessionID, "claude", plan.context, plan.alwaysApprove, plan.yoloSpecified,
+		plan.attachmentID, "claude", plan.context, plan.alwaysApprove, plan.yoloSpecified,
 	)
 	if err != nil {
 		return errors.Join(fmt.Errorf("preview Agent Sessions peer preferences: %w", err), removeClaudePeerLaunchSettings(settingsPath))
@@ -128,7 +123,7 @@ func RunClaudePeer(args []string) error {
 	if err != nil {
 		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
 	}
-	environment := claudePeerEnvironment(os.Environ(), sharedRoot, source, plan.sessionID)
+	environment := claudePeerEnvironment(os.Environ(), sharedRoot, source, plan.attachmentID)
 	gateReader, gateWriter, err := os.Pipe()
 	if err != nil {
 		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
@@ -166,22 +161,30 @@ func RunClaudePeer(args []string) error {
 		return errors.Join(fmt.Errorf("snapshot gated Claude peer keys: %w", err), removeClaudePeerLaunchSettings(settingsPath))
 	}
 	preparation := federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: plan.sessionID, Product: "claude", Name: plan.peerName,
+		Version: federator.GroupProtocolVersion, SessionID: plan.attachmentID, Product: "claude", Name: plan.peerName,
 		PID: command.Process.Pid, ProcStart: adapterStart,
 		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: sharedRoot,
 		ClaudeKeyBaseline: keyBaseline, ClaudeKeyBaselineSet: true,
 		ClaudeSocketPath: managedSocket, ClaudeSocketPathSet: true,
 	}
-	prepared, err := federator.PreparePeerLaunch(
-		agentRuntimeDir(), preparation, preferenceRequest, resolved.Preference,
-	)
+	if lateBoundSelection {
+		preparation.AttachmentID = plan.attachmentID
+		err = federator.PrepareClaudePeerSelection(agentRuntimeDir(), preparation)
+	} else {
+		var prepared federator.ResolvedPreferences
+		prepared, err = federator.PreparePeerLaunch(
+			agentRuntimeDir(), preparation, preferenceRequest, resolved.Preference,
+		)
+		if err == nil {
+			resolved = prepared
+		}
+	}
 	if err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 		return errors.Join(err, removeClaudePeerLaunchSettings(settingsPath))
 	}
-	resolved = prepared
 	if err := writeClaudePeerLaunchSettings(settingsPath, settingsBody); err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
@@ -301,7 +304,7 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 			plan.sessionID = strings.TrimPrefix(argument, "--session-id=")
 		case argument == "--resume" || argument == "-r":
 			if index+1 >= len(scanned) {
-				return claudePeerPlan{}, usageError(argument + " requires a session UUID or unique managed name")
+				return claudePeerPlan{}, usageError(argument + " requires a native Claude resume target")
 			}
 			plan.resumeTarget, plan.resume = scanned[index+1], true
 			index++
@@ -327,21 +330,29 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 	switch {
 	case plan.resume:
 		if strings.TrimSpace(plan.resumeTarget) == "" {
-			return claudePeerPlan{}, usageError("--resume requires a session UUID or unique managed name")
+			return claudePeerPlan{}, usageError("--resume requires a native Claude resume target")
 		}
 		if threadIDPattern.MatchString(plan.resumeTarget) {
 			plan.sessionID = plan.resumeTarget
+			plan.attachmentID = plan.sessionID
 		} else {
 			plan.sessionID = ""
+			plan.attachmentID, err = newClaudePeerSessionID()
+			if err != nil {
+				return claudePeerPlan{}, err
+			}
 		}
 	case plan.sessionID == "":
 		plan.sessionID, err = newClaudePeerSessionID()
 		if err != nil {
 			return claudePeerPlan{}, err
 		}
+		plan.attachmentID = plan.sessionID
 		plan.args = insertClaudeManagedArgs(plan.args, "--session-id", plan.sessionID)
 	case !threadIDPattern.MatchString(plan.sessionID):
 		return claudePeerPlan{}, usageError("--session-id requires an exact session UUID")
+	default:
+		plan.attachmentID = plan.sessionID
 	}
 	if peerName != "" {
 		plan.args = insertClaudeManagedArgs(plan.args, "--name", peerName)
@@ -353,26 +364,6 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 		plan.args = insertClaudeManagedArgs(plan.args, "--no-chrome")
 	}
 	return plan, nil
-}
-
-func replaceClaudeResumeTarget(args []string, sessionID string) []string {
-	result := append([]string(nil), args...)
-	for index := 0; index < len(result); index++ {
-		argument := result[index]
-		if argument == "--" {
-			break
-		}
-		switch {
-		case argument == "--resume" || argument == "-r":
-			if index+1 < len(result) {
-				result[index+1] = sessionID
-				index++
-			}
-		case strings.HasPrefix(argument, "--resume="):
-			result[index] = "--resume=" + sessionID
-		}
-	}
-	return result
 }
 
 func insertClaudeManagedArgs(args []string, managed ...string) []string {
@@ -770,8 +761,13 @@ func superviseClaudePeer(
 			}
 		}
 	}()
-	deadline := time.Now().Add(claudePeerReadyTimeout)
+	deadline := time.Time{}
+	if plan.sessionID != "" {
+		deadline = time.Now().Add(claudePeerReadyTimeout)
+	}
 	var registration federator.PeerRegistration
+	selectionPromoted := false
+	var selectedPreference federator.SessionPreferences
 	nativeRow := claudeNativePeerRecord{PID: childPID, MessagingSocketPath: managedSocket}
 	var observedKeys []federator.ClaudeKeyBaselineEntry
 	observeKeys := func() error {
@@ -791,8 +787,12 @@ func superviseClaudePeer(
 		if nativeRow.PID <= 1 {
 			nativeRow.PID = childPID
 		}
+		expectedSessionID := plan.sessionID
+		if nativeRow.SessionID != "" {
+			expectedSessionID = nativeRow.SessionID
+		}
 		*cleanupErr = cleanupClaudePeerNativeArtifacts(
-			sharedRoot, nativeRow, childStart, adapterStrongStart, plan.sessionID, keyBaseline, observedKeys,
+			sharedRoot, nativeRow, childStart, adapterStrongStart, expectedSessionID, keyBaseline, observedKeys,
 		)
 	}()
 	for registration.SessionID == "" {
@@ -808,19 +808,54 @@ func superviseClaudePeer(
 		}
 		row, err := readClaudeNativePeerRecord(sharedRoot, childPID, childStart, managedSocket)
 		if err != nil {
-			if time.Now().After(deadline) {
+			if !deadline.IsZero() && time.Now().After(deadline) {
 				_ = command.Process.Kill()
 				<-done
 				return fmt.Errorf("claude-peer did not publish a native messaging socket: %w", err)
 			}
 			continue
 		}
-		if row.SessionID != plan.sessionID {
+		if deadline.IsZero() && plan.sessionID != "" {
+			deadline = time.Now().Add(claudePeerReadyTimeout)
+		}
+		if plan.sessionID != "" && row.SessionID != plan.sessionID {
 			_ = command.Process.Kill()
 			<-done
 			return errors.New("Claude published a different session ID than the requested stable session") //nolint:staticcheck // Claude is a product name.
 		}
+		if !threadIDPattern.MatchString(row.SessionID) {
+			_ = command.Process.Kill()
+			<-done
+			return errors.New("Claude published an invalid native session UUID") //nolint:staticcheck // Claude is a product name.
+		}
+		nativeRow = row
+		if plan.sessionID == "" && !selectionPromoted {
+			title, selected := federator.ClaudeNativeSessionTitle(sharedRoot, row.SessionID)
+			if !selected || !strings.EqualFold(strings.TrimSpace(title), strings.TrimSpace(plan.resumeTarget)) {
+				// Native Claude first publishes a boot identity, then changes the
+				// same PID/socket row after its resume selector resolves. Never
+				// promote that transient identity; a duplicate-title picker may
+				// remain here until the operator chooses the actual transcript.
+				continue
+			}
+		}
 		actualYolo := effectiveClaudePeerYolo(row.PermissionMode, durableYolo)
+		if plan.sessionID == "" && !selectionPromoted {
+			selected, _, previewErr := previewPeerLaunchContext(
+				row.SessionID, "claude", plan.context, plan.alwaysApprove, plan.yoloSpecified,
+			)
+			if previewErr != nil {
+				_ = command.Process.Kill()
+				<-done
+				return fmt.Errorf("preview selected Claude session preferences: %w", previewErr)
+			}
+			if actualYolo != selected.Preference.AlwaysApprove {
+				_ = command.Process.Kill()
+				<-done
+				return errors.New("Claude selected a session whose durable yolo preference differs from the native launch; pass --yolo or --no-yolo explicitly") //nolint:staticcheck // Claude is a product name.
+			}
+			selectedPreference = selected.Preference
+		}
 		if plan.yoloSpecified && actualYolo != plan.alwaysApprove {
 			_ = command.Process.Kill()
 			<-done
@@ -838,11 +873,27 @@ func superviseClaudePeer(
 		registration.ClaudeConfigRoot = sharedRoot
 		registration.ClaudeKeyBaseline = append([]federator.ClaudeKeyBaselineEntry(nil), keyBaseline...)
 		registration.ClaudeKeyBaselineSet = true
-		nativeRow = row
+		registration.ClaudeSocketPath = managedSocket
+		registration.ClaudeSocketPathSet = true
 		if registration.LifecycleProcStart == "" {
 			_ = command.Process.Kill()
 			<-done
 			return errors.New("cannot corroborate claude-peer supervisor identity")
+		}
+		if plan.sessionID == "" && !selectionPromoted {
+			request := peerPreferenceRequest(
+				row.SessionID, "claude", plan.context, plan.alwaysApprove, plan.yoloSpecified,
+			)
+			promoted, promoteErr := federator.PromoteClaudePeerSelection(
+				agentRuntimeDir(), registration, request, selectedPreference,
+			)
+			if promoteErr != nil {
+				_ = command.Process.Kill()
+				<-done
+				return fmt.Errorf("adopt native Claude resume selection: %w", promoteErr)
+			}
+			durableYolo = promoted.Preference.AlwaysApprove
+			selectionPromoted = true
 		}
 		if _, err := federator.RegisterPeer(agentRuntimeDir(), registration); err != nil {
 			registration = federator.PeerRegistration{}
@@ -869,7 +920,7 @@ func superviseClaudePeer(
 			return waitErr
 		case <-ticker.C:
 			row, rowErr := readClaudeNativePeerRecord(sharedRoot, childPID, childStart, managedSocket)
-			if rowErr != nil || row.SessionID != plan.sessionID {
+			if rowErr != nil || row.SessionID != registration.SessionID {
 				continue
 			}
 			if effectiveClaudePeerYolo(row.PermissionMode, durableYolo) && !durableYolo {
@@ -884,6 +935,8 @@ func superviseClaudePeer(
 			registration.ClaudeConfigRoot = sharedRoot
 			registration.ClaudeKeyBaseline = append([]federator.ClaudeKeyBaselineEntry(nil), keyBaseline...)
 			registration.ClaudeKeyBaselineSet = true
+			registration.ClaudeSocketPath = managedSocket
+			registration.ClaudeSocketPathSet = true
 			nativeRow = row
 			_, _ = federator.RegisterPeer(agentRuntimeDir(), registration)
 		}
@@ -902,12 +955,16 @@ func claudePeerRegistration(row claudeNativePeerRecord, plan claudePeerPlan, yol
 	if yolo {
 		permissionMode = "bypassPermissions"
 	}
-	return federator.PeerRegistration{
+	registration := federator.PeerRegistration{
 		Version: federator.GroupProtocolVersion, SessionID: row.SessionID, Product: "claude",
-		Name: defaultClaudePeerName(plan.peerName, row), Status: defaultClaudePeerStatus(row.Status),
+		Name: defaultClaudePeerName(plan, row), Status: defaultClaudePeerStatus(row.Status),
 		PermissionMode: permissionMode, Cwd: row.Cwd, PID: pid, ProcStart: procStart,
 		Socket: row.MessagingSocketPath, StartedAt: row.StartedAt,
 	}
+	if plan.sessionID == "" {
+		registration.AttachmentID = plan.attachmentID
+	}
+	return registration
 }
 
 func defaultClaudePeerStatus(status string) string {
@@ -1085,12 +1142,16 @@ func parseClaudeNativePeerRecordForCleanup(
 	return row, nil
 }
 
-func defaultClaudePeerName(explicit string, row claudeNativePeerRecord) string {
-	if strings.TrimSpace(row.Name) != "" {
-		return row.Name
-	}
-	if strings.TrimSpace(explicit) != "" {
+func defaultClaudePeerName(plan claudePeerPlan, row claudeNativePeerRecord) string {
+	if explicit := strings.TrimSpace(plan.peerName); explicit != "" {
 		return explicit
+	}
+	if target := strings.TrimSpace(plan.resumeTarget); plan.resume && target != "" &&
+		!threadIDPattern.MatchString(target) {
+		return target
+	}
+	if native := strings.TrimSpace(row.Name); native != "" {
+		return native
 	}
 	return "claude-" + row.SessionID[:8]
 }

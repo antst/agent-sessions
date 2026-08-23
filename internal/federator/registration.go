@@ -80,6 +80,7 @@ func ProcessStart(pid int) string { return processStart(pid) }
 type PeerRegistration struct {
 	Version              int                      `json:"version"`
 	SessionID            string                   `json:"session_id"`
+	AttachmentID         string                   `json:"attachment_id,omitempty"`
 	Product              string                   `json:"product"`
 	Name                 string                   `json:"name"`
 	Status               string                   `json:"status,omitempty"`
@@ -290,6 +291,45 @@ func (a *agent) claudeTranscriptSessionNames(
 	return names, invalid
 }
 
+func (a *agent) claudeTranscriptSessionTitle(sessionID string) (string, bool) {
+	return ClaudeNativeSessionTitle(a.options.ClaudeConfigDir, sessionID)
+}
+
+// ClaudeNativeSessionTitle returns the exact custom title stored by native
+// Claude for one transcript UUID. It is intentionally independent of the
+// Agent Sessions catalog: a named native resume may select an ordinary Claude
+// transcript that has never previously been a managed peer.
+func ClaudeNativeSessionTitle(configDir, sessionID string) (string, bool) {
+	if !validClaudeNativeSessionID(sessionID) {
+		return "", false
+	}
+	projects := filepath.Join(configDir, "projects")
+	entries, err := os.ReadDir(projects)
+	if err != nil {
+		return "", false
+	}
+	selected := ""
+	for _, project := range entries {
+		if !project.IsDir() {
+			continue
+		}
+		path := filepath.Join(projects, project.Name(), sessionID+".jsonl")
+		info, statErr := os.Lstat(path)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		title, titleErr := readClaudeTranscriptTitle(path, sessionID)
+		if titleErr != nil || title == "" || selected != "" && selected != title {
+			return "", false
+		}
+		selected = title
+	}
+	return selected, selected != ""
+}
+
 func readClaudeTranscriptTitle(path, expectedSessionID string) (string, error) {
 	file, err := os.Open(path) //nolint:gosec // exact catalog session filename below the configured Claude projects root.
 	if err != nil {
@@ -413,6 +453,13 @@ func PreparePeer(runtimeDir string, registration PeerRegistration) error {
 	return err
 }
 
+// PrepareClaudePeerSelection gives the host agent durable cleanup ownership
+// before native Claude resolves a named resume target to its actual session ID.
+func PrepareClaudePeerSelection(runtimeDir string, registration PeerRegistration) error {
+	_, err := requestAgentControl(runtimeDir, Message{Type: "peer_prepare_selection", Registration: &registration})
+	return err
+}
+
 // PreparePeerLaunch atomically adopts the previewed session preferences and
 // gives the host agent durable ownership of the still-gated Claude adapter.
 // Cancel/restart reconciliation restores the prior catalog row unless a full
@@ -432,6 +479,29 @@ func PreparePeerLaunch(
 	}
 	if response.Type != "peer_prepare_launch" || response.Preference == nil {
 		return ResolvedPreferences{}, errors.New("agent returned no prepared peer preferences")
+	}
+	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
+}
+
+// PromoteClaudePeerSelection atomically binds a gated named-resume attachment
+// to the actual session ID published by native Claude and adopts its durable
+// preferences. The preparation remains keyed by its launch-scoped attachment
+// ID so crash cleanup has no rename window.
+func PromoteClaudePeerSelection(
+	runtimeDir string,
+	registration PeerRegistration,
+	request ResolvePreferencesRequest,
+	expected SessionPreferences,
+) (ResolvedPreferences, error) {
+	message := preferenceMessage("peer_promote_selection", request)
+	message.Registration = &registration
+	message.Preference = &expected
+	response, err := requestAgentControl(runtimeDir, message)
+	if err != nil {
+		return ResolvedPreferences{}, err
+	}
+	if response.Type != "peer_promote_selection" || response.Preference == nil {
+		return ResolvedPreferences{}, errors.New("agent returned no promoted peer preferences")
 	}
 	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
 }
@@ -578,6 +648,13 @@ func decodePeerPreparation(body []byte) (peerPreparation, error) {
 	return peerPreparation{Registration: registration}, nil
 }
 
+func peerPreparationID(registration PeerRegistration) string {
+	if registration.AttachmentID != "" {
+		return registration.AttachmentID
+	}
+	return registration.SessionID
+}
+
 //nolint:gocyclo // Loading validates transactional and legacy preparation shapes explicitly.
 func (a *agent) loadPeerPreparations() error {
 	if err := os.MkdirAll(a.preparationDir, 0o700); err != nil {
@@ -600,14 +677,16 @@ func (a *agent) loadPeerPreparations() error {
 			return fmt.Errorf("invalid durable peer preparation: %w", err)
 		}
 		registration := preparation.Registration
-		if !validCatalogSessionID(registration.SessionID) || entry.Name() != sessionKey(registration.SessionID)+".json" ||
+		preparationID := peerPreparationID(registration)
+		if !validCatalogSessionID(registration.SessionID) || !validCatalogSessionID(preparationID) ||
+			entry.Name() != sessionKey(preparationID)+".json" ||
 			registration.AdapterStrongStart == "" || registration.LifecycleStrongStart == "" ||
 			!validClaudeKeyBaseline(registration.PID, registration.ClaudeKeyBaselineSet, registration.ClaudeKeyBaseline) ||
 			!validLoadedClaudePeerSocket(a.options.RuntimeDir, registration) ||
 			(preparation.RollbackPreferences && preparation.DesiredPreference.SessionID != registration.SessionID) {
 			return errors.New("invalid durable Claude peer preparation")
 		}
-		a.preparations[registration.SessionID] = preparation
+		a.preparations[preparationID] = preparation
 	}
 	return nil
 }
@@ -628,15 +707,17 @@ func (a *agent) validateClaudePreparation(registration PeerRegistration) error {
 
 //nolint:gocyclo // Preparation identity joins path ownership with two strong live process identities.
 func (a *agent) validateClaudePreparationIdentity(registration PeerRegistration) error {
+	preparationID := peerPreparationID(registration)
 	if registration.Version != GroupProtocolVersion || registration.Product != "claude" ||
-		!validCatalogSessionID(registration.SessionID) || registration.PID <= 1 || registration.ProcStart == "" ||
+		!validCatalogSessionID(registration.SessionID) || !validCatalogSessionID(preparationID) ||
+		registration.PID <= 1 || registration.ProcStart == "" ||
 		registration.LifecyclePID <= 1 || registration.LifecycleProcStart == "" ||
 		registration.LifecycleRoot == "" || registration.ClaudeConfigRoot == "" || registration.Socket != "" {
 		return errors.New("invalid Claude peer preparation")
 	}
-	expectedRoot := ClaudePeerLifecycleRootInState(a.options.StateDir, registration.SessionID)
+	expectedRoot := ClaudePeerLifecycleRootInState(a.options.StateDir, preparationID)
 	if a.options.StateDir == "" {
-		expectedRoot = ClaudePeerLifecycleRoot(a.options.HostID, registration.SessionID)
+		expectedRoot = ClaudePeerLifecycleRoot(a.options.HostID, preparationID)
 	}
 	if filepath.Clean(registration.LifecycleRoot) != filepath.Clean(expectedRoot) ||
 		!sameRegistryRoot(registration.ClaudeConfigRoot, a.options.ClaudeConfigDir) {
@@ -646,7 +727,7 @@ func (a *agent) validateClaudePreparationIdentity(registration PeerRegistration)
 		return errors.New("claude peer preparation key baseline is missing")
 	}
 	if registration.ClaudeSocketPathSet {
-		expectedSocket := ClaudePeerMessagingSocketPath(a.options.RuntimeDir, registration.SessionID)
+		expectedSocket := ClaudePeerMessagingSocketPath(a.options.RuntimeDir, preparationID)
 		if registration.ClaudeSocketPath != expectedSocket || ValidateClaudePeerMessagingSocketPath(expectedSocket) != nil {
 			return errors.New("claude peer preparation socket is not agent-owned")
 		}
@@ -676,6 +757,22 @@ func (a *agent) preparePeer(registration PeerRegistration) error {
 	if err := a.validateClaudePreparation(registration); err != nil {
 		return err
 	}
+	return a.persistUncommittedClaudePreparation(registration)
+}
+
+func (a *agent) prepareClaudePeerSelection(registration PeerRegistration) error {
+	a.preparationMu.Lock()
+	defer a.preparationMu.Unlock()
+	if registration.AttachmentID == "" || registration.AttachmentID != registration.SessionID {
+		return errors.New("named Claude selection requires a provisional attachment ID")
+	}
+	if err := a.validateClaudePreparationIdentity(registration); err != nil {
+		return err
+	}
+	return a.persistUncommittedClaudePreparation(registration)
+}
+
+func (a *agent) persistUncommittedClaudePreparation(registration PeerRegistration) error {
 	adapter := procinfo.Read(registration.PID)
 	lifecycle := procinfo.Read(registration.LifecyclePID)
 	if adapter.Status != procinfo.Known || adapter.Start != registration.ProcStart || adapter.StrongStart == "" ||
@@ -684,17 +781,18 @@ func (a *agent) preparePeer(registration PeerRegistration) error {
 	}
 	registration.AdapterStrongStart = adapter.StrongStart
 	registration.LifecycleStrongStart = lifecycle.StrongStart
+	preparationID := peerPreparationID(registration)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if current, ok := a.preparations[registration.SessionID]; ok &&
+	if current, ok := a.preparations[preparationID]; ok &&
 		!samePreparedRegistration(current.Registration, registration) {
-		return errors.New("claude peer session already has another prepared attachment")
+		return errors.New("claude peer attachment is already prepared")
 	}
 	preparation := peerPreparation{Registration: registration}
-	if err := writePeerPreparation(a.preparationPath(registration.SessionID), preparation); err != nil {
+	if err := writePeerPreparation(a.preparationPath(preparationID), preparation); err != nil {
 		return err
 	}
-	a.preparations[registration.SessionID] = preparation
+	a.preparations[preparationID] = preparation
 	return nil
 }
 
@@ -716,43 +814,176 @@ func (a *agent) preparePeerLaunch(
 	}
 	registration.AdapterStrongStart = adapter.StrongStart
 	registration.LifecycleStrongStart = lifecycle.StrongStart
+	preparationID := peerPreparationID(registration)
 	persist := func(prior *SessionPreferences, desired SessionPreferences) error {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if current, ok := a.preparations[registration.SessionID]; ok &&
+		if current, ok := a.preparations[preparationID]; ok &&
 			!samePreparedRegistration(current.Registration, registration) {
 			return errors.New("claude peer session already has another prepared attachment")
 		}
 		preparation := peerPreparation{
 			Registration: registration, PriorPreference: prior, DesiredPreference: desired, RollbackPreferences: true,
 		}
-		if err := writePeerPreparation(a.preparationPath(registration.SessionID), preparation); err != nil {
+		if err := writePeerPreparation(a.preparationPath(preparationID), preparation); err != nil {
 			return err
 		}
-		a.preparations[registration.SessionID] = preparation
+		a.preparations[preparationID] = preparation
 		return nil
 	}
 	discard := func() error {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		current, ok := a.preparations[registration.SessionID]
+		current, ok := a.preparations[preparationID]
 		if !ok || !samePreparedRegistration(current.Registration, registration) {
 			return nil
 		}
-		if err := os.Remove(a.preparationPath(registration.SessionID)); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(a.preparationPath(preparationID)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		delete(a.preparations, registration.SessionID)
+		delete(a.preparations, preparationID)
 		return nil
 	}
 	return a.catalog.prepare(update, expected, persist, discard)
 }
 
+func (a *agent) promoteClaudePeerSelection(
+	registration PeerRegistration,
+	update SessionPreferenceUpdate,
+	expected SessionPreferences,
+) (SessionPreferences, []string, error) {
+	a.preparationMu.Lock()
+	defer a.preparationMu.Unlock()
+	promotion, err := a.validateClaudePeerSelectionPromotion(registration, update)
+	if err != nil {
+		return SessionPreferences{}, nil, err
+	}
+	return a.catalog.prepare(update, expected, promotion.persist, promotion.discard)
+}
+
+type claudePeerSelectionPromotion struct {
+	agent         *agent
+	preparationID string
+	current       peerPreparation
+	prepared      PeerRegistration
+	promoted      PeerRegistration
+}
+
+func (a *agent) validateClaudePeerSelectionPromotion(
+	registration PeerRegistration,
+	update SessionPreferenceUpdate,
+) (claudePeerSelectionPromotion, error) {
+	preparationID := peerPreparationID(registration)
+	if !validClaudePeerSelectionPromotionRequest(registration, update) {
+		return claudePeerSelectionPromotion{}, errors.New("invalid named Claude selection promotion")
+	}
+	a.mu.RLock()
+	current, ok := a.preparations[preparationID]
+	a.mu.RUnlock()
+	if !validUnpromotedClaudeSelection(current, ok, preparationID, registration) {
+		return claudePeerSelectionPromotion{}, errors.New("named Claude selection preparation changed before promotion")
+	}
+	preparedRegistration := current.Registration
+	if preparedRegistration.ClaudeSocketPathSet && registration.Socket != preparedRegistration.ClaudeSocketPath {
+		return claudePeerSelectionPromotion{}, errors.New("named Claude selection published an unexpected messaging socket")
+	}
+	if !livePreparedClaudeSelection(preparedRegistration) {
+		return claudePeerSelectionPromotion{}, errors.New("named Claude selection identity changed before promotion")
+	}
+	promotedRegistration := preparedRegistration
+	promotedRegistration.SessionID = registration.SessionID
+	return claudePeerSelectionPromotion{
+		agent: a, preparationID: preparationID, current: current,
+		prepared: preparedRegistration, promoted: promotedRegistration,
+	}, nil
+}
+
+func validClaudePeerSelectionPromotionRequest(
+	registration PeerRegistration,
+	update SessionPreferenceUpdate,
+) bool {
+	return registration.AttachmentID != "" && registration.AttachmentID != registration.SessionID &&
+		validClaudeNativeSessionID(registration.SessionID) && update.SessionID == registration.SessionID
+}
+
+func validClaudeNativeSessionID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return false
+			}
+			continue
+		}
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') &&
+			(character < 'A' || character > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func validUnpromotedClaudeSelection(
+	current peerPreparation,
+	exists bool,
+	preparationID string,
+	registration PeerRegistration,
+) bool {
+	return exists && !current.RollbackPreferences && !current.Committed &&
+		current.Registration.SessionID == preparationID &&
+		samePreparedRegistrationWeak(current.Registration, registration)
+}
+
+func livePreparedClaudeSelection(registration PeerRegistration) bool {
+	adapter := procinfo.Read(registration.PID)
+	lifecycle := procinfo.Read(registration.LifecyclePID)
+	return adapter.Status == procinfo.Known && adapter.Start == registration.ProcStart &&
+		adapter.StrongStart == registration.AdapterStrongStart &&
+		lifecycle.Status == procinfo.Known && lifecycle.Start == registration.LifecycleProcStart &&
+		lifecycle.StrongStart == registration.LifecycleStrongStart
+}
+
+func (p claudePeerSelectionPromotion) persist(prior *SessionPreferences, desired SessionPreferences) error {
+	p.agent.mu.Lock()
+	defer p.agent.mu.Unlock()
+	latest, exists := p.agent.preparations[p.preparationID]
+	if !exists || !samePreparedRegistration(latest.Registration, p.prepared) ||
+		latest.RollbackPreferences || latest.Committed {
+		return errors.New("named Claude selection preparation changed during promotion")
+	}
+	promoted := peerPreparation{
+		Registration: p.promoted, PriorPreference: prior,
+		DesiredPreference: desired, RollbackPreferences: true,
+	}
+	if err := writeJSONAtomic(p.agent.preparationPath(p.preparationID), promoted); err != nil {
+		return err
+	}
+	p.agent.preparations[p.preparationID] = promoted
+	return nil
+}
+
+func (p claudePeerSelectionPromotion) discard() error {
+	p.agent.mu.Lock()
+	defer p.agent.mu.Unlock()
+	latest, exists := p.agent.preparations[p.preparationID]
+	if !exists || !samePreparedRegistration(latest.Registration, p.promoted) || latest.Committed {
+		return nil
+	}
+	if err := writeJSONAtomic(p.agent.preparationPath(p.preparationID), p.current); err != nil {
+		return err
+	}
+	p.agent.preparations[p.preparationID] = p.current
+	return nil
+}
+
 func (a *agent) cancelPeerPreparation(registration PeerRegistration) error {
 	a.preparationMu.Lock()
 	defer a.preparationMu.Unlock()
+	preparationID := peerPreparationID(registration)
 	a.mu.RLock()
-	current, ok := a.preparations[registration.SessionID]
+	current, ok := a.preparations[preparationID]
 	a.mu.RUnlock()
 	if !ok {
 		return nil
@@ -778,22 +1009,23 @@ func (a *agent) cancelPeerPreparation(registration PeerRegistration) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	latest, ok := a.preparations[registration.SessionID]
+	latest, ok := a.preparations[preparationID]
 	if !ok {
 		return nil
 	}
 	if !samePreparedRegistration(latest.Registration, preparedRegistration) {
 		return errors.New("claude peer preparation identity changed during cancellation")
 	}
-	if err := os.Remove(a.preparationPath(registration.SessionID)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(a.preparationPath(preparationID)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	delete(a.preparations, registration.SessionID)
+	delete(a.preparations, preparationID)
 	return nil
 }
 
 func samePreparedRegistration(left, right PeerRegistration) bool {
-	return left.PID == right.PID && left.ProcStart == right.ProcStart &&
+	return left.SessionID == right.SessionID && peerPreparationID(left) == peerPreparationID(right) &&
+		left.PID == right.PID && left.ProcStart == right.ProcStart &&
 		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart &&
 		left.AdapterStrongStart == right.AdapterStrongStart && left.LifecycleStrongStart == right.LifecycleStrongStart &&
 		left.ClaudeKeyBaselineSet == right.ClaudeKeyBaselineSet &&
@@ -802,7 +1034,8 @@ func samePreparedRegistration(left, right PeerRegistration) bool {
 }
 
 func samePreparedRegistrationWeak(left, right PeerRegistration) bool {
-	return left.PID == right.PID && left.ProcStart == right.ProcStart &&
+	return peerPreparationID(left) == peerPreparationID(right) &&
+		left.PID == right.PID && left.ProcStart == right.ProcStart &&
 		left.LifecyclePID == right.LifecyclePID && left.LifecycleProcStart == right.LifecycleProcStart &&
 		left.ClaudeKeyBaselineSet == right.ClaudeKeyBaselineSet &&
 		left.ClaudeSocketPathSet == right.ClaudeSocketPathSet && left.ClaudeSocketPath == right.ClaudeSocketPath &&
@@ -924,7 +1157,10 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	defer a.preparationMu.Unlock()
 	if registration.Version != GroupProtocolVersion || !validCatalogSessionID(registration.SessionID) ||
 		!validProduct(registration.Product) || registration.Name == "" || registration.PID <= 1 ||
-		registration.ProcStart == "" || registration.Socket == "" {
+		registration.ProcStart == "" || registration.Socket == "" ||
+		(registration.AttachmentID != "" &&
+			(registration.Product != "claude" && registration.Product != "grok" ||
+				!validCatalogSessionID(registration.AttachmentID) || registration.AttachmentID == registration.SessionID)) {
 		return Peer{}, errors.New("invalid peer registration")
 	}
 	adapterInfo := procinfo.Read(registration.PID)
@@ -949,9 +1185,10 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 			return Peer{}, errors.New("claude peer lifecycle or shared configuration root is not agent-owned")
 		}
 		if registration.LifecycleRoot != "" {
-			expected := ClaudePeerLifecycleRootInState(a.options.StateDir, registration.SessionID)
+			preparationID := peerPreparationID(registration)
+			expected := ClaudePeerLifecycleRootInState(a.options.StateDir, preparationID)
 			if a.options.StateDir == "" {
-				expected = ClaudePeerLifecycleRoot(a.options.HostID, registration.SessionID)
+				expected = ClaudePeerLifecycleRoot(a.options.HostID, preparationID)
 			}
 			if filepath.Clean(registration.LifecycleRoot) != filepath.Clean(expected) {
 				return Peer{}, errors.New("claude peer lifecycle or shared configuration root is not agent-owned")
@@ -968,16 +1205,40 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	if preference.AlwaysApprove != (registration.PermissionMode == "bypassPermissions") {
 		return Peer{}, errors.New("peer permission mode does not match durable yolo preference")
 	}
+	peerName := registration.Name
+	if registration.Product == "claude" {
+		if title, ok := a.claudeTranscriptSessionTitle(registration.SessionID); ok {
+			peerName = title
+		}
+	}
 	id := a.options.HostID + "/" + registration.SessionID
+	preparationID := peerPreparationID(registration)
 	a.mu.Lock()
 	if _, retiring := a.retirements[id]; retiring {
 		a.mu.Unlock()
 		return Peer{}, errors.New("session adapter retirement is still pending")
 	}
+	for otherID, candidate := range a.local {
+		if otherID == id {
+			continue
+		}
+		if (registration.AttachmentID != "" &&
+			(candidate.SessionID == registration.AttachmentID || candidate.AttachmentID == registration.AttachmentID)) ||
+			(candidate.AttachmentID != "" && candidate.AttachmentID == registration.SessionID) {
+			a.mu.Unlock()
+			return Peer{}, errors.New("peer attachment identity collides with another live session")
+		}
+	}
 	current, exists := a.local[id]
-	prepared, preparedExists := a.preparations[registration.SessionID]
+	prepared, preparedExists := a.preparations[preparationID]
 	preparedRegistration := prepared.Registration
-	if preparedExists && (preparedRegistration.PID != registration.PID || preparedRegistration.ProcStart != registration.ProcStart ||
+	if registration.Product == "claude" && registration.AttachmentID != "" && !preparedExists {
+		a.mu.Unlock()
+		return Peer{}, errors.New("named Claude selection has no prepared attachment")
+	}
+	if preparedExists && (preparedRegistration.SessionID != registration.SessionID ||
+		peerPreparationID(preparedRegistration) != preparationID ||
+		preparedRegistration.PID != registration.PID || preparedRegistration.ProcStart != registration.ProcStart ||
 		preparedRegistration.LifecyclePID != lifecyclePID || preparedRegistration.LifecycleProcStart != lifecycleProcStart ||
 		preparedRegistration.AdapterStrongStart != adapterInfo.StrongStart || preparedRegistration.LifecycleStrongStart != lifecycleInfo.StrongStart ||
 		preparedRegistration.ClaudeSocketPathSet && preparedRegistration.ClaudeSocketPath != registration.Socket) {
@@ -1001,7 +1262,7 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	peer := Peer{
 		ID: id, HostID: a.options.HostID, HostName: a.options.HostName,
 		SessionID: registration.SessionID, GlobalID: globalSessionID(a.options.HostID, registration.SessionID),
-		Name: cleanPeerName(registration.Name), DisplayName: qualifiedName(registration.Name, a.options.HostName),
+		Name: cleanPeerName(peerName), DisplayName: qualifiedName(peerName, a.options.HostName),
 		Status: defaultString(registration.Status, "idle"), Cwd: registration.Cwd,
 		Entrypoint: registration.Product, PermissionMode: defaultString(registration.PermissionMode, "default"),
 		StartedAt: startedAt, PeerProtocol: GroupProtocolVersion,
@@ -1014,14 +1275,14 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	}
 	if preparedExists && !prepared.Committed {
 		prepared.Committed = true
-		if err := writePeerPreparation(a.preparationPath(registration.SessionID), prepared); err != nil {
+		if err := writePeerPreparation(a.preparationPath(preparationID), prepared); err != nil {
 			a.mu.Unlock()
 			return Peer{}, err
 		}
-		a.preparations[registration.SessionID] = prepared
+		a.preparations[preparationID] = prepared
 	}
 	a.local[id] = localPeer{
-		Peer: peer, PID: registration.PID, ProcStart: registration.ProcStart,
+		Peer: peer, AttachmentID: registration.AttachmentID, PID: registration.PID, ProcStart: registration.ProcStart,
 		Socket: registration.Socket, GroupProtocol: GroupProtocolVersion,
 		LifecyclePID: lifecyclePID, LifecycleProcStart: lifecycleProcStart,
 		AdapterStrongStart: adapterInfo.StrongStart, LifecycleStrongStart: lifecycleInfo.StrongStart,
@@ -1045,7 +1306,7 @@ func validLoadedClaudePeerSocket(runtimeDir string, registration PeerRegistratio
 	if ValidateClaudePeerMessagingSocketPath(registration.ClaudeSocketPath) != nil {
 		return false
 	}
-	expectedName := filepath.Base(ClaudePeerMessagingSocketPath(runtimeDir, registration.SessionID))
+	expectedName := filepath.Base(ClaudePeerMessagingSocketPath(runtimeDir, peerPreparationID(registration)))
 	return filepath.Base(registration.ClaudeSocketPath) == expectedName
 }
 
@@ -1085,12 +1346,23 @@ func sameRegistryRoot(left, right string) bool {
 func (a *agent) parentContext(sessionID string) (ParentContext, error) {
 	a.reconcileRegisteredPeers()
 	a.mu.RLock()
-	peer, ok := localPeerBySession(a.local, sessionID)
+	resolvedSessionID := sessionID
+	peer, ok := localPeerBySession(a.local, resolvedSessionID)
+	if ok {
+		resolvedSessionID = peer.SessionID
+	}
+	if !ok {
+		if prepared, exists := a.preparations[sessionID]; exists && prepared.Committed &&
+			prepared.Registration.SessionID != sessionID {
+			resolvedSessionID = prepared.Registration.SessionID
+			peer, ok = localPeerBySession(a.local, resolvedSessionID)
+		}
+	}
 	a.mu.RUnlock()
 	if !ok {
 		return ParentContext{}, errors.New("parent session is not a live local peer")
 	}
-	preference, groups, exists, err := a.catalog.get(sessionID)
+	preference, groups, exists, err := a.catalog.get(resolvedSessionID)
 	if err != nil {
 		return ParentContext{}, err
 	}
@@ -1098,7 +1370,7 @@ func (a *agent) parentContext(sessionID string) (ParentContext, error) {
 		return ParentContext{}, errors.New("parent session preferences do not match its live registration")
 	}
 	return ParentContext{
-		HostID: a.options.HostID, SessionID: sessionID, Product: preference.Product,
+		HostID: a.options.HostID, SessionID: resolvedSessionID, Product: preference.Product,
 		InstanceID: peer.InstanceID, Groups: groups,
 		AlwaysApprove: preference.AlwaysApprove, AgentRuntimeDir: absolutePathOrOriginal(a.options.RuntimeDir),
 		AdapterPID: peer.PID, AdapterProcStart: peer.ProcStart, AdapterSocket: peer.Socket,
@@ -1174,7 +1446,7 @@ func (a *agent) reconcilePeerPreparations(logger interface{ Printf(string, ...an
 		prepared[sessionID] = preparation
 	}
 	a.mu.RUnlock()
-	for sessionID, preparation := range prepared {
+	for preparationID, preparation := range prepared {
 		registration := preparation.Registration
 		lifecycle := exactProcessStatus(exactProcess{
 			PID: registration.LifecyclePID, Start: registration.LifecycleProcStart,
@@ -1185,8 +1457,8 @@ func (a *agent) reconcilePeerPreparations(logger interface{ Printf(string, ...an
 		}
 		peer := localPeer{
 			Peer: Peer{
-				ID: a.options.HostID + "/" + sessionID, HostID: a.options.HostID, HostName: a.options.HostName,
-				SessionID: sessionID, Entrypoint: "claude",
+				ID: a.options.HostID + "/" + registration.SessionID, HostID: a.options.HostID, HostName: a.options.HostName,
+				SessionID: registration.SessionID, Entrypoint: "claude",
 			},
 			PID: registration.PID, ProcStart: registration.ProcStart, Socket: registration.ClaudeSocketPath,
 			LifecyclePID: registration.LifecyclePID, LifecycleProcStart: registration.LifecycleProcStart,
@@ -1195,26 +1467,28 @@ func (a *agent) reconcilePeerPreparations(logger interface{ Printf(string, ...an
 			ClaudeKeyBaseline:    append([]ClaudeKeyBaselineEntry(nil), registration.ClaudeKeyBaseline...),
 			ClaudeKeyBaselineSet: registration.ClaudeKeyBaselineSet,
 			CleanupDebt:          append([]PeerCleanupDebt(nil), preparation.CleanupDebt...),
+			ClaudeSessionUnresolved: registration.AttachmentID != "" &&
+				registration.AttachmentID == registration.SessionID && !preparation.RollbackPreferences,
 		}
 		if err := retirePeerAdapter(peer); err != nil {
-			logger.Printf("clean prepared Claude peer %s failed: %v", sessionID, err)
+			logger.Printf("clean prepared Claude peer %s failed: %v", registration.SessionID, err)
 			continue
 		}
 		if preparation.RollbackPreferences && !preparation.Committed {
 			if _, err := a.catalog.restorePrepared(preparation.DesiredPreference, preparation.PriorPreference); err != nil {
-				logger.Printf("restore prepared Claude peer preferences %s failed: %v", sessionID, err)
+				logger.Printf("restore prepared Claude peer preferences %s failed: %v", registration.SessionID, err)
 				continue
 			}
 		}
 		a.mu.Lock()
-		current, ok := a.preparations[sessionID]
+		current, ok := a.preparations[preparationID]
 		if ok && samePreparedRegistration(current.Registration, registration) {
-			if err := os.Remove(a.preparationPath(sessionID)); err != nil && !os.IsNotExist(err) {
+			if err := os.Remove(a.preparationPath(preparationID)); err != nil && !os.IsNotExist(err) {
 				a.mu.Unlock()
-				logger.Printf("remove prepared Claude peer %s failed: %v", sessionID, err)
+				logger.Printf("remove prepared Claude peer %s failed: %v", registration.SessionID, err)
 				continue
 			}
-			delete(a.preparations, sessionID)
+			delete(a.preparations, preparationID)
 		}
 		a.mu.Unlock()
 	}

@@ -645,17 +645,24 @@ func liveRegisteredClaudePeer(sessionID string) bool {
 // MCP process must descend from the exact native Claude adapter named by the
 // inherited UUID/socket, and the host agent must independently attest that
 // adapter plus its live lifecycle owner for the same grouped registration.
-//
-//nolint:gocyclo // Every process, registration, row, and socket condition is an independent fail-closed gate.
 func attestClaudeMCPCaller(paths nativePaths, startPID int) (string, error) {
+	return attestClaudeMCPCallerWithResolver(paths, startPID, federator.ResolveParentContext)
+}
+
+//nolint:gocyclo // Every process, registration, row, and socket condition is an independent fail-closed gate.
+func attestClaudeMCPCallerWithResolver(
+	paths nativePaths,
+	startPID int,
+	resolveParent func(string, string) (federator.ParentContext, error),
+) (string, error) {
 	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
 	socket := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))
 	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) != "claude" ||
 		!validSessionID(sessionID) || socket == "" || startPID <= 1 {
 		return "", errors.New("Claude launch context is unavailable") //nolint:staticcheck // Claude is a product name.
 	}
-	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
-	if err != nil || parent.Product != "claude" || parent.SessionID != sessionID ||
+	parent, err := resolveParent(laneAgentRuntimeDir(), sessionID)
+	if err != nil || parent.Product != "claude" || !validSessionID(parent.SessionID) ||
 		parent.AdapterPID <= 1 || parent.AdapterProcStart == "" || parent.AdapterSocket == "" ||
 		parent.PID <= 1 || parent.ProcStart == "" {
 		return "", errors.New("grouped Claude registration is unavailable")
@@ -668,12 +675,12 @@ func attestClaudeMCPCaller(paths nativePaths, startPID int) (string, error) {
 	body, err := os.ReadFile(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(parent.AdapterPID)+".json"))
 	var peer peerSession
 	if err != nil || json.Unmarshal(body, &peer) != nil || peer.PID != parent.AdapterPID ||
-		peer.SessionID != sessionID || peer.Entrypoint != "cli" || peer.Kind != "interactive" ||
+		peer.SessionID != parent.SessionID || peer.Entrypoint != "cli" || peer.Kind != "interactive" ||
 		peer.ProcStart != parent.AdapterProcStart || !samePath(peer.MessagingSocketPath, socket) ||
 		!probeUnixSocket(socket, 250*time.Millisecond) {
 		return "", errors.New("native Claude registry row does not match its grouped registration")
 	}
-	return sessionID, nil
+	return parent.SessionID, nil
 }
 
 func attestStdioMCPCaller(params json.RawMessage) (string, error) {
@@ -741,11 +748,35 @@ func listNativePeerSessions(paths nativePaths) ([]peerSession, error) {
 // registry row agrees. Those variables are inherited by detached and nested
 // subprocesses, so environment-only attribution can target the wrong session.
 func inferClaudeParent(paths nativePaths, startPID int) (laneOwner, bool) {
+	return inferClaudeParentWithResolver(paths, startPID, federator.ResolveParentContext)
+}
+
+//nolint:gocyclo // Native, attachment, process, lifecycle, row, and socket evidence must all fail closed independently.
+func inferClaudeParentWithResolver(
+	paths nativePaths,
+	startPID int,
+	resolveParent func(string, string) (federator.ParentContext, error),
+) (laneOwner, bool) {
 	sessionID := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID"))
 	socket := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))
 	pid, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CLAUDE_PID")))
 	if err != nil || pid <= 1 || !validSessionID(sessionID) || socket == "" || !processHasAncestor(startPID, pid) {
 		return laneOwner{}, false
+	}
+	// Native Claude resolves a title or picker selection after the managed
+	// launcher has already created its attachment identity. Recover the actual
+	// resumed UUID only through the host agent's strongly attested alias; never
+	// trust an ambient replacement UUID by itself.
+	attachmentID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
+	if validSessionID(attachmentID) && resolveParent != nil {
+		parent, parentErr := resolveParent(laneAgentRuntimeDir(), attachmentID)
+		if parentErr == nil && parent.Product == "claude" && validSessionID(parent.SessionID) &&
+			parent.AdapterPID == pid && samePath(parent.AdapterSocket, socket) &&
+			exactProcessIdentityMatch(pid, parent.AdapterProcStart) && parent.PID > 1 &&
+			exactProcessIdentityMatch(parent.PID, parent.ProcStart) &&
+			processHasAncestor(startPID, parent.PID) {
+			sessionID = parent.SessionID
+		}
 	}
 	body, err := os.ReadFile(filepath.Join(paths.claudeRoot, "sessions", strconv.Itoa(pid)+".json"))
 	if err != nil {
