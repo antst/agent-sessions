@@ -21,9 +21,9 @@ architecture, stop every Codex client and managed App Server, then run `make ins
 installs the nine native executables under the selected prefix, registers the
 `agent-sessions` marketplace, and installs `agent-sessions@agent-sessions` into Codex.
 
-Use `make install-all` when the same operation should also install the Claude and Grok plugins.
-`make install-claude` and `make install-grok` update only those optional product surfaces after the
-native runtime already exists.
+Use `make install-all` to install the shared runtime plus every product integration whose native
+client is present. Missing Claude, Grok, or Qwen clients are reported and skipped. The explicit
+`make install-claude`, `make install-grok`, and `make install-qwen` targets remain strict.
 
 ## Activate and verify
 

@@ -302,10 +302,75 @@ func TestMakefileAggregatesQwenInstallAndUpgradeTargets(t *testing.T) {
 	text := string(body)
 	for _, required := range []string{
 		"install-qwen: validate-qwen", "upgrade-qwen: install-qwen", "remove-qwen: build",
-		"install-all: install", "$(MAKE) install-qwen", "dev-install-all: dev-install", "$(MAKE) dev-install-qwen",
+		"install-all:", "$(INSTALL_ALL_MAKE) install-qwen", "dev-install-all:", "$(INSTALL_ALL_MAKE) dev-install-qwen",
+		"INSTALL_CODEX_INTEGRATION=0", "Skipping Grok integration: Grok is not installed.",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("Makefile omits Qwen install aggregation %q", required)
+		}
+	}
+}
+
+func TestInstallAllSkipsOnlyUnavailableNativeProducts(t *testing.T) {
+	repository, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	logPath := filepath.Join(root, "make.log")
+	writeScript := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	fakeMake := writeScript("aggregate-make", `printf '%s\n' "$*" >>"$AGGREGATE_MAKE_LOG"`)
+	availableCodex := writeScript("codex", "exit 0")
+	availableQwen := writeScript("qwen", "exit 0")
+	missingGrok := writeScript("grok-peer", "exit 127")
+
+	run := func(name string, arguments ...string) (string, []string) {
+		t.Helper()
+		if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		base := make([]string, 0, 7+len(arguments))
+		base = append(base, "-s", "-C", repository, "install-all", "INSTALL_ALL_MAKE="+fakeMake,
+			"GROK_PEER="+missingGrok, "GROK_PLUGIN_ROOT="+filepath.Join(repository, "grok"))
+		base = append(base, arguments...)
+		command := exec.Command("make", base...)
+		command.Env = append(os.Environ(), "AGGREGATE_MAKE_LOG="+logPath)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s install-all failed: %v\n%s", name, err, output)
+		}
+		body, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.FieldsFunc(strings.TrimSpace(string(body)), func(r rune) bool { return r == '\n' })
+		return string(output), lines
+	}
+
+	output, calls := run("partial", "CODEX="+availableCodex, "CLAUDE=missing-claude-client", "QWEN="+availableQwen)
+	if !reflect.DeepEqual(calls, []string{"install", "install-qwen"}) {
+		t.Fatalf("partial install calls = %#v, want Codex base and Qwen only", calls)
+	}
+	for _, wanted := range []string{"Skipping Claude integration", "Skipping Grok integration"} {
+		if !strings.Contains(output, wanted) {
+			t.Errorf("partial install output omits %q: %s", wanted, output)
+		}
+	}
+
+	output, calls = run("runtime only", "CODEX=missing-codex-client", "CLAUDE=missing-claude-client", "QWEN=missing-qwen-client")
+	if !reflect.DeepEqual(calls, []string{"install INSTALL_CODEX_INTEGRATION=0"}) {
+		t.Fatalf("runtime-only install calls = %#v", calls)
+	}
+	for _, wanted := range []string{"Skipping Codex integration", "Skipping Claude integration", "Skipping Grok integration", "Skipping Qwen integration"} {
+		if !strings.Contains(output, wanted) {
+			t.Errorf("runtime-only install output omits %q: %s", wanted, output)
 		}
 	}
 }

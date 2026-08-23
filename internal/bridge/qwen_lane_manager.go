@@ -1043,7 +1043,7 @@ func (m *qwenLaneManager) queueWake(item map[string]any) (map[string]any, error)
 		}
 		return qwenLaneWakeResult(turn), nil
 	}
-	turn := newQwenLaneTurn(trustedPeerTextForProduct(item, "qwen"), 0)
+	turn := newQwenLaneTurn(peerMessageText(item), 0)
 	turn.MessageID, turn.Fingerprint = messageID, fingerprint
 	if m.closing || m.state.Status == "archived" {
 		turn.Status, turn.Outcome, turn.Exit, turn.Error, turn.CompletedAt = "interrupted", "interrupted", 130, "Qwen lane is closing", time.Now().UnixMilli()

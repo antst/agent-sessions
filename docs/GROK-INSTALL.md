@@ -22,7 +22,8 @@ with multiple valid candidates, pin the intended Grok Build executable with
 `make install-grok GROK=/absolute/path/to/grok`; a pinned path is still
 validated and never falls through silently.
 
-`make install-all` also installs the Codex and Claude integrations. The installer
+`make install-all` installs every integration whose native client is present; absent products are
+reported and skipped. The explicit `make install-grok` target remains strict. The installer
 copies the validated payload to Grok's documented auto-trusted user location,
 `~/.grok/plugins/agent-sessions`. Grok 1.0.4 has no direct command for enabling
 an auto-discovered user plugin, so the installer briefly registers the source

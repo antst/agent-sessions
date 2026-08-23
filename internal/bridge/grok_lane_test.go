@@ -382,8 +382,9 @@ func TestGrokLaneWakeAndResumeRollbackFailedPersistence(t *testing.T) {
 		t.Fatalf("closing wake ownership = %#v, %v", result, err)
 	}
 	if len(manager.state.Turns) != 1 || manager.state.Turns[0].Status != "interrupted" ||
-		strings.Contains(manager.state.Turns[0].Prompt, "agent_sessions.send_message") ||
-		!strings.Contains(manager.state.Turns[0].Prompt, "Agent Sessions send_message") {
+		!strings.Contains(manager.state.Turns[0].Prompt, "Message from an unidentified peer:") ||
+		!strings.Contains(manager.state.Turns[0].Prompt, "arrived at archive boundary") ||
+		strings.Contains(strings.ToLower(manager.state.Turns[0].Prompt), "trusted") {
 		t.Fatalf("closing wake state/instruction = %+v", manager.state.Turns)
 	}
 }

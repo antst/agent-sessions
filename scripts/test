@@ -506,6 +506,14 @@ if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/age
   printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
   exit 1
 fi
+runtime_only_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 INSTALL_CODEX_INTEGRATION=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
+if grep -Eq 'plugin (list|add|remove|marketplace)' <<<"$runtime_only_install_plan" ||
+   grep -Fq 'agent-session-runtime" bootstrap' <<<"$runtime_only_install_plan" ||
+   ! grep -Fq 'Skipping Codex integration: Codex CLI is not installed.' <<<"$runtime_only_install_plan" ||
+   ! grep -Fq "ln -sfn \"$custom_install_root/bin/" <<<"$runtime_only_install_plan"; then
+  printf 'runtime-only install still requires Codex or omits the shared runtime payload\n' >&2
+  exit 1
+fi
 runtime_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=1 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
 if ! grep -Eq "CODEX_PEER_CODEX_BIN=.*agent-session-runtime\" bootstrap" <<<"$runtime_install_plan" ||
    grep -Eq 'scripts/(ensure-runtime|build-runtime)' <<<"$runtime_install_plan"; then

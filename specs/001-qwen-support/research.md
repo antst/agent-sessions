@@ -114,8 +114,8 @@ cwd-sensitive. Qwen does not migrate state into a redirected home.
 skills for `agent-sessions` plus all four lane targets. `install-qwen` invokes the selected Qwen
 binary's supported extension installer with the exact selected `QWEN_HOME`, explicit consent, and
 user scope, then verifies the installed manifest version, enabled state, MCP inventory, and skills.
-`install-all` includes the default-profile Qwen install. Non-default profiles require a separate
-explicit install.
+`install-all` includes the default-profile Qwen install when Qwen Code is present and reports a skip
+when it is absent. Non-default profiles require a separate explicit install.
 
 Managed launches still inject a private per-launch MCP capability/config. Installed inventory may be
 visible in a bare Qwen session, but every operation returns inactive without exact process ancestry,

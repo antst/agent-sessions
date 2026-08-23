@@ -2003,7 +2003,7 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
-	err = h.acp.requestInterjection(ctx, h.identitySnapshot().sessionID, messageID, trustedPeerTextForProduct(item, "grok"))
+	err = h.acp.requestInterjection(ctx, h.identitySnapshot().sessionID, messageID, peerMessageText(item))
 	cancel()
 	if err != nil {
 		h.clearActiveInterjectionPermissionSnapshot()

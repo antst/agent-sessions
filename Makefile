@@ -36,6 +36,8 @@ QWEN_PLUGIN_ROOT ?= $(INSTALL_ROOT)/qwen
 QWEN_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' qwen/plugin.json | head -1)
 QWEN_PLUGIN_INSTALLER ?= $(BIN_DIR)/agent-session-runtime
 START_RUNTIME ?= 1
+INSTALL_CODEX_INTEGRATION ?= 1
+INSTALL_ALL_MAKE ?= $(MAKE)
 PEER_FEDERATOR_CONFIG_DIR ?= $(HOME)/.config/peer-federator
 PEER_FEDERATOR_DOC_ROOT ?= $(PREFIX)/share/doc/peer-federator
 USER_SYSTEMD_DIR ?= $(HOME)/.config/systemd/user
@@ -241,6 +243,7 @@ install: install-preflight
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/qwen-peer-lane" "$(PREFIX)/bin/qwen-peer-lane"
 	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
+ifeq ($(INSTALL_CODEX_INTEGRATION),1)
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
 		$(CODEX) plugin remove "$(PLUGIN)@$(MARKETPLACE)"; \
@@ -273,6 +276,9 @@ install: install-preflight
 	@if [[ "$(START_RUNTIME)" == "1" ]]; then \
 		CODEX_PEER_CODEX_BIN="$(CODEX)" "$(INSTALL_ROOT)/bin/$(PLATFORM)/agent-session-runtime" bootstrap; \
 	fi
+else
+	@printf 'Skipping Codex integration: Codex CLI is not installed.\n'
+endif
 
 dev-install: install-preflight
 	mkdir -p "$(PREFIX)/bin"
@@ -288,6 +294,7 @@ dev-install: install-preflight
 	ln -sfn "$(abspath $(BIN_DIR))/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/qwen-peer-lane" "$(PREFIX)/bin/qwen-peer-lane"
 	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
+ifeq ($(INSTALL_CODEX_INTEGRATION),1)
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
 		$(CODEX) plugin remove "$(PLUGIN)@$(MARKETPLACE)"; \
@@ -320,6 +327,9 @@ dev-install: install-preflight
 	@if [[ "$(START_RUNTIME)" == "1" ]]; then \
 		CODEX_PEER_CODEX_BIN="$(CODEX)" "$(BIN_DIR)/agent-session-runtime" bootstrap; \
 	fi
+else
+	@printf 'Skipping Codex integration: Codex CLI is not installed.\n'
+endif
 
 reinstall: install-preflight
 	./scripts/cachebuster
@@ -481,15 +491,55 @@ remove-qwen: build
 dev-install-qwen:
 	$(MAKE) install-qwen QWEN_PLUGIN_ROOT="$(CURDIR)/qwen" QWEN_PLUGIN_INSTALLER="$(BIN_DIR)/agent-session-runtime"
 
-install-all: install
-	$(MAKE) install-claude
-	$(MAKE) install-grok
-	$(MAKE) install-qwen
+install-all:
+	+@if command -v "$(CODEX)" >/dev/null 2>&1; then \
+		$(INSTALL_ALL_MAKE) install; \
+	else \
+		printf 'Skipping Codex integration: Codex CLI is not installed (%s).\n' "$(CODEX)"; \
+		$(INSTALL_ALL_MAKE) install INSTALL_CODEX_INTEGRATION=0; \
+	fi
+	+@if command -v "$(CLAUDE)" >/dev/null 2>&1; then \
+		$(INSTALL_ALL_MAKE) install-claude; \
+	else \
+		printf 'Skipping Claude integration: Claude Code is not installed (%s).\n' "$(CLAUDE)"; \
+	fi
+	+@grok_status=0; \
+		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin validate "$(GROK_PLUGIN_ROOT)" >/dev/null 2>&1 || grok_status=$$?; \
+		if [[ $$grok_status -eq 127 ]]; then \
+			printf 'Skipping Grok integration: Grok is not installed.\n'; \
+		else \
+			$(INSTALL_ALL_MAKE) install-grok; \
+		fi
+	+@if command -v "$(QWEN)" >/dev/null 2>&1; then \
+		$(INSTALL_ALL_MAKE) install-qwen; \
+	else \
+		printf 'Skipping Qwen integration: Qwen Code is not installed (%s).\n' "$(QWEN)"; \
+	fi
 
-dev-install-all: dev-install
-	$(MAKE) dev-install-claude
-	$(MAKE) dev-install-grok
-	$(MAKE) dev-install-qwen
+dev-install-all:
+	+@if command -v "$(CODEX)" >/dev/null 2>&1; then \
+		$(INSTALL_ALL_MAKE) dev-install; \
+	else \
+		printf 'Skipping Codex integration: Codex CLI is not installed (%s).\n' "$(CODEX)"; \
+		$(INSTALL_ALL_MAKE) dev-install INSTALL_CODEX_INTEGRATION=0; \
+	fi
+	+@if command -v "$(CLAUDE)" >/dev/null 2>&1; then \
+		$(INSTALL_ALL_MAKE) dev-install-claude; \
+	else \
+		printf 'Skipping Claude integration: Claude Code is not installed (%s).\n' "$(CLAUDE)"; \
+	fi
+	+@grok_status=0; \
+		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin validate "$(CURDIR)/grok" >/dev/null 2>&1 || grok_status=$$?; \
+		if [[ $$grok_status -eq 127 ]]; then \
+			printf 'Skipping Grok integration: Grok is not installed.\n'; \
+		else \
+			$(INSTALL_ALL_MAKE) dev-install-grok; \
+		fi
+	+@if command -v "$(QWEN)" >/dev/null 2>&1; then \
+		$(INSTALL_ALL_MAKE) dev-install-qwen; \
+	else \
+		printf 'Skipping Qwen integration: Qwen Code is not installed (%s).\n' "$(QWEN)"; \
+	fi
 
 repair-projection:
 	@test -n "$(THREAD_ID)" || { printf 'usage: make repair-projection THREAD_ID=<id> [APPLY=1]\n' >&2; exit 2; }

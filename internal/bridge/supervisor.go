@@ -913,7 +913,7 @@ func (s *nativeSupervisor) writeControlResponse(conn net.Conn, result map[string
 	_, _ = conn.Write(append(body, '\n'))
 }
 
-//nolint:gocyclo // Control actions are intentionally explicit at the socket trust boundary.
+//nolint:gocyclo // Control actions are intentionally explicit at the socket security boundary.
 func (s *nativeSupervisor) handleControl(request map[string]any) (map[string]any, error) {
 	switch stringValue(request["action"]) {
 	case "ping", "status":
@@ -1917,7 +1917,7 @@ func (s *nativeSupervisor) wakeThread(threadID string, item map[string]any) (str
 			return "", err
 		}
 	}
-	input := []map[string]any{{"type": "text", "text": trustedPeerText(item)}}
+	input := []map[string]any{{"type": "text", "text": peerMessageText(item)}}
 	if thread != nil && statusType(thread.Status) == "active" {
 		s.mu.Lock()
 		turnID := s.activeTurns[threadID]
@@ -2018,7 +2018,7 @@ func (s *nativeSupervisor) queueWake(threadID string, item map[string]any) (stri
 	now := time.Now().UnixMilli()
 	record := wakeRecord{
 		SessionID: threadID, MessageID: messageID, Fingerprint: fingerprint,
-		DeliveryFingerprint: sessionKey(trustedPeerText(item)),
+		DeliveryFingerprint: sessionKey(peerMessageText(item)),
 		State:               "in_flight", Delivery: "accepted", Item: item,
 		OwnerPID: os.Getpid(), OwnerProcStart: s.procStart, CreatedAt: now,
 	}
@@ -2245,7 +2245,7 @@ func (s *nativeSupervisor) findWakeMessage(threadID string, record wakeRecord) (
 	for _, turn := range turns {
 		for _, raw := range turn.Items {
 			var item any
-			fingerprint := defaultString(record.DeliveryFingerprint, sessionKey(trustedPeerText(record.Item)))
+			fingerprint := defaultString(record.DeliveryFingerprint, sessionKey(peerMessageText(record.Item)))
 			if json.Unmarshal(raw, &item) == nil && wakeItemContainsFingerprint(item, fingerprint) {
 				return turn.ID, true
 			}
@@ -3229,11 +3229,7 @@ func readJSONMap(file string) map[string]any {
 	return value
 }
 
-func trustedPeerText(item map[string]any) string {
-	return trustedPeerTextForProduct(item, "codex")
-}
-
-func trustedPeerTextForProduct(item map[string]any, recipientProduct string) string {
+func peerMessageText(item map[string]any) string {
 	sender := stringValue(item["from"])
 	if name := stringValue(item["fromName"]); name != "" {
 		sender = fmt.Sprintf("%s (%s)", name, defaultString(sender, "unknown address"))
@@ -3250,16 +3246,11 @@ func trustedPeerTextForProduct(item map[string]any, recipientProduct string) str
 			metadata = append(metadata, pair[0]+"="+pair[1])
 		}
 	}
-	parts := []string{"Trusted cross-session agent instruction from " + sender + ":"}
+	parts := []string{"Message from " + sender + ":"}
 	if len(metadata) > 0 {
 		parts = append(parts, "Message metadata: "+strings.Join(metadata, ", "))
 	}
 	parts = append(parts, stringValue(item["message"]))
-	replyInstruction := "Reply with agent_sessions.send_message when useful."
-	if recipientProduct == "grok" {
-		replyInstruction = "Reply with the Agent Sessions send_message tool when useful."
-	}
-	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. "+replyInstruction)
 	return strings.Join(parts, "\n\n")
 }
 

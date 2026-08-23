@@ -69,7 +69,8 @@ version, enabled state, path, MCP name, and every skill after the native command
 Rules:
 
 - `install-qwen` is explicit and profile-scoped.
-- `install-all` includes `install-qwen` for the default profile.
+- `install-all` includes `install-qwen` for the default profile when Qwen Code is present and reports
+  a skip when it is absent; explicit `install-qwen` remains strict.
 - Launch never installs, updates, enables, copies, or borrows integration files.
 - Missing integration produces an instruction to run the explicit install for that exact profile.
 - Authentication, trust, owner settings, unrelated extensions/skills, and transcripts are preserved.

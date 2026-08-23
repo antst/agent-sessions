@@ -46,8 +46,10 @@ On macOS, use `shasum -a 256 -c --ignore-missing SHA256SUMS` and the matching `d
 `darwin-arm64` archive. The `.agent-sessions-prebuilt` marker makes `make build` and the install
 targets use the packaged executable even if Go is present. Extracting an archive on the wrong OS
 or architecture fails before installation with the missing platform name. `make install` installs
-only the native runtime and Codex side; `make install-all` also installs the Claude orchestration,
-trusted Grok MCP, and selected-profile Qwen Agent Plugins payloads.
+only the native runtime and Codex side. `make install-all` installs the shared runtime and then each
+integration whose native client is present; absent Codex, Claude, Grok, or Qwen clients are named and
+skipped. An explicitly requested product target such as `make install-grok` remains strict and fails
+when that client is unavailable.
 
 ## Source installation
 
@@ -175,7 +177,7 @@ make install-grok   # validate/trust/install the Grok MCP plugin
 make install-qwen   # install/verify Qwen support in the selected profile
 make upgrade-qwen   # idempotent verified Qwen update
 make remove-qwen    # remove only Agent Sessions from the selected Qwen profile
-make install-all    # native runtime plus Claude Code, Grok, and Qwen plugins
+make install-all    # shared runtime plus every locally available product integration
 make reinstall     # new cachebuster, rebuild, reinstall
 make repair-projection THREAD_ID=<uuid>          # inspect the known duplicate-ordinal failure
 make repair-projection THREAD_ID=<uuid> APPLY=1  # back up and repair only that exact failure

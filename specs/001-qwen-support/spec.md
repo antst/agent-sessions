@@ -51,7 +51,7 @@
 
 An operator launches or resumes Qwen as a named Agent Sessions peer, assigns it to explicit groups,
 and uses the same discovery and messaging workflow available to other managed products. The Qwen peer
-can receive trusted cross-session deliveries while idle or busy and can discover, send, multicast,
+can receive cross-session deliveries while idle or busy and can discover, send, multicast,
 and broadcast through its authorized groups. A normally launched, unmanaged Qwen session remains an
 intentional communication opt-out.
 
@@ -385,6 +385,16 @@ owner's native profile and credentials are unchanged.
   `SendMessage`, a host-agent service row, or a framed native carrier. The low-level carrier may
   remain implemented as an explicit protocol-compatibility surface, but it is not an automatic
   model fallback.
+- **FR-034**: Agent Sessions MUST present each delivered peer payload as neutral provenance using
+  `Message from <peer>:` plus factual transport metadata and content. Delivery framing, startup
+  context, hooks, and MCP instructions MUST NOT characterize peer content's reliability, assign it
+  user or developer authority, or repeat instruction-hierarchy boilerplate. The user alone defines whether
+  and within what scope one interactive session may instruct another.
+- **FR-035**: Aggregate source and prebuilt installation MUST install the shared runtime plus each
+  Codex, Claude, Grok, or Qwen integration whose native client is available on that host. An absent
+  native product MUST produce an explicit skip and MUST NOT fail installation of the runtime or
+  other available integrations. Product-specific install, upgrade, validate, and remove targets
+  MUST remain strict when explicitly invoked.
 
 ### Key Entities
 
@@ -464,6 +474,12 @@ owner's native profile and credentials are unchanged.
 - **SC-013**: Every packaged Claude-facing skill contains structured `agent_sessions` guidance and
   contains no framed-native-carrier instruction; a regression test fails if the carrier marker or
   host-agent service target reappears in any of those skills.
+- **SC-014**: Every interactive product renders a correlated delivery with the neutral
+  `Message from <peer>:` heading, and repository regressions find no transport-generated reliability,
+  delegation, or repeated instruction-hierarchy directive in delivery, startup, hook, or MCP text.
+- **SC-015**: Aggregate installation succeeds with zero, one, or several native product clients
+  available, installs only the matching integrations, and names every skipped product; each direct
+  product install still fails when its required native client is absent.
 
 ## Assumptions
 

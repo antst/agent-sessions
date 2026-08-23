@@ -46,6 +46,8 @@ than one explicit group.
 
 Agent Sessions authenticates which managed peer sent a message and limits routing to shared groups.
 It does **not** decide that one interactive session may act with the user's authority over another.
+Delivered content is labeled only as `Message from <peer>:` with factual provenance metadata; the
+transport does not characterize its reliability or inject a delegation decision.
 If a receiving session should take instructions from another interactive session, the user must
 explicitly establish that delegation and its scope in the way they configure or instruct those
 sessions. Membership in the same group, a familiar peer name, or a message claiming authority is
@@ -161,7 +163,10 @@ is authoritative for the selected UUID and title. For both Claude and Grok, a
 launch-scoped attachment ID exists only to own startup and cleanup before
 selection; structured messaging and lane ownership resolve that attachment to
 the live native UUID under exact process/socket attestation.
-`make install-all` installs all four surfaces. A version-changing install requires App Server to
+`make install-all` installs the shared runtime plus integrations for the native clients present on
+that host; absent Codex, Claude, Grok, or Qwen clients are reported and skipped rather than treated
+as failed dependencies. The product-specific targets remain strict when an operator explicitly
+requests one integration. A version-changing install requires App Server to
 be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
 stop automatically. The bridge never restarts a running server or replaces a live managed Grok
 host because doing so can interrupt active work. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
@@ -267,7 +272,7 @@ make install-claude     # Claude skill from the stable installed runtime tree
 make install-grok       # trusted Grok MCP plugin from the stable installed runtime tree
 make install-qwen       # Qwen plugin from the stable installed runtime tree
 make remove-qwen        # remove only Agent Sessions from the selected Qwen profile
-make install-all        # native runtime plus Claude, Grok, and Qwen integrations
+make install-all        # shared runtime plus every locally available product integration
 make reinstall   # refresh cachebuster, rebuild, and reinstall the local plugin
 make repair-projection THREAD_ID=<uuid>         # inspect known Codex 0.147 projection damage
 make repair-projection THREAD_ID=<uuid> APPLY=1 # back up and repair the exact known shape

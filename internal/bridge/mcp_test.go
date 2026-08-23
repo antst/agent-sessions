@@ -90,6 +90,47 @@ func TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity(t *testing.T) 
 	}
 }
 
+func TestPeerMessagePresentationIsNeutralProvenance(t *testing.T) {
+	item := map[string]any{
+		"from":        "pdev/session-id",
+		"fromName":    "reviewer",
+		"fromProduct": "claude",
+		"id":          "message-id",
+		"sentAt":      "2026-08-23T12:00:00Z",
+		"receivedAt":  "2026-08-23T12:00:01Z",
+		"message":     "Check this finding independently.",
+	}
+	want := "Message from reviewer (pdev/session-id):\n\n" +
+		"Message metadata: sender-type=claude, message-id=message-id, sent-at=2026-08-23T12:00:00Z, received-at=2026-08-23T12:00:01Z\n\n" +
+		"Check this finding independently."
+	if got := peerMessageText(item); got != want {
+		t.Fatalf("peer message presentation = %q, want %q", got, want)
+	}
+
+	hookWant := strings.ReplaceAll(want, "\n\n", "\n")
+	if got := formatNativeHookMessages([]map[string]any{item}); got != hookWant {
+		t.Fatalf("hook peer message presentation = %q, want %q", got, hookWant)
+	}
+
+	texts := map[string]string{
+		"codex MCP":     mcpInstructions,
+		"claude MCP":    claudeMCPInstructions,
+		"grok MCP":      grokMCPInstructions,
+		"qwen MCP":      qwenMCPInstructions,
+		"startup hook":  hookStartupContext(map[string]any{"name": "peer", "sessionId": "session"}),
+		"overflow hook": nativeInboxOverflowNotice(),
+		"delivery":      peerMessageText(item),
+	}
+	for label, value := range texts {
+		lower := strings.ToLower(value)
+		for _, forbidden := range []string{"trust", "authority", "subject to current user/developer instructions", "it remains subject to"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s injects trust or authority policy %q: %s", label, forbidden, value)
+			}
+		}
+	}
+}
+
 func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *testing.T) {
 	root, runtimeDir := startLaneContextTestAgent(t)
 	configDir := filepath.Join(root, "claude")

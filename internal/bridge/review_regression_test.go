@@ -950,7 +950,7 @@ func TestWakeLedgerRecoversInFlightAfterSupervisorRestart(t *testing.T) {
 		case "thread/turns/list":
 			return map[string]any{"data": []map[string]any{{
 				"id": "turn-already-started", "status": "inProgress",
-				"items": []map[string]any{{"id": "user-item", "type": "userMessage", "text": trustedPeerText(item)}},
+				"items": []map[string]any{{"id": "user-item", "type": "userMessage", "text": peerMessageText(item)}},
 			}}}, nil
 		default:
 			return map[string]any{}, nil
@@ -966,7 +966,7 @@ func TestWakeLedgerRecoversInFlightAfterSupervisorRestart(t *testing.T) {
 		Item: item, CreatedAt: time.Now().UnixMilli(),
 	}
 	record.Fingerprint = wakeItemFingerprint(item)
-	record.DeliveryFingerprint = sessionKey(trustedPeerText(item))
+	record.DeliveryFingerprint = sessionKey(peerMessageText(item))
 	if err := writeWakeRecord(supervisor.paths, record); err != nil {
 		t.Fatal(err)
 	}

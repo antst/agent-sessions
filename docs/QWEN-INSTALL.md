@@ -27,8 +27,9 @@ make upgrade-qwen       # same verified, idempotent transaction
 make remove-qwen
 ```
 
-`make install-all` installs the native runtime and all Codex, Claude, Grok, and
-Qwen product surfaces. A prebuilt archive needs no Go toolchain: its eleven
+`make install-all` installs the shared runtime and each Codex, Claude, Grok, or Qwen integration
+whose native client is present. Missing products are reported and skipped; `make install-qwen`
+remains strict when requested directly. A prebuilt archive needs no Go toolchain: its eleven
 platform binaries are validated before installation.
 
 The Qwen operation uses native `qwen extensions install/update/uninstall` at

@@ -931,7 +931,7 @@ func (m *grokLaneManager) queueWake(item map[string]any) (map[string]any, error)
 	}
 	if m.closing || m.state.Status == "archived" {
 		previous := cloneGrokLaneState(m.state)
-		turn := newGrokLaneTurn(trustedPeerTextForProduct(item, "grok"), 0)
+		turn := newGrokLaneTurn(peerMessageText(item), 0)
 		turn.MessageID, turn.Fingerprint = messageID, fingerprint
 		turn.Status, turn.Outcome, turn.Exit, turn.Error, turn.CompletedAt = "interrupted", "interrupted", 130, "Grok lane is closing", time.Now().UnixMilli()
 		m.state.Turns = append(m.state.Turns, turn)
@@ -949,7 +949,7 @@ func (m *grokLaneManager) queueWake(item map[string]any) (map[string]any, error)
 		return grokLaneWakeResult(turn, "interrupted"), nil
 	}
 	previous := cloneGrokLaneState(m.state)
-	turn := newGrokLaneTurn(trustedPeerTextForProduct(item, "grok"), 0)
+	turn := newGrokLaneTurn(peerMessageText(item), 0)
 	turn.MessageID, turn.Fingerprint = messageID, fingerprint
 	m.state.Turns = append(m.state.Turns, turn)
 	if m.state.TurnID == "" {

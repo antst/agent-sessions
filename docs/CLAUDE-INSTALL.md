@@ -25,8 +25,9 @@ claude plugin install agent-sessions@agent-sessions
 The default user-scope installation is available to every new interactive Claude session and to
 non-interactive `claude -p` sessions on that host. Restart Claude Code afterwards, or use
 `/reload-plugins` in a development session. From a source checkout, `make install-all` installs
-both the native runtime and this Claude plugin into the stable installation tree. If that runtime
-tree is already populated, `make install-claude` updates only Claude. Use
+the shared runtime and every integration whose native client is present; missing products are
+reported and skipped. If that runtime tree is already populated, `make install-claude` updates only
+Claude and remains strict when Claude Code is absent. Use
 `make dev-install-claude` only when the marketplace should deliberately follow the checkout. Normal
 installation stages each cache-busted Claude plugin version under
 `~/.local/share/agent-sessions/claude-marketplaces/`; the active version is immutable, so a later
