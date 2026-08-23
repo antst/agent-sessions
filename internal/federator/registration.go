@@ -287,12 +287,42 @@ func (a *agent) claudeTranscriptSessionNames(
 }
 
 func (a *agent) claudeTranscriptSessionTitle(sessionID string) (string, bool) {
-	names, invalid := a.claudeTranscriptSessionNames(map[string]bool{sessionID: true})
-	if invalid[sessionID] {
+	return ClaudeNativeSessionTitle(a.options.ClaudeConfigDir, sessionID)
+}
+
+// ClaudeNativeSessionTitle returns the exact custom title stored by native
+// Claude for one transcript UUID. It is intentionally independent of the
+// Agent Sessions catalog: a named native resume may select an ordinary Claude
+// transcript that has never previously been a managed peer.
+func ClaudeNativeSessionTitle(configDir, sessionID string) (string, bool) {
+	if !validClaudeNativeSessionID(sessionID) {
 		return "", false
 	}
-	title, ok := names[sessionID]
-	return title, ok && title != ""
+	projects := filepath.Join(configDir, "projects")
+	entries, err := os.ReadDir(projects)
+	if err != nil {
+		return "", false
+	}
+	selected := ""
+	for _, project := range entries {
+		if !project.IsDir() {
+			continue
+		}
+		path := filepath.Join(projects, project.Name(), sessionID+".jsonl")
+		info, statErr := os.Lstat(path)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		title, titleErr := readClaudeTranscriptTitle(path, sessionID)
+		if titleErr != nil || title == "" || selected != "" && selected != title {
+			return "", false
+		}
+		selected = title
+	}
+	return selected, selected != ""
 }
 
 func readClaudeTranscriptTitle(path, expectedSessionID string) (string, error) {
@@ -1022,8 +1052,9 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	if registration.Version != GroupProtocolVersion || !validCatalogSessionID(registration.SessionID) ||
 		!validProduct(registration.Product) || registration.Name == "" || registration.PID <= 1 ||
 		registration.ProcStart == "" || registration.Socket == "" ||
-		registration.AttachmentID != "" &&
-			(registration.Product != "claude" || !validCatalogSessionID(registration.AttachmentID)) {
+		(registration.AttachmentID != "" &&
+			(registration.Product != "claude" && registration.Product != "grok" ||
+				!validCatalogSessionID(registration.AttachmentID) || registration.AttachmentID == registration.SessionID)) {
 		return Peer{}, errors.New("invalid peer registration")
 	}
 	adapterInfo := procinfo.Read(registration.PID)
@@ -1081,10 +1112,21 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 		a.mu.Unlock()
 		return Peer{}, errors.New("session adapter retirement is still pending")
 	}
+	for otherID, candidate := range a.local {
+		if otherID == id {
+			continue
+		}
+		if (registration.AttachmentID != "" &&
+			(candidate.SessionID == registration.AttachmentID || candidate.AttachmentID == registration.AttachmentID)) ||
+			(candidate.AttachmentID != "" && candidate.AttachmentID == registration.SessionID) {
+			a.mu.Unlock()
+			return Peer{}, errors.New("peer attachment identity collides with another live session")
+		}
+	}
 	current, exists := a.local[id]
 	prepared, preparedExists := a.preparations[preparationID]
 	preparedRegistration := prepared.Registration
-	if registration.AttachmentID != "" && !preparedExists {
+	if registration.Product == "claude" && registration.AttachmentID != "" && !preparedExists {
 		a.mu.Unlock()
 		return Peer{}, errors.New("named Claude selection has no prepared attachment")
 	}
@@ -1134,7 +1176,7 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 		a.preparations[preparationID] = prepared
 	}
 	a.local[id] = localPeer{
-		Peer: peer, PID: registration.PID, ProcStart: registration.ProcStart,
+		Peer: peer, AttachmentID: registration.AttachmentID, PID: registration.PID, ProcStart: registration.ProcStart,
 		Socket: registration.Socket, GroupProtocol: GroupProtocolVersion,
 		LifecyclePID: lifecyclePID, LifecycleProcStart: lifecycleProcStart,
 		AdapterStrongStart: adapterInfo.StrongStart, LifecycleStrongStart: lifecycleInfo.StrongStart,
@@ -1199,6 +1241,9 @@ func (a *agent) parentContext(sessionID string) (ParentContext, error) {
 	a.mu.RLock()
 	resolvedSessionID := sessionID
 	peer, ok := localPeerBySession(a.local, resolvedSessionID)
+	if ok {
+		resolvedSessionID = peer.SessionID
+	}
 	if !ok {
 		if prepared, exists := a.preparations[sessionID]; exists && prepared.Committed &&
 			prepared.Registration.SessionID != sessionID {

@@ -815,7 +815,7 @@ func superviseClaudePeer(
 			}
 			continue
 		}
-		if deadline.IsZero() {
+		if deadline.IsZero() && plan.sessionID != "" {
 			deadline = time.Now().Add(claudePeerReadyTimeout)
 		}
 		if plan.sessionID != "" && row.SessionID != plan.sessionID {
@@ -829,6 +829,16 @@ func superviseClaudePeer(
 			return errors.New("Claude published an invalid native session UUID") //nolint:staticcheck // Claude is a product name.
 		}
 		nativeRow = row
+		if plan.sessionID == "" && !selectionPromoted {
+			title, selected := federator.ClaudeNativeSessionTitle(sharedRoot, row.SessionID)
+			if !selected || !strings.EqualFold(strings.TrimSpace(title), strings.TrimSpace(plan.resumeTarget)) {
+				// Native Claude first publishes a boot identity, then changes the
+				// same PID/socket row after its resume selector resolves. Never
+				// promote that transient identity; a duplicate-title picker may
+				// remain here until the operator chooses the actual transcript.
+				continue
+			}
+		}
 		actualYolo := effectiveClaudePeerYolo(row.PermissionMode, durableYolo)
 		if plan.sessionID == "" && !selectionPromoted {
 			selected, _, previewErr := previewPeerLaunchContext(

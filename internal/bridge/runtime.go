@@ -32,6 +32,7 @@ const maxFrameBytes = 1024 * 1024
 type daemon struct {
 	mu               sync.Mutex
 	sessionID        string
+	attachmentID     string
 	cwd              string
 	name             string
 	nameSource       string
@@ -213,7 +214,8 @@ func newDaemon(args map[string]string) *daemon {
 		agentRuntimeDir = strings.TrimSpace(os.Getenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR"))
 	}
 	return &daemon{
-		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
+		sessionID: sessionID, attachmentID: strings.TrimSpace(args["attachment-id"]),
+		cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
 		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
 		entrypoint:      entrypoint,
 		agentRuntimeDir: agentRuntimeDir, agentManaged: agentRuntimeDir != "",
@@ -649,6 +651,10 @@ func (d *daemon) writeRecordsLocked() error {
 		"status": d.status, "permissionMode": d.permissionMode, "updatedAt": now, "statusUpdatedAt": now,
 		"messagingSocketPath": d.stableSocket, "bridgeSessionId": nil,
 	}
+	if d.attachmentID != "" && d.attachmentID != d.sessionID {
+		state["attachmentId"] = d.attachmentID
+		registry["attachmentId"] = d.attachmentID
+	}
 	if err := writeJSONAtomic(d.stateFile, state); err != nil {
 		return err
 	}
@@ -661,7 +667,7 @@ func (d *daemon) writeRecordsLocked() error {
 
 func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
 	return federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, Product: d.entrypoint,
+		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, AttachmentID: d.attachmentID, Product: d.entrypoint,
 		Name: d.name, Status: d.status, PermissionMode: d.permissionMode, Cwd: d.cwd,
 		PID: os.Getpid(), ProcStart: d.procStart, Socket: d.stableSocket,
 		// The per-session shim is the communication parent's lifetime. Its

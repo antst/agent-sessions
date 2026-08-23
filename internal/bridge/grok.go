@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 const (
@@ -50,12 +52,24 @@ type grokHostConfig struct {
 	LaunchToken     string
 	RuntimeDir      string
 	Name            string
+	NameSpecified   bool
 	PermissionMode  string
 	AgentRuntimeDir string
+	AttachmentID    string
+	LateBoundResume bool
+	Groups          []string
+	GroupsSpecified bool
+	ParentSession   string
+	ParentSpecified bool
+	InheritGroups   bool
+	InheritSet      bool
+	AlwaysApprove   bool
+	AlwaysSet       bool
 	readyWriter     io.Writer
 
 	// command is overridden only by tests. Production always executes GrokBin.
-	command func(args ...string) *exec.Cmd
+	command            func(args ...string) *exec.Cmd
+	resolvePreferences func(federator.ResolvePreferencesRequest) (federator.ResolvedPreferences, error)
 }
 
 type grokHostPaths struct {
@@ -70,6 +84,7 @@ type grokHostPaths struct {
 // identifier; the raw launch capability exists only in process environments.
 type grokLaunchRecord struct {
 	SessionID       string `json:"sessionId"`
+	AttachmentID    string `json:"attachmentId,omitempty"`
 	Cwd             string `json:"cwd"`
 	Name            string `json:"name"`
 	PermissionMode  string `json:"permissionMode"`
@@ -329,6 +344,41 @@ func activeGrokLaunchForSession(paths nativePaths, sessionID string) *grokLaunch
 	return record
 }
 
+// activeGrokLaunchForToken recovers the canonical session selected by a
+// native title resume. The private leader and TUI inherit the provisional
+// attachment ID before Grok resolves the title, but the strong launch token,
+// exact process tree, and private sockets remain stable across that selection.
+func activeGrokLaunchForToken(paths nativePaths, token string) *grokLaunchRecord {
+	if !validGrokLaunchToken(token) {
+		return nil
+	}
+	directory := filepath.Join(profileDataRoot(paths), "grok-launches")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	wanted := grokTokenHash(token)
+	var matched *grokLaunchRecord
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		record := readGrokLaunchRecord(filepath.Join(directory, entry.Name()))
+		if record == nil || record.TokenHash != wanted ||
+			(record.AttachmentID != "" && record.AttachmentID == record.SessionID) ||
+			entry.Name() != sessionKey(record.SessionID)+".json" || !liveGrokProcessTree(*record) {
+			continue
+		}
+		expected := grokRuntimePathsForKey(record.RuntimeDir, os.Getuid(), record.TokenHash[:20])
+		if !liveGrokControlPaths(*record, expected) || matched != nil {
+			return nil
+		}
+		recordCopy := *record
+		matched = &recordCopy
+	}
+	return matched
+}
+
 // liveGrokLaunchForSession returns only a fully resident and published launch.
 // Registry data alone is discovery, never authority: the owning process tree,
 // private paths, and published bridge state must all corroborate it.
@@ -373,6 +423,9 @@ func attestGrokMCPCaller(paths nativePaths) (string, error) {
 		return "", errors.New("grok MCP launch context is unavailable")
 	}
 	record := activeGrokLaunchForSession(paths, sessionID)
+	if record == nil {
+		record = activeGrokLaunchForToken(paths, token)
+	}
 	if record == nil || subtle.ConstantTimeCompare([]byte(record.TokenHash), []byte(grokTokenHash(token))) != 1 {
 		return "", errors.New("grok MCP launch token is not attested by a live host")
 	}
@@ -385,12 +438,12 @@ func attestGrokMCPCaller(paths nativePaths) (string, error) {
 	// and private control paths already authorize this narrow bootstrap phase.
 	// Once the daemon is published, every model-visible call refreshes the live
 	// permission class normally before it can act as the peer.
-	if liveGrokLaunchForSession(paths, sessionID) != nil {
+	if liveGrokLaunchForSession(paths, record.SessionID) != nil {
 		if err := refreshGrokLaunchPermission(record, token); err != nil {
 			return "", fmt.Errorf("refresh live Grok permission mode: %w", err)
 		}
 	}
-	return sessionID, nil
+	return record.SessionID, nil
 }
 
 func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
@@ -436,6 +489,12 @@ func inferGrokParent(paths nativePaths, startPID int) (laneOwner, bool) {
 		return laneOwner{}, false
 	}
 	record := liveGrokLaunchForSession(paths, sessionID)
+	if record == nil {
+		record = activeGrokLaunchForToken(paths, token)
+		if record != nil {
+			record = liveGrokLaunchForSession(paths, record.SessionID)
+		}
+	}
 	if record == nil || subtle.ConstantTimeCompare([]byte(record.TokenHash), []byte(grokTokenHash(token))) != 1 ||
 		!processHasAncestor(startPID, record.LeaderPID) {
 		return laneOwner{}, false
@@ -443,7 +502,7 @@ func inferGrokParent(paths nativePaths, startPID int) (laneOwner, bool) {
 	if refreshGrokLaunchPermission(record, token) != nil {
 		return laneOwner{}, false
 	}
-	record = liveGrokLaunchForSession(paths, sessionID)
+	record = liveGrokLaunchForSession(paths, record.SessionID)
 	if record == nil {
 		return laneOwner{}, false
 	}
@@ -556,6 +615,7 @@ func (c *grokACPClient) readError() error {
 }
 
 type grokRosterState struct {
+	name           string
 	permissionMode string
 	status         string
 	fromPush       bool
@@ -791,6 +851,11 @@ func grokWakeRecordPath(paths nativePaths, sessionID, messageID string) string {
 type grokHost struct {
 	config grokHostConfig
 	paths  grokHostPaths
+	// Native title/picker resume replaces the provisional attachment with the
+	// selected UUID after the host has already started its worker goroutines.
+	// Keep every mutable identity field behind one independent lock.
+	identityMu sync.RWMutex
+	identity   grokHostIdentity
 
 	listener    net.Listener
 	leader      *grokManagedProcess
@@ -833,6 +898,24 @@ type grokHost struct {
 	wg        sync.WaitGroup
 }
 
+type grokHostIdentity struct {
+	sessionID       string
+	name            string
+	lateBoundResume bool
+}
+
+func (h *grokHost) identitySnapshot() grokHostIdentity {
+	h.identityMu.RLock()
+	defer h.identityMu.RUnlock()
+	return h.identity
+}
+
+func (h *grokHost) setIdentity(identity grokHostIdentity) {
+	h.identityMu.Lock()
+	h.identity = identity
+	h.identityMu.Unlock()
+}
+
 func newGrokHost(config grokHostConfig) (*grokHost, error) {
 	if config.GrokBin == "" || !validSessionID(config.SessionID) || strings.TrimSpace(config.Cwd) == "" {
 		return nil, errors.New("grok host requires grok-bin, valid session-id, and cwd")
@@ -861,13 +944,19 @@ func newGrokHost(config grokHostConfig) (*grokHost, error) {
 	if config.PermissionMode != "bypassPermissions" {
 		config.PermissionMode = "default"
 	}
+	if config.LateBoundResume {
+		config.AttachmentID = config.SessionID
+	}
 	if config.RuntimeDir == "" {
 		config.RuntimeDir = os.TempDir()
 	}
 	host := &grokHost{
 		config: config,
 		paths:  grokRuntimePaths(config.RuntimeDir, os.Getuid(), config.LaunchToken),
-		mode:   config.PermissionMode, status: "idle",
+		identity: grokHostIdentity{
+			sessionID: config.SessionID, name: config.Name, lateBoundResume: config.LateBoundResume,
+		},
+		mode: config.PermissionMode, status: "idle",
 		wakes: make(map[string]*grokWakeRecord), wakeNotify: make(chan struct{}, 1),
 		rosterUpdates: make(chan grokRosterState, 8),
 		done:          make(chan struct{}),
@@ -877,7 +966,10 @@ func newGrokHost(config grokHostConfig) (*grokHost, error) {
 }
 
 func (h *grokHost) restoreWakeRecords() {
-	directory := filepath.Dir(grokWakeRecordPath(resolveNativePaths(), h.config.SessionID, "message"))
+	h.wakeMu.Lock()
+	defer h.wakeMu.Unlock()
+	sessionID := h.identitySnapshot().sessionID
+	directory := filepath.Dir(grokWakeRecordPath(resolveNativePaths(), sessionID, "message"))
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return
@@ -888,7 +980,7 @@ func (h *grokHost) restoreWakeRecords() {
 		}
 		body, readErr := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // entry is inside the bridge-owned wake directory.
 		var record grokWakeRecord
-		if readErr != nil || json.Unmarshal(body, &record) != nil || record.SessionID != h.config.SessionID ||
+		if readErr != nil || json.Unmarshal(body, &record) != nil || record.SessionID != sessionID ||
 			record.MessageID == "" || record.Fingerprint != wakeItemFingerprint(record.Item) {
 			continue
 		}
@@ -900,7 +992,7 @@ func (h *grokHost) restoreWakeRecords() {
 }
 
 func (h *grokHost) persistWakeRecord(record *grokWakeRecord) error {
-	if record == nil || record.SessionID != h.config.SessionID || record.MessageID == "" {
+	if record == nil || record.SessionID != h.identitySnapshot().sessionID || record.MessageID == "" {
 		return errors.New("invalid Grok wake record")
 	}
 	return writeJSONAtomic(grokWakeRecordPath(resolveNativePaths(), record.SessionID, record.MessageID), record)
@@ -915,7 +1007,7 @@ func (h *grokHost) grokCommand(args ...string) *exec.Cmd {
 	}
 	command.Env = append(os.Environ(),
 		grokLaunchTokenEnv+"="+h.config.LaunchToken,
-		grokSessionIDEnv+"="+h.config.SessionID,
+		grokSessionIDEnv+"="+h.identitySnapshot().sessionID,
 	)
 	return command
 }
@@ -927,8 +1019,9 @@ func (h *grokHost) run(ctx context.Context) error {
 	}
 	defer h.cleanup()
 	if h.config.readyWriter != nil {
+		identity := h.identitySnapshot()
 		_ = json.NewEncoder(h.config.readyWriter).Encode(map[string]any{
-			"ready": true, "session_id": h.config.SessionID, "cwd": h.config.Cwd,
+			"ready": true, "session_id": identity.sessionID, "cwd": h.config.Cwd,
 			"leader_socket": h.paths.LeaderSocket, "control_socket": h.paths.ControlSocket,
 		})
 	}
@@ -958,7 +1051,8 @@ func (h *grokHost) run(ctx context.Context) error {
 
 func (h *grokHost) start() error {
 	paths := resolveNativePaths()
-	lease, err := acquireGrokLaunchLease(paths, h.config.SessionID)
+	identity := h.identitySnapshot()
+	lease, err := acquireGrokLaunchLease(paths, identity.sessionID)
 	if err != nil {
 		return err
 	}
@@ -967,7 +1061,8 @@ func (h *grokHost) start() error {
 		return err
 	}
 	h.record = grokLaunchRecord{
-		SessionID: h.config.SessionID, Cwd: h.config.Cwd, Name: sanitizeName(h.config.Name),
+		SessionID: identity.sessionID, AttachmentID: h.config.AttachmentID,
+		Cwd: h.config.Cwd, Name: sanitizeName(identity.name),
 		PermissionMode: h.currentPermissionMode(), TokenHash: grokTokenHash(h.config.LaunchToken),
 		OwnerPID: h.config.OwnerPID, OwnerProcStart: h.config.OwnerProcStart,
 		HostPID: os.Getpid(), HostProcStart: readProcStart(os.Getpid()),
@@ -1137,7 +1232,7 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 			stopGrokManagedProcess(process, 2*time.Second)
 			return process.attributedError("persist official Grok ACP observer ownership", err)
 		}
-		h.acp = newGrokACPClient(process, stdin, stdout, h.config.SessionID, generation, h.rosterUpdates)
+		h.acp = newGrokACPClient(process, stdin, stdout, h.identitySnapshot().sessionID, generation, h.rosterUpdates)
 		result, err := h.acp.request(ctx, "initialize", map[string]any{
 			"protocolVersion": 1,
 			"clientCapabilities": map[string]any{
@@ -1171,7 +1266,21 @@ func (h *grokHost) refreshRosterStateLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("query live Grok session roster: %w", err)
 	}
-	state, err := grokRosterStateFromResponse(result, h.config.SessionID)
+	identity := h.identitySnapshot()
+	if identity.lateBoundResume {
+		selectedID, state, selectionErr := grokSelectedResidentSession(result)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		if adoptErr := h.adoptNativeGrokSelection(selectedID, state); adoptErr != nil {
+			return adoptErr
+		}
+		// Reconnect so notification filtering and every subsequent request use
+		// the selected native UUID rather than the provisional attachment ID.
+		h.closeACPLocked()
+		return errors.New("native Grok resume selection adopted; reconnecting observer")
+	}
+	state, err := grokRosterStateFromResponse(result, identity.sessionID)
 	if err != nil {
 		if errors.Is(err, errGrokRosterAuthorityLost) {
 			h.stopForRosterAuthorityLoss(h.currentACPGeneration())
@@ -1182,6 +1291,102 @@ func (h *grokHost) refreshRosterStateLocked(ctx context.Context) error {
 	return h.applyRosterState(state)
 }
 
+var errGrokSelectionPending = errors.New("native Grok resume selection is not resident yet")
+
+func grokSelectedResidentSession(response map[string]any) (string, grokRosterState, error) {
+	result, _ := response["result"].(map[string]any)
+	sessions, ok := result["sessions"].([]any)
+	if !ok {
+		return "", grokRosterState{}, errors.New("native Grok resume roster has no sessions")
+	}
+	selected := ""
+	for _, raw := range sessions {
+		row, _ := raw.(map[string]any)
+		id := stringValue(row["sessionId"])
+		resident, residentOK := row["resident"].(bool)
+		activity := stringValue(row["activity"])
+		if !validSessionID(id) || !residentOK || !resident ||
+			activity == "completed" || activity == "dormant" || activity == "dead" {
+			continue
+		}
+		if selected != "" && selected != id {
+			return "", grokRosterState{}, errors.New("private Grok leader reported multiple resident resume selections")
+		}
+		selected = id
+	}
+	if selected == "" {
+		return "", grokRosterState{}, errGrokSelectionPending
+	}
+	state, err := grokRosterStateFromResponse(response, selected)
+	return selected, state, err
+}
+
+func (h *grokHost) adoptNativeGrokSelection(selectedID string, state grokRosterState) error {
+	identity := h.identitySnapshot()
+	if !identity.lateBoundResume || !validSessionID(selectedID) || selectedID == h.config.AttachmentID {
+		return errors.New("invalid native Grok resume selection")
+	}
+	paths := resolveNativePaths()
+	selectedLease, err := acquireGrokLaunchLease(paths, selectedID)
+	if err != nil {
+		return err
+	}
+	resolve := h.config.resolvePreferences
+	if resolve == nil {
+		resolve = func(request federator.ResolvePreferencesRequest) (federator.ResolvedPreferences, error) {
+			return federator.ResolveSessionPreferences(h.config.AgentRuntimeDir, request)
+		}
+	}
+	resolved, err := resolve(federator.ResolvePreferencesRequest{
+		SessionID: selectedID, Product: "grok", Kind: federator.SessionKindInteractive,
+		Groups: h.config.Groups, GroupsSpecified: h.config.GroupsSpecified,
+		ParentSessionID: h.config.ParentSession, ParentSpecified: h.config.ParentSpecified,
+		InheritParentGroups: h.config.InheritGroups, InheritGroupsSpecified: h.config.InheritSet,
+		AlwaysApprove: h.config.AlwaysApprove, AlwaysApproveSpecified: h.config.AlwaysSet,
+	})
+	if err != nil {
+		_ = selectedLease.Close()
+		return fmt.Errorf("resolve selected Grok peer preferences: %w", err)
+	}
+	liveYolo := state.permissionMode == "bypassPermissions"
+	if resolved.Preference.AlwaysApprove != liveYolo {
+		_ = selectedLease.Close()
+		return errors.New("grok selected a session whose durable yolo preference differs from the native launch; pass --yolo or --no-yolo explicitly")
+	}
+	previousID := identity.sessionID
+	promoted := h.record
+	promoted.SessionID = selectedID
+	promoted.AttachmentID = h.config.AttachmentID
+	promoted.PermissionMode = state.permissionMode
+	if !h.config.NameSpecified && state.name != "" {
+		promoted.Name = sanitizeName(state.name)
+	}
+	if err := claimGrokLaunchRecord(paths, promoted); err != nil {
+		_ = selectedLease.Close()
+		return fmt.Errorf("persist selected Grok launch ownership: %w", err)
+	}
+	removeJSONIf(grokLaunchRecordPath(paths, previousID), func(row map[string]any) bool {
+		return stringValue(row["tokenHash"]) == promoted.TokenHash && intValue(row["hostPid"]) == os.Getpid()
+	})
+	if h.lease != nil {
+		_ = h.lease.Close()
+	}
+	h.lease = selectedLease
+	identity.sessionID = selectedID
+	identity.lateBoundResume = false
+	if !h.config.NameSpecified && state.name != "" {
+		identity.name = promoted.Name
+	}
+	h.setIdentity(identity)
+	h.record = promoted
+	h.modeMu.Lock()
+	h.mode, h.status = state.permissionMode, state.status
+	h.modeMu.Unlock()
+	h.restoreWakeRecords()
+	return nil
+}
+
+//nolint:gocyclo // Generation, identity, permission, status, and durable publication are independent fail-closed gates.
 func (h *grokHost) applyRosterState(state grokRosterState) error {
 	if state.authorityLost {
 		h.stopForRosterAuthorityLoss(state.generation)
@@ -1198,7 +1403,12 @@ func (h *grokHost) applyRosterState(state grokRosterState) error {
 		return nil
 	}
 	pushObservedAt := h.reconcileRosterPushLocked(&state)
-	if state.permissionMode == h.mode && state.status == h.status {
+	identity := h.identitySnapshot()
+	desiredName := identity.name
+	if !h.config.NameSpecified && state.name != "" {
+		desiredName = sanitizeName(state.name)
+	}
+	if state.permissionMode == h.mode && state.status == h.status && desiredName == identity.name {
 		h.rosterValid = true
 		if !pushObservedAt.IsZero() {
 			h.lastRosterPushAt = pushObservedAt
@@ -1212,12 +1422,19 @@ func (h *grokHost) applyRosterState(state grokRosterState) error {
 		return err
 	}
 	nextRecord := h.record
+	if desiredName != identity.name {
+		nextRecord.Name = desiredName
+	}
 	if state.permissionMode != h.mode {
 		nextRecord.PermissionMode = state.permissionMode
+	}
+	if nextRecord.Name != h.record.Name || nextRecord.PermissionMode != h.record.PermissionMode {
 		if err := writeJSONAtomic(grokLaunchRecordPath(resolveNativePaths(), nextRecord.SessionID), nextRecord); err != nil {
-			return fmt.Errorf("persist live Grok permission mode: %w", err)
+			return fmt.Errorf("persist live Grok roster identity: %w", err)
 		}
 	}
+	identity.name = desiredName
+	h.setIdentity(identity)
 	h.mode = state.permissionMode
 	h.status = state.status
 	h.record = nextRecord
@@ -1257,8 +1474,14 @@ func (h *grokHost) publishRosterStateLocked(state grokRosterState) error {
 	defer peer.mu.Unlock()
 	previousMode := peer.permissionMode
 	previousStatus := peer.status
+	previousName := peer.name
+	previousNameSource := peer.nameSource
 	peer.permissionMode = state.permissionMode
 	peer.status = state.status
+	if !h.config.NameSpecified && state.name != "" {
+		peer.name = sanitizeName(state.name)
+		peer.nameSource = "canonical"
+	}
 	publisher := h.publishRosterState
 	if publisher == nil {
 		publisher = func(peer *daemon) error { return peer.writeRecordsLocked() }
@@ -1266,6 +1489,8 @@ func (h *grokHost) publishRosterStateLocked(state grokRosterState) error {
 	if err := publisher(peer); err != nil {
 		peer.permissionMode = previousMode
 		peer.status = previousStatus
+		peer.name = previousName
+		peer.nameSource = previousNameSource
 		return fmt.Errorf("publish live Grok roster state: %w", err)
 	}
 	return nil
@@ -1322,16 +1547,17 @@ func (h *grokHost) ensureAgentSessionsMCPReadyLocked(ctx context.Context) error 
 	// server and its identity tool instead; the exact process-attested launch may
 	// report a starting identity before publication. Group discovery cannot run
 	// until that same publication has registered the source with the host agent.
+	sessionID := h.identitySnapshot().sessionID
 	result, err := h.acp.request(ctx, "_x.ai/mcp/call", map[string]any{
-		"sessionId": h.config.SessionID,
+		"sessionId": sessionID,
 		"server":    "agent_sessions",
 		"tool":      "identity",
-		"arguments": map[string]any{"session_id": h.config.SessionID},
+		"arguments": map[string]any{"session_id": sessionID},
 	})
 	if err != nil {
 		return fmt.Errorf("probe live Grok agent_sessions MCP: %w", err)
 	}
-	return grokAgentSessionsMCPIdentityReady(result, h.config.SessionID)
+	return grokAgentSessionsMCPIdentityReady(result, sessionID)
 }
 
 func grokAgentSessionsMCPCallReady(response map[string]any) error {
@@ -1480,6 +1706,7 @@ func grokRosterStateFromRows(rows []any, sessionID string) (grokRosterState, int
 			return grokRosterState{}, matches, err
 		}
 		state = grokRosterState{
+			name:           strings.TrimSpace(stringValue(row["title"])),
 			permissionMode: map[bool]string{true: "bypassPermissions", false: "default"}[yolo],
 			status:         status,
 		}
@@ -1571,7 +1798,8 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(h.config.LaunchToken)) != 1 {
 		return nil, errors.New("grok control launch token mismatch")
 	}
-	if stringValue(request["sessionId"]) != h.config.SessionID {
+	sessionID := h.identitySnapshot().sessionID
+	if stringValue(request["sessionId"]) != sessionID {
 		return nil, errors.New("grok control session mismatch")
 	}
 	switch stringValue(request["action"]) {
@@ -1587,7 +1815,7 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 			leaderReady := h.leader != nil
 			h.peerMu.Unlock()
 			return map[string]any{
-				"sessionId": h.config.SessionID, "leaderReady": leaderReady,
+				"sessionId": sessionID, "leaderReady": leaderReady,
 				"loaded": true, "ready": published, "permissionMode": permissionMode,
 				"refreshDeferred": true, "permissionAuthority": "active_interjection_snapshot",
 			}, nil
@@ -1619,7 +1847,7 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 			if !published || !valid {
 				h.peerMu.Unlock()
 				return map[string]any{
-					"sessionId": h.config.SessionID, "leaderReady": h.leader != nil,
+					"sessionId": sessionID, "leaderReady": h.leader != nil,
 					"loaded": false, "ready": false, "refreshBusy": true,
 					"refreshDeferred": true, "permissionAuthority": "none",
 				}, nil
@@ -1631,7 +1859,7 @@ func (h *grokHost) handleControl(request map[string]any) (map[string]any, error)
 		}
 		h.peerMu.Unlock()
 		return map[string]any{
-			"sessionId": h.config.SessionID, "leaderReady": h.leader != nil,
+			"sessionId": sessionID, "leaderReady": h.leader != nil,
 			"loaded": resident, "ready": resident && published,
 			"permissionMode": permissionMode, "refreshDeferred": refreshDeferred,
 			"permissionAuthority": permissionAuthority,
@@ -1673,7 +1901,7 @@ func (h *grokHost) queueWake(item map[string]any) (map[string]any, error) {
 		return response, nil
 	}
 	record := &grokWakeRecord{
-		SessionID: h.config.SessionID, MessageID: messageID, Fingerprint: fingerprint,
+		SessionID: h.identitySnapshot().sessionID, MessageID: messageID, Fingerprint: fingerprint,
 		Delivery: "queued", Item: item, UpdatedAt: time.Now().UnixMilli(),
 	}
 	if err := h.persistWakeRecord(record); err != nil {
@@ -1775,7 +2003,7 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
-	err = h.acp.requestInterjection(ctx, h.config.SessionID, messageID, trustedPeerTextForProduct(item, "grok"))
+	err = h.acp.requestInterjection(ctx, h.identitySnapshot().sessionID, messageID, trustedPeerTextForProduct(item, "grok"))
 	cancel()
 	if err != nil {
 		h.clearActiveInterjectionPermissionSnapshot()
@@ -1830,6 +2058,7 @@ func (h *grokHost) setWakeResult(messageID, delivery, detail string) {
 	h.wakeMu.Unlock()
 }
 
+//nolint:gocyclo // Every process, record, socket, wake, and provisional-identity cleanup has its own ownership predicate.
 func (h *grokHost) cleanup() {
 	h.requestStop()
 	h.closeOnce.Do(func() {
@@ -1838,9 +2067,19 @@ func (h *grokHost) cleanup() {
 		}
 		paths := resolveNativePaths()
 		hostProcStart := readProcStart(os.Getpid())
-		launchRecordPath := grokLaunchRecordPath(paths, h.config.SessionID)
+		identity := h.identitySnapshot()
+		launchRecordPath := grokLaunchRecordPath(paths, identity.sessionID)
 		removeDurableOwnership := func() {
 			removeJSONIf(launchRecordPath, func(row map[string]any) bool {
+				return stringValue(row["tokenHash"]) == grokTokenHash(h.config.LaunchToken) &&
+					intValue(row["hostPid"]) == os.Getpid() && stringValue(row["hostProcStart"]) == hostProcStart
+			})
+		}
+		removeProvisionalOwnership := func() {
+			if h.config.AttachmentID == "" || h.config.AttachmentID == identity.sessionID {
+				return
+			}
+			removeJSONIf(grokLaunchRecordPath(paths, h.config.AttachmentID), func(row map[string]any) bool {
 				return stringValue(row["tokenHash"]) == grokTokenHash(h.config.LaunchToken) &&
 					intValue(row["hostPid"]) == os.Getpid() && stringValue(row["hostProcStart"]) == hostProcStart
 			})
@@ -1851,7 +2090,7 @@ func (h *grokHost) cleanup() {
 			h.peer = nil
 		}
 		h.peerMu.Unlock()
-		peerStateDir := filepath.Join(paths.dataRoot, "sessions", sessionKey(h.config.SessionID))
+		peerStateDir := filepath.Join(paths.dataRoot, "sessions", sessionKey(identity.sessionID))
 		_ = os.Remove(peerStateDir) // Only succeeds when the session left no durable inbox content.
 
 		// Stop both private process groups before discarding their durable
@@ -1866,6 +2105,7 @@ func (h *grokHost) cleanup() {
 				removeDurableOwnership()
 			}
 		}
+		removeProvisionalOwnership()
 		if h.diagnostics != nil {
 			if err := h.diagnostics.close(); err != nil {
 				fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: close private diagnostic log failed")
@@ -1941,9 +2181,10 @@ func (h *grokHost) ensurePeerPublished() error {
 		return errors.New("grok host has no authoritative live roster state")
 	}
 	paths := resolveNativePaths()
+	identity := h.identitySnapshot()
 	args := map[string]string{
-		"session-id": h.config.SessionID, "cwd": h.config.Cwd,
-		"name": h.config.Name, "name-source": "launch", "entrypoint": "grok",
+		"session-id": identity.sessionID, "cwd": h.config.Cwd,
+		"name": identity.name, "name-source": map[bool]string{true: "explicit", false: "canonical"}[h.config.NameSpecified], "entrypoint": "grok",
 		"permission-mode":   permissionMode,
 		"status":            status,
 		"supervisor-socket": h.paths.ControlSocket,
@@ -1952,6 +2193,9 @@ func (h *grokHost) ensurePeerPublished() error {
 		"data-dir": paths.dataRoot, "claude-config-dir": paths.claudeRoot,
 		"codex-home": paths.codexHome, "runtime-dir": paths.runtimeDir,
 		"agent-runtime-dir": h.config.AgentRuntimeDir,
+	}
+	if h.config.AttachmentID != "" && h.config.AttachmentID != identity.sessionID {
+		args["attachment-id"] = h.config.AttachmentID
 	}
 	peer := newDaemon(args)
 	if err := peer.start(); err != nil {
@@ -1976,9 +2220,24 @@ func runGrokHostCommand(argv []string) int {
 	flags.StringVar(&config.OwnerProcStart, "owner-proc-start", "", "TUI owner process-start token")
 	flags.StringVar(&config.RuntimeDir, "runtime-dir", "", "private runtime parent")
 	flags.StringVar(&config.Name, "name", "", "published peer name")
+	flags.BoolVar(&config.NameSpecified, "name-specified", false, "published peer name was explicit")
 	flags.StringVar(&config.PermissionMode, "permission-mode", "default", "published permission class")
 	flags.StringVar(&config.AgentRuntimeDir, "agent-runtime-dir", "", "Agent Sessions host-agent runtime directory")
+	flags.BoolVar(&config.LateBoundResume, "late-bound-resume", false, "adopt the native Grok title selection")
+	groupsJSON := "[]"
+	flags.StringVar(&groupsJSON, "groups-json", groupsJSON, "explicit peer groups")
+	flags.BoolVar(&config.GroupsSpecified, "groups-specified", false, "explicit groups were supplied")
+	flags.StringVar(&config.ParentSession, "parent-session", "", "attested parent session")
+	flags.BoolVar(&config.ParentSpecified, "parent-specified", false, "parent session was supplied")
+	flags.BoolVar(&config.InheritGroups, "inherit-parent-groups", false, "inherit parent groups")
+	flags.BoolVar(&config.InheritSet, "inherit-groups-specified", false, "group inheritance was supplied")
+	flags.BoolVar(&config.AlwaysApprove, "always-approve", false, "requested durable yolo policy")
+	flags.BoolVar(&config.AlwaysSet, "always-approve-specified", false, "yolo policy was supplied")
 	if err := flags.Parse(argv); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	if json.Unmarshal([]byte(groupsJSON), &config.Groups) != nil {
+		fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: invalid groups JSON")
 		return 2
 	}
 	config.LaunchToken = strings.TrimSpace(os.Getenv(grokLaunchTokenEnv))

@@ -88,16 +88,18 @@ The product is the leader + waker. Hooks are not the delivery path.
 ### What to build
 
 - `cmd/grok-peer` + `internal/launcher/grok_peer.go`
-  - Strip only `-n` / `--peer-name`.
+  - Consume only Agent Sessions launch context (`-n` / `--peer-name`, groups,
+    inheritance, and `--yolo`); preserve every native selector and option in
+    its original order.
   - For a fresh conversation, generate a UUID before starting children and
-    pass it to the TUI with Grok's documented `--session-id`. For the initial
-    implementation, managed resume accepts an exact UUID only; reject title,
-    bare `--resume`, and `--continue` rather than scraping Grok's private
-    storage or parsing a human table.
-    This preselection is the readiness observer: the TUI does not need to mint
-    or report an unknown ID, and no SessionStart hook is involved.
+    pass it to the TUI with Grok's documented `--session-id`. For resume, pass
+    an exact UUID, title, or bare `--resume` unchanged to native Grok. Use a
+    separate provisional attachment ID for cleanup until the private leader's
+    official live roster reports exactly one selected resident UUID and title;
+    then atomically adopt that identity. Never scrape Grok's private storage or
+    parse a human table.
   - Start a private leader, then `exec grok --leader --leader-socket …`
-    with the managed exact session selector and remaining args.
+    with the native session selector and remaining args.
   - Reject `--no-leader`, caller `--leader-socket`, and non-`off`
     `--sandbox`. Fail closed; do not launch an isolated TUI.
   - Passthrough (plain `Exec`, no leader): `--help`, `--version`, and
@@ -183,7 +185,8 @@ The product is the leader + waker. Hooks are not the delivery path.
 - `grok -p --resume` against a live pager (dual writer).
 - Binding or adopting `~/.grok/leader.sock`.
 - Scraping `~/.grok/sessions` or parsing `grok sessions` human output to
-  emulate native title resolution.
+  emulate native title resolution. Native Grok owns selector and picker
+  semantics; the adapter observes only the resulting live roster identity.
 - PTY/tmux keystroke injection.
 - Polling `/loop` or a blocking MCP wait to fake wake.
 - Anything from `feature/antigravity-support` `agy-*`.

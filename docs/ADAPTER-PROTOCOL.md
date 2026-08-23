@@ -60,6 +60,53 @@ in the message body.
 `CLAUDE_PEER_SESSION_NAME`, `launch` for a prepared interactive wrapper, `lane` for a durable lane,
 `manual` after the MCP rename tool is used, and `generated` for the startup fallback.
 
+## Late-bound native resume contract
+
+Some native products do not expose the selected transcript UUID until after
+their interactive resume UI has started. A wrapper must preserve that native
+behavior (including title matching and duplicate-title pickers) without
+mistaking its launch-scoped identity for the selected transcript.
+
+Every late-bound adapter therefore has two deliberately different identities:
+
+- an unpredictable **attachment ID**, created before launch and used only for
+  lifecycle journaling, socket ownership, process capabilities, and crash
+  cleanup; and
+- the native **session ID**, adopted only after an authoritative product-owned
+  surface proves the selected live actor.
+
+The first row or handshake is not necessarily the selection. Claude can
+publish a transient boot UUID and replace it several seconds later after
+`--resume TITLE` resolves. Grok resolves the target inside its private leader
+and exposes the selected resident UUID and `title` through
+`_x.ai/sessions/list`. An adapter must wait for the product-specific selection
+proof, then atomically move catalog preferences and live registration to the
+native UUID. A transient UUID must never enter the durable catalog or become
+model-visible authority.
+
+The attachment remains a narrowly scoped alias for descendants that inherited
+environment before selection. The host agent may resolve that alias only to
+the one live registration that published it, and only while its exact
+PID/process-start/socket/lifecycle evidence remains valid. MCP attestation,
+local/remote lane ownership, terminal notices, and cleanup must all return and
+use the native UUID after resolution. Unknown, stale, duplicate, or colliding
+aliases fail closed. Session ID is not made advisory and PID alone never grants
+authority.
+
+Names follow the same rule. Unless the caller supplied an explicit peer-name
+override, exact-UUID and title resumes publish the native title from the same
+authoritative surface and refresh it after a native rename. Cwd-derived or
+launch-derived placeholders may exist before selection but must not overwrite
+the native title afterward.
+
+New product adapters with late-bound resume must test at least: a transient
+boot ID followed by the selected ID; exact UUID and title resume; duplicate
+title chooser behavior; explicit-name precedence; MCP discovery/send from a
+descendant that still carries the attachment ID; local and remote lane launch
+from that descendant; agent restart; normal exit and crash cleanup; and proof
+that no provisional catalog row, peer, socket, or credential/config mutation
+survives.
+
 ## Transport
 
 - Unix stream socket on Linux or macOS
@@ -246,10 +293,12 @@ continue useful work rather than poll `check_inbox`, sleep, or block waiting for
 
 ## Grok private-leader wake path
 
-`grok-peer` preselects an exact UUID, starts one private Grok leader and one
-persistent official ACP stdio bridge, then replaces itself with the attached
-Grok TUI. The leader socket uses Grok's private protocol; Agent Sessions never
-speaks it. Wake delivery uses ACP v1 over
+`grok-peer` starts one private Grok leader and one persistent official ACP
+stdio bridge, then replaces itself with the attached Grok TUI. Exact-UUID
+resumes are known at launch; title and bare-picker resumes use the provisional
+attachment until the private roster proves the one selected resident UUID.
+The leader socket uses Grok's private protocol; Agent Sessions never speaks
+it. Wake delivery uses ACP v1 over
 `grok --leader-socket <private> agent --leader stdio`: initialize, authenticate
 with the CLI's advertised `cached_token` method, observe the preselected
 resident session through `_x.ai/sessions/list`, verify the exact local
@@ -291,9 +340,10 @@ the inherited token, and ancestry inside that leader tree. On owner death the
 host removes its discovery row and stops only its own leader and bridge process
 groups. Native Grok clients must not concurrently open the same UUID.
 
-Interactive Grok supports fresh sessions and exact-UUID resume. Title resolution and a bare resume
-picker remain native-Grok concerns rather than private-store parsing. Separate sole-owner headless
-ACP sessions implement local or federated Grok lanes.
+Interactive Grok supports fresh sessions plus exact-UUID, title, and bare-picker
+resume. Resolution remains a native-Grok concern rather than private-store
+parsing; the adapter adopts the resulting live roster UUID/title. Separate
+sole-owner headless ACP sessions implement local or federated Grok lanes.
 
 Headless App Server turns can issue server-initiated `item/tool/call` JSON-RPC requests. The native
 client handles bridge-owned `claude_peer` tools directly only after the App Server-supplied `threadId`
@@ -320,11 +370,15 @@ authority. The Claude inventory deliberately exposes only grouped discovery, sen
 broadcast. Bare Claude, a copied environment, a recycled PID, a different registered Claude peer,
 or a mismatched row/socket receives no roster or send authority.
 
-Interactive Claude names are indexed durably by session UUID in host-agent state. Resume-by-name
-selects one live interactive product match first, otherwise one historical interactive match.
-Multiple live or historical UUIDs are ambiguous and require an exact UUID. The launcher resolves a
-name through the local host-agent control socket before acquiring a lifecycle path or changing the
-catalog, then rewrites only the native pre-`--` resume selector to the exact UUID.
+Interactive Claude resume selectors remain native Claude selectors. An exact
+UUID is stable before launch; any other argument, including a title with
+duplicates, is passed through so Claude can apply its own matching and chooser
+semantics. The launcher must not resolve that title from the Agent Sessions
+catalog. It prepares a provisional attachment, ignores Claude's transient boot
+row, and promotes only after the native row plus validated transcript title
+identify the selected UUID. The catalog is keyed by that selected UUID, while
+the attachment survives only as the strongly attested descendant alias
+described above.
 
 The bridge accepts MCP approval elicitations only for the bridge-owned `claude_peer`
 server; foreign
