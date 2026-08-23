@@ -1192,6 +1192,77 @@ func TestSessionNameResolutionMigratesOnlyManagedClaudeTranscriptTitles(t *testi
 	}
 }
 
+func TestClaudeRegistrationUsesLatestNativeTranscriptTitle(t *testing.T) {
+	root := t.TempDir()
+	claudeRoot := filepath.Join(root, "claude")
+	project := filepath.Join(claudeRoot, "projects", "-work")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-0000000000d3"
+	transcript := filepath.Join(project, sessionID+".jsonl")
+	writeTitle := func(title string, appendFile bool) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "custom-title", "sessionId": sessionID, "customTitle": title,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+		if appendFile {
+			flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		}
+		file, err := os.OpenFile(transcript, flag, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = file.Write(append(body, '\n')); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTitle("spec", false)
+	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-spec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := catalog.update(SessionPreferenceUpdate{SessionID: sessionID, Product: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	socket, listener := registrationSocket(t, root, "peer.sock")
+	defer func() { _ = listener.Close() }()
+	agent := &agent{
+		options: AgentOptions{
+			HostID: "host-spec", HostName: "spec", StateDir: root, ClaudeConfigDir: claudeRoot,
+		},
+		catalog: catalog, local: map[string]localPeer{}, remote: map[string]Peer{},
+		localChanged: make(chan struct{}, 1),
+	}
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude", Name: "kernel-tdd-2c",
+		PermissionMode: "default", PID: os.Getpid(), ProcStart: processStart(os.Getpid()), Socket: socket,
+	}
+	peer, err := agent.registerPeer(registration, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peer.Name != "spec" || peer.DisplayName != "spec--spec" {
+		t.Fatalf("initial Claude transcript name = %+v", peer)
+	}
+	writeTitle("reviewer", true)
+	peer, err = agent.registerPeer(registration, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peer.Name != "reviewer" || peer.DisplayName != "reviewer--spec" {
+		t.Fatalf("refreshed Claude transcript name = %+v", peer)
+	}
+}
+
 func TestParentContextSeparatesAdapterAndLifecycleIdentity(t *testing.T) {
 	root := t.TempDir()
 	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-a")
