@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -1269,7 +1268,8 @@ func TestGrokToolRegistrySerializesRegistrationWithArchive(t *testing.T) {
 	}
 	state := grokLaneState{
 		Type: "grok-peer-lane", SessionID: sessionID, Status: "idle",
-		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start,
+		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start, ManagerStrongStart: managerInfo.StrongStart,
+		WorkerPID: os.Getpid(), WorkerProcStart: managerInfo.Start, WorkerStrongStart: managerInfo.StrongStart,
 		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: runtimeDir,
 		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: "bash", ToolRealShell: "/bin/bash",
 	}
@@ -1286,6 +1286,13 @@ func TestGrokToolRegistrySerializesRegistrationWithArchive(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
 	statePath := grokLaneStatePath(resolveNativePaths(), sessionID)
 	if err := writeJSONAtomic(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	ledgerConfig, err := grokToolRootLedgerConfig(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareToolRootLedger(ledgerConfig); err != nil {
 		t.Fatal(err)
 	}
 	wrapperPath := filepath.Join(host.LaunchDir, "bash")
@@ -1418,7 +1425,8 @@ func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
 	}
 	state := grokLaneState{
 		Type: "grok-peer-lane", SessionID: sessionID, Status: "idle",
-		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start,
+		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start, ManagerStrongStart: managerInfo.StrongStart,
+		WorkerPID: os.Getpid(), WorkerProcStart: managerInfo.Start, WorkerStrongStart: managerInfo.StrongStart,
 		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: runtimeDir,
 		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: filepath.Base(realShell), ToolRealShell: realShell,
 	}
@@ -1445,6 +1453,13 @@ func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
 	if err := writeJSONAtomic(statePath, state); err != nil {
 		t.Fatal(err)
 	}
+	ledgerConfig, err := grokToolRootLedgerConfig(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareToolRootLedger(ledgerConfig); err != nil {
+		t.Fatal(err)
+	}
 	command := exec.Command(wrapperPath, "-test.run=^TestGrokToolWrapperExecHelper$")
 	command.Args[0] = filepath.Base(wrapperPath)
 	command.Env = grokLaneWorkerEnvironment(os.Environ(), launchToken, state, wrapperPath, realShell)
@@ -1453,11 +1468,13 @@ func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
 	if err != nil || string(output) != "TOOL_WRAPPER_EXEC_OK" {
 		t.Fatalf("wrapper subprocess: err=%v output=%q", err, output)
 	}
-	recordPath := filepath.Join(host.LaunchDir, "tool-roots", strconv.Itoa(command.ProcessState.Pid())+".json")
-	var record grokToolRootRecord
-	body, err := os.ReadFile(recordPath)
-	if err != nil || json.Unmarshal(body, &record) != nil || record.PID != command.ProcessState.Pid() || record.StrongStart == "" {
-		t.Fatalf("wrapper record: err=%v record=%+v", err, record)
+	ledger, err := openToolRootLedger(ledgerConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ledger.snapshot()
+	if err != nil || len(snapshot.Roots) != 1 || snapshot.Roots[0].PID != command.ProcessState.Pid() || snapshot.Roots[0].StrongStart == "" {
+		t.Fatalf("wrapper ledger: err=%v snapshot=%+v", err, snapshot)
 	}
 }
 

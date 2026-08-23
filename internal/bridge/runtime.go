@@ -80,7 +80,7 @@ func Main() {
 		os.Exit(runGrokToolWrapper(os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, qwen-plugin-install, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
 	}
 	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
@@ -103,6 +103,8 @@ func Main() {
 		os.Exit(runGrokHostCommand(os.Args[2:]))
 	case "grok-plugin-verify":
 		os.Exit(runGrokPluginVerify(os.Args[2:]))
+	case "qwen-plugin-install":
+		os.Exit(runQwenPluginInstall(os.Args[2:]))
 	case "hook":
 		runHookCommand()
 	case "mcp":
@@ -118,12 +120,16 @@ func Main() {
 }
 
 func runNativeLaneRole(role string, args []string) (int, bool) {
-	switch role {
-	case "lane":
+	product, known := bridgeProductByLaneRole(role)
+	if !known {
+		return 0, false
+	}
+	switch product.descriptor.ID {
+	case "codex":
 		return runLaneCommand(args), true
-	case "claude-lane":
+	case "claude":
 		return runClaudeLaneCommand(args), true
-	case "grok-lane":
+	case "grok":
 		return runGrokLaneCommand(args), true
 	default:
 		return 0, false
@@ -212,6 +218,7 @@ func newDaemon(args map[string]string) *daemon {
 	if agentRuntimeDir == "" {
 		agentRuntimeDir = strings.TrimSpace(os.Getenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR"))
 	}
+	stableSocket := filepath.Join(runtimeRoot, fmt.Sprintf("session-%s.sock", key))
 	return &daemon{
 		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
 		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
@@ -220,8 +227,11 @@ func newDaemon(args map[string]string) *daemon {
 		supervisorSocket: args["supervisor-socket"], supervisorToken: args["supervisor-token"], ownerPID: ownerPID,
 		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),
 		startedAt: time.Now().UnixMilli(), heartbeat: heartbeat,
-		backendSocket: filepath.Join(runtimeRoot, fmt.Sprintf("%d.sock", pid)),
-		stableSocket:  filepath.Join(runtimeRoot, fmt.Sprintf("session-%s.sock", key)),
+		// New adapters bind the stable session path directly. backendSocket is
+		// retained in the state schema as the exact listener path so current
+		// cleanup can also migrate the older PID-socket + symlink shape.
+		backendSocket: stableSocket,
+		stableSocket:  stableSocket,
 		registryFile:  filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)),
 		stateFile:     filepath.Join(dataDir, "sessions", key, "state.json"),
 		inboxDir:      filepath.Join(dataDir, "sessions", key, "inbox"),
@@ -283,17 +293,11 @@ func (d *daemon) start() error {
 		return err
 	}
 	cleanupStaleStateFile(d.stateFile, filepath.Dir(d.backendSocket), filepath.Dir(d.registryFile))
-	_ = os.Remove(d.backendSocket)
-	listener, err := net.Listen("unix", d.backendSocket)
+	listener, err := listenPrivateSessionSocket(d.stableSocket)
 	if err != nil {
 		return err
 	}
 	d.listener = listener
-	_ = os.Chmod(d.backendSocket, 0600)
-	if err := d.publishAlias(); err != nil {
-		d.shutdown()
-		return err
-	}
 	d.mu.Lock()
 	d.refreshNameLocked()
 	err = d.writeRecordsLocked()
@@ -305,6 +309,33 @@ func (d *daemon) start() error {
 	go d.acceptLoop()
 	go d.maintenanceLoop()
 	return nil
+}
+
+func listenPrivateSessionSocket(path string) (net.Listener, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("session delivery socket path must be absolute")
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil, fmt.Errorf("session delivery socket already exists: %s", path)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect session delivery socket: %w", err)
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, errors.New("session delivery endpoint is not a real Unix socket")
+	}
+	return listener, nil
 }
 
 func (d *daemon) acceptLoop() {
@@ -704,18 +735,6 @@ func (d *daemon) enqueue(item map[string]any) error {
 	sort.Strings(names)
 	for _, name := range names[:max(0, len(names)-50)] {
 		_ = os.Remove(filepath.Join(d.pendingDir, name))
-	}
-	return nil
-}
-
-func (d *daemon) publishAlias() error {
-	temporary := fmt.Sprintf("%s.%d.%s.tmp", d.stableSocket, os.Getpid(), randomID())
-	if err := os.Symlink(d.backendSocket, temporary); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, d.stableSocket); err != nil {
-		_ = os.Remove(temporary)
-		return err
 	}
 	return nil
 }

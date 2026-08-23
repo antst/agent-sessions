@@ -38,6 +38,7 @@ type AgentOptions struct {
 	CodexLaneExecutable  string
 	ClaudeLaneExecutable string
 	GrokLaneExecutable   string
+	QwenLaneExecutable   string
 	Logger               *log.Logger
 }
 
@@ -184,14 +185,17 @@ func configureLaneExecutables(options *AgentOptions) error {
 		options.CodexLaneExecutable = ""
 		options.ClaudeLaneExecutable = ""
 		options.GrokLaneExecutable = ""
+		options.QwenLaneExecutable = ""
 		return nil
 	}
 	codexConfigured := options.CodexLaneExecutable
 	claudeConfigured := options.ClaudeLaneExecutable
 	grokConfigured := options.GrokLaneExecutable
+	qwenConfigured := options.QwenLaneExecutable
 	options.CodexLaneExecutable = resolveLaneExecutable(codexConfigured, "codex-peer-lane")
 	options.ClaudeLaneExecutable = resolveLaneExecutable(claudeConfigured, "claude-peer-lane")
 	options.GrokLaneExecutable = resolveLaneExecutable(grokConfigured, "grok-peer-lane")
+	options.QwenLaneExecutable = resolveLaneExecutable(qwenConfigured, "qwen-peer-lane")
 	if codexConfigured != "" && options.CodexLaneExecutable == "" {
 		return fmt.Errorf("configured codex lane launcher %q is not executable", codexConfigured)
 	}
@@ -200,6 +204,9 @@ func configureLaneExecutables(options *AgentOptions) error {
 	}
 	if grokConfigured != "" && options.GrokLaneExecutable == "" {
 		return fmt.Errorf("configured Grok lane launcher %q is not executable", grokConfigured)
+	}
+	if qwenConfigured != "" && options.QwenLaneExecutable == "" {
+		return fmt.Errorf("configured Qwen lane launcher %q is not executable", qwenConfigured)
 	}
 	return nil
 }

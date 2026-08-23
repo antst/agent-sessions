@@ -57,6 +57,7 @@ cp -R \
 	"$plugin_root/docs" \
 	"$plugin_root/grok" \
 	"$plugin_root/hooks" \
+	"$plugin_root/qwen" \
 	"$plugin_root/scripts" \
 	"$plugin_root/skills" \
 	"$package_root/"

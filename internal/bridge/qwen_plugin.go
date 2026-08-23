@@ -1,0 +1,270 @@
+package bridge
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/antst/agent-sessions/internal/qwenprofile"
+)
+
+const (
+	qwenPluginSchema = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+	qwenMCPSchema    = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+	qwenPluginName   = "agent-sessions"
+	qwenMCPName      = "agent_sessions"
+)
+
+var qwenPluginSkills = []string{
+	"agent-sessions", "claude-lane", "codex-lane", "grok-lane", "qwen-lane",
+}
+
+func qwenPluginInstallCommand(executable, pluginRoot string, profile qwenprofile.Identity, environment []string) (*exec.Cmd, error) {
+	if strings.TrimSpace(executable) == "" {
+		return nil, errors.New("qwen executable is empty")
+	}
+	if !filepath.IsAbs(pluginRoot) {
+		return nil, fmt.Errorf("qwen plugin root must be absolute: %q", pluginRoot)
+	}
+	command := exec.Command(executable, "extensions", "install", pluginRoot, "--scope", "user", "--consent") //nolint:gosec // Executable is the operator-selected Qwen binary; argv is structured and fixed.
+	command.Env = qwenprofile.ApplyEnvironment(environment, profile)
+	return command, nil
+}
+
+//nolint:gocyclo // Exact plugin verification intentionally validates every manifest and inventory invariant together.
+func verifyQwenPluginInstallation(root, expectedVersion string, enabled bool) error {
+	if !enabled {
+		return errors.New("qwen agent-sessions plugin is not enabled at user scope")
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("inspect Qwen plugin root: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("qwen plugin root is not a real directory")
+	}
+
+	manifest, err := readQwenPluginObject(filepath.Join(root, "plugin.json"))
+	if err != nil {
+		return err
+	}
+	if stringValue(manifest["$schema"]) != qwenPluginSchema {
+		return errors.New("qwen plugin manifest has the wrong schema")
+	}
+	if stringValue(manifest["name"]) != qwenPluginName {
+		return errors.New("qwen plugin manifest has the wrong name")
+	}
+	if expectedVersion == "" || stringValue(manifest["version"]) != expectedVersion {
+		return fmt.Errorf("qwen plugin manifest version is not %q", expectedVersion)
+	}
+
+	mcp, err := readQwenPluginObject(filepath.Join(root, "mcp.json"))
+	if err != nil {
+		return err
+	}
+	servers, ok := mcp["mcpServers"].(map[string]any)
+	if stringValue(mcp["$schema"]) != qwenMCPSchema || !ok || len(servers) != 1 {
+		return errors.New("qwen plugin MCP manifest has the wrong schema or inventory")
+	}
+	server, ok := servers[qwenMCPName].(map[string]any)
+	if !ok || stringValue(server["type"]) != "stdio" || strings.TrimSpace(stringValue(server["command"])) == "" {
+		return fmt.Errorf("qwen plugin does not provide the exact %s stdio MCP server", qwenMCPName)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, "skills"))
+	if err != nil {
+		return fmt.Errorf("inspect Qwen plugin skills: %w", err)
+	}
+	gotSkills := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return fmt.Errorf("qwen plugin skills contain non-directory %q", entry.Name())
+		}
+		skillPath := filepath.Join(root, "skills", entry.Name(), "SKILL.md")
+		skillInfo, statErr := os.Lstat(skillPath)
+		if statErr != nil || !skillInfo.Mode().IsRegular() || skillInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("qwen plugin skills inventory entry %q has no regular direct-child SKILL.md", entry.Name())
+		}
+		gotSkills = append(gotSkills, entry.Name())
+	}
+	sort.Strings(gotSkills)
+	if strings.Join(gotSkills, "\x00") != strings.Join(qwenPluginSkills, "\x00") {
+		return fmt.Errorf("qwen plugin skills inventory is %q, want %q", gotSkills, qwenPluginSkills)
+	}
+	return nil
+}
+
+func readQwenPluginObject(path string) (map[string]any, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Qwen plugin file %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("qwen plugin file %s is not a regular file", path)
+	}
+	body, err := os.ReadFile(path) //nolint:gosec // Lstat above requires the exact selected-profile plugin file to be regular and non-symlink.
+	if err != nil {
+		return nil, fmt.Errorf("read Qwen plugin file %s: %w", path, err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(body, &value); err != nil {
+		return nil, fmt.Errorf("decode Qwen plugin file %s: %w", path, err)
+	}
+	return value, nil
+}
+
+func qwenPluginEnabled(statePath string) (bool, error) {
+	state, err := readQwenPluginObject(statePath)
+	if err != nil {
+		return false, err
+	}
+	if intValue(state["version"]) != 2 {
+		return false, errors.New("qwen extension store has an unsupported state version")
+	}
+	extensions, ok := state["extensions"].(map[string]any)
+	if !ok {
+		return false, errors.New("qwen extension store has no extensions inventory")
+	}
+	matches := 0
+	enabled := false
+	for _, raw := range extensions {
+		policy, _ := raw.(map[string]any)
+		if stringValue(policy["name"]) != qwenPluginName {
+			continue
+		}
+		matches++
+		enabled = stringValue(policy["defaultActivation"]) == "enabled"
+	}
+	if matches != 1 {
+		return false, fmt.Errorf("qwen extension store contains %d agent-sessions policies", matches)
+	}
+	return enabled, nil
+}
+
+//nolint:gocyclo // Installation is one selected-profile native transaction with exact pre/post verification.
+func runQwenPluginInstall(args []string) int {
+	values, err := parseQwenPluginInstallArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", err)
+		return 2
+	}
+	profile, err := qwenprofile.Current()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", err)
+		return 1
+	}
+	if err := verifyQwenPluginInstallation(values.pluginRoot, values.version, true); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: source payload verification failed: %v\n", err)
+		return 1
+	}
+	home, err := qwenprofile.EffectiveHome(profile, os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", err)
+		return 1
+	}
+	root := filepath.Join(home, "extensions", qwenPluginName)
+	statePath := filepath.Join(home, "extension-store", "state.json")
+	if enabled, stateErr := qwenPluginEnabled(statePath); stateErr == nil &&
+		verifyQwenPluginInstallation(root, values.version, enabled) == nil {
+		return 0
+	}
+
+	install, err := qwenPluginInstallCommand(values.qwen, values.pluginRoot, profile, os.Environ())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", err)
+		return 1
+	}
+	command := install
+	if _, statErr := os.Lstat(root); statErr == nil {
+		// Qwen's native update is transactional and follows the source recorded
+		// by the native installer. Normal installed releases keep that source at
+		// INSTALL_ROOT/qwen, so an updated payload is adopted without an
+		// uninstall/reinstall gap.
+		source, sourceErr := installedQwenPluginSource(root)
+		if sourceErr != nil {
+			fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", sourceErr)
+			return 1
+		}
+		if sameQwenPluginSource(source, values.pluginRoot) {
+			command = exec.Command(values.qwen, "extensions", "update", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
+			command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
+		} else {
+			uninstall := exec.Command(values.qwen, "extensions", "uninstall", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
+			uninstall.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
+			uninstall.Stdin, uninstall.Stdout, uninstall.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if uninstallErr := uninstall.Run(); uninstallErr != nil {
+				fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: remove prior selected-profile plugin: %v\n", uninstallErr)
+				return 1
+			}
+		}
+	} else if !os.IsNotExist(statErr) {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: inspect installed Qwen plugin: %v\n", statErr)
+		return 1
+	}
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: native Qwen installer failed: %v\n", err)
+		return 1
+	}
+	enabled, err := qwenPluginEnabled(statePath)
+	if err == nil {
+		err = verifyQwenPluginInstallation(root, values.version, enabled)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: post-install verification failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func installedQwenPluginSource(root string) (string, error) {
+	metadata, err := readQwenPluginObject(filepath.Join(root, ".qwen-extension-install.json"))
+	if err != nil {
+		return "", fmt.Errorf("read native Qwen install metadata: %w", err)
+	}
+	source := stringValue(metadata["source"])
+	if stringValue(metadata["type"]) != "local" || !filepath.IsAbs(source) {
+		return "", errors.New("installed agent-sessions Qwen plugin does not have an absolute local source")
+	}
+	return source, nil
+}
+
+func sameQwenPluginSource(left, right string) bool {
+	leftPath, leftErr := filepath.Abs(left)
+	rightPath, rightErr := filepath.Abs(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(leftPath) == filepath.Clean(rightPath)
+}
+
+type qwenPluginInstallArgs struct {
+	qwen, pluginRoot, version string
+}
+
+func parseQwenPluginInstallArgs(args []string) (qwenPluginInstallArgs, error) {
+	var result qwenPluginInstallArgs
+	for index := 0; index < len(args); index++ {
+		if index+1 >= len(args) {
+			return result, errors.New("usage: qwen-plugin-install --qwen PATH --plugin-root PATH --version VERSION")
+		}
+		value := args[index+1]
+		switch args[index] {
+		case "--qwen":
+			result.qwen = value
+		case "--plugin-root":
+			result.pluginRoot = value
+		case "--version":
+			result.version = value
+		default:
+			return result, fmt.Errorf("unknown option %q", args[index])
+		}
+		index++
+	}
+	if result.qwen == "" || result.pluginRoot == "" || result.version == "" {
+		return result, errors.New("usage: qwen-plugin-install --qwen PATH --plugin-root PATH --version VERSION")
+	}
+	return result, nil
+}

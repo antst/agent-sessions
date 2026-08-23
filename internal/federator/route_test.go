@@ -101,6 +101,15 @@ func TestGroupedDiscoverySendMulticastAndBroadcast(t *testing.T) {
 	assertNoAgentFrame(t, otherFrames)
 }
 
+func TestCapabilityNormalizationUsesCompleteProductDescriptor(t *testing.T) {
+	input := []string{CapabilityQwenLane, CapabilityCodexLane, "unknown", CapabilityQwenLane, CapabilityGrokLane, CapabilityClaudeLane}
+	got := normalizeCapabilities(input)
+	want := []string{CapabilityClaudeLane, CapabilityCodexLane, CapabilityGrokLane, CapabilityQwenLane}
+	if !equalStrings(got, want) {
+		t.Fatalf("normalized capabilities = %v, want %v", got, want)
+	}
+}
+
 func TestAgentFrameRejectsDuplicateTargetsAndGlobalBroadcast(t *testing.T) {
 	agent := &agent{
 		options: AgentOptions{HostID: "host-a"}, routeRefresh: func() error { return nil },

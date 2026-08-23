@@ -417,16 +417,8 @@ func validCatalogSessionID(value string) bool {
 }
 
 func validProduct(value string) bool {
-	if value == "" || len(value) > 32 || value != strings.ToLower(value) {
-		return false
-	}
-	for _, r := range value {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
-			continue
-		}
-		return false
-	}
-	return true
+	_, ok := ProductByID(value)
+	return ok
 }
 
 func sortedUnique(values []string) []string {

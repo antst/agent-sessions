@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/antst/agent-sessions/internal/federator"
 )
 
 // RunLane ensures the shared runtime and replaces the launcher with one of its
@@ -13,7 +15,7 @@ func RunLane(role string, args []string) error {
 	if err != nil {
 		return err
 	}
-	if role != "lane" && role != "claude-lane" && role != "grok-lane" {
+	if _, ok := launcherProductByLaneRole(role); !ok {
 		return fmt.Errorf("unsupported lane role %q", role)
 	}
 	environment := replaceLaneEnvironment(os.Environ(), agentRuntimeDirEnv, agentRuntimeDir())
@@ -26,6 +28,15 @@ func RunLane(role string, args []string) error {
 		environment = replaceLaneEnvironment(environment, "GROK_PEER_NATIVE_RUNTIME", selected.Path)
 	}
 	return Exec(selected.Path, append([]string{role}, args...), environment)
+}
+
+func launcherProductByLaneRole(role string) (launcherProduct, bool) {
+	for _, descriptor := range federator.ProductDescriptors() {
+		if descriptor.LaneRuntimeRole == role {
+			return launcherProduct{descriptor: descriptor}, true
+		}
+	}
+	return launcherProduct{}, false
 }
 
 func grokLaneNeedsExecutable(args []string) bool {

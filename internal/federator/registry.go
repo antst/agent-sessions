@@ -48,8 +48,32 @@ type localPeer struct {
 	ClaudeConfigRoot     string
 	ClaudeKeyBaseline    []ClaudeKeyBaselineEntry
 	ClaudeKeyBaselineSet bool
+	CleanupDebt          []PeerCleanupDebt
 	GroupProtocol        int
 	AgentService         bool
+}
+
+// PeerCleanupDebt retains typed, retryable ownership work after an ambiguous
+// post-prepare failure. Text is diagnostic only; expected identity fields are
+// the authority for a later retry.
+type PeerCleanupDebt struct {
+	Version           int    `json:"version"`
+	DebtID            string `json:"debt_id"`
+	Revision          string `json:"revision"`
+	Product           string `json:"product"`
+	OwnerKind         string `json:"owner_kind"`
+	OwnerID           string `json:"owner_id"`
+	Operation         string `json:"operation"`
+	ExpectedPath      string `json:"expected_path,omitempty"`
+	ExpectedPID       int    `json:"expected_pid,omitempty"`
+	ExpectedStart     string `json:"expected_start,omitempty"`
+	ExpectedStrong    string `json:"expected_strong_start,omitempty"`
+	ExpectedDigest    string `json:"expected_digest,omitempty"`
+	ObservationState  string `json:"observation_state"`
+	Attempts          int    `json:"attempts"`
+	LastError         string `json:"last_error,omitempty"`
+	UpdatedAt         int64  `json:"updated_at"`
+	TerminalWhenClean string `json:"terminal_when_clean"`
 }
 
 //nolint:gocyclo,unparam // Legacy registry fixture keeps validation in one loop; hostID varies in external use.
@@ -94,8 +118,10 @@ func discoverLocalPeers(registryDir, hostID, hostName string) (map[string]localP
 			instanceIdentity = strconv.Itoa(pid) + "\x00" + instanceIdentity
 		}
 		permissionMode := peerPermissionMode(pid, record.PermissionMode)
-		if record.Entrypoint == "grok" {
-			// Grok permission changes are runtime state, not immutable argv. If
+		descriptor, knownProduct := ProductByID(record.Entrypoint)
+		if knownProduct && descriptor.DynamicPermission {
+			// Some products publish permission changes as runtime state rather
+			// than immutable argv. If
 			// the live bridge cannot corroborate its current state, over-report
 			// privilege instead of silently labelling a yolo session constrained.
 			permissionMode = "bypassPermissions"

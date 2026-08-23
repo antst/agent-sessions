@@ -142,7 +142,8 @@ func (a *agent) persistSessionName(peer Peer, kind string) error {
 //nolint:gocyclo // Live priority, durable validation, and explicit ambiguity errors form one lookup policy.
 func (a *agent) resolveSessionName(product, requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
-	if !validProduct(product) || requested == "" {
+	descriptor, productOK := ProductByID(product)
+	if !productOK || !descriptor.SupportsResume(SessionKindInteractive) || requested == "" {
 		return "", errors.New("session name lookup requires a product and non-empty name")
 	}
 	a.mu.RLock()
@@ -192,6 +193,10 @@ func (a *agent) resolveSessionName(product, requested string) (string, error) {
 
 //nolint:gocyclo // Durable index validation and Claude transcript migration deliberately fail closed per session.
 func (a *agent) historicalSessionNames(product string) (map[string]string, error) {
+	descriptor, productOK := ProductByID(product)
+	if !productOK || !descriptor.SupportsResume(SessionKindInteractive) {
+		return nil, fmt.Errorf("product %q does not support interactive resume", product)
+	}
 	candidates := map[string]bool{}
 	a.catalog.mu.Lock()
 	for sessionID, preference := range a.catalog.sessions {
@@ -224,7 +229,7 @@ func (a *agent) historicalSessionNames(product string) (map[string]string, error
 			}
 		}
 	}
-	if product != "claude" {
+	if !descriptor.TranscriptNameIndex {
 		return names, nil
 	}
 	transcriptNames, invalid := a.claudeTranscriptSessionNames(candidates)
@@ -330,6 +335,29 @@ type peerPreparation struct {
 	DesiredPreference   SessionPreferences  `json:"desired_preference,omitempty"`
 	RollbackPreferences bool                `json:"rollback_preferences,omitempty"`
 	Committed           bool                `json:"committed,omitempty"`
+	CleanupDebt         []PeerCleanupDebt   `json:"cleanup_debt,omitempty"`
+}
+
+const peerPreparationVersion = 1
+
+type durablePeerPreparation struct {
+	Version             int                 `json:"version"`
+	Product             string              `json:"product"`
+	Registration        PeerRegistration    `json:"registration"`
+	ProductPayload      json.RawMessage     `json:"product_payload"`
+	PriorPreference     *SessionPreferences `json:"prior_preference,omitempty"`
+	DesiredPreference   SessionPreferences  `json:"desired_preference,omitempty"`
+	RollbackPreferences bool                `json:"rollback_preferences,omitempty"`
+	Committed           bool                `json:"committed,omitempty"`
+	CleanupDebt         []PeerCleanupDebt   `json:"cleanup_debt,omitempty"`
+}
+
+type claudePreparationPayload struct {
+	ConfigRoot     string                   `json:"config_root"`
+	KeyBaseline    []ClaudeKeyBaselineEntry `json:"key_baseline,omitempty"`
+	KeyBaselineSet bool                     `json:"key_baseline_set,omitempty"`
+	SocketPath     string                   `json:"socket_path,omitempty"`
+	SocketPathSet  bool                     `json:"socket_path_set,omitempty"`
 }
 
 // ParentContext is the agent-attested parent layer inherited by a child lane.
@@ -462,6 +490,94 @@ func (a *agent) preparationPath(sessionID string) string {
 	return filepath.Join(a.preparationDir, sessionKey(sessionID)+".json")
 }
 
+func writePeerPreparation(path string, preparation peerPreparation) error {
+	registration := preparation.Registration
+	product := registration.Product
+	var payload any
+	switch product {
+	case "claude":
+		payload = claudePreparationPayload{
+			ConfigRoot:     registration.ClaudeConfigRoot,
+			KeyBaseline:    append([]ClaudeKeyBaselineEntry(nil), registration.ClaudeKeyBaseline...),
+			KeyBaselineSet: registration.ClaudeKeyBaselineSet,
+			SocketPath:     registration.ClaudeSocketPath, SocketPathSet: registration.ClaudeSocketPathSet,
+		}
+		registration.ClaudeConfigRoot = ""
+		registration.ClaudeKeyBaseline = nil
+		registration.ClaudeKeyBaselineSet = false
+		registration.ClaudeSocketPath = ""
+		registration.ClaudeSocketPathSet = false
+	default:
+		return fmt.Errorf("unsupported peer preparation product %q", product)
+	}
+	payloadBody, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	durable := durablePeerPreparation{
+		Version: peerPreparationVersion, Product: product, Registration: registration,
+		ProductPayload: payloadBody, PriorPreference: preparation.PriorPreference,
+		DesiredPreference: preparation.DesiredPreference, RollbackPreferences: preparation.RollbackPreferences,
+		Committed: preparation.Committed, CleanupDebt: append([]PeerCleanupDebt(nil), preparation.CleanupDebt...),
+	}
+	return writeJSONAtomic(path, durable)
+}
+
+func decodePeerPreparation(body []byte) (peerPreparation, error) {
+	var header struct {
+		Version        int             `json:"version"`
+		Product        string          `json:"product"`
+		Registration   json.RawMessage `json:"registration"`
+		ProductPayload json.RawMessage `json:"product_payload"`
+	}
+	if err := json.Unmarshal(body, &header); err != nil {
+		return peerPreparation{}, err
+	}
+	if header.Version == peerPreparationVersion && header.Product != "" &&
+		len(header.Registration) != 0 && len(header.ProductPayload) != 0 {
+		var durable durablePeerPreparation
+		if err := json.Unmarshal(body, &durable); err != nil || durable.Registration.Product != durable.Product {
+			return peerPreparation{}, errors.New("invalid durable peer preparation envelope")
+		}
+		registration := durable.Registration
+		switch durable.Product {
+		case "claude":
+			var payload claudePreparationPayload
+			if len(durable.ProductPayload) == 0 || json.Unmarshal(durable.ProductPayload, &payload) != nil {
+				return peerPreparation{}, errors.New("invalid Claude peer preparation payload")
+			}
+			registration.ClaudeConfigRoot = payload.ConfigRoot
+			registration.ClaudeKeyBaseline = append([]ClaudeKeyBaselineEntry(nil), payload.KeyBaseline...)
+			registration.ClaudeKeyBaselineSet = payload.KeyBaselineSet
+			registration.ClaudeSocketPath = payload.SocketPath
+			registration.ClaudeSocketPathSet = payload.SocketPathSet
+		default:
+			return peerPreparation{}, fmt.Errorf("unsupported durable peer preparation product %q", durable.Product)
+		}
+		return peerPreparation{
+			Registration: registration, PriorPreference: durable.PriorPreference,
+			DesiredPreference: durable.DesiredPreference, RollbackPreferences: durable.RollbackPreferences,
+			Committed: durable.Committed, CleanupDebt: append([]PeerCleanupDebt(nil), durable.CleanupDebt...),
+		}, nil
+	}
+
+	// Compatibility with the v0.2.0 transactional shape. This is a supported
+	// local durable-state migration, not mixed-version wire compatibility.
+	var preparation peerPreparation
+	if err := json.Unmarshal(body, &preparation); err != nil {
+		return peerPreparation{}, err
+	}
+	if preparation.Registration.SessionID != "" {
+		return preparation, nil
+	}
+	// Development builds briefly persisted the registration directly.
+	var registration PeerRegistration
+	if err := json.Unmarshal(body, &registration); err != nil || registration.SessionID == "" {
+		return peerPreparation{}, errors.New("invalid durable peer preparation")
+	}
+	return peerPreparation{Registration: registration}, nil
+}
+
 //nolint:gocyclo // Loading validates transactional and legacy preparation shapes explicitly.
 func (a *agent) loadPeerPreparations() error {
 	if err := os.MkdirAll(a.preparationDir, 0o700); err != nil {
@@ -479,19 +595,9 @@ func (a *agent) loadPeerPreparations() error {
 		if err != nil {
 			return err
 		}
-		var preparation peerPreparation
-		if err := json.Unmarshal(body, &preparation); err != nil {
-			return errors.New("invalid durable Claude peer preparation")
-		}
-		if preparation.Registration.SessionID == "" {
-			// Development builds briefly persisted the registration directly.
-			// Recover that non-transactional shape so an upgrade can still retire
-			// its exact gated adapter instead of refusing to start the host agent.
-			var legacy PeerRegistration
-			if err := json.Unmarshal(body, &legacy); err != nil {
-				return errors.New("invalid durable Claude peer preparation")
-			}
-			preparation.Registration = legacy
+		preparation, err := decodePeerPreparation(body)
+		if err != nil {
+			return fmt.Errorf("invalid durable peer preparation: %w", err)
 		}
 		registration := preparation.Registration
 		if !validCatalogSessionID(registration.SessionID) || entry.Name() != sessionKey(registration.SessionID)+".json" ||
@@ -585,7 +691,7 @@ func (a *agent) preparePeer(registration PeerRegistration) error {
 		return errors.New("claude peer session already has another prepared attachment")
 	}
 	preparation := peerPreparation{Registration: registration}
-	if err := writeJSONAtomic(a.preparationPath(registration.SessionID), preparation); err != nil {
+	if err := writePeerPreparation(a.preparationPath(registration.SessionID), preparation); err != nil {
 		return err
 	}
 	a.preparations[registration.SessionID] = preparation
@@ -620,7 +726,7 @@ func (a *agent) preparePeerLaunch(
 		preparation := peerPreparation{
 			Registration: registration, PriorPreference: prior, DesiredPreference: desired, RollbackPreferences: true,
 		}
-		if err := writeJSONAtomic(a.preparationPath(registration.SessionID), preparation); err != nil {
+		if err := writePeerPreparation(a.preparationPath(registration.SessionID), preparation); err != nil {
 			return err
 		}
 		a.preparations[registration.SessionID] = preparation
@@ -908,7 +1014,7 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 	}
 	if preparedExists && !prepared.Committed {
 		prepared.Committed = true
-		if err := writeJSONAtomic(a.preparationPath(registration.SessionID), prepared); err != nil {
+		if err := writePeerPreparation(a.preparationPath(registration.SessionID), prepared); err != nil {
 			a.mu.Unlock()
 			return Peer{}, err
 		}
@@ -922,6 +1028,7 @@ func (a *agent) registerPeer(registration PeerRegistration, updateOnly bool) (Pe
 		LifecycleRoot: registration.LifecycleRoot, ClaudeConfigRoot: registration.ClaudeConfigRoot,
 		ClaudeKeyBaseline:    append([]ClaudeKeyBaselineEntry(nil), preparedRegistration.ClaudeKeyBaseline...),
 		ClaudeKeyBaselineSet: preparedRegistration.ClaudeKeyBaselineSet,
+		CleanupDebt:          append([]PeerCleanupDebt(nil), prepared.CleanupDebt...),
 	}
 	a.mu.Unlock()
 	if err := a.persistSessionName(peer, preferenceKind); err != nil {
@@ -1087,6 +1194,7 @@ func (a *agent) reconcilePeerPreparations(logger interface{ Printf(string, ...an
 			LifecycleRoot: registration.LifecycleRoot, ClaudeConfigRoot: registration.ClaudeConfigRoot,
 			ClaudeKeyBaseline:    append([]ClaudeKeyBaselineEntry(nil), registration.ClaudeKeyBaseline...),
 			ClaudeKeyBaselineSet: registration.ClaudeKeyBaselineSet,
+			CleanupDebt:          append([]PeerCleanupDebt(nil), preparation.CleanupDebt...),
 		}
 		if err := retirePeerAdapter(peer); err != nil {
 			logger.Printf("clean prepared Claude peer %s failed: %v", sessionID, err)

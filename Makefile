@@ -2,6 +2,7 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
+QWEN ?= qwen
 # Ignore an inherited GROK environment variable: a long-lived peer may have
 # pinned its own launcher, but that must not disable discovery for a later
 # install. An explicit make command-line GROK=/absolute/path pins one candidate.
@@ -10,7 +11,9 @@ GROK ?=
 GROK_PEER ?= $(BIN_DIR)/grok-peer
 GROK_PLUGIN_VERIFY ?= $(BIN_DIR)/agent-session-runtime
 GROK_PEER_ENV = $(if $(and $(findstring command line,$(GROK_INPUT_ORIGIN)),$(strip $(GROK))),GROK_PEER_GROK_BIN="$(GROK)")
-GOLANGCI_LINT ?= golangci-lint
+GOLANGCI_LINT_VERSION ?= v2.12.2
+TOOLS_BIN_DIR ?= $(CURDIR)/bin/tools
+GOLANGCI_LINT ?= $(TOOLS_BIN_DIR)/golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
 MARKETPLACE ?= agent-sessions
@@ -29,6 +32,9 @@ CLAUDE_MARKETPLACE_ROOT ?= $(CLAUDE_STAGED_ROOT)
 GROK_PLUGIN_ROOT ?= $(INSTALL_ROOT)/grok
 GROK_PLUGIN_NAME := agent-sessions
 GROK_USER_PLUGIN_ROOT ?= $(HOME)/.grok/plugins/$(GROK_PLUGIN_NAME)
+QWEN_PLUGIN_ROOT ?= $(INSTALL_ROOT)/qwen
+QWEN_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' qwen/plugin.json | head -1)
+QWEN_PLUGIN_INSTALLER ?= $(BIN_DIR)/agent-session-runtime
 START_RUNTIME ?= 1
 PEER_FEDERATOR_CONFIG_DIR ?= $(HOME)/.config/peer-federator
 PEER_FEDERATOR_DOC_ROOT ?= $(PREFIX)/share/doc/peer-federator
@@ -74,15 +80,24 @@ BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
 BINARY_NAMES := agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator
 
-.PHONY: all lint test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
+.PHONY: all lint lint-tool test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
 	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
-	dev-install-grok install-all dev-install-all \
+	dev-install-grok validate-qwen install-qwen dev-install-qwen install-all dev-install-all \
 	install-peer-federator install-systemd-user-files install-systemd-user \
 	install-launchd-user-files install-launchd-user repair-projection clean
 
 all: lint test build
 
-lint:
+lint-tool:
+	@if [[ "$(GOLANGCI_LINT)" == "$(TOOLS_BIN_DIR)/golangci-lint" ]]; then \
+		if [[ ! -x "$(GOLANGCI_LINT)" ]] || ! "$(GOLANGCI_LINT)" version | grep -Fq 'version $(patsubst v%,%,$(GOLANGCI_LINT_VERSION)) '; then \
+			command -v go >/dev/null 2>&1 || { printf 'Go is required to install the repository-managed linter\n' >&2; exit 127; }; \
+			mkdir -p "$(TOOLS_BIN_DIR)"; \
+			GOBIN="$(TOOLS_BIN_DIR)" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+		fi; \
+	fi
+
+lint: lint-tool
 	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run
 
@@ -192,9 +207,10 @@ install: install-preflight
 		"$(INSTALL_ROOT)/docs" \
 		"$(INSTALL_ROOT)/grok" \
 		"$(INSTALL_ROOT)/hooks" \
+		"$(INSTALL_ROOT)/qwen" \
 		"$(INSTALL_ROOT)/scripts" \
 		"$(INSTALL_ROOT)/skills"
-	cp -R .agents .codex-plugin deploy docs grok hooks scripts skills "$(INSTALL_ROOT)/"
+	cp -R .agents .codex-plugin deploy docs grok hooks qwen scripts skills "$(INSTALL_ROOT)/"
 	cp .mcp.json README.md "$(INSTALL_ROOT)/"
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
@@ -417,13 +433,35 @@ install-grok: grok-install-preflight validate-grok
 dev-install-grok:
 	$(MAKE) install-grok GROK_PLUGIN_ROOT="$(CURDIR)/grok"
 
+validate-qwen: build
+	@command -v "$(QWEN)" >/dev/null 2>&1 || { \
+		printf 'Qwen Code is required for Qwen plugin installation: %s\n' "$(QWEN)" >&2; \
+		exit 127; \
+	}
+	@test -n "$(QWEN_PLUGIN_VERSION)" || { printf 'Qwen plugin version is missing\n' >&2; exit 1; }
+	@test -f "$(QWEN_PLUGIN_ROOT)/plugin.json" -a -f "$(QWEN_PLUGIN_ROOT)/mcp.json" || { \
+		printf 'Qwen plugin payload is missing at %s\n' "$(QWEN_PLUGIN_ROOT)" >&2; \
+		exit 1; \
+	}
+
+install-qwen: validate-qwen
+	"$(QWEN_PLUGIN_INSTALLER)" qwen-plugin-install \
+		--qwen "$(QWEN)" \
+		--plugin-root "$(abspath $(QWEN_PLUGIN_ROOT))" \
+		--version "$(QWEN_PLUGIN_VERSION)"
+
+dev-install-qwen:
+	$(MAKE) install-qwen QWEN_PLUGIN_ROOT="$(CURDIR)/qwen" QWEN_PLUGIN_INSTALLER="$(BIN_DIR)/agent-session-runtime"
+
 install-all: install
 	$(MAKE) install-claude
 	$(MAKE) install-grok
+	$(MAKE) install-qwen
 
 dev-install-all: dev-install
 	$(MAKE) dev-install-claude
 	$(MAKE) dev-install-grok
+	$(MAKE) dev-install-qwen
 
 repair-projection:
 	@test -n "$(THREAD_ID)" || { printf 'usage: make repair-projection THREAD_ID=<id> [APPLY=1]\n' >&2; exit 2; }

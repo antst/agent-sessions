@@ -221,6 +221,10 @@ func (m *grokLaneManager) start() error {
 	if err != nil {
 		return fmt.Errorf("capture Grok lane manager identity: %w", err)
 	}
+	managerInfo := procinfo.Read(os.Getpid())
+	if managerInfo.Status != procinfo.Known || managerInfo.Start != managerProcStart || managerInfo.StrongStart == "" {
+		return errors.New("capture strong Grok lane manager identity")
+	}
 	m.mu.Lock()
 	if m.closing {
 		m.mu.Unlock()
@@ -228,7 +232,7 @@ func (m *grokLaneManager) start() error {
 		return m.closingError("grok lane manager is closing during startup")
 	}
 	m.listener = listener
-	m.state.ManagerPID, m.state.ManagerProcStart = os.Getpid(), managerProcStart
+	m.state.ManagerPID, m.state.ManagerProcStart, m.state.ManagerStrongStart = os.Getpid(), managerProcStart, managerInfo.StrongStart
 	err = m.persistLocked()
 	m.mu.Unlock()
 	if err != nil {
@@ -322,6 +326,7 @@ func (m *grokLaneManager) start() error {
 	return nil
 }
 
+//nolint:gocyclo // Worker startup keeps process, ledger, ACP, and publication state in one fail-closed transaction.
 func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	grokBin := strings.TrimSpace(os.Getenv("GROK_PEER_GROK_BIN"))
 	if grokBin == "" {
@@ -378,6 +383,10 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	err = m.persistLocked()
 	m.mu.Unlock()
 	if err != nil {
+		stopGrokManagedProcess(worker, 2*time.Second)
+		return err
+	}
+	if err := m.prepareSharedToolRootLedger(); err != nil {
 		stopGrokManagedProcess(worker, 2*time.Second)
 		return err
 	}
@@ -1326,8 +1335,8 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		// root before ACP shutdown changes ancestry. Registered roots remain
 		// authoritative after manager death even when Darwin hides their env.
 		taggedCleanupErr := registryErr
-		if taggedCleanupErr == nil {
-			taggedCleanupErr = stopGrokTaggedProcesses(cleanupState.LaunchTokenHash, os.Getpid(), cleanupRoots...)
+		if taggedCleanupErr == nil && registryGuard != nil && registryGuard.ledger != nil {
+			taggedCleanupErr = registryGuard.ledger.reconcileCleanup()
 		}
 		if client != nil {
 			client.close()
@@ -1358,7 +1367,8 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		if cleanupErr == nil {
 			m.mu.Lock()
 			previous := cloneGrokLaneState(m.state)
-			m.state.ManagerPID, m.state.ManagerProcStart, m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerStrongStart, m.state.WorkerSessionID = 0, "", 0, "", "", 0
+			m.state.ManagerPID, m.state.ManagerProcStart, m.state.ManagerStrongStart = 0, "", ""
+			m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerStrongStart, m.state.WorkerSessionID = 0, "", "", 0
 			m.state.ControlSocket, m.state.MessagingSocket, m.state.StartupID = "", "", ""
 			if err := m.persistLocked(); err != nil {
 				m.state = previous

@@ -68,6 +68,8 @@ func TestCodexPeerInformationalAndPassthroughPreserveNativeArgv(t *testing.T) {
 	for _, args := range [][]string{
 		{"-n", "ignored", "--version"},
 		{"-C", root, "completion", "bash"},
+		{"agents"},
+		{"queue", "thread", "message"},
 		{"app"},
 		{"migrate-rollouts"},
 	} {

@@ -527,6 +527,9 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
    [[ ! -f "$custom_install_root/skills/codex-lane/SKILL.md" ]] ||
    [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
+   [[ ! -f "$custom_install_root/qwen/plugin.json" ]] ||
+   [[ ! -f "$custom_install_root/qwen/mcp.json" ]] ||
+   [[ ! -f "$custom_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
    [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
    [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
@@ -787,6 +790,13 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
    [[ ! -f "$release_root/grok/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.mcp.json" ]] ||
    [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
+   [[ ! -f "$release_root/qwen/plugin.json" ]] ||
+   [[ ! -f "$release_root/qwen/mcp.json" ]] ||
+   [[ ! -f "$release_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/codex-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/claude-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/grok-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/qwen-lane/SKILL.md" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
@@ -845,6 +855,9 @@ for packaged_doc in \
 done
 if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
    [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
+   [[ ! -f "$release_install_root/qwen/plugin.json" ]] ||
+   [[ ! -f "$release_install_root/qwen/mcp.json" ]] ||
+   [[ ! -f "$release_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
   printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
   exit 1

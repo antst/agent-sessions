@@ -134,9 +134,14 @@ func ownedBridgeState(state map[string]any, statePath, runtimeRoot, registryRoot
 		return false
 	}
 	key := sessionKey(sessionID)
+	backend := stringValue(state["backendSocketPath"])
+	stable := stringValue(state["socketPath"])
+	legacyBackend := filepath.Join(runtimeRoot, strconv.Itoa(pid)+".sock")
+	currentSocket := filepath.Join(runtimeRoot, "session-"+key+".sock")
+	validSocketShape := samePath(stable, currentSocket) &&
+		(samePath(backend, currentSocket) || samePath(backend, legacyBackend))
 	return filepath.Base(statePath) == "state.json" && filepath.Base(filepath.Dir(statePath)) == key &&
-		samePath(stringValue(state["backendSocketPath"]), filepath.Join(runtimeRoot, strconv.Itoa(pid)+".sock")) &&
-		samePath(stringValue(state["socketPath"]), filepath.Join(runtimeRoot, "session-"+key+".sock")) &&
+		validSocketShape &&
 		samePath(stringValue(state["registryFile"]), filepath.Join(registryRoot, strconv.Itoa(pid)+".json"))
 }
 

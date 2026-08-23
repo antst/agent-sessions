@@ -81,7 +81,7 @@ var nativeToolDefinitions = []map[string]any{
 		"name": "lane", "description": "Run one exact local or federated Codex, Claude, or Grok lane lifecycle command for this attested parent. Use this instead of invoking a lane executable from a sandboxed shell.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
-				"product":    map[string]any{"type": "string", "enum": []string{"codex", "claude", "grok"}},
+				"product":    map[string]any{"type": "string", "enum": mcpLaneProductIDs()},
 				"command":    map[string]any{"type": "string", "enum": []string{"doctor", "list", "run", "start", "resume", "wait", "status", "interrupt", "archive"}},
 				"arguments":  map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": 4096}, "maxItems": 256, "description": "Native arguments after the lifecycle command."},
 				"input":      map[string]any{"type": "string", "maxLength": maxFrameBytes, "description": "Optional stdin briefing for run, start, or resume."},

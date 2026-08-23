@@ -77,10 +77,11 @@ func callMCPParentLane(paths nativePaths, args map[string]any, callerSessionID s
 
 func parseMCPParentLaneRequest(args map[string]any) (mcpLaneRequest, error) {
 	request := mcpLaneRequest{product: strings.TrimSpace(stringValue(args["product"]))}
-	request.role = map[string]string{"codex": "lane", "claude": "claude-lane", "grok": "grok-lane"}[request.product]
-	if request.role == "" {
-		return mcpLaneRequest{}, errors.New("lane product must be codex, claude, or grok")
+	product, ok := bridgeProductByID(request.product)
+	if !ok {
+		return mcpLaneRequest{}, errors.New("lane product is not supported")
 	}
+	request.role = product.descriptor.LaneRuntimeRole
 	request.command = strings.TrimSpace(stringValue(args["command"]))
 	if !mcpLaneCommands[request.command] {
 		return mcpLaneRequest{}, errors.New("unsupported lane lifecycle command")

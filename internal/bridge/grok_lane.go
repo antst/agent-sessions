@@ -85,6 +85,7 @@ type grokLaneState struct {
 	Status                string             `json:"status"`
 	ManagerPID            int                `json:"managerPid,omitempty"`
 	ManagerProcStart      string             `json:"managerProcStart,omitempty"`
+	ManagerStrongStart    string             `json:"managerStrongStart,omitempty"`
 	ControlSocket         string             `json:"controlSocket,omitempty"`
 	ManagerLog            string             `json:"managerLog,omitempty"`
 	WorkerPID             int                `json:"workerPid,omitempty"`
