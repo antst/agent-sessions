@@ -206,7 +206,7 @@ func TestGrokPeerTitleResumePreservesNativeSelectorAndHostContext(t *testing.T) 
 		LateBoundResume: true, PeerContext: plan.peerContext, YoloSpecified: plan.permissionSpecified,
 	}
 	hostArgs := grokHostArguments(request)
-	wantPairs := [][]string{{"--late-bound-resume"}, {"--groups-json", `["umka"]`}, {"--groups-specified", "true"}}
+	wantPairs := [][]string{{"--late-bound-resume"}, {"--groups-json", `["umka"]`}, {"--groups-specified=true"}}
 	for _, want := range wantPairs {
 		if !containsArgumentSequence(hostArgs, want) {
 			t.Fatalf("host args %q do not contain %q", hostArgs, want)
@@ -289,7 +289,7 @@ func TestGrokHostContractAndReadinessValidation(t *testing.T) {
 		"grok-host", "--session-id", testGrokSessionID, "--cwd", root,
 		"--owner-pid", "42", "--owner-proc-start", "start-token",
 		"--permission-mode", "bypassPermissions", "--grok-bin", "/opt/grok/bin/grok",
-		"--name-specified", "true", "--name", "reviewer",
+		"--name-specified=true", "--name", "reviewer",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("host args = %q, want %q", got, want)

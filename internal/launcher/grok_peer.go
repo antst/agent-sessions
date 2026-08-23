@@ -773,13 +773,19 @@ func grokHostArguments(request grokHostRequest) []string {
 	}
 	if request.LateBoundResume {
 		args = append(args, "--late-bound-resume")
-		contextArgs := request.PeerContext.launchArguments(
-			request.PermissionMode == "bypassPermissions", request.YoloSpecified,
+		groupsJSON, _ := json.Marshal(request.PeerContext.groups)
+		args = append(args,
+			"--groups-json", string(groupsJSON),
+			"--groups-specified="+boolString(request.PeerContext.groupsSpecified),
+			"--parent-session", request.PeerContext.parentSession,
+			"--parent-specified="+boolString(request.PeerContext.parentSpecified),
+			"--inherit-parent-groups="+boolString(request.PeerContext.inheritParentGroups),
+			"--inherit-groups-specified="+boolString(request.PeerContext.inheritGroupsSpecified),
+			"--always-approve="+boolString(request.PermissionMode == "bypassPermissions"),
+			"--always-approve-specified="+boolString(request.YoloSpecified),
 		)
-		// AgentRuntimeDir was already supplied from this exact request above.
-		args = append(args, contextArgs[2:]...)
 	}
-	args = append(args, "--name-specified", boolString(request.NameSpecified))
+	args = append(args, "--name-specified="+boolString(request.NameSpecified))
 	if request.Name != "" {
 		args = append(args, "--name", request.Name)
 	}

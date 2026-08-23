@@ -1840,6 +1840,21 @@ func TestGrokRuntimePathsStayCompactAndDoNotExposeToken(t *testing.T) {
 	}
 }
 
+func TestGrokHostCommandAcceptsExplicitBooleanFlagValues(t *testing.T) {
+	t.Setenv(grokLaunchTokenEnv, "")
+	rc := runGrokHostCommand([]string{
+		"--grok-bin", "/bin/false", "--session-id", "019fe660-1c86-7700-b462-6ff16de00fc5",
+		"--cwd", t.TempDir(), "--owner-pid", strconv.Itoa(os.Getpid()),
+		"--owner-proc-start", readProcStart(os.Getpid()), "--late-bound-resume",
+		"--name-specified=false", "--groups-json", `[]`, "--groups-specified=false",
+		"--parent-session", "", "--parent-specified=false", "--inherit-parent-groups=false",
+		"--inherit-groups-specified=false", "--always-approve=false", "--always-approve-specified=false",
+	})
+	if rc != 1 {
+		t.Fatalf("boolean host flags failed parsing: rc=%d", rc)
+	}
+}
+
 func startTestGrokHost(t *testing.T, ownerPID int, ownerStart, sessionID string) (*grokHost, context.CancelFunc, <-chan error, string) {
 	t.Helper()
 	root := t.TempDir()
