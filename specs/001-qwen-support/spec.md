@@ -378,6 +378,13 @@ owner's native profile and credentials are unchanged.
   model-facing skills, runtime instructions, dynamic-tool dispatch, documentation, and acceptance
   evidence MUST NOT expose the historical vendor-specific `claude_peer` namespace or a compatibility
   alias for it.
+- **FR-033**: Every Claude-facing model skill MUST use the structured `agent_sessions` tools for
+  Agent Sessions discovery, send, multicast, broadcast, acknowledgment, and reply. If a structured
+  tool is unavailable, inactive, or fails, the skill MUST require reporting that exact failure and
+  stopping. It MUST NOT instruct the model to retry through native Claude `ListAgents`,
+  `SendMessage`, a host-agent service row, or a framed native carrier. The low-level carrier may
+  remain implemented as an explicit protocol-compatibility surface, but it is not an automatic
+  model fallback.
 
 ### Key Entities
 
@@ -454,6 +461,9 @@ owner's native profile and credentials are unchanged.
 - **SC-012**: All four installed product plugins advertise exactly one `agent_sessions` MCP server,
   every structured discover/send/broadcast/lane call uses that namespace, and repository completeness
   tests find zero public `claude_peer` namespace references.
+- **SC-013**: Every packaged Claude-facing skill contains structured `agent_sessions` guidance and
+  contains no framed-native-carrier instruction; a regression test fails if the carrier marker or
+  host-agent service target reappears in any of those skills.
 
 ## Assumptions
 

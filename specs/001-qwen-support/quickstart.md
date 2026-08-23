@@ -99,6 +99,9 @@ Validate:
    separately inspect every live Codex, Grok, and Qwen session-stable published endpoint with
    `lstat`, require a Unix socket rather than a symlink, and complete correlated managed
    Claude-to-Codex and Claude-to-Grok deliveries through those exact paths without resolving them;
+   separately force one structured Claude messaging operation to fail and require Claude to report
+   that failure without invoking native `ListAgents`, native `SendMessage`, the host-agent service
+   row, or a framed carrier retry;
 6. inbound delivery while idle and busy exactly once;
 7. bare `qwen` may show installed surfaces but has no successful Agent Sessions operation;
 8. exact UUID and unique-name resume preserve transcript/profile/groups and use the durable launch

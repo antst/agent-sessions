@@ -92,7 +92,9 @@ identity: the runtime requires exact ancestry beneath the live native Claude ada
 owner, then corroborates the same UUID, process starts, native registry row, messaging socket, and
 host-agent registration. Bare Claude and an unrelated process fail closed. Native Claude
 `SendMessage` to `agent-sessions--HOST` remains only a framed compatibility carrier; its carrier
-acknowledgment is not evidence that an unframed peer reply was delivered.
+acknowledgment is not evidence that an unframed peer reply was delivered. Current Claude-facing
+skills never select that carrier as an automatic fallback: if a structured `agent_sessions` call is
+inactive or fails, they report the failure and stop instead of switching channels.
 
 The launcher removes only its own `-n/--peer-name` and, for resume, the selector it resolves to one
 UUID. It invokes the managed `--remote unix:// resume UUID` target, supplies a canonical cwd when the

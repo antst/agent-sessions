@@ -221,6 +221,30 @@ func TestPublicMCPNamespaceIsProductNeutral(t *testing.T) {
 	}
 }
 
+func TestClaudeSkillsRequireStructuredMessagingWithoutNativeFallback(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, relative := range []string{
+		"claude/skills/agent-sessions/SKILL.md",
+		"claude/skills/codex-lane/SKILL.md",
+		"claude/skills/claude-lane/SKILL.md",
+		"claude/skills/grok-lane/SKILL.md",
+	} {
+		body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(body)
+		if !strings.Contains(text, "agent_sessions") {
+			t.Errorf("%s does not direct Claude to structured Agent Sessions tools", relative)
+		}
+		for _, forbidden := range []string{"AGENT_SESSIONS_FRAME", "agent-sessions--HOST"} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s retains native-carrier fallback %q", relative, forbidden)
+			}
+		}
+	}
+}
+
 func TestExistingLaneParsedGroupOptionsAreAdvertisedInHelp(t *testing.T) {
 	for product, usage := range map[string]string{
 		"codex": laneUsage(), "claude": claudeLaneUsage(), "grok": grokLaneUsage(), "qwen": qwenLaneUsage(),

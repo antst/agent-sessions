@@ -111,6 +111,12 @@ The service session is not a group member and is never a broadcast recipient.
 There is one service session per host/profile, not one service session per
 group or remote peer.
 
+This carrier remains a protocol compatibility surface, not an automatic retry
+policy. Current Claude-facing skills use the structured `agent_sessions` MCP
+tools exclusively for Agent Sessions operations. If those tools are inactive or
+fail, the model must report that failure and stop rather than retrying with
+native `ListAgents` or `SendMessage`.
+
 Installation does not change the profile's default `crossSessionInbound`
 policy. Each managed Claude peer or lane supplies `accept` only as a launch
 override; ordinary Claude keeps the operator's `reject`, `prompt`, or `accept`

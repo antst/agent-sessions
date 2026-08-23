@@ -100,7 +100,11 @@ if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$self_skill" | head -1)" != claude-la
 fi
 messaging_skill="$plugin_root/claude/skills/agent-sessions/SKILL.md"
 if [[ "$(sed -n 's/^name:[[:space:]]*//p' "$messaging_skill" | head -1)" != agent-sessions ]] ||
-   ! grep -Fq '"type":"broadcast"' "$messaging_skill"; then
+   ! grep -Fq 'agent_sessions.list_peers' "$messaging_skill" ||
+   ! grep -Fq 'agent_sessions.send_message' "$messaging_skill" ||
+   ! grep -Fq 'agent_sessions.broadcast' "$messaging_skill" ||
+   ! grep -Fq "Do not fall back to Claude's native" "$messaging_skill" ||
+   grep -Fq 'AGENT_SESSIONS_FRAME' "$messaging_skill"; then
   printf 'Claude grouped messaging skill is incomplete\n' >&2
   exit 1
 fi

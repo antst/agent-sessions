@@ -21,10 +21,11 @@ parent’s other groups; use repeatable `--group NAME` for child-specific groups
 `--no-inherit-groups` resets optional inheritance without removing the anchor.
 Omitted resume flags restore the durable choice.
 
-Discover and message the child through the `agent-sessions` skill: send the
-complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the single host-agent service projected into
-the shared Claude profile. The lane is also a real native Claude registry row;
-only AgentFrame discovery and routing are group-filtered.
+Discover and message the child through the `agent-sessions` skill using
+`agent_sessions.list_peers` and `agent_sessions.send_message`. The lane is also
+a real native Claude registry row, but native Claude messaging is not an Agent
+Sessions fallback; report a structured-tool failure instead of switching
+channels. Only Agent Sessions discovery and routing are group-filtered.
 
 For a remote target use `peer-federator lane --host HOST --product claude --`
 after `status`, `hosts`, and remote doctor. Never fall back to SSH. Federation
