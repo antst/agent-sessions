@@ -34,10 +34,12 @@ func TestResolveExplicitProfilePreservesValueAndPresence(t *testing.T) {
 	identity := resolveTestIdentity(t, map[string]string{
 		"HOME": root, "QWEN_HOME": qwenHome, "QWEN_RUNTIME_DIR": runtimeDir,
 	})
-	if !identity.QwenHomeSet || identity.QwenHome != qwenHome {
+	canonicalHome := canonicalExistingTestPath(t, qwenHome)
+	canonicalRuntime := canonicalExistingTestPath(t, runtimeDir)
+	if !identity.QwenHomeSet || identity.QwenHome != canonicalHome {
 		t.Fatalf("explicit QWEN_HOME identity = %#v", identity)
 	}
-	if !identity.QwenRuntimeSet || identity.QwenRuntimeDir != runtimeDir {
+	if !identity.QwenRuntimeSet || identity.QwenRuntimeDir != canonicalRuntime {
 		t.Fatalf("explicit QWEN_RUNTIME_DIR identity = %#v", identity)
 	}
 	assertProfileFingerprint(t, identity.Fingerprint)
@@ -77,8 +79,10 @@ func TestResolveCanonicalizesAbsoluteProfilePaths(t *testing.T) {
 		"QWEN_HOME":        filepath.Join(root, "profiles", "discard", "..", "qwen"),
 		"QWEN_RUNTIME_DIR": filepath.Join(root, "unused", "..", "runtime"),
 	})
-	if identity.QwenHome != qwenHome || identity.QwenRuntimeDir != runtimeDir {
-		t.Fatalf("canonical profile identity = %#v, want home=%q runtime=%q", identity, qwenHome, runtimeDir)
+	canonicalHome := canonicalExistingTestPath(t, qwenHome)
+	canonicalRuntime := canonicalExistingTestPath(t, runtimeDir)
+	if identity.QwenHome != canonicalHome || identity.QwenRuntimeDir != canonicalRuntime {
+		t.Fatalf("canonical profile identity = %#v, want home=%q runtime=%q", identity, canonicalHome, canonicalRuntime)
 	}
 	if !filepath.IsAbs(identity.QwenHome) || !filepath.IsAbs(identity.QwenRuntimeDir) {
 		t.Fatalf("profile identity is not absolute: %#v", identity)
@@ -249,6 +253,15 @@ func assertProfileFingerprint(t *testing.T, fingerprint string) {
 	if !fingerprintPattern.MatchString(fingerprint) {
 		t.Fatalf("profile fingerprint = %q, want lowercase SHA-256", fingerprint)
 	}
+}
+
+func canonicalExistingTestPath(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func withTestFingerprint(identity Identity, fingerprint string) Identity {

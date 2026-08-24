@@ -102,7 +102,9 @@ The helper is never a federation listener, peer transport, or persistent service
 ## Profile contract
 
 - Unset `QWEN_HOME` means the native default profile.
-- Explicit `QWEN_HOME` is canonical and absolute.
+- Explicit `QWEN_HOME` is canonical and absolute. Mutable symlink components
+  fail closed; fixed platform-owned aliases such as macOS `/tmp` and `/var`
+  resolve to their native targets.
 - `QWEN_RUNTIME_DIR` value or absence is part of exact transcript identity.
 - Launch never copies/migrates credentials, settings, skills, plugins, or transcripts.
 - Qwen-owned counters/caches/bookkeeping inside the selected profile are allowed and inventoried

@@ -94,9 +94,11 @@ Claude socket/key evidence or introducing a weaker parallel transaction.
 ## Decision 5: use native `QWEN_HOME` as the explicit profile identity
 
 **Decision**: The default launch leaves `QWEN_HOME` unset and records the canonical effective
-default. An explicit profile override sets a canonical absolute `QWEN_HOME`; relative values are
-rejected. The exact `QWEN_HOME` and `QWEN_RUNTIME_DIR` value-or-absence are persisted and required on
-resume. Agent Sessions never searches, copies, or borrows another profile.
+default. An explicit profile override sets a canonical absolute `QWEN_HOME`; relative values and
+mutable symlink components are rejected. Fixed platform-owned aliases are resolved to their native
+targets (for example, macOS `/tmp` and `/var` become `/private/tmp` and `/private/var`). The exact
+canonical `QWEN_HOME` and `QWEN_RUNTIME_DIR` value-or-absence are persisted and required on resume.
+Agent Sessions never searches, copies, or borrows another profile.
 
 **Rationale**: Qwen has no native `--profile`; `QWEN_HOME` is its supported global-state override
 and owns credentials, settings, transcripts, memory, extensions, and skills. Relative values are

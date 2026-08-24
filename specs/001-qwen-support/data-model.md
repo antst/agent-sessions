@@ -32,9 +32,9 @@ Durable value that binds a managed peer or lane to Qwen-owned state.
 | Field | Type | Validation |
 |---|---|---|
 | `qwen_home_set` | boolean | Presence-sensitive; distinguishes unset default from explicit path. |
-| `qwen_home` | absolute canonical path | Required iff `qwen_home_set`; no relative path or symlink ambiguity. |
+| `qwen_home` | absolute canonical path | Required iff `qwen_home_set`; no relative path or mutable symlink ambiguity. Fixed platform-owned aliases such as macOS `/tmp` and `/var` resolve to their native targets. |
 | `qwen_runtime_dir_set` | boolean | Presence-sensitive. |
-| `qwen_runtime_dir` | absolute canonical path | Required iff set. |
+| `qwen_runtime_dir` | absolute canonical path | Required iff set; follows the same canonical alias policy as `qwen_home`. |
 | `profile_fingerprint` | digest | Digest of canonical value-or-absence, not credentials or settings contents. |
 | `integration_id` | string | Must be `agent-sessions`. |
 | `integration_version` | semver/build identity | Must match the installed Agent Sessions release. |

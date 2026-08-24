@@ -22,8 +22,8 @@ reported `0.2.0`, as required before T082 takes exclusive ownership of the `0.2.
   the hub and host, and does not opt into `--enable-remote-lanes`; the environment contains exactly
   the documented Qwen launcher/profile variables in addition to the template's fixed launch data.
 - `go test ./internal/qwenprofile -count=1`: PASS. This proves unset profile variables preserve the
-  native default, explicit values are canonical absolute non-symlink paths, set-empty values fail,
-  and both variables participate in profile identity.
+  native default, explicit values are canonical absolute paths without mutable symlink ambiguity,
+  set-empty values fail, and both variables participate in profile identity.
 - Focused launcher and federator Qwen/profile tests: PASS. The agent consumes
   `PEER_FEDERATOR_QWEN_LANE`, withholds Qwen capability until the shared readiness engine succeeds,
   and retains the one-agent runtime lock.

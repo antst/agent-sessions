@@ -10,7 +10,9 @@ The integration is installed into exactly the profile selected by the current
 environment:
 
 - with `QWEN_HOME` unset, Qwen's native `$HOME/.qwen` default is preserved;
-- with `QWEN_HOME` set, it must be a non-empty absolute non-symlink path;
+- with `QWEN_HOME` set, it must be a non-empty canonical absolute path with no
+  mutable symlink ambiguity; fixed macOS `/tmp` and `/var` system aliases are
+  resolved to their `/private/...` targets;
 - `QWEN_RUNTIME_DIR`, when set, has the same presence-sensitive rule.
 
 Run install, doctor, the host agent, peers, and lanes with the same values. An

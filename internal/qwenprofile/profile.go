@@ -149,28 +149,38 @@ func selectedPath(lookup LookupEnv, name string) (string, bool, error) {
 	return canonical, true, nil
 }
 
-// canonicalPath normalizes lexical spelling while refusing any symlink in an
-// existing path component. Identity must not silently change through a later
-// symlink retarget, and missing leaves remain valid for first-run profiles.
+// canonicalPath normalizes lexical spelling while refusing mutable symlinks in
+// existing path components. Platform-owned aliases may be resolved to their
+// fixed targets; missing leaves remain valid for first-run profiles.
 func canonicalPath(name, value string) (string, error) {
 	clean := filepath.Clean(value)
 	volume := filepath.VolumeName(clean)
 	relative := clean[len(volume):]
 	current := volume + string(filepath.Separator)
-	for _, component := range splitPath(relative) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
+	components := splitPath(relative)
+	for index, component := range components {
+		next := filepath.Join(current, component)
+		info, err := os.Lstat(next)
 		if os.IsNotExist(err) {
-			break
+			return filepath.Join(append([]string{current}, components[index:]...)...), nil
 		}
 		if err != nil {
 			return "", fmt.Errorf("inspect %s path: %w", name, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("%s path contains symlink component %q", name, current)
+			resolved, allowed, resolveErr := resolvePlatformPathAlias(next)
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve %s path alias %q: %w", name, next, resolveErr)
+			}
+			if !allowed {
+				return "", fmt.Errorf("%s path contains symlink component %q", name, next)
+			}
+			current = resolved
+			continue
 		}
+		current = next
 	}
-	return clean, nil
+	return current, nil
 }
 
 func splitPath(path string) []string {
