@@ -335,6 +335,77 @@ printf '%s\n' "$*" >>"$QWEN_TEST_LOG"
 	}
 }
 
+func TestQwenPluginSameVersionDriftUsesNativeReplacement(t *testing.T) {
+	root := t.TempDir()
+	qwenHome := filepath.Join(root, "qwen-home")
+	qwenRuntime := filepath.Join(root, "qwen-runtime")
+	source := filepath.Join(root, "source")
+	installed := filepath.Join(qwenHome, "extensions", qwenPluginName)
+	statePath := filepath.Join(qwenHome, "extension-store", "state.json")
+	settingsPath := filepath.Join(qwenHome, "settings.json")
+	qwenTestPluginFixtureAt(t, source)
+	qwenTestPluginFixtureAt(t, installed)
+	qwenTestRewriteJSONObject(t, filepath.Join(installed, "mcp.json"), func(value map[string]any) {
+		servers := value["mcpServers"].(map[string]any)
+		servers[qwenTestMCPName].(map[string]any)["command"] = "agent-session-runtime"
+	})
+	if err := os.Remove(filepath.Join(installed, "scripts", "native-entry")); err != nil {
+		t.Fatal(err)
+	}
+	qwenTestWriteJSON(t, filepath.Join(installed, ".qwen-extension-install.json"), map[string]any{
+		"type": "local", "source": source,
+	})
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	qwenTestWriteJSON(t, statePath, map[string]any{"version": 2, "extensions": map[string]any{
+		"agent-sessions": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+	}})
+	if err := os.WriteFile(settingsPath, []byte("{\"theme\":\"owner\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "qwen.log")
+	fakeQwen := filepath.Join(root, "qwen")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$QWEN_TEST_LOG"
+case "$2" in
+  uninstall)
+    /usr/bin/find "$QWEN_HOME/extensions/agent-sessions" -depth -delete
+    ;;
+  install)
+    plugin_source=$3
+    /bin/mkdir -p "$QWEN_HOME/extensions/agent-sessions"
+    /bin/cp -R "$plugin_source/." "$QWEN_HOME/extensions/agent-sessions/"
+    printf '{"type":"local","source":"%s"}\n' "$plugin_source" >"$QWEN_HOME/extensions/agent-sessions/.qwen-extension-install.json"
+    ;;
+  *) exit 64 ;;
+esac
+`
+	if err := os.WriteFile(fakeQwen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QWEN_HOME", qwenHome)
+	t.Setenv("QWEN_RUNTIME_DIR", qwenRuntime)
+	t.Setenv("QWEN_TEST_LOG", logPath)
+	if exit := runQwenPluginInstall([]string{
+		"--qwen", fakeQwen, "--plugin-root", source, "--version", qwenTestPluginVersion,
+	}); exit != 0 {
+		t.Fatalf("same-version Qwen drift reconciliation exit = %d", exit)
+	}
+	wantLog := "extensions uninstall agent-sessions\n" +
+		"extensions install " + source + " --scope user --consent\n"
+	if body, err := os.ReadFile(logPath); err != nil || string(body) != wantLog {
+		t.Fatalf("same-version Qwen drift reconciliation commands = %q, %v", body, err)
+	}
+	if err := verifyQwenPluginInstallation(installed, qwenTestPluginVersion, true); err != nil {
+		t.Fatalf("reconciled Qwen plugin = %v", err)
+	}
+	if body, err := os.ReadFile(settingsPath); err != nil || string(body) != "{\"theme\":\"owner\"}\n" {
+		t.Fatalf("Qwen owner settings changed: %q, %v", body, err)
+	}
+}
+
 func TestQwenPluginInstallReconcilesSameVersionDeveloperSource(t *testing.T) {
 	root := t.TempDir()
 	qwenHome := filepath.Join(root, "qwen-home")

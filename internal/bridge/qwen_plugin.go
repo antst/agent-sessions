@@ -218,16 +218,18 @@ func runQwenPluginInstall(args []string) int {
 	}
 	command := install
 	if _, statErr := os.Lstat(root); statErr == nil {
-		// Qwen's native update is transactional and follows the source recorded
-		// by the native installer. Normal installed releases keep that source at
-		// INSTALL_ROOT/qwen, so an updated payload is adopted without an
-		// uninstall/reinstall gap.
+		// Qwen's native update follows the source recorded by the native
+		// installer for a version change. It treats a same-version local source
+		// as already current even when its payload changed, so exact drift at the
+		// same version must use the native scoped uninstall/install transaction.
 		source, sourceErr := installedQwenPluginSource(root)
 		if sourceErr != nil {
 			fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", sourceErr)
 			return 1
 		}
-		if sameQwenPluginSource(source, values.pluginRoot) {
+		manifest, manifestErr := readQwenPluginObject(filepath.Join(root, "plugin.json"))
+		sameVersion := manifestErr == nil && stringValue(manifest["version"]) == values.version
+		if sameQwenPluginSource(source, values.pluginRoot) && !sameVersion {
 			command = exec.Command(values.qwen, "extensions", "update", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
 			command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
 		} else {

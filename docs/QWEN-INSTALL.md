@@ -35,7 +35,11 @@ remains strict when requested directly. A prebuilt archive needs no Go toolchain
 platform binaries are validated before installation.
 
 The Qwen operation uses native `qwen extensions install/update/uninstall` at
-user scope. Before and after a mutation it verifies the exact Agent Plugins v1
+user scope. A version change uses native update. Because Qwen treats a
+same-version local source as already current even when its files changed,
+same-version drift or source reconciliation uses a scoped native
+uninstall/install of `agent-sessions` after the live-profile refusal gate.
+Before and after a mutation it verifies the exact Agent Plugins v1
 manifest, version, enabled policy, one `agent_sessions` stdio MCP server, and
 five direct-child skills (`agent-sessions` plus four lane skills). Drift yields
 a cause-specific error. The recorded native extension source must also equal
