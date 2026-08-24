@@ -5,7 +5,7 @@
 - Qwen Code: `0.22.0`
 - Claude Code: `2.1.240`
 - Agent Sessions version: `0.2.4`
-- Credited command: `QWEN_TEST_HOME=/home/antst/.qwen QWEN_TEST_RUNTIME_DIR=<private-runtime> CODEX_TEST_HOME=<isolated-authenticated-home> CLAUDE_TEST_CONFIG_DIR=<isolated-config> CLAUDE_TEST_SECURE_CONFIG_DIR=/home/antst/.claude ./scripts/test-qwen-composition`
+- Credited command: `QWEN_TEST_HOME=/home/antst/.qwen QWEN_TEST_RUNTIME_DIR=<private-runtime> CODEX_TEST_HOME=<isolated-authenticated-home> CLAUDE_TEST_CONFIG_DIR=<isolated-config> CLAUDE_TEST_SECURE_CONFIG_DIR=/home/antst/.claude GROK_TEST_HOME=<isolated-authenticated-home> GROK_TEST_BIN=/home/antst/.grok/bin/grok ./scripts/test-qwen-composition`
 - Result: `qwen.composition.passed` (exit 0)
 
 ## Credited edges
@@ -17,22 +17,22 @@ returned its unique terminal token:
 
 | Parent | Target | Child identity | Exact terminal token |
 | --- | --- | --- | --- |
-| Codex | Codex | `01a03190-ddc5-7723-b709-b1224f34bdc6` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
-| Codex | Claude | `c02ca920-d025-47e7-b905-09344b25146f` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
-| Codex | Grok | `b50c59a2-b127-4b8e-b21a-11c1345d9ee9` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
-| Codex | Qwen | `9f99c696-a973-42f2-9c47-953a1b34570d` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
-| Claude | Codex | `01a03191-962b-7231-95c5-40c23a4b0d5f` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
-| Claude | Claude | `317adfee-73ef-4397-a438-c19c5c47dd34` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
-| Claude | Grok | `8dfdd418-5bee-4e36-8922-a188e11d5ad1` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
-| Claude | Qwen | `af6faf6e-894c-43ec-a889-1ccda67a3595` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
-| Grok | Codex | `01a03192-5484-7412-a660-7a30a0893a49` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
-| Grok | Claude | `f0781d6f-59db-4d88-ab20-93d4768b428f` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
-| Grok | Grok | `e5b3eb4e-7a52-47c6-b655-4dfb99795589` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
-| Grok | Qwen | `1553ca82-07d2-47e8-adf9-4472585703e4` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
-| Qwen | Codex | `01a03193-2737-7f60-8540-781da7f7accb` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
-| Qwen | Claude | `7f2dd98b-a3c3-4768-a1dc-101f02d40958` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
-| Qwen | Grok | `68fdde66-728b-44cd-9bb9-eedd15518e48` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
-| Qwen | Qwen | `739caa4f-e7ad-4a29-8d6f-29bb373b8600` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
+| Codex | Codex | `01a03218-71f3-7a50-9364-4c3cb88b26a8` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
+| Codex | Claude | `9e6cf13c-1c72-4c35-bb60-f1a07f4b5b7d` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
+| Codex | Grok | `6f57f1e9-2087-47b7-9812-1418fbab218b` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
+| Codex | Qwen | `bd9f7279-1622-4cec-be57-572c9d4fb50d` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
+| Claude | Codex | `01a03219-2442-74c1-8b3d-a128b4b742e7` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
+| Claude | Claude | `b197bacc-70bc-4652-b21e-4d2f2dcce327` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
+| Claude | Grok | `4f6707bb-04df-4b0a-8973-20fff1415d44` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
+| Claude | Qwen | `8eb88aea-ebcf-4a7f-a8fb-d3f8815d7d9a` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
+| Grok | Codex | `01a03219-d703-7760-b68f-5d70c9beb433` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
+| Grok | Claude | `69fa2a50-ecbf-46ea-a7d0-af0b25c7bab5` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
+| Grok | Grok | `961bcc6b-6857-46a1-85c8-62a91577ba6a` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
+| Grok | Qwen | `5b597767-f00f-4a29-bf97-8d06297ad045` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
+| Qwen | Codex | `01a0321a-9a95-7e73-9ace-a15110aedff0` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
+| Qwen | Claude | `6ad4748f-efe7-48a4-bb6d-642e0eeb058d` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
+| Qwen | Grok | `9d2fce6e-511a-498a-97b7-1270028e1e87` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
+| Qwen | Qwen | `2cdb7a78-75af-433c-aa12-0d3fd6344a9b` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
 
 For every edge the runner asserted the exact immediate parent session, owner,
 and notification target; the explicit `qwen-composition` group; both mandatory
@@ -63,6 +63,14 @@ credited run:
    lifecycle strong-start identities, exact lifecycle ancestry, and a real
    non-symlink socket. Native-specific inference remains first, and Qwen still
    requires its capability digest.
+4. The first live matrix unknowingly depended on an exact-tip Agent Sessions
+   plugin already installed in the owner's Grok profile. A clean isolated Grok
+   home therefore exposed two missing harness preconditions: the source-tree
+   plugin must be installed into that test-owned profile, and the workspace
+   must be explicitly trusted before Grok will load plugin MCP servers. The
+   runner now performs both operations inside `GROK_TEST_HOME`, pins the native
+   Grok executable through `GROK_TEST_BIN`, and never reads or mutates the
+   owner's plugin/configuration.
 
 Claude authentication also expired between attempts. A direct owner-profile
 inference reproduced the native failure. The operator refreshed Claude through
@@ -70,10 +78,10 @@ its native `/login`; no test or Agent Sessions code read, copied, selected, or
 modified a credential. The credited run used an isolated Claude state/config
 root plus Claude's supported secure-storage namespace selection.
 
-After the credited run all fixture processes, the isolated host agent,
+After the credited rerun all fixture processes, the isolated host agent,
 supervisors, lane managers/workers, delivery sockets, and owned active lane
 records were absent. The supplied isolated profile roots had zero open files
 and zero matching processes. The harness stopped the isolated Codex App Server
 and did not stop or alter the owner's normal Codex daemon. Baseline and final
 SHA-256 values were identical for Codex auth/config, Claude settings and local
-settings, and Qwen settings/extension-store state.
+settings, Grok auth/config, and the complete Qwen profile file manifest.

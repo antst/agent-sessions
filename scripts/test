@@ -45,6 +45,7 @@ import tempfile
 
 module = runpy.run_path(sys.argv[1], run_name="composition_contract_test")
 secure_config = module["claude_test_secure_config"]
+required_executable = module["required_test_executable"]
 
 try:
     secure_config({})
@@ -62,6 +63,15 @@ except AssertionError:
     pass
 else:
     raise AssertionError("relative Claude test secure-storage namespace was accepted")
+
+assert required_executable({"GROK_TEST_BIN": sys.executable}, "GROK_TEST_BIN") == pathlib.Path(sys.executable)
+for invalid in ("", "relative", str(pathlib.Path(sys.executable).parent)):
+    try:
+        required_executable({"GROK_TEST_BIN": invalid}, "GROK_TEST_BIN")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"invalid Grok test executable was accepted: {invalid!r}")
 PY
 
 if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then

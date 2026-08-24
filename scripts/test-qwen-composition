@@ -33,6 +33,14 @@ def required_test_directory(environment: dict[str, str], name: str) -> pathlib.P
     return path
 
 
+def required_test_executable(environment: dict[str, str], name: str) -> pathlib.Path:
+    raw = environment.get(name, "")
+    path = pathlib.Path(raw)
+    if not raw or not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        fail(f"{name} must name an existing absolute executable")
+    return path
+
+
 def claude_test_secure_config(environment: dict[str, str]) -> str:
     name = "CLAUDE_TEST_SECURE_CONFIG_DIR"
     if name not in environment:
@@ -179,11 +187,62 @@ def stop_isolated_codex_app_server(codex_home: pathlib.Path, environment: dict[s
     )
 
 
+def install_isolated_grok_plugin(
+    repo: pathlib.Path,
+    binary_root: pathlib.Path,
+    grok_home: pathlib.Path,
+    grok_binary: pathlib.Path,
+    environment: dict[str, str],
+) -> None:
+    """Install the exact source-tree plugin without touching the owner profile."""
+    plugin_parent = grok_home / ".grok" / "plugins"
+    plugin_root = plugin_parent / "agent-sessions"
+    plugin_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    trust_path = grok_home / ".grok" / "trusted_folders.toml"
+    if trust_path.exists() or trust_path.is_symlink():
+        fail(f"GROK_TEST_HOME must not contain pre-existing workspace trust: {trust_path}")
+    trust_path.write_text(
+        f"[folders.{json.dumps(str(repo))}]\ntrusted = true\ndecided_at = {int(time.time())}\n",
+        encoding="utf-8",
+    )
+    trust_path.chmod(0o600)
+    if plugin_root.exists() or plugin_root.is_symlink():
+        fail(f"GROK_TEST_HOME must not contain a preinstalled agent-sessions plugin: {plugin_root}")
+    stage = pathlib.Path(tempfile.mkdtemp(prefix=".agent-sessions.stage.", dir=plugin_parent))
+    try:
+        shutil.copytree(repo / "grok", stage, dirs_exist_ok=True)
+        os.replace(stage, plugin_root)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+
+    grok_peer = binary_root / "grok-peer"
+    runtime = binary_root / "agent-session-runtime"
+    subprocess.run(
+        [str(grok_peer), "plugin", "install", str(repo / "grok"), "--trust"],
+        env=environment, check=True,
+    )
+    subprocess.run(
+        [str(grok_peer), "plugin", "uninstall", "agent-sessions", "--keep-data"],
+        env=environment, check=True,
+    )
+    inspection = subprocess.run(
+        [str(grok_binary), "inspect", "--json"], env=environment,
+        stdout=subprocess.PIPE, check=True,
+    )
+    subprocess.run(
+        [str(runtime), "grok-plugin-verify", "--root", str(plugin_root)],
+        env=environment, input=inspection.stdout, check=True,
+    )
+
+
 def main() -> int:
     qwen_home = required_test_directory(os.environ, "QWEN_TEST_HOME")
     qwen_runtime = required_test_directory(os.environ, "QWEN_TEST_RUNTIME_DIR")
     codex_home = required_test_directory(os.environ, "CODEX_TEST_HOME")
     claude_config = required_test_directory(os.environ, "CLAUDE_TEST_CONFIG_DIR")
+    grok_home = required_test_directory(os.environ, "GROK_TEST_HOME")
+    grok_binary = required_test_executable(os.environ, "GROK_TEST_BIN")
     claude_secure_config = claude_test_secure_config(os.environ)
     repo = pathlib.Path(__file__).resolve().parents[1]
     temporary_parent = pathlib.Path("/tmp") if platform.system() == "Darwin" else None
@@ -218,6 +277,9 @@ def main() -> int:
             "CLAUDE_CONFIG_DIR": str(claude_config),
             "CLAUDE_SECURESTORAGE_CONFIG_DIR": claude_secure_config,
             "CODEX_HOME": str(codex_home),
+            "GROK_PEER_GROK_BIN": str(grok_binary),
+            "GROK_PEER_NATIVE_RUNTIME": str(binary_root / "agent-session-runtime"),
+            "HOME": str(grok_home),
             "QWEN_HOME": str(qwen_home),
             "QWEN_RUNTIME_DIR": str(qwen_runtime),
             "XDG_RUNTIME_DIR": str(xdg_runtime),
@@ -225,6 +287,7 @@ def main() -> int:
             "AGENT_SESSIONS_AGENT_RUNTIME_DIR": str(runtime),
         })
         pathlib.Path(environment["XDG_STATE_HOME"]).mkdir(mode=0o700)
+        install_isolated_grok_plugin(repo, binary_root, grok_home, grok_binary, environment)
         stop_isolated_codex_app_server(codex_home, environment)
         federator = binary_root / "peer-federator"
         runtime_binary = binary_root / "agent-session-runtime"
