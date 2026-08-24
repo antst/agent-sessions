@@ -477,13 +477,13 @@ dev-install-qwen:
 
 install-all:
 	+@if command -v "$(CODEX)" >/dev/null 2>&1; then \
-		$(INSTALL_ALL_MAKE) install; \
+		"$(INSTALL_ALL_MAKE)" install; \
 	else \
 		printf 'Skipping Codex integration: Codex CLI is not installed (%s).\n' "$(CODEX)"; \
-		$(INSTALL_ALL_MAKE) install INSTALL_CODEX_INTEGRATION=0; \
+		"$(INSTALL_ALL_MAKE)" install INSTALL_CODEX_INTEGRATION=0; \
 	fi
 	+@if command -v "$(CLAUDE)" >/dev/null 2>&1; then \
-		$(INSTALL_ALL_MAKE) install-claude; \
+		"$(INSTALL_ALL_MAKE)" install-claude; \
 	else \
 		printf 'Skipping Claude integration: Claude Code is not installed (%s).\n' "$(CLAUDE)"; \
 	fi
@@ -492,23 +492,23 @@ install-all:
 		if [[ $$grok_status -eq 127 ]]; then \
 			printf 'Skipping Grok integration: Grok is not installed.\n'; \
 		else \
-			$(INSTALL_ALL_MAKE) install-grok; \
+			"$(INSTALL_ALL_MAKE)" install-grok; \
 		fi
 	+@if command -v "$(QWEN)" >/dev/null 2>&1; then \
-		$(INSTALL_ALL_MAKE) install-qwen; \
+		"$(INSTALL_ALL_MAKE)" install-qwen; \
 	else \
 		printf 'Skipping Qwen integration: Qwen Code is not installed (%s).\n' "$(QWEN)"; \
 	fi
 
 dev-install-all:
 	+@if command -v "$(CODEX)" >/dev/null 2>&1; then \
-		$(INSTALL_ALL_MAKE) dev-install; \
+		"$(INSTALL_ALL_MAKE)" dev-install; \
 	else \
 		printf 'Skipping Codex integration: Codex CLI is not installed (%s).\n' "$(CODEX)"; \
-		$(INSTALL_ALL_MAKE) dev-install INSTALL_CODEX_INTEGRATION=0; \
+		"$(INSTALL_ALL_MAKE)" dev-install INSTALL_CODEX_INTEGRATION=0; \
 	fi
 	+@if command -v "$(CLAUDE)" >/dev/null 2>&1; then \
-		$(INSTALL_ALL_MAKE) dev-install-claude; \
+		"$(INSTALL_ALL_MAKE)" dev-install-claude; \
 	else \
 		printf 'Skipping Claude integration: Claude Code is not installed (%s).\n' "$(CLAUDE)"; \
 	fi
@@ -517,10 +517,10 @@ dev-install-all:
 		if [[ $$grok_status -eq 127 ]]; then \
 			printf 'Skipping Grok integration: Grok is not installed.\n'; \
 		else \
-			$(INSTALL_ALL_MAKE) dev-install-grok; \
+			"$(INSTALL_ALL_MAKE)" dev-install-grok; \
 		fi
 	+@if command -v "$(QWEN)" >/dev/null 2>&1; then \
-		$(INSTALL_ALL_MAKE) dev-install-qwen; \
+		"$(INSTALL_ALL_MAKE)" dev-install-qwen; \
 	else \
 		printf 'Skipping Qwen integration: Qwen Code is not installed (%s).\n' "$(QWEN)"; \
 	fi

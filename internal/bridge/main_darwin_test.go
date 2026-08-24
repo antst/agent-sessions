@@ -80,9 +80,10 @@ func setDarwinTestRuntimeRoot(root string) {
 }
 
 func compactDarwinTestRoot() (*darwinTestRootLease, error) {
-	// Punctuation extends the pool for hosts carrying unmarked roots leaked by
-	// older test binaries. Every entry remains one byte, preserving sun_path.
-	const leaves = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()+,-;=@[]^_{}~"
+	// Keep every one-byte leaf safe when a test path crosses a shell boundary.
+	// The 64 choices preserve sun_path headroom while leaving enough leases for
+	// hosts carrying marked roots from abruptly terminated older test binaries.
+	const leaves = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
 	return claimDarwinTestRoot("/tmp", leaves)
 }
 

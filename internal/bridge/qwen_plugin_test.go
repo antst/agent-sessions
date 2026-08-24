@@ -391,7 +391,7 @@ func TestMakefileAggregatesQwenInstallAndUpgradeTargets(t *testing.T) {
 	text := string(body)
 	for _, required := range []string{
 		"install-qwen: validate-qwen", "upgrade-qwen: install-qwen", "remove-qwen: build",
-		"install-all:", "$(INSTALL_ALL_MAKE) install-qwen", "dev-install-all:", "$(INSTALL_ALL_MAKE) dev-install-qwen",
+		"install-all:", "\"$(INSTALL_ALL_MAKE)\" install-qwen", "dev-install-all:", "\"$(INSTALL_ALL_MAKE)\" dev-install-qwen",
 		"INSTALL_CODEX_INTEGRATION=0", "Skipping Grok integration: Grok is not installed.",
 	} {
 		if !strings.Contains(text, required) {
@@ -406,10 +406,14 @@ func TestInstallAllSkipsOnlyUnavailableNativeProducts(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
+	commandRoot := filepath.Join(root, "aggregate;make")
+	if err := os.Mkdir(commandRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	logPath := filepath.Join(root, "make.log")
 	writeScript := func(name, body string) string {
 		t.Helper()
-		path := filepath.Join(root, name)
+		path := filepath.Join(commandRoot, name)
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
