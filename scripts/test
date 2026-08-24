@@ -874,7 +874,7 @@ release_install_root="$temporary_root/release-install"
 : >"$install_codex_record"
 rm -f -- "$install_codex_state"
 FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
-  make -s -C "$release_root" install START_RUNTIME=0 CODEX="$install_codex" \
+  make -s -C "$release_root" install GOOS=linux GOARCH=amd64 START_RUNTIME=0 CODEX="$install_codex" \
     PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
 for packaged_binary in "${release_binaries[@]}"; do
   release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"

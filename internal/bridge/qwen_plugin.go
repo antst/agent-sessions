@@ -189,7 +189,14 @@ func runQwenPluginInstall(args []string) int {
 	statePath := filepath.Join(home, "extension-store", "state.json")
 	if enabled, stateErr := qwenPluginEnabled(statePath); stateErr == nil &&
 		verifyQwenPluginInstallation(root, values.version, enabled) == nil {
-		return 0
+		// Exact payload bytes are not enough for an idempotent installed release:
+		// Qwen's native update follows the source recorded in its install metadata.
+		// Reconcile a same-version developer install back to the immutable selected
+		// INSTALL_ROOT instead of leaving future updates attached to a checkout.
+		if source, sourceErr := installedQwenPluginSource(root); sourceErr == nil &&
+			sameQwenPluginSource(source, values.pluginRoot) {
+			return 0
+		}
 	}
 	if err := refuseLiveQwenPluginMutation(profile); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: %v\n", err)

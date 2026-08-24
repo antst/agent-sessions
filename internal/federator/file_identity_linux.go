@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 package federator
 
@@ -12,5 +12,5 @@ func durableFileIdentity(info os.FileInfo) (uint64, uint64, bool) {
 	if !ok || stat.Dev == 0 || stat.Ino == 0 {
 		return 0, 0, false
 	}
-	return uint64(stat.Dev), uint64(stat.Ino), true //nolint:unconvert // Darwin exposes Dev as int32; Linux already exposes the portable width.
+	return uint64(stat.Dev), uint64(stat.Ino), true //nolint:unconvert // Linux syscall widths vary across supported architectures.
 }

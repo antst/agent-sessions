@@ -294,6 +294,66 @@ printf '%s\n' "$*" >>"$QWEN_TEST_LOG"
 	}
 }
 
+func TestQwenPluginInstallReconcilesSameVersionDeveloperSource(t *testing.T) {
+	root := t.TempDir()
+	qwenHome := filepath.Join(root, "qwen-home")
+	qwenRuntime := filepath.Join(root, "qwen-runtime")
+	developerSource := filepath.Join(root, "checkout", "qwen")
+	installedSource := filepath.Join(root, "stable", "qwen")
+	installed := filepath.Join(qwenHome, "extensions", qwenPluginName)
+	statePath := filepath.Join(qwenHome, "extension-store", "state.json")
+	qwenTestPluginFixtureAt(t, developerSource)
+	qwenTestPluginFixtureAt(t, installedSource)
+	qwenTestPluginFixtureAt(t, installed)
+	qwenTestWriteJSON(t, filepath.Join(installed, ".qwen-extension-install.json"), map[string]any{
+		"type": "local", "source": developerSource,
+	})
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	qwenTestWriteJSON(t, statePath, map[string]any{"version": 2, "extensions": map[string]any{
+		"agent-sessions": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+	}})
+	logPath := filepath.Join(root, "qwen.log")
+	fakeQwen := filepath.Join(root, "qwen")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$QWEN_TEST_LOG"
+case "$2" in
+  uninstall)
+    /usr/bin/find "$QWEN_HOME/extensions/agent-sessions" -depth -delete
+    ;;
+  install)
+    source=$3
+    /bin/mkdir -p "$QWEN_HOME/extensions/agent-sessions"
+    /bin/cp -R "$source/." "$QWEN_HOME/extensions/agent-sessions/"
+    printf '{"type":"local","source":"%s"}\n' "$source" >"$QWEN_HOME/extensions/agent-sessions/.qwen-extension-install.json"
+    ;;
+  *) exit 64 ;;
+esac
+`
+	if err := os.WriteFile(fakeQwen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QWEN_HOME", qwenHome)
+	t.Setenv("QWEN_RUNTIME_DIR", qwenRuntime)
+	t.Setenv("QWEN_TEST_LOG", logPath)
+	if exit := runQwenPluginInstall([]string{
+		"--qwen", fakeQwen, "--plugin-root", installedSource, "--version", qwenTestPluginVersion,
+	}); exit != 0 {
+		t.Fatalf("same-version Qwen source reconciliation exit = %d", exit)
+	}
+	wantLog := "extensions uninstall agent-sessions\n" +
+		"extensions install " + installedSource + " --scope user --consent\n"
+	if body, err := os.ReadFile(logPath); err != nil || string(body) != wantLog {
+		t.Fatalf("same-version source reconciliation commands = %q, %v", body, err)
+	}
+	source, err := installedQwenPluginSource(installed)
+	if err != nil || !sameQwenPluginSource(source, installedSource) {
+		t.Fatalf("reconciled Qwen source = %q, %v", source, err)
+	}
+}
+
 func TestMakefileAggregatesQwenInstallAndUpgradeTargets(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
 	if err != nil {

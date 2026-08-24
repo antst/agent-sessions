@@ -36,8 +36,11 @@ The Qwen operation uses native `qwen extensions install/update/uninstall` at
 user scope. Before and after a mutation it verifies the exact Agent Plugins v1
 manifest, version, enabled policy, one `agent_sessions` stdio MCP server, and
 five direct-child skills (`agent-sessions` plus four lane skills). Drift yields
-a cause-specific error. Exact already-current install and already-absent remove
-are idempotent.
+a cause-specific error. The recorded native extension source must also equal
+the selected stable plugin root: a same-version `dev-install-qwen` is therefore
+reconciled back to `INSTALL_ROOT/qwen` by a later release install instead of
+leaving future native updates attached to a checkout. Exact already-current
+install and already-absent remove are idempotent.
 
 Upgrade or removal refuses while a managed Qwen peer or lane uses that exact
 profile. Stop/archive it and retry. The gate reads process identity and
@@ -63,7 +66,10 @@ For remote Qwen lanes, enable remote lanes only on a trusted hub. The agent
 auto-discovers `qwen-peer-lane`; override it with
 `PEER_FEDERATOR_QWEN_LANE=/absolute/path/qwen-peer-lane`. The agent advertises
 `qwen-lane` only after the same readiness engine passes in its selected
-profile.
+profile. Capabilities are fixed when the agent connects to its hub. If Qwen is
+installed after an already-running agent withheld `qwen-lane`, restart that
+agent after installation; product installation does not stop an unrelated
+federation process automatically.
 
 See [INSTALL.md](INSTALL.md), [QWEN-ADAPTER.md](QWEN-ADAPTER.md), and
 [QWEN-LANES.md](QWEN-LANES.md).

@@ -64,6 +64,10 @@ Remote lanes are disabled unless `--enable-remote-lanes` or
 `PEER_FEDERATOR_GROK_LANE`, and `PEER_FEDERATOR_QWEN_LANE`. The Qwen capability
 is withheld unless the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR`, executable,
 ACP/archive surface, trusted cwd, and installed integration are ready.
+Capabilities are evaluated when the agent starts and are advertised in its hub
+handshake. After installing a previously unavailable product integration,
+restart that agent to advertise the newly ready capability; plugin installation
+does not signal or replace a separately managed federation process.
 
 Every parent product can select every target product. The source parent is
 agent-attested; it is independent from `--product`, which chooses only the

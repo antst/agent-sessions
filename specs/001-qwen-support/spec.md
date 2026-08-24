@@ -198,6 +198,9 @@ owner's native profile and credentials are unchanged.
    **Then** startup fails clearly before publication rather than silently selecting another option.
 4. **Given** an existing native Qwen profile, **When** Agent Sessions is installed, upgraded, used,
    and removed, **Then** credentials and unrelated native settings remain unchanged.
+5. **Given** the same Agent Sessions version was installed previously from a developer checkout,
+   **When** a release installation selects the immutable installed payload, **Then** the native Qwen
+   extension source is reconciled to that payload rather than remaining attached to the checkout.
 
 ### Edge Cases
 
@@ -395,6 +398,9 @@ owner's native profile and credentials are unchanged.
   native product MUST produce an explicit skip and MUST NOT fail installation of the runtime or
   other available integrations. Product-specific install, upgrade, validate, and remove targets
   MUST remain strict when explicitly invoked.
+- **FR-036**: Qwen installation and upgrade MUST verify and reconcile the native extension's recorded
+  source path in addition to payload/version/enabled state. A same-version developer install MUST NOT
+  cause a release install to retain a mutable checkout as its future update source.
 
 ### Key Entities
 
