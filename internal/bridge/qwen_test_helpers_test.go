@@ -29,7 +29,13 @@ const (
 	qwenTestExitAfterStart = "AGENT_SESSIONS_TEST_QWEN_EXIT_AFTER_START"
 )
 
-const qwenTestPollInterval = 5 * time.Millisecond
+const (
+	qwenTestPollInterval = 5 * time.Millisecond
+	// Match the product's bounded lifecycle operations while allowing
+	// race-instrumented subprocess and filesystem transitions on loaded hosts.
+	// Polls and event waits return immediately once the transition completes.
+	qwenTestLifecycleTimeout = 10 * time.Second
+)
 
 type qwenTestPrivatePaths struct {
 	Root       string
@@ -366,7 +372,7 @@ func TestQwenFakeInteractiveExitsWhenTestParentDies(t *testing.T) {
 	}
 	process, _ := os.FindProcess(pid)
 	t.Cleanup(func() { _ = process.Kill() })
-	qwenTestPoll(t, 3*time.Second, "orphaned fake Qwen helper exit", func() (bool, error) {
+	qwenTestPoll(t, qwenTestLifecycleTimeout, "orphaned fake Qwen helper exit", func() (bool, error) {
 		err := syscall.Kill(pid, 0)
 		if errors.Is(err, syscall.ESRCH) {
 			return true, nil

@@ -79,8 +79,8 @@ func TestQwenInteractiveHostPublishesAndCleansExactPreparation(t *testing.T) {
 			Native: []string{"--session-id", sessionID, "--json-file", eventsPath, "--input-file", inputPath},
 		})
 	}()
-	qwenTestWaitForPath(t, fake.Paths.Ready, 3*time.Second)
-	deadline := time.Now().Add(3 * time.Second)
+	qwenTestWaitForPath(t, fake.Paths.Ready, qwenTestLifecycleTimeout)
+	deadline := time.Now().Add(qwenTestLifecycleTimeout)
 	for {
 		resolved, lookupErr := federator.LookupManagedSession(agentRuntime, sessionID)
 		if lookupErr == nil && resolved.Live {
@@ -102,7 +102,7 @@ func TestQwenInteractiveHostPublishesAndCleansExactPreparation(t *testing.T) {
 		time.Sleep(qwenTestPollInterval)
 	}
 	qwenFakeWriteMarker(fake.Paths.Stop, "stop\n")
-	if err := qwenTestWaitForCommand(t, done, 3*time.Second); err != nil {
+	if err := qwenTestWaitForCommand(t, done, qwenTestLifecycleTimeout); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{inputPath, eventsPath, lifecycleRoot, filepath.Dir(lifecycleRoot)} {

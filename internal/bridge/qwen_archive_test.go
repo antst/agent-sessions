@@ -122,7 +122,7 @@ func TestQwenArchiveTransactionAuthenticatesExactUUIDAndRetiresHelperTree(t *tes
 			t.Fatalf("helper record = %#v", record)
 		}
 		pid, start := intValue(record["childPid"]), stringValue(record["childStart"])
-		if !waitForCondition(3*time.Second, func() bool { return !exactProcessIdentityMatch(pid, start) }) {
+		if !waitForCondition(qwenTestLifecycleTimeout, func() bool { return !exactProcessIdentityMatch(pid, start) }) {
 			t.Fatalf("Qwen archive helper child %d survived exact process-group retirement", pid)
 		}
 	}

@@ -271,7 +271,7 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	if err := manager.start(); err != nil {
 		t.Fatalf("start Qwen lane manager: %v", err)
 	}
-	qwenTestPoll(t, 3*time.Second, "terminal Qwen lane turn", func() (bool, error) {
+	qwenTestPoll(t, qwenTestLifecycleTimeout, "terminal Qwen lane turn", func() (bool, error) {
 		latest, readErr := readQwenLaneState(paths, threadID)
 		if readErr != nil {
 			return false, readErr
@@ -300,7 +300,7 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	qwenTestPoll(t, 3*time.Second, "terminal Qwen follow-up", func() (bool, error) {
+	qwenTestPoll(t, qwenTestLifecycleTimeout, "terminal Qwen follow-up", func() (bool, error) {
 		current, readErr := readQwenLaneState(paths, threadID)
 		if readErr != nil {
 			return false, readErr
@@ -321,14 +321,14 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	qwenTestPoll(t, 3*time.Second, "active Qwen interrupt turn", func() (bool, error) {
+	qwenTestPoll(t, qwenTestLifecycleTimeout, "active Qwen interrupt turn", func() (bool, error) {
 		current, readErr := readQwenLaneState(paths, threadID)
 		return readErr == nil && len(current.Turns) == 3 && current.Turns[2].Status == "active", readErr
 	})
 	if _, err := manager.handleControl(map[string]any{"action": "interrupt", "sessionId": threadID}); err != nil {
 		t.Fatal(err)
 	}
-	qwenTestPoll(t, 3*time.Second, "interrupted Qwen turn", func() (bool, error) {
+	qwenTestPoll(t, qwenTestLifecycleTimeout, "interrupted Qwen turn", func() (bool, error) {
 		current, readErr := readQwenLaneState(paths, threadID)
 		return readErr == nil && current.Turns[2].Status == "interrupted", readErr
 	})
@@ -585,7 +585,7 @@ func TestQwenLaneManagerOwnerExitArchivesOwnedButNotPersistentLane(t *testing.T)
 			go manager.maintenanceLoop()
 			stopGrokManagedProcess(owner, time.Second)
 			if !persistent {
-				qwenTestPoll(t, 3*time.Second, "owned Qwen lane archive", func() (bool, error) {
+				qwenTestPoll(t, qwenTestLifecycleTimeout, "owned Qwen lane archive", func() (bool, error) {
 					latest, err := readQwenLaneState(paths, state.ThreadID)
 					return err == nil && latest.Status == "archived", err
 				})
