@@ -39,6 +39,10 @@ user scope. A version change uses native update. Because Qwen treats a
 same-version local source as already current even when its files changed,
 same-version drift or source reconciliation uses a scoped native
 uninstall/install of `agent-sessions` after the live-profile refusal gate.
+Before that replacement transaction, Agent Sessions verifies the prior recorded local source and
+plugin identity. If the new native install or exact post-install verification fails, it removes the
+failed replacement and restores the prior enabled plugin through Qwen's installer. If no usable
+rollback source exists, the command fails before uninstalling the current extension.
 Before and after a mutation it verifies the exact Agent Plugins v1
 manifest, version, enabled policy, one `agent_sessions` stdio MCP server, and
 five direct-child skills (`agent-sessions` plus four lane skills). Drift yields

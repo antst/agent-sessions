@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
@@ -37,6 +38,76 @@ func qwenPluginInstallCommand(executable, pluginRoot string, profile qwenprofile
 	command := exec.Command(executable, "extensions", "install", pluginRoot, "--scope", "user", "--consent") //nolint:gosec // Executable is the operator-selected Qwen binary; argv is structured and fixed.
 	command.Env = qwenprofile.ApplyEnvironment(environment, profile)
 	return command, nil
+}
+
+func qwenPluginUninstallCommand(executable string, profile qwenprofile.Identity, environment []string) *exec.Cmd {
+	command := exec.Command(executable, "extensions", "uninstall", qwenPluginName)
+	command.Env = qwenprofile.ApplyEnvironment(environment, profile)
+	return command
+}
+
+func qwenPluginRollbackSource(root, source, version string) (string, error) {
+	canonical, err := pathidentity.ExistingDirectory(source)
+	if err != nil {
+		return "", fmt.Errorf("prior Qwen plugin source is not an existing real directory: %w", err)
+	}
+	installedRoot, err := pathidentity.ExistingDirectory(root)
+	if err != nil {
+		return "", fmt.Errorf("installed Qwen plugin root is not an existing real directory: %w", err)
+	}
+	if canonical == installedRoot {
+		return "", errors.New("prior Qwen plugin source is the installed plugin root and would be removed by replacement")
+	}
+	if version == "" {
+		return "", errors.New("prior Qwen plugin version is empty")
+	}
+	if err := verifyQwenPluginInstallation(canonical, version, true); err != nil {
+		return "", fmt.Errorf("prior Qwen plugin source does not provide the installed plugin payload: %w", err)
+	}
+	return canonical, nil
+}
+
+func verifyQwenPluginRollback(root, source, version, statePath string) error {
+	enabled, err := qwenPluginEnabled(statePath)
+	if err != nil {
+		return fmt.Errorf("verify restored Qwen plugin policy: %w", err)
+	}
+	if !enabled {
+		return errors.New("restored Qwen plugin is not enabled")
+	}
+	if err := verifyQwenPluginInstallation(root, version, enabled); err != nil {
+		return fmt.Errorf("verify restored Qwen plugin payload: %w", err)
+	}
+	restoredSource, err := installedQwenPluginSource(root)
+	if err != nil {
+		return err
+	}
+	if !sameQwenPluginSource(restoredSource, source) {
+		return fmt.Errorf("restored Qwen plugin source is %q, want %q", restoredSource, source)
+	}
+	return nil
+}
+
+func rollbackQwenPluginReplacement(executable, root, source, version, statePath string, profile qwenprofile.Identity) error {
+	environment := os.Environ()
+	if _, err := os.Lstat(root); err == nil {
+		uninstall := qwenPluginUninstallCommand(executable, profile, environment)
+		uninstall.Stdin, uninstall.Stdout, uninstall.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := uninstall.Run(); err != nil {
+			return fmt.Errorf("remove failed replacement: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect failed replacement: %w", err)
+	}
+	restore, err := qwenPluginInstallCommand(executable, source, profile, environment)
+	if err != nil {
+		return err
+	}
+	restore.Stdin, restore.Stdout, restore.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := restore.Run(); err != nil {
+		return fmt.Errorf("restore prior Qwen plugin: %w", err)
+	}
+	return verifyQwenPluginRollback(root, source, version, statePath)
 }
 
 //nolint:gocyclo // Exact plugin verification intentionally validates every manifest and inventory invariant together.
@@ -217,6 +288,9 @@ func runQwenPluginInstall(args []string) int {
 		return 1
 	}
 	command := install
+	replacement := false
+	rollbackSource := ""
+	rollbackVersion := ""
 	if _, statErr := os.Lstat(root); statErr == nil {
 		// Qwen's native update follows the source recorded by the native
 		// installer for a version change. It treats a same-version local source
@@ -233,21 +307,36 @@ func runQwenPluginInstall(args []string) int {
 			command = exec.Command(values.qwen, "extensions", "update", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
 			command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
 		} else {
-			uninstall := exec.Command(values.qwen, "extensions", "uninstall", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
-			uninstall.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
+			rollbackVersion = stringValue(manifest["version"])
+			rollbackSource, err = qwenPluginRollbackSource(root, source, rollbackVersion)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: refuse non-rollbackable replacement: %v\n", err)
+				return 1
+			}
+			uninstall := qwenPluginUninstallCommand(values.qwen, profile, os.Environ())
 			uninstall.Stdin, uninstall.Stdout, uninstall.Stderr = os.Stdin, os.Stdout, os.Stderr
 			if uninstallErr := uninstall.Run(); uninstallErr != nil {
 				fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: remove prior selected-profile plugin: %v\n", uninstallErr)
 				return 1
 			}
+			replacement = true
 		}
 	} else if !os.IsNotExist(statErr) {
 		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: inspect installed Qwen plugin: %v\n", statErr)
 		return 1
 	}
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := command.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: native Qwen installer failed: %v\n", err)
+	if installErr := command.Run(); installErr != nil {
+		if replacement {
+			rollbackErr := rollbackQwenPluginReplacement(values.qwen, root, rollbackSource, rollbackVersion, statePath, profile)
+			if rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: native Qwen installer failed: %v; rollback failed: %v\n", installErr, rollbackErr)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: native Qwen installer failed: %v; prior plugin restored\n", installErr)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: native Qwen installer failed: %v\n", installErr)
 		return 1
 	}
 	enabled, err := qwenPluginEnabled(statePath)
@@ -255,6 +344,15 @@ func runQwenPluginInstall(args []string) int {
 		err = verifyQwenPluginInstallation(root, values.version, enabled)
 	}
 	if err != nil {
+		if replacement {
+			rollbackErr := rollbackQwenPluginReplacement(values.qwen, root, rollbackSource, rollbackVersion, statePath, profile)
+			if rollbackErr != nil {
+				fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: post-install verification failed: %v; rollback failed: %v\n", err, rollbackErr)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: post-install verification failed: %v; prior plugin restored\n", err)
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-install: post-install verification failed: %v\n", err)
 		return 1
 	}

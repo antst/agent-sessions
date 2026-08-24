@@ -472,6 +472,150 @@ esac
 	}
 }
 
+func TestQwenPluginReplacementRestoresPriorPluginAfterFailure(t *testing.T) {
+	for _, failureMode := range []string{"native", "verification"} {
+		t.Run(failureMode, func(t *testing.T) {
+			root := t.TempDir()
+			qwenHome := filepath.Join(root, "qwen-home")
+			qwenRuntime := filepath.Join(root, "qwen-runtime")
+			priorSource := filepath.Join(root, "prior-source")
+			newSource := filepath.Join(root, "new-source")
+			installed := filepath.Join(qwenHome, "extensions", qwenPluginName)
+			statePath := filepath.Join(qwenHome, "extension-store", "state.json")
+			settingsPath := filepath.Join(qwenHome, "settings.json")
+			qwenTestPluginFixtureAt(t, priorSource)
+			qwenTestPluginFixtureAt(t, newSource)
+			qwenTestPluginFixtureAt(t, installed)
+			qwenTestWriteJSON(t, filepath.Join(installed, ".qwen-extension-install.json"), map[string]any{
+				"type": "local", "source": priorSource,
+			})
+			if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			qwenTestWriteJSON(t, statePath, map[string]any{"version": 2, "extensions": map[string]any{
+				"agent-sessions": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+			}})
+			if err := os.WriteFile(settingsPath, []byte("{\"theme\":\"owner\"}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			logPath := filepath.Join(root, "qwen.log")
+			fakeQwen := filepath.Join(root, "qwen")
+			script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$QWEN_TEST_LOG"
+case "$2" in
+  uninstall)
+    if [ -e "$QWEN_HOME/extensions/agent-sessions" ]; then
+      /usr/bin/find "$QWEN_HOME/extensions/agent-sessions" -depth -delete
+    fi
+    ;;
+  install)
+    source=$3
+    if [ "$source" = "$QWEN_NEW_SOURCE" ]; then
+      if [ "$QWEN_FAILURE_MODE" = native ]; then exit 45; fi
+      /bin/mkdir -p "$QWEN_HOME/extensions/agent-sessions"
+      /bin/cp "$source/plugin.json" "$QWEN_HOME/extensions/agent-sessions/plugin.json"
+      printf '{"type":"local","source":"%s"}\n' "$source" >"$QWEN_HOME/extensions/agent-sessions/.qwen-extension-install.json"
+      exit 0
+    fi
+    /bin/mkdir -p "$QWEN_HOME/extensions/agent-sessions"
+    /bin/cp -R "$source/." "$QWEN_HOME/extensions/agent-sessions/"
+    printf '{"type":"local","source":"%s"}\n' "$source" >"$QWEN_HOME/extensions/agent-sessions/.qwen-extension-install.json"
+    ;;
+  *) exit 64 ;;
+esac
+`
+			if err := os.WriteFile(fakeQwen, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("QWEN_HOME", qwenHome)
+			t.Setenv("QWEN_RUNTIME_DIR", qwenRuntime)
+			t.Setenv("QWEN_TEST_LOG", logPath)
+			t.Setenv("QWEN_NEW_SOURCE", newSource)
+			t.Setenv("QWEN_FAILURE_MODE", failureMode)
+			if exit := runQwenPluginInstall([]string{
+				"--qwen", fakeQwen, "--plugin-root", newSource, "--version", qwenTestPluginVersion,
+			}); exit != 1 {
+				t.Fatalf("failed replacement exit = %d, want 1", exit)
+			}
+			if err := verifyQwenPluginInstallation(installed, qwenTestPluginVersion, true); err != nil {
+				t.Fatalf("prior Qwen plugin was not restored: %v", err)
+			}
+			source, err := installedQwenPluginSource(installed)
+			if err != nil || !sameQwenPluginSource(source, priorSource) {
+				t.Fatalf("restored Qwen source = %q, %v", source, err)
+			}
+			if body, err := os.ReadFile(settingsPath); err != nil || string(body) != "{\"theme\":\"owner\"}\n" {
+				t.Fatalf("Qwen owner settings changed during rollback: %q, %v", body, err)
+			}
+			body, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+			want := []string{
+				"extensions uninstall agent-sessions",
+				"extensions install " + newSource + " --scope user --consent",
+			}
+			if failureMode == "verification" {
+				want = append(want, "extensions uninstall agent-sessions")
+			}
+			want = append(want, "extensions install "+source+" --scope user --consent")
+			if !reflect.DeepEqual(lines, want) {
+				t.Fatalf("replacement rollback commands = %#v, want %#v", lines, want)
+			}
+		})
+	}
+}
+
+func TestQwenPluginReplacementRefusesUnusableRollbackSourceBeforeMutation(t *testing.T) {
+	for _, sourceState := range []string{"missing", "invalid-payload"} {
+		t.Run(sourceState, func(t *testing.T) {
+			root := t.TempDir()
+			qwenHome := filepath.Join(root, "qwen-home")
+			installed := filepath.Join(qwenHome, "extensions", qwenPluginName)
+			statePath := filepath.Join(qwenHome, "extension-store", "state.json")
+			priorSource := filepath.Join(root, "prior-source")
+			newSource := filepath.Join(root, "new-source")
+			qwenTestPluginFixtureAt(t, installed)
+			qwenTestPluginFixtureAt(t, newSource)
+			if sourceState == "invalid-payload" {
+				qwenTestPluginFixtureAt(t, priorSource)
+				if err := os.Remove(filepath.Join(priorSource, "scripts", "native-entry")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			qwenTestWriteJSON(t, filepath.Join(installed, ".qwen-extension-install.json"), map[string]any{
+				"type": "local", "source": priorSource,
+			})
+			if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			qwenTestWriteJSON(t, statePath, map[string]any{"version": 2, "extensions": map[string]any{
+				"agent-sessions": map[string]any{"name": qwenPluginName, "defaultActivation": "enabled"},
+			}})
+			marker := filepath.Join(root, "native-called")
+			fakeQwen := filepath.Join(root, "qwen")
+			if err := os.WriteFile(fakeQwen, []byte("#!/bin/sh\nprintf called >\"$QWEN_NATIVE_MARKER\"\nexit 99\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("QWEN_HOME", qwenHome)
+			t.Setenv("QWEN_NATIVE_MARKER", marker)
+			if exit := runQwenPluginInstall([]string{
+				"--qwen", fakeQwen, "--plugin-root", newSource, "--version", qwenTestPluginVersion,
+			}); exit != 1 {
+				t.Fatalf("non-rollbackable replacement exit = %d, want 1", exit)
+			}
+			if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+				t.Fatalf("non-rollbackable replacement invoked native Qwen: %v", err)
+			}
+			if err := verifyQwenPluginInstallation(installed, qwenTestPluginVersion, true); err != nil {
+				t.Fatalf("installed Qwen plugin changed after refused replacement: %v", err)
+			}
+		})
+	}
+}
+
 func TestMakefileAggregatesQwenInstallAndUpgradeTargets(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
 	if err != nil {

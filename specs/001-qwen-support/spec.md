@@ -1,10 +1,10 @@
 # Feature Specification: Qwen Support
 
-**Feature Branch**: `develop`
+**Feature Branch**: `feature/qwen-support`
 
 **Created**: 2026-08-20
 
-**Status**: Draft
+**Status**: Validation
 
 **Input**: User description: "Implement Qwen support"
 
@@ -400,7 +400,10 @@ owner's native profile and credentials are unchanged.
   MUST remain strict when explicitly invoked.
 - **FR-036**: Qwen installation and upgrade MUST verify and reconcile the native extension's recorded
   source path in addition to payload/version/enabled state. A same-version developer install MUST NOT
-  cause a release install to retain a mutable checkout as its future update source.
+  cause a release install to retain a mutable checkout as its future update source. Any reconciliation
+  that requires native uninstall followed by install MUST prove an exact usable rollback source before
+  mutation and restore the prior enabled plugin when native installation or post-install verification
+  fails; without that proof it MUST refuse before uninstalling the working extension.
 - **FR-037**: Qwen and the existing adapters MUST consume the same host-platform primitives for
   canonical existing/future path identity, Unix-domain socket byte budgets and compact test roots,
   and process identity/environment observability. On macOS, fixed `/tmp` and `/var` aliases MUST be

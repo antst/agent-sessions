@@ -173,7 +173,8 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 				t.Error("tag release does not require the exact signed evidence-bound tag")
 			}
 		case "release-publication-preflight":
-			if !strings.Contains(text, "gh release view") || !strings.Contains(text, ".assets[]?") {
+			if !strings.Contains(text, "gh release view") || !strings.Contains(text, ".assets[]?") ||
+				strings.Contains(text, "releases?per_page") {
 				t.Error("publication gate does not independently reject release and asset collisions")
 			}
 		}

@@ -57,12 +57,11 @@ func TestReleasePublicationPreflightRejectsReleaseAndAssetCollisionsSeparately(t
 	gh := filepath.Join(root, "gh")
 	if err := os.WriteFile(gh, []byte(`#!/bin/sh
 if [ "$1 $2" = "release view" ]; then
-  [ "${FAKE_RELEASE_EXISTS:-}" = 1 ] && exit 0
-  exit 1
-fi
-if [ "$1" = api ]; then
-  printf '%s\n' "${FAKE_ASSET_COLLISION:-}"
-  exit 0
+	if [ "${FAKE_RELEASE_EXISTS:-}" = 1 ]; then
+		printf '%s\n' "${FAKE_TARGET_ASSETS:-}"
+		exit 0
+	fi
+	exit 1
 fi
 exit 2
 `), 0o700); err != nil {
@@ -84,7 +83,7 @@ exit 2
 	if output, err := run("FAKE_RELEASE_EXISTS=1"); err == nil || !strings.Contains(string(output), "release v0.2.4 already exists") {
 		t.Fatalf("existing release collision = %v: %s", err, output)
 	}
-	if output, err := run("FAKE_ASSET_COLLISION=agent-sessions-0.2.4-linux-x64.tar.gz"); err == nil || !strings.Contains(string(output), "release asset") {
+	if output, err := run("FAKE_RELEASE_EXISTS=1", "FAKE_TARGET_ASSETS=agent-sessions-0.2.4-linux-x64.tar.gz"); err == nil || !strings.Contains(string(output), "release asset") {
 		t.Fatalf("existing asset collision = %v: %s", err, output)
 	}
 }

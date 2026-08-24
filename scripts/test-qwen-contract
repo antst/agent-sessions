@@ -448,10 +448,12 @@ def main() -> int:
         # native mode.
         before = peer.capture()
         peer.key("BTab")
-        time.sleep(1)
-        after = peer.capture()
-        if before == after:
-            fail("Qwen Shift+Tab approval-mode cycle produced no visible TUI change")
+
+        def changed_qwen_capture():
+            current = peer.capture()
+            return current if current != before else None
+
+        wait_for(changed_qwen_capture, "visible Qwen Shift+Tab approval-mode change")
 
         peer.quit()
         wait_for(lambda: registration(config, data, session_id) is None, "normal Qwen cleanup")

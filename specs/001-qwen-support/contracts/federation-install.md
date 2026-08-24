@@ -66,6 +66,10 @@ qwen extensions install <versioned-staged-plugin> --scope user --consent
 For the default profile, `QWEN_HOME` remains unset. Installation must verify exact installed identity,
 version, enabled state, recorded immutable source path, MCP name, and every skill after the native
 command returns. A same-version developer source must be reconciled to the selected installed source.
+When native Qwen requires uninstall/install for that reconciliation, Agent Sessions first proves the
+recorded prior local source and plugin identity. A failed native install or failed exact post-install
+verification restores and verifies the prior enabled plugin through Qwen's supported installer. If
+the prior source cannot be proved, replacement refuses before uninstalling anything.
 
 Rules:
 
@@ -76,6 +80,7 @@ Rules:
 - Missing integration produces an instruction to run the explicit install for that exact profile.
 - Authentication, trust, owner settings, unrelated extensions/skills, and transcripts are preserved.
 - Upgrade refuses unsafe shared-runtime replacement while an exact managed Qwen peer/lane is live.
+- Upgrade never destroys a working selected-profile integration merely because its replacement fails.
 - A host agent evaluates capability readiness at startup; installing a newly available integration
   requires an explicit agent restart and never signals an unrelated running agent implicitly.
 

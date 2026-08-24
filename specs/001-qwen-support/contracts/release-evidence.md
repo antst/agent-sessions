@@ -30,7 +30,8 @@ GitHub release for the lifetime of that release. `SHA256SUMS` includes the JSON 
 platform archive. Before tag creation, the release procedure must refuse if local or remote
 `refs/tags/v0.2.4` already exists. After that exact signed tag is created, the tag-triggered job must
 require it, verify its signature and target, and refuse an existing GitHub release or same-named
-release asset rather than replace either. The triggering tag itself is required state, not a
+release asset on that target release rather than replace either. Asset names may repeat on historical
+releases because GitHub scopes assets to their owning release. The triggering tag itself is required state, not a
 publication collision. After publication, the signed tag's recorded digest detects any out-of-band
 asset change.
 

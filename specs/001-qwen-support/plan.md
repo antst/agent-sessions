@@ -1,6 +1,6 @@
 # Implementation Plan: Qwen Support
 
-**Branch**: `develop` | **Date**: 2026-08-20 | **Spec**: [spec.md](spec.md)
+**Branch**: `feature/qwen-support` | **Date**: 2026-08-20 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/001-qwen-support/spec.md`
 
@@ -35,8 +35,9 @@ does not otherwise replace Qwen's native UI, tools, permission system, or sessio
 `>=0.21.15` syntax/protocol floor plus operation-specific live probes
 
 **Primary Dependencies**: Go standard library and existing internal Agent Sessions packages;
-external Qwen Code CLI dual-output v2, stdio ACP v1, `qwen serve` archive capability, and Agent
-Plugins v1; no new third-party Go runtime dependency is planned
+`spf13/pflag` for the shared owned-lane CLI parser; `cyberphone/json-canonicalization` for the
+RFC-8785 release-evidence contract; external Qwen Code CLI dual-output v2, stdio ACP v1,
+`qwen serve` archive capability, and Agent Plugins v1
 
 **Storage**: Existing versioned JSON state/catalog files and private filesystem roots; Qwen-owned
 JSONL transcripts under the exact selected `QWEN_HOME`/`QWEN_RUNTIME_DIR`; no database and no

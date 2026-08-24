@@ -8,20 +8,21 @@ fi
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 tag=$1
 shift
-if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-  printf 'GitHub release %s already exists; refusing replacement\n' "$tag" >&2
-  exit 1
-fi
 for asset in "$@"; do
   [[ "$asset" == "${asset##*/}" && "$asset" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
     printf 'unsafe release asset name %s\n' "$asset" >&2
     exit 2
   }
-  collision="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-    --jq ".[] | .assets[]? | select(.name == \"$asset\") | .name")"
-  if [[ -n "$collision" ]]; then
-    printf 'release asset %s already exists; refusing replacement\n' "$asset" >&2
-    exit 1
-  fi
 done
+if existing_assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+  --json assets --jq '.assets[]?.name' 2>/dev/null)"; then
+  for asset in "$@"; do
+    if grep -Fxq -- "$asset" <<<"$existing_assets"; then
+      printf 'release asset %s already exists on %s; refusing replacement\n' "$asset" "$tag" >&2
+      exit 1
+    fi
+  done
+  printf 'GitHub release %s already exists; refusing replacement\n' "$tag" >&2
+  exit 1
+fi
 printf 'release %s and all requested asset names are unused\n' "$tag"
