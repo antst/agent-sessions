@@ -20,10 +20,7 @@ func nativeRuntimeAgentSessionsMCPServer(role string, environment map[string]str
 		return nil, errors.New("resolve lane MCP runtime")
 	}
 	server := map[string]any{
-		"name": "agent_sessions", "command": executable, "args": []any{role},
-	}
-	if len(environment) == 0 {
-		return server, nil
+		"name": "agent_sessions", "command": executable, "args": []any{role}, "env": []any{},
 	}
 	names := make([]string, 0, len(environment))
 	for variable := range environment {

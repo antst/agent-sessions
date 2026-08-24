@@ -421,13 +421,13 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return worker.attributedError("initialize headless Grok lane ACP worker", err)
+		return grokLanePrivateACPError("initialize headless Grok lane ACP worker", err)
 	}
 	if !grokAuthMethodAdvertised(result, "cached_token") {
-		return worker.attributedError("authenticate headless Grok lane ACP worker", errors.New("cached_token authentication was not advertised"))
+		return errors.New("authenticate headless Grok lane ACP worker: cached_token authentication was not advertised")
 	}
 	if _, err := client.request(ctx, "authenticate", map[string]any{"methodId": "cached_token", "_meta": map[string]any{"headless": true}}); err != nil {
-		return worker.attributedError("authenticate headless Grok lane ACP worker", err)
+		return grokLanePrivateACPError("authenticate headless Grok lane ACP worker", err)
 	}
 	mcpServer, err := nativeRuntimeAgentSessionsMCPServer("grok-mcp", nil)
 	if err != nil {
@@ -446,7 +446,7 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 	}
 	created, err := client.request(ctx, method, params)
 	if err != nil {
-		return worker.attributedError("open headless Grok lane session", err)
+		return grokLanePrivateACPError("open headless Grok lane session", err)
 	}
 	returned := stringValue(created["sessionId"])
 	if method == "session/new" && returned == "" {
@@ -466,6 +466,15 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 		client.setNotificationHandler(m.handleACPNotification)
 	}
 	return err
+}
+
+// grokLanePrivateACPError preserves a bounded protocol cause for the lane
+// manager's private 0600 log. The public launcher reports only that the manager
+// failed startup, while shutdown separately stops and joins the still-live ACP
+// worker; treating a request rejection as a process-exit error would mask the
+// useful cause behind a spurious "managed process join incomplete" message.
+func grokLanePrivateACPError(role string, err error) error {
+	return fmt.Errorf("%s: %w", role, grokMCPReadinessDiagnostic(err))
 }
 
 func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {

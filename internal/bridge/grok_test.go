@@ -148,7 +148,7 @@ func runGrokFakeACP() {
 				args, _ := server["args"].([]any)
 				if len(servers) != 1 || stringValue(server["name"]) != "agent_sessions" ||
 					!filepath.IsAbs(stringValue(server["command"])) || len(args) != 1 || stringValue(args[0]) != "grok-mcp" ||
-					server["env"] != nil {
+					!reflect.DeepEqual(server["env"], []any{}) {
 					writeGrokFakeResponse(request["id"], nil, map[string]any{
 						"code": -32602, "message": "missing injected agent_sessions MCP",
 					})

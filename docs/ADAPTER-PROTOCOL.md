@@ -440,7 +440,8 @@ headless session admitted that server: the live session must expose the server
 and a harmless direct identity call must succeed before peer publication.
 
 Use the current Agent Sessions runtime as the command and the product's MCP
-runtime role as structured argv. Reuse the shared ACP stdio-server constructor;
+runtime role as structured argv. Emit the vendor-required `env` array even
+when it is empty. Reuse the shared ACP stdio-server constructor;
 do not hand-build a second command/argv/environment schema. Prefer the native
 worker's already-attested inherited environment, so a raw launch capability is
 not duplicated into a session configuration that the vendor may persist. Add

@@ -429,7 +429,8 @@ owner's native profile and credentials are unchanged.
   session configuration. Retried readiness MUST retain the last substantive protocol failure,
   bounded vendor `error.data` detail, and repetition count instead of replacing the cause with the
   final deadline. Linux and macOS acceptance MUST exercise an isolated native profile with no
-  preinstalled Agent Sessions plugin.
+  preinstalled Agent Sessions plugin. The structured server MUST include every field required by
+  the vendor ACP schema, including an empty environment array when there are no explicit entries.
 
 ### Key Entities
 

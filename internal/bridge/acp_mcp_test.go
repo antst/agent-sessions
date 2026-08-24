@@ -24,7 +24,8 @@ func TestNativeRuntimeACPMCPServerUsesDeterministicSharedContract(t *testing.T) 
 		t.Fatalf("native ACP MCP server = %#v", server)
 	}
 	withoutEnvironment, err := nativeRuntimeAgentSessionsMCPServer("grok-mcp", nil)
-	if err != nil || withoutEnvironment["env"] != nil || !reflect.DeepEqual(withoutEnvironment["args"], []any{"grok-mcp"}) {
+	if err != nil || !reflect.DeepEqual(withoutEnvironment["env"], []any{}) ||
+		!reflect.DeepEqual(withoutEnvironment["args"], []any{"grok-mcp"}) {
 		t.Fatalf("environment-free native ACP MCP server = %#v, %v", withoutEnvironment, err)
 	}
 }

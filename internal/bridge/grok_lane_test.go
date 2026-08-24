@@ -139,6 +139,22 @@ func TestGrokMCPReadinessFailurePreservesRepeatedProtocolCause(t *testing.T) {
 	}
 }
 
+func TestGrokLanePrivateACPErrorPreservesBoundedProtocolCause(t *testing.T) {
+	t.Parallel()
+
+	failure := grokLanePrivateACPError("open headless Grok lane session", &grokRPCError{
+		Code: -32602, Message: "Invalid params",
+		Data: "data did not match any variant of untagged enum McpServer",
+	})
+	message := failure.Error()
+	if !strings.Contains(message, "open headless Grok lane session") ||
+		!strings.Contains(message, "Grok ACP error -32602: Invalid params") ||
+		!strings.Contains(message, "untagged enum McpServer") ||
+		strings.Contains(message, "managed process join incomplete") {
+		t.Fatalf("private Grok lane ACP failure = %q", message)
+	}
+}
+
 func TestParseGrokLaneArgsRejectsUnknownOrMissingTarget(t *testing.T) {
 	t.Parallel()
 

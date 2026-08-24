@@ -1,6 +1,6 @@
 # US3 Linux: four-product composition
 
-- Date: 2026-08-23
+- Date: 2026-08-24
 - Platform: Linux amd64
 - Qwen Code: `0.22.0`
 - Claude Code: `2.1.240`
@@ -17,22 +17,22 @@ returned its unique terminal token:
 
 | Parent | Target | Child identity | Exact terminal token |
 | --- | --- | --- | --- |
-| Codex | Codex | `01a032ac-39b2-7e72-b642-bea7cebfe0ac` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
-| Codex | Claude | `cda3780a-b177-4ac3-81f0-049f3d514cfb` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
-| Codex | Grok | `bf2db783-258a-453d-b4d4-92a192f06158` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
-| Codex | Qwen | `58cba8db-7b9e-40e8-86b5-bba42dca0d66` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
-| Claude | Codex | `01a032ad-0ca3-7a71-aa62-d3fa29019143` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
-| Claude | Claude | `1ec56f11-ff83-4a39-9342-c810b81485a8` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
-| Claude | Grok | `d428bd1e-0ec1-4fc2-aa03-8f2fc4765b3a` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
-| Claude | Qwen | `ac48bc80-c328-42f5-b7f5-9e6db9c08221` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
-| Grok | Codex | `01a032ad-c333-79c2-ae12-2e0b6871d6aa` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
-| Grok | Claude | `e1975083-07d4-4a60-b41a-5314f703e7fe` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
-| Grok | Grok | `482fd5cb-ad9c-4448-bf10-376e0569a1ea` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
-| Grok | Qwen | `18ad334b-5731-4b5a-8429-13c54c6e4fbc` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
-| Qwen | Codex | `01a032ae-82a8-7893-8a82-4ccb2460d299` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
-| Qwen | Claude | `cc22a400-6d35-4b77-810b-afb0098d95db` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
-| Qwen | Grok | `40c30ca2-d3f1-415c-865b-2499e8551f38` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
-| Qwen | Qwen | `6f3217d6-2773-4960-9e47-9f694a0500a7` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
+| Codex | Codex | `01a032ea-68a2-7b70-b741-69a3014d5b21` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
+| Codex | Claude | `065551c3-c9c1-4620-833d-3cf048ccc6ac` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
+| Codex | Grok | `66cff8bd-c2d5-4563-ba0e-48630e8ed2ac` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
+| Codex | Qwen | `9c888d17-563f-48b4-a0bb-65108d396ac8` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
+| Claude | Codex | `01a032eb-37b6-7483-a38d-0f84e43f3eaf` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
+| Claude | Claude | `3a47b28c-3b8c-4852-b412-21342faa2f89` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
+| Claude | Grok | `d3a01ab3-7a90-4b18-8dc0-e15f2a9e6830` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
+| Claude | Qwen | `5a9ad75b-50c1-4d05-98c7-6d2052a85652` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
+| Grok | Codex | `01a032eb-f73e-7b21-9665-d17c6520c05a` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
+| Grok | Claude | `bc34ae5d-7636-47a8-adfc-b69834eb3580` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
+| Grok | Grok | `fdd07bfd-5cbe-4bf0-8179-918a9ab45cb2` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
+| Grok | Qwen | `21829a51-022f-40b6-aa1e-1a670e5f7c88` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
+| Qwen | Codex | `01a032ec-aa6a-7dd3-bd15-a359bfe3f1da` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
+| Qwen | Claude | `62c7523e-0e1c-4fe9-be32-41aceb7bcca1` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
+| Qwen | Grok | `edf5e468-93be-464f-92be-52634fc2bfe4` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
+| Qwen | Qwen | `cb914ba2-c105-469d-93d0-88355598654f` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
 
 For every edge the runner asserted the exact immediate parent session, owner,
 and notification target; the explicit `qwen-composition` group; both mandatory
@@ -78,6 +78,19 @@ credited run:
    failure cleanup. A pure contract test asserts that Codex, Claude, and Qwen
    preserve the original home and that product scoping never mutates the input
    environment.
+6. Static Grok plugin inspection passed while the live headless ACP session
+   admitted zero MCP servers. Grok and Qwen now share one structured ACP-server
+   constructor and explicitly inject the current Agent Sessions runtime at
+   session create/resume, so the live lane does not depend on an owner-profile
+   plugin. The first injection attempt omitted Grok's required empty `env`
+   array and failed closed with `-32602`; the credited run emits `env: []`,
+   serializes no launch capability, and inherits the attested worker environment.
+7. Grok's JSON-RPC decoder and readiness retry initially reduced deterministic
+   vendor causes to `Internal error` and then to a deadline. The bridge now
+   retains bounded `error.data`, repetition count, and the last substantive
+   failure. Lane initialize/auth/create errors are written directly to the
+   private manager log rather than being misclassified as an exited process
+   and masked by a spurious process-join error.
 
 One manual authentication probe outside the credited matrix omitted the
 isolated `CODEX_HOME` from an App Server stop command and stopped the owner's
