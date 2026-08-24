@@ -1469,6 +1469,66 @@ func TestSupervisorStopTimeoutDoesNotPermitReplacement(t *testing.T) {
 	}
 }
 
+func TestSupervisorStopCommandWaitsForExactProcessExit(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "data"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
+	socket := filepath.Join(root, "supervisor.sock")
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", socket)
+
+	child := exec.Command("sleep", "0.35")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+	procStart := ""
+	deadline := time.Now().Add(time.Second)
+	for procStart == "" && time.Now().Before(deadline) {
+		procStart = readProcStart(child.Process.Pid)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if procStart == "" {
+		t.Fatal("could not capture supervisor fixture process identity")
+	}
+
+	paths := resolveNativePaths()
+	if err := writeJSONAtomic(paths.supervisorState, map[string]any{
+		"pid": child.Process.Pid, "procStart": procStart,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		_, _ = bufio.NewReader(connection).ReadBytes('\n')
+		_, _ = connection.Write([]byte(`{"ok":true,"stopping":true}` + "\n"))
+		_ = connection.Close()
+		_ = listener.Close()
+		_ = os.Remove(socket)
+	}()
+
+	started := time.Now()
+	if exit := runSupervisorCommand([]string{"stop"}); exit != 0 {
+		t.Fatalf("supervisor stop exit = %d", exit)
+	}
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+		t.Fatalf("supervisor stop returned before exact process exit: %s", elapsed)
+	}
+	<-done
+}
+
 func TestNamespacedSupervisorRetiresResponsiveLegacyInstance(t *testing.T) {
 	runtimeRoot := t.TempDir()
 	legacySocket := filepath.Join(bridgeRuntimeRoot(runtimeRoot, os.Getuid()), "supervisor.sock")

@@ -21,8 +21,30 @@ TIMEOUT = 180.0
 PRODUCTS = ("codex", "claude", "grok", "qwen")
 
 
+class CompositionTerminated(Exception):
+    """Request orderly cleanup after an external interrupt."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"received signal {signum}")
+        self.signum = signum
+
+
 def fail(message: str) -> None:
     raise AssertionError(message)
+
+
+def install_termination_handlers() -> None:
+    """Turn the first interactive termination signal into a cleanup unwind."""
+
+    def terminate(signum: int, _frame) -> None:
+        # Cleanup must not be interrupted by a second terminal signal. SIGKILL
+        # remains available to an operator who explicitly needs a hard stop.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise CompositionTerminated(signum)
+
+    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, terminate)
 
 
 def required_test_directory(environment: dict[str, str], name: str) -> pathlib.Path:
@@ -268,6 +290,7 @@ def main() -> int:
     parents: list[subprocess.Popen] = []
     agent: subprocess.Popen | None = None
     success = False
+    install_termination_handlers()
     try:
         subprocess.run(["make", "-s", "build"], cwd=repo, check=True)
         binary_root = repo / "bin" / platform_name()
@@ -404,38 +427,78 @@ def main() -> int:
         print(json.dumps({"type": "qwen.composition.passed", "edges": evidence}, sort_keys=True))
         return 0
     finally:
+        cleanup_errors: list[str] = []
+
+        def cleanup(description: str, action) -> None:
+            try:
+                action()
+            except Exception as error:  # Continue through independent owned cleanup.
+                cleanup_errors.append(f"{description}: {error}")
+
         binary_root = repo / "bin" / platform_name()
         for product, thread_id in reversed(launched):
-            subprocess.run(
-                [str(binary_root / f"{product}-peer-lane"), "archive", thread_id],
-                env=target_test_environment(environment, product, grok_home),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=30, check=False,
+            cleanup(
+                f"archive {product} lane {thread_id}",
+                lambda product=product, thread_id=thread_id: subprocess.run(
+                    [str(binary_root / f"{product}-peer-lane"), "archive", thread_id],
+                    env=target_test_environment(environment, product, grok_home),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=True,
+                ),
             )
         for parent_process in reversed(parents):
-            stop_fixture(parent_process)
+            cleanup(f"stop fixture {parent_process.pid}", lambda process=parent_process: stop_fixture(process))
         if agent is not None and agent.poll() is None:
-            os.killpg(agent.pid, signal.SIGTERM)
-            try:
-                agent.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(agent.pid, signal.SIGKILL)
-                agent.wait(timeout=5)
+            def stop_agent() -> None:
+                os.killpg(agent.pid, signal.SIGTERM)
+                try:
+                    agent.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(agent.pid, signal.SIGKILL)
+                    agent.wait(timeout=5)
+
+            cleanup(f"stop host agent {agent.pid}", stop_agent)
         runtime_binary = binary_root / "agent-session-runtime"
-        if runtime_binary.exists():
-            subprocess.run([str(runtime_binary), "supervisor", "stop"], env=environment,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        stop_isolated_codex_app_server(codex_home, environment)
+        supervisor_state = list(data.rglob("supervisor.json"))
+        supervisor_sockets = list(xdg_runtime.rglob("supervisor-*.sock"))
+        if runtime_binary.exists() and (supervisor_state or supervisor_sockets):
+            def stop_supervisor() -> None:
+                subprocess.run(
+                    [str(runtime_binary), "supervisor", "stop"], env=environment,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=True,
+                )
+                wait_for(
+                    lambda: not any(path.exists() for path in supervisor_state + supervisor_sockets),
+                    "bridge supervisor cleanup", timeout=10,
+                )
+
+            cleanup(
+                "stop bridge supervisor",
+                stop_supervisor,
+            )
+        cleanup(
+            "stop isolated Codex App Server",
+            lambda: stop_isolated_codex_app_server(codex_home, environment),
+        )
         if not success:
             error_log = root / "agent.err"
             if error_log.exists() and error_log.stat().st_size:
                 print(error_log.read_text(errors="replace"), file=sys.stderr)
-        shutil.rmtree(root)
+        cleanup("remove composition root", lambda: shutil.rmtree(root))
+        if cleanup_errors:
+            message = "Qwen composition cleanup failed: " + "; ".join(cleanup_errors)
+            if success:
+                fail(message)
+            print(message, file=sys.stderr)
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except CompositionTerminated as error:
+        print(f"Qwen composition contract: terminated by signal {error.signum}", file=sys.stderr)
+        raise SystemExit(128 + error.signum)
     except (AssertionError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"Qwen composition contract: FAIL: {error}", file=sys.stderr)
         raise SystemExit(1)

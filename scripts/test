@@ -40,6 +40,7 @@ PY
 python3 - "$plugin_root/scripts/test-qwen-composition" <<'PY'
 import pathlib
 import runpy
+import signal
 import sys
 import tempfile
 
@@ -90,6 +91,25 @@ except AssertionError:
     pass
 else:
     raise AssertionError("unknown composition target received an environment")
+
+termination = module["CompositionTerminated"]
+install_handlers = module["install_termination_handlers"]
+previous_int = signal.getsignal(signal.SIGINT)
+previous_term = signal.getsignal(signal.SIGTERM)
+try:
+    install_handlers()
+    handler = signal.getsignal(signal.SIGTERM)
+    try:
+        handler(signal.SIGTERM, None)
+    except termination as error:
+        assert error.signum == signal.SIGTERM
+    else:
+        raise AssertionError("composition SIGTERM handler did not request orderly cleanup")
+    assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+finally:
+    signal.signal(signal.SIGINT, previous_int)
+    signal.signal(signal.SIGTERM, previous_term)
 
 with tempfile.TemporaryDirectory() as directory:
     root = pathlib.Path(directory)

@@ -3029,7 +3029,7 @@ func runSupervisorCommand(args []string) int {
 		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 3*time.Second)
 		return printNativeResult(response, err)
 	case "stop":
-		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "stop"}, 3*time.Second)
+		response, err := stopNativeSupervisor(paths)
 		return printNativeResult(response, err)
 	case "start":
 		response, err := startNativeSupervisor(version)
@@ -3055,6 +3055,22 @@ func runSupervisorCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown supervisor command: %s\n", command)
 		return 2
 	}
+}
+
+func stopNativeSupervisor(paths nativePaths) (map[string]any, error) {
+	state := readJSONMap(paths.supervisorState)
+	pid, procStart := intValue(state["pid"]), stringValue(state["procStart"])
+	if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) {
+		return nil, fmt.Errorf("supervisor process %d did not stop", pid)
+	}
+	return map[string]any{"stopped": true}, nil
 }
 
 func startNativeSupervisor(version string) (map[string]any, error) {
