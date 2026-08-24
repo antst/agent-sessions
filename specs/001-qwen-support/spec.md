@@ -433,8 +433,9 @@ owner's native profile and credentials are unchanged.
   the vendor ACP schema, including an empty environment array when there are no explicit entries.
 - **FR-040**: Every interactive plugin-owned Agent Sessions MCP entrypoint MUST select an exact
   installed or launch-selected Agent Sessions runtime without consulting ambient `PATH`. The Qwen
-  extension command MUST be rooted in its own `${extensionPath}`, managed Qwen peers MUST pass the
-  exact runtime selected by their launcher, and ordinary Qwen sessions MUST use the runtime path
+  Agent Plugins v1 command MUST use the vendor-required contained `./scripts/native-entry` form,
+  managed Qwen peers MUST pass the exact runtime selected by their launcher, and ordinary Qwen
+  sessions MUST use the runtime path
   published by the selected Agent Sessions installation. A missing, stale, non-executable, or
   unverifiable exact runtime MUST fail closed instead of silently loading another installed release.
   Future vendor plugins MUST reuse this entrypoint/runtime-selection contract and its stale-PATH

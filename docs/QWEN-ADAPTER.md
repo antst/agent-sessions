@@ -61,12 +61,12 @@ The installed `agent_sessions` MCP is active only when all of these agree:
 4. the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR` identity and canonical cwd; and
 5. the host-agent registration and group catalog.
 
-The Qwen extension starts that MCP through its own `${extensionPath}`-rooted
-native entrypoint. A managed peer supplies the exact launch-selected Agent
-Sessions runtime to that entrypoint; an ordinary Qwen session uses the runtime
-path published by the installed integration. Ambient `PATH` is never used to
-select the MCP runtime, so a stale system installation cannot silently provide
-the parent-side messaging or lane tools.
+The Qwen extension starts that MCP through the Agent Plugins v1 contained
+`./scripts/native-entry` command. A managed peer supplies the exact
+launch-selected Agent Sessions runtime to that entrypoint; an ordinary Qwen
+session uses the runtime path published by the installed integration. Ambient
+`PATH` is never used to select the MCP runtime, so a stale system installation
+cannot silently provide the parent-side messaging or lane tools.
 
 Model-supplied IDs, names, paths, and permission labels are corroboration only.
 The MCP supports grouped discovery, direct send, atomic multicast, named-group

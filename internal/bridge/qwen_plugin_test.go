@@ -22,7 +22,7 @@ const (
 	qwenTestMCPSchema          = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 	qwenTestPluginName         = "agent-sessions"
 	qwenTestMCPName            = "agent_sessions"
-	qwenTestMCPCommand         = "${extensionPath}${/}scripts${/}native-entry"
+	qwenTestMCPCommand         = "./scripts/native-entry"
 	qwenTestPluginVersion      = qwenreadiness.IntegrationVersion
 	qwenPluginProcessHelperEnv = "AGENT_SESSIONS_QWEN_PLUGIN_PROCESS_HELPER"
 )
@@ -121,6 +121,12 @@ func TestVerifyQwenPluginInstallationRequiresExactEnabledInventory(t *testing.T)
 			qwenTestRewriteJSONObject(t, filepath.Join(root, "mcp.json"), func(value map[string]any) {
 				servers := value["mcpServers"].(map[string]any)
 				servers[qwenTestMCPName].(map[string]any)["command"] = "agent-session-runtime"
+			})
+		}, want: "exact"},
+		{name: "native Qwen extension variable syntax", enabled: true, mutate: func(root string) {
+			qwenTestRewriteJSONObject(t, filepath.Join(root, "mcp.json"), func(value map[string]any) {
+				servers := value["mcpServers"].(map[string]any)
+				servers[qwenTestMCPName].(map[string]any)["command"] = "${extensionPath}${/}scripts${/}native-entry"
 			})
 		}, want: "exact"},
 		{name: "missing native entry", enabled: true, mutate: func(root string) {

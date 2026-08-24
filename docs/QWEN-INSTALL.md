@@ -48,13 +48,13 @@ reconciled back to `INSTALL_ROOT/qwen` by a later release install instead of
 leaving future native updates attached to a checkout. Exact already-current
 install and already-absent remove are idempotent.
 
-The installed MCP command is rooted in the selected Qwen extension through
-`${extensionPath}` and enters a shipped native launcher. It never resolves
-`agent-session-runtime` from ambient `PATH`. Managed Qwen parents pass their
-exact selected runtime explicitly; ordinary Qwen sessions use the runtime path
-published by the Agent Sessions installation. A missing or stale exact runtime
-fails closed with an installation diagnostic instead of silently loading a
-different release.
+The installed MCP command uses the Agent Plugins v1 contained
+`./scripts/native-entry` form and enters a shipped native launcher. It never
+resolves `agent-session-runtime` from ambient `PATH`. Managed Qwen parents pass
+their exact selected runtime explicitly; ordinary Qwen sessions use the
+runtime path published by the Agent Sessions installation. A missing or stale
+exact runtime fails closed with an installation diagnostic instead of silently
+loading a different release.
 
 Upgrade or removal refuses while a managed Qwen peer or lane uses that exact
 profile. Stop/archive it and retry. The gate reads process identity and

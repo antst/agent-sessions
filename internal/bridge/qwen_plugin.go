@@ -20,7 +20,7 @@ const (
 	qwenMCPSchema    = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 	qwenPluginName   = "agent-sessions"
 	qwenMCPName      = "agent_sessions"
-	qwenMCPCommand   = "${extensionPath}${/}scripts${/}native-entry"
+	qwenMCPCommand   = "./scripts/native-entry"
 )
 
 var qwenPluginSkills = []string{
