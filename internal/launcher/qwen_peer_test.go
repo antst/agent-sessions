@@ -336,11 +336,12 @@ func TestRunQwenPeerExecsPreparedHostAndRollsBackExecFailure(t *testing.T) {
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	canonicalProfile := qwenTestCanonicalPath(t, profile)
 	sentinel := errors.New("exec sentinel")
 	var prepared federator.PeerRegistration
 	err = runQwenPeer([]string{"--qwen-home", profile, "-n", "managed-qwen", "-g", "project", "--no-yolo"}, qwenPeerDependencies{
 		readiness: func(_ context.Context, request qwenreadiness.Request) (qwenreadiness.Report, error) {
-			if request.Workspace != wantCwd || request.Profile.QwenHome != profile {
+			if request.Workspace != wantCwd || request.Profile.QwenHome != canonicalProfile {
 				t.Fatalf("readiness request = %#v", request)
 			}
 			return qwenreadiness.Report{Ready: true, Version: "0.21.15", IntegrationReady: true}, nil
