@@ -638,19 +638,16 @@ func (m *qwenLaneManager) initializeACP(ctx context.Context) error { //nolint:go
 }
 
 func (m *qwenLaneManager) qwenMCPServers() ([]any, error) {
-	executable, err := os.Executable()
+	server, err := nativeRuntimeAgentSessionsMCPServer("mcp", map[string]string{
+		peerSessionIDEnvironment:         m.state.ThreadID,
+		"AGENT_SESSIONS_PRODUCT":         "qwen",
+		"AGENT_SESSIONS_QWEN_CAPABILITY": m.launchToken,
+		agentRuntimeDirEnvironment:       laneAgentRuntimeDir(),
+	})
 	if err != nil {
-		return nil, errors.New("resolve Qwen lane MCP runtime")
+		return nil, err
 	}
-	env := []any{
-		map[string]any{"name": peerSessionIDEnvironment, "value": m.state.ThreadID},
-		map[string]any{"name": "AGENT_SESSIONS_PRODUCT", "value": "qwen"},
-		map[string]any{"name": "AGENT_SESSIONS_QWEN_CAPABILITY", "value": m.launchToken},
-		map[string]any{"name": agentRuntimeDirEnvironment, "value": laneAgentRuntimeDir()},
-	}
-	return []any{map[string]any{
-		"name": "agent_sessions", "command": executable, "args": []any{"mcp"}, "env": env,
-	}}, nil
+	return []any{server}, nil
 }
 
 func qwenACPMode(result map[string]any) string {

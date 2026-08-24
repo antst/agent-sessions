@@ -229,7 +229,9 @@ differs from the existing Codex, Claude, and Grok payloads.
    controls.
 5. **Qwen lane foundation**: implement stdio ACP manager, exact parent/groups/notices, serialized
    turns, collection, interruption, owner/persistence policy, initial native-mode mapping, and crash
-   recovery.
+   recovery. Use one shared structured ACP MCP-server constructor for Qwen and Grok headless sessions,
+   inject the current runtime explicitly at session create/resume, and require live-session identity
+   readiness without relying on an operator-profile plugin.
 6. **Native archive transaction**: implement the bounded authenticated helper, capability gate,
    archive/unarchive CAS, compensation, helper-child cleanup, external-conflict handling, and
    idempotence.

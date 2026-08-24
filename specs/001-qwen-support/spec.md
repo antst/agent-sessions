@@ -419,6 +419,17 @@ owner's native profile and credentials are unchanged.
   state machines MUST remain separate where the vendor's authoritative identity, terminal evidence,
   archive, or recovery semantics genuinely differ. CI MUST reject unreviewed clones at the
   repository's 100-token duplicate threshold, and every exception MUST carry a local rationale.
+- **FR-039**: Every headless native lane session MUST receive its exact bridge-owned
+  `agent_sessions` stdio MCP through the vendor's structured session-create and session-resume
+  request, using the current Agent Sessions runtime and shared ACP MCP-server constructor. Lane
+  readiness MUST NOT depend on an Agent Sessions plugin already installed in the operator's native
+  profile, and a static plugin inspection MUST NOT substitute for a successful harmless call through
+  the live session. Raw launch capabilities MUST remain in the inherited process environment when
+  that native ACP implementation preserves it rather than being duplicated into vendor-persisted
+  session configuration. Retried readiness MUST retain the last substantive protocol failure,
+  bounded vendor `error.data` detail, and repetition count instead of replacing the cause with the
+  final deadline. Linux and macOS acceptance MUST exercise an isolated native profile with no
+  preinstalled Agent Sessions plugin.
 
 ### Key Entities
 
@@ -504,6 +515,10 @@ owner's native profile and credentials are unchanged.
 - **SC-015**: Aggregate installation succeeds with zero, one, or several native product clients
   available, installs only the matching integrations, and names every skipped product; each direct
   product install still fails when its required native client is absent.
+- **SC-016**: Every headless Grok and Qwen lane created from an isolated native profile reports one
+  live `agent_sessions` MCP, completes a direct identity probe before publication, and produces no
+  owner-profile plugin dependency on Linux or macOS; deterministic protocol failures retain their
+  non-deadline cause in the private lane diagnostic.
 
 ## Assumptions
 

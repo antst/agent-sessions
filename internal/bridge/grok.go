@@ -629,6 +629,7 @@ var errGrokRosterAuthorityLost = errors.New("live Grok roster authority lost")
 type grokRPCError struct {
 	Code    int
 	Message string
+	Data    any
 }
 
 func (e *grokRPCError) Error() string {
@@ -636,6 +637,25 @@ func (e *grokRPCError) Error() string {
 		return "Grok ACP: " + e.Message
 	}
 	return fmt.Sprintf("Grok ACP error %d: %s", e.Code, e.Message)
+}
+
+func (e *grokRPCError) diagnosticDetail() string {
+	if e == nil {
+		return ""
+	}
+	value, _ := e.Data.(string)
+	if value == "" {
+		if object, ok := e.Data.(map[string]any); ok {
+			value = stringValue(object["message"])
+		}
+	}
+	value = strings.Join(strings.Fields(strings.ToValidUTF8(value, "�")), " ")
+	const maxRunes = 512
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "…"
+	}
+	return value
 }
 
 func newGrokACPClient(
@@ -746,7 +766,9 @@ func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, mess
 				continue
 			}
 			if raw, ok := response["error"].(map[string]any); ok {
-				return &grokRPCError{Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected")}
+				return &grokRPCError{
+					Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected"), Data: raw["data"],
+				}
 			}
 			result, _ := response["result"].(map[string]any)
 			inner, _ := result["result"].(map[string]any)
@@ -796,7 +818,9 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 				continue
 			}
 			if raw, ok := response["error"].(map[string]any); ok {
-				return nil, &grokRPCError{Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected")}
+				return nil, &grokRPCError{
+					Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected"), Data: raw["data"],
+				}
 			}
 			result, _ := response["result"].(map[string]any)
 			return result, nil

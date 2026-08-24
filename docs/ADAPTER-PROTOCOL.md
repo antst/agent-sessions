@@ -430,6 +430,32 @@ Direct peer messages are pushed into an active recipient turn automatically. Orc
 continue useful work rather than poll `check_inbox`, sleep, or block waiting for delivery;
 `check_inbox` exists only to recover messages held past a delivery boundary.
 
+## Headless lane MCP injection
+
+A headless native session must receive the exact bridge-owned `agent_sessions`
+stdio MCP in its native session-create and session-resume request. It must not
+depend on a plugin already installed or enabled in the operator's profile. A
+static plugin inspection is installation evidence, not proof that the new
+headless session admitted that server: the live session must expose the server
+and a harmless direct identity call must succeed before peer publication.
+
+Use the current Agent Sessions runtime as the command and the product's MCP
+runtime role as structured argv. Reuse the shared ACP stdio-server constructor;
+do not hand-build a second command/argv/environment schema. Prefer the native
+worker's already-attested inherited environment, so a raw launch capability is
+not duplicated into a session configuration that the vendor may persist. Add
+explicit environment entries only when the native ACP contract does not retain
+the worker environment, and test that capability handling independently.
+
+Readiness retries may accommodate a genuinely initializing MCP, but they must
+retain the last non-deadline protocol failure and its repetition count. If the
+vendor wraps a useful cause inside JSON-RPC `error.data`, preserve a bounded,
+single-line diagnostic in the private lane log rather than reducing it to the
+generic error message or the final timeout. Cross-platform acceptance must use
+an isolated native profile with no preinstalled Agent Sessions plugin and must
+prove that the live session, not merely an `inspect` command, contains exactly
+the injected server.
+
 ## Grok private-leader wake path
 
 `grok-peer` starts one private Grok leader and one persistent official ACP

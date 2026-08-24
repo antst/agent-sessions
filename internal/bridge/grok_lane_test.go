@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -117,6 +118,24 @@ func TestGrokLaneUsageAdvertisesGroupOptions(t *testing.T) {
 		if !strings.Contains(usage, option) {
 			t.Fatalf("Grok lane usage does not advertise %s", option)
 		}
+	}
+}
+
+func TestGrokMCPReadinessFailurePreservesRepeatedProtocolCause(t *testing.T) {
+	t.Parallel()
+
+	failures := grokMCPReadinessFailures{}
+	rpcFailure := &grokRPCError{Code: -32603, Message: "Internal error", Data: "server 'agent_sessions' not found"}
+	failures.record(grokMCPReadinessDiagnostic(rpcFailure))
+	failures.record(grokMCPReadinessDiagnostic(rpcFailure))
+	failures.record(fmt.Errorf("grok ACP _x.ai/sessions/list: %w", context.DeadlineExceeded))
+
+	summary := failures.summary(context.DeadlineExceeded)
+	if !strings.Contains(summary, "Grok ACP error -32603: Internal error") ||
+		!strings.Contains(summary, "server 'agent_sessions' not found") ||
+		!strings.Contains(summary, "repeated 2 times") ||
+		!strings.Contains(summary, "context deadline exceeded") {
+		t.Fatalf("Grok MCP readiness failure summary = %q", summary)
 	}
 }
 
@@ -831,6 +850,7 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 	t.Setenv("GROK_FAKE_YOLO", "1")
 	t.Setenv("GROK_FAKE_ANSWER", "LANE-ANSWER")
 	t.Setenv("GROK_FAKE_GENERATED_SESSION_ID", "native-grok-session")
+	t.Setenv("GROK_FAKE_REQUIRE_AGENT_SESSIONS_MCP", "1")
 	recordPath := filepath.Join(root, "fake.jsonl")
 	t.Setenv("GROK_FAKE_RECORD", recordPath)
 

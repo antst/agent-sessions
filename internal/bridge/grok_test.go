@@ -138,6 +138,23 @@ func runGrokFakeACP() {
 				continue
 			}
 		case "session/new", "session/load":
+			if os.Getenv("GROK_FAKE_REQUIRE_AGENT_SESSIONS_MCP") == "1" {
+				params, _ := request["params"].(map[string]any)
+				servers, _ := params["mcpServers"].([]any)
+				server := map[string]any{}
+				if len(servers) == 1 {
+					server, _ = servers[0].(map[string]any)
+				}
+				args, _ := server["args"].([]any)
+				if len(servers) != 1 || stringValue(server["name"]) != "agent_sessions" ||
+					!filepath.IsAbs(stringValue(server["command"])) || len(args) != 1 || stringValue(args[0]) != "grok-mcp" ||
+					server["env"] != nil {
+					writeGrokFakeResponse(request["id"], nil, map[string]any{
+						"code": -32602, "message": "missing injected agent_sessions MCP",
+					})
+					continue
+				}
+			}
 			result["sessionId"] = defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv))
 		case "session/prompt":
 			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {

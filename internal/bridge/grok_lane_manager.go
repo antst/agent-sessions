@@ -429,7 +429,13 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 	if _, err := client.request(ctx, "authenticate", map[string]any{"methodId": "cached_token", "_meta": map[string]any{"headless": true}}); err != nil {
 		return worker.attributedError("authenticate headless Grok lane ACP worker", err)
 	}
-	params := map[string]any{"cwd": m.state.Cwd, "mcpServers": []any{}, "_meta": map[string]any{"yoloMode": true}}
+	mcpServer, err := nativeRuntimeAgentSessionsMCPServer("grok-mcp", nil)
+	if err != nil {
+		return err
+	}
+	params := map[string]any{
+		"cwd": m.state.Cwd, "mcpServers": []any{mcpServer}, "_meta": map[string]any{"yoloMode": true},
+	}
 	method := "session/new"
 	if m.state.SessionCreated {
 		method = "session/load"
@@ -465,7 +471,7 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	var lastFailure string
+	failures := grokMCPReadinessFailures{}
 	for {
 		m.mu.Lock()
 		client, worker := m.client, m.worker
@@ -477,14 +483,14 @@ func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 		roster, rosterErr := client.request(ctx, "_x.ai/sessions/list", map[string]any{})
 		switch {
 		case rosterErr != nil:
-			lastFailure = rosterErr.Error()
+			failures.record(rosterErr)
 		default:
 			state, stateErr := grokRosterStateFromResponse(roster, grokSessionID)
 			switch {
 			case stateErr != nil:
-				lastFailure = stateErr.Error()
+				failures.record(stateErr)
 			case state.permissionMode != "bypassPermissions":
-				lastFailure = "Grok session is not in bypassPermissions mode"
+				failures.record(errors.New("grok session is not in bypassPermissions mode"))
 			default:
 				result, callErr := client.request(ctx, "_x.ai/mcp/call", map[string]any{
 					"sessionId": grokSessionID, "server": "agent_sessions", "tool": "identity",
@@ -496,9 +502,9 @@ func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 				}
 				switch {
 				case callErr != nil:
-					lastFailure = callErr.Error()
+					failures.record(grokMCPReadinessDiagnostic(callErr))
 				case readyErr != nil:
-					lastFailure = readyErr.Error()
+					failures.record(readyErr)
 				default:
 					return nil
 				}
@@ -506,12 +512,63 @@ func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for the Grok lane agent_sessions MCP: %s", lastFailure)
+			return fmt.Errorf("timed out waiting for the Grok lane agent_sessions MCP: %s", failures.summary(ctx.Err()))
 		case <-worker.done:
 			return worker.attributedError("headless Grok lane ACP worker exited during MCP startup", nil)
 		case <-ticker.C:
 		}
 	}
+}
+
+func grokMCPReadinessDiagnostic(err error) error {
+	var rpcErr *grokRPCError
+	if !errors.As(err, &rpcErr) {
+		return err
+	}
+	detail := rpcErr.diagnosticDetail()
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w; detail: %s", err, detail)
+}
+
+// grokMCPReadinessFailures retains the last substantive protocol failure even
+// when the final bounded probe ends with its parent context. Without this, a
+// deterministic, promptly returned ACP/MCP error is misreported as a hung
+// request merely because the retry window eventually closes.
+type grokMCPReadinessFailures struct {
+	lastFailure          string
+	lastSubstantive      string
+	lastSubstantiveCount int
+}
+
+func (f *grokMCPReadinessFailures) record(err error) {
+	if err == nil {
+		return
+	}
+	f.lastFailure = err.Error()
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return
+	}
+	if f.lastSubstantive == f.lastFailure {
+		f.lastSubstantiveCount++
+		return
+	}
+	f.lastSubstantive = f.lastFailure
+	f.lastSubstantiveCount = 1
+}
+
+func (f *grokMCPReadinessFailures) summary(ctxErr error) string {
+	if f.lastSubstantive != "" {
+		if f.lastSubstantiveCount > 1 {
+			return fmt.Sprintf("%s (repeated %d times before %v)", f.lastSubstantive, f.lastSubstantiveCount, ctxErr)
+		}
+		return fmt.Sprintf("%s (before %v)", f.lastSubstantive, ctxErr)
+	}
+	if f.lastFailure != "" {
+		return f.lastFailure
+	}
+	return ctxErr.Error()
 }
 
 func (m *grokLaneManager) handleACPNotification(message map[string]any) {
