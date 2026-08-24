@@ -2,13 +2,10 @@
 
 - Date: 2026-08-24
 - Platform: Linux amd64
-- Commit/tree: `1524e3e22645e8a5f471b093a7a91218066dda0c` /
-  `845050aa198b13ed9faa3ecd761465b6112d403c`
+- Final gate commit/tree: `b8bc0136ca37de484588d2e3ce4a978f186a19a7` /
+  `2e314a145d99f907ccfe71b568f27c1417395805`
 - Qwen Code / integration: `0.22.0` / `agent-sessions 0.2.4`
-- Verdict: RED — the native mutation operations below passed, but the
-  subsequently launched managed Qwen peer had no discoverable
-  `agent_sessions` MCP tools. Upgrade/removal credit is held until the live
-  MCP-registration regression is fixed and the full contract is rerun.
+- Verdict: GREEN
 
 The selected authenticated profile was the owner's already-authorized
 `/home/antst/.qwen`; no credential material was inspected or copied. Default
@@ -20,8 +17,8 @@ selection and explicit `QWEN_HOME=/home/antst/.qwen` plus the dedicated
 1. A no-Go default-profile install from the extracted prebuilt archive replaced
    the source-selected same-version extension through native scoped
    uninstall/install. Exact post-verification required the packaged source,
-   version, manifest, extension-rooted MCP command, executable native entry,
-   and full skill inventory.
+   version, manifest, contained `./scripts/native-entry` MCP command,
+   executable native entry, and full skill inventory.
 2. Repeating explicit-profile `upgrade-qwen` against that exact payload exited
    0 idempotently and performed no replacement.
 3. While managed peer `qwen-us5-live-refusal` was live on that exact profile,
@@ -50,6 +47,13 @@ Cleanup reused the exact US5 Linux boundary: local peers returned to zero, the
 test lane was archived, supported supervisor/App Server stops completed, the
 isolated agent stopped, no test-owned socket or process survived, and the
 validated temporary root was removed.
+
+The original mutation cell ran at `1524e3e...`; its static verifier accepted a
+native-Qwen `${extensionPath}` command that Agent Plugins v1 silently skipped.
+Successor `5f881f7...` corrected the command and exact verifier, and final
+`b8bc013...` reran the packaged install plus real interactive and lane smokes.
+Both complete Qwen contracts passed after the correction, so the earlier
+mutation evidence is no longer isolated from live MCP-registration proof.
 
 ```text
 Credential values read: NO
