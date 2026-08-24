@@ -22,6 +22,7 @@ const (
 	qwenTestMCPSchema          = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 	qwenTestPluginName         = "agent-sessions"
 	qwenTestMCPName            = "agent_sessions"
+	qwenTestMCPCommand         = "${extensionPath}${/}scripts${/}native-entry"
 	qwenTestPluginVersion      = qwenreadiness.IntegrationVersion
 	qwenPluginProcessHelperEnv = "AGENT_SESSIONS_QWEN_PLUGIN_PROCESS_HELPER"
 )
@@ -116,6 +117,17 @@ func TestVerifyQwenPluginInstallationRequiresExactEnabledInventory(t *testing.T)
 				delete(servers, qwenTestMCPName)
 			})
 		}, want: qwenTestMCPName},
+		{name: "ambient PATH MCP command", enabled: true, mutate: func(root string) {
+			qwenTestRewriteJSONObject(t, filepath.Join(root, "mcp.json"), func(value map[string]any) {
+				servers := value["mcpServers"].(map[string]any)
+				servers[qwenTestMCPName].(map[string]any)["command"] = "agent-session-runtime"
+			})
+		}, want: "exact"},
+		{name: "missing native entry", enabled: true, mutate: func(root string) {
+			if err := os.Remove(filepath.Join(root, "scripts", "native-entry")); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "native entry"},
 		{name: "missing skill", enabled: true, mutate: func(root string) {
 			if err := os.Remove(filepath.Join(root, "skills", "qwen-lane", "SKILL.md")); err != nil {
 				t.Fatal(err)
@@ -490,8 +502,14 @@ func assertQwenPluginPayload(t *testing.T, root string) {
 		t.Fatalf("Qwen MCP manifest = %#v", mcp)
 	}
 	server, ok := servers[qwenTestMCPName].(map[string]any)
-	if !ok || server["type"] != "stdio" || strings.TrimSpace(stringValue(server["command"])) == "" {
+	arguments, argumentsOK := server["args"].([]any)
+	if !ok || server["type"] != "stdio" || server["command"] != qwenTestMCPCommand ||
+		!argumentsOK || len(arguments) != 1 || arguments[0] != "mcp" {
 		t.Fatalf("Qwen %s MCP definition = %#v", qwenTestMCPName, servers[qwenTestMCPName])
+	}
+	entryInfo, err := os.Lstat(filepath.Join(root, "scripts", "native-entry"))
+	if err != nil || !entryInfo.Mode().IsRegular() || entryInfo.Mode()&os.ModeSymlink != 0 || entryInfo.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("Qwen MCP native entry = %v, %v", entryInfo, err)
 	}
 
 	skillsRoot := filepath.Join(root, "skills")
@@ -539,9 +557,15 @@ func qwenTestPluginFixtureAt(t *testing.T, root string) {
 	qwenTestWriteJSON(t, filepath.Join(root, "mcp.json"), map[string]any{
 		"$schema": qwenTestMCPSchema,
 		"mcpServers": map[string]any{
-			qwenTestMCPName: map[string]any{"type": "stdio", "command": "agent-session-runtime", "args": []string{"qwen-mcp"}},
+			qwenTestMCPName: map[string]any{"type": "stdio", "command": qwenTestMCPCommand, "args": []string{"mcp"}},
 		},
 	})
+	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scripts", "native-entry"), []byte("#!/bin/sh\nexec /exact/agent-session-runtime \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, skill := range qwenTestPluginSkills {
 		qwenTestWriteSkill(t, root, skill)
 	}

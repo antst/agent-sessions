@@ -310,6 +310,8 @@ func launchPreparedQwenPeer(
 	environment := qwenprofile.ApplyEnvironment(os.Environ(), plan.profile)
 	environment = peerEnvironment(environment, plan.sessionID, "qwen")
 	environment = envutil.Set(environment, qwenCapabilityEnv, capability)
+	environment = envutil.Set(environment, nativeRuntimeEnv, runtimePath)
+	environment = envutil.Set(environment, "QWEN_PEER_NATIVE_RUNTIME", runtimePath)
 	if err := execCommand(runtimePath, hostArgs, environment); err != nil {
 		cleanupErr := cleanupPreparedQwenLaunchPaths(lifecycleRoot, inputAttestation, eventsAttestation)
 		var rollbackErr error

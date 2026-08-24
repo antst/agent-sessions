@@ -431,6 +431,14 @@ owner's native profile and credentials are unchanged.
   final deadline. Linux and macOS acceptance MUST exercise an isolated native profile with no
   preinstalled Agent Sessions plugin. The structured server MUST include every field required by
   the vendor ACP schema, including an empty environment array when there are no explicit entries.
+- **FR-040**: Every interactive plugin-owned Agent Sessions MCP entrypoint MUST select an exact
+  installed or launch-selected Agent Sessions runtime without consulting ambient `PATH`. The Qwen
+  extension command MUST be rooted in its own `${extensionPath}`, managed Qwen peers MUST pass the
+  exact runtime selected by their launcher, and ordinary Qwen sessions MUST use the runtime path
+  published by the selected Agent Sessions installation. A missing, stale, non-executable, or
+  unverifiable exact runtime MUST fail closed instead of silently loading another installed release.
+  Future vendor plugins MUST reuse this entrypoint/runtime-selection contract and its stale-PATH
+  regression rather than introducing another bare runtime command.
 
 ### Key Entities
 

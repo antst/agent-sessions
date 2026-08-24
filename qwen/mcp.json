@@ -3,7 +3,7 @@
   "mcpServers": {
     "agent_sessions": {
       "type": "stdio",
-      "command": "agent-session-runtime",
+      "command": "${extensionPath}${/}scripts${/}native-entry",
       "args": [
         "mcp"
       ]

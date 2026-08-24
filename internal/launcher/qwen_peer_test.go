@@ -373,6 +373,12 @@ func TestRunQwenPeerExecsPreparedHostAndRollsBackExecFailure(t *testing.T) {
 			if value, ok := qwenTestEnvironment(environment, qwenCapabilityEnv); !ok || value == "" {
 				t.Fatal("prepared host has no raw Qwen MCP capability")
 			}
+			if value, ok := qwenTestEnvironment(environment, nativeRuntimeEnv); !ok || value != executable {
+				t.Fatalf("prepared host generic native runtime = %q, present=%v", value, ok)
+			}
+			if value, ok := qwenTestEnvironment(environment, "QWEN_PEER_NATIVE_RUNTIME"); !ok || value != executable {
+				t.Fatalf("prepared host Qwen native runtime = %q, present=%v", value, ok)
+			}
 			return sentinel
 		},
 	})

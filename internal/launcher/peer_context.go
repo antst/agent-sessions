@@ -11,6 +11,7 @@ import (
 
 const (
 	agentRuntimeDirEnv = "AGENT_SESSIONS_AGENT_RUNTIME_DIR"
+	nativeRuntimeEnv   = "AGENT_SESSIONS_NATIVE_RUNTIME"
 	peerSessionIDEnv   = "AGENT_SESSIONS_SESSION_ID"
 	peerProductEnv     = "AGENT_SESSIONS_PRODUCT"
 	remoteParentEnv    = "AGENT_SESSIONS_REMOTE_PARENT_CONTEXT"

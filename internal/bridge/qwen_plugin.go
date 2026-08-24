@@ -20,6 +20,7 @@ const (
 	qwenMCPSchema    = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 	qwenPluginName   = "agent-sessions"
 	qwenMCPName      = "agent_sessions"
+	qwenMCPCommand   = "${extensionPath}${/}scripts${/}native-entry"
 )
 
 var qwenPluginSkills = []string{
@@ -74,8 +75,14 @@ func verifyQwenPluginInstallation(root, expectedVersion string, enabled bool) er
 		return errors.New("qwen plugin MCP manifest has the wrong schema or inventory")
 	}
 	server, ok := servers[qwenMCPName].(map[string]any)
-	if !ok || stringValue(server["type"]) != "stdio" || strings.TrimSpace(stringValue(server["command"])) == "" {
+	arguments, argumentsOK := server["args"].([]any)
+	if !ok || stringValue(server["type"]) != "stdio" || stringValue(server["command"]) != qwenMCPCommand ||
+		!argumentsOK || len(arguments) != 1 || stringValue(arguments[0]) != "mcp" {
 		return fmt.Errorf("qwen plugin does not provide the exact %s stdio MCP server", qwenMCPName)
+	}
+	entryInfo, err := os.Lstat(filepath.Join(root, "scripts", "native-entry"))
+	if err != nil || !entryInfo.Mode().IsRegular() || entryInfo.Mode()&os.ModeSymlink != 0 || entryInfo.Mode().Perm()&0o111 == 0 {
+		return errors.New("qwen plugin MCP native entry is not an executable regular file")
 	}
 
 	entries, err := os.ReadDir(filepath.Join(root, "skills"))

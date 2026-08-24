@@ -29,6 +29,7 @@ bash -n \
   "$plugin_root/scripts/test-claude-contract" \
   "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
   "$plugin_root/grok/scripts/native-entry" \
+  "$plugin_root/qwen/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
 python3 - "$plugin_root/scripts/release-gate-manifest" <<'PY'
@@ -139,10 +140,15 @@ with tempfile.TemporaryDirectory() as directory:
     assert not (grok_home / ".grok" / "plugins" / "agent-sessions").exists()
 PY
 
-if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
-  printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
-  exit 1
-fi
+for native_entry_copy in \
+  "$plugin_root/grok/scripts/native-entry" \
+  "$plugin_root/qwen/scripts/native-entry"; do
+  if ! cmp -s "$plugin_root/scripts/native-entry" "$native_entry_copy"; then
+    printf 'plugin native-entry copy drifted from the shared installed entry point: %s\n' \
+      "$native_entry_copy" >&2
+    exit 1
+  fi
+done
 
 release_matrix="$("$plugin_root/scripts/release-inventory" matrix-json)"
 release_package_inventory="$("$plugin_root/scripts/release-inventory" package-inventory-json)"
@@ -654,6 +660,7 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
    [[ ! -f "$custom_install_root/qwen/plugin.json" ]] ||
    [[ ! -f "$custom_install_root/qwen/mcp.json" ]] ||
+   [[ ! -x "$custom_install_root/qwen/scripts/native-entry" ]] ||
    [[ ! -f "$custom_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
    [[ -e "$custom_prefix/bin/codex-messaging" ]]; then
@@ -698,6 +705,19 @@ grok_exact_result="$(GROK_PEER_NATIVE_RUNTIME="$grok_exact_runtime" CLAUDE_PEER_
   "$grok_cache/scripts/native-entry" grok-mcp)"
 if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
   printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
+  exit 1
+fi
+ambient_runtime_dir="$temporary_root/ambient-runtime"
+mkdir -p "$ambient_runtime_dir"
+printf '%s\n' '#!/bin/sh' 'printf "ambient:%s\\n" "$*"' >"$ambient_runtime_dir/agent-session-runtime"
+chmod 0700 "$ambient_runtime_dir/agent-session-runtime"
+qwen_exact_result="$(PATH="$ambient_runtime_dir:$PATH" \
+  AGENT_SESSIONS_NATIVE_RUNTIME="$grok_exact_runtime" \
+  QWEN_PEER_NATIVE_RUNTIME="$ambient_runtime_dir/agent-session-runtime" \
+  CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
+  "$custom_install_root/qwen/scripts/native-entry" mcp)"
+if [[ "$qwen_exact_result" != exact:mcp ]]; then
+  printf 'Qwen plugin did not preserve the managed parent exact runtime ahead of product and PATH candidates\n' >&2
   exit 1
 fi
 grok_user_plugin_root="$temporary_root/grok-user-plugins/agent-sessions"
@@ -917,6 +937,7 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
    [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
    [[ ! -f "$release_root/qwen/plugin.json" ]] ||
    [[ ! -f "$release_root/qwen/mcp.json" ]] ||
+   [[ ! -x "$release_root/qwen/scripts/native-entry" ]] ||
    [[ ! -f "$release_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -f "$release_root/qwen/skills/codex-lane/SKILL.md" ]] ||
    [[ ! -f "$release_root/qwen/skills/claude-lane/SKILL.md" ]] ||
@@ -990,6 +1011,7 @@ if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
    [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -f "$release_install_root/qwen/plugin.json" ]] ||
    [[ ! -f "$release_install_root/qwen/mcp.json" ]] ||
+   [[ ! -x "$release_install_root/qwen/scripts/native-entry" ]] ||
    [[ ! -f "$release_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
   printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
