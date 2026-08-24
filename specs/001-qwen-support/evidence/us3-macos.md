@@ -39,7 +39,13 @@ The verifier independently found all sixteen tokens in the corresponding native 
 
 The authenticated default Qwen profile initially contained no Agent Sessions extension. With explicit owner authorization, `make dev-install-qwen QWEN="$HOME/.local/bin/qwen"` installed the exact source payload at version `0.2.4`; all seven shipped payload files matched the tree byte-for-byte. After the matrix, `make remove-qwen QWEN="$HOME/.local/bin/qwen"` removed the extension payload and active policy successfully.
 
-A recursive pre/post manifest found no removed baseline path and no credential or unrelated setting mutation. Qwen's native extension manager retained its normal bookkeeping: an empty artifact-keyed plugin-data directory, `state.previous.json`, an empty `extension-preferences.json`, and a monotonic `state.json` generation change. The authenticated run also appended native usage records and created the client's log-cleanup marker. These are native journal/usage artifacts, not active Agent Sessions installation state; none was manually restored or deleted.
+Permitted path and filesystem-metadata observations found no removed baseline path and no owner-profile
+credential or settings metadata change. They do not support a content-equality claim. Qwen's native
+extension manager retained its normal bookkeeping: an empty artifact-keyed plugin-data directory,
+`state.previous.json`, an empty `extension-preferences.json`, and a monotonic `state.json` generation
+change. The authenticated run also appended native usage records and created the client's log-cleanup
+marker. These are native journal/usage artifacts, not active Agent Sessions installation state; none
+was manually restored or deleted.
 
 The isolated Grok profile began with an authentication-file symlink to the owner's profile. Native
 Grok atomically replaced that symlink with a regular credential file inside the isolated profile.

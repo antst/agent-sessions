@@ -174,7 +174,7 @@ func runHosts(args []string) error {
 func runLane(ctx context.Context, args []string) error {
 	set := flag.NewFlagSet("lane", flag.ContinueOnError)
 	host := set.String("host", "", "connected destination host id or unique name")
-	product := set.String("product", "", "lane product: codex, claude, or grok")
+	product := set.String("product", "", "lane product: "+laneProductChoices(", "))
 	sourceSession := set.String("source-session", "", "originating live local peer session (normally inferred)")
 	runtimeDir := set.String("runtime-dir", federator.DefaultRuntimeDir(), "ephemeral runtime directory")
 	if err := set.Parse(args); err != nil {
@@ -226,7 +226,7 @@ func envEnabled(name string) bool {
 }
 
 func usage() string {
-	return `peer-federator — route grouped Agent Sessions peers locally and across a trusted LAN
+	return fmt.Sprintf(`peer-federator — route grouped Agent Sessions peers locally and across a trusted LAN
 
 Usage:
   peer-federator hub   [--listen :7419]
@@ -234,9 +234,18 @@ Usage:
   peer-federator doctor --hub HOST:PORT
   peer-federator status
   peer-federator hosts
-  peer-federator lane --host HOST --product codex|claude|grok -- COMMAND [ARGS...]
+  peer-federator lane --host HOST --product %s -- COMMAND [ARGS...]
   peer-federator version
 
 Remote lane execution is disabled by default. Run peer-federator COMMAND --help for all options.
-`
+`, laneProductChoices("|"))
+}
+
+func laneProductChoices(separator string) string {
+	descriptors := federator.ProductDescriptors()
+	products := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		products = append(products, descriptor.ID)
+	}
+	return strings.Join(products, separator)
 }
