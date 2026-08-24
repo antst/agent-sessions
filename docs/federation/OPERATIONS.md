@@ -62,8 +62,11 @@ Remote lanes are disabled unless `--enable-remote-lanes` or
 `~/.local/bin` for all four target launchers. Exact paths can be supplied with
 `PEER_FEDERATOR_CODEX_LANE`, `PEER_FEDERATOR_CLAUDE_LANE`, and
 `PEER_FEDERATOR_GROK_LANE`, and `PEER_FEDERATOR_QWEN_LANE`. The Qwen capability
-is withheld unless the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR`, executable,
+is withheld unless the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR`, native executable,
 ACP/archive surface, trusted cwd, and installed integration are ready.
+The native client is resolved separately from `qwen-peer-lane`; override it with
+`QWEN_PEER_QWEN_BIN` or `--qwen-bin` when it is not on the service `PATH`. The exact resolved path
+is inherited by remote Qwen workers.
 Capabilities are evaluated when the agent starts and are advertised in its hub
 handshake. After installing a previously unavailable product integration,
 restart that agent to advertise the newly ready capability; plugin installation

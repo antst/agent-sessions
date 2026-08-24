@@ -77,6 +77,7 @@ type AgentOptions struct {
 	ClaudeLaneExecutable string
 	GrokLaneExecutable   string
 	QwenLaneExecutable   string
+	QwenExecutable       string
 	Logger               *log.Logger
 }
 
@@ -225,35 +226,55 @@ func configureLaneExecutables(options *AgentOptions) error {
 		options.ClaudeLaneExecutable = ""
 		options.GrokLaneExecutable = ""
 		options.QwenLaneExecutable = ""
+		options.QwenExecutable = ""
 		return nil
 	}
 	codexConfigured := options.CodexLaneExecutable
 	claudeConfigured := options.ClaudeLaneExecutable
 	grokConfigured := options.GrokLaneExecutable
 	qwenConfigured := options.QwenLaneExecutable
-	options.CodexLaneExecutable = resolveLaneExecutable(codexConfigured, "codex-peer-lane")
-	options.ClaudeLaneExecutable = resolveLaneExecutable(claudeConfigured, "claude-peer-lane")
-	options.GrokLaneExecutable = resolveLaneExecutable(grokConfigured, "grok-peer-lane")
-	options.QwenLaneExecutable = resolveLaneExecutable(qwenConfigured, "qwen-peer-lane")
-	if codexConfigured != "" && options.CodexLaneExecutable == "" {
-		return fmt.Errorf("configured codex lane launcher %q is not executable", codexConfigured)
+	qwenExecutableConfigured := options.QwenExecutable
+	if qwenExecutableConfigured == "" {
+		qwenExecutableConfigured = strings.TrimSpace(os.Getenv("QWEN_PEER_QWEN_BIN"))
 	}
-	if claudeConfigured != "" && options.ClaudeLaneExecutable == "" {
-		return fmt.Errorf("configured Claude lane launcher %q is not executable", claudeConfigured)
+	bindings := []struct {
+		configured string
+		fallback   string
+		label      string
+		target     *string
+	}{
+		{codexConfigured, "codex-peer-lane", "codex", &options.CodexLaneExecutable},
+		{claudeConfigured, "claude-peer-lane", "Claude", &options.ClaudeLaneExecutable},
+		{grokConfigured, "grok-peer-lane", "Grok", &options.GrokLaneExecutable},
+		{qwenConfigured, "qwen-peer-lane", "Qwen", &options.QwenLaneExecutable},
 	}
-	if grokConfigured != "" && options.GrokLaneExecutable == "" {
-		return fmt.Errorf("configured Grok lane launcher %q is not executable", grokConfigured)
-	}
-	if qwenConfigured != "" && options.QwenLaneExecutable == "" {
-		return fmt.Errorf("configured Qwen lane launcher %q is not executable", qwenConfigured)
-	}
-	if options.QwenLaneExecutable != "" {
-		if err := evaluateQwenLaneReadiness(options.QwenLaneExecutable); err != nil {
-			if qwenConfigured != "" {
-				return fmt.Errorf("configured Qwen lane launcher is not ready: %w", err)
-			}
-			options.QwenLaneExecutable = ""
+	for _, binding := range bindings {
+		*binding.target = resolveLaneExecutable(binding.configured, binding.fallback)
+		if binding.configured != "" && *binding.target == "" {
+			return fmt.Errorf("configured %s lane launcher %q is not executable", binding.label, binding.configured)
 		}
+	}
+	options.QwenExecutable = resolveLaneExecutable(qwenExecutableConfigured, "qwen")
+	return configureQwenLaneReadiness(options, qwenConfigured, qwenExecutableConfigured)
+}
+
+func configureQwenLaneReadiness(options *AgentOptions, configuredLauncher, configuredNative string) error {
+	if options.QwenLaneExecutable == "" {
+		return nil
+	}
+	if options.QwenExecutable == "" {
+		if configuredLauncher != "" || configuredNative != "" {
+			return errors.New("configured Qwen lane launcher has no executable native Qwen client")
+		}
+		options.QwenLaneExecutable = ""
+		return nil
+	}
+	if err := evaluateQwenLaneReadiness(options.QwenExecutable); err != nil {
+		if configuredLauncher != "" || configuredNative != "" {
+			return fmt.Errorf("configured Qwen lane launcher is not ready: %w", err)
+		}
+		options.QwenLaneExecutable = ""
+		options.QwenExecutable = ""
 	}
 	return nil
 }

@@ -1,18 +1,17 @@
 # US5 deployment-example review
 
-Reviewed at `2026-08-23T21:13:37Z` on Linux amd64 before the T082 version freeze. The source
-baseline was `4402e9abe2499d1d99e81ad68ec7935b3c6665b9`; the examples already contained the T061
-Qwen changes and were not edited during this review.
+Revalidated on 2026-08-24 on Linux amd64 before the T082 version freeze. The reviewed behavior tree
+is parented by `642829eca0e18bd6949689563998fce78e30e02d`. The T059A correction separates the native
+Qwen executable used for readiness from the `qwen-peer-lane` launcher used for dispatch.
 
 ## Inputs
 
 | Example | SHA-256 |
 |---|---|
-| `deploy/peer-federator/systemd/user/agent.env.example` | `a023042b4343e23dcd3ff6f4de3403d1d3bf72900ff795834c1b69703505d44d` |
-| `deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example` | `213d409b2c551cf1738b5223695bf6c77f2684b17411882eb79d7eedaf5d7316` |
+| `deploy/peer-federator/systemd/user/agent.env.example` | `f0939e0aa0a0573feed52039d638ac133e4de82938196a36134e719c52f20429` |
+| `deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example` | `f0c534497a2638baca0a9026fb8513675ba41b7270e6500b4b055965c3351f68` |
 
-Tool labels: Go `go1.26.5 linux/amd64`, Qwen Code `0.22.0`. The repository binary still
-reported `0.2.0`, as required before T082 takes exclusive ownership of the `0.2.4` version change.
+Tool labels: Go `go1.26.5 linux/amd64`, Qwen Code `0.22.0`, Agent Sessions `0.2.4`.
 
 ## Validation
 
@@ -20,13 +19,16 @@ reported `0.2.0`, as required before T082 takes exclusive ownership of the `0.2.
 - `bash -n deploy/peer-federator/systemd/user/agent.env.example`: PASS.
 - Python `plistlib.load` of the launchd example: PASS. `ProgramArguments` selects `agent`, includes
   the hub and host, and does not opt into `--enable-remote-lanes`; the environment contains exactly
-  the documented Qwen launcher/profile variables in addition to the template's fixed launch data.
+  the documented Qwen launcher, independent native executable, and profile variables in addition to
+  the template's fixed launch data.
 - `go test ./internal/qwenprofile -count=1`: PASS. This proves unset profile variables preserve the
   native default, explicit values are canonical absolute paths without mutable symlink ambiguity,
   set-empty values fail, and both variables participate in profile identity.
-- Focused launcher and federator Qwen/profile tests: PASS. The agent consumes
-  `PEER_FEDERATOR_QWEN_LANE`, withholds Qwen capability until the shared readiness engine succeeds,
-  and retains the one-agent runtime lock.
+- Focused launcher and federator Qwen/profile tests plus `scripts/federation/test`: PASS. The agent
+  consumes `PEER_FEDERATOR_QWEN_LANE` only as the dispatch launcher, resolves native Qwen separately
+  from `--qwen-bin` / `QWEN_PEER_QWEN_BIN` or the service path, runs the sole readiness engine against
+  that native executable, propagates the exact native path into remote Qwen workers, withholds Qwen
+  capability on failure, and retains the one-agent runtime lock.
 - Every runtime lane role (`lane`, `claude-lane`, `grok-lane`, `qwen-lane`) returned help directly.
   The review exposed and fixed a class defect where wrapper help attempted runtime/plugin activation
   first; `TestLaneHelpDoesNotActivateRuntime` now requires help to use read-only runtime discovery,
@@ -41,7 +43,8 @@ reported `0.2.0`, as required before T082 takes exclusive ownership of the `0.2.
 - Omitting `QWEN_HOME` and `QWEN_RUNTIME_DIR` selects Qwen's native profile. Supplying them binds
   readiness, plugin verification, peer/lane launch, and federation advertisement to the exact same
   profile. No example copies or embeds credentials.
-- The optional Qwen launcher override is product-specific configuration, while the runtime, state,
-  hub, host, and listener contracts remain shared with the other products.
+- The optional Qwen launcher and native-client overrides are independent product-specific
+  configuration, while the runtime, state, hub, host, and listener contracts remain shared with the
+  other products. Neither example conflates `qwen-peer-lane` with native `qwen`.
 
-Result: PASS. The T061 examples match the frozen behavioral contracts and need no further edit.
+Result: PASS. The T061/T059A examples match the corrected behavioral contract.

@@ -166,20 +166,39 @@ func TestPrepareRemoteQwenLaneUsesAdvertisedReadyLauncher(t *testing.T) {
 
 func TestConfiguredQwenRemoteLaneRequiresSoleReadinessEngine(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "qwen-peer-lane")
+	native := filepath.Join(t.TempDir(), "qwen")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(native, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	previous := evaluateQwenLaneReadiness
 	evaluateQwenLaneReadiness = func(got string) error {
-		if got != executable {
-			t.Fatalf("readiness executable = %q", got)
+		if got != native {
+			t.Fatalf("readiness executable = %q, want native %q (lane launcher %q)", got, native, executable)
 		}
 		return errors.New("native archive unavailable")
 	}
 	t.Cleanup(func() { evaluateQwenLaneReadiness = previous })
-	options := AgentOptions{EnableRemoteLanes: true, QwenLaneExecutable: executable}
+	options := AgentOptions{EnableRemoteLanes: true, QwenLaneExecutable: executable, QwenExecutable: native}
 	if err := configureLaneExecutables(&options); err == nil || !strings.Contains(err.Error(), "native archive unavailable") {
 		t.Fatalf("unready configured Qwen launcher = %v", err)
+	}
+}
+
+func TestRemoteQwenLaneInheritsExactNativeExecutable(t *testing.T) {
+	options := AgentOptions{
+		RuntimeDir: "/runtime", ClaudeConfigDir: "/claude", QwenExecutable: "/opt/qwen/bin/qwen",
+	}
+	updates := remoteLaneEnvironmentUpdates(options, "qwen", `{"session_id":"parent"}`)
+	if got := updates["QWEN_PEER_QWEN_BIN"]; got != options.QwenExecutable {
+		t.Fatalf("remote Qwen executable = %q, want %q", got, options.QwenExecutable)
+	}
+	for _, product := range []string{"codex", "claude", "grok"} {
+		if value, exists := remoteLaneEnvironmentUpdates(options, product, "{}")["QWEN_PEER_QWEN_BIN"]; exists {
+			t.Fatalf("remote %s lane inherited Qwen executable %q", product, value)
+		}
 	}
 }
 

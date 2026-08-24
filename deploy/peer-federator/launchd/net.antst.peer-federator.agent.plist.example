@@ -18,6 +18,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PEER_FEDERATOR_QWEN_LANE</key><string>/Users/CHANGE_ME/.local/bin/qwen-peer-lane</string>
+    <key>QWEN_PEER_QWEN_BIN</key><string>/Users/CHANGE_ME/.local/bin/qwen</string>
     <key>QWEN_HOME</key><string>/Users/CHANGE_ME/.qwen</string>
     <key>QWEN_RUNTIME_DIR</key><string>/Users/CHANGE_ME/Library/Caches/qwen</string>
   </dict>

@@ -100,6 +100,7 @@ func runAgent(ctx context.Context, args []string) error {
 	claudeLane := set.String("claude-lane", os.Getenv("PEER_FEDERATOR_CLAUDE_LANE"), "claude-peer-lane executable")
 	grokLane := set.String("grok-lane", os.Getenv("PEER_FEDERATOR_GROK_LANE"), "grok-peer-lane executable")
 	qwenLane := set.String("qwen-lane", os.Getenv("PEER_FEDERATOR_QWEN_LANE"), "qwen-peer-lane executable")
+	qwenExecutable := set.String("qwen-bin", os.Getenv("QWEN_PEER_QWEN_BIN"), "native Qwen executable used for readiness and remote lanes")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -109,6 +110,7 @@ func runAgent(ctx context.Context, args []string) error {
 		EnableRemoteLanes:   *enableRemoteLanes,
 		CodexLaneExecutable: *codexLane, ClaudeLaneExecutable: *claudeLane,
 		GrokLaneExecutable: *grokLane, QwenLaneExecutable: *qwenLane,
+		QwenExecutable: *qwenExecutable,
 	})
 }
 

@@ -97,9 +97,6 @@ func resolveLaneExecutable(configured, fallback string) string {
 		if path, err := exec.LookPath(configured); err == nil {
 			return path
 		}
-		if info, err := os.Stat(configured); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-			return configured
-		}
 		return ""
 	}
 	if path, err := exec.LookPath(fallback); err == nil {
@@ -463,11 +460,8 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: profileErr.Error()})
 		return
 	}
-	command.Env = claudeProfileEnvironment(envutil.Replace(os.Environ(), map[string]string{
-		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     a.options.RuntimeDir,
-		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": string(parentBody),
-		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        a.options.ClaudeConfigDir,
-	}), claudeProfile)
+	environmentUpdates := remoteLaneEnvironmentUpdates(a.options, request.Product, string(parentBody))
+	command.Env = claudeProfileEnvironment(envutil.Replace(os.Environ(), environmentUpdates), claudeProfile)
 	command.Stdin = bytes.NewReader(request.Input)
 	livenessReader, livenessWriter, err := os.Pipe()
 	if err != nil {
@@ -525,6 +519,18 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		}
 	}
 	_ = a.sendLaneMessage(Message{Type: "lane_exit", RequestID: request.RequestID, ExitCode: exitCode})
+}
+
+func remoteLaneEnvironmentUpdates(options AgentOptions, product, parentContext string) map[string]string {
+	updates := map[string]string{
+		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     options.RuntimeDir,
+		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": parentContext,
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        options.ClaudeConfigDir,
+	}
+	if product == "qwen" && options.QwenExecutable != "" {
+		updates["QWEN_PEER_QWEN_BIN"] = options.QwenExecutable
+	}
+	return updates
 }
 
 func claudeProfileEnvironment(environment []string, profile claudeprofile.Source) []string {

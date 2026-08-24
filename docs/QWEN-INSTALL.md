@@ -66,7 +66,9 @@ performed.
 
 For remote Qwen lanes, enable remote lanes only on a trusted hub. The agent
 auto-discovers `qwen-peer-lane`; override it with
-`PEER_FEDERATOR_QWEN_LANE=/absolute/path/qwen-peer-lane`. The agent advertises
+`PEER_FEDERATOR_QWEN_LANE=/absolute/path/qwen-peer-lane`. It resolves the native Qwen client
+independently; use `QWEN_PEER_QWEN_BIN=/absolute/path/qwen` or agent flag
+`--qwen-bin /absolute/path/qwen` when it is not on the service `PATH`. The agent advertises
 `qwen-lane` only after the same readiness engine passes in its selected
 profile. Capabilities are fixed when the agent connects to its hub. If Qwen is
 installed after an already-running agent withheld `qwen-lane`, restart that

@@ -181,6 +181,7 @@ archive, nonmutation, and cleanup.
 ### Implementation for User Story 4
 
 - [X] T059 [US4] Add Qwen capability constants, host readiness advertisement, status output, and current-version validation by consuming the sole `internal/qwenreadiness` evidence engine from T016; generic federator code MUST NOT implement a second Qwen probe path, in `internal/federator/protocol.go`, `internal/federator/agent.go`, and `internal/federator/diagnostics.go`
+- [X] T059A Keep the remote Qwen lane launcher and native Qwen executable as separate attested paths: run capability readiness against native Qwen, propagate that exact path into remote workers, expose `--qwen-bin`/`QWEN_PEER_QWEN_BIN`, and regress both deployment surfaces in `internal/federator/agent.go`, `internal/federator/lane.go`, `cmd/peer-federator/main.go`, deployment examples, and federation tests
 - [X] T060 [US4] Route explicit remote Qwen lane execution, stdin, lifecycle ownership, typed ParentContext, and verbatim collection pointers in `internal/federator/lane.go` and `internal/federator/lane_watch.go`
 - [X] T061 [P] [US4] Own and complete the Qwen launcher variables and runtime/profile examples without adding listeners or legacy compatibility in `deploy/peer-federator/systemd/user/agent.env.example` and `deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example`
 - [X] T062 [US4] Extend grouped federation fixtures and exact destination residue checks for Qwen in `scripts/federation/grouped_peer_fixture.go`, `scripts/federation/integration_test.py`, and `scripts/federation/test`
