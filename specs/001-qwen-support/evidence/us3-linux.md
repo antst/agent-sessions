@@ -12,6 +12,10 @@
   isolated Grok profile was inspected before launch and contained neither an `agent-sessions`
   plugin nor an `agent_sessions` MCP. The injected session MCP was therefore the only possible
   Grok readiness path.
+- Credential boundary: `GROK_TEST_HOME` was a dedicated disposable owner-only profile. A seeded
+  authentication symlink is not a no-copy guarantee because native Grok may replace it with a
+  regular credential file; the supplied profile must be treated as credential-bearing after launch
+  and removed after metadata-only evidence extraction.
 
 ## Credited edges
 
@@ -121,6 +125,6 @@ records were absent. The supplied isolated profile roots had zero open files
 and zero matching processes. The harness stopped the isolated Codex App Server
 and did not stop or alter the owner's normal Codex daemon. Baseline and final
 metadata showed only Qwen's native usage ledger and Claude's native credential
-file updated during the authenticated run. No harness code read or wrote a
+file updated during the authenticated run. No harness code intentionally read or wrote a
 credential value; Codex auth, Grok auth/config, Qwen settings/plugin state, and
 every other Qwen profile file retained pre-run timestamps.

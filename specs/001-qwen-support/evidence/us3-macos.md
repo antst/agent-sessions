@@ -41,10 +41,17 @@ The authenticated default Qwen profile initially contained no Agent Sessions ext
 
 A recursive pre/post manifest found no removed baseline path and no credential or unrelated setting mutation. Qwen's native extension manager retained its normal bookkeeping: an empty artifact-keyed plugin-data directory, `state.previous.json`, an empty `extension-preferences.json`, and a monotonic `state.json` generation change. The authenticated run also appended native usage records and created the client's log-cleanup marker. These are native journal/usage artifacts, not active Agent Sessions installation state; none was manually restored or deleted.
 
+The isolated Grok profile began with an authentication-file symlink to the owner's profile. Native
+Grok atomically replaced that symlink with a regular credential file inside the isolated profile.
+The owner target was not written through, but the test profile thereby became credential-bearing and
+was deleted after token-location evidence was recorded. Future runs must treat such a symlink only as
+owner-target protection—not as a no-copy guarantee—and must use a dedicated owner-only disposable
+profile.
+
 ## RCA and cleanup
 
 Earlier macOS attempts established that the repository workspace's checked-in `.mcp.json` had masked whether Grok used session injection. Once every lane used the clean workspace and both fallback sources were rejected, Codex-to-Grok and the remaining Grok edges passed on the same Darwin Grok build. The earlier conclusion that Darwin discarded session MCP configuration is therefore withdrawn.
 
 An externally terminated diagnostic run had left an isolated bridge supervisor alive after its temporary root was removed. The composition runner now converts SIGINT/SIGTERM into an orderly cleanup unwind, continues independent cleanup after an individual failure, and the supervisor `stop` command waits for both its control socket and exact PID/process-start identity to retire before the runner removes the root. Regression coverage exercises the signal handler and proves stop does not return merely because the socket disappeared.
 
-The credited matrix left zero composition roots and zero processes whose executable belonged to the test runtime. Owner Grok configuration/plugin state was unchanged. No evidence writer read or copied any credential value, and no merge, tag, or release occurred during acceptance.
+The credited matrix left zero composition roots and zero processes whose executable belonged to the test runtime. Owner Grok configuration/plugin state was unchanged. The verifier mistakenly computed content digests for credential-bearing files while making its full-profile and authentication-file comparisons, contrary to this evidence directory's metadata-only policy. Those measurements are discarded and receive no acceptance credit; no credential content was printed or used by the implementation. Subsequent teardown and release evidence use metadata-only credential checks. No merge, tag, or release occurred during acceptance.

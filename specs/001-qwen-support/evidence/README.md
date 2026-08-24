@@ -45,6 +45,14 @@ Permitted evidence is limited to:
 - hashes of files proven non-secret before hashing, such as public manifests, settings with no secret
   fields, skills, installed binaries, and test-owned transcripts.
 
+An authentication-file symlink protects its external target from write-through only while the
+native client preserves the link. It is not proof that no credential copy exists: a client may
+atomically replace the symlink with a regular credential file inside the test profile. After any
+authenticated native launch, treat the entire supplied test profile as credential-bearing, keep it
+owner-only, inspect credential paths by metadata only, and delete the validated dedicated profile
+after extracting non-secret evidence. Never hash either the external credential target or a
+materialized test copy.
+
 For a Qwen profile, record every selector's literal value or explicit absence, the resolved physical
 profile path, and whether selection is default or an explicit supported override. Do not infer an
 unset value from shell defaults. A nondefault profile must show the same explicit selector on resume.
