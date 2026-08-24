@@ -269,20 +269,7 @@ func (a *agent) handleNativeCarrierFrame(raw json.RawMessage) (AgentFrameResult,
 }
 
 func (a *agent) deliverNativeCarrierResult(target localPeer, result AgentFrameResult) error {
-	inner, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	content := wrapAgentFrameInClaudeEnvelope(a.controlPath, a.serviceSessionID(), a.serviceName(), inner)
-	native, err := json.Marshal(map[string]any{
-		"msgV": 1, "msg_id": result.MessageID, "type": "user", "priority": "next",
-		"from":    encodeUDS(a.controlPath),
-		"message": map[string]any{"role": "user", "content": content},
-	})
-	if err != nil {
-		return err
-	}
-	return sendUnixFrame(target.Socket, native, 5*time.Second)
+	return a.deliverNativeCarrierPayload(target, result.MessageID, result)
 }
 
 func (a *agent) deliverAgentFrame(source Peer, targets []Peer, request AgentFrame) []DeliveryResult {
@@ -326,13 +313,17 @@ func (a *agent) deliverAgentFrame(source Peer, targets []Peer, request AgentFram
 }
 
 func (a *agent) deliverAgentFrameLocal(target localPeer, frame AgentFrame) error {
-	inner, err := json.Marshal(frame)
+	return a.deliverNativeCarrierPayload(target, frame.MessageID, frame)
+}
+
+func (a *agent) deliverNativeCarrierPayload(target localPeer, messageID string, payload any) error {
+	inner, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	content := wrapAgentFrameInClaudeEnvelope(a.controlPath, a.serviceSessionID(), a.serviceName(), inner)
 	native, err := json.Marshal(map[string]any{
-		"msgV": 1, "msg_id": frame.MessageID, "type": "user", "priority": "next",
+		"msgV": 1, "msg_id": messageID, "type": "user", "priority": "next",
 		"from":    encodeUDS(a.controlPath),
 		"message": map[string]any{"role": "user", "content": content},
 	})

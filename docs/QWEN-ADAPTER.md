@@ -23,6 +23,14 @@ version, protocol version, and event inventory. The stable delivery endpoint is
 a real owner-only Unix socket. It is never a symlink and callers never need a
 path-resolution workaround.
 
+Profile and cwd identity use the shared adapter platform contract. On macOS,
+the fixed `/tmp` and `/var` aliases are accepted only after resolving to the
+expected `/private/...` system targets; arbitrary symlink components remain a
+fail-closed error. Agent Sessions-owned sockets use the shared 103-byte macOS /
+107-byte Linux pathname budget and compact runtime roots. Process environment
+inspection that returns no entries is treated as unavailable, never as proof
+that a live process is unrelated. See [ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md#shared-host-platform-primitives).
+
 `qwen-peer --resume UUID_OR_UNIQUE_MANAGED_NAME` restores the exact Agent
 Sessions catalog identity and Qwen transcript. `--continue` and
 `--fork-session` are deliberately left to bare Qwen because neither identifies

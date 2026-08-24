@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestPeerRegistrationRequiresCatalogAndRestoresGroups(t *testing.T) {
@@ -584,7 +585,7 @@ func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
 }
 
 func TestNamedClaudeSelectionPromotesAcrossAgentRestart(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.ShortSocketRoot(t, "ncs-", filepath.Join("runtime", "agent.sock"))
 	runtimeDir := filepath.Join(root, "runtime")
 	stateDir := filepath.Join(root, "state")
 	configRoot := filepath.Join(root, "claude")

@@ -19,6 +19,7 @@ import (
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 const claudePeerNativeHelperEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_NATIVE"
@@ -1115,14 +1116,5 @@ func TestCleanupClaudePeerArtifactsRemovesOnlyNewTokenBeforeNativeRow(t *testing
 
 func shortClaudePeerTestRoot(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("", "cp-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(root); err != nil {
-			t.Errorf("remove short Claude peer test root: %v", err)
-		}
-	})
-	return root
+	return testutil.ShortSocketRoot(t, "cp-", "000000.sock")
 }

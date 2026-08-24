@@ -138,8 +138,8 @@ archive semantics and the common Agent Sessions lifecycle contract.
 **Goal**: Make Qwen a symmetric managed parent and target in the complete four-product composition
 matrix without adding product-specific routing rules.
 
-**Independent Test**: Contract-test all 16 parent-target combinations and live-test the seven edges
-involving Qwen, checking exact parent/notification identity, both private anchors, opt-in inherited
+**Independent Test**: Contract-test and live-test all 16 parent-target combinations, checking exact
+parent/notification identity, both private anchors, opt-in inherited
 groups, terminal answer, and cleanup.
 
 ### Tests for User Story 3
@@ -154,9 +154,9 @@ groups, terminal answer, and cleanup.
 - [X] T050 [US3] Add Qwen parent-context inference, exact attestation, group inheritance, notification routing, and child composition in `internal/bridge/group_context.go` and `internal/federator/registration.go`
 - [X] T051 [P] [US3] Add Qwen-target lane guidance for Codex and Claude parents in `skills/qwen-lane/SKILL.md`, `skills/qwen-lane/agents/openai.yaml`, and `claude/skills/qwen-lane/SKILL.md`
 - [X] T052 [P] [US3] Add Qwen-target guidance to Grok and replace the four inventory-only Qwen-parent lane skill shells from T016 with their complete, tested behavioral guidance in `grok/skills/agent-lanes/SKILL.md` and `qwen/skills/codex-lane/SKILL.md`, `qwen/skills/claude-lane/SKILL.md`, `qwen/skills/grok-lane/SKILL.md`, and `qwen/skills/qwen-lane/SKILL.md`
-- [X] T053 [US3] Add a deterministic seven-edge Qwen composition runner with unique tokens and exact anchor assertions in `scripts/test-qwen-composition`
-- [X] T054 [US3] Execute every live Qwen composition edge on Linux and record the 4x4 contract plus cleanup evidence in `specs/001-qwen-support/evidence/us3-linux.md`
-- [ ] T055 [US3] Execute every live Qwen composition edge on macOS and record the 4x4 contract plus cleanup evidence in `specs/001-qwen-support/evidence/us3-macos.md`
+- [X] T053 [US3] Add a deterministic complete 16-edge composition runner with unique tokens and exact anchor assertions in `scripts/test-qwen-composition`
+- [X] T054 [US3] Execute all 16 live composition edges on Linux and record the contract plus cleanup evidence in `specs/001-qwen-support/evidence/us3-linux.md`
+- [ ] T055 [US3] Execute all 16 live composition edges on macOS and record the contract plus cleanup evidence in `specs/001-qwen-support/evidence/us3-macos.md`
 
 **Checkpoint**: Qwen is symmetric with Codex, Claude, and Grok as both parent and target.
 
@@ -231,6 +231,8 @@ artifacts without a source checkout or collateral native-profile changes.
 boundary only after every desired story is green.
 
 - [X] T079 [P] Add remaining cross-story adversarial regressions for partial publication, path/PID reuse, same-name socket replacement, legacy symlink migration, symlink-substitution refusal, duplicate collection, native external archive conflicts, agent/supervisor restart, and neutral peer-message provenance without transport-generated trust or authority instructions in `internal/bridge/review_regression_test.go`, `internal/bridge/mcp_test.go`, and `internal/federator/runtime_regression_test.go`
+- [ ] T079A Close the repeated Linux/macOS adapter-platform defect class: introduce shared canonical existing/future path identity, exact `sockaddr_un` byte budgeting, compact socket test roots, and fail-closed process-environment observability in `internal/pathidentity`, `internal/socketpath`, `internal/testutil`, and `internal/procinfo`; migrate all four applicable adapters and Qwen profile-mutation guards; add stock-Darwin alias, long-socket, empty-environment, and unrelated-state regressions; and document the mandatory new-adapter platform contract in `docs/ADAPTER-PROTOCOL.md`, `specs/001-qwen-support/spec.md`, and `specs/001-qwen-support/plan.md`
+- [ ] T079B Close cross-product DRY drift: use one established parser for owned lane CLIs, centralize lane dispatch/parent/state/list/readiness/notice/control contracts, environment operations, permission classification, and install projections; enforce a 100-token clone gate; retain explicit native lifecycle differences; and record the audit plus rationale in `docs/ADAPTER-PROTOCOL.md` and `specs/001-qwen-support/evidence/dry-audit.md`
 - [X] T080 [P] Extend the single generated completeness table and harness introduced by T004/T005—without adding another product inventory—to cover descriptors, help, runtime roles, the exact product-neutral `agent_sessions` MCP namespace with no `claude_peer` alias, skills including the absence of any Claude native-carrier fallback instruction, neutral `Message from <peer>:` delivery framing without trust/instruction-hierarchy injection, package entries, documentation, normative `specs/001-qwen-support/contracts/release-evidence.schema.json`, and the actual `.github/workflows/ci.yml` build/release inputs in `internal/bridge/product_test.go`, `internal/launcher/product_test.go`, and `internal/federator/product_test.go`; workflow drift from the authoritative eleven-executable/four-plugin inventory, schema, canonicalization rules, or staged tag/release collision semantics must fail this gate
 - [X] T081 Audit the implementation against every Qwen requirement and append any missing executable work to `specs/001-qwen-support/tasks.md`
 - [ ] T082 Freeze the release inputs before rehearsal: run T080's completeness checks against the actual CLI help, Qwen/Codex/Claude/Grok skill payloads, deployment examples owned by T061, documentation owned by T073-T075, `.github/workflows/ci.yml`, and normative `specs/001-qwen-support/contracts/release-evidence.schema.json`; return any discrepancy to its owning task rather than editing a second copy here; reconcile `README.md`, `docs/README.md`, `docs/QWEN-ADAPTER.md`, advisory `docs/designs/QWEN-ADAPTER.md`, `specs/001-qwen-support/contracts/release-evidence.md`, and its schema; and update v0.2.4 in `deploy/peer-federator/VERSION`

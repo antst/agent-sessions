@@ -724,7 +724,7 @@ func TestWaitGrokLaneReconcilesCrashedManagerAndCollectsDebt(t *testing.T) {
 	if err := writeGrokLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
-	code, err := waitGrokLane(grokLaneOptions{target: state.SessionID, timeout: 2 * time.Second})
+	code, err := waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{target: state.SessionID, timeout: 2 * time.Second}})
 	if err != nil || code != 130 {
 		t.Fatalf("collect crashed Grok lane = %d, %v", code, err)
 	}

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
 
@@ -218,7 +219,7 @@ func (s *NativeSource) InspectCredentialConfiguration(_ context.Context, _ qwenp
 
 // InspectIntegration attests the installed Agent Sessions extension inventory for the selected profile.
 func (s *NativeSource) InspectIntegration(_ context.Context, profile qwenprofile.Identity) (IntegrationEvidence, error) {
-	home, err := qwenprofile.EffectiveHome(profile, environmentLookup(s.environment))
+	home, err := qwenprofile.EffectiveHome(profile, envutil.Lookup(s.environment))
 	if err != nil {
 		return IntegrationEvidence{}, err
 	}
@@ -478,18 +479,6 @@ func qwenIntegrationEnabled(path string) (bool, error) {
 		return false, fmt.Errorf("qwen extension store contains %d agent-sessions entries", matches)
 	}
 	return enabled, nil
-}
-
-func environmentLookup(environment []string) qwenprofile.LookupEnv {
-	return func(name string) (string, bool) {
-		prefix := name + "="
-		for index := len(environment) - 1; index >= 0; index-- {
-			if strings.HasPrefix(environment[index], prefix) {
-				return strings.TrimPrefix(environment[index], prefix), true
-			}
-		}
-		return "", false
-	}
 }
 
 func stringNumber(value any) string { value, _ = value.(string); return fmt.Sprint(value) }

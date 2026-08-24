@@ -20,6 +20,10 @@ func TestQwenInteractiveHostPublishesAndCleansExactPreparation(t *testing.T) {
 	}
 	fake := newFakeQwenProcess(t)
 	fake.installEnvironment(t)
+	canonicalCwd, err := filepath.EvalSymlinks(fake.Paths.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const sessionID = "11111111-2222-4333-8444-555555555555"
 	lifecycleRoot := federator.PeerLifecycleRootInState(status.StateDir, "qwen", sessionID)
@@ -46,14 +50,14 @@ func TestQwenInteractiveHostPublishesAndCleansExactPreparation(t *testing.T) {
 		PID: os.Getpid(), ProcStart: procStart, LifecyclePID: os.Getpid(), LifecycleProcStart: procStart,
 		LifecycleRoot: lifecycleRoot, QwenCapabilityDigest: digest,
 		QwenPreparation: &federator.QwenPreparationPayload{
-			Version: 1, CanonicalCwd: fake.Paths.Root,
+			Version: 1, CanonicalCwd: canonicalCwd,
 			Profile:          federator.QwenProfileIdentity{Fingerprint: strings.Repeat("b", 64)},
 			LaunchPreference: "native_default", InitialModeRequest: "native_default",
 			Input: input, Events: events, MCPCapabilityDigest: digest,
 		},
 	}
 	metadata := &federator.QwenSessionMetadata{
-		Cwd: fake.Paths.Root, Profile: registration.QwenPreparation.Profile,
+		Cwd: canonicalCwd, Profile: registration.QwenPreparation.Profile,
 		LaunchPreference: "native_default", InitialModeRequest: "native_default",
 	}
 	request := federator.ResolvePreferencesRequest{

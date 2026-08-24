@@ -149,35 +149,25 @@ func removeRequiredMCPProperty(schema map[string]any, name string) {
 }
 
 func grokPeerToolDefinitions() []map[string]any {
-	body, _ := json.Marshal(nativeToolDefinitions)
-	var definitions []map[string]any
-	_ = json.Unmarshal(body, &definitions)
-	for _, definition := range definitions {
-		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this Grok session")
-		description = strings.ReplaceAll(description, "Current Codex session", "Current Grok session")
-		definition["description"] = description
-		schema, _ := definition["inputSchema"].(map[string]any)
-		properties, _ := schema["properties"].(map[string]any)
-		if session, ok := properties["session_id"].(map[string]any); ok {
-			session["description"] = "Optional corroboration of the current Grok session ID. The launch token is authoritative."
-		}
-		removeRequiredMCPProperty(schema, "session_id")
-	}
-	return definitions
+	return peerToolDefinitions("Grok", "Optional corroboration of the current Grok session ID. The launch token is authoritative.")
 }
 
 func qwenPeerToolDefinitions() []map[string]any {
+	return peerToolDefinitions("Qwen", "Optional corroboration of the current Qwen session ID. Exact process and host registration attestation are authoritative.")
+}
+
+func peerToolDefinitions(product, sessionDescription string) []map[string]any {
 	body, _ := json.Marshal(nativeToolDefinitions)
 	var definitions []map[string]any
 	_ = json.Unmarshal(body, &definitions)
 	for _, definition := range definitions {
-		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this Qwen session")
-		description = strings.ReplaceAll(description, "Current Codex session", "Current Qwen session")
+		description := strings.ReplaceAll(stringValue(definition["description"]), "this Codex session", "this "+product+" session")
+		description = strings.ReplaceAll(description, "Current Codex session", "Current "+product+" session")
 		definition["description"] = description
 		schema, _ := definition["inputSchema"].(map[string]any)
 		properties, _ := schema["properties"].(map[string]any)
 		if session, ok := properties["session_id"].(map[string]any); ok {
-			session["description"] = "Optional corroboration of the current Qwen session ID. Exact process and host registration attestation are authoritative."
+			session["description"] = sessionDescription
 		}
 		removeRequiredMCPProperty(schema, "session_id")
 	}

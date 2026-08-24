@@ -76,7 +76,7 @@ involving Qwen, and one bidirectional remote Qwen lane per OS direction
 
 | Principle | Pre-research gate | Post-design result |
 |---|---|---|
-| I. Shared Contracts, One Implementation | Qwen must reuse AgentFrame, groups, lane/federation contracts and close product-enumeration/tool-ledger duplication first. | Passed: shared product descriptor, generated/table-tested inventories, generalized preparation, and shared tool-root ledger are explicit design elements; native adapters remain separate only for genuine differences. |
+| I. Shared Contracts, One Implementation | Qwen must reuse AgentFrame, groups, lane/federation contracts and close product-enumeration/tool-ledger duplication first. | Passed: shared product descriptor, generated/table-tested inventories, generalized preparation/tool-root ledger, established common lane parser, lane contract helpers, environment and permission packages, inventory-driven install projection, and a 100-token clone gate are explicit; native adapters remain separate only for genuine authority/lifecycle differences. |
 | II. Exact Identity and Fail-Closed Safety | Native identity, profile, process, initial mode, socket/file, and host registration must agree before Agent Sessions authority or cleanup. | Passed: contracts require raw capability plus exact ancestry/strong-start/native/profile/catalog proof; stable published endpoints are real sockets; legacy aliases are removed only with exact stale-backend proof; ambiguous state becomes debt. Native permission changes do not grant Agent Sessions identity or bypass group authorization. |
 | III. RCA Before Permanent Fixes | Historical design and current Qwen behavior must be independently evidenced; no retries or assumed compatibility. | Passed: `research.md` classifies every material pre-design proposal, explains Qwen's native mutable permissions and native archive foundation, and records the stable-symlink/native-sender refusal trigger, mechanism, invariant, and class-closing real-socket decision. |
 | IV. Evidence-Driven Testing | Every new native/process/protocol boundary needs lowest-layer and adversarial integration evidence. | Passed: quickstart and contracts require parser/protocol fixtures, live native admission, real-socket Claude-to-Codex/Grok delivery, legacy-alias migration, crash/reuse/conflict/duplicate tests, packaging, and cross-host evidence. |
@@ -152,7 +152,10 @@ internal/
 ├── qwenreadiness/
 │   ├── readiness.go               # sole Qwen session-free evidence engine
 │   └── readiness_test.go
-└── procinfo/                       # existing cross-platform strong identity
+├── pathidentity/                   # shared canonical existing/future path identity
+├── socketpath/                     # shared Linux/macOS sockaddr_un byte budgets
+├── testutil/                       # short private socket roots for cross-platform tests
+└── procinfo/                       # shared strong identity and observable environment
 
 qwen/
 ├── plugin.json                     # Agent Plugin v1
@@ -212,8 +215,9 @@ differs from the existing Codex, Claude, and Grok payloads.
    to consume or validate that source.
 2. **Shared lifecycle and transport primitives**: generalize the gated peer preparation with product
    validators; extract the Grok tool-root ledger; replace Codex/Grok stable symlink aliases with real
-   session-named sockets; retain conservative local legacy-alias cleanup; and preserve every existing
-   Claude/Grok contract except that intentional endpoint-type correction.
+   session-named sockets; centralize canonical path identity, platform socket budgets/short test
+   roots, and fail-closed process observability; retain conservative local legacy-alias cleanup; and
+   preserve every existing Claude/Grok contract except that intentional endpoint-type correction.
 3. **Qwen installation and readiness foundation**: add Agent Plugin v1
    staging/install/verification and implement one Qwen-specific session-free parser/ACP/read-only
    evidence engine in `internal/qwenreadiness`. Launch admission, capability advertisement, and the

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/permissionmode"
 )
 
 type hookInput struct {
@@ -676,31 +678,7 @@ func readPeerProcessArgsWithReader(
 }
 
 func permissionModeFromArgs(fields []string) string {
-	for index, field := range fields {
-		if field == "--" {
-			break
-		}
-		if processArgEnablesBypass(fields, index) {
-			return "bypassPermissions"
-		}
-	}
-	return "default"
-}
-
-func processArgEnablesBypass(args []string, index int) bool {
-	argument := args[index]
-	switch argument {
-	case "--dangerously-skip-permissions", "--permission-mode=bypassPermissions",
-		"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--ask-for-approval=never",
-		"-a=never", "-anever":
-		return true
-	case "--permission-mode":
-		return index+1 < len(args) && args[index+1] == "bypassPermissions"
-	case "-a", "--ask-for-approval":
-		return index+1 < len(args) && args[index+1] == "never"
-	default:
-		return false
-	}
+	return permissionmode.FromArgs(fields)
 }
 
 func runtimeGOOS() string { return runtime.GOOS }

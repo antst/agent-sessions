@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -204,7 +205,7 @@ func runLocalMCPParentLane(
 		return 1, err
 	}
 	command := exec.CommandContext(ctx, executable, append([]string{role}, args...)...) //nolint:gosec // exact runtime and validated argv vector.
-	command.Env = mcpLaneEnvironment(os.Environ(), map[string]string{
+	command.Env = envutil.Replace(os.Environ(), map[string]string{
 		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     runtimeDir,
 		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": "",
 		"AGENT_SESSIONS_SESSION_ID":            parent.SessionID,
@@ -258,23 +259,6 @@ func mcpLaneArguments(value any) ([]string, error) {
 		result = append(result, argument)
 	}
 	return result, nil
-}
-
-func mcpLaneEnvironment(environment []string, replacements map[string]string) []string {
-	result := make([]string, 0, len(environment)+len(replacements))
-	for _, entry := range environment {
-		name := entry
-		if index := strings.IndexByte(entry, '='); index >= 0 {
-			name = entry[:index]
-		}
-		if _, replaced := replacements[name]; !replaced {
-			result = append(result, entry)
-		}
-	}
-	for name, value := range replacements {
-		result = append(result, name+"="+value)
-	}
-	return result
 }
 
 type mcpCappedBuffer struct {

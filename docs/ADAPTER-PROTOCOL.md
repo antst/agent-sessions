@@ -112,6 +112,84 @@ from that descendant; agent restart; normal exit and crash cleanup; and proof
 that no provisional catalog row, peer, socket, or credential/config mutation
 survives.
 
+## Shared host-platform primitives
+
+An adapter must not implement its own interpretation of host paths, Unix socket
+limits, or process visibility. These contracts are shared because Linux and
+macOS expose materially different spellings and observability:
+
+- `internal/pathidentity` owns path identity. `ExistingDirectory` follows the
+  real target used by a native process. `FuturePath` permits missing leaves but
+  rejects mutable symlink components; on macOS it admits only the fixed system
+  aliases `/tmp -> /private/tmp` and `/var -> /private/var`, after verifying the
+  exact target. Durable records and comparisons use the returned canonical
+  spelling on both sides.
+- `internal/socketpath` owns the `sockaddr_un.sun_path` budget for Codex,
+  Claude, Grok, Qwen, and the host agent: 103 pathname bytes on macOS and 107
+  on Linux, reserving the terminating NUL. Runtime-root selection budgets the
+  longest address before publication, and every Agent Sessions-owned listener
+  validates its final absolute clean path before binding. Tests that create a
+  socket use `internal/testutil.ShortSocketRoot`; renaming a long test or adding
+  a one-off length constant is not a class-closing fix.
+- `internal/procinfo` owns process existence, kernel start identity, arguments,
+  and environment visibility. An empty environment is not evidence that a live
+  process lacks a managed-product tag: macOS can return success with zero
+  entries for another process. Identity-sensitive callers treat empty or
+  unreadable environment evidence alike, use exact process arguments only for
+  conservative recognition, and fail closed when the selected profile cannot
+  be distinguished.
+
+Canonicalizing a profile or cwd requires updating every producer, durable
+record, equality guard, child environment, and test expectation in the same
+change. A listener path may intentionally retain the short lexical `/tmp`
+spelling to fit `sun_path`; that transport address is not interchangeable with
+canonical durable filesystem identity.
+
+Every new adapter must add shared-package regressions and run its first vertical
+slice on real Linux and macOS before broad lifecycle implementation. Required
+platform cases include the stock macOS `/var/folders/...` temporary root, the
+fixed `/tmp` and `/var` aliases, a mutable symlink rejection, an over-budget
+socket, a short-root fallback, process environment with data, unreadable/empty
+environment, and a still-live unrelated process. A cross-compile is useful but
+does not satisfy this runtime gate.
+
+## Shared cross-product mechanics
+
+Adding a product is not permission to copy an existing adapter. The following
+mechanics have one implementation and must be extended there:
+
+- `internal/federator.ProductDescriptors` is the runtime product/capability
+  inventory. `scripts/release-inventory` is the release binary/plugin/platform
+  inventory. Bridge, launcher, Make, archive, and workflow projections consume
+  those inventories and their conformance tests; they do not carry parallel
+  hand-written product lists.
+- Owned `*-peer-lane` commands use the common `pflag` parser and
+  `laneCommonOptions` contract for lifecycle, selection, collection, grouping,
+  aliases (including `-g`), durations, interspersed options, and `--`.
+  Product options are registered declaratively. Interactive `*-peer` wrappers
+  are the deliberate exception: they extract only wrapper-owned flags and pass
+  unknown vendor-native arguments through unchanged, so a strict flag parser
+  must not be placed in front of that surface.
+- `internal/bridge/lane_contract.go` owns common dispatch, parent projection,
+  state enumeration/name selection, list filtering, manager readiness, control
+  acceptance, notification construction, and option-validation mechanics.
+  Product tables state only real native differences.
+- `internal/envutil` owns `NAME=value` lookup and deterministic replacement.
+  `internal/permissionmode` owns argv permission classification. Adapters may
+  define which variables or modes are allowed, but may not reimplement these
+  mechanics.
+- The repository linter runs `dupl` at a 100-token threshold. A local
+  `//nolint:dupl` is acceptable only for an explicitly documented declarative
+  binding where moving the text would hide, rather than share, product policy.
+
+Native lifecycle engines remain product-owned: Codex App Server rollouts,
+Claude stream-JSON workers, Grok ACP sessions, and Qwen ACP plus native archive
+have different authoritative identities and recovery rules. DRY means sharing
+the invariant and the mechanical primitive, not forcing those state machines
+through one lowest-common-denominator implementation. New adapters must first
+look for an existing shared primitive, add one when the host/product-neutral
+contract recurs, and document why any similar-looking code must remain native.
+
 ## New-adapter acceptance checklist
 
 The historical design for a vendor is research input, not authority. Before a
@@ -145,6 +223,9 @@ and macOS:
 7. **Install and release** — exact selected-profile install/upgrade/remove,
    readiness doctor, no-secret/nonmutation proof, prebuilt no-Go install,
    authoritative inventory, and identical Linux/macOS release gates pass.
+8. **Host-platform contract** — every cwd/profile/socket/process observation
+   uses the shared primitives above; no product-local path alias, socket limit,
+   temp-root, or empty-environment rule remains.
 
 If a native surface cannot prove one of these properties, fail closed or state
 the narrower supported contract. Do not copy a prior adapter's workaround merely

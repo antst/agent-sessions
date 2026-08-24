@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/envutil"
 )
 
 const (
@@ -715,7 +717,7 @@ func startGrokHost(runtimePath string, request grokHostRequest) (grokHostProcess
 	// and exits as soon as that exec-preserved owner disappears.
 	configureGrokHostProcess(command)
 	command.Env = replaceGrokLaunchEnvironment(os.Environ(), request.LaunchToken, request.SessionID, runtimePath)
-	command.Env = replaceLaneEnvironment(command.Env, agentRuntimeDirEnv, request.AgentRuntimeDir)
+	command.Env = envutil.Set(command.Env, agentRuntimeDirEnv, request.AgentRuntimeDir)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return grokHostProcess{}, fmt.Errorf("capture Grok host readiness: %w", err)

@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
@@ -166,19 +168,11 @@ func canonicalQwenCwd() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve working directory: %w", err)
 	}
-	canonical, err := filepath.EvalSymlinks(cwd)
+	canonical, err := pathidentity.ExistingDirectory(cwd)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize Qwen working directory: %w", err)
 	}
-	canonical, err = filepath.Abs(canonical)
-	if err != nil {
-		return "", fmt.Errorf("resolve Qwen working directory: %w", err)
-	}
-	info, err := os.Stat(canonical)
-	if err != nil || !info.IsDir() {
-		return "", errors.New("qwen working directory is not an existing directory")
-	}
-	return filepath.Clean(canonical), nil
+	return canonical, nil
 }
 
 func resolveQwenResumeFromAgent(plan qwenPeerPlan, runtimeDir string) (qwenPeerPlan, error) {
@@ -315,7 +309,7 @@ func launchPreparedQwenPeer(
 	hostArgs = append(hostArgs, nativeArgs...)
 	environment := qwenprofile.ApplyEnvironment(os.Environ(), plan.profile)
 	environment = peerEnvironment(environment, plan.sessionID, "qwen")
-	environment = replaceLaneEnvironment(environment, qwenCapabilityEnv, capability)
+	environment = envutil.Set(environment, qwenCapabilityEnv, capability)
 	if err := execCommand(runtimePath, hostArgs, environment); err != nil {
 		cleanupErr := cleanupPreparedQwenLaunchPaths(lifecycleRoot, inputAttestation, eventsAttestation)
 		var rollbackErr error

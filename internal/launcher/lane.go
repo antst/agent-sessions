@@ -3,8 +3,8 @@ package launcher
 import (
 	"fmt"
 	"os"
-	"strings"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -31,21 +31,21 @@ func RunLane(role string, args []string) error {
 	if err != nil {
 		return err
 	}
-	environment := replaceLaneEnvironment(os.Environ(), agentRuntimeDirEnv, agentRuntimeDir())
+	environment := envutil.Set(os.Environ(), agentRuntimeDirEnv, agentRuntimeDir())
 	if role == "grok-lane" && grokLaneNeedsExecutable(args) {
 		grok, err := grokExecutable()
 		if err != nil {
 			return err
 		}
-		environment = replaceLaneEnvironment(environment, "GROK_PEER_GROK_BIN", grok)
-		environment = replaceLaneEnvironment(environment, "GROK_PEER_NATIVE_RUNTIME", selected.Path)
+		environment = envutil.Set(environment, "GROK_PEER_GROK_BIN", grok)
+		environment = envutil.Set(environment, "GROK_PEER_NATIVE_RUNTIME", selected.Path)
 	}
 	if role == "qwen-lane" && qwenLaneNeedsExecutable(args) {
 		qwen, err := qwenExecutable()
 		if err != nil {
 			return err
 		}
-		environment = replaceLaneEnvironment(environment, "QWEN_PEER_QWEN_BIN", qwen)
+		environment = envutil.Set(environment, "QWEN_PEER_QWEN_BIN", qwen)
 	}
 	return execLaneRuntime(selected.Path, append([]string{role}, args...), environment)
 }
@@ -87,15 +87,4 @@ func qwenLaneNeedsExecutable(args []string) bool {
 		}
 	}
 	return len(args) > 0 && (args[0] == "run" || args[0] == "start" || args[0] == "resume" || args[0] == "doctor")
-}
-
-func replaceLaneEnvironment(environment []string, key, value string) []string {
-	prefix := key + "="
-	updated := make([]string, 0, len(environment)+1)
-	for _, entry := range environment {
-		if !strings.HasPrefix(entry, prefix) {
-			updated = append(updated, entry)
-		}
-	}
-	return append(updated, prefix+value)
 }

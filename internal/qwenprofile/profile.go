@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 // LookupEnv is the presence-sensitive environment lookup used by ResolveEnvironment.
@@ -153,52 +155,11 @@ func selectedPath(lookup LookupEnv, name string) (string, bool, error) {
 // existing path components. Platform-owned aliases may be resolved to their
 // fixed targets; missing leaves remain valid for first-run profiles.
 func canonicalPath(name, value string) (string, error) {
-	clean := filepath.Clean(value)
-	volume := filepath.VolumeName(clean)
-	relative := clean[len(volume):]
-	current := volume + string(filepath.Separator)
-	components := splitPath(relative)
-	for index, component := range components {
-		next := filepath.Join(current, component)
-		info, err := os.Lstat(next)
-		if os.IsNotExist(err) {
-			return filepath.Join(append([]string{current}, components[index:]...)...), nil
-		}
-		if err != nil {
-			return "", fmt.Errorf("inspect %s path: %w", name, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, allowed, resolveErr := resolvePlatformPathAlias(next)
-			if resolveErr != nil {
-				return "", fmt.Errorf("resolve %s path alias %q: %w", name, next, resolveErr)
-			}
-			if !allowed {
-				return "", fmt.Errorf("%s path contains symlink component %q", name, next)
-			}
-			current = resolved
-			continue
-		}
-		current = next
+	canonical, err := pathidentity.FuturePath(value)
+	if err != nil {
+		return "", fmt.Errorf("%s path: %w", name, err)
 	}
-	return current, nil
-}
-
-func splitPath(path string) []string {
-	result := make([]string, 0)
-	for {
-		dir, base := filepath.Split(path)
-		if base != "" {
-			result = append(result, base)
-		}
-		path = filepath.Clean(dir)
-		if path == "." || path == string(filepath.Separator) || path == "" {
-			break
-		}
-	}
-	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
-		result[left], result[right] = result[right], result[left]
-	}
-	return result
+	return canonical, nil
 }
 
 func hasEnvironmentName(entry, name string) bool {

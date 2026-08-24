@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
@@ -462,12 +464,8 @@ func canonicalDirectory(base, requested string) (string, error) {
 	if !filepath.IsAbs(requested) {
 		requested = filepath.Join(base, requested)
 	}
-	resolved, err := filepath.EvalSymlinks(requested)
+	resolved, err := pathidentity.ExistingDirectory(requested)
 	if err != nil {
-		return "", usageError("working directory does not exist: " + requested)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
 		return "", usageError("working directory does not exist: " + requested)
 	}
 	return resolved, nil

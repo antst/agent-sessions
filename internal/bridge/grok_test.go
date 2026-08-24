@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const grokFakeProcessEnv = "AGENT_SESSIONS_GROK_FAKE_PROCESS"
@@ -1832,8 +1833,11 @@ func waitGrokFakeChildPID(t *testing.T, path string) int {
 func TestGrokRuntimePathsStayCompactAndDoNotExposeToken(t *testing.T) {
 	token := strings.Repeat("secret-token-", 4)
 	paths := grokRuntimePaths(strings.Repeat("/long-runtime", 12), os.Getuid(), token)
-	if len(paths.ControlSocket) > 92 || len(paths.LeaderSocket) > 92 {
-		t.Fatalf("Grok sockets exceed compact budget: %#v", paths)
+	if err := socketpath.Validate(paths.ControlSocket); err != nil {
+		t.Fatalf("Grok control socket exceeds platform budget: %#v: %v", paths, err)
+	}
+	if err := socketpath.Validate(paths.LeaderSocket); err != nil {
+		t.Fatalf("Grok leader socket exceeds platform budget: %#v: %v", paths, err)
 	}
 	if strings.Contains(paths.ControlSocket, token) || strings.Contains(paths.LeaderSocket, token) {
 		t.Fatal("raw launch token leaked into a socket path")

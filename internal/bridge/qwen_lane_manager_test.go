@@ -454,6 +454,11 @@ func TestQwenACPClientRejectsUnknownInboundRequestAndMalformedFrames(t *testing.
 	if _, err := agentOutput.Write([]byte("not-json\n")); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case <-client.done:
+	case <-time.After(time.Second):
+		t.Fatal("Qwen ACP client did not reject the malformed frame")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := client.request(ctx, "initialize", map[string]any{}); err == nil || !strings.Contains(err.Error(), "malformed") {

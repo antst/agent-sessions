@@ -1,16 +1,12 @@
 //go:build darwin
 
-package qwenprofile
+package pathidentity
 
 import (
 	"fmt"
 	"path/filepath"
 )
 
-// resolvePlatformPathAlias accepts only Darwin's fixed root-level aliases.
-// Their directory entries live under / and cannot be retargeted by an
-// unprivileged user. Requiring the exact native targets keeps arbitrary and
-// user-controlled symlinks fail-closed.
 func resolvePlatformPathAlias(path string) (string, bool, error) {
 	var want string
 	switch filepath.Clean(path) {

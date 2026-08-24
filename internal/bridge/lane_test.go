@@ -161,24 +161,24 @@ func TestNativeLaneNotifyFlagsAreExplicit(t *testing.T) {
 
 func TestResumeLifecycleOptionsPreservePersistentPolicyUnlessExplicitlyChanged(t *testing.T) {
 	state := laneState{Persistent: true, NotifyTarget: "session:old", AutoArchive: false, AutoArchiveDelayMS: 7_000}
-	applyLaneLifecycleOptions(&state, laneOptions{ownerPID: 42, ownerProcStart: "start", ownerSessionID: "session:new", notifyTarget: "session:new", autoArchive: true, autoArchiveDelay: 3 * time.Minute})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{ownerPID: 42, ownerProcStart: "start", ownerSessionID: "session:new", notifyTarget: "session:new", autoArchive: true, autoArchiveDelay: 3 * time.Minute}})
 	if !state.Persistent || state.NotifyTarget != "session:old" || state.OwnerPID != 0 || state.OwnerSessionID != "" || state.AutoArchive || state.AutoArchiveDelayMS != 7_000 {
 		t.Fatalf("implicit resume changed persistent lifecycle = %+v", state)
 	}
 	state = laneState{NotifyTarget: "session:old", AutoArchive: true, AutoArchiveDelayMS: 7_000}
-	applyLaneLifecycleOptions(&state, laneOptions{ownerPID: 42, ownerProcStart: "start", ownerSessionID: "session:new", notifyTarget: "session:new", autoArchive: true, autoArchiveDelay: 3 * time.Minute})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{ownerPID: 42, ownerProcStart: "start", ownerSessionID: "session:new", notifyTarget: "session:new", autoArchive: true, autoArchiveDelay: 3 * time.Minute}})
 	if state.NotifyTarget != "session:new" || state.OwnerPID != 42 || state.OwnerSessionID != "session:new" || state.Persistent || !state.AutoArchive || state.AutoArchiveDelayMS != 7_000 {
 		t.Fatalf("parent-owned lifecycle = %+v", state)
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{persistent: true, persistentSet: true, notifyTarget: "coordinator", notifyExplicit: true})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{persistent: true, persistentSet: true, notifyTarget: "coordinator", notifyExplicit: true}})
 	if state.NotifyTarget != "coordinator" || !state.Persistent || state.OwnerPID != 0 || state.OwnerSessionID != "" {
 		t.Fatalf("persistent lifecycle = %+v", state)
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{autoArchive: true, autoArchiveDelay: 3 * time.Minute, autoArchiveCustom: true})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{autoArchive: true, autoArchiveDelay: 3 * time.Minute, autoArchiveCustom: true}})
 	if !state.AutoArchive || state.AutoArchiveDelayMS != 180_000 {
 		t.Fatalf("explicit auto-archive lifecycle = %+v", state)
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{noAutoArchiveSet: true})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{noAutoArchiveSet: true}})
 	if state.AutoArchive {
 		t.Fatalf("explicit no-auto-archive lifecycle = %+v", state)
 	}
@@ -194,7 +194,7 @@ func TestWaitArchivedLaneExplainsPriorAnswerIsUnrecoverable(t *testing.T) {
 	if err := recordLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
-	code, err := waitLaneNative(laneOptions{target: state.ThreadID})
+	code, err := waitLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: state.ThreadID}})
 	if code != 1 || err == nil || !strings.Contains(err.Error(), "wait cannot recover an uncollected prior turn") ||
 		!strings.Contains(err.Error(), "resume starts a new follow-up turn") {
 		t.Fatalf("archived wait result = code %d, err %v", code, err)
@@ -254,15 +254,15 @@ func TestInferClaudeParentNotifyTargetRequiresLiveCorroboratedAncestor(t *testin
 	if got := inferClaudeParentNotifyTarget(paths, pid); got != "session:"+sessionID {
 		t.Fatalf("inferred target = %q", got)
 	}
-	owned := withLaneLaunchContext(laneOptions{command: "start"})
+	owned := withLaneLaunchContext(laneOptions{laneCommonOptions: laneCommonOptions{command: "start"}})
 	if owned.ownerPID != pid || owned.ownerSessionID != sessionID || owned.notifyTarget != "session:"+sessionID || owned.persistent {
 		t.Fatalf("automatic parent-owned context = %+v", owned)
 	}
-	persistent := withLaneLaunchContext(laneOptions{command: "start", persistent: true})
+	persistent := withLaneLaunchContext(laneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: true}})
 	if persistent.ownerPID != 0 || persistent.ownerSessionID != "" || persistent.notifyTarget != "" || !persistent.persistent {
 		t.Fatalf("persistent context = %+v", persistent)
 	}
-	mine := withLaneLaunchContext(laneOptions{command: "list", mine: true})
+	mine := withLaneLaunchContext(laneOptions{laneCommonOptions: laneCommonOptions{command: "list", mine: true}})
 	if mine.ownerPID != pid || mine.ownerProcStart != readProcStart(pid) || mine.ownerSessionID != sessionID {
 		t.Fatalf("mine context = %+v", mine)
 	}
@@ -273,11 +273,11 @@ func TestInferClaudeParentNotifyTargetRequiresLiveCorroboratedAncestor(t *testin
 	if got := inferClaudeParentNotifyTarget(paths, pid); got != "" {
 		t.Fatalf("mismatched socket inferred %q", got)
 	}
-	unresolved := withLaneLaunchContext(laneOptions{command: "list", mine: true})
+	unresolved := withLaneLaunchContext(laneOptions{laneCommonOptions: laneCommonOptions{command: "list", mine: true}})
 	if unresolved.ownerPID != 0 || unresolved.ownerProcStart != "" {
 		t.Fatalf("unresolved --mine fell back to a transient parent: %+v", unresolved)
 	}
-	fallback := withLaneLaunchContext(laneOptions{command: "start"})
+	fallback := withLaneLaunchContext(laneOptions{laneCommonOptions: laneCommonOptions{command: "start"}})
 	if fallback.ownerPID != 0 || fallback.ownerProcStart != "" {
 		t.Fatalf("ordinary shell unexpectedly became a lifecycle owner: %+v", fallback)
 	}
@@ -437,19 +437,50 @@ func TestLaneListIncludesArchivedOnlyWhenRequested(t *testing.T) {
 		strings.Contains(current, "partial-test-fixture") {
 		t.Fatalf("active list = %s", current)
 	}
-	all := capture(laneOptions{all: true})
+	all := capture(laneOptions{laneCommonOptions: laneCommonOptions{all: true}})
 	if !strings.Contains(all, "active-lane") || !strings.Contains(all, "archived-lane") ||
 		!strings.Contains(all, `"contract_version":2`) {
 		t.Fatalf("all list = %s", all)
 	}
-	mine := capture(laneOptions{mine: true, ownerPID: ownerPID, ownerProcStart: ownerProcStart})
+	mine := capture(laneOptions{laneCommonOptions: laneCommonOptions{mine: true, ownerPID: ownerPID, ownerProcStart: ownerProcStart}})
 	if !strings.Contains(mine, "active-lane") || strings.Contains(mine, "foreign-lane") || strings.Contains(mine, "persistent-lane") || strings.Contains(mine, "archived-lane") {
 		t.Fatalf("mine list = %s", mine)
 	}
-	mineAll := capture(laneOptions{mine: true, all: true, ownerPID: ownerPID, ownerProcStart: ownerProcStart})
+	mineAll := capture(laneOptions{laneCommonOptions: laneCommonOptions{mine: true, all: true, ownerPID: ownerPID, ownerProcStart: ownerProcStart}})
 	if !strings.Contains(mineAll, "active-lane") || !strings.Contains(mineAll, "archived-lane") || strings.Contains(mineAll, "foreign-lane") || strings.Contains(mineAll, "persistent-lane") {
 		t.Fatalf("mine all list = %s", mineAll)
 	}
+}
+
+func startLaneTestSupervisor(t *testing.T, root string) string {
+	t.Helper()
+	supervisorSocket := filepath.Join(root, "supervisor.sock")
+	listener, err := net.Listen("unix", supervisorSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = connection.Close() }()
+				line, _ := bufio.NewReader(connection).ReadBytes('\n')
+				var request map[string]any
+				_ = json.Unmarshal(line, &request)
+				response := map[string]any{"ok": true}
+				if stringValue(request["action"]) == "flush_notices" {
+					response["pending"] = 0
+				}
+				body, _ := json.Marshal(response)
+				_, _ = connection.Write(append(body, '\n'))
+			}()
+		}
+	}()
+	return supervisorSocket
 }
 
 func TestArchiveInterruptsActiveLaneAndPersistsTerminalOutcome(t *testing.T) {
@@ -505,32 +536,7 @@ func TestArchiveInterruptsActiveLaneAndPersistsTerminalOutcome(t *testing.T) {
 					return map[string]any{}, nil
 				}
 			})
-			supervisorSocket := filepath.Join(root, "supervisor.sock")
-			listener, err := net.Listen("unix", supervisorSocket)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = listener.Close() })
-			go func() {
-				for {
-					connection, acceptErr := listener.Accept()
-					if acceptErr != nil {
-						return
-					}
-					go func() {
-						defer func() { _ = connection.Close() }()
-						line, _ := bufio.NewReader(connection).ReadBytes('\n')
-						var request map[string]any
-						_ = json.Unmarshal(line, &request)
-						response := map[string]any{"ok": true}
-						if stringValue(request["action"]) == "flush_notices" {
-							response["pending"] = 0
-						}
-						body, _ := json.Marshal(response)
-						_, _ = connection.Write(append(body, '\n'))
-					}()
-				}
-			}()
+			supervisorSocket := startLaneTestSupervisor(t, root)
 			t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
 			t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
 			t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
@@ -545,7 +551,7 @@ func TestArchiveInterruptsActiveLaneAndPersistsTerminalOutcome(t *testing.T) {
 			if err := recordLaneState(paths, state); err != nil {
 				t.Fatal(err)
 			}
-			code, archiveErr := archiveLaneNative(laneOptions{target: threadID})
+			code, archiveErr := archiveLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID}})
 			if test.wantArchive && (code != 0 || archiveErr != nil) {
 				t.Fatalf("archive active lane = code %d err %v", code, archiveErr)
 			}
@@ -608,32 +614,7 @@ func TestArchiveDeletesFailedLaneThatNeverCreatedRollout(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	supervisorSocket := filepath.Join(root, "supervisor.sock")
-	listener, err := net.Listen("unix", supervisorSocket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			connection, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = connection.Close() }()
-				line, _ := bufio.NewReader(connection).ReadBytes('\n')
-				var request map[string]any
-				_ = json.Unmarshal(line, &request)
-				response := map[string]any{"ok": true}
-				if stringValue(request["action"]) == "flush_notices" {
-					response["pending"] = 0
-				}
-				body, _ := json.Marshal(response)
-				_, _ = connection.Write(append(body, '\n'))
-			}()
-		}
-	}()
+	supervisorSocket := startLaneTestSupervisor(t, root)
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
 	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
@@ -647,7 +628,7 @@ func TestArchiveDeletesFailedLaneThatNeverCreatedRollout(t *testing.T) {
 	if err := recordLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
-	code, archiveErr := archiveLaneNative(laneOptions{target: threadID})
+	code, archiveErr := archiveLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID}})
 	if code != 0 || archiveErr != nil {
 		t.Fatalf("archive unmaterialized lane = code %d err %v", code, archiveErr)
 	}

@@ -12,16 +12,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const (
-	qwenTestPluginSchema  = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
-	qwenTestMCPSchema     = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
-	qwenTestPluginName    = "agent-sessions"
-	qwenTestMCPName       = "agent_sessions"
-	qwenTestPluginVersion = qwenreadiness.IntegrationVersion
+	qwenTestPluginSchema       = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+	qwenTestMCPSchema          = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+	qwenTestPluginName         = "agent-sessions"
+	qwenTestMCPName            = "agent_sessions"
+	qwenTestPluginVersion      = qwenreadiness.IntegrationVersion
+	qwenPluginProcessHelperEnv = "AGENT_SESSIONS_QWEN_PLUGIN_PROCESS_HELPER"
 )
 
 var qwenTestPluginSkills = []string{
@@ -66,7 +68,7 @@ func TestQwenPluginInstallCommandUsesOnlySelectedProfile(t *testing.T) {
 		wantRuntime string
 	}{
 		{name: "native default remains unset", profile: defaultProfile},
-		{name: "explicit profile is exact", profile: explicitProfile, wantHome: explicitHome, wantRuntime: explicitRuntime},
+		{name: "explicit profile is exact", profile: explicitProfile, wantHome: explicitProfile.QwenHome, wantRuntime: explicitProfile.QwenRuntimeDir},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			command, err := qwenPluginInstallCommand(qwenExecutable, pluginRoot, test.profile, baseEnvironment)
@@ -166,19 +168,39 @@ func TestQwenPluginMutationRefusesExactLiveProfileAndAllowsDifferentProfile(t *t
 		"HOME": root, "QWEN_HOME": filepath.Join(root, "other"), "QWEN_RUNTIME_DIR": filepath.Join(root, "other-runtime"),
 	})
 	start := func(profile qwenprofile.Identity) *exec.Cmd {
-		command := exec.Command("sleep", "30")
+		testBinary, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(testBinary, "-test.run=^TestQwenPluginManagedProcessHelper$", "--", "qwen-host")
 		command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
-		command.Env = append(command.Env, "AGENT_SESSIONS_PRODUCT=qwen")
+		command.Env = append(command.Env, "AGENT_SESSIONS_PRODUCT=qwen", qwenPluginProcessHelperEnv+"=1")
 		if err := command.Start(); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
+		deadline := time.Now().Add(time.Second)
+		for {
+			arguments, argsErr := procinfo.Args(command.Process.Pid)
+			if argsErr == nil && looksLikeManagedQwenRuntime(arguments) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("managed Qwen process %d did not exec fixture: args=%v err=%v", command.Process.Pid, arguments, argsErr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		return command
 	}
 	otherProcess := start(other)
-	if err := refuseLiveQwenPluginMutation(selected); err != nil {
-		t.Fatalf("different Qwen profile blocked selected-profile mutation: %v (pid %d)", err, otherProcess.Process.Pid)
+	_, otherEnvironmentErr := procinfo.Environment(otherProcess.Process.Pid)
+	if err := refuseLiveQwenPluginMutation(selected); otherEnvironmentErr == nil && err != nil {
+		t.Fatalf("observable different Qwen profile blocked selected-profile mutation: %v (pid %d)", err, otherProcess.Process.Pid)
+	} else if otherEnvironmentErr != nil && (err == nil || !strings.Contains(err.Error(), "process "+strconv.Itoa(otherProcess.Process.Pid))) {
+		t.Fatalf("unobservable managed Qwen profile did not fail closed: environment=%v refusal=%v", otherEnvironmentErr, err)
 	}
+	_ = otherProcess.Process.Kill()
+	_ = otherProcess.Wait()
 	selectedProcess := start(selected)
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -194,6 +216,13 @@ func TestQwenPluginMutationRefusesExactLiveProfileAndAllowsDifferentProfile(t *t
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestQwenPluginManagedProcessHelper(_ *testing.T) {
+	if os.Getenv(qwenPluginProcessHelperEnv) != "1" {
+		return
+	}
+	time.Sleep(30 * time.Second)
 }
 
 func TestQwenPluginRemoveIsProfileScopedIdempotentAndPreservesOwnerFiles(t *testing.T) {

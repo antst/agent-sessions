@@ -1,6 +1,6 @@
 //go:build !darwin
 
-package qwenprofile
+package pathidentity
 
 func resolvePlatformPathAlias(string) (string, bool, error) {
 	return "", false, nil

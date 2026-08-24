@@ -51,12 +51,12 @@ func TestCodexLaneResumePreservesPersistentLifecyclePolicy(t *testing.T) {
 		Persistent: true, OwnerPID: 91, OwnerProcStart: "old", OwnerSessionID: "old-session",
 		NotifyTarget: "session:old-session",
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{ownerPID: 92, ownerProcStart: "new"})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{ownerPID: 92, ownerProcStart: "new"}})
 	if !state.Persistent || state.OwnerPID != 0 || state.OwnerProcStart != "" ||
 		state.OwnerSessionID != "" || state.NotifyTarget != "session:old-session" {
 		t.Fatalf("implicit resume changed persistent lifecycle = %+v", state)
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{persistent: true, persistentSet: true})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{persistent: true, persistentSet: true}})
 	if !state.Persistent || state.OwnerPID != 0 || state.OwnerProcStart != "" || state.OwnerSessionID != "" {
 		t.Fatalf("persistent resume lifecycle = %+v", state)
 	}
@@ -105,7 +105,7 @@ func TestPrivateRuntimeDirectoryRejectsSymlinkAndRepairsMode(t *testing.T) {
 }
 
 func TestStableSessionSocketRefusesSameNameSocketAndSymlinkSubstitution(t *testing.T) {
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "ss-")
 	path := filepath.Join(root, "session-collision.sock")
 	target := filepath.Join(root, "unrelated-target")
 	if err := os.WriteFile(target, []byte("preserve\n"), 0o600); err != nil {
@@ -358,7 +358,7 @@ func TestLaneSetupArchivesThreadWhenNamingFails(t *testing.T) {
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "name-fail", cwd: root, promptFile: prompt}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "name-fail", cwd: root, promptFile: prompt}}), false); err == nil {
 		t.Fatal("name failure unexpectedly succeeded")
 	}
 	select {
@@ -402,7 +402,7 @@ func TestLaneSetupRetainsManageableStateWhenRollbackArchiveFails(t *testing.T) {
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "recoverable-setup", cwd: root, promptFile: prompt}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "recoverable-setup", cwd: root, promptFile: prompt}}), false); err == nil {
 		t.Fatal("name failure unexpectedly succeeded")
 	}
 	state, err := resolveLaneState(resolveNativePaths(), "recoverable-setup")
@@ -443,7 +443,7 @@ func TestLaneSetupDeletesUnmaterializedThreadWhenRollbackFindsNoRollout(t *testi
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "no-rollout", cwd: root, promptFile: prompt}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "no-rollout", cwd: root, promptFile: prompt}}), false); err == nil {
 		t.Fatal("name failure unexpectedly succeeded")
 	}
 	select {
@@ -489,7 +489,9 @@ func TestFailedLaneStartRemovesProvisionalWorktree(t *testing.T) {
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "duplicate", cwd: repository, promptFile: prompt, worktree: true}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{
+		laneCommonOptions: laneCommonOptions{name: "duplicate", cwd: repository, promptFile: prompt}, worktree: true,
+	}), false); err == nil {
 		t.Fatal("lane start unexpectedly succeeded without an App Server")
 	}
 	output, err := exec.Command("git", "-C", repository, "worktree", "list", "--porcelain").Output()
@@ -627,7 +629,7 @@ func TestRunReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 	}
 	finished := make(chan struct{})
 	go func() {
-		_, _ = startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "parallel", cwd: root, promptFile: prompt, timeout: 800 * time.Millisecond}), true)
+		_, _ = startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "parallel", cwd: root, promptFile: prompt, timeout: 800 * time.Millisecond}}), true)
 		close(finished)
 	}()
 	select {
@@ -717,7 +719,7 @@ func TestResumeReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 	}
 	finished := make(chan struct{})
 	go func() {
-		_, _ = resumeLaneNative(withCurrentTestLaneOwner(laneOptions{target: threadID, promptFile: prompt, timeout: 800 * time.Millisecond}))
+		_, _ = resumeLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID, promptFile: prompt, timeout: 800 * time.Millisecond}}))
 		close(finished)
 	}()
 	select {
@@ -1402,7 +1404,7 @@ func TestLaneReadyFollowsInitialTurnAndRegistration(t *testing.T) {
 	original := os.Stdout
 	os.Stdout = write
 	code, startErr := startLaneNative(withCurrentTestLaneOwner(laneOptions{
-		command: "start", name: "ready-lane", cwd: root, promptFile: promptFile,
+		laneCommonOptions: laneCommonOptions{command: "start", name: "ready-lane", cwd: root, promptFile: promptFile},
 	}), false)
 	_ = write.Close()
 	os.Stdout = original
@@ -1844,7 +1846,7 @@ func TestResumeLaneStartsNewTurnOnSameTranscript(t *testing.T) {
 	}
 	original := os.Stdout
 	os.Stdout = write
-	code, resumeErr := resumeLaneNative(withCurrentTestLaneOwner(laneOptions{command: "resume", target: "resume-lane", promptFile: promptFile}))
+	code, resumeErr := resumeLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{command: "resume", target: "resume-lane", promptFile: promptFile}}))
 	_ = write.Close()
 	os.Stdout = original
 	output, _ := io.ReadAll(read)
@@ -1896,7 +1898,7 @@ func TestResumeStartFailureRestoresOriginalLaneState(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, resumeErr := resumeLaneNative(laneOptions{
-		command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false,
+		laneCommonOptions: laneCommonOptions{command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false},
 	})
 	if resumeErr == nil || code == 0 {
 		t.Fatalf("rejected resume = code %d err %v", code, resumeErr)
@@ -1951,7 +1953,7 @@ func TestResumeUncertainStartPreservesObservedTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, resumeErr := resumeLaneNative(laneOptions{
-		command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false,
+		laneCommonOptions: laneCommonOptions{command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false},
 	})
 	if resumeErr == nil || code == 0 {
 		t.Fatalf("uncertain resume = code %d err %v", code, resumeErr)
@@ -2633,8 +2635,8 @@ func TestArchiveByRawThreadIDDoesNotFabricateLaneMetadata(t *testing.T) {
 	}
 	original := os.Stdout
 	os.Stdout = write
-	code, archiveErr := archiveLaneNative(laneOptions{target: threadID})
-	secondCode, secondErr := archiveLaneNative(laneOptions{target: threadID})
+	code, archiveErr := archiveLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID}})
+	secondCode, secondErr := archiveLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID}})
 	_ = write.Close()
 	os.Stdout = original
 	_, _ = io.ReadAll(read)
@@ -3069,7 +3071,7 @@ func TestArchivedLaneStatusIsLocalAndRetainedForResume(t *testing.T) {
 	}
 	original := os.Stdout
 	os.Stdout = write
-	code, statusErr := statusLaneNative(laneOptions{target: state.Name})
+	code, statusErr := statusLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: state.Name}})
 	_ = write.Close()
 	os.Stdout = original
 	output, _ := io.ReadAll(read)

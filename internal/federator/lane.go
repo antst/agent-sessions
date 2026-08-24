@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -462,7 +463,7 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: profileErr.Error()})
 		return
 	}
-	command.Env = claudeProfileEnvironment(replaceEnvironment(os.Environ(), map[string]string{
+	command.Env = claudeProfileEnvironment(envutil.Replace(os.Environ(), map[string]string{
 		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     a.options.RuntimeDir,
 		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": string(parentBody),
 		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        a.options.ClaudeConfigDir,

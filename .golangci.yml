@@ -26,6 +26,7 @@ linters:
     - asciicheck
     - bidichk
     - durationcheck
+    - dupl              # Shared product contracts must not drift as copied blocks
     - errname
     - exhaustive
     - gocheckcompilerdirectives
@@ -39,6 +40,8 @@ linters:
     - usestdlibvars
     - wastedassign
   settings:
+    dupl:
+      threshold: 100
     gocyclo:
       min-complexity: 15
     staticcheck:

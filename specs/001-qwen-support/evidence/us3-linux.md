@@ -1,4 +1,4 @@
-# US3 Linux: four-product composition with Qwen
+# US3 Linux: four-product composition
 
 - Date: 2026-08-23
 - Platform: Linux amd64
@@ -17,13 +17,22 @@ returned its unique terminal token:
 
 | Parent | Target | Child identity | Exact terminal token |
 | --- | --- | --- | --- |
-| Qwen | Codex | `01a030ad-3cd0-76a3-86d3-b666d4dfb69d` | `QWEN_COMPOSE_QWEN_TO_CODEX_1_OK` |
-| Qwen | Claude | `430ddffd-df1b-4b03-b81f-bc43d3dc194c` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_2_OK` |
-| Qwen | Grok | `e2394857-7810-42a3-a308-23c73b926a68` | `QWEN_COMPOSE_QWEN_TO_GROK_3_OK` |
-| Qwen | Qwen | `60e51567-9b10-4de2-a6a2-194deb693d2b` | `QWEN_COMPOSE_QWEN_TO_QWEN_4_OK` |
-| Codex | Qwen | `54d0a184-1b4e-4b3d-b247-ad7414e5db54` | `QWEN_COMPOSE_CODEX_TO_QWEN_5_OK` |
-| Claude | Qwen | `e83ea488-bdc8-4672-98ef-50ba2a2d9ea3` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_6_OK` |
-| Grok | Qwen | `93884eae-5f55-484b-a8bd-4a9825b1340f` | `QWEN_COMPOSE_GROK_TO_QWEN_7_OK` |
+| Codex | Codex | `01a03190-ddc5-7723-b709-b1224f34bdc6` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
+| Codex | Claude | `c02ca920-d025-47e7-b905-09344b25146f` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
+| Codex | Grok | `b50c59a2-b127-4b8e-b21a-11c1345d9ee9` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
+| Codex | Qwen | `9f99c696-a973-42f2-9c47-953a1b34570d` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
+| Claude | Codex | `01a03191-962b-7231-95c5-40c23a4b0d5f` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
+| Claude | Claude | `317adfee-73ef-4397-a438-c19c5c47dd34` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
+| Claude | Grok | `8dfdd418-5bee-4e36-8922-a188e11d5ad1` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
+| Claude | Qwen | `af6faf6e-894c-43ec-a889-1ccda67a3595` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
+| Grok | Codex | `01a03192-5484-7412-a660-7a30a0893a49` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
+| Grok | Claude | `f0781d6f-59db-4d88-ab20-93d4768b428f` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
+| Grok | Grok | `e5b3eb4e-7a52-47c6-b655-4dfb99795589` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
+| Grok | Qwen | `1553ca82-07d2-47e8-adf9-4472585703e4` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
+| Qwen | Codex | `01a03193-2737-7f60-8540-781da7f7accb` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
+| Qwen | Claude | `7f2dd98b-a3c3-4768-a1dc-101f02d40958` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
+| Qwen | Grok | `68fdde66-728b-44cd-9bb9-eedd15518e48` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
+| Qwen | Qwen | `739caa4f-e7ad-4a29-8d6f-29bb373b8600` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
 
 For every edge the runner asserted the exact immediate parent session, owner,
 and notification target; the explicit `qwen-composition` group; both mandatory
@@ -32,8 +41,9 @@ collection; terminal completion; idempotent archive; cleared manager/worker
 identities; and absence of the recorded delivery socket after cleanup.
 
 The complete 4x4 product matrix is independently table-tested in
-`internal/bridge/group_agent_test.go`; this live run covers its seven Qwen row
-and column edges.
+`internal/bridge/group_agent_test.go` and was repeated ten times before this
+live run. The live runner now executes every one of those 16 combinations by
+default with an attested product parent fixture and a real target lane.
 
 ## First-RED record and RCA
 
@@ -60,7 +70,10 @@ its native `/login`; no test or Agent Sessions code read, copied, selected, or
 modified a credential. The credited run used an isolated Claude state/config
 root plus Claude's supported secure-storage namespace selection.
 
-After the credited run the composition root, all fixture processes, the
-isolated host agent, supervisors, lane managers/workers, delivery sockets, and
-owned active lane records were absent. The harness stopped the isolated Codex
-App Server and did not stop or alter the owner's normal Codex daemon.
+After the credited run all fixture processes, the isolated host agent,
+supervisors, lane managers/workers, delivery sockets, and owned active lane
+records were absent. The supplied isolated profile roots had zero open files
+and zero matching processes. The harness stopped the isolated Codex App Server
+and did not stop or alter the owner's normal Codex daemon. Baseline and final
+SHA-256 values were identical for Codex auth/config, Claude settings and local
+settings, and Qwen settings/extension-store state.

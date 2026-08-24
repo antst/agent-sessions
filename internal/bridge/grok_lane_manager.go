@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 type grokLaneManager struct {
@@ -207,6 +208,9 @@ func (m *grokLaneManager) start() error {
 	m.diagnostics = diagnostics
 	if err := m.prepareToolRegistry(); err != nil {
 		return err
+	}
+	if err := socketpath.Validate(m.state.ControlSocket); err != nil {
+		return fmt.Errorf("validate Grok lane control socket: %w", err)
 	}
 	_ = os.Remove(m.state.ControlSocket)
 	listener, err := net.Listen("unix", m.state.ControlSocket)
@@ -694,29 +698,15 @@ func (m *grokLaneManager) publishStatusLocked(status string) {
 }
 
 func (m *grokLaneManager) acceptLoop(listener net.Listener) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-m.done:
-				return
-			default:
-				continue
-			}
-		}
+	acceptLaneControlLoop(listener, m.done, func() bool {
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		if m.controlClosed {
-			m.mu.Unlock()
-			_ = conn.Close()
-			continue
+			return false
 		}
 		m.controlWG.Add(1)
-		m.mu.Unlock()
-		go func() {
-			defer m.controlWG.Done()
-			m.handleControlConn(conn)
-		}()
-	}
+		return true
+	}, m.controlWG.Done, m.handleControlConn)
 }
 
 func (m *grokLaneManager) handleControlConn(conn net.Conn) {
@@ -1068,23 +1058,10 @@ func cancelAllGrokLaneNotices(state *grokLaneState) int {
 }
 
 func queueGrokLaneTerminalNotice(state *grokLaneState, turn grokLaneTurn) {
-	if state.NotifyTarget == "" {
-		return
-	}
-	for _, notice := range state.Notices {
-		if notice.TurnID == turn.ID {
-			return
-		}
-	}
-	noticeID := sessionKey("grok-lane-terminal\x00" + state.SessionID + "\x00" + turn.ID)
-	collect := laneCollectionPointer("grok", state.SessionID, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups)
-	message := fmt.Sprintf(
-		"GROK_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
-		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,
+	state.Notices = appendLaneTerminalNotice(
+		state.Notices, "grok", state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit,
+		state.NotifyTarget, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups,
 	)
-	state.Notices = append(state.Notices, claudeLaneNotice{
-		ID: noticeID, TurnID: turn.ID, Target: state.NotifyTarget, Message: message, CreatedAt: time.Now().UnixMilli(),
-	})
 }
 
 func grokLaneHasUnsentNotices(state grokLaneState) bool {
@@ -1163,19 +1140,7 @@ func (m *grokLaneManager) flushTerminalNoticesLocked() {
 }
 
 func lockGrokLaneNotices(paths nativePaths, sessionID string) (*os.File, error) {
-	directory := filepath.Join(profileDataRoot(paths), "grok-lane-notice-locks")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(directory, sessionKey(sessionID)+".lock"), os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // session id is hashed.
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return lockLaneFile(paths, "grok-lane-notice-locks", sessionID, true)
 }
 
 func currentGrokLaneNotifyTarget(paths nativePaths, state grokLaneState, fallback string) string {

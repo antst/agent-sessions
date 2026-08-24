@@ -25,6 +25,7 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const maxFrameBytes = 1024 * 1024
@@ -263,14 +264,10 @@ func newDaemon(args map[string]string) *daemon {
 
 func bridgeRuntimeRoot(runtimeDir string, uid int) string {
 	runtimeRoot := filepath.Join(runtimeDir, fmt.Sprintf("codex-claude-peer-%d", uid))
-	// Keep every peer address below the smaller Unix-domain socket limits used
-	// by supported systems. The stable alias is longer than supervisor.sock, so
-	// it is the canonical path-length check for every process in the bridge.
-	longestSocket := filepath.Join(runtimeRoot, "session-"+strings.Repeat("0", 20)+".sock")
-	if len(longestSocket) > 100 {
-		return filepath.Join(os.TempDir(), fmt.Sprintf("ccp-%d", uid))
-	}
-	return runtimeRoot
+	compactRoot := filepath.Join("/tmp", fmt.Sprintf("ccp-%d", uid))
+	// The stable session address is longer than supervisor.sock, so it is the
+	// representative budget for every socket below this root.
+	return socketpath.PreferRoot(runtimeRoot, compactRoot, "session-"+strings.Repeat("0", 20)+".sock")
 }
 
 // ensurePrivateRuntimeDir establishes the trust boundary for every UDS and
@@ -331,8 +328,8 @@ func (d *daemon) start() error {
 }
 
 func listenPrivateSessionSocket(path string) (net.Listener, error) {
-	if !filepath.IsAbs(path) {
-		return nil, errors.New("session delivery socket path must be absolute")
+	if err := socketpath.Validate(path); err != nil {
+		return nil, fmt.Errorf("validate session delivery socket: %w", err)
 	}
 	if _, err := os.Lstat(path); err == nil {
 		return nil, fmt.Errorf("session delivery socket already exists: %s", path)

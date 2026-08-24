@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const (
@@ -119,13 +120,13 @@ func grokRuntimePaths(runtimeDir string, uid int, launchToken string) grokHostPa
 
 func grokRuntimePathsForKey(runtimeDir string, uid int, launchKey string) grokHostPaths {
 	root := filepath.Join(runtimeDir, fmt.Sprintf("agent-sessions-grok-%d", uid))
-	// Darwin has a substantially shorter sockaddr_un budget. Prefer the caller's
-	// runtime directory, but fall back to the literal /tmp spelling before any
-	// socket is created. The root is still protected by ensurePrivateRuntimeDir.
-	longest := filepath.Join(root, "g-"+strings.Repeat("0", 20), "control.sock")
-	if len(longest) > 92 {
-		root = filepath.Join("/tmp", fmt.Sprintf("asg-%d", uid))
-	}
+	// Prefer the caller's runtime directory, but compact before any socket is
+	// created when the longest per-launch address would exceed sun_path.
+	root = socketpath.PreferRoot(
+		root,
+		filepath.Join("/tmp", fmt.Sprintf("asg-%d", uid)),
+		filepath.Join("g-"+strings.Repeat("0", 20), "control.sock"),
+	)
 	launchDir := filepath.Join(root, "g-"+launchKey)
 	return grokHostPaths{
 		Root:          root,
@@ -1100,6 +1101,9 @@ func (h *grokHost) start() error {
 	}
 	if err := h.waitForLeaderSocket(10 * time.Second); err != nil {
 		return err
+	}
+	if err := socketpath.Validate(h.paths.ControlSocket); err != nil {
+		return fmt.Errorf("validate Grok control socket: %w", err)
 	}
 	listener, err := net.Listen("unix", h.paths.ControlSocket)
 	if err != nil {

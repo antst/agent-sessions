@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -688,7 +689,7 @@ func claudePeerEnvironment(environment []string, sharedRoot string, source claud
 		peerSessionIDEnv:          sessionID, peerProductEnv: "claude",
 	}
 	for key, value := range values {
-		environment = replaceLaneEnvironment(environment, key, value)
+		environment = envutil.Set(environment, key, value)
 	}
 	environment = applyClaudeProfileEnvironment(environment, source)
 	return environment

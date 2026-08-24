@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 // AgentServiceProjection is the one native Claude service row plus its
@@ -1324,12 +1324,8 @@ func ValidateClaudePeerMessagingSocketPath(path string) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("managed Claude messaging socket path is not absolute and clean")
 	}
-	limit := 107
-	if runtime.GOOS == "darwin" {
-		limit = 103
-	}
-	if len([]byte(path)) > limit {
-		return fmt.Errorf("managed Claude messaging socket path is %d bytes; platform limit is %d", len([]byte(path)), limit)
+	if err := socketpath.Validate(path); err != nil {
+		return fmt.Errorf("managed Claude messaging socket path is %d bytes; platform limit is %d", len([]byte(path)), socketpath.Limit())
 	}
 	return nil
 }

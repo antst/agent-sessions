@@ -5,12 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,40 +20,13 @@ const (
 )
 
 type grokLaneOptions struct {
-	command            string
-	name               string
-	nameSet            bool
-	target             string
-	cwd                string
-	cwdSet             bool
+	laneCommonOptions
 	model              string
 	modelSet           bool
 	reasoningEffort    string
 	reasoningEffortSet bool
 	permissionMode     string
 	permissionModeSet  bool
-	timeout            time.Duration
-	timeoutSet         bool
-	promptFile         string
-	notifyTarget       string
-	notifyExplicit     bool
-	disableNotify      bool
-	persistent         bool
-	persistentSet      bool
-	autoArchive        bool
-	autoArchiveDelay   time.Duration
-	autoArchiveCustom  bool
-	noAutoArchiveSet   bool
-	allowDuplicateName bool
-	all                bool
-	mine               bool
-	json               bool
-	stdinMarker        bool
-	ownerPID           int
-	ownerProcStart     string
-	ownerSessionID     string
-	help               bool
-	groupOptions       laneGroupOptions
 }
 
 type grokLaneTurn struct {
@@ -154,7 +124,7 @@ Options:
       --auto-archive-after SECONDS
       --no-auto-archive
       --prompt-file FILE
-	  --group GROUP           add a child group; repeatable
+	  -g, --group GROUP       add a child group; repeatable
 	  --inherit-groups        also inherit the parent's non-private groups
 	  --no-inherit-groups     retain only the mandatory parent anchor
       --all
@@ -165,170 +135,40 @@ ACP sessions and never attach to an interactive grok-peer conversation.
 `
 }
 
-//nolint:gocyclo // The lane CLI contract is centralized so unsupported option combinations fail closed.
 func parseGrokLaneArgs(argv []string) (grokLaneOptions, error) {
 	o := grokLaneOptions{
-		cwd: mustGetwd(), permissionMode: "bypassPermissions", autoArchive: true,
-		autoArchiveDelay: defaultLaneAutoArchiveDelay,
+		laneCommonOptions: newLaneCommonOptions("SESSION_OR_NAME"), permissionMode: "bypassPermissions",
 	}
-	if len(argv) == 0 {
-		o.help = true
-		return o, nil
+	start, done, err := beginLaneOptionParse(argv, &o.laneCommonOptions)
+	if done || err != nil {
+		return o, err
 	}
-	for _, argument := range argv {
-		if argument == "-h" || argument == "--help" {
-			o.help = true
-			return o, nil
-		}
+	parser := newLaneFlagParser("grok-peer-lane", &o.laneCommonOptions)
+	parser.set.StringVarP(&o.model, "model", "m", o.model, "model")
+	parser.set.StringVar(&o.reasoningEffort, "reasoning-effort", o.reasoningEffort, "reasoning effort")
+	parser.set.StringVar(&o.reasoningEffort, "effort", o.reasoningEffort, "reasoning effort alias")
+	parser.set.StringVar(&o.permissionMode, "permission-mode", o.permissionMode, "permission mode")
+	parser.set.StringVar(&o.permissionMode, "always-approve", o.permissionMode, "always approve")
+	parser.set.Lookup("always-approve").NoOptDefVal = "bypassPermissions"
+	parser.set.StringVar(&o.permissionMode, "yolo", o.permissionMode, "always approve alias")
+	parser.set.Lookup("yolo").NoOptDefVal = "bypassPermissions"
+	positionals, err := parser.parse(argv[start:])
+	if err != nil {
+		return o, err
 	}
-	o.command = argv[0]
-	if !containsString([]string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"}, o.command) {
-		return o, fmt.Errorf("unknown command %q", o.command)
-	}
-	positionals := []string{}
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		take := func() (string, error) {
-			if index+1 >= len(argv) || argv[index+1] == "" {
-				return "", fmt.Errorf("%s requires a value", argument)
-			}
-			index++
-			return argv[index], nil
-		}
-		var value string
-		var err error
-		switch argument {
-		case "-n", "--name", "--peer-name":
-			value, err = take()
-			o.name, o.nameSet = value, true
-		case "-C", "--cd":
-			value, err = take()
-			o.cwd, o.cwdSet = value, true
-		case "-m", "--model":
-			value, err = take()
-			o.model, o.modelSet = value, true
-		case "--reasoning-effort", "--effort":
-			value, err = take()
-			o.reasoningEffort, o.reasoningEffortSet = value, true
-		case "--permission-mode":
-			value, err = take()
-			o.permissionMode, o.permissionModeSet = value, true
-		case "--always-approve", "--yolo":
-			o.permissionMode, o.permissionModeSet = "bypassPermissions", true
-		case "--timeout":
-			value, err = take()
-			if err == nil {
-				o.timeout, err = parseGrokLaneSeconds(value, false, "--timeout")
-				o.timeoutSet = err == nil
-			}
-		case "--prompt-file":
-			value, err = take()
-			o.promptFile = value
-		case "--notify":
-			value, err = take()
-			o.notifyTarget, o.notifyExplicit = value, true
-		case "--no-notify":
-			o.disableNotify = true
-		case "--persistent":
-			o.persistent, o.persistentSet = true, true
-		case "--no-auto-archive":
-			o.autoArchive, o.noAutoArchiveSet = false, true
-		case "--auto-archive-after":
-			value, err = take()
-			if err == nil {
-				o.autoArchiveDelay, err = parseGrokLaneSeconds(value, true, "--auto-archive-after")
-				o.autoArchiveCustom = err == nil
-			}
-		case "--allow-duplicate-name":
-			o.allowDuplicateName = true
-		case "--group":
-			value, err = take()
-			o.groupOptions.groups = append(o.groupOptions.groups, value)
-			o.groupOptions.groupsSpecified = true
-		case "--inherit-groups":
-			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = true, true
-		case "--no-inherit-groups":
-			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = false, true
-		case "--all":
-			o.all = true
-		case "--mine":
-			o.mine = true
-		case "--json":
-			o.json = true
-		case "-":
-			o.stdinMarker = true
-		default:
-			if strings.HasPrefix(argument, "-") {
-				return o, fmt.Errorf("unknown option %s", argument)
-			}
-			positionals = append(positionals, argument)
-		}
-		if err != nil {
-			return o, err
-		}
-	}
+	o.modelSet = parser.set.Changed("model")
+	o.reasoningEffortSet = parser.set.Changed("reasoning-effort") || parser.set.Changed("effort")
+	o.permissionModeSet = parser.set.Changed("permission-mode") || parser.set.Changed("always-approve") || parser.set.Changed("yolo")
 	if o.permissionMode != "bypassPermissions" {
 		return o, fmt.Errorf("unsupported headless Grok permission mode %q; use bypassPermissions", o.permissionMode)
-	}
-	if o.notifyTarget != "" && o.disableNotify {
-		return o, errors.New("--notify and --no-notify cannot be used together")
-	}
-	if o.notifyExplicit && !o.persistent && o.command != "resume" {
-		return o, errors.New("--notify requires --persistent; parent-owned lanes notify their owner automatically")
-	}
-	if o.autoArchiveCustom && !o.autoArchive {
-		return o, errors.New("--auto-archive-after and --no-auto-archive cannot be used together")
-	}
-	if o.autoArchiveCustom && !containsString([]string{"run", "start", "resume"}, o.command) {
-		return o, fmt.Errorf("--auto-archive-after is not valid for %s", o.command)
-	}
-	if o.mine && o.command != "list" {
-		return o, fmt.Errorf("--mine is not valid for %s", o.command)
-	}
-	if err := validateLaneGroupCommand(o.command, o.groupOptions); err != nil {
-		return o, err
 	}
 	if err := validateGrokLaneCommandOptions(o); err != nil {
 		return o, err
 	}
-	switch o.command {
-	case "run", "start":
-		if strings.TrimSpace(o.name) == "" {
-			return o, fmt.Errorf("%s requires --name", o.command)
-		}
-		if len(positionals) != 0 {
-			return o, fmt.Errorf("%s does not accept a prompt on argv; use stdin or --prompt-file", o.command)
-		}
-	case "resume":
-		if len(positionals) != 1 {
-			return o, errors.New("resume requires exactly one SESSION_OR_NAME")
-		}
-		o.target = positionals[0]
-	case "list", "doctor":
-		if len(positionals) != 0 {
-			return o, fmt.Errorf("%s does not accept positional arguments", o.command)
-		}
-	default:
-		if len(positionals) != 1 {
-			return o, fmt.Errorf("%s requires exactly one SESSION_OR_NAME", o.command)
-		}
-		o.target = positionals[0]
+	if err := validateLaneCommonOptions(&o.laneCommonOptions, positionals); err != nil {
+		return o, err
 	}
 	return o, nil
-}
-
-func parseGrokLaneSeconds(value string, positive bool, flag string) (time.Duration, error) {
-	seconds, err := strconv.ParseFloat(value, 64)
-	minimum := 0.0
-	message := flag + " must be a non-negative number of seconds"
-	if positive {
-		minimum = 0.001
-		message = flag + " must be at least 0.001 seconds"
-	}
-	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < minimum || seconds >= float64(math.MaxInt64)/float64(time.Second) {
-		return 0, errors.New(message)
-	}
-	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 func (o grokLaneOptions) hasLaunchOptions() bool {
@@ -338,106 +178,48 @@ func (o grokLaneOptions) hasLaunchOptions() bool {
 }
 
 func validateGrokLaneCommandOptions(o grokLaneOptions) error {
-	invalid := func(flag string, set bool) error {
-		if set {
-			return fmt.Errorf("%s is not valid for %s", flag, o.command)
-		}
-		return nil
-	}
-	checks := [][2]any{}
+	checks := []laneOptionCheck{}
 	switch o.command {
 	case "run", "start":
-		checks = append(checks, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	case "resume":
-		checks = append(checks, [2]any{"--name", o.nameSet}, [2]any{"--cd", o.cwdSet}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("--name", o.nameSet), laneOption("--cd", o.cwdSet), laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	case "wait":
-		checks = append(checks, [2]any{"launch options", o.hasLaunchOptions()}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("launch options", o.hasLaunchOptions()), laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	case "list":
-		checks = append(checks, [2]any{"launch options", o.hasLaunchOptions()}, [2]any{"--timeout", o.timeoutSet}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("launch options", o.hasLaunchOptions()), laneOption("--timeout", o.timeoutSet), laneOption("--json", o.json))
 	case "doctor":
-		checks = append(checks, [2]any{"launch options", o.hasLaunchOptions()}, [2]any{"--timeout", o.timeoutSet}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine})
+		checks = append(checks, laneOption("launch options", o.hasLaunchOptions()), laneOption("--timeout", o.timeoutSet), laneOption("--all", o.all), laneOption("--mine", o.mine))
 	default:
-		checks = append(checks, [2]any{"launch options", o.hasLaunchOptions()}, [2]any{"--timeout", o.timeoutSet}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("launch options", o.hasLaunchOptions()), laneOption("--timeout", o.timeoutSet), laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	}
-	for _, check := range checks {
-		if err := invalid(check[0].(string), check[1].(bool)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateLaneCommandOptions(o.command, checks)
 }
 
 func runGrokLaneCommand(argv []string) int {
-	o, err := parseGrokLaneArgs(argv)
-	if err != nil {
-		return reportGrokLaneError(err)
-	}
-	if o.help {
-		fmt.Print(grokLaneUsage())
-		return 0
-	}
-	if err := reconcileGrokLaneManagers(resolveNativePaths()); err != nil {
-		return reportGrokLaneError(err)
-	}
-	o = withGrokLaneLaunchContext(o)
-	var code int
-	switch o.command {
-	case "run":
-		code, err = startGrokLane(o, true)
-	case "start":
-		code, err = startGrokLane(o, false)
-	case "resume":
-		code, err = resumeGrokLane(o)
-	case "wait":
-		code, err = waitGrokLane(o)
-	case "status":
-		code, err = statusGrokLane(o)
-	case "interrupt":
-		code, err = interruptGrokLane(o)
-	case "archive":
-		code, err = archiveGrokLane(o)
-	case "list":
-		code, err = listGrokLanes(o)
-	case "doctor":
-		code, err = doctorGrokLane()
-	}
-	if err != nil {
-		return reportGrokLaneError(err)
-	}
-	return code
-}
-
-func reportGrokLaneError(err error) int {
-	_ = emitLane(map[string]any{"type": "error", "message": err.Error(), "timeout": errors.Is(err, context.DeadlineExceeded)})
-	fmt.Fprintf(os.Stderr, "grok-peer-lane: %v\n", err)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return 124
-	}
-	return 1
+	return runProductLaneCommand(argv, productLaneCommands[grokLaneOptions]{
+		binary: "grok-peer-lane", usage: grokLaneUsage, parse: parseGrokLaneArgs, parseExit: 1,
+		help: func(o grokLaneOptions) bool { return o.help },
+		prepare: func(o grokLaneOptions) (grokLaneOptions, error) {
+			if err := reconcileGrokLaneManagers(resolveNativePaths()); err != nil {
+				return o, err
+			}
+			return withGrokLaneLaunchContext(o), nil
+		},
+		command: func(o grokLaneOptions) string { return o.command },
+		start:   startGrokLane, resume: resumeGrokLane, wait: waitGrokLane, status: statusGrokLane,
+		interrupt: interruptGrokLane, archive: archiveGrokLane, list: listGrokLanes,
+		doctor: func(grokLaneOptions) (int, error) { return doctorGrokLane() },
+	})
 }
 
 func withGrokLaneLaunchContext(o grokLaneOptions) grokLaneOptions {
-	listMine := o.command == "list" && o.mine
-	if !containsString([]string{"run", "start", "resume"}, o.command) && !listMine {
-		return o
-	}
-	owner := inferPeerParent(resolveNativePaths(), os.Getpid())
-	return withGrokLaneResolvedParent(o, owner)
+	o.laneCommonOptions = withCurrentLaneParent(o.laneCommonOptions)
+	return o
 }
 
 func withGrokLaneResolvedParent(o grokLaneOptions, owner laneOwner) grokLaneOptions {
-	listMine := o.command == "list" && o.mine
-	o.groupOptions = applyAgentParentContext(o.groupOptions, &owner)
-	ok := owner.SessionID != ""
-	if ok {
-		o.groupOptions.parentSessionID = owner.SessionID
-		if !o.persistent || listMine {
-			o.ownerPID, o.ownerProcStart, o.ownerSessionID = owner.PID, owner.ProcStart, owner.SessionID
-		}
-		if !listMine && !o.persistent && !o.disableNotify && !o.notifyExplicit {
-			o.notifyTarget = "session:" + owner.SessionID
-		}
-	}
+	o.laneCommonOptions = withResolvedLaneParent(o.laneCommonOptions, owner)
 	return o
 }
 
@@ -473,50 +255,19 @@ func writeGrokLaneStateUnlocked(paths nativePaths, state grokLaneState) error {
 
 func readGrokLaneStates(paths nativePaths) []grokLaneState {
 	directory := filepath.Join(profileDataRoot(paths), "grok-lanes")
-	entries, _ := os.ReadDir(directory)
-	states := []grokLaneState{}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		var state grokLaneState
-		body, err := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // bridge-owned state directory.
-		if err != nil || json.Unmarshal(body, &state) != nil || state.Type != "grok-peer-lane" || entry.Name() != sessionKey(state.SessionID)+".json" {
-			continue
-		}
-		states = append(states, state)
-	}
-	sort.Slice(states, func(i, j int) bool { return states[i].CreatedAt > states[j].CreatedAt })
-	return states
+	return readProductLaneStates(directory, func(entryName string, state *grokLaneState) bool {
+		return state.Type == "grok-peer-lane" && entryName == sessionKey(state.SessionID)+".json"
+	}, func(state *grokLaneState) int64 { return state.CreatedAt })
 }
 
 func resolveGrokLaneState(paths nativePaths, target string) (grokLaneState, error) {
-	target = strings.TrimSpace(target)
-	byName := []grokLaneState{}
-	for _, state := range readGrokLaneStates(paths) {
-		if state.SessionID == target {
-			return state, nil
-		}
-		if strings.EqualFold(state.Name, target) {
-			byName = append(byName, state)
-		}
-	}
-	if len(byName) == 1 {
-		return byName[0], nil
-	}
-	if len(byName) > 1 {
-		active := []grokLaneState{}
-		for _, state := range byName {
-			if state.Status != "archived" {
-				active = append(active, state)
-			}
-		}
-		if len(active) == 1 {
-			return active[0], nil
-		}
-		return grokLaneState{}, fmt.Errorf("grok lane name %q is ambiguous; use a session ID", target)
-	}
-	return grokLaneState{}, fmt.Errorf("no Grok lane matching %q", target)
+	return resolveProductLaneState(
+		target, readGrokLaneStates(paths),
+		func(state *grokLaneState, candidate string) bool { return state.SessionID == candidate },
+		func(state *grokLaneState) string { return state.Name },
+		func(state *grokLaneState) string { return state.Status },
+		"Grok", "session ID",
+	)
 }
 
 func newGrokLaneTurn(prompt string, timeout time.Duration) grokLaneTurn {
@@ -528,7 +279,7 @@ func startGrokLane(o grokLaneOptions, wait bool) (int, error) {
 	if err := validateLaneOwner(o.persistent, o.ownerPID, o.ownerProcStart); err != nil {
 		return 1, err
 	}
-	prompt, err := readLanePrompt(laneOptions{promptFile: o.promptFile})
+	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
 	if err != nil {
 		return 1, err
 	}
@@ -600,7 +351,9 @@ func startGrokLane(o grokLaneOptions, wait bool) (int, error) {
 	if !wait {
 		return 0, nil
 	}
-	return waitGrokLane(grokLaneOptions{target: sessionID, timeout: laneCollectionBound(o.timeout)})
+	return waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: sessionID, timeout: laneCollectionBound(o.timeout),
+	}})
 }
 
 func canonicalGrokLaneDirectory(value string) (string, error) {
@@ -658,19 +411,16 @@ func grokLaneManagerEnvironment(environment []string, launchToken, sessionID str
 }
 
 func waitGrokLaneReady(paths nativePaths, sessionID string, managerPID int, managerProcStart string, timeout time.Duration) (grokLaneState, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		state, err := readGrokLaneState(paths, sessionID)
-		if err == nil && state.ManagerPID == managerPID && state.Status != "starting" &&
-			state.MessagingSocket != "" && probeUnixSocket(state.MessagingSocket, 200*time.Millisecond) {
-			return state, nil
-		}
-		if cleanupProcessIdentityStatus(managerPID, managerProcStart).Status == processIdentityStale {
-			return grokLaneState{}, errors.New("grok lane manager exited during startup; inspect its private manager log")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return grokLaneState{}, errors.New("timed out starting Grok lane manager; inspect its private manager log")
+	return waitProductLaneReady(
+		managerPID, managerProcStart, timeout,
+		func() (grokLaneState, error) { return readGrokLaneState(paths, sessionID) },
+		func(state *grokLaneState) bool {
+			return state.ManagerPID == managerPID && state.Status != "starting" && state.MessagingSocket != "" &&
+				probeUnixSocket(state.MessagingSocket, 200*time.Millisecond)
+		},
+		"grok lane manager exited during startup; inspect its private manager log",
+		"timed out starting Grok lane manager; inspect its private manager log",
+	)
 }
 
 func emitGrokLaneReady(state grokLaneState) error {
@@ -698,7 +448,7 @@ func resumeGrokLane(o grokLaneOptions) (int, error) {
 	if err := validateLaneOwner(desiredPersistent, o.ownerPID, o.ownerProcStart); err != nil {
 		return 1, err
 	}
-	prompt, err := readLanePrompt(laneOptions{promptFile: o.promptFile})
+	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
 	if err != nil {
 		return 1, err
 	}
@@ -755,7 +505,9 @@ func resumeLiveGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTur
 			return 1, err
 		}
 	}
-	return waitGrokLane(grokLaneOptions{target: state.SessionID, timeout: laneCollectionBound(o.timeout)})
+	return waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: state.SessionID, timeout: laneCollectionBound(o.timeout),
+	}})
 }
 
 //nolint:gocyclo // Archived resume is one guarded state/ownership transaction with explicit rollback.
@@ -867,7 +619,9 @@ func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLan
 	if err := emitGrokLaneReady(ready); err != nil {
 		return 1, err
 	}
-	return waitGrokLane(grokLaneOptions{target: state.SessionID, timeout: laneCollectionBound(o.timeout)})
+	return waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: state.SessionID, timeout: laneCollectionBound(o.timeout),
+	}})
 }
 
 func rollbackGrokLaneResume(paths nativePaths, original grokLaneState, startupID string) error {
@@ -1206,22 +960,14 @@ func grokLaneReportedTurn(state grokLaneState) *grokLaneTurn {
 }
 
 func listGrokLanes(o grokLaneOptions) (int, error) {
-	if o.mine && !validLaneOwner(o.ownerPID, o.ownerProcStart) {
-		return 1, errors.New("cannot establish the current orchestrator identity for --mine")
-	}
-	rows := []map[string]any{}
-	for _, state := range readGrokLaneStates(resolveNativePaths()) {
-		if !o.all && state.Status == "archived" {
-			continue
-		}
-		if o.mine && (state.Persistent || !sameLaneOwner(state.OwnerPID, state.OwnerProcStart, o.ownerPID, o.ownerProcStart)) {
-			continue
-		}
-		row := grokLaneStatusEvent(state)
-		delete(row, "type")
-		rows = append(rows, row)
-	}
-	return 0, emitLane(map[string]any{"type": "lane.list", "product": "grok", "contract_version": grokLaneContractVersion, "lanes": rows})
+	return listProductLaneStates(
+		o.laneCommonOptions, "grok", grokLaneContractVersion, readGrokLaneStates(resolveNativePaths()),
+		func(state *grokLaneState) string { return state.Status },
+		func(state *grokLaneState) (bool, int, string) {
+			return state.Persistent, state.OwnerPID, state.OwnerProcStart
+		},
+		grokLaneStatusEvent,
+	)
 }
 
 func interruptGrokLane(o grokLaneOptions) (int, error) {

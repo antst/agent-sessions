@@ -22,6 +22,7 @@ import (
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 // qwenACPClient is the single Agent Sessions client for one Qwen stdio ACP
@@ -394,6 +395,9 @@ func (m *qwenLaneManager) start() error { //nolint:gocyclo // One transaction ow
 	m.state = latest
 	if err := ensurePrivateRuntimeDir(filepath.Dir(m.state.ControlSocket)); err != nil {
 		return err
+	}
+	if err := socketpath.Validate(m.state.ControlSocket); err != nil {
+		return fmt.Errorf("validate Qwen lane control socket: %w", err)
 	}
 	_ = os.Remove(m.state.ControlSocket)
 	listener, err := net.Listen("unix", m.state.ControlSocket)
@@ -843,29 +847,15 @@ func (m *qwenLaneManager) publishStatusLocked(status string) {
 }
 
 func (m *qwenLaneManager) acceptLoop(listener net.Listener) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-m.done:
-				return
-			default:
-				continue
-			}
-		}
+	acceptLaneControlLoop(listener, m.done, func() bool {
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		if m.controlClosed {
-			m.mu.Unlock()
-			_ = conn.Close()
-			continue
+			return false
 		}
 		m.controlWG.Add(1)
-		m.mu.Unlock()
-		go func() {
-			defer m.controlWG.Done()
-			m.handleControlConn(conn)
-		}()
-	}
+		return true
+	}, m.controlWG.Done, m.handleControlConn)
 }
 
 func (m *qwenLaneManager) handleControlConn(conn net.Conn) {
@@ -1131,23 +1121,10 @@ func (m *qwenLaneManager) queueTerminalNoticeLocked(turn qwenLaneTurn) {
 }
 
 func queueQwenLaneTerminalNotice(state *qwenLaneState, turn qwenLaneTurn) {
-	if state.NotifyTarget == "" {
-		return
-	}
-	for _, notice := range state.Notices {
-		if notice.TurnID == turn.ID {
-			return
-		}
-	}
-	id := sessionKey("qwen-lane-terminal\x00" + state.ThreadID + "\x00" + turn.ID)
-	collect := laneCollectionPointer("qwen", state.ThreadID, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups)
-	message := fmt.Sprintf(
-		"QWEN_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
-		id, state.Name, state.ThreadID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,
+	state.Notices = appendLaneTerminalNotice(
+		state.Notices, "qwen", state.Name, state.ThreadID, turn.ID, turn.Status, turn.Outcome, turn.Exit,
+		state.NotifyTarget, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups,
 	)
-	state.Notices = append(state.Notices, claudeLaneNotice{
-		ID: id, TurnID: turn.ID, Target: state.NotifyTarget, Message: message, CreatedAt: time.Now().UnixMilli(),
-	})
 }
 
 func cancelAllQwenLaneNotices(state *qwenLaneState) {

@@ -21,8 +21,10 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 var evaluateQwenLaneReadiness = func(executable string) error {
@@ -34,7 +36,7 @@ var evaluateQwenLaneReadiness = func(executable string) error {
 	if err != nil {
 		return err
 	}
-	workspace, err = filepath.EvalSymlinks(workspace)
+	workspace, err = pathidentity.ExistingDirectory(workspace)
 	if err != nil {
 		return err
 	}
@@ -427,6 +429,9 @@ func (a *agent) handleHubMessage(message Message) error {
 }
 
 func (a *agent) startControlListener() (net.Listener, error) {
+	if err := socketpath.Validate(a.controlPath); err != nil {
+		return nil, fmt.Errorf("validate agent control socket: %w", err)
+	}
 	_ = os.Remove(a.controlPath)
 	listener, err := net.Listen("unix", a.controlPath)
 	if err != nil {

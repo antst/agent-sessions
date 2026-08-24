@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
@@ -318,17 +319,17 @@ func refuseLiveQwenPluginMutation(selected qwenprofile.Identity) error {
 	}
 	for _, process := range processes {
 		environment, environmentErr := procinfo.Environment(process.PID)
-		if environmentErr != nil {
+		if environmentErr != nil || len(environment) == 0 {
 			arguments, argumentsErr := procinfo.Args(process.PID)
 			if argumentsErr == nil && looksLikeManagedQwenRuntime(arguments) {
 				return fmt.Errorf("cannot inspect live managed Qwen process %d before plugin mutation", process.PID)
 			}
 			continue
 		}
-		if environmentValue(environment, "AGENT_SESSIONS_PRODUCT") != "qwen" {
+		if envutil.Value(environment, "AGENT_SESSIONS_PRODUCT") != "qwen" {
 			continue
 		}
-		candidate, resolveErr := qwenprofile.ResolveEnvironment(environmentLookup(environment))
+		candidate, resolveErr := qwenprofile.ResolveEnvironment(envutil.Lookup(environment))
 		if resolveErr != nil {
 			return fmt.Errorf("cannot identify live managed Qwen process %d profile: %w", process.PID, resolveErr)
 		}
@@ -346,22 +347,6 @@ func looksLikeManagedQwenRuntime(arguments []string) bool {
 		}
 	}
 	return false
-}
-
-func environmentLookup(environment []string) qwenprofile.LookupEnv {
-	values := make(map[string]string, len(environment))
-	for _, entry := range environment {
-		name, value, ok := strings.Cut(entry, "=")
-		if ok {
-			values[name] = value
-		}
-	}
-	return func(name string) (string, bool) { value, ok := values[name]; return value, ok }
-}
-
-func environmentValue(environment []string, name string) string {
-	value, _ := environmentLookup(environment)(name)
-	return value
 }
 
 func installedQwenPluginSource(root string) (string, error) {

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 type nativePaths struct {
@@ -314,6 +316,9 @@ func (s *nativeSupervisor) start() error {
 	cleanupStaleBridgeArtifacts(s.paths)
 	if probeUnixSocket(s.paths.supervisorSock, 250*time.Millisecond) {
 		return fmt.Errorf("refuse to replace live supervisor socket %s", s.paths.supervisorSock)
+	}
+	if err := socketpath.Validate(s.paths.supervisorSock); err != nil {
+		return fmt.Errorf("validate Codex supervisor socket: %w", err)
 	}
 	_ = os.Remove(s.paths.supervisorSock)
 	listener, err := net.Listen("unix", s.paths.supervisorSock)

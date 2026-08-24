@@ -14,6 +14,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestRemoteLaneCollectionPointerCarriesSourceAgentRuntime(t *testing.T) {
@@ -295,10 +296,11 @@ func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
 	t.Setenv("AGENT_SESSIONS_GROK_SESSION_ID", "")
 
 	localOwner := laneOwner{PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), SessionID: "destination-local-parent"}
-	codex := withLaneResolvedParent(laneOptions{command: "start", persistent: true}, localOwner)
-	claude := withClaudeLaneResolvedParent(claudeLaneOptions{command: "start", persistent: true}, localOwner)
-	grok := withGrokLaneResolvedParent(grokLaneOptions{command: "start", persistent: true}, localOwner)
-	qwen := withQwenLaneResolvedParent(qwenLaneOptions{command: "start", persistent: true}, localOwner)
+	common := laneCommonOptions{command: "start", persistent: true}
+	codex := withLaneResolvedParent(laneOptions{laneCommonOptions: common}, localOwner)
+	claude := withClaudeLaneResolvedParent(claudeLaneOptions{laneCommonOptions: common}, localOwner)
+	grok := withGrokLaneResolvedParent(grokLaneOptions{laneCommonOptions: common}, localOwner)
+	qwen := withQwenLaneResolvedParent(qwenLaneOptions{laneCommonOptions: common}, localOwner)
 	for product, state := range map[string]laneGroupOptions{
 		"codex": codex.groupOptions, "claude": claude.groupOptions, "grok": grok.groupOptions, "qwen": qwen.groupOptions,
 	} {
@@ -517,16 +519,16 @@ type targetLaunchProjection struct {
 func resolvedTargetLaunch(product string, persistent bool, groups laneGroupOptions, owner laneOwner) targetLaunchProjection {
 	switch product {
 	case "codex":
-		got := withLaneResolvedParent(laneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withLaneResolvedParent(laneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	case "claude":
-		got := withClaudeLaneResolvedParent(claudeLaneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withClaudeLaneResolvedParent(claudeLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	case "grok":
-		got := withGrokLaneResolvedParent(grokLaneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withGrokLaneResolvedParent(grokLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	case "qwen":
-		got := withQwenLaneResolvedParent(qwenLaneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withQwenLaneResolvedParent(qwenLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	default:
 		panic("unsupported test target product: " + product)
@@ -619,16 +621,7 @@ func startLaneContextTestAgent(t *testing.T) (string, string) {
 // the full test name even when TMPDIR itself is already compact.
 func shortSocketTestRoot(t *testing.T, pattern string) string {
 	t.Helper()
-	root, err := os.MkdirTemp("", pattern)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(root); err != nil {
-			t.Errorf("remove short socket test root: %v", err)
-		}
-	})
-	return root
+	return testutil.ShortSocketRoot(t, pattern, filepath.Join("agent-runtime", "agent.sock"))
 }
 
 func equalStringSlices(left, right []string) bool {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the seven live parent/target composition edges involving Qwen."""
+"""Run the complete 4x4 live parent/target composition matrix."""
 
 from __future__ import annotations
 
@@ -227,8 +227,7 @@ def main() -> int:
            start_new_session=True)
         wait_for(lambda: (runtime / "agent.sock").is_socket(), "composition host agent")
 
-        edges = [("qwen", target) for target in PRODUCTS]
-        edges.extend((parent, "qwen") for parent in PRODUCTS if parent != "qwen")
+        edges = [(parent, target) for parent in PRODUCTS for target in PRODUCTS]
         evidence = []
         for index, (parent, target) in enumerate(edges, start=1):
             parent_id = str(uuid.uuid4())

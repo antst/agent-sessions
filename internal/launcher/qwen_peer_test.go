@@ -17,6 +17,7 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 const testQwenSessionID = "12345678-1234-4234-8234-123456789abc"
@@ -34,6 +35,8 @@ func TestQwenPeerManagedArgumentContract(t *testing.T) {
 	lookup := qwenTestLookup(map[string]string{
 		"HOME": home, "QWEN_RUNTIME_DIR": runtimeDir,
 	})
+	canonicalRuntime := qwenTestCanonicalPath(t, runtimeDir)
+	canonicalProfile := qwenTestCanonicalPath(t, profile)
 	tests := []struct {
 		name       string
 		args       []string
@@ -90,7 +93,7 @@ func TestQwenPeerManagedArgumentContract(t *testing.T) {
 		{
 			name:     "explicit profile",
 			args:     []string{"--qwen-home", profile},
-			wantMode: qwenPeerModeFresh, wantPref: qwenLaunchNativeDefault, wantHome: profile,
+			wantMode: qwenPeerModeFresh, wantPref: qwenLaunchNativeDefault, wantHome: canonicalProfile,
 		},
 		{
 			name:     "prompt boundary untouched",
@@ -124,7 +127,7 @@ func TestQwenPeerManagedArgumentContract(t *testing.T) {
 			} else if plan.profile.QwenHomeSet {
 				t.Fatalf("default profile unexpectedly sets QWEN_HOME: %+v", plan.profile)
 			}
-			if plan.profile.QwenRuntimeDir != runtimeDir || !plan.profile.QwenRuntimeSet {
+			if plan.profile.QwenRuntimeDir != canonicalRuntime || !plan.profile.QwenRuntimeSet {
 				t.Fatalf("runtime profile identity = %+v", plan.profile)
 			}
 		})
@@ -192,11 +195,12 @@ func TestQwenPeerProfileOverridePreservesRuntimePresence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.profile.QwenHomeSet || plan.profile.QwenHome != profile || plan.profile.QwenRuntimeSet {
+	canonicalProfile := qwenTestCanonicalPath(t, profile)
+	if !plan.profile.QwenHomeSet || plan.profile.QwenHome != canonicalProfile || plan.profile.QwenRuntimeSet {
 		t.Fatalf("profile identity = %+v", plan.profile)
 	}
 	environment := qwenprofile.ApplyEnvironment([]string{"HOME=" + home, "QWEN_HOME=stale", "QWEN_RUNTIME_DIR=stale", "KEEP=yes"}, plan.profile)
-	if !slices.Contains(environment, "QWEN_HOME="+profile) || slices.Contains(environment, "QWEN_RUNTIME_DIR=stale") || !slices.Contains(environment, "KEEP=yes") {
+	if !slices.Contains(environment, "QWEN_HOME="+canonicalProfile) || slices.Contains(environment, "QWEN_RUNTIME_DIR=stale") || !slices.Contains(environment, "KEEP=yes") {
 		t.Fatalf("Qwen environment = %q", environment)
 	}
 }
@@ -387,7 +391,7 @@ func TestRunQwenPeerExecsPreparedHostAndRollsBackExecFailure(t *testing.T) {
 
 func qwenLauncherTestAgent(t *testing.T) (root, runtimeDir, stateDir, executable string) {
 	t.Helper()
-	root = t.TempDir()
+	root = testutil.ShortSocketRoot(t, "qp-", filepath.Join("agent-runtime", "agent.sock"))
 	runtimeDir, stateDir = filepath.Join(root, "agent-runtime"), filepath.Join(root, "state")
 	executable = filepath.Join(root, "agent-session-runtime")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -417,6 +421,15 @@ func qwenLauncherTestAgent(t *testing.T) (root, runtimeDir, stateDir, executable
 	}
 	t.Fatal("Qwen launcher test agent did not become ready")
 	return "", "", "", ""
+}
+
+func qwenTestCanonicalPath(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func qwenTestEnvironment(environment []string, name string) (string, bool) {

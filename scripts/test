@@ -495,15 +495,10 @@ printf '%s\n' \
   'fi' >"$install_codex"
 chmod 0700 "$install_codex"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer; do
-  if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
-    printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
-    exit 1
-  fi
-done
-if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/agent-session-runtime\" \"$custom_prefix/bin/agent-session-runtime\"" <<<"$install_plan" ||
+if ! grep -Eq "for binary in .*agent-session-runtime.*qwen-peer.*qwen-peer-lane.*peer-federator" <<<"$install_plan" ||
+   ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/\\\$binary\" \"$custom_prefix/bin/\\\$binary\"" <<<"$install_plan" ||
    ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
-  printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
+  printf 'install projection does not consume the complete release inventory from INSTALL_ROOT\n' >&2
   exit 1
 fi
 runtime_only_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 INSTALL_CODEX_INTEGRATION=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
@@ -559,22 +554,15 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ ! -f "$custom_install_root/qwen/mcp.json" ]] ||
    [[ ! -f "$custom_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
-   [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/peer")" != "$installed_binary_dir/peer" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/claude-peer")" != "$installed_binary_dir/claude-peer" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/grok-peer-lane")" != "$installed_binary_dir/grok-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
+   [[ -e "$custom_prefix/bin/codex-messaging" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
-  if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
-    printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
+mapfile -t installed_inventory < <("$plugin_root/scripts/release-inventory" binaries)
+for installed_binary in "${installed_inventory[@]}"; do
+  if [[ ! -x "$installed_binary_dir/$installed_binary" ]] ||
+     [[ "$(readlink "$custom_prefix/bin/$installed_binary")" != "$installed_binary_dir/$installed_binary" ]]; then
+    printf 'copied-prefix installation omitted or misprojected binary %s\n' "$installed_binary" >&2
     exit 1
   fi
 done

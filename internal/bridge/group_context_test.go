@@ -44,7 +44,7 @@ func TestQwenParentChildAnchorsInheritanceExclusionAndNotice(t *testing.T) {
 	owner := laneOwner{PID: os.Getpid(), ProcStart: procStart, SessionID: parentID, PermissionMode: "default"}
 
 	const childID = "qwen-child-session"
-	launch := withQwenLaneResolvedParent(qwenLaneOptions{command: "start"}, owner)
+	launch := withQwenLaneResolvedParent(qwenLaneOptions{laneCommonOptions: laneCommonOptions{command: "start"}}, owner)
 	if launch.ownerSessionID != parentID || launch.notifyTarget != "session:"+parentID {
 		t.Fatalf("Qwen child ownership = %+v", launch)
 	}
@@ -59,7 +59,9 @@ func TestQwenParentChildAnchorsInheritanceExclusionAndNotice(t *testing.T) {
 	}
 
 	inheritedLaunch := withQwenLaneResolvedParent(qwenLaneOptions{
-		command: "start", groupOptions: laneGroupOptions{inheritParentGroups: true, inheritGroupsSpecified: true},
+		laneCommonOptions: laneCommonOptions{
+			command: "start", groupOptions: laneGroupOptions{inheritParentGroups: true, inheritGroupsSpecified: true},
+		},
 	}, owner)
 	inherited, _, err := resolveLaneGroupState(childID+"-inherited", "qwen", inheritedLaunch.groupOptions, false, true)
 	if err != nil {

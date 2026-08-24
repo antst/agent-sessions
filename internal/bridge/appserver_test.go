@@ -313,26 +313,7 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 	if err := client.request(ctx, "trigger/dynamic", map[string]any{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case request := <-fake.requests:
-			if request["id"] != "dynamic-request-1" || request["method"] != nil {
-				continue
-			}
-			result := request["result"].(map[string]any)
-			if success, _ := result["success"].(bool); success {
-				t.Fatalf("ungrouped dynamic call unexpectedly succeeded: %v", result)
-			}
-			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "communication is inactive for this ungrouped session") {
-				t.Fatalf("unexpected dynamic content: %v", items)
-			}
-			return
-		case <-deadline:
-			t.Fatal("timed out waiting for dynamic tool response")
-		}
-	}
+	waitForDynamicToolError(t, fake.requests, "dynamic-request-1", "communication is inactive for this ungrouped session")
 }
 
 func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
@@ -374,24 +355,29 @@ func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
 	if err := client.request(ctx, "trigger/dynamic", map[string]any{}, nil); err != nil {
 		t.Fatal(err)
 	}
+	waitForDynamicToolError(t, fake.requests, "dynamic-foreign-session", "cannot act as")
+}
+
+func waitForDynamicToolError(t *testing.T, requests <-chan map[string]any, requestID, message string) {
+	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
-		case request := <-fake.requests:
-			if request["id"] != "dynamic-foreign-session" || request["method"] != nil {
+		case request := <-requests:
+			if request["id"] != requestID || request["method"] != nil {
 				continue
 			}
 			result := request["result"].(map[string]any)
 			if success, _ := result["success"].(bool); success {
-				t.Fatalf("foreign session claim succeeded: %v", result)
+				t.Fatalf("dynamic tool error unexpectedly succeeded: %v", result)
 			}
 			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "cannot act as") {
-				t.Fatalf("unexpected identity rejection: %v", items)
+			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), message) {
+				t.Fatalf("dynamic tool error content = %v, want substring %q", items, message)
 			}
 			return
 		case <-deadline:
-			t.Fatal("timed out waiting for dynamic identity rejection")
+			t.Fatalf("timed out waiting for dynamic tool error %q", requestID)
 		}
 	}
 }

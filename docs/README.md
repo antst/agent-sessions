@@ -36,7 +36,9 @@ also defines the Claude carrier, Grok wake path, Qwen dual-output path, common f
 
 ## Protocol and verification
 
-- [Native carrier and product-adapter protocol](ADAPTER-PROTOCOL.md)
+- [Native carrier and product-adapter protocol](ADAPTER-PROTOCOL.md) — shared
+  resume, identity, path, socket-budget, process-observability, and new-adapter
+  acceptance contracts.
 - [Federation wire protocol](federation/PROTOCOL.md)
 - [Acceptance matrix](ACCEPTANCE-MATRIX.md)
 

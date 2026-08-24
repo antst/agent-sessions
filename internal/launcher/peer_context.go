@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -94,9 +95,9 @@ func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]
 }
 
 func peerEnvironment(environment []string, sessionID, product string) []string {
-	environment = replaceLaneEnvironment(environment, agentRuntimeDirEnv, agentRuntimeDir())
-	environment = replaceLaneEnvironment(environment, peerSessionIDEnv, sessionID)
-	return replaceLaneEnvironment(environment, peerProductEnv, product)
+	environment = envutil.Set(environment, agentRuntimeDirEnv, agentRuntimeDir())
+	environment = envutil.Set(environment, peerSessionIDEnv, sessionID)
+	return envutil.Set(environment, peerProductEnv, product)
 }
 
 func (c peerLaunchContext) launchArguments(alwaysApprove bool, alwaysApproveSpecified bool) []string {

@@ -336,6 +336,7 @@ func TestRemoteLaneStdinDetectionMatchesNativeLifecycle(t *testing.T) {
 }
 
 func TestAutomaticRemoteLaneSourceInferenceRejectsInheritedEnvironment(t *testing.T) {
+	t.Setenv("AGENT_SESSIONS_SESSION_ID", "")
 	t.Setenv("CODEX_THREAD_ID", "stale-codex-session")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "stale-claude-session")
 	t.Setenv("CLAUDE_PID", "999999")

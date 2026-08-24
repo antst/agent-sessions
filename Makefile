@@ -231,18 +231,10 @@ install: install-preflight
 	cp .mcp.json README.md "$(INSTALL_ROOT)/"
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer" "$(PREFIX)/bin/peer"
+	@for binary in $(BINARY_NAMES); do \
+		ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/$$binary" "$(PREFIX)/bin/$$binary"; \
+	done
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer" "$(PREFIX)/bin/codex-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer" "$(PREFIX)/bin/claude-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/qwen-peer" "$(PREFIX)/bin/qwen-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/qwen-peer-lane" "$(PREFIX)/bin/qwen-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
 ifeq ($(INSTALL_CODEX_INTEGRATION),1)
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
@@ -282,18 +274,10 @@ endif
 
 dev-install: install-preflight
 	mkdir -p "$(PREFIX)/bin"
-	ln -sfn "$(abspath $(BIN_DIR))/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
-	ln -sfn "$(abspath $(BIN_DIR))/peer" "$(PREFIX)/bin/peer"
+	@for binary in $(BINARY_NAMES); do \
+		ln -sfn "$(abspath $(BIN_DIR))/$$binary" "$(PREFIX)/bin/$$binary"; \
+	done
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
-	ln -sfn "$(abspath $(BIN_DIR))/codex-peer" "$(PREFIX)/bin/codex-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/claude-peer" "$(PREFIX)/bin/claude-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/qwen-peer" "$(PREFIX)/bin/qwen-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/qwen-peer-lane" "$(PREFIX)/bin/qwen-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
 ifeq ($(INSTALL_CODEX_INTEGRATION),1)
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \

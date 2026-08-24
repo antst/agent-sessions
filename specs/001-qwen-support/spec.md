@@ -126,8 +126,8 @@ Qwen parent can launch each of the four target products.
 **Why this priority**: A partial one-way adapter would force users to reason about product-specific
 topologies and would violate the product's shared contract.
 
-**Independent Test**: Exercise every parent-target combination at contract level and live-test every
-edge involving Qwen, verifying the immediate parent identity, notification target, private anchors,
+**Independent Test**: Exercise every parent-target combination at contract level and live-test all
+16 combinations with an attested product parent and real target lane, verifying the immediate parent identity, notification target, private anchors,
 explicit group inheritance, terminal answer, and cleanup.
 
 **Acceptance Scenarios**:
@@ -401,6 +401,24 @@ owner's native profile and credentials are unchanged.
 - **FR-036**: Qwen installation and upgrade MUST verify and reconcile the native extension's recorded
   source path in addition to payload/version/enabled state. A same-version developer install MUST NOT
   cause a release install to retain a mutable checkout as its future update source.
+- **FR-037**: Qwen and the existing adapters MUST consume the same host-platform primitives for
+  canonical existing/future path identity, Unix-domain socket byte budgets and compact test roots,
+  and process identity/environment observability. On macOS, fixed `/tmp` and `/var` aliases MUST be
+  admitted only after exact-target verification; arbitrary symlink components MUST remain rejected.
+  Empty or unreadable process environments MUST NOT prove that a live process is unrelated, and a
+  recognized managed runtime whose exact selected profile cannot be observed MUST block profile
+  mutation. All final socket paths MUST be absolute, clean, and within the 103-byte macOS or
+  107-byte Linux pathname payload limit. Future adapters MUST reuse these primitives and their real
+  Linux/macOS conformance cases rather than copying product-local platform rules.
+- **FR-038**: Cross-product mechanics MUST have one implementation. Owned lane CLIs MUST use the
+  shared established flag parser and common lifecycle/group/collection option contract; product
+  permission classification, environment operations, lane dispatch/parent/state/list/readiness/
+  notice/control mechanics, product inventory, and release install projection MUST consume their
+  authoritative shared packages or inventories. Transparent interactive peer wrappers MAY retain a
+  narrow custom extractor only to preserve unknown native pass-through arguments. Native lifecycle
+  state machines MUST remain separate where the vendor's authoritative identity, terminal evidence,
+  archive, or recovery semantics genuinely differ. CI MUST reject unreviewed clones at the
+  repository's 100-token duplicate threshold, and every exception MUST carry a local rationale.
 
 ### Key Entities
 
@@ -423,8 +441,8 @@ owner's native profile and credentials are unchanged.
 
 - Managed Qwen interactive peers, durable Qwen lanes, messaging, groups, resume, permissions,
   ownership, collection, archive, crash recovery, packaging, skills, documentation, and federation.
-- All four parent products targeting all four lane products, with complete live coverage for every
-  composition edge involving Qwen.
+- All four parent products targeting all four lane products, with complete live coverage for all 16
+  composition edges.
 - Coordinated current-version Agent Sessions hosts on Linux and macOS.
 
 **Out of scope**:
@@ -443,8 +461,8 @@ owner's native profile and credentials are unchanged.
 
 - **SC-001**: Users can launch a managed Qwen peer, discover one authorized peer, exchange a direct
   message and reply, and complete a group broadcast in under five minutes using documented commands.
-- **SC-002**: Every one of the 16 parent-target product combinations passes contract validation, and
-  every live composition edge involving Qwen returns the requested terminal answer to the exact
+- **SC-002**: Every one of the 16 parent-target product combinations passes contract validation and
+  live execution, returning the requested terminal answer to the exact
   parent with no unrelated recipient.
 - **SC-003**: The full Qwen lane lifecycle completes with exactly one terminal result per turn and
   preserves both lane and native transcript identity across follow-up, archive, and resume in 100% of

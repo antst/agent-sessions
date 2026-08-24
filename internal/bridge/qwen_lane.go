@@ -7,12 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,39 +28,12 @@ const (
 )
 
 type qwenLaneOptions struct {
-	command            string
-	name               string
-	nameSet            bool
-	target             string
-	cwd                string
-	cwdSet             bool
-	qwenHome           string
-	qwenHomeSet        bool
-	permissionMode     string
-	permissionModeSet  bool
-	launchPreference   string
-	timeout            time.Duration
-	timeoutSet         bool
-	promptFile         string
-	notifyTarget       string
-	notifyExplicit     bool
-	disableNotify      bool
-	persistent         bool
-	persistentSet      bool
-	autoArchive        bool
-	autoArchiveDelay   time.Duration
-	autoArchiveCustom  bool
-	noAutoArchiveSet   bool
-	allowDuplicateName bool
-	all                bool
-	mine               bool
-	json               bool
-	stdinMarker        bool
-	ownerPID           int
-	ownerProcStart     string
-	ownerSessionID     string
-	help               bool
-	groupOptions       laneGroupOptions
+	laneCommonOptions
+	qwenHome          string
+	qwenHomeSet       bool
+	permissionMode    string
+	permissionModeSet bool
+	launchPreference  string
 }
 
 type qwenLaneTurn struct {
@@ -194,169 +164,49 @@ mode changes.
 `
 }
 
-//nolint:gocyclo // The complete CLI conflict contract must reject before state mutation.
 func parseQwenLaneArgs(argv []string) (qwenLaneOptions, error) {
-	o := qwenLaneOptions{cwd: mustGetwd(), autoArchive: true, autoArchiveDelay: defaultLaneAutoArchiveDelay, launchPreference: "native_default"}
-	if len(argv) == 0 {
-		o.help = true
-		return o, nil
+	o := qwenLaneOptions{
+		laneCommonOptions: newLaneCommonOptions("SESSION_OR_NAME"), launchPreference: "native_default",
 	}
-	for _, argument := range argv {
-		if argument == "-h" || argument == "--help" {
-			o.help = true
-			return o, nil
-		}
+	start, done, err := beginLaneOptionParse(argv, &o.laneCommonOptions)
+	if done || err != nil {
+		return o, err
 	}
-	o.command = argv[0]
-	if !containsString([]string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"}, o.command) {
-		return o, fmt.Errorf("unknown command %q", o.command)
-	}
-	positionals := []string{}
 	permissionChoices := 0
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		take := func() (string, error) {
-			if index+1 >= len(argv) || argv[index+1] == "" {
-				return "", fmt.Errorf("%s requires a value", argument)
-			}
-			index++
-			return argv[index], nil
-		}
-		var value string
-		var err error
-		switch argument {
-		case "-n", "--name", "--peer-name":
-			value, err = take()
-			o.name, o.nameSet = value, true
-		case "-C", "--cwd", "--cd":
-			value, err = take()
-			o.cwd, o.cwdSet = value, true
-		case "-g", "--group":
-			value, err = take()
-			o.groupOptions.groups = append(o.groupOptions.groups, value)
-			o.groupOptions.groupsSpecified = true
-		case "--inherit-groups":
-			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = true, true
-		case "--no-inherit-groups":
-			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = false, true
-		case "--qwen-home":
-			value, err = take()
-			o.qwenHome, o.qwenHomeSet = value, true
-		case "--yolo":
-			permissionChoices++
-			o.permissionMode, o.permissionModeSet, o.launchPreference = "yolo", true, "yolo"
-		case "--no-yolo":
-			permissionChoices++
-			o.permissionMode, o.permissionModeSet, o.launchPreference = "default", true, "non_yolo"
-		case "--approval-mode":
-			permissionChoices++
-			value, err = take()
-			o.permissionMode, o.permissionModeSet, o.launchPreference = value, true, "native:"+value
-		case "--timeout":
-			value, err = take()
-			if err == nil {
-				o.timeout, err = parseQwenLaneSeconds(value, false, "--timeout")
-				o.timeoutSet = err == nil
-			}
-		case "--prompt-file":
-			value, err = take()
-			o.promptFile = value
-		case "--notify":
-			value, err = take()
-			o.notifyTarget, o.notifyExplicit = value, true
-		case "--no-notify":
-			o.disableNotify = true
-		case "--persistent":
-			o.persistent, o.persistentSet = true, true
-		case "--no-auto-archive":
-			o.autoArchive, o.noAutoArchiveSet = false, true
-		case "--auto-archive-after":
-			value, err = take()
-			if err == nil {
-				o.autoArchiveDelay, err = parseQwenLaneSeconds(value, true, "--auto-archive-after")
-				o.autoArchiveCustom = err == nil
-			}
-		case "--allow-duplicate-name":
-			o.allowDuplicateName = true
-		case "--all":
-			o.all = true
-		case "--mine":
-			o.mine = true
-		case "--json":
-			o.json = true
-		case "-":
-			o.stdinMarker = true
-		default:
-			if strings.HasPrefix(argument, "-") {
-				return o, fmt.Errorf("unknown option %s", argument)
-			}
-			positionals = append(positionals, argument)
-		}
-		if err != nil {
-			return o, err
-		}
+	parser := newLaneFlagParser("qwen-peer-lane", &o.laneCommonOptions)
+	parser.set.StringVar(&o.qwenHome, "qwen-home", o.qwenHome, "Qwen profile")
+	parser.set.Var(&laneChoiceFlag{destination: &o.permissionMode, fixed: "yolo", count: &permissionChoices}, "yolo", "Qwen yolo mode")
+	parser.set.Lookup("yolo").NoOptDefVal = "yolo"
+	parser.set.Var(&laneChoiceFlag{destination: &o.permissionMode, fixed: "default", count: &permissionChoices}, "no-yolo", "Qwen default mode")
+	parser.set.Lookup("no-yolo").NoOptDefVal = "default"
+	parser.set.Var(&laneChoiceFlag{destination: &o.permissionMode, count: &permissionChoices}, "approval-mode", "Qwen approval mode")
+	positionals, err := parser.parse(argv[start:])
+	if err != nil {
+		return o, err
 	}
+	o.qwenHomeSet = parser.set.Changed("qwen-home")
+	o.permissionModeSet = permissionChoices != 0
 	if permissionChoices > 1 {
 		return o, errors.New("qwen lane permission options are repeated or contradictory")
+	}
+	switch {
+	case parser.set.Changed("yolo"):
+		o.launchPreference = "yolo"
+	case parser.set.Changed("no-yolo"):
+		o.launchPreference = "non_yolo"
+	case parser.set.Changed("approval-mode"):
+		o.launchPreference = "native:" + o.permissionMode
 	}
 	if o.permissionModeSet && !containsString([]string{"default", "yolo", "plan", "auto", "accept_edits"}, o.permissionMode) {
 		return o, fmt.Errorf("unsupported Qwen approval mode %q", o.permissionMode)
 	}
-	if o.notifyTarget != "" && o.disableNotify {
-		return o, errors.New("--notify and --no-notify cannot be used together")
-	}
-	if o.notifyExplicit && !o.persistent && o.command != "resume" {
-		return o, errors.New("--notify requires --persistent; parent-owned lanes notify their owner automatically")
-	}
-	if o.autoArchiveCustom && !o.autoArchive {
-		return o, errors.New("--auto-archive-after and --no-auto-archive cannot be used together")
-	}
-	if o.mine && o.command != "list" {
-		return o, fmt.Errorf("--mine is not valid for %s", o.command)
-	}
-	if err := validateLaneGroupCommand(o.command, o.groupOptions); err != nil {
-		return o, err
-	}
 	if err := validateQwenLaneCommandOptions(o); err != nil {
 		return o, err
 	}
-	switch o.command {
-	case "run", "start":
-		if strings.TrimSpace(o.name) == "" {
-			return o, fmt.Errorf("%s requires --name", o.command)
-		}
-		if len(positionals) != 0 {
-			return o, fmt.Errorf("%s does not accept a prompt on argv; use stdin or --prompt-file", o.command)
-		}
-	case "resume":
-		if len(positionals) != 1 {
-			return o, errors.New("resume requires exactly one SESSION_OR_NAME")
-		}
-		o.target = positionals[0]
-	case "list", "doctor":
-		if len(positionals) != 0 {
-			return o, fmt.Errorf("%s does not accept positional arguments", o.command)
-		}
-	default:
-		if len(positionals) != 1 {
-			return o, fmt.Errorf("%s requires exactly one SESSION_OR_NAME", o.command)
-		}
-		o.target = positionals[0]
+	if err := validateLaneCommonOptions(&o.laneCommonOptions, positionals); err != nil {
+		return o, err
 	}
 	return o, nil
-}
-
-func parseQwenLaneSeconds(value string, positive bool, flag string) (time.Duration, error) {
-	seconds, err := strconv.ParseFloat(value, 64)
-	minimum := 0.0
-	message := flag + " must be a non-negative number of seconds"
-	if positive {
-		minimum, message = 0.001, flag+" must be at least 0.001 seconds"
-	}
-	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < minimum || seconds >= float64(math.MaxInt64)/float64(time.Second) {
-		return 0, errors.New(message)
-	}
-	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 func (o qwenLaneOptions) hasLaunchOptions() bool {
@@ -365,115 +215,53 @@ func (o qwenLaneOptions) hasLaunchOptions() bool {
 }
 
 func validateQwenLaneCommandOptions(o qwenLaneOptions) error {
-	invalid := func(flag string, set bool) error {
-		if set {
-			return fmt.Errorf("%s is not valid for %s", flag, o.command)
-		}
-		return nil
-	}
 	launch := o.hasLaunchOptions()
-	checks := [][2]any{}
+	checks := []laneOptionCheck{}
 	switch o.command {
 	case "run", "start":
-		checks = append(checks, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	case "resume":
-		checks = append(checks, [2]any{"--name", o.nameSet}, [2]any{"--cwd", o.cwdSet}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("--name", o.nameSet), laneOption("--cwd", o.cwdSet), laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	case "wait":
-		checks = append(checks, [2]any{"launch options", launch}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("launch options", launch), laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	case "list":
-		checks = append(checks, [2]any{"launch options", launch}, [2]any{"--timeout", o.timeoutSet}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("launch options", launch), laneOption("--timeout", o.timeoutSet), laneOption("--json", o.json))
 	case "doctor":
 		checks = append(checks,
-			[2]any{"--name", o.nameSet}, [2]any{"--prompt-file", o.promptFile != ""},
-			[2]any{"--notify", o.notifyExplicit}, [2]any{"--no-notify", o.disableNotify},
-			[2]any{"--persistent", o.persistentSet}, [2]any{"--no-auto-archive", o.noAutoArchiveSet},
-			[2]any{"--auto-archive-after", o.autoArchiveCustom}, [2]any{"--allow-duplicate-name", o.allowDuplicateName},
-			[2]any{"group options", o.groupOptions.groupsSpecified || o.groupOptions.inheritGroupsSpecified},
-			[2]any{"--timeout", o.timeoutSet}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine},
+			laneOption("--name", o.nameSet), laneOption("--prompt-file", o.promptFile != ""),
+			laneOption("--notify", o.notifyExplicit), laneOption("--no-notify", o.disableNotify),
+			laneOption("--persistent", o.persistentSet), laneOption("--no-auto-archive", o.noAutoArchiveSet),
+			laneOption("--auto-archive-after", o.autoArchiveCustom), laneOption("--allow-duplicate-name", o.allowDuplicateName),
+			laneOption("group options", o.groupOptions.groupsSpecified || o.groupOptions.inheritGroupsSpecified),
+			laneOption("--timeout", o.timeoutSet), laneOption("--all", o.all), laneOption("--mine", o.mine),
 		)
 	default:
-		checks = append(checks, [2]any{"launch options", launch}, [2]any{"--timeout", o.timeoutSet}, [2]any{"--all", o.all}, [2]any{"--mine", o.mine}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("launch options", launch), laneOption("--timeout", o.timeoutSet), laneOption("--all", o.all), laneOption("--mine", o.mine), laneOption("--json", o.json))
 	}
-	for _, check := range checks {
-		if err := invalid(check[0].(string), check[1].(bool)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateLaneCommandOptions(o.command, checks)
 }
 
 func runQwenLaneCommand(argv []string) int {
-	o, err := parseQwenLaneArgs(argv)
-	if err != nil {
-		return reportQwenLaneError(err, true)
-	}
-	if o.help {
-		fmt.Print(qwenLaneUsage())
-		return 0
-	}
-	o = withQwenLaneLaunchContext(o)
-	if err := reconcileQwenLaneManagers(resolveNativePaths()); err != nil {
-		return reportQwenLaneError(err, false)
-	}
-	var code int
-	switch o.command {
-	case "run":
-		code, err = startQwenLane(o, true)
-	case "start":
-		code, err = startQwenLane(o, false)
-	case "resume":
-		code, err = resumeQwenLane(o)
-	case "wait":
-		code, err = waitQwenLane(o)
-	case "status":
-		code, err = statusQwenLane(o)
-	case "interrupt":
-		code, err = interruptQwenLane(o)
-	case "archive":
-		code, err = archiveQwenLane(o)
-	case "list":
-		code, err = listQwenLanes(o)
-	case "doctor":
-		code, err = doctorQwenLane(o)
-	}
-	if err != nil {
-		return reportQwenLaneError(err, false)
-	}
-	return code
-}
-
-func reportQwenLaneError(err error, usage bool) int {
-	_ = emitLane(map[string]any{"type": "error", "message": err.Error(), "timeout": errors.Is(err, context.DeadlineExceeded)})
-	fmt.Fprintf(os.Stderr, "qwen-peer-lane: %v\n", err)
-	if usage {
-		return 2
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return 124
-	}
-	return 1
+	return runProductLaneCommand(argv, productLaneCommands[qwenLaneOptions]{
+		binary: "qwen-peer-lane", usage: qwenLaneUsage, parse: parseQwenLaneArgs, parseExit: 2,
+		help: func(o qwenLaneOptions) bool { return o.help },
+		prepare: func(o qwenLaneOptions) (qwenLaneOptions, error) {
+			o = withQwenLaneLaunchContext(o)
+			return o, reconcileQwenLaneManagers(resolveNativePaths())
+		},
+		command: func(o qwenLaneOptions) string { return o.command },
+		start:   startQwenLane, resume: resumeQwenLane, wait: waitQwenLane, status: statusQwenLane,
+		interrupt: interruptQwenLane, archive: archiveQwenLane, list: listQwenLanes, doctor: doctorQwenLane,
+	})
 }
 
 func withQwenLaneLaunchContext(o qwenLaneOptions) qwenLaneOptions {
-	listMine := o.command == "list" && o.mine
-	if !containsString([]string{"run", "start", "resume"}, o.command) && !listMine {
-		return o
-	}
-	return withQwenLaneResolvedParent(o, inferPeerParent(resolveNativePaths(), os.Getpid()))
+	o.laneCommonOptions = withCurrentLaneParent(o.laneCommonOptions)
+	return o
 }
 
 func withQwenLaneResolvedParent(o qwenLaneOptions, owner laneOwner) qwenLaneOptions {
-	listMine := o.command == "list" && o.mine
-	o.groupOptions = applyAgentParentContext(o.groupOptions, &owner)
-	if owner.SessionID != "" {
-		o.groupOptions.parentSessionID = owner.SessionID
-		if !o.persistent || listMine {
-			o.ownerPID, o.ownerProcStart, o.ownerSessionID = owner.PID, owner.ProcStart, owner.SessionID
-		}
-		if !listMine && !o.persistent && !o.disableNotify && !o.notifyExplicit {
-			o.notifyTarget = "session:" + owner.SessionID
-		}
-	}
+	o.laneCommonOptions = withResolvedLaneParent(o.laneCommonOptions, owner)
 	return o
 }
 
@@ -514,50 +302,19 @@ func writeQwenLaneStateUnlocked(paths nativePaths, state qwenLaneState) error {
 
 func readQwenLaneStates(paths nativePaths) []qwenLaneState {
 	directory := filepath.Join(profileDataRoot(paths), "qwen-lanes")
-	entries, _ := os.ReadDir(directory)
-	states := []qwenLaneState{}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		var state qwenLaneState
-		body, err := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // bridge-owned state directory.
-		if err != nil || json.Unmarshal(body, &state) != nil || state.Type != "qwen-peer-lane" || entry.Name() != sessionKey(state.ThreadID)+".json" {
-			continue
-		}
-		states = append(states, state)
-	}
-	sort.Slice(states, func(i, j int) bool { return states[i].CreatedAt > states[j].CreatedAt })
-	return states
+	return readProductLaneStates(directory, func(entryName string, state *qwenLaneState) bool {
+		return state.Type == "qwen-peer-lane" && entryName == sessionKey(state.ThreadID)+".json"
+	}, func(state *qwenLaneState) int64 { return state.CreatedAt })
 }
 
 func resolveQwenLaneState(paths nativePaths, target string) (qwenLaneState, error) {
-	target = strings.TrimSpace(target)
-	byName := []qwenLaneState{}
-	for _, state := range readQwenLaneStates(paths) {
-		if state.ThreadID == target {
-			return state, nil
-		}
-		if strings.EqualFold(state.Name, target) {
-			byName = append(byName, state)
-		}
-	}
-	if len(byName) == 1 {
-		return byName[0], nil
-	}
-	if len(byName) > 1 {
-		active := []qwenLaneState{}
-		for _, state := range byName {
-			if state.Status != "archived" {
-				active = append(active, state)
-			}
-		}
-		if len(active) == 1 {
-			return active[0], nil
-		}
-		return qwenLaneState{}, fmt.Errorf("qwen lane name %q is ambiguous; use a thread ID", target)
-	}
-	return qwenLaneState{}, fmt.Errorf("no Qwen lane matching %q", target)
+	return resolveProductLaneState(
+		target, readQwenLaneStates(paths),
+		func(state *qwenLaneState, candidate string) bool { return state.ThreadID == candidate },
+		func(state *qwenLaneState) string { return state.Name },
+		func(state *qwenLaneState) string { return state.Status },
+		"Qwen", "thread ID",
+	)
 }
 
 func newQwenLaneTurn(prompt string, timeout time.Duration) qwenLaneTurn {
@@ -593,7 +350,7 @@ func startQwenLane(o qwenLaneOptions, wait bool) (int, error) {
 	if err := validateLaneOwner(o.persistent, o.ownerPID, o.ownerProcStart); err != nil {
 		return 1, err
 	}
-	prompt, err := readLanePrompt(laneOptions{promptFile: o.promptFile})
+	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
 	if err != nil {
 		return 1, err
 	}
@@ -651,7 +408,9 @@ func startQwenLane(o qwenLaneOptions, wait bool) (int, error) {
 	if !wait {
 		return 0, nil
 	}
-	return waitQwenLane(qwenLaneOptions{target: threadID, timeout: laneCollectionBound(o.timeout)})
+	return waitQwenLane(qwenLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: threadID, timeout: laneCollectionBound(o.timeout),
+	}})
 }
 
 func spawnQwenLaneManager(state qwenLaneState, launchToken string) (int, string, error) {
@@ -696,19 +455,16 @@ func qwenLaneManagerEnvironment(environment []string, token string) []string {
 }
 
 func waitQwenLaneReady(paths nativePaths, threadID string, managerPID int, managerStart string, timeout time.Duration) (qwenLaneState, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		state, err := readQwenLaneState(paths, threadID)
-		if err == nil && state.ManagerPID == managerPID && state.Status != "starting" && state.MessagingSocket != "" &&
-			probeUnixSocket(state.MessagingSocket, 200*time.Millisecond) {
-			return state, nil
-		}
-		if cleanupProcessIdentityStatus(managerPID, managerStart).Status == processIdentityStale {
-			return qwenLaneState{}, errors.New("qwen lane manager exited during startup; inspect its private manager log")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return qwenLaneState{}, errors.New("timed out starting Qwen lane manager; inspect its private manager log")
+	return waitProductLaneReady(
+		managerPID, managerStart, timeout,
+		func() (qwenLaneState, error) { return readQwenLaneState(paths, threadID) },
+		func(state *qwenLaneState) bool {
+			return state.ManagerPID == managerPID && state.Status != "starting" && state.MessagingSocket != "" &&
+				probeUnixSocket(state.MessagingSocket, 200*time.Millisecond)
+		},
+		"qwen lane manager exited during startup; inspect its private manager log",
+		"timed out starting Qwen lane manager; inspect its private manager log",
+	)
 }
 
 func emitQwenLaneReady(state qwenLaneState) error {
@@ -764,7 +520,7 @@ func resumeQwenLane(o qwenLaneOptions) (int, error) {
 	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
 	state.ParentSessionID, state.ParentHostID, state.ParentAgentRuntimeDir = groupState.ParentSessionID, groupState.ParentHostID, groupState.ParentAgentRuntimeDir
 	state.InheritParentGroups = groupState.InheritParentGroups
-	prompt, err := readLanePrompt(laneOptions{promptFile: o.promptFile})
+	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
 	if err != nil {
 		return 1, err
 	}
@@ -798,7 +554,9 @@ func resumeQwenLane(o qwenLaneOptions) (int, error) {
 			return 1, err
 		}
 		_ = emitLane(map[string]any{"type": "thread.resumed", "thread_id": state.ThreadID, "session_id": state.ThreadID})
-		return waitQwenLane(qwenLaneOptions{target: state.ThreadID, timeout: laneCollectionBound(o.timeout)})
+		return waitQwenLane(qwenLaneOptions{laneCommonOptions: laneCommonOptions{
+			target: state.ThreadID, timeout: laneCollectionBound(o.timeout),
+		}})
 	}
 	if state.Status != "archived" || state.NativeArchiveState != "archived" {
 		return 1, errors.New("qwen lane is not cleanly archived")
@@ -858,7 +616,9 @@ func resumeQwenLane(o qwenLaneOptions) (int, error) {
 		stopExactQwenLaneManager(managerPID, managerStart)
 		return 1, compensateQwenLaneResume(paths, archivedState, state, err)
 	}
-	return waitQwenLane(qwenLaneOptions{target: state.ThreadID, timeout: laneCollectionBound(o.timeout)})
+	return waitQwenLane(qwenLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: state.ThreadID, timeout: laneCollectionBound(o.timeout),
+	}})
 }
 
 func compensateQwenLaneResume(paths nativePaths, archived, attempted qwenLaneState, resumeErr error) error {
@@ -1007,22 +767,14 @@ func qwenLaneStatusEvent(state qwenLaneState) map[string]any {
 }
 
 func listQwenLanes(o qwenLaneOptions) (int, error) {
-	if o.mine && !validLaneOwner(o.ownerPID, o.ownerProcStart) {
-		return 1, errors.New("cannot establish the current orchestrator identity for --mine")
-	}
-	rows := []map[string]any{}
-	for _, state := range readQwenLaneStates(resolveNativePaths()) {
-		if !o.all && state.Status == "archived" {
-			continue
-		}
-		if o.mine && (state.Persistent || !sameLaneOwner(state.OwnerPID, state.OwnerProcStart, o.ownerPID, o.ownerProcStart)) {
-			continue
-		}
-		row := qwenLaneStatusEvent(state)
-		delete(row, "type")
-		rows = append(rows, row)
-	}
-	return 0, emitLane(map[string]any{"type": "lane.list", "product": "qwen", "contract_version": qwenLaneContractVersion, "lanes": rows})
+	return listProductLaneStates(
+		o.laneCommonOptions, "qwen", qwenLaneContractVersion, readQwenLaneStates(resolveNativePaths()),
+		func(state *qwenLaneState) string { return state.Status },
+		func(state *qwenLaneState) (bool, int, string) {
+			return state.Persistent, state.OwnerPID, state.OwnerProcStart
+		},
+		qwenLaneStatusEvent,
+	)
 }
 
 func interruptQwenLane(o qwenLaneOptions) (int, error) {
