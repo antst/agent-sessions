@@ -47,6 +47,9 @@ module = runpy.run_path(sys.argv[1], run_name="composition_contract_test")
 secure_config = module["claude_test_secure_config"]
 required_executable = module["required_test_executable"]
 target_environment = module["target_test_environment"]
+lane_arguments = module["lane_arguments"]
+prepare_grok = module["prepare_isolated_grok_profile"]
+assert_no_grok_fallback = module["assert_no_grok_mcp_fallback"]
 
 try:
     secure_config({})
@@ -87,6 +90,33 @@ except AssertionError:
     pass
 else:
     raise AssertionError("unknown composition target received an environment")
+
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    workspace = root / "target-workspace"
+    workspace.mkdir()
+    prompt = root / "prompt.txt"
+    arguments = lane_arguments("grok", "matrix-grok", root / "qwen", workspace, prompt)
+    assert arguments[arguments.index("-C") + 1] == str(workspace)
+    assert str(pathlib.Path(sys.argv[1]).resolve().parents[1]) not in arguments
+
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    grok_home = root / "grok-home"
+    workspace = root / "workspace"
+    grok_home.mkdir()
+    workspace.mkdir()
+    fake_grok = root / "fake-grok"
+    fake_grok.write_text(
+        "#!/bin/sh\nprintf '%s\\n' '{\"plugins\":[],\"mcpServers\":[]}'\n",
+        encoding="utf-8",
+    )
+    fake_grok.chmod(0o700)
+    prepare_grok(workspace, grok_home, fake_grok, {})
+    assert_no_grok_fallback(workspace, grok_home, fake_grok, {})
+    trust = (grok_home / ".grok" / "trusted_folders.toml").read_text(encoding="utf-8")
+    assert str(workspace) in trust
+    assert not (grok_home / ".grok" / "plugins" / "agent-sessions").exists()
 PY
 
 if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then

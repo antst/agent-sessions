@@ -132,11 +132,11 @@ def archived_record_is_clean(data: pathlib.Path, thread_id: str) -> dict | None:
 
 
 def lane_arguments(
-    product: str, name: str, qwen_home: pathlib.Path, repo: pathlib.Path, prompt: pathlib.Path,
+    product: str, name: str, qwen_home: pathlib.Path, workspace: pathlib.Path, prompt: pathlib.Path,
 ) -> list[str]:
     arguments = [
         f"{product}-peer-lane", "start", "--name", name,
-        "--no-auto-archive", "--inherit-groups", "-C", str(repo),
+        "--no-auto-archive", "--inherit-groups", "-C", str(workspace),
         "--prompt-file", str(prompt),
     ]
     if product == "qwen":
@@ -198,53 +198,54 @@ def stop_isolated_codex_app_server(codex_home: pathlib.Path, environment: dict[s
     )
 
 
-def install_isolated_grok_plugin(
-    repo: pathlib.Path,
-    binary_root: pathlib.Path,
+def prepare_isolated_grok_profile(
+    workspace: pathlib.Path,
     grok_home: pathlib.Path,
     grok_binary: pathlib.Path,
     environment: dict[str, str],
 ) -> None:
-    """Install the exact source-tree plugin without touching the owner profile."""
-    plugin_parent = grok_home / ".grok" / "plugins"
-    plugin_root = plugin_parent / "agent-sessions"
-    plugin_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    """Trust the clean target without allowing a plugin to mask ACP injection."""
+    grok_config = grok_home / ".grok"
+    plugin_root = grok_config / "plugins" / "agent-sessions"
+    grok_config.mkdir(mode=0o700, parents=True, exist_ok=True)
     trust_path = grok_home / ".grok" / "trusted_folders.toml"
     if trust_path.exists() or trust_path.is_symlink():
         fail(f"GROK_TEST_HOME must not contain pre-existing workspace trust: {trust_path}")
+    decided_at = int(time.time())
     trust_path.write_text(
-        f"[folders.{json.dumps(str(repo))}]\ntrusted = true\ndecided_at = {int(time.time())}\n",
+        f"[folders.{json.dumps(str(workspace))}]\ntrusted = true\ndecided_at = {decided_at}\n",
         encoding="utf-8",
     )
     trust_path.chmod(0o600)
     if plugin_root.exists() or plugin_root.is_symlink():
         fail(f"GROK_TEST_HOME must not contain a preinstalled agent-sessions plugin: {plugin_root}")
-    stage = pathlib.Path(tempfile.mkdtemp(prefix=".agent-sessions.stage.", dir=plugin_parent))
-    try:
-        shutil.copytree(repo / "grok", stage, dirs_exist_ok=True)
-        os.replace(stage, plugin_root)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+    assert_no_grok_mcp_fallback(workspace, grok_home, grok_binary, environment)
 
-    grok_peer = binary_root / "grok-peer"
-    runtime = binary_root / "agent-session-runtime"
-    subprocess.run(
-        [str(grok_peer), "plugin", "install", str(repo / "grok"), "--trust"],
-        env=environment, check=True,
-    )
-    subprocess.run(
-        [str(grok_peer), "plugin", "uninstall", "agent-sessions", "--keep-data"],
-        env=environment, check=True,
-    )
+
+def assert_no_grok_mcp_fallback(
+    workspace: pathlib.Path,
+    grok_home: pathlib.Path,
+    grok_binary: pathlib.Path,
+    environment: dict[str, str],
+) -> None:
+    """Fail if a local or profile MCP could impersonate session injection."""
+    local_mcp = workspace / ".mcp.json"
+    plugin_root = grok_home / ".grok" / "plugins" / "agent-sessions"
+    if local_mcp.exists() or local_mcp.is_symlink():
+        fail(f"composition target workspace contains local MCP configuration: {local_mcp}")
+    if plugin_root.exists() or plugin_root.is_symlink():
+        fail(f"isolated Grok profile contains the agent-sessions plugin: {plugin_root}")
     inspection = subprocess.run(
         [str(grok_binary), "inspect", "--json"], env=environment,
-        stdout=subprocess.PIPE, check=True,
+        cwd=workspace, text=True, stdout=subprocess.PIPE, check=True,
     )
-    subprocess.run(
-        [str(runtime), "grok-plugin-verify", "--root", str(plugin_root)],
-        env=environment, input=inspection.stdout, check=True,
-    )
+    inspected = json.loads(inspection.stdout)
+    plugins = inspected.get("plugins", []) if isinstance(inspected, dict) else []
+    servers = inspected.get("mcpServers", []) if isinstance(inspected, dict) else []
+    if any(isinstance(row, dict) and row.get("name") == "agent-sessions" for row in plugins):
+        fail("isolated Grok profile unexpectedly resolves the agent-sessions plugin")
+    if any(isinstance(row, dict) and row.get("name") == "agent_sessions" for row in servers):
+        fail("isolated Grok profile unexpectedly resolves the agent_sessions MCP")
 
 
 def main() -> int:
@@ -258,6 +259,10 @@ def main() -> int:
     repo = pathlib.Path(__file__).resolve().parents[1]
     temporary_parent = pathlib.Path("/tmp") if platform.system() == "Darwin" else None
     root = pathlib.Path(tempfile.mkdtemp(prefix="qwen-composition.", dir=temporary_parent))
+    workspace = root / "target-workspace"
+    workspace.mkdir(mode=0o700)
+    if (workspace / ".mcp.json").exists() or (workspace / ".mcp.json").is_symlink():
+        fail("composition target workspace unexpectedly contains local MCP configuration")
     environment = os.environ.copy()
     launched: list[tuple[str, str]] = []
     parents: list[subprocess.Popen] = []
@@ -297,8 +302,8 @@ def main() -> int:
             "AGENT_SESSIONS_AGENT_RUNTIME_DIR": str(runtime),
         })
         pathlib.Path(environment["XDG_STATE_HOME"]).mkdir(mode=0o700)
-        install_isolated_grok_plugin(
-            repo, binary_root, grok_home, grok_binary,
+        prepare_isolated_grok_profile(
+            workspace, grok_home, grok_binary,
             target_test_environment(environment, "grok", grok_home),
         )
         stop_isolated_codex_app_server(codex_home, environment)
@@ -325,9 +330,13 @@ def main() -> int:
                 str(fixture), "--runtime-dir", str(runtime), "--session", parent_id,
                 "--product", parent, "--name", f"{parent}-composition-parent",
                 "--groups", "qwen-composition", "--stay-after-child", "--",
-                *lane_arguments(target, name, qwen_home, repo, prompt),
+                *lane_arguments(target, name, qwen_home, workspace, prompt),
             ]
             target_environment = target_test_environment(environment, target, grok_home)
+            if target == "grok":
+                assert_no_grok_mcp_fallback(
+                    workspace, grok_home, grok_binary, target_environment,
+                )
             parent_process = subprocess.Popen(
                 command, env=target_environment,
                 text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -4,9 +4,14 @@
 - Platform: Linux amd64
 - Qwen Code: `0.22.0`
 - Claude Code: `2.1.240`
+- Grok: `1.0.5 (5115b46bc9)`
 - Agent Sessions version: `0.2.4`
 - Credited command: `QWEN_TEST_HOME=/home/antst/.qwen QWEN_TEST_RUNTIME_DIR=<private-runtime> CODEX_TEST_HOME=<isolated-authenticated-home> CLAUDE_TEST_CONFIG_DIR=<isolated-config> CLAUDE_TEST_SECURE_CONFIG_DIR=/home/antst/.claude GROK_TEST_HOME=<isolated-authenticated-home> GROK_TEST_BIN=/home/antst/.grok/bin/grok ./scripts/test-qwen-composition`
 - Result: `qwen.composition.passed` (exit 0)
+- Isolation discriminator: the target cwd was a fresh trusted workspace with no `.mcp.json`; the
+  isolated Grok profile was inspected before launch and contained neither an `agent-sessions`
+  plugin nor an `agent_sessions` MCP. The injected session MCP was therefore the only possible
+  Grok readiness path.
 
 ## Credited edges
 
@@ -17,22 +22,22 @@ returned its unique terminal token:
 
 | Parent | Target | Child identity | Exact terminal token |
 | --- | --- | --- | --- |
-| Codex | Codex | `01a032ea-68a2-7b70-b741-69a3014d5b21` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
-| Codex | Claude | `065551c3-c9c1-4620-833d-3cf048ccc6ac` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
-| Codex | Grok | `66cff8bd-c2d5-4563-ba0e-48630e8ed2ac` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
-| Codex | Qwen | `9c888d17-563f-48b4-a0bb-65108d396ac8` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
-| Claude | Codex | `01a032eb-37b6-7483-a38d-0f84e43f3eaf` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
-| Claude | Claude | `3a47b28c-3b8c-4852-b412-21342faa2f89` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
-| Claude | Grok | `d3a01ab3-7a90-4b18-8dc0-e15f2a9e6830` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
-| Claude | Qwen | `5a9ad75b-50c1-4d05-98c7-6d2052a85652` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
-| Grok | Codex | `01a032eb-f73e-7b21-9665-d17c6520c05a` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
-| Grok | Claude | `bc34ae5d-7636-47a8-adfc-b69834eb3580` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
-| Grok | Grok | `fdd07bfd-5cbe-4bf0-8179-918a9ab45cb2` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
-| Grok | Qwen | `21829a51-022f-40b6-aa1e-1a670e5f7c88` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
-| Qwen | Codex | `01a032ec-aa6a-7dd3-bd15-a359bfe3f1da` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
-| Qwen | Claude | `62c7523e-0e1c-4fe9-be32-41aceb7bcca1` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
-| Qwen | Grok | `edf5e468-93be-464f-92be-52634fc2bfe4` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
-| Qwen | Qwen | `cb914ba2-c105-469d-93d0-88355598654f` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
+| Codex | Codex | `01a03321-da83-77c2-a8ba-ea4e9ff19560` | `QWEN_COMPOSE_CODEX_TO_CODEX_1_OK` |
+| Codex | Claude | `f7349391-4757-45e4-8aa2-7e62ecdbf3bc` | `QWEN_COMPOSE_CODEX_TO_CLAUDE_2_OK` |
+| Codex | Grok | `181847a2-c1d7-4d9b-a073-72c3a1525675` | `QWEN_COMPOSE_CODEX_TO_GROK_3_OK` |
+| Codex | Qwen | `f4d2710b-91f3-46db-8672-2784e3112d99` | `QWEN_COMPOSE_CODEX_TO_QWEN_4_OK` |
+| Claude | Codex | `01a03322-a1c1-7a81-af8d-3692124c30ca` | `QWEN_COMPOSE_CLAUDE_TO_CODEX_5_OK` |
+| Claude | Claude | `f70d9869-eba3-4459-9ad0-31c3ec36c5dc` | `QWEN_COMPOSE_CLAUDE_TO_CLAUDE_6_OK` |
+| Claude | Grok | `51be7bdc-371f-4444-ae6b-5d1cb1f8854a` | `QWEN_COMPOSE_CLAUDE_TO_GROK_7_OK` |
+| Claude | Qwen | `f19eac29-21b5-4442-894e-cb0920fdcaf4` | `QWEN_COMPOSE_CLAUDE_TO_QWEN_8_OK` |
+| Grok | Codex | `01a03323-52dc-7ab0-9bdb-9038ba4d2da9` | `QWEN_COMPOSE_GROK_TO_CODEX_9_OK` |
+| Grok | Claude | `6ac75b93-4045-4e5d-8b79-93c2ad4f99ae` | `QWEN_COMPOSE_GROK_TO_CLAUDE_10_OK` |
+| Grok | Grok | `e5a1b397-96fd-43e6-a263-5ff3fac6e61b` | `QWEN_COMPOSE_GROK_TO_GROK_11_OK` |
+| Grok | Qwen | `df13169a-591a-4bd5-80f8-d0ab35e33218` | `QWEN_COMPOSE_GROK_TO_QWEN_12_OK` |
+| Qwen | Codex | `01a03324-0ac5-73d0-9904-81f55411a0d6` | `QWEN_COMPOSE_QWEN_TO_CODEX_13_OK` |
+| Qwen | Claude | `09f02bdf-1bcb-43cf-9dc9-a0ed2dbcdbdd` | `QWEN_COMPOSE_QWEN_TO_CLAUDE_14_OK` |
+| Qwen | Grok | `df1cbbd1-8261-4696-8e1a-a906113b5992` | `QWEN_COMPOSE_QWEN_TO_GROK_15_OK` |
+| Qwen | Qwen | `97271a78-a3af-4f06-82a1-18e0e5f67bb3` | `QWEN_COMPOSE_QWEN_TO_QWEN_16_OK` |
 
 For every edge the runner asserted the exact immediate parent session, owner,
 and notification target; the explicit `qwen-composition` group; both mandatory
@@ -64,12 +69,12 @@ credited run:
    non-symlink socket. Native-specific inference remains first, and Qwen still
    requires its capability digest.
 4. The first live matrix unknowingly depended on an exact-tip Agent Sessions
-   plugin already installed in the owner's Grok profile. A clean isolated Grok
-   home therefore exposed two missing harness preconditions: the source-tree
-   plugin must be installed into that test-owned profile, and the workspace
-   must be explicitly trusted before Grok will load plugin MCP servers. The
-   runner now performs both operations inside `GROK_TEST_HOME`, pins the native
-   Grok executable through `GROK_TEST_BIN`, and never reads or mutates the
+   plugin already installed in the owner's Grok profile. An intermediate
+   harness then staged the source plugin into `GROK_TEST_HOME`, which isolated
+   owner state but could still mask whether session-scoped MCP injection worked.
+   The credited runner instead refuses any preinstalled Agent Sessions plugin,
+   inspects zero `agent_sessions` MCPs from the clean target workspace, pins the
+   native Grok executable through `GROK_TEST_BIN`, and never reads or mutates the
    owner's plugin/configuration.
 5. Applying that isolated Grok home as the shared `HOME` passed on Linux but
    moved Darwin Claude into a different Keychain namespace. The runner now
@@ -91,6 +96,11 @@ credited run:
    failure. Lane initialize/auth/create errors are written directly to the
    private manager log rather than being misclassified as an exited process
    and masked by a spurious process-join error.
+8. The earlier Linux matrix also launched targets from the repository root,
+   whose checked-in `.mcp.json` defines `agent_sessions`. That made its Grok
+   result non-discriminating even after session injection landed. The credited
+   rerun uses a fresh trusted target workspace for every edge and asserts both
+   fallback sources absent before launching the first parent.
 
 One manual authentication probe outside the credited matrix omitted the
 isolated `CODEX_HOME` from an App Server stop command and stopped the owner's
