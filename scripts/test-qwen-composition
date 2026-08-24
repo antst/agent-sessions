@@ -53,6 +53,17 @@ def claude_test_secure_config(environment: dict[str, str]) -> str:
     return raw
 
 
+def target_test_environment(
+    environment: dict[str, str], product: str, grok_home: pathlib.Path,
+) -> dict[str, str]:
+    if product not in PRODUCTS:
+        fail(f"unsupported composition target product: {product}")
+    result = environment.copy()
+    if product == "grok":
+        result["HOME"] = str(grok_home)
+    return result
+
+
 def platform_name() -> str:
     value = f"{platform.system().lower()}-{platform.machine()}"
     return {
@@ -279,7 +290,6 @@ def main() -> int:
             "CODEX_HOME": str(codex_home),
             "GROK_PEER_GROK_BIN": str(grok_binary),
             "GROK_PEER_NATIVE_RUNTIME": str(binary_root / "agent-session-runtime"),
-            "HOME": str(grok_home),
             "QWEN_HOME": str(qwen_home),
             "QWEN_RUNTIME_DIR": str(qwen_runtime),
             "XDG_RUNTIME_DIR": str(xdg_runtime),
@@ -287,7 +297,10 @@ def main() -> int:
             "AGENT_SESSIONS_AGENT_RUNTIME_DIR": str(runtime),
         })
         pathlib.Path(environment["XDG_STATE_HOME"]).mkdir(mode=0o700)
-        install_isolated_grok_plugin(repo, binary_root, grok_home, grok_binary, environment)
+        install_isolated_grok_plugin(
+            repo, binary_root, grok_home, grok_binary,
+            target_test_environment(environment, "grok", grok_home),
+        )
         stop_isolated_codex_app_server(codex_home, environment)
         federator = binary_root / "peer-federator"
         runtime_binary = binary_root / "agent-session-runtime"
@@ -314,8 +327,9 @@ def main() -> int:
                 "--groups", "qwen-composition", "--stay-after-child", "--",
                 *lane_arguments(target, name, qwen_home, repo, prompt),
             ]
+            target_environment = target_test_environment(environment, target, grok_home)
             parent_process = subprocess.Popen(
-                command, env=environment,
+                command, env=target_environment,
                 text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             parents.append(parent_process)
@@ -336,7 +350,7 @@ def main() -> int:
             launched.append((target, thread_id))
             lane = binary_root / f"{target}-peer-lane"
             waited = subprocess.run(
-                [str(lane), "wait", thread_id, "--timeout", "150"], env=environment,
+                [str(lane), "wait", thread_id, "--timeout", "150"], env=target_environment,
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=TIMEOUT, check=False,
             )
@@ -363,7 +377,7 @@ def main() -> int:
                     set(groups) != expected_groups):
                 fail(f"{parent}->{target} parent/groups = {record}")
             archived = subprocess.run(
-                [str(lane), "archive", thread_id], env=environment, text=True,
+                [str(lane), "archive", thread_id], env=target_environment, text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT, check=False,
             )
             if archived.returncode != 0:
@@ -385,7 +399,8 @@ def main() -> int:
         for product, thread_id in reversed(launched):
             subprocess.run(
                 [str(binary_root / f"{product}-peer-lane"), "archive", thread_id],
-                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=target_test_environment(environment, product, grok_home),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=30, check=False,
             )
         for parent_process in reversed(parents):

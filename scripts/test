@@ -46,6 +46,7 @@ import tempfile
 module = runpy.run_path(sys.argv[1], run_name="composition_contract_test")
 secure_config = module["claude_test_secure_config"]
 required_executable = module["required_test_executable"]
+target_environment = module["target_test_environment"]
 
 try:
     secure_config({})
@@ -72,6 +73,20 @@ for invalid in ("", "relative", str(pathlib.Path(sys.executable).parent)):
         pass
     else:
         raise AssertionError(f"invalid Grok test executable was accepted: {invalid!r}")
+
+common = {"HOME": "/owner/home", "KEEP": "yes"}
+for product in ("codex", "claude", "qwen"):
+    scoped = target_environment(common, product, pathlib.Path("/isolated/grok"))
+    assert scoped == common and scoped is not common
+grok_scoped = target_environment(common, "grok", pathlib.Path("/isolated/grok"))
+assert grok_scoped == {"HOME": "/isolated/grok", "KEEP": "yes"}
+assert common == {"HOME": "/owner/home", "KEEP": "yes"}
+try:
+    target_environment(common, "unknown", pathlib.Path("/isolated/grok"))
+except AssertionError:
+    pass
+else:
+    raise AssertionError("unknown composition target received an environment")
 PY
 
 if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
