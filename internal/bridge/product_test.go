@@ -30,6 +30,17 @@ func TestBridgeProductProjectionCoversRuntimeAndMCP(t *testing.T) {
 	if len(products) != len(federator.ProductDescriptors()) {
 		t.Fatalf("MCP product count = %d, want %d", len(products), len(federator.ProductDescriptors()))
 	}
+	for _, definition := range nativeToolDefinitions {
+		if stringValue(definition["name"]) != "lane" {
+			continue
+		}
+		description := stringValue(definition["description"])
+		if !strings.Contains(description, "supported-product lane") {
+			t.Fatalf("MCP lane description is not product-neutral: %q", description)
+		}
+		return
+	}
+	t.Fatal("MCP lane tool definition is missing")
 }
 
 func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {

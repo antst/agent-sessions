@@ -83,7 +83,7 @@ var nativeToolDefinitions = []map[string]any{
 		},
 	},
 	{
-		"name": "lane", "description": "Run one exact local or federated Codex, Claude, or Grok lane lifecycle command for this attested parent. Use this instead of invoking a lane executable from a sandboxed shell.",
+		"name": "lane", "description": "Run one exact local or federated supported-product lane lifecycle command for this attested parent. Use this instead of invoking a lane executable from a sandboxed shell.",
 		"inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{
 				"product":    map[string]any{"type": "string", "enum": mcpLaneProductIDs()},

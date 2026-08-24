@@ -168,8 +168,10 @@ The product is the leader + waker. Hooks are not the delivery path.
 - A process-attested Grok session may own `codex-peer-lane` and
   `claude-peer-lane` children. Use the same deepest-live-ancestor rule as Codex
   and Claude; a model-provided session ID is never authority.
-- `fromProduct` / entrypoint allowlist is `codex|claude|grok`. Grep those strings when adding a
-  product; do not reuse an unrelated product identity.
+- `fromProduct` / entrypoint validation consumes the authoritative product descriptor table; its
+  current values are `codex|claude|grok|qwen`. Adding a product updates that table and the generated
+  completeness projections rather than another Grok-local allowlist. Do not reuse an unrelated
+  product identity.
 
 ### What not to build
 
