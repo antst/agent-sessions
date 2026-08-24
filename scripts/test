@@ -37,6 +37,33 @@ path = pathlib.Path(sys.argv[1])
 compile(path.read_bytes(), str(path), "exec")
 PY
 
+python3 - "$plugin_root/scripts/test-qwen-composition" <<'PY'
+import pathlib
+import runpy
+import sys
+import tempfile
+
+module = runpy.run_path(sys.argv[1], run_name="composition_contract_test")
+secure_config = module["claude_test_secure_config"]
+
+try:
+    secure_config({})
+except AssertionError:
+    pass
+else:
+    raise AssertionError("unset Claude test secure-storage namespace was accepted")
+
+assert secure_config({"CLAUDE_TEST_SECURE_CONFIG_DIR": ""}) == ""
+with tempfile.TemporaryDirectory() as directory:
+    assert secure_config({"CLAUDE_TEST_SECURE_CONFIG_DIR": directory}) == directory
+try:
+    secure_config({"CLAUDE_TEST_SECURE_CONFIG_DIR": "relative"})
+except AssertionError:
+    pass
+else:
+    raise AssertionError("relative Claude test secure-storage namespace was accepted")
+PY
+
 if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
   printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
   exit 1

@@ -25,6 +25,26 @@ def fail(message: str) -> None:
     raise AssertionError(message)
 
 
+def required_test_directory(environment: dict[str, str], name: str) -> pathlib.Path:
+    raw = environment.get(name, "")
+    path = pathlib.Path(raw)
+    if not raw or not path.is_absolute() or not path.is_dir():
+        fail(f"{name} must name an existing absolute test-owned directory")
+    return path
+
+
+def claude_test_secure_config(environment: dict[str, str]) -> str:
+    name = "CLAUDE_TEST_SECURE_CONFIG_DIR"
+    if name not in environment:
+        fail(f"{name} must be explicitly set; an empty value selects the platform default namespace")
+    raw = environment[name]
+    if raw:
+        path = pathlib.Path(raw)
+        if not path.is_absolute() or not path.is_dir():
+            fail(f"{name} must be empty or name an existing absolute test-owned directory")
+    return raw
+
+
 def platform_name() -> str:
     value = f"{platform.system().lower()}-{platform.machine()}"
     return {
@@ -160,22 +180,11 @@ def stop_isolated_codex_app_server(codex_home: pathlib.Path, environment: dict[s
 
 
 def main() -> int:
-    required = {
-        "QWEN_TEST_HOME": os.environ.get("QWEN_TEST_HOME", ""),
-        "QWEN_TEST_RUNTIME_DIR": os.environ.get("QWEN_TEST_RUNTIME_DIR", ""),
-        "CODEX_TEST_HOME": os.environ.get("CODEX_TEST_HOME", ""),
-        "CLAUDE_TEST_CONFIG_DIR": os.environ.get("CLAUDE_TEST_CONFIG_DIR", ""),
-        "CLAUDE_TEST_SECURE_CONFIG_DIR": os.environ.get("CLAUDE_TEST_SECURE_CONFIG_DIR", ""),
-    }
-    for name, raw in required.items():
-        path = pathlib.Path(raw)
-        if not raw or not path.is_absolute() or not path.is_dir():
-            fail(f"{name} must name an existing absolute test-owned directory")
-    qwen_home = pathlib.Path(required["QWEN_TEST_HOME"])
-    qwen_runtime = pathlib.Path(required["QWEN_TEST_RUNTIME_DIR"])
-    codex_home = pathlib.Path(required["CODEX_TEST_HOME"])
-    claude_config = pathlib.Path(required["CLAUDE_TEST_CONFIG_DIR"])
-    claude_secure_config = pathlib.Path(required["CLAUDE_TEST_SECURE_CONFIG_DIR"])
+    qwen_home = required_test_directory(os.environ, "QWEN_TEST_HOME")
+    qwen_runtime = required_test_directory(os.environ, "QWEN_TEST_RUNTIME_DIR")
+    codex_home = required_test_directory(os.environ, "CODEX_TEST_HOME")
+    claude_config = required_test_directory(os.environ, "CLAUDE_TEST_CONFIG_DIR")
+    claude_secure_config = claude_test_secure_config(os.environ)
     repo = pathlib.Path(__file__).resolve().parents[1]
     temporary_parent = pathlib.Path("/tmp") if platform.system() == "Darwin" else None
     root = pathlib.Path(tempfile.mkdtemp(prefix="qwen-composition.", dir=temporary_parent))
@@ -207,7 +216,7 @@ def main() -> int:
             "CLAUDE_PEER_DATA_DIR": str(data),
             "CLAUDE_PEER_CLAUDE_CONFIG_DIR": str(claude_config),
             "CLAUDE_CONFIG_DIR": str(claude_config),
-            "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(claude_secure_config),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": claude_secure_config,
             "CODEX_HOME": str(codex_home),
             "QWEN_HOME": str(qwen_home),
             "QWEN_RUNTIME_DIR": str(qwen_runtime),
