@@ -61,6 +61,11 @@ if [ "$1 $2" = "release view" ]; then
 		printf '%s\n' "${FAKE_TARGET_ASSETS:-}"
 		exit 0
 	fi
+	if [ "${FAKE_GH_FAILURE:-}" = 1 ]; then
+		printf '%s\n' "authentication failed" >&2
+		exit 1
+	fi
+	printf '%s\n' "release not found" >&2
 	exit 1
 fi
 exit 2
@@ -85,6 +90,11 @@ exit 2
 	}
 	if output, err := run("FAKE_RELEASE_EXISTS=1", "FAKE_TARGET_ASSETS=agent-sessions-0.2.4-linux-x64.tar.gz"); err == nil || !strings.Contains(string(output), "release asset") {
 		t.Fatalf("existing asset collision = %v: %s", err, output)
+	}
+	if output, err := run("FAKE_GH_FAILURE=1"); err == nil ||
+		!strings.Contains(string(output), "failed to inspect GitHub release") ||
+		!strings.Contains(string(output), "authentication failed") {
+		t.Fatalf("GitHub inspection failure = %v: %s", err, output)
 	}
 }
 

@@ -469,9 +469,9 @@ func installedQwenPluginSource(root string) (string, error) {
 }
 
 func sameQwenPluginSource(left, right string) bool {
-	leftPath, leftErr := filepath.Abs(left)
-	rightPath, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil && filepath.Clean(leftPath) == filepath.Clean(rightPath)
+	leftPath, leftErr := pathidentity.ExistingDirectory(left)
+	rightPath, rightErr := pathidentity.ExistingDirectory(right)
+	return leftErr == nil && rightErr == nil && leftPath == rightPath
 }
 
 type qwenPluginInstallArgs struct {

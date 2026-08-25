@@ -568,6 +568,24 @@ esac
 	}
 }
 
+func TestSameQwenPluginSourceUsesExistingPathIdentity(t *testing.T) {
+	realSource := filepath.Join(t.TempDir(), "real-source")
+	if err := os.Mkdir(realSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "source-alias")
+	if err := os.Symlink(realSource, alias); err != nil {
+		t.Fatal(err)
+	}
+	if !sameQwenPluginSource(alias, realSource) {
+		t.Fatalf("existing source alias %q does not match real source %q", alias, realSource)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if sameQwenPluginSource(missing, missing) {
+		t.Fatalf("missing source %q was treated as a usable source identity", missing)
+	}
+}
+
 func TestQwenPluginReplacementRefusesUnusableRollbackSourceBeforeMutation(t *testing.T) {
 	for _, sourceState := range []string{"missing", "invalid-payload"} {
 		t.Run(sourceState, func(t *testing.T) {
