@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -76,6 +77,36 @@ func setDarwinTestRuntimeRoot(root string) {
 	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", root); err != nil {
 		panic(err)
+	}
+}
+
+func TestNativeSupervisorDefaultSocketIgnoresDarwinTMPDIR(t *testing.T) {
+	root := os.Getenv(darwinTestRootEnv)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", "")
+	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", "")
+	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "runtime-path-state"))
+	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "runtime-path-claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "runtime-path-codex"))
+
+	var sockets []string
+	for _, tempDir := range []string{
+		"/var/folders/very/long/native/darwin/temp/directory/T",
+		"",
+		"/tmp",
+	} {
+		t.Setenv("TMPDIR", tempDir)
+		paths := resolveNativePaths()
+		if paths.runtimeDir != "/tmp" {
+			t.Fatalf("TMPDIR %q selected runtime dir %q", tempDir, paths.runtimeDir)
+		}
+		sockets = append(sockets, paths.supervisorSock)
+	}
+	want := filepath.Join("/tmp", "ccp-"+strconv.Itoa(os.Getuid()), "supervisor-"+nativeProfileKey(filepath.Join(root, "runtime-path-codex"))+".sock")
+	for index, socket := range sockets {
+		if socket != want {
+			t.Fatalf("Darwin default supervisor socket[%d] = %q, want %q", index, socket, want)
+		}
 	}
 }
 

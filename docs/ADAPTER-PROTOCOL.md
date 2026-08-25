@@ -324,6 +324,12 @@ must receive a successful stop acknowledgement and release its socket before a s
 an unresponsive live supervisor is never unlinked from underneath. The namespacing migration
 explicitly stops the prior global `supervisor.sock` only after verifying its implementation and
 App Server identity, preventing an old and new supervisor from coexisting after upgrade.
+Runtime-root migrations obey the same rule for profile-named sockets: startup consults the durable
+profile record, exact historical roots, and bridge-owned live Codex shim records, then validates the
+reported implementation, profile identity when available, and App Server before stopping a
+predecessor. It waits for the exact predecessor process to exit before publishing the successor.
+Darwin's default socket root is `/tmp/ccp-<uid>` whenever no explicit XDG runtime directory exists,
+so `TMPDIR` presence cannot partition one profile between multiple supervisors.
 
 A fresh `codex-peer` launch is created through the shared App Server using the caller's canonical cwd.
 An explicit UUID resume selects that thread. A session-name resume selects the newest usable exact-name

@@ -255,6 +255,40 @@ already durable at that point, so the next `codex-peer`, `codex-peer-lane`, or d
 `agent-session-runtime bootstrap` retries only supervisor startup; it does not require another
 server stop or plugin reinstall.
 
+Supervisor replacement also covers a runtime-root relocation. Before publishing a successor,
+startup checks the profile's recorded control socket, exact historical runtime-root spellings, and
+bridge-owned live Codex shim state. A predecessor is stopped only after it reports the Go
+implementation, the same profile when available, and the same App Server; startup waits for its
+exact process identity to exit before publishing new state. An unknown or unresponsive exact
+predecessor fails the update rather than producing two authorities. On macOS, the default root is
+always the private `/tmp/ccp-<uid>` spelling when `XDG_RUNTIME_DIR` is absent, independent of
+`TMPDIR`. Explicit test/runtime roots remain supported through `XDG_RUNTIME_DIR`.
+
+The peer federator is a separate explicitly configured service and is never stopped or reconfigured
+by supervisor replacement. Existing Claude MCP children likewise remain owned by their Claude
+session; replacing a Codex supervisor does not terminate them.
+
+## Recovering an empty App Server history projection
+
+`codex-peer` resumes through Codex's managed App Server. A large legacy rollout without a paginated
+projection can therefore appear empty through `codex-peer` even while native `codex resume` renders
+the intact canonical rollout. Inspect one affected thread without mutation:
+
+```bash
+codex migrate-rollouts --thread <uuid> --json
+```
+
+After closing every writer for that thread, build the native Codex projection explicitly:
+
+```bash
+codex migrate-rollouts --thread <uuid> --apply
+```
+
+Busy threads are skipped safely and may be retried after their writers exit. This is a host-local
+Codex maintenance operation, not an Agent Sessions data migration; installation never applies it
+automatically. The confirmed recovery builds `thread_history_*.sqlite` rows alongside the canonical
+rollout and restores history rendering through the remote App Server path.
+
 ## Recovering the Codex 0.147 duplicate-ordinal projection failure
 
 Codex 0.147 can append the same rollout ordinal twice if App Server is replaced during an active

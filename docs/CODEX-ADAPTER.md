@@ -28,6 +28,19 @@ Name resolution is performed by the local host agent. Multiple usable matches ar
 require an exact UUID. Resume retains the canonical thread cwd and durable Agent Sessions
 preferences unless the caller supplies a supported explicit override.
 
+`codex-peer` attaches through Codex's managed App Server. If a large older rollout opens with an
+empty history through `codex-peer` while ordinary `codex resume` still shows the transcript, inspect
+Codex's native paginated-history migration for that exact thread:
+
+```bash
+codex migrate-rollouts --thread <uuid> --json
+codex migrate-rollouts --thread <uuid> --apply
+```
+
+The first command is read-only. The second is a host-local Codex operation and must be run only when
+the thread has no active writer. It builds the App Server's derived history projection without
+removing the canonical rollout. Agent Sessions does not run this migration during install or resume.
+
 ## Permissions
 
 Normal launches inherit Codex policy. `--yolo` is the managed shorthand for Codex's native

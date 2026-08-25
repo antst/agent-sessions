@@ -449,6 +449,73 @@ func TestNativeSupervisorWakesIdleThreadInYoloMode(t *testing.T) {
 	}
 }
 
+func TestNativeSupervisorRetiresRelocatedPredecessorBeforePublishingState(t *testing.T) {
+	root := shortSocketTestRoot(t, "sp-")
+	_, appServerSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/loaded/list", "thread/list":
+			return map[string]any{"data": []any{}}, nil
+		default:
+			return map[string]any{}, nil
+		}
+	})
+	oldSocket := filepath.Join(root, "old", "supervisor-profile.sock")
+	stopRequested := make(chan struct{})
+	releaseStop := make(chan struct{})
+	oldDone := startTestNativeSupervisorControl(t, oldSocket, appServerSocket, func() {
+		close(stopRequested)
+		<-releaseStop
+	})
+	paths := nativePaths{
+		dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "state", "profiles", "profile"),
+		profileKey: "profile", claudeRoot: filepath.Join(root, "claude"), codexHome: filepath.Join(root, "codex"),
+		runtimeDir: filepath.Join(root, "new"), supervisorSock: filepath.Join(root, "new", "supervisor-profile.sock"),
+		supervisorState: filepath.Join(root, "state", "profiles", "profile", "supervisor.json"), appServerSock: appServerSocket,
+	}
+	if err := writeJSONAtomic(paths.supervisorState, map[string]any{
+		"pid": 17, "controlSocket": oldSocket, "appServerSocket": appServerSocket,
+		"profileKey": "profile", "implementation": "go",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := &nativeSupervisor{
+		paths: paths, pluginVersion: "current", executable: executable, shimExecutable: executable,
+		procStart: readProcStart(os.Getpid()), startedAt: time.Now().UnixMilli(), done: make(chan struct{}),
+		shims: map[string]map[string]any{}, activeTurns: map[string]string{}, subscribed: map[string]bool{},
+		releasing: map[string]int64{}, retired: map[string]bool{}, closedCandidates: map[string]uint64{}, reconcileWake: make(chan struct{}, 1),
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- supervisor.start() }()
+	select {
+	case <-stopRequested:
+	case <-time.After(time.Second):
+		t.Fatal("successor did not request predecessor shutdown")
+	}
+	if state := readJSONMap(paths.supervisorState); !samePath(stringValue(state["controlSocket"]), oldSocket) {
+		t.Fatalf("successor state was published before predecessor retired: %#v", state)
+	}
+	close(releaseStop)
+	if err := <-startResult; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(supervisor.shutdown)
+	select {
+	case <-oldDone:
+	case <-time.After(time.Second):
+		t.Fatal("predecessor did not exit")
+	}
+	state := readJSONMap(paths.supervisorState)
+	if !samePath(stringValue(state["controlSocket"]), paths.supervisorSock) || stringValue(state["profileKey"]) != paths.profileKey {
+		t.Fatalf("successor state was not published after retirement: %#v", state)
+	}
+}
+
 func TestNativeSupervisorDoesNotRepublishRetiredLoadedThread(t *testing.T) {
 	threadReads := make(chan struct{}, 1)
 	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {

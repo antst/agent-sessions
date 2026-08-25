@@ -48,6 +48,14 @@ func resolveNativePaths() nativePaths {
 			runtimeDir = candidate
 		}
 	}
+	// Darwin exports a long, per-process TMPDIR by default and does not have a
+	// native XDG runtime directory.  Using that environment-dependent path as
+	// the bridge identity split one CODEX_HOME across two supervisors when an
+	// upgrade changed the socket compaction rule.  The private /tmp/ccp-<uid>
+	// root is short, host-stable, and still protected by ensurePrivateRuntimeDir.
+	if runtimeDir == "" && runtime.GOOS == "darwin" {
+		runtimeDir = "/tmp"
+	}
 	if runtimeDir == "" {
 		runtimeDir = os.TempDir()
 	}
@@ -313,6 +321,9 @@ func (s *nativeSupervisor) start() error {
 	if err := stopLegacyNativeSupervisor(s.paths); err != nil {
 		return err
 	}
+	if err := retireAlternateNativeSupervisors(s.paths); err != nil {
+		return err
+	}
 	cleanupStaleBridgeArtifacts(s.paths)
 	if probeUnixSocket(s.paths.supervisorSock, 250*time.Millisecond) {
 		return fmt.Errorf("refuse to replace live supervisor socket %s", s.paths.supervisorSock)
@@ -331,7 +342,7 @@ func (s *nativeSupervisor) start() error {
 		"pid": os.Getpid(), "procStart": s.procStart, "pluginVersion": s.pluginVersion,
 		"runtimeIdentity": s.runtimeIdentity,
 		"controlSocket":   s.paths.supervisorSock, "appServerSocket": s.paths.appServerSock,
-		"implementation": "go", "startedAt": s.startedAt,
+		"profileKey": s.paths.profileKey, "implementation": "go", "startedAt": s.startedAt,
 	}); err != nil {
 		_ = listener.Close()
 		return err
@@ -1372,7 +1383,7 @@ func (s *nativeSupervisor) status() map[string]any {
 	s.clientMu.Unlock()
 	return map[string]any{
 		"pid": os.Getpid(), "pluginVersion": s.pluginVersion, "runtimeIdentity": s.runtimeIdentity, "implementation": "go",
-		"controlSocket": s.paths.supervisorSock, "appServerSocket": s.paths.appServerSock,
+		"profileKey": s.paths.profileKey, "controlSocket": s.paths.supervisorSock, "appServerSocket": s.paths.appServerSock,
 		"appServerConnected": connected, "appServerPid": appServerPID, "appServerProcStart": appServerProcStart,
 		"shimCount": len(s.shims), "ready": s.ready,
 	}
@@ -3058,17 +3069,20 @@ func runSupervisorCommand(args []string) int {
 }
 
 func stopNativeSupervisor(paths nativePaths) (map[string]any, error) {
+	startLock, err := lockNativeSupervisorStart(paths)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockNativeSupervisorStart(startLock)
 	state := readJSONMap(paths.supervisorState)
-	pid, procStart := intValue(state["pid"]), stringValue(state["procStart"])
 	if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
 		return nil, err
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
+	if err := waitNativeSupervisorProcessExit(state, 10*time.Second, "supervisor"); err != nil {
+		return nil, err
 	}
-	if pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) {
-		return nil, fmt.Errorf("supervisor process %d did not stop", pid)
+	if err := retireAlternateNativeSupervisors(paths); err != nil {
+		return nil, err
 	}
 	return map[string]any{"stopped": true}, nil
 }
@@ -3088,6 +3102,9 @@ func startNativeSupervisor(version string) (map[string]any, error) {
 		return nil, err
 	}
 	defer unlockNativeSupervisorStart(startLock)
+	if err := retireAlternateNativeSupervisors(paths); err != nil {
+		return nil, err
+	}
 	if current, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 500*time.Millisecond); err == nil {
 		if !samePath(stringValue(current["appServerSocket"]), paths.appServerSock) {
 			return nil, fmt.Errorf("supervisor socket %s belongs to App Server %s, not %s", paths.supervisorSock, stringValue(current["appServerSocket"]), paths.appServerSock)
@@ -3135,6 +3152,134 @@ func nativeSupervisorMatches(status map[string]any, paths nativePaths, version, 
 		stringValue(status["pluginVersion"]) == version &&
 		stringValue(status["runtimeIdentity"]) == runtimeIdentity &&
 		samePath(stringValue(status["appServerSocket"]), paths.appServerSock)
+}
+
+type nativeSupervisorCandidate struct {
+	path   string
+	strict bool
+}
+
+// alternateNativeSupervisorCandidates enumerates only durable or historically
+// exact addresses.  In particular it does not scan processes or arbitrary
+// sockets.  The session-state source lets a current runtime recover an already
+// split estate even after a newer supervisor overwrote supervisor.json.
+func alternateNativeSupervisorCandidates(paths nativePaths) []nativeSupervisorCandidate {
+	candidates := map[string]bool{}
+	add := func(path string, strict bool) {
+		if !filepath.IsAbs(path) || samePath(path, paths.supervisorSock) {
+			return
+		}
+		path = filepath.Clean(path)
+		candidates[path] = candidates[path] || strict
+	}
+	if state := readJSONMap(paths.supervisorState); state != nil {
+		add(stringValue(state["controlSocket"]), true)
+	}
+	if paths.profileKey != "" {
+		uid := strconv.Itoa(os.Getuid())
+		roots := []string{
+			filepath.Join(paths.runtimeDir, "codex-claude-peer-"+uid),
+			filepath.Join(paths.runtimeDir, "ccp-"+uid),
+			filepath.Join(os.TempDir(), "codex-claude-peer-"+uid),
+			filepath.Join(os.TempDir(), "ccp-"+uid),
+			filepath.Join("/tmp", "codex-claude-peer-"+uid),
+			filepath.Join("/tmp", "ccp-"+uid),
+		}
+		for _, root := range roots {
+			add(filepath.Join(root, "supervisor-"+paths.profileKey+".sock"), true)
+			// Before profile namespacing, one global supervisor.sock served the
+			// App Server.  Its status must match before the relaxed candidate is
+			// touched, because the path itself carries no profile identity.
+			add(filepath.Join(root, "supervisor.sock"), false)
+		}
+	}
+	sessionsRoot := filepath.Join(paths.dataRoot, "sessions")
+	if entries, err := os.ReadDir(sessionsRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			state := readJSONMap(filepath.Join(sessionsRoot, entry.Name(), "state.json"))
+			if stringValue(state["entrypoint"]) == "codex" {
+				add(stringValue(state["supervisorSocket"]), false)
+			}
+		}
+	}
+	pathsSorted := make([]string, 0, len(candidates))
+	for path := range candidates {
+		pathsSorted = append(pathsSorted, path)
+	}
+	sort.Strings(pathsSorted)
+	result := make([]nativeSupervisorCandidate, 0, len(pathsSorted))
+	for _, path := range pathsSorted {
+		result = append(result, nativeSupervisorCandidate{path: path, strict: candidates[path]})
+	}
+	return result
+}
+
+// retireAlternateNativeSupervisors enforces one supervisor authority per
+// canonical CODEX_HOME even when a release changes the derived runtime root.
+// Every stopped process first proves it is our Go supervisor for the same App
+// Server.  Unknown, mismatched, or unresponsive strict candidates fail closed.
+func retireAlternateNativeSupervisors(paths nativePaths) error {
+	for _, candidate := range alternateNativeSupervisorCandidates(paths) {
+		status, err := requestControl(candidate.path, map[string]any{"action": "status"}, 500*time.Millisecond)
+		if err != nil {
+			if candidate.strict && probeUnixSocket(candidate.path, 200*time.Millisecond) {
+				return fmt.Errorf("refuse supervisor migration while predecessor %s is live but unresponsive", candidate.path)
+			}
+			continue
+		}
+		matched, err := nativeSupervisorCandidateMatches(paths, candidate, status)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			continue
+		}
+		if err := stopExistingNativeSupervisor(candidate.path, 10*time.Second); err != nil {
+			return fmt.Errorf("retire predecessor supervisor: %w", err)
+		}
+		if err := waitNativeSupervisorProcessExit(status, 10*time.Second, "predecessor supervisor"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func nativeSupervisorCandidateMatches(paths nativePaths, candidate nativeSupervisorCandidate, status map[string]any) (bool, error) {
+	if stringValue(status["implementation"]) != "go" {
+		return rejectNativeSupervisorCandidate(candidate, "refuse to stop unknown predecessor supervisor at %s", candidate.path)
+	}
+	if profileKey := stringValue(status["profileKey"]); profileKey != "" && profileKey != paths.profileKey {
+		return rejectNativeSupervisorCandidate(candidate, "predecessor supervisor at %s belongs to profile %s, not %s", candidate.path, profileKey, paths.profileKey)
+	}
+	if appServerSocket := stringValue(status["appServerSocket"]); !samePath(appServerSocket, paths.appServerSock) {
+		return rejectNativeSupervisorCandidate(candidate, "predecessor supervisor at %s belongs to App Server %s, not %s", candidate.path, appServerSocket, paths.appServerSock)
+	}
+	if controlSocket := stringValue(status["controlSocket"]); controlSocket != "" && !samePath(controlSocket, candidate.path) {
+		return rejectNativeSupervisorCandidate(candidate, "predecessor supervisor at %s reports control socket %s", candidate.path, controlSocket)
+	}
+	return true, nil
+}
+
+func rejectNativeSupervisorCandidate(candidate nativeSupervisorCandidate, format string, args ...any) (bool, error) {
+	if candidate.strict {
+		return false, fmt.Errorf(format, args...)
+	}
+	return false, nil
+}
+
+func waitNativeSupervisorProcessExit(status map[string]any, timeout time.Duration, label string) error {
+	pid, procStart := intValue(status["pid"]), stringValue(status["procStart"])
+	deadline := time.Now().Add(timeout)
+	for pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) {
+		return fmt.Errorf("%s process %d did not stop", label, pid)
+	}
+	return nil
 }
 
 func lockNativeSupervisorStart(paths nativePaths) (*os.File, error) {

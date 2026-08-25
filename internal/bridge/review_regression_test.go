@@ -1532,38 +1532,8 @@ func TestSupervisorStopCommandWaitsForExactProcessExit(t *testing.T) {
 func TestNamespacedSupervisorRetiresResponsiveLegacyInstance(t *testing.T) {
 	runtimeRoot := t.TempDir()
 	legacySocket := filepath.Join(bridgeRuntimeRoot(runtimeRoot, os.Getuid()), "supervisor.sock")
-	if err := os.MkdirAll(filepath.Dir(legacySocket), 0700); err != nil {
-		t.Fatal(err)
-	}
-	listener, err := net.Listen("unix", legacySocket)
-	if err != nil {
-		t.Fatal(err)
-	}
 	appServerSocket := filepath.Join(t.TempDir(), "app-server.sock")
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			connection, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			line, _ := bufio.NewReader(connection).ReadBytes('\n')
-			var request map[string]any
-			_ = json.Unmarshal(line, &request)
-			if stringValue(request["action"]) == "stop" {
-				_, _ = connection.Write([]byte(`{"ok":true,"stopping":true}` + "\n"))
-				_ = connection.Close()
-				_ = listener.Close()
-				return
-			}
-			response, _ := json.Marshal(map[string]any{
-				"ok": true, "implementation": "go", "appServerSocket": appServerSocket,
-			})
-			_, _ = connection.Write(append(response, '\n'))
-			_ = connection.Close()
-		}
-	}()
+	done := startTestNativeSupervisorControl(t, legacySocket, appServerSocket)
 	paths := nativePaths{
 		runtimeDir: runtimeRoot, appServerSock: appServerSocket,
 		supervisorSock: filepath.Join(bridgeRuntimeRoot(runtimeRoot, os.Getuid()), "supervisor-profile.sock"),
@@ -1578,6 +1548,140 @@ func TestNamespacedSupervisorRetiresResponsiveLegacyInstance(t *testing.T) {
 	}
 	if probeUnixSocket(legacySocket, 25*time.Millisecond) {
 		t.Fatal("legacy supervisor remained reachable")
+	}
+}
+
+func startTestNativeSupervisorControl(t *testing.T, socket, appServerSocket string, beforeStop ...func()) <-chan struct{} {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			line, _ := bufio.NewReader(connection).ReadBytes('\n')
+			var request map[string]any
+			_ = json.Unmarshal(line, &request)
+			if stringValue(request["action"]) == "stop" {
+				if len(beforeStop) > 0 && beforeStop[0] != nil {
+					beforeStop[0]()
+				}
+				_, _ = connection.Write([]byte(`{"ok":true,"stopping":true}` + "\n"))
+				_ = connection.Close()
+				_ = listener.Close()
+				_ = os.Remove(socket)
+				return
+			}
+			response, _ := json.Marshal(map[string]any{
+				"ok": true, "ready": true, "implementation": "go",
+				"controlSocket": socket, "appServerSocket": appServerSocket,
+			})
+			_, _ = connection.Write(append(response, '\n'))
+			_ = connection.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(socket)
+	})
+	return done
+}
+
+func TestSupervisorRetiresRecordedAlternateProfileInstance(t *testing.T) {
+	root := shortSocketTestRoot(t, "sr-")
+	appServerSocket := filepath.Join(root, "app-server.sock")
+	oldSocket := filepath.Join(root, "old-runtime", "supervisor-profile.sock")
+	done := startTestNativeSupervisorControl(t, oldSocket, appServerSocket)
+	paths := nativePaths{
+		dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "state", "profiles", "profile"),
+		profileKey: "profile", runtimeDir: filepath.Join(root, "new-runtime"),
+		supervisorSock:  filepath.Join(root, "new-runtime", "supervisor-profile.sock"),
+		supervisorState: filepath.Join(root, "state", "profiles", "profile", "supervisor.json"),
+		appServerSock:   appServerSocket,
+	}
+	if err := writeJSONAtomic(paths.supervisorState, map[string]any{
+		"controlSocket": oldSocket, "appServerSocket": appServerSocket, "implementation": "go",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireAlternateNativeSupervisors(paths); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("recorded predecessor supervisor was not stopped")
+	}
+	if probeUnixSocket(oldSocket, 25*time.Millisecond) {
+		t.Fatal("recorded predecessor supervisor remained reachable")
+	}
+}
+
+func TestSupervisorRecoversSplitPredecessorFromLiveShimState(t *testing.T) {
+	root := shortSocketTestRoot(t, "ss-")
+	appServerSocket := filepath.Join(root, "app-server.sock")
+	oldSocket := filepath.Join(root, "unrecorded-runtime", "supervisor-profile.sock")
+	done := startTestNativeSupervisorControl(t, oldSocket, appServerSocket)
+	paths := nativePaths{
+		dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "state", "profiles", "profile"),
+		profileKey: "profile", runtimeDir: filepath.Join(root, "new-runtime"),
+		supervisorSock:  filepath.Join(root, "new-runtime", "supervisor-profile.sock"),
+		supervisorState: filepath.Join(root, "state", "profiles", "profile", "supervisor.json"),
+		appServerSock:   appServerSocket,
+	}
+	if err := writeJSONAtomic(paths.supervisorState, map[string]any{
+		"controlSocket": paths.supervisorSock, "appServerSocket": appServerSocket, "implementation": "go",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "00000000-0000-0000-0000-000000000017"
+	if err := writeJSONAtomic(filepath.Join(paths.dataRoot, "sessions", sessionKey(sessionID), "state.json"), map[string]any{
+		"sessionId": sessionID, "entrypoint": "codex", "supervisorSocket": oldSocket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireAlternateNativeSupervisors(paths); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("split predecessor supervisor was not stopped")
+	}
+}
+
+func TestSupervisorDoesNotRetireRelaxedCandidateForAnotherProfile(t *testing.T) {
+	root := shortSocketTestRoot(t, "so-")
+	currentAppServer := filepath.Join(root, "current-app-server.sock")
+	otherSocket := filepath.Join(root, "other-runtime", "supervisor-other.sock")
+	_ = startTestNativeSupervisorControl(t, otherSocket, filepath.Join(root, "other-app-server.sock"))
+	paths := nativePaths{
+		dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "state", "profiles", "profile"),
+		profileKey: "profile", runtimeDir: filepath.Join(root, "current-runtime"),
+		supervisorSock:  filepath.Join(root, "current-runtime", "supervisor-profile.sock"),
+		supervisorState: filepath.Join(root, "state", "profiles", "profile", "supervisor.json"),
+		appServerSock:   currentAppServer,
+	}
+	sessionID := "00000000-0000-0000-0000-000000000018"
+	if err := writeJSONAtomic(filepath.Join(paths.dataRoot, "sessions", sessionKey(sessionID), "state.json"), map[string]any{
+		"sessionId": sessionID, "entrypoint": "codex", "supervisorSocket": otherSocket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireAlternateNativeSupervisors(paths); err != nil {
+		t.Fatal(err)
+	}
+	if !probeUnixSocket(otherSocket, 25*time.Millisecond) {
+		t.Fatal("another profile's supervisor was stopped")
 	}
 }
 

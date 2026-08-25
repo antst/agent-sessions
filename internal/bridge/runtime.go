@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -265,6 +266,12 @@ func newDaemon(args map[string]string) *daemon {
 func bridgeRuntimeRoot(runtimeDir string, uid int) string {
 	runtimeRoot := filepath.Join(runtimeDir, fmt.Sprintf("codex-claude-peer-%d", uid))
 	compactRoot := filepath.Join("/tmp", fmt.Sprintf("ccp-%d", uid))
+	// resolveNativePaths deliberately maps Darwin's missing XDG runtime root to
+	// /tmp.  Keep that default on the compact spelling so TMPDIR presence cannot
+	// change the supervisor or session addresses for one profile.
+	if runtime.GOOS == "darwin" && filepath.Clean(runtimeDir) == "/tmp" {
+		return compactRoot
+	}
 	// The stable session address is longer than supervisor.sock, so it is the
 	// representative budget for every socket below this root.
 	return socketpath.PreferRoot(runtimeRoot, compactRoot, "session-"+strings.Repeat("0", 20)+".sock")
