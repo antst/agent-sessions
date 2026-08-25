@@ -47,7 +47,12 @@ func qwenPluginUninstallCommand(executable string, profile qwenprofile.Identity,
 }
 
 func qwenPluginRollbackSource(root, source, version string) (string, error) {
-	canonical, err := pathidentity.ExistingDirectory(source)
+	restoreSource, err := filepath.Abs(source)
+	if err != nil {
+		return "", fmt.Errorf("make prior Qwen plugin source absolute: %w", err)
+	}
+	restoreSource = filepath.Clean(restoreSource)
+	canonical, err := pathidentity.ExistingDirectory(restoreSource)
 	if err != nil {
 		return "", fmt.Errorf("prior Qwen plugin source is not an existing real directory: %w", err)
 	}
@@ -64,7 +69,9 @@ func qwenPluginRollbackSource(root, source, version string) (string, error) {
 	if err := verifyQwenPluginInstallation(canonical, version, true); err != nil {
 		return "", fmt.Errorf("prior Qwen plugin source does not provide the installed plugin payload: %w", err)
 	}
-	return canonical, nil
+	// Validate through the canonical identity, but reinstall from the spelling
+	// recorded by Qwen so rollback restores native profile state exactly.
+	return restoreSource, nil
 }
 
 func verifyQwenPluginRollback(root, source, version, statePath string) error {

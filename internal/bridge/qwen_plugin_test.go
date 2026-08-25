@@ -586,6 +586,24 @@ func TestSameQwenPluginSourceUsesExistingPathIdentity(t *testing.T) {
 	}
 }
 
+func TestQwenPluginRollbackSourcePreservesRecordedSpelling(t *testing.T) {
+	realSource := filepath.Join(t.TempDir(), "real-source")
+	qwenTestPluginFixtureAt(t, realSource)
+	alias := filepath.Join(t.TempDir(), "source-alias")
+	if err := os.Symlink(realSource, alias); err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(t.TempDir(), "installed")
+	qwenTestPluginFixtureAt(t, installed)
+	got, err := qwenPluginRollbackSource(installed, alias, qwenTestPluginVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != alias {
+		t.Fatalf("rollback source = %q, want recorded spelling %q", got, alias)
+	}
+}
+
 func TestQwenPluginReplacementRefusesUnusableRollbackSourceBeforeMutation(t *testing.T) {
 	for _, sourceState := range []string{"missing", "invalid-payload"} {
 		t.Run(sourceState, func(t *testing.T) {
