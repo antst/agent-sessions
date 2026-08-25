@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1655,9 +1656,25 @@ func TestActiveGrokLaunchSessionsIncludesLaneProcessSessionAndMalformedLaneState
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	sessionID := randomID()
-	processSessionID, err := grokProcessSessionID(os.Getpid())
+	worker := exec.Command("sleep", "30")
+	worker.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := worker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = worker.Process.Kill()
+		_ = worker.Wait()
+	})
+	processSessionID, err := grokProcessSessionID(worker.Process.Pid)
 	if err != nil {
 		t.Skipf("process-session inventory is unsupported: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !grokProcessSessionHasMembers(processSessionID, 0) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !grokProcessSessionHasMembers(processSessionID, 0) {
+		t.Fatal("dedicated Grok lane process-session did not become observable")
 	}
 	state := grokLaneState{
 		Type: "grok-peer-lane", Name: "install-lane", SessionID: sessionID, Status: "archived",
