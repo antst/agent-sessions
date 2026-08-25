@@ -1382,7 +1382,7 @@ func (s *nativeSupervisor) status() map[string]any {
 	}
 	s.clientMu.Unlock()
 	return map[string]any{
-		"pid": os.Getpid(), "pluginVersion": s.pluginVersion, "runtimeIdentity": s.runtimeIdentity, "implementation": "go",
+		"pid": os.Getpid(), "procStart": s.procStart, "pluginVersion": s.pluginVersion, "runtimeIdentity": s.runtimeIdentity, "implementation": "go",
 		"profileKey": s.paths.profileKey, "controlSocket": s.paths.supervisorSock, "appServerSocket": s.paths.appServerSock,
 		"appServerConnected": connected, "appServerPid": appServerPID, "appServerProcStart": appServerProcStart,
 		"shimCount": len(s.shims), "ready": s.ready,
@@ -3039,6 +3039,9 @@ func runSupervisorCommand(args []string) int {
 	case "status":
 		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 3*time.Second)
 		return printNativeResult(response, err)
+	case "quiescent":
+		err := checkNativeSupervisorsQuiescent(paths)
+		return printNativeResult(map[string]any{"quiescent": err == nil}, err)
 	case "stop":
 		response, err := stopNativeSupervisor(paths)
 		return printNativeResult(response, err)
@@ -3105,18 +3108,10 @@ func startNativeSupervisor(version string) (map[string]any, error) {
 	if err := retireAlternateNativeSupervisors(paths); err != nil {
 		return nil, err
 	}
-	if current, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 500*time.Millisecond); err == nil {
-		if !samePath(stringValue(current["appServerSocket"]), paths.appServerSock) {
-			return nil, fmt.Errorf("supervisor socket %s belongs to App Server %s, not %s", paths.supervisorSock, stringValue(current["appServerSocket"]), paths.appServerSock)
-		}
-		if nativeSupervisorMatches(current, paths, version, runtimeIdentity) {
-			return current, nil
-		}
-		if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
-			return nil, err
-		}
-	} else if probeUnixSocket(paths.supervisorSock, 200*time.Millisecond) {
-		return nil, fmt.Errorf("refuse to replace unresponsive live supervisor socket %s", paths.supervisorSock)
+	if current, reused, err := prepareCurrentNativeSupervisor(paths, version, runtimeIdentity); err != nil {
+		return nil, err
+	} else if reused {
+		return current, nil
 	}
 	child := exec.Command(executable, "supervisor", "run", "--plugin-version", version) //nolint:gosec // executable is the current installed bridge binary.
 	child.Stdin, child.Stdout, child.Stderr = nil, nil, nil
@@ -3127,7 +3122,7 @@ func startNativeSupervisor(version string) (map[string]any, error) {
 	_ = child.Process.Release()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, time.Second); err == nil {
+		if response, err := requestNativeSupervisorStatus(paths.supervisorSock, time.Second); err == nil {
 			if nativeSupervisorMatches(response, paths, version, runtimeIdentity) {
 				return response, nil
 			}
@@ -3135,6 +3130,30 @@ func startNativeSupervisor(version string) (map[string]any, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, errors.New("timed out starting native Claude peer supervisor")
+}
+
+func prepareCurrentNativeSupervisor(paths nativePaths, version, runtimeIdentity string) (map[string]any, bool, error) {
+	current, err := requestNativeSupervisorStatus(paths.supervisorSock, 500*time.Millisecond)
+	if err == nil {
+		if !samePath(stringValue(current["appServerSocket"]), paths.appServerSock) {
+			return nil, false, fmt.Errorf("supervisor socket %s belongs to App Server %s, not %s", paths.supervisorSock, stringValue(current["appServerSocket"]), paths.appServerSock)
+		}
+		if nativeSupervisorMatches(current, paths, version, runtimeIdentity) {
+			return current, true, nil
+		}
+		if err := requireQuiescentNativeSupervisor(current, paths.supervisorSock); err != nil {
+			return nil, false, err
+		}
+		if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
+			return nil, false, err
+		}
+		if err := waitNativeSupervisorProcessExit(current, 10*time.Second, "supervisor"); err != nil {
+			return nil, false, err
+		}
+	} else if probeUnixSocket(paths.supervisorSock, 200*time.Millisecond) {
+		return nil, false, fmt.Errorf("refuse to replace unresponsive live supervisor socket %s", paths.supervisorSock)
+	}
+	return nil, false, nil
 }
 
 func nativeExecutableIdentity(executable string) (string, error) {
@@ -3222,8 +3241,37 @@ func alternateNativeSupervisorCandidates(paths nativePaths) []nativeSupervisorCa
 // Every stopped process first proves it is our Go supervisor for the same App
 // Server.  Unknown, mismatched, or unresponsive strict candidates fail closed.
 func retireAlternateNativeSupervisors(paths nativePaths) error {
-	for _, candidate := range alternateNativeSupervisorCandidates(paths) {
-		status, err := requestControl(candidate.path, map[string]any{"action": "status"}, 500*time.Millisecond)
+	return visitNativeSupervisorCandidates(paths, false, func(candidate nativeSupervisorCandidate, status map[string]any) error {
+		if err := requireQuiescentNativeSupervisor(status, candidate.path); err != nil {
+			return err
+		}
+		if err := stopExistingNativeSupervisor(candidate.path, 10*time.Second); err != nil {
+			return fmt.Errorf("retire predecessor supervisor: %w", err)
+		}
+		if err := waitNativeSupervisorProcessExit(status, 10*time.Second, "predecessor supervisor"); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func checkNativeSupervisorsQuiescent(paths nativePaths) error {
+	return visitNativeSupervisorCandidates(paths, true, func(candidate nativeSupervisorCandidate, status map[string]any) error {
+		return requireQuiescentNativeSupervisor(status, candidate.path)
+	})
+}
+
+func visitNativeSupervisorCandidates(
+	paths nativePaths,
+	includeCurrent bool,
+	visit func(nativeSupervisorCandidate, map[string]any) error,
+) error {
+	candidates := alternateNativeSupervisorCandidates(paths)
+	if includeCurrent {
+		candidates = append([]nativeSupervisorCandidate{{path: paths.supervisorSock, strict: true}}, candidates...)
+	}
+	for _, candidate := range candidates {
+		status, err := requestNativeSupervisorStatus(candidate.path, 500*time.Millisecond)
 		if err != nil {
 			if candidate.strict && probeUnixSocket(candidate.path, 200*time.Millisecond) {
 				return fmt.Errorf("refuse supervisor migration while predecessor %s is live but unresponsive", candidate.path)
@@ -3237,14 +3285,74 @@ func retireAlternateNativeSupervisors(paths nativePaths) error {
 		if !matched {
 			continue
 		}
-		if err := stopExistingNativeSupervisor(candidate.path, 10*time.Second); err != nil {
-			return fmt.Errorf("retire predecessor supervisor: %w", err)
-		}
-		if err := waitNativeSupervisorProcessExit(status, 10*time.Second, "predecessor supervisor"); err != nil {
+		if err := visit(candidate, status); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func requireQuiescentNativeSupervisor(status map[string]any, socket string) error {
+	raw, present := status["shimCount"]
+	if !present {
+		return fmt.Errorf("refuse to replace supervisor %s because its live Codex shim count is unavailable", socket)
+	}
+	count, valid := nativeSupervisorShimCount(raw)
+	if !valid {
+		return fmt.Errorf("refuse to replace supervisor %s because its live Codex shim count is invalid", socket)
+	}
+	if count != 0 {
+		return fmt.Errorf("refuse to replace supervisor %s while it owns %d live Codex shim(s); exit every codex-peer TUI and archive or stop every Codex lane, then retry", socket, count)
+	}
+	return nil
+}
+
+func nativeSupervisorShimCount(raw any) (int, bool) {
+	const maxPlausibleShimCount = 1 << 30
+	switch value := raw.(type) {
+	case int:
+		return value, value >= 0 && value <= maxPlausibleShimCount
+	case int64:
+		return int(value), value >= 0 && value <= maxPlausibleShimCount
+	case uint64:
+		if value > maxPlausibleShimCount {
+			return 0, false
+		}
+		return int(value), true
+	case float64:
+		count := int(value)
+		return count, value >= 0 && value <= maxPlausibleShimCount && value == float64(count)
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil || parsed < 0 || parsed > maxPlausibleShimCount {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
+}
+
+func requestNativeSupervisorStatus(socket string, timeout time.Duration) (map[string]any, error) {
+	status, peerPID, err := requestControlWithPeerPID(socket, map[string]any{"action": "status"}, timeout)
+	if err != nil {
+		return nil, err
+	}
+	reportedPID := intValue(status["pid"])
+	if reportedPID <= 1 {
+		// Focused protocol fixtures predating process attestation omit pid. A
+		// production supervisor has always reported it.
+		return status, nil
+	}
+	if reportedPID != peerPID {
+		return nil, fmt.Errorf("supervisor at %s reports process %d, but its socket peer is %d", socket, reportedPID, peerPID)
+	}
+	procStart := readProcStart(peerPID)
+	if procStart == "" {
+		return nil, fmt.Errorf("cannot attest process start for supervisor %d at %s", peerPID, socket)
+	}
+	status["procStart"] = procStart
+	return status, nil
 }
 
 func nativeSupervisorCandidateMatches(paths nativePaths, candidate nativeSupervisorCandidate, status map[string]any) (bool, error) {
@@ -3311,7 +3419,7 @@ func stopLegacyNativeSupervisor(paths nativePaths) error {
 	if samePath(legacySocket, paths.supervisorSock) {
 		return nil
 	}
-	status, err := requestControl(legacySocket, map[string]any{"action": "status"}, 500*time.Millisecond)
+	status, err := requestNativeSupervisorStatus(legacySocket, 500*time.Millisecond)
 	if err != nil {
 		if probeUnixSocket(legacySocket, 200*time.Millisecond) {
 			return fmt.Errorf("refuse supervisor migration while legacy socket %s is live but unresponsive", legacySocket)
@@ -3324,6 +3432,9 @@ func stopLegacyNativeSupervisor(paths nativePaths) error {
 	}
 	if appServerSocket := stringValue(status["appServerSocket"]); !samePath(appServerSocket, paths.appServerSock) {
 		return fmt.Errorf("legacy supervisor at %s belongs to App Server %s, not %s", legacySocket, appServerSocket, paths.appServerSock)
+	}
+	if err := requireQuiescentNativeSupervisor(status, legacySocket); err != nil {
+		return err
 	}
 	if err := stopExistingNativeSupervisor(legacySocket, 10*time.Second); err != nil {
 		return fmt.Errorf("retire legacy supervisor: %w", err)

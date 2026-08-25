@@ -1552,6 +1552,10 @@ func TestNamespacedSupervisorRetiresResponsiveLegacyInstance(t *testing.T) {
 }
 
 func startTestNativeSupervisorControl(t *testing.T, socket, appServerSocket string, beforeStop ...func()) <-chan struct{} {
+	return startTestNativeSupervisorControlWithShims(t, socket, appServerSocket, 0, beforeStop...)
+}
+
+func startTestNativeSupervisorControlWithShims(t *testing.T, socket, appServerSocket string, shimCount int, beforeStop ...func()) <-chan struct{} {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
 		t.Fatal(err)
@@ -1583,7 +1587,7 @@ func startTestNativeSupervisorControl(t *testing.T, socket, appServerSocket stri
 			}
 			response, _ := json.Marshal(map[string]any{
 				"ok": true, "ready": true, "implementation": "go",
-				"controlSocket": socket, "appServerSocket": appServerSocket,
+				"controlSocket": socket, "appServerSocket": appServerSocket, "shimCount": shimCount,
 			})
 			_, _ = connection.Write(append(response, '\n'))
 			_ = connection.Close()
@@ -1594,6 +1598,78 @@ func startTestNativeSupervisorControl(t *testing.T, socket, appServerSocket stri
 		_ = os.Remove(socket)
 	})
 	return done
+}
+
+func TestSupervisorRefusesToRetirePredecessorWithLiveCodexShims(t *testing.T) {
+	root := shortSocketTestRoot(t, "sl-")
+	appServerSocket := filepath.Join(root, "app-server.sock")
+	oldSocket := filepath.Join(root, "old-runtime", "supervisor-profile.sock")
+	done := startTestNativeSupervisorControlWithShims(t, oldSocket, appServerSocket, 2)
+	paths := nativePaths{
+		dataRoot: filepath.Join(root, "state"), profileRoot: filepath.Join(root, "state", "profiles", "profile"),
+		profileKey: "profile", runtimeDir: filepath.Join(root, "new-runtime"),
+		supervisorSock:  filepath.Join(root, "new-runtime", "supervisor-profile.sock"),
+		supervisorState: filepath.Join(root, "state", "profiles", "profile", "supervisor.json"),
+		appServerSock:   appServerSocket,
+	}
+	if err := writeJSONAtomic(paths.supervisorState, map[string]any{
+		"controlSocket": oldSocket, "appServerSocket": appServerSocket, "implementation": "go",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := checkNativeSupervisorsQuiescent(paths)
+	if err == nil || !strings.Contains(err.Error(), "owns 2 live Codex shim") {
+		t.Fatalf("live-shim quiescence error = %v", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("quiescence check stopped predecessor with live Codex shims")
+	default:
+	}
+	err = retireAlternateNativeSupervisors(paths)
+	if err == nil || !strings.Contains(err.Error(), "owns 2 live Codex shim") {
+		t.Fatalf("live-shim retirement error = %v", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("predecessor with live Codex shims was stopped")
+	default:
+	}
+	if !probeUnixSocket(oldSocket, 25*time.Millisecond) {
+		t.Fatal("predecessor with live Codex shims became unreachable")
+	}
+}
+
+func TestNativeSupervisorStatusAttestsSocketPeerProcessStart(t *testing.T) {
+	root := shortSocketTestRoot(t, "sa-")
+	socket := filepath.Join(root, "supervisor.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		_, _ = bufio.NewReader(connection).ReadBytes('\n')
+		response, _ := json.Marshal(map[string]any{
+			"ok": true, "pid": os.Getpid(), "procStart": "untrusted-response-value",
+		})
+		_, _ = connection.Write(append(response, '\n'))
+	}()
+	status, err := requestNativeSupervisorStatus(socket, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stringValue(status["procStart"]), readProcStart(os.Getpid()); got == "" || got != want {
+		t.Fatalf("attested supervisor process start = %q, want %q", got, want)
+	}
+	<-done
 }
 
 func TestSupervisorRetiresRecordedAlternateProfileInstance(t *testing.T) {

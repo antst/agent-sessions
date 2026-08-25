@@ -30,8 +30,8 @@ const (
 )
 
 type qwenOwnedArtifact struct {
-	Path     string
-	identity os.FileInfo
+	Path string
+	pin  *os.File
 }
 
 type qwenCleanupRequest struct {
@@ -68,8 +68,9 @@ type qwenSessionStart struct {
 }
 
 type qwenEventCursor struct {
+	mu           sync.Mutex
 	path         string
-	identity     os.FileInfo
+	pin          *os.File
 	offset       int64
 	prefixDigest [sha256.Size]byte
 }
@@ -80,10 +81,16 @@ func qwenRequiredDualOutputEvents() []string {
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
 func admitQwenDualOutput(path string, expected qwenAdmissionExpectation) (*qwenEventCursor, qwenSessionStart, error) {
-	info, body, err := readAttestedQwenRegularFile(path, nil)
+	pin, _, body, err := readPinnedQwenRegularFile(path, nil)
 	if err != nil {
 		return nil, qwenSessionStart{}, fmt.Errorf("inspect Qwen dual-output path: %w", err)
 	}
+	accepted := false
+	defer func() {
+		if !accepted {
+			_ = pin.Close()
+		}
+	}()
 	newline := bytes.IndexByte(body, '\n')
 	if newline < 0 {
 		return nil, qwenSessionStart{}, errors.New("qwen dual-output first event is incomplete")
@@ -133,8 +140,9 @@ func admitQwenDualOutput(path string, expected qwenAdmissionExpectation) (*qwenE
 		}
 	}
 	consumed := body[:newline+1]
+	accepted = true
 	return &qwenEventCursor{
-		path: path, identity: info, offset: int64(len(consumed)), prefixDigest: sha256.Sum256(consumed),
+		path: path, pin: pin, offset: int64(len(consumed)), prefixDigest: sha256.Sum256(consumed),
 	}, start, nil
 }
 
@@ -143,15 +151,37 @@ func (c *qwenEventCursor) Offset() int64 {
 	if c == nil {
 		return 0
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.offset
+}
+
+// Close releases the descriptor that pins the admitted stream identity.
+func (c *qwenEventCursor) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pin == nil {
+		return nil
+	}
+	err := c.pin.Close()
+	c.pin = nil
+	return err
 }
 
 // ReadAvailable returns complete newly appended events after re-attesting the stream.
 func (c *qwenEventCursor) ReadAvailable() ([]json.RawMessage, error) {
-	if c == nil || c.identity == nil {
+	if c == nil {
 		return nil, errors.New("qwen event cursor is not initialized")
 	}
-	info, body, err := readAttestedQwenRegularFile(c.path, c.identity)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pin == nil {
+		return nil, errors.New("qwen event cursor is closed")
+	}
+	_, _, body, err := readPinnedQwenRegularFile(c.path, c.pin)
 	if err != nil {
 		return nil, err
 	}
@@ -180,38 +210,40 @@ func (c *qwenEventCursor) ReadAvailable() ([]json.RawMessage, error) {
 	}
 	c.offset += int64(len(complete))
 	c.prefixDigest = sha256.Sum256(body[:c.offset])
-	c.identity = info
 	return result, nil
 }
 
 type qwenInputWriter struct {
-	mu       sync.Mutex
-	path     string
-	file     *os.File
-	identity os.FileInfo
-	offset   int64
-	digest   [sha256.Size]byte
+	mu     sync.Mutex
+	path   string
+	file   *os.File
+	pin    *os.File
+	offset int64
+	digest [sha256.Size]byte
 }
 
 func openQwenInputWriter(path string) (*qwenInputWriter, error) {
-	info, body, err := readAttestedQwenRegularFile(path, nil)
+	pin, info, body, err := readPinnedQwenRegularFile(path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Qwen input path: %w", err)
 	}
 	if info.Mode().Perm() != 0o600 {
+		_ = pin.Close()
 		return nil, fmt.Errorf("qwen input path mode is %04o, want 0600", info.Mode().Perm())
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0) //nolint:gosec // The exact regular-file identity is re-attested immediately after opening.
 	if err != nil {
+		_ = pin.Close()
 		return nil, err
 	}
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
 		_ = file.Close()
+		_ = pin.Close()
 		return nil, errors.New("qwen input path changed while opening")
 	}
 	return &qwenInputWriter{
-		path: path, file: file, identity: info, offset: int64(len(body)), digest: sha256.Sum256(body),
+		path: path, file: file, pin: pin, offset: int64(len(body)), digest: sha256.Sum256(body),
 	}, nil
 }
 
@@ -235,7 +267,7 @@ func (w *qwenInputWriter) Submit(text string) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, body, err := readAttestedQwenRegularFile(w.path, w.identity)
+	_, _, body, err := readPinnedQwenRegularFile(w.path, w.pin)
 	if err != nil {
 		return err
 	}
@@ -245,8 +277,7 @@ func (w *qwenInputWriter) Submit(text string) error {
 	if sha256.Sum256(body) != w.digest {
 		return errors.New("qwen input body changed before append")
 	}
-	opened, err := w.file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(w.identity, opened) {
+	if !samePinnedQwenFile(w.pin, w.file) {
 		return errors.New("qwen input descriptor identity changed")
 	}
 	record, err := json.Marshal(map[string]string{"type": "submit", "text": text})
@@ -261,15 +292,24 @@ func (w *qwenInputWriter) Submit(text string) error {
 		return err
 	}
 	expected := append(append([]byte(nil), body...), record...)
-	info, after, err := readAttestedQwenRegularFile(w.path, w.identity)
+	_, _, after, err := readPinnedQwenRegularFile(w.path, w.pin)
 	if err != nil {
 		return err
 	}
 	if !bytes.Equal(after, expected) {
 		return errors.New("qwen input append could not be re-attested")
 	}
-	w.identity, w.offset, w.digest = info, int64(len(after)), sha256.Sum256(after)
+	w.offset, w.digest = int64(len(after)), sha256.Sum256(after)
 	return nil
+}
+
+func samePinnedQwenFile(first, second *os.File) bool {
+	if first == nil || second == nil {
+		return false
+	}
+	firstInfo, firstErr := first.Stat()
+	secondInfo, secondErr := second.Stat()
+	return firstErr == nil && secondErr == nil && secondInfo.Mode().IsRegular() && os.SameFile(firstInfo, secondInfo)
 }
 
 // Close closes the private input descriptor and prevents further submissions.
@@ -284,45 +324,56 @@ func (w *qwenInputWriter) Close() error {
 	}
 	err := w.file.Close()
 	w.file = nil
+	if w.pin != nil {
+		err = errors.Join(err, w.pin.Close())
+		w.pin = nil
+	}
 	return err
 }
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
-func readAttestedQwenRegularFile(path string, expected os.FileInfo) (os.FileInfo, []byte, error) {
+func readPinnedQwenRegularFile(path string, expected *os.File) (*os.File, os.FileInfo, []byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, nil, fmt.Errorf("path is not a regular non-symlink file: %s", info.Mode())
+		return nil, nil, nil, fmt.Errorf("path is not a regular non-symlink file: %s", info.Mode())
 	}
-	if expected != nil && !os.SameFile(expected, info) {
-		return nil, nil, errors.New("path identity changed")
+	file := expected
+	owned := false
+	if file == nil {
+		file, err = os.Open(path) //nolint:gosec // the path is lstat-attested and the descriptor is retained as the durable identity pin.
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		owned = true
 	}
-	if info.Size() > qwenDualOutputMaxBytes {
-		return nil, nil, errors.New("qwen protocol file exceeds the bounded size")
+	fail := func(err error) (*os.File, os.FileInfo, []byte, error) {
+		if owned {
+			_ = file.Close()
+		}
+		return nil, nil, nil, err
 	}
-	file, err := os.Open(path) //nolint:gosec // exact path is lstat-attested immediately before open and fstat-checked below.
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return nil, nil, errors.New("path changed while opening")
+		return fail(errors.New("path identity changed while opening"))
 	}
-	body, err := io.ReadAll(io.LimitReader(file, qwenDualOutputMaxBytes+1))
+	if info.Size() > qwenDualOutputMaxBytes {
+		return fail(errors.New("qwen protocol file exceeds the bounded size"))
+	}
+	body, err := io.ReadAll(io.NewSectionReader(file, 0, qwenDualOutputMaxBytes+1))
 	if err != nil {
-		return nil, nil, err
+		return fail(err)
 	}
 	if len(body) > qwenDualOutputMaxBytes {
-		return nil, nil, errors.New("qwen protocol file exceeds the bounded size")
+		return fail(errors.New("qwen protocol file exceeds the bounded size"))
 	}
 	closed, err := os.Lstat(path)
-	if err != nil || !closed.Mode().IsRegular() || closed.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, closed) || closed.Size() != int64(len(body)) {
-		return nil, nil, errors.New("path changed while reading")
+	if err != nil || !closed.Mode().IsRegular() || closed.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, closed) || closed.Size() != int64(len(body)) {
+		return fail(errors.New("path changed while reading"))
 	}
-	return closed, body, nil
+	return file, closed, body, nil
 }
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
@@ -338,16 +389,38 @@ func observeQwenOwnedArtifacts(root string, paths []string) ([]qwenOwnedArtifact
 		relative, relErr := filepath.Rel(root, path)
 		if relErr != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
 			!filepath.IsAbs(path) || seen[path] {
+			closeQwenOwnedArtifacts(result)
 			return nil, errors.New("qwen artifact is outside its ownership root or duplicated")
 		}
 		info, statErr := os.Lstat(path)
 		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			closeQwenOwnedArtifacts(result)
 			return nil, fmt.Errorf("qwen artifact %s is not an exact private regular file", path)
 		}
+		pin, openErr := os.Open(path)
+		if openErr != nil {
+			closeQwenOwnedArtifacts(result)
+			return nil, fmt.Errorf("pin qwen artifact %s: %w", path, openErr)
+		}
+		opened, openErr := pin.Stat()
+		closed, closeErr := os.Lstat(path)
+		if openErr != nil || closeErr != nil || !os.SameFile(info, opened) || !os.SameFile(opened, closed) {
+			_ = pin.Close()
+			closeQwenOwnedArtifacts(result)
+			return nil, fmt.Errorf("qwen artifact %s changed while pinning identity", path)
+		}
 		seen[path] = true
-		result = append(result, qwenOwnedArtifact{Path: path, identity: info})
+		result = append(result, qwenOwnedArtifact{Path: path, pin: pin})
 	}
 	return result, nil
+}
+
+func closeQwenOwnedArtifacts(artifacts []qwenOwnedArtifact) {
+	for _, artifact := range artifacts {
+		if artifact.pin != nil {
+			_ = artifact.pin.Close()
+		}
+	}
 }
 
 func observeQwenCleanupProcessIdentity(pid int, expected string) qwenCleanupIdentityStatus {
@@ -383,6 +456,7 @@ func cleanupQwenOwnedArtifacts(request qwenCleanupRequest) error {
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
 func cleanupQwenOwnedArtifactsWithContext(_ context.Context, request qwenCleanupRequest) error {
+	defer closeQwenOwnedArtifacts(request.Artifacts)
 	status := qwenCleanupProcessIdentity(request.LifecyclePID, request.LifecycleStart)
 	switch status {
 	case qwenCleanupIdentityStopped:
@@ -401,7 +475,7 @@ func cleanupQwenOwnedArtifactsWithContext(_ context.Context, request qwenCleanup
 	for _, artifact := range request.Artifacts {
 		path := filepath.Clean(artifact.Path)
 		relative, relErr := filepath.Rel(request.Root, path)
-		if relErr != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || artifact.identity == nil {
+		if relErr != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || artifact.pin == nil {
 			debt = append(debt, path)
 			continue
 		}
@@ -409,7 +483,8 @@ func cleanupQwenOwnedArtifactsWithContext(_ context.Context, request qwenCleanup
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
-		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !os.SameFile(info, artifact.identity) {
+		pinned, pinErr := artifact.pin.Stat()
+		if statErr != nil || pinErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !os.SameFile(info, pinned) {
 			debt = append(debt, path)
 			continue
 		}

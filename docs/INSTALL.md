@@ -264,6 +264,11 @@ predecessor fails the update rather than producing two authorities. On macOS, th
 always the private `/tmp/ccp-<uid>` spelling when `XDG_RUNTIME_DIR` is absent, independent of
 `TMPDIR`. Explicit test/runtime roots remain supported through `XDG_RUNTIME_DIR`.
 
+Supervisor replacement also fails closed when the current or predecessor supervisor owns any live
+Codex shims. Before updating, exit every `codex-peer` TUI and archive or stop every Codex lane, then
+stop App Server and retry the install. The updater never tears down those sessions in the
+background and does not migrate a live shim between supervisors.
+
 The peer federator is a separate explicitly configured service and is never stopped or reconfigured
 by supervisor replacement. Existing Claude MCP children likewise remain owned by their Claude
 session; replacing a Codex supervisor does not terminate them.

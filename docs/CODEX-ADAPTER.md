@@ -73,6 +73,11 @@ and sockets while retaining the Codex transcript for resume. Exact process-start
 supervisor perform the same scoped cleanup after `SIGKILL` without acting on a recycled PID.
 Ordinary Codex threads and child subagents are never adopted heuristically.
 
+An upgrade never terminates live Codex shims. Exit every `codex-peer` TUI and archive or stop every
+Codex lane before replacing the runtime; otherwise supervisor replacement fails closed and tells
+the operator to retry after those sessions are quiescent. Live shims are not transferred between
+old and new supervisors.
+
 See [CODEX-INSTALL.md](CODEX-INSTALL.md) for installation,
 [CODEX-LANES.md](CODEX-LANES.md) for durable worker lanes, and
 [ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md) for the shared carrier and authorization details.

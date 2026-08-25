@@ -182,6 +182,12 @@ install-preflight: build
 				'After it stops, run make install again.' >&2; \
 			exit 75; \
 		}; \
+		"$(BIN_DIR)/agent-session-runtime" supervisor quiescent || { \
+			printf '%s\n' \
+				'A managed Codex peer or lane is still attached to an existing supervisor.' \
+				'Exit every codex-peer TUI and archive or stop every Codex lane, then run make install again.' >&2; \
+			exit 75; \
+		}; \
 		grok_status=0; \
 		"$(BIN_DIR)/agent-session-runtime" grok stopped || grok_status=$$?; \
 		if [[ $$grok_status -eq 3 ]]; then \

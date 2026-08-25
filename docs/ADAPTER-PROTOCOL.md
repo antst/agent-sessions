@@ -328,6 +328,9 @@ Runtime-root migrations obey the same rule for profile-named sockets: startup co
 profile record, exact historical roots, and bridge-owned live Codex shim records, then validates the
 reported implementation, profile identity when available, and App Server before stopping a
 predecessor. It waits for the exact predecessor process to exit before publishing the successor.
+If the current or predecessor supervisor reports any live Codex shims, replacement fails closed;
+operators must exit the peer TUIs and stop or archive Codex lanes before retrying. Live shims are
+never terminated or transferred as a side effect of an upgrade.
 Darwin's default socket root is `/tmp/ccp-<uid>` whenever no explicit XDG runtime directory exists,
 so `TMPDIR` presence cannot partition one profile between multiple supervisors.
 

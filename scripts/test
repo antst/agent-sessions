@@ -628,6 +628,11 @@ if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
   printf 'install preflight does not print the App Server stop command\n' >&2
   exit 1
 fi
+if ! grep -Fq 'agent-session-runtime" supervisor quiescent' <<<"$preflight_plan" ||
+   ! grep -Fq 'Exit every codex-peer TUI and archive or stop every Codex lane' <<<"$preflight_plan"; then
+  printf 'install preflight does not require clean managed Codex shutdown\n' >&2
+  exit 1
+fi
 if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
    ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan" ||
    ! grep -Fq 'grok-peer-lane archive SESSION_OR_NAME' <<<"$preflight_plan"; then
@@ -667,7 +672,10 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-mapfile -t installed_inventory < <("$plugin_root/scripts/release-inventory" binaries)
+installed_inventory=()
+while IFS= read -r installed_binary; do
+  installed_inventory+=("$installed_binary")
+done < <("$plugin_root/scripts/release-inventory" binaries)
 for installed_binary in "${installed_inventory[@]}"; do
   if [[ ! -x "$installed_binary_dir/$installed_binary" ]] ||
      [[ "$(readlink "$custom_prefix/bin/$installed_binary")" != "$installed_binary_dir/$installed_binary" ]]; then

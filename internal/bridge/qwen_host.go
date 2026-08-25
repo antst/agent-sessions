@@ -140,6 +140,7 @@ func runQwenInteractiveHost(ctx context.Context, config qwenHostArguments) error
 	if err != nil {
 		return errors.Join(err, rollback())
 	}
+	defer func() { _ = cursor.Close() }()
 	input, err := openQwenInputWriter(payload.Input.Path)
 	if err != nil {
 		return errors.Join(err, rollback())
@@ -201,6 +202,8 @@ func runQwenInteractiveHost(ctx context.Context, config qwenHostArguments) error
 		requestedExitCode = 143
 		err = <-done
 	}
+	stopEvents()
+	_ = cursor.Close()
 	daemon.shutdown()
 	if cleanupErr := removeQwenHostArtifacts(registration.LifecycleRoot, ownedArtifacts); cleanupErr != nil {
 		return cleanupErr
@@ -223,14 +226,19 @@ func runQwenInteractiveHost(ctx context.Context, config qwenHostArguments) error
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
 func removeQwenHostArtifacts(root string, artifacts []qwenOwnedArtifact) error {
+	defer closeQwenOwnedArtifacts(artifacts)
 	rootInfo, err := os.Lstat(root)
 	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm() != 0o700 {
 		return errors.New("qwen cleanup ownership root changed")
 	}
 	for _, artifact := range artifacts {
 		info, statErr := os.Lstat(artifact.Path)
-		if statErr != nil || artifact.identity == nil || !info.Mode().IsRegular() ||
-			info.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, artifact.identity) {
+		pinned, pinErr := os.FileInfo(nil), error(nil)
+		if artifact.pin != nil {
+			pinned, pinErr = artifact.pin.Stat()
+		}
+		if statErr != nil || pinErr != nil || pinned == nil || !info.Mode().IsRegular() ||
+			info.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, pinned) {
 			return &qwenCleanupDebtError{Paths: []string{artifact.Path}}
 		}
 	}

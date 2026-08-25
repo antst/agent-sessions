@@ -845,31 +845,40 @@ type controlResponseError struct {
 func (e *controlResponseError) Error() string { return e.message }
 
 func requestControl(socket string, request map[string]any, timeout time.Duration) (map[string]any, error) {
+	response, _, err := requestControlWithPeerPID(socket, request, timeout)
+	return response, err
+}
+
+func requestControlWithPeerPID(socket string, request map[string]any, timeout time.Duration) (map[string]any, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", socket)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = conn.Close() }()
+	peerPID, err := unixPeerPID(conn)
+	if err != nil {
+		return nil, 0, fmt.Errorf("attest local control peer: %w", err)
+	}
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	body, _ := json.Marshal(request)
 	if _, err = conn.Write(append(body, '\n')); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	line, err := bufio.NewReader(ioLimitReader{r: conn, n: maxFrameBytes}).ReadBytes('\n')
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var response map[string]any
 	if err = json.Unmarshal(line, &response); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if ok, _ := response["ok"].(bool); !ok {
-		return nil, &controlResponseError{message: defaultString(stringValue(response["error"]), "local control failed")}
+		return nil, 0, &controlResponseError{message: defaultString(stringValue(response["error"]), "local control failed")}
 	}
-	return response, nil
+	return response, peerPID, nil
 }
 
 type ioLimitReader struct {
