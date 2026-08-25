@@ -141,6 +141,15 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 		strings.Contains(workflow, "platform: linux-x64") {
 		t.Fatal("CI workflow does not consume the authoritative release build entrypoint")
 	}
+	lintStart, lintEnd := strings.Index(workflow, "\n  lint:\n"), strings.Index(workflow, "\n  test:\n")
+	if lintStart < 0 || lintEnd <= lintStart {
+		t.Fatal("CI workflow does not contain a bounded lint job")
+	}
+	lintJob := workflow[lintStart:lintEnd]
+	if !strings.Contains(lintJob, "os: [ubuntu-latest, macos-latest]") ||
+		!strings.Contains(lintJob, "runs-on: ${{ matrix.os }}") {
+		t.Fatal("CI lint does not cover both Linux and Darwin build-tagged files")
+	}
 	for _, gate := range []string{
 		"make test-race", "go vet ./...", "make lint", "scripts/release-final-gate",
 		"release-evidence generate", "release-evidence validate",

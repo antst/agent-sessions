@@ -89,7 +89,7 @@ func TestNativeSupervisorDefaultSocketIgnoresDarwinTMPDIR(t *testing.T) {
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "runtime-path-claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "runtime-path-codex"))
 
-	var sockets []string
+	sockets := make([]string, 0, 3)
 	for _, tempDir := range []string{
 		"/var/folders/very/long/native/darwin/temp/directory/T",
 		"",
