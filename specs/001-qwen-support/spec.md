@@ -479,6 +479,22 @@ owner's native profile and credentials are unchanged.
 - Changing Qwen authentication, credential storage, owner-wide permission policy, or unrelated
   native configuration.
 
+### Known Runtime Architecture Debt
+
+Release validation exposed a product-neutral upgrade defect in the pre-existing Agent Sessions
+runtime model: independently restarted supervisors and federation agents can remain live at
+different versions and runtime roots. A legacy supervisor can also retain stale in-memory shim state
+after its last real client exits, leaving safe replacement unable to distinguish live ownership from
+obsolete state. The exact observation and disposition are recorded in
+[evidence/runtime-lifecycle-debt.md](evidence/runtime-lifecycle-debt.md).
+
+This defect is not a Qwen adapter failure and does not change the Qwen requirements above. Its repair
+is intentionally excluded from this feature rather than adding another incremental cross-process
+reconciliation protocol here. A successor Spec Kit feature and separate pull request will define one
+versioned per-user Agent Sessions runtime authority. Merging this Qwen feature into `develop` is not
+a release claim: the v0.2.4 release/tag gates remain blocked until that successor feature either
+closes the debt or the release scope is explicitly revised.
+
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
