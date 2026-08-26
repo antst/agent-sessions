@@ -6,7 +6,7 @@ It owns no project packet format, briefing, model, reasoning, sandbox, approval,
 postflight policy.
 
 Managed Codex peers invoke local and federated lane lifecycle operations through
-the attested `claude_peer.lane` MCP tool. Codex shell tools run inside an OS sandbox
+the attested `agent_sessions.lane` MCP tool. Codex shell tools run inside an OS sandbox
 that may correctly deny the App Server, supervisor, and host-agent Unix sockets;
 granting broader shell access is not a prerequisite for launching a lane. The MCP
 tool executes the exact packaged runtime outside that shell sandbox, binds the live
@@ -296,13 +296,13 @@ configuration. Explicit values are overlays:
 The wrapper does not replace or disable user configuration. It internally overlays only
 `features.code_mode_host=false`, which is headless execution plumbing rather than agent policy:
 detached lanes have no attached TUI to act as an external code-mode host. Shell/patch tools remain
-available in App Server, and the supervisor dispatches nested MCP calls such as `claude_peer`.
+available in App Server, and the supervisor dispatches nested MCP calls such as `agent_sessions`.
 
 An autonomous lane cannot ask a human through a TUI. Orchestrators that intend unattended tool use
 should normally pass `--approval-policy never`; the wrapper deliberately does not choose this for
-them. Approval and sandboxing are independent: `claude_peer` messaging is client-side and works for
+them. Approval and sandboxing are independent: `agent_sessions` messaging is client-side and works for
 a `read-only` model sandbox. The supervisor auto-accepts only MCP approval elicitations for its own
-`claude_peer` server, reflecting the bridge's trusted-isolated-peer contract; it does not approve
+`agent_sessions` server, reflecting the bridge's trusted-isolated-peer contract; it does not approve
 foreign MCP servers or ordinary elicitations.
 
 Prompts should use stdin or `--prompt-file`; large briefings are never placed on argv.

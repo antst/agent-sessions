@@ -19,15 +19,143 @@ plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 bash -n \
   "$plugin_root/scripts/cachebuster" \
   "$plugin_root/scripts/package-release" \
+  "$plugin_root/scripts/release-final-gate" \
+  "$plugin_root/scripts/release-inventory" \
+  "$plugin_root/scripts/release-publication-preflight" \
+  "$plugin_root/scripts/release-tag-preflight" \
+  "$plugin_root/scripts/release-tag-verify" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
   "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
   "$plugin_root/grok/scripts/native-entry" \
+  "$plugin_root/qwen/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
-if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
-  printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
+python3 - "$plugin_root/scripts/release-gate-manifest" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+compile(path.read_bytes(), str(path), "exec")
+PY
+
+python3 - "$plugin_root/scripts/test-qwen-composition" <<'PY'
+import pathlib
+import runpy
+import signal
+import sys
+import tempfile
+
+module = runpy.run_path(sys.argv[1], run_name="composition_contract_test")
+secure_config = module["claude_test_secure_config"]
+required_executable = module["required_test_executable"]
+target_environment = module["target_test_environment"]
+lane_arguments = module["lane_arguments"]
+prepare_grok = module["prepare_isolated_grok_profile"]
+assert_no_grok_fallback = module["assert_no_grok_mcp_fallback"]
+
+try:
+    secure_config({})
+except AssertionError:
+    pass
+else:
+    raise AssertionError("unset Claude test secure-storage namespace was accepted")
+
+assert secure_config({"CLAUDE_TEST_SECURE_CONFIG_DIR": ""}) == ""
+with tempfile.TemporaryDirectory() as directory:
+    assert secure_config({"CLAUDE_TEST_SECURE_CONFIG_DIR": directory}) == directory
+try:
+    secure_config({"CLAUDE_TEST_SECURE_CONFIG_DIR": "relative"})
+except AssertionError:
+    pass
+else:
+    raise AssertionError("relative Claude test secure-storage namespace was accepted")
+
+assert required_executable({"GROK_TEST_BIN": sys.executable}, "GROK_TEST_BIN") == pathlib.Path(sys.executable)
+for invalid in ("", "relative", str(pathlib.Path(sys.executable).parent)):
+    try:
+        required_executable({"GROK_TEST_BIN": invalid}, "GROK_TEST_BIN")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"invalid Grok test executable was accepted: {invalid!r}")
+
+common = {"HOME": "/owner/home", "KEEP": "yes"}
+for product in ("codex", "claude", "qwen"):
+    scoped = target_environment(common, product, pathlib.Path("/isolated/grok"))
+    assert scoped == common and scoped is not common
+grok_scoped = target_environment(common, "grok", pathlib.Path("/isolated/grok"))
+assert grok_scoped == {"HOME": "/isolated/grok", "KEEP": "yes"}
+assert common == {"HOME": "/owner/home", "KEEP": "yes"}
+try:
+    target_environment(common, "unknown", pathlib.Path("/isolated/grok"))
+except AssertionError:
+    pass
+else:
+    raise AssertionError("unknown composition target received an environment")
+
+termination = module["CompositionTerminated"]
+install_handlers = module["install_termination_handlers"]
+previous_int = signal.getsignal(signal.SIGINT)
+previous_term = signal.getsignal(signal.SIGTERM)
+try:
+    install_handlers()
+    handler = signal.getsignal(signal.SIGTERM)
+    try:
+        handler(signal.SIGTERM, None)
+    except termination as error:
+        assert error.signum == signal.SIGTERM
+    else:
+        raise AssertionError("composition SIGTERM handler did not request orderly cleanup")
+    assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+finally:
+    signal.signal(signal.SIGINT, previous_int)
+    signal.signal(signal.SIGTERM, previous_term)
+
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    workspace = root / "target-workspace"
+    workspace.mkdir()
+    prompt = root / "prompt.txt"
+    arguments = lane_arguments("grok", "matrix-grok", root / "qwen", workspace, prompt)
+    assert arguments[arguments.index("-C") + 1] == str(workspace)
+    assert str(pathlib.Path(sys.argv[1]).resolve().parents[1]) not in arguments
+
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    grok_home = root / "grok-home"
+    workspace = root / "workspace"
+    grok_home.mkdir()
+    workspace.mkdir()
+    fake_grok = root / "fake-grok"
+    fake_grok.write_text(
+        "#!/bin/sh\nprintf '%s\\n' '{\"plugins\":[],\"mcpServers\":[]}'\n",
+        encoding="utf-8",
+    )
+    fake_grok.chmod(0o700)
+    prepare_grok(workspace, grok_home, fake_grok, {})
+    assert_no_grok_fallback(workspace, grok_home, fake_grok, {})
+    trust = (grok_home / ".grok" / "trusted_folders.toml").read_text(encoding="utf-8")
+    assert str(workspace) in trust
+    assert not (grok_home / ".grok" / "plugins" / "agent-sessions").exists()
+PY
+
+for native_entry_copy in \
+  "$plugin_root/grok/scripts/native-entry" \
+  "$plugin_root/qwen/scripts/native-entry"; do
+  if ! cmp -s "$plugin_root/scripts/native-entry" "$native_entry_copy"; then
+    printf 'plugin native-entry copy drifted from the shared installed entry point: %s\n' \
+      "$native_entry_copy" >&2
+    exit 1
+  fi
+done
+
+release_matrix="$("$plugin_root/scripts/release-inventory" matrix-json)"
+release_package_inventory="$("$plugin_root/scripts/release-inventory" package-inventory-json)"
+if [[ "$(grep -o '"platform"' <<<"$release_matrix" | wc -l | tr -d ' ')" != 4 ]] ||
+   [[ "$(grep -o '"product"' <<<"$release_package_inventory" | wc -l | tr -d ' ')" != 4 ]] ||
+   [[ "$(grep -o 'qwen-peer' <<<"$release_package_inventory" | wc -l | tr -d ' ')" != 2 ]]; then
+  printf 'authoritative release JSON inventory is incomplete\n' >&2
   exit 1
 fi
 
@@ -100,7 +228,7 @@ if grep -Rq '\[TODO' "$plugin_root/skills/grok-lane" ||
 fi
 if [[ ! -f "$plugin_root/grok/skills/agent-lanes/SKILL.md" ]] ||
    ! grep -Fq 'Codex lanes require contract version **2**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
-   ! grep -Fq 'Claude and Grok lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
+   ! grep -Fq 'Claude, Grok, and Qwen lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
    ! grep -Fq 'report the lane cell as blocked; never "try anyway."' "$plugin_root/grok/skills/agent-lanes/SKILL.md"; then
   printf 'Grok agent-lanes skill does not distinguish all target contracts\n' >&2
   exit 1
@@ -475,15 +603,18 @@ printf '%s\n' \
   'fi' >"$install_codex"
 chmod 0700 "$install_codex"
 install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer; do
-  if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
-    printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
-    exit 1
-  fi
-done
-if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/agent-session-runtime\" \"$custom_prefix/bin/agent-session-runtime\"" <<<"$install_plan" ||
+if ! grep -Eq "for binary in .*agent-session-runtime.*qwen-peer.*qwen-peer-lane.*peer-federator" <<<"$install_plan" ||
+   ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/\\\$binary\" \"$custom_prefix/bin/\\\$binary\"" <<<"$install_plan" ||
    ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
-  printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
+  printf 'install projection does not consume the complete release inventory from INSTALL_ROOT\n' >&2
+  exit 1
+fi
+runtime_only_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 INSTALL_CODEX_INTEGRATION=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
+if grep -Eq 'plugin (list|add|remove|marketplace)' <<<"$runtime_only_install_plan" ||
+   grep -Fq 'agent-session-runtime" bootstrap' <<<"$runtime_only_install_plan" ||
+   ! grep -Fq 'Skipping Codex integration: Codex CLI is not installed.' <<<"$runtime_only_install_plan" ||
+   ! grep -Fq "ln -sfn \"$custom_install_root/bin/" <<<"$runtime_only_install_plan"; then
+  printf 'runtime-only install still requires Codex or omits the shared runtime payload\n' >&2
   exit 1
 fi
 runtime_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=1 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
@@ -527,23 +658,20 @@ if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]]
    [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
    [[ ! -f "$custom_install_root/skills/codex-lane/SKILL.md" ]] ||
    [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
+   [[ ! -f "$custom_install_root/qwen/plugin.json" ]] ||
+   [[ ! -f "$custom_install_root/qwen/mcp.json" ]] ||
+   [[ ! -x "$custom_install_root/qwen/scripts/native-entry" ]] ||
+   [[ ! -f "$custom_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
-   [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/peer")" != "$installed_binary_dir/peer" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/claude-peer")" != "$installed_binary_dir/claude-peer" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/grok-peer-lane")" != "$installed_binary_dir/grok-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
+   [[ -e "$custom_prefix/bin/codex-messaging" ]]; then
   printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
   exit 1
 fi
-for installed_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
-  if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
-    printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
+mapfile -t installed_inventory < <("$plugin_root/scripts/release-inventory" binaries)
+for installed_binary in "${installed_inventory[@]}"; do
+  if [[ ! -x "$installed_binary_dir/$installed_binary" ]] ||
+     [[ "$(readlink "$custom_prefix/bin/$installed_binary")" != "$installed_binary_dir/$installed_binary" ]]; then
+    printf 'copied-prefix installation omitted or misprojected binary %s\n' "$installed_binary" >&2
     exit 1
   fi
 done
@@ -577,6 +705,19 @@ grok_exact_result="$(GROK_PEER_NATIVE_RUNTIME="$grok_exact_runtime" CLAUDE_PEER_
   "$grok_cache/scripts/native-entry" grok-mcp)"
 if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
   printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
+  exit 1
+fi
+ambient_runtime_dir="$temporary_root/ambient-runtime"
+mkdir -p "$ambient_runtime_dir"
+printf '%s\n' '#!/bin/sh' 'printf "ambient:%s\\n" "$*"' >"$ambient_runtime_dir/agent-session-runtime"
+chmod 0700 "$ambient_runtime_dir/agent-session-runtime"
+qwen_exact_result="$(PATH="$ambient_runtime_dir:$PATH" \
+  AGENT_SESSIONS_NATIVE_RUNTIME="$grok_exact_runtime" \
+  QWEN_PEER_NATIVE_RUNTIME="$ambient_runtime_dir/agent-session-runtime" \
+  CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
+  "$custom_install_root/qwen/scripts/native-entry" mcp)"
+if [[ "$qwen_exact_result" != exact:mcp ]]; then
+  printf 'Qwen plugin did not preserve the managed parent exact runtime ahead of product and PATH candidates\n' >&2
   exit 1
 fi
 grok_user_plugin_root="$temporary_root/grok-user-plugins/agent-sessions"
@@ -772,6 +913,13 @@ fi
 release_output="$temporary_root/releases"
 release_archive="$("$plugin_root/scripts/package-release" \
   linux-x64 v0.1.0 "$installed_binary_dir" "$release_output")"
+release_output_second="$temporary_root/releases-second"
+release_archive_second="$("$plugin_root/scripts/package-release" \
+  linux-x64 v0.1.0 "$installed_binary_dir" "$release_output_second")"
+if ! cmp -s "$release_archive" "$release_archive_second"; then
+  printf 'identical release inputs did not produce byte-identical archives\n' >&2
+  exit 1
+fi
 release_extract="$temporary_root/release-extract"
 mkdir -p "$release_extract"
 tar -C "$release_extract" -xzf "$release_archive"
@@ -787,12 +935,27 @@ if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
    [[ ! -f "$release_root/grok/skills/agent-sessions/SKILL.md" ]] ||
    [[ ! -f "$release_root/grok/.mcp.json" ]] ||
    [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
+   [[ ! -f "$release_root/qwen/plugin.json" ]] ||
+   [[ ! -f "$release_root/qwen/mcp.json" ]] ||
+   [[ ! -x "$release_root/qwen/scripts/native-entry" ]] ||
+   [[ ! -f "$release_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/codex-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/claude-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/grok-lane/SKILL.md" ]] ||
+   [[ ! -f "$release_root/qwen/skills/qwen-lane/SKILL.md" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
   printf 'release archive is not a slim installable prebuilt payload\n' >&2
   exit 1
 fi
-for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+release_binaries=()
+while IFS= read -r packaged_binary; do release_binaries+=("$packaged_binary"); done \
+  < <("$plugin_root/scripts/release-inventory" binaries)
+if (( ${#release_binaries[@]} != 11 )); then
+  printf 'authoritative release inventory has %s binaries, want 11\n' "${#release_binaries[@]}" >&2
+  exit 1
+fi
+for packaged_binary in "${release_binaries[@]}"; do
   if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
     printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
     exit 1
@@ -822,9 +985,9 @@ release_install_root="$temporary_root/release-install"
 : >"$install_codex_record"
 rm -f -- "$install_codex_state"
 FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
-  make -s -C "$release_root" install START_RUNTIME=0 CODEX="$install_codex" \
+  make -s -C "$release_root" install GOOS=linux GOARCH=amd64 START_RUNTIME=0 CODEX="$install_codex" \
     PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
-for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+for packaged_binary in "${release_binaries[@]}"; do
   release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"
   if [[ ! -x "$release_install_root/bin/linux-x64/$packaged_binary" ]] ||
      [[ "$release_installed_link" != "$release_install_root/bin/linux-x64/$packaged_binary" ]]; then
@@ -837,6 +1000,7 @@ for packaged_doc in \
   CODEX-ADAPTER.md CODEX-INSTALL.md CODEX-LANES.md \
   CLAUDE-ADAPTER.md CLAUDE-INSTALL.md CLAUDE-LANES.md \
   GROK-ADAPTER.md GROK-INSTALL.md GROK-LANES.md \
+  QWEN-ADAPTER.md QWEN-INSTALL.md QWEN-LANES.md \
   README.md designs/QWEN-ADAPTER.md; do
   if [[ ! -f "$release_install_root/docs/$packaged_doc" ]]; then
     printf 'prebuilt release install omitted documentation %s\n' "$packaged_doc" >&2
@@ -845,6 +1009,10 @@ for packaged_doc in \
 done
 if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
    [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
+   [[ ! -f "$release_install_root/qwen/plugin.json" ]] ||
+   [[ ! -f "$release_install_root/qwen/mcp.json" ]] ||
+   [[ ! -x "$release_install_root/qwen/scripts/native-entry" ]] ||
+   [[ ! -f "$release_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
    ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
   printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
   exit 1

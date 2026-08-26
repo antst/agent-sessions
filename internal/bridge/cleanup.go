@@ -134,9 +134,14 @@ func ownedBridgeState(state map[string]any, statePath, runtimeRoot, registryRoot
 		return false
 	}
 	key := sessionKey(sessionID)
+	backend := stringValue(state["backendSocketPath"])
+	stable := stringValue(state["socketPath"])
+	legacyBackend := filepath.Join(runtimeRoot, strconv.Itoa(pid)+".sock")
+	currentSocket := filepath.Join(runtimeRoot, "session-"+key+".sock")
+	validSocketShape := samePath(stable, currentSocket) &&
+		(samePath(backend, currentSocket) || samePath(backend, legacyBackend))
 	return filepath.Base(statePath) == "state.json" && filepath.Base(filepath.Dir(statePath)) == key &&
-		samePath(stringValue(state["backendSocketPath"]), filepath.Join(runtimeRoot, strconv.Itoa(pid)+".sock")) &&
-		samePath(stringValue(state["socketPath"]), filepath.Join(runtimeRoot, "session-"+key+".sock")) &&
+		validSocketShape &&
 		samePath(stringValue(state["registryFile"]), filepath.Join(registryRoot, strconv.Itoa(pid)+".json"))
 }
 
@@ -159,7 +164,7 @@ func removeOwnedStableAlias(stable, backend, runtimeRoot string) bool {
 func ownedBridgeRegistry(row map[string]any, pid int, runtimeRoot string) bool {
 	entrypoint := stringValue(row["entrypoint"])
 	return row != nil && intValue(row["pid"]) == pid &&
-		(entrypoint == "codex" || entrypoint == "grok") &&
+		(entrypoint == "codex" || entrypoint == "grok" || entrypoint == "qwen") &&
 		strings.HasPrefix(stringValue(row["version"]), "codex-claude-peer/") &&
 		ownedRuntimePath(stringValue(row["messagingSocketPath"]), runtimeRoot)
 }

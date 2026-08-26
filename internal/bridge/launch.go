@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 var exactLaunchThreadIDRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -693,20 +694,9 @@ func canonicalLaunchDirectory(value string) (string, error) {
 	if value == "" {
 		return "", errors.New("launch requires --cwd")
 	}
-	absolute, err := filepath.Abs(value)
+	canonical, err := pathidentity.ExistingDirectory(value)
 	if err != nil {
 		return "", fmt.Errorf("resolve launch cwd: %w", err)
-	}
-	canonical, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return "", fmt.Errorf("resolve launch cwd: %w", err)
-	}
-	info, err := os.Stat(canonical)
-	if err != nil {
-		return "", fmt.Errorf("inspect launch cwd: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("launch cwd is not a directory: %s", canonical)
 	}
 	if strings.ContainsAny(canonical, "\r\n") {
 		return "", errors.New("launch cwd cannot contain a line break")

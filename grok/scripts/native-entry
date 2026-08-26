@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installed hook and MCP entry point; never falls back to Node.
+# Installed hook and MCP entry point; never falls back to Node or PATH.
 
 state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
-native_runtime="${GROK_PEER_NATIVE_RUNTIME:-$(sed -n '1p' "$state_root/native-runtime-path" 2>/dev/null || true)}"
+native_runtime="${AGENT_SESSIONS_NATIVE_RUNTIME:-${QWEN_PEER_NATIVE_RUNTIME:-${GROK_PEER_NATIVE_RUNTIME:-${CODEX_PEER_NATIVE_RUNTIME:-}}}}"
+if [[ -z "$native_runtime" ]]; then
+  native_runtime="$(sed -n '1p' "$state_root/native-runtime-path" 2>/dev/null || true)"
+fi
 if [[ -z "$native_runtime" || ! -x "$native_runtime" ]]; then
   printf 'agent-sessions: native runtime is not installed; run make install first\n' >&2
   exit 1

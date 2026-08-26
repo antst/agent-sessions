@@ -5,7 +5,7 @@ source test, fake protocol server, successful enqueue, or clean build proves
 only its own cell. It must never be reported as installed product acceptance.
 
 Each run uses unique names (`mx-<run>-...`) and records the exact source SHA,
-installed VCS revision, OS/architecture, Codex/Claude/Grok versions, commands,
+installed VCS revision, OS/architecture, Codex/Claude/Grok/Qwen versions, commands,
 exit codes, live argv, session IDs, registry/owner state, protocol counts, TUI
 output, and cleanup inventory. Tests communicate only with sessions created by
 that run. Unrelated peers, lanes, federators, worktrees, and application
@@ -48,7 +48,7 @@ changes additionally require at least two Linux hosts and one macOS host.
     Server and restart it from the intended environment; changing the caller's
     environment after daemon startup is not sufficient.
 11. On a host with another Agent Sessions install on `PATH`, in-session lane
-    acceptance uses the attested `claude_peer.lane`/`agent_sessions.lane` tool
+    acceptance uses the attested `agent_sessions.lane` tool
     and verifies the loaded plugin/runtime revision. A shell-resolved lane
     executable from another install is not exact-revision evidence.
 
@@ -64,15 +64,11 @@ RACE=1 /bin/bash ./scripts/test
 go vet ./...
 make lint
 
-VERSION=acceptance
-CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 make build
-scripts/package-release linux-x64 "$VERSION" bin/linux-x64 dist
-CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 make build
-scripts/package-release linux-arm64 "$VERSION" bin/linux-arm64 dist
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 make build
-scripts/package-release darwin-x64 "$VERSION" bin/darwin-x64 dist
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 make build
-scripts/package-release darwin-arm64 "$VERSION" bin/darwin-arm64 dist
+VERSION="$(cat deploy/peer-federator/VERSION)"
+GOOS=linux  GOARCH=amd64 make build-release-platform RELEASE_VERSION="$VERSION" RELEASE_OUTPUT_DIR=dist/one
+GOOS=linux  GOARCH=arm64 make build-release-platform RELEASE_VERSION="$VERSION" RELEASE_OUTPUT_DIR=dist/two
+GOOS=darwin GOARCH=amd64 make build-release-platform RELEASE_VERSION="$VERSION" RELEASE_OUTPUT_DIR=dist/three
+GOOS=darwin GOARCH=arm64 make build-release-platform RELEASE_VERSION="$VERSION" RELEASE_OUTPUT_DIR=dist/four
 ```
 
 | ID | Assertion |
@@ -104,6 +100,8 @@ must refuse when a process it would replace is still live.
 | U-08 | Linux, macOS | Plugin entry points select the exact same runtime revision as their owner host. |
 | U-09 | Release | Every release archive installs without Go and matches its published checksum. |
 | U-10 | Linux, macOS | Malformed/unreadable Grok launch inventory fails closed with an inventory diagnostic, not false "peer still running" advice. |
+| U-11 | Linux, macOS | Qwen install/upgrade/remove uses the exact selected profile, refuses a live managed user of that profile, verifies manifest/version/enabled/MCP/skill inventory, and preserves credentials, settings, other extensions, and transcripts. |
+| U-12 | Linux, macOS | Eleven binaries and four product plugin payloads install from a prebuilt archive without Go; a second build from the same tree is byte-identical. |
 
 ## Codex interactive peer (`T/F`)
 
@@ -135,13 +133,13 @@ must refuse when a process it would replace is still live.
 | CL-01 | Linux, macOS | Bare `claude` remains an opt-out and changes neither the Agent Sessions catalog nor registration set. |
 | CL-02 | Linux, macOS | `claude-peer` starts a real native TUI in the configured shared Claude profile; ordinary, peer, and lane rows coexist with exactly one host-agent service row. |
 | CL-03 | Linux, macOS | Two Claude peers use distinct preparation-bound sockets and discover one another through group-filtered AgentFrame routing; native Claude direct messaging remains independently available. |
-| CL-04 | Linux, macOS | Exact UUID ordinary→peer→ordinary→generic-peer resume retains one shared transcript plus explicit groups, inheritance snapshot, name, cwd, and effective durable YOLO choice. `claude-peer --resume UNIQUE_NAME` resolves a live or durable managed name to that exact UUID before mutation; ambiguous history fails closed and explicit overrides replace only selected fields. |
-| CL-05 | Linux, macOS | Native name/status changes refresh the host-agent registration without duplicating the service row. Permission class is a stable launch decision: constrained peers disable the unobservable in-session bypass surface, while explicit bypass peers remain conservatively advertised as bypass until restart. |
+| CL-04 | Linux, macOS | Exact UUID ordinary→peer→ordinary→generic-peer resume retains one shared transcript plus explicit groups, inheritance snapshot, name, cwd, and effective durable YOLO choice. `claude-peer --resume NATIVE_TARGET` passes non-UUID targets unchanged to Claude, including ordinary titles and duplicate-title chooser flows, ignores any transient boot UUID, then atomically promotes a cleanup-owned provisional attachment only after the selected transcript title/UUID is authoritative. The attachment alias still attests structured MCP and local/remote lane calls as the selected UUID. Named resumes publish the requested title immediately; exact-UUID resumes recover the latest validated native transcript title. No provisional or transient catalog row survives; explicit overrides replace only selected fields. |
+| CL-05 | Linux, macOS | Explicit launch names and native transcript title/status changes refresh the host-agent registration without being replaced by Claude's cwd-derived row fallback and without duplicating the service row. Permission class is a stable launch decision: constrained peers disable the unobservable in-session bypass surface, while explicit bypass peers remain conservatively advertised as bypass until restart. |
 | CL-06 | Linux, macOS | Host-agent restart republishes one service row and every idle Claude supershim re-registers without restarting Claude. |
 | CL-07 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, supershim crash, stale native row, key/socket-before-row startup failure, PID reuse, and socket mismatch retire only the exact owned Claude process/registration/artifacts, preserving unrelated shared rows and the service. |
 | CL-08 | Linux, macOS | Managed Claude's structured MCP discover/direct/multicast/broadcast returns correlated group-filtered results and replies to an incoming delivery through Agent Sessions. Exact adapter/lifecycle ancestry is accepted without a model-supplied Codex ID; copied environment, unrelated registered process, bare caller, and native unframed service prose fail closed. The framed native carrier remains a compatibility path, while independent native direct traffic can cross Agent Sessions groups. |
-| CL-09 | Linux, macOS | Claude→Codex, Claude→Claude, and Claude→Grok lane launches all bind the immediate Claude parent, including nested and persistent children. |
-| CL-10 | Linux, macOS | Profile/credential mismatch, live exact-UUID attachment, invalid launch settings, launcher crash, and native startup failure do not adopt or alter the ordinary session's catalog row; a durable gated-launch journal rolls back groups and YOLO before retry. |
+| CL-09 | Linux, macOS | Claude→Codex, Claude→Claude, Claude→Grok, and Claude→Qwen lane launches all bind the immediate Claude parent, including nested and persistent children. |
+| CL-10 | Linux, macOS | Profile/credential mismatch, live exact-UUID attachment, invalid launch settings, launcher crash, native startup failure, and failure before or after native named-target selection do not adopt or alter the ordinary session's catalog row; a durable gated-launch journal survives agent restart and rolls back groups and YOLO before retry. |
 | CL-11 | Linux, macOS with Claude in Chrome installed | Ordinary shared-profile use may cache extension discovery; a later managed peer or lane still publishes its native row/socket without an interstitial. Peers preserve explicit `--chrome`/`--no-chrome`, while the managed default and all headless lanes use `--no-chrome`; host profile settings remain unchanged. |
 
 ## Grok interactive peer (`T/F`)
@@ -160,7 +158,7 @@ must refuse when a process it would replace is still live.
 | G-10 | Linux, macOS | Busy/generating/tool-active interjection is received once without replacing the TUI actor. |
 | G-11 | Linux, macOS | Burst, duplicate ID, conflicting reuse, reconnect, rejection, response-before-echo, missing actor echo, and ambiguous EOF preserve the documented local dedup/never-replay contract. |
 | G-12 | Linux, macOS | Restart restores queued records but never replays ambiguous `in_flight` interjection. |
-| G-13 | Linux, macOS | Exact-UUID resume preserves identity, name, cwd, plugin access, and messageability. |
+| G-13 | Linux, macOS | Exact-UUID, title, and bare-picker resume preserve native selection behavior, selected UUID/title, cwd, plugin access, structured messageability, and local/remote lane ownership. A cleanup-owned attachment alias is promoted only after one authoritative resident roster row; no provisional catalog row survives and an explicit peer name wins. |
 | G-14 | Linux, macOS | Launch/config/admin policy and in-TUI changes converge across roster, record, registry, status, federation, and label. |
 | G-15 | Linux, macOS | Failed permission publication retries; background refresh reports retryable busy instead of stale authority. |
 | G-16 | Linux, macOS | Before exit, the host process group differs from the TUI's and the private leader/observer remain isolated; normal TUI exit then terminates only those owned processes and removes the MCP, sockets, locks, launch record, private directory, registry, and empty state directory. |
@@ -170,6 +168,21 @@ must refuse when a process it would replace is still live.
 | G-20 | Linux, macOS | After actor acceptance, a Grok-deferred roster request cannot block the interjected turn's own `agent_sessions` calls; the labelled pre-interjection permission snapshot retires on the first successful post-turn roster refresh and expires after 30 minutes if recovery remains broken. |
 | G-21 | Linux, macOS | Global roster pushes plus one-second reconciliation publish `working`/`needs_input`/`idle` as busy/waiting/idle; initial non-idle state is retained, old observer generations and turn-boundary stale polls cannot overwrite it, and removed/terminal/nonresident/ambiguous actors withdraw the peer. |
 
+## Qwen interactive peer (`T/F`)
+
+| ID | Platforms | Cell |
+|---|---|---|
+| Q-01 | Linux, macOS | Bare `qwen` remains an opt-out; a cold `qwen-peer` uses the exact selected profile and reaches a usable native TUI. |
+| Q-02 | Linux, macOS | Session-free readiness proves package/version, presence-sensitive profile, parser semantics, ACP initialize/capabilities, native archive, trusted cwd, and exact plugin inventory without creating a transcript or reading secrets. |
+| Q-03 | Linux, macOS | Fresh and exact managed resume retain UUID, canonical cwd, native transcript, groups, name, and selected profile; continue/fork and ambiguous managed selectors fail before mutation. |
+| Q-04 | Linux, macOS | Native-default, exact `--no-yolo`→initial `default`, `--yolo`, and admitted native `--approval-mode` launches match argv and durable launch preference; conflicting flags fail before a child exists. Native in-session mode changes remain Qwen-owned. |
+| Q-05 | Linux, macOS | Dual-output admission requires the exact session-start UUID/cwd/version/protocol/event inventory; truncation, replacement, path-type change, native authentication failure, and malformed/out-of-order events fail closed. |
+| Q-06 | Linux, macOS | The published session-stable endpoint is a real `0600` Unix socket, not a symlink. Direct native delivery succeeds at the advertised path with no caller-side resolution or extra hub round trip. |
+| Q-07 | Linux, macOS | Attested Qwen MCP discovery, direct send/reply, atomic multicast, named-group broadcast, idle/busy delivery, and deduplication work; copied environment, bare Qwen, stale process, wrong profile, wrong capability, and model-supplied ID fail closed. |
+| Q-08 | Linux, macOS | Agent restart republishes the same live peer without restarting Qwen or duplicating the service/participant. |
+| Q-09 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, wrapper/native crash, failure before/after publication, recycled PID, replaced file/socket, and legacy symlink cleanup remove only exact owned state and retain retryable debt on ambiguity. |
+| Q-10 | Linux, macOS | Ordinary→managed→ordinary transcript use requires no credential, settings, extension, skill, or transcript migration and leaves no Agent Sessions authority in the ordinary attachment. |
+
 ## Pairwise peer messaging (`T/X`)
 
 For each applicable pair, send a unique marker while destination is idle and
@@ -177,21 +190,23 @@ busy, then require the exact return marker:
 
 | Source | Destinations |
 |---|---|
-| Codex peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Claude peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Grok peer | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Codex lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Claude lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
-| Grok lane | Codex peer, Claude peer, Grok peer, Codex lane, Claude lane, Grok lane |
+| Codex peer | Codex, Claude, Grok, Qwen peer/lane |
+| Claude peer | Codex, Claude, Grok, Qwen peer/lane |
+| Grok peer | Codex, Claude, Grok, Qwen peer/lane |
+| Qwen peer | Codex, Claude, Grok, Qwen peer/lane |
+| Codex lane | Codex, Claude, Grok, Qwen peer/lane |
+| Claude lane | Codex, Claude, Grok, Qwen peer/lane |
+| Grok lane | Codex, Claude, Grok, Qwen peer/lane |
+| Qwen lane | Codex, Claude, Grok, Qwen peer/lane |
 
 Repeat same-host, Linux→macOS, macOS→Linux, and Linux→Linux. Repeat with the
 destination offline then resumed and across federator reconnect. Enqueue-only
 evidence is `RED`.
 
-## Codex, Claude, and Grok lanes (`L/F/X`)
+## Codex, Claude, Grok, and Qwen lanes (`L/F/X`)
 
-Run every applicable cell for local and remote Codex, Claude, and Grok lanes, owned in turn by a
-live Codex peer, a live Claude peer, and a live Grok peer. Grok lane federation is explicitly
+Run every applicable cell for local and remote Codex, Claude, Grok, and Qwen lanes, owned in turn by a
+live Codex peer, a live Claude peer, a live Grok peer, and a live Qwen peer. Grok and Qwen lane federation are explicitly
 implemented. Use real turns and unique names.
 
 | ID | Cell |
@@ -222,6 +237,10 @@ implemented. Use real turns and unique names.
 | L-24 | Grok `lane.status`/`lane.list` report stable and native identities, lifecycle state, collection debt, owner/persistence, and auto-archive policy; every collected terminal result is `turn.completed` with explicit status/outcome/exit. |
 | L-25 | Grok normal archive and crash reconciliation remove the real ACP worker and all attributable MCP/tool descendants on Linux and macOS. The macOS cell must exercise a registered restricted shell in its own session after manager SIGKILL. Unmanaged restricted daemons that create a new session and reparent after their registered shell has exited are explicitly unsupported and excluded from a green cleanup claim, never guessed or killed heuristically. |
 | L-26 | A Codex lane that fails before its first rollout exists remains archivable by exact thread ID. Only an authoritative missing-rollout response plus a local failed record with no turn evidence permits `thread/delete`; transport ambiguity or any turn evidence fails closed. |
+| L-27 | Qwen persists its ACP-created native UUID beside the stable lane UUID and uses one sole ACP client for initialize/new-or-resume, serialized prompt, mode request, and cancel. |
+| L-28 | Qwen native archive/unarchive uses one bounded token-authenticated loopback helper, exact workspace/UUID, idempotent conflict handling, compensation, and zero helper/preheated-child residue. |
+| L-29 | Qwen manager/worker/tool-root/helper crash, PID reuse, agent/supervisor restart, and cleanup retry preserve unrelated processes and converge durable cleanup debt. |
+| L-30 | Qwen launch preference, expected initial mode, and observed current mode or `unknown` remain distinct; Qwen-native later mode changes are neither blocked nor treated as routing authority. |
 
 ## Federation (`X/F`)
 
@@ -240,11 +259,12 @@ implemented. Use real turns and unique names.
 
 Run every local pair and every supported federated pair, not just different-product pairs:
 
-| Parent | Codex lane | Claude lane | Grok lane |
-|---|---|---|---|
-| Codex | required | required | required |
-| Claude | required | required | required |
-| Grok | required | required | required |
+| Parent | Codex lane | Claude lane | Grok lane | Qwen lane |
+|---|---|---|---|---|
+| Codex | required | required | required | required |
+| Claude | required | required | required | required |
+| Grok | required | required | required | required |
+| Qwen | required | required | required | required |
 
 For every cell prove the child gets its own private group plus the immediate
 parent anchor, does not inherit other parent groups by default, inherits them
@@ -274,7 +294,7 @@ user to type `.` for each message is a failed wake cell.
 ## Minimum evidence before saying “ready”
 
 For a new peer adapter: exact installed cold launch, visible real response,
-idle wake, busy wake, two-way messaging, Codex and Claude lane ownership and
+idle wake, busy wake, two-way messaging, all four lane targets and parent roles,
 message flow, resume, permission observation, normal shutdown, crash recovery,
 and cleanup on Linux and macOS. All source gates must also pass. Any missing
 live cell is `BLOCKED` or pending—not green.

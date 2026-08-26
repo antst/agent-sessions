@@ -25,6 +25,7 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const maxFrameBytes = 1024 * 1024
@@ -32,6 +33,7 @@ const maxFrameBytes = 1024 * 1024
 type daemon struct {
 	mu               sync.Mutex
 	sessionID        string
+	attachmentID     string
 	cwd              string
 	name             string
 	nameSource       string
@@ -64,6 +66,8 @@ type daemon struct {
 	// maintenanceBeforeWrite is a test seam for terminal-write ordering.
 	maintenanceBeforeWrite func()
 	handleBeforeFrame      func()
+	messageQueued          func(map[string]any)
+	registrationOverride   func(federator.PeerRegistration) federator.PeerRegistration
 	closeOnce              sync.Once
 	done                   chan struct{}
 }
@@ -76,11 +80,14 @@ type envelope struct {
 //
 //nolint:gocyclo // Runtime role dispatch is intentionally centralized.
 func Main() {
+	if isQwenToolWrapperInvocation() {
+		os.Exit(runQwenToolWrapper(os.Args[1:]))
+	}
 	if isGrokToolWrapperInvocation() {
 		os.Exit(runGrokToolWrapper(os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, grok, grok-host, grok-plugin-verify, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok, grok-host, grok-plugin-verify, qwen-host, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, grok-mcp, or launch")
 		os.Exit(2)
 	}
 	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
@@ -97,12 +104,24 @@ func Main() {
 		os.Exit(runClaudeLaneManager(os.Args[2:]))
 	case "grok-lane-manager":
 		os.Exit(runGrokLaneManager(os.Args[2:]))
+	case "qwen-lane-manager":
+		os.Exit(runQwenLaneManager(os.Args[2:]))
 	case "grok":
 		os.Exit(runGrokSafetyCommand(os.Args[2:]))
 	case "grok-host":
 		os.Exit(runGrokHostCommand(os.Args[2:]))
 	case "grok-plugin-verify":
 		os.Exit(runGrokPluginVerify(os.Args[2:]))
+	case "qwen-plugin-install":
+		os.Exit(runQwenPluginInstall(os.Args[2:]))
+	case "qwen-plugin-remove":
+		os.Exit(runQwenPluginRemove(os.Args[2:]))
+	case "qwen-host":
+		os.Exit(runQwenHostCommand(os.Args[2:]))
+	case "release-package":
+		os.Exit(runReleasePackage(os.Args[2:]))
+	case "release-evidence":
+		os.Exit(runReleaseEvidence(os.Args[2:]))
 	case "hook":
 		runHookCommand()
 	case "mcp":
@@ -118,13 +137,19 @@ func Main() {
 }
 
 func runNativeLaneRole(role string, args []string) (int, bool) {
-	switch role {
-	case "lane":
+	product, known := bridgeProductByLaneRole(role)
+	if !known {
+		return 0, false
+	}
+	switch product.descriptor.ID {
+	case "codex":
 		return runLaneCommand(args), true
-	case "claude-lane":
+	case "claude":
 		return runClaudeLaneCommand(args), true
-	case "grok-lane":
+	case "grok":
 		return runGrokLaneCommand(args), true
+	case "qwen":
+		return runQwenLaneCommand(args), true
 	default:
 		return 0, false
 	}
@@ -212,16 +237,21 @@ func newDaemon(args map[string]string) *daemon {
 	if agentRuntimeDir == "" {
 		agentRuntimeDir = strings.TrimSpace(os.Getenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR"))
 	}
+	stableSocket := filepath.Join(runtimeRoot, fmt.Sprintf("session-%s.sock", key))
 	return &daemon{
-		sessionID: sessionID, cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
+		sessionID: sessionID, attachmentID: strings.TrimSpace(args["attachment-id"]),
+		cwd: cwd, name: sanitizeName(name), nameSource: nameSource,
 		permissionMode: defaultString(args["permission-mode"], "default"), status: status,
 		entrypoint:      entrypoint,
 		agentRuntimeDir: agentRuntimeDir, agentManaged: agentRuntimeDir != "",
 		supervisorSocket: args["supervisor-socket"], supervisorToken: args["supervisor-token"], ownerPID: ownerPID,
 		ownerProcStart: args["owner-proc-start"], procStart: readProcStart(pid),
 		startedAt: time.Now().UnixMilli(), heartbeat: heartbeat,
-		backendSocket: filepath.Join(runtimeRoot, fmt.Sprintf("%d.sock", pid)),
-		stableSocket:  filepath.Join(runtimeRoot, fmt.Sprintf("session-%s.sock", key)),
+		// New adapters bind the stable session path directly. backendSocket is
+		// retained in the state schema as the exact listener path so current
+		// cleanup can also migrate the older PID-socket + symlink shape.
+		backendSocket: stableSocket,
+		stableSocket:  stableSocket,
 		registryFile:  filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)),
 		stateFile:     filepath.Join(dataDir, "sessions", key, "state.json"),
 		inboxDir:      filepath.Join(dataDir, "sessions", key, "inbox"),
@@ -234,14 +264,10 @@ func newDaemon(args map[string]string) *daemon {
 
 func bridgeRuntimeRoot(runtimeDir string, uid int) string {
 	runtimeRoot := filepath.Join(runtimeDir, fmt.Sprintf("codex-claude-peer-%d", uid))
-	// Keep every peer address below the smaller Unix-domain socket limits used
-	// by supported systems. The stable alias is longer than supervisor.sock, so
-	// it is the canonical path-length check for every process in the bridge.
-	longestSocket := filepath.Join(runtimeRoot, "session-"+strings.Repeat("0", 20)+".sock")
-	if len(longestSocket) > 100 {
-		return filepath.Join(os.TempDir(), fmt.Sprintf("ccp-%d", uid))
-	}
-	return runtimeRoot
+	compactRoot := filepath.Join("/tmp", fmt.Sprintf("ccp-%d", uid))
+	// The stable session address is longer than supervisor.sock, so it is the
+	// representative budget for every socket below this root.
+	return socketpath.PreferRoot(runtimeRoot, compactRoot, "session-"+strings.Repeat("0", 20)+".sock")
 }
 
 // ensurePrivateRuntimeDir establishes the trust boundary for every UDS and
@@ -283,17 +309,11 @@ func (d *daemon) start() error {
 		return err
 	}
 	cleanupStaleStateFile(d.stateFile, filepath.Dir(d.backendSocket), filepath.Dir(d.registryFile))
-	_ = os.Remove(d.backendSocket)
-	listener, err := net.Listen("unix", d.backendSocket)
+	listener, err := listenPrivateSessionSocket(d.stableSocket)
 	if err != nil {
 		return err
 	}
 	d.listener = listener
-	_ = os.Chmod(d.backendSocket, 0600)
-	if err := d.publishAlias(); err != nil {
-		d.shutdown()
-		return err
-	}
 	d.mu.Lock()
 	d.refreshNameLocked()
 	err = d.writeRecordsLocked()
@@ -305,6 +325,33 @@ func (d *daemon) start() error {
 	go d.acceptLoop()
 	go d.maintenanceLoop()
 	return nil
+}
+
+func listenPrivateSessionSocket(path string) (net.Listener, error) {
+	if err := socketpath.Validate(path); err != nil {
+		return nil, fmt.Errorf("validate session delivery socket: %w", err)
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil, fmt.Errorf("session delivery socket already exists: %s", path)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect session delivery socket: %w", err)
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, errors.New("session delivery endpoint is not a real Unix socket")
+	}
+	return listener, nil
 }
 
 func (d *daemon) acceptLoop() {
@@ -455,7 +502,9 @@ func (d *daemon) handleUser(frame map[string]any) {
 	if supervisor != "" && d.supervisorOwnsWake(supervisor, item) {
 		return
 	}
-	_ = d.enqueue(item)
+	if err := d.enqueue(item); err == nil && d.messageQueued != nil {
+		d.messageQueued(item)
+	}
 }
 
 func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool {
@@ -503,6 +552,17 @@ func (d *daemon) supervisorOwnsWake(supervisor string, item map[string]any) bool
 
 func (d *daemon) handleControl(frame map[string]any) {
 	action := stringValue(frame["action"])
+	if action == "permission_mode" {
+		mode := strings.TrimSpace(stringValue(frame["permissionMode"]))
+		if mode == "" {
+			return
+		}
+		d.mu.Lock()
+		d.permissionMode = mode
+		_ = d.writeRecordsLocked()
+		d.mu.Unlock()
+		return
+	}
 	if action == "shutdown" {
 		d.closeOnce.Do(func() { close(d.done) })
 		return
@@ -649,6 +709,10 @@ func (d *daemon) writeRecordsLocked() error {
 		"status": d.status, "permissionMode": d.permissionMode, "updatedAt": now, "statusUpdatedAt": now,
 		"messagingSocketPath": d.stableSocket, "bridgeSessionId": nil,
 	}
+	if d.attachmentID != "" && d.attachmentID != d.sessionID {
+		state["attachmentId"] = d.attachmentID
+		registry["attachmentId"] = d.attachmentID
+	}
 	if err := writeJSONAtomic(d.stateFile, state); err != nil {
 		return err
 	}
@@ -660,8 +724,8 @@ func (d *daemon) writeRecordsLocked() error {
 }
 
 func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
-	return federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, Product: d.entrypoint,
+	registration := federator.PeerRegistration{
+		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, AttachmentID: d.attachmentID, Product: d.entrypoint,
 		Name: d.name, Status: d.status, PermissionMode: d.permissionMode, Cwd: d.cwd,
 		PID: os.Getpid(), ProcStart: d.procStart, Socket: d.stableSocket,
 		// The per-session shim is the communication parent's lifetime. Its
@@ -669,6 +733,10 @@ func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
 		// alive after this one is retired.
 		LifecyclePID: os.Getpid(), LifecycleProcStart: d.procStart, StartedAt: d.startedAt,
 	}
+	if d.registrationOverride != nil {
+		registration = d.registrationOverride(registration)
+	}
+	return registration
 }
 
 func (d *daemon) enqueue(item map[string]any) error {
@@ -704,18 +772,6 @@ func (d *daemon) enqueue(item map[string]any) error {
 	sort.Strings(names)
 	for _, name := range names[:max(0, len(names)-50)] {
 		_ = os.Remove(filepath.Join(d.pendingDir, name))
-	}
-	return nil
-}
-
-func (d *daemon) publishAlias() error {
-	temporary := fmt.Sprintf("%s.%d.%s.tmp", d.stableSocket, os.Getpid(), randomID())
-	if err := os.Symlink(d.backendSocket, temporary); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, d.stableSocket); err != nil {
-		_ = os.Remove(temporary)
-		return err
 	}
 	return nil
 }
@@ -853,7 +909,7 @@ func parsePeerMessage(content string) envelope {
 		}
 	}
 	product := defaultString(attrs["from-product"], stringValue(metadata["fromProduct"]))
-	if product != "codex" && product != "claude" && product != "grok" {
+	if _, ok := bridgeProductByID(product); !ok {
 		product = ""
 	}
 	mode := attrs["from-mode"]
@@ -868,7 +924,7 @@ func parsePeerMessage(content string) envelope {
 }
 
 func writeJSONAtomic(file string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return err
 	}
 	return fileutil.WriteJSONAtomic(file, value)

@@ -90,6 +90,47 @@ func TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity(t *testing.T) 
 	}
 }
 
+func TestPeerMessagePresentationIsNeutralProvenance(t *testing.T) {
+	item := map[string]any{
+		"from":        "pdev/session-id",
+		"fromName":    "reviewer",
+		"fromProduct": "claude",
+		"id":          "message-id",
+		"sentAt":      "2026-08-23T12:00:00Z",
+		"receivedAt":  "2026-08-23T12:00:01Z",
+		"message":     "Check this finding independently.",
+	}
+	want := "Message from reviewer (pdev/session-id):\n\n" +
+		"Message metadata: sender-type=claude, message-id=message-id, sent-at=2026-08-23T12:00:00Z, received-at=2026-08-23T12:00:01Z\n\n" +
+		"Check this finding independently."
+	if got := peerMessageText(item); got != want {
+		t.Fatalf("peer message presentation = %q, want %q", got, want)
+	}
+
+	hookWant := strings.ReplaceAll(want, "\n\n", "\n")
+	if got := formatNativeHookMessages([]map[string]any{item}); got != hookWant {
+		t.Fatalf("hook peer message presentation = %q, want %q", got, hookWant)
+	}
+
+	texts := map[string]string{
+		"codex MCP":     mcpInstructions,
+		"claude MCP":    claudeMCPInstructions,
+		"grok MCP":      grokMCPInstructions,
+		"qwen MCP":      qwenMCPInstructions,
+		"startup hook":  hookStartupContext(map[string]any{"name": "peer", "sessionId": "session"}),
+		"overflow hook": nativeInboxOverflowNotice(),
+		"delivery":      peerMessageText(item),
+	}
+	for label, value := range texts {
+		lower := strings.ToLower(value)
+		for _, forbidden := range []string{"trust", "authority", "subject to current user/developer instructions", "it remains subject to"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s injects trust or authority policy %q: %s", label, forbidden, value)
+			}
+		}
+	}
+}
+
 func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *testing.T) {
 	root, runtimeDir := startLaneContextTestAgent(t)
 	configDir := filepath.Join(root, "claude")
@@ -148,6 +189,21 @@ func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *tes
 	if listed, err := callNativePeerTool("list_peers", map[string]any{}, ownID); err != nil ||
 		stringValue(listed["text"]) != "No live peers share a group with this session." {
 		t.Fatalf("Claude structured peer discovery = %#v, %v", listed, err)
+	}
+	const attachmentID = "00000000-0000-4000-8000-0000000000ca"
+	t.Setenv(peerSessionIDEnvironment, attachmentID)
+	resolvedParent := func(_ string, requested string) (federator.ParentContext, error) {
+		if requested != attachmentID {
+			return federator.ParentContext{}, errors.New("unexpected attachment")
+		}
+		return federator.ParentContext{
+			SessionID: ownID, Product: "claude", AdapterPID: os.Getpid(),
+			AdapterProcStart: readProcStart(os.Getpid()), AdapterSocket: ownSocket,
+			PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), PermissionMode: "default",
+		}, nil
+	}
+	if caller, err := attestClaudeMCPCallerWithResolver(paths, os.Getpid(), resolvedParent); err != nil || caller != ownID {
+		t.Fatalf("late-bound Claude attachment caller = %q, %v", caller, err)
 	}
 
 	foreign := exec.Command("sleep", "30")
@@ -333,9 +389,9 @@ func TestSplitDynamicMCPName(t *testing.T) {
 		server    string
 		name      string
 	}{
-		{tool: "mcp__claude_peer__list_peers", server: "claude_peer", name: "list_peers"},
-		{tool: "tools.mcp__claude_peer__send_message", server: "claude_peer", name: "send_message"},
-		{namespace: "mcp__claude_peer", tool: "identity", server: "claude_peer", name: "identity"},
+		{tool: "mcp__agent_sessions__list_peers", server: "agent_sessions", name: "list_peers"},
+		{tool: "tools.mcp__agent_sessions__send_message", server: "agent_sessions", name: "send_message"},
+		{namespace: "mcp__agent_sessions", tool: "identity", server: "agent_sessions", name: "identity"},
 	}
 	for _, test := range tests {
 		server, name, ok := splitDynamicMCPName(test.namespace, test.tool)
@@ -350,7 +406,7 @@ func TestSplitDynamicMCPName(t *testing.T) {
 
 func TestNativePeerElicitationApprovalIsServerScoped(t *testing.T) {
 	trusted, _ := json.Marshal(map[string]any{
-		"serverName": "claude_peer", "mode": "form",
+		"serverName": "agent_sessions", "mode": "form",
 		"_meta": map[string]any{"codex_approval_kind": "mcp_tool_call", "tool_name": "send_message"},
 	})
 	response, ok := nativePeerElicitationResponse(trusted)
@@ -363,7 +419,7 @@ func TestNativePeerElicitationApprovalIsServerScoped(t *testing.T) {
 	if _, ok := nativePeerElicitationResponse(foreign); ok {
 		t.Fatal("foreign MCP server approval was trusted")
 	}
-	ordinary, _ := json.Marshal(map[string]any{"serverName": "claude_peer", "mode": "form", "_meta": map[string]any{}})
+	ordinary, _ := json.Marshal(map[string]any{"serverName": "agent_sessions", "mode": "form", "_meta": map[string]any{}})
 	if _, ok := nativePeerElicitationResponse(ordinary); ok {
 		t.Fatal("ordinary peer elicitation was auto-accepted")
 	}

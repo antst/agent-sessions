@@ -186,10 +186,14 @@ def main():
 
         peer_a = Peer(str(fixture), host_a / "runtime", "session-a", "codex", "alpha", ["project"], root / "peer-a.log")
         peer_b = Peer(str(fixture), host_b / "runtime", "session-b", "claude", "beta", ["project"], root / "peer-b.log")
+        peer_qwen = Peer(str(fixture), host_b / "runtime", "session-qwen", "qwen", "gamma", ["project"], root / "peer-qwen.log")
         peer_hidden = Peer(str(fixture), host_b / "runtime", "session-hidden", "grok", "hidden", ["other"], root / "peer-hidden.log")
-        processes.extend([peer_a, peer_b, peer_hidden])
+        processes.extend([peer_a, peer_b, peer_qwen, peer_hidden])
 
-        wait_for(lambda: discovered_sessions(peer_a, "discover-initial") == {"session-b"}, "group-filtered remote discovery")
+        qwen_socket = host_b / "runtime" / "fixture-session-qwen.sock"
+        wait_for(lambda: qwen_socket.is_socket(), "real Qwen fixture destination socket")
+
+        wait_for(lambda: discovered_sessions(peer_a, "discover-initial") == {"session-b", "session-qwen"}, "group-filtered remote discovery")
         assert discovered_sessions(peer_hidden, "discover-hidden") == set()
         wait_for(lambda: len(service_rows(host_a / "claude")) == 1, "one host-a service row")
         wait_for(lambda: len(service_rows(host_b / "claude")) == 1, "one host-b service row")
@@ -200,14 +204,21 @@ def main():
         assert delivered["content"] == "HELLO_GROUPED"
         assert delivered["source"]["entrypoint"] == "codex"
 
+        qwen_sent = peer_a.command("send-a-qwen", frame("send", "send-a-qwen", targets=["gamma"], content="HELLO_QWEN"))
+        assert qwen_sent["result"]["deliveries"] == [{"target": "host-b/session-qwen", "session_id": "session-qwen", "status": "accepted"}], qwen_sent
+        qwen_delivered = peer_qwen.wait_delivery("send-a-qwen")["frame"]
+        assert qwen_delivered["content"] == "HELLO_QWEN"
+        assert qwen_delivered["source"]["entrypoint"] == "codex"
+
         denied = peer_a.command("atomic-denied", frame("send", "atomic-denied", targets=["beta", "hidden"], content="NO"))
         assert "error" in denied, denied
         peer_b.assert_no_delivery("atomic-denied")
         peer_hidden.assert_no_delivery("atomic-denied")
 
         broadcast = peer_a.command("broadcast-project", frame("broadcast", "broadcast-project", group="project", content="ALL_PROJECT"))
-        assert len(broadcast["result"]["deliveries"]) == 1, broadcast
+        assert len(broadcast["result"]["deliveries"]) == 2, broadcast
         assert peer_b.wait_delivery("broadcast-project")["frame"]["content"] == "ALL_PROJECT"
+        assert peer_qwen.wait_delivery("broadcast-project")["frame"]["content"] == "ALL_PROJECT"
         peer_hidden.assert_no_delivery("broadcast-project")
 
         # Restart the hub. Agents reconnect and grouped routing resumes without
@@ -216,7 +227,7 @@ def main():
         processes.remove(hub)
         hub = Managed([binary, "hub", "--listen", hub_address], root / "hub-restart.log")
         processes.append(hub)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-hub") == {"session-b"}, "roster after hub restart", 15)
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-hub") == {"session-b", "session-qwen"}, "roster after hub restart", 15)
         peer_a.command("send-after-hub", frame("send", "send-after-hub", targets=["session-b"], content="AFTER_HUB"))
         assert peer_b.wait_delivery("send-after-hub")["frame"]["content"] == "AFTER_HUB"
 
@@ -226,14 +237,20 @@ def main():
         processes.remove(agent_b)
         agent_b = Managed(agent_command(binary, hub_address, "host-b", host_b), root / "agent-b-restart.log")
         processes.append(agent_b)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-agent") == {"session-b"}, "peer re-registration after agent restart", 15)
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-agent") == {"session-b", "session-qwen"}, "peer re-registration after agent restart", 15)
         wait_for(lambda: len(service_rows(host_b / "claude")) == 1, "single service row after agent restart")
         peer_a.command("send-after-agent", frame("send", "send-after-agent", targets=["beta"], content="AFTER_AGENT"))
         assert peer_b.wait_delivery("send-after-agent")["frame"]["content"] == "AFTER_AGENT"
 
         peer_b.stop()
         processes.remove(peer_b)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-exit") == set(), "remote peer removal")
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-exit") == {"session-qwen"}, "exact remote peer removal")
+        peer_qwen.stop()
+        processes.remove(peer_qwen)
+        wait_for(lambda: discovered_sessions(peer_a, "discover-after-qwen-exit") == set(), "remote Qwen peer removal")
+        wait_for(lambda: not qwen_socket.exists(), "exact remote Qwen destination socket cleanup")
+        assert peer_hidden.process.poll() is None, "unrelated remote peer was stopped by Qwen cleanup"
+        assert len(service_rows(host_b / "claude")) == 1, "Qwen cleanup changed the destination service row"
         print("grouped federation integration: PASS")
         success = True
         return 0

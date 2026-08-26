@@ -62,7 +62,7 @@ func TestKilledShimArtifactsAreGarbageCollected(t *testing.T) {
 		}
 	}
 	stats := cleanupStaleBridgeArtifacts(paths)
-	if stats.StateFiles != 1 || stats.RegistryFiles != 1 || stats.SocketFiles != 2 {
+	if stats.StateFiles != 1 || stats.RegistryFiles != 1 || stats.SocketFiles != 1 {
 		t.Fatalf("unexpected cleanup stats: %#v", stats)
 	}
 	for _, path := range bridgeArtifactPaths(state) {

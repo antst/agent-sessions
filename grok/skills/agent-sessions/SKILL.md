@@ -1,6 +1,6 @@
 ---
 name: agent-sessions
-description: Discover and message grouped Codex, Claude, and Grok Agent Sessions peers. Use when the user asks to list peers, send, reply, acknowledge, multicast, or broadcast, and whenever an incoming Agent Sessions delivery requests a response.
+description: Discover and message grouped Codex, Claude, Grok, and Qwen Agent Sessions peers. Use when the user asks to list peers, send, reply, acknowledge, multicast, or broadcast, and whenever an incoming Agent Sessions delivery requests a response.
 ---
 
 # Grouped Agent Sessions messaging

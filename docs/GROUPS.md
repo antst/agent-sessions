@@ -21,7 +21,7 @@ Federation is an optional transport of the same host agent. Local routing must
 work without a federation hub.
 
 Product-specific managers retain sole ownership of Codex threads, Claude
-processes, Grok ACP sessions, and future product sessions. Restarting the host
+processes, and Grok/Qwen ACP sessions. Restarting the host
 agent must not terminate those sessions; live participants reconnect and
 register again.
 
@@ -34,7 +34,7 @@ need.
 
 ## Membership
 
-`codex-peer`, `claude-peer`, and `grok-peer` accept repeatable
+`codex-peer`, `claude-peer`, `grok-peer`, and `qwen-peer` accept repeatable
 `-g NAME` or `--group NAME` arguments. Group names are opaque, case-sensitive strings after
 basic length and character validation.
 
@@ -72,7 +72,7 @@ names can be reused or changed. Delegation does not override the receiving sessi
 instructions, permission mode, sandbox, or approval requirements.
 
 The parent layer and target layer are independent. Any registered Codex,
-Claude, or Grok parent can launch any supported Codex, Claude, or Grok lane.
+Claude, Grok, or Qwen parent can launch any supported Codex, Claude, Grok, or Qwen lane.
 Parent resolution supplies lifecycle and group context; the selected target
 adapter continues to own its native thread/process/ACP semantics.
 
@@ -99,7 +99,7 @@ Within the same-user trust boundary, the host agent maps the top-level native
 source fields before routing. The native stream does not independently prove
 that the connecting process owns the claimed reply socket. Delivery to Claude
 wraps the same Agent Sessions frame in a new Claude-native envelope. Codex,
-Grok, federation, and future product adapters carry the same inner frame.
+Grok, Qwen, and federation adapters carry the same inner frame.
 
 Claude's outer envelope remains unchanged and uses its exact native attribute
 grammar. Agent Sessions fields exist only in the inner frame. On a relayed
@@ -110,6 +110,12 @@ and never upgrades the outer permission class.
 The service session is not a group member and is never a broadcast recipient.
 There is one service session per host/profile, not one service session per
 group or remote peer.
+
+This carrier remains a protocol compatibility surface, not an automatic retry
+policy. Current Claude-facing skills use the structured `agent_sessions` MCP
+tools exclusively for Agent Sessions operations. If those tools are inactive or
+fail, the model must report that failure and stop rather than retrying with
+native `ListAgents` or `SendMessage`.
 
 Installation does not change the profile's default `crossSessionInbound`
 policy. Each managed Claude peer or lane supplies `accept` only as a launch

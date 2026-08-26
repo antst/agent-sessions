@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestPeerRegistrationRequiresCatalogAndRestoresGroups(t *testing.T) {
@@ -181,6 +182,25 @@ func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *test
 	}
 	if _, _, err := first.preparePeerLaunch(registration, update, expected); err != nil {
 		t.Fatal(err)
+	}
+	body, err := os.ReadFile(first.preparationPath(sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var durable map[string]any
+	if err := json.Unmarshal(body, &durable); err != nil {
+		t.Fatal(err)
+	}
+	version, _ := durable["version"].(float64)
+	product, _ := durable["product"].(string)
+	if int(version) != peerPreparationVersion || product != "claude" || durable["product_payload"] == nil {
+		t.Fatalf("durable preparation is not a versioned product envelope: %s", body)
+	}
+	durableRegistration, _ := durable["registration"].(map[string]any)
+	for _, key := range []string{"claude_config_root", "claude_key_baseline", "claude_socket_path"} {
+		if _, exists := durableRegistration[key]; exists {
+			t.Fatalf("Claude field %q escaped the product payload: %s", key, body)
+		}
 	}
 	// A restarted agent recovers the preparation before the native adapter has
 	// ever published or completed a full peer registration.
@@ -415,6 +435,66 @@ func TestLoadLegacyRawClaudePeerPreparation(t *testing.T) {
 	}
 }
 
+func TestLoadCurrentTransactionalClaudePeerPreparation(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "00000000-0000-4000-8000-000000000209"
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: 2001, ProcStart: "adapter-start", AdapterStrongStart: "adapter-strong",
+		LifecyclePID: 2002, LifecycleProcStart: "lifecycle-start", LifecycleStrongStart: "lifecycle-strong",
+	}
+	agent := &agent{
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(root, "preparations"),
+	}
+	if err := os.MkdirAll(agent.preparationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	current := struct {
+		Registration        PeerRegistration    `json:"registration"`
+		PriorPreference     *SessionPreferences `json:"prior_preference,omitempty"`
+		DesiredPreference   SessionPreferences  `json:"desired_preference,omitempty"`
+		RollbackPreferences bool                `json:"rollback_preferences,omitempty"`
+		Committed           bool                `json:"committed,omitempty"`
+	}{Registration: registration, Committed: true}
+	if err := writeJSONAtomic(agent.preparationPath(sessionID), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.loadPeerPreparations(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := agent.preparations[sessionID]
+	if !ok || !samePreparedRegistration(loaded.Registration, registration) || !loaded.Committed {
+		t.Fatalf("current transactional preparation was not migrated: %+v", loaded)
+	}
+}
+
+func TestPeerPreparationTypedCleanupDebtRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "preparation.json")
+	registration := PeerRegistration{Version: GroupProtocolVersion, SessionID: "session-debt", Product: "claude"}
+	debt := PeerCleanupDebt{
+		Version: 1, DebtID: "debt-a", Revision: "revision-a", Product: "claude",
+		OwnerKind: "peer", OwnerID: registration.SessionID, Operation: "unlink",
+		ExpectedPath: filepath.Join(root, "owned.sock"), ExpectedDigest: strings.Repeat("a", 64),
+		ObservationState: "unknown", Attempts: 2, LastError: "identity unavailable",
+		UpdatedAt: 1234, TerminalWhenClean: "absent",
+	}
+	if err := writePeerPreparation(path, peerPreparation{Registration: registration, CleanupDebt: []PeerCleanupDebt{debt}}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := decodePeerPreparation(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.CleanupDebt) != 1 || loaded.CleanupDebt[0] != debt {
+		t.Fatalf("typed cleanup debt round trip = %+v, want %+v", loaded.CleanupDebt, debt)
+	}
+}
+
 func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
@@ -501,6 +581,173 @@ func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
 		}
 	} else if exists || len(agent.local) != 0 {
 		t.Fatalf("canceled transaction left partial commit: register=%v preference=%+v exists=%v local=%d", registerErr, preference, exists, len(agent.local))
+	}
+}
+
+func TestNamedClaudeSelectionPromotesAcrossAgentRestart(t *testing.T) {
+	root := testutil.ShortSocketRoot(t, "ncs-", filepath.Join("runtime", "agent.sock"))
+	runtimeDir := filepath.Join(root, "runtime")
+	stateDir := filepath.Join(root, "state")
+	configRoot := filepath.Join(root, "claude")
+	for _, directory := range []string{runtimeDir, stateDir, filepath.Join(configRoot, "sessions")} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalogPath := filepath.Join(stateDir, "sessions.json")
+	catalog, err := openSessionCatalog(catalogPath, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const attachmentID = "00000000-0000-4000-8000-0000000002a1"
+	const selectedID = "00000000-0000-4000-8000-0000000002a2"
+	adapter := exec.Command("sleep", "30")
+	lifecycle := exec.Command("sleep", "30")
+	if err := adapter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(); err != nil {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = adapter.Process.Kill()
+		_ = adapter.Wait()
+		_ = lifecycle.Process.Kill()
+		_ = lifecycle.Wait()
+	})
+	managedSocket := ClaudePeerMessagingSocketPath(runtimeDir, attachmentID)
+	preparation := registrationWithClaudeKeyBaseline(t, PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: attachmentID, AttachmentID: attachmentID, Product: "claude",
+		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
+		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
+		LifecycleRoot: ClaudePeerLifecycleRootInState(stateDir, attachmentID), ClaudeConfigRoot: configRoot,
+		ClaudeSocketPath: managedSocket, ClaudeSocketPathSet: true,
+	})
+	preparationDir := filepath.Join(stateDir, "claude-peer-preparations")
+	hostAgent := &agent{
+		options: AgentOptions{
+			HostID: "host-a", HostName: "Host A", RuntimeDir: runtimeDir,
+			StateDir: stateDir, ClaudeConfigDir: configRoot,
+		},
+		catalog: catalog, local: map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: preparationDir,
+		localChanged: make(chan struct{}, 1),
+	}
+	if err := hostAgent.prepareClaudePeerSelection(preparation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, exists, err := catalog.get(attachmentID); err != nil || exists {
+		t.Fatalf("provisional selection mutated catalog: exists=%v err=%v", exists, err)
+	}
+	listener, err := net.Listen("unix", managedSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	registration := preparation
+	registration.SessionID = selectedID
+	registration.Name = "ordinary-title"
+	registration.Status = "idle"
+	registration.PermissionMode = "default"
+	registration.Socket = managedSocket
+	update := SessionPreferenceUpdate{
+		SessionID: selectedID, Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"peer-dev"}, GroupsSpecified: true,
+	}
+	expected, _, err := catalog.preview(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, groups, err := hostAgent.promoteClaudePeerSelection(registration, update, expected); err != nil {
+		t.Fatal(err)
+	} else if !slices.Contains(groups, "peer-dev") {
+		t.Fatalf("promoted groups = %v", groups)
+	}
+	if _, _, exists, err := catalog.get(attachmentID); err != nil || exists {
+		t.Fatalf("promotion retained provisional catalog row: exists=%v err=%v", exists, err)
+	}
+	if preference, _, exists, err := catalog.get(selectedID); err != nil || !exists || preference.Product != "claude" {
+		t.Fatalf("promotion did not adopt selected session: preference=%+v exists=%v err=%v", preference, exists, err)
+	}
+
+	// Reopen both durable stores between selection and registration. The journal
+	// stays under the provisional attachment identity while its catalog decision
+	// and subsequent live peer use Claude's selected UUID.
+	restartedCatalog, err := openSessionCatalog(catalogPath, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := &agent{
+		options: hostAgent.options, catalog: restartedCatalog,
+		local: map[string]localPeer{}, retirements: map[string]localPeer{},
+		preparations: map[string]peerPreparation{}, preparationDir: preparationDir,
+		localChanged: make(chan struct{}, 1),
+	}
+	if err := restarted.loadPeerPreparations(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := restarted.preparations[attachmentID]; !ok {
+		t.Fatal("restarted agent lost provisional preparation identity")
+	}
+	if _, err := restarted.registerPeer(registration, false); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := restarted.parentContext(attachmentID)
+	if err != nil || parent.SessionID != selectedID || !slices.Contains(parent.Groups, "peer-dev") {
+		t.Fatalf("provisional parent alias = %+v, %v", parent, err)
+	}
+	if err := restarted.cancelPeerPreparation(preparation); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.preparations) != 0 {
+		t.Fatalf("committed selection retained preparation: %d", len(restarted.preparations))
+	}
+	if _, _, exists, err := restartedCatalog.get(selectedID); err != nil || !exists {
+		t.Fatalf("committed selection was rolled back: exists=%v err=%v", exists, err)
+	}
+
+	const canceledAttachmentID = "00000000-0000-4000-8000-0000000002a3"
+	const canceledSelectedID = "00000000-0000-4000-8000-0000000002a4"
+	if _, _, err := restartedCatalog.update(SessionPreferenceUpdate{
+		SessionID: canceledSelectedID, Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"prior"}, GroupsSpecified: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	canceledSocket := ClaudePeerMessagingSocketPath(runtimeDir, canceledAttachmentID)
+	canceledPreparation := registrationWithClaudeKeyBaseline(t, PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: canceledAttachmentID, AttachmentID: canceledAttachmentID, Product: "claude",
+		PID: adapter.Process.Pid, ProcStart: processStart(adapter.Process.Pid),
+		LifecyclePID: lifecycle.Process.Pid, LifecycleProcStart: processStart(lifecycle.Process.Pid),
+		LifecycleRoot: ClaudePeerLifecycleRootInState(stateDir, canceledAttachmentID), ClaudeConfigRoot: configRoot,
+		ClaudeSocketPath: canceledSocket, ClaudeSocketPathSet: true,
+	})
+	if err := restarted.prepareClaudePeerSelection(canceledPreparation); err != nil {
+		t.Fatal(err)
+	}
+	canceledRegistration := canceledPreparation
+	canceledRegistration.SessionID = canceledSelectedID
+	canceledRegistration.Socket = canceledSocket
+	canceledUpdate := SessionPreferenceUpdate{
+		SessionID: canceledSelectedID, Product: "claude", Kind: SessionKindInteractive,
+		ExplicitGroups: []string{"replacement"}, GroupsSpecified: true,
+	}
+	canceledExpected, _, err := restartedCatalog.preview(canceledUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := restarted.promoteClaudePeerSelection(canceledRegistration, canceledUpdate, canceledExpected); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.cancelPeerPreparation(canceledPreparation); err != nil {
+		t.Fatal(err)
+	}
+	prior, priorGroups, exists, err := restartedCatalog.get(canceledSelectedID)
+	if err != nil || !exists || prior.Product != "claude" ||
+		!slices.Contains(priorGroups, "prior") || slices.Contains(priorGroups, "replacement") {
+		t.Fatalf("canceled selection did not restore prior catalog row: preference=%+v groups=%v exists=%v err=%v", prior, priorGroups, exists, err)
 	}
 }
 
@@ -743,6 +990,49 @@ func TestRetirementAcquiresProfileLockBeforeStoppingAdapter(t *testing.T) {
 	}
 }
 
+func TestUnpromotedNamedClaudeSelectionCleansPublishedNativeUUID(t *testing.T) {
+	root := t.TempDir()
+	configRoot := filepath.Join(root, "claude")
+	registryDir := filepath.Join(configRoot, "sessions")
+	if err := os.MkdirAll(registryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const absentPID = 1_000_000_000
+	const attachmentID = "00000000-0000-4000-8000-0000000002b1"
+	const selectedID = "00000000-0000-4000-8000-0000000002b2"
+	socket := filepath.Join(root, "cp-provisional.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(registryDir, strconv.Itoa(absentPID)+".json")
+	if err := writeJSONAtomic(recordPath, registryRecord{
+		PID: absentPID, SessionID: selectedID, ProcStart: "selected-start", MessagingSocketPath: socket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	peer := localPeer{
+		Peer: Peer{SessionID: attachmentID}, PID: absentPID, ProcStart: "selected-start", Socket: socket,
+		ClaudeConfigRoot: configRoot, ClaudeKeyBaselineSet: true, ClaudeSessionUnresolved: true,
+	}
+	strict := peer
+	strict.ClaudeSessionUnresolved = false
+	if err := cleanupClaudePeerArtifactsLocked(strict, nil); err == nil {
+		t.Fatal("ordinary cleanup accepted a different native session UUID")
+	}
+	if err := cleanupClaudePeerArtifactsLocked(peer, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{recordPath, socket} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("unpromoted native selection artifact survived: %s (%v)", path, err)
+		}
+	}
+}
+
 func TestPublishServiceRecordRemovesOnlyAttestedStaleServiceRows(t *testing.T) {
 	root := t.TempDir()
 	registryDir := filepath.Join(root, "sessions")
@@ -979,6 +1269,77 @@ func TestSessionNameResolutionMigratesOnlyManagedClaudeTranscriptTitles(t *testi
 	if _, err := agent.resolveSessionName("claude", "test"); err == nil || !strings.Contains(err.Error(), "ambiguous") ||
 		!strings.Contains(err.Error(), managedID) || !strings.Contains(err.Error(), secondID) {
 		t.Fatalf("managed transcript title ambiguity = %v", err)
+	}
+}
+
+func TestClaudeRegistrationUsesLatestNativeTranscriptTitle(t *testing.T) {
+	root := t.TempDir()
+	claudeRoot := filepath.Join(root, "claude")
+	project := filepath.Join(claudeRoot, "projects", "-work")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "00000000-0000-4000-8000-0000000000d3"
+	transcript := filepath.Join(project, sessionID+".jsonl")
+	writeTitle := func(title string, appendFile bool) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "custom-title", "sessionId": sessionID, "customTitle": title,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+		if appendFile {
+			flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		}
+		file, err := os.OpenFile(transcript, flag, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = file.Write(append(body, '\n')); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTitle("spec", false)
+	catalog, err := openSessionCatalog(filepath.Join(root, "sessions.json"), "host-spec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := catalog.update(SessionPreferenceUpdate{SessionID: sessionID, Product: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	socket, listener := registrationSocket(t, root, "peer.sock")
+	defer func() { _ = listener.Close() }()
+	agent := &agent{
+		options: AgentOptions{
+			HostID: "host-spec", HostName: "spec", StateDir: root, ClaudeConfigDir: claudeRoot,
+		},
+		catalog: catalog, local: map[string]localPeer{}, remote: map[string]Peer{},
+		localChanged: make(chan struct{}, 1),
+	}
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude", Name: "kernel-tdd-2c",
+		PermissionMode: "default", PID: os.Getpid(), ProcStart: processStart(os.Getpid()), Socket: socket,
+	}
+	peer, err := agent.registerPeer(registration, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peer.Name != "spec" || peer.DisplayName != "spec--spec" {
+		t.Fatalf("initial Claude transcript name = %+v", peer)
+	}
+	writeTitle("reviewer", true)
+	peer, err = agent.registerPeer(registration, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peer.Name != "reviewer" || peer.DisplayName != "reviewer--spec" {
+		t.Fatalf("refreshed Claude transcript name = %+v", peer)
 	}
 }
 

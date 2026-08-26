@@ -127,7 +127,7 @@ Pick one mode. Modes A and B are both correct; C is a fallback.
 terminal notice arrives as a peer message carrying `collection=required` and the exact `wait`
 command. That message is a *pointer, never a result*. On arrival:
 
-Peer delivery is push-based. Do **not** poll `claude_peer.check_inbox`, sleep, or block the
+Peer delivery is push-based. Do **not** poll `agent_sessions.check_inbox`, sleep, or block the
 orchestrator waiting for the notice; continue useful work and the message will be injected
 automatically. `check_inbox` is only a recovery tool for content queued past a delivery boundary.
 
@@ -163,10 +163,12 @@ Exit codes: `0` completed, `124` timed out, `130` interrupted, `1` everything el
 
 ### 3. Talk to a running lane
 
-Use the `agent-sessions` skill and send a complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the one host-agent
-service. Address the lane by its current visible name or exact host-qualified identity. A message
-wakes an idle lane or steers a turn already in flight. Message delivery does not return the result;
-a turn started by an inbound message is collected by a later `wait`.
+Use the `agent-sessions` skill and `agent_sessions.send_message`. Address the
+lane by its current visible name or exact host-qualified identity. Do not fall
+back to Claude's native messaging when the structured tool fails. A message
+wakes an idle lane or steers a turn already in flight. Message delivery does
+not return the result; a turn started by an inbound message is collected by a
+later `wait`.
 
 For a remote lane, use its current host-qualified identity from Agent Sessions discovery. The
 destination-local lane name and session ID are valid behind `peer-federator lane` for lifecycle

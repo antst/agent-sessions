@@ -7,13 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,16 +21,13 @@ import (
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const claudeLaneContractVersion = 1
 
 type claudeLaneOptions struct {
-	command            string
-	name               string
-	nameSet            bool
-	cwd                string
-	cwdSet             bool
+	laneCommonOptions
 	model              string
 	effort             string
 	permissionMode     string
@@ -43,21 +38,6 @@ type claudeLaneOptions struct {
 	allowedToolsSet    bool
 	disallowedTools    string
 	disallowedToolsSet bool
-	timeout            time.Duration
-	timeoutSet         bool
-	promptFile         string
-	notifyTarget       string
-	notifyExplicit     bool
-	disableNotify      bool
-	persistent         bool
-	persistentSet      bool
-	autoArchive        bool
-	noAutoArchiveSet   bool
-	autoArchiveDelay   time.Duration
-	autoArchiveCustom  bool
-	ownerPID           int
-	ownerProcStart     string
-	ownerSessionID     string
 	schemaFile         string
 	outputSchema       json.RawMessage
 	worktree           bool
@@ -68,14 +48,6 @@ type claudeLaneOptions struct {
 	permissionModeSet  bool
 	maxBudgetUSDSet    bool
 	schemaSet          bool
-	target             string
-	allowDuplicateName bool
-	all                bool
-	mine               bool
-	json               bool
-	stdinMarker        bool
-	help               bool
-	groupOptions       laneGroupOptions
 }
 
 type claudeLaneTurn struct {
@@ -219,7 +191,7 @@ Claude policy options are passed through without inventing a Codex sandbox mappi
       --notify PEER            persistent lanes: send terminal pointers here
       --no-notify              parent-owned lanes: suppress owner notification
       --worktree               create a detached git worktree for this lane
-	  --group GROUP           add a child group; repeatable
+	  -g, --group GROUP       add a child group; repeatable
 	  --inherit-groups        also inherit the parent's non-private groups
 	  --no-inherit-groups     retain only the mandatory parent anchor
       --prompt-file FILE
@@ -231,161 +203,38 @@ prompts. A corroborated bypass owner is inherited unless a mode is explicit.
 `
 }
 
-//nolint:gocyclo // The CLI contract is intentionally centralized and explicit.
 func parseClaudeLaneArgs(argv []string) (claudeLaneOptions, error) {
-	o := claudeLaneOptions{
-		cwd: mustGetwd(), permissionMode: "dontAsk", autoArchive: true,
-		autoArchiveDelay: defaultLaneAutoArchiveDelay,
+	o := claudeLaneOptions{laneCommonOptions: newLaneCommonOptions("SESSION_OR_NAME"), permissionMode: "dontAsk"}
+	start, done, err := beginLaneOptionParse(argv, &o.laneCommonOptions)
+	if done || err != nil {
+		return o, err
 	}
-	if len(argv) == 0 {
-		o.help = true
-		return o, nil
+	parser := newLaneFlagParser("claude-peer-lane", &o.laneCommonOptions)
+	parser.set.StringVarP(&o.model, "model", "m", o.model, "model")
+	parser.set.StringVar(&o.effort, "effort", o.effort, "reasoning effort")
+	parser.set.StringVar(&o.permissionMode, "permission-mode", o.permissionMode, "permission mode")
+	parser.set.StringVar(&o.maxBudgetUSD, "max-budget-usd", o.maxBudgetUSD, "maximum budget")
+	parser.set.StringVar(&o.tools, "tools", o.tools, "tools")
+	parser.set.StringVar(&o.allowedTools, "allowed-tools", o.allowedTools, "allowed tools")
+	parser.set.StringVar(&o.disallowedTools, "disallowed-tools", o.disallowedTools, "disallowed tools")
+	parser.set.StringVar(&o.schemaFile, "schema", o.schemaFile, "output schema")
+	parser.set.BoolVar(&o.bare, "bare", o.bare, "bare mode")
+	parser.set.BoolVar(&o.worktree, "worktree", o.worktree, "create a worktree")
+	positionals, err := parser.parse(argv[start:])
+	if err != nil {
+		return o, err
 	}
-	for _, argument := range argv {
-		if argument == "-h" || argument == "--help" {
-			o.help = true
-			return o, nil
-		}
-	}
-	o.command = argv[0]
-	if !containsString([]string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"}, o.command) {
-		return o, fmt.Errorf("unknown command %q", o.command)
-	}
-	positionals := []string{}
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		take := func() (string, error) {
-			if index+1 >= len(argv) || argv[index+1] == "" {
-				return "", fmt.Errorf("%s requires a value", argument)
-			}
-			index++
-			return argv[index], nil
-		}
-		takeAllowEmpty := func() (string, error) {
-			if index+1 >= len(argv) {
-				return "", fmt.Errorf("%s requires a value", argument)
-			}
-			index++
-			return argv[index], nil
-		}
-		var value string
-		var err error
-		switch argument {
-		case "-n", "--name", "--peer-name":
-			value, err = take()
-			o.name, o.nameSet = value, true
-		case "-C", "--cd":
-			value, err = take()
-			o.cwd, o.cwdSet = value, true
-		case "-m", "--model":
-			value, err = take()
-			o.model = value
-			o.modelSet = true
-		case "--effort":
-			value, err = take()
-			o.effort = value
-			o.effortSet = true
-		case "--permission-mode":
-			value, err = take()
-			o.permissionMode = value
-			o.permissionModeSet = true
-		case "--max-budget-usd":
-			value, err = take()
-			o.maxBudgetUSD = value
-			o.maxBudgetUSDSet = true
-		case "--tools":
-			value, err = takeAllowEmpty()
-			o.tools = value
-			o.toolsSet = true
-		case "--allowed-tools":
-			value, err = take()
-			o.allowedTools = value
-			o.allowedToolsSet = true
-		case "--disallowed-tools":
-			value, err = take()
-			o.disallowedTools = value
-			o.disallowedToolsSet = true
-		case "--schema":
-			value, err = take()
-			o.schemaFile = value
-			o.schemaSet = true
-		case "--bare":
-			o.bare = true
-			o.bareSet = true
-		case "--timeout":
-			value, err = take()
-			if err == nil {
-				o.timeout, err = parseClaudeLaneSeconds(value, false, "--timeout")
-				o.timeoutSet = err == nil
-			}
-		case "--prompt-file":
-			value, err = take()
-			o.promptFile = value
-		case "--notify":
-			value, err = take()
-			o.notifyTarget, o.notifyExplicit = value, true
-		case "--no-notify":
-			o.disableNotify = true
-		case "--persistent":
-			o.persistent, o.persistentSet = true, true
-		case "--no-auto-archive":
-			o.autoArchive, o.noAutoArchiveSet = false, true
-		case "--auto-archive-after":
-			value, err = take()
-			if err == nil {
-				o.autoArchiveDelay, err = parseClaudeLaneSeconds(value, true, "--auto-archive-after")
-				o.autoArchiveCustom = err == nil
-			}
-		case "--worktree":
-			o.worktree = true
-		case "--group":
-			value, err = take()
-			o.groupOptions.groups = append(o.groupOptions.groups, value)
-			o.groupOptions.groupsSpecified = true
-		case "--inherit-groups":
-			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = true, true
-		case "--no-inherit-groups":
-			o.groupOptions.inheritParentGroups, o.groupOptions.inheritGroupsSpecified = false, true
-		case "--allow-duplicate-name":
-			o.allowDuplicateName = true
-		case "--all":
-			o.all = true
-		case "--mine":
-			o.mine = true
-		case "--json":
-			o.json = true
-		case "-":
-			o.stdinMarker = true
-		default:
-			if strings.HasPrefix(argument, "-") {
-				return o, fmt.Errorf("unknown option %s", argument)
-			}
-			positionals = append(positionals, argument)
-		}
-		if err != nil {
-			return o, err
-		}
-	}
-	if o.notifyTarget != "" && o.disableNotify {
-		return o, errors.New("--notify and --no-notify cannot be used together")
-	}
-	if o.notifyExplicit && !o.persistent && o.command != "resume" {
-		return o, errors.New("--notify requires --persistent; parent-owned lanes notify their owner automatically")
-	}
-	if o.autoArchiveCustom && !o.autoArchive {
-		return o, errors.New("--auto-archive-after and --no-auto-archive cannot be used together")
-	}
+	o.modelSet = parser.set.Changed("model")
+	o.effortSet = parser.set.Changed("effort")
+	o.permissionModeSet = parser.set.Changed("permission-mode")
+	o.maxBudgetUSDSet = parser.set.Changed("max-budget-usd")
+	o.toolsSet = parser.set.Changed("tools")
+	o.allowedToolsSet = parser.set.Changed("allowed-tools")
+	o.disallowedToolsSet = parser.set.Changed("disallowed-tools")
+	o.schemaSet = parser.set.Changed("schema")
+	o.bareSet = parser.set.Changed("bare")
 	if o.bare {
 		return o, errors.New("--bare is incompatible with messageable Claude lanes because Claude Code does not publish a native peer socket in bare mode")
-	}
-	if o.autoArchiveCustom && !containsString([]string{"run", "start", "resume"}, o.command) {
-		return o, fmt.Errorf("--auto-archive-after is not valid for %s", o.command)
-	}
-	if o.mine && o.command != "list" {
-		return o, fmt.Errorf("--mine is not valid for %s", o.command)
-	}
-	if err := validateLaneGroupCommand(o.command, o.groupOptions); err != nil {
-		return o, err
 	}
 	if !containsString([]string{"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}, o.permissionMode) {
 		return o, fmt.Errorf("unsupported Claude permission mode %q", o.permissionMode)
@@ -393,47 +242,15 @@ func parseClaudeLaneArgs(argv []string) (claudeLaneOptions, error) {
 	if err := validateClaudeLaneCommandOptions(o); err != nil {
 		return o, err
 	}
-	switch o.command {
-	case "run", "start":
-		if strings.TrimSpace(o.name) == "" {
-			return o, fmt.Errorf("%s requires --name", o.command)
-		}
-		if len(positionals) != 0 {
-			return o, fmt.Errorf("%s does not accept a prompt on argv; use stdin or --prompt-file", o.command)
-		}
-	case "resume":
-		if len(positionals) != 1 {
-			return o, errors.New("resume requires exactly one SESSION_OR_NAME")
-		}
+	if err := validateLaneCommonOptions(&o.laneCommonOptions, positionals); err != nil {
+		return o, err
+	}
+	if o.command == "resume" {
 		if o.worktree {
 			return o, errors.New("resume reuses the lane cwd and cannot create a worktree")
 		}
-		o.target = positionals[0]
-	case "list", "doctor":
-		if len(positionals) != 0 {
-			return o, fmt.Errorf("%s does not accept positional arguments", o.command)
-		}
-	default:
-		if len(positionals) != 1 {
-			return o, fmt.Errorf("%s requires exactly one SESSION_OR_NAME", o.command)
-		}
-		o.target = positionals[0]
 	}
 	return o, nil
-}
-
-func parseClaudeLaneSeconds(value string, positive bool, flag string) (time.Duration, error) {
-	seconds, err := strconv.ParseFloat(value, 64)
-	minimum := 0.0
-	message := flag + " must be a non-negative number of seconds"
-	if positive {
-		minimum = 0.001
-		message = flag + " must be at least 0.001 seconds"
-	}
-	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < minimum || seconds >= float64(math.MaxInt64)/float64(time.Second) {
-		return 0, errors.New(message)
-	}
-	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 func (o claudeLaneOptions) hasWorkerPolicyOptions() bool {
@@ -442,124 +259,71 @@ func (o claudeLaneOptions) hasWorkerPolicyOptions() bool {
 }
 
 func validateClaudeLaneCommandOptions(o claudeLaneOptions) error {
-	invalid := func(flag string, set bool) error {
-		if set {
-			return fmt.Errorf("%s is not valid for %s", flag, o.command)
-		}
-		return nil
-	}
-	checks := [][2]any{}
+	checks := []laneOptionCheck{}
 	switch o.command {
 	case "run", "start":
-		checks = append(checks, [2]any{"--all", o.all}, [2]any{"--json", o.json})
+		checks = append(checks, laneOption("--all", o.all), laneOption("--json", o.json))
 	case "resume":
 		checks = append(checks,
-			[2]any{"--name", o.nameSet}, [2]any{"--cd", o.cwdSet}, [2]any{"--worktree", o.worktree},
-			[2]any{"--all", o.all}, [2]any{"--json", o.json})
+			laneOption("--name", o.nameSet), laneOption("--cd", o.cwdSet), laneOption("--worktree", o.worktree),
+			laneOption("--all", o.all), laneOption("--json", o.json))
 	case "wait":
 		checks = append(checks, claudeLaneNonWaitOptions(o)...)
 	case "list":
 		checks = append(checks, claudeLaneOperationalOptions(o)...)
-		checks = append(checks, [2]any{"--json", o.json}, [2]any{"--timeout", o.timeoutSet})
+		checks = append(checks, laneOption("--json", o.json), laneOption("--timeout", o.timeoutSet))
 	case "doctor":
 		checks = append(checks, claudeLaneOperationalOptions(o)...)
-		checks = append(checks, [2]any{"--all", o.all}, [2]any{"--timeout", o.timeoutSet})
+		checks = append(checks, laneOption("--all", o.all), laneOption("--timeout", o.timeoutSet))
 	default:
 		checks = append(checks, claudeLaneOperationalOptions(o)...)
-		checks = append(checks, [2]any{"--all", o.all}, [2]any{"--json", o.json}, [2]any{"--timeout", o.timeoutSet})
+		checks = append(checks, laneOption("--all", o.all), laneOption("--json", o.json), laneOption("--timeout", o.timeoutSet))
 	}
-	for _, check := range checks {
-		if err := invalid(check[0].(string), check[1].(bool)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateLaneCommandOptions(o.command, checks)
 }
 
-func claudeLaneOperationalOptions(o claudeLaneOptions) [][2]any {
-	return [][2]any{
-		{"--name", o.nameSet}, {"--cd", o.cwdSet}, {"--model/policy", o.hasWorkerPolicyOptions()},
-		{"--prompt-file", o.promptFile != ""}, {"--notify", o.notifyExplicit}, {"--no-notify", o.disableNotify},
-		{"--persistent", o.persistentSet}, {"--no-auto-archive", o.noAutoArchiveSet},
-		{"--auto-archive-after", o.autoArchiveCustom}, {"--worktree", o.worktree},
-		{"--allow-duplicate-name", o.allowDuplicateName}, {"-", o.stdinMarker},
+func claudeLaneOperationalOptions(o claudeLaneOptions) []laneOptionCheck {
+	return []laneOptionCheck{
+		laneOption("--name", o.nameSet), laneOption("--cd", o.cwdSet), laneOption("--model/policy", o.hasWorkerPolicyOptions()),
+		laneOption("--prompt-file", o.promptFile != ""), laneOption("--notify", o.notifyExplicit), laneOption("--no-notify", o.disableNotify),
+		laneOption("--persistent", o.persistentSet), laneOption("--no-auto-archive", o.noAutoArchiveSet),
+		laneOption("--auto-archive-after", o.autoArchiveCustom), laneOption("--worktree", o.worktree),
+		laneOption("--allow-duplicate-name", o.allowDuplicateName), laneOption("-", o.stdinMarker),
 	}
 }
 
-func claudeLaneNonWaitOptions(o claudeLaneOptions) [][2]any {
+func claudeLaneNonWaitOptions(o claudeLaneOptions) []laneOptionCheck {
 	checks := claudeLaneOperationalOptions(o)
-	return append(checks, [2]any{"--all", o.all}, [2]any{"--json", o.json})
+	return append(checks, laneOption("--all", o.all), laneOption("--json", o.json))
 }
 
+//nolint:dupl // Declarative product binding is intentionally explicit; dispatch mechanics live in runProductLaneCommand.
 func runClaudeLaneCommand(argv []string) int {
-	o, err := parseClaudeLaneArgs(argv)
-	if err != nil {
-		_ = emitLane(map[string]any{"type": "error", "message": err.Error()})
-		fmt.Fprintf(os.Stderr, "claude-peer-lane: %v\n", err)
-		return 1
-	}
-	if o.help {
-		fmt.Print(claudeLaneUsage())
-		return 0
-	}
-	o = withClaudeLaneLaunchContext(o)
-	var code int
-	switch o.command {
-	case "run":
-		code, err = startClaudeLane(o, true)
-	case "start":
-		code, err = startClaudeLane(o, false)
-	case "resume":
-		code, err = resumeClaudeLane(o)
-	case "wait":
-		code, err = waitClaudeLane(o)
-	case "status":
-		code, err = statusClaudeLane(o)
-	case "interrupt":
-		code, err = interruptClaudeLane(o)
-	case "archive":
-		code, err = archiveClaudeLane(o)
-	case "list":
-		code, err = listClaudeLanes(o)
-	case "doctor":
-		code, err = doctorClaudeLane()
-	}
-	if err != nil {
-		_ = emitLane(map[string]any{"type": "error", "message": err.Error(), "timeout": errors.Is(err, context.DeadlineExceeded)})
-		fmt.Fprintf(os.Stderr, "claude-peer-lane: %v\n", err)
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 124
-		}
-		return 1
-	}
-	return code
+	return runProductLaneCommand(argv, productLaneCommands[claudeLaneOptions]{
+		binary: "claude-peer-lane", usage: claudeLaneUsage, parse: parseClaudeLaneArgs, parseExit: 1,
+		help: func(o claudeLaneOptions) bool { return o.help },
+		prepare: func(o claudeLaneOptions) (claudeLaneOptions, error) {
+			return withClaudeLaneLaunchContext(o), nil
+		},
+		command: func(o claudeLaneOptions) string { return o.command },
+		start:   startClaudeLane, resume: resumeClaudeLane, wait: waitClaudeLane, status: statusClaudeLane,
+		interrupt: interruptClaudeLane, archive: archiveClaudeLane, list: listClaudeLanes,
+		doctor: func(claudeLaneOptions) (int, error) { return doctorClaudeLane() },
+	})
 }
 
 func withClaudeLaneLaunchContext(o claudeLaneOptions) claudeLaneOptions {
-	listMine := o.command == "list" && o.mine
-	if !containsString([]string{"run", "start", "resume"}, o.command) && !listMine {
+	if !laneCommandNeedsParent(o.laneCommonOptions) {
 		return o
 	}
-	owner := inferPeerParent(resolveNativePaths(), os.Getpid())
-	return withClaudeLaneResolvedParent(o, owner)
+	return withClaudeLaneResolvedParent(o, inferPeerParent(resolveNativePaths(), os.Getpid()))
 }
 
 func withClaudeLaneResolvedParent(o claudeLaneOptions, owner laneOwner) claudeLaneOptions {
 	listMine := o.command == "list" && o.mine
-	o.groupOptions = applyAgentParentContext(o.groupOptions, &owner)
-	ok := owner.SessionID != ""
-	if ok {
-		o.groupOptions.parentSessionID = owner.SessionID
-		if !o.persistent || listMine {
-			o = applyClaudeLaneOwnerContext(o, owner)
-		}
-		if !listMine && !o.persistent && !o.disableNotify {
-			o.notifyTarget = "session:" + owner.SessionID
-		}
-		return o
-	}
-	if listMine {
-		return o
+	o.laneCommonOptions = withResolvedLaneParent(o.laneCommonOptions, owner)
+	if owner.SessionID != "" && (!o.persistent || listMine) {
+		o = applyClaudeLaneOwnerContext(o, owner)
 	}
 	return o
 }
@@ -664,12 +428,8 @@ func claudeLaneControlSocket(paths nativePaths, sessionID string) string {
 }
 
 func validateClaudeLaneSocketPath(path string) error {
-	limit := 107
-	if runtimeGOOS() == "darwin" {
-		limit = 103
-	}
-	if len([]byte(path)) > limit {
-		return fmt.Errorf("claude lane control socket path is %d bytes; platform limit is %d: %s", len([]byte(path)), limit, path)
+	if err := socketpath.Validate(path); err != nil {
+		return fmt.Errorf("claude lane control socket path is %d bytes; platform limit is %d: %s", len([]byte(path)), socketpath.Limit(), path)
 	}
 	return nil
 }
@@ -705,59 +465,25 @@ func writeClaudeLaneStateUnlocked(paths nativePaths, state claudeLaneState) erro
 
 func readClaudeLaneStates(paths nativePaths) []claudeLaneState {
 	directory := filepath.Join(profileDataRoot(paths), "claude-lanes")
-	entries, _ := os.ReadDir(directory)
-	states := []claudeLaneState{}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		var state claudeLaneState
-		body, err := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // directory is bridge-owned.
-		if err != nil || json.Unmarshal(body, &state) != nil || state.Type != "claude-peer-lane" || entry.Name() != sessionKey(state.SessionID)+".json" {
-			continue
-		}
-		states = append(states, state)
-	}
-	sort.Slice(states, func(i, j int) bool { return states[i].CreatedAt > states[j].CreatedAt })
-	return states
+	return readProductLaneStates(directory, func(entryName string, state *claudeLaneState) bool {
+		return state.Type == "claude-peer-lane" && entryName == sessionKey(state.SessionID)+".json"
+	}, func(state *claudeLaneState) int64 { return state.CreatedAt })
 }
 
 func resolveClaudeLaneState(paths nativePaths, target string) (claudeLaneState, error) {
-	target = strings.TrimSpace(target)
-	states := readClaudeLaneStates(paths)
-	byID := []claudeLaneState{}
-	byName := []claudeLaneState{}
-	for _, state := range states {
-		if state.SessionID == target || state.ThreadID == target {
-			byID = append(byID, state)
-		}
-		if strings.EqualFold(state.Name, target) {
-			byName = append(byName, state)
-		}
-	}
-	if len(byID) == 1 {
-		return byID[0], nil
-	}
-	if len(byName) == 1 {
-		return byName[0], nil
-	}
-	if len(byName) > 1 {
-		active := []claudeLaneState{}
-		for _, state := range byName {
-			if state.Status != "archived" {
-				active = append(active, state)
-			}
-		}
-		if len(active) == 1 {
-			return active[0], nil
-		}
-		return claudeLaneState{}, fmt.Errorf("claude lane name %q is ambiguous; use a session ID", target)
-	}
-	return claudeLaneState{}, fmt.Errorf("no Claude lane matching %q", target)
+	return resolveProductLaneState(
+		target, readClaudeLaneStates(paths),
+		func(state *claudeLaneState, candidate string) bool {
+			return state.SessionID == candidate || state.ThreadID == candidate
+		},
+		func(state *claudeLaneState) string { return state.Name },
+		func(state *claudeLaneState) string { return state.Status },
+		"Claude", "session ID",
+	)
 }
 
 func readClaudeLanePrompt(o claudeLaneOptions) (string, error) {
-	return readLanePrompt(laneOptions{promptFile: o.promptFile})
+	return readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
 }
 
 func readClaudeLaneSchema(file string) (json.RawMessage, error) {
@@ -900,7 +626,9 @@ func startClaudeLane(o claudeLaneOptions, wait bool) (int, error) {
 	if !wait {
 		return 0, nil
 	}
-	return waitClaudeLane(claudeLaneOptions{target: sessionID, command: "wait", timeout: claudeLaneCollectionBound(o.timeout)})
+	return waitClaudeLane(claudeLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: sessionID, command: "wait", timeout: claudeLaneCollectionBound(o.timeout),
+	}})
 }
 
 func spawnClaudeLaneManager(sessionID string) (int, error) {
@@ -1123,7 +851,9 @@ func resumeClaudeLane(o claudeLaneOptions) (int, error) {
 	if err := emitClaudeLaneReady(state); err != nil {
 		return 1, err
 	}
-	return waitClaudeLane(claudeLaneOptions{target: state.SessionID, command: "wait", timeout: claudeLaneCollectionBound(o.timeout)})
+	return waitClaudeLane(claudeLaneOptions{laneCommonOptions: laneCommonOptions{
+		target: state.SessionID, command: "wait", timeout: claudeLaneCollectionBound(o.timeout),
+	}})
 }
 
 func corroboratedLegacyClaudeLaneManager(paths nativePaths, state claudeLaneState) bool {
@@ -1345,19 +1075,7 @@ func waitClaudeLane(o claudeLaneOptions) (int, error) {
 }
 
 func lockClaudeLaneCollection(paths nativePaths, sessionID string) (*os.File, error) {
-	directory := filepath.Join(profileDataRoot(paths), "claude-lane-collection-locks")
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(directory, sessionKey(sessionID)+".lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // session id is hashed.
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return lockLaneFile(paths, "claude-lane-collection-locks", sessionID, false)
 }
 
 func emitClaudeLaneTurn(state claudeLaneState, turn claudeLaneTurn) error {
@@ -1467,22 +1185,14 @@ func claudeLaneTurnStatus(state claudeLaneState) any {
 }
 
 func listClaudeLanes(o claudeLaneOptions) (int, error) {
-	if o.mine && !validLaneOwner(o.ownerPID, o.ownerProcStart) {
-		return 1, errors.New("cannot establish the current orchestrator identity for --mine")
-	}
-	rows := []map[string]any{}
-	for _, state := range readClaudeLaneStates(resolveNativePaths()) {
-		if !o.all && state.Status == "archived" {
-			continue
-		}
-		if o.mine && (state.Persistent || !sameLaneOwner(state.OwnerPID, state.OwnerProcStart, o.ownerPID, o.ownerProcStart)) {
-			continue
-		}
-		row := claudeLaneStatusEvent(state)
-		delete(row, "type")
-		rows = append(rows, row)
-	}
-	return 0, emitLane(map[string]any{"type": "lane.list", "product": "claude", "contract_version": claudeLaneContractVersion, "lanes": rows})
+	return listProductLaneStates(
+		o.laneCommonOptions, "claude", claudeLaneContractVersion, readClaudeLaneStates(resolveNativePaths()),
+		func(state *claudeLaneState) string { return state.Status },
+		func(state *claudeLaneState) (bool, int, string) {
+			return state.Persistent, state.OwnerPID, state.OwnerProcStart
+		},
+		claudeLaneStatusEvent,
+	)
 }
 
 func doctorClaudeLane() (int, error) {
@@ -2748,24 +2458,10 @@ func (m *claudeLaneManager) queueTerminalNoticeLocked(turn claudeLaneTurn) {
 }
 
 func queueClaudeLaneTerminalNotice(state *claudeLaneState, turn claudeLaneTurn) {
-	if state.NotifyTarget == "" {
-		return
-	}
-	for _, notice := range state.Notices {
-		if notice.TurnID == turn.ID {
-			return
-		}
-	}
-	noticeID := sessionKey("claude-lane-terminal\x00" + state.SessionID + "\x00" + turn.ID)
-	collect := laneCollectionPointer("claude", state.SessionID, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups)
-	message := fmt.Sprintf(
-		"CLAUDE_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
-		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,
+	state.Notices = appendLaneTerminalNotice(
+		state.Notices, "claude", state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit,
+		state.NotifyTarget, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups,
 	)
-	state.Notices = append(state.Notices, claudeLaneNotice{
-		ID:     noticeID,
-		TurnID: turn.ID, Target: state.NotifyTarget, Message: message, CreatedAt: time.Now().UnixMilli(),
-	})
 }
 
 func (m *claudeLaneManager) flushTerminalNoticesAsyncLocked() {
@@ -2871,19 +2567,7 @@ func flushOrphanClaudeLaneNotices(paths nativePaths, sessionID string) {
 }
 
 func lockClaudeLaneNotices(paths nativePaths, sessionID string) (*os.File, error) {
-	directory := filepath.Join(profileDataRoot(paths), "claude-lane-notice-locks")
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(directory, sessionKey(sessionID)+".lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // session id is hashed.
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return lockLaneFile(paths, "claude-lane-notice-locks", sessionID, true)
 }
 
 func currentClaudeLaneNotifyTarget(paths nativePaths, state claudeLaneState, fallback string) string {

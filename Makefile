@@ -2,6 +2,7 @@ SHELL := /bin/bash
 
 CODEX ?= codex
 CLAUDE ?= claude
+QWEN ?= qwen
 # Ignore an inherited GROK environment variable: a long-lived peer may have
 # pinned its own launcher, but that must not disable discovery for a later
 # install. An explicit make command-line GROK=/absolute/path pins one candidate.
@@ -10,7 +11,9 @@ GROK ?=
 GROK_PEER ?= $(BIN_DIR)/grok-peer
 GROK_PLUGIN_VERIFY ?= $(BIN_DIR)/agent-session-runtime
 GROK_PEER_ENV = $(if $(and $(findstring command line,$(GROK_INPUT_ORIGIN)),$(strip $(GROK))),GROK_PEER_GROK_BIN="$(GROK)")
-GOLANGCI_LINT ?= golangci-lint
+GOLANGCI_LINT_VERSION ?= v2.12.2
+TOOLS_BIN_DIR ?= $(CURDIR)/bin/tools
+GOLANGCI_LINT ?= $(TOOLS_BIN_DIR)/golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
 MARKETPLACE ?= agent-sessions
@@ -29,12 +32,17 @@ CLAUDE_MARKETPLACE_ROOT ?= $(CLAUDE_STAGED_ROOT)
 GROK_PLUGIN_ROOT ?= $(INSTALL_ROOT)/grok
 GROK_PLUGIN_NAME := agent-sessions
 GROK_USER_PLUGIN_ROOT ?= $(HOME)/.grok/plugins/$(GROK_PLUGIN_NAME)
+QWEN_PLUGIN_ROOT ?= $(INSTALL_ROOT)/qwen
+QWEN_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' qwen/plugin.json | head -1)
+QWEN_PLUGIN_INSTALLER ?= $(BIN_DIR)/agent-session-runtime
 START_RUNTIME ?= 1
+INSTALL_CODEX_INTEGRATION ?= 1
+INSTALL_ALL_MAKE ?= $(MAKE)
 PEER_FEDERATOR_CONFIG_DIR ?= $(HOME)/.config/peer-federator
 PEER_FEDERATOR_DOC_ROOT ?= $(PREFIX)/share/doc/peer-federator
 USER_SYSTEMD_DIR ?= $(HOME)/.config/systemd/user
 USER_LAUNCHD_DIR ?= $(HOME)/Library/LaunchAgents
-PEER_FEDERATOR_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || cat deploy/peer-federator/VERSION)
+PEER_FEDERATOR_VERSION ?= $(shell cat deploy/peer-federator/VERSION)
 PEER_FEDERATOR_LDFLAGS ?= -s -w -X main.version=$(PEER_FEDERATOR_VERSION)
 
 UNAME_S := $(shell uname -s)
@@ -72,17 +80,45 @@ endif
 PLATFORM := $(GOOS)-$(PLATFORM_ARCH)
 BIN_DIR := $(CURDIR)/bin/$(PLATFORM)
 PREBUILT_RELEASE_MARKER := $(CURDIR)/.agent-sessions-prebuilt
-BINARY_NAMES := agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator
+BINARY_NAMES := $(shell ./scripts/release-inventory binaries)
 
-.PHONY: all lint test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
+.PHONY: all lint lint-tool test test-race build build-peer-federator install-preflight grok-install-preflight install dev-install reinstall \
 	stage-claude validate-claude install-claude dev-install-claude validate-grok install-grok \
-	dev-install-grok install-all dev-install-all \
+	dev-install-grok validate-qwen install-qwen upgrade-qwen remove-qwen dev-install-qwen install-all dev-install-all \
 	install-peer-federator install-systemd-user-files install-systemd-user \
 	install-launchd-user-files install-launchd-user repair-projection clean
 
+.PHONY: release-inventory build-release-platform
+
+release-inventory:
+	@./scripts/release-inventory binaries
+	@./scripts/release-inventory plugins
+
+build-release-platform:
+	@test -n "$(RELEASE_OUTPUT_DIR)" || { printf 'RELEASE_OUTPUT_DIR is required\n' >&2; exit 2; }
+	@test -n "$(RELEASE_VERSION)" || { printf 'RELEASE_VERSION is required\n' >&2; exit 2; }
+	@test "$(RELEASE_VERSION)" = "$$(cat deploy/peer-federator/VERSION)" || { \
+		printf 'release version %s does not match deploy/peer-federator/VERSION\n' "$(RELEASE_VERSION)" >&2; exit 1; \
+	}
+	$(MAKE) build GOOS="$(GOOS)" GOARCH="$(GOARCH)" PEER_FEDERATOR_VERSION="$(RELEASE_VERSION)"
+	@mkdir -p "$(TOOLS_BIN_DIR)"
+	CGO_ENABLED=0 GOOS="$(HOST_GOOS)" GOARCH="$(HOST_GOARCH)" go build -trimpath -ldflags='-s -w' \
+		-o "$(TOOLS_BIN_DIR)/agent-session-runtime-release-packager-$(PLATFORM)" ./cmd/agent-session-runtime
+	AGENT_SESSIONS_RELEASE_PACKAGER="$(TOOLS_BIN_DIR)/agent-session-runtime-release-packager-$(PLATFORM)" \
+		./scripts/package-release "$(PLATFORM)" "$(RELEASE_VERSION)" "$(BIN_DIR)" "$(RELEASE_OUTPUT_DIR)"
+
 all: lint test build
 
-lint:
+lint-tool:
+	@if [[ "$(GOLANGCI_LINT)" == "$(TOOLS_BIN_DIR)/golangci-lint" ]]; then \
+		if [[ ! -x "$(GOLANGCI_LINT)" ]] || ! "$(GOLANGCI_LINT)" version | grep -Fq 'version $(patsubst v%,%,$(GOLANGCI_LINT_VERSION)) '; then \
+			command -v go >/dev/null 2>&1 || { printf 'Go is required to install the repository-managed linter\n' >&2; exit 127; }; \
+			mkdir -p "$(TOOLS_BIN_DIR)"; \
+			GOBIN="$(TOOLS_BIN_DIR)" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+		fi; \
+	fi
+
+lint: lint-tool
 	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run
 
@@ -103,15 +139,11 @@ build:
 		done; \
 		printf 'Using packaged prebuilt binaries in %s\n' "$(BIN_DIR)"; \
 	elif command -v go >/dev/null 2>&1; then \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/agent-session-runtime" ./cmd/agent-session-runtime; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/peer" ./cmd/peer; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer" ./cmd/codex-peer; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer" ./cmd/claude-peer; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/codex-peer-lane" ./cmd/codex-peer-lane; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/claude-peer-lane" ./cmd/claude-peer-lane; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer" ./cmd/grok-peer; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='-s -w' -o "$(BIN_DIR)/grok-peer-lane" ./cmd/grok-peer-lane; \
-		CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags='$(PEER_FEDERATOR_LDFLAGS)' -o "$(BIN_DIR)/peer-federator" ./cmd/peer-federator; \
+		for binary in $(BINARY_NAMES); do \
+			ldflags='-s -w'; \
+			if [[ "$$binary" == peer-federator ]]; then ldflags='$(PEER_FEDERATOR_LDFLAGS)'; fi; \
+			CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build -trimpath -ldflags="$$ldflags" -o "$(BIN_DIR)/$$binary" "./cmd/$$binary" || exit; \
+		done; \
 	else \
 		printf 'Go is required because this source tree has no authorized packaged %s binaries\n' "$(PLATFORM)" >&2; \
 		exit 127; \
@@ -192,22 +224,18 @@ install: install-preflight
 		"$(INSTALL_ROOT)/docs" \
 		"$(INSTALL_ROOT)/grok" \
 		"$(INSTALL_ROOT)/hooks" \
+		"$(INSTALL_ROOT)/qwen" \
 		"$(INSTALL_ROOT)/scripts" \
 		"$(INSTALL_ROOT)/skills"
-	cp -R .agents .codex-plugin deploy docs grok hooks scripts skills "$(INSTALL_ROOT)/"
+	cp -R .agents .codex-plugin deploy docs grok hooks qwen scripts skills "$(INSTALL_ROOT)/"
 	cp .mcp.json README.md "$(INSTALL_ROOT)/"
 	mkdir -p "$(INSTALL_ROOT)/bin/$(PLATFORM)"
 	@for binary in $(BINARY_NAMES); do cp "$(BIN_DIR)/$$binary" "$(INSTALL_ROOT)/bin/$(PLATFORM)/$$binary"; done
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer" "$(PREFIX)/bin/peer"
+	@for binary in $(BINARY_NAMES); do \
+		ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/$$binary" "$(PREFIX)/bin/$$binary"; \
+	done
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer" "$(PREFIX)/bin/codex-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer" "$(PREFIX)/bin/claude-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer" "$(PREFIX)/bin/grok-peer"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
-	ln -sfn "$(abspath $(INSTALL_ROOT))/bin/$(PLATFORM)/peer-federator" "$(PREFIX)/bin/peer-federator"
+ifeq ($(INSTALL_CODEX_INTEGRATION),1)
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
 		$(CODEX) plugin remove "$(PLUGIN)@$(MARKETPLACE)"; \
@@ -240,19 +268,17 @@ install: install-preflight
 	@if [[ "$(START_RUNTIME)" == "1" ]]; then \
 		CODEX_PEER_CODEX_BIN="$(CODEX)" "$(INSTALL_ROOT)/bin/$(PLATFORM)/agent-session-runtime" bootstrap; \
 	fi
+else
+	@printf 'Skipping Codex integration: Codex CLI is not installed.\n'
+endif
 
 dev-install: install-preflight
 	mkdir -p "$(PREFIX)/bin"
-	ln -sfn "$(abspath $(BIN_DIR))/agent-session-runtime" "$(PREFIX)/bin/agent-session-runtime"
-	ln -sfn "$(abspath $(BIN_DIR))/peer" "$(PREFIX)/bin/peer"
+	@for binary in $(BINARY_NAMES); do \
+		ln -sfn "$(abspath $(BIN_DIR))/$$binary" "$(PREFIX)/bin/$$binary"; \
+	done
 	rm -f -- "$(PREFIX)/bin/codex-messaging"
-	ln -sfn "$(abspath $(BIN_DIR))/codex-peer" "$(PREFIX)/bin/codex-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/claude-peer" "$(PREFIX)/bin/claude-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/codex-peer-lane" "$(PREFIX)/bin/codex-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/claude-peer-lane" "$(PREFIX)/bin/claude-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/grok-peer" "$(PREFIX)/bin/grok-peer"
-	ln -sfn "$(abspath $(BIN_DIR))/grok-peer-lane" "$(PREFIX)/bin/grok-peer-lane"
-	ln -sfn "$(abspath $(BIN_DIR))/peer-federator" "$(PREFIX)/bin/peer-federator"
+ifeq ($(INSTALL_CODEX_INTEGRATION),1)
 	@if $(CODEX) plugin list --json | \
 		grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"$(PLUGIN)@$(MARKETPLACE)"'; then \
 		$(CODEX) plugin remove "$(PLUGIN)@$(MARKETPLACE)"; \
@@ -285,6 +311,9 @@ dev-install: install-preflight
 	@if [[ "$(START_RUNTIME)" == "1" ]]; then \
 		CODEX_PEER_CODEX_BIN="$(CODEX)" "$(BIN_DIR)/agent-session-runtime" bootstrap; \
 	fi
+else
+	@printf 'Skipping Codex integration: Codex CLI is not installed.\n'
+endif
 
 reinstall: install-preflight
 	./scripts/cachebuster
@@ -417,13 +446,84 @@ install-grok: grok-install-preflight validate-grok
 dev-install-grok:
 	$(MAKE) install-grok GROK_PLUGIN_ROOT="$(CURDIR)/grok"
 
-install-all: install
-	$(MAKE) install-claude
-	$(MAKE) install-grok
+validate-qwen: build
+	@command -v "$(QWEN)" >/dev/null 2>&1 || { \
+		printf 'Qwen Code is required for Qwen plugin installation: %s\n' "$(QWEN)" >&2; \
+		exit 127; \
+	}
+	@test -n "$(QWEN_PLUGIN_VERSION)" || { printf 'Qwen plugin version is missing\n' >&2; exit 1; }
+	@test -f "$(QWEN_PLUGIN_ROOT)/plugin.json" -a -f "$(QWEN_PLUGIN_ROOT)/mcp.json" || { \
+		printf 'Qwen plugin payload is missing at %s\n' "$(QWEN_PLUGIN_ROOT)" >&2; \
+		exit 1; \
+	}
 
-dev-install-all: dev-install
-	$(MAKE) dev-install-claude
-	$(MAKE) dev-install-grok
+install-qwen: validate-qwen
+	"$(QWEN_PLUGIN_INSTALLER)" qwen-plugin-install \
+		--qwen "$(QWEN)" \
+		--plugin-root "$(abspath $(QWEN_PLUGIN_ROOT))" \
+		--version "$(QWEN_PLUGIN_VERSION)"
+
+upgrade-qwen: install-qwen
+
+remove-qwen: build
+	@command -v "$(QWEN)" >/dev/null 2>&1 || { \
+		printf 'Qwen Code is required for Qwen plugin removal: %s\n' "$(QWEN)" >&2; \
+		exit 127; \
+	}
+	"$(QWEN_PLUGIN_INSTALLER)" qwen-plugin-remove --qwen "$(QWEN)"
+
+dev-install-qwen:
+	$(MAKE) install-qwen QWEN_PLUGIN_ROOT="$(CURDIR)/qwen" QWEN_PLUGIN_INSTALLER="$(BIN_DIR)/agent-session-runtime"
+
+install-all:
+	+@if command -v "$(CODEX)" >/dev/null 2>&1; then \
+		"$(INSTALL_ALL_MAKE)" install; \
+	else \
+		printf 'Skipping Codex integration: Codex CLI is not installed (%s).\n' "$(CODEX)"; \
+		"$(INSTALL_ALL_MAKE)" install INSTALL_CODEX_INTEGRATION=0; \
+	fi
+	+@if command -v "$(CLAUDE)" >/dev/null 2>&1; then \
+		"$(INSTALL_ALL_MAKE)" install-claude; \
+	else \
+		printf 'Skipping Claude integration: Claude Code is not installed (%s).\n' "$(CLAUDE)"; \
+	fi
+	+@grok_status=0; \
+		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin validate "$(GROK_PLUGIN_ROOT)" >/dev/null 2>&1 || grok_status=$$?; \
+		if [[ $$grok_status -eq 127 ]]; then \
+			printf 'Skipping Grok integration: Grok is not installed.\n'; \
+		else \
+			"$(INSTALL_ALL_MAKE)" install-grok; \
+		fi
+	+@if command -v "$(QWEN)" >/dev/null 2>&1; then \
+		"$(INSTALL_ALL_MAKE)" install-qwen; \
+	else \
+		printf 'Skipping Qwen integration: Qwen Code is not installed (%s).\n' "$(QWEN)"; \
+	fi
+
+dev-install-all:
+	+@if command -v "$(CODEX)" >/dev/null 2>&1; then \
+		"$(INSTALL_ALL_MAKE)" dev-install; \
+	else \
+		printf 'Skipping Codex integration: Codex CLI is not installed (%s).\n' "$(CODEX)"; \
+		"$(INSTALL_ALL_MAKE)" dev-install INSTALL_CODEX_INTEGRATION=0; \
+	fi
+	+@if command -v "$(CLAUDE)" >/dev/null 2>&1; then \
+		"$(INSTALL_ALL_MAKE)" dev-install-claude; \
+	else \
+		printf 'Skipping Claude integration: Claude Code is not installed (%s).\n' "$(CLAUDE)"; \
+	fi
+	+@grok_status=0; \
+		$(GROK_PEER_ENV) "$(GROK_PEER)" plugin validate "$(CURDIR)/grok" >/dev/null 2>&1 || grok_status=$$?; \
+		if [[ $$grok_status -eq 127 ]]; then \
+			printf 'Skipping Grok integration: Grok is not installed.\n'; \
+		else \
+			"$(INSTALL_ALL_MAKE)" dev-install-grok; \
+		fi
+	+@if command -v "$(QWEN)" >/dev/null 2>&1; then \
+		"$(INSTALL_ALL_MAKE)" dev-install-qwen; \
+	else \
+		printf 'Skipping Qwen integration: Qwen Code is not installed (%s).\n' "$(QWEN)"; \
+	fi
 
 repair-projection:
 	@test -n "$(THREAD_ID)" || { printf 'usage: make repair-projection THREAD_ID=<id> [APPLY=1]\n' >&2; exit 2; }

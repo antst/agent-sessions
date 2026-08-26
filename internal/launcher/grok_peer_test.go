@@ -22,6 +22,8 @@ func TestGrokPeerManagedArgumentParity(t *testing.T) {
 		wantMode   grokMode
 		wantName   string
 		wantNative []string
+		wantTarget string
+		wantLate   bool
 	}{
 		{
 			name:     "fresh strips only peer name",
@@ -43,12 +45,26 @@ func TestGrokPeerManagedArgumentParity(t *testing.T) {
 		{
 			name:     "resume after options",
 			args:     []string{"--always-approve", "--resume", testGrokSessionID, "--no-alt-screen"},
-			wantMode: grokModeResume, wantNative: []string{"--always-approve", "--no-alt-screen"},
+			wantMode: grokModeResume, wantNative: []string{"--always-approve", "--no-alt-screen"}, wantTarget: testGrokSessionID,
 		},
 		{
 			name:     "resume compact before options",
 			args:     []string{"-r" + testGrokSessionID, "--model", "grok-4.6", "prompt"},
-			wantMode: grokModeResume, wantNative: []string{"--model", "grok-4.6", "prompt"},
+			wantMode: grokModeResume, wantNative: []string{"--model", "grok-4.6", "prompt"}, wantTarget: testGrokSessionID,
+		},
+		{
+			name:       "native title resume is late bound",
+			args:       []string{"--resume", "test", "--always-approve"},
+			wantMode:   grokModeResume,
+			wantNative: []string{"--always-approve"},
+			wantTarget: "test", wantLate: true,
+		},
+		{
+			name:       "bare native resume is late bound",
+			args:       []string{"--resume", "--no-alt-screen"},
+			wantMode:   grokModeResume,
+			wantNative: []string{"--no-alt-screen"},
+			wantLate:   true,
 		},
 		{
 			name:     "bare boundary is untouched",
@@ -65,6 +81,9 @@ func TestGrokPeerManagedArgumentParity(t *testing.T) {
 			}
 			if plan.mode != test.wantMode || plan.peerName != test.wantName {
 				t.Fatalf("plan identity = %+v, want mode=%s name=%q", plan, test.wantMode, test.wantName)
+			}
+			if plan.resumeTarget != test.wantTarget || plan.lateBoundResume != test.wantLate {
+				t.Fatalf("resume selection = target %q late=%v, want %q/%v", plan.resumeTarget, plan.lateBoundResume, test.wantTarget, test.wantLate)
 			}
 			if !threadIDPattern.MatchString(plan.sessionID) {
 				t.Fatalf("session id = %q", plan.sessionID)
@@ -140,10 +159,7 @@ func TestGrokPeerRejectsUnmanagedOrUnresolvableInteractiveModes(t *testing.T) {
 		{"--continue"},
 		{"--continue=true"},
 		{"-c"},
-		{"--resume"},
-		{"--resume", "human title"},
-		{"--resume=human-title"},
-		{"-rhuman-title"},
+		{"--resume="},
 		{"--fork-session"},
 		{"--session-id", testGrokSessionID, "--resume", testGrokSessionID},
 	} {
@@ -156,11 +172,55 @@ func TestGrokPeerRejectsUnmanagedOrUnresolvableInteractiveModes(t *testing.T) {
 		{"--sandbox=off"},
 		{"--resume", testGrokSessionID},
 		{"--load=" + testGrokSessionID},
+		{"--resume"},
+		{"--resume", "human title"},
+		{"--resume=human-title"},
+		{"-rhuman-title"},
 	} {
 		if _, err := parseGrokPeerArgs(args, root); err != nil {
 			t.Fatalf("rejected %q: %v", args, err)
 		}
 	}
+}
+
+func TestGrokPeerTitleResumePreservesNativeSelectorAndHostContext(t *testing.T) {
+	root := t.TempDir()
+	plan, err := parseGrokPeerArgs([]string{"--resume", "test", "--yolo", "-g", "umka"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.lateBoundResume || plan.resumeTarget != "test" || !threadIDPattern.MatchString(plan.sessionID) {
+		t.Fatalf("late-bound plan = %+v", plan)
+	}
+	if !reflect.DeepEqual(plan.peerContext.groups, []string{"umka"}) || !plan.peerContext.groupsSpecified {
+		t.Fatalf("peer context = %+v", plan.peerContext)
+	}
+	ready := grokHostReady{LeaderSocket: filepath.Join(root, "leader.sock")}
+	managed := grokInteractiveArguments(plan, ready)
+	if !slices.Contains(managed, "test") || slices.Contains(managed, plan.sessionID) {
+		t.Fatalf("native title selector was rewritten: %q", managed)
+	}
+	request := grokHostRequest{
+		SessionID: plan.sessionID, Cwd: root, OwnerPID: 42, OwnerProcStart: "start",
+		PermissionMode: plan.permissionMode, GrokBin: "/bin/grok", AgentRuntimeDir: "/run/agent",
+		LateBoundResume: true, PeerContext: plan.peerContext, YoloSpecified: plan.permissionSpecified,
+	}
+	hostArgs := grokHostArguments(request)
+	wantPairs := [][]string{{"--late-bound-resume"}, {"--groups-json", `["umka"]`}, {"--groups-specified=true"}}
+	for _, want := range wantPairs {
+		if !containsArgumentSequence(hostArgs, want) {
+			t.Fatalf("host args %q do not contain %q", hostArgs, want)
+		}
+	}
+}
+
+func containsArgumentSequence(args, sequence []string) bool {
+	for index := 0; index+len(sequence) <= len(args); index++ {
+		if slices.Equal(args[index:index+len(sequence)], sequence) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGrokPeerPermissionPublicationUsesLastPolicyOption(t *testing.T) {
@@ -220,7 +280,7 @@ func TestGrokPeerCwdIsCanonicalButNativeArgvIsUntouched(t *testing.T) {
 func TestGrokHostContractAndReadinessValidation(t *testing.T) {
 	root := t.TempDir()
 	request := grokHostRequest{
-		SessionID: testGrokSessionID, Cwd: root, Name: "reviewer", OwnerPID: 42,
+		SessionID: testGrokSessionID, Cwd: root, Name: "reviewer", NameSpecified: true, OwnerPID: 42,
 		OwnerProcStart: "start-token", LaunchToken: "secret-token",
 		PermissionMode: "bypassPermissions", GrokBin: "/opt/grok/bin/grok",
 	}
@@ -229,7 +289,7 @@ func TestGrokHostContractAndReadinessValidation(t *testing.T) {
 		"grok-host", "--session-id", testGrokSessionID, "--cwd", root,
 		"--owner-pid", "42", "--owner-proc-start", "start-token",
 		"--permission-mode", "bypassPermissions", "--grok-bin", "/opt/grok/bin/grok",
-		"--name", "reviewer",
+		"--name-specified=true", "--name", "reviewer",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("host args = %q, want %q", got, want)

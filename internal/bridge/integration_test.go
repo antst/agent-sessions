@@ -186,13 +186,17 @@ func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 	t.Cleanup(d.shutdown)
 
 	state := readJSONMap(d.stateFile)
-	if stringValue(state["socketPath"]) != d.stableSocket || stringValue(state["backendSocketPath"]) != d.backendSocket {
+	if stringValue(state["socketPath"]) != d.stableSocket || stringValue(state["backendSocketPath"]) != d.stableSocket {
 		t.Fatalf("unexpected state: %#v", state)
 	}
-	if target, err := os.Readlink(d.stableSocket); err != nil || target != d.backendSocket {
-		t.Fatalf("stable alias = %q, %v", target, err)
+	stableInfo, err := os.Lstat(d.stableSocket)
+	if err != nil || stableInfo.Mode()&os.ModeSocket == 0 || stableInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("stable delivery endpoint is not a real socket: info=%v err=%v", stableInfo, err)
 	}
-	for _, file := range []string{d.backendSocket, d.registryFile, d.stateFile} {
+	if target, err := os.Readlink(d.stableSocket); err == nil {
+		t.Fatalf("stable delivery endpoint unexpectedly resolves as symlink to %q", target)
+	}
+	for _, file := range []string{d.stableSocket, d.registryFile, d.stateFile} {
 		info, err := os.Stat(file)
 		if err != nil {
 			t.Fatal(err)

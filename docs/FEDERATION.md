@@ -8,7 +8,7 @@ local protocol.
 
 The public Claude registry contains exactly one synthetic Agent Sessions
 service row per running host agent. Participating `codex-peer`, `claude-peer`,
-`grok-peer`, and lane adapters register their real delivery sockets privately
+`grok-peer`, `qwen-peer`, and lane adapters register their real delivery sockets privately
 with that agent. Remote peers are never projected as per-peer Claude records or
 shadow processes.
 
@@ -44,6 +44,7 @@ peer-federator agent --host workstation-a --name workstation-a
 codex-peer -g project-a -n reviewer
 claude-peer -g project-a -n implementer
 grok-peer -g project-a -n researcher
+qwen-peer -g project-a -n analyst
 ```
 
 `peer-federator doctor` accepts this local-only topology. `peer-federator
@@ -93,8 +94,8 @@ peer-federator agent ... --enable-remote-lanes
 peer-federator hosts
 ```
 
-The parent product and target product are independent. A Codex, Claude, or Grok
-parent may launch a Codex, Claude, or Grok lane, locally or remotely. The target
+The parent product and target product are independent. A Codex, Claude, Grok, or Qwen
+parent may launch a Codex, Claude, Grok, or Qwen lane, locally or remotely. The target
 is selected explicitly:
 
 ```sh
@@ -109,7 +110,7 @@ anchor, and copies optional parent groups only when launch requested
 `--inherit-groups`. Terminal notices are ordinary grouped Agent Sessions
 frames, not shadow-socket callbacks.
 
-The installed `codex-peer-lane`, `claude-peer-lane`, and `grok-peer-lane`
+The installed `codex-peer-lane`, `claude-peer-lane`, `grok-peer-lane`, and `qwen-peer-lane`
 remain the target-specific lifecycle adapters. The shared parent/group layer
 selects the parent context; it does not merge their native runtimes.
 

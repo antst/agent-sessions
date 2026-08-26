@@ -12,7 +12,7 @@ JSONL.
 ## Managed Codex execution boundary
 
 From a managed Codex peer, run every lifecycle operation through the attested
-`claude_peer.lane` MCP tool. Do not invoke `grok-peer-lane` from a shell tool:
+`agent_sessions.lane` MCP tool. Do not invoke `grok-peer-lane` from a shell tool:
 the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
 Unix sockets even when their directories are writable. The MCP tool retains this
 session as the exact parent and returns `exit`, `stdout`, and `stderr`.
@@ -116,7 +116,7 @@ grok-peer-lane interrupt review-api
 grok-peer-lane archive review-api
 ```
 
-- Default lanes belong to the launching Codex, Claude, or Grok peer and archive after that exact owner
+- Default lanes belong to the launching Codex, Claude, Grok, or Qwen peer and archive after that exact owner
   exits. A plain shell must use `--persistent`.
 - Every lane keeps its immediate parent anchor. Parent groups propagate only after explicit
   `--inherit-groups`; repeat `--group NAME` for child-specific groups.

@@ -57,7 +57,10 @@ func Args(pid int) ([]string, error) {
 // Environment uses the environment tail in Darwin's KERN_PROCARGS2 payload.
 func Environment(pid int) ([]string, error) {
 	environment, _, err := processArgsAndEnvironment(pid)
-	return environment, err
+	if err != nil {
+		return nil, err
+	}
+	return observableEnvironment(pid, environment)
 }
 
 // List returns one coherent identity for every non-zombie process in one

@@ -4,11 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
@@ -166,14 +167,7 @@ func execInteractiveCodex(codex, threadID, cwd string, plan codexPlan) error {
 }
 
 func codexExecutable() (string, error) {
-	if path := os.Getenv("CODEX_PEER_CODEX_BIN"); path != "" {
-		return path, nil
-	}
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return "", &ExitError{Code: 127, Err: errors.New("codex was not found on PATH")}
-	}
-	return path, nil
+	return productExecutable("CODEX_PEER_CODEX_BIN", "codex")
 }
 
 func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, error) {
@@ -315,7 +309,7 @@ func classifyCodexMode(args []string) (codexMode, int, error) {
 			return modeResume, index, nil
 		case "fork":
 			return modeFork, index, nil
-		case "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "cloud", "app", "exec-server", "features", "help", "migrate-rollouts":
+		case "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "unarchive", "cloud", "app", "exec-server", "features", "help", "migrate-rollouts":
 			return modePassthrough, index, nil
 		default:
 			return modeFresh, index, nil
@@ -470,12 +464,8 @@ func canonicalDirectory(base, requested string) (string, error) {
 	if !filepath.IsAbs(requested) {
 		requested = filepath.Join(base, requested)
 	}
-	resolved, err := filepath.EvalSymlinks(requested)
+	resolved, err := pathidentity.ExistingDirectory(requested)
 	if err != nil {
-		return "", usageError("working directory does not exist: " + requested)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
 		return "", usageError("working directory does not exist: " + requested)
 	}
 	return resolved, nil

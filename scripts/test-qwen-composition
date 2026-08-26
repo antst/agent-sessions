@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""Run the complete 4x4 live parent/target composition matrix."""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import platform
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+TIMEOUT = 180.0
+PRODUCTS = ("codex", "claude", "grok", "qwen")
+
+
+class CompositionTerminated(Exception):
+    """Request orderly cleanup after an external interrupt."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"received signal {signum}")
+        self.signum = signum
+
+
+def fail(message: str) -> None:
+    raise AssertionError(message)
+
+
+def install_termination_handlers() -> None:
+    """Turn the first interactive termination signal into a cleanup unwind."""
+
+    def terminate(signum: int, _frame) -> None:
+        # Cleanup must not be interrupted by a second terminal signal. SIGKILL
+        # remains available to an operator who explicitly needs a hard stop.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise CompositionTerminated(signum)
+
+    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, terminate)
+
+
+def required_test_directory(environment: dict[str, str], name: str) -> pathlib.Path:
+    raw = environment.get(name, "")
+    path = pathlib.Path(raw)
+    if not raw or not path.is_absolute() or not path.is_dir():
+        fail(f"{name} must name an existing absolute test-owned directory")
+    return path
+
+
+def required_test_executable(environment: dict[str, str], name: str) -> pathlib.Path:
+    raw = environment.get(name, "")
+    path = pathlib.Path(raw)
+    if not raw or not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        fail(f"{name} must name an existing absolute executable")
+    return path
+
+
+def claude_test_secure_config(environment: dict[str, str]) -> str:
+    name = "CLAUDE_TEST_SECURE_CONFIG_DIR"
+    if name not in environment:
+        fail(f"{name} must be explicitly set; an empty value selects the platform default namespace")
+    raw = environment[name]
+    if raw:
+        path = pathlib.Path(raw)
+        if not path.is_absolute() or not path.is_dir():
+            fail(f"{name} must be empty or name an existing absolute test-owned directory")
+    return raw
+
+
+def target_test_environment(
+    environment: dict[str, str], product: str, grok_home: pathlib.Path,
+) -> dict[str, str]:
+    if product not in PRODUCTS:
+        fail(f"unsupported composition target product: {product}")
+    result = environment.copy()
+    if product == "grok":
+        result["HOME"] = str(grok_home)
+    return result
+
+
+def platform_name() -> str:
+    value = f"{platform.system().lower()}-{platform.machine()}"
+    return {
+        "linux-x86_64": "linux-x64", "linux-aarch64": "linux-arm64",
+        "darwin-x86_64": "darwin-x64", "darwin-arm64": "darwin-arm64",
+    }.get(value, value)
+
+
+def rows(body: str) -> list[dict]:
+    result = []
+    for line in body.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            result.append(value)
+    return result
+
+
+def wait_for(predicate, description: str, timeout: float = TIMEOUT):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            value = predicate()
+            if value:
+                return value
+        except Exception as error:
+            last = error
+        time.sleep(0.05)
+    fail(f"timed out waiting for {description}; last={last}")
+
+
+def lane_record(data: pathlib.Path, thread_id: str) -> dict | None:
+    matches = []
+    for path in data.rglob("*.json"):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or not str(value.get("type", "")).endswith("-peer-lane"):
+            continue
+        identities = {
+            value.get("threadId"), value.get("thread_id"), value.get("sessionId"), value.get("session_id"),
+        }
+        if thread_id in identities:
+            matches.append(value)
+    if len(matches) > 1:
+        fail(f"multiple durable lane records match {thread_id}")
+    return matches[0] if matches else None
+
+
+def archived_record_is_clean(data: pathlib.Path, thread_id: str) -> dict | None:
+    record = lane_record(data, thread_id)
+    if record is None or record.get("status") != "archived":
+        return None
+    for field in ("managerPid", "manager_pid", "workerPid", "worker_pid"):
+        if record.get(field) not in (None, 0):
+            return None
+    for field in ("socket", "socketPath", "socket_path", "workerSocket", "worker_socket"):
+        path = record.get(field)
+        if isinstance(path, str) and path and pathlib.Path(path).exists():
+            return None
+    return record
+
+
+def lane_arguments(
+    product: str, name: str, qwen_home: pathlib.Path, workspace: pathlib.Path, prompt: pathlib.Path,
+) -> list[str]:
+    arguments = [
+        f"{product}-peer-lane", "start", "--name", name,
+        "--no-auto-archive", "--inherit-groups", "-C", str(workspace),
+        "--prompt-file", str(prompt),
+    ]
+    if product == "qwen":
+        arguments.extend(["--qwen-home", str(qwen_home), "--yolo"])
+    return arguments
+
+
+def read_fixture_events(process: subprocess.Popen, description: str) -> list[dict]:
+    if process.stdout is None:
+        fail(f"{description} fixture stdout is unavailable")
+    deadline = time.monotonic() + TIMEOUT
+    events: list[dict] = []
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        line = process.stdout.readline()
+        if not line:
+            break
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+            if value.get("event") == "child_exit":
+                return events
+    stderr = ""
+    if process.stderr is not None and process.poll() is not None:
+        stderr = process.stderr.read()
+    fail(f"{description} fixture did not report child exit: events={events!r} stderr={stderr!r}")
+
+
+def stop_fixture(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def stop_isolated_codex_app_server(codex_home: pathlib.Path, environment: dict[str, str]) -> None:
+    """Stop only the App Server rooted in the caller-supplied test CODEX_HOME."""
+    binary = codex_home / "packages" / "standalone" / "current" / "codex"
+    if not binary.exists():
+        return
+    subprocess.run(
+        [str(binary), "app-server", "daemon", "stop"],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+
+
+def prepare_isolated_grok_profile(
+    workspace: pathlib.Path,
+    grok_home: pathlib.Path,
+    grok_binary: pathlib.Path,
+    environment: dict[str, str],
+) -> None:
+    """Trust the clean target without allowing a plugin to mask ACP injection."""
+    grok_config = grok_home / ".grok"
+    plugin_root = grok_config / "plugins" / "agent-sessions"
+    grok_config.mkdir(mode=0o700, parents=True, exist_ok=True)
+    trust_path = grok_home / ".grok" / "trusted_folders.toml"
+    if trust_path.exists() or trust_path.is_symlink():
+        fail(f"GROK_TEST_HOME must not contain pre-existing workspace trust: {trust_path}")
+    decided_at = int(time.time())
+    trust_path.write_text(
+        f"[folders.{json.dumps(str(workspace))}]\ntrusted = true\ndecided_at = {decided_at}\n",
+        encoding="utf-8",
+    )
+    trust_path.chmod(0o600)
+    if plugin_root.exists() or plugin_root.is_symlink():
+        fail(f"GROK_TEST_HOME must not contain a preinstalled agent-sessions plugin: {plugin_root}")
+    assert_no_grok_mcp_fallback(workspace, grok_home, grok_binary, environment)
+
+
+def assert_no_grok_mcp_fallback(
+    workspace: pathlib.Path,
+    grok_home: pathlib.Path,
+    grok_binary: pathlib.Path,
+    environment: dict[str, str],
+) -> None:
+    """Fail if a local or profile MCP could impersonate session injection."""
+    local_mcp = workspace / ".mcp.json"
+    plugin_root = grok_home / ".grok" / "plugins" / "agent-sessions"
+    if local_mcp.exists() or local_mcp.is_symlink():
+        fail(f"composition target workspace contains local MCP configuration: {local_mcp}")
+    if plugin_root.exists() or plugin_root.is_symlink():
+        fail(f"isolated Grok profile contains the agent-sessions plugin: {plugin_root}")
+    inspection = subprocess.run(
+        [str(grok_binary), "inspect", "--json"], env=environment,
+        cwd=workspace, text=True, stdout=subprocess.PIPE, check=True,
+    )
+    inspected = json.loads(inspection.stdout)
+    plugins = inspected.get("plugins", []) if isinstance(inspected, dict) else []
+    servers = inspected.get("mcpServers", []) if isinstance(inspected, dict) else []
+    if any(isinstance(row, dict) and row.get("name") == "agent-sessions" for row in plugins):
+        fail("isolated Grok profile unexpectedly resolves the agent-sessions plugin")
+    if any(isinstance(row, dict) and row.get("name") == "agent_sessions" for row in servers):
+        fail("isolated Grok profile unexpectedly resolves the agent_sessions MCP")
+
+
+def main() -> int:
+    qwen_home = required_test_directory(os.environ, "QWEN_TEST_HOME")
+    qwen_runtime = required_test_directory(os.environ, "QWEN_TEST_RUNTIME_DIR")
+    codex_home = required_test_directory(os.environ, "CODEX_TEST_HOME")
+    claude_config = required_test_directory(os.environ, "CLAUDE_TEST_CONFIG_DIR")
+    grok_home = required_test_directory(os.environ, "GROK_TEST_HOME")
+    grok_binary = required_test_executable(os.environ, "GROK_TEST_BIN")
+    claude_secure_config = claude_test_secure_config(os.environ)
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    temporary_parent = pathlib.Path("/tmp") if platform.system() == "Darwin" else None
+    root = pathlib.Path(tempfile.mkdtemp(prefix="qwen-composition.", dir=temporary_parent))
+    workspace = root / "target-workspace"
+    workspace.mkdir(mode=0o700)
+    if (workspace / ".mcp.json").exists() or (workspace / ".mcp.json").is_symlink():
+        fail("composition target workspace unexpectedly contains local MCP configuration")
+    environment = os.environ.copy()
+    launched: list[tuple[str, str]] = []
+    parents: list[subprocess.Popen] = []
+    agent: subprocess.Popen | None = None
+    success = False
+    install_termination_handlers()
+    try:
+        subprocess.run(["make", "-s", "build"], cwd=repo, check=True)
+        binary_root = repo / "bin" / platform_name()
+        fixture = root / "composition-parent"
+        subprocess.run([
+            "go", "build", "-o", str(fixture), "./scripts/federation/grouped_peer_fixture.go",
+        ], cwd=repo, check=True)
+        runtime, state, data, xdg_runtime = (
+            root / "agent-runtime", root / "agent-state", root / "data", root / "xdg-runtime",
+        )
+        for path in (runtime, state, data, xdg_runtime):
+            path.mkdir(mode=0o700)
+        for name in (
+            "CODEX_SESSION_ID", "CODEX_THREAD_ID", "AGENT_SESSIONS_SESSION_ID",
+            "AGENT_SESSIONS_PRODUCT", "AGENT_SESSIONS_QWEN_CAPABILITY",
+            "AGENT_SESSIONS_REMOTE_PARENT_CONTEXT",
+        ):
+            environment.pop(name, None)
+        environment.update({
+            "PATH": str(binary_root) + os.pathsep + environment.get("PATH", ""),
+            "CLAUDE_PEER_DATA_DIR": str(data),
+            "CLAUDE_PEER_CLAUDE_CONFIG_DIR": str(claude_config),
+            "CLAUDE_CONFIG_DIR": str(claude_config),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": claude_secure_config,
+            "CODEX_HOME": str(codex_home),
+            "GROK_PEER_GROK_BIN": str(grok_binary),
+            "GROK_PEER_NATIVE_RUNTIME": str(binary_root / "agent-session-runtime"),
+            "QWEN_HOME": str(qwen_home),
+            "QWEN_RUNTIME_DIR": str(qwen_runtime),
+            "XDG_RUNTIME_DIR": str(xdg_runtime),
+            "XDG_STATE_HOME": str(root / "xdg-state"),
+            "AGENT_SESSIONS_AGENT_RUNTIME_DIR": str(runtime),
+        })
+        pathlib.Path(environment["XDG_STATE_HOME"]).mkdir(mode=0o700)
+        prepare_isolated_grok_profile(
+            workspace, grok_home, grok_binary,
+            target_test_environment(environment, "grok", grok_home),
+        )
+        stop_isolated_codex_app_server(codex_home, environment)
+        federator = binary_root / "peer-federator"
+        runtime_binary = binary_root / "agent-session-runtime"
+        agent = subprocess.Popen([
+            str(federator), "agent", "--host", "qwen-composition", "--name", "qwen-composition",
+            "--runtime-dir", str(runtime), "--state-dir", str(state),
+            "--claude-config-dir", str(claude_config),
+        ], env=environment, stdout=subprocess.DEVNULL, stderr=(root / "agent.err").open("wb"),
+           start_new_session=True)
+        wait_for(lambda: (runtime / "agent.sock").is_socket(), "composition host agent")
+
+        edges = [(parent, target) for parent in PRODUCTS for target in PRODUCTS]
+        evidence = []
+        for index, (parent, target) in enumerate(edges, start=1):
+            parent_id = str(uuid.uuid4())
+            name = f"qwen-compose-{parent}-to-{target}-{index}"
+            token = f"QWEN_COMPOSE_{parent.upper()}_TO_{target.upper()}_{index}_OK"
+            prompt = root / f"prompt-{index}.txt"
+            prompt.write_text(f"Return only the exact token {token} and nothing else.\n", encoding="utf-8")
+            prompt.chmod(0o600)
+            command = [
+                str(fixture), "--runtime-dir", str(runtime), "--session", parent_id,
+                "--product", parent, "--name", f"{parent}-composition-parent",
+                "--groups", "qwen-composition", "--stay-after-child", "--",
+                *lane_arguments(target, name, qwen_home, workspace, prompt),
+            ]
+            target_environment = target_test_environment(environment, target, grok_home)
+            if target == "grok":
+                assert_no_grok_mcp_fallback(
+                    workspace, grok_home, grok_binary, target_environment,
+                )
+            parent_process = subprocess.Popen(
+                command, env=target_environment,
+                text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            parents.append(parent_process)
+            started_rows = read_fixture_events(parent_process, f"{parent}->{target}")
+            child_exit = next((row for row in started_rows if row.get("event") == "child_exit"), None)
+            ready = next((row for row in started_rows if row.get("type") == "lane.ready"), None)
+            if child_exit is None or child_exit.get("exit") != 0 or ready is None:
+                stop_fixture(parent_process)
+                parents.remove(parent_process)
+                diagnostic = parent_process.stderr.read() if parent_process.stderr is not None else ""
+                fail(f"{parent}->{target} start failed: events={started_rows!r} stderr={diagnostic!r}")
+            if parent_process.poll() is not None:
+                diagnostic = parent_process.stderr.read() if parent_process.stderr is not None else ""
+                fail(f"{parent}->{target} lifecycle fixture exited before collection: {diagnostic!r}")
+            thread_id = ready.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id:
+                fail(f"{parent}->{target} omitted thread identity: {ready}")
+            launched.append((target, thread_id))
+            lane = binary_root / f"{target}-peer-lane"
+            waited = subprocess.run(
+                [str(lane), "wait", thread_id, "--timeout", "150"], env=target_environment,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=TIMEOUT, check=False,
+            )
+            if waited.returncode != 0:
+                fail(f"{parent}->{target} wait failed: {waited.stdout!r} {waited.stderr!r}")
+            waited_rows = rows(waited.stdout)
+            answers = [
+                row.get("item", {}).get("text", "") for row in waited_rows
+                if isinstance(row.get("item"), dict) and row["item"].get("phase") == "final_answer"
+            ]
+            if not answers or answers[-1].strip() != token:
+                fail(f"{parent}->{target} final answer = {answers}")
+            record = wait_for(lambda: lane_record(data, thread_id), f"{parent}->{target} durable record")
+            groups = record.get("groups") or []
+            parent_recorded = record.get("parentSessionId") or record.get("parent_session_id")
+            owner_recorded = record.get("ownerSessionId") or record.get("owner_session_id")
+            notify_recorded = record.get("notifyTarget") or record.get("notify_target")
+            expected_groups = {
+                "qwen-composition", f"session:qwen-composition/{parent_id}",
+                f"session:qwen-composition/{thread_id}",
+            }
+            if (parent_recorded != parent_id or owner_recorded != parent_id or
+                    notify_recorded != "session:" + parent_id or record.get("persistent") or
+                    set(groups) != expected_groups):
+                fail(f"{parent}->{target} parent/groups = {record}")
+            archived = subprocess.run(
+                [str(lane), "archive", thread_id], env=target_environment, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT, check=False,
+            )
+            if archived.returncode != 0:
+                fail(f"{parent}->{target} archive failed: {archived.stdout!r} {archived.stderr!r}")
+            wait_for(
+                lambda: archived_record_is_clean(data, thread_id),
+                f"{parent}->{target} archived cleanup",
+            )
+            launched.remove((target, thread_id))
+            stop_fixture(parent_process)
+            parents.remove(parent_process)
+            evidence.append({"parent": parent, "target": target, "thread_id": thread_id, "token": token})
+
+        success = True
+        print(json.dumps({"type": "qwen.composition.passed", "edges": evidence}, sort_keys=True))
+        return 0
+    finally:
+        cleanup_errors: list[str] = []
+
+        def cleanup(description: str, action) -> None:
+            try:
+                action()
+            except Exception as error:  # Continue through independent owned cleanup.
+                cleanup_errors.append(f"{description}: {error}")
+
+        binary_root = repo / "bin" / platform_name()
+        for product, thread_id in reversed(launched):
+            cleanup(
+                f"archive {product} lane {thread_id}",
+                lambda product=product, thread_id=thread_id: subprocess.run(
+                    [str(binary_root / f"{product}-peer-lane"), "archive", thread_id],
+                    env=target_test_environment(environment, product, grok_home),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=True,
+                ),
+            )
+        for parent_process in reversed(parents):
+            cleanup(f"stop fixture {parent_process.pid}", lambda process=parent_process: stop_fixture(process))
+        if agent is not None and agent.poll() is None:
+            def stop_agent() -> None:
+                os.killpg(agent.pid, signal.SIGTERM)
+                try:
+                    agent.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(agent.pid, signal.SIGKILL)
+                    agent.wait(timeout=5)
+
+            cleanup(f"stop host agent {agent.pid}", stop_agent)
+        runtime_binary = binary_root / "agent-session-runtime"
+        supervisor_state = list(data.rglob("supervisor.json"))
+        supervisor_sockets = list(xdg_runtime.rglob("supervisor-*.sock"))
+        if runtime_binary.exists() and (supervisor_state or supervisor_sockets):
+            def stop_supervisor() -> None:
+                subprocess.run(
+                    [str(runtime_binary), "supervisor", "stop"], env=environment,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=True,
+                )
+                wait_for(
+                    lambda: not any(path.exists() for path in supervisor_state + supervisor_sockets),
+                    "bridge supervisor cleanup", timeout=10,
+                )
+
+            cleanup(
+                "stop bridge supervisor",
+                stop_supervisor,
+            )
+        cleanup(
+            "stop isolated Codex App Server",
+            lambda: stop_isolated_codex_app_server(codex_home, environment),
+        )
+        if not success:
+            error_log = root / "agent.err"
+            if error_log.exists() and error_log.stat().st_size:
+                print(error_log.read_text(errors="replace"), file=sys.stderr)
+        cleanup("remove composition root", lambda: shutil.rmtree(root))
+        if cleanup_errors:
+            message = "Qwen composition cleanup failed: " + "; ".join(cleanup_errors)
+            if success:
+                fail(message)
+            print(message, file=sys.stderr)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except CompositionTerminated as error:
+        print(f"Qwen composition contract: terminated by signal {error.signum}", file=sys.stderr)
+        raise SystemExit(128 + error.signum)
+    except (AssertionError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        print(f"Qwen composition contract: FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)

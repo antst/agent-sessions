@@ -3,9 +3,10 @@
 ## Requirements and targets
 
 Agent Sessions targets Linux and macOS on x86-64 and arm64. It requires Codex CLI with plugins,
-hooks, and managed App Server support; Claude Code with local cross-session messaging; and Bash for
+hooks, and managed App Server support; Claude Code with local cross-session messaging; Qwen Code
+0.21.15 or newer for Qwen peers/lanes; and Bash for
 installation and maintenance scripts. Building from source requires Go 1.22 or newer. CI/release
-artifacts include the nine native binaries and require
+artifacts include the eleven native binaries and require
 neither Go nor Node.js on the destination host.
 
 | Host | Bundled binary |
@@ -15,19 +16,19 @@ neither Go nor Node.js on the destination host.
 | macOS Intel | `bin/darwin-x64/agent-session-runtime` |
 | macOS Apple Silicon | `bin/darwin-arm64/agent-session-runtime` |
 
-Each platform directory also contains the distinct `peer`, `codex-peer`, `claude-peer`,
-`codex-peer-lane`, `claude-peer-lane`, `grok-peer`, `grok-peer-lane`, and `peer-federator`
+Each platform directory also contains the distinct `peer`, `codex-peer`, `claude-peer`, `qwen-peer`,
+`codex-peer-lane`, `claude-peer-lane`, `grok-peer`, `grok-peer-lane`, `qwen-peer-lane`, and `peer-federator`
 executables. `peer-federator` remains a separately
 operated process; installing the binary does not enable or load a federation service.
 
-The v0.2.0 peer, lane, cleanup, and bidirectional federation matrix was exercised on real Linux and
+The release peer, lane, cleanup, and bidirectional federation matrix is exercised on real Linux and
 macOS hosts. CI additionally cross-builds every release for Linux and macOS on x86-64 and arm64.
 
 ## Release archive installation
 
 A `vX.Y.Z` tag whose base version matches the plugin manifest creates a Forgejo Release containing
 four archives and `SHA256SUMS`. Choose exactly one archive for the destination host. Each archive
-has one top-level directory and contains the matching native executable plus the Codex, Claude, and Grok
+has one top-level directory and contains the matching native executables plus the Codex, Claude, Grok, and Qwen
 plugin payloads, launchers, documentation, and installer; it deliberately omits Go source.
 
 ```bash
@@ -45,8 +46,10 @@ On macOS, use `shasum -a 256 -c --ignore-missing SHA256SUMS` and the matching `d
 `darwin-arm64` archive. The `.agent-sessions-prebuilt` marker makes `make build` and the install
 targets use the packaged executable even if Go is present. Extracting an archive on the wrong OS
 or architecture fails before installation with the missing platform name. `make install` installs
-only the native runtime and Codex side; `make install-all` also installs the Claude orchestration
-and trusted Grok MCP plugins.
+only the native runtime and Codex side. `make install-all` installs the shared runtime and then each
+integration whose native client is present; absent Codex, Claude, Grok, or Qwen clients are named and
+skipped. An explicitly requested product target such as `make install-grok` remains strict and fails
+when that client is unavailable.
 
 ## Source installation
 
@@ -62,7 +65,7 @@ For a release archive with the matching prebuilt binary, run only `make install`
 
 By default, `make install`:
 
-1. builds all nine binaries under `bin/<platform>`;
+1. builds all eleven binaries under `bin/<platform>`;
 2. copies the runtime plugin payload into `~/.local/libexec/agent-sessions`;
 3. registers that installed tree's marketplace as `agent-sessions`;
 4. installs `agent-sessions@agent-sessions` into Codex's plugin cache; and
@@ -98,8 +101,8 @@ that private process group automatically; see
 Packagers can use `START_RUNTIME=0` to stage files without starting host services.
 
 `make install` deliberately changes only the Codex/runtime side. To install the reusable Claude
-orchestration skill and Grok MCP plugin as well, use `make install-all`; on a host where the runtime
-is already installed, `make install-claude` and `make install-grok` update those surfaces
+orchestration skill plus Grok and Qwen MCP plugins, use `make install-all`; on a host where the runtime
+is already installed, `make install-claude`, `make install-grok`, and `make install-qwen` update those surfaces
 independently. The Claude target stages its cache-busted payload under a
 versioned, immutable directory below `$(PREFIX)/share/agent-sessions/claude-marketplaces` before
 updating the marketplace, so later native-only installs cannot change an active Claude plugin.
@@ -117,6 +120,14 @@ that temporary registry row is then removed with `--keep-data`. Installation
 fails unless `grok inspect --json` resolves exactly one enabled user plugin and
 the exact staged `agent_sessions` MCP executable. See
 [GROK-INSTALL.md](./GROK-INSTALL.md).
+
+The Qwen target invokes Qwen's native Agent Plugins v1 extension manager in the
+exact profile selected by presence-sensitive `QWEN_HOME` and
+`QWEN_RUNTIME_DIR`. It verifies manifest/version/enabled-state drift, one
+`agent_sessions` stdio MCP server, and all five skills before admitting a
+managed launch. `make upgrade-qwen` is the same idempotent verified transaction;
+`make remove-qwen` removes only that extension. Both refuse while a managed
+Qwen process uses the selected profile. See [QWEN-INSTALL.md](./QWEN-INSTALL.md).
 
 The equivalent source-linked development command is:
 
@@ -163,7 +174,10 @@ make build         # current host, under bin/<platform>
 make build GOOS=darwin GOARCH=arm64
 make install-claude # install/update agent-sessions in Claude Code
 make install-grok   # validate/trust/install the Grok MCP plugin
-make install-all    # native runtime plus Claude Code and Grok plugins
+make install-qwen   # install/verify Qwen support in the selected profile
+make upgrade-qwen   # idempotent verified Qwen update
+make remove-qwen    # remove only Agent Sessions from the selected Qwen profile
+make install-all    # shared runtime plus every locally available product integration
 make reinstall     # new cachebuster, rebuild, reinstall
 make repair-projection THREAD_ID=<uuid>          # inspect the known duplicate-ordinal failure
 make repair-projection THREAD_ID=<uuid> APPLY=1  # back up and repair only that exact failure

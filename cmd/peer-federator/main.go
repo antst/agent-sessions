@@ -99,6 +99,8 @@ func runAgent(ctx context.Context, args []string) error {
 	codexLane := set.String("codex-lane", os.Getenv("PEER_FEDERATOR_CODEX_LANE"), "codex-peer-lane executable")
 	claudeLane := set.String("claude-lane", os.Getenv("PEER_FEDERATOR_CLAUDE_LANE"), "claude-peer-lane executable")
 	grokLane := set.String("grok-lane", os.Getenv("PEER_FEDERATOR_GROK_LANE"), "grok-peer-lane executable")
+	qwenLane := set.String("qwen-lane", os.Getenv("PEER_FEDERATOR_QWEN_LANE"), "qwen-peer-lane executable")
+	qwenExecutable := set.String("qwen-bin", os.Getenv("QWEN_PEER_QWEN_BIN"), "native Qwen executable used for readiness and remote lanes")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -107,7 +109,8 @@ func runAgent(ctx context.Context, args []string) error {
 		ClaudeConfigDir: *claudeConfig, RuntimeDir: *runtimeDir, StateDir: *stateDir,
 		EnableRemoteLanes:   *enableRemoteLanes,
 		CodexLaneExecutable: *codexLane, ClaudeLaneExecutable: *claudeLane,
-		GrokLaneExecutable: *grokLane,
+		GrokLaneExecutable: *grokLane, QwenLaneExecutable: *qwenLane,
+		QwenExecutable: *qwenExecutable,
 	})
 }
 
@@ -173,7 +176,7 @@ func runHosts(args []string) error {
 func runLane(ctx context.Context, args []string) error {
 	set := flag.NewFlagSet("lane", flag.ContinueOnError)
 	host := set.String("host", "", "connected destination host id or unique name")
-	product := set.String("product", "", "lane product: codex, claude, or grok")
+	product := set.String("product", "", "lane product: "+laneProductChoices(", "))
 	sourceSession := set.String("source-session", "", "originating live local peer session (normally inferred)")
 	runtimeDir := set.String("runtime-dir", federator.DefaultRuntimeDir(), "ephemeral runtime directory")
 	if err := set.Parse(args); err != nil {
@@ -225,7 +228,7 @@ func envEnabled(name string) bool {
 }
 
 func usage() string {
-	return `peer-federator — route grouped Agent Sessions peers locally and across a trusted LAN
+	return fmt.Sprintf(`peer-federator — route grouped Agent Sessions peers locally and across a trusted LAN
 
 Usage:
   peer-federator hub   [--listen :7419]
@@ -233,9 +236,18 @@ Usage:
   peer-federator doctor --hub HOST:PORT
   peer-federator status
   peer-federator hosts
-  peer-federator lane --host HOST --product codex|claude|grok -- COMMAND [ARGS...]
+  peer-federator lane --host HOST --product %s -- COMMAND [ARGS...]
   peer-federator version
 
 Remote lane execution is disabled by default. Run peer-federator COMMAND --help for all options.
-`
+`, laneProductChoices("|"))
+}
+
+func laneProductChoices(separator string) string {
+	descriptors := federator.ProductDescriptors()
+	products := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		products = append(products, descriptor.ID)
+	}
+	return strings.Join(products, separator)
 }

@@ -117,3 +117,34 @@ func TestNativeMCPPublishesAttestedLaneProxy(t *testing.T) {
 		t.Fatalf("lane tool schema = %#v", schema)
 	}
 }
+
+func TestQwenParentMCPPublishesAllFourLaneTargets(t *testing.T) {
+	var lane map[string]any
+	for _, definition := range qwenToolDefinitions {
+		if stringValue(definition["name"]) == "lane" {
+			lane = definition
+			break
+		}
+	}
+	if lane == nil {
+		t.Fatal("Qwen MCP omitted the lane tool")
+	}
+	schema, _ := lane["inputSchema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	product, _ := properties["product"].(map[string]any)
+	values, _ := product["enum"].([]any)
+	got := make([]string, 0, len(values))
+	for _, value := range values {
+		got = append(got, stringValue(value))
+	}
+	for _, want := range []string{"codex", "claude", "grok", "qwen"} {
+		if !containsString(got, want) {
+			t.Fatalf("Qwen MCP lane products = %v; missing %q", got, want)
+		}
+	}
+	for _, required := range qwenRequiredSchemaProperties(schema["required"]) {
+		if required == "session_id" {
+			t.Fatal("Qwen MCP lane tool trusts a model-supplied session ID")
+		}
+	}
+}

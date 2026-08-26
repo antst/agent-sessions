@@ -52,6 +52,14 @@ if ! grep -Fq 'PEER_FEDERATOR_ENABLE_REMOTE_LANES=false' "$config_root/agent.env
   printf 'agent environment template does not keep remote execution opt-in\n' >&2
   exit 1
 fi
+if ! grep -Fq 'PEER_FEDERATOR_QWEN_LANE=' "$config_root/agent.env.example"; then
+  printf 'agent environment template omits the Qwen lane launcher\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'QWEN_PEER_QWEN_BIN=' "$config_root/agent.env.example"; then
+  printf 'agent environment template omits the independent native Qwen executable\n' >&2
+  exit 1
+fi
 
 launchd_root="$install_stage/Library/LaunchAgents"
 mkdir -p "$launchd_root"
@@ -88,6 +96,14 @@ fi
 agent_help="$({ "$temporary_root/peer-federator" agent --help || true; } 2>&1)"
 if ! grep -Fq -- '-enable-remote-lanes' <<<"$agent_help"; then
   printf 'agent CLI help is missing the explicit remote-execution opt-in\n' >&2
+  exit 1
+fi
+if ! grep -Fq -- '-qwen-lane' <<<"$agent_help"; then
+  printf 'agent CLI help is missing the Qwen lane launcher\n' >&2
+  exit 1
+fi
+if ! grep -Fq -- '-qwen-bin' <<<"$agent_help"; then
+  printf 'agent CLI help is missing the independent native Qwen executable\n' >&2
   exit 1
 fi
 if ! grep -Fq '# Federation protocol version 3' docs/federation/PROTOCOL.md ||

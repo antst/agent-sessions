@@ -1,9 +1,14 @@
-# Qwen Code adapter (future design)
+# Qwen Code adapter (historical pre-design)
 
-Status: future work. Nothing described here is implemented or advertised as a
-current capability.
+Status: advisory history only. This document predates the implemented Qwen
+adapter and is not authoritative for current behavior. The normative feature
+specification is under `specs/001-qwen-support/`; current operator contracts
+are [../QWEN-ADAPTER.md](../QWEN-ADAPTER.md),
+[../QWEN-LANES.md](../QWEN-LANES.md), and
+[../QWEN-INSTALL.md](../QWEN-INSTALL.md). Where this pre-design conflicts with
+those documents or the tested CLI, it is obsolete.
 
-This design was prepared against the locally installed Qwen Code `0.21.12` and
+This design was prepared against the then-installed Qwen Code `0.21.12` and
 the matching upstream tag at commit
 `b965d5f8c24f48e65fb0b17c7d45f34ca4ce8f38`. Authoritative upstream surfaces:
 

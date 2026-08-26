@@ -18,6 +18,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const grokFakeProcessEnv = "AGENT_SESSIONS_GROK_FAKE_PROCESS"
@@ -135,6 +138,23 @@ func runGrokFakeACP() {
 				continue
 			}
 		case "session/new", "session/load":
+			if os.Getenv("GROK_FAKE_REQUIRE_AGENT_SESSIONS_MCP") == "1" {
+				params, _ := request["params"].(map[string]any)
+				servers, _ := params["mcpServers"].([]any)
+				server := map[string]any{}
+				if len(servers) == 1 {
+					server, _ = servers[0].(map[string]any)
+				}
+				args, _ := server["args"].([]any)
+				if len(servers) != 1 || stringValue(server["name"]) != "agent_sessions" ||
+					!filepath.IsAbs(stringValue(server["command"])) || len(args) != 1 || stringValue(args[0]) != "grok-mcp" ||
+					!reflect.DeepEqual(server["env"], []any{}) {
+					writeGrokFakeResponse(request["id"], nil, map[string]any{
+						"code": -32602, "message": "missing injected agent_sessions MCP",
+					})
+					continue
+				}
+			}
 			result["sessionId"] = defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv))
 		case "session/prompt":
 			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
@@ -171,6 +191,7 @@ func runGrokFakeACP() {
 			}
 			result["result"] = map[string]any{"sessions": []any{map[string]any{
 				"sessionId": defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv)),
+				"title":     strings.TrimSpace(os.Getenv("GROK_FAKE_SESSION_TITLE")),
 				"resident":  true, "yolo": yolo, "activity": activity,
 			}}}
 			if marker := os.Getenv("GROK_FAKE_EXIT_AFTER_ROSTER_ONCE"); marker != "" {
@@ -1163,12 +1184,12 @@ func TestGrokRosterChangedNotificationParsesExactResidentActivity(t *testing.T) 
 		"params": map[string]any{"method": "x.ai/sessions/changed", "params": map[string]any{
 			"upserted": []any{
 				map[string]any{"sessionId": "foreign", "resident": true, "yolo": true, "activity": "working"},
-				map[string]any{"sessionId": "target", "resident": true, "yolo": false, "activity": "needs_input"},
+				map[string]any{"sessionId": "target", "title": "Native Review Session", "resident": true, "yolo": false, "activity": "needs_input"},
 			},
 		}},
 	}
 	state, ok := grokRosterNotificationState(message, "target")
-	if !ok || state.permissionMode != "default" || state.status != "waiting" {
+	if !ok || state.name != "Native Review Session" || state.permissionMode != "default" || state.status != "waiting" {
 		t.Fatalf("roster notification state = %+v, %v", state, ok)
 	}
 	if _, ok := grokRosterNotificationState(message, "absent"); ok {
@@ -1182,6 +1203,60 @@ func TestGrokRosterChangedNotificationParsesExactResidentActivity(t *testing.T) 
 	}
 	if _, ok := grokRosterNotificationState(wrongWrapper, "target"); ok {
 		t.Fatal("notification with a different nested extension method was accepted")
+	}
+}
+
+func TestGrokUUIDResumePublishesNativeRosterTitleUnlessNameIsExplicit(t *testing.T) {
+	t.Setenv("GROK_FAKE_SESSION_TITLE", "Native Grok Session")
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "019fe660-1c86-7700-b462-6ff16de00fc5")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+	identity := host.identitySnapshot()
+	state := readJSONMap(filepath.Join(resolveNativePaths().dataRoot, "sessions", sessionKey(identity.sessionID), "state.json"))
+	registry := readJSONMap(stringValue(state["registryFile"]))
+	if identity.name != "Native-Grok-Session" || stringValue(state["name"]) != "Native-Grok-Session" ||
+		stringValue(registry["name"]) != "Native-Grok-Session" || stringValue(registry["nameSource"]) != "canonical" {
+		t.Fatalf("native title publication = identity %q state %#v registry %#v", identity.name, state, registry)
+	}
+}
+
+func TestGrokExplicitNameOverridesNativeRosterTitle(t *testing.T) {
+	t.Setenv("GROK_FAKE_SESSION_TITLE", "Native Grok Session")
+	t.Setenv("GROK_FAKE_NAME_SPECIFIED", "1")
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "019fe660-1c86-7700-b462-6ff16de00fc5")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+	identity := host.identitySnapshot()
+	state := readJSONMap(filepath.Join(resolveNativePaths().dataRoot, "sessions", sessionKey(identity.sessionID), "state.json"))
+	if identity.name != "grok-test" || stringValue(state["name"]) != "grok-test" {
+		t.Fatalf("explicit peer name was overwritten by native title: %#v", state)
+	}
+}
+
+func TestGrokNativeTitleResumeAdoptsSelectedUUIDAndTitle(t *testing.T) {
+	attachmentID := "019fe660-1c86-7700-b462-6ff16de00fc5"
+	selectedID := "3c0c0831-9bd7-40db-9ee3-e108f315ea57"
+	t.Setenv("GROK_FAKE_GENERATED_SESSION_ID", selectedID)
+	t.Setenv("GROK_FAKE_SESSION_TITLE", "Selected Native Title")
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), attachmentID)
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+	identity := host.identitySnapshot()
+	if identity.sessionID != selectedID || identity.name != "Selected-Native-Title" {
+		t.Fatalf("adopted identity = %q / %q", identity.sessionID, identity.name)
+	}
+	paths := resolveNativePaths()
+	if provisional := readGrokLaunchRecord(grokLaunchRecordPath(paths, attachmentID)); provisional != nil {
+		t.Fatalf("provisional launch record survived adoption: %#v", provisional)
+	}
+	record := readGrokLaunchRecord(grokLaunchRecordPath(paths, selectedID))
+	if record == nil || record.AttachmentID != attachmentID || record.Name != "Selected-Native-Title" {
+		t.Fatalf("selected launch record = %#v", record)
+	}
+	t.Setenv(grokSessionIDEnv, attachmentID)
+	t.Setenv(grokLaunchTokenEnv, host.config.LaunchToken)
+	if launch := activeGrokLaunchForToken(paths, host.config.LaunchToken); launch == nil || launch.SessionID != selectedID {
+		t.Fatalf("late-bound Grok launch capability resolved to %#v", launch)
 	}
 }
 
@@ -1775,11 +1850,29 @@ func waitGrokFakeChildPID(t *testing.T, path string) int {
 func TestGrokRuntimePathsStayCompactAndDoNotExposeToken(t *testing.T) {
 	token := strings.Repeat("secret-token-", 4)
 	paths := grokRuntimePaths(strings.Repeat("/long-runtime", 12), os.Getuid(), token)
-	if len(paths.ControlSocket) > 92 || len(paths.LeaderSocket) > 92 {
-		t.Fatalf("Grok sockets exceed compact budget: %#v", paths)
+	if err := socketpath.Validate(paths.ControlSocket); err != nil {
+		t.Fatalf("Grok control socket exceeds platform budget: %#v: %v", paths, err)
+	}
+	if err := socketpath.Validate(paths.LeaderSocket); err != nil {
+		t.Fatalf("Grok leader socket exceeds platform budget: %#v: %v", paths, err)
 	}
 	if strings.Contains(paths.ControlSocket, token) || strings.Contains(paths.LeaderSocket, token) {
 		t.Fatal("raw launch token leaked into a socket path")
+	}
+}
+
+func TestGrokHostCommandAcceptsExplicitBooleanFlagValues(t *testing.T) {
+	t.Setenv(grokLaunchTokenEnv, "")
+	rc := runGrokHostCommand([]string{
+		"--grok-bin", "/bin/false", "--session-id", "019fe660-1c86-7700-b462-6ff16de00fc5",
+		"--cwd", t.TempDir(), "--owner-pid", strconv.Itoa(os.Getpid()),
+		"--owner-proc-start", readProcStart(os.Getpid()), "--late-bound-resume",
+		"--name-specified=false", "--groups-json", `[]`, "--groups-specified=false",
+		"--parent-session", "", "--parent-specified=false", "--inherit-parent-groups=false",
+		"--inherit-groups-specified=false", "--always-approve=false", "--always-approve-specified=false",
+	})
+	if rc != 1 {
+		t.Fatalf("boolean host flags failed parsing: rc=%d", rc)
 	}
 }
 
@@ -1802,6 +1895,16 @@ func startTestGrokHost(t *testing.T, ownerPID int, ownerStart, sessionID string)
 		OwnerPID: ownerPID, OwnerProcStart: ownerStart,
 		LaunchToken: grokTokenHash(root)[:32], RuntimeDir: filepath.Join(root, "run"),
 		Name: "grok-test", PermissionMode: "default",
+	}
+	config.NameSpecified = os.Getenv("GROK_FAKE_NAME_SPECIFIED") == "1"
+	if selectedID := strings.TrimSpace(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID")); selectedID != "" && selectedID != sessionID {
+		config.LateBoundResume = true
+		config.resolvePreferences = func(request federator.ResolvePreferencesRequest) (federator.ResolvedPreferences, error) {
+			return federator.ResolvedPreferences{Preference: federator.SessionPreferences{
+				SessionID: request.SessionID, Product: "grok", Kind: federator.SessionKindInteractive,
+				AlwaysApprove: os.Getenv("GROK_FAKE_YOLO") == "1",
+			}}, nil
+		}
 	}
 	config.command = func(args ...string) *exec.Cmd {
 		argv := append([]string{"-test.run=^TestGrokFakeProcess$", "--"}, args...)
@@ -1831,8 +1934,9 @@ func waitGrokHostReady(t *testing.T, host *grokHost) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		identity := host.identitySnapshot()
 		response, err := requestControl(host.paths.ControlSocket, map[string]any{
-			"action": "status", "sessionId": host.config.SessionID, "launchToken": host.config.LaunchToken,
+			"action": "status", "sessionId": identity.sessionID, "launchToken": host.config.LaunchToken,
 		}, 500*time.Millisecond)
 		if err == nil {
 			if ready, _ := response["ready"].(bool); ready {

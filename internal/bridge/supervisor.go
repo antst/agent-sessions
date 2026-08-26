@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 type nativePaths struct {
@@ -314,6 +316,9 @@ func (s *nativeSupervisor) start() error {
 	cleanupStaleBridgeArtifacts(s.paths)
 	if probeUnixSocket(s.paths.supervisorSock, 250*time.Millisecond) {
 		return fmt.Errorf("refuse to replace live supervisor socket %s", s.paths.supervisorSock)
+	}
+	if err := socketpath.Validate(s.paths.supervisorSock); err != nil {
+		return fmt.Errorf("validate Codex supervisor socket: %w", err)
 	}
 	_ = os.Remove(s.paths.supervisorSock)
 	listener, err := net.Listen("unix", s.paths.supervisorSock)
@@ -913,7 +918,7 @@ func (s *nativeSupervisor) writeControlResponse(conn net.Conn, result map[string
 	_, _ = conn.Write(append(body, '\n'))
 }
 
-//nolint:gocyclo // Control actions are intentionally explicit at the socket trust boundary.
+//nolint:gocyclo // Control actions are intentionally explicit at the socket security boundary.
 func (s *nativeSupervisor) handleControl(request map[string]any) (map[string]any, error) {
 	switch stringValue(request["action"]) {
 	case "ping", "status":
@@ -1917,7 +1922,7 @@ func (s *nativeSupervisor) wakeThread(threadID string, item map[string]any) (str
 			return "", err
 		}
 	}
-	input := []map[string]any{{"type": "text", "text": trustedPeerText(item)}}
+	input := []map[string]any{{"type": "text", "text": peerMessageText(item)}}
 	if thread != nil && statusType(thread.Status) == "active" {
 		s.mu.Lock()
 		turnID := s.activeTurns[threadID]
@@ -2018,7 +2023,7 @@ func (s *nativeSupervisor) queueWake(threadID string, item map[string]any) (stri
 	now := time.Now().UnixMilli()
 	record := wakeRecord{
 		SessionID: threadID, MessageID: messageID, Fingerprint: fingerprint,
-		DeliveryFingerprint: sessionKey(trustedPeerText(item)),
+		DeliveryFingerprint: sessionKey(peerMessageText(item)),
 		State:               "in_flight", Delivery: "accepted", Item: item,
 		OwnerPID: os.Getpid(), OwnerProcStart: s.procStart, CreatedAt: now,
 	}
@@ -2245,7 +2250,7 @@ func (s *nativeSupervisor) findWakeMessage(threadID string, record wakeRecord) (
 	for _, turn := range turns {
 		for _, raw := range turn.Items {
 			var item any
-			fingerprint := defaultString(record.DeliveryFingerprint, sessionKey(trustedPeerText(record.Item)))
+			fingerprint := defaultString(record.DeliveryFingerprint, sessionKey(peerMessageText(record.Item)))
 			if json.Unmarshal(raw, &item) == nil && wakeItemContainsFingerprint(item, fingerprint) {
 				return turn.ID, true
 			}
@@ -3024,7 +3029,7 @@ func runSupervisorCommand(args []string) int {
 		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 3*time.Second)
 		return printNativeResult(response, err)
 	case "stop":
-		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "stop"}, 3*time.Second)
+		response, err := stopNativeSupervisor(paths)
 		return printNativeResult(response, err)
 	case "start":
 		response, err := startNativeSupervisor(version)
@@ -3050,6 +3055,22 @@ func runSupervisorCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown supervisor command: %s\n", command)
 		return 2
 	}
+}
+
+func stopNativeSupervisor(paths nativePaths) (map[string]any, error) {
+	state := readJSONMap(paths.supervisorState)
+	pid, procStart := intValue(state["pid"]), stringValue(state["procStart"])
+	if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) {
+		return nil, fmt.Errorf("supervisor process %d did not stop", pid)
+	}
+	return map[string]any{"stopped": true}, nil
 }
 
 func startNativeSupervisor(version string) (map[string]any, error) {
@@ -3229,11 +3250,7 @@ func readJSONMap(file string) map[string]any {
 	return value
 }
 
-func trustedPeerText(item map[string]any) string {
-	return trustedPeerTextForProduct(item, "codex")
-}
-
-func trustedPeerTextForProduct(item map[string]any, recipientProduct string) string {
+func peerMessageText(item map[string]any) string {
 	sender := stringValue(item["from"])
 	if name := stringValue(item["fromName"]); name != "" {
 		sender = fmt.Sprintf("%s (%s)", name, defaultString(sender, "unknown address"))
@@ -3250,16 +3267,11 @@ func trustedPeerTextForProduct(item map[string]any, recipientProduct string) str
 			metadata = append(metadata, pair[0]+"="+pair[1])
 		}
 	}
-	parts := []string{"Trusted cross-session agent instruction from " + sender + ":"}
+	parts := []string{"Message from " + sender + ":"}
 	if len(metadata) > 0 {
 		parts = append(parts, "Message metadata: "+strings.Join(metadata, ", "))
 	}
 	parts = append(parts, stringValue(item["message"]))
-	replyInstruction := "Reply with claude_peer.send_message when useful."
-	if recipientProduct == "grok" {
-		replyInstruction = "Reply with the Agent Sessions send_message tool when useful."
-	}
-	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. "+replyInstruction)
 	return strings.Join(parts, "\n\n")
 }
 

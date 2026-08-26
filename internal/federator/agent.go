@@ -15,12 +15,50 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/qwenprofile"
+	"github.com/antst/agent-sessions/internal/qwenreadiness"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
+
+var evaluateQwenLaneReadiness = func(executable string) error {
+	profile, err := qwenprofile.Current()
+	if err != nil {
+		return err
+	}
+	workspace, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	workspace, err = pathidentity.ExistingDirectory(workspace)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	report, err := qwenreadiness.Check(ctx, qwenreadiness.Request{
+		Executable: executable, Workspace: workspace, Profile: profile,
+		ExpectedIntegrationVersion: qwenreadiness.IntegrationVersion,
+		Source:                     qwenreadiness.NewNativeSource(os.Environ()),
+	})
+	if err != nil {
+		return err
+	}
+	if !report.Ready {
+		issues := make([]string, 0, len(report.Issues))
+		for _, issue := range report.Issues {
+			issues = append(issues, issue.Code+": "+issue.Message)
+		}
+		return fmt.Errorf("qwen lane readiness failed: %s", strings.Join(issues, "; "))
+	}
+	return nil
+}
 
 // AgentOptions configures one host agent and its local Claude registry.
 type AgentOptions struct {
@@ -38,6 +76,8 @@ type AgentOptions struct {
 	CodexLaneExecutable  string
 	ClaudeLaneExecutable string
 	GrokLaneExecutable   string
+	QwenLaneExecutable   string
+	QwenExecutable       string
 	Logger               *log.Logger
 }
 
@@ -79,6 +119,7 @@ func preferenceUpdateFromMessage(message Message) SessionPreferenceUpdate {
 		ParentGroups: message.ParentGroups, ParentSpecified: message.ParentSpecified,
 		InheritParentGroups: message.InheritParentGroups, InheritGroupsSpecified: message.InheritGroupsSpecified,
 		AlwaysApprove: message.AlwaysApprove, AlwaysApproveSpecified: message.AlwaysApproveSpecified,
+		Qwen: message.QwenSession,
 	}
 }
 
@@ -184,22 +225,56 @@ func configureLaneExecutables(options *AgentOptions) error {
 		options.CodexLaneExecutable = ""
 		options.ClaudeLaneExecutable = ""
 		options.GrokLaneExecutable = ""
+		options.QwenLaneExecutable = ""
+		options.QwenExecutable = ""
 		return nil
 	}
 	codexConfigured := options.CodexLaneExecutable
 	claudeConfigured := options.ClaudeLaneExecutable
 	grokConfigured := options.GrokLaneExecutable
-	options.CodexLaneExecutable = resolveLaneExecutable(codexConfigured, "codex-peer-lane")
-	options.ClaudeLaneExecutable = resolveLaneExecutable(claudeConfigured, "claude-peer-lane")
-	options.GrokLaneExecutable = resolveLaneExecutable(grokConfigured, "grok-peer-lane")
-	if codexConfigured != "" && options.CodexLaneExecutable == "" {
-		return fmt.Errorf("configured codex lane launcher %q is not executable", codexConfigured)
+	qwenConfigured := options.QwenLaneExecutable
+	qwenExecutableConfigured := options.QwenExecutable
+	if qwenExecutableConfigured == "" {
+		qwenExecutableConfigured = strings.TrimSpace(os.Getenv("QWEN_PEER_QWEN_BIN"))
 	}
-	if claudeConfigured != "" && options.ClaudeLaneExecutable == "" {
-		return fmt.Errorf("configured Claude lane launcher %q is not executable", claudeConfigured)
+	bindings := []struct {
+		configured string
+		fallback   string
+		label      string
+		target     *string
+	}{
+		{codexConfigured, "codex-peer-lane", "codex", &options.CodexLaneExecutable},
+		{claudeConfigured, "claude-peer-lane", "Claude", &options.ClaudeLaneExecutable},
+		{grokConfigured, "grok-peer-lane", "Grok", &options.GrokLaneExecutable},
+		{qwenConfigured, "qwen-peer-lane", "Qwen", &options.QwenLaneExecutable},
 	}
-	if grokConfigured != "" && options.GrokLaneExecutable == "" {
-		return fmt.Errorf("configured Grok lane launcher %q is not executable", grokConfigured)
+	for _, binding := range bindings {
+		*binding.target = resolveLaneExecutable(binding.configured, binding.fallback)
+		if binding.configured != "" && *binding.target == "" {
+			return fmt.Errorf("configured %s lane launcher %q is not executable", binding.label, binding.configured)
+		}
+	}
+	options.QwenExecutable = resolveLaneExecutable(qwenExecutableConfigured, "qwen")
+	return configureQwenLaneReadiness(options, qwenConfigured, qwenExecutableConfigured)
+}
+
+func configureQwenLaneReadiness(options *AgentOptions, configuredLauncher, configuredNative string) error {
+	if options.QwenLaneExecutable == "" {
+		return nil
+	}
+	if options.QwenExecutable == "" {
+		if configuredLauncher != "" || configuredNative != "" {
+			return errors.New("configured Qwen lane launcher has no executable native Qwen client")
+		}
+		options.QwenLaneExecutable = ""
+		return nil
+	}
+	if err := evaluateQwenLaneReadiness(options.QwenExecutable); err != nil {
+		if configuredLauncher != "" || configuredNative != "" {
+			return fmt.Errorf("configured Qwen lane launcher is not ready: %w", err)
+		}
+		options.QwenLaneExecutable = ""
+		options.QwenExecutable = ""
 	}
 	return nil
 }
@@ -375,6 +450,9 @@ func (a *agent) handleHubMessage(message Message) error {
 }
 
 func (a *agent) startControlListener() (net.Listener, error) {
+	if err := socketpath.Validate(a.controlPath); err != nil {
+		return nil, fmt.Errorf("validate agent control socket: %w", err)
+	}
 	_ = os.Remove(a.controlPath)
 	listener, err := net.Listen("unix", a.controlPath)
 	if err != nil {
@@ -631,9 +709,11 @@ func (a *agent) handleControl(conn net.Conn) {
 				case !ok:
 					response.Error = "session is not present in the catalog"
 				default:
+					name, live := a.sessionProjection(message.SessionID, preference.Product)
 					response = Message{
 						Type: "session_lookup", Version: GroupProtocolVersion,
-						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+						SessionID: message.SessionID, Name: name, Preference: &preference, Groups: groups,
+						Peers: live,
 					}
 				}
 			case "session_name_lookup":
@@ -698,6 +778,16 @@ func (a *agent) handleControl(conn net.Conn) {
 				} else {
 					response = Message{Type: "peer_prepare", Version: GroupProtocolVersion}
 				}
+			case "peer_prepare_selection":
+				if message.Registration == nil {
+					response.Error = "peer preparation is required"
+					break
+				}
+				if err := a.prepareClaudePeerSelection(*message.Registration); err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{Type: "peer_prepare_selection", Version: GroupProtocolVersion}
+				}
 			case "peer_prepare_launch":
 				if message.Registration == nil || message.Preference == nil {
 					response.Error = "peer preparation and previewed preferences are required"
@@ -715,6 +805,26 @@ func (a *agent) handleControl(conn net.Conn) {
 				} else {
 					response = Message{
 						Type: "peer_prepare_launch", Version: GroupProtocolVersion,
+						SessionID: message.SessionID, Preference: &preference, Groups: groups,
+					}
+				}
+			case "peer_promote_selection":
+				if message.Registration == nil || message.Preference == nil {
+					response.Error = "peer preparation and previewed preferences are required"
+					break
+				}
+				if err := a.validatePreferenceParentUpdate(message); err != nil {
+					response.Error = err.Error()
+					break
+				}
+				preference, groups, err := a.promoteClaudePeerSelection(
+					*message.Registration, preferenceUpdateFromMessage(message), *message.Preference,
+				)
+				if err != nil {
+					response.Error = err.Error()
+				} else {
+					response = Message{
+						Type: "peer_promote_selection", Version: GroupProtocolVersion,
 						SessionID: message.SessionID, Preference: &preference, Groups: groups,
 					}
 				}

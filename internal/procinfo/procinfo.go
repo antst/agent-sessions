@@ -3,6 +3,7 @@
 package procinfo
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -35,6 +36,17 @@ type Info struct {
 type Process struct {
 	PID int
 	Info
+}
+
+// observableEnvironment keeps identity-sensitive callers from treating an
+// empty result as authoritative proof that a process has no managed tags.
+// Some hosts report an unreadable environment as success with zero entries;
+// a genuinely empty exec environment is equally insufficient for ownership.
+func observableEnvironment(pid int, environment []string) ([]string, error) {
+	if len(environment) == 0 {
+		return nil, fmt.Errorf("process %d environment is empty or unavailable", pid)
+	}
+	return environment, nil
 }
 
 // LooksLikeCodexHost recognizes the native and Node-hosted Codex entrypoints

@@ -34,7 +34,7 @@ func TestDiscoverLocalPeersExportsRealAndSkipsFederatedRecords(t *testing.T) {
 	pid := os.Getpid()
 	path := filepath.Join(registry, strconv.Itoa(pid)+".json")
 	record := registryRecord{
-		PID: pid, SessionID: "session-a", Name: "reviewer", Status: "idle",
+		PID: pid, SessionID: "session-a", AttachmentID: "attachment-a", Name: "reviewer", Status: "idle",
 		MessagingSocketPath: socket, ProcStart: processStart(pid), StartedAt: time.Now().UnixMilli(),
 		PermissionMode: "bypassPermissions",
 	}
@@ -48,6 +48,9 @@ func TestDiscoverLocalPeersExportsRealAndSkipsFederatedRecords(t *testing.T) {
 	peer, ok := peers["host-a/session-a"]
 	if !ok || peer.DisplayName != "reviewer--alpha" || peer.GlobalID != globalSessionID("host-a", "session-a") {
 		t.Fatalf("peer = %#v, exists=%v", peer, ok)
+	}
+	if peer.AttachmentID != "attachment-a" {
+		t.Fatalf("late-bound attachment identity was not recovered from the native row: %#v", peer)
 	}
 	// A registry claim alone cannot elevate the exported permission class. This
 	// test process was not launched in bypass mode, so argv corroboration wins.
@@ -97,6 +100,31 @@ func TestDiscoverLocalPeersExportsRealAndSkipsFederatedRecords(t *testing.T) {
 	}
 	if len(peers) != 0 {
 		t.Fatalf("federated record was re-exported: %#v", peers)
+	}
+}
+
+func TestCurrentRegistryFormatRemainsCompatibleForEveryProduct(t *testing.T) {
+	for _, descriptor := range ProductDescriptors() {
+		t.Run(descriptor.ID, func(t *testing.T) {
+			root := t.TempDir()
+			socket, listener := registrationSocket(t, root, descriptor.ID+".sock")
+			defer func() { _ = listener.Close() }()
+			pid := os.Getpid()
+			record := registryRecord{
+				PID: pid, SessionID: descriptor.ID + "-current-registry", Name: descriptor.ID + "-peer",
+				Status: "idle", Entrypoint: descriptor.ID, ProcStart: processStart(pid),
+				MessagingSocketPath: socket, StartedAt: time.Now().UnixMilli(), PeerProtocol: GroupProtocolVersion,
+			}
+			registry := writeRegistryFixture(t, record)
+			peers, err := discoverLocalPeers(registry, "host-a", "alpha")
+			if err != nil {
+				t.Fatal(err)
+			}
+			peer, ok := peers["host-a/"+record.SessionID]
+			if !ok || peer.Entrypoint != descriptor.ID || peer.Socket != socket {
+				t.Fatalf("current %s registry row was not recovered: %+v", descriptor.ID, peer)
+			}
+		})
 	}
 }
 

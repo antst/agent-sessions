@@ -35,7 +35,7 @@ disconnected instead of returning stale data.
 
 ## Product sessions
 
-Use `codex-peer`, `claude-peer`, or `grok-peer` to opt in. Pass repeatable
+Use `codex-peer`, `claude-peer`, `grok-peer`, or `qwen-peer` to opt in. Pass repeatable
 `-g NAME` or `--group NAME` options on a fresh launch. Resume without group/yolo overrides
 restores the catalog; explicit values replace it. `peer resume SESSION_UUID`
 uses the catalogued product adapter.
@@ -59,9 +59,18 @@ is no collision-safe automatic migration for those development-only sessions.
 
 Remote lanes are disabled unless `--enable-remote-lanes` or
 `PEER_FEDERATOR_ENABLE_REMOTE_LANES=true` is set. The agent searches `PATH` and
-`~/.local/bin` for all three target launchers. Exact paths can be supplied with
+`~/.local/bin` for all four target launchers. Exact paths can be supplied with
 `PEER_FEDERATOR_CODEX_LANE`, `PEER_FEDERATOR_CLAUDE_LANE`, and
-`PEER_FEDERATOR_GROK_LANE`.
+`PEER_FEDERATOR_GROK_LANE`, and `PEER_FEDERATOR_QWEN_LANE`. The Qwen capability
+is withheld unless the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR`, native executable,
+ACP/archive surface, trusted cwd, and installed integration are ready.
+The native client is resolved separately from `qwen-peer-lane`; override it with
+`QWEN_PEER_QWEN_BIN` or `--qwen-bin` when it is not on the service `PATH`. The exact resolved path
+is inherited by remote Qwen workers.
+Capabilities are evaluated when the agent starts and are advertised in its hub
+handshake. After installing a previously unavailable product integration,
+restart that agent to advertise the newly ready capability; plugin installation
+does not signal or replace a separately managed federation process.
 
 Every parent product can select every target product. The source parent is
 agent-attested; it is independent from `--product`, which chooses only the
