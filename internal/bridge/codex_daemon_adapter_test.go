@@ -91,12 +91,12 @@ func (client *codexDaemonTestClient) PrepareInteractive(_ context.Context, reque
 	return daemonpkg.NativeLaunchPlan{Executable: "codex", Arguments: request.Intent.NativeArguments, Cwd: request.Cwd}, nil
 }
 
-func (client *codexDaemonTestClient) InspectThread(_ context.Context, _ string) (codexDaemonThread, error) {
+func (client *codexDaemonTestClient) InspectThread(_ context.Context, _, _ string) (codexDaemonThread, error) {
 	client.inspectCalls++
 	return client.thread, nil
 }
 
-func (client *codexDaemonTestClient) DeliverFrame(_ context.Context, threadID string, frame federation.AgentFrame) error {
+func (client *codexDaemonTestClient) DeliverFrame(_ context.Context, _, threadID string, frame federation.AgentFrame) error {
 	client.deliverThread = threadID
 	client.frames = append(client.frames, frame)
 	return nil

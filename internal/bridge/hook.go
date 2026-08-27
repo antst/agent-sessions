@@ -3,6 +3,7 @@ package bridge
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 )
 
@@ -29,6 +31,8 @@ type hookInput struct {
 }
 
 const hookAdditionalContextLimit = 2400
+
+var queryDaemonCodexHook = daemonpkg.QueryLocalControl
 
 func runHookCommand() {
 	body, err := io.ReadAll(io.LimitReader(os.Stdin, maxFrameBytes+1))
@@ -57,6 +61,9 @@ func runHookCommand() {
 //nolint:gocyclo // Each hook event has a separate, explicit delivery policy.
 func handleNativeHook(input hookInput) (map[string]any, error) {
 	paths := resolveNativePaths()
+	if identity := daemonpkg.InheritedConnectorIdentity("codex"); identity.AttachmentID != "" {
+		return handleDaemonCodexHook(paths, input, identity)
+	}
 	if input.Event == "SessionEnd" {
 		// Hook metadata identifies a thread, not the client attachment that
 		// ended. Exact owner-process reconciliation owns teardown.
@@ -163,6 +170,52 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 	default:
 		return nil, nil
 	}
+}
+
+// handleDaemonCodexHook is the managed hook path for the unified runtime. The
+// inherited one-time launch capability is the authority; transcript metadata
+// only corroborates the exact Codex thread. No supervisor, shim, inbox, or
+// product-specific Agent Sessions socket is created.
+func handleDaemonCodexHook(paths nativePaths, input hookInput, identity daemonpkg.LocalControlIdentity) (map[string]any, error) {
+	if input.Event == "SessionEnd" {
+		identity.Role = daemonpkg.LocalControlHook
+		_, err := queryDaemonCodexHook(context.Background(), identity, "attachment.detach", daemonpkg.AttachmentDetachRequest{
+			AttachmentID: identity.AttachmentID, Reason: "codex_session_end",
+		})
+		return nil, err
+	}
+	if input.Event != "SessionStart" && input.Event != "UserPromptSubmit" && input.Event != "Stop" {
+		return nil, nil
+	}
+	threadID, err := codexHookThreadID(paths, input)
+	if err != nil {
+		return nil, err
+	}
+	if identity.SessionID != "" && identity.SessionID != threadID {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	identity.Role = daemonpkg.LocalControlHook
+	identity.SessionID = threadID
+	identity.NativeActor = map[string]any{"thread_id": threadID}
+	response, err := queryDaemonCodexHook(context.Background(), identity, "attachment.refresh", daemonpkg.AttachmentRefreshRequest{
+		AttachmentID: identity.AttachmentID, SessionID: threadID, NativeActor: identity.NativeActor,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if input.Event != "SessionStart" {
+		return map[string]any{}, nil
+	}
+	var record daemonpkg.AttachmentRecord
+	if err := json.Unmarshal(response.Result, &record); err != nil {
+		return nil, fmt.Errorf("decode daemon Codex hook attachment: %w", err)
+	}
+	return map[string]any{"hookSpecificOutput": map[string]any{
+		"hookEventName": "SessionStart",
+		"additionalContext": hookStartupContext(map[string]any{
+			"name": record.Name, "sessionId": record.SessionID, "groups": record.Groups,
+		}),
+	}}, nil
 }
 
 // preparedOwnerProcessArgs is a test seam around the PID/start-attested argv

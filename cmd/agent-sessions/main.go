@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/antst/agent-sessions/internal/bridge"
 	"github.com/antst/agent-sessions/internal/clihelp"
 	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
@@ -175,7 +176,12 @@ func dispatchHostCommand(command clihelp.CommandDescriptor, args []string) error
 	case "host.daemon":
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		return daemon.RunForeground(ctx)
+		codex := bridge.NewCodexDaemonAdapter()
+		defer codex.Close()
+		return daemon.RunForegroundWithOptions(ctx, daemon.ForegroundOptions{
+			AttachmentAdapters: map[string]daemon.AttachmentAdapter{"codex": codex},
+			DeliveryAdapters:   map[string]daemon.DeliveryAdapter{"codex": codex},
+		})
 	case "host.connector.install":
 		return daemon.RunConnectorLifecycleCLI(context.Background(), "install", args)
 	case "host.connector.remove":

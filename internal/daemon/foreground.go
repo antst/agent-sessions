@@ -26,6 +26,20 @@ var BuildVersion = "development"
 // RunForeground runs the one service-manager-owned host authority in the
 // foreground. It never forks or supervises another daemon image.
 func RunForeground(ctx context.Context) error {
+	return RunForegroundWithOptions(ctx, ForegroundOptions{})
+}
+
+// ForegroundOptions supplies in-process product adapters from the executable
+// composition root. The daemon package stays independent of vendor protocol
+// implementations while still owning their one runtime generation.
+type ForegroundOptions struct {
+	AttachmentAdapters map[string]AttachmentAdapter
+	DeliveryAdapters   map[string]DeliveryAdapter
+}
+
+// RunForegroundWithOptions runs the canonical foreground authority with
+// callable product adapters embedded in the same process.
+func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) error {
 	paths, err := ResolveProductionPaths()
 	if err != nil {
 		return err
@@ -65,6 +79,7 @@ func RunForeground(ctx context.Context) error {
 		RuntimeVersion: BuildVersion, RuntimeIdentity: runtimeIdentity, PID: os.Getpid(),
 		ProcStart: identity.Start, StrongStart: identity.StrongStart,
 		ServiceManager: manager, ServiceUnit: unit, RecoveryHooks: recoveryHooks,
+		AttachmentAdapters: options.AttachmentAdapters, DeliveryAdapters: options.DeliveryAdapters,
 	})
 	if err != nil {
 		return err
