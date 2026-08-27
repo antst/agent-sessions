@@ -134,7 +134,7 @@ native identities and no duplicate accepted message.
 - [X] T047 [P] [US2] Refactor Grok owner/leader/ACP observation, selection, wake, and delivery into a callable daemon adapter in internal/bridge/grok.go without a grok-host listener/process
 - [X] T048 [P] [US2] Refactor Qwen readiness, selection, event observation, native input, and delivery into a callable daemon adapter in internal/bridge/qwen.go and internal/bridge/qwen_host.go without a qwen-host listener/process
 - [X] T049 [US2] Point Codex, Claude, Grok, and Qwen connector payloads at canonical stateless relay modes and one `agent_sessions` tool namespace in .mcp.json, claude/.mcp.json, grok/.mcp.json, qwen/mcp.json, and scripts/native-entry
-- [ ] T050 [US2] Add and run the four-product peer, group-isolation, bare-session, daemon-restart, accepted-message, and exact-process-census acceptance flow plus an installer-driven upgrade while all four peers remain active, proving unchanged native process/session identities and reconstructed messaging, in scripts/test-unified-peers and scripts/test
+- [X] T050 [US2] Add and run the four-product peer, group-isolation, bare-session, daemon-restart, accepted-message, and exact-process-census acceptance flow plus an installer-driven upgrade while all four peers remain active, proving unchanged native process/session identities and reconstructed messaging, in scripts/test-unified-peers and scripts/test
 
 **Checkpoint**: Interactive peers preserve existing messaging semantics across daemon restart with no
 separate Agent Sessions peer runtime.

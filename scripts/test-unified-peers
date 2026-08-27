@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+	script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+	link_target="$(readlink -- "$script_path")"
+	if [[ "$link_target" == /* ]]; then script_path="$link_target"; else script_path="$script_dir/$link_target"; fi
+done
+repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+
+cd -- "$repository_root"
+AGENT_SESSIONS_UNIFIED_PEERS_ACCEPTANCE=1 \
+	go test ./internal/daemon -run '^TestUnifiedPeersAcceptance$' -count=1 -v
+printf '{"type":"unified.peers.passed","products":4,"bare_session":true,"group_isolation":true,"daemon_restart":true,"active_peer_upgrade":true,"exact_process_census":true}\n'

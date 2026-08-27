@@ -27,6 +27,7 @@ bash -n \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
   "$plugin_root/scripts/test-claude-contract" \
+  "$plugin_root/scripts/test-unified-peers" \
   "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
   "$plugin_root/grok/scripts/native-entry" \
   "$plugin_root/qwen/scripts/native-entry" \
@@ -898,6 +899,7 @@ fi
 unset AGENT_SESSIONS_AGENT_RUNTIME_DIR
 cd -- "$plugin_root"
 if [[ "${RACE:-0}" != 1 ]]; then
+  "$plugin_root/scripts/test-unified-peers"
   "$plugin_root/scripts/test-unified-service"
 fi
 if [[ "${RACE:-0}" == "1" ]]; then
