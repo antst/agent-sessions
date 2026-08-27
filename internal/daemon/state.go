@@ -270,6 +270,20 @@ func (store *StateStore) CompareAndSwapRuntime(ctx context.Context, expected sta
 // Recover removes only validated abandoned same-root temporary records.
 func (store *StateStore) Recover(ctx context.Context) error { return store.records.Recover(ctx) }
 
+func (store *StateStore) readAttachmentCatalog(ctx context.Context) (attachmentCatalog, statestore.Revision, error) {
+	var catalog attachmentCatalog
+	revision, err := store.records.Read(ctx, "attachments", &catalog)
+	return catalog, revision, err
+}
+
+func (store *StateStore) compareAndSwapAttachmentCatalog(
+	ctx context.Context,
+	expected statestore.Revision,
+	catalog attachmentCatalog,
+) (statestore.Revision, error) {
+	return store.records.CompareAndSwap(ctx, "attachments", expected, catalog)
+}
+
 // ReadDebt reads and validates one exact lifecycle-debt record.
 func (store *StateStore) ReadDebt(ctx context.Context, debtID string) (DebtRecord, statestore.Revision, error) {
 	if !durableRecordID.MatchString(debtID) {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/statestore"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 type runtimeLifecycleFixture struct {
@@ -328,7 +329,7 @@ func TestRuntimeLifecycleResourceExhaustionFailsBeforeAdmission(t *testing.T) {
 
 func newRuntimeLifecycleFixture(t *testing.T) *runtimeLifecycleFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.ShortSocketRoot(t, "asr-", filepath.Join("run", "daemon.sock"))
 	paths := ProductionPaths{
 		ConfigurationRoot: filepath.Join(root, "config"),
 		ConfigurationFile: filepath.Join(root, "config", "config.json"),

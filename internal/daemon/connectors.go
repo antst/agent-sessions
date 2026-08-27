@@ -227,17 +227,33 @@ func validateConnectorRequest(request ConnectorRequest, product, payloadRoot str
 		!pathWithin(payloadRoot, request.SourceRoot) {
 		return errors.New("connector source is not a clean absolute release payload")
 	}
+	canonicalSource, err := canonicalConnectorSource(request.SourceRoot, payloadRoot)
+	if err != nil {
+		return err
+	}
 	paths := []string{filepath.Join(request.SourceRoot, request.Descriptor.ManifestPath)}
 	if strings.Contains(request.Descriptor.EntryPoint, string(filepath.Separator)) {
 		paths = append(paths, filepath.Join(request.SourceRoot, request.Descriptor.EntryPoint))
 	}
 	for _, path := range paths {
-		info, err := filepath.EvalSymlinks(path)
-		if err != nil || !pathWithin(info, request.SourceRoot) {
+		info, pathErr := filepath.EvalSymlinks(path)
+		if pathErr != nil || !pathWithin(info, canonicalSource) {
 			return fmt.Errorf("connector payload path is missing or escapes the release: %s", path)
 		}
 	}
 	return nil
+}
+
+func canonicalConnectorSource(sourceRoot, payloadRoot string) (string, error) {
+	canonicalSource, err := filepath.EvalSymlinks(sourceRoot)
+	if err != nil || !filepath.IsAbs(canonicalSource) || filepath.Clean(canonicalSource) != canonicalSource {
+		return "", errors.New("connector source release payload cannot be canonicalized")
+	}
+	canonicalPayloadRoot, err := filepath.EvalSymlinks(payloadRoot)
+	if err != nil || !pathWithin(canonicalPayloadRoot, canonicalSource) {
+		return "", errors.New("connector payload root is missing or escapes the release")
+	}
+	return canonicalSource, nil
 }
 
 func decodeConnectorInventory(body []byte) (any, error) {

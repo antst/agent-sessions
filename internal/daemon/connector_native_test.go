@@ -73,6 +73,21 @@ func TestNativeConnectorDriversTreatEveryMissingProductAsOptional(t *testing.T) 
 	}
 }
 
+func TestConnectorPayloadValidationCanonicalizesReleaseAndChildrenTogether(t *testing.T) {
+	realRoot := connectorReleaseFixture(t)
+	aliasParent := t.TempDir()
+	alias := filepath.Join(aliasParent, "release-alias")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, _ := productcatalog.ProductByID("claude")
+	if err := validateConnectorRequest(ConnectorRequest{
+		Product: "claude", SourceRoot: alias, Descriptor: descriptor.Connector,
+	}, "claude", filepath.Join(alias, "claude")); err != nil {
+		t.Fatalf("validate release through a canonicalizable alias: %v", err)
+	}
+}
+
 func TestCodexConnectorMutationRestoresExactPriorMarketplace(t *testing.T) {
 	root := connectorReleaseFixture(t)
 	priorSource := filepath.Join(t.TempDir(), "prior")

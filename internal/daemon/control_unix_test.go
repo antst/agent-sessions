@@ -16,6 +16,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/socketpath"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestProductionControlEndpointIsFixedAndTMPDIRIndependent(t *testing.T) {
@@ -65,7 +66,7 @@ func TestLinuxProductionControlEndpointRequiresXDGRuntimeDir(t *testing.T) {
 }
 
 func TestAcquireControlEndpointRejectsDuplicateDaemonWithoutTouchingLiveSocket(t *testing.T) {
-	endpoint := filepath.Join(t.TempDir(), "daemon.sock")
+	endpoint := filepath.Join(testutil.ShortSocketRoot(t, "asc-", "daemon.sock"), "daemon.sock")
 	first, err := acquireControlEndpoint(controlEndpointOptions{endpoint: endpoint})
 	if err != nil {
 		t.Fatalf("acquire first endpoint: %v", err)
@@ -107,7 +108,7 @@ func TestAcquireControlEndpointRejectsDuplicateDaemonWithoutTouchingLiveSocket(t
 }
 
 func TestAcquireControlEndpointLocksBeforeUnlinkingOrBinding(t *testing.T) {
-	endpoint := filepath.Join(t.TempDir(), "daemon.sock")
+	endpoint := filepath.Join(testutil.ShortSocketRoot(t, "asc-", "daemon.sock"), "daemon.sock")
 	leaveOrphanedUnixSocket(t, endpoint)
 	before := mustSocketInfo(t, endpoint)
 
@@ -232,7 +233,7 @@ func TestAcquireControlEndpointRemovesStaleSocketOnlyWithExactAbsentIdentity(t *
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint := filepath.Join(t.TempDir(), "daemon.sock")
+			endpoint := filepath.Join(testutil.ShortSocketRoot(t, "asc-", "daemon.sock"), "daemon.sock")
 			leaveOrphanedUnixSocket(t, endpoint)
 			before := mustSocketInfo(t, endpoint)
 
@@ -270,7 +271,7 @@ func TestAcquireControlEndpointRemovesStaleSocketOnlyWithExactAbsentIdentity(t *
 }
 
 func TestAcquireControlEndpointEnforcesAFUnixBudgetBeforeCreatingArtifacts(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.ShortSocketRoot(t, "asc-", "maximum.sock")
 	leafBytes := socketpath.Limit() - len([]byte(root)) - 1
 	if leafBytes < 1 {
 		t.Fatalf("test root %q leaves no AF_UNIX path budget", root)
