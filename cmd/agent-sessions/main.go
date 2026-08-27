@@ -180,9 +180,11 @@ func dispatchHostCommand(command clihelp.CommandDescriptor, args []string) error
 		defer codex.Close()
 		claude := bridge.NewClaudeDaemonAdapter()
 		defer claude.Close()
+		grok := bridge.NewGrokDaemonAdapter()
+		defer grok.Close()
 		return daemon.RunForegroundWithOptions(ctx, daemon.ForegroundOptions{
-			AttachmentAdapters: map[string]daemon.AttachmentAdapter{"codex": codex, "claude": claude},
-			DeliveryAdapters:   map[string]daemon.DeliveryAdapter{"codex": codex, "claude": claude},
+			AttachmentAdapters: map[string]daemon.AttachmentAdapter{"codex": codex, "claude": claude, "grok": grok},
+			DeliveryAdapters:   map[string]daemon.DeliveryAdapter{"codex": codex, "claude": claude, "grok": grok},
 		})
 	case "host.connector.install":
 		return daemon.RunConnectorLifecycleCLI(context.Background(), "install", args)

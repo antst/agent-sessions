@@ -92,6 +92,10 @@ func (client *grokDaemonTestClient) ResolveSession(_ context.Context, selector s
 	return client.session, false, nil
 }
 
+func (client *grokDaemonTestClient) ObserveSession(_ context.Context, _ daemonpkg.AttachmentRecord, _ int) (grokDaemonSession, error) {
+	return client.session, nil
+}
+
 func (client *grokDaemonTestClient) InspectSession(_ context.Context, _ string) (grokDaemonSession, error) {
 	return client.session, nil
 }

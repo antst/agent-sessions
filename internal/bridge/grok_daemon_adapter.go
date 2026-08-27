@@ -21,11 +21,13 @@ type grokDaemonSession struct {
 	OwnerProcStart  string
 	LeaderSessionID string
 	ACPReady        bool
+	CoordinatorID   string
 }
 
 type grokDaemonClient interface {
 	PrepareInteractive(context.Context, daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error)
 	ResolveSession(context.Context, string) (grokDaemonSession, bool, error)
+	ObserveSession(context.Context, daemonpkg.AttachmentRecord, int) (grokDaemonSession, error)
 	InspectSession(context.Context, string) (grokDaemonSession, error)
 	InterjectFrame(context.Context, string, federation.AgentFrame) error
 }
@@ -44,6 +46,18 @@ func newGrokDaemonAdapter(client grokDaemonClient) *grokDaemonAdapter {
 	return &grokDaemonAdapter{client: client}
 }
 
+// NewGrokDaemonAdapter constructs the in-process Grok leader and ACP coordinator.
+func NewGrokDaemonAdapter() *grokDaemonAdapter {
+	return newGrokDaemonAdapter(newGrokNativeCoordinator())
+}
+
+// Close stops only vendor processes owned by this daemon generation.
+func (adapter *grokDaemonAdapter) Close() {
+	if coordinator, ok := adapter.client.(*grokNativeCoordinator); ok {
+		coordinator.close()
+	}
+}
+
 // ResolveSelection maps an exact UUID or unique Grok name to one roster session.
 func (adapter *grokDaemonAdapter) ResolveSelection(ctx context.Context, selector string) (grokDaemonSession, error) {
 	if adapter == nil || adapter.client == nil || strings.TrimSpace(selector) == "" {
@@ -60,6 +74,26 @@ func (adapter *grokDaemonAdapter) ResolveSelection(ctx context.Context, selector
 		return grokDaemonSession{}, daemonpkg.ErrAttachmentNotFound
 	}
 	return session, nil
+}
+
+// ObserveConnector binds a Grok attachment to the private leader's one live
+// resident session using the connector's exact native process ancestry.
+func (adapter *grokDaemonAdapter) ObserveConnector(
+	ctx context.Context,
+	record daemonpkg.AttachmentRecord,
+	evidence daemonpkg.ConnectorProcessEvidence,
+) (string, map[string]any, error) {
+	if adapter == nil || adapter.client == nil || evidence.PID <= 1 {
+		return "", nil, daemonpkg.ErrAttachmentSelecting
+	}
+	session, err := adapter.client.ObserveSession(ctx, record, evidence.PID)
+	if err != nil {
+		return "", nil, err
+	}
+	if session.Cwd != record.Cwd || !matchesOptionalString(record.ProfileIdentity["profile"], session.Profile) {
+		return "", nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return session.SessionID, grokSessionActor(session), nil
 }
 
 // Corroborate proves that a prepared Grok attachment selected the expected roster actor.
@@ -95,7 +129,6 @@ func (adapter *grokDaemonAdapter) Deliver(
 	return adapter.client.InterjectFrame(ctx, destination.SessionID, frame)
 }
 
-//nolint:dupl // Product-specific evidence and readiness rules intentionally remain explicit adapter contracts.
 func (adapter *grokDaemonAdapter) inspectExact(
 	ctx context.Context,
 	record daemonpkg.AttachmentRecord,
@@ -112,16 +145,22 @@ func (adapter *grokDaemonAdapter) inspectExact(
 					daemonActorField{key: "owner_pid", value: session.OwnerPID},
 					daemonActorField{key: "owner_proc_start", value: session.OwnerProcStart},
 					daemonActorField{key: "leader_session_id", value: session.LeaderSessionID},
+					daemonActorField{key: "coordinator_id", value: session.CoordinatorID},
 				) {
 				return nil, daemonpkg.ErrAttachmentEvidenceChanged
 			}
 			if !session.ACPReady {
 				return nil, ErrGrokACPUnavailable
 			}
-			return map[string]any{
-				"session_id": session.SessionID, "owner_pid": session.OwnerPID,
-				"owner_proc_start": session.OwnerProcStart, "leader_session_id": session.LeaderSessionID,
-				"profile": session.Profile, "cwd": session.Cwd, "acp_ready": true,
-			}, nil
+			return grokSessionActor(session), nil
 		})
+}
+
+func grokSessionActor(session grokDaemonSession) map[string]any {
+	return map[string]any{
+		"session_id": session.SessionID, "owner_pid": session.OwnerPID,
+		"owner_proc_start": session.OwnerProcStart, "leader_session_id": session.LeaderSessionID,
+		"coordinator_id": session.CoordinatorID, "profile": session.Profile,
+		"cwd": session.Cwd, "acp_ready": session.ACPReady,
+	}
 }

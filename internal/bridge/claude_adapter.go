@@ -145,7 +145,6 @@ func (adapter *claudeDaemonAdapter) Deliver(
 	return adapter.client.DeliverFrame(ctx, stringValue(actor["socket"]), frame)
 }
 
-//nolint:dupl // Product-specific evidence and readiness rules intentionally remain explicit adapter contracts.
 func (adapter *claudeDaemonAdapter) inspectExact(
 	ctx context.Context,
 	record daemonpkg.AttachmentRecord,
