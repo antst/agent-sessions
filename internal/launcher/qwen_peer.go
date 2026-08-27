@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
@@ -90,7 +91,57 @@ func RunQwenPeer(args []string) error {
 		fmt.Print(qwenPeerUsage())
 		return nil
 	}
-	return runQwenPeer(args, qwenPeerDependencies{readiness: qwenreadiness.Check, exec: Exec})
+	return runQwenPeerWithDaemon(args, productionDaemonPeerDependencies())
+}
+
+func runQwenPeerWithDaemon(args []string, dependencies daemonPeerDependencies) error {
+	cwd, err := canonicalQwenCwd()
+	if err != nil {
+		return err
+	}
+	plan, err := parseQwenPeerArgs(args, cwd, os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	if plan.mode == qwenPeerModePassthrough || plan.informationalPass {
+		qwen, executableErr := qwenExecutable()
+		if executableErr != nil {
+			return executableErr
+		}
+		return dependencies.exec(qwen, plan.nativeArgs, qwenprofile.ApplyEnvironment(os.Environ(), plan.profile))
+	}
+	if dependencies.prepare == nil {
+		return errors.New("qwen peer daemon client is unavailable")
+	}
+	if plan.peerName == "" {
+		plan.peerName = filepath.Base(plan.requestedCwd)
+		if plan.peerName == "." || plan.peerName == string(filepath.Separator) || plan.peerName == "" {
+			plan.peerName = "qwen"
+		}
+	}
+	profile := map[string]any{
+		"profile": plan.profile.Fingerprint, "qwen_home_set": plan.profile.QwenHomeSet,
+		"qwen_home": plan.profile.QwenHome, "qwen_runtime_dir_set": plan.profile.QwenRuntimeSet,
+		"qwen_runtime_dir": plan.profile.QwenRuntimeDir,
+	}
+	selector := plan.resumeTarget
+	if plan.mode == qwenPeerModeFresh {
+		selector = plan.sessionID
+	}
+	prepared, err := dependencies.prepare(context.Background(), daemon.AttachmentPrepareRequest{
+		Product: "qwen", Kind: "interactive", ProfileIdentity: profile,
+		Cwd: plan.requestedCwd, Name: plan.peerName, NameSource: "launch",
+		Groups: append([]string(nil), plan.peerContext.groups...), PermissionMode: qwenInitialModeRequest(plan),
+		Intent: daemon.InteractiveLaunchIntent{
+			Mode: string(plan.mode), Selector: selector,
+			SelectorIsName:  selector != "" && !threadIDPattern.MatchString(selector),
+			NativeArguments: append([]string(nil), plan.nativeArgs...), PermissionExplicit: plan.permissionSpecified,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("prepare Qwen attachment: %w", err)
+	}
+	return executeDaemonPreparedPeer(context.Background(), "qwen", prepared, dependencies)
 }
 
 //nolint:gocyclo // Readiness, resume, durable preparation, and exec rollback are intentionally separate gates.

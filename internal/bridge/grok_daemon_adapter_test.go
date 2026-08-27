@@ -78,6 +78,10 @@ type grokDaemonTestClient struct {
 	frames             []federation.AgentFrame
 }
 
+func (client *grokDaemonTestClient) PrepareInteractive(_ context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	return daemonpkg.NativeLaunchPlan{Executable: "grok", Arguments: request.Intent.NativeArguments, Cwd: request.Cwd}, nil
+}
+
 func (client *grokDaemonTestClient) ResolveSession(_ context.Context, selector string) (grokDaemonSession, bool, error) {
 	if client.ambiguous {
 		return grokDaemonSession{}, true, nil

@@ -69,18 +69,22 @@ type RecoveryHook func(context.Context, *Runtime) error
 
 // RuntimeOptions supplies exact authority and component hooks to one runtime.
 type RuntimeOptions struct {
-	Paths           ProductionPaths
-	Configuration   DaemonConfig
-	State           *StateStore
-	RuntimeVersion  string
-	RuntimeIdentity string
-	PID             int
-	ProcStart       string
-	StrongStart     string
-	ServiceManager  string
-	ServiceUnit     string
-	Now             func() time.Time
-	RecoveryHooks   map[RecoveryStage]RecoveryHook
+	Paths              ProductionPaths
+	Configuration      DaemonConfig
+	State              *StateStore
+	RuntimeVersion     string
+	RuntimeIdentity    string
+	PID                int
+	ProcStart          string
+	StrongStart        string
+	ServiceManager     string
+	ServiceUnit        string
+	Now                func() time.Time
+	RecoveryHooks      map[RecoveryStage]RecoveryHook
+	AttachmentAdapters map[string]AttachmentAdapter
+	DeliveryAdapters   map[string]DeliveryAdapter
+	DeliveryPreflight  func(context.Context, DeliveryRequest) error
+	ObserveDelivery    func(DeliveryObservation)
 }
 
 // Runtime is the in-process composition root for every host responsibility.
@@ -96,6 +100,8 @@ type Runtime struct {
 	stateRevision  statestore.Revision
 	startedAt      int64
 	completedStage []RecoveryStage
+	attachments    *AttachmentRegistry
+	deliveries     *DeliveryEngine
 }
 
 // NewRuntime constructs one closed host composition root.
@@ -181,6 +187,10 @@ func (runtime *Runtime) Start(ctx context.Context) error {
 		return err
 	}
 	for _, stage := range orderedRecoveryStages {
+		if err := runtime.recoverOwnedStage(ctx, stage); err != nil {
+			runtime.closeAdmission()
+			return fmt.Errorf("recovery stage %s: %w", stage, err)
+		}
 		if hook := runtime.options.RecoveryHooks[stage]; hook != nil {
 			if err := hook(ctx, runtime); err != nil {
 				runtime.closeAdmission()
@@ -204,6 +214,61 @@ func (runtime *Runtime) Start(ctx context.Context) error {
 	runtime.admission = AdmissionReady
 	runtime.mu.Unlock()
 	return nil
+}
+
+func (runtime *Runtime) recoverOwnedStage(ctx context.Context, stage RecoveryStage) error {
+	switch stage {
+	case RecoveryAttachments:
+		registry, err := NewAttachmentRegistry(AttachmentRegistryOptions{
+			State: runtime.options.State, Generation: runtime.generation,
+			HostID: runtime.options.Configuration.HostID, Now: runtime.options.Now,
+			Adapters: runtime.options.AttachmentAdapters,
+		})
+		if err != nil {
+			return err
+		}
+		runtime.mu.Lock()
+		runtime.attachments = registry
+		runtime.mu.Unlock()
+	case RecoveryNativeActors:
+		registry := runtime.attachmentRegistry()
+		if registry == nil {
+			return errors.New("attachment registry was not recovered")
+		}
+		return registry.Reconcile(ctx)
+	case RecoveryRouting:
+		registry := runtime.attachmentRegistry()
+		if registry == nil {
+			return errors.New("attachment registry was not recovered")
+		}
+		engine, err := NewDeliveryEngine(DeliveryEngineOptions{
+			State: runtime.options.State, Attachments: registry,
+			Adapters: runtime.options.DeliveryAdapters, Now: runtime.options.Now,
+			Preflight: runtime.options.DeliveryPreflight, Observe: runtime.options.ObserveDelivery,
+		})
+		if err != nil {
+			return err
+		}
+		runtime.mu.Lock()
+		runtime.deliveries = engine
+		runtime.mu.Unlock()
+	case RecoveryValidateAuthority, RecoveryLoadConfiguration, RecoveryTransactions, RecoveryCatalog,
+		RecoveryFederation, RecoveryCommitAuthority, RecoverySyntheticService:
+		// These stages are owned by their existing hooks or lifecycle commit.
+	}
+	return nil
+}
+
+func (runtime *Runtime) attachmentRegistry() *AttachmentRegistry {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.attachments
+}
+
+func (runtime *Runtime) deliveryEngine() *DeliveryEngine {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.deliveries
 }
 
 // Stop closes admission and commits the stopping lifecycle state.

@@ -136,12 +136,14 @@ func boolString(value bool) string {
 	return "false"
 }
 
+//nolint:unused // Legacy pre-daemon preference path is removed with T045-T048 adapter extraction.
 func resolvedPeerPreferences(sessionID, product string) (federator.ResolvedPreferences, error) {
 	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
 		SessionID: sessionID, Product: product, Kind: federation.SessionKindInteractive,
 	})
 }
 
+//nolint:unused // Legacy pre-daemon preference path is removed with T045-T048 adapter extraction.
 func resolvePeerLaunchContext(
 	sessionID, product string,
 	context peerLaunchContext,

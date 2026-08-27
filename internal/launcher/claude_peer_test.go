@@ -466,7 +466,7 @@ func TestClaudePeerLaunchSettingsPreserveLargeJSONNumbers(t *testing.T) {
 	}
 }
 
-func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
+func TestLegacyClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	root := shortClaudePeerTestRoot(t)
 	home := filepath.Join(root, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
@@ -527,7 +527,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	}
 	const mismatchID = "00000000-0000-4000-8000-000000000201"
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "wrong-profile"))
-	if err := RunClaudePeer([]string{"--session-id", mismatchID, "--group", "must-not-persist"}); err == nil {
+	if err := runLegacyClaudePeer([]string{"--session-id", mismatchID, "--group", "must-not-persist"}); err == nil {
 		t.Fatal("mismatched Claude profile unexpectedly launched")
 	}
 	assertCatalogAbsent(mismatchID)
@@ -560,7 +560,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	if err := os.WriteFile(liveRowPath, liveBody, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunClaudePeer([]string{"--session-id", liveID, "--group", "must-not-persist"}); err == nil {
+	if err := runLegacyClaudePeer([]string{"--session-id", liveID, "--group", "must-not-persist"}); err == nil {
 		t.Fatal("live ordinary Claude attachment unexpectedly launched as a peer")
 	}
 	assertCatalogAbsent(liveID)
@@ -570,7 +570,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	}
 
 	const invalidSettingsID = "00000000-0000-4000-8000-000000000203"
-	if err := RunClaudePeer([]string{
+	if err := runLegacyClaudePeer([]string{
 		"--session-id", invalidSettingsID, "--group", "must-not-persist", "--settings", "{",
 	}); err == nil {
 		t.Fatal("invalid Claude settings unexpectedly launched")
@@ -579,7 +579,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 
 	const startupFailureID = "00000000-0000-4000-8000-000000000204"
 	t.Setenv(claudePeerNativeFailBeforeRowEnv, "1")
-	if err := RunClaudePeer([]string{
+	if err := runLegacyClaudePeer([]string{
 		"--session-id", startupFailureID, "--group", "must-roll-back", "--dangerously-skip-permissions",
 	}); err == nil {
 		t.Fatal("Claude native startup failure unexpectedly succeeded")
@@ -597,7 +597,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(claudePeerNativeFailAfterSocketEnv, "1")
-	if err := RunClaudePeer([]string{
+	if err := runLegacyClaudePeer([]string{
 		"--session-id", socketFailureID, "--group", "must-roll-back",
 	}); err == nil {
 		t.Fatal("Claude socket-before-row startup failure unexpectedly succeeded")
@@ -622,7 +622,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunClaudePeer([]string{"--session-id", collisionID, "--group", "must-not-persist"}); err == nil || !strings.Contains(err.Error(), "socket path already exists") {
+	if err := runLegacyClaudePeer([]string{"--session-id", collisionID, "--group", "must-not-persist"}); err == nil || !strings.Contains(err.Error(), "socket path already exists") {
 		t.Fatalf("pre-existing managed socket launch = %v", err)
 	}
 	assertCatalogAbsent(collisionID)
@@ -638,7 +638,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	// Run the real public entry with the stable ID generated above so the test
 	// can inspect the exact retained profile and durable catalog entry.
 	t.Setenv(claudePeerNativePublishedNameEnv, "kernel-tdd-2c")
-	if err := RunClaudePeer([]string{
+	if err := runLegacyClaudePeer([]string{
 		"--session-id", plan.sessionID, "--group", "project", "--peer-name", "worker", "--dangerously-skip-permissions",
 	}); err != nil {
 		t.Fatal(err)
@@ -655,7 +655,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	}
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "worker")
 	t.Setenv(claudePeerNativeSessionIDEnv, plan.sessionID)
-	if err := RunClaudePeer([]string{"--resume", "worker", "--yolo", "--", "prompt text"}); err != nil {
+	if err := runLegacyClaudePeer([]string{"--resume", "worker", "--yolo", "--", "prompt text"}); err != nil {
 		t.Fatalf("name resume with durable yolo and prompt delimiter: %v", err)
 	}
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "")
@@ -665,7 +665,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blockedErr := RunClaudePeer([]string{
+	blockedErr := runLegacyClaudePeer([]string{
 		"--session-id", plan.sessionID, "--group", "replacement", "--no-yolo",
 	})
 	releaseClaudePeerProfileLock(attachmentLock)
@@ -715,7 +715,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 		t.Fatalf("shared Claude registry has service=%d keys=%d native=%d; entries=%v", serviceRows, serviceKeys, nativeRows, entries)
 	}
 	ordinaryID := "00000000-0000-4000-8000-000000000123"
-	if err := RunClaudePeer([]string{"--resume", ordinaryID, "--peer-name", "adopted"}); err != nil {
+	if err := runLegacyClaudePeer([]string{"--resume", ordinaryID, "--peer-name", "adopted"}); err != nil {
 		t.Fatalf("adopt ordinary Claude session as peer: %v", err)
 	}
 	adopted, err := federator.LookupSessionPreferences(runtimeDir, ordinaryID)
@@ -728,7 +728,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	t.Setenv(claudePeerNativeSessionIDEnv, ordinaryNamedID)
 	t.Setenv(claudePeerNativeInitialSessionIDEnv, transientBootID)
 	t.Setenv(claudePeerNativePublishedNameEnv, "antst-d2")
-	if err := RunClaudePeer([]string{"--resume", "ordinary-title", "--group", "adopted-by-name"}); err != nil {
+	if err := runLegacyClaudePeer([]string{"--resume", "ordinary-title", "--group", "adopted-by-name"}); err != nil {
 		t.Fatalf("adopt ordinary named Claude session through native resume: %v", err)
 	}
 	t.Setenv(claudePeerNativeExpectedResumeEnv, "")
@@ -755,7 +755,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	}
 	const cleanupFailureID = "00000000-0000-4000-8000-000000000210"
 	t.Setenv(claudePeerNativeFailCleanupEnv, "1")
-	cleanupFailure := RunClaudePeer([]string{"--session-id", cleanupFailureID, "--peer-name", "cleanup-debt"})
+	cleanupFailure := runLegacyClaudePeer([]string{"--session-id", cleanupFailureID, "--peer-name", "cleanup-debt"})
 	t.Setenv(claudePeerNativeFailCleanupEnv, "")
 	if cleanupFailure == nil || !strings.Contains(cleanupFailure.Error(), "socket path changed type") {
 		t.Fatalf("changed native socket cleanup = %v", cleanupFailure)
@@ -771,7 +771,7 @@ func TestClaudePeerSharedRegistryRegistersAndRestoresPreferences(t *testing.T) {
 	settingsFailureRoot := claudePeerLifecycleRoot(stateDir, "host-test", settingsCleanupFailureID)
 	settingsFailurePath := filepath.Join(settingsFailureRoot, "launch-settings.json")
 	t.Setenv(claudePeerNativeFailSettingsCleanupEnv, settingsFailurePath)
-	settingsCleanupFailure := RunClaudePeer([]string{
+	settingsCleanupFailure := runLegacyClaudePeer([]string{
 		"--session-id", settingsCleanupFailureID, "--peer-name", "settings-cleanup-debt",
 	})
 	t.Setenv(claudePeerNativeFailSettingsCleanupEnv, "")

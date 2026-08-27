@@ -117,6 +117,7 @@ func platformKey() (string, error) {
 	}
 }
 
+//nolint:unused // Removed with the remaining legacy adapter extraction in T045-T048.
 func capture(path string, args ...string) (string, error) {
 	// #nosec G204 G702 -- path is the selected installed runtime executable.
 	command := exec.Command(path, args...)

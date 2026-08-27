@@ -64,14 +64,14 @@ type DeliveryAdapter interface {
 
 // DeliveryRequest is one product-neutral local delivery admission request.
 type DeliveryRequest struct {
-	MessageID          string
-	SourceAttachmentID string
-	Operation          string
-	Targets            []string
-	Group              string
-	Content            string
-	Summary            string
-	SentAt             string
+	MessageID          string   `json:"message_id"`
+	SourceAttachmentID string   `json:"source_attachment_id"`
+	Operation          string   `json:"operation"`
+	Targets            []string `json:"targets,omitempty"`
+	Group              string   `json:"group,omitempty"`
+	Content            string   `json:"content"`
+	Summary            string   `json:"summary,omitempty"`
+	SentAt             string   `json:"sent_at,omitempty"`
 }
 
 // DeliveryObservation is metadata-only diagnostic state; it intentionally has no content fields.

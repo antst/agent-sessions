@@ -33,9 +33,18 @@ type qwenDaemonSession struct {
 }
 
 type qwenDaemonClient interface {
+	PrepareInteractive(context.Context, daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error)
 	ResolveSession(context.Context, string) (qwenDaemonSession, bool, error)
 	InspectSession(context.Context, string) (qwenDaemonSession, error)
 	WriteInput(context.Context, string, federation.AgentFrame) error
+}
+
+// PrepareInteractive returns the direct Qwen vendor handoff for one validated launch intent.
+func (adapter *qwenDaemonAdapter) PrepareInteractive(ctx context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	if adapter == nil || adapter.client == nil {
+		return daemonpkg.NativeLaunchPlan{}, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return adapter.client.PrepareInteractive(ctx, request)
 }
 
 type qwenDaemonAdapter struct{ client qwenDaemonClient }

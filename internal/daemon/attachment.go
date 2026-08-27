@@ -53,6 +53,33 @@ type AttachmentAdapter interface {
 	Reconnect(context.Context, AttachmentRecord) (map[string]any, error)
 }
 
+// InteractiveAttachmentAdapter adds product-native launch preparation without taking vendor lifetime ownership.
+type InteractiveAttachmentAdapter interface {
+	AttachmentAdapter
+	// PrepareInteractive validates intent and returns the exact direct vendor handoff plan.
+	PrepareInteractive(context.Context, AttachmentPrepareRequest) (NativeLaunchPlan, error)
+}
+
+// InteractiveLaunchIntent carries parsed wrapper intent without granting native authority.
+type InteractiveLaunchIntent struct {
+	Mode               string   `json:"mode"`
+	Selector           string   `json:"selector,omitempty"`
+	SelectorIsName     bool     `json:"selector_is_name,omitempty"`
+	CwdExplicit        bool     `json:"cwd_explicit,omitempty"`
+	NativeArguments    []string `json:"native_arguments,omitempty"`
+	PermissionExplicit bool     `json:"permission_explicit,omitempty"`
+}
+
+// NativeLaunchPlan is the daemon-validated direct handoff to a vendor executable.
+type NativeLaunchPlan struct {
+	Executable          string            `json:"executable"`
+	Arguments           []string          `json:"arguments,omitempty"`
+	Environment         map[string]string `json:"environment,omitempty"`
+	SessionID           string            `json:"session_id,omitempty"`
+	Cwd                 string            `json:"cwd"`
+	ExpectedNativeActor map[string]any    `json:"expected_native_actor,omitempty"`
+}
+
 // AttachmentRegistryOptions supplies the one daemon generation and its vendor adapters.
 type AttachmentRegistryOptions struct {
 	State      *StateStore
@@ -65,30 +92,31 @@ type AttachmentRegistryOptions struct {
 
 // AttachmentPrepareRequest durably reserves one managed native launch.
 type AttachmentPrepareRequest struct {
-	Product             string
-	Kind                string
-	ProfileIdentity     map[string]any
-	Cwd                 string
-	Name                string
-	NameSource          string
-	Groups              []string
-	PermissionMode      string
-	ExpectedNativeActor map[string]any
+	Product             string                  `json:"product"`
+	Kind                string                  `json:"kind"`
+	ProfileIdentity     map[string]any          `json:"profile_identity,omitempty"`
+	Cwd                 string                  `json:"cwd"`
+	Name                string                  `json:"name,omitempty"`
+	NameSource          string                  `json:"name_source,omitempty"`
+	Groups              []string                `json:"groups,omitempty"`
+	PermissionMode      string                  `json:"permission_mode,omitempty"`
+	ExpectedNativeActor map[string]any          `json:"expected_native_actor,omitempty"`
+	Intent              InteractiveLaunchIntent `json:"intent"`
 }
 
 // AttachmentAdoptRequest binds an authoritative vendor session to a prepared attachment.
 type AttachmentAdoptRequest struct {
-	AttachmentID string
-	Capability   string
-	SessionID    string
-	NativeActor  map[string]any
+	AttachmentID string         `json:"attachment_id"`
+	Capability   string         `json:"capability"`
+	SessionID    string         `json:"session_id"`
+	NativeActor  map[string]any `json:"native_actor,omitempty"`
 }
 
 // AttachmentRefreshRequest refreshes exact evidence without changing functional identity.
 type AttachmentRefreshRequest struct {
-	AttachmentID string
-	SessionID    string
-	NativeActor  map[string]any
+	AttachmentID string         `json:"attachment_id"`
+	SessionID    string         `json:"session_id"`
+	NativeActor  map[string]any `json:"native_actor,omitempty"`
 }
 
 // ConnectorAttestation proves one ephemeral connector belongs to an already prepared attachment.
@@ -102,9 +130,16 @@ type ConnectorAttestation struct {
 
 // AttachmentSelector selects one visible attachment by exact address or unambiguous display name.
 type AttachmentSelector struct {
-	HostID    string
-	SessionID string
-	Name      string
+	HostID    string `json:"host_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+// AttachmentPrepareResult returns the durable reservation and its one-time launch capability.
+type AttachmentPrepareResult struct {
+	Attachment AttachmentRecord `json:"attachment"`
+	Capability string           `json:"capability"`
+	Launch     NativeLaunchPlan `json:"launch"`
 }
 
 // AttachmentPreferences retains existing session choices without owning vendor history.
@@ -176,21 +211,38 @@ func NewAttachmentRegistry(options AttachmentRegistryOptions) (*AttachmentRegist
 
 // Prepare commits launch intent before the vendor process can become managed.
 func (registry *AttachmentRegistry) Prepare(ctx context.Context, request AttachmentPrepareRequest) (AttachmentRecord, string, error) {
+	record, capability, _, err := registry.PrepareInteractive(ctx, request)
+	return record, capability, err
+}
+
+// PrepareInteractive validates product-native intent before committing the durable reservation.
+func (registry *AttachmentRegistry) PrepareInteractive(ctx context.Context, request AttachmentPrepareRequest) (AttachmentRecord, string, NativeLaunchPlan, error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if err := registry.validatePrepare(request); err != nil {
-		return AttachmentRecord{}, "", err
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, err
+	}
+	adapter, ok := registry.adapters[request.Product].(InteractiveAttachmentAdapter)
+	if !ok {
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, fmt.Errorf("%s adapter cannot prepare interactive launches", request.Product)
+	}
+	launch, err := adapter.PrepareInteractive(ctx, request)
+	if err != nil {
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, err
+	}
+	if err := validateNativeLaunchPlan(request, launch); err != nil {
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, err
 	}
 	capability, err := registry.capability()
 	if err != nil || strings.TrimSpace(capability) == "" {
 		if err == nil {
 			err = errors.New("empty capability")
 		}
-		return AttachmentRecord{}, "", fmt.Errorf("create launch capability: %w", err)
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, fmt.Errorf("create launch capability: %w", err)
 	}
 	attachmentID, err := randomAttachmentID()
 	if err != nil {
-		return AttachmentRecord{}, "", err
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, err
 	}
 	now := registry.now().UnixMilli()
 	record := AttachmentRecord{
@@ -199,15 +251,15 @@ func (registry *AttachmentRegistry) Prepare(ctx context.Context, request Attachm
 		ProfileIdentity: cloneAttachmentEvidence(request.ProfileIdentity), Cwd: request.Cwd,
 		Name: request.Name, NameSource: request.NameSource, HostID: registry.hostID,
 		Groups: normalizeAttachmentGroups(request.Groups), PermissionMode: request.PermissionMode,
-		NativeActor:          cloneAttachmentEvidence(request.ExpectedNativeActor),
+		NativeActor:          cloneAttachmentEvidence(launch.ExpectedNativeActor),
 		LaunchCapabilityHash: attachmentCapabilityHash(capability), State: AttachmentStatePrepared,
 	}
 	if err := registry.commitAttachmentCatalog(ctx, func(attachments map[string]AttachmentRecord, _ map[string]AttachmentPreferences) {
 		attachments[attachmentID] = record
 	}); err != nil {
-		return AttachmentRecord{}, "", err
+		return AttachmentRecord{}, "", NativeLaunchPlan{}, err
 	}
-	return cloneAttachmentRecord(record), capability, nil
+	return cloneAttachmentRecord(record), capability, cloneNativeLaunchPlan(launch), nil
 }
 
 // Adopt atomically binds the authoritative native identity after vendor selection.
@@ -363,6 +415,13 @@ func (registry *AttachmentRegistry) attachedByID(attachmentID string) (Attachmen
 	return cloneAttachmentRecord(record), true
 }
 
+func (registry *AttachmentRegistry) attachmentByID(attachmentID string) (AttachmentRecord, bool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	record, ok := registry.attachments[attachmentID]
+	return cloneAttachmentRecord(record), ok
+}
+
 func (registry *AttachmentRegistry) attachedRecords() []AttachmentRecord {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
@@ -417,6 +476,31 @@ func (registry *AttachmentRegistry) validatePrepare(request AttachmentPrepareReq
 		return errors.New("attachment prepare requires interactive kind and cwd")
 	}
 	return nil
+}
+
+func validateNativeLaunchPlan(request AttachmentPrepareRequest, plan NativeLaunchPlan) error {
+	if strings.TrimSpace(plan.Executable) == "" || strings.TrimSpace(plan.Cwd) == "" || plan.Cwd != request.Cwd {
+		return errors.New("native launch plan requires an executable and exact requested cwd")
+	}
+	for key := range plan.Environment {
+		if strings.TrimSpace(key) == "" || strings.Contains(key, "=") {
+			return errors.New("native launch plan contains an invalid environment name")
+		}
+	}
+	return nil
+}
+
+func cloneNativeLaunchPlan(plan NativeLaunchPlan) NativeLaunchPlan {
+	plan.Arguments = append([]string(nil), plan.Arguments...)
+	plan.ExpectedNativeActor = cloneAttachmentEvidence(plan.ExpectedNativeActor)
+	if plan.Environment != nil {
+		environment := make(map[string]string, len(plan.Environment))
+		for key, value := range plan.Environment {
+			environment[key] = value
+		}
+		plan.Environment = environment
+	}
+	return plan
 }
 
 func (registry *AttachmentRegistry) advanceAttachment(record *AttachmentRecord) {

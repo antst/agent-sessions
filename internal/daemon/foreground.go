@@ -83,7 +83,7 @@ func RunForeground(ctx context.Context) error {
 	emitForegroundStarted(observability, host, paths, identity, runtimeIdentity, priorOwner, recoveredCrash)
 	server := newControlServer(controlServerConfig{
 		Generation: host.Generation(), RuntimeVersion: BuildVersion, OwnerUID: os.Getuid(),
-		AuthorizeHello: authorizeForegroundHello, Dispatch: runtimeAdminDispatch(host),
+		AuthorizeHello: authorizeForegroundHello(host), Dispatch: runtimeControlDispatch(host),
 		ObserveRequest: observability.observeControl,
 	})
 	serveResult := make(chan error, 1)
@@ -160,16 +160,45 @@ func priorControlOwner(ctx context.Context, state *StateStore) (*procinfo.Proces
 	return owner, recoveredCrash, nil
 }
 
-func authorizeForegroundHello(_ context.Context, peer controlPeerEvidence, hello controlHello) (controlPrincipal, *controlError) {
-	if peer.UID != os.Getuid() {
-		return controlPrincipal{}, &controlError{Code: "different_user", Message: "control client belongs to another OS user"}
-	}
-	if hello.Role != controlRoleAdmin && hello.Role != controlRoleService {
-		return controlPrincipal{}, &controlError{
-			Code: "role_not_ready", Message: "workflow role is not available in this daemon generation", Retryable: true,
+func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPeerEvidence, controlHello) (controlPrincipal, *controlError) {
+	return func(ctx context.Context, peer controlPeerEvidence, hello controlHello) (controlPrincipal, *controlError) {
+		if peer.UID != os.Getuid() {
+			return controlPrincipal{}, &controlError{Code: "different_user", Message: "control client belongs to another OS user"}
+		}
+		principal := controlPrincipal{Role: hello.Role, Product: hello.Product, AttachmentID: hello.AttachmentID}
+		switch hello.Role {
+		case controlRoleAdmin, controlRoleService, controlRoleLauncher:
+			return principal, nil
+		case controlRoleConnector, controlRoleHook:
+			registry := runtime.attachmentRegistry()
+			if registry == nil {
+				return controlPrincipal{}, &controlError{Code: "runtime_recovering", Message: "attachment authority is not ready", Retryable: true}
+			}
+			record, ok := registry.attachmentByID(hello.AttachmentID)
+			if !ok || record.Product != hello.Product || hello.Capability == "" || hello.SessionID == "" {
+				return controlPrincipal{}, &controlError{Code: "attachment_not_attested", Message: "connector does not identify one prepared attachment"}
+			}
+			var err error
+			if record.State == AttachmentStatePrepared {
+				record, err = registry.Adopt(ctx, AttachmentAdoptRequest{
+					AttachmentID: record.AttachmentID, Capability: hello.Capability,
+					SessionID: hello.SessionID, NativeActor: hello.NativeActor,
+				})
+			} else {
+				record, err = registry.AttestConnector(ctx, ConnectorAttestation{
+					Product: hello.Product, AttachmentID: hello.AttachmentID,
+					SessionID: hello.SessionID, Capability: hello.Capability, NativeActor: hello.NativeActor,
+				})
+			}
+			if err != nil {
+				return controlPrincipal{}, controlFailure(err)
+			}
+			principal.SessionID = record.SessionID
+			return principal, nil
+		default:
+			return controlPrincipal{}, &controlError{Code: "role_not_ready", Message: "workflow role is not available in this daemon generation", Retryable: true}
 		}
 	}
-	return controlPrincipal{Role: hello.Role}, nil
 }
 
 func loadOrCreateDefaultConfiguration(paths ProductionPaths) (DaemonConfig, error) {

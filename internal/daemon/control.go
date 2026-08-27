@@ -43,13 +43,15 @@ type controlPeerEvidence struct {
 }
 
 type controlHello struct {
-	Type         string      `json:"type"`
-	Version      int         `json:"version"`
-	RequestID    string      `json:"request_id"`
-	Role         controlRole `json:"role"`
-	Product      string      `json:"product,omitempty"`
-	AttachmentID string      `json:"attachment_id,omitempty"`
-	Capability   string      `json:"capability,omitempty"`
+	Type         string         `json:"type"`
+	Version      int            `json:"version"`
+	RequestID    string         `json:"request_id"`
+	Role         controlRole    `json:"role"`
+	Product      string         `json:"product,omitempty"`
+	AttachmentID string         `json:"attachment_id,omitempty"`
+	SessionID    string         `json:"session_id,omitempty"`
+	Capability   string         `json:"capability,omitempty"`
+	NativeActor  map[string]any `json:"native_actor,omitempty"`
 }
 
 type controlPrincipal struct {

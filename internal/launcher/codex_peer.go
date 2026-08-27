@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
@@ -40,6 +42,10 @@ type codexPlan struct {
 
 // RunCodexPeer starts or resumes an owner-attested interactive Codex peer.
 func RunCodexPeer(args []string) error {
+	return runCodexPeer(args, productionDaemonPeerDependencies())
+}
+
+func runCodexPeer(args []string, dependencies daemonPeerDependencies) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
@@ -55,29 +61,35 @@ func RunCodexPeer(args []string) error {
 		}
 		return Exec(codex, plan.originalArgs, nil)
 	}
-	selected, err := EnsureRuntime()
+	if dependencies.prepare == nil {
+		return errors.New("codex peer daemon client is unavailable")
+	}
+	permissionMode := "default"
+	if plan.requestedYolo {
+		permissionMode = "bypassPermissions"
+	}
+	profile := map[string]any{}
+	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
+		profile["profile"] = codexHome
+	}
+	prepared, err := dependencies.prepare(context.Background(), daemon.AttachmentPrepareRequest{
+		Product: "codex", Kind: "interactive", ProfileIdentity: profile,
+		Cwd: plan.requestedCwd, Name: plan.peerName, NameSource: plan.peerNameSource,
+		Groups: append([]string(nil), plan.peerContext.groups...), PermissionMode: permissionMode,
+		Intent: daemon.InteractiveLaunchIntent{
+			Mode: string(plan.mode), Selector: plan.selectionTarget,
+			SelectorIsName: plan.selectionTarget != "" && !threadIDPattern.MatchString(plan.selectionTarget),
+			CwdExplicit:    plan.cwdExplicit, NativeArguments: append([]string(nil), plan.interactiveArgs...),
+			PermissionExplicit: plan.yoloSpecified,
+		},
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("prepare Codex attachment: %w", err)
 	}
-	codex, err := codexExecutable()
-	if err != nil {
-		return err
-	}
-	threadID, selectedCwd, err := prepareInteractiveSession(selected, plan)
-	if err != nil {
-		return err
-	}
-	resolved, err := resolvedPeerPreferences(threadID, "codex")
-	if err != nil {
-		return fmt.Errorf("restore Agent Sessions peer preferences: %w", err)
-	}
-	if resolved.Preference.AlwaysApprove && !plan.requestedYolo {
-		plan.requestedYolo = true
-		plan.interactiveArgs = append(plan.interactiveArgs, "--yolo")
-	}
-	return execInteractiveCodex(codex, threadID, selectedCwd, plan)
+	return executeDaemonPreparedPeer(context.Background(), "codex", prepared, dependencies)
 }
 
+//nolint:unused // Legacy implementation retained only until T045 moves its App Server primitives into the daemon adapter.
 func prepareInteractiveSession(selected Runtime, plan codexPlan) (string, string, error) {
 	ownerPID := os.Getpid()
 	ownerStart, err := capture(selected.Path, "launch", "proc-start", strconv.Itoa(ownerPID))
@@ -93,6 +105,7 @@ func prepareInteractiveSession(selected Runtime, plan codexPlan) (string, string
 	return validatePreparedThread(threadID, selectedCwd, bindErr)
 }
 
+//nolint:unused // Legacy implementation retained only until T045 moves its App Server primitives into the daemon adapter.
 func prepareFreshThread(runtimePath string, plan codexPlan, ownerPID int, ownerStart string) (string, error) {
 	launchArgs := []string{
 		"launch", "start", "--cwd", plan.requestedCwd,
@@ -113,6 +126,7 @@ func prepareFreshThread(runtimePath string, plan codexPlan, ownerPID int, ownerS
 	return strings.TrimSpace(threadID), nil
 }
 
+//nolint:unused // Legacy implementation retained only until T045 moves its App Server primitives into the daemon adapter.
 func bindResumedThread(runtimePath string, plan codexPlan, ownerPID int, ownerStart string) (string, string, error) {
 	bindArgs := resumedBindArguments(plan, ownerPID, ownerStart)
 	binding, err := capture(runtimePath, bindArgs...)
@@ -140,6 +154,7 @@ func resumedBindArguments(plan codexPlan, ownerPID int, ownerStart string) []str
 	return args
 }
 
+//nolint:unused // Legacy implementation retained only until T045 moves its App Server primitives into the daemon adapter.
 func validatePreparedThread(threadID, cwd string, err error) (string, string, error) {
 	if err != nil {
 		return "", "", err
@@ -150,6 +165,7 @@ func validatePreparedThread(threadID, cwd string, err error) (string, string, er
 	return threadID, cwd, nil
 }
 
+//nolint:unused // Legacy implementation retained only until T045 moves its App Server primitives into the daemon adapter.
 func execInteractiveCodex(codex, threadID, cwd string, plan codexPlan) error {
 	if _, present := os.LookupEnv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT"); !present {
 		_ = os.Setenv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT", "1")
@@ -492,6 +508,7 @@ func usageError(message string) error {
 	return &ExitError{Code: 2, Err: errors.New(message)}
 }
 
+//nolint:unused // Legacy terminal handoff retained only until T045 completes native plan extraction.
 func resetTerminalEnhancement() {
 	info, err := os.Stdout.Stat()
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {

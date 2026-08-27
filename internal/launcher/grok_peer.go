@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/envutil"
 )
 
@@ -96,16 +97,54 @@ type grokHostProcess struct {
 	process *os.Process
 }
 
+//nolint:unused // Legacy host seam retained only until T047 completes in-process ACP extraction.
 type grokHostStarter func(runtimePath string, request grokHostRequest) (grokHostProcess, error)
 
 // RunGrokPeer starts an owner-attested Grok TUI backed by its own leader and
 // ACP waker host. Native informational and administrative commands pass
 // through without starting the shared Agent Sessions runtime.
 func RunGrokPeer(args []string) error {
-	return runGrokPeer(args, startGrokHost)
+	return runGrokPeerWithDaemon(args, productionDaemonPeerDependencies())
 }
 
-//nolint:gocyclo // Parse, preference, ownership, host-readiness, exec, and rollback failures require distinct diagnostics.
+func runGrokPeerWithDaemon(args []string, dependencies daemonPeerDependencies) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	plan, err := parseGrokPeerArgs(args, cwd)
+	if err != nil {
+		return err
+	}
+	if plan.mode == grokModePassthrough || plan.informationalPass {
+		grok, executableErr := grokExecutable()
+		if executableErr != nil {
+			return executableErr
+		}
+		return dependencies.exec(grok, plan.originalArgs, nil)
+	}
+	if dependencies.prepare == nil {
+		return errors.New("grok peer daemon client is unavailable")
+	}
+	profile := map[string]any{"profile": os.Getenv("HOME")}
+	prepared, err := dependencies.prepare(context.Background(), daemon.AttachmentPrepareRequest{
+		Product: "grok", Kind: "interactive", ProfileIdentity: profile,
+		Cwd: plan.requestedCwd, Name: plan.peerName, NameSource: "launch",
+		Groups: append([]string(nil), plan.peerContext.groups...), PermissionMode: plan.permissionMode,
+		Intent: daemon.InteractiveLaunchIntent{
+			Mode: string(plan.mode), Selector: plan.resumeTarget,
+			SelectorIsName: plan.resumeTarget != "" && !threadIDPattern.MatchString(plan.resumeTarget),
+			CwdExplicit:    plan.cwdExplicit, NativeArguments: append([]string(nil), plan.interactiveArgs...),
+			PermissionExplicit: plan.permissionSpecified,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("prepare Grok attachment: %w", err)
+	}
+	return executeDaemonPreparedPeer(context.Background(), "grok", prepared, dependencies)
+}
+
+//nolint:gocyclo,unused // Legacy host path is unreachable and removed when T047 extraction completes.
 func runGrokPeer(args []string, startHost grokHostStarter) error {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -833,6 +872,7 @@ func newGrokSessionID() (string, error) {
 	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:], nil
 }
 
+//nolint:unused // Legacy Grok host token is removed when T047 extraction completes.
 func randomHex(bytes int) (string, error) {
 	value := make([]byte, bytes)
 	if _, err := rand.Read(value); err != nil {

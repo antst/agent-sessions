@@ -95,6 +95,10 @@ type qwenDaemonTestClient struct {
 	frames       []federation.AgentFrame
 }
 
+func (client *qwenDaemonTestClient) PrepareInteractive(_ context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	return daemonpkg.NativeLaunchPlan{Executable: "qwen", Arguments: request.Intent.NativeArguments, Cwd: request.Cwd}, nil
+}
+
 func (client *qwenDaemonTestClient) ResolveSession(_ context.Context, selector string) (qwenDaemonSession, bool, error) {
 	if client.ambiguous {
 		return qwenDaemonSession{}, true, nil

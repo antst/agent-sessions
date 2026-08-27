@@ -103,6 +103,10 @@ type claudeDaemonTestClient struct {
 	frames         []federation.AgentFrame
 }
 
+func (client *claudeDaemonTestClient) PrepareInteractive(_ context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	return daemonpkg.NativeLaunchPlan{Executable: "claude", Arguments: request.Intent.NativeArguments, Cwd: request.Cwd}, nil
+}
+
 func (client *claudeDaemonTestClient) ResolveSession(_ context.Context, selector string) (claudeDaemonSession, bool, error) {
 	if client.ambiguous && selector == client.session.Name {
 		return claudeDaemonSession{}, true, nil

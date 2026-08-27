@@ -24,8 +24,17 @@ type codexDaemonThread struct {
 }
 
 type codexDaemonClient interface {
+	PrepareInteractive(context.Context, daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error)
 	InspectThread(context.Context, string) (codexDaemonThread, error)
 	DeliverFrame(context.Context, string, federation.AgentFrame) error
+}
+
+// PrepareInteractive returns the direct Codex vendor handoff for one validated launch intent.
+func (adapter *codexDaemonAdapter) PrepareInteractive(ctx context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	if adapter == nil || adapter.client == nil {
+		return daemonpkg.NativeLaunchPlan{}, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return adapter.client.PrepareInteractive(ctx, request)
 }
 
 type codexDaemonAdapter struct{ client codexDaemonClient }

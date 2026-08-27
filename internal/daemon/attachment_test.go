@@ -225,6 +225,13 @@ type attachmentTestAdapter struct {
 	reconnectErr error
 }
 
+func (adapter *attachmentTestAdapter) PrepareInteractive(_ context.Context, request AttachmentPrepareRequest) (NativeLaunchPlan, error) {
+	return NativeLaunchPlan{
+		Executable: request.Product, Arguments: append([]string(nil), request.Intent.NativeArguments...), Cwd: request.Cwd,
+		ExpectedNativeActor: cloneAttachmentEvidence(request.ExpectedNativeActor),
+	}, nil
+}
+
 func (adapter *attachmentTestAdapter) Corroborate(_ context.Context, record AttachmentRecord, evidence map[string]any) (map[string]any, error) {
 	expectedPID := record.NativeActor["pid"]
 	if expectedPID != nil && !reflect.DeepEqual(expectedPID, evidence["pid"]) {

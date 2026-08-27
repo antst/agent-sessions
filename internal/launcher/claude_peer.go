@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
@@ -54,9 +56,64 @@ type claudeNativePeerRecord struct {
 // RunClaudePeer launches one native Claude session in the host agent's shared
 // Claude profile and registers its real native socket. Bare `claude` remains
 // the Agent Sessions opt-out and host settings are never modified.
-//
-//nolint:gocyclo // Launch keeps validation, gated ownership, publication, and cleanup in one transaction.
 func RunClaudePeer(args []string) error {
+	return runClaudePeerWithDaemon(args, productionDaemonPeerDependencies())
+}
+
+func runClaudePeerWithDaemon(args []string, dependencies daemonPeerDependencies) error {
+	plan, err := parseClaudePeerArgs(args)
+	if err != nil {
+		return err
+	}
+	if plan.informational {
+		claude, executableErr := claudeExecutable()
+		if executableErr != nil {
+			return executableErr
+		}
+		return dependencies.exec(claude, plan.args, nil)
+	}
+	if dependencies.prepare == nil {
+		return errors.New("claude peer daemon client is unavailable")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve Claude working directory: %w", err)
+	}
+	source, err := claudeprofile.CurrentSource()
+	if err != nil {
+		return err
+	}
+	permissionMode := "default"
+	if plan.alwaysApprove {
+		permissionMode = "bypassPermissions"
+	}
+	selector := plan.sessionID
+	mode := "fresh"
+	if plan.resume {
+		mode, selector = "resume", plan.resumeTarget
+	}
+	prepared, err := dependencies.prepare(context.Background(), daemon.AttachmentPrepareRequest{
+		Product: "claude", Kind: "interactive",
+		ProfileIdentity: map[string]any{
+			"profile": source.ConfigRoot, "config_env_set": source.ConfigEnvSet,
+			"config_env_value": source.ConfigEnvValue, "secure_env_set": source.SecureEnvSet,
+			"secure_config": source.SecureConfig,
+		},
+		Cwd: cwd, Name: plan.peerName, NameSource: "launch",
+		Groups: append([]string(nil), plan.context.groups...), PermissionMode: permissionMode,
+		Intent: daemon.InteractiveLaunchIntent{
+			Mode: mode, Selector: selector, SelectorIsName: selector != "" && !threadIDPattern.MatchString(selector),
+			NativeArguments: append([]string(nil), plan.args...), PermissionExplicit: plan.yoloSpecified,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("prepare Claude attachment: %w", err)
+	}
+	return executeDaemonPreparedPeer(context.Background(), "claude", prepared, dependencies)
+}
+
+//nolint:gocyclo // Legacy launch remains only as a migration reference until adapter extraction deletes it.
+func runLegacyClaudePeer(args []string) error {
 	plan, err := parseClaudePeerArgs(args)
 	if err != nil {
 		return err

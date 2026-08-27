@@ -87,6 +87,10 @@ type codexDaemonTestClient struct {
 	frames        []federation.AgentFrame
 }
 
+func (client *codexDaemonTestClient) PrepareInteractive(_ context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	return daemonpkg.NativeLaunchPlan{Executable: "codex", Arguments: request.Intent.NativeArguments, Cwd: request.Cwd}, nil
+}
+
 func (client *codexDaemonTestClient) InspectThread(_ context.Context, _ string) (codexDaemonThread, error) {
 	client.inspectCalls++
 	return client.thread, nil

@@ -24,9 +24,18 @@ type grokDaemonSession struct {
 }
 
 type grokDaemonClient interface {
+	PrepareInteractive(context.Context, daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error)
 	ResolveSession(context.Context, string) (grokDaemonSession, bool, error)
 	InspectSession(context.Context, string) (grokDaemonSession, error)
 	InterjectFrame(context.Context, string, federation.AgentFrame) error
+}
+
+// PrepareInteractive returns the direct Grok vendor handoff for one validated launch intent.
+func (adapter *grokDaemonAdapter) PrepareInteractive(ctx context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
+	if adapter == nil || adapter.client == nil {
+		return daemonpkg.NativeLaunchPlan{}, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return adapter.client.PrepareInteractive(ctx, request)
 }
 
 type grokDaemonAdapter struct{ client grokDaemonClient }
