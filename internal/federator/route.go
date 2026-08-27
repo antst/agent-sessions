@@ -1,7 +1,6 @@
 package federator
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,47 +8,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 const (
 	// AgentFrameVersion is the product-neutral body protocol carried by every adapter.
-	AgentFrameVersion      = 1
-	maxAgentContent        = 1024 * 1024
-	claudeAgentFramePrefix = "AGENT_SESSIONS_FRAME "
+	AgentFrameVersion      = federation.AgentFrameVersion
+	maxAgentContent        = federation.MaxAgentFrameBytes
+	claudeAgentFramePrefix = federation.AgentFrameCarrierPrefix
 )
 
-// AgentFrame is the complete product-neutral protocol body carried by local
-// controls, Claude native messages, and federation deliveries.
-type AgentFrame struct {
-	Version         int      `json:"version"`
-	Type            string   `json:"type"`
-	MessageID       string   `json:"message_id"`
-	SourceSessionID string   `json:"source_session_id,omitempty"`
-	Source          *Peer    `json:"source,omitempty"`
-	Targets         []string `json:"targets,omitempty"`
-	Group           string   `json:"group,omitempty"`
-	Content         string   `json:"content,omitempty"`
-	Summary         string   `json:"summary,omitempty"`
-	SentAt          string   `json:"sent_at,omitempty"`
-}
+// AgentFrame remains a compatibility alias for the shared carrier contract.
+type AgentFrame = federation.AgentFrame
 
-// DeliveryResult is the per-recipient outcome after one request passed admission.
-type DeliveryResult struct {
-	Target    string `json:"target"`
-	SessionID string `json:"session_id,omitempty"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
-}
+// DeliveryResult remains a compatibility alias for the shared destination result.
+type DeliveryResult = federation.DeliveryResult
 
-// AgentFrameResult is the synchronous local result for discovery or fan-out.
-type AgentFrameResult struct {
-	Version    int              `json:"version"`
-	Type       string           `json:"type"`
-	MessageID  string           `json:"message_id,omitempty"`
-	Peers      []Peer           `json:"peers,omitempty"`
-	Deliveries []DeliveryResult `json:"deliveries,omitempty"`
-	Error      string           `json:"error,omitempty"`
-}
+// AgentFrameResult remains a compatibility alias for the shared operation result.
+type AgentFrameResult = federation.AgentFrameResult
 
 //nolint:gocyclo // Admission and all three routing operations share one atomic validation boundary.
 func (a *agent) handleAgentFrame(sourceSessionID string, frame AgentFrame) (AgentFrameResult, error) {
@@ -239,7 +216,7 @@ func (a *agent) handleNativeCarrierFrame(raw json.RawMessage) (AgentFrameResult,
 	}
 	message, _ := outer["message"].(map[string]any)
 	content, _ := message["content"].(string)
-	body, err := unwrapClaudeCarrierBody(content)
+	body, err := federation.UnwrapAgentFrameCarrierBody(content)
 	if err != nil {
 		return AgentFrameResult{}, err
 	}
@@ -544,7 +521,7 @@ func (a *agent) serviceName() string {
 }
 
 func wrapAgentFrameInClaudeEnvelope(socket, sessionID, name string, inner []byte) string {
-	inner = escapeAgentEnvelopeJSON(inner)
+	inner = federation.EscapeAgentFrameEnvelopeJSON(inner)
 	return `<cross-session-message from="` + safeAttribute(encodeUDS(socket)) + `" from-session="` +
 		safeAttribute(sessionID) + `" from-name="` + safeAttribute(name) + `" from-mode="prompting">` +
 		"\n" + string(inner) + "\n</cross-session-message>"
@@ -554,40 +531,5 @@ func wrapAgentFrameInClaudeEnvelope(socket, sessionID, name string, inner []byte
 // single Claude-native carrier. Product adapters use the result as their
 // trusted, product-neutral delivery input.
 func DecodeAgentFrameBody(content string) (AgentFrame, error) {
-	body, err := unwrapClaudeCarrierBody(content)
-	if err != nil {
-		return AgentFrame{}, err
-	}
-	body = strings.TrimPrefix(body, claudeAgentFramePrefix)
-	var frame AgentFrame
-	if err := json.Unmarshal([]byte(body), &frame); err != nil {
-		return AgentFrame{}, fmt.Errorf("decode agent frame: %w", err)
-	}
-	return frame, nil
-}
-
-func unwrapClaudeCarrierBody(content string) (string, error) {
-	body := content
-	if strings.HasPrefix(body, "<cross-session-message") {
-		newline := strings.IndexByte(body, '\n')
-		const closeTag = "\n</cross-session-message>"
-		if newline < 0 || !strings.HasSuffix(body, closeTag) {
-			return "", errors.New("invalid Claude carrier envelope")
-		}
-		body = body[newline+1 : len(body)-len(closeTag)]
-	}
-	return body, nil
-}
-
-func escapeAgentEnvelopeJSON(body []byte) []byte {
-	lower := bytes.ToLower(body)
-	needle := []byte("</cross-session-message")
-	for {
-		index := bytes.Index(lower, needle)
-		if index < 0 {
-			return body
-		}
-		body = append(append(append([]byte(nil), body[:index+1]...), '\\'), body[index+1:]...)
-		lower = bytes.ToLower(body)
-	}
+	return federation.DecodeAgentFrameBody(content)
 }

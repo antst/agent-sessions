@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 const (
@@ -27,57 +29,20 @@ const (
 )
 
 const (
-	// SessionKindInteractive is a resumable top-level product peer.
-	SessionKindInteractive = "interactive"
-	// SessionKindLane is a resumable supervised worker lane.
-	SessionKindLane = "lane"
+	// SessionKindInteractive remains a compatibility projection of the shared contract.
+	SessionKindInteractive = federation.SessionKindInteractive
+	// SessionKindLane remains a compatibility projection of the shared contract.
+	SessionKindLane = federation.SessionKindLane
 )
 
-// SessionPreferences is the small durable portion of one peer registration.
-// Live addresses, process identities, names, and status remain runtime state.
-type SessionPreferences struct {
-	SessionID           string               `json:"session_id"`
-	Product             string               `json:"product"`
-	Kind                string               `json:"kind,omitempty"`
-	ExplicitGroups      []string             `json:"explicit_groups,omitempty"`
-	InheritedGroups     []string             `json:"inherited_groups,omitempty"`
-	ParentSession       string               `json:"parent_session_id,omitempty"`
-	ParentHostID        string               `json:"parent_host_id,omitempty"`
-	InheritParentGroups bool                 `json:"inherit_parent_groups"`
-	AlwaysApprove       bool                 `json:"always_approve"`
-	Qwen                *QwenSessionMetadata `json:"qwen,omitempty"`
-	UpdatedAt           int64                `json:"updated_at"`
-	Revision            string               `json:"revision,omitempty"`
-}
+// SessionPreferences remains a compatibility alias during package convergence.
+type SessionPreferences = federation.SessionPreferences
 
-// QwenSessionMetadata is the non-secret durable launch context required to
-// resume one managed interactive Qwen transcript. Live transport and process
-// identity remain in the registration and preparation ledgers.
-type QwenSessionMetadata struct {
-	Cwd                string              `json:"cwd"`
-	Profile            QwenProfileIdentity `json:"profile"`
-	LaunchPreference   string              `json:"launch_permission_preference"`
-	InitialModeRequest string              `json:"initial_mode_request,omitempty"`
-}
+// QwenSessionMetadata remains a compatibility alias during package convergence.
+type QwenSessionMetadata = federation.QwenSessionMetadata
 
-// SessionPreferenceUpdate distinguishes omitted resume flags from explicit
-// replacements. Omitted values restore the existing durable preference.
-type SessionPreferenceUpdate struct {
-	SessionID              string
-	Product                string
-	Kind                   string
-	ExplicitGroups         []string
-	GroupsSpecified        bool
-	ParentSession          string
-	ParentHostID           string
-	ParentGroups           []string
-	ParentSpecified        bool
-	InheritParentGroups    bool
-	InheritGroupsSpecified bool
-	AlwaysApprove          bool
-	AlwaysApproveSpecified bool
-	Qwen                   *QwenSessionMetadata
-}
+// SessionPreferenceUpdate remains a compatibility alias during package convergence.
+type SessionPreferenceUpdate = federation.SessionPreferenceUpdate
 
 type sessionCatalogFile struct {
 	Version  int                           `json:"version"`

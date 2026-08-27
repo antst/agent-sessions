@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
@@ -107,13 +108,7 @@ type PeerRegistration struct {
 
 // QwenProfileIdentity is the non-secret selected native profile identity
 // retained by the host agent. It deliberately contains no credentials.
-type QwenProfileIdentity struct {
-	QwenHomeSet    bool   `json:"qwen_home_set"`
-	QwenHome       string `json:"qwen_home,omitempty"`
-	QwenRuntimeSet bool   `json:"qwen_runtime_dir_set"`
-	QwenRuntimeDir string `json:"qwen_runtime_dir,omitempty"`
-	Fingerprint    string `json:"profile_fingerprint"`
-}
+type QwenProfileIdentity = federation.QwenProfileIdentity
 
 // QwenArtifactAttestation binds one launch artifact to an exact path, body,
 // and durable filesystem identity.

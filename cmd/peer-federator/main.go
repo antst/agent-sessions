@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -166,7 +167,7 @@ func runHosts(args []string) error {
 		return fmt.Errorf("cannot list remote hosts: %w", err)
 	}
 	if hosts == nil {
-		hosts = []federator.Host{}
+		hosts = []federation.Host{}
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"type": "host.list", "protocol_version": federator.ProtocolVersion, "hosts": hosts,

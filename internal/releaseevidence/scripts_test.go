@@ -18,13 +18,13 @@ func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "deploy", "peer-federator"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "deploy", "agent-sessions"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "scripts", "release-tag-preflight"), body, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "deploy", "peer-federator", "VERSION"), []byte("0.2.4\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "deploy", "agent-sessions", "VERSION"), []byte("0.2.4\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, root, "init", "-q")

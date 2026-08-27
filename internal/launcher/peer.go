@@ -11,6 +11,8 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
+var requirePeerDaemon = requireUserDaemon
+
 // RunPeer dispatches a generic exact-session resume through the product stored
 // in the host agent's durable session catalog.
 func RunPeer(args []string) error {
@@ -20,6 +22,9 @@ func RunPeer(args []string) error {
 	}
 	if len(args) < 2 || args[0] != "resume" || strings.TrimSpace(args[1]) == "" {
 		return usageError(peerUsage())
+	}
+	if err := requirePeerDaemon(); err != nil {
+		return err
 	}
 	sessionID := args[1]
 	resolved, err := federator.LookupSessionPreferences(agentRuntimeDir(), sessionID)

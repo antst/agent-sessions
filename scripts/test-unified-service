@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+	script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+	link_target="$(readlink -- "$script_path")"
+	if [[ "$link_target" == /* ]]; then script_path="$link_target"; else script_path="$script_dir/$link_target"; fi
+done
+repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+platform="$(uname -s)"
+
+fail() {
+	printf 'unified service acceptance: %s\n' "$*" >&2
+	exit 1
+}
+
+wait_for() {
+	local description="$1"
+	shift
+	for _ in {1..400}; do
+		if "$@"; then return 0; fi
+		sleep 0.05
+	done
+	fail "timed out waiting for $description"
+}
+
+json_field() {
+	python3 -c 'import json,sys
+value=json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    value=value[key]
+print(json.dumps(value,separators=(",",":")) if isinstance(value,(dict,list,bool)) else value)' "$1"
+}
+
+if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 ]]; then
+	outer_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-service.XXXXXX")"
+	go_module_cache="$(go env GOMODCACHE)"
+	go_build_cache="$(go env GOCACHE)"
+	go_workspace="$(go env GOPATH)"
+	chmod 0700 "$outer_root"
+	cleanup_outer() {
+		if [[ "${AGENT_SESSIONS_KEEP_ACCEPTANCE_ROOT:-0}" == 1 ]]; then
+			printf 'unified service acceptance: retained diagnostic root %s\n' "$outer_root" >&2
+			return
+		fi
+		# Installed release images are deliberately immutable (directories 0555),
+		# so restore owner write permission only inside this validated temp root
+		# before removing the disposable acceptance user.
+		chmod -R u+w -- "$outer_root" 2>/dev/null || true
+		rm -rf -- "$outer_root"
+	}
+	trap cleanup_outer EXIT
+	mkdir -p "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state"
+	chmod 0700 "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state"
+	set +e
+	dbus-run-session -- env \
+		AGENT_SESSIONS_NESTED_SYSTEMD=1 AGENT_SESSIONS_ACCEPTANCE_ROOT="$outer_root" \
+		HOME="$outer_root/home" XDG_RUNTIME_DIR="$outer_root/runtime" \
+		XDG_CONFIG_HOME="$outer_root/config" XDG_STATE_HOME="$outer_root/state" \
+		GOMODCACHE="$go_module_cache" GOCACHE="$go_build_cache" GOPATH="$go_workspace" \
+		PATH="$PATH" "$script_path"
+	status=$?
+	set -e
+	exit "$status"
+fi
+
+acceptance_root="${AGENT_SESSIONS_ACCEPTANCE_ROOT:-}"
+if [[ "$platform" == Darwin ]]; then
+	if [[ "${AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER:-0}" != 1 ]]; then
+		fail 'Darwin live acceptance requires AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER=1 under a dedicated clean user'
+	fi
+	if launchctl print "gui/$UID/net.antst.agent-sessions" >/dev/null 2>&1; then
+		fail 'the standard launchd service is already loaded'
+	fi
+	for path in \
+		"$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist" \
+		"$HOME/.config/agent-sessions" "$HOME/.local/state/agent-sessions" \
+		"$HOME/.local/libexec/agent-sessions/host"; do
+		[[ ! -e "$path" && ! -L "$path" ]] || fail "clean-user path already exists: $path"
+	done
+	acceptance_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-service.XXXXXX")"
+	chmod 0700 "$acceptance_root"
+elif [[ "$platform" != Linux ]]; then
+	fail "unsupported platform $platform"
+fi
+[[ -n "$acceptance_root" && -d "$acceptance_root" ]] || fail 'acceptance root is absent'
+
+prefix="$HOME/.local"
+acceptance_started_epoch="$(date +%s)"
+plan="$acceptance_root/host-purge-plan.json"
+missing_root="$acceptance_root/missing-products"
+mkdir -p "$missing_root"
+fake_native_root="$acceptance_root/native-products"
+fake_qwen_home="$HOME/.qwen"
+mkdir -p "$fake_native_root/bin" "$fake_native_root/state"
+install -m 0755 "$repository_root/scripts/fixtures/fake-native-product.py" "$fake_native_root/bin/native-product"
+for product in codex claude grok qwen; do
+	ln -s native-product "$fake_native_root/bin/$product"
+done
+export AGENT_SESSIONS_FAKE_NATIVE_ROOT="$fake_native_root" QWEN_HOME="$fake_qwen_home"
+service_manager_pid=
+
+cleanup_inner() {
+	set +e
+	if [[ "$platform" == Linux ]]; then
+		systemctl --user disable --now agent-sessions.service >/dev/null 2>&1 || true
+		if [[ -n "$service_manager_pid" ]]; then
+			systemctl --user exit >/dev/null 2>&1 || true
+			wait "$service_manager_pid" 2>/dev/null || true
+		fi
+	else
+		launchctl bootout "gui/$UID/net.antst.agent-sessions" >/dev/null 2>&1 || true
+	fi
+	if [[ "$platform" == Darwin ]]; then rm -rf -- "$acceptance_root"; fi
+}
+trap cleanup_inner EXIT
+
+if [[ "$platform" == Linux ]]; then
+	systemd --user --log-target=console >"$acceptance_root/systemd.stdout" 2>"$acceptance_root/systemd.stderr" &
+	service_manager_pid=$!
+	wait_for 'nested systemd user manager' systemctl --user is-system-running
+fi
+
+cd -- "$repository_root"
+make -s build
+host_binary="$repository_root/bin/$(case "$platform/$(uname -m)" in Linux/x86_64) echo linux-x64;; Linux/aarch64) echo linux-arm64;; Darwin/x86_64) echo darwin-x64;; Darwin/arm64) echo darwin-arm64;; *) exit 1;; esac)/agent-sessions"
+[[ -x "$host_binary" ]] || fail "host binary is absent: $host_binary"
+
+missing_codex="$missing_root/codex"
+missing_claude="$missing_root/claude"
+missing_grok="$missing_root/grok"
+missing_qwen="$missing_root/qwen"
+make -s install-all \
+	PREFIX="$prefix" INSTALL_ROOT="$prefix/libexec/agent-sessions" HOST_INSTALLER="$host_binary" \
+	CODEX="$missing_codex" CLAUDE="$missing_claude" GROK="$missing_grok" QWEN="$missing_qwen"
+
+service_active() {
+	if [[ "$platform" == Linux ]]; then
+		systemctl --user is-active --quiet agent-sessions.service
+	else
+		launchctl print "gui/$UID/net.antst.agent-sessions" 2>/dev/null | grep -Fq 'state = running'
+	fi
+}
+status_pid() {
+	local body
+	body="$($prefix/bin/agent-sessions status --json 2>/dev/null)" || return 1
+	python3 -c 'import json,sys
+result=json.load(sys.stdin).get("result")
+if not isinstance(result,dict) or not isinstance(result.get("pid"),int): raise SystemExit(1)
+print(result["pid"])' <<<"$body"
+}
+different_daemon_pid() {
+	local current
+	current="$(status_pid)" || return 1
+	[[ "$current" != "$1" ]]
+}
+wait_for 'installed unified service' service_active
+
+status_json="$($prefix/bin/agent-sessions status --json)"
+[[ "$(json_field result.runtime_version <<<"$status_json")" == "$(<deploy/agent-sessions/VERSION)" ]] ||
+	fail 'status did not report the selected release version'
+[[ "$(json_field result.generation <<<"$status_json")" =~ ^[1-9][0-9]*$ ]] || fail 'status generation is not positive'
+[[ "$(json_field result.attachments <<<"$status_json")" == 0 ]] || fail 'clean service reported attachments'
+[[ "$(json_field result.lanes <<<"$status_json")" == 0 ]] || fail 'clean service reported lanes'
+for product in codex claude grok qwen; do
+	[[ "$(json_field "result.products.$product.state" <<<"$status_json")" == not_installed ]] ||
+		fail "absent $product was not reported unavailable"
+done
+for vendor in "$HOME/.codex" "$HOME/.claude" "$HOME/.grok" "$HOME/.qwen"; do
+	[[ ! -e "$vendor" ]] || fail "zero-product install unexpectedly created vendor profile $vendor"
+done
+
+doctor_json="$($prefix/bin/agent-sessions doctor --json)"
+[[ "$(json_field result.healthy <<<"$doctor_json")" == true ]] || fail 'doctor did not report healthy service'
+
+help_json="$($prefix/bin/agent-sessions help --json)"
+python3 -c 'import json,sys
+document=json.load(sys.stdin)
+keys={mode["key"] for mode in document["result"]["modes"]}
+required={"host.status","host.doctor","host.migrate.inspect","host.migrate.status","host.remove.inspect","host.purge.inspect","host.purge.apply"}
+missing=sorted(required-keys)
+if missing:
+    raise SystemExit("machine help omitted canonical modes: "+", ".join(missing))' <<<"$help_json" ||
+	fail 'machine help is incomplete'
+for alias in agent-sessions peer codex-peer claude-peer grok-peer qwen-peer codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane; do
+	[[ -L "$prefix/bin/$alias" ]] || fail "installed alias is not a symlink: $alias"
+	[[ "$(readlink "$prefix/bin/$alias")" == "$prefix/libexec/agent-sessions/host/current/bin/agent-sessions" ]] ||
+		fail "installed alias selected another image: $alias"
+done
+[[ ! -e "$prefix/bin/agent-sessions-hub" && ! -e "$prefix/libexec/agent-sessions/hub/current" ]] ||
+	fail 'host install mutated hub lifecycle'
+
+first_pid="$(json_field result.pid <<<"$status_json")"
+first_generation="$(json_field result.generation <<<"$status_json")"
+if [[ "$platform" == Linux ]]; then
+	systemctl --user restart agent-sessions.service
+else
+	launchctl kickstart -k "gui/$UID/net.antst.agent-sessions"
+fi
+wait_for 'same-version service restart' service_active
+wait_for 'new same-version process' different_daemon_pid "$first_pid"
+restarted_status="$($prefix/bin/agent-sessions status --json)"
+restarted_generation="$(json_field result.generation <<<"$restarted_status")"
+((restarted_generation > first_generation)) || fail 'same-version restart did not advance generation'
+
+crashed_pid="$(json_field result.pid <<<"$restarted_status")"
+kill -KILL "$crashed_pid"
+wait_for 'service-manager crash restart' service_active
+wait_for 'replacement after crash' different_daemon_pid "$crashed_pid"
+crash_status="$($prefix/bin/agent-sessions status --json)"
+(( $(json_field result.generation <<<"$crash_status") > restarted_generation )) ||
+	fail 'crash restart did not advance generation'
+
+if [[ "$platform" == Linux ]]; then
+	systemctl --user stop agent-sessions.service
+	control_endpoint="$XDG_RUNTIME_DIR/agent-sessions/daemon.sock"
+else
+	launchctl bootout "gui/$UID/net.antst.agent-sessions"
+	control_endpoint="/tmp/agent-sessions-$UID/daemon.sock"
+fi
+wait_for 'explicit service stop' test ! -S "$control_endpoint"
+set +e
+"$prefix/bin/peer" resume 00000000-0000-0000-0000-000000000001 \
+	>"$acceptance_root/stopped-peer.out" 2>"$acceptance_root/stopped-peer.err"
+stopped_status=$?
+set -e
+[[ "$stopped_status" == 3 ]] || fail "stopped workflow exit=$stopped_status, want 3"
+grep -Fq 'agent-sessions daemon is unavailable' "$acceptance_root/stopped-peer.err" ||
+	fail 'stopped workflow omitted daemon-unavailable diagnosis'
+grep -Fq "$(if [[ "$platform" == Linux ]]; then echo 'systemctl --user status agent-sessions.service'; else echo 'launchctl print gui/$UID/net.antst.agent-sessions'; fi)" \
+	"$acceptance_root/stopped-peer.err" || fail 'stopped workflow omitted service inspection action'
+sleep "${AGENT_SESSIONS_EXPLICIT_STOP_SECONDS:-30}"
+[[ ! -S "$control_endpoint" ]] || fail 'workflow resurrected explicitly stopped service'
+if [[ "$platform" == Linux ]]; then systemctl --user start agent-sessions.service; else launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist"; fi
+wait_for 'explicit service start' service_active
+
+install_host_with_products() {
+	local codex="$1" claude="$2" grok="$3" qwen="$4"
+	make -s install-all \
+		PREFIX="$prefix" INSTALL_ROOT="$prefix/libexec/agent-sessions" HOST_INSTALLER="$host_binary" \
+		CODEX="$codex" CLAUDE="$claude" GROK="$grok" QWEN="$qwen"
+	wait_for 'installed service after connector transaction' service_active
+}
+
+assert_fake_connector_set() {
+	local wanted="$1"
+	python3 - "$fake_native_root/state" "$wanted" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); wanted=set(filter(None,sys.argv[2].split(',')))
+for product in ("codex","claude","grok","qwen"):
+    path=root/(product+".json")
+    state=json.loads(path.read_text()) if path.exists() else {}
+    present={
+        "codex": bool(state.get("marketplace") and state.get("plugin")),
+        "claude": bool(state.get("marketplace") and state.get("plugin")),
+        "grok": bool(state.get("enabled")),
+        "qwen": bool(state.get("installed")),
+    }[product]
+    if present != (product in wanted):
+        raise SystemExit(f"{product} fixture presence={present}, want {product in wanted}: {state}")
+PY
+}
+
+fake_codex="$fake_native_root/bin/codex"
+fake_claude="$fake_native_root/bin/claude"
+fake_grok="$fake_native_root/bin/grok"
+fake_qwen="$fake_native_root/bin/qwen"
+
+# Exercise installed product cardinalities through the real immutable-release,
+# service restart, readiness and connector transaction—not just driver units.
+install_host_with_products "$fake_codex" "$missing_claude" "$missing_grok" "$missing_qwen"
+assert_fake_connector_set codex
+install_host_with_products "$fake_codex" "$fake_claude" "$fake_grok" "$missing_qwen"
+assert_fake_connector_set codex,claude,grok
+install_host_with_products "$fake_codex" "$fake_claude" "$fake_grok" "$fake_qwen"
+assert_fake_connector_set codex,claude,grok,qwen
+
+for vendor in "$HOME/.codex" "$HOME/.claude" "$HOME/.grok" "$HOME/.qwen"; do
+	mkdir -p "$vendor"
+	: >"$vendor/acceptance-preserve"
+done
+
+connector_semantics() {
+	python3 - "$fake_native_root/state" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); result={}
+for product in ("codex","claude","grok","qwen"):
+    path=root/(product+".json")
+    state=json.loads(path.read_text()) if path.exists() else {}
+    result[product]={key:state.get(key) for key in {
+        "codex":("marketplace","plugin","source"),
+        "claude":("marketplace","plugin","source"),
+        "grok":("enabled",),
+        "qwen":("installed","source"),
+    }[product]}
+print(json.dumps(result,sort_keys=True,separators=(",",":")))
+PY
+}
+
+# A distinct immutable candidate reaches a real running successor, then a
+# one-shot Grok commit failure forces service, pointer, and all-four connector
+# rollback to the exact prior usable release.
+prior_selection="$(readlink "$prefix/libexec/agent-sessions/host/current")"
+prior_connectors="$(connector_semantics)"
+upgrade_source="$acceptance_root/upgrade-source"
+cp -R -- "$(readlink -f "$prefix/libexec/agent-sessions/host/current")" "$upgrade_source"
+chmod -R u+w -- "$upgrade_source"
+sed -i '1s/$/ (acceptance rollback candidate)/' "$upgrade_source/docs/CLI.md"
+set +e
+AGENT_SESSIONS_FAKE_FAIL_PRODUCT=grok "$host_binary" lifecycle install \
+	--role host --source-root "$upgrade_source" --prefix "$prefix" \
+	--version "$(<deploy/agent-sessions/VERSION)" \
+	--codex "$fake_codex" --claude "$fake_claude" --grok "$fake_grok" --qwen "$fake_qwen" \
+	>"$acceptance_root/upgrade-rollback.out" 2>"$acceptance_root/upgrade-rollback.err"
+upgrade_status=$?
+set -e
+[[ "$upgrade_status" != 0 ]] || fail 'injected all-four upgrade unexpectedly committed'
+[[ "$(readlink "$prefix/libexec/agent-sessions/host/current")" == "$prior_selection" ]] ||
+	fail 'failed upgrade did not restore the exact prior release selection'
+wait_for 'prior service after upgrade rollback' service_active
+[[ "$(connector_semantics)" == "$prior_connectors" ]] ||
+	fail 'failed upgrade did not restore exact prior connector semantics'
+
+# Inject private content through accepted and rejected production control
+# requests, then audit the actual service-manager-owned outputs.
+content_canary="T034_INSTALLED_PRIVATE_CONTENT_75b767e9"
+AGENT_SESSIONS_INSTALLED_CONTENT_CANARY="$content_canary" \
+	go test ./internal/daemon -run '^TestInstalledServiceContentCanary$' -count=1
+"$prefix/bin/agent-sessions" status >"$acceptance_root/status.human"
+"$prefix/bin/agent-sessions" status --json >"$acceptance_root/status.json"
+"$prefix/bin/agent-sessions" doctor >"$acceptance_root/doctor.human"
+"$prefix/bin/agent-sessions" doctor --json >"$acceptance_root/doctor.json"
+if [[ "$platform" == Linux ]]; then
+	systemctl --user status --no-pager agent-sessions.service >"$acceptance_root/service-manager.log" 2>&1 || true
+	journalctl --since "@$acceptance_started_epoch" --no-pager -o json 2>/dev/null |
+		python3 -c 'import json,sys
+root=sys.argv[1]
+for line in sys.stdin:
+    try: record=json.loads(line)
+    except json.JSONDecodeError: continue
+    if root in str(record.get("_CMDLINE","")) or root in str(record.get("_EXE","")) or root in str(record.get("MESSAGE","")):
+        print(record.get("MESSAGE",""))' "$acceptance_root" >"$acceptance_root/service-journal.log"
+	cat "$acceptance_root/systemd.stdout" "$acceptance_root/systemd.stderr" \
+		"$acceptance_root/service-manager.log" "$acceptance_root/service-journal.log" \
+		>"$acceptance_root/service-observability.log"
+else
+	launchctl print "gui/$UID/net.antst.agent-sessions" >"$acceptance_root/service-manager.log" 2>&1
+	cat "$XDG_STATE_HOME/agent-sessions/logs/agent-sessions.stdout.log" \
+		"$XDG_STATE_HOME/agent-sessions/logs/agent-sessions.stderr.log" \
+		"$acceptance_root/service-manager.log" >"$acceptance_root/service-observability.log"
+fi
+for kind in normal debug error crash_report metric trace; do
+	grep -Fq "\"kind\":\"$kind\"" "$acceptance_root/service-observability.log" ||
+		fail "real service observability omitted $kind output"
+done
+grep -Fq 'host.crash_recovered' "$acceptance_root/service-observability.log" ||
+	fail 'real service observability omitted crash recovery attribution'
+if grep -R -Fq -- "$content_canary" \
+	"$acceptance_root/service-observability.log" "$acceptance_root/status.human" \
+	"$acceptance_root/status.json" "$acceptance_root/doctor.human" "$acceptance_root/doctor.json"; then
+	fail 'real installed observability leaked private content canary'
+fi
+
+make -s remove \
+	PREFIX="$prefix" INSTALL_ROOT="$prefix/libexec/agent-sessions" HOST_INSTALLER="$prefix/bin/agent-sessions" \
+	CODEX="$fake_codex" CLAUDE="$fake_claude" GROK="$fake_grok" QWEN="$fake_qwen"
+[[ ! -e "$prefix/libexec/agent-sessions/host/current" ]] || fail 'normal removal retained host selection'
+[[ ! -e "$prefix/bin/agent-sessions" ]] || fail 'normal removal retained host aliases'
+[[ -d "$XDG_CONFIG_HOME/agent-sessions" && -d "$XDG_STATE_HOME/agent-sessions" ]] ||
+	fail 'normal removal did not preserve Agent Sessions metadata'
+assert_fake_connector_set ''
+for vendor in "$HOME/.codex" "$HOME/.claude" "$HOME/.grok" "$HOME/.qwen"; do
+	[[ -f "$vendor/acceptance-preserve" ]] || fail "normal removal changed vendor profile $vendor"
+done
+
+"$host_binary" purge inspect --plan "$plan" >/dev/null
+[[ -f "$plan" ]] || fail 'offline purge did not create a revision-bound plan'
+"$host_binary" purge apply --plan "$plan" >/dev/null
+[[ ! -e "$XDG_CONFIG_HOME/agent-sessions" && ! -e "$XDG_STATE_HOME/agent-sessions" ]] ||
+	fail 'offline purge retained an enumerated Agent Sessions root'
+[[ ! -S "$control_endpoint" ]] || fail 'offline purge started the daemon'
+for vendor in "$HOME/.codex" "$HOME/.claude" "$HOME/.grok" "$HOME/.qwen"; do
+	[[ -f "$vendor/acceptance-preserve" ]] || fail "purge changed vendor profile $vendor"
+done
+
+if [[ "$platform" == Linux ]]; then
+	systemctl --user is-enabled agent-sessions.service >/dev/null 2>&1 && fail 'removal retained login enablement'
+	[[ ! -e "$XDG_CONFIG_HOME/systemd/user/agent-sessions.service" ]] || fail 'removal retained systemd unit'
+else
+	[[ ! -e "$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist" ]] || fail 'removal retained launchd plist'
+fi
+
+printf '{"type":"unified.service.passed","platform":"%s","optional_product_cardinalities":true,"all_four_upgrade_rollback":true,"observability_canary":true,"explicit_stop":true,"crash_restart":true,"removal":true,"purge":true}\n' "$platform"

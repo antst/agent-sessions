@@ -175,8 +175,7 @@ func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[string]any {
 	t.Helper()
 	executables := []string{
-		"agent-session-runtime", "peer", "codex-peer", "claude-peer", "grok-peer", "qwen-peer",
-		"codex-peer-lane", "claude-peer-lane", "grok-peer-lane", "qwen-peer-lane", "peer-federator",
+		"agent-sessions", "agent-sessions-hub",
 	}
 	plugins := []map[string]any{
 		{"product": "codex", "plugin_id": "agent-sessions", "archive_paths": []string{".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills"}},

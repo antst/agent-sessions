@@ -9,44 +9,25 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 const (
 	// ProtocolVersion identifies the compatible hub/agent wire contract.
-	ProtocolVersion = 3
+	ProtocolVersion = federation.ProtocolVersion
 	// GroupProtocolVersion identifies the local grouped-routing contract.
-	GroupProtocolVersion = 1
-	maxWireBytes         = 2 * 1024 * 1024
-	maxLaneInputBytes    = 1024 * 1024
+	GroupProtocolVersion = federation.GroupProtocolVersion
+	maxWireBytes         = federation.MaxFrameBytes
+	maxLaneInputBytes    = federation.MaxLaneInputBytes
 	wireWriteTimeout     = 10 * time.Second
 )
 
-// Host is one connected federation agent and the remote services it can run.
-type Host struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Capabilities []string `json:"capabilities,omitempty"`
-}
+// Host remains a compatibility alias for the shared wire identity.
+type Host = federation.Host
 
-// Peer is one live, messageable session advertised by a host agent.
-type Peer struct {
-	ID              string   `json:"id"`
-	HostID          string   `json:"host_id"`
-	HostName        string   `json:"host_name"`
-	SessionID       string   `json:"session_id"`
-	GlobalID        string   `json:"global_session_id"`
-	Name            string   `json:"name"`
-	DisplayName     string   `json:"display_name"`
-	Status          string   `json:"status,omitempty"`
-	Cwd             string   `json:"cwd,omitempty"`
-	Entrypoint      string   `json:"entrypoint,omitempty"`
-	PermissionMode  string   `json:"permission_mode,omitempty"`
-	StartedAt       int64    `json:"started_at,omitempty"`
-	PeerProtocol    int      `json:"peer_protocol,omitempty"`
-	InstanceID      string   `json:"instance_id,omitempty"`
-	Groups          []string `json:"groups,omitempty"`
-	ParentSessionID string   `json:"parent_session_id,omitempty"`
-}
+// Peer remains a compatibility alias for the shared wire projection.
+type Peer = federation.Peer
 
 // Message is one newline-delimited hub, agent, or local-control frame.
 type Message struct {

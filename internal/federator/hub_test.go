@@ -84,6 +84,33 @@ func newTestHubClient(t *testing.T, hub *hub, host string, capabilities ...strin
 	return result
 }
 
+func TestHubRejectsProtocolMismatchBeforeHostRegistration(t *testing.T) {
+	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}, clientTimeout: time.Second}
+	server, client := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		hub.handleConnection(server)
+		close(done)
+	}()
+	if err := newWireConn(client).Send(Message{
+		Type: "hello", Version: ProtocolVersion + 1, HostID: "mismatch", HostName: "mismatch",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _ = io.ReadAll(client)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("hub did not terminate the protocol-mismatched connection")
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if len(hub.clients) != 0 {
+		t.Fatalf("protocol-mismatched host registered before rejection: %+v", hub.clients)
+	}
+}
+
 func TestHubRoutesRemoteLaneOnlyThroughConnectedCapableHosts(t *testing.T) {
 	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}}
 	source := newTestHubClient(t, hub, "host-a")

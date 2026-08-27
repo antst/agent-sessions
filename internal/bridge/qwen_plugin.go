@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	daemoncore "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/procinfo"
@@ -404,11 +406,10 @@ func runQwenPluginRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: %v\n", err)
 		return 1
 	}
-	command := exec.Command(qwen, "extensions", "uninstall", qwenPluginName) //nolint:gosec // Operator-selected Qwen executable and fixed native extension argv.
-	command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := command.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: native Qwen uninstaller failed: %v\n", err)
+	if err := daemoncore.RunConnectorLifecycleCLI(context.Background(), "remove", []string{
+		"--product", "qwen", "--native", qwen,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-session-runtime qwen-plugin-remove: %v\n", err)
 		return 1
 	}
 	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/socketpath"
@@ -1736,7 +1737,7 @@ func (m *claudeLaneManager) agentPeerRegistration() federator.PeerRegistration {
 		permissionMode = "bypassPermissions"
 	}
 	return federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: m.state.SessionID,
+		Version: federation.GroupProtocolVersion, SessionID: m.state.SessionID,
 		Product: "claude", Name: m.state.Name, Status: defaultString(m.state.Status, "idle"),
 		PermissionMode: permissionMode, Cwd: m.state.Cwd,
 		PID: m.state.WorkerPID, ProcStart: m.state.WorkerProcStart, Socket: m.state.WorkerSocket,

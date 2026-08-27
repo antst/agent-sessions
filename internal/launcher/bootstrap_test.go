@@ -1,57 +1,64 @@
 package launcher
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/antst/agent-sessions/internal/daemon"
 )
 
-func TestEnsureCodexHomeCreatesConfiguredDirectoryBeforeProfileResolution(t *testing.T) {
+func TestEnsureRuntimeFailsUnavailableBeforeDiscoveryWithoutMutation(t *testing.T) {
+	previous := queryLauncherDaemon
+	t.Cleanup(func() { queryLauncherDaemon = previous })
+	want := &daemon.UnavailableError{
+		Endpoint: "/run/user/501/agent-sessions/daemon.sock",
+		Cause:    errors.New("connection refused"), NextAction: "systemctl --user status agent-sessions.service",
+	}
+	queryLauncherDaemon = func(_ context.Context) error { return want }
+
 	root := t.TempDir()
-	realRoot := filepath.Join(root, "real")
-	if err := os.MkdirAll(realRoot, 0700); err != nil {
-		t.Fatal(err)
+	missingParent := filepath.Join(root, "must-not-create")
+	t.Setenv("CODEX_PEER_PLUGIN_ROOT", filepath.Join(missingParent, "plugin"))
+	t.Setenv("CODEX_PEER_NATIVE_RUNTIME", filepath.Join(missingParent, "runtime"))
+	_, err := EnsureRuntime()
+	if !errors.Is(err, want) {
+		t.Fatalf("EnsureRuntime error = %v, want exact unavailable cause", err)
 	}
-	aliasRoot := filepath.Join(root, "alias")
-	if err := os.Symlink(realRoot, aliasRoot); err != nil {
-		t.Fatal(err)
+	var exit *ExitError
+	var unavailable *daemon.UnavailableError
+	if !errors.As(err, &exit) || exit.Code != 3 || !errors.As(err, &unavailable) {
+		t.Fatalf("unavailable classification = %T %v", err, err)
 	}
-	codexHome := filepath.Join(aliasRoot, "missing", "codex")
-	t.Setenv("CODEX_HOME", codexHome)
-	if _, err := filepath.EvalSymlinks(codexHome); err == nil {
-		t.Fatal("test CODEX_HOME unexpectedly existed before bootstrap")
-	}
-	if err := ensureCodexHome(); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(codexHome)
-	if err != nil || !info.IsDir() {
-		t.Fatalf("fresh CODEX_HOME was not established: info=%v err=%v", info, err)
-	}
-	if err := ensureCodexHome(); err != nil {
-		t.Fatalf("existing CODEX_HOME was not idempotent: %v", err)
-	}
-	resolved, err := filepath.EvalSymlinks(codexHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolvedRealRoot, err := filepath.EvalSymlinks(realRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(resolvedRealRoot, "missing", "codex")
-	if resolved != want {
-		t.Fatalf("fresh aliased CODEX_HOME resolved to %q, want %q", resolved, want)
+	if _, statErr := os.Lstat(missingParent); !os.IsNotExist(statErr) {
+		t.Fatalf("unavailable launcher mutated filesystem: %v", statErr)
 	}
 }
 
-func TestEnsureCodexHomeRejectsRegularFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "codex-file")
-	if err := os.WriteFile(path, []byte("not a directory"), 0600); err != nil {
+func TestEnsureRuntimeDiscoversExecutableWithoutLegacyState(t *testing.T) {
+	previous := queryLauncherDaemon
+	t.Cleanup(func() { queryLauncherDaemon = previous })
+	queryLauncherDaemon = func(_ context.Context) error { return nil }
+
+	root := t.TempDir()
+	runtimePath := filepath.Join(root, "agent-session-runtime")
+	if err := os.WriteFile(runtimePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CODEX_HOME", path)
-	if err := ensureCodexHome(); err == nil {
-		t.Fatal("regular-file CODEX_HOME was accepted")
+	legacyState := filepath.Join(root, "legacy-state")
+	t.Setenv("CODEX_PEER_NATIVE_RUNTIME", runtimePath)
+	t.Setenv("CODEX_PEER_PLUGIN_ROOT", filepath.Join(root, "unused-plugin"))
+	t.Setenv("CLAUDE_PEER_DATA_DIR", legacyState)
+	selected, err := EnsureRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Path != runtimePath {
+		t.Fatalf("runtime path = %q, want %q", selected.Path, runtimePath)
+	}
+	if _, statErr := os.Lstat(legacyState); !os.IsNotExist(statErr) {
+		t.Fatalf("launcher recreated legacy state root: %v", statErr)
 	}
 }

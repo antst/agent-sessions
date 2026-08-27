@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
@@ -1366,7 +1367,7 @@ func (h *grokHost) adoptNativeGrokSelection(selectedID string, state grokRosterS
 		}
 	}
 	resolved, err := resolve(federator.ResolvePreferencesRequest{
-		SessionID: selectedID, Product: "grok", Kind: federator.SessionKindInteractive,
+		SessionID: selectedID, Product: "grok", Kind: federation.SessionKindInteractive,
 		Groups: h.config.Groups, GroupsSpecified: h.config.GroupsSpecified,
 		ParentSessionID: h.config.ParentSession, ParentSpecified: h.config.ParentSpecified,
 		InheritParentGroups: h.config.InheritGroups, InheritGroupsSpecified: h.config.InheritSet,

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -407,8 +408,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
-		result, err := routeMCPAgentFrame(runtimeDir, callerSessionID, federator.AgentFrame{
-			Version: federator.AgentFrameVersion, Type: "discover", MessageID: randomID(),
+		result, err := routeMCPAgentFrame(runtimeDir, callerSessionID, federation.AgentFrame{
+			Version: federation.AgentFrameVersion, Type: "discover", MessageID: randomID(),
 		})
 		if err != nil {
 			return nil, err
@@ -443,8 +444,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if err != nil {
 			return nil, err
 		}
-		result, routeErr := routeMCPAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
-			Version: federator.AgentFrameVersion, Type: "send", MessageID: randomID(),
+		result, routeErr := routeMCPAgentFrame(runtimeDir, sessionID, federation.AgentFrame{
+			Version: federation.AgentFrameVersion, Type: "send", MessageID: randomID(),
 			Targets: targets, Content: message, Summary: summary,
 		})
 		if routeErr != nil {
@@ -468,8 +469,8 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		if !managed {
 			return nil, errors.New("broadcast requires the grouped host agent")
 		}
-		result, err := routeMCPAgentFrame(runtimeDir, sessionID, federator.AgentFrame{
-			Version: federator.AgentFrameVersion, Type: "broadcast", MessageID: randomID(),
+		result, err := routeMCPAgentFrame(runtimeDir, sessionID, federation.AgentFrame{
+			Version: federation.AgentFrameVersion, Type: "broadcast", MessageID: randomID(),
 			Group: group, Content: message, Summary: strings.TrimSpace(stringValue(args["summary"])),
 		})
 		if err != nil {
@@ -566,7 +567,7 @@ func nativePeerProductLabel(entrypoint string) string {
 
 func groupedAgentRuntime(paths nativePaths, sessionID string) (string, bool) {
 	state, err := readOwnNativeState(paths, sessionID)
-	if err == nil && intValue(state["groupProtocol"]) == federator.GroupProtocolVersion {
+	if err == nil && intValue(state["groupProtocol"]) == federation.GroupProtocolVersion {
 		runtimeDir := strings.TrimSpace(stringValue(state["agentRuntimeDir"]))
 		return runtimeDir, runtimeDir != ""
 	}
@@ -621,7 +622,7 @@ func requestedPeerTargets(args map[string]any) ([]string, error) {
 	return targets, nil
 }
 
-func groupedDeliveryToolResult(kind string, result federator.AgentFrameResult) map[string]any {
+func groupedDeliveryToolResult(kind string, result federation.AgentFrameResult) map[string]any {
 	accepted, failed := 0, 0
 	for _, delivery := range result.Deliveries {
 		if delivery.Status == "accepted" || delivery.Status == "queued" || delivery.Status == "delivered" {

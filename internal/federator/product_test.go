@@ -51,9 +51,9 @@ func TestProductDescriptorsMatchFourProductContract(t *testing.T) {
 			continue
 		}
 		if got.ID != want.id || got.Label != want.label ||
-			got.PeerExecutable != want.peerExecutable || got.LaneExecutable != want.laneExecutable ||
+			got.PeerAlias != want.peerExecutable || got.LaneAlias != want.laneExecutable ||
 			got.LaneRuntimeRole != want.laneRuntimeRole || got.LaneManagerRole != want.laneManagerRole ||
-			got.FederationCapability != want.federationCapability {
+			got.LaneCapability != want.federationCapability {
 			t.Errorf("product descriptor %q = %+v, want %+v", want.id, got, want)
 		}
 	}
@@ -70,19 +70,19 @@ func TestProductDescriptorsHaveUniqueIDsExecutablesRolesAndCapabilities(t *testi
 
 	for _, descriptor := range descriptors {
 		assertUniqueProductDescriptorValue(t, "id", descriptor.ID, ids)
-		assertUniqueProductDescriptorValue(t, "peer executable", descriptor.PeerExecutable, peerExecutables)
-		assertUniqueProductDescriptorValue(t, "lane executable", descriptor.LaneExecutable, laneExecutables)
+		assertUniqueProductDescriptorValue(t, "peer executable", descriptor.PeerAlias, peerExecutables)
+		assertUniqueProductDescriptorValue(t, "lane executable", descriptor.LaneAlias, laneExecutables)
 		assertUniqueProductDescriptorValue(t, "lane runtime role", descriptor.LaneRuntimeRole, laneRuntimeRoles)
 		if descriptor.LaneManagerRole != "" {
 			assertUniqueProductDescriptorValue(t, "lane manager role", descriptor.LaneManagerRole, laneManagerRoles)
 		}
-		assertUniqueProductDescriptorValue(t, "federation capability", descriptor.FederationCapability, federationCapabilities)
+		assertUniqueProductDescriptorValue(t, "federation capability", descriptor.LaneCapability, federationCapabilities)
 
-		if filepath.Base(descriptor.PeerExecutable) != descriptor.PeerExecutable {
-			t.Errorf("product %q peer executable %q is not a basename", descriptor.ID, descriptor.PeerExecutable)
+		if filepath.Base(descriptor.PeerAlias) != descriptor.PeerAlias {
+			t.Errorf("product %q peer executable %q is not a basename", descriptor.ID, descriptor.PeerAlias)
 		}
-		if filepath.Base(descriptor.LaneExecutable) != descriptor.LaneExecutable {
-			t.Errorf("product %q lane executable %q is not a basename", descriptor.ID, descriptor.LaneExecutable)
+		if filepath.Base(descriptor.LaneAlias) != descriptor.LaneAlias {
+			t.Errorf("product %q lane executable %q is not a basename", descriptor.ID, descriptor.LaneAlias)
 		}
 	}
 }

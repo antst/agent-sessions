@@ -17,9 +17,9 @@ func TestLauncherProductProjectionCoversEveryDescriptor(t *testing.T) {
 			if !resumeOK || len(arguments) != 2 {
 				t.Fatalf("%s %s resume projection = %q %v, %v", descriptor.ID, kind, executable, arguments, resumeOK)
 			}
-			wantExecutable := descriptor.PeerExecutable
+			wantExecutable := descriptor.PeerAlias
 			if kind == federator.SessionKindLane {
-				wantExecutable = descriptor.LaneExecutable
+				wantExecutable = descriptor.LaneAlias
 			}
 			if executable != wantExecutable {
 				t.Fatalf("%s %s executable = %q, want %q", descriptor.ID, kind, executable, wantExecutable)

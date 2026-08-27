@@ -585,9 +585,6 @@ func grokExecutable() (string, error) {
 // bootstrapping Codex App Server or the Codex supervisor. Grok owns its own
 // private leader lifecycle and must remain usable on a host without Codex.
 func grokRuntimeExecutable() (string, error) {
-	if err := ensureCodexHome(); err != nil {
-		return "", err
-	}
 	runtimePath := strings.TrimSpace(os.Getenv("GROK_PEER_NATIVE_RUNTIME"))
 	if runtimePath == "" {
 		runtimePath = strings.TrimSpace(os.Getenv("CODEX_PEER_NATIVE_RUNTIME"))

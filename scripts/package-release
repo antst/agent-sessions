@@ -30,6 +30,9 @@ done
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 binaries=()
 while IFS= read -r binary; do binaries+=("$binary"); done < <("$plugin_root/scripts/release-inventory" binaries)
+# This builds one transport archive containing the two independently deployed
+# role images. It stages bytes only: host and hub lifecycle remain explicit,
+# separate operations and are never invoked by the packager.
 package_paths=()
 while IFS= read -r path; do package_paths+=("$path"); done < <("$plugin_root/scripts/release-inventory" package-paths)
 for binary in "${binaries[@]}"; do

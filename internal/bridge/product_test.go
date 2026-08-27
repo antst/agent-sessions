@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 func TestBridgeProductProjectionCoversRuntimeAndMCP(t *testing.T) {
@@ -52,13 +53,13 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	binaries := strings.Fields(string(body))
-	if len(binaries) != 11 {
-		t.Fatalf("release executable inventory = %q", binaries)
+	if !slices.Equal(binaries, productcatalog.Catalog().ReleaseExecutables) {
+		t.Fatalf("release executable inventory = %q, want canonical images %q", binaries, productcatalog.Catalog().ReleaseExecutables)
 	}
 	for _, descriptor := range federator.ProductDescriptors() {
-		for _, executable := range []string{descriptor.PeerExecutable, descriptor.LaneExecutable} {
-			if !slices.Contains(binaries, executable) {
-				t.Errorf("release inventory omits %s %s", descriptor.ID, executable)
+		for _, executable := range []string{descriptor.PeerAlias, descriptor.LaneAlias} {
+			if !slices.Contains(productcatalog.Catalog().HostAliases, executable) {
+				t.Errorf("canonical host alias inventory omits %s %s", descriptor.ID, executable)
 			}
 		}
 		for _, document := range []string{
@@ -80,12 +81,6 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 			}
 		}
 	}
-	for _, common := range []string{"agent-session-runtime", "peer", "peer-federator"} {
-		if !slices.Contains(binaries, common) {
-			t.Errorf("release inventory omits shared executable %s", common)
-		}
-	}
-
 	pluginBody, err := exec.Command(inventory, "plugins").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +260,45 @@ func TestExistingLaneParsedGroupOptionsAreAdvertisedInHelp(t *testing.T) {
 			if !strings.Contains(usage, option) {
 				t.Errorf("%s parser option %q is absent from help", product, option)
 			}
+		}
+	}
+}
+
+func TestBridgeProjectsAuthoritativeCatalogWithoutLegacyDescriptorTable(t *testing.T) {
+	for _, authoritative := range productcatalog.Catalog().Products {
+		projected, ok := bridgeProductByID(authoritative.ID)
+		if !ok {
+			t.Errorf("bridge projection omits authoritative product %q", authoritative.ID)
+			continue
+		}
+		if projected.descriptor.ID != authoritative.ID ||
+			projected.descriptor.PeerAlias != authoritative.PeerAlias ||
+			projected.descriptor.LaneAlias != authoritative.LaneAlias ||
+			projected.descriptor.LaneCapability != authoritative.LaneCapability {
+			t.Errorf("bridge projection for %s = %+v, authoritative = %+v", authoritative.ID, projected.descriptor, authoritative)
+		}
+	}
+
+	root := filepath.Join("..", "..")
+	legacyTable := filepath.Join(root, "internal", "federator", "product.go")
+	body, err := os.ReadFile(legacyTable)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "type ProductDescriptor struct") ||
+		strings.Contains(string(body), "var productDescriptors") {
+		t.Errorf("legacy federator product authority remains in %s", legacyTable)
+	}
+	for _, projection := range []string{
+		"internal/bridge/product.go",
+		"internal/launcher/product.go",
+	} {
+		body, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(projection)))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(body), "internal/federator") {
+			t.Errorf("%s still sources product descriptors from the legacy federator package", projection)
 		}
 	}
 }

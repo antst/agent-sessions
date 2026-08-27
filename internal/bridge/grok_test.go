@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
@@ -1900,7 +1901,7 @@ func startTestGrokHost(t *testing.T, ownerPID int, ownerStart, sessionID string)
 	if selectedID := strings.TrimSpace(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID")); selectedID != "" && selectedID != sessionID {
 		config.LateBoundResume = true
 		config.resolvePreferences = func(request federator.ResolvePreferencesRequest) (federator.ResolvedPreferences, error) {
-			return federator.ResolvedPreferences{Preference: federator.SessionPreferences{
+			return federator.ResolvedPreferences{Preference: federation.SessionPreferences{
 				SessionID: request.SessionID, Product: "grok", Kind: federator.SessionKindInteractive,
 				AlwaysApprove: os.Getenv("GROK_FAKE_YOLO") == "1",
 			}}, nil

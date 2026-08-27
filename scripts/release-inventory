@@ -4,17 +4,8 @@ set -euo pipefail
 # Single release inventory consumed by local builds, packaging, tests, evidence,
 # and CI. Do not transcribe these lists into workflow YAML or another script.
 binaries=(
-  agent-session-runtime
-  peer
-  codex-peer
-  claude-peer
-  grok-peer
-  qwen-peer
-  codex-peer-lane
-  claude-peer-lane
-  grok-peer-lane
-  qwen-peer-lane
-  peer-federator
+  agent-sessions
+  agent-sessions-hub
 )
 plugins=(
   'codex|.agents,.codex-plugin,.mcp.json,hooks,scripts,skills'
@@ -25,6 +16,13 @@ plugins=(
 package_paths=(
   .agents .claude-plugin .codex-plugin .mcp.json
   claude deploy docs grok hooks qwen scripts skills Makefile README.md
+)
+host_package_paths=(
+  .agents .claude-plugin .codex-plugin .mcp.json
+  claude deploy/agent-sessions docs grok hooks qwen scripts skills README.md
+)
+hub_package_paths=(
+  deploy/agent-sessions-hub docs/FEDERATION.md docs/federation README.md
 )
 platforms=(
   'linux|amd64|linux-x64'
@@ -61,6 +59,12 @@ case "${1:-}" in
   package-paths)
     printf '%s\n' "${package_paths[@]}"
     ;;
+  host-package-paths)
+    printf '%s\n' "${host_package_paths[@]}"
+    ;;
+  hub-package-paths)
+    printf '%s\n' "${hub_package_paths[@]}"
+    ;;
   platforms)
     printf '%s\n' "${platforms[@]}"
     ;;
@@ -94,7 +98,7 @@ case "${1:-}" in
     printf ']}\n'
     ;;
   *)
-    printf 'usage: %s binaries|plugins|package-paths|platforms|matrix-json|package-inventory-json\n' "${0##*/}" >&2
+    printf 'usage: %s binaries|plugins|package-paths|host-package-paths|hub-package-paths|platforms|matrix-json|package-inventory-json\n' "${0##*/}" >&2
     exit 2
     ;;
 esac

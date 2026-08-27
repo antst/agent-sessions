@@ -17,6 +17,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -162,7 +163,7 @@ func RunClaudePeer(args []string) error {
 		return errors.Join(fmt.Errorf("snapshot gated Claude peer keys: %w", err), removeClaudePeerLaunchSettings(settingsPath))
 	}
 	preparation := federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: plan.attachmentID, Product: "claude", Name: plan.peerName,
+		Version: federation.GroupProtocolVersion, SessionID: plan.attachmentID, Product: "claude", Name: plan.peerName,
 		PID: command.Process.Pid, ProcStart: adapterStart,
 		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
 		LifecycleRoot: lifecycleRoot, ClaudeConfigRoot: sharedRoot,
@@ -247,9 +248,6 @@ func waitClaudePeerProcessStart(pid int) (string, error) {
 }
 
 func claudePeerAgentStatus() (federator.AgentStatus, error) {
-	if err := ensureCodexHome(); err != nil {
-		return federator.AgentStatus{}, fmt.Errorf("prepare Agent Sessions profile: %w", err)
-	}
 	status, err := federator.ReadAgentStatus(agentRuntimeDir())
 	if err != nil {
 		return federator.AgentStatus{}, fmt.Errorf("host agent is required for claude-peer; bare claude remains available: %w", err)
@@ -761,7 +759,7 @@ func superviseClaudePeer(
 	}
 	var registration federator.PeerRegistration
 	selectionPromoted := false
-	var selectedPreference federator.SessionPreferences
+	var selectedPreference federation.SessionPreferences
 	nativeRow := claudeNativePeerRecord{PID: childPID, MessagingSocketPath: managedSocket}
 	var observedKeys []federator.ClaudeKeyBaselineEntry
 	observeKeys := func() error {
@@ -950,7 +948,7 @@ func claudePeerRegistration(row claudeNativePeerRecord, plan claudePeerPlan, yol
 		permissionMode = "bypassPermissions"
 	}
 	registration := federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: row.SessionID, Product: "claude",
+		Version: federation.GroupProtocolVersion, SessionID: row.SessionID, Product: "claude",
 		Name: defaultClaudePeerName(plan, row), Status: defaultClaudePeerStatus(row.Status),
 		PermissionMode: permissionMode, Cwd: row.Cwd, PID: pid, ProcStart: procStart,
 		Socket: row.MessagingSocketPath, StartedAt: row.StartedAt,

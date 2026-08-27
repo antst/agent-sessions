@@ -1,10 +1,43 @@
 # Host agent and federation
 
-`peer-federator agent` is the local authority for Agent Sessions discovery,
+`agent-sessions` is the local authority for Agent Sessions discovery,
 group membership, routing, and the small durable session catalog. It works
-without a hub for local peers. Connecting agents to `peer-federator hub` adds
+without a hub for local peers. Connecting agents to one central
+`agent-sessions-hub` adds
 cross-host discovery, messaging, and lane execution without changing the
 local protocol.
+
+There is one hub and one uniform multi-host peer space. These global groups are
+routing and visibility selectors within that space, and peer display names
+are host-suffixed to remain unambiguous. There is no additional namespace or
+per-product federation realm.
+
+## Authoritative protocol inventory
+
+<!-- BEGIN: generated federation protocol inventory -->
+- protocol version: 3 (exact equality only; release identity is irrelevant)
+- mismatch behavior: reject before registration or work acceptance
+- handshake: `hello` -> `hello_ok`; health: `probe` -> `probe_ok`
+- bounds: frame 2 MiB; lane input 1 MiB; AgentFrame 1 MiB
+- AgentFrame version: 1
+- capabilities: `claude-lane`, `codex-lane`, `grok-lane`, `qwen-lane`
+- frame types: `hello`, `hello_ok`, `probe`, `probe_ok`, `snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`, `delivery_ack`, `delivery_error`, `lane_exec`, `lane_cancel`, `lane_stdout`, `lane_stderr`, `lane_exit`, `lane_error`, `ping`, `pong`
+- legacy flat `deliver`: rejected
+<!-- END: generated federation protocol inventory -->
+
+Host and hub interoperate only when their federation protocol versions are
+exactly equal; the current protocol is **3**. Release versions are not an
+interoperability input. Capabilities report which operations are available on
+a host: `claude-lane`, `codex-lane`, `grok-lane`, and `qwen-lane`.
+
+The newline-delimited JSON wire frame limit is 2 MiB. Lane input and the
+product-neutral AgentFrame are each bounded to 1 MiB. AgentFrame version is 1.
+The closed hub frame inventory is `hello`, `hello_ok`, `probe`, `probe_ok`,
+`snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`,
+`delivery_ack`, `delivery_error`, `lane_exec`, `lane_cancel`, `lane_stdout`,
+`lane_stderr`, `lane_exit`, `lane_error`, `ping`, and `pong`. The obsolete
+flat `deliver` frame is rejected; grouped delivery is the only delivery
+contract.
 
 The public Claude registry contains exactly one synthetic Agent Sessions
 service row per running host agent. Participating `codex-peer`, `claude-peer`,

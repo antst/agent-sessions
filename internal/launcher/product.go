@@ -7,15 +7,15 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 type launcherProduct struct {
-	descriptor federator.ProductDescriptor
+	descriptor productcatalog.ProductDescriptor
 }
 
 func launcherProductByID(product string) (launcherProduct, bool) {
-	descriptor, ok := federator.ProductByID(product)
+	descriptor, ok := productcatalog.ProductByID(product)
 	return launcherProduct{descriptor: descriptor}, ok
 }
 
@@ -24,9 +24,9 @@ func (product launcherProduct) resume(kind, sessionID string) (string, []string,
 	if !ok {
 		return "", nil, false
 	}
-	executable := product.descriptor.PeerExecutable
-	if kind == federator.SessionKindLane {
-		executable = product.descriptor.LaneExecutable
+	executable := product.descriptor.PeerAlias
+	if kind == "lane" {
+		executable = product.descriptor.LaneAlias
 	}
 	return executable, arguments, true
 }

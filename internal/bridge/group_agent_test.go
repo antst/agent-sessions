@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/testutil"
 )
@@ -184,8 +185,8 @@ func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.
 		t.Fatalf("attested MCP lane result = %#v", laneResult)
 	}
 
-	result, err := federator.RouteAgentFrame(runtimeDir, "source-session", federator.AgentFrame{
-		Version: federator.AgentFrameVersion, Type: "send", MessageID: "group-message-1",
+	result, err := federator.RouteAgentFrame(runtimeDir, "source-session", federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "group-message-1",
 		Targets: []string{"target"}, Content: "GROUPED_DELIVERY_OK", Summary: "test grouped delivery",
 	})
 	if err != nil {

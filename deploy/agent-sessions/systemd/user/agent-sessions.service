@@ -1,0 +1,18 @@
+[Unit]
+Description=Agent Sessions unified host daemon
+Documentation=https://github.com/antst/agent-sessions/blob/main/docs/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/agent-sessions/service.env
+RuntimeDirectory=agent-sessions
+RuntimeDirectoryMode=0700
+ExecStart=@PREFIX@/libexec/agent-sessions/host/current/bin/agent-sessions daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -48,14 +48,18 @@ func RunCodexPeer(args []string) error {
 	if err != nil {
 		return err
 	}
-	codex, err := codexExecutable()
-	if err != nil {
-		return err
-	}
 	if plan.mode == modePassthrough || plan.informationalPass {
+		codex, executableErr := codexExecutable()
+		if executableErr != nil {
+			return executableErr
+		}
 		return Exec(codex, plan.originalArgs, nil)
 	}
 	selected, err := EnsureRuntime()
+	if err != nil {
+		return err
+	}
+	codex, err := codexExecutable()
 	if err != nil {
 		return err
 	}

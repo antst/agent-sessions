@@ -32,7 +32,7 @@ jobs:
         name: Load authoritative release inventory
         run: |
           printf 'matrix=%s\n' "$(./scripts/release-inventory matrix-json)" >> "$GITHUB_OUTPUT"
-          printf 'version=%s\n' "$(cat deploy/peer-federator/VERSION)" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$(cat deploy/agent-sessions/VERSION)" >> "$GITHUB_OUTPUT"
 
   lint:
     runs-on: ubuntu-latest

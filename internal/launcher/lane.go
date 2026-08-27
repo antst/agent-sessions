@@ -9,25 +9,25 @@ import (
 )
 
 var (
-	ensureLaneRuntime   = EnsureRuntime
+	requireLaneDaemon   = requireUserDaemon
 	discoverLaneRuntime = discoverRuntime
 	execLaneRuntime     = Exec
 )
 
-// RunLane ensures the shared runtime and replaces the launcher with one of its
-// native lane clients.
+// RunLane requires the existing user daemon and replaces the launcher with a
+// transitional native lane client. It never manages daemon lifetime.
 func RunLane(role string, args []string) error {
 	if _, ok := launcherProductByLaneRole(role); !ok {
 		return fmt.Errorf("unsupported lane role %q", role)
 	}
-	resolve := ensureLaneRuntime
 	if laneHelpRequested(args) {
 		// Help is a read-only parser surface. It must remain available while a
-		// different installed plugin version is live and therefore cannot run
-		// activation, supervisor, or App Server bootstrap first.
-		resolve = discoverLaneRuntime
+		// daemon is explicitly stopped and therefore never queries or activates
+		// service lifetime.
+	} else if err := requireLaneDaemon(); err != nil {
+		return err
 	}
-	selected, err := resolve()
+	selected, err := discoverLaneRuntime()
 	if err != nil {
 		return err
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -140,7 +141,7 @@ func TestQwenMCPGroupedMessagingUsesOneAgentRouteAndExactSockets(t *testing.T) {
 
 	previousRoute := routeMCPAgentFrame
 	routes := 0
-	routeMCPAgentFrame = func(runtime, caller string, frame federator.AgentFrame) (federator.AgentFrameResult, error) {
+	routeMCPAgentFrame = func(runtime, caller string, frame federation.AgentFrame) (federation.AgentFrameResult, error) {
 		routes++
 		return federator.RouteAgentFrame(runtime, caller, frame)
 	}
@@ -180,8 +181,8 @@ func TestQwenMCPGroupedMessagingUsesOneAgentRouteAndExactSockets(t *testing.T) {
 		}
 	}
 
-	frame := federator.AgentFrame{
-		Version: federator.AgentFrameVersion, Type: "send", MessageID: "qwen-duplicate",
+	frame := federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "qwen-duplicate",
 		Targets: []string{"codex-target"}, Content: "QWEN_DUPLICATE",
 	}
 	if _, err := federator.RouteAgentFrame(runtimeDir, sourceID, frame); err != nil {
@@ -195,8 +196,8 @@ func TestQwenMCPGroupedMessagingUsesOneAgentRouteAndExactSockets(t *testing.T) {
 		t.Fatalf("duplicate delivery count = %d", got)
 	}
 
-	if _, err := routeMCPAgentFrame(runtimeDir, targetID, federator.AgentFrame{
-		Version: federator.AgentFrameVersion, Type: "send", MessageID: "qwen-reply",
+	if _, err := routeMCPAgentFrame(runtimeDir, targetID, federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "qwen-reply",
 		Targets: []string{sourceID}, Content: "EXACT_SENDER_REPLY",
 	}); err != nil {
 		t.Fatal(err)

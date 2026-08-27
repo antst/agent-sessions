@@ -152,12 +152,20 @@ done
 
 release_matrix="$("$plugin_root/scripts/release-inventory" matrix-json)"
 release_package_inventory="$("$plugin_root/scripts/release-inventory" package-inventory-json)"
-if [[ "$(grep -o '"platform"' <<<"$release_matrix" | wc -l | tr -d ' ')" != 4 ]] ||
-   [[ "$(grep -o '"product"' <<<"$release_package_inventory" | wc -l | tr -d ' ')" != 4 ]] ||
-   [[ "$(grep -o 'qwen-peer' <<<"$release_package_inventory" | wc -l | tr -d ' ')" != 2 ]]; then
-  printf 'authoritative release JSON inventory is incomplete\n' >&2
-  exit 1
-fi
+python3 - "$release_matrix" "$release_package_inventory" <<'PY'
+import json
+import sys
+
+matrix = json.loads(sys.argv[1])
+inventory = json.loads(sys.argv[2])
+assert [row["platform"] for row in matrix["include"]] == [
+    "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64",
+]
+assert inventory["executables"] == ["agent-sessions", "agent-sessions-hub"]
+assert [row["product"] for row in inventory["plugin_payloads"]] == [
+    "codex", "claude", "grok", "qwen",
+]
+PY
 
 "$plugin_root/scripts/test-claude-contract"
 
@@ -272,10 +280,15 @@ fi
 temporary_parent="$(cd -P -- "$temporary_parent" && pwd)"
 temporary_root="$(mktemp -d "$temporary_parent/codex-peer-test.XXXXXX")"
 agent_pid=
+daemon_pid=
 cleanup() {
 	if [[ -n "$agent_pid" ]]; then
 		kill "$agent_pid" 2>/dev/null || true
 		wait "$agent_pid" 2>/dev/null || true
+	fi
+	if [[ -n "$daemon_pid" ]]; then
+		kill "$daemon_pid" 2>/dev/null || true
+		wait "$daemon_pid" 2>/dev/null || true
 	fi
   rm -rf -- "$temporary_root"
 }
@@ -289,8 +302,63 @@ launcher_binary="$temporary_root/codex-peer"
 go build -o "$launcher_binary" "$plugin_root/cmd/codex-peer"
 runtime_binary="$temporary_root/agent-session-runtime"
 go build -o "$runtime_binary" "$plugin_root/cmd/agent-session-runtime"
+host_binary="$temporary_root/agent-sessions"
+go build -o "$host_binary" "$plugin_root/cmd/agent-sessions"
 federator_binary="$temporary_root/peer-federator"
 go build -o "$federator_binary" "$plugin_root/cmd/peer-federator"
+
+# Workflow launchers may inspect, but never activate, the one user-managed
+# daemon. Prove the retired bootstrap command performs no App Server,
+# supervisor, or legacy-state mutation before arranging a test-owned daemon
+# for the remaining launcher contract cells.
+test_xdg_config="$temporary_root/xdg-config"
+test_xdg_state="$temporary_root/xdg-state"
+test_xdg_runtime="$temporary_root/xdg-runtime"
+mkdir -p "$test_xdg_config" "$test_xdg_state" "$test_xdg_runtime"
+export XDG_CONFIG_HOME="$test_xdg_config"
+export XDG_STATE_HOME="$test_xdg_state"
+export XDG_RUNTIME_DIR="$test_xdg_runtime"
+bootstrap_codex="$temporary_root/bootstrap-codex"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@" >"$CODEX_RECORD"' >"$bootstrap_codex"
+chmod 0700 "$bootstrap_codex"
+set +e
+CODEX_RECORD="$temporary_root/bootstrap-codex.argv" \
+  CODEX_PEER_CODEX_BIN="$bootstrap_codex" \
+  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
+  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
+  CLAUDE_PEER_DATA_DIR="$temporary_root/bootstrap-legacy-state" \
+  "$runtime_binary" bootstrap \
+  >"$temporary_root/bootstrap.out" 2>"$temporary_root/bootstrap.err"
+bootstrap_status=$?
+set -e
+if ((bootstrap_status != 0 && bootstrap_status != 3)); then
+  printf 'read-only runtime availability check returned unexpected status %s\n' "$bootstrap_status" >&2
+  exit 1
+fi
+if [[ -e "$temporary_root/bootstrap-codex.argv" ]] ||
+   [[ -e "$temporary_root/bootstrap-legacy-state" ]]; then
+  printf 'runtime availability check activated Codex or recreated legacy state\n' >&2
+  exit 1
+fi
+
+if ((bootstrap_status == 3)); then
+  "$host_binary" daemon >"$temporary_root/daemon.out" 2>"$temporary_root/daemon.err" &
+  daemon_pid=$!
+  if [[ "$(uname -s)" == Darwin ]]; then
+    daemon_socket="/tmp/agent-sessions-$(id -u)/daemon.sock"
+  else
+    daemon_socket="$test_xdg_runtime/agent-sessions/daemon.sock"
+  fi
+  for _ in {1..200}; do
+    [[ -S "$daemon_socket" ]] && break
+    sleep 0.01
+  done
+  if [[ ! -S "$daemon_socket" ]]; then
+    printf 'test-owned unified daemon did not publish its control endpoint\n' >&2
+    exit 1
+  fi
+fi
+
 agent_runtime="$temporary_root/agent-runtime"
 "$federator_binary" agent --host launcher-test --runtime-dir "$agent_runtime" \
   --state-dir "$temporary_root/agent-state" --claude-config-dir "$temporary_root/agent-claude" \
@@ -581,315 +649,55 @@ for lane_binary in codex-peer-lane claude-peer-lane; do
   fi
 done
 
-# INSTALL_ROOT is independently configurable from PREFIX; installed launchers
-# must point at that exact tree rather than a hard-coded libexec relative path.
+# Aggregate installation is one quoted host-role transaction. Keep the test
+# installer in a metacharacter-bearing path to protect the shell boundary,
+# and make it validate the staged role payload without touching user services
+# or native product profiles.
 custom_install_root="$temporary_root/custom-install"
 custom_prefix="$temporary_root/custom-prefix"
-install_codex="$temporary_root/install-codex"
-install_codex_record="$temporary_root/install-codex-commands"
-install_codex_state="$temporary_root/install-codex-state"
+aggregate_root="$temporary_root/aggregate;installer"
+aggregate_record="$temporary_root/aggregate-install.args"
+mkdir -p "$aggregate_root"
+aggregate_installer="$aggregate_root/agent-sessions"
 printf '%s\n' \
   '#!/bin/sh' \
-  'printf "%s\n" "$*" >>"$FAKE_CODEX_RECORD"' \
-  'if [ "$1 $2 $3" = "plugin add agent-sessions@agent-sessions" ]; then : >"$FAKE_CODEX_STATE"; fi' \
-  'if [ "$1 $2 $3" = "plugin list --json" ]; then' \
-  '  if [ -f "$FAKE_CODEX_STATE" ]; then' \
-  '    printf "%s\n" '\''[{"pluginId":"agent-sessions@agent-sessions"},{"pluginId":"claude-code-peer@agent-sessions"},{"pluginId":"claude-code-peer@personal"},{"pluginId":"claude-code-peer@codex-messaging"},{"pluginId":"agent-sessions@codex-messaging"}]'\''' \
-  '  else' \
-  '    printf "%s\n" '\''[{"pluginId":"claude-code-peer@agent-sessions"},{"pluginId":"claude-code-peer@personal"},{"pluginId":"claude-code-peer@codex-messaging"},{"pluginId":"agent-sessions@codex-messaging"}]'\''' \
-  '  fi' \
-  'elif [ "$1 $2 $3 $4" = "plugin marketplace list --json" ]; then' \
-  '  printf "%s\n" '\''[{"name":"agent-sessions"},{"name":"codex-messaging"}]'\''' \
-  'fi' >"$install_codex"
-chmod 0700 "$install_codex"
-install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-if ! grep -Eq "for binary in .*agent-session-runtime.*qwen-peer.*qwen-peer-lane.*peer-federator" <<<"$install_plan" ||
-   ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/\\\$binary\" \"$custom_prefix/bin/\\\$binary\"" <<<"$install_plan" ||
-   ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
-  printf 'install projection does not consume the complete release inventory from INSTALL_ROOT\n' >&2
-  exit 1
-fi
-runtime_only_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 INSTALL_CODEX_INTEGRATION=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-if grep -Eq 'plugin (list|add|remove|marketplace)' <<<"$runtime_only_install_plan" ||
-   grep -Fq 'agent-session-runtime" bootstrap' <<<"$runtime_only_install_plan" ||
-   ! grep -Fq 'Skipping Codex integration: Codex CLI is not installed.' <<<"$runtime_only_install_plan" ||
-   ! grep -Fq "ln -sfn \"$custom_install_root/bin/" <<<"$runtime_only_install_plan"; then
-  printf 'runtime-only install still requires Codex or omits the shared runtime payload\n' >&2
-  exit 1
-fi
-runtime_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=1 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-if ! grep -Eq "CODEX_PEER_CODEX_BIN=.*agent-session-runtime\" bootstrap" <<<"$runtime_install_plan" ||
-   grep -Eq 'scripts/(ensure-runtime|build-runtime)' <<<"$runtime_install_plan"; then
-  printf 'install does not bootstrap through the installed native runtime\n' >&2
-  exit 1
-fi
-preflight_plan="$(make -n -C "$plugin_root" install-preflight CODEX=codex-test-cli)"
-if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
-  printf 'install preflight does not print the App Server stop command\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
-   ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan" ||
-   ! grep -Fq 'grok-peer-lane archive SESSION_OR_NAME' <<<"$preflight_plan"; then
-  printf 'install preflight does not require clean managed Grok shutdown\n' >&2
-  exit 1
-fi
-FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
-make -s -C "$plugin_root" install \
-  START_RUNTIME=0 CODEX="$install_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
-  >"$temporary_root/install.out"
-replacement="$(grep -nFx 'plugin add agent-sessions@agent-sessions' "$install_codex_record" | head -1 | cut -d: -f1)"
-for legacy_id in \
-  claude-code-peer@agent-sessions \
-  claude-code-peer@personal \
-  claude-code-peer@codex-messaging \
-  agent-sessions@codex-messaging; do
-  removal="$(grep -nFx "plugin remove $legacy_id" "$install_codex_record" | head -1 | cut -d: -f1)"
-  if [[ -z "$replacement" || -z "$removal" ]] || (( replacement >= removal )); then
-    printf 'Codex migration removed %s before accepting agent-sessions@agent-sessions\n' "$legacy_id" >&2
-    cat "$install_codex_record" >&2
+  'set -eu' \
+  'printf "%s\\n" "$*" >"$AGGREGATE_INSTALL_RECORD"' \
+  'source_root=' \
+  'while [ "$#" -gt 0 ]; do' \
+  '  if [ "$1" = --source-root ]; then source_root=$2; shift 2; else shift; fi' \
+  'done' \
+  'test -x "$source_root/bin/agent-sessions"' \
+  'test -f "$source_root/deploy/agent-sessions/VERSION"' \
+  'test ! -e "$source_root/deploy/agent-sessions-hub"' \
+  >"$aggregate_installer"
+chmod 0700 "$aggregate_installer"
+missing_codex="$temporary_root/missing-codex"
+missing_claude="$temporary_root/missing-claude"
+missing_grok="$temporary_root/missing-grok"
+missing_qwen="$temporary_root/missing-qwen"
+AGGREGATE_INSTALL_RECORD="$aggregate_record" make -s -C "$plugin_root" install-all \
+  BINARY_NAMES= BIN_DIR="$aggregate_root" HOST_INSTALLER="$aggregate_installer" \
+  PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
+  CODEX="$missing_codex" CLAUDE="$missing_claude" GROK="$missing_grok" QWEN="$missing_qwen"
+aggregate_call="$(<"$aggregate_record")"
+for required in \
+  'lifecycle install --role host' \
+  "--prefix $custom_prefix" \
+  "--version $(<"$plugin_root/deploy/agent-sessions/VERSION")" \
+  "--codex $missing_codex" \
+  "--claude $missing_claude" \
+  "--grok $missing_grok" \
+  "--qwen $missing_qwen"; do
+  if [[ "$aggregate_call" != *"$required"* ]]; then
+    printf 'aggregate host transaction omitted %s: %s\n' "$required" "$aggregate_call" >&2
     exit 1
   fi
 done
-installed_runtimes=("$custom_install_root"/bin/*/agent-session-runtime)
-installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
-if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
-   [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
-   [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/skills/codex-lane/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/qwen/plugin.json" ]] ||
-   [[ ! -f "$custom_install_root/qwen/mcp.json" ]] ||
-   [[ ! -x "$custom_install_root/qwen/scripts/native-entry" ]] ||
-   [[ ! -f "$custom_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
-   [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
-   [[ -e "$custom_prefix/bin/codex-messaging" ]]; then
-  printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
+if [[ "$aggregate_call" == *hub* ]]; then
+  printf 'aggregate host transaction crossed into hub lifecycle: %s\n' "$aggregate_call" >&2
   exit 1
 fi
-mapfile -t installed_inventory < <("$plugin_root/scripts/release-inventory" binaries)
-for installed_binary in "${installed_inventory[@]}"; do
-  if [[ ! -x "$installed_binary_dir/$installed_binary" ]] ||
-     [[ "$(readlink "$custom_prefix/bin/$installed_binary")" != "$installed_binary_dir/$installed_binary" ]]; then
-    printf 'copied-prefix installation omitted or misprojected binary %s\n' "$installed_binary" >&2
-    exit 1
-  fi
-done
-if [[ ! -f "$custom_install_root/grok/.grok-plugin/plugin.json" ]] ||
-   [[ ! -f "$custom_install_root/grok/.mcp.json" ]] ||
-   [[ ! -f "$custom_install_root/grok/skills/agent-lanes/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -x "$custom_install_root/grok/scripts/native-entry" ]] ||
-   ! grep -Fq '"grok-mcp"' "$custom_install_root/grok/.mcp.json" ||
-   ! grep -Fq '${GROK_PLUGIN_ROOT}/scripts/native-entry' "$custom_install_root/grok/.mcp.json"; then
-  printf 'copied-prefix installation omitted the Grok MCP plugin or its native runtime entry\n' >&2
-  exit 1
-fi
-grok_cache="$temporary_root/grok-cache"
-cp -R "$custom_install_root/grok" "$grok_cache"
-grok_cache_state="$temporary_root/grok-cache-state"
-mkdir -p "$grok_cache_state"
-grok_cache_runtime="$temporary_root/grok-cache-runtime"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@"' >"$grok_cache_runtime"
-chmod 0700 "$grok_cache_runtime"
-printf '%s\n' "$grok_cache_runtime" >"$grok_cache_state/native-runtime-path"
-grok_cache_result="$(CLAUDE_PEER_DATA_DIR="$grok_cache_state" "$grok_cache/scripts/native-entry" grok-mcp)"
-if [[ "$grok_cache_result" != grok-mcp ]]; then
-  printf 'cached Grok plugin did not resolve and invoke the installed native runtime\n' >&2
-  exit 1
-fi
-grok_exact_runtime="$temporary_root/grok-exact-runtime"
-printf '%s\n' '#!/bin/sh' 'printf "exact:%s\\n" "$*"' >"$grok_exact_runtime"
-chmod 0700 "$grok_exact_runtime"
-grok_exact_result="$(GROK_PEER_NATIVE_RUNTIME="$grok_exact_runtime" CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  "$grok_cache/scripts/native-entry" grok-mcp)"
-if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
-  printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
-  exit 1
-fi
-ambient_runtime_dir="$temporary_root/ambient-runtime"
-mkdir -p "$ambient_runtime_dir"
-printf '%s\n' '#!/bin/sh' 'printf "ambient:%s\\n" "$*"' >"$ambient_runtime_dir/agent-session-runtime"
-chmod 0700 "$ambient_runtime_dir/agent-session-runtime"
-qwen_exact_result="$(PATH="$ambient_runtime_dir:$PATH" \
-  AGENT_SESSIONS_NATIVE_RUNTIME="$grok_exact_runtime" \
-  QWEN_PEER_NATIVE_RUNTIME="$ambient_runtime_dir/agent-session-runtime" \
-  CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  "$custom_install_root/qwen/scripts/native-entry" mcp)"
-if [[ "$qwen_exact_result" != exact:mcp ]]; then
-  printf 'Qwen plugin did not preserve the managed parent exact runtime ahead of product and PATH candidates\n' >&2
-  exit 1
-fi
-grok_user_plugin_root="$temporary_root/grok-user-plugins/agent-sessions"
-grok_install_plan="$(make -n -C "$plugin_root" install-grok GROK=grok-test-cli \
-  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-  GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root")"
-if ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_install_plan" ||
-   ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$grok_install_plan" ||
-   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin uninstall \"agent-sessions\" --keep-data" <<<"$grok_install_plan" ||
-   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan" ||
-   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" inspect --json" <<<"$grok_install_plan" ||
-   ! grep -Fq "\"$custom_prefix/bin/agent-session-runtime\" grok-plugin-verify --root \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
-   ! grep -Fq "rm -rf -- \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
-   ! grep -Fq "mv \"\$stage_dir\" \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
-   grep -Fq ' plugin enable ' <<<"$grok_install_plan"; then
-  printf 'Grok plugin install plan does not validate, stage, enable, and inspect the user payload\n' >&2
-  exit 1
-fi
-grok_auto_install_plan="$(GROK="$temporary_root/inherited-chat-grok" make -e -n -C "$plugin_root" install-grok \
-  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root")"
-if grep -Fq 'GROK_PEER_GROK_BIN=' <<<"$grok_auto_install_plan" ||
-   ! grep -Fq "\"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_auto_install_plan"; then
-  printf 'default Grok plugin install does not ignore inherited GROK under make -e\n' >&2
-  exit 1
-fi
-
-grok_plugin_fixture="$temporary_root/grok-build-fixture"
-grok_plugin_log="$temporary_root/grok-plugin-commands.log"
-cat >"$grok_plugin_fixture" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >>"$GROK_PLUGIN_TEST_LOG"
-if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then
-  printf '%s\n' 'Grok Build TUI' 'Usage: grok [OPTIONS]' '--leader-socket <PATH>' 'Commands:' '  agent' '  leader'
-  exit 0
-fi
-if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
-  exit "${GROK_PLUGIN_TEST_LIST_STATUS:-0}"
-fi
-if [ "$1" = "plugin" ] && { [ "$2" = "validate" ] || [ "$2" = "install" ] || [ "$2" = "uninstall" ]; }; then
-  exit 0
-fi
-if [ "$1" = "inspect" ] && [ "$2" = "--json" ]; then
-  printf '{"plugins":[{"name":"agent-sessions","scope":"user","path":"%s","enabled":true,"provides":{"skills":2,"mcpServers":1}}],"mcpServers":[{"name":"agent_sessions","transport":"stdio","target":"%s/scripts/native-entry","source":{"type":"plugin","plugin_name":"agent-sessions","path":"%s"}}]}\n' \
-    "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT"
-  exit "${GROK_PLUGIN_TEST_INSPECT_STATUS:-0}"
-fi
-exit 91
-EOF
-chmod 0700 "$grok_plugin_fixture"
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$grok_user_plugin_root" \
-  make -s -C "$plugin_root" install-grok \
-  GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-  GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-  GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root"
-if [[ ! -f "$grok_user_plugin_root/.grok-plugin/plugin.json" ]] ||
-   [[ ! -f "$grok_user_plugin_root/.mcp.json" ]] ||
-   [[ ! -f "$grok_user_plugin_root/skills/agent-lanes/SKILL.md" ]] ||
-   [[ ! -f "$grok_user_plugin_root/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -x "$grok_user_plugin_root/scripts/native-entry" ]] ||
-   ! grep -Fq 'plugin validate' "$grok_plugin_log" ||
-   ! grep -Fq "plugin install $custom_install_root/grok --trust" "$grok_plugin_log" ||
-   ! grep -Fq 'plugin uninstall agent-sessions --keep-data' "$grok_plugin_log" ||
-   ! grep -Fq 'inspect --json' "$grok_plugin_log" ||
-   grep -Fq 'plugin enable' "$grok_plugin_log"; then
-  printf 'Grok user plugin staging did not preserve, enable, and inspect the validated payload\n' >&2
-  exit 1
-fi
-
-unsafe_grok_root="$temporary_root/grok-user-plugins"
-mkdir -p "$unsafe_grok_root"
-: >"$unsafe_grok_root/must-survive"
-set +e
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$unsafe_grok_root" \
-  make -s -C "$plugin_root" install-grok \
-    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-    GROK_USER_PLUGIN_ROOT="$unsafe_grok_root" \
-    >"$temporary_root/unsafe-grok-root.out" 2>"$temporary_root/unsafe-grok-root.err"
-unsafe_grok_status=$?
-set -e
-if ((unsafe_grok_status == 0)) || [[ ! -f "$unsafe_grok_root/must-survive" ]] ||
-   ! grep -Fq 'Refusing unsafe GROK_USER_PLUGIN_ROOT' "$temporary_root/unsafe-grok-root.err"; then
-  printf 'Grok plugin install did not fail closed before replacing an unsafe user plugin root\n' >&2
-  exit 1
-fi
-
-failed_list_root="$temporary_root/grok-user-plugins/failed-list/agent-sessions"
-set +e
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" GROK_PLUGIN_TEST_LIST_STATUS=41 \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$failed_list_root" \
-  make -s -C "$plugin_root" install-grok \
-    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-    GROK_USER_PLUGIN_ROOT="$failed_list_root" \
-    >"$temporary_root/failed-grok-list.out" 2>"$temporary_root/failed-grok-list.err"
-failed_list_status=$?
-set -e
-if ((failed_list_status == 0)) || [[ -e "$failed_list_root" ]] ||
-   ! grep -Fq 'Cannot inspect existing Grok plugin registrations' "$temporary_root/failed-grok-list.err"; then
-  printf 'Grok plugin install masked a failed plugin-list producer\n' >&2
-  exit 1
-fi
-
-failed_inspect_root="$temporary_root/grok-user-plugins/failed-inspect/agent-sessions"
-set +e
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" GROK_PLUGIN_TEST_INSPECT_STATUS=42 \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$failed_inspect_root" \
-  make -s -C "$plugin_root" install-grok \
-    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-    GROK_USER_PLUGIN_ROOT="$failed_inspect_root" \
-    >"$temporary_root/failed-grok-inspect.out" 2>"$temporary_root/failed-grok-inspect.err"
-failed_inspect_status=$?
-set -e
-if ((failed_inspect_status == 0)) || [[ ! -f "$failed_inspect_root/.grok-plugin/plugin.json" ]]; then
-  printf 'Grok plugin install masked a failed inspect producer\n' >&2
-  exit 1
-fi
-
-# Every plugin-management verb must traverse grok-peer's fail-closed CLI
-# resolver. A desktop helper or merely Grok-shaped incompatible executable may
-# be probed with the inert --help contract, but must never receive `plugin`.
-for fixture_kind in gui incompatible; do
-  rejected_grok="$temporary_root/$fixture_kind-grok/grok"
-  rejected_log="$temporary_root/$fixture_kind-grok.log"
-  mkdir -p "$(dirname -- "$rejected_grok")"
-  if [[ "$fixture_kind" == gui ]]; then
-    fixture_help="Grok desktop application"
-  else
-    fixture_help=$'Grok Build TUI\nUsage: grok [OPTIONS]\nCommands:\n  plugin  Manage plugins'
-  fi
-  printf '%s\n' \
-    '#!/bin/sh' \
-    'printf '\''%s\n'\'' "$*" >>"$REJECTED_GROK_LOG"' \
-    'if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then' \
-    '  printf '\''%s\n'\'' "$REJECTED_GROK_HELP"' \
-    '  exit 0' \
-    'fi' \
-    'printf '\''fixture must never receive a plugin command\n'\'' >&2' \
-    'exit 97' >"$rejected_grok"
-  chmod 0700 "$rejected_grok"
-  set +e
-  REJECTED_GROK_LOG="$rejected_log" REJECTED_GROK_HELP="$fixture_help" \
-    make -s -C "$plugin_root" validate-grok GROK="$rejected_grok" \
-      GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-      >"$temporary_root/$fixture_kind-grok.out" 2>"$temporary_root/$fixture_kind-grok.err"
-  rejected_status=$?
-  set -e
-  if [[ -f "$rejected_log" ]]; then
-    rejected_argv="$(tr '\n' ' ' <"$rejected_log")"
-  else
-    rejected_argv='<not probed>'
-  fi
-  if ((rejected_status == 0)) || [[ ! -f "$rejected_log" ]] ||
-     grep -Eq '(^|[[:space:]])plugin([[:space:]]|$)' "$rejected_log" ||
-     [[ "$(wc -l <"$rejected_log")" -ne 1 ]] ||
-     ! grep -Fxq -- '--no-auto-update --help' "$rejected_log"; then
-    printf 'Grok %s fixture escaped validated plugin management (status=%s; argv=%s)\n' \
-      "$fixture_kind" "$rejected_status" "$rejected_argv" >&2
-    exit 1
-  fi
-done
-
 # A source checkout must never relabel an old bin/ artifact as current merely
 # because Go is absent. Only a release archive's explicit prebuilt marker may
 # authorize reuse of an existing executable.
@@ -908,14 +716,19 @@ if ((no_go_status == 0)) || ! grep -Fq 'no authorized packaged' "$temporary_root
   printf 'source build reused a stale binary without Go (status=%s)\n' "$no_go_status" >&2
   exit 1
 fi
-# Release archives are slim installable payloads. Their marker must select the
-# bundled binaries even on a build host that also has Go installed.
+# Release archives contain exactly the two independently deployed images and
+# their shared payload. Packaging never invokes either role's lifecycle.
+release_binary_dir="$temporary_root/release-binaries"
+mkdir -p "$release_binary_dir"
+go build -o "$release_binary_dir/agent-sessions" "$plugin_root/cmd/agent-sessions"
+go build -o "$release_binary_dir/agent-sessions-hub" "$plugin_root/cmd/agent-sessions-hub"
+release_version="$(<"$plugin_root/deploy/agent-sessions/VERSION")"
 release_output="$temporary_root/releases"
-release_archive="$("$plugin_root/scripts/package-release" \
-  linux-x64 v0.1.0 "$installed_binary_dir" "$release_output")"
+release_archive="$(AGENT_SESSIONS_RELEASE_PACKAGER="$runtime_binary" "$plugin_root/scripts/package-release" \
+  linux-x64 "$release_version" "$release_binary_dir" "$release_output")"
 release_output_second="$temporary_root/releases-second"
-release_archive_second="$("$plugin_root/scripts/package-release" \
-  linux-x64 v0.1.0 "$installed_binary_dir" "$release_output_second")"
+release_archive_second="$(AGENT_SESSIONS_RELEASE_PACKAGER="$runtime_binary" "$plugin_root/scripts/package-release" \
+  linux-x64 "$release_version" "$release_binary_dir" "$release_output_second")"
 if ! cmp -s "$release_archive" "$release_archive_second"; then
   printf 'identical release inputs did not produce byte-identical archives\n' >&2
   exit 1
@@ -923,47 +736,27 @@ fi
 release_extract="$temporary_root/release-extract"
 mkdir -p "$release_extract"
 tar -C "$release_extract" -xzf "$release_archive"
-release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
+release_root="$release_extract/agent-sessions-$release_version-linux-x64"
 if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
-	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/skills/grok-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
-   [[ ! -f "$release_root/claude/.mcp.json" ]] ||
-   [[ ! -f "$release_root/claude/skills/grok-lane/SKILL.md" ]] ||
+   [[ ! -x "$release_root/bin/linux-x64/agent-sessions" ]] ||
+   [[ ! -x "$release_root/bin/linux-x64/agent-sessions-hub" ]] ||
+   [[ ! -f "$release_root/deploy/agent-sessions/VERSION" ]] ||
+   [[ ! -f "$release_root/deploy/agent-sessions-hub/README.md" ]] ||
    [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
-   [[ ! -f "$release_root/grok/skills/agent-lanes/SKILL.md" ]] ||
-   [[ ! -f "$release_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -f "$release_root/grok/.mcp.json" ]] ||
-   [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
    [[ ! -f "$release_root/qwen/plugin.json" ]] ||
-   [[ ! -f "$release_root/qwen/mcp.json" ]] ||
-   [[ ! -x "$release_root/qwen/scripts/native-entry" ]] ||
-   [[ ! -f "$release_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -f "$release_root/qwen/skills/codex-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/qwen/skills/claude-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/qwen/skills/grok-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/qwen/skills/qwen-lane/SKILL.md" ]] ||
    [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
    [[ -e "$release_root/go.mod" ]]; then
-  printf 'release archive is not a slim installable prebuilt payload\n' >&2
+  printf 'release archive is not the slim two-role prebuilt payload\n' >&2
   exit 1
 fi
-release_binaries=()
-while IFS= read -r packaged_binary; do release_binaries+=("$packaged_binary"); done \
-  < <("$plugin_root/scripts/release-inventory" binaries)
-if (( ${#release_binaries[@]} != 11 )); then
-  printf 'authoritative release inventory has %s binaries, want 11\n' "${#release_binaries[@]}" >&2
+mapfile -t release_binaries < <("$plugin_root/scripts/release-inventory" binaries)
+if [[ "${release_binaries[*]}" != 'agent-sessions agent-sessions-hub' ]]; then
+  printf 'authoritative release binary inventory is not exact: %s\n' "${release_binaries[*]}" >&2
   exit 1
 fi
-for packaged_binary in "${release_binaries[@]}"; do
-  if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
-    printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
-    exit 1
-  fi
-done
 release_build="$(make -s -C "$release_root" build GOOS=linux GOARCH=amd64)"
 if ! grep -Fq 'Using packaged prebuilt' <<<"$release_build"; then
-  printf 'release archive did not select its packaged binary\n' >&2
+  printf 'release archive did not select its packaged binaries\n' >&2
   exit 1
 fi
 set +e
@@ -972,53 +765,12 @@ make -s -C "$release_root" build GOOS=darwin GOARCH=arm64 \
 wrong_release_status=$?
 set -e
 if (( wrong_release_status == 0 )) ||
-   ! grep -Fq 'does not contain prebuilt darwin-arm64/agent-session-runtime' "$temporary_root/wrong-release.err"; then
+   ! grep -Fq 'does not contain prebuilt darwin-arm64/agent-sessions' "$temporary_root/wrong-release.err"; then
   printf 'release archive did not reject a mismatched host platform\n' >&2
   exit 1
 fi
 
-# Exercise the extracted prebuilt archive's real native/Codex installation,
-# not only its build selector. The fake Codex client confines plugin registry
-# writes to this fixture while the custom prefix proves every installed path.
-release_prefix="$temporary_root/release-prefix"
-release_install_root="$temporary_root/release-install"
-: >"$install_codex_record"
-rm -f -- "$install_codex_state"
-FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
-  make -s -C "$release_root" install GOOS=linux GOARCH=amd64 START_RUNTIME=0 CODEX="$install_codex" \
-    PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
-for packaged_binary in "${release_binaries[@]}"; do
-  release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"
-  if [[ ! -x "$release_install_root/bin/linux-x64/$packaged_binary" ]] ||
-     [[ "$release_installed_link" != "$release_install_root/bin/linux-x64/$packaged_binary" ]]; then
-    printf 'prebuilt release install omitted or mislinked %s\n' "$packaged_binary" >&2
-    exit 1
-  fi
-done
-for packaged_doc in \
-  ADAPTER-PROTOCOL.md \
-  CODEX-ADAPTER.md CODEX-INSTALL.md CODEX-LANES.md \
-  CLAUDE-ADAPTER.md CLAUDE-INSTALL.md CLAUDE-LANES.md \
-  GROK-ADAPTER.md GROK-INSTALL.md GROK-LANES.md \
-  QWEN-ADAPTER.md QWEN-INSTALL.md QWEN-LANES.md \
-  README.md designs/QWEN-ADAPTER.md; do
-  if [[ ! -f "$release_install_root/docs/$packaged_doc" ]]; then
-    printf 'prebuilt release install omitted documentation %s\n' "$packaged_doc" >&2
-    exit 1
-  fi
-done
-if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
-   [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -f "$release_install_root/qwen/plugin.json" ]] ||
-   [[ ! -f "$release_install_root/qwen/mcp.json" ]] ||
-   [[ ! -x "$release_install_root/qwen/scripts/native-entry" ]] ||
-   [[ ! -f "$release_install_root/qwen/skills/agent-sessions/SKILL.md" ]] ||
-   ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
-  printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
-  exit 1
-fi
-
-for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$release_root/.mcp.json"; do
+for packaged_mcp in "$plugin_root/.mcp.json" "$release_root/.mcp.json"; do
   for required_mcp_env in \
     AGENT_SESSIONS_AGENT_RUNTIME_DIR \
     CLAUDE_PEER_CLAUDE_BIN \
@@ -1039,6 +791,7 @@ for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$
   fi
 done
 
+
 set +e
 CODEX_PEER_CODEX_BIN="$fake_codex" \
   "$launcher_binary" -n '   ' --version \
@@ -1047,59 +800,6 @@ empty_name_status=$?
 set -e
 if (( empty_name_status != 2 )) || ! grep -q 'requires a non-empty value' "$temporary_root/empty-name.err"; then
   printf 'codex-peer did not reject an empty peer name\n' >&2
-  exit 1
-fi
-
-# A plugin version mismatch must never restart the App Server from inside the
-# turn that is currently writing its rollout. This is the regression that can
-# produce duplicate ordinals and freeze Codex's derived history projection.
-in_turn_state="$temporary_root/in-turn-state"
-mkdir -p "$in_turn_state"
-set +e
-CODEX_THREAD_ID="00000000-0000-0000-0000-000000000002" \
-  CODEX_PEER_CODEX_BIN="$fake_codex" \
-  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
-  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-  CLAUDE_PEER_DATA_DIR="$in_turn_state" \
-  "$runtime_binary" bootstrap \
-  >"$temporary_root/in-turn.out" 2>"$temporary_root/in-turn.err"
-in_turn_status=$?
-set -e
-if (( in_turn_status != 75 )) || ! grep -q 'plugin update deferred' "$temporary_root/in-turn.err"; then
-  printf 'native runtime bootstrap did not refuse an in-turn App Server update\n' >&2
-  exit 1
-fi
-if [[ -s "$temporary_root/in-turn.out" ]]; then
-  printf 'native runtime bootstrap invoked Codex before refusing an in-turn update\n' >&2
-  exit 1
-fi
-
-# Exercise the version-change path with a stopped fake App Server and record
-# the actual Codex argv. This protects behavior even if shell quoting or
-# indirection changes; activation may start a server but must never restart it.
-recording_codex="$temporary_root/recording-codex"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@" >"$CODEX_RECORD"' 'exit 1' >"$recording_codex"
-chmod 0700 "$recording_codex"
-set +e
-CODEX_THREAD_ID= \
-  CODEX_HOME="$temporary_root/stopped-codex-home" \
-  CODEX_RECORD="$temporary_root/codex-argv" \
-  CODEX_PEER_CODEX_BIN="$recording_codex" \
-  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
-  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-  CLAUDE_PEER_APP_SERVER_SOCKET= \
-  CLAUDE_PEER_DATA_DIR="$temporary_root/stopped-state" \
-  CLAUDE_PEER_SUPERVISOR_SOCKET= \
-  "$runtime_binary" bootstrap \
-  >"$temporary_root/stopped.out" 2>"$temporary_root/stopped.err"
-stopped_status=$?
-set -e
-if (( stopped_status == 0 )); then
-  printf 'native runtime bootstrap unexpectedly survived the deliberately failed fake daemon start\n' >&2
-  exit 1
-fi
-if [[ "$(<"$temporary_root/codex-argv")" != $'app-server\ndaemon\nstart' ]]; then
-  printf 'version-change activation did not invoke exactly app-server daemon start\n' >&2
   exit 1
 fi
 
@@ -1190,8 +890,16 @@ if [[ -n "$agent_pid" ]]; then
   wait "$agent_pid" 2>/dev/null || true
   agent_pid=
 fi
+if [[ -n "$daemon_pid" ]]; then
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  daemon_pid=
+fi
 unset AGENT_SESSIONS_AGENT_RUNTIME_DIR
 cd -- "$plugin_root"
+if [[ "${RACE:-0}" != 1 ]]; then
+  "$plugin_root/scripts/test-unified-service"
+fi
 if [[ "${RACE:-0}" == "1" ]]; then
   go test -race ./...
 else

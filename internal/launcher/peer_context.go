@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -137,7 +138,7 @@ func boolString(value bool) string {
 
 func resolvedPeerPreferences(sessionID, product string) (federator.ResolvedPreferences, error) {
 	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
+		SessionID: sessionID, Product: product, Kind: federation.SessionKindInteractive,
 	})
 }
 
@@ -167,7 +168,7 @@ func peerPreferenceRequest(
 	alwaysApprove, alwaysApproveSpecified bool,
 ) federator.ResolvePreferencesRequest {
 	return federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
+		SessionID: sessionID, Product: product, Kind: federation.SessionKindInteractive,
 		Groups: context.groups, GroupsSpecified: context.groupsSpecified,
 		ParentSessionID: context.parentSession, ParentSpecified: context.parentSpecified,
 		InheritParentGroups: context.inheritParentGroups, InheritGroupsSpecified: context.inheritGroupsSpecified,

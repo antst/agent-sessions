@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
@@ -444,9 +445,9 @@ func (d *daemon) handleUser(frame map[string]any) {
 	if content == "" {
 		return
 	}
-	var grouped *federator.AgentFrame
-	if decoded, err := federator.DecodeAgentFrameBody(content); err == nil &&
-		decoded.Version == federator.AgentFrameVersion && decoded.Type == "delivery" &&
+	var grouped *federation.AgentFrame
+	if decoded, err := federation.DecodeAgentFrameBody(content); err == nil &&
+		decoded.Version == federation.AgentFrameVersion && decoded.Type == "delivery" &&
 		decoded.MessageID != "" && decoded.Source != nil && decoded.Content != "" {
 		grouped = &decoded
 		content = decoded.Content
@@ -699,7 +700,7 @@ func (d *daemon) writeRecordsLocked() error {
 		"permissionMode": d.permissionMode, "socketPath": d.stableSocket, "backendSocketPath": d.backendSocket,
 		"registryFile": d.registryFile, "inboxDir": d.inboxDir, "startedAt": d.startedAt,
 		"status": d.status, "entrypoint": d.entrypoint, "supervisorSocket": d.supervisorSocket,
-		"agentRuntimeDir": d.agentRuntimeDir, "groupProtocol": map[bool]int{true: federator.GroupProtocolVersion, false: 0}[d.agentManaged],
+		"agentRuntimeDir": d.agentRuntimeDir, "groupProtocol": map[bool]int{true: federation.GroupProtocolVersion, false: 0}[d.agentManaged],
 		"updatedAt": now,
 	}
 	registry := map[string]any{
@@ -725,7 +726,7 @@ func (d *daemon) writeRecordsLocked() error {
 
 func (d *daemon) agentRegistrationLocked() federator.PeerRegistration {
 	registration := federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: d.sessionID, AttachmentID: d.attachmentID, Product: d.entrypoint,
+		Version: federation.GroupProtocolVersion, SessionID: d.sessionID, AttachmentID: d.attachmentID, Product: d.entrypoint,
 		Name: d.name, Status: d.status, PermissionMode: d.permissionMode, Cwd: d.cwd,
 		PID: os.Getpid(), ProcStart: d.procStart, Socket: d.stableSocket,
 		// The per-session shim is the communication parent's lifetime. Its

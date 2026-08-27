@@ -224,17 +224,8 @@
       "properties": {
         "executables": {
           "const": [
-            "agent-session-runtime",
-            "peer",
-            "codex-peer",
-            "claude-peer",
-            "grok-peer",
-            "qwen-peer",
-            "codex-peer-lane",
-            "claude-peer-lane",
-            "grok-peer-lane",
-            "qwen-peer-lane",
-            "peer-federator"
+            "agent-sessions",
+            "agent-sessions-hub"
           ]
         },
         "plugin_payloads": {

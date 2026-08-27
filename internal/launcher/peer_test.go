@@ -1,42 +1,28 @@
 package launcher
 
 import (
-	"reflect"
+	"errors"
 	"testing"
-
-	"github.com/antst/agent-sessions/internal/federator"
 )
 
-func TestGenericResumeInvocationUsesCatalogProduct(t *testing.T) {
-	tests := map[string]struct {
-		launcher string
-		args     []string
-	}{
-		"codex":  {launcher: "codex-peer", args: []string{"resume", "session", "--group", "project"}},
-		"claude": {launcher: "claude-peer", args: []string{"--resume", "session", "--group", "project"}},
-		"grok":   {launcher: "grok-peer", args: []string{"--resume", "session", "--group", "project"}},
-		"qwen":   {launcher: "qwen-peer", args: []string{"--resume", "session", "--group", "project"}},
+func TestPeerResumeFailsBeforeCatalogLookupWhenDaemonUnavailable(t *testing.T) {
+	previous := requirePeerDaemon
+	t.Cleanup(func() { requirePeerDaemon = previous })
+	want := errors.New("daemon unavailable")
+	requirePeerDaemon = func() error { return want }
+	if err := RunPeer([]string{"resume", "00000000-0000-0000-0000-000000000001"}); !errors.Is(err, want) {
+		t.Fatalf("RunPeer error = %v, want %v", err, want)
 	}
-	for product, want := range tests {
-		t.Run(product, func(t *testing.T) {
-			launcher, args, err := genericResumeInvocation(product, federator.SessionKindInteractive, "session", []string{"--group", "project"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if launcher != want.launcher || !reflect.DeepEqual(args, want.args) {
-				t.Fatalf("invocation = %s %v; want %s %v", launcher, args, want.launcher, want.args)
-			}
-		})
+}
+
+func TestPeerHelpDoesNotRequireDaemon(t *testing.T) {
+	previous := requirePeerDaemon
+	t.Cleanup(func() { requirePeerDaemon = previous })
+	requirePeerDaemon = func() error {
+		t.Fatal("peer help queried daemon")
+		return nil
 	}
-	for product, launcherName := range map[string]string{
-		"codex": "codex-peer-lane", "claude": "claude-peer-lane", "grok": "grok-peer-lane", "qwen": "qwen-peer-lane",
-	} {
-		launcher, args, err := genericResumeInvocation(product, federator.SessionKindLane, "session", nil)
-		if err != nil || launcher != launcherName || !reflect.DeepEqual(args, []string{"resume", "session"}) {
-			t.Fatalf("%s lane resume = %s %v, %v", product, launcher, args, err)
-		}
-	}
-	if _, _, err := genericResumeInvocation("grok", "", "session", nil); err == nil {
-		t.Fatal("unknown session kind was routed to an interactive shim")
+	if err := RunPeer([]string{"--help"}); err != nil {
+		t.Fatal(err)
 	}
 }

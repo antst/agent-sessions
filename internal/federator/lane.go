@@ -114,10 +114,11 @@ func (a *agent) laneCapabilities() []string {
 	if !a.options.EnableRemoteLanes {
 		return nil
 	}
-	capabilities := make([]string, 0, len(productDescriptors))
-	for _, descriptor := range productDescriptors {
+	descriptors := ProductDescriptors()
+	capabilities := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
 		if a.laneExecutable(descriptor.ID) != "" {
-			capabilities = append(capabilities, descriptor.FederationCapability)
+			capabilities = append(capabilities, descriptor.LaneCapability)
 		}
 	}
 	return capabilities
@@ -128,7 +129,7 @@ func capabilityForProduct(product string) string {
 	if !ok {
 		return ""
 	}
-	return descriptor.FederationCapability
+	return descriptor.LaneCapability
 }
 
 func (a *agent) laneExecutable(product string) string {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 )
@@ -748,7 +749,7 @@ func resolvePreparedPeerPreferences(sessionID string, options map[string]string)
 		return federator.ResolvedPreferences{}, true, err
 	}
 	resolved, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: "codex", Kind: federator.SessionKindInteractive, Groups: groups, GroupsSpecified: groupsSpecified,
+		SessionID: sessionID, Product: "codex", Kind: federation.SessionKindInteractive, Groups: groups, GroupsSpecified: groupsSpecified,
 		ParentSessionID: options["parent-session"], ParentSpecified: parentSpecified,
 		InheritParentGroups: inherit, InheritGroupsSpecified: inheritSpecified,
 		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,

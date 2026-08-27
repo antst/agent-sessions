@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
@@ -255,7 +256,7 @@ func launchPreparedQwenPeer(
 	}
 	profile := qwenProfileToFederator(plan.profile)
 	registration := federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: plan.sessionID, Product: "qwen",
+		Version: federation.GroupProtocolVersion, SessionID: plan.sessionID, Product: "qwen",
 		// The public interactive dual-output protocol does not expose the live
 		// approval mode. Keep the shared current-mode field empty instead of
 		// presenting the durable launch preference as a live observation.
@@ -271,7 +272,7 @@ func launchPreparedQwenPeer(
 			MCPCapabilityDigest: capabilityDigest,
 		},
 	}
-	metadata := &federator.QwenSessionMetadata{
+	metadata := &federation.QwenSessionMetadata{
 		Cwd: plan.requestedCwd, Profile: profile, LaunchPreference: string(plan.launchPreference),
 		InitialModeRequest: qwenInitialModeRequest(plan),
 	}
@@ -323,9 +324,9 @@ func launchPreparedQwenPeer(
 	return nil
 }
 
-func qwenPreferenceRequest(plan qwenPeerPlan, metadata *federator.QwenSessionMetadata) federator.ResolvePreferencesRequest {
+func qwenPreferenceRequest(plan qwenPeerPlan, metadata *federation.QwenSessionMetadata) federator.ResolvePreferencesRequest {
 	return federator.ResolvePreferencesRequest{
-		SessionID: plan.sessionID, Product: "qwen", Kind: federator.SessionKindInteractive,
+		SessionID: plan.sessionID, Product: "qwen", Kind: federation.SessionKindInteractive,
 		Groups: plan.peerContext.groups, GroupsSpecified: plan.peerContext.groupsSpecified,
 		ParentSessionID: plan.peerContext.parentSession, ParentSpecified: plan.peerContext.parentSpecified,
 		InheritParentGroups:    plan.peerContext.inheritParentGroups,
@@ -342,15 +343,15 @@ func qwenInitialModeRequest(plan qwenPeerPlan) string {
 	return "native_default"
 }
 
-func qwenProfileToFederator(profile qwenprofile.Identity) federator.QwenProfileIdentity {
-	return federator.QwenProfileIdentity{
+func qwenProfileToFederator(profile qwenprofile.Identity) federation.QwenProfileIdentity {
+	return federation.QwenProfileIdentity{
 		QwenHomeSet: profile.QwenHomeSet, QwenHome: profile.QwenHome,
 		QwenRuntimeSet: profile.QwenRuntimeSet, QwenRuntimeDir: profile.QwenRuntimeDir,
 		Fingerprint: profile.Fingerprint,
 	}
 }
 
-func qwenProfileFromFederator(profile federator.QwenProfileIdentity) qwenprofile.Identity {
+func qwenProfileFromFederator(profile federation.QwenProfileIdentity) qwenprofile.Identity {
 	return qwenprofile.Identity{
 		QwenHomeSet: profile.QwenHomeSet, QwenHome: profile.QwenHome,
 		QwenRuntimeSet: profile.QwenRuntimeSet, QwenRuntimeDir: profile.QwenRuntimeDir,

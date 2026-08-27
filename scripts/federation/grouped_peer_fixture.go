@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -72,7 +73,7 @@ func main() {
 		panic(err)
 	}
 	registration := federator.PeerRegistration{
-		Version: federator.GroupProtocolVersion, SessionID: *sessionID, Product: *product,
+		Version: federation.GroupProtocolVersion, SessionID: *sessionID, Product: *product,
 		Name: *name, Status: "idle", PermissionMode: "default", Cwd: mustGetwd(),
 		PID: os.Getpid(), ProcStart: federator.ProcessStart(os.Getpid()), Socket: socket,
 		LifecyclePID: os.Getpid(), LifecycleProcStart: federator.ProcessStart(os.Getpid()),
@@ -161,7 +162,7 @@ func acceptFrames(ctx context.Context, listener net.Listener, output *fixtureOut
 				}
 				message, _ := outer["message"].(map[string]any)
 				content, _ := message["content"].(string)
-				frame, err := federator.DecodeAgentFrameBody(content)
+				frame, err := federation.DecodeAgentFrameBody(content)
 				if err == nil {
 					output.write(map[string]any{"event": "delivery", "frame": frame})
 				}
@@ -203,8 +204,8 @@ func readCommands(ctx context.Context, runtimeDir, sessionID string, output *fix
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var command struct {
-			ID    string               `json:"id"`
-			Frame federator.AgentFrame `json:"frame"`
+			ID    string                `json:"id"`
+			Frame federation.AgentFrame `json:"frame"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
 			output.write(map[string]any{"event": "result", "id": command.ID, "error": err.Error()})

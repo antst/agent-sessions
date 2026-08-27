@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
@@ -74,13 +75,13 @@ func deliverGroupedLaneNotice(sourceSessionID, target, messageID, content string
 	if messageID == "" {
 		messageID = sessionKey(sourceSessionID + "\x00" + content)
 	}
-	result, err := federator.RouteAgentFrame(laneAgentRuntimeDir(), sourceSessionID, federator.AgentFrame{
-		Version: federator.AgentFrameVersion, Type: "send", MessageID: messageID,
+	result, err := federator.RouteAgentFrame(laneAgentRuntimeDir(), sourceSessionID, federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: messageID,
 		Targets: []string{target}, Content: content, SentAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil && strings.Contains(err.Error(), "source session is not a live registered peer") {
-		result, err = federator.RouteTerminalNotice(laneAgentRuntimeDir(), sourceSessionID, target, federator.AgentFrame{
-			Version: federator.AgentFrameVersion, Type: "send", MessageID: messageID,
+		result, err = federator.RouteTerminalNotice(laneAgentRuntimeDir(), sourceSessionID, target, federation.AgentFrame{
+			Version: federation.AgentFrameVersion, Type: "send", MessageID: messageID,
 			Content: content, SentAt: time.Now().UTC().Format(time.RFC3339Nano),
 		})
 	}
@@ -211,7 +212,7 @@ func resolveLaneGroupState(
 		return laneGroupState{}, false, errors.New("grouped lanes require a running host agent")
 	}
 	resolved, err := federator.ResolveSessionPreferences(laneAgentRuntimeDir(), federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: product, Kind: federator.SessionKindLane,
+		SessionID: sessionID, Product: product, Kind: federation.SessionKindLane,
 		Groups: groups.groups, GroupsSpecified: groups.groupsSpecified,
 		ParentSessionID: groups.parentSessionID, ParentSpecified: groups.parentSessionID != "",
 		ParentHostID: groups.parentHostID, ParentGroups: groups.parentGroups,
