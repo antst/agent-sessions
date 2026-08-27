@@ -60,6 +60,22 @@ type InteractiveAttachmentAdapter interface {
 	PrepareInteractive(context.Context, AttachmentPrepareRequest) (NativeLaunchPlan, error)
 }
 
+// ConnectorProcessEvidence is the kernel-corroborated process identity of one
+// short-lived vendor connector reaching the daemon.
+type ConnectorProcessEvidence struct {
+	PID         int
+	ProcStart   string
+	StrongStart string
+}
+
+// ObservedConnectorAdapter resolves a late-bound native session from the
+// connector's exact vendor process ancestry. Products without a supported
+// observation contract remain durably selecting.
+type ObservedConnectorAdapter interface {
+	// ObserveConnector resolves one native session from exact connector process evidence.
+	ObserveConnector(context.Context, AttachmentRecord, ConnectorProcessEvidence) (string, map[string]any, error)
+}
+
 // InteractiveLaunchIntent carries parsed wrapper intent without granting native authority.
 type InteractiveLaunchIntent struct {
 	Mode               string   `json:"mode"`
@@ -379,6 +395,47 @@ func (registry *AttachmentRegistry) PreparedConnector(product, attachmentID, cap
 	if !ok || record.Product != product || record.State != AttachmentStatePrepared ||
 		!attachmentCapabilityMatches(record.LaunchCapabilityHash, capability) {
 		return AttachmentRecord{}, ErrAttachmentNotAttested
+	}
+	return cloneAttachmentRecord(record), nil
+}
+
+// AdoptObservedConnector binds a late-selected native session only when the
+// product adapter can corroborate it from exact kernel process evidence.
+func (registry *AttachmentRegistry) AdoptObservedConnector(
+	ctx context.Context,
+	product, attachmentID, capability string,
+	evidence ConnectorProcessEvidence,
+) (AttachmentRecord, error) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	record, ok := registry.attachments[attachmentID]
+	if !ok || record.Product != product || record.State != AttachmentStatePrepared ||
+		!attachmentCapabilityMatches(record.LaunchCapabilityHash, capability) {
+		return AttachmentRecord{}, ErrAttachmentNotAttested
+	}
+	observer, ok := registry.adapters[product].(ObservedConnectorAdapter)
+	if !ok {
+		return AttachmentRecord{}, ErrAttachmentSelecting
+	}
+	sessionID, suppliedActor, err := observer.ObserveConnector(ctx, cloneAttachmentRecord(record), evidence)
+	if err != nil {
+		return AttachmentRecord{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return AttachmentRecord{}, ErrAttachmentSelecting
+	}
+	actor, err := registry.adapters[product].Corroborate(ctx, cloneAttachmentRecord(record), suppliedActor)
+	if err != nil {
+		return AttachmentRecord{}, err
+	}
+	record.SessionID = sessionID
+	record.NativeActor = actor
+	record.State = AttachmentStateAttached
+	registry.advanceAttachment(&record)
+	if err := registry.commitAttachmentCatalog(ctx, func(attachments map[string]AttachmentRecord, _ map[string]AttachmentPreferences) {
+		attachments[record.AttachmentID] = record
+	}); err != nil {
+		return AttachmentRecord{}, err
 	}
 	return cloneAttachmentRecord(record), nil
 }

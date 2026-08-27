@@ -135,6 +135,31 @@ func TestAttachmentLateSelectionConnectorReconnectAndBareSessionRefusal(t *testi
 	}
 }
 
+func TestAttachmentLateSelectionAdoptsOnlyObservedConnectorAncestry(t *testing.T) {
+	ctx := context.Background()
+	adapter := &observedAttachmentTestAdapter{attachmentTestAdapter: attachmentTestAdapter{}}
+	registry := newAttachmentTestRegistry(t, 4, adapter)
+	prepared, capability, err := registry.Prepare(ctx, AttachmentPrepareRequest{
+		Product: "claude", Kind: "interactive", Cwd: "/work", Name: "late-selection",
+		ExpectedNativeActor: map[string]any{"pid": 707, "proc_start": "native-start"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.AdoptObservedConnector(ctx, "claude", prepared.AttachmentID, "wrong", ConnectorProcessEvidence{PID: 808}); !errors.Is(err, ErrAttachmentNotAttested) {
+		t.Fatalf("wrong observed capability error = %v", err)
+	}
+	attached, err := registry.AdoptObservedConnector(ctx, "claude", prepared.AttachmentID, capability, ConnectorProcessEvidence{
+		PID: 808, ProcStart: "connector-start", StrongStart: "connector-strong",
+	})
+	if err != nil {
+		t.Fatalf("adopt observed connector: %v", err)
+	}
+	if attached.State != AttachmentStateAttached || attached.SessionID != "observed-session" || adapter.observedPID != 808 {
+		t.Fatalf("observed attachment = %#v, pid=%d", attached, adapter.observedPID)
+	}
+}
+
 func TestAttachmentSelectionRejectsAmbiguousNamesAndAcceptsExactAddress(t *testing.T) {
 	ctx := context.Background()
 	registry := newAttachmentTestRegistry(t, 1, &attachmentTestAdapter{})
@@ -223,6 +248,20 @@ func TestAttachmentRestartPreservesNativeIdentityAcrossDaemonGeneration(t *testi
 
 type attachmentTestAdapter struct {
 	reconnectErr error
+}
+
+type observedAttachmentTestAdapter struct {
+	attachmentTestAdapter
+	observedPID int
+}
+
+func (adapter *observedAttachmentTestAdapter) ObserveConnector(
+	_ context.Context,
+	_ AttachmentRecord,
+	evidence ConnectorProcessEvidence,
+) (string, map[string]any, error) {
+	adapter.observedPID = evidence.PID
+	return "observed-session", map[string]any{"pid": float64(707), "proc_start": "native-start"}, nil
 }
 
 func (adapter *attachmentTestAdapter) PrepareInteractive(_ context.Context, request AttachmentPrepareRequest) (NativeLaunchPlan, error) {

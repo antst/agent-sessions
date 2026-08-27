@@ -200,10 +200,21 @@ func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPee
 			}
 			var err error
 			if record.State == AttachmentStatePrepared && hello.SessionID == "" {
-				_, err = registry.PreparedConnector(hello.Product, hello.AttachmentID, hello.Capability)
+				record, err = registry.AdoptObservedConnector(ctx, hello.Product, hello.AttachmentID, hello.Capability, ConnectorProcessEvidence{
+					PID: peer.PID, ProcStart: peer.ProcStart, StrongStart: peer.StrongStart,
+				})
+				if errors.Is(err, ErrAttachmentSelecting) {
+					_, err = registry.PreparedConnector(hello.Product, hello.AttachmentID, hello.Capability)
+					if err != nil {
+						return controlPrincipal{}, controlFailure(err)
+					}
+					return principal, nil
+				}
 				if err != nil {
 					return controlPrincipal{}, controlFailure(err)
 				}
+				principal.SessionID = record.SessionID
+				principal.Attested = true
 				return principal, nil
 			}
 			if record.State == AttachmentStatePrepared {

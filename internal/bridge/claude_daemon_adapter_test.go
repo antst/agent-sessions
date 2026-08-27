@@ -18,7 +18,7 @@ func TestClaudeDaemonAdapterResolvesUUIDAndUniqueName(t *testing.T) {
 	}}
 	adapter := newClaudeDaemonAdapter(client)
 	for _, selector := range []string{"11111111-2222-4333-8444-555555555555", "reviewer"} {
-		selection, err := adapter.ResolveSelection(context.Background(), selector)
+		selection, err := adapter.ResolveSelection(context.Background(), "profile-claude", selector)
 		if err != nil {
 			t.Fatalf("resolve Claude selector %q: %v", selector, err)
 		}
@@ -27,7 +27,7 @@ func TestClaudeDaemonAdapterResolvesUUIDAndUniqueName(t *testing.T) {
 		}
 	}
 	client.ambiguous = true
-	if _, err := adapter.ResolveSelection(context.Background(), "reviewer"); !errors.Is(err, daemonpkg.ErrAttachmentAmbiguous) {
+	if _, err := adapter.ResolveSelection(context.Background(), "profile-claude", "reviewer"); !errors.Is(err, daemonpkg.ErrAttachmentAmbiguous) {
 		t.Fatalf("ambiguous Claude name error = %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func (client *claudeDaemonTestClient) PrepareInteractive(_ context.Context, requ
 	return daemonpkg.NativeLaunchPlan{Executable: "claude", Arguments: request.Intent.NativeArguments, Cwd: request.Cwd}, nil
 }
 
-func (client *claudeDaemonTestClient) ResolveSession(_ context.Context, selector string) (claudeDaemonSession, bool, error) {
+func (client *claudeDaemonTestClient) ResolveSession(_ context.Context, _, selector string) (claudeDaemonSession, bool, error) {
 	if client.ambiguous && selector == client.session.Name {
 		return claudeDaemonSession{}, true, nil
 	}
@@ -117,7 +117,11 @@ func (client *claudeDaemonTestClient) ResolveSession(_ context.Context, selector
 	return client.session, false, nil
 }
 
-func (client *claudeDaemonTestClient) InspectSession(_ context.Context, _ string) (claudeDaemonSession, error) {
+func (client *claudeDaemonTestClient) ObserveSession(_ context.Context, _ string, _ int) (claudeDaemonSession, error) {
+	return client.session, nil
+}
+
+func (client *claudeDaemonTestClient) InspectSession(_ context.Context, _, _ string) (claudeDaemonSession, error) {
 	return client.session, nil
 }
 
