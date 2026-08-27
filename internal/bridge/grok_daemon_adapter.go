@@ -78,6 +78,8 @@ func (adapter *grokDaemonAdapter) ResolveSelection(ctx context.Context, selector
 
 // ObserveConnector binds a Grok attachment to the private leader's one live
 // resident session using the connector's exact native process ancestry.
+//
+//nolint:dupl // Product-specific observation remains explicit at the adapter boundary.
 func (adapter *grokDaemonAdapter) ObserveConnector(
 	ctx context.Context,
 	record daemonpkg.AttachmentRecord,

@@ -109,6 +109,10 @@ func (client *qwenDaemonTestClient) ResolveSession(_ context.Context, selector s
 	return client.session, false, nil
 }
 
+func (client *qwenDaemonTestClient) ObserveSession(_ context.Context, _ daemonpkg.AttachmentRecord, _ int) (qwenDaemonSession, error) {
+	return client.session, nil
+}
+
 func (client *qwenDaemonTestClient) InspectSession(_ context.Context, _ string) (qwenDaemonSession, error) {
 	return client.session, nil
 }

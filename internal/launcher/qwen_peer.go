@@ -128,7 +128,9 @@ func runQwenPeerWithDaemon(args []string, dependencies daemonPeerDependencies) e
 	if plan.mode == qwenPeerModeFresh {
 		selector = plan.sessionID
 	}
-	prepared, err := dependencies.prepare(context.Background(), daemon.AttachmentPrepareRequest{
+	prepareContext, cancelPrepare := context.WithTimeout(context.Background(), qwenReadinessTimeout+5*time.Second)
+	defer cancelPrepare()
+	prepared, err := dependencies.prepare(prepareContext, daemon.AttachmentPrepareRequest{
 		Product: "qwen", Kind: "interactive", ProfileIdentity: profile,
 		Cwd: plan.requestedCwd, Name: plan.peerName, NameSource: "launch",
 		Groups: append([]string(nil), plan.peerContext.groups...), PermissionMode: qwenInitialModeRequest(plan),

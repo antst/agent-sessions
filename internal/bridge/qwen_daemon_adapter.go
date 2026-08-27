@@ -18,23 +18,27 @@ var (
 )
 
 type qwenDaemonSession struct {
-	SessionID     string
-	Name          string
-	Cwd           string
-	Profile       string
-	PID           int
-	ProcStart     string
-	ParentPID     int
-	EventPath     string
-	InputPath     string
-	ReadinessPath string
-	Ready         bool
-	DualOutput    bool
+	SessionID      string
+	Name           string
+	Cwd            string
+	Profile        string
+	Status         string
+	PermissionMode string
+	PID            int
+	ProcStart      string
+	ParentPID      int
+	EventPath      string
+	InputPath      string
+	ReadinessPath  string
+	Ready          bool
+	DualOutput     bool
+	CoordinatorID  string
 }
 
 type qwenDaemonClient interface {
 	PrepareInteractive(context.Context, daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error)
 	ResolveSession(context.Context, string) (qwenDaemonSession, bool, error)
+	ObserveSession(context.Context, daemonpkg.AttachmentRecord, int) (qwenDaemonSession, error)
 	InspectSession(context.Context, string) (qwenDaemonSession, error)
 	WriteInput(context.Context, string, federation.AgentFrame) error
 }
@@ -53,6 +57,18 @@ func newQwenDaemonAdapter(client qwenDaemonClient) *qwenDaemonAdapter {
 	return &qwenDaemonAdapter{client: client}
 }
 
+// NewQwenDaemonAdapter constructs the in-process Qwen dual-output coordinator.
+func NewQwenDaemonAdapter() *qwenDaemonAdapter {
+	return newQwenDaemonAdapter(newQwenNativeCoordinator())
+}
+
+// Close releases daemon descriptors without stopping vendor-owned Qwen processes.
+func (adapter *qwenDaemonAdapter) Close() {
+	if coordinator, ok := adapter.client.(*qwenNativeCoordinator); ok {
+		coordinator.close()
+	}
+}
+
 // ResolveSelection maps an exact UUID or unique Qwen name to one native session.
 func (adapter *qwenDaemonAdapter) ResolveSelection(ctx context.Context, selector string) (qwenDaemonSession, error) {
 	if adapter == nil || adapter.client == nil || strings.TrimSpace(selector) == "" {
@@ -69,6 +85,28 @@ func (adapter *qwenDaemonAdapter) ResolveSelection(ctx context.Context, selector
 		return qwenDaemonSession{}, daemonpkg.ErrAttachmentNotFound
 	}
 	return session, nil
+}
+
+// ObserveConnector adopts the exact Qwen process and first dual-output event
+// selected by a daemon-prepared connector ancestry.
+//
+//nolint:dupl // Product-specific observation remains explicit at the adapter boundary.
+func (adapter *qwenDaemonAdapter) ObserveConnector(
+	ctx context.Context,
+	record daemonpkg.AttachmentRecord,
+	evidence daemonpkg.ConnectorProcessEvidence,
+) (string, map[string]any, error) {
+	if adapter == nil || adapter.client == nil || evidence.PID <= 1 {
+		return "", nil, daemonpkg.ErrAttachmentSelecting
+	}
+	session, err := adapter.client.ObserveSession(ctx, record, evidence.PID)
+	if err != nil {
+		return "", nil, err
+	}
+	if session.Cwd != record.Cwd || !matchesOptionalString(record.ProfileIdentity["profile"], session.Profile) {
+		return "", nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return session.SessionID, qwenSessionActor(session), nil
 }
 
 // Corroborate proves that a prepared Qwen attachment selected the expected native actor.
@@ -126,6 +164,7 @@ func (adapter *qwenDaemonAdapter) inspectExact(
 			daemonActorField{key: "event_path", value: session.EventPath},
 			daemonActorField{key: "input_path", value: session.InputPath},
 			daemonActorField{key: "readiness_path", value: session.ReadinessPath},
+			daemonActorField{key: "coordinator_id", value: session.CoordinatorID},
 		) {
 		return nil, daemonpkg.ErrAttachmentEvidenceChanged
 	}
@@ -135,10 +174,16 @@ func (adapter *qwenDaemonAdapter) inspectExact(
 	if !session.Ready {
 		return nil, ErrQwenReadinessUnavailable
 	}
+	return qwenSessionActor(session), nil
+}
+
+func qwenSessionActor(session qwenDaemonSession) map[string]any {
 	return map[string]any{
 		"session_id": session.SessionID, "pid": session.PID, "proc_start": session.ProcStart,
 		"parent_pid": session.ParentPID, "profile": session.Profile, "cwd": session.Cwd,
+		"status": session.Status, "permission_mode": session.PermissionMode,
 		"event_path": session.EventPath, "input_path": session.InputPath,
-		"readiness_path": session.ReadinessPath, "dual_output": true, "ready": true,
-	}, nil
+		"readiness_path": session.ReadinessPath, "coordinator_id": session.CoordinatorID,
+		"dual_output": session.DualOutput, "ready": session.Ready,
+	}
 }
