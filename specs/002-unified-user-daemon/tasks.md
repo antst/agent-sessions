@@ -118,10 +118,10 @@ native identities and no duplicate accepted message.
 
 - [X] T035 [P] [US2] Add failing attachment prepare/select/adopt/refresh/detach, connector reconnect, exact-evidence, ambiguous-name, bare-session, and active-peer upgrade-generation preservation tests in internal/daemon/attachment_test.go
 - [X] T036 [P] [US2] Add failing group discovery, direct send, all-target multicast admission, broadcast authorization, durable acceptance, retry, at-most-once delivery, message-content log canary, and disk/memory/file-descriptor/process pre-acceptance tests in internal/daemon/delivery_test.go
-- [ ] T037 [P] [US2] Add failing Codex App Server attachment, history-readiness, delivery, and daemon-restart/upgrade-generation reconstruction tests in internal/bridge/codex_daemon_adapter_test.go
-- [ ] T038 [P] [US2] Add failing Claude UUID/name adoption, native-socket delivery, attestation, synthetic-service, and restart/upgrade-generation reconstruction tests in internal/bridge/claude_daemon_adapter_test.go
-- [ ] T039 [P] [US2] Add failing Grok leader/ACP roster, interjection, exact-owner, delivery, and restart/upgrade-generation reconstruction tests in internal/bridge/grok_daemon_adapter_test.go
-- [ ] T040 [P] [US2] Add failing Qwen readiness, dual-output admission, native input/event, ancestry, delivery, and restart/upgrade-generation reconstruction tests in internal/bridge/qwen_daemon_adapter_test.go
+- [X] T037 [P] [US2] Add failing Codex App Server attachment, history-readiness, delivery, and daemon-restart/upgrade-generation reconstruction tests in internal/bridge/codex_daemon_adapter_test.go
+- [X] T038 [P] [US2] Add failing Claude UUID/name adoption, native-socket delivery, attestation, synthetic-service, and restart/upgrade-generation reconstruction tests in internal/bridge/claude_daemon_adapter_test.go
+- [X] T039 [P] [US2] Add failing Grok leader/ACP roster, interjection, exact-owner, delivery, and restart/upgrade-generation reconstruction tests in internal/bridge/grok_daemon_adapter_test.go
+- [X] T040 [P] [US2] Add failing Qwen readiness, dual-output admission, native input/event, ancestry, delivery, and restart/upgrade-generation reconstruction tests in internal/bridge/qwen_daemon_adapter_test.go
 
 ### Implementation for User Story 2
 
