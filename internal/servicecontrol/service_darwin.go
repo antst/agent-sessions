@@ -102,11 +102,12 @@ type darwinServiceStatus struct {
 
 func newDarwinServiceController(options darwinServiceControllerOptions) (*darwinServiceController, error) {
 	if options.UID < 0 || options.Runner == nil {
-		return nil, errors.New("Darwin service controller requires a UID and runner")
+		return nil, errors.New("darwin service controller requires a UID and runner")
 	}
 	return &darwinServiceController{uid: options.UID, runner: options.Runner}, nil
 }
 
+// Start bootstraps one exact user launchd descriptor.
 func (controller *darwinServiceController) Start(ctx context.Context, descriptor darwinServiceDescriptor) error {
 	if err := validateDarwinServiceDescriptor(descriptor); err != nil {
 		return err
@@ -118,6 +119,7 @@ func (controller *darwinServiceController) Start(ctx context.Context, descriptor
 	return nil
 }
 
+// Stop boots out one exact user launchd label.
 func (controller *darwinServiceController) Stop(ctx context.Context, descriptor darwinServiceDescriptor) error {
 	if err := validateDarwinServiceDescriptor(descriptor); err != nil {
 		return err
@@ -129,6 +131,7 @@ func (controller *darwinServiceController) Stop(ctx context.Context, descriptor 
 	return nil
 }
 
+// Status inspects one exact user launchd label without mutating it.
 func (controller *darwinServiceController) Status(ctx context.Context, descriptor darwinServiceDescriptor) (darwinServiceStatus, error) {
 	if err := validateDarwinServiceDescriptor(descriptor); err != nil {
 		return darwinServiceStatus{}, err

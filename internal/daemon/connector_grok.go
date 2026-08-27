@@ -325,10 +325,16 @@ func restoreConnectorTree(root string, snapshot connectorTreeSnapshot) error {
 			_ = os.RemoveAll(stage)
 		}
 	}()
-	if err := materializeConnectorSnapshot(stage, snapshot); err != nil {
+	rootMode, err := materializeConnectorSnapshot(stage, snapshot)
+	if err != nil {
 		return err
 	}
 	if err := os.Rename(stage, root); err != nil {
+		return err
+	}
+	if err := os.Chmod(root, rootMode); err != nil {
+		_ = makeConnectorTreeWritable(root)
+		_ = os.RemoveAll(root)
 		return err
 	}
 	committed = true
@@ -340,7 +346,7 @@ type stagedConnectorDirectory struct {
 	mode os.FileMode
 }
 
-func materializeConnectorSnapshot(stage string, snapshot connectorTreeSnapshot) error {
+func materializeConnectorSnapshot(stage string, snapshot connectorTreeSnapshot) (os.FileMode, error) {
 	directories := make([]stagedConnectorDirectory, 0, len(snapshot.entries))
 	rootMode := os.FileMode(0o700)
 	for _, entry := range snapshot.entries {
@@ -350,20 +356,20 @@ func materializeConnectorSnapshot(stage string, snapshot connectorTreeSnapshot) 
 		}
 		path := filepath.Join(stage, entry.path)
 		if !pathWithin(path, stage) {
-			return errors.New("connector snapshot path escapes stage")
+			return 0, errors.New("connector snapshot path escapes stage")
 		}
 		if entry.mode.IsDir() {
 			if err := os.MkdirAll(path, 0o700); err != nil {
-				return err
+				return 0, err
 			}
 			directories = append(directories, stagedConnectorDirectory{path: path, mode: entry.mode.Perm()})
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
+			return 0, err
 		}
 		if err := os.WriteFile(path, entry.body, entry.mode.Perm()); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	// Apply immutable directory modes only after all children exist. Applying
@@ -371,13 +377,13 @@ func materializeConnectorSnapshot(stage string, snapshot connectorTreeSnapshot) 
 	// that directory's own files on the same transaction.
 	for index := len(directories) - 1; index >= 0; index-- {
 		if err := os.Chmod(directories[index].path, directories[index].mode); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	if err := os.Chmod(stage, rootMode); err != nil {
-		return err
-	}
-	return nil
+	// Keep the stage root owner-writable through rename. Darwin may reject
+	// moving an immutable directory even when its parent is writable. The
+	// captured root mode is applied to the committed destination afterward.
+	return rootMode, nil
 }
 
 func removeExactConnectorTree(root string) error {

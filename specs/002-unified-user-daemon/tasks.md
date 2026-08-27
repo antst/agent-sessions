@@ -117,7 +117,7 @@ native identities and no duplicate accepted message.
 ### Tests for User Story 2
 
 - [X] T035 [P] [US2] Add failing attachment prepare/select/adopt/refresh/detach, connector reconnect, exact-evidence, ambiguous-name, bare-session, and active-peer upgrade-generation preservation tests in internal/daemon/attachment_test.go
-- [ ] T036 [P] [US2] Add failing group discovery, direct send, all-target multicast admission, broadcast authorization, durable acceptance, retry, at-most-once delivery, message-content log canary, and disk/memory/file-descriptor/process pre-acceptance tests in internal/daemon/delivery_test.go
+- [X] T036 [P] [US2] Add failing group discovery, direct send, all-target multicast admission, broadcast authorization, durable acceptance, retry, at-most-once delivery, message-content log canary, and disk/memory/file-descriptor/process pre-acceptance tests in internal/daemon/delivery_test.go
 - [ ] T037 [P] [US2] Add failing Codex App Server attachment, history-readiness, delivery, and daemon-restart/upgrade-generation reconstruction tests in internal/bridge/codex_daemon_adapter_test.go
 - [ ] T038 [P] [US2] Add failing Claude UUID/name adoption, native-socket delivery, attestation, synthetic-service, and restart/upgrade-generation reconstruction tests in internal/bridge/claude_daemon_adapter_test.go
 - [ ] T039 [P] [US2] Add failing Grok leader/ACP roster, interjection, exact-owner, delivery, and restart/upgrade-generation reconstruction tests in internal/bridge/grok_daemon_adapter_test.go
@@ -126,7 +126,7 @@ native identities and no duplicate accepted message.
 ### Implementation for User Story 2
 
 - [X] T041 [US2] Implement the daemon-owned attachment registry, launch capabilities, session preferences, exact actor evidence, publication, and restart reconciliation in internal/daemon/attachment.go
-- [ ] T042 [US2] Implement durable AgentFrame admission, global-group recipient resolution, local delivery state, retries, and at-most-once destination outcomes in internal/daemon/delivery.go using shared internal/federation/groups.go and internal/federation/frame.go
+- [X] T042 [US2] Implement durable AgentFrame admission, global-group recipient resolution, local delivery state, retries, and at-most-once destination outcomes in internal/daemon/delivery.go using shared internal/federation/groups.go and internal/federation/frame.go
 - [ ] T043 [US2] Convert peer launch/resume commands into short-lived prepare/adopt clients that exec or hand off to the native vendor process and never supervise the daemon in internal/launcher/codex_peer.go, internal/launcher/claude_peer.go, internal/launcher/grok_peer.go, and internal/launcher/qwen_peer.go
 - [ ] T044 [US2] Convert the MCP implementation into a stateless stdio relay whose tools and decisions come from the daemon in internal/bridge/mcp.go and internal/bridge/dynamic_tools.go
 - [ ] T045 [P] [US2] Refactor Codex App Server coordination, hooks, attachment verification, and delivery into a callable daemon adapter in internal/bridge/appserver.go, internal/bridge/hook.go, and internal/bridge/supervisor.go without spawning supervisors or shims

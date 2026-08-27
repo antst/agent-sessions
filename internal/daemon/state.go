@@ -121,6 +121,7 @@ type AttachmentRecord struct {
 type DeliveryRecord struct {
 	RecordHeader
 	MessageID                string            `json:"message_id"`
+	SourceAttachmentID       string            `json:"source_attachment_id"`
 	SourceHostID             string            `json:"source_host_id"`
 	SourceSessionID          string            `json:"source_session_id"`
 	SourceAttachmentRevision uint64            `json:"source_attachment_revision"`
@@ -135,6 +136,7 @@ type DeliveryRecord struct {
 	DestinationResults       map[string]string `json:"destination_results,omitempty"`
 	AcceptedRevision         uint64            `json:"accepted_revision"`
 	AcceptedAt               int64             `json:"accepted_at"`
+	RequestDigest            string            `json:"request_digest"`
 }
 
 // LaneRecord is one daemon-owned durable vendor lane.
@@ -282,6 +284,20 @@ func (store *StateStore) compareAndSwapAttachmentCatalog(
 	catalog attachmentCatalog,
 ) (statestore.Revision, error) {
 	return store.records.CompareAndSwap(ctx, "attachments", expected, catalog)
+}
+
+func (store *StateStore) readDeliveryCatalog(ctx context.Context) (deliveryCatalog, statestore.Revision, error) {
+	var catalog deliveryCatalog
+	revision, err := store.records.Read(ctx, "deliveries", &catalog)
+	return catalog, revision, err
+}
+
+func (store *StateStore) compareAndSwapDeliveryCatalog(
+	ctx context.Context,
+	expected statestore.Revision,
+	catalog deliveryCatalog,
+) (statestore.Revision, error) {
+	return store.records.CompareAndSwap(ctx, "deliveries", expected, catalog)
 }
 
 // ReadDebt reads and validates one exact lifecycle-debt record.

@@ -353,6 +353,29 @@ func (registry *AttachmentRegistry) SessionPreferences(_ context.Context, produc
 	return cloneAttachmentPreferences(preference), nil
 }
 
+func (registry *AttachmentRegistry) attachedByID(attachmentID string) (AttachmentRecord, bool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	record, ok := registry.attachments[attachmentID]
+	if !ok || record.State != AttachmentStateAttached {
+		return AttachmentRecord{}, false
+	}
+	return cloneAttachmentRecord(record), true
+}
+
+func (registry *AttachmentRegistry) attachedRecords() []AttachmentRecord {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	result := make([]AttachmentRecord, 0, len(registry.attachments))
+	for _, record := range registry.attachments {
+		if record.State == AttachmentStateAttached {
+			result = append(result, cloneAttachmentRecord(record))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return attachmentAddress(result[i]) < attachmentAddress(result[j]) })
+	return result
+}
+
 // Reconcile re-corroborates all visible native actors before a new daemon generation publishes them.
 func (registry *AttachmentRegistry) Reconcile(ctx context.Context) error {
 	registry.mu.Lock()
