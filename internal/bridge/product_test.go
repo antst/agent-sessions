@@ -311,3 +311,32 @@ func TestBridgeProjectsAuthoritativeCatalogWithoutLegacyDescriptorTable(t *testi
 		}
 	}
 }
+
+func TestConnectorPayloadsUseOneCanonicalStatelessRelayContract(t *testing.T) {
+	root := filepath.Join("..", "..")
+	tests := []struct {
+		product, manifest, command string
+	}{
+		{product: "codex", manifest: ".mcp.json", command: "./scripts/native-entry"},
+		{product: "claude", manifest: "claude/.mcp.json", command: "agent-sessions"},
+		{product: "grok", manifest: "grok/.mcp.json", command: "${GROK_PLUGIN_ROOT}/scripts/native-entry"},
+		{product: "qwen", manifest: "qwen/mcp.json", command: "./scripts/native-entry"},
+	}
+	for _, test := range tests {
+		body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(test.manifest)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(body, &manifest); err != nil {
+			t.Fatalf("decode %s: %v", test.manifest, err)
+		}
+		servers, _ := manifest["mcpServers"].(map[string]any)
+		server, _ := servers["agent_sessions"].(map[string]any)
+		arguments, _ := server["args"].([]any)
+		wantArguments := []any{"connector", test.product, "mcp"}
+		if len(servers) != 1 || stringValue(server["command"]) != test.command || !slices.Equal(arguments, wantArguments) {
+			t.Errorf("%s connector = %#v, want command %q args %#v", test.product, server, test.command, wantArguments)
+		}
+	}
+}

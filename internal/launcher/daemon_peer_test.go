@@ -42,7 +42,7 @@ func TestExecuteDaemonPreparedPeerDirectExecAndExactRollback(t *testing.T) {
 	joined := strings.Join(environment, "\n")
 	for _, want := range []string{
 		internalAttachmentIDEnv + "=attachment-1", internalCapabilityEnv + "=capability-secret",
-		internalProductEnv + "=qwen", internalSessionIDEnv + "=session-1",
+		internalProductEnv + "=qwen", internalSessionIDEnv + "=session-1", hostBinaryEnv + "=",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("prepared environment lacks %q", want)

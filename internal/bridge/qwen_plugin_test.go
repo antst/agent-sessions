@@ -758,7 +758,7 @@ func assertQwenPluginPayload(t *testing.T, root string) {
 	server, ok := servers[qwenTestMCPName].(map[string]any)
 	arguments, argumentsOK := server["args"].([]any)
 	if !ok || server["type"] != "stdio" || server["command"] != qwenTestMCPCommand ||
-		!argumentsOK || len(arguments) != 1 || arguments[0] != "mcp" {
+		!argumentsOK || !reflect.DeepEqual(arguments, []any{"connector", "qwen", "mcp"}) {
 		t.Fatalf("Qwen %s MCP definition = %#v", qwenTestMCPName, servers[qwenTestMCPName])
 	}
 	entryInfo, err := os.Lstat(filepath.Join(root, "scripts", "native-entry"))
@@ -811,7 +811,7 @@ func qwenTestPluginFixtureAt(t *testing.T, root string) {
 	qwenTestWriteJSON(t, filepath.Join(root, "mcp.json"), map[string]any{
 		"$schema": qwenTestMCPSchema,
 		"mcpServers": map[string]any{
-			qwenTestMCPName: map[string]any{"type": "stdio", "command": qwenTestMCPCommand, "args": []string{"mcp"}},
+			qwenTestMCPName: map[string]any{"type": "stdio", "command": qwenTestMCPCommand, "args": []string{"connector", "qwen", "mcp"}},
 		},
 	})
 	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o700); err != nil {

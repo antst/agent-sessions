@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installed hook and MCP entry point; never falls back to Node or PATH.
+# Installed stateless connector entry point; never falls back to a legacy runtime.
 
-state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
-native_runtime="${AGENT_SESSIONS_NATIVE_RUNTIME:-${QWEN_PEER_NATIVE_RUNTIME:-${GROK_PEER_NATIVE_RUNTIME:-${CODEX_PEER_NATIVE_RUNTIME:-}}}}"
-if [[ -z "$native_runtime" ]]; then
-  native_runtime="$(sed -n '1p' "$state_root/native-runtime-path" 2>/dev/null || true)"
+host_binary="${AGENT_SESSIONS_HOST_BINARY:-}"
+if [[ -z "$host_binary" ]]; then
+  default_binary="${HOME}/.local/libexec/agent-sessions/host/current/bin/agent-sessions"
+  if [[ -x "$default_binary" ]]; then
+    host_binary="$default_binary"
+  else
+    host_binary="$(command -v agent-sessions 2>/dev/null || true)"
+  fi
 fi
-if [[ -z "$native_runtime" || ! -x "$native_runtime" ]]; then
-  printf 'agent-sessions: native runtime is not installed; run make install first\n' >&2
+if [[ -z "$host_binary" || ! -x "$host_binary" ]]; then
+  printf 'agent-sessions: unified host binary is not installed; run make install-all first\n' >&2
   exit 1
 fi
-exec "$native_runtime" "$@"
+exec "$host_binary" "$@"

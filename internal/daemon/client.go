@@ -23,6 +23,8 @@ const (
 	InternalProductEnvironment = "AGENT_SESSIONS_INTERNAL_PRODUCT"
 	// InternalSessionIDEnvironment carries a daemon-selected native session when known before exec.
 	InternalSessionIDEnvironment = "AGENT_SESSIONS_INTERNAL_SESSION_ID"
+	// HostBinaryEnvironment pins connector subprocesses to the same installed host image as their launcher.
+	HostBinaryEnvironment = "AGENT_SESSIONS_HOST_BINARY"
 )
 
 // LocalControlRole identifies one short-lived same-user daemon client boundary.

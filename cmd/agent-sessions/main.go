@@ -18,6 +18,8 @@ import (
 	"github.com/antst/agent-sessions/internal/launcher"
 )
 
+var runConnectorRelay = bridge.RunDaemonMCPRelay
+
 func main() {
 	code := run(filepathBase(os.Args[0]), os.Args[1:], os.Stdout, os.Stderr)
 	if code != 0 {
@@ -45,6 +47,9 @@ func run(argv0 string, args []string, stdout, stderr io.Writer) int {
 		}
 		return runAdministrativeCommand(command, options, stdout, stderr)
 	}
+	if command.Visibility == clihelp.VisibilityConnector {
+		return runConnectorCommand(command, remainder, argv0, stdout, stderr)
+	}
 
 	err = dispatchHostCommand(command, remainder)
 	if err == nil {
@@ -60,6 +65,19 @@ func run(argv0 string, args []string, stdout, stderr io.Writer) int {
 		return coded.ExitCode()
 	}
 	return 1
+}
+
+func runConnectorCommand(command clihelp.CommandDescriptor, remainder []string, argv0 string, stdout, stderr io.Writer) int {
+	if len(remainder) != 0 {
+		_, _ = fmt.Fprintf(stderr, "%s: connector relay does not accept positional arguments\n", filepathBase(argv0))
+		return 2
+	}
+	parts := strings.Split(command.Key, ".")
+	if len(parts) != 3 || parts[0] != "connector" || parts[2] != "mcp" {
+		_, _ = fmt.Fprintf(stderr, "%s: invalid connector identity %q\n", filepathBase(argv0), command.Key)
+		return 2
+	}
+	return runConnectorRelay(parts[1], os.Stdin, stdout, stderr)
 }
 
 func runAdministrativeCommand(command clihelp.CommandDescriptor, options clihelp.ParsedOptions, stdout, stderr io.Writer) int {

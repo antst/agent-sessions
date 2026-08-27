@@ -108,14 +108,14 @@ var products = [...]ProductDescriptor{
 	{
 		ID: "claude", Label: "Claude Code", PeerAlias: "claude-peer", LaneAlias: "claude-peer-lane",
 		LaneCapability:  CapabilityClaudeLane,
-		Connector:       ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "claude/.mcp.json", EntryPoint: "agent-session-runtime", Mode: "mcp"},
+		Connector:       ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "claude/.mcp.json", EntryPoint: "agent-sessions", Mode: "mcp"},
 		LaneRuntimeRole: "claude-lane", LaneManagerRole: "claude-lane-manager",
 		TranscriptNameIndex: true, InteractiveResumeFlag: true,
 	},
 	{
 		ID: "grok", Label: "Grok", PeerAlias: "grok-peer", LaneAlias: "grok-peer-lane",
 		LaneCapability:  CapabilityGrokLane,
-		Connector:       ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "grok/.mcp.json", EntryPoint: "grok/scripts/native-entry", Mode: "grok-mcp"},
+		Connector:       ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "grok/.mcp.json", EntryPoint: "grok/scripts/native-entry", Mode: "mcp"},
 		LaneRuntimeRole: "grok-lane", LaneManagerRole: "grok-lane-manager",
 		DynamicPermission: true, InteractiveResumeFlag: true,
 	},

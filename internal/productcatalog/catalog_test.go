@@ -13,8 +13,8 @@ func TestCatalogIsTheClosedFourProductTwoBinaryAuthority(t *testing.T) {
 
 	wantProducts := []ProductDescriptor{
 		{ID: "codex", PeerAlias: "codex-peer", LaneAlias: "codex-peer-lane", LaneCapability: "codex-lane", Connector: ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: ".mcp.json", EntryPoint: "scripts/native-entry", Mode: "mcp"}},
-		{ID: "claude", PeerAlias: "claude-peer", LaneAlias: "claude-peer-lane", LaneCapability: "claude-lane", Connector: ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "claude/.mcp.json", EntryPoint: "agent-session-runtime", Mode: "mcp"}},
-		{ID: "grok", PeerAlias: "grok-peer", LaneAlias: "grok-peer-lane", LaneCapability: "grok-lane", Connector: ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "grok/.mcp.json", EntryPoint: "grok/scripts/native-entry", Mode: "grok-mcp"}},
+		{ID: "claude", PeerAlias: "claude-peer", LaneAlias: "claude-peer-lane", LaneCapability: "claude-lane", Connector: ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "claude/.mcp.json", EntryPoint: "agent-sessions", Mode: "mcp"}},
+		{ID: "grok", PeerAlias: "grok-peer", LaneAlias: "grok-peer-lane", LaneCapability: "grok-lane", Connector: ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "grok/.mcp.json", EntryPoint: "grok/scripts/native-entry", Mode: "mcp"}},
 		{ID: "qwen", PeerAlias: "qwen-peer", LaneAlias: "qwen-peer-lane", LaneCapability: "qwen-lane", Connector: ConnectorDescriptor{Type: "mcp-stdio", ManifestPath: "qwen/mcp.json", EntryPoint: "qwen/scripts/native-entry", Mode: "mcp"}},
 	}
 	if len(catalog.Products) != len(wantProducts) {

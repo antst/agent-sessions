@@ -157,7 +157,8 @@ func verifyQwenPluginInstallation(root, expectedVersion string, enabled bool) er
 	server, ok := servers[qwenMCPName].(map[string]any)
 	arguments, argumentsOK := server["args"].([]any)
 	if !ok || stringValue(server["type"]) != "stdio" || stringValue(server["command"]) != qwenMCPCommand ||
-		!argumentsOK || len(arguments) != 1 || stringValue(arguments[0]) != "mcp" {
+		!argumentsOK || len(arguments) != 3 || stringValue(arguments[0]) != "connector" ||
+		stringValue(arguments[1]) != "qwen" || stringValue(arguments[2]) != "mcp" {
 		return fmt.Errorf("qwen plugin does not provide the exact %s stdio MCP server", qwenMCPName)
 	}
 	entryInfo, err := os.Lstat(filepath.Join(root, "scripts", "native-entry"))

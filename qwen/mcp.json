@@ -5,6 +5,8 @@
       "type": "stdio",
       "command": "./scripts/native-entry",
       "args": [
+        "connector",
+        "qwen",
         "mcp"
       ]
     }

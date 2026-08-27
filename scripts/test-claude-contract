@@ -139,7 +139,9 @@ for forbidden in hooks agents settings.json; do
 done
 if [[ ! -f "$plugin_root/claude/.mcp.json" ]] ||
    ! grep -Fq '"agent_sessions"' "$plugin_root/claude/.mcp.json" ||
-   ! grep -Fq '"agent-session-runtime"' "$plugin_root/claude/.mcp.json" ||
+   ! grep -Fq '"agent-sessions"' "$plugin_root/claude/.mcp.json" ||
+   ! grep -Fq '"connector"' "$plugin_root/claude/.mcp.json" ||
+   ! grep -Fq '"claude"' "$plugin_root/claude/.mcp.json" ||
    ! grep -Fq '"mcp"' "$plugin_root/claude/.mcp.json"; then
   printf 'Claude structured messaging MCP inventory is incomplete\n' >&2
   exit 1

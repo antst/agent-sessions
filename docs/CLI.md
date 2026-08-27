@@ -8,7 +8,7 @@ Generated from `internal/clihelp`; edit the descriptor, not this table.
 |---|---|---|---:|---|
 | `connector.claude.mcp` | `agent-sessions connector claude mcp` | connector-internal | true | run the stateless Claude Code connector relay |
 | `connector.codex.mcp` | `agent-sessions connector codex mcp` | connector-internal | true | run the stateless Codex connector relay |
-| `connector.grok.grok-mcp` | `agent-sessions connector grok grok-mcp` | connector-internal | true | run the stateless Grok connector relay |
+| `connector.grok.mcp` | `agent-sessions connector grok mcp` | connector-internal | true | run the stateless Grok connector relay |
 | `connector.qwen.mcp` | `agent-sessions connector qwen mcp` | connector-internal | true | run the stateless Qwen Code connector relay |
 | `host.connector.install` | `agent-sessions connector install --product PRODUCT --source-root ROOT` | public | false | install one explicit native product connector transaction |
 | `host.connector.remove` | `agent-sessions connector remove --product PRODUCT` | public | false | remove one explicit native product connector through its supported installer |

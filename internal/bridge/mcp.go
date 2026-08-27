@@ -205,11 +205,11 @@ func runMCPCommand() int {
 	if product == "" {
 		product = "codex"
 	}
-	return runDaemonMCPRelay(product, os.Stdin, os.Stdout, os.Stderr)
+	return RunDaemonMCPRelay(product, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func runGrokMCPCommand() int {
-	return runDaemonMCPRelay("grok", os.Stdin, os.Stdout, os.Stderr)
+	return RunDaemonMCPRelay("grok", os.Stdin, os.Stdout, os.Stderr)
 }
 
 func writeMCPResponse(writer *bufio.Writer, id json.RawMessage, result any, rpcErr *rpcError) {

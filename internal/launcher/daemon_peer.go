@@ -15,6 +15,7 @@ const (
 	internalCapabilityEnv   = daemon.InternalCapabilityEnvironment
 	internalProductEnv      = daemon.InternalProductEnvironment
 	internalSessionIDEnv    = daemon.InternalSessionIDEnvironment
+	hostBinaryEnv           = daemon.HostBinaryEnvironment
 )
 
 type daemonPeerDependencies struct {
@@ -32,21 +33,26 @@ func executeDaemonPreparedPeer(ctx context.Context, product string, prepared dae
 		strings.TrimSpace(prepared.Attachment.AttachmentID) == "" || strings.TrimSpace(prepared.Capability) == "" {
 		return errors.New("daemon returned an incomplete native launch handoff")
 	}
-	environment := preparedPeerEnvironment(os.Environ(), product, prepared)
+	hostBinary, err := os.Executable()
+	if err != nil || strings.TrimSpace(hostBinary) == "" {
+		return errors.New("resolve the canonical Agent Sessions host binary")
+	}
+	environment := preparedPeerEnvironment(os.Environ(), product, hostBinary, prepared)
 	if err := dependencies.exec(prepared.Launch.Executable, prepared.Launch.Arguments, environment); err != nil {
 		return errors.Join(err, dependencies.detach(ctx, prepared.Attachment.AttachmentID, "native_exec_failed"))
 	}
 	return nil
 }
 
-func preparedPeerEnvironment(base []string, product string, prepared daemon.AttachmentPrepareResult) []string {
-	replacements := make(map[string]string, len(prepared.Launch.Environment)+4)
+func preparedPeerEnvironment(base []string, product, hostBinary string, prepared daemon.AttachmentPrepareResult) []string {
+	replacements := make(map[string]string, len(prepared.Launch.Environment)+5)
 	for key, value := range prepared.Launch.Environment {
 		replacements[key] = value
 	}
 	replacements[internalAttachmentIDEnv] = prepared.Attachment.AttachmentID
 	replacements[internalCapabilityEnv] = prepared.Capability
 	replacements[internalProductEnv] = product
+	replacements[hostBinaryEnv] = hostBinary
 	if prepared.Launch.SessionID != "" {
 		replacements[internalSessionIDEnv] = prepared.Launch.SessionID
 	}

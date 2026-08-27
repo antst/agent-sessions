@@ -105,6 +105,23 @@ func TestAdministrativeParserRejectsUndocumentedOptionsBeforeDispatch(t *testing
 	}
 }
 
+func TestCanonicalConnectorModeDispatchesOneProductRelay(t *testing.T) {
+	previous := runConnectorRelay
+	t.Cleanup(func() { runConnectorRelay = previous })
+	called := ""
+	runConnectorRelay = func(product string, _ io.Reader, _, _ io.Writer) int {
+		called = product
+		return 17
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run("agent-sessions", []string{"connector", "grok", "mcp"}, &stdout, &stderr); code != 17 {
+		t.Fatalf("connector exit = %d, stderr=%q", code, stderr.String())
+	}
+	if called != "grok" {
+		t.Fatalf("connector product = %q", called)
+	}
+}
+
 func TestMachineHelpProjectsCanonicalEnvironmentJSONAndExitContracts(t *testing.T) {
 	contract := clihelp.Contract()
 	wantEnvironment := []string{

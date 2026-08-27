@@ -24,11 +24,7 @@ func TestCanonicalModesAliasesAndBinaryRolesAreComplete(t *testing.T) {
 		for _, operation := range []string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"} {
 			wantKeys = append(wantKeys, "lane."+product+"."+operation)
 		}
-		mode := "mcp"
-		if product == "grok" {
-			mode = "grok-mcp"
-		}
-		wantKeys = append(wantKeys, "connector."+product+"."+mode)
+		wantKeys = append(wantKeys, "connector."+product+".mcp")
 	}
 	gotKeys := make([]string, 0, len(contract.Commands))
 	seen := map[string]bool{}

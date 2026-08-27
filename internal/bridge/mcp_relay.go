@@ -15,6 +15,17 @@ import (
 
 var forwardMCPToDaemon = daemonpkg.ForwardMCP
 
+// RunDaemonMCPRelay runs the one stateless stdio relay contract for an exact
+// authoritative product. Product-specific payloads differ only in this
+// attested connector identity; tools and routing remain daemon-owned.
+func RunDaemonMCPRelay(product string, input io.Reader, output io.Writer, diagnostics io.Writer) int {
+	if _, ok := bridgeProductByID(product); !ok {
+		_, _ = fmt.Fprintf(diagnostics, "agent-sessions MCP relay: unsupported product %q\n", product)
+		return 2
+	}
+	return runDaemonMCPRelay(product, input, output, diagnostics)
+}
+
 func runDaemonMCPRelay(product string, input io.Reader, output io.Writer, diagnostics io.Writer) int {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 2*maxFrameBytes)
