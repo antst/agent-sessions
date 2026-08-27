@@ -370,6 +370,19 @@ func (registry *AttachmentRegistry) AttestConnector(ctx context.Context, attesta
 	return cloneAttachmentRecord(record), nil
 }
 
+// PreparedConnector validates only the daemon-issued launch reservation. It
+// grants no peer authority while native session selection is unresolved.
+func (registry *AttachmentRegistry) PreparedConnector(product, attachmentID, capability string) (AttachmentRecord, error) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	record, ok := registry.attachments[attachmentID]
+	if !ok || record.Product != product || record.State != AttachmentStatePrepared ||
+		!attachmentCapabilityMatches(record.LaunchCapabilityHash, capability) {
+		return AttachmentRecord{}, ErrAttachmentNotAttested
+	}
+	return cloneAttachmentRecord(record), nil
+}
+
 // Select resolves an exact address or one unambiguous visible display name.
 func (registry *AttachmentRegistry) Select(_ context.Context, selector AttachmentSelector) (AttachmentRecord, error) {
 	registry.mu.Lock()

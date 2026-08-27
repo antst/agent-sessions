@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // AttachmentDetachRequest unpublishes one exact prepared or attached native actor.
@@ -31,6 +32,16 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 			err    error
 		)
 		switch request.Operation {
+		case "mcp.forward":
+			var payload MCPForwardRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			service := runtime.mcpService()
+			if service == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "MCP authority is not ready", Retryable: true}
+			}
+			result = service.Forward(ctx, principal, payload)
 		case "attachment.prepare":
 			var payload AttachmentPrepareRequest
 			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
@@ -60,14 +71,26 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 			}
 			result, err = registry.Detach(ctx, payload.AttachmentID, payload.Reason)
 		case "peer.identity":
+			if !principal.Attested {
+				err = ErrAttachmentNotAttested
+				break
+			}
 			result, err = registry.Select(ctx, AttachmentSelector{SessionID: principal.SessionID})
 		case "peer.discover":
+			if !principal.Attested {
+				err = ErrAttachmentNotAttested
+				break
+			}
 			engine := runtime.deliveryEngine()
 			if engine == nil {
 				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "delivery authority is not ready", Retryable: true}
 			}
 			result, err = engine.Discover(ctx, principal.AttachmentID)
 		case "peer.send", "peer.broadcast":
+			if !principal.Attested {
+				err = ErrAttachmentNotAttested
+				break
+			}
 			engine := runtime.deliveryEngine()
 			if engine == nil {
 				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "delivery authority is not ready", Retryable: true}
@@ -108,6 +131,9 @@ func decodeControlPayload(body json.RawMessage, target any) *controlError {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return &controlError{Code: "invalid_payload", Message: "request payload does not match the operation contract", Retryable: false}
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return &controlError{Code: "invalid_payload", Message: "request payload contains trailing JSON", Retryable: false}
 	}
 	return nil
 }

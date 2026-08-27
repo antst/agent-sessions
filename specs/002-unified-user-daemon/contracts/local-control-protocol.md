@@ -56,6 +56,13 @@ The API assigns one role per connection:
 Role scoping prevents accidental capability exposure through model-facing tool inventories. It is not
 claimed as a security boundary against arbitrary code already running as the owning OS user.
 
+A connector launched by a bare native session sends only its product. The daemon admits that
+connection solely for MCP initialization, ping, and tool discovery; `tools/call` returns the canonical
+inactive result. A managed connector additionally sends the exact attachment ID and raw launch
+capability. A known native session ID is optional corroboration; late-bound connectors remain in the
+selecting state until the daemon adapter or native hook adopts the authoritative session. Partial
+attachment claims are rejected rather than interpreted as either bare or managed.
+
 ## Hello frame
 
 The first frame must be:
@@ -68,6 +75,7 @@ The first frame must be:
   "role": "connector",
   "product": "qwen",
   "attachment_id": "launch-scoped-id",
+  "session_id": "optional-native-selection",
   "capability": "raw-daemon-issued-capability"
 }
 ```
@@ -158,6 +166,7 @@ do not start a daemon or send mutation requests to an unavailable daemon endpoin
 | `attachment.adopt` | launcher, hook | Atomically bind a late-selected authoritative native session ID |
 | `attachment.refresh` | launcher, hook | Update exact live native evidence without changing functional identity |
 | `attachment.detach` | launcher, hook | End one exact attachment revision; retain durable session preferences |
+| `mcp.forward` | connector | Relay one bounded MCP method and parameters; the daemon owns tool inventory, authorization, routing, and result shaping |
 | `peer.identity` | connector | Return the connector's own attested participant identity |
 | `peer.discover` | connector | Existing group-filtered peer discovery |
 | `peer.send` | connector | Existing direct or explicit-target multicast delivery |

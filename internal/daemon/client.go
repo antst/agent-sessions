@@ -9,7 +9,20 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"time"
+)
+
+const (
+	// InternalAttachmentIDEnvironment is inherited only by a daemon-prepared vendor process tree.
+	InternalAttachmentIDEnvironment = "AGENT_SESSIONS_INTERNAL_ATTACHMENT_ID"
+	// InternalCapabilityEnvironment carries one daemon-issued non-durable launch capability.
+	InternalCapabilityEnvironment = "AGENT_SESSIONS_INTERNAL_LAUNCH_CAPABILITY"
+	// InternalProductEnvironment identifies the prepared vendor product.
+	InternalProductEnvironment = "AGENT_SESSIONS_INTERNAL_PRODUCT"
+	// InternalSessionIDEnvironment carries a daemon-selected native session when known before exec.
+	InternalSessionIDEnvironment = "AGENT_SESSIONS_INTERNAL_SESSION_ID"
 )
 
 // LocalControlRole identifies one short-lived same-user daemon client boundary.
@@ -88,6 +101,36 @@ func DetachManagedAttachment(ctx context.Context, attachmentID, reason string) e
 		AttachmentID: attachmentID, Reason: reason,
 	})
 	return err
+}
+
+// InheritedConnectorIdentity reads only daemon-issued internal launch metadata.
+// An ordinary native session has none and therefore remains a bare connector.
+func InheritedConnectorIdentity(product string) LocalControlIdentity {
+	if inherited := strings.TrimSpace(os.Getenv(InternalProductEnvironment)); inherited != "" {
+		product = inherited
+	}
+	return LocalControlIdentity{
+		Role: LocalControlConnector, Product: strings.TrimSpace(product),
+		AttachmentID: strings.TrimSpace(os.Getenv(InternalAttachmentIDEnvironment)),
+		SessionID:    strings.TrimSpace(os.Getenv(InternalSessionIDEnvironment)),
+		Capability:   strings.TrimSpace(os.Getenv(InternalCapabilityEnvironment)),
+	}
+}
+
+// ForwardMCP relays one MCP method to the current daemon generation and returns its complete decision.
+func ForwardMCP(ctx context.Context, identity LocalControlIdentity, method string, params json.RawMessage) (MCPForwardResult, error) {
+	response, err := QueryLocalControl(ctx, identity, "mcp.forward", MCPForwardRequest{Method: method, Params: params})
+	if err != nil {
+		return MCPForwardResult{}, err
+	}
+	var result MCPForwardResult
+	if err := decodeStrictControlFrame(response.Result, &result); err != nil {
+		return MCPForwardResult{}, fmt.Errorf("decode daemon MCP decision: %w", err)
+	}
+	if len(result.Result) == 0 && result.Error == nil {
+		return MCPForwardResult{}, errors.New("daemon returned an empty MCP decision")
+	}
+	return result, nil
 }
 
 //nolint:gocyclo // One bounded exchange validates the complete hello/request/response correlation contract.

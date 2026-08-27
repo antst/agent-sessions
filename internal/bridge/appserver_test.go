@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 )
 
 type fakeAppServer struct {
@@ -273,6 +275,11 @@ func TestAppServerSocketRunning(t *testing.T) {
 }
 
 func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
+	previousForward := forwardMCPToDaemon
+	t.Cleanup(func() { forwardMCPToDaemon = previousForward })
+	forwardMCPToDaemon = func(context.Context, daemonpkg.LocalControlIdentity, string, json.RawMessage) (daemonpkg.MCPForwardResult, error) {
+		return daemonpkg.MCPForwardResult{Result: json.RawMessage(`{"content":[{"type":"text","text":"communication is inactive for this ungrouped session"}],"isError":true}`)}, nil
+	}
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
@@ -317,6 +324,11 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 }
 
 func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
+	previousForward := forwardMCPToDaemon
+	t.Cleanup(func() { forwardMCPToDaemon = previousForward })
+	forwardMCPToDaemon = func(context.Context, daemonpkg.LocalControlIdentity, string, json.RawMessage) (daemonpkg.MCPForwardResult, error) {
+		return daemonpkg.MCPForwardResult{Result: json.RawMessage(`{"content":[{"type":"text","text":"session-scoped peer tool cannot act as another session"}],"isError":true}`)}, nil
+	}
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))

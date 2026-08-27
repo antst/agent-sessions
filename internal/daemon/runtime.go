@@ -102,6 +102,7 @@ type Runtime struct {
 	completedStage []RecoveryStage
 	attachments    *AttachmentRegistry
 	deliveries     *DeliveryEngine
+	mcp            *MCPService
 }
 
 // NewRuntime constructs one closed host composition root.
@@ -249,8 +250,13 @@ func (runtime *Runtime) recoverOwnedStage(ctx context.Context, stage RecoverySta
 		if err != nil {
 			return err
 		}
+		mcp, err := newMCPService(registry, engine)
+		if err != nil {
+			return err
+		}
 		runtime.mu.Lock()
 		runtime.deliveries = engine
+		runtime.mcp = mcp
 		runtime.mu.Unlock()
 	case RecoveryValidateAuthority, RecoveryLoadConfiguration, RecoveryTransactions, RecoveryCatalog,
 		RecoveryFederation, RecoveryCommitAuthority, RecoverySyntheticService:
@@ -269,6 +275,12 @@ func (runtime *Runtime) deliveryEngine() *DeliveryEngine {
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
 	return runtime.deliveries
+}
+
+func (runtime *Runtime) mcpService() *MCPService {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.mcp
 }
 
 // Stop closes admission and commits the stopping lifecycle state.

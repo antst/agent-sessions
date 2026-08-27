@@ -59,6 +59,7 @@ type controlPrincipal struct {
 	Product      string
 	AttachmentID string
 	SessionID    string
+	Attested     bool
 	Peer         controlPeerEvidence
 }
 
@@ -381,8 +382,15 @@ func validateControlHello(hello controlHello) error {
 	if _, ok := controlRoleOperations[hello.Role]; !ok {
 		return fmt.Errorf("unknown local control role %q", hello.Role)
 	}
-	if hello.Role == controlRoleConnector && (hello.Product == "" || hello.AttachmentID == "" || hello.Capability == "") {
-		return errors.New("connector hello requires product, attachment_id, and capability")
+	if hello.Role == controlRoleConnector {
+		if hello.Product == "" {
+			return errors.New("connector hello requires a product")
+		}
+		hasAttachment := hello.AttachmentID != "" || hello.SessionID != "" || hello.Capability != "" || len(hello.NativeActor) != 0
+		completeAttachment := hello.AttachmentID != "" && hello.Capability != ""
+		if hasAttachment && !completeAttachment {
+			return errors.New("connector hello attachment attestation is incomplete")
+		}
 	}
 	return nil
 }

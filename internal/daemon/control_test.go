@@ -104,7 +104,7 @@ func TestControlHelloAndRequestResponseAreNDJSONAndCorrelated(t *testing.T) {
 
 	writeControlTestFrame(t, client, map[string]any{
 		"type": "hello", "version": 1, "request_id": "hello-1", "role": "connector",
-		"product": "qwen", "attachment_id": "attachment-1", "capability": "raw-secret-capability",
+		"product": "qwen", "attachment_id": "attachment-1", "session_id": "native-session-1", "capability": "raw-secret-capability",
 	})
 	helloResult := readControlTestFrame(t, client)
 	wantHello := map[string]any{
@@ -577,6 +577,7 @@ func TestControlRoleOperationInventory(t *testing.T) {
 			"attachment.adopt", "attachment.refresh", "attachment.detach",
 		},
 		controlRoleConnector: {
+			"mcp.forward",
 			"peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
 			"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 			"lane.interrupt", "lane.collect", "lane.archive",
@@ -588,6 +589,7 @@ func TestControlRoleOperationInventory(t *testing.T) {
 	allOperations := []string{
 		"runtime.status", "runtime.doctor",
 		"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach",
+		"mcp.forward",
 		"peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
 		"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list", "lane.interrupt", "lane.collect", "lane.archive",
 		"migration.inspect", "remove.inspect",
@@ -721,7 +723,7 @@ func roundTripControlTestRequest(
 	client, serverErr := startControlTestSession(t, server)
 	writeControlTestFrame(t, client, map[string]any{
 		"type": "hello", "version": 1, "request_id": "hello-" + attachmentID, "role": "connector",
-		"product": "qwen", "attachment_id": attachmentID, "capability": "test-capability",
+		"product": "qwen", "attachment_id": attachmentID, "session_id": "session-for-" + attachmentID, "capability": "test-capability",
 	})
 	if hello := readControlTestFrame(t, client); hello["type"] != "hello.result" {
 		t.Fatalf("hello response = %#v", hello)
@@ -756,6 +758,7 @@ func helloControlTestSession(t *testing.T, client net.Conn, role string) {
 	if role == "connector" {
 		hello["product"] = "qwen"
 		hello["attachment_id"] = "attachment-1"
+		hello["session_id"] = "session-1"
 		hello["capability"] = "test-capability"
 	}
 	writeControlTestFrame(t, client, hello)

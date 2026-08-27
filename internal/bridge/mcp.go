@@ -202,90 +202,14 @@ type laneOwner struct {
 
 func runMCPCommand() int {
 	product := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT"))
-	if product == "claude" {
-		paths := resolveNativePaths()
-		return runMCPServer(claudeToolDefinitions, claudeMCPInstructions, func(_ json.RawMessage) (string, error) {
-			caller, err := attestClaudeMCPCaller(paths, os.Getpid())
-			if err != nil {
-				return "", fmt.Errorf("inactive Claude caller attestation: %w", err)
-			}
-			return caller, nil
-		})
+	if product == "" {
+		product = "codex"
 	}
-	if product == "qwen" {
-		paths := resolveNativePaths()
-		return runMCPServer(qwenToolDefinitions, qwenMCPInstructions, func(_ json.RawMessage) (string, error) {
-			caller, err := attestQwenMCPCaller(paths, os.Getpid())
-			if err != nil {
-				return "", fmt.Errorf("inactive Qwen caller attestation: %w", err)
-			}
-			return caller, nil
-		})
-	}
-	return runMCPServer(nativeToolDefinitions, mcpInstructions, func(params json.RawMessage) (string, error) {
-		if err := attestStdioMCPHost(); err != nil {
-			return "", fmt.Errorf("inactive host attestation: %w", err)
-		}
-		caller, err := attestStdioMCPCaller(params)
-		if err != nil {
-			return "", fmt.Errorf("inactive caller attestation: %w", err)
-		}
-		return caller, nil
-	})
+	return runDaemonMCPRelay(product, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func runGrokMCPCommand() int {
-	paths := resolveNativePaths()
-	return runMCPServer(grokToolDefinitions, grokMCPInstructions, func(_ json.RawMessage) (string, error) {
-		caller, err := attestGrokMCPCaller(paths)
-		if err != nil {
-			return "", fmt.Errorf("inactive Grok caller attestation: %w", err)
-		}
-		return caller, nil
-	})
-}
-
-func runMCPServer(toolDefinitions []map[string]any, instructions string, attest func(json.RawMessage) (string, error)) int {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 4096), 2*maxFrameBytes)
-	writer := bufio.NewWriter(os.Stdout)
-	defer func() { _ = writer.Flush() }()
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var request struct {
-			JSONRPC string          `json:"jsonrpc"`
-			ID      json.RawMessage `json:"id"`
-			Method  string          `json:"method"`
-			Params  json.RawMessage `json:"params"`
-		}
-		if json.Unmarshal([]byte(line), &request) != nil {
-			writeMCPResponse(writer, nil, nil, &rpcError{Code: -32700, Message: "Parse error"})
-			continue
-		}
-		if len(request.ID) == 0 {
-			continue
-		}
-		result, err := handleNativeMCPRequestWithTools(request.Method, request.Params, "", toolDefinitions, instructions, attest)
-		if err != nil {
-			code := -32603
-			var rpcErr *rpcError
-			if errors.As(err, &rpcErr) && rpcErr.Code != 0 {
-				code = rpcErr.Code
-			}
-			writeMCPResponse(writer, request.ID, nil, &rpcError{Code: code, Message: err.Error()})
-		} else {
-			writeMCPResponse(writer, request.ID, result, nil)
-		}
-		_ = writer.Flush()
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native MCP server failed: %v\n", err)
-		return 1
-	}
-	return 0
+	return runDaemonMCPRelay("grok", os.Stdin, os.Stdout, os.Stderr)
 }
 
 func writeMCPResponse(writer *bufio.Writer, id json.RawMessage, result any, rpcErr *rpcError) {

@@ -23,6 +23,7 @@ type mcpToolCallResponse struct {
 	IsError           bool             `json:"isError,omitempty"`
 }
 
+//nolint:gocyclo // Vendor request classification, daemon relay, and foreign MCP translation are one closed dispatch boundary.
 func handleNativeServerRequest(client *appServerClient, request rpcServerRequest) {
 	if request.Method == "mcpServer/elicitation/request" {
 		response, trusted := nativePeerElicitationResponse(request.Params)
@@ -53,17 +54,27 @@ func handleNativeServerRequest(client *appServerClient, request rpcServerRequest
 		return
 	}
 	if server == "agent_sessions" {
-		if !authorizedPeerThreadNative(resolveNativePaths(), call.ThreadID) {
-			respondDynamicToolFailure(client, request.ID, fmt.Errorf("agent_sessions is inactive outside an attested peer session"))
-			return
-		}
-		result, err := callNativePeerTool(tool, call.Arguments, call.ThreadID)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		decision, err := daemonMCPToolCall(ctx, "codex", tool, call.Arguments)
 		if err != nil {
 			respondDynamicToolFailure(client, request.ID, err)
 			return
 		}
-		items := []map[string]any{{"type": "inputText", "text": stringValue(result["text"])}}
-		_ = client.respond(request.ID, map[string]any{"contentItems": items, "success": true}, nil)
+		result, err := decodeDaemonMCPToolResult(decision)
+		if err != nil {
+			respondDynamicToolFailure(client, request.ID, err)
+			return
+		}
+		items := dynamicContentItems(result.Content)
+		if len(items) == 0 && result.StructuredContent != nil {
+			body, _ := json.Marshal(result.StructuredContent)
+			items = append(items, map[string]any{"type": "inputText", "text": string(body)})
+		}
+		if len(items) == 0 {
+			items = append(items, map[string]any{"type": "inputText", "text": ""})
+		}
+		_ = client.respond(request.ID, map[string]any{"contentItems": items, "success": !result.IsError}, nil)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

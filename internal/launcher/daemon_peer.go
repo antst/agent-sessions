@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	internalAttachmentIDEnv = "AGENT_SESSIONS_INTERNAL_ATTACHMENT_ID"
-	internalCapabilityEnv   = "AGENT_SESSIONS_INTERNAL_LAUNCH_CAPABILITY"
-	internalProductEnv      = "AGENT_SESSIONS_INTERNAL_PRODUCT"
-	internalSessionIDEnv    = "AGENT_SESSIONS_INTERNAL_SESSION_ID"
+	internalAttachmentIDEnv = daemon.InternalAttachmentIDEnvironment
+	internalCapabilityEnv   = daemon.InternalCapabilityEnvironment
+	internalProductEnv      = daemon.InternalProductEnvironment
+	internalSessionIDEnv    = daemon.InternalSessionIDEnvironment
 )
 
 type daemonPeerDependencies struct {

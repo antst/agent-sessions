@@ -415,39 +415,6 @@ func grokBridgeStateMatchesLaunch(state map[string]any, record grokLaunchRecord)
 		samePath(stringValue(state["supervisorSocket"]), record.ControlSocket)
 }
 
-// attestGrokMCPCaller authorizes an MCP process only when it inherited the raw
-// per-launch capability from this launch's private leader and is a descendant
-// of that exact live leader. Neither environment value grants authority alone.
-func attestGrokMCPCaller(paths nativePaths) (string, error) {
-	token := strings.TrimSpace(os.Getenv(grokLaunchTokenEnv))
-	sessionID := strings.TrimSpace(os.Getenv(grokSessionIDEnv))
-	if !validGrokLaunchToken(token) || !validSessionID(sessionID) {
-		return "", errors.New("grok MCP launch context is unavailable")
-	}
-	record := activeGrokLaunchForSession(paths, sessionID)
-	if record == nil {
-		record = activeGrokLaunchForToken(paths, token)
-	}
-	if record == nil || subtle.ConstantTimeCompare([]byte(record.TokenHash), []byte(grokTokenHash(token))) != 1 {
-		return "", errors.New("grok MCP launch token is not attested by a live host")
-	}
-	if !processHasAncestor(os.Getpid(), record.LeaderPID) {
-		return "", errors.New("grok MCP process is not descended from the private launch leader")
-	}
-	// The host's pre-publication MCP probe runs while it owns the ACP request
-	// stream. Calling status from that probe would wait on the same stream and
-	// deadlock. The raw capability, exact ancestry, owner/host/leader identities,
-	// and private control paths already authorize this narrow bootstrap phase.
-	// Once the daemon is published, every model-visible call refreshes the live
-	// permission class normally before it can act as the peer.
-	if liveGrokLaunchForSession(paths, record.SessionID) != nil {
-		if err := refreshGrokLaunchPermission(record, token); err != nil {
-			return "", fmt.Errorf("refresh live Grok permission mode: %w", err)
-		}
-	}
-	return record.SessionID, nil
-}
-
 func refreshGrokLaunchPermission(record *grokLaunchRecord, token string) error {
 	deadline := time.Now().Add(grokControlTimeout)
 	retryDelay := grokStatusRetryDelay

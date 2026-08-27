@@ -160,6 +160,7 @@ func priorControlOwner(ctx context.Context, state *StateStore) (*procinfo.Proces
 	return owner, recoveredCrash, nil
 }
 
+//nolint:gocyclo // Role, bare-connector, attachment, and exact-evidence gates intentionally fail closed in one boundary.
 func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPeerEvidence, controlHello) (controlPrincipal, *controlError) {
 	return func(ctx context.Context, peer controlPeerEvidence, hello controlHello) (controlPrincipal, *controlError) {
 		if peer.UID != os.Getuid() {
@@ -170,15 +171,26 @@ func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPee
 		case controlRoleAdmin, controlRoleService, controlRoleLauncher:
 			return principal, nil
 		case controlRoleConnector, controlRoleHook:
+			if hello.Role == controlRoleConnector && hello.AttachmentID == "" && hello.SessionID == "" &&
+				hello.Capability == "" && len(hello.NativeActor) == 0 {
+				return principal, nil
+			}
 			registry := runtime.attachmentRegistry()
 			if registry == nil {
 				return controlPrincipal{}, &controlError{Code: "runtime_recovering", Message: "attachment authority is not ready", Retryable: true}
 			}
 			record, ok := registry.attachmentByID(hello.AttachmentID)
-			if !ok || record.Product != hello.Product || hello.Capability == "" || hello.SessionID == "" {
+			if !ok || record.Product != hello.Product || hello.Capability == "" {
 				return controlPrincipal{}, &controlError{Code: "attachment_not_attested", Message: "connector does not identify one prepared attachment"}
 			}
 			var err error
+			if record.State == AttachmentStatePrepared && hello.SessionID == "" {
+				_, err = registry.PreparedConnector(hello.Product, hello.AttachmentID, hello.Capability)
+				if err != nil {
+					return controlPrincipal{}, controlFailure(err)
+				}
+				return principal, nil
+			}
 			if record.State == AttachmentStatePrepared {
 				record, err = registry.Adopt(ctx, AttachmentAdoptRequest{
 					AttachmentID: record.AttachmentID, Capability: hello.Capability,
@@ -194,6 +206,7 @@ func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPee
 				return controlPrincipal{}, controlFailure(err)
 			}
 			principal.SessionID = record.SessionID
+			principal.Attested = true
 			return principal, nil
 		default:
 			return controlPrincipal{}, &controlError{Code: "role_not_ready", Message: "workflow role is not available in this daemon generation", Retryable: true}

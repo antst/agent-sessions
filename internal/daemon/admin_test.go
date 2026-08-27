@@ -133,6 +133,7 @@ func TestAdministrativeOperationsAreCompleteAndAbsentFromMCPConnectorRole(t *tes
 	wantConnector := []string{
 		"lane.archive", "lane.collect", "lane.followup", "lane.interrupt", "lane.list",
 		"lane.resume", "lane.start", "lane.status",
+		"mcp.forward",
 		"peer.broadcast", "peer.discover", "peer.identity", "peer.inbox", "peer.rename", "peer.send",
 	}
 	// Vendor MCP tools are admitted to the daemon as the connector role. Keep

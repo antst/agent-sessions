@@ -82,7 +82,7 @@ func newWorkflowTestRuntime(t *testing.T) *Runtime {
 	}
 	adapter := &attachmentTestAdapter{}
 	attachmentAdapters := map[string]AttachmentAdapter{"codex": adapter, "claude": adapter, "grok": adapter, "qwen": adapter}
-	deliveryAdapter := &deliveryTestAdapter{}
+	deliveryAdapter := &deliveryTestAdapter{counts: make(map[string]int)}
 	deliveryAdapters := map[string]DeliveryAdapter{"codex": deliveryAdapter, "claude": deliveryAdapter, "grok": deliveryAdapter, "qwen": deliveryAdapter}
 	runtime, err := NewRuntime(RuntimeOptions{
 		Paths: paths, State: state,

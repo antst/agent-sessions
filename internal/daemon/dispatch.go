@@ -22,6 +22,7 @@ var controlRoleOperations = map[controlRole]map[string]struct{}{
 		"attachment.adopt", "attachment.refresh", "attachment.detach",
 	),
 	controlRoleConnector: operationSet(
+		"mcp.forward",
 		"peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
 		"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 		"lane.interrupt", "lane.collect", "lane.archive",
@@ -102,13 +103,14 @@ func controlPrincipalReplayNamespace(principal controlPrincipal) string {
 		Product      string      `json:"product,omitempty"`
 		AttachmentID string      `json:"attachment_id,omitempty"`
 		SessionID    string      `json:"session_id,omitempty"`
+		Attested     bool        `json:"attested"`
 		UID          int         `json:"uid"`
 		PID          int         `json:"pid"`
 		ProcStart    string      `json:"proc_start"`
 		StrongStart  string      `json:"strong_start"`
 	}{
 		Role: principal.Role, Product: principal.Product, AttachmentID: principal.AttachmentID,
-		SessionID: principal.SessionID, UID: principal.Peer.UID, PID: principal.Peer.PID,
+		SessionID: principal.SessionID, Attested: principal.Attested, UID: principal.Peer.UID, PID: principal.Peer.PID,
 		ProcStart: principal.Peer.ProcStart, StrongStart: principal.Peer.StrongStart,
 	})
 	digest := sha256.Sum256(body)

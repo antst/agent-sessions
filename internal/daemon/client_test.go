@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestInheritedConnectorIdentityUsesOnlyInternalLaunchMetadata(t *testing.T) {
+	t.Setenv(InternalProductEnvironment, "qwen")
+	t.Setenv(InternalAttachmentIDEnvironment, "attachment-7")
+	t.Setenv(InternalSessionIDEnvironment, "session-7")
+	t.Setenv(InternalCapabilityEnvironment, "capability-7")
+	identity := InheritedConnectorIdentity("codex")
+	if identity.Role != LocalControlConnector || identity.Product != "qwen" || identity.AttachmentID != "attachment-7" ||
+		identity.SessionID != "session-7" || identity.Capability != "capability-7" {
+		t.Fatalf("inherited identity = %#v", identity)
+	}
+}
+
 func TestLocalControlLauncherPreparesThroughOneCorrelatedExchange(t *testing.T) {
 	server := newControlTestServer(controlServerConfig{
 		Generation: 17, RuntimeVersion: "0.3.0",
