@@ -132,15 +132,17 @@ vet:
 federation-integration:
 	./scripts/federation/test
 
-# Closed unified live-contract inventory. Only test-unified-service creates a
-# production-shaped daemon, and it does so under its isolated service-manager
-# fixture; the remaining contracts use in-process authorities.
+# Closed in-process live-contract inventory. The production-shaped service
+# manager cell has a separate target so scripts/test can run it first under a
+# genuinely clean acceptance user.
 unified-live-contracts:
 	./scripts/test-unified-peers
 	./scripts/test-unified-lane-composition
 	./scripts/test-unified-lane-restart
 	./scripts/test-unified-migration
 	./scripts/test-unified-stress
+
+unified-service-contract:
 	./scripts/test-unified-service
 
 build:
