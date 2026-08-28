@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -103,7 +102,7 @@ var grokToolDefinitions = grokPeerToolDefinitions()
 var claudeToolDefinitions = claudePeerToolDefinitions()
 var qwenToolDefinitions = qwenPeerToolDefinitions()
 
-var routeMCPAgentFrame = federator.RouteAgentFrame
+var routeMCPAgentFrame = routeDaemonAgentFrame
 
 func claudePeerToolDefinitions() []map[string]any {
 	body, _ := json.Marshal(nativeToolDefinitions)
@@ -198,18 +197,6 @@ type laneOwner struct {
 	ProcStart      string
 	SessionID      string
 	PermissionMode string
-}
-
-func runMCPCommand() int {
-	product := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT"))
-	if product == "" {
-		product = "codex"
-	}
-	return RunDaemonMCPRelay(product, os.Stdin, os.Stdout, os.Stderr)
-}
-
-func runGrokMCPCommand() int {
-	return RunDaemonMCPRelay("grok", os.Stdin, os.Stdout, os.Stderr)
 }
 
 func writeMCPResponse(writer *bufio.Writer, id json.RawMessage, result any, rpcErr *rpcError) {
@@ -496,7 +483,7 @@ func groupedAgentRuntime(paths nativePaths, sessionID string) (string, bool) {
 		return runtimeDir, runtimeDir != ""
 	}
 	runtimeDir := laneAgentRuntimeDir()
-	parent, parentErr := federator.ResolveParentContext(runtimeDir, sessionID)
+	parent, parentErr := resolveDaemonParentContext(runtimeDir, sessionID)
 	if parentErr == nil && parent.Product == "claude" && parent.SessionID == sessionID {
 		return runtimeDir, true
 	}
@@ -591,7 +578,7 @@ func liveRegisteredClaudePeer(sessionID string) bool {
 	if !validSessionID(sessionID) {
 		return false
 	}
-	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	parent, err := resolveDaemonParentContext(laneAgentRuntimeDir(), sessionID)
 	return err == nil && parent.Product == "claude" && parent.SessionID == sessionID
 }
 
@@ -599,7 +586,7 @@ func liveRegisteredQwenPeer(sessionID string) bool {
 	if !validSessionID(sessionID) {
 		return false
 	}
-	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	parent, err := resolveDaemonParentContext(laneAgentRuntimeDir(), sessionID)
 	return err == nil && parent.Product == "qwen" && parent.SessionID == sessionID
 }
 
@@ -607,7 +594,7 @@ func liveRegisteredQwenPeer(sessionID string) bool {
 // model-supplied session id. The MCP process must descend from the exact live
 // Qwen adapter and lifecycle process attested by the grouped host agent.
 func attestQwenMCPCaller(paths nativePaths, startPID int) (string, error) {
-	return attestQwenMCPCallerWithResolver(paths, startPID, federator.ResolveParentContext)
+	return attestQwenMCPCallerWithResolver(paths, startPID, resolveDaemonParentContext)
 }
 
 // inferQwenParent uses the same capability, exact-process, ancestry, and real
@@ -618,7 +605,7 @@ func inferQwenParent(paths nativePaths, startPID int) (laneOwner, bool) {
 	if err != nil {
 		return laneOwner{}, false
 	}
-	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	parent, err := resolveDaemonParentContext(laneAgentRuntimeDir(), sessionID)
 	if err != nil || parent.Product != "qwen" || parent.SessionID != sessionID {
 		return laneOwner{}, false
 	}
@@ -638,7 +625,7 @@ func inferQwenParent(paths nativePaths, startPID int) (laneOwner, bool) {
 //nolint:gocyclo // Product, process, ancestry, registration, and socket proofs intentionally fail closed independently.
 func inferRegisteredPeerParent(
 	startPID int,
-	resolveParent func(string, string) (federator.ParentContext, error),
+	resolveParent func(string, string) (federation.ParentContext, error),
 ) (laneOwner, bool) {
 	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
 	product := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT"))
@@ -677,7 +664,7 @@ func strongProcessIdentityMatches(pid int, start, strongStart string) bool {
 func attestQwenMCPCallerWithResolver(
 	_ nativePaths,
 	startPID int,
-	resolveParent func(string, string) (federator.ParentContext, error),
+	resolveParent func(string, string) (federation.ParentContext, error),
 ) (string, error) {
 	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
 	if strings.TrimSpace(os.Getenv("AGENT_SESSIONS_PRODUCT")) != "qwen" ||
@@ -713,14 +700,14 @@ func attestQwenMCPCallerWithResolver(
 // inherited UUID/socket, and the host agent must independently attest that
 // adapter plus its live lifecycle owner for the same grouped registration.
 func attestClaudeMCPCaller(paths nativePaths, startPID int) (string, error) {
-	return attestClaudeMCPCallerWithResolver(paths, startPID, federator.ResolveParentContext)
+	return attestClaudeMCPCallerWithResolver(paths, startPID, resolveDaemonParentContext)
 }
 
 //nolint:gocyclo // Every process, registration, row, and socket condition is an independent fail-closed gate.
 func attestClaudeMCPCallerWithResolver(
 	paths nativePaths,
 	startPID int,
-	resolveParent func(string, string) (federator.ParentContext, error),
+	resolveParent func(string, string) (federation.ParentContext, error),
 ) (string, error) {
 	sessionID := strings.TrimSpace(os.Getenv(peerSessionIDEnvironment))
 	socket := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))
@@ -815,14 +802,14 @@ func listNativePeerSessions(paths nativePaths) ([]peerSession, error) {
 // registry row agrees. Those variables are inherited by detached and nested
 // subprocesses, so environment-only attribution can target the wrong session.
 func inferClaudeParent(paths nativePaths, startPID int) (laneOwner, bool) {
-	return inferClaudeParentWithResolver(paths, startPID, federator.ResolveParentContext)
+	return inferClaudeParentWithResolver(paths, startPID, resolveDaemonParentContext)
 }
 
 //nolint:gocyclo // Native, attachment, process, lifecycle, row, and socket evidence must all fail closed independently.
 func inferClaudeParentWithResolver(
 	paths nativePaths,
 	startPID int,
-	resolveParent func(string, string) (federator.ParentContext, error),
+	resolveParent func(string, string) (federation.ParentContext, error),
 ) (laneOwner, bool) {
 	sessionID := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID"))
 	socket := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))

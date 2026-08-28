@@ -2,12 +2,11 @@ package launcher
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 )
 
 const (
@@ -123,10 +122,7 @@ func (c peerLaunchContext) launchArguments(alwaysApprove bool, alwaysApproveSpec
 }
 
 func agentRuntimeDir() string {
-	if value := strings.TrimSpace(os.Getenv(agentRuntimeDirEnv)); value != "" {
-		return value
-	}
-	return federator.DefaultRuntimeDir()
+	return ""
 }
 
 func boolString(value bool) string {
@@ -149,31 +145,11 @@ func resolvePeerLaunchContext(
 	context peerLaunchContext,
 	alwaysApprove, alwaysApproveSpecified bool,
 ) (federator.ResolvedPreferences, error) {
-	return federator.ResolveSessionPreferences(agentRuntimeDir(), peerPreferenceRequest(
-		sessionID, product, context, alwaysApprove, alwaysApproveSpecified,
-	))
-}
-
-func previewPeerLaunchContext(
-	sessionID, product string,
-	context peerLaunchContext,
-	alwaysApprove, alwaysApproveSpecified bool,
-) (federator.ResolvedPreferences, federator.ResolvePreferencesRequest, error) {
-	request := peerPreferenceRequest(sessionID, product, context, alwaysApprove, alwaysApproveSpecified)
-	resolved, err := federator.PreviewSessionPreferences(agentRuntimeDir(), request)
-	return resolved, request, err
-}
-
-func peerPreferenceRequest(
-	sessionID, product string,
-	context peerLaunchContext,
-	alwaysApprove, alwaysApproveSpecified bool,
-) federator.ResolvePreferencesRequest {
-	return federator.ResolvePreferencesRequest{
+	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
 		SessionID: sessionID, Product: product, Kind: federation.SessionKindInteractive,
 		Groups: context.groups, GroupsSpecified: context.groupsSpecified,
 		ParentSessionID: context.parentSession, ParentSpecified: context.parentSpecified,
 		InheritParentGroups: context.inheritParentGroups, InheritGroupsSpecified: context.inheritGroupsSpecified,
 		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,
-	}
+	})
 }

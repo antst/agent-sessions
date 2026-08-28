@@ -192,7 +192,7 @@ func TestQwenResumeCompensationRearchivesOrRetainsTypedDebt(t *testing.T) {
 	}
 	attempted := cloneQwenLaneState(prior)
 	attempted.Status, attempted.NativeArchiveState, attempted.StartupID = "starting", "active", randomID()
-	attempted.Turns = append(attempted.Turns, newQwenLaneTurn("resume", 0))
+	attempted.Turns = append(attempted.Turns, newQwenLaneTurn("resume"))
 	attempted.PendingTurnIDs = []string{attempted.Turns[0].ID}
 	if err := writeQwenLaneState(paths, attempted); err != nil {
 		t.Fatal(err)

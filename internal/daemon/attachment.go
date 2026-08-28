@@ -151,6 +151,27 @@ type AttachmentSelector struct {
 	Name      string `json:"name,omitempty"`
 }
 
+// AttachmentLookupRequest selects one durable managed session without
+// requiring connector attestation. Launchers use this read-only projection to
+// dispatch an exact generic resume through the product recorded by the daemon.
+type AttachmentLookupRequest struct {
+	Product   string `json:"product,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+// ManagedAttachment is the metadata-only durable session projection returned
+// to launchers. It contains no capability or native message content.
+type ManagedAttachment struct {
+	SessionID      string   `json:"session_id"`
+	Product        string   `json:"product"`
+	Kind           string   `json:"kind"`
+	Name           string   `json:"name,omitempty"`
+	Groups         []string `json:"groups,omitempty"`
+	PermissionMode string   `json:"permission_mode,omitempty"`
+	Live           bool     `json:"live"`
+}
+
 // AttachmentPrepareResult returns the durable reservation and its one-time launch capability.
 type AttachmentPrepareResult struct {
 	Attachment AttachmentRecord `json:"attachment"`
@@ -221,8 +242,33 @@ func NewAttachmentRegistry(options AttachmentRegistryOptions) (*AttachmentRegist
 		for _, preference := range catalog.Preferences {
 			registry.preferences[attachmentPreferenceKey(preference.Product, preference.SessionID)] = cloneAttachmentPreferences(preference)
 		}
+	} else {
+		if adoptionErr := registry.loadAdoptedAttachmentPreferences(context.Background()); adoptionErr != nil {
+			return nil, adoptionErr
+		}
 	}
 	return registry, nil
+}
+
+func (registry *AttachmentRegistry) loadAdoptedAttachmentPreferences(ctx context.Context) error {
+	adopted, _, err := registry.state.ReadSessionCatalog(ctx)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load adopted attachment preferences: %w", err)
+	}
+	for _, session := range adopted.Sessions {
+		preference := AttachmentPreferences{
+			SessionID: session.SessionID, Product: session.Product, Kind: session.Kind,
+			Groups: sortedUniqueStrings(append(
+				append([]string(nil), session.ExplicitGroups...), session.InheritedGroups...,
+			)),
+			PermissionMode: session.PermissionMode, Revision: 1, UpdatedAt: session.UpdatedAt,
+		}
+		registry.preferences[attachmentPreferenceKey(preference.Product, preference.SessionID)] = preference
+	}
+	return nil
 }
 
 // Prepare commits launch intent before the vendor process can become managed.
@@ -473,6 +519,61 @@ func (registry *AttachmentRegistry) SessionPreferences(_ context.Context, produc
 		return AttachmentPreferences{}, ErrAttachmentNotFound
 	}
 	return cloneAttachmentPreferences(preference), nil
+}
+
+// LookupManaged resolves one exact durable session, or one unambiguous live
+// name within a product. Detached preferences remain resumable by exact
+// session ID and never gain a synthetic live identity.
+func (registry *AttachmentRegistry) LookupManaged(_ context.Context, request AttachmentLookupRequest) (ManagedAttachment, error) { //nolint:gocyclo // Exact/live/name/durable precedence is one fail-closed selector.
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if (strings.TrimSpace(request.SessionID) == "") == (strings.TrimSpace(request.Name) == "") {
+		return ManagedAttachment{}, errors.New("managed attachment lookup requires exactly one selector")
+	}
+	matchesByProduct := make(map[string]ManagedAttachment)
+	updatedByProduct := make(map[string]int64)
+	for _, record := range registry.attachments {
+		if request.Product != "" && record.Product != request.Product {
+			continue
+		}
+		if request.SessionID != "" && record.SessionID != request.SessionID ||
+			request.Name != "" && (record.Name != request.Name || record.State != AttachmentStateAttached) {
+			continue
+		}
+		candidate := ManagedAttachment{
+			SessionID: record.SessionID, Product: record.Product, Kind: record.Kind, Name: record.Name,
+			Groups: append([]string(nil), record.Groups...), PermissionMode: record.PermissionMode,
+			Live: record.State == AttachmentStateAttached,
+		}
+		prior, exists := matchesByProduct[record.Product]
+		if !exists || candidate.Live && !prior.Live || candidate.Live == prior.Live && record.UpdatedAt > updatedByProduct[record.Product] {
+			matchesByProduct[record.Product] = candidate
+			updatedByProduct[record.Product] = record.UpdatedAt
+		}
+	}
+	if request.SessionID != "" {
+		for _, preference := range registry.preferences {
+			if preference.SessionID != request.SessionID || request.Product != "" && preference.Product != request.Product ||
+				matchesByProduct[preference.Product].SessionID != "" {
+				continue
+			}
+			matchesByProduct[preference.Product] = ManagedAttachment{
+				SessionID: preference.SessionID, Product: preference.Product, Kind: preference.Kind,
+				Groups: append([]string(nil), preference.Groups...), PermissionMode: preference.PermissionMode,
+			}
+		}
+	}
+	matches := make([]ManagedAttachment, 0, len(matchesByProduct))
+	for _, match := range matchesByProduct {
+		matches = append(matches, match)
+	}
+	if len(matches) == 0 {
+		return ManagedAttachment{}, ErrAttachmentNotFound
+	}
+	if len(matches) > 1 {
+		return ManagedAttachment{}, ErrAttachmentAmbiguous
+	}
+	return matches[0], nil
 }
 
 func (registry *AttachmentRegistry) attachedByID(attachmentID string) (AttachmentRecord, bool) {

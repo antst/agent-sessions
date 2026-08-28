@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Sessions central federation hub
+Documentation=https://github.com/antst/agent-sessions/blob/main/docs/FEDERATION.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@PREFIX@/libexec/agent-sessions/hub/current/bin/agent-sessions-hub --listen @LISTEN@
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

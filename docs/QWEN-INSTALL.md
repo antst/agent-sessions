@@ -15,7 +15,7 @@ environment:
   resolved to their `/private/...` targets;
 - `QWEN_RUNTIME_DIR`, when set, has the same presence-sensitive rule.
 
-Run install, doctor, the host agent, peers, and lanes with the same values. An
+Run install, doctor, the host daemon, peers, and lanes with the same values. An
 unset variable and a variable explicitly set to the native-looking path are
 different identities by design.
 
@@ -29,10 +29,10 @@ make upgrade-qwen       # same verified, idempotent transaction
 make remove-qwen
 ```
 
-`make install-all` installs the shared runtime and each Codex, Claude, Grok, or Qwen integration
-whose native client is present. Missing products are reported and skipped; `make install-qwen`
-remains strict when requested directly. A prebuilt archive needs no Go toolchain: its eleven
-platform binaries are validated before installation.
+`make install-all` installs the host role and each Codex, Claude, Grok, or Qwen integration whose
+native client is present. Missing products are reported and skipped; `make install-qwen` remains
+strict when requested directly. A prebuilt archive needs no Go toolchain: its two role images,
+manifest, checksums, service assets, and four product payloads are validated before installation.
 
 The Qwen operation uses native `qwen extensions install/update/uninstall` at
 user scope. A version change uses native update. Because Qwen treats a
@@ -53,12 +53,11 @@ leaving future native updates attached to a checkout. Exact already-current
 install and already-absent remove are idempotent.
 
 The installed MCP command uses the Agent Plugins v1 contained
-`./scripts/native-entry` form and enters a shipped native launcher. It never
-resolves `agent-session-runtime` from ambient `PATH`. Managed Qwen parents pass
-their exact selected runtime explicitly; ordinary Qwen sessions use the
-runtime path published by the Agent Sessions installation. A missing or stale
-exact runtime fails closed with an installation diagnostic instead of silently
-loading a different release.
+`./scripts/native-entry` form and enters the exact canonical `agent-sessions`
+host image selected by the installation pointer; it never resolves an ambient
+runtime from `PATH`. Managed Qwen parents receive their exact daemon-issued
+connector identity. A missing or stale selected image fails closed with an
+installation diagnostic instead of silently loading a different release.
 
 Upgrade or removal refuses while a managed Qwen peer or lane uses that exact
 profile. Stop/archive it and retry. The gate reads process identity and
@@ -80,16 +79,13 @@ Credential/provider configuration is reported as `ready`, `unknown`, or
 `unready` without secret values and without pretending a provider login was
 performed.
 
-For remote Qwen lanes, enable remote lanes only on a trusted hub. The agent
-auto-discovers `qwen-peer-lane`; override it with
-`PEER_FEDERATOR_QWEN_LANE=/absolute/path/qwen-peer-lane`. It resolves the native Qwen client
-independently; use `QWEN_PEER_QWEN_BIN=/absolute/path/qwen` or agent flag
-`--qwen-bin /absolute/path/qwen` when it is not on the service `PATH`. The agent advertises
-`qwen-lane` only after the same readiness engine passes in its selected
-profile. Capabilities are fixed when the agent connects to its hub. If Qwen is
-installed after an already-running agent withheld `qwen-lane`, restart that
-agent after installation; product installation does not stop an unrelated
-federation process automatically.
+For remote Qwen lanes, enable remote execution only through a trusted configured hub. Use
+`agent-sessions lane --host HOST --product qwen -- ...`; there is no product-specific listener,
+executable override, or fallback transport. The host daemon advertises `qwen-lane` only when its
+Qwen adapter is ready in the selected profile and republishes its ready-product set on federation
+recovery. Remote doctor must report `ready: true`, authority `remote-daemon`, the exact requested
+host, and product `qwen`. If readiness is absent, inspect host status/doctor and the selected Qwen
+profile; do not substitute a caller-chosen binary or restart an unrelated hub.
 
 See [INSTALL.md](INSTALL.md), [QWEN-ADAPTER.md](QWEN-ADAPTER.md), and
 [QWEN-LANES.md](QWEN-LANES.md).

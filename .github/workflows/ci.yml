@@ -57,14 +57,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ runner.os == 'macOS' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: Test plugin, native runtime, and federation
-        run: ./scripts/test
+      - name: Test unified host, hub, native adapters, and federation
+        run: make test
 
   race:
     strategy:
@@ -123,13 +125,47 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: agent-sessions-${{ matrix.platform }}
-          path: dist/release/*.tar.gz
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.tar.gz.sha256
           if-no-files-found: error
+
+  package-contract:
+    needs: [inventory, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Validate authoritative host and hub package contracts
+        run: |
+          test -n "$(./scripts/release-inventory host-package-paths)"
+          test -n "$(./scripts/release-inventory hub-package-paths)"
+          go test ./internal/releasepkg ./internal/releaseevidence -count=1
+
+  service-fixture:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ runner.os == 'macOS' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Exercise the installed host service fixture
+        run: ./scripts/test-unified-service
 
   release-linux:
     name: release-linux
     if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
-    needs: [inventory, lint, test, race, vet, build]
+    needs: [inventory, lint, test, race, vet, build, package-contract, service-fixture]
     runs-on: [self-hosted, linux, agent-sessions-release]
     permissions:
       actions: read
@@ -162,7 +198,7 @@ jobs:
   release-macos:
     name: release-macos
     if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
-    needs: [inventory, lint, test, race, vet, build]
+    needs: [inventory, lint, test, race, vet, build, package-contract, service-fixture]
     runs-on: [self-hosted, macos, agent-sessions-release]
     permissions:
       actions: read
@@ -233,8 +269,8 @@ jobs:
           ./scripts/release-inventory platforms > dist/platforms.txt
           mkdir -p dist/evidence
           tree_sha="$(git rev-parse HEAD^{tree})"
-          bin/linux-x64/agent-session-runtime release-evidence generate \
-            --schema specs/001-qwen-support/contracts/release-evidence.schema.json \
+          bin/linux-x64/agent-sessions release-evidence generate \
+            --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
             --inventory dist/package-inventory.json --platforms dist/platforms.txt \
             --archive-dir dist/release --gate-dir dist/gates \
             --linux-gate dist/gates/linux.json --macos-gate dist/gates/macos.json \
@@ -254,7 +290,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [inventory, lint, test, race, vet, build]
+    needs: [inventory, lint, test, race, vet, build, package-contract, service-fixture]
     permissions:
       actions: read
       contents: write
@@ -295,8 +331,8 @@ jobs:
           evidence="dist/candidate/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json"
           test "$(sha256sum "$evidence" | cut -d' ' -f1)" = "${{ steps.tag.outputs.sha256 }}"
           make build GOOS=linux GOARCH=amd64
-          bin/linux-x64/agent-session-runtime release-evidence validate \
-            --schema specs/001-qwen-support/contracts/release-evidence.schema.json \
+          bin/linux-x64/agent-sessions release-evidence validate \
+            --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
             --document "$evidence" --archive-dir dist/release --gate-dir dist/candidate \
             --commit "$GITHUB_SHA" --tree "$(git rev-parse HEAD^{tree})" \
             --run-id "${{ steps.tag.outputs.run_id }}"
@@ -307,13 +343,15 @@ jobs:
           assets=("agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" SHA256SUMS)
           while IFS='|' read -r _ _ platform; do
             assets+=("agent-sessions-${{ needs.inventory.outputs.version }}-$platform.tar.gz")
+            assets+=("agent-sessions-${{ needs.inventory.outputs.version }}-$platform.tar.gz.sha256")
           done < <(./scripts/release-inventory platforms)
           ./scripts/release-publication-preflight "$GITHUB_REF_NAME" "${assets[@]}"
       - name: Generate complete checksums
         run: |
           cp "dist/candidate/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" dist/release/
           cd dist/release
-          sha256sum agent-sessions-*.tar.gz agent-sessions-v*-release-evidence.json > SHA256SUMS
+          sha256sum agent-sessions-*.tar.gz agent-sessions-*.tar.gz.sha256 \
+            agent-sessions-v*-release-evidence.json > SHA256SUMS
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

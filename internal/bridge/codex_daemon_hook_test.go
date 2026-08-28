@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -43,11 +44,19 @@ func TestManagedCodexHookRefreshesDaemonWithoutSupervisorOrShim(t *testing.T) {
 		return daemonpkg.LocalControlResult{Generation: 7, Result: body}, nil
 	}
 
-	output, err := handleNativeHook(hookInput{
+	input, err := json.Marshal(hookInput{
 		Event: "SessionStart", SessionID: sessionID, TranscriptPath: transcript, Cwd: root,
 	})
 	if err != nil {
-		t.Fatalf("managed daemon hook: %v", err)
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := RunHook(bytes.NewReader(input), &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("managed daemon hook exit=%d stderr=%q", code, stderr.String())
+	}
+	var output map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
+		t.Fatalf("decode managed daemon hook output %q: %v", stdout.String(), err)
 	}
 	specific, _ := output["hookSpecificOutput"].(map[string]any)
 	if specific["hookEventName"] != "SessionStart" {

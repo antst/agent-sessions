@@ -29,17 +29,20 @@ run_gate race make -C "$root" test-race
 run_gate vet bash -c 'cd "$1"; go vet ./...' release-vet "$root"
 run_gate lint make -C "$root" lint
 run_gate focused_contracts bash -c \
-  'cd "$1"; go test ./internal/bridge ./internal/federator ./internal/launcher ./internal/qwenprofile ./internal/qwenreadiness' \
+  'cd "$1"; go test ./internal/bridge ./internal/daemon ./internal/federation ./internal/launcher ./internal/qwenprofile ./internal/qwenreadiness ./internal/releaseinstall ./internal/releasepkg ./internal/releaseevidence' \
   release-focused "$root"
+run_gate source_pointers bash -c \
+  'set -euo pipefail; "$1/scripts/release-inventory" verify-source-pointers; cd "$1"; go test ./internal/releaseinstall -run ^TestInstallStagesImmutableReleaseCommitsPointerAndRequiresReadiness$ -count=1' \
+  release-source-pointers "$root"
 run_gate quickstart bash -c \
-  'set -euo pipefail; "$1/scripts/test-qwen-contract"; "$1/scripts/test-qwen-lane-contract"' \
+  'set -euo pipefail; "$1/scripts/test-unified-service"; "$1/scripts/test-unified-peers"; "$1/scripts/test-unified-lane-restart"; "$1/scripts/test-unified-lane-composition"; "$1/scripts/test-unified-migration"' \
   release-quickstart "$root"
 {
   printf 'gate=permissions os=%s derived_from=quickstart\n' "$os_name"
   cat "$evidence_dir/$os_name-quickstart.txt"
 } >"$evidence_dir/$os_name-permissions.txt"
 run_gate federation bash -c \
-  'set -euo pipefail; "$1/scripts/federation/test"; "$1/scripts/test-qwen-composition"' \
+  'set -euo pipefail; "$1/scripts/federation/test"; "$1/scripts/test-unified-stress"' \
   release-federation "$root"
 {
   printf 'gate=prebuilt_install os=%s derived_from=normal\n' "$os_name"
@@ -50,7 +53,7 @@ run_gate federation bash -c \
   cat "$evidence_dir/$os_name-quickstart.txt"
 } >"$evidence_dir/$os_name-owner_nonmutation.txt"
 
-for required in normal race vet lint focused_contracts quickstart permissions federation prebuilt_install owner_nonmutation; do
+for required in normal race vet lint focused_contracts source_pointers quickstart permissions federation prebuilt_install owner_nonmutation; do
   [[ -s "$evidence_dir/$os_name-$required.txt" ]] || {
     printf 'release gate %s did not produce evidence\n' "$required" >&2
     exit 1

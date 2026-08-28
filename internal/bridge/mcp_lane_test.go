@@ -2,13 +2,12 @@ package bridge
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 )
 
 func TestMCPLaneArgumentsRejectInvalidAndOversizedValues(t *testing.T) {
@@ -66,37 +65,59 @@ func TestMCPLaneDeadlineTracksNativeTimeoutAndPreservesLongWaits(t *testing.T) {
 	}
 }
 
-func TestLocalMCPLaneProxyUsesAttestedParentEnvironment(t *testing.T) {
-	root := t.TempDir()
-	fake := filepath.Join(root, "runtime")
-	body := "#!/bin/sh\n" +
-		"printf 'argv=%s\\n' \"$*\"\n" +
-		"printf 'session=%s product=%s agent=%s remote=%s data=%s claude=%s codex=%s\\n' \"$AGENT_SESSIONS_SESSION_ID\" \"$AGENT_SESSIONS_PRODUCT\" \"$AGENT_SESSIONS_AGENT_RUNTIME_DIR\" \"$AGENT_SESSIONS_REMOTE_PARENT_CONTEXT\" \"$CLAUDE_PEER_DATA_DIR\" \"$CLAUDE_PEER_CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" >&2\n"
-	if err := os.WriteFile(fake, []byte(body), 0700); err != nil {
-		t.Fatal(err)
-	}
-	previous := mcpLaneRuntimeExecutable
-	mcpLaneRuntimeExecutable = func() (string, error) { return fake, nil }
-	t.Cleanup(func() { mcpLaneRuntimeExecutable = previous })
-	t.Setenv("AGENT_SESSIONS_REMOTE_PARENT_CONTEXT", "stale-remote-parent")
-	paths := nativePaths{
-		dataRoot: filepath.Join(root, "data"), claudeRoot: filepath.Join(root, "claude"),
-		codexHome: filepath.Join(root, "codex"),
+func TestLocalMCPLaneRoutesThroughDaemonControlWithoutSubprocess(t *testing.T) {
+	previous := queryMCPLaneDaemon
+	t.Cleanup(func() { queryMCPLaneDaemon = previous })
+	t.Setenv(daemonpkg.InternalProductEnvironment, "codex")
+	t.Setenv(daemonpkg.InternalAttachmentIDEnvironment, "parent-attachment")
+	t.Setenv(daemonpkg.InternalSessionIDEnvironment, "parent-session")
+	t.Setenv(daemonpkg.InternalCapabilityEnvironment, "parent-capability")
+	queryMCPLaneDaemon = func(_ context.Context, identity daemonpkg.LocalControlIdentity, operation string, payload any) (daemonpkg.LocalControlResult, error) {
+		if identity.Role != daemonpkg.LocalControlConnector || identity.Product != "codex" ||
+			identity.AttachmentID != "parent-attachment" || identity.SessionID != "parent-session" ||
+			identity.Capability != "parent-capability" {
+			t.Fatalf("connector identity = %#v", identity)
+		}
+		request, ok := payload.(daemonpkg.LaneCommandRequest)
+		if !ok || operation != "lane.command" || request.Product != "claude" || request.Command != "start" ||
+			request.Input != "review this" || strings.Join(request.Arguments, " ") != "--name reviewer" {
+			t.Fatalf("daemon lane request = %q %#v", operation, payload)
+		}
+		return daemonpkg.LocalControlResult{Result: json.RawMessage(`{"type":"lane.started","lane":{"lane_id":"lane-1"}}`)}, nil
 	}
 	stdout, stderr := &mcpCappedBuffer{limit: 4096}, &mcpCappedBuffer{limit: 4096}
-	exit, err := runLocalMCPParentLane(context.Background(), paths, filepath.Join(root, "agent"), federator.ParentContext{
-		SessionID: "parent-session", Product: "codex",
-	}, "claude-lane", []string{"doctor", "--json"}, "", stdout, stderr)
+	exit, err := runLocalMCPParentLane(context.Background(), nativePaths{}, "parent-session",
+		"claude-lane", []string{"start", "--name", "reviewer"}, "review this", "", stdout, stderr)
 	if err != nil || exit != 0 {
 		t.Fatalf("local MCP lane proxy = %d, %v: %s", exit, err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "argv=claude-lane doctor --json") {
-		t.Fatalf("runtime argv = %q", stdout.String())
+	if !strings.Contains(stdout.String(), `"lane_id":"lane-1"`) || stderr.Len() != 0 {
+		t.Fatalf("daemon lane output = stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
-	want := "session=parent-session product=codex agent=" + filepath.Join(root, "agent") +
-		" remote= data=" + paths.dataRoot + " claude=" + paths.claudeRoot + " codex=" + paths.codexHome
-	if !strings.Contains(stderr.String(), want) {
-		t.Fatalf("runtime environment = %q, want %q", stderr.String(), want)
+}
+
+func TestRemoteMCPLaneRoutesThroughDaemonWithoutLegacyFederatorFallback(t *testing.T) {
+	previous := queryMCPLaneDaemon
+	t.Cleanup(func() { queryMCPLaneDaemon = previous })
+	t.Setenv(daemonpkg.InternalProductEnvironment, "codex")
+	t.Setenv(daemonpkg.InternalAttachmentIDEnvironment, "parent-attachment")
+	t.Setenv(daemonpkg.InternalSessionIDEnvironment, "parent-session")
+	t.Setenv(daemonpkg.InternalCapabilityEnvironment, "parent-capability")
+	queryMCPLaneDaemon = func(_ context.Context, _ daemonpkg.LocalControlIdentity, operation string, payload any) (daemonpkg.LocalControlResult, error) {
+		request, ok := payload.(daemonpkg.LaneCommandRequest)
+		if !ok || operation != "lane.command" || request.Host != "macbook" || request.Product != "qwen" ||
+			request.Command != "start" || request.Input != "remote work" {
+			t.Fatalf("remote daemon lane request = %q %#v", operation, payload)
+		}
+		return daemonpkg.LocalControlResult{Result: json.RawMessage(`{"type":"lane.start","host":"macbook"}`)}, nil
+	}
+	stdout, stderr := &mcpCappedBuffer{limit: 4096}, &mcpCappedBuffer{limit: 4096}
+	exit, err := runMCPParentLaneRequest(context.Background(), nativePaths{}, "parent-session", mcpLaneRequest{
+		product: "qwen", role: "qwen-lane", command: "start", host: "macbook",
+		args: []string{"start", "--name", "remote"}, input: "remote work",
+	}, stdout, stderr)
+	if err != nil || exit != 0 || !strings.Contains(stdout.String(), `"host":"macbook"`) || stderr.Len() != 0 {
+		t.Fatalf("remote MCP daemon proxy = %d, %v stdout=%q stderr=%q", exit, err, stdout.String(), stderr.String())
 	}
 }
 
@@ -113,7 +134,7 @@ func TestNativeMCPPublishesAttestedLaneProxy(t *testing.T) {
 	}
 	schema, _ := lane["inputSchema"].(map[string]any)
 	properties, _ := schema["properties"].(map[string]any)
-	if properties["product"] == nil || properties["command"] == nil || properties["session_id"] == nil {
+	if properties["product"] == nil || properties["command"] == nil || properties["input"] == nil || properties["session_id"] == nil {
 		t.Fatalf("lane tool schema = %#v", schema)
 	}
 }

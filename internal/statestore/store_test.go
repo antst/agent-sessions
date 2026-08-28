@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -97,6 +99,87 @@ func TestStoreRoleNeutralAtomicRecord(t *testing.T) {
 	default:
 	}
 	assertStoredRecord(t, store, key, current, storeTestRecord{Name: "next", Count: 64})
+}
+
+func TestOpenExistingIsReadOnlyAndPreservesMissingRoot(t *testing.T) {
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "missing-state")
+	if _, err := OpenExisting(Options{Root: missing, MaxRecordBytes: 1 << 20}); !os.IsNotExist(err) {
+		t.Fatalf("missing existing store error = %v, want os.IsNotExist", err)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("read-only open created missing root: %v", err)
+	}
+
+	root := filepath.Join(parent, "state")
+	store := openStoreTest(t, root, Options{})
+	if _, err := store.CompareAndSwap(context.Background(), "migration/current", 0, storeTestRecord{Name: "selected"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := OpenExisting(Options{Root: root, MaxRecordBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got storeTestRecord
+	if _, err := opened.Read(context.Background(), "migration/current", &got); err != nil || got.Name != "selected" {
+		t.Fatalf("existing store read = %+v, %v", got, err)
+	}
+	after, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("read-only open changed root metadata: before=%v/%v after=%v/%v", before.Mode(), before.ModTime(), after.Mode(), after.ModTime())
+	}
+}
+
+func TestOpenExistingConcurrentReadersDoNotRepairOrCreate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store := openStoreTest(t, root, Options{})
+	if _, err := store.CompareAndSwap(context.Background(), "records/existing", 0, storeTestRecord{Name: "stable"}); err != nil {
+		t.Fatal(err)
+	}
+	const readers = 32
+	start := make(chan struct{})
+	errorsCh := make(chan error, readers)
+	var group sync.WaitGroup
+	for range readers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			opened, err := OpenExisting(Options{Root: root, MaxRecordBytes: 1 << 20})
+			if err == nil {
+				var value storeTestRecord
+				_, err = opened.Read(context.Background(), "records/existing", &value)
+				if err == nil && value.Name != "stable" {
+					err = fmt.Errorf("read value %q", value.Name)
+				}
+			}
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".agent-sessions-") {
+			t.Fatalf("read-only open created temporary %q", entry.Name())
+		}
+	}
 }
 
 func TestStoreCompareAndSwapRejectsStaleRevision(t *testing.T) {

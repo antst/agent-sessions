@@ -23,8 +23,6 @@ func newQwenConnectorDriver(options NativeConnectorOptions) ConnectorDriver {
 }
 
 // Prepare implements ConnectorDriver.
-//
-//nolint:gocyclo // Preparation keeps exact prior-source, policy, and rollback validation at one boundary.
 func (driver *qwenConnectorDriver) Prepare(_ context.Context, request ConnectorRequest) (ConnectorMutation, error) {
 	payloadRoot := filepath.Join(request.SourceRoot, "qwen")
 	if err := validateConnectorRequest(request, "qwen", payloadRoot); err != nil {
@@ -35,7 +33,7 @@ func (driver *qwenConnectorDriver) Prepare(_ context.Context, request ConnectorR
 		if err != nil {
 			return nil, err
 		}
-		return noConnectorMutation{}, nil
+		return unavailableConnectorMutation("qwen", request.SourceRoot), nil
 	}
 	version, err := qwenConnectorVersion(payloadRoot)
 	if err != nil {
@@ -57,28 +55,50 @@ func (driver *qwenConnectorDriver) Prepare(_ context.Context, request ConnectorR
 		if !filepath.IsAbs(prior.source) || filepath.Clean(prior.source) != prior.source {
 			return nil, errors.New("existing Qwen extension has no recoverable absolute source")
 		}
+		if !prior.enabled {
+			return nil, errors.New("existing Qwen extension is disabled and cannot be restored exactly")
+		}
 		if _, err := qwenConnectorVersion(prior.source); err != nil {
 			return nil, fmt.Errorf("existing Qwen extension source is not recoverable: %w", err)
 		}
 	}
-	mutation := &nativeConnectorMutation{}
+	return newQwenConnectorMutation(driver.runner, executable, request.SourceRoot, payloadRoot, home, version, prior), nil
+}
+
+func newQwenConnectorMutation(
+	runner ConnectorCommandRunner,
+	executable string,
+	sourceRoot string,
+	payloadRoot string,
+	home string,
+	version string,
+	prior qwenConnectorState,
+) *nativeConnectorMutation {
+	mutation := &nativeConnectorMutation{provenance: connectorMutationProvenance{
+		SchemaVersion: connectorRecoverySchemaVersion,
+		Product:       "qwen", Available: true, Executable: executable,
+		SourceRoot: sourceRoot, PayloadRoot: payloadRoot, QwenHome: home, TargetVersion: version,
+		Prior: connectorPriorProvenance{
+			Present: prior.present, Enabled: prior.enabled, Source: prior.source, Version: prior.version,
+		},
+	}}
 	if prior.present {
 		mutation.steps = append(mutation.steps, connectorStep{
 			apply: func(ctx context.Context) error {
-				return driver.runner.Run(ctx, executable, "extensions", "uninstall", qwenConnectorName)
+				return uninstallQwenConnectorIfPresent(ctx, runner, executable, home, prior.source)
 			},
 			undo: func(ctx context.Context) error {
-				return driver.runner.Run(ctx, executable, "extensions", "install", prior.source, "--scope", "user", "--consent")
+				return installQwenConnectorIfAbsent(ctx, runner, executable, home, prior.source, prior.version)
 			},
 		})
 	}
 	mutation.steps = append(mutation.steps,
 		connectorStep{
 			apply: func(ctx context.Context) error {
-				return driver.runner.Run(ctx, executable, "extensions", "install", payloadRoot, "--scope", "user", "--consent")
+				return installQwenConnectorIfAbsent(ctx, runner, executable, home, payloadRoot, version)
 			},
 			undo: func(ctx context.Context) error {
-				return driver.runner.Run(ctx, executable, "extensions", "uninstall", qwenConnectorName)
+				return uninstallQwenConnectorIfPresent(ctx, runner, executable, home, payloadRoot)
 			},
 		},
 		connectorStep{apply: func(context.Context) error {
@@ -92,7 +112,45 @@ func (driver *qwenConnectorDriver) Prepare(_ context.Context, request ConnectorR
 			return nil
 		}},
 	)
-	return mutation, nil
+	return mutation
+}
+
+func uninstallQwenConnectorIfPresent(
+	ctx context.Context,
+	runner ConnectorCommandRunner,
+	executable string,
+	home string,
+	expectedSource string,
+) error {
+	current, err := inspectQwenConnector(home)
+	if err != nil || !current.present {
+		return err
+	}
+	if !sameConnectorSource(current.source, expectedSource) {
+		return errors.New("qwen connector changed source during recovery")
+	}
+	return runner.Run(ctx, executable, "extensions", "uninstall", qwenConnectorName)
+}
+
+func installQwenConnectorIfAbsent(
+	ctx context.Context,
+	runner ConnectorCommandRunner,
+	executable string,
+	home string,
+	source string,
+	version string,
+) error {
+	current, err := inspectQwenConnector(home)
+	if err != nil {
+		return err
+	}
+	if current.present {
+		if current.enabled && current.version == version && sameConnectorSource(current.source, source) {
+			return nil
+		}
+		return errors.New("qwen connector changed identity during recovery")
+	}
+	return runner.Run(ctx, executable, "extensions", "install", source, "--scope", "user", "--consent")
 }
 
 // Remove implements ConnectorDriver.

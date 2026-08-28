@@ -1,53 +1,141 @@
 package launcher
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
+	"time"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
+
+const launcherLaneInputLimit = 1024 * 1024
 
 var (
-	requireLaneDaemon   = requireUserDaemon
-	discoverLaneRuntime = discoverRuntime
-	execLaneRuntime     = Exec
+	queryLaneDaemon           = daemon.QueryLocalControl
+	laneInput       io.Reader = os.Stdin
+	laneOutput      io.Writer = os.Stdout
 )
 
-// RunLane requires the existing user daemon and replaces the launcher with a
-// transitional native lane client. It never manages daemon lifetime.
+// RunLane is a short-lived client of the existing unified daemon. It never
+// discovers or execs a native runtime and never manages daemon lifetime.
 func RunLane(role string, args []string) error {
-	if _, ok := launcherProductByLaneRole(role); !ok {
+	product, ok := launcherProductByLaneRole(role)
+	if !ok {
 		return fmt.Errorf("unsupported lane role %q", role)
 	}
 	if laneHelpRequested(args) {
-		// Help is a read-only parser surface. It must remain available while a
-		// daemon is explicitly stopped and therefore never queries or activates
-		// service lifetime.
-	} else if err := requireLaneDaemon(); err != nil {
-		return err
+		// Canonical help is rendered by cmd/agent-sessions before this boundary.
+		return nil
 	}
-	selected, err := discoverLaneRuntime()
+	if len(args) == 0 {
+		return errors.New("lane operation is required")
+	}
+	command := strings.TrimSpace(args[0])
+	host, arguments, err := extractLaneHost(args[1:])
 	if err != nil {
 		return err
 	}
-	environment := envutil.Set(os.Environ(), agentRuntimeDirEnv, agentRuntimeDir())
-	if role == "grok-lane" && grokLaneNeedsExecutable(args) {
-		grok, err := grokExecutable()
-		if err != nil {
-			return err
-		}
-		environment = envutil.Set(environment, "GROK_PEER_GROK_BIN", grok)
-		environment = envutil.Set(environment, "GROK_PEER_NATIVE_RUNTIME", selected.Path)
+	if host != "" && launcherLanePromptFile(arguments) != "" {
+		return errors.New("--prompt-file is not supported for remote lanes; provide bounded prompt input on stdin")
 	}
-	if role == "qwen-lane" && qwenLaneNeedsExecutable(args) {
-		qwen, err := qwenExecutable()
-		if err != nil {
-			return err
-		}
-		environment = envutil.Set(environment, "QWEN_PEER_QWEN_BIN", qwen)
+	input, err := readLauncherLaneInput(command, arguments)
+	if err != nil {
+		return err
 	}
-	return execLaneRuntime(selected.Path, append([]string{role}, args...), environment)
+	duration := 5 * time.Minute
+	if command == "run" || command == "resume" || command == "wait" {
+		duration = 24 * time.Hour
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+	response, err := queryLaneDaemon(ctx, daemon.InheritedLauncherIdentity(product.descriptor.ID), "lane.command", daemon.LaneCommandRequest{
+		Product: product.descriptor.ID, Command: command, Host: host,
+		Arguments: append([]string(nil), arguments...), Input: input,
+	})
+	if err != nil {
+		return err
+	}
+	if len(response.Result) == 0 {
+		return errors.New("daemon returned an empty lane result")
+	}
+	_, err = laneOutput.Write(append(append([]byte(nil), response.Result...), '\n'))
+	return err
+}
+
+func extractLaneHost(arguments []string) (string, []string, error) {
+	result := make([]string, 0, len(arguments))
+	host := ""
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if strings.HasPrefix(argument, "--host=") {
+			if host != "" {
+				return "", nil, errors.New("lane --host may be specified only once")
+			}
+			host = strings.TrimSpace(strings.TrimPrefix(argument, "--host="))
+			if host == "" {
+				return "", nil, errors.New("lane --host requires a non-empty host id")
+			}
+			continue
+		}
+		if argument == "--host" {
+			if host != "" {
+				return "", nil, errors.New("lane --host may be specified only once")
+			}
+			remaining := arguments[index+1:]
+			if len(remaining) == 0 {
+				return "", nil, errors.New("lane --host requires a host id")
+			}
+			index++
+			host = strings.TrimSpace(remaining[0])
+			if host == "" || strings.HasPrefix(host, "-") {
+				return "", nil, errors.New("lane --host requires a non-empty host id")
+			}
+			continue
+		}
+		result = append(result, argument)
+	}
+	return host, result, nil
+}
+
+func readLauncherLaneInput(command string, arguments []string) (string, error) {
+	if command != "run" && command != "start" && command != "resume" {
+		return "", nil
+	}
+	reader := laneInput
+	var file *os.File
+	if path := launcherLanePromptFile(arguments); path != "" {
+		opened, err := os.Open(path) //nolint:gosec // explicit operator-owned prompt path.
+		if err != nil {
+			return "", err
+		}
+		file, reader = opened, opened
+		defer func() { _ = file.Close() }()
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, launcherLaneInputLimit+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > launcherLaneInputLimit {
+		return "", fmt.Errorf("lane input exceeds %d bytes", launcherLaneInputLimit)
+	}
+	return string(body), nil
+}
+
+func launcherLanePromptFile(arguments []string) string {
+	for index, argument := range arguments {
+		if strings.HasPrefix(argument, "--prompt-file=") {
+			return strings.TrimPrefix(argument, "--prompt-file=")
+		}
+		if argument == "--prompt-file" && index+1 < len(arguments) {
+			return arguments[index+1]
+		}
+	}
+	return ""
 }
 
 func laneHelpRequested(args []string) bool {
@@ -63,28 +151,10 @@ func laneHelpRequested(args []string) bool {
 }
 
 func launcherProductByLaneRole(role string) (launcherProduct, bool) {
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.ProductDescriptors() {
 		if descriptor.LaneRuntimeRole == role {
 			return launcherProduct{descriptor: descriptor}, true
 		}
 	}
 	return launcherProduct{}, false
-}
-
-func grokLaneNeedsExecutable(args []string) bool {
-	for _, argument := range args {
-		if argument == "-h" || argument == "--help" {
-			return false
-		}
-	}
-	return len(args) > 0 && (args[0] == "run" || args[0] == "start" || args[0] == "resume" || args[0] == "doctor")
-}
-
-func qwenLaneNeedsExecutable(args []string) bool {
-	for _, argument := range args {
-		if argument == "-h" || argument == "--help" {
-			return false
-		}
-	}
-	return len(args) > 0 && (args[0] == "run" || args[0] == "start" || args[0] == "resume" || args[0] == "doctor")
 }

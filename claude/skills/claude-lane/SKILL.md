@@ -7,8 +7,8 @@ description: Orchestrate named, messageable local or remote Claude Code lanes fr
 
 Use `claude-peer-lane`; the parent happens to be Claude, while the target
 adapter is still the ordinary Claude lane runtime. Run `claude-peer-lane doctor
---json` and `list --all`, require contract version 1 and a logged-in Claude
-runtime, then pipe prompts on stdin:
+--json` and `list --all`, require `ready: true`, `authority: "daemon"`, and
+product `claude`, then pipe prompts on stdin:
 
 ```sh
 claude-peer-lane start --name review-a --permission-mode dontAsk - < brief.md
@@ -27,9 +27,12 @@ a real native Claude registry row, but native Claude messaging is not an Agent
 Sessions fallback; report a structured-tool failure instead of switching
 channels. Only Agent Sessions discovery and routing are group-filtered.
 
-For a remote target use `peer-federator lane --host HOST --product claude --`
-after `status`, `hosts`, and remote doctor. Never fall back to SSH. Federation
-supplies an attested parent context and grouped terminal notices.
+For a remote target use `agent-sessions lane --host HOST --product claude --`
+after `agent-sessions status --json` and remote doctor. Require remote `ready: true`, authority
+`remote-daemon`, the exact host, product `claude`, and advertised `claude-lane`. Remote `--mine`
+matches this source-proxy parent and host; prompts use bounded stdin and remote `--prompt-file` is
+unsupported. Never fall back to SSH. Federation supplies an attested parent context and grouped
+terminal notices.
 
 `lane.ready` and `CLAUDE_LANE_TERMINAL` are pointers, not answers. Use one
 collector, match terminal/result turn IDs, collect debt before `resume`, and

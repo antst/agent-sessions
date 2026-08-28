@@ -1,16 +1,13 @@
-# Host agent and federation
+# Federation: one hub, multiple embedded host agents
 
-`agent-sessions` is the local authority for Agent Sessions discovery,
-group membership, routing, and the small durable session catalog. It works
-without a hub for local peers. Connecting agents to one central
-`agent-sessions-hub` adds
-cross-host discovery, messaging, and lane execution without changing the
-local protocol.
+Agent Sessions keeps its existing topology: one central `agent-sessions-hub` and multiple host agents.
+Each host agent is embedded in that OS user's one `agent-sessions` daemon; no standalone host
+federation-agent process or local federation listener remains.
 
-There is one hub and one uniform multi-host peer space. These global groups are
-routing and visibility selectors within that space, and peer display names
-are host-suffixed to remain unambiguous. There is no additional namespace or
-per-product federation realm.
+Local discovery and routing work without a hub. Configuring the daemon's one hub address adds
+cross-host discovery, messaging, terminal notices, and remote lanes in the same uniform multi-host
+space. Existing global groups remain the sole collaboration boundary and peer names remain
+host-suffixed. There is no additional namespace, per-product realm, or fallback topology.
 
 ## Authoritative protocol inventory
 
@@ -21,138 +18,97 @@ per-product federation realm.
 - bounds: frame 2 MiB; lane input 1 MiB; AgentFrame 1 MiB
 - AgentFrame version: 1
 - capabilities: `claude-lane`, `codex-lane`, `grok-lane`, `qwen-lane`
-- frame types: `hello`, `hello_ok`, `probe`, `probe_ok`, `snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`, `delivery_ack`, `delivery_error`, `lane_exec`, `lane_cancel`, `lane_stdout`, `lane_stderr`, `lane_exit`, `lane_error`, `ping`, `pong`
+- frame types: `hello`, `hello_ok`, `probe`, `probe_ok`, `snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`, `delivery_ack`, `delivery_error`, `lane_exec`, `lane_accepted`, `lane_cancel`, `lane_cancelled`, `lane_cancel_refused`, `lane_archive`, `lane_archived`, `lane_archive_refused`, `lane_result`, `lane_result_ack`, `lane_result_refused`, `lane_stdout`, `lane_stderr`, `lane_exit`, `lane_error`, `ping`, `pong`
 - legacy flat `deliver`: rejected
 <!-- END: generated federation protocol inventory -->
 
-Host and hub interoperate only when their federation protocol versions are
-exactly equal; the current protocol is **3**. Release versions are not an
-interoperability input. Capabilities report which operations are available on
-a host: `claude-lane`, `codex-lane`, `grok-lane`, and `qwen-lane`.
+The descriptor above is generated from the same authoritative contract as both binaries and is
+checked field-for-field against the feature protocol contract.
 
-The newline-delimited JSON wire frame limit is 2 MiB. Lane input and the
-product-neutral AgentFrame are each bounded to 1 MiB. AgentFrame version is 1.
-The closed hub frame inventory is `hello`, `hello_ok`, `probe`, `probe_ok`,
-`snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`,
-`delivery_ack`, `delivery_error`, `lane_exec`, `lane_cancel`, `lane_stdout`,
-`lane_stderr`, `lane_exit`, `lane_error`, `ping`, and `pong`. The obsolete
-flat `deliver` frame is rejected; grouped delivery is the only delivery
-contract.
+## Interoperability
 
-The public Claude registry contains exactly one synthetic Agent Sessions
-service row per running host agent. Participating `codex-peer`, `claude-peer`,
-`grok-peer`, `qwen-peer`, and lane adapters register their real delivery sockets privately
-with that agent. Remote peers are never projected as per-peer Claude records or
-shadow processes.
+Software interoperability is exact protocol-version equality and nothing else. A host and hub built
+from unrelated commits, releases, archive generations, or build times interoperate when both declare
+protocol `3`. Release version, executable digest, source ancestry, and upgrade order are diagnostic
+facts, not handshake inputs.
 
-Bare native CLIs are untouched and therefore opted out. In particular, bare
-`claude` remains an escape hatch that is neither catalogued nor group-routed.
+A different protocol version is rejected before host registration, roster publication, delivery, or
+lane acceptance. There is no best-effort downgrade, legacy flat delivery, native carrier fallback, or
+automatic lifecycle action.
 
-## Groups and messages
+Capabilities advertise currently available destination operations only. The four tokens are
+`codex-lane`, `claude-lane`, `grok-lane`, and `qwen-lane`. A missing token makes that target product
+unavailable on the host; it does not hide peers, change global groups, reject the host, or require the
+same release.
 
-Every registered peer belongs to its automatic private group
-`session:<host>/<session>` and to zero or more explicit groups. A child lane
-always gets its own private group and its parent’s private group. The parent’s
-other groups are copied only when the parent chooses `--inherit-groups` for
-that launch.
+## Lifecycle independence
 
-Peers can discover or address only peers sharing at least one group. The first
-protocol supports direct sends, explicit-target multicast, and broadcast to
-one named group of which the sender is a member. There is no global broadcast
-and no implicit compatibility group. See [GROUPS.md](GROUPS.md).
-
-For Claude-native transport the ordinary outer message is addressed to the
-single service row. Its body contains the complete Agent Sessions JSON frame.
-Within the same-user trust boundary, the service maps the outer message's
-claimed `from` address to one live registered native socket, performs group
-routing, and sends a new Claude-native outer message to each local destination.
-The connection itself does not prove ownership of the claimed socket. The
-service does not add attributes to Claude’s strict native envelope grammar.
-
-## Run locally
+Install and operate the hub explicitly:
 
 ```sh
-peer-federator agent --host workstation-a --name workstation-a
-
-codex-peer -g project-a -n reviewer
-claude-peer -g project-a -n implementer
-grok-peer -g project-a -n researcher
-qwen-peer -g project-a -n analyst
+make install-hub HUB_LISTEN=:7419
+agent-sessions-hub status --json
+agent-sessions-hub doctor --json
 ```
 
-`peer-federator doctor` accepts this local-only topology. `peer-federator
-status` reports the registered local peers. The durable catalog remembers each
-stable session’s product, groups, parent/inheritance choice, and effective
-yolo status. An exact session can later be resumed without knowing its product:
+The hub and each host have disjoint immutable releases, current selections, locks, journals, service
+definitions, configuration, durable state, readiness, removal, and purge. Host upgrade/restart leaves
+the hub process and every other host untouched. Hub upgrade/restart leaves all host daemons running;
+protocol-matching hosts reconnect and republish.
 
-```sh
-peer resume 01234567-89ab-cdef-0123-456789abcdef
-```
+The hub owns network roster and relay state only. It owns no vendor integration, local product
+adapter, attachment, lane actor, credential, transcript, or host service.
 
-## Add a federation hub
+## Handshake and routing
 
-Start one hub on the trusted network:
+The transport is bounded newline-delimited JSON over the configured TCP connection. The first host
+frame is `hello` with protocol version, stable host ID/name, and ready capabilities. Only a valid exact
+version receives `hello_ok`. `probe`/`probe_ok` is the bounded health exchange.
 
-```sh
-peer-federator hub --listen :7419
-```
+The host publishes `snapshot`; the hub returns `roster`. Grouped delivery uses `group_deliver` or
+`terminal_notice_deliver` with explicit acknowledgements/errors. The hub validates source/destination
+identity and group intersection, and the destination daemon repeats authorization before local native
+delivery.
 
-Connect one agent per participating OS user:
-
-```sh
-peer-federator agent \
-  --hub 10.2.17.1:7419 \
-  --host workstation-a \
-  --name workstation-a
-```
-
-Agents send only explicitly registered live peers and their effective groups.
-The hub validates peer identities and private anchors, distributes snapshots,
-and forwards only deliveries whose source and destination share a group. A hub
-restart does not require peer restart: agents reconnect, republish, and retain
-local routing throughout the outage.
-
-The transport is plain newline-delimited JSON over TCP and assumes a trusted,
-isolated network. It intentionally has no authentication, encryption, offline
-queue, or high-availability protocol yet.
+The neutral AgentFrame remains version `1`. Direct send, explicit multicast, named-group broadcast,
+provenance, and result semantics are unchanged. Protocol `3` rejects the obsolete flat `deliver`
+frame.
 
 ## Remote lanes
 
-Remote execution is disabled by default. Enable it only on destinations where
-every connected hub host is trusted to execute the installed lane launchers as
-that OS user:
+A managed Codex, Claude, Grok, or Qwen parent may target any ready Codex, Claude, Grok, or Qwen adapter
+on another host. The source daemon commits the parent-authorized request and sends `lane_exec`. The
+destination embedded agent hands the normalized request directly to its daemon lane engine, preserving
+the exact hub-attested parent host/session, global groups, and permission mode. The destination returns
+`lane_accepted` only after durable admission. Exact request replay converges on that acceptance without
+starting duplicate native work; changed reuse of a request ID is rejected.
 
-```sh
-peer-federator agent ... --enable-remote-lanes
-peer-federator hosts
-```
+`lane_cancel` receives an explicit `lane_cancelled` or `lane_cancel_refused` decision. A transport loss
+leaves cancellation pending for retry rather than claiming success or terminal failure. At completion,
+the destination sends bounded `lane_result` metadata and waits for `lane_result_ack`; a refusal keeps
+the durable terminal outbox pending. Only then does it publish the content-free terminal notice through
+the grouped route. The source persists the result before acknowledging it, validates the exact
+destination lane and parent target, and exposes the reference through normal lane collection. Accepted
+routes and terminal outboxes survive daemon, hub, and connection restart without redispatch.
 
-The parent product and target product are independent. A Codex, Claude, Grok, or Qwen
-parent may launch a Codex, Claude, Grok, or Qwen lane, locally or remotely. The target
-is selected explicitly:
+Remote archive remains destination-owned: `lane_archive` receives `lane_archived` only after native
+archive and cleanup succeed. `lane_archive_refused` or a lost acknowledgement is explicit and safe to
+retry, and the source proxy never invokes a local product adapter.
 
-```sh
-printf '%s\n' 'Inspect the repository.' |
-  peer-federator lane --host workstation-b --product grok -- \
-    start --name remote-review -C /srv/project -
-```
+There is no remote lane watcher, extra CLI proxy, lane-manager process, SSH transport, direct agent
+listener, or local fallback. Hub loss prevents new remote admission and cross-host delivery but does
+not terminate an already-started vendor-native lane or local messaging. Durable state reconciles after
+the connection returns.
 
-The source agent supplies an attested parent context. The destination stores
-the source-host private parent anchor, gives the child its destination private
-anchor, and copies optional parent groups only when launch requested
-`--inherit-groups`. Terminal notices are ordinary grouped Agent Sessions
-frames, not shadow-socket callbacks.
+## Security and observability
 
-The installed `codex-peer-lane`, `claude-peer-lane`, `grok-peer-lane`, and `qwen-peer-lane`
-remain the target-specific lifecycle adapters. The shared parent/group layer
-selects the parent context; it does not merge their native runtimes.
+The current TCP deployment assumes the trusted network boundary documented by the operator. Group and
+identity validation still fail closed; a capability is not authorization.
 
-Remote stdin is capped at 1 MiB, remote auto-archive delays are capped at
-86,400 seconds, and each destination accepts at most 32 concurrent remote lane
-CLI processes. There is no SSH or direct agent listener fallback. Hub loss
-cancels an in-flight remote CLI proxy; an already-started persistent lane keeps
-its local target lifecycle but cannot communicate cross-host until federation
-returns.
+Host and hub logs/status may report bounded IDs, protocol/build versions, capabilities, generations,
+counts, timings, frame types, and causes. They never report peer messages, prompts, lane results, tool
+content, credentials, or vendor transcripts.
 
-See [federation/OPERATIONS.md](federation/OPERATIONS.md) for service examples
-and [federation/PROTOCOL.md](federation/PROTOCOL.md) for the wire contract.
+Normal hub removal stops only the exact hub service and preserves hub configuration/durable metadata.
+`purge-hub` is the separate offline revision-bound operation. Neither action stops or mutates remote
+hosts. See [INSTALL.md](INSTALL.md).

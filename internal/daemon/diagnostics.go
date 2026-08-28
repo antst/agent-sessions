@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/diagnostics"
+	sharedfederation "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
@@ -74,6 +75,7 @@ type HostStatusProjection struct {
 func (runtime *Runtime) StatusProjection() HostStatusProjection {
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
+	federationComponent := runtime.federation
 	products := make(map[string]any, len(productcatalog.Catalog().Products))
 	for _, product := range productcatalog.Catalog().Products {
 		state := "not_installed"
@@ -93,7 +95,7 @@ func (runtime *Runtime) StatusProjection() HostStatusProjection {
 		Generation: runtime.generation, PID: runtime.options.PID, ProcStart: runtime.options.ProcStart,
 		Endpoint: runtime.options.Paths.ControlEndpoint,
 		Service:  map[string]any{"manager": runtime.options.ServiceManager, "unit": runtime.options.ServiceUnit},
-		Products: products, Federation: map[string]any{"state": "unconfigured"},
+		Products: products, Federation: hostFederationStatus(runtime.options.Configuration, federationComponent),
 		Migration: map[string]any{"state": "none"}, Debt: []map[string]any{},
 	}
 }
@@ -118,13 +120,16 @@ func (runtime *Runtime) DoctorProjection() HostDoctorProjection {
 	ready := runtime.admission == AdmissionReady
 	identity := runtime.options.RuntimeIdentity != "" && runtime.options.ProcStart != ""
 	service := runtime.options.ServiceManager != "" && runtime.options.ServiceUnit != ""
+	configuration := runtime.options.Configuration
+	federationComponent := runtime.federation
+	runtimeVersion, runtimeIdentity := runtime.options.RuntimeVersion, runtime.options.RuntimeIdentity
 	runtime.mu.RUnlock()
 	checks := []HostDoctorCheck{
 		doctorCheck("service_manager", service, "service_unavailable", daemonInspectionCommand()),
 		doctorCheck("runtime_identity", identity, "identity_incomplete", daemonInspectionCommand()),
 		doctorCheck("state_schema", ready, "runtime_not_ready", daemonInspectionCommand()),
 		doctorCheck("product_inventory", true, "", ""),
-		doctorCheck("federation_protocol", true, "", ""),
+		hostFederationDoctorCheck(configuration, federationComponent, runtimeVersion, runtimeIdentity),
 		doctorCheck("lifecycle_debt", true, "", ""),
 	}
 	healthy := true
@@ -132,6 +137,74 @@ func (runtime *Runtime) DoctorProjection() HostDoctorProjection {
 		healthy = healthy && check.Healthy
 	}
 	return HostDoctorProjection{Healthy: healthy, Checks: checks}
+}
+
+func hostFederationStatus(configuration DaemonConfig, component *federationComponent) map[string]any {
+	state := FederationStateRecord{}
+	stateName := string(sharedfederation.AgentDisabled)
+	if component != nil {
+		state = component.snapshot()
+		stateName = state.State
+	} else if configuration.HubAddress != "" {
+		stateName = "not_recovered"
+	}
+	return map[string]any{
+		"configured":                  configuration.HubAddress != "",
+		"host_id":                     configuration.HostID,
+		"host_name":                   configuration.HostName,
+		"hub_address":                 configuration.HubAddress,
+		"remote_lanes_enabled":        configuration.RemoteLanesEnabled,
+		"state":                       stateName,
+		"protocol_version":            state.ProtocolVersion,
+		"connection_generation":       state.ConnectionGeneration,
+		"advertised_runtime_version":  state.AdvertisedRuntimeVersion,
+		"advertised_runtime_identity": state.AdvertisedRuntimeIdentity,
+		"advertised_products":         append([]string{}, state.AdvertisedProducts...),
+		"advertised_capabilities":     append([]string{}, state.AdvertisedCapabilities...),
+		"remote_roster_revision":      state.RemoteRosterRevision,
+		"last_connected_at":           state.LastConnectedAt,
+		"last_error_code":             state.LastErrorCode,
+	}
+}
+
+func hostFederationDoctorCheck(
+	configuration DaemonConfig,
+	component *federationComponent,
+	runtimeVersion string,
+	runtimeIdentity string,
+) HostDoctorCheck {
+	if configuration.HubAddress == "" {
+		return doctorCheck("federation_protocol", true, "", "")
+	}
+	if component == nil {
+		return doctorCheck(
+			"federation_protocol", false, "federation_not_recovered",
+			"restart the host service to recover the configured hub connection",
+		)
+	}
+	state := component.snapshot()
+	if state.ProtocolVersion != sharedfederation.ProtocolVersion ||
+		state.State == string(sharedfederation.AgentIncompatible) || state.LastErrorCode == "protocol_mismatch" {
+		return doctorCheck(
+			"federation_protocol", false, "federation_protocol_mismatch",
+			"install host and hub releases with matching federation protocol versions, then retry",
+		)
+	}
+	if state.HostID != configuration.HostID || state.HostName != configuration.HostName ||
+		state.HubAddress != configuration.HubAddress || state.AdvertisedRuntimeVersion != runtimeVersion ||
+		state.AdvertisedRuntimeIdentity != runtimeIdentity {
+		return doctorCheck(
+			"federation_protocol", false, "federation_identity_mismatch",
+			"restart the host service to republish the configured host and runtime identity",
+		)
+	}
+	if state.State != string(sharedfederation.AgentConnected) {
+		return doctorCheck(
+			"federation_protocol", false, "federation_unavailable",
+			"verify the configured hub address and hub service, then retry",
+		)
+	}
+	return doctorCheck("federation_protocol", true, "", "")
 }
 
 func doctorCheck(id string, healthy bool, code, action string) HostDoctorCheck {

@@ -43,8 +43,8 @@ retires an idle lane one minute after its latest final terminal turn; a newer tu
 Pass `--auto-archive-after SECONDS` only when a different grace is requested. Pass
 `--no-auto-archive` only for indefinite retention, never together with a custom grace, and pair it
 with `--persistent` for a permanent lane.
-The configured grace sets an exact not-before deadline; actual cleanup normally follows within five
-seconds on the supervisor's next reconciliation tick.
+The configured grace sets an exact not-before deadline; the daemon performs cleanup after that
+deadline without creating another lifecycle authority.
 `--notify PEER` is valid only with `--persistent`; use `--no-notify` only when asked to suppress owner notices.
 
 ## Prohibitions

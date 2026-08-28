@@ -566,11 +566,11 @@ func TestControlHelloUsesKernelObservedPeerEvidence(t *testing.T) {
 func TestControlRoleOperationInventory(t *testing.T) {
 	allowed := map[controlRole][]string{
 		controlRoleAdmin: {
-			"runtime.status", "runtime.doctor", "migration.inspect", "remove.inspect",
+			"runtime.status", "runtime.doctor", "migration.inspect", "migration.status", "remove.inspect",
 		},
 		controlRoleLauncher: {
-			"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach",
-			"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
+			"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach", "attachment.lookup",
+			"lane.command", "lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 			"lane.interrupt", "lane.collect", "lane.archive",
 		},
 		controlRoleHook: {
@@ -578,8 +578,8 @@ func TestControlRoleOperationInventory(t *testing.T) {
 		},
 		controlRoleConnector: {
 			"mcp.forward",
-			"peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
-			"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
+			"attachment.context", "peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
+			"lane.command", "lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 			"lane.interrupt", "lane.collect", "lane.archive",
 		},
 		controlRoleService: {
@@ -588,11 +588,11 @@ func TestControlRoleOperationInventory(t *testing.T) {
 	}
 	allOperations := []string{
 		"runtime.status", "runtime.doctor",
-		"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach",
+		"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach", "attachment.lookup", "attachment.context",
 		"mcp.forward",
 		"peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
-		"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list", "lane.interrupt", "lane.collect", "lane.archive",
-		"migration.inspect", "remove.inspect",
+		"lane.command", "lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list", "lane.interrupt", "lane.collect", "lane.archive",
+		"migration.inspect", "migration.status", "remove.inspect",
 	}
 
 	for role, roleOperations := range allowed {
@@ -614,7 +614,7 @@ func TestControlRoleOperationInventory(t *testing.T) {
 			}
 		}
 	}
-	for _, operation := range []string{"runtime.status", "runtime.doctor", "migration.inspect", "remove.inspect"} {
+	for _, operation := range []string{"runtime.status", "runtime.doctor", "migration.inspect", "migration.status", "remove.inspect"} {
 		if controlRoleAllowsOperation(controlRoleConnector, operation) {
 			t.Errorf("model-facing connector accepted administrative operation %q", operation)
 		}

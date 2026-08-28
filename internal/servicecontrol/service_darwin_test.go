@@ -128,6 +128,42 @@ func TestDarwinControllerBootstrapsAndExplicitStopUsesBootout(t *testing.T) {
 	}
 }
 
+type recordingDarwinGenericRunner struct{ commands []recordedDarwinCommand }
+
+func (runner *recordingDarwinGenericRunner) Run(_ context.Context, executable string, arguments ...string) error {
+	runner.commands = append(runner.commands, recordedDarwinCommand{Name: executable, Args: append([]string(nil), arguments...)})
+	return nil
+}
+
+func TestDarwinPersistentEnablementIsDistinctFromRuntimeStartStop(t *testing.T) {
+	descriptor := darwinTestRoleDescriptors(t)[0]
+	role := RoleDescriptor{
+		Role: descriptor.Role, Label: descriptor.Label, DefinitionPath: descriptor.DefinitionPath,
+		Program: descriptor.Program, ProgramArguments: descriptor.ProgramArguments,
+	}
+	runner := &recordingDarwinGenericRunner{}
+	controller := NewController(runner)
+	ctx := context.Background()
+	for _, operation := range []func(context.Context, RoleDescriptor) error{
+		controller.Enable, controller.Start, controller.Restart, controller.Stop, controller.Disable,
+	} {
+		if err := operation(ctx, role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	want := []recordedDarwinCommand{
+		{Name: "launchctl", Args: []string{"enable", domain + "/" + descriptor.Label}},
+		{Name: "launchctl", Args: []string{"bootstrap", domain, descriptor.DefinitionPath}},
+		{Name: "launchctl", Args: []string{"kickstart", "-k", domain + "/" + descriptor.Label}},
+		{Name: "launchctl", Args: []string{"bootout", domain + "/" + descriptor.Label}},
+		{Name: "launchctl", Args: []string{"disable", domain + "/" + descriptor.Label}},
+	}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("Darwin service commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
 func TestDarwinSleepWakeObservesOneExistingOrReplacementJobWithoutLifecycleMutation(t *testing.T) {
 	for _, replacementPID := range []int{7001, 7002} {
 		name := "same_process"

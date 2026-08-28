@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -279,7 +278,7 @@ type wakeDeliveryUncertainError struct {
 func (e *wakeDeliveryUncertainError) Error() string { return e.err.Error() }
 func (e *wakeDeliveryUncertainError) Unwrap() error { return e.err }
 
-func newNativeSupervisor(pluginVersion string) (*nativeSupervisor, error) {
+func newNativeSupervisor() (*nativeSupervisor, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -290,7 +289,7 @@ func newNativeSupervisor(pluginVersion string) (*nativeSupervisor, error) {
 	}
 	paths := resolveNativePaths()
 	return &nativeSupervisor{
-		paths: paths, pluginVersion: defaultString(pluginVersion, "unknown"),
+		paths: paths, pluginVersion: "test",
 		executable: executable, runtimeIdentity: runtimeIdentity, shimExecutable: executable,
 		procStart: readProcStart(os.Getpid()), startedAt: time.Now().UnixMilli(),
 		done: make(chan struct{}), shims: map[string]map[string]any{},
@@ -3015,48 +3014,6 @@ func (s *nativeSupervisor) shutdown() {
 	})
 }
 
-func runSupervisorCommand(args []string) int {
-	command := "run"
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		command = args[0]
-		args = args[1:]
-	}
-	options := parseArgs(args)
-	version := options["plugin-version"]
-	paths := resolveNativePaths()
-	switch command {
-	case "status":
-		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 3*time.Second)
-		return printNativeResult(response, err)
-	case "stop":
-		response, err := stopNativeSupervisor(paths)
-		return printNativeResult(response, err)
-	case "start":
-		response, err := startNativeSupervisor(version)
-		return printNativeResult(response, err)
-	case "run":
-		supervisor, err := newNativeSupervisor(version)
-		if err == nil {
-			err = supervisor.start()
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: %v\n", err)
-			return 1
-		}
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-		select {
-		case <-signals:
-		case <-supervisor.done:
-		}
-		supervisor.shutdown()
-		return 0
-	default:
-		fmt.Fprintf(os.Stderr, "unknown supervisor command: %s\n", command)
-		return 2
-	}
-}
-
 func stopNativeSupervisor(paths nativePaths) (map[string]any, error) {
 	state := readJSONMap(paths.supervisorState)
 	pid, procStart := intValue(state["pid"]), stringValue(state["procStart"])
@@ -3071,53 +3028,6 @@ func stopNativeSupervisor(paths nativePaths) (map[string]any, error) {
 		return nil, fmt.Errorf("supervisor process %d did not stop", pid)
 	}
 	return map[string]any{"stopped": true}, nil
-}
-
-func startNativeSupervisor(version string) (map[string]any, error) {
-	paths := resolveNativePaths()
-	executable, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
-	runtimeIdentity, err := nativeExecutableIdentity(executable)
-	if err != nil {
-		return nil, err
-	}
-	startLock, err := lockNativeSupervisorStart(paths)
-	if err != nil {
-		return nil, err
-	}
-	defer unlockNativeSupervisorStart(startLock)
-	if current, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 500*time.Millisecond); err == nil {
-		if !samePath(stringValue(current["appServerSocket"]), paths.appServerSock) {
-			return nil, fmt.Errorf("supervisor socket %s belongs to App Server %s, not %s", paths.supervisorSock, stringValue(current["appServerSocket"]), paths.appServerSock)
-		}
-		if nativeSupervisorMatches(current, paths, version, runtimeIdentity) {
-			return current, nil
-		}
-		if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
-			return nil, err
-		}
-	} else if probeUnixSocket(paths.supervisorSock, 200*time.Millisecond) {
-		return nil, fmt.Errorf("refuse to replace unresponsive live supervisor socket %s", paths.supervisorSock)
-	}
-	child := exec.Command(executable, "supervisor", "run", "--plugin-version", version) //nolint:gosec // executable is the current installed bridge binary.
-	child.Stdin, child.Stdout, child.Stderr = nil, nil, nil
-	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := child.Start(); err != nil {
-		return nil, err
-	}
-	_ = child.Process.Release()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, time.Second); err == nil {
-			if nativeSupervisorMatches(response, paths, version, runtimeIdentity) {
-				return response, nil
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nil, errors.New("timed out starting native Claude peer supervisor")
 }
 
 func nativeExecutableIdentity(executable string) (string, error) {
@@ -3135,27 +3045,6 @@ func nativeSupervisorMatches(status map[string]any, paths nativePaths, version, 
 		stringValue(status["pluginVersion"]) == version &&
 		stringValue(status["runtimeIdentity"]) == runtimeIdentity &&
 		samePath(stringValue(status["appServerSocket"]), paths.appServerSock)
-}
-
-func lockNativeSupervisorStart(paths nativePaths) (*os.File, error) {
-	directory := profileDataRoot(paths)
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(directory, "supervisor-start.lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // bridge-owned state path.
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
-}
-
-func unlockNativeSupervisorStart(file *os.File) {
-	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	_ = file.Close()
 }
 
 // stopLegacyNativeSupervisor removes the single global supervisor used before
@@ -3201,16 +3090,6 @@ func stopExistingNativeSupervisor(socket string, timeout time.Duration) error {
 		return fmt.Errorf("timed out waiting for existing supervisor %s to stop", socket)
 	}
 	return nil
-}
-
-func printNativeResult(value map[string]any, err error) int {
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	body, _ := json.Marshal(value)
-	fmt.Println(string(body))
-	return 0
 }
 
 //nolint:unparam // Keeping the timeout explicit makes the socket boundary reusable in focused tests and adapters.

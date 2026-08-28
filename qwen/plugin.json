@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-sessions",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Discover grouped Agent Sessions peers and orchestrate durable Codex, Claude, Grok, and Qwen lanes from Qwen Code.",
   "author": {
     "name": "Agent Sessions contributors"

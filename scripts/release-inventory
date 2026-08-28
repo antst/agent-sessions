@@ -3,15 +3,34 @@ set -euo pipefail
 
 # Single release inventory consumed by local builds, packaging, tests, evidence,
 # and CI. Do not transcribe these lists into workflow YAML or another script.
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+  script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+  link_target="$(readlink -- "$script_path")"
+  if [[ "$link_target" == /* ]]; then script_path="$link_target"; else script_path="$script_dir/$link_target"; fi
+done
+source_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+
 binaries=(
   agent-sessions
   agent-sessions-hub
+)
+host_aliases=(
+  peer
+  codex-peer claude-peer grok-peer qwen-peer
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane
 )
 plugins=(
   'codex|.agents,.codex-plugin,.mcp.json,hooks,scripts,skills'
   'claude|.claude-plugin,claude'
   'grok|grok'
   'qwen|qwen'
+)
+connector_pointers=(
+  'codex|.mcp.json|scripts/native-entry'
+  'claude|claude/.mcp.json|agent-sessions'
+  'grok|grok/.mcp.json|grok/scripts/native-entry'
+  'qwen|qwen/mcp.json|qwen/scripts/native-entry'
 )
 package_paths=(
   .agents .claude-plugin .codex-plugin .mcp.json
@@ -22,7 +41,16 @@ host_package_paths=(
   claude deploy/agent-sessions docs grok hooks qwen scripts skills README.md
 )
 hub_package_paths=(
-  deploy/agent-sessions-hub docs/FEDERATION.md docs/federation README.md
+  deploy/agent-sessions-hub deploy/agent-sessions/VERSION docs/FEDERATION.md docs/federation README.md
+)
+host_service_assets=(
+  deploy/agent-sessions/systemd/user/agent-sessions.service
+  deploy/agent-sessions/launchd/net.antst.agent-sessions.plist
+)
+hub_service_assets=(
+  deploy/agent-sessions-hub/systemd/user/agent-sessions-hub.service
+  deploy/agent-sessions-hub/systemd/user/hub.env.example
+  deploy/agent-sessions-hub/launchd/net.antst.agent-sessions-hub.plist
 )
 platforms=(
   'linux|amd64|linux-x64'
@@ -49,12 +77,142 @@ json_string_array() {
   printf ']'
 }
 
+hub_protocol_version() {
+  local catalog="$source_root/internal/productcatalog/catalog.go" value
+  value="$(sed -n 's/^[[:space:]]*ProtocolVersion[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$catalog")"
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    printf 'cannot derive the authoritative hub protocol version from %s\n' "$catalog" >&2
+    return 1
+  }
+  printf '%s\n' "$value"
+}
+
+source_release_manifest() {
+  local platform=${2:-} version=${3:-} projection=${4:-} known=false row product paths role name protocol_version
+  [[ "$version" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || {
+    printf 'invalid source-release version: %s\n' "$version" >&2
+    exit 2
+  }
+  [[ "$version" == "$(<"$source_root/deploy/agent-sessions/VERSION")" ]] || {
+    printf 'source-release manifest version does not match deploy/agent-sessions/VERSION: %s\n' "$version" >&2
+    exit 1
+  }
+  for row in "${platforms[@]}"; do
+    [[ "${row##*|}" == "$platform" ]] && known=true
+  done
+  [[ "$known" == true ]] || {
+    printf 'invalid source-release platform: %s\n' "$platform" >&2
+    exit 2
+  }
+  protocol_version="$(hub_protocol_version)"
+	[[ -z "$projection" || "$projection" == host || "$projection" == hub ]] || {
+		printf 'invalid source-release role projection: %s\n' "$projection" >&2
+		exit 2
+	}
+  printf '{"schema_version":1,"release_version":'; json_string "$version"
+  printf ',"hub_protocol_version":%s,"platform":' "$protocol_version"; json_string "$platform"
+  printf ',"checksums":"SHA256SUMS"'
+  printf ',"executables":['
+	local first_executable=true
+  for name in "${binaries[@]}"; do
+    [[ "$name" == agent-sessions ]] && role=host || role=hub
+		[[ -z "$projection" || "$projection" == "$role" ]] || continue
+		if [[ "$first_executable" == true ]]; then first_executable=false; else printf ','; fi
+    printf '{"name":'; json_string "$name"
+    printf ',"role":'; json_string "$role"
+		if [[ -z "$projection" ]]; then
+			printf ',"path":'; json_string "bin/$platform/$name"
+		else
+			printf ',"path":'; json_string "bin/$name"
+		fi
+    printf '}'
+  done
+  printf '],"connector_payloads":['
+  local first=true
+	if [[ "$projection" != hub ]]; then for row in "${plugins[@]}"; do
+    IFS='|' read -r product paths <<<"$row"
+    IFS=',' read -r -a archive_paths <<<"$paths"
+    if [[ "$first" == true ]]; then first=false; else printf ','; fi
+    printf '{"product":'; json_string "$product"
+    printf ',"plugin_id":"agent-sessions","archive_paths":'
+    json_string_array "${archive_paths[@]}"
+    printf '}'
+	done; fi
+  printf '],"service_assets":{"host":'
+	if [[ "$projection" == hub ]]; then json_string_array; else json_string_array "${host_service_assets[@]}"; fi
+  printf ',"hub":'
+	if [[ "$projection" == host ]]; then json_string_array; else json_string_array "${hub_service_assets[@]}"; fi
+  printf '}}\n'
+}
+
+verify_source_pointers() {
+  local declared row product manifest entry version asset
+  declared="$(<"$source_root/deploy/agent-sessions/VERSION")"
+  [[ "$declared" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || {
+    printf 'declared source-release version is invalid: %s\n' "$declared" >&2
+    return 1
+  }
+  for manifest in \
+    .codex-plugin/plugin.json claude/.claude-plugin/plugin.json \
+    grok/.grok-plugin/plugin.json qwen/plugin.json; do
+    version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$source_root/$manifest" | head -1)"
+    [[ "$version" == "$declared" ]] || {
+      printf 'connector manifest %s version %s does not match source release %s\n' "$manifest" "$version" "$declared" >&2
+      return 1
+    }
+  done
+  for row in "${connector_pointers[@]}"; do
+    IFS='|' read -r product manifest entry <<<"$row"
+    [[ -f "$source_root/$manifest" ]] || { printf 'connector manifest is missing: %s\n' "$manifest" >&2; return 1; }
+    grep -Fq '"agent_sessions"' "$source_root/$manifest" || {
+      printf 'connector manifest %s omits agent_sessions\n' "$manifest" >&2
+      return 1
+    }
+    if [[ "$entry" == */* ]]; then
+      [[ -f "$source_root/$entry" && -x "$source_root/$entry" && ! -L "$source_root/$entry" ]] || {
+        printf '%s connector entry point is not a real executable: %s\n' "$product" "$entry" >&2
+        return 1
+      }
+      cmp -s "$source_root/scripts/native-entry" "$source_root/$entry" || {
+        printf '%s connector entry point drifted from the canonical relay: %s\n' "$product" "$entry" >&2
+        return 1
+      }
+    else
+      grep -Fq '"command": "agent-sessions"' "$source_root/$manifest" || {
+        printf '%s connector does not resolve the canonical installed host alias\n' "$product" >&2
+        return 1
+      }
+    fi
+  done
+  grep -Fq '/libexec/agent-sessions/host/current/bin/agent-sessions' "$source_root/scripts/native-entry" || {
+    printf 'canonical connector relay does not select the immutable host current release\n' >&2
+    return 1
+  }
+  if grep -Fq 'agent-session-runtime' "$source_root/scripts/native-entry"; then
+    printf 'canonical connector relay still references the legacy runtime\n' >&2
+    return 1
+  fi
+  for asset in "${host_service_assets[@]}" "${hub_service_assets[@]}"; do
+    [[ -f "$source_root/$asset" && ! -L "$source_root/$asset" ]] || {
+      printf 'release service asset is missing or indirect: %s\n' "$asset" >&2
+      return 1
+    }
+  done
+  printf 'release source pointers: PASS\n'
+}
+
 case "${1:-}" in
   binaries)
     printf '%s\n' "${binaries[@]}"
     ;;
+  host-aliases)
+    printf '%s\n' "${host_aliases[@]}"
+    ;;
   plugins)
     printf '%s\n' "${plugins[@]}"
+    ;;
+  connector-pointers)
+    printf '%s\n' "${connector_pointers[@]}"
     ;;
   package-paths)
     printf '%s\n' "${package_paths[@]}"
@@ -65,8 +223,17 @@ case "${1:-}" in
   hub-package-paths)
     printf '%s\n' "${hub_package_paths[@]}"
     ;;
+  host-service-assets)
+    printf '%s\n' "${host_service_assets[@]}"
+    ;;
+  hub-service-assets)
+    printf '%s\n' "${hub_service_assets[@]}"
+    ;;
   platforms)
     printf '%s\n' "${platforms[@]}"
+    ;;
+  protocol-version)
+    hub_protocol_version
     ;;
   matrix-json)
     printf '{"include":['
@@ -97,8 +264,14 @@ case "${1:-}" in
     done
     printf ']}\n'
     ;;
+  source-release-manifest-json)
+    source_release_manifest "$@"
+    ;;
+  verify-source-pointers)
+    verify_source_pointers
+    ;;
   *)
-    printf 'usage: %s binaries|plugins|package-paths|host-package-paths|hub-package-paths|platforms|matrix-json|package-inventory-json\n' "${0##*/}" >&2
+    printf 'usage: %s binaries|host-aliases|plugins|connector-pointers|package-paths|host-package-paths|hub-package-paths|host-service-assets|hub-service-assets|platforms|protocol-version|matrix-json|package-inventory-json|source-release-manifest-json PLATFORM VERSION [host|hub]|verify-source-pointers\n' "${0##*/}" >&2
     exit 2
     ;;
 esac

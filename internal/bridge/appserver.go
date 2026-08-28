@@ -433,53 +433,6 @@ func requestWithTimeout(client *appServerClient, timeout time.Duration, method s
 	return client.request(ctx, method, params, output)
 }
 
-// runAppServerCommand exposes only the host-safety checks needed by the
-// installer. It is intentionally not a general raw-RPC escape hatch.
-func runAppServerCommand(argv []string) int {
-	if len(argv) != 1 || (argv[0] != "quiescent" && argv[0] != "stopped" && argv[0] != "profile-key") {
-		fmt.Fprintln(os.Stderr, "usage: agent-session-runtime appserver quiescent|stopped|profile-key")
-		return 2
-	}
-	paths := resolveNativePaths()
-	if argv[0] == "profile-key" {
-		fmt.Println(paths.profileKey)
-		return 0
-	}
-	if argv[0] == "stopped" {
-		running, err := appServerSocketRunning(paths.appServerSock)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent-session-runtime appserver stopped: %v\n", err)
-			return 1
-		}
-		encoded, _ := json.Marshal(map[string]any{"stopped": !running})
-		fmt.Println(string(encoded))
-		if running {
-			return 3
-		}
-		return 0
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	client, err := dialAppServer(ctx, paths.appServerSock)
-	cancel()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime appserver quiescent: %v\n", err)
-		return 1
-	}
-	defer client.close()
-	active, err := activeAppServerThreads(client)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime appserver quiescent: %v\n", err)
-		return 1
-	}
-	result := map[string]any{"quiescent": len(active) == 0, "activeThreadIds": active}
-	encoded, _ := json.Marshal(result)
-	fmt.Println(string(encoded))
-	if len(active) != 0 {
-		return 3
-	}
-	return 0
-}
-
 func appServerSocketRunning(socketPath string) (bool, error) {
 	connection, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
 	if err == nil {

@@ -11,10 +11,11 @@ import (
 
 var controlRoleOperations = map[controlRole]map[string]struct{}{
 	controlRoleAdmin: operationSet(
-		"runtime.status", "runtime.doctor", "migration.inspect", "remove.inspect",
+		"runtime.status", "runtime.doctor", "migration.inspect", "migration.status", "remove.inspect",
 	),
 	controlRoleLauncher: operationSet(
-		"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach",
+		"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach", "attachment.lookup",
+		"lane.command",
 		"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 		"lane.interrupt", "lane.collect", "lane.archive",
 	),
@@ -23,7 +24,8 @@ var controlRoleOperations = map[controlRole]map[string]struct{}{
 	),
 	controlRoleConnector: operationSet(
 		"mcp.forward",
-		"peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
+		"attachment.context", "peer.identity", "peer.discover", "peer.send", "peer.broadcast", "peer.inbox", "peer.rename",
+		"lane.command",
 		"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 		"lane.interrupt", "lane.collect", "lane.archive",
 	),

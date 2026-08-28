@@ -40,8 +40,8 @@ Start a new Claude Code session, then run:
 /agent-sessions:doctor
 ```
 
-Proceed only when its report has `summary: "ready"`, `contract_version: 2`, and
-`runtime_ready: true`. The skill never installs, updates, or starts host services itself.
+Proceed only when its report has `summary: "ready"`, `daemon_ready: true`, authority `daemon`,
+and product `codex`. The skill never installs, updates, or starts host services itself.
 
 ## Optional manual-launcher permission
 

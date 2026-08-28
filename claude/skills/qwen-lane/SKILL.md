@@ -9,14 +9,15 @@ description: Orchestrate named, messageable local or remote Qwen Code worker lan
 Sessions peer. Qwen remains the authority for its approval mode.
 
 Run `qwen-peer-lane doctor --json` and `qwen-peer-lane list --all` first. Require
-contract version 1 and `ready: true`; do not launch when version, ACP, archive,
-trusted-cwd, profile, integration, or non-secret credential configuration evidence
-is missing. Readiness is session-free and does not prove a live provider login.
+`ready: true`, `authority: "daemon"`, and product `qwen`. The daemon adapter checks
+native/profile readiness; this remains session-free readiness and does not prove a live provider login.
 
-For another host use `peer-federator lane --host HOST --product qwen --` after
-confirming `qwen-lane` capability. Never use SSH or silently fall back locally.
+For another host use `agent-sessions lane --host HOST --product qwen --` after
+confirming `qwen-lane` capability and remote doctor fields `ready: true`, authority
+`remote-daemon`, exact host, and product `qwen`. Never use SSH or silently fall back locally.
 Federation owns lifecycle, so omit `--persistent`, `--notify`, `--no-notify`, and
-`--no-auto-archive` remotely.
+`--no-auto-archive` remotely. Remote `--mine` matches the exact source-proxy parent and host;
+prompts use bounded stdin and remote `--prompt-file` is unsupported.
 
 ```sh
 qwen-peer-lane start --name qwen-review --no-yolo --auto-archive-after 300 - < brief.md
@@ -42,8 +43,8 @@ qwen-peer-lane interrupt qwen-review
 qwen-peer-lane archive qwen-review
 ```
 
-Resume preserves the exact native Qwen UUID. Interrupt returns 130. Archive is
-idempotent and retires manager, worker, tool roots, helper, sockets, and grouped
-publication. Default lanes belong to this exact Claude parent; persistent lanes
+Resume preserves the exact native Qwen UUID. Interrupt returns 130. Archive is daemon-owned and
+idempotent; it retires publication and adapter-owned native resources. Default lanes belong to
+this exact Claude parent; persistent lanes
 must be explicitly archived. Use `--inherit-groups` only deliberately and repeat
 `--group NAME` for child-specific groups.

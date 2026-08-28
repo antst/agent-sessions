@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/clihelp"
+	"github.com/antst/agent-sessions/internal/daemon"
 )
 
 func TestAdministrativeHelpUsesTheCanonicalParsedOptionInventory(t *testing.T) {
@@ -44,50 +46,133 @@ func TestAdministrativeHelpUsesTheCanonicalParsedOptionInventory(t *testing.T) {
 }
 
 func TestAdministrativeJSONUsesCanonicalEnvelopeSchemaAndExitClass(t *testing.T) {
-	for _, command := range []string{"status", "doctor"} {
-		t.Run(command, func(t *testing.T) {
+	previousInspect, previousStatus := runHostMigrationInspect, runHostMigrationStatus
+	inspectCalls, statusCalls := 0, 0
+	runHostMigrationInspect = func(context.Context) (daemon.MigrationInspectProjection, error) {
+		inspectCalls++
+		return daemon.MigrationInspectProjection{
+			Candidates: []daemon.LegacyRuntimeCandidate{}, Blockers: []daemon.LegacyMigrationBlocker{}, Debt: []daemon.LegacyMigrationDebt{},
+		}, nil
+	}
+	runHostMigrationStatus = func(context.Context) (daemon.MigrationStatusProjection, error) {
+		statusCalls++
+		return daemon.MigrationStatusProjection{State: "none", NextAction: "none"}, nil
+	}
+	t.Cleanup(func() { runHostMigrationInspect, runHostMigrationStatus = previousInspect, previousStatus })
+
+	tests := []struct {
+		name     string
+		args     []string
+		contract string
+		offline  bool
+	}{
+		{name: "status", args: []string{"status"}, contract: "status"},
+		{name: "doctor", args: []string{"doctor"}, contract: "doctor"},
+		{name: "migrate-inspect", args: []string{"migrate", "inspect"}, contract: "migrate.inspect", offline: true},
+		{name: "migrate-status", args: []string{"migrate", "status"}, contract: "migrate.status", offline: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run("agent-sessions", []string{command, "--json"}, &stdout, &stderr)
+			code := run("agent-sessions", append(append([]string(nil), test.args...), "--json"), &stdout, &stderr)
+			if test.offline && code != 0 {
+				t.Fatalf("offline %s --json exit = %d, want 0 without a daemon; stdout=%q stderr=%q", test.name, code, stdout.String(), stderr.String())
+			}
 			if code != 0 && code != 3 {
-				t.Fatalf("%s --json exit = %d, want success or unavailable", command, code)
+				t.Fatalf("%s --json exit = %d, want success or unavailable", test.name, code)
 			}
 			if stderr.Len() != 0 {
-				t.Errorf("%s --json wrote non-JSON stderr: %q", command, stderr.String())
+				t.Errorf("%s --json wrote non-JSON stderr: %q", test.name, stderr.String())
 			}
 			var envelope map[string]any
 			decoder := json.NewDecoder(&stdout)
 			if err := decoder.Decode(&envelope); err != nil {
-				t.Fatalf("%s --json did not emit one JSON object: %v; stdout=%q", command, err, stdout.String())
+				t.Fatalf("%s --json did not emit one JSON object: %v; stdout=%q", test.name, err, stdout.String())
 			}
 			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-				t.Fatalf("%s --json emitted trailing data: %v", command, err)
+				t.Fatalf("%s --json emitted trailing data: %v", test.name, err)
 			}
 			contract := clihelp.Contract()
 			ok, _ := envelope["ok"].(bool)
 			if ok {
 				if code != 0 {
-					t.Errorf("successful %s JSON used exit %d", command, code)
+					t.Errorf("successful %s JSON used exit %d", test.name, code)
 				}
 				assertCLIExactStringSet(t, "success envelope fields", cliMapKeys(envelope), contract.JSONEnvelope.SuccessFields)
 				result, resultOK := envelope["result"].(map[string]any)
 				if !resultOK {
-					t.Fatalf("%s success result = %#v", command, envelope["result"])
+					t.Fatalf("%s success result = %#v", test.name, envelope["result"])
 				}
-				assertCLIExactStringSet(t, command+" result fields", cliMapKeys(result), contract.JSONResultFields[command])
+				assertCLIExactStringSet(t, test.contract+" result fields", cliMapKeys(result), contract.JSONResultFields[test.contract])
 				return
 			}
 			if code != 3 {
-				t.Errorf("failed %s JSON exit = %d, want unavailable class 3", command, code)
+				t.Errorf("failed %s JSON exit = %d, want unavailable class 3", test.name, code)
 			}
 			assertCLIExactStringSet(t, "failure envelope fields", cliMapKeys(envelope), contract.JSONEnvelope.FailureFields)
 			errorObject, errorOK := envelope["error"].(map[string]any)
 			if !errorOK {
-				t.Fatalf("%s failure error = %#v", command, envelope["error"])
+				t.Fatalf("%s failure error = %#v", test.name, envelope["error"])
 			}
 			assertCLIExactStringSet(t, "failure error fields", cliMapKeys(errorObject), contract.JSONEnvelope.ErrorFields)
 			if errorObject["class"] != "unavailable" || errorObject["code"] != "daemon_unavailable" ||
 				errorObject["retryable"] != true || strings.TrimSpace(stringValue(errorObject["next_action"])) == "" { //nolint:revive // Dynamic JSON Boolean is intentional.
-				t.Errorf("%s unavailable error is not canonical: %#v", command, errorObject)
+				t.Errorf("%s unavailable error is not canonical: %#v", test.name, errorObject)
+			}
+		})
+	}
+	if inspectCalls != 1 || statusCalls != 1 {
+		t.Fatalf("offline migration dispatch calls inspect=%d status=%d, want one each", inspectCalls, statusCalls)
+	}
+}
+
+func TestMigrationAdministrativeFailuresPreserveStableSpecificExitClasses(t *testing.T) {
+	command, _, err := clihelp.ResolveCommand("agent-sessions", []string{"migrate", "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		failure   *daemon.AdministrativeError
+		exit      int
+		class     string
+		code      string
+		retryable bool
+	}{
+		{
+			name: "exact blocker", exit: 4, class: "refused", code: "migration_blocked",
+			failure: &daemon.AdministrativeError{Operation: "migration.status", Code: "migration_blocked", Message: "one exact peer remains live", NextAction: "close peer peer-owner and retry"},
+		},
+		{
+			name: "unsafe state root", exit: 4, class: "refused", code: "migration_state_unsafe",
+			failure: &daemon.AdministrativeError{Operation: "migration.status", Code: "migration_state_unsafe", Message: "state root is not owner-only", NextAction: "restore the owner-only canonical state path"},
+		},
+		{
+			name: "incompatible state", exit: 5, class: "incompatible", code: "migration_state_incompatible",
+			failure: &daemon.AdministrativeError{Operation: "migration.status", Code: "migration_state_incompatible", Message: "selector schema is unsupported", NextAction: "install a compatible Agent Sessions release"},
+		},
+		{
+			name: "incomplete state", exit: 6, class: "retryable", code: "migration_state_incomplete", retryable: true,
+			failure: &daemon.AdministrativeError{Operation: "migration.status", Code: "migration_state_incomplete", Message: "selected record is absent", Retryable: true, NextAction: "restore the exact selected record and retry"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if got := renderAdministrativeFailure(command, true, test.failure, &stdout, &stderr); got != test.exit {
+				t.Fatalf("exit = %d, want %d", got, test.exit)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("machine failure wrote stderr %q", stderr.String())
+			}
+			var envelope map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			errorObject, ok := envelope["error"].(map[string]any)
+			if !ok || errorObject["class"] != test.class || errorObject["code"] != test.code ||
+				errorObject["retryable"] != test.retryable || errorObject["next_action"] != test.failure.NextAction {
+				t.Fatalf("migration failure envelope = %#v", envelope)
 			}
 		})
 	}

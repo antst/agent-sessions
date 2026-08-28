@@ -34,8 +34,11 @@ const hookAdditionalContextLimit = 2400
 
 var queryDaemonCodexHook = daemonpkg.QueryLocalControl
 
-func runHookCommand() {
-	body, err := io.ReadAll(io.LimitReader(os.Stdin, maxFrameBytes+1))
+// RunHook serves the stateless Codex hook connector through the canonical
+// agent-sessions binary. Hook failures degrade to an empty successful response
+// so a connector outage never blocks the vendor session.
+func RunHook(stdin io.Reader, stdout, diagnostics io.Writer) int {
+	body, err := io.ReadAll(io.LimitReader(stdin, maxFrameBytes+1))
 	if err == nil && len(body) > maxFrameBytes {
 		err = errors.New("hook input exceeds 1 MiB")
 	}
@@ -45,17 +48,30 @@ func runHookCommand() {
 	}
 	var output map[string]any
 	if err == nil {
-		output, err = handleNativeHook(input)
+		output, err = handleCanonicalCodexHook(input)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native hook degraded gracefully: %v\n", err)
+		_, _ = fmt.Fprintf(diagnostics, "agent-sessions hook degraded gracefully: %v\n", err)
 		output = map[string]any{}
 	}
 	if output == nil {
-		return
+		return 0
 	}
 	encoded, _ := json.Marshal(output)
-	fmt.Println(string(encoded))
+	_, _ = fmt.Fprintln(stdout, string(encoded))
+	return 0
+}
+
+// handleCanonicalCodexHook admits only the daemon-minted connector identity
+// inherited by a managed Codex attachment. Hooks are installed daemon-wide,
+// so every ordinary vendor session is a silent no-op and can never resurrect
+// a legacy supervisor, shim, or product-specific socket.
+func handleCanonicalCodexHook(input hookInput) (map[string]any, error) {
+	identity := daemonpkg.InheritedConnectorIdentity("codex")
+	if identity.AttachmentID == "" {
+		return nil, nil
+	}
+	return handleDaemonCodexHook(resolveNativePaths(), input, identity)
 }
 
 //nolint:gocyclo // Each hook event has a separate, explicit delivery policy.

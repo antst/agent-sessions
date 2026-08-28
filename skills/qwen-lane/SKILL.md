@@ -20,14 +20,17 @@ launcher from a sandboxed Codex peer.
 ```
 
 For a remote host add `"host":"HOST"`; require a connected hub and advertised
-`qwen-lane`. Federation owns lifecycle flags, so do not pass `--persistent`,
-`--notify`, `--no-notify`, or `--no-auto-archive` remotely. Never fall back to SSH
-or local execution.
+`qwen-lane`. Remote doctor must return `ready: true`, authority `remote-daemon`,
+the exact requested host, and product `qwen`. Remote `--mine` matches the exact
+source-proxy parent and host. Federation owns lifecycle flags, so do not pass
+`--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` remotely. Send
+prompts through bounded `input`; remote `--prompt-file` is unsupported. Never
+fall back to SSH or local execution.
 
-Run `doctor --json` and `list --all` before starting. Require contract version 1,
-`ready: true`, Qwen Code >= 0.21.15, ACP session load/list/resume plus stdio MCP,
-native archive capability, a trusted cwd, and the expected selected-profile plugin
-identity. Readiness is session-free and does not claim live provider authentication.
+Run `doctor --json` and `list --all` before starting. Require `ready: true`,
+`authority: "daemon"`, and product `qwen`. The daemon's Qwen adapter validates the selected
+profile and native prerequisites; readiness is session-free and does not claim live provider
+authentication.
 
 Start detached work and collect it exactly once:
 
@@ -60,10 +63,9 @@ qwen-peer-lane interrupt qwen-review
 qwen-peer-lane archive qwen-review
 ```
 
-Interrupt maps ACP cancel to outcome `interrupted`, exit 130. Archive is
-idempotent, retires the manager, ACP worker, registered detached tool roots,
-private archive helper tree, sockets, and grouped publication, while retaining the
-native transcript for resume. Default lanes belong to the exact parent and archive
+Interrupt maps ACP cancel to outcome `interrupted`, exit 130. Archive is daemon-owned and
+idempotent, retires the grouped publication and adapter-owned native resources, while retaining
+the native transcript for resume. Default lanes belong to the exact parent and archive
 when it exits; use `--persistent` only when survival is intended. Child groups are
 private by default; add `--inherit-groups` deliberately and repeat `--group NAME`
 for child-specific membership.

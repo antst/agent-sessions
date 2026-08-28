@@ -19,7 +19,6 @@ import (
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
@@ -186,28 +185,8 @@ func parseLaneArgs(argv []string) (laneOptions, error) {
 	return options, nil
 }
 
-//nolint:dupl // Declarative product binding is intentionally explicit; dispatch mechanics live in runProductLaneCommand.
-func runLaneCommand(argv []string) int {
-	return runProductLaneCommand(argv, productLaneCommands[laneOptions]{
-		binary: "codex-peer-lane", usage: laneUsage, parse: parseLaneArgs, parseExit: 1,
-		help: func(o laneOptions) bool { return o.help },
-		prepare: func(o laneOptions) (laneOptions, error) {
-			return withLaneLaunchContext(o), nil
-		},
-		command: func(o laneOptions) string { return o.command },
-		start:   startLaneNative, resume: resumeLaneNative, wait: waitLaneNative, status: statusLaneNative,
-		interrupt: interruptLaneNative, archive: archiveLaneNative, list: listLanesNative,
-		doctor: func(laneOptions) (int, error) { return doctorLaneNative() },
-	})
-}
-
 func withLaneLaunchContext(options laneOptions) laneOptions {
 	options.laneCommonOptions = withCurrentLaneParent(options.laneCommonOptions)
-	return options
-}
-
-func withLaneResolvedParent(options laneOptions, owner laneOwner) laneOptions {
-	options.laneCommonOptions = withResolvedLaneParent(options.laneCommonOptions, owner)
 	return options
 }
 
@@ -898,7 +877,7 @@ func inferPeerParent(paths nativePaths, startPID int) laneOwner {
 		candidates = append(candidates, owner)
 	}
 	if len(candidates) == 0 {
-		if owner, ok := inferRegisteredPeerParent(startPID, federator.ResolveParentContext); ok {
+		if owner, ok := inferRegisteredPeerParent(startPID, resolveDaemonParentContext); ok {
 			candidates = append(candidates, owner)
 		}
 	}
@@ -936,43 +915,6 @@ func doctorLaneNative() (int, error) {
 	if !appServerReachable || !supervisorReachable {
 		return 1, nil
 	}
-	return 0, nil
-}
-
-func interruptLaneNative(options laneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveLaneState(paths, options.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.Status == "archived" || isRetiredThreadNative(paths, state.ThreadID) {
-		return 1, fmt.Errorf("lane %s is archived", state.ThreadID)
-	}
-	client, err := connectLaneClient(paths)
-	if err != nil {
-		return 1, err
-	}
-	defer client.close()
-	if _, err := resumeThreadForPeer(client, state.ThreadID); err != nil {
-		return 1, err
-	}
-	turns, err := listLaneTurns(client, state.ThreadID, "notLoaded")
-	if err != nil {
-		return 1, err
-	}
-	turn := findActiveLaneTurn(turns)
-	if turn == nil {
-		return 1, fmt.Errorf("lane %s has no active turn", state.ThreadID)
-	}
-	if err := requestWithTimeout(client, 30*time.Second, "turn/interrupt", map[string]any{
-		"threadId": state.ThreadID, "turnId": turn.ID,
-	}, nil); err != nil {
-		return 1, err
-	}
-	if err := recordLaneInterrupted(paths, state.ThreadID, turn.ID); err != nil {
-		return 1, fmt.Errorf("persist interrupted lane turn: %w", err)
-	}
-	_ = emitLane(map[string]any{"type": "turn.interrupted", "thread_id": state.ThreadID, "turn_id": turn.ID})
 	return 0, nil
 }
 

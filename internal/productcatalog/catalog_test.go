@@ -79,7 +79,10 @@ func TestHubProtocolInventoryIsClosedAndCapabilityNeutral(t *testing.T) {
 	wantFrames := []string{
 		"hello", "hello_ok", "probe", "probe_ok", "snapshot", "roster",
 		"group_deliver", "terminal_notice_deliver", "delivery_ack", "delivery_error",
-		"lane_exec", "lane_cancel", "lane_stdout", "lane_stderr", "lane_exit", "lane_error",
+		"lane_exec", "lane_accepted", "lane_cancel", "lane_cancelled", "lane_cancel_refused",
+		"lane_archive", "lane_archived", "lane_archive_refused",
+		"lane_result", "lane_result_ack", "lane_result_refused",
+		"lane_stdout", "lane_stderr", "lane_exit", "lane_error",
 		"ping", "pong",
 	}
 	if !slices.Equal(protocol.FrameTypes, wantFrames) {

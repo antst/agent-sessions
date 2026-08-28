@@ -38,7 +38,7 @@ codex plugin list
 codex app-server daemon version
 codex-peer -n reviewer -g project-a
 codex-peer-lane doctor --json
-peer-federator status
+agent-sessions status --json
 ```
 
 An already-running TUI retains its old plugin snapshot and must be restarted. The installer refuses

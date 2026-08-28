@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path=${BASH_SOURCE[0]}
+while [[ -L "$script_path" ]]; do
+	script_dir=$(cd -P -- "$(dirname -- "$script_path")" && pwd)
+	link_target=$(readlink -- "$script_path")
+	if [[ "$link_target" == /* ]]; then script_path=$link_target; else script_path=$script_dir/$link_target; fi
+done
+repository_root=$(cd -- "$(dirname -- "$script_path")/../.." && pwd -P)
+
+fail() {
+	printf 'installed hub acceptance: %s\n' "$*" >&2
+	exit 1
+}
+
+wait_for() {
+	local description=$1
+	shift
+	for _ in {1..500}; do
+		if "$@"; then return 0; fi
+		sleep 0.05
+	done
+	fail "timed out waiting for $description"
+}
+
+json_field() {
+	python3 -c 'import json,sys
+value=json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    value=value[key]
+print(json.dumps(value,separators=(",",":")) if isinstance(value,(dict,list,bool)) else value)' "$1"
+}
+
+[[ $(uname -s) == Linux ]] || fail 'the installed systemd-user hub cell is Linux-only'
+
+if [[ ${AGENT_SESSIONS_NESTED_HUB_SYSTEMD:-0} != 1 ]]; then
+	# Keep the disposable ancestor role-neutral. The host's closed legacy
+	# inventory deliberately rejects every path containing a hub boundary, so
+	# naming the synthetic HOME after the hub would make its otherwise valid
+	# legacy-state candidates appear to cross that boundary.
+	outer_root=$(mktemp -d "${TMPDIR:-/tmp}/unified-role-service.XXXXXX")
+	chmod 0700 "$outer_root"
+	cleanup_outer() {
+		if [[ ${AGENT_SESSIONS_KEEP_ACCEPTANCE_ROOT:-0} == 1 ]]; then
+			printf 'installed hub acceptance: retained diagnostic root %s\n' "$outer_root" >&2
+			return
+		fi
+		chmod -R u+w -- "$outer_root" 2>/dev/null || true
+		rm -rf -- "$outer_root"
+	}
+	trap cleanup_outer EXIT
+	mkdir -p "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state" "$outer_root/tmp"
+	chmod 0700 "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state" "$outer_root/tmp"
+	go_module_cache=$(go env GOMODCACHE)
+	go_build_cache=$(go env GOCACHE)
+	go_workspace=$(go env GOPATH)
+	set +e
+	dbus-run-session -- env \
+		AGENT_SESSIONS_NESTED_HUB_SYSTEMD=1 AGENT_SESSIONS_HUB_ACCEPTANCE_ROOT="$outer_root" \
+		HOME="$outer_root/home" XDG_RUNTIME_DIR="$outer_root/runtime" \
+		XDG_CONFIG_HOME="$outer_root/config" XDG_STATE_HOME="$outer_root/state" \
+		TMPDIR="$outer_root/tmp" \
+		GOMODCACHE="$go_module_cache" GOCACHE="$go_build_cache" GOPATH="$go_workspace" \
+		PATH="$PATH" "$script_path"
+	status=$?
+	set -e
+	exit "$status"
+fi
+
+acceptance_root=${AGENT_SESSIONS_HUB_ACCEPTANCE_ROOT:-}
+[[ -n "$acceptance_root" && -d "$acceptance_root" ]] || fail 'isolated acceptance root is absent'
+acceptance_started_epoch=$(date +%s)
+prefix=$HOME/.local
+install_root=$prefix/libexec/agent-sessions
+platform=linux-$(case $(uname -m) in x86_64) echo x64;; aarch64) echo arm64;; *) exit 1;; esac)
+base_version=$(<"$repository_root/deploy/agent-sessions/VERSION")
+hub_port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+hub_listen=127.0.0.1:$hub_port
+missing_root=$acceptance_root/missing-products
+mkdir -p "$missing_root"
+service_manager_pid=
+
+cleanup_inner() {
+	set +e
+	systemctl --user disable --now agent-sessions-hub.service >/dev/null 2>&1 || true
+	systemctl --user disable --now agent-sessions.service >/dev/null 2>&1 || true
+	if [[ -n "$service_manager_pid" ]]; then
+		systemctl --user exit >/dev/null 2>&1 || true
+		wait "$service_manager_pid" 2>/dev/null || true
+	fi
+}
+trap cleanup_inner EXIT
+
+systemd --user --log-target=console >"$acceptance_root/systemd.stdout" 2>"$acceptance_root/systemd.stderr" &
+service_manager_pid=$!
+wait_for 'nested systemd user manager' systemctl --user is-system-running
+
+cd -- "$repository_root"
+make -s build
+host_builder=$repository_root/bin/$platform/agent-sessions
+hub_builder=$repository_root/bin/$platform/agent-sessions-hub
+[[ -x "$host_builder" && -x "$hub_builder" ]] || fail 'canonical role binaries are absent'
+
+host_active() { systemctl --user is-active --quiet agent-sessions.service; }
+hub_active() { systemctl --user is-active --quiet agent-sessions-hub.service; }
+hub_binary() { printf '%s\n' "$install_root/hub/current/bin/agent-sessions-hub"; }
+hub_status() { "$(hub_binary)" status --json; }
+hub_status_pid() { hub_status | json_field metadata.pid; }
+hub_status_version() { hub_status | json_field metadata.runtime_version; }
+hub_status_hosts() { hub_status | json_field metadata.connected_hosts; }
+host_status_pid() { "$prefix/bin/agent-sessions" status --json | json_field result.pid; }
+different_hub_pid() {
+	local current
+	current=$(hub_status_pid 2>/dev/null) || return 1
+	[[ "$current" != "$1" ]]
+}
+
+install_custom_hub() {
+	local candidate_label=$1 runtime_version=$2 resource=${3:-}
+	local declared_version=$base_version
+	local binary=$acceptance_root/candidates/$candidate_label/agent-sessions-hub
+	local stage
+	mkdir -p "$(dirname -- "$binary")"
+	CGO_ENABLED=0 go build -trimpath \
+		-ldflags="-s -w -X main.version=$runtime_version -X main.acceptanceResourceFailure=$resource" \
+		-o "$binary" ./cmd/agent-sessions-hub
+	stage=$(mktemp -d "$install_root/.hub-acceptance-source.XXXXXX")
+	while IFS= read -r path; do
+		mkdir -p "$stage/$(dirname -- "$path")"
+		cp -R -- "$path" "$stage/$(dirname -- "$path")/"
+	done < <(./scripts/release-inventory hub-package-paths)
+	printf '\nT074 candidate: %s\n' "$candidate_label" >>"$stage/docs/CLI.md"
+	mkdir -p "$stage/bin"
+	cp -- "$binary" "$stage/bin/agent-sessions-hub"
+	chmod 0755 "$stage/bin/agent-sessions-hub"
+	bash ./scripts/stage-release-metadata "$stage" "$platform" "$declared_version" hub
+	local result
+	if "$binary" lifecycle install --role hub --source-root "$stage" --prefix "$prefix" \
+		--version "$declared_version" --listen "$hub_listen"; then
+		result=0
+	else
+		result=$?
+	fi
+	chmod -R u+w -- "$stage" 2>/dev/null || true
+	rm -rf -- "$stage"
+	return "$result"
+}
+
+install_custom_host() {
+	local candidate_label=$1
+	local declared_version=$base_version
+	local binary=$acceptance_root/candidates/$candidate_label/agent-sessions
+	local stage
+	mkdir -p "$(dirname -- "$binary")"
+	CGO_ENABLED=0 go build -trimpath \
+		-ldflags="-s -w -X github.com/antst/agent-sessions/internal/daemon.BuildVersion=$declared_version" \
+		-o "$binary" ./cmd/agent-sessions
+	stage=$(mktemp -d "$install_root/.host-acceptance-source.XXXXXX")
+	while IFS= read -r path; do
+		mkdir -p "$stage/$(dirname -- "$path")"
+		cp -R -- "$path" "$stage/$(dirname -- "$path")/"
+	done < <(./scripts/release-inventory host-package-paths)
+	printf '\nT074 candidate: %s\n' "$candidate_label" >>"$stage/docs/CLI.md"
+	mkdir -p "$stage/bin"
+	cp -- "$binary" "$stage/bin/agent-sessions"
+	chmod 0755 "$stage/bin/agent-sessions"
+	bash ./scripts/stage-release-metadata "$stage" "$platform" "$declared_version" host
+	"$binary" lifecycle install --role host --source-root "$stage" --prefix "$prefix" \
+		--version "$declared_version" \
+		--codex "$missing_root/codex" --claude "$missing_root/claude" \
+		--grok "$missing_root/grok" --qwen "$missing_root/qwen"
+	chmod -R u+w -- "$stage" 2>/dev/null || true
+	rm -rf -- "$stage"
+}
+
+probe_resource_refusal() {
+	local resource=$1 canary=$2
+	local listener
+	listener=$(hub_status | json_field metadata.listener)
+	python3 - "$listener" "$resource" "$canary" <<'PY'
+import json,socket,sys
+listener,resource,canary=sys.argv[1:]
+host,port=listener.rsplit(":",1)
+frame={"type":"hello","version":3,"host_id":canary,"host_name":canary,
+       "runtime_version":canary,"runtime_identity":"sha256:"+("4"*64),"generation":1}
+with socket.create_connection((host,int(port)),timeout=3) as connection:
+    connection.sendall(json.dumps(frame,separators=(",",":")).encode()+b"\n")
+    reply=json.loads(connection.makefile("rb").readline())
+if reply.get("type") != "error" or resource not in reply.get("error",""):
+    raise SystemExit(f"{resource} resource refusal changed: {reply}")
+PY
+}
+
+# Install both roles through their supported transactions in one isolated
+# user manager. Neither invocation is allowed to infer or mutate the other.
+make -s install-all PREFIX="$prefix" INSTALL_ROOT="$install_root" HOST_INSTALLER="$host_builder" \
+	CODEX="$missing_root/codex" CLAUDE="$missing_root/claude" GROK="$missing_root/grok" QWEN="$missing_root/qwen"
+wait_for 'co-located host service' host_active
+make -s install-hub PREFIX="$prefix" INSTALL_ROOT="$install_root" HUB_INSTALLER="$hub_builder" HUB_LISTEN="$hub_listen"
+wait_for 'co-located hub service' hub_active
+
+host_selection=$(readlink "$install_root/host/current")
+hub_selection=$(readlink "$install_root/hub/current")
+[[ "$host_selection" != "$hub_selection" ]] || fail 'host and hub selected the same role release'
+host_pid=$(host_status_pid)
+hub_pid=$(hub_status_pid)
+[[ $(hub_status_version) == "$base_version" ]] || fail 'installed hub status version changed'
+[[ $(hub_status_hosts) == 0 ]] || fail 'clean installed hub reported connected hosts'
+status_json=$(hub_status)
+doctor_json="$("$(hub_binary)" doctor --json)"
+[[ $(json_field metadata.healthy <<<"$doctor_json") == true ]] || fail 'installed hub doctor is unhealthy'
+
+# A host-only upgrade advances its process and release while the live hub
+# selection and exact process remain unchanged.
+install_custom_host t074-host2
+wait_for 'host successor after independent upgrade' host_active
+new_host_pid=$(host_status_pid)
+[[ "$new_host_pid" != "$host_pid" ]] || fail 'host upgrade did not replace its own process'
+upgraded_host_selection=$(readlink "$install_root/host/current")
+[[ "$upgraded_host_selection" != "$host_selection" ]] || fail 'host upgrade did not select a distinct release'
+[[ $(readlink "$install_root/hub/current") == "$hub_selection" && $(hub_status_pid) == "$hub_pid" ]] ||
+	fail 'host upgrade changed the co-located hub'
+
+# Each linker-only acceptance image drives one real systemd-owned listener
+# through a distinct resource refusal before registration commits.
+content_canary=T074_INSTALLED_PRIVATE_CONTENT_6ce7d3e8
+for resource in disk memory file_descriptor process; do
+	version=$base_version
+	install_custom_hub "t074-$resource" "$version" "$resource"
+	wait_for "$resource hub service" hub_active
+	[[ $(hub_status_version) == "$version" ]] || fail "$resource candidate did not become ready"
+	probe_resource_refusal "$resource" "$content_canary-$resource"
+	[[ $(hub_status_hosts) == 0 ]] || fail "$resource refusal durably registered a host"
+	[[ $(host_status_pid) == "$new_host_pid" && $(readlink "$install_root/host/current") == "$upgraded_host_selection" ]] ||
+		fail "$resource hub upgrade changed host authority"
+	doctor_json="$("$(hub_binary)" doctor --json)"
+	[[ $(json_field metadata.healthy <<<"$doctor_json") == true ]] || fail "$resource candidate doctor is unhealthy"
+	done
+
+# Restore a normal selected hub, kill it externally, and require systemd to
+# start a new exact process which emits the metadata-only crash boundary.
+normal_version=$base_version
+install_custom_hub t074-hub2 "$normal_version"
+wait_for 'normal hub after resource cells' hub_active
+[[ $(host_status_pid) == "$new_host_pid" ]] || fail 'normal hub upgrade restarted the host'
+crashed_pid=$(hub_status_pid)
+kill -KILL "$crashed_pid"
+wait_for 'systemd hub crash recovery' hub_active
+wait_for 'replacement hub process' different_hub_pid "$crashed_pid"
+hub_pid=$(hub_status_pid)
+[[ $(host_status_pid) == "$new_host_pid" ]] || fail 'hub crash recovery restarted the host'
+
+# A real readiness mismatch must restore the exact normal hub selection and
+# service while leaving the host generation untouched.
+rollback_selection=$(readlink "$install_root/hub/current")
+rollback_host_pid=$new_host_pid
+set +e
+install_custom_hub t074-rollback 0.3.1 \
+	>"$acceptance_root/rollback.out" 2>"$acceptance_root/rollback.err"
+rollback_status=$?
+set -e
+[[ "$rollback_status" != 0 ]] || fail 'readiness-mismatched hub upgrade unexpectedly committed'
+wait_for 'prior hub after readiness rollback' hub_active
+[[ $(readlink "$install_root/hub/current") == "$rollback_selection" ]] || fail 'hub rollback changed prior selection'
+[[ $(hub_status_version) == "$normal_version" ]] || fail 'hub rollback did not restore prior runtime'
+[[ $(host_status_pid) == "$rollback_host_pid" ]] || fail 'hub rollback restarted the host'
+
+# Capture the real service-manager-owned streams and every public projection.
+"$(hub_binary)" status >"$acceptance_root/status.human"
+"$(hub_binary)" status --json >"$acceptance_root/status.json"
+"$(hub_binary)" doctor >"$acceptance_root/doctor.human"
+"$(hub_binary)" doctor --json >"$acceptance_root/doctor.json"
+systemctl --user status --no-pager agent-sessions-hub.service >"$acceptance_root/service-manager.log" 2>&1 || true
+journalctl --since "@$acceptance_started_epoch" --no-pager -o json 2>/dev/null |
+	python3 -c 'import json,sys
+root=sys.argv[1]
+for line in sys.stdin:
+    try: record=json.loads(line)
+    except json.JSONDecodeError: continue
+    if root in str(record.get("_CMDLINE","")) or root in str(record.get("_EXE","")) or root in str(record.get("MESSAGE","")):
+        print(record.get("MESSAGE",""))' "$acceptance_root" >"$acceptance_root/service-journal.log"
+cat "$acceptance_root/systemd.stdout" "$acceptance_root/systemd.stderr" \
+	"$acceptance_root/service-manager.log" "$acceptance_root/service-journal.log" \
+	"$acceptance_root/rollback.out" "$acceptance_root/rollback.err" \
+	>"$acceptance_root/service-observability.log"
+if grep -R -Fq -- "$content_canary" "$acceptance_root/service-observability.log" \
+	"$acceptance_root/status.human" "$acceptance_root/status.json" \
+	"$acceptance_root/doctor.human" "$acceptance_root/doctor.json"; then
+	fail 'installed hub observability leaked private content canary'
+fi
+for kind in normal debug error crash_report metric trace; do
+	grep -Fq "\"kind\":\"$kind\"" "$acceptance_root/service-observability.log" ||
+		fail "installed hub observability omitted $kind output"
+done
+for code in disk_full memory_unavailable file_descriptors_exhausted process_resources_exhausted; do
+	grep -Fq "$code" "$acceptance_root/service-observability.log" || fail "installed hub output omitted $code"
+done
+grep -Fq 'hub.crash_recovered' "$acceptance_root/service-observability.log" ||
+	fail 'installed hub output omitted crash recovery attribution'
+
+# Normal removal preserves only hub configuration/state and does not stop or
+# repoint the host. Reinstall restores the same non-secret configuration.
+hub_configuration=$XDG_CONFIG_HOME/agent-sessions-hub/configuration.json
+configuration_before=$acceptance_root/configuration.before
+cp -- "$hub_configuration" "$configuration_before"
+configuration_value_before=$(json_field value <"$configuration_before")
+configuration_revision_before=$(json_field revision <"$configuration_before")
+"$(hub_binary)" lifecycle remove --role hub --prefix "$prefix"
+[[ ! -e "$install_root/hub/current" ]] || fail 'hub removal retained current selection'
+[[ -e "$hub_configuration" ]] || fail 'hub removal discarded preserved configuration'
+cmp -s "$configuration_before" "$hub_configuration" || fail 'hub removal changed preserved configuration'
+[[ $(host_status_pid) == "$rollback_host_pid" && $(readlink "$install_root/host/current") == "$upgraded_host_selection" ]] ||
+	fail 'hub removal changed host authority'
+
+install_custom_hub t074-reinstall "$normal_version"
+wait_for 'hub reinstall' hub_active
+[[ $(json_field value <"$hub_configuration") == "$configuration_value_before" ]] ||
+	fail 'hub reinstall changed preserved configuration semantics'
+configuration_revision_after=$(json_field revision <"$hub_configuration")
+(( configuration_revision_after > configuration_revision_before )) ||
+	fail 'hub reinstall did not advance the preserved configuration revision'
+[[ $(host_status_pid) == "$rollback_host_pid" ]] || fail 'hub reinstall restarted the host'
+
+# Revision-bound purge deletes only hub-owned configuration and state. Host
+# roots, selection, service and process survive byte-for-byte/in-place.
+purge_binary=$acceptance_root/candidates/t074-reinstall/agent-sessions-hub
+"$(hub_binary)" lifecycle remove --role hub --prefix "$prefix"
+plan=$acceptance_root/hub-purge-plan.json
+"$purge_binary" purge inspect --plan "$plan" >/dev/null
+"$purge_binary" purge apply --plan "$plan" >/dev/null
+[[ ! -e "$XDG_CONFIG_HOME/agent-sessions-hub" && ! -e "$XDG_STATE_HOME/agent-sessions-hub" ]] ||
+	fail 'hub purge retained an enumerated hub root'
+[[ -d "$XDG_CONFIG_HOME/agent-sessions" && -d "$XDG_STATE_HOME/agent-sessions" ]] ||
+	fail 'hub purge removed co-located host state'
+[[ $(host_status_pid) == "$rollback_host_pid" ]] || fail 'hub purge restarted the host'
+[[ ! -e "$XDG_CONFIG_HOME/systemd/user/agent-sessions-hub.service" ]] || fail 'hub purge retained its service definition'
+
+printf '{"type":"unified.federation.installed_hub.passed","platform":"linux","systemd_user":true,"co_located_roles":true,"independent_host_upgrade":true,"hub_resource_preflight":true,"hub_crash_restart":true,"hub_rollback":true,"hub_removal_reinstall":true,"hub_purge":true,"metadata_only_observability":true}\n'

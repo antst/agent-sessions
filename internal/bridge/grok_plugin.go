@@ -3,22 +3,9 @@ package bridge
 import (
 	"fmt"
 	"io"
-	"os"
 
 	daemoncore "github.com/antst/agent-sessions/internal/daemon"
 )
-
-func runGrokPluginVerify(args []string) int {
-	if len(args) != 2 || args[0] != "--root" || args[1] == "" {
-		fmt.Fprintln(os.Stderr, "usage: agent-session-runtime grok-plugin-verify --root <user-plugin-root>")
-		return 2
-	}
-	if err := verifyGrokPluginInspection(os.Stdin, args[1]); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-plugin-verify: %v\n", err)
-		return 1
-	}
-	return 0
-}
 
 // verifyGrokPluginInspection is retained as a compatibility boundary for the
 // retiring runtime command. The canonical connector transaction and this

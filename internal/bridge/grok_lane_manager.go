@@ -10,13 +10,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
@@ -53,62 +54,468 @@ type grokLaneManager struct {
 	persistOverride   func(grokLaneState) error
 }
 
-func runGrokLaneManager(argv []string) int {
-	args := parseArgs(argv)
-	sessionID := args["session-id"]
-	if !validSessionID(sessionID) {
-		fmt.Fprintln(os.Stderr, "grok-lane-manager requires --session-id")
-		return 2
-	}
-	paths := resolveNativePaths()
-	state, err := readGrokLaneState(paths, sessionID)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "grok-lane-manager: cannot read lane state")
-		return 1
-	}
-	manager := &grokLaneManager{
-		paths: paths, state: state,
-		launchToken: strings.TrimSpace(os.Getenv(grokLaunchTokenEnv)),
-		turnNotify:  make(chan struct{}, 1), done: make(chan struct{}), startupDone: make(chan struct{}),
-		startupPhase: "initializing",
-	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(signals)
-	go func() {
-		select {
-		case caught := <-signals:
-			reason := "manager signalled: " + caught.String()
-			manager.beginShutdown(reason, true)
-			manager.logShutdownTrigger("signal=" + caught.String())
-			manager.shutdown(reason, true)
-		case <-manager.done:
-		}
-	}()
-	if err := manager.start(); err != nil {
-		manager.beginShutdown("manager startup failed", false)
-		// The manager's stderr is a private 0600 per-lane log, never the calling
-		// model/TUI stream. Retain the actionable startup cause there while the
-		// public launcher continues to return a bounded generic failure.
-		fmt.Fprintf(os.Stderr, "grok-lane-manager: startup failed: %v\n", err)
-		manager.shutdown("manager startup failed", false)
-		return 1
-	}
-	select {
-	case <-manager.workerDone():
-		manager.shutdown("Grok ACP worker exited", false)
-	case <-manager.done:
-	}
-	return 0
+// grokDaemonLaneActor is the in-process successor to grokLaneManager. It owns
+// one vendor Grok ACP worker and its anonymous stdio channel, but no Agent
+// Sessions listener, manager process, peer daemon, or durable catalog.
+type grokDaemonLaneActor struct {
+	mu sync.Mutex
+
+	laneSessionID string
+	cwd           string
+	permission    string
+	model         string
+	reasoning     string
+	profile       string
+	grokBin       string
+	actorRoot     string
+
+	diagnostics *grokDiagnosticSink
+	worker      *grokManagedProcess
+	client      *grokACPClient
+
+	sessionID         string
+	workerPID         int
+	workerProcStart   string
+	workerStrongStart string
+	activeTurnID      string
+	activeAnswer      strings.Builder
+	interrupted       map[string]bool
+	dispatches        map[string]map[string]any
+	terminals         map[string]map[string]any
+	terminalReady     map[string]chan struct{}
+	closed            bool
 }
 
-func (m *grokLaneManager) workerDone() <-chan struct{} {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.worker == nil {
-		return m.done
+func newGrokDaemonLaneActor(lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) (*grokDaemonLaneActor, error) {
+	if lane.Product != "grok" || strings.TrimSpace(lane.LaneSessionID) == "" ||
+		!filepath.IsAbs(lane.Cwd) || lane.PermissionMode != "bypassPermissions" {
+		return nil, errors.New("invalid daemon-owned Grok lane")
 	}
-	return m.worker.done
+	profile, err := canonicalGrokProfile("")
+	if err != nil {
+		return nil, err
+	}
+	grokBin, err := grokDaemonExecutable()
+	if err != nil {
+		return nil, err
+	}
+	paths, err := daemonpkg.ResolveProductionPaths()
+	if err != nil {
+		return nil, err
+	}
+	actorRoot := filepath.Join(paths.RuntimeRoot, "grok-lanes", safeID(lane.LaneSessionID))
+	if !filepath.IsAbs(actorRoot) || safeID(lane.LaneSessionID) == "" {
+		return nil, errors.New("invalid daemon-owned Grok lane runtime root")
+	}
+	native := daemonLaneNativeOptions(turn)
+	return &grokDaemonLaneActor{
+		laneSessionID: lane.LaneSessionID, cwd: lane.Cwd, permission: lane.PermissionMode,
+		model: stringValue(native["model"]), reasoning: stringValue(native["reasoning_effort"]),
+		profile: profile, grokBin: grokBin, actorRoot: actorRoot,
+		interrupted: make(map[string]bool), dispatches: make(map[string]map[string]any),
+		terminals: make(map[string]map[string]any), terminalReady: make(map[string]chan struct{}),
+	}, nil
+}
+
+func (actor *grokDaemonLaneActor) startTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	if turn.LaneSessionID != lane.LaneSessionID || strings.TrimSpace(turn.TurnID) == "" {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if err := actor.verifyLocked(lane); err != nil {
+		return nil, err
+	}
+	if prior := actor.dispatches[turn.TurnID]; prior != nil {
+		return cloneGrokLaneEvidence(prior), nil
+	}
+	if actor.activeTurnID != "" {
+		return nil, errors.New("grok daemon lane already has an active turn")
+	}
+	if err := actor.ensureStartedLocked(ctx, lane); err != nil {
+		return nil, err
+	}
+	dispatch := actor.dispatchEvidenceLocked(turn.TurnID)
+	actor.dispatches[turn.TurnID] = dispatch
+	actor.terminalReady[turn.TurnID] = make(chan struct{})
+	if stringValue(turn.InputReference["kind"]) == "peer_message" {
+		messageID := strings.TrimSpace(stringValue(turn.InputReference["message_id"]))
+		message := strings.TrimSpace(stringValue(turn.InputReference["content"]))
+		if messageID == "" || message == "" {
+			delete(actor.dispatches, turn.TurnID)
+			return nil, errors.New("grok lane interjection requires message identity and content")
+		}
+		if err := actor.client.requestInterjection(ctx, actor.sessionID, messageID, message); err != nil {
+			delete(actor.dispatches, turn.TurnID)
+			return nil, err
+		}
+		actor.setTerminalLocked(turn.TurnID, map[string]any{
+			"session_id": actor.sessionID, "native_turn_id": messageID,
+			"terminal_outcome": "completed", "result_reference": map[string]any{
+				"kind": "native_interjection", "message_id": messageID,
+			},
+		})
+		dispatch["native_turn_id"] = messageID
+		actor.dispatches[turn.TurnID] = dispatch
+		return cloneGrokLaneEvidence(dispatch), nil
+	}
+	prompt := strings.TrimSpace(defaultString(stringValue(turn.InputReference["content"]), stringValue(turn.InputReference["prompt"])))
+	if prompt == "" {
+		delete(actor.dispatches, turn.TurnID)
+		return nil, errors.New("grok lane turn requires prompt content")
+	}
+	actor.activeTurnID = turn.TurnID
+	actor.activeAnswer.Reset()
+	// An accepted turn outlives the request that dispatched it while retaining
+	// request-scoped values needed by the native coordinator.
+	executionContext := context.WithoutCancel(ctx)
+	go actor.executePrompt(executionContext, actor.client, actor.sessionID, turn.TurnID, prompt)
+	return cloneGrokLaneEvidence(dispatch), nil
+}
+
+func (actor *grokDaemonLaneActor) ensureStartedLocked(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	if actor.client != nil {
+		return nil
+	}
+	if err := os.MkdirAll(actor.actorRoot, 0o700); err != nil {
+		return err
+	}
+	diagnostics, err := newGrokDiagnosticSink(filepath.Join(actor.actorRoot, "diagnostics.log"))
+	if err != nil {
+		return err
+	}
+	actor.diagnostics = diagnostics
+	processDiagnostics := diagnostics.process("daemon-owned Grok lane ACP worker")
+	args := []string{"--no-auto-update"}
+	if actor.model != "" {
+		args = append(args, "--model", actor.model)
+	}
+	if actor.reasoning != "" {
+		args = append(args, "--reasoning-effort", actor.reasoning)
+	}
+	args = append(args, "agent", "--no-leader", "--always-approve", "stdio")
+	command := exec.Command(actor.grokBin, args...) //nolint:gosec // validated Grok executable and fixed lane argv.
+	command.Dir = actor.cwd
+	command.Env = envutil.Set(grokLaneManagerEnvironment(os.Environ(), "", actor.laneSessionID), "HOME", actor.profile)
+	command.Env = envutil.Set(command.Env, "AGENT_SESSIONS_PRODUCT", "grok")
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	command.Stderr = processDiagnostics
+	worker, err := startGrokManagedProcess(command, processDiagnostics)
+	if err != nil {
+		return (&grokManagedProcess{diagnostics: processDiagnostics}).attributedError("start daemon-owned Grok lane ACP worker", err)
+	}
+	identity := procinfo.Read(worker.cmd.Process.Pid)
+	if identity.Status != procinfo.Known || identity.Start != worker.procStart || identity.StrongStart == "" {
+		stopGrokManagedProcess(worker, 2*time.Second)
+		return errors.New("capture strong daemon-owned Grok lane worker identity")
+	}
+	actor.worker, actor.workerPID = worker, worker.cmd.Process.Pid
+	actor.workerProcStart, actor.workerStrongStart = worker.procStart, identity.StrongStart
+	actor.client = newGrokACPClient(worker, stdin, stdout, actor.laneSessionID, 0, nil)
+	if err := actor.initializeACPLocked(ctx, lane); err != nil {
+		actor.closeClientLocked()
+		return err
+	}
+	actor.client.setNotificationHandler(actor.handleNotification)
+	return nil
+}
+
+func (actor *grokDaemonLaneActor) initializeACPLocked(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	sessionID, err := initializeGrokLaneACP(ctx, actor.client, actor.cwd, stringValue(lane.NativeActor["session_id"]))
+	if err != nil {
+		return err
+	}
+	actor.sessionID = sessionID
+	return nil
+}
+
+func (actor *grokDaemonLaneActor) executePrompt(ctx context.Context, client *grokACPClient, sessionID, turnID, prompt string) {
+	result, requestErr := client.request(ctx, "session/prompt", map[string]any{
+		"sessionId": sessionID, "prompt": []any{map[string]any{"type": "text", "text": prompt}},
+	})
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if actor.closed || actor.activeTurnID != turnID {
+		return
+	}
+	outcome := "completed"
+	reference := map[string]any{"kind": "native_result", "text": actor.activeAnswer.String()}
+	if stopReason := stringValue(result["stopReason"]); stopReason != "" {
+		reference["stop_reason"] = stopReason
+	}
+	switch {
+	case actor.interrupted[turnID]:
+		outcome = "interrupted"
+	case requestErr != nil:
+		outcome = "failed"
+		reference = map[string]any{"kind": "native_error", "error": "Grok ACP prompt failed"}
+	}
+	actor.setTerminalLocked(turnID, map[string]any{
+		"session_id": actor.sessionID, "native_turn_id": turnID,
+		"terminal_outcome": outcome, "result_reference": reference,
+	})
+	actor.activeTurnID = ""
+	actor.activeAnswer.Reset()
+}
+
+func (actor *grokDaemonLaneActor) handleNotification(message map[string]any) {
+	method := stringValue(message["method"])
+	if method != "session/update" && method != "x.ai/session/update" && method != "_x.ai/session/update" {
+		return
+	}
+	params, _ := message["params"].(map[string]any)
+	if sessionID := stringValue(params["sessionId"]); sessionID != "" && sessionID != actor.sessionID {
+		return
+	}
+	update, _ := params["update"].(map[string]any)
+	if update == nil {
+		update, _ = params["sessionUpdate"].(map[string]any)
+	}
+	if stringValue(update["sessionUpdate"]) != "agent_message_chunk" {
+		return
+	}
+	content, _ := update["content"].(map[string]any)
+	text := defaultString(stringValue(content["text"]), stringValue(update["text"]))
+	if text == "" {
+		return
+	}
+	actor.mu.Lock()
+	if actor.activeTurnID != "" {
+		actor.activeAnswer.WriteString(text)
+	}
+	actor.mu.Unlock()
+}
+
+func (actor *grokDaemonLaneActor) reconnectTurn(
+	_ context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if err := actor.verifyLocked(lane); err != nil {
+		return nil, err
+	}
+	if actor.activeTurnID != turn.TurnID || stringValue(turn.NativeTurnIdentity["native_turn_id"]) != turn.TurnID {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	result := actor.dispatchEvidenceLocked(turn.TurnID)
+	result["reconnectable"] = true
+	return result, nil
+}
+
+func (actor *grokDaemonLaneActor) interruptTurn(
+	_ context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) error {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if err := actor.verifyLocked(lane); err != nil {
+		return err
+	}
+	if actor.activeTurnID != turn.TurnID ||
+		stringValue(turn.NativeTurnIdentity["native_turn_id"]) != turn.TurnID || actor.client == nil {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if err := actor.client.notifyRequest(map[string]any{"sessionId": actor.sessionID}); err != nil {
+		return err
+	}
+	actor.interrupted[turn.TurnID] = true
+	return nil
+}
+
+func (actor *grokDaemonLaneActor) collectTurn(
+	_ context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if err := actor.verifyLocked(lane); err != nil {
+		return nil, err
+	}
+	if stringValue(turn.NativeTurnIdentity["native_turn_id"]) == "" {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	terminal := actor.terminals[turn.TurnID]
+	if terminal == nil {
+		return nil, daemonpkg.ErrLaneNotTerminal
+	}
+	return cloneGrokLaneEvidence(terminal), nil
+}
+
+func (actor *grokDaemonLaneActor) waitTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	actor.mu.Lock()
+	if err := actor.verifyLocked(lane); err != nil {
+		actor.mu.Unlock()
+		return nil, err
+	}
+	if stringValue(turn.NativeTurnIdentity["native_turn_id"]) == "" {
+		actor.mu.Unlock()
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if terminal := actor.terminals[turn.TurnID]; terminal != nil {
+		result := cloneGrokLaneEvidence(terminal)
+		actor.mu.Unlock()
+		return result, nil
+	}
+	ready := actor.terminalReady[turn.TurnID]
+	if ready == nil {
+		actor.mu.Unlock()
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	actor.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-ready:
+	}
+
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if terminal := actor.terminals[turn.TurnID]; terminal != nil {
+		return cloneGrokLaneEvidence(terminal), nil
+	}
+	return nil, daemonpkg.ErrAttachmentEvidenceChanged
+}
+
+func (actor *grokDaemonLaneActor) setTerminalLocked(turnID string, terminal map[string]any) {
+	actor.terminals[turnID] = terminal
+	if ready := actor.terminalReady[turnID]; ready != nil {
+		close(ready)
+		delete(actor.terminalReady, turnID)
+	}
+}
+
+func (actor *grokDaemonLaneActor) verify(_ context.Context, lane daemonpkg.LaneRecord) error {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	return actor.verifyLocked(lane)
+}
+
+func (actor *grokDaemonLaneActor) verifyLocked(lane daemonpkg.LaneRecord) error {
+	if actor.closed || lane.LaneSessionID != actor.laneSessionID || lane.Cwd != actor.cwd ||
+		lane.PermissionMode != actor.permission {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	// A newly constructed actor is allowed to replace the prior worker only as
+	// part of an accepted resume, while loading the exact durable session ID.
+	// Once its ACP channel exists every subsequent operation requires exact
+	// worker identity below.
+	if actor.client == nil {
+		return nil
+	}
+	if expected := stringValue(lane.NativeActor["session_id"]); expected != "" && expected != actor.sessionID {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if expected := lane.NativeActor["worker_pid"]; expected != nil && intValue(expected) != actor.workerPID {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	for key, actual := range map[string]string{
+		"worker_proc_start": actor.workerProcStart, "worker_strong_start": actor.workerStrongStart,
+	} {
+		if expected := stringValue(lane.NativeActor[key]); expected != "" && expected != actual {
+			return daemonpkg.ErrAttachmentEvidenceChanged
+		}
+	}
+	return nil
+}
+
+func (actor *grokDaemonLaneActor) dispatchEvidenceLocked(turnID string) map[string]any {
+	return map[string]any{
+		"session_id": actor.sessionID, "native_turn_id": turnID,
+		"worker_pid": actor.workerPID, "worker_proc_start": actor.workerProcStart,
+		"worker_strong_start": actor.workerStrongStart,
+	}
+}
+
+func (actor *grokDaemonLaneActor) unstarted() bool {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	return actor.client == nil && actor.activeTurnID == ""
+}
+
+func (actor *grokDaemonLaneActor) close() {
+	actor.mu.Lock()
+	if actor.closed {
+		actor.mu.Unlock()
+		return
+	}
+	actor.closed = true
+	for turnID, ready := range actor.terminalReady {
+		close(ready)
+		delete(actor.terminalReady, turnID)
+	}
+	if actor.client != nil && actor.activeTurnID != "" {
+		_ = actor.client.notifyRequest(map[string]any{"sessionId": actor.sessionID})
+	}
+	actor.closeClientLocked()
+	if actor.diagnostics != nil {
+		_ = actor.diagnostics.close()
+	}
+	_ = os.Remove(filepath.Join(actor.actorRoot, "diagnostics.log"))
+	_ = os.Remove(actor.actorRoot)
+	actor.mu.Unlock()
+}
+
+func (actor *grokDaemonLaneActor) closeClientLocked() {
+	if actor.client != nil {
+		actor.client.close()
+		actor.client = nil
+	} else {
+		stopGrokManagedProcess(actor.worker, 2*time.Second)
+	}
+	actor.worker = nil
+}
+
+func inspectUnattachableGrokLaneTurn(
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	sessionID := stringValue(lane.NativeActor["session_id"])
+	nativeTurnID := stringValue(turn.NativeTurnIdentity["native_turn_id"])
+	pid := intValue(lane.NativeActor["worker_pid"])
+	procStart := stringValue(lane.NativeActor["worker_proc_start"])
+	strongStart := stringValue(lane.NativeActor["worker_strong_start"])
+	if sessionID == "" || nativeTurnID == "" || pid <= 1 || procStart == "" || strongStart == "" {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	identity := procinfo.Read(pid)
+	workerStatus := "absent"
+	switch identity.Status {
+	case procinfo.Known:
+		if identity.Start != procStart || identity.StrongStart != strongStart {
+			return nil, daemonpkg.ErrAttachmentEvidenceChanged
+		}
+		workerStatus = "live_unattachable"
+	case procinfo.Absent:
+		// Exact absence is sufficient native evidence for the bounded restart outcome.
+	case procinfo.Unknown:
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return map[string]any{
+		"reconnectable": false, "session_id": sessionID, "native_turn_id": nativeTurnID,
+		"worker_status": workerStatus, "worker_pid": pid, "worker_proc_start": procStart,
+		"worker_strong_start": strongStart, "limitation": "grok_acp_stdio_is_not_reattachable",
+		"native_transcript": map[string]any{"session_id": sessionID, "resume_supported": true},
+	}, nil
 }
 
 func (m *grokLaneManager) closingState() bool {
@@ -406,14 +813,36 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	return nil
 }
 
-//nolint:gocyclo // ACP bootstrap validates authentication and exact create/load identity in one transaction.
 func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 	m.mu.Lock()
 	client, worker := m.client, m.worker
+	cwd, expectedSessionID := m.state.Cwd, ""
+	if m.state.SessionCreated {
+		expectedSessionID = m.state.GrokSessionID
+	}
 	m.mu.Unlock()
 	if client == nil || worker == nil {
 		return errors.New("headless Grok lane ACP worker is unavailable")
 	}
+	returned, err := initializeGrokLaneACP(ctx, client, cwd, expectedSessionID)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.state.GrokSessionID, m.state.SessionCreated = returned, true
+	err = m.persistLocked()
+	m.mu.Unlock()
+	if err == nil {
+		client.setNotificationHandler(m.handleACPNotification)
+	}
+	return err
+}
+
+// initializeGrokLaneACP is the one native create/load transaction shared by
+// the legacy migration manager and the daemon-owned actor. The successor path
+// therefore preserves Grok authentication, MCP injection, and exact native
+// session validation without carrying the manager listener or catalog.
+func initializeGrokLaneACP(ctx context.Context, client *grokACPClient, cwd, expectedSessionID string) (string, error) {
 	result, err := client.request(ctx, "initialize", map[string]any{
 		"protocolVersion": 1,
 		"clientCapabilities": map[string]any{
@@ -421,51 +850,37 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return grokLanePrivateACPError("initialize headless Grok lane ACP worker", err)
+		return "", grokLanePrivateACPError("initialize headless Grok lane ACP worker", err)
 	}
 	if !grokAuthMethodAdvertised(result, "cached_token") {
-		return errors.New("authenticate headless Grok lane ACP worker: cached_token authentication was not advertised")
+		return "", errors.New("authenticate headless Grok lane ACP worker: cached_token authentication was not advertised")
 	}
 	if _, err := client.request(ctx, "authenticate", map[string]any{"methodId": "cached_token", "_meta": map[string]any{"headless": true}}); err != nil {
-		return grokLanePrivateACPError("authenticate headless Grok lane ACP worker", err)
+		return "", grokLanePrivateACPError("authenticate headless Grok lane ACP worker", err)
 	}
 	mcpServer, err := nativeRuntimeAgentSessionsMCPServer("grok-mcp", nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	params := map[string]any{
-		"cwd": m.state.Cwd, "mcpServers": []any{mcpServer}, "_meta": map[string]any{"yoloMode": true},
+		"cwd": cwd, "mcpServers": []any{mcpServer}, "_meta": map[string]any{"yoloMode": true},
 	}
 	method := "session/new"
-	if m.state.SessionCreated {
-		method = "session/load"
-		if strings.TrimSpace(m.state.GrokSessionID) == "" {
-			return errors.New("grok lane has no native ACP session identity to load")
-		}
-		params["sessionId"] = m.state.GrokSessionID
+	if strings.TrimSpace(expectedSessionID) != "" {
+		method, params["sessionId"] = "session/load", expectedSessionID
 	}
 	created, err := client.request(ctx, method, params)
 	if err != nil {
-		return grokLanePrivateACPError("open headless Grok lane session", err)
+		return "", grokLanePrivateACPError("open headless Grok lane session", err)
 	}
 	returned := stringValue(created["sessionId"])
 	if method == "session/new" && returned == "" {
-		return errors.New("grok ACP returned no native session identity")
+		return "", errors.New("grok ACP returned no native session identity")
 	}
-	if method == "session/load" && returned != "" && returned != m.state.GrokSessionID {
-		return errors.New("grok ACP loaded a different native session identity")
+	if method == "session/load" && returned != "" && returned != expectedSessionID {
+		return "", daemonpkg.ErrAttachmentEvidenceChanged
 	}
-	m.mu.Lock()
-	if returned != "" {
-		m.state.GrokSessionID = returned
-	}
-	m.state.SessionCreated = true
-	err = m.persistLocked()
-	m.mu.Unlock()
-	if err == nil {
-		client.setNotificationHandler(m.handleACPNotification)
-	}
-	return err
+	return defaultString(returned, expectedSessionID), nil
 }
 
 // grokLanePrivateACPError preserves a bounded protocol cause for the lane
@@ -678,7 +1093,7 @@ func (m *grokLaneManager) executeNextTurn() bool {
 	})
 	cancel()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		_ = m.client.notifyRequest("session/cancel", map[string]any{"sessionId": m.state.GrokSessionID})
+		_ = m.client.notifyRequest(map[string]any{"sessionId": m.state.GrokSessionID})
 	}
 
 	m.mu.Lock()
@@ -950,7 +1365,7 @@ func (m *grokLaneManager) handleControl(request map[string]any) (map[string]any,
 		if client == nil {
 			return nil, errors.New("grok lane ACP worker is unavailable")
 		}
-		if err := client.notifyRequest("session/cancel", map[string]any{"sessionId": grokSessionID}); err != nil {
+		if err := client.notifyRequest(map[string]any{"sessionId": grokSessionID}); err != nil {
 			m.mu.Lock()
 			if m.interruptedID == turnID {
 				m.interruptedID = ""
@@ -987,7 +1402,7 @@ func (m *grokLaneManager) queueWake(item map[string]any) (map[string]any, error)
 	}
 	if m.closing || m.state.Status == "archived" {
 		previous := cloneGrokLaneState(m.state)
-		turn := newGrokLaneTurn(peerMessageText(item), 0)
+		turn := newGrokLaneTurn(peerMessageText(item))
 		turn.MessageID, turn.Fingerprint = messageID, fingerprint
 		turn.Status, turn.Outcome, turn.Exit, turn.Error, turn.CompletedAt = "interrupted", "interrupted", 130, "Grok lane is closing", time.Now().UnixMilli()
 		m.state.Turns = append(m.state.Turns, turn)
@@ -1005,7 +1420,7 @@ func (m *grokLaneManager) queueWake(item map[string]any) (map[string]any, error)
 		return grokLaneWakeResult(turn, "interrupted"), nil
 	}
 	previous := cloneGrokLaneState(m.state)
-	turn := newGrokLaneTurn(peerMessageText(item), 0)
+	turn := newGrokLaneTurn(peerMessageText(item))
 	turn.MessageID, turn.Fingerprint = messageID, fingerprint
 	m.state.Turns = append(m.state.Turns, turn)
 	if m.state.TurnID == "" {
@@ -1360,7 +1775,7 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 			m.flushTerminalNotices()
 		}
 		if interrupt && client != nil {
-			_ = client.notifyRequest("session/cancel", map[string]any{"sessionId": grokSessionID})
+			_ = client.notifyRequest(map[string]any{"sessionId": grokSessionID})
 		}
 		// Snapshot and stop the exact worker plus every registered tool-shell
 		// root before ACP shutdown changes ancestry. Registered roots remain

@@ -215,23 +215,31 @@ daemons concurrently.
 
 ## Decision 10: Treat first migration separately from steady upgrades
 
-**Decision**: First migration inventories every known legacy state/root and exact live owner, refuses
-before mutation unless every managed legacy peer and lane is closed, stops the exact quiescent legacy
-authorities, adopts their durable Agent Sessions state, and starts the unified authority. It does not
-transfer live legacy attachments or lane turns. Steady-state upgrades after unification never require
-supported native interactive sessions to close.
+**Decision**: First migration inventories every known legacy state/root and exact live owner. The
+operator establishes a maintenance window by closing every managed legacy peer and lane, explicitly
+stopping each responsive legacy supervisor, product manager, and federation authority through its old
+supported lifecycle, and preventing any new legacy launch until installation completes. The installer
+fails closed naming any live authority even when it reports zero shims, and never stops, signals, or
+restarts legacy authority. Only after proving all such authorities absent does it adopt durable Agent
+Sessions state, retire exact legacy artifacts, and start the unified authority. A pre-ready failure
+leaves both unified candidate and legacy authorities stopped, restores only installer-changed
+release/state/connector/service surfaces, and directs either a unified-install retry or a manual old
+supported relaunch. It implements neither live handoff nor a compatibility drain protocol. Steady-state
+upgrades after unification never require supported native interactive sessions to close.
 
 **Rationale**: Existing installations can contain supervisors, shims, product hosts, lane managers,
 and a host federation agent under several runtime roots. A stale scalar count caused the immediate
 upgrade deadlock that motivated this redesign. The software is not released and its three deployed
 hosts are operator-controlled, so a documented quiescence prerequisite closes the real migration need
-without inventing a one-use live handoff protocol. Migration still uses exact process and filesystem
-identity primitives rather than trusting old counts or names.
+without inventing a one-use live handoff or compatibility drain protocol. Migration still uses exact
+process and filesystem identity primitives rather than trusting old counts or names, while leaving
+legacy lifecycle authority with the operator.
 
 **Alternatives considered**:
 
-- Kill every matching process during install: rejected because names and PID liveness do not establish
-  ownership.
+- Stop or signal corroborated legacy processes during install: rejected because the maintenance-window
+  contract assigns old supported lifecycle actions to the operator and makes any remaining live
+  authority a fail-closed blocker.
 - Implement live re-registration or handoff from every legacy runtime: rejected as one-use complexity
   for an unreleased, operator-controlled deployment.
 - Let old processes drain indefinitely beside the daemon: rejected because it preserves mixed-version

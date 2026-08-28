@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
@@ -222,7 +222,6 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	t.Setenv("QWEN_HOME", filepath.Join(root, "qwen-home"))
 	t.Setenv("QWEN_RUNTIME_DIR", filepath.Join(root, "qwen-runtime"))
 	fake := newFakeQwenProcess(t)
@@ -237,7 +236,7 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	}
 	paths := resolveNativePaths()
 	threadID, launchToken := randomID(), randomID()+randomID()
-	turn := newQwenLaneTurn("return the fake answer", 0)
+	turn := newQwenLaneTurn("return the fake answer")
 	now := time.Now().UnixMilli()
 	state := qwenLaneState{
 		Version: qwenLaneVersion, ContractVersion: qwenLaneContractVersion, Type: "qwen-peer-lane",
@@ -248,11 +247,11 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 		AutoArchive: false, Turns: []qwenLaneTurn{turn}, PendingTurnIDs: []string{turn.ID}, LatestTurnID: turn.ID,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if _, err := federator.ResolveSessionPreferences(agentRuntime, federator.ResolvePreferencesRequest{
-		SessionID: threadID, Product: "qwen", Kind: federator.SessionKindLane,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	identity := bridgeDaemonFixture(t, agentRuntime).attach(t, "qwen", threadID, "qwen-manager-test", "", []string{"bridge-test"})
+	t.Setenv(daemonpkg.InternalAttachmentIDEnvironment, identity.attachmentID)
+	t.Setenv(daemonpkg.InternalCapabilityEnvironment, identity.capability)
+	t.Setenv(daemonpkg.InternalProductEnvironment, identity.product)
+	t.Setenv(daemonpkg.InternalSessionIDEnvironment, identity.sessionID)
 	if err := writeQwenLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +292,7 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	if _, err := manager.handleControl(map[string]any{"action": "ack", "sessionId": threadID, "turnId": turn.ID}); err != nil {
 		t.Fatal(err)
 	}
-	followUp := newQwenLaneTurn("follow up on the same native transcript", 0)
+	followUp := newQwenLaneTurn("follow up on the same native transcript")
 	if _, err := manager.handleControl(map[string]any{
 		"action": "resume", "sessionId": threadID, "turn": followUp, "persistent": true,
 		"groups": []string{}, "explicitGroups": []string{}, "requestedInitialMode": "plan", "launchPreference": "native:plan",
@@ -314,7 +313,7 @@ func TestQwenLaneManagerPublishesSerializesCollectsAndArchives(t *testing.T) {
 	if _, err := manager.handleControl(map[string]any{"action": "ack", "sessionId": threadID, "turnId": followUp.ID}); err != nil {
 		t.Fatal(err)
 	}
-	interrupted := newQwenLaneTurn("BLOCK_QWEN_PROMPT", 0)
+	interrupted := newQwenLaneTurn("BLOCK_QWEN_PROMPT")
 	if _, err := manager.handleControl(map[string]any{
 		"action": "resume", "sessionId": threadID, "turn": interrupted, "persistent": true,
 		"groups": []string{}, "explicitGroups": []string{},

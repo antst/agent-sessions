@@ -211,7 +211,7 @@ func TestAcknowledgeGrokLaneTurnDoesNotWriteBehindLiveManager(t *testing.T) {
 
 	paths := resolveNativePaths()
 	sessionID := randomID()
-	turn := newGrokLaneTurn("terminal result", 0)
+	turn := newGrokLaneTurn("terminal result")
 	turn.Status, turn.Outcome, turn.Exit = "completed", "completed", 0
 	state := grokLaneState{
 		Type: "grok-peer-lane", Name: "live-ack-test", SessionID: sessionID,
@@ -276,7 +276,7 @@ func TestGrokLaneInfrastructureFailuresUseFailedTerminalTaxonomy(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
 	paths := resolveNativePaths()
 	for _, reason := range []string{"manager startup failed", "persist active Grok lane turn failed", "Grok ACP worker exited"} {
-		turn := newGrokLaneTurn("work", 0)
+		turn := newGrokLaneTurn("work")
 		manager := &grokLaneManager{
 			paths: paths, state: grokLaneState{SessionID: randomID(), Status: "starting", RuntimeDir: paths.runtimeDir, Turns: []grokLaneTurn{turn}},
 			done: make(chan struct{}), persistOverride: func(grokLaneState) error { return nil },
@@ -303,7 +303,7 @@ func TestGrokLaneStartupShutdownKeepsFirstSignalOrArchiveCause(t *testing.T) {
 		{name: "archive", reason: "explicit archive"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			turn := newGrokLaneTurn("work", 0)
+			turn := newGrokLaneTurn("work")
 			startupDone := make(chan struct{})
 			close(startupDone)
 			manager := &grokLaneManager{
@@ -370,7 +370,7 @@ func TestGrokLaneFinalOwnershipPersistFailureRemainsReconcileable(t *testing.T) 
 
 func TestGrokLaneControlRequiresExactSessionAndTerminalAck(t *testing.T) {
 	sessionID := randomID()
-	turn := newGrokLaneTurn("queued", 0)
+	turn := newGrokLaneTurn("queued")
 	manager := &grokLaneManager{state: grokLaneState{SessionID: sessionID, Turns: []grokLaneTurn{turn}}}
 	if _, err := manager.handleControl(map[string]any{"action": "archive"}); err == nil || !strings.Contains(err.Error(), "session mismatch") {
 		t.Fatalf("missing control session error = %v", err)
@@ -400,7 +400,7 @@ func TestGrokLaneWakeAndResumeRollbackFailedPersistence(t *testing.T) {
 		t.Fatalf("failed wake mutated manager state: %+v", manager.state)
 	}
 
-	turn := newGrokLaneTurn("resume", 0)
+	turn := newGrokLaneTurn("resume")
 	if _, err := manager.handleControl(map[string]any{
 		"action": "resume", "sessionId": sessionID, "turn": turn, "persistent": true,
 	}); err == nil || !strings.Contains(err.Error(), "injected state write") {
@@ -747,7 +747,7 @@ func TestWaitGrokLaneReconcilesCrashedManagerAndCollectsDebt(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
 	paths := resolveNativePaths()
-	turn := newGrokLaneTurn("manager crash", 0)
+	turn := newGrokLaneTurn("manager crash")
 	turn.Status, turn.StartedAt = "active", time.Now().UnixMilli()
 	now := time.Now().UnixMilli()
 	state := grokLaneState{
@@ -891,7 +891,7 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 		Cwd: root, Status: "starting", ControlSocket: hostPaths.ControlSocket,
 		ManagerLog: filepath.Join(root, "manager.log"), LaunchTokenHash: grokTokenHash(launchToken),
 		RuntimeDir: paths.runtimeDir, Persistent: true, AutoArchive: false,
-		PermissionMode: "bypassPermissions", Turns: []grokLaneTurn{newGrokLaneTurn("first turn", 0)},
+		PermissionMode: "bypassPermissions", Turns: []grokLaneTurn{newGrokLaneTurn("first turn")},
 		CreatedAt: now, UpdatedAt: now,
 	}
 	state.TurnID, state.LatestTurnID = state.Turns[0].ID, state.Turns[0].ID
@@ -983,7 +983,7 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 	resumed.LaunchTokenHash = grokTokenHash(resumedToken)
 	resumed.ManagerPID, resumed.ManagerProcStart, resumed.WorkerPID, resumed.WorkerProcStart = 0, "", 0, ""
 	resumed.MessagingSocket = ""
-	resumedTurn := newGrokLaneTurn("resumed turn", 0)
+	resumedTurn := newGrokLaneTurn("resumed turn")
 	resumed.Turns = append(resumed.Turns, resumedTurn)
 	resumed.TurnID, resumed.LatestTurnID = resumedTurn.ID, resumedTurn.ID
 	if err := writeGrokLaneState(paths, resumed); err != nil {
@@ -1199,7 +1199,7 @@ func startTestGrokLaneManagerWithOwner(t *testing.T, root string, autoArchive bo
 	sessionID := randomID()
 	launchToken := randomID() + randomID()
 	hostPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), launchToken)
-	turn := newGrokLaneTurn("managed turn", 0)
+	turn := newGrokLaneTurn("managed turn")
 	now := time.Now().UnixMilli()
 	state := grokLaneState{
 		Type: "grok-peer-lane", Name: "grok-lane-" + first8(sessionID), SessionID: sessionID,

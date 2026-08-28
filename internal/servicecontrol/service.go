@@ -37,7 +37,11 @@ type OSCommandRunner struct{}
 
 // Run implements CommandRunner.
 func (OSCommandRunner) Run(ctx context.Context, executable string, arguments ...string) error {
-	command := exec.CommandContext(ctx, executable, arguments...) //nolint:gosec // Executable and argv come only from validated role descriptors.
+	// platformServiceCommand selects the service-manager executable and builds
+	// argv from a validated role descriptor; no shell or command-string
+	// expansion is involved.
+	//nolint:gosec // G204: executable and argv originate at the closed platform service-command boundary.
+	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Stdin, command.Stdout, command.Stderr = nil, io.Discard, io.Discard
 	return command.Run()
 }

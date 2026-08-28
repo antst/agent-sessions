@@ -9,13 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 func TestBridgeProductProjectionCoversRuntimeAndMCP(t *testing.T) {
 	products := mcpLaneProductIDs()
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.ProductDescriptors() {
 		projected, ok := bridgeProductByID(descriptor.ID)
 		if !ok || projected.descriptor != descriptor {
 			t.Fatalf("bridge product projection %s = %+v, %v", descriptor.ID, projected, ok)
@@ -28,8 +27,8 @@ func TestBridgeProductProjectionCoversRuntimeAndMCP(t *testing.T) {
 			t.Fatalf("MCP product enum is missing %s", descriptor.ID)
 		}
 	}
-	if len(products) != len(federator.ProductDescriptors()) {
-		t.Fatalf("MCP product count = %d, want %d", len(products), len(federator.ProductDescriptors()))
+	if len(products) != len(productcatalog.ProductDescriptors()) {
+		t.Fatalf("MCP product count = %d, want %d", len(products), len(productcatalog.ProductDescriptors()))
 	}
 	for _, definition := range nativeToolDefinitions {
 		if stringValue(definition["name"]) != "lane" {
@@ -44,6 +43,54 @@ func TestBridgeProductProjectionCoversRuntimeAndMCP(t *testing.T) {
 	t.Fatal("MCP lane tool definition is missing")
 }
 
+func TestRuntimeDispatchExcludesDaemonOwnedRoles(t *testing.T) {
+	body, err := os.ReadFile("runtime.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainBody := string(body)
+	obsolete := []string{
+		"shim", "supervisor", "lane", "claude-lane", "claude-lane-manager",
+		"grok-lane", "grok-lane-manager", "qwen-lane", "qwen-lane-manager",
+		"grok-host", "qwen-host", "lane-watch", "host",
+	}
+	for _, role := range obsolete {
+		if strings.Contains(mainBody, `case "`+role+`"`) {
+			t.Errorf("runtime still dispatches daemon-owned role %q", role)
+		}
+	}
+	for _, entrypoint := range []string{"func Main()", "func runShimMain("} {
+		if strings.Contains(mainBody, entrypoint) {
+			t.Errorf("runtime still exposes obsolete dispatcher %q", entrypoint)
+		}
+	}
+	legacyEntrypoints := map[string][]string{
+		"supervisor.go":        {"func runSupervisorCommand("},
+		"claude_lane.go":       {"func runClaudeLaneCommand(", "func runClaudeLaneManager("},
+		"grok_lane.go":         {"func runGrokLaneCommand("},
+		"grok_lane_manager.go": {"func runGrokLaneManager("},
+		"qwen_lane.go":         {"func runQwenLaneCommand("},
+		"qwen_lane_manager.go": {"func runQwenLaneManager("},
+		"grok.go":              {"func runGrokHostCommand("},
+		"qwen_host.go":         {"func runQwenHostCommand("},
+	}
+	for file, symbols := range legacyEntrypoints {
+		body, readErr := os.ReadFile(file)
+		if os.IsNotExist(readErr) {
+			continue
+		}
+		if readErr != nil {
+			t.Errorf("read %s: %v", file, readErr)
+			continue
+		}
+		for _, symbol := range symbols {
+			if strings.Contains(string(body), symbol) {
+				t.Errorf("%s still exposes obsolete process entrypoint %q", file, symbol)
+			}
+		}
+	}
+}
+
 func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 	root := filepath.Join("..", "..")
 	inventory := filepath.Join(root, "scripts", "release-inventory")
@@ -56,7 +103,7 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 	if !slices.Equal(binaries, productcatalog.Catalog().ReleaseExecutables) {
 		t.Fatalf("release executable inventory = %q, want canonical images %q", binaries, productcatalog.Catalog().ReleaseExecutables)
 	}
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.ProductDescriptors() {
 		for _, executable := range []string{descriptor.PeerAlias, descriptor.LaneAlias} {
 			if !slices.Contains(productcatalog.Catalog().HostAliases, executable) {
 				t.Errorf("canonical host alias inventory omits %s %s", descriptor.ID, executable)
@@ -93,10 +140,10 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 		}
 		plugins[product] = strings.Split(paths, ",")
 	}
-	if len(plugins) != len(federator.ProductDescriptors()) {
+	if len(plugins) != len(productcatalog.ProductDescriptors()) {
 		t.Fatalf("release plugin inventory = %v", plugins)
 	}
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.ProductDescriptors() {
 		paths, ok := plugins[descriptor.ID]
 		if !ok || len(paths) == 0 {
 			t.Errorf("release plugin inventory omits %s", descriptor.ID)
@@ -118,7 +165,7 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.ProductDescriptors() {
 		if !strings.Contains(string(grokSkill), `"product":"`+descriptor.ID+`"`) {
 			t.Errorf("Grok all-target lane skill omits structured %s examples", descriptor.ID)
 		}
@@ -148,7 +195,7 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 	for _, gate := range []string{
 		"make test-race", "go vet ./...", "make lint", "scripts/release-final-gate",
 		"release-evidence generate", "release-evidence validate",
-		"specs/001-qwen-support/contracts/release-evidence.schema.json",
+		"specs/002-unified-user-daemon/contracts/release-evidence.schema.json",
 		"scripts/release-tag-verify", "git verify-commit", "gh run download",
 		"scripts/release-publication-preflight", "retention-days: 90",
 		"agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence-${{ github.sha }}",
@@ -184,14 +231,15 @@ func TestAuthoritativeReleaseInventoryCoversEveryProductSurface(t *testing.T) {
 		}
 	}
 
-	schemaBody, err := os.ReadFile(filepath.Join(root, "specs", "001-qwen-support", "contracts", "release-evidence.schema.json"))
+	schemaBody, err := os.ReadFile(filepath.Join(root, "specs", "002-unified-user-daemon", "contracts", "release-evidence.schema.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var schema map[string]any
-	if json.Unmarshal(schemaBody, &schema) != nil || !strings.Contains(string(schemaBody), "agent-sessions-v0\\\\.2\\\\.4-release-evidence") ||
-		!strings.Contains(string(schemaBody), "agent-sessions-0\\\\.2\\\\.4-") {
-		t.Fatal("normative release evidence schema does not pin v0.2.4 artifact identities")
+	if json.Unmarshal(schemaBody, &schema) != nil || strings.Contains(string(schemaBody), "0\\\\.2\\\\.4") ||
+		!strings.Contains(string(schemaBody), "agent-sessions-v[0-9]+") ||
+		!strings.Contains(string(schemaBody), "agent-sessions-[0-9]+") {
+		t.Fatal("unified release evidence schema is not version-generic and source-authority compatible")
 	}
 }
 

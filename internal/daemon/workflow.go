@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 // AttachmentDetachRequest unpublishes one exact prepared or attached native actor.
@@ -20,7 +23,7 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 	admin := runtimeAdminDispatch(runtime)
 	return func(ctx context.Context, principal controlPrincipal, request controlRequest) (controlDispatchResult, *controlError) {
 		switch request.Operation {
-		case "runtime.status", "runtime.doctor", "remove.inspect", "migration.inspect":
+		case "runtime.status", "runtime.doctor", "remove.inspect", "migration.inspect", "migration.status":
 			return admin(ctx, principal, request)
 		}
 		registry := runtime.attachmentRegistry()
@@ -58,6 +61,9 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 				return controlDispatchResult{}, failure
 			}
 			result, err = registry.Adopt(ctx, payload)
+			if err == nil {
+				err = runtime.reconcileAdoptedDeliveries(ctx)
+			}
 		case "attachment.refresh":
 			var payload AttachmentRefreshRequest
 			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
@@ -70,6 +76,34 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 				return controlDispatchResult{}, failure
 			}
 			result, err = registry.Detach(ctx, payload.AttachmentID, payload.Reason)
+		case "attachment.lookup":
+			if principal.Role != controlRoleLauncher {
+				err = ErrAttachmentNotAttested
+				break
+			}
+			var payload AttachmentLookupRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			result, err = registry.LookupManaged(ctx, payload)
+		case "attachment.context":
+			if !principal.Attested {
+				err = ErrAttachmentNotAttested
+				break
+			}
+			var payload AttachmentLookupRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if payload.SessionID != "" && payload.SessionID != principal.SessionID {
+				err = ErrAttachmentNotAttested
+				break
+			}
+			var record AttachmentRecord
+			record, err = registry.Select(ctx, AttachmentSelector{SessionID: principal.SessionID})
+			if err == nil {
+				result = attachmentParentContext(record)
+			}
 		case "peer.identity":
 			if !principal.Attested {
 				err = ErrAttachmentNotAttested
@@ -109,6 +143,102 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 				payload.Operation = DeliveryOperationSend
 			}
 			result, err = engine.Accept(ctx, payload)
+		case "lane.command":
+			if !principal.Attested || principal.AttachmentID == "" {
+				err = ErrAttachmentNotAttested
+				break
+			}
+			engine := runtime.laneEngine()
+			if engine == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "lane authority is not ready", Retryable: true}
+			}
+			var payload LaneCommandRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if strings.TrimSpace(payload.Host) != "" {
+				runtime.mu.RLock()
+				federated := runtime.federation
+				runtime.mu.RUnlock()
+				if federated == nil {
+					return controlDispatchResult{}, &controlError{Code: "federation_unavailable", Message: "federation authority is not ready", Retryable: true}
+				}
+				result, err = federated.executeRemoteLaneCommand(ctx, engine, registry, principal.AttachmentID, payload)
+			} else {
+				result, err = executeLaneCommand(ctx, engine, registry, principal.AttachmentID, payload)
+			}
+		case "lane.start", "lane.resume", "lane.followup":
+			engine := runtime.laneEngine()
+			if engine == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "lane authority is not ready", Retryable: true}
+			}
+			var payload LaneStartRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if principal.Attested {
+				payload.SourceAttachmentID = principal.AttachmentID
+			}
+			var lane LaneRecord
+			var turn LaneTurnRecord
+			lane, turn, err = engine.Start(ctx, payload)
+			result = map[string]any{"lane": lane, "turn": turn}
+		case "lane.status":
+			engine := runtime.laneEngine()
+			if engine == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "lane authority is not ready", Retryable: true}
+			}
+			var payload LaneArchiveRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if principal.Attested {
+				payload.SourceAttachmentID = principal.AttachmentID
+			}
+			result, err = engine.Status(ctx, payload)
+		case "lane.list":
+			engine := runtime.laneEngine()
+			if engine == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "lane authority is not ready", Retryable: true}
+			}
+			var payload LaneListRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if principal.Attested {
+				payload.SourceAttachmentID = principal.AttachmentID
+			}
+			result, err = engine.List(ctx, payload)
+		case "lane.interrupt", "lane.collect":
+			engine := runtime.laneEngine()
+			if engine == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "lane authority is not ready", Retryable: true}
+			}
+			var payload LaneCollectRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if principal.Attested {
+				payload.SourceAttachmentID = principal.AttachmentID
+			}
+			if request.Operation == "lane.interrupt" {
+				result, err = engine.Interrupt(ctx, payload)
+			} else {
+				result, err = engine.Collect(ctx, payload)
+			}
+		case "lane.archive":
+			engine := runtime.laneEngine()
+			if engine == nil {
+				return controlDispatchResult{}, &controlError{Code: "runtime_recovering", Message: "lane authority is not ready", Retryable: true}
+			}
+			var payload LaneArchiveRequest
+			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {
+				return controlDispatchResult{}, failure
+			}
+			if principal.Attested {
+				payload.SourceAttachmentID = principal.AttachmentID
+			}
+			result, err = engine.Archive(ctx, payload)
 		default:
 			return controlDispatchResult{}, &controlError{Code: "operation_unavailable", Message: "workflow operation is not implemented", Retryable: false}
 		}
@@ -120,6 +250,48 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 			return controlDispatchResult{}, &controlError{Code: "internal", Message: "encode workflow result", Retryable: true}
 		}
 		return controlDispatchResult{Result: body, ResourceRevision: workflowResourceRevision(result)}, nil
+	}
+}
+
+func attachmentParentContext(record AttachmentRecord) federation.ParentContext {
+	adapterPID := attachmentEvidenceInt(record.NativeActor, "pid")
+	adapterStart := attachmentEvidenceString(record.NativeActor, "proc_start")
+	adapterStrongStart := attachmentEvidenceString(record.NativeActor, "strong_start")
+	ownerPID := attachmentEvidenceInt(record.NativeActor, "parent_pid")
+	if ownerPID <= 1 {
+		ownerPID = adapterPID
+	}
+	ownerStart := attachmentEvidenceString(record.NativeActor, "parent_proc_start")
+	if ownerStart == "" {
+		ownerStart = adapterStart
+	}
+	ownerStrongStart := attachmentEvidenceString(record.NativeActor, "parent_strong_start")
+	if ownerStrongStart == "" {
+		ownerStrongStart = adapterStrongStart
+	}
+	return federation.ParentContext{
+		HostID: record.HostID, SessionID: record.SessionID, Product: record.Product,
+		InstanceID: record.AttachmentID, Groups: append([]string(nil), record.Groups...),
+		PermissionMode: record.PermissionMode, AdapterPID: adapterPID, AdapterProcStart: adapterStart,
+		AdapterStrongStart: adapterStrongStart, AdapterSocket: attachmentEvidenceString(record.NativeActor, "socket"),
+		PID: ownerPID, ProcStart: ownerStart, StrongStart: ownerStrongStart,
+		QwenCapabilityDigest: attachmentEvidenceString(record.NativeActor, "capability_digest"),
+	}
+}
+
+func attachmentEvidenceString(evidence map[string]any, key string) string {
+	value, _ := evidence[key].(string)
+	return value
+}
+
+func attachmentEvidenceInt(evidence map[string]any, key string) int {
+	switch value := evidence[key].(type) {
+	case int:
+		return value
+	case float64:
+		return int(value)
+	default:
+		return 0
 	}
 }
 
@@ -144,8 +316,16 @@ func workflowResourceRevision(result any) string {
 		return fmt.Sprintf("%d", value.Revision)
 	case AttachmentPrepareResult:
 		return fmt.Sprintf("%d", value.Attachment.Revision)
+	case ManagedAttachment:
+		return value.SessionID
 	case DeliveryRecord:
 		return fmt.Sprintf("%d", value.Revision)
+	case LaneRecord:
+		return fmt.Sprintf("%d", value.Revision)
+	case LaneTurnRecord:
+		return fmt.Sprintf("%d", value.Revision)
+	case LaneCollection:
+		return fmt.Sprintf("%d", value.CollectionRevision)
 	default:
 		return ""
 	}
@@ -155,9 +335,10 @@ func controlFailure(err error) *controlError {
 	switch {
 	case errors.Is(err, ErrAttachmentNotAttested), errors.Is(err, ErrDeliveryUnauthorized):
 		return &controlError{Code: "not_authorized", Message: err.Error(), Retryable: false}
-	case errors.Is(err, ErrAttachmentNotFound), errors.Is(err, ErrDeliveryNotFound):
+	case errors.Is(err, ErrAttachmentNotFound), errors.Is(err, ErrDeliveryNotFound), errors.Is(err, ErrLaneNotFound):
 		return &controlError{Code: "not_found", Message: err.Error(), Retryable: false}
-	case errors.Is(err, ErrAttachmentAmbiguous), errors.Is(err, ErrDeliveryIdempotencyConflict):
+	case errors.Is(err, ErrAttachmentAmbiguous), errors.Is(err, ErrDeliveryIdempotencyConflict),
+		errors.Is(err, ErrLaneIdempotencyConflict), errors.Is(err, ErrLaneArchived):
 		return &controlError{Code: "conflict", Message: err.Error(), Retryable: false}
 	case errors.Is(err, ErrAttachmentSelecting):
 		return &controlError{Code: "selection_pending", Message: err.Error(), Retryable: true}

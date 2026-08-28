@@ -36,29 +36,52 @@ func (driver *grokConnectorDriver) Prepare(ctx context.Context, request Connecto
 		if err != nil {
 			return nil, err
 		}
-		return noConnectorMutation{}, nil
+		return unavailableConnectorMutation("grok", request.SourceRoot), nil
 	}
 	prior, err := inspectGrokConnector(ctx, driver.runner, executable, driver.userPluginRoot)
 	if err != nil {
 		return nil, err
 	}
+	if prior.present && !prior.enabled {
+		return nil, errors.New("existing Grok connector is disabled and cannot be restored exactly")
+	}
 	snapshot, err := snapshotConnectorTree(driver.userPluginRoot)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot prior Grok connector: %w", err)
 	}
-	mutation := &nativeConnectorMutation{}
+	return newGrokConnectorMutation(
+		driver.runner, executable, request.SourceRoot, payloadRoot, driver.userPluginRoot, prior, snapshot,
+	), nil
+}
+
+func newGrokConnectorMutation(
+	runner ConnectorCommandRunner,
+	executable string,
+	sourceRoot string,
+	payloadRoot string,
+	userPluginRoot string,
+	prior grokConnectorState,
+	snapshot connectorTreeSnapshot,
+) *nativeConnectorMutation {
+	mutation := &nativeConnectorMutation{provenance: connectorMutationProvenance{
+		SchemaVersion: connectorRecoverySchemaVersion,
+		Product:       "grok", Available: true, Executable: executable,
+		SourceRoot: sourceRoot, PayloadRoot: payloadRoot, UserRoot: userPluginRoot,
+		Prior:     connectorPriorProvenance{Present: prior.present, Enabled: prior.enabled},
+		PriorTree: snapshotConnectorTreeProvenance(snapshot),
+	}}
 	mutation.steps = append(mutation.steps,
 		connectorStep{
-			apply: func(context.Context) error { return replaceConnectorTree(payloadRoot, driver.userPluginRoot) },
-			undo:  func(context.Context) error { return restoreConnectorTree(driver.userPluginRoot, snapshot) },
+			apply: func(context.Context) error { return replaceConnectorTree(payloadRoot, userPluginRoot) },
+			undo:  func(context.Context) error { return restoreConnectorTree(userPluginRoot, snapshot) },
 		},
 		connectorStep{
 			apply: func(ctx context.Context) error {
-				if err := driver.runner.Run(ctx, executable, "plugin", "install", payloadRoot, "--trust"); err != nil {
+				if err := runner.Run(ctx, executable, "plugin", "install", payloadRoot, "--trust"); err != nil {
 					return err
 				}
-				if err := driver.runner.Run(ctx, executable, "plugin", "uninstall", grokConnectorName, "--keep-data"); err != nil {
-					_ = driver.runner.Run(ctx, executable, "plugin", "uninstall", grokConnectorName)
+				if err := runner.Run(ctx, executable, "plugin", "uninstall", grokConnectorName, "--keep-data"); err != nil {
+					_ = runner.Run(ctx, executable, "plugin", "uninstall", grokConnectorName)
 					return err
 				}
 				return nil
@@ -67,14 +90,14 @@ func (driver *grokConnectorDriver) Prepare(ctx context.Context, request Connecto
 				if prior.present && prior.enabled {
 					return nil
 				}
-				if err := driver.runner.Run(ctx, executable, "plugin", "install", payloadRoot, "--trust"); err != nil {
+				if err := runner.Run(ctx, executable, "plugin", "install", payloadRoot, "--trust"); err != nil {
 					return err
 				}
-				return driver.runner.Run(ctx, executable, "plugin", "uninstall", grokConnectorName)
+				return runner.Run(ctx, executable, "plugin", "uninstall", grokConnectorName)
 			},
 		},
 		connectorStep{apply: func(ctx context.Context) error {
-			current, inspectErr := inspectGrokConnector(ctx, driver.runner, executable, driver.userPluginRoot)
+			current, inspectErr := inspectGrokConnector(ctx, runner, executable, userPluginRoot)
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -84,7 +107,7 @@ func (driver *grokConnectorDriver) Prepare(ctx context.Context, request Connecto
 			return nil
 		}},
 	)
-	return mutation, nil
+	return mutation
 }
 
 // Remove implements ConnectorDriver.

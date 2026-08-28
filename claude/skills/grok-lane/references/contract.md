@@ -11,14 +11,14 @@ timeout also exits 124 without terminalizing the turn. Exactly one collector may
 turn. Resume refuses uncollected debt and uses ACP `session/load` with the exact stored native Grok
 UUID; the Agent Sessions lane UUID remains the stable lifecycle/message identity.
 
-The lane manager is the sole ACP driver. It publishes only after authentication, exact resident
+The daemon's Grok adapter is the sole ACP client. It publishes only after authentication, exact resident
 roster identity, live bypass permission, and a direct Agent Sessions MCP probe. Peer messages form
 durable serialized turns; duplicate IDs are idempotent and conflicts fail closed.
-Its local owner-only control socket rejects a request unless it carries the exact stable lane
-session ID. This is a same-UID lifecycle boundary; names and model-supplied IDs grant nothing.
+The daemon control request is accepted only with the exact attested parent and stable lane session
+ID; names and model-supplied IDs grant nothing.
 
-Archive is bridge-owned and preserves the native transcript for a fresh ACP owner to `session/load`;
+Archive is daemon-owned and preserves the native transcript for the adapter to `session/load`;
 there is no native Grok archive/unarchive call. `GROK_LANE_TERMINAL` is a durable collection pointer
 with a stable native message ID, not answer content. Remote lifecycle uses
-`peer-federator lane --host HOST --product grok --`, requires advertised `grok-lane`, and retains
+`agent-sessions lane --host HOST --product grok --`, requires advertised `grok-lane`, and retains
 this same JSONL and collection contract.

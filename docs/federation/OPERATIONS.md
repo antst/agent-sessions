@@ -2,36 +2,35 @@
 
 ## Topology
 
-Run exactly one host agent per OS user/runtime directory. A local-only agent is
-fully supported. Add one outbound hub connection only when cross-host routing
-or remote lanes are needed. Reusing a host ID replaces the old hub connection;
-the runtime-directory lock rejects a second local agent.
+Run exactly one `agent-sessions` daemon per OS user. Its embedded federation
+component is local-only unless the host configuration names one outbound hub.
+Reusing a host ID replaces the old hub connection; the fixed control-endpoint
+lock rejects a second daemon.
 
-The agent publishes exactly one synthetic service row in the configured
+The daemon publishes exactly one synthetic service row in the configured
 Claude `sessions/` registry. Participating peer adapters are registered through
 the private control socket and do not create public router/shadow rows.
 
 ## Start and diagnose
 
 ```sh
-peer-federator agent --host workstation-a
-peer-federator doctor
-peer-federator status
+agent-sessions status --json
+agent-sessions doctor --json
 ```
 
 For federation:
 
 ```sh
-peer-federator hub --listen :7419
-peer-federator agent --hub 10.2.17.1:7419 --host workstation-a
-peer-federator doctor --hub 10.2.17.1:7419
-peer-federator hosts
+agent-sessions-hub --listen :7419
+agent-sessions-hub doctor --json
+agent-sessions status --json
+agent-sessions lane --host workstation-b --product codex -- doctor --json
 ```
 
-`doctor` requires the local agent and registry. It checks hub compatibility
-only when `--hub` is supplied. `status` reports local/remote peer and host
-counts; there is no shadow count in protocol 3. `hosts` fails while the hub is
-disconnected instead of returning stale data.
+Host `doctor` requires the local daemon and its attachment authority. Host
+`status` reports the embedded federation state; hub status/doctor are owned by
+the independent hub binary. Remote lane commands fail while disconnected
+instead of falling back locally or returning stale host data.
 
 ## Product sessions
 
@@ -57,37 +56,30 @@ is no collision-safe automatic migration for those development-only sessions.
 
 ## Remote lane execution
 
-Remote lanes are disabled unless `--enable-remote-lanes` or
-`PEER_FEDERATOR_ENABLE_REMOTE_LANES=true` is set. The agent searches `PATH` and
-`~/.local/bin` for all four target launchers. Exact paths can be supplied with
-`PEER_FEDERATOR_CODEX_LANE`, `PEER_FEDERATOR_CLAUDE_LANE`, and
-`PEER_FEDERATOR_GROK_LANE`, and `PEER_FEDERATOR_QWEN_LANE`. The Qwen capability
-is withheld unless the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR`, native executable,
-ACP/archive surface, trusted cwd, and installed integration are ready.
-The native client is resolved separately from `qwen-peer-lane`; override it with
-`QWEN_PEER_QWEN_BIN` or `--qwen-bin` when it is not on the service `PATH`. The exact resolved path
-is inherited by remote Qwen workers.
-Capabilities are evaluated when the agent starts and are advertised in its hub
-handshake. After installing a previously unavailable product integration,
-restart that agent to advertise the newly ready capability; plugin installation
-does not signal or replace a separately managed federation process.
+Remote lanes require `remote_lanes_enabled` and a `hub_address` in the unified
+host daemon configuration. The daemon advertises only product adapters that
+are ready in that generation. After installing or repairing a connector,
+restart the user-managed `agent-sessions` service to publish the new readiness
+snapshot; there is no separately managed federation-agent process.
 
 Every parent product can select every target product. The source parent is
 agent-attested; it is independent from `--product`, which chooses only the
 destination lane adapter. Parent group inheritance is opt-in per launch.
 
-Each destination accepts at most 32 concurrent remote lane CLI processes.
-Remote stdin is capped at 1 MiB and auto-archive at 86,400 seconds. Supply the
-destination `-C`/`--cd` path explicitly when needed. `--prompt-file` names a
-destination-local file; it does not transfer data.
+Remote structured input is capped at 1 MiB before durable source acceptance.
+Remote work uses the same in-process lane engine, adapter state machine, and
+vendor-native lifecycle as local work; it has no separate CLI-process pool or
+federation-specific capacity namespace. Supply the destination `-C`/`--cd`
+path explicitly when needed.
 
 ## Linux systemd user service
 
 ```sh
-make install-systemd-user
-cp ~/.config/peer-federator/agent.env.example ~/.config/peer-federator/agent.env
+make install
+make install-hub HUB_LISTEN=:7419
 systemctl --user daemon-reload
-systemctl --user enable --now peer-federator-agent.service
+systemctl --user enable --now agent-sessions.service
+systemctl --user enable --now agent-sessions-hub.service
 ```
 
 On the hub host, configure and enable the supplied hub unit. Permit TCP 7419
@@ -96,26 +88,27 @@ only inside the trusted network.
 ## macOS launchd
 
 ```sh
-make install-launchd-user
-cp ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist.example \
-  ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist
-plutil -lint ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist
+make install
+make install-hub HUB_LISTEN=:7419
+plutil -lint ~/Library/LaunchAgents/net.antst.agent-sessions.plist
+plutil -lint ~/Library/LaunchAgents/net.antst.agent-sessions-hub.plist
 launchctl bootstrap "gui/$(id -u)" \
-  ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist
+  ~/Library/LaunchAgents/net.antst.agent-sessions.plist
 ```
 
-The install target updates example templates only; it never overwrites or
-loads an active plist.
+The supported role transaction stages the exact launchd definition, enables login start, and
+starts or restarts only that selected role through the shared service lifecycle engine. Host and
+hub definitions, release roots, and service labels remain disjoint.
 
 ## Failure and upgrades
 
 Local routing and the durable catalog remain available during a hub outage.
-Agents reconnect with bounded backoff and republish their current registered
-peers. A peer adapter periodically refreshes registration, so an agent restart
-does not require a peer restart. Exiting adapters unregister exact identities;
-the agent also removes stale registrations after PID/socket revalidation.
+Host daemons reconnect with bounded backoff and republish their current attachment snapshot.
+Daemon generation recovery re-corroborates native attachments and active lane state, so a daemon
+restart does not require a peer restart. Exiting connectors detach exact identities; stale native
+evidence is withdrawn by the owning adapter without a second registration authority.
 
-Upgrade the hub first, then one agent at a time. Protocol mismatches fail at
+Upgrade the hub and host daemons independently. Protocol mismatches fail at
 hello/probe, and no protocol-2 flat/shadow fallback is attempted.
 
 Before release, run `make lint`, `make test`, `make test-race`, the grouped

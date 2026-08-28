@@ -14,13 +14,15 @@ import (
 	"strings"
 	"time"
 
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
+	"github.com/antst/agent-sessions/internal/sessionkey"
 )
 
 const (
@@ -260,7 +262,7 @@ func launchPreparedQwenPeer(
 	qwen, qwenVersion, runtimePath, agentRuntime, stateDir string,
 	execCommand func(string, []string, []string) error,
 ) error {
-	lifecycleRoot := federator.PeerLifecycleRootInState(stateDir, "qwen", plan.sessionID)
+	lifecycleRoot := filepath.Join(stateDir, "qwen-peers", sessionkey.FromID(plan.sessionID), "config")
 	productRoot := filepath.Join(stateDir, "qwen-peers")
 	if err := os.MkdirAll(productRoot, 0o700); err != nil {
 		return fmt.Errorf("create Qwen lifecycle namespace: %w", err)
@@ -286,12 +288,12 @@ func launchPreparedQwenPeer(
 		}
 		_ = file.Close()
 	}
-	inputAttestation, err := federator.QwenArtifactAttestationForPath(inputPath)
+	inputAttestation, err := qwenreadiness.AttestArtifact(inputPath)
 	if err != nil {
 		_ = cleanupQwenLaunchPaths(lifecycleRoot, inputPath, eventsPath)
 		return err
 	}
-	eventsAttestation, err := federator.QwenArtifactAttestationForPath(eventsPath)
+	eventsAttestation, err := qwenreadiness.AttestArtifact(eventsPath)
 	if err != nil {
 		_ = cleanupQwenLaunchPaths(lifecycleRoot, inputPath, eventsPath)
 		return err
@@ -302,7 +304,7 @@ func launchPreparedQwenPeer(
 		return err
 	}
 	pid := os.Getpid()
-	procStart := federator.ProcessStart(pid)
+	procStart := procinfo.Start(pid)
 	if pid <= 1 || procStart == "" {
 		_ = cleanupQwenLaunchPaths(lifecycleRoot, inputPath, eventsPath)
 		return errors.New("capture Qwen launcher process identity")
@@ -438,13 +440,13 @@ func cleanupQwenLaunchPaths(root string, paths ...string) error {
 	return result
 }
 
-func cleanupPreparedQwenLaunchPaths(root string, artifacts ...federator.QwenArtifactAttestation) error {
+func cleanupPreparedQwenLaunchPaths(root string, artifacts ...qwenreadiness.ArtifactAttestation) error {
 	rootInfo, err := os.Lstat(root)
 	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm() != 0o700 {
 		return errors.New("qwen launch cleanup ownership root changed")
 	}
 	for _, artifact := range artifacts {
-		if filepath.Dir(artifact.Path) != root || !federator.QwenArtifactIdentityMatches(artifact) {
+		if filepath.Dir(artifact.Path) != root || !qwenreadiness.ArtifactIdentityMatches(artifact) {
 			return fmt.Errorf("qwen launch cleanup retained changed artifact %s", artifact.Path)
 		}
 	}

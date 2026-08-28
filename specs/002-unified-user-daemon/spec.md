@@ -4,7 +4,7 @@
 
 **Created**: 2026-08-26
 
-**Status**: Draft
+**Status**: Implementation complete; cross-platform release acceptance pending
 
 **Input**: User description: "Converge the existing Agent Sessions functionality into one stable
 user-space daemon per OS user on each host so adapters, sessions, lanes, local routing, cleanup, and
@@ -30,7 +30,8 @@ host service."
 - Q: Should normal daemon logs, status output, and diagnostics ever contain peer messages, prompts, lane results, or vendor transcript content? → A: No. Operational observability is metadata-only and never logs content, including in debug mode.
 - Q: What defines collaboration granularity and access after process unification? → A: The existing global groups are the sole collaboration access boundary in one uniform multi-host space behind one hub; host suffixes only disambiguate peer addresses.
 - Q: What is the exclusive goal of this feature? → A: Converge existing Agent Sessions functionality into a stable working form with one host daemon per OS user on each host; do not add product functionality.
-- Q: Must first migration preserve running legacy managed peers or lanes? → A: No. This is an unreleased, operator-controlled deployment; first migration requires the user to close every managed peer and lane before proceeding and does not implement live legacy handoff.
+- Q: Must first migration preserve running legacy managed peers or lanes? → A: No. This is an unreleased, operator-controlled deployment; as the first maintenance-window step, the user closes every managed peer and lane. First migration implements neither live legacy handoff nor a compatibility drain protocol.
+- Q: Who stops legacy Agent Sessions authorities for first migration, and may rollback restart them? → A: The operator establishes a maintenance window: close every peer and lane, explicitly stop every responsive legacy supervisor, product manager, and federation authority through its old supported lifecycle, and prevent new legacy launches until installation completes. The installer only verifies absence, fails closed naming any live authority even when it reports zero shims, adopts metadata, and retires exact artifacts. It never stops, signals, or restarts a legacy authority. A failed first migration leaves both the unified candidate and all legacy authorities stopped, restores only installer-changed release/state/connector/service surfaces, and directs the operator to retry unified installation or manually relaunch the old supported lifecycle.
 - Q: Should the central federation hub be another mode of the host daemon executable? → A: No. Build one `agent-sessions` host executable and one separate `agent-sessions-hub` central-hub executable. They share one explicitly versioned hub protocol, but deployed builds may come from arbitrary commits or releases; there is still no separate host federation-agent process.
 - Q: Does upgrading `agent-sessions` on one host require upgrading or restarting `agent-sessions-hub`? → A: No while both processes declare the same hub-protocol version. Host and hub lifecycle are independent. Their SHA, release version, packaging generation, and installation time are irrelevant to software-version interoperability; a protocol-version mismatch fails closed and requires deploying a matching protocol on the affected side. A host's advertised lane capabilities describe available work and do not couple releases.
 - Q: Must the new unified host/hub software interoperate with the pre-unification split-process software? → A: No. This feature may replace every old local command, service, process, and host-agent interface. Its only legacy obligation is the explicit quiescent first-migration path. Network interoperability among deployed unified hosts and the hub depends only on equal hub-protocol versions, never on software ancestry.
@@ -216,9 +217,11 @@ leave the split-runtime model safely and deterministically.
 
 **Independent Test**: Construct a legacy estate with old and new runtime roots, a stale reported shim
 count, one genuinely live managed session, one dead owner, active federation, and unrelated control
-processes. Verify first migration refuses without mutation while the managed session is live, then
-succeeds after every managed peer and lane is closed, preserving native session data and retiring every
-obsolete Agent Sessions authority.
+processes. Verify first migration refuses without mutation while either managed work or any legacy
+authority remains live, including a responsive authority reporting zero shims. Then establish the
+operator-owned maintenance window, retry installation, preserve native session data, and retire every
+selected disposable Agent Sessions artifact without the installer signalling or restarting legacy
+processes. Dormant or terminal metadata that was adopted as history remains revision-bound provenance.
 
 **Acceptance Scenarios**:
 
@@ -227,15 +230,25 @@ obsolete Agent Sessions authority.
    durable-state evidence rather than by path shape, name, or scalar count alone.
 2. **Given** any exactly corroborated live legacy managed peer or lane, **When** migration runs,
    **Then** it fails closed, names every blocking session or lane, changes nothing, and instructs the
-   operator to close them before retrying; live legacy handoff is not attempted.
+   operator to close them before retrying; neither live handoff nor a compatibility drain protocol is
+   attempted.
 3. **Given** a stale legacy count with no corresponding live process identity, **When** migration
    rechecks current state, **Then** the stale claim cannot deadlock retirement or authorize cleanup.
-4. **Given** two responsive legacy authorities for one profile but no managed peer or lane is active,
-   **When** their exact identities are corroborated, **Then** migration stops and retires both through
-   their supported lifecycle rather than preserving a split authority or transferring live work.
-5. **Given** migration completes, **When** the host is sampled after recovery, **Then** one current
-   service and its one current endpoint remain, all retired Agent Sessions authorities are gone, and
-   unrelated native processes and data are unchanged.
+4. **Given** two responsive legacy authorities for one profile but no managed peer, lane, or shim is
+   active, **When** their exact identities are corroborated, **Then** installation fails closed, names
+   both authorities, performs no mutation, and instructs the operator to stop them through the old
+   supported lifecycle and prevent new legacy launches for the rest of the maintenance window.
+5. **Given** the operator has closed all peers and lanes, stopped every responsive legacy supervisor,
+   product manager, and federation authority, and prevented new legacy launches, **When** installation
+   re-verifies the closed inventory, **Then** it adopts Agent Sessions metadata and retires only exact
+   legacy artifacts without stopping, signalling, or restarting a legacy process.
+6. **Given** successor readiness fails before first migration commits, **When** rollback completes,
+   **Then** the unified candidate and legacy authorities remain stopped, only installer-changed
+   release/state/connector/service surfaces are restored, and guidance names either retrying unified
+   installation or manually relaunching the old supported lifecycle.
+7. **Given** migration completes, **When** the host is sampled after recovery, **Then** one current
+   service and its one current endpoint remain, all legacy authorities remain absent, all selected exact
+   legacy artifacts are retired, and unrelated native processes and data are unchanged.
 
 ### Edge Cases
 
@@ -348,20 +361,25 @@ obsolete Agent Sessions authority.
   a build change that retains the protocol version MUST NOT require or trigger lifecycle work on the
   other side; a protocol-version mismatch MUST fail closed and name the required matching version.
 - **FR-022**: The first migration from the legacy runtime model MUST inventory every known historical
-  runtime root and durable record using exact identity checks before stopping a process, removing an
-  endpoint, adopting durable state, or changing authoritative state.
+  runtime root and durable record using exact identity checks before judging an authority absent,
+  removing an endpoint or artifact, adopting durable state, or changing authoritative state.
 - **FR-023**: First migration MUST require every legacy managed peer and lane to be quiescent. If any
   exact live managed peer or lane remains, migration MUST refuse before mutation, name every blocker,
-  and instruct the operator to close it. First migration MUST NOT implement live legacy handoff and
-  MUST NOT terminate a native session or unrelated work automatically.
+  and instruct the operator to close it. The operator MUST then explicitly stop every responsive
+  legacy supervisor, product manager, and federation authority through its old supported lifecycle and
+  prevent any new legacy launch until installation completes. First migration MUST NOT implement live
+  legacy handoff or a compatibility drain protocol and MUST NOT terminate native or unrelated work.
 - **FR-024**: A legacy scalar count, path, PID, process name, or liveness result without matching exact
   owner evidence MUST NOT authorize retirement and MUST NOT permanently block migration after its
   alleged owner is proven absent.
 - **FR-025**: Unknown, changed, conflicting, or partially observable ownership MUST fail closed as
   durable migration or cleanup debt. A later retry MUST re-evaluate current exact state.
-- **FR-026**: A successful first migration MUST retire every obsolete Agent Sessions supervisor,
-  shim, product host/manager, local routing agent, and federation agent before declaring the unified
-  runtime ready.
+- **FR-026**: The first-migration installer MUST fail closed before mutation and name every exactly
+  corroborated live legacy Agent Sessions authority, including a responsive authority that reports
+  zero shims or no active work. It MUST NOT stop, signal, or restart a legacy authority. Only after all
+  such authorities are proven absent MAY it adopt metadata and retire the exact obsolete supervisor,
+  shim, product host/manager, local routing, federation, endpoint, job, and file artifacts before
+  declaring the unified runtime ready.
 - **FR-027**: Runtime state MUST support crash-safe restart, exact revision checks, idempotent recovery,
   and explicit schema compatibility. An incompatible state version MUST fail before mutation with an
   actionable diagnostic.
@@ -380,7 +398,10 @@ obsolete Agent Sessions authority.
   processes, transcripts, settings, credentials, and Agent Sessions instances.
 - **FR-032**: Normal exit, interrupt, runtime crash, machine restart, network loss, partial upgrade,
   and repeated recovery MUST converge to the same documented terminal state without manual registry
-  editing.
+  editing. First-migration rollback MUST leave both the unified candidate and every legacy authority
+  stopped, restore only release/state/connector/service surfaces changed by the installer, and instruct
+  the operator to retry unified installation or manually invoke the old supported lifecycle; it MUST
+  NOT perform a live handoff or automatically relaunch legacy authority.
 - **FR-033**: The unified contracts, packages, service controls, migration, restart, and complete
   four-product behavior MUST pass equivalent real-installation acceptance on Linux and macOS.
 - **FR-034**: Release packages and aggregate installation MUST support zero, one, several, or all
@@ -572,10 +593,13 @@ obsolete Agent Sessions authority.
 - The separately deployed central `agent-sessions-hub` is not a host runtime authority. It may run
   under a dedicated service account or on a host that also has a user daemon without acquiring local
   product, attachment, lane, credential, transcript, or service-lifecycle authority.
-- The operator will close every legacy managed Agent Sessions peer and lane before first migration.
-  Live legacy handoff is intentionally out of scope because this is an unreleased deployment on three
-  operator-controlled hosts. This one-time prerequisite does not weaken the steady-state upgrade
-  contract after unification.
+- The operator will establish a first-migration maintenance window by closing every legacy managed
+  Agent Sessions peer and lane, explicitly stopping each responsive legacy supervisor, product
+  manager, and federation authority through its old supported lifecycle, and preventing new legacy
+  launches until installation completes. The installer verifies absence but never stops, signals, or
+  restarts those authorities. Live handoff and a compatibility drain protocol are intentionally out of
+  scope because this is an unreleased deployment on three operator-controlled hosts. This one-time
+  prerequisite does not weaken the steady-state upgrade contract after unification.
 - After migration, native interactive sessions can outlive an Agent Sessions service restart. Active
   delegated work is expected to continue transparently; an explicit interrupted and resumable
   outcome is an evidence-gated native limitation, not the default implementation shortcut.

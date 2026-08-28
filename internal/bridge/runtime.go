@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -22,8 +21,8 @@ import (
 	"time"
 	"unicode"
 
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 	"github.com/antst/agent-sessions/internal/socketpath"
@@ -75,117 +74,6 @@ type daemon struct {
 
 type envelope struct {
 	From, FromSession, FromName, FromProduct, FromMode, MessageID, SentAt, Message string
-}
-
-// Main dispatches one role of the agent-session-runtime executable.
-//
-//nolint:gocyclo // Runtime role dispatch is intentionally centralized.
-func Main() {
-	if isQwenToolWrapperInvocation() {
-		os.Exit(runQwenToolWrapper(os.Args[1:]))
-	}
-	if isGrokToolWrapperInvocation() {
-		os.Exit(runGrokToolWrapper(os.Args[1:]))
-	}
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok, grok-host, grok-plugin-verify, qwen-host, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, grok-mcp, or launch")
-		os.Exit(2)
-	}
-	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
-		os.Exit(code)
-	}
-	switch os.Args[1] {
-	case "shim":
-		runShimMain(os.Args[2:])
-	case "supervisor":
-		os.Exit(runSupervisorCommand(os.Args[2:]))
-	case "appserver":
-		os.Exit(runAppServerCommand(os.Args[2:]))
-	case "claude-lane-manager":
-		os.Exit(runClaudeLaneManager(os.Args[2:]))
-	case "grok-lane-manager":
-		os.Exit(runGrokLaneManager(os.Args[2:]))
-	case "qwen-lane-manager":
-		os.Exit(runQwenLaneManager(os.Args[2:]))
-	case "grok":
-		os.Exit(runGrokSafetyCommand(os.Args[2:]))
-	case "grok-host":
-		os.Exit(runGrokHostCommand(os.Args[2:]))
-	case "grok-plugin-verify":
-		os.Exit(runGrokPluginVerify(os.Args[2:]))
-	case "qwen-plugin-install":
-		os.Exit(runQwenPluginInstall(os.Args[2:]))
-	case "qwen-plugin-remove":
-		os.Exit(runQwenPluginRemove(os.Args[2:]))
-	case "qwen-host":
-		os.Exit(runQwenHostCommand(os.Args[2:]))
-	case "release-package":
-		os.Exit(runReleasePackage(os.Args[2:]))
-	case "release-evidence":
-		os.Exit(runReleaseEvidence(os.Args[2:]))
-	case "hook":
-		runHookCommand()
-	case "mcp":
-		os.Exit(runMCPCommand())
-	case "grok-mcp":
-		os.Exit(runGrokMCPCommand())
-	case "launch":
-		os.Exit(runLaunchCommand(os.Args[2:]))
-	default:
-		fmt.Fprintf(os.Stderr, "agent-session-runtime: unknown command %q\n", os.Args[1])
-		os.Exit(2)
-	}
-}
-
-func runNativeLaneRole(role string, args []string) (int, bool) {
-	product, known := bridgeProductByLaneRole(role)
-	if !known {
-		return 0, false
-	}
-	switch product.descriptor.ID {
-	case "codex":
-		return runLaneCommand(args), true
-	case "claude":
-		return runClaudeLaneCommand(args), true
-	case "grok":
-		return runGrokLaneCommand(args), true
-	case "qwen":
-		return runQwenLaneCommand(args), true
-	default:
-		return 0, false
-	}
-}
-
-func runShimMain(argv []string) {
-	args := parseArgs(argv)
-	if args["session-id"] == "" || args["cwd"] == "" {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime shim requires --session-id and --cwd")
-		os.Exit(2)
-	}
-	d := newDaemon(args)
-	if err := d.start(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native shim: %v\n", err)
-		os.Exit(1)
-	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	select {
-	case <-signals:
-	case <-d.done:
-	}
-	d.shutdown()
-}
-
-func parseArgs(argv []string) map[string]string {
-	result := map[string]string{}
-	for i := 0; i < len(argv); i++ {
-		if !strings.HasPrefix(argv[i], "--") || i+1 >= len(argv) {
-			continue
-		}
-		result[strings.TrimPrefix(argv[i], "--")] = argv[i+1]
-		i++
-	}
-	return result
 }
 
 func newDaemon(args map[string]string) *daemon {

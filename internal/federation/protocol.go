@@ -6,8 +6,10 @@ package federation
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/agent-sessions/internal/sessionkey"
 )
 
 const (
@@ -91,4 +93,63 @@ type Peer struct {
 	InstanceID      string   `json:"instance_id,omitempty"`
 	Groups          []string `json:"groups,omitempty"`
 	ParentSessionID string   `json:"parent_session_id,omitempty"`
+}
+
+// GlobalSessionID returns the stable, host-qualified session identity used on
+// the federation wire. It is independent of process and release identity.
+func GlobalSessionID(hostID, sessionID string) string {
+	identity := hostID + "\x00" + sessionID
+	value := sessionkey.FromID(identity) + "_" + canonicalRoutingID(hostID) + "_" + canonicalRoutingID(sessionID)
+	if len(value) <= 100 {
+		return value
+	}
+	return value[:100]
+}
+
+func canonicalRoutingID(value string) string {
+	var output strings.Builder
+	for _, character := range value {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) || character == '_' || character == '-' {
+			output.WriteRune(character)
+		}
+		if output.Len() >= 48 {
+			break
+		}
+	}
+	return strings.Trim(output.String(), "_-")
+}
+
+// QualifiedPeerName disambiguates one peer display name with its host while
+// retaining the established name--host spelling.
+func QualifiedPeerName(name, host string) string {
+	return canonicalPeerName(defaultPeerName(name, "peer")) + "--" + canonicalPeerName(defaultPeerName(host, "host"))
+}
+
+func defaultPeerName(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func canonicalPeerName(value string) string {
+	var output strings.Builder
+	separator := false
+	for _, character := range value {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) || character == '.' || character == '_' || character == '-' {
+			output.WriteRune(character)
+			separator = false
+		} else if !separator {
+			output.WriteByte('-')
+			separator = true
+		}
+		if output.Len() >= 72 {
+			break
+		}
+	}
+	result := strings.Trim(output.String(), "._-")
+	if result == "" {
+		return "peer"
+	}
+	return result
 }

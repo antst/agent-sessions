@@ -19,9 +19,9 @@ the only assertions expected to change under this feature.
 |---|---|
 | Source/fake protocol | `go clean -testcache && ./scripts/test`; repeat as `RACE=1 ./scripts/test`; `go vet ./...`; `make lint`; four `make build-release-platform` calls from the acceptance matrix |
 | Claude contract | [`scripts/test-claude-contract`](../../../scripts/test-claude-contract) plus installed `claude`/`claude-peer` TUIs and `agent_sessions` MCP calls |
-| Qwen interactive | [`scripts/test-qwen-contract`](../../../scripts/test-qwen-contract) plus installed `qwen`/`qwen-peer` TUIs |
-| Qwen lane | [`scripts/test-qwen-lane-contract`](../../../scripts/test-qwen-lane-contract) |
-| 4x4 lane composition | [`scripts/test-qwen-composition`](../../../scripts/test-qwen-composition) with authenticated, isolated product homes as required by that script |
+| Qwen interactive | [`scripts/test-unified-peers`](../../../scripts/test-unified-peers), the Qwen daemon attachment tests, and installed `qwen`/`qwen-peer` TUIs. Q-01 through Q-10 below remain individually reportable; the unified runner's aggregate result is not evidence for an unnamed cell. |
+| Qwen lane | [`scripts/test-unified-lane-restart`](../../../scripts/test-unified-lane-restart), the Qwen daemon lane lifecycle tests, and [`scripts/test-unified-lane-composition`](../../../scripts/test-unified-lane-composition). L-01 through L-30 below remain individually reportable wherever Qwen is applicable. |
+| 4x4 lane composition | [`scripts/test-unified-lane-composition`](../../../scripts/test-unified-lane-composition), which parses and validates one structured record for each of the 16 P-* cells below; [`scripts/test-unified-lane-restart`](../../../scripts/test-unified-lane-restart) separately binds each target's restart discriminator. |
 | Federation | [`scripts/federation/test`](../../../scripts/federation/test), [`scripts/federation/integration_test.py`](../../../scripts/federation/integration_test.py), and installed multi-host peers/lanes |
 | Codex peer | Installed `codex-peer [OPTIONS] [resume TARGET]`, native `codex`, App Server control, and attested `agent_sessions` MCP calls |
 | Grok peer | Installed `grok-peer [OPTIONS] [resume TARGET]`, native `grok`, ACP/leader observations, and attested `agent_sessions` MCP calls |
@@ -180,12 +180,16 @@ with each of the four peer products as parent. Product-specific `N/A` remains ex
 
 ## Parent-product x target-product composition cells
 
-[`scripts/test-qwen-composition`](../../../scripts/test-qwen-composition) is the existing executable
-4x4 harness. Every cell requires a real target turn with its unique marker physically present in the
-target's native store; a runner summary alone is insufficient. It also proves child private group,
-immediate parent anchor, default non-inheritance, explicit `--inherit-groups`, exact resume,
-parent/child messaging, terminal collection/notice, interrupt, archive, parent exit, persistence, and
-target-owned cleanup.
+[`scripts/test-unified-lane-composition`](../../../scripts/test-unified-lane-composition) is the
+daemon-backed 4x4 harness. It emits and validates one `unified.lane_composition.cell` record for each
+P-* cell, including exact parent attachment/session, lane/turn, native PID/process-start, generation,
+dispatch/reconnect/redispatch, collection, resume, and evidence fields. The closed acceptance report
+must still name separately, for every P-* cell, the real target turn and unique marker in the target's
+native store; child private group, immediate parent anchor, default non-inheritance, explicit
+`--inherit-groups`, exact resume, parent/child messaging, terminal collection/notice, interrupt,
+archive, parent exit, persistence, and target-owned cleanup. A runner summary alone remains
+insufficient. [`scripts/test-unified-lane-restart`](../../../scripts/test-unified-lane-restart) binds
+the no-redispatch restart outcome for each target product without creating a second user daemon.
 
 | Parent → target | Codex | Claude | Grok | Qwen |
 |---|---|---|---|---|

@@ -25,7 +25,7 @@ func TestQwenLaneForcedArchiveReapsWorkerAndDetachedToolRoots(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { executeQwenArchiveTransaction = originalArchive })
-	if err := forceArchiveQwenLane(paths, state.ThreadID, "Qwen lane manager exited"); err != nil {
+	if err := forceArchiveQwenLane(paths, state.ThreadID); err != nil {
 		t.Fatal(err)
 	}
 	for label, process := range map[string]*grokManagedProcess{"worker": worker, "tool": tool} {
@@ -71,7 +71,7 @@ func TestQwenLaneForcedArchivePreservesRecycledWorkerPID(t *testing.T) {
 	originalArchive := executeQwenArchiveTransaction
 	executeQwenArchiveTransaction = func(qwenLaneState, string) error { return nil }
 	t.Cleanup(func() { executeQwenArchiveTransaction = originalArchive })
-	if err := forceArchiveQwenLane(paths, state.ThreadID, "Qwen lane manager exited"); err != nil {
+	if err := forceArchiveQwenLane(paths, state.ThreadID); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -94,7 +94,7 @@ func TestQwenLaneCleanupDebtSurvivesRestartAndRetries(t *testing.T) {
 	originalArchive := executeQwenArchiveTransaction
 	executeQwenArchiveTransaction = func(qwenLaneState, string) error { return nil }
 	t.Cleanup(func() { executeQwenArchiveTransaction = originalArchive })
-	firstErr := forceArchiveQwenLane(paths, state.ThreadID, "Qwen lane manager exited")
+	firstErr := forceArchiveQwenLane(paths, state.ThreadID)
 	if firstErr == nil {
 		t.Fatal("corrupt durable tool ledger did not retain cleanup debt")
 	}

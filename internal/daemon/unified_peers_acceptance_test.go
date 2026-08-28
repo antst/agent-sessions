@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -419,11 +421,19 @@ func assertUnifiedPeerProcessCensus(t *testing.T, token string, processes map[st
 
 type unifiedPeerRoleService struct{ restarts int }
 
+func (*unifiedPeerRoleService) Observe(context.Context) (releaseinstall.RoleServiceState, error) {
+	return releaseinstall.RoleServiceState{}, nil
+}
+func (*unifiedPeerRoleService) Reload(context.Context) error          { return nil }
+func (*unifiedPeerRoleService) Enable(context.Context) error          { return nil }
 func (service *unifiedPeerRoleService) Restart(context.Context) error { service.restarts++; return nil }
 func (*unifiedPeerRoleService) Stop(context.Context) error            { return nil }
 func (*unifiedPeerRoleService) Disable(context.Context) error         { return nil }
 func (*unifiedPeerRoleService) Start(context.Context) error           { return nil }
 func (*unifiedPeerRoleService) Verify(context.Context) error          { return nil }
+func (*unifiedPeerRoleService) VerifyCandidate(context.Context, releaseinstall.InstalledRelease) error {
+	return errors.New("candidate is not already verified")
+}
 
 type unifiedPeerRoleHooks struct {
 	adapter            *unifiedPeerAdapter
@@ -453,7 +463,6 @@ func (*unifiedPeerRoleHooks) Remove(context.Context) error   { return nil }
 
 func unifiedPeerRelease(t *testing.T, root, version, seed string) releaseinstall.InstallRequest {
 	t.Helper()
-	contentIdentity := "sha256:" + strings.Repeat(seed, 64)
 	source := filepath.Join(root, "source-"+version)
 	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o700); err != nil {
 		t.Fatal(err)
@@ -461,11 +470,52 @@ func unifiedPeerRelease(t *testing.T, root, version, seed string) releaseinstall
 	if err := os.WriteFile(filepath.Join(source, "bin", "agent-sessions"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(map[string]any{"version": version, "content_identity": contentIdentity})
-	if err != nil {
+	for _, path := range []string{
+		".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills",
+		".claude-plugin", "claude", "grok", "qwen",
+	} {
+		if path == ".mcp.json" {
+			if err := os.WriteFile(filepath.Join(source, path), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(source, path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	servicePaths := []string{
+		"deploy/agent-sessions/systemd/user/agent-sessions.service",
+		"deploy/agent-sessions/launchd/net.antst.agent-sessions.plist",
+	}
+	serviceBody := []byte("host service " + seed)
+	for _, servicePath := range servicePaths {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(source, servicePath)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, servicePath), serviceBody, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := []byte(`{"schema_version":1,"release_version":"` + version + `","hub_protocol_version":3,"platform":"linux-x64","checksums":"SHA256SUMS","executables":[{"name":"agent-sessions","role":"host","path":"bin/agent-sessions"}],"connector_payloads":[{"product":"codex","plugin_id":"agent-sessions","archive_paths":[".agents",".codex-plugin",".mcp.json","hooks","scripts","skills"]},{"product":"claude","plugin_id":"agent-sessions","archive_paths":[".claude-plugin","claude"]},{"product":"grok","plugin_id":"agent-sessions","archive_paths":["grok"]},{"product":"qwen","plugin_id":"agent-sessions","archive_paths":["qwen"]}],"service_assets":{"host":["` + strings.Join(servicePaths, `","`) + `"],"hub":[]}}`)
+	if err := os.WriteFile(filepath.Join(source, "manifest.json"), manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(source, "manifest.json"), body, 0o600); err != nil {
+	digest := func(body []byte) string {
+		hash := sha256.Sum256(body)
+		return hex.EncodeToString(hash[:])
+	}
+	checksums := digest([]byte("#!/bin/sh\nexit 0\n")) + "  bin/agent-sessions\n" +
+		digest([]byte("{}")) + "  .mcp.json\n"
+	for _, servicePath := range servicePaths {
+		checksums += digest(serviceBody) + "  " + servicePath + "\n"
+	}
+	checksums += digest(manifest) + "  manifest.json\n"
+	if err := os.WriteFile(filepath.Join(source, "SHA256SUMS"), []byte(checksums), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contentIdentity, err := releaseinstall.ContentIdentity(source)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return releaseinstall.InstallRequest{Version: version, ContentIdentity: contentIdentity, SourceRoot: source, Executable: "agent-sessions"}

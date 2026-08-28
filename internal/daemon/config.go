@@ -6,8 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -63,6 +64,12 @@ func (configuration DaemonConfig) Validate(paths ProductionPaths) error {
 	if configuration.Revision == 0 || configuration.UpdatedAt <= 0 {
 		return errors.New("daemon configuration requires a positive revision and updated_at")
 	}
+	if err := validateDaemonHubAddress(configuration.HubAddress); err != nil {
+		return err
+	}
+	if configuration.RemoteLanesEnabled && configuration.HubAddress == "" {
+		return errors.New("remote lanes require one configured hub address")
+	}
 	for product, override := range configuration.ProductOverrides {
 		if _, ok := productcatalog.ProductByID(product); !ok {
 			return fmt.Errorf("daemon configuration contains unknown product %q", product)
@@ -77,33 +84,36 @@ func (configuration DaemonConfig) Validate(paths ProductionPaths) error {
 	return nil
 }
 
+func validateDaemonHubAddress(address string) error {
+	if address == "" {
+		return nil
+	}
+	if address != strings.TrimSpace(address) {
+		return errors.New("daemon hub address must be canonical")
+	}
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil || host == "" || strings.ContainsAny(host, " \t\r\n/@\\") {
+		return errors.New("daemon hub address must be an exact host and port without scheme or credentials")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return errors.New("daemon hub address has an invalid port")
+	}
+	return nil
+}
+
 // LoadDaemonConfig reads one bounded regular configuration file and rejects
 // unknown fields. Credential values are neither required nor inspected.
 func LoadDaemonConfig(path string, paths ProductionPaths) (DaemonConfig, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return DaemonConfig{}, errors.New("daemon configuration path must be clean and absolute")
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return DaemonConfig{}, fmt.Errorf("inspect daemon configuration: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return DaemonConfig{}, errors.New("daemon configuration is not a real regular file")
-	}
-	if info.Size() < 1 || info.Size() > maxDaemonConfigBytes {
-		return DaemonConfig{}, errors.New("daemon configuration is empty or unbounded")
-	}
-	file, err := os.Open(path) //nolint:gosec // validated canonical caller-owned configuration path.
-	if err != nil {
-		return DaemonConfig{}, fmt.Errorf("open daemon configuration: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	body, err := io.ReadAll(io.LimitReader(file, maxDaemonConfigBytes+1))
+	body, err := readDaemonBoundedRegularFile(path, maxDaemonConfigBytes)
 	if err != nil {
 		return DaemonConfig{}, fmt.Errorf("read daemon configuration: %w", err)
 	}
-	if len(body) > maxDaemonConfigBytes {
-		return DaemonConfig{}, errors.New("daemon configuration exceeds its bound")
+	if len(body) == 0 {
+		return DaemonConfig{}, errors.New("daemon configuration is empty")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()

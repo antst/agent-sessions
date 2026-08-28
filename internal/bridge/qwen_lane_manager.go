@@ -11,14 +11,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
@@ -115,7 +113,7 @@ func (c *qwenACPClient) request(ctx context.Context, method string, params map[s
 	}
 }
 
-func (c *qwenACPClient) notifyRequest(method string, params map[string]any) error {
+func (c *qwenACPClient) notifyRequest(method string, params map[string]any) error { //nolint:unparam // Keep the ACP notification method explicit at the protocol boundary.
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "method": method, "params": params,
 	})
@@ -314,57 +312,6 @@ type qwenLaneManager struct {
 	shutdownCause string
 	shutdownAs130 bool
 	cleanupOnce   sync.Once
-}
-
-func runQwenLaneManager(argv []string) int {
-	args := parseArgs(argv)
-	threadID := strings.TrimSpace(args["session-id"])
-	if !validSessionID(threadID) {
-		fmt.Fprintln(os.Stderr, "qwen-lane-manager requires --session-id")
-		return 2
-	}
-	paths := resolveNativePaths()
-	state, err := readQwenLaneState(paths, threadID)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "qwen-lane-manager: cannot read lane state")
-		return 1
-	}
-	manager := &qwenLaneManager{
-		paths: paths, state: state, launchToken: strings.TrimSpace(os.Getenv(qwenLaneLaunchTokenEnv)),
-		turnNotify: make(chan struct{}, 1), done: make(chan struct{}), startupDone: make(chan struct{}),
-	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(signals)
-	go func() {
-		select {
-		case caught := <-signals:
-			manager.beginShutdown("manager signalled: "+caught.String(), true)
-			manager.shutdown("manager signalled: "+caught.String(), true)
-		case <-manager.done:
-		}
-	}()
-	if err := manager.start(); err != nil {
-		manager.beginShutdown("manager startup failed", false)
-		fmt.Fprintf(os.Stderr, "qwen-lane-manager: startup failed: %v\n", err)
-		manager.shutdown("manager startup failed", false)
-		return 1
-	}
-	select {
-	case <-manager.workerDone():
-		manager.shutdown("Qwen ACP worker exited", false)
-	case <-manager.done:
-	}
-	return 0
-}
-
-func (m *qwenLaneManager) workerDone() <-chan struct{} {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.worker == nil {
-		return m.done
-	}
-	return m.worker.done
 }
 
 func (m *qwenLaneManager) beginShutdown(reason string, interrupted bool) <-chan struct{} {
@@ -1030,7 +977,7 @@ func (m *qwenLaneManager) queueWake(item map[string]any) (map[string]any, error)
 		}
 		return qwenLaneWakeResult(turn), nil
 	}
-	turn := newQwenLaneTurn(peerMessageText(item), 0)
+	turn := newQwenLaneTurn(peerMessageText(item))
 	turn.MessageID, turn.Fingerprint = messageID, fingerprint
 	if m.closing || m.state.Status == "archived" {
 		turn.Status, turn.Outcome, turn.Exit, turn.Error, turn.CompletedAt = "interrupted", "interrupted", 130, "Qwen lane is closing", time.Now().UnixMilli()
@@ -1122,15 +1069,6 @@ func queueQwenLaneTerminalNotice(state *qwenLaneState, turn qwenLaneTurn) {
 		state.Notices, "qwen", state.Name, state.ThreadID, turn.ID, turn.Status, turn.Outcome, turn.Exit,
 		state.NotifyTarget, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups,
 	)
-}
-
-func cancelAllQwenLaneNotices(state *qwenLaneState) {
-	now := time.Now().UnixMilli()
-	for index := range state.Notices {
-		if state.Notices[index].SentAt == 0 {
-			state.Notices[index].SentAt = now
-		}
-	}
 }
 
 func (m *qwenLaneManager) cancelTerminalNoticeLocked(turnID string) {

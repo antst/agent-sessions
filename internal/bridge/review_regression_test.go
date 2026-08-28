@@ -766,7 +766,7 @@ func TestWakeLedgerMakesRetriesIdempotent(t *testing.T) {
 		}
 	})
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	supervisor, err := newNativeSupervisor("test")
+	supervisor, err := newNativeSupervisor()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +835,7 @@ func TestSlowWakeIsJournaledBeforeAppServerDelivery(t *testing.T) {
 		}
 	})
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	supervisor, err := newNativeSupervisor("test")
+	supervisor, err := newNativeSupervisor()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -907,7 +907,7 @@ func TestFailedWakeQueuesExactlyOnceAndSurvivesShimRestart(t *testing.T) {
 		}
 	})
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	supervisor, err := newNativeSupervisor("test")
+	supervisor, err := newNativeSupervisor()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +959,7 @@ func TestWakeLedgerRecoversInFlightAfterSupervisorRestart(t *testing.T) {
 		}
 	})
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	supervisor, err := newNativeSupervisor("test")
+	supervisor, err := newNativeSupervisor()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1520,8 +1520,8 @@ func TestSupervisorStopCommandWaitsForExactProcessExit(t *testing.T) {
 	}()
 
 	started := time.Now()
-	if exit := runSupervisorCommand([]string{"stop"}); exit != 0 {
-		t.Fatalf("supervisor stop exit = %d", exit)
+	if _, err := stopNativeSupervisor(paths); err != nil {
+		t.Fatalf("stop supervisor: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
 		t.Fatalf("supervisor stop returned before exact process exit: %s", elapsed)

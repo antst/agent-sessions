@@ -7,9 +7,9 @@
 Non-persistent `run`, `start`, and `resume` likewise require a corroborated live Codex or Claude
 lifecycle owner. Callers from a plain shell, cron, or CI environment must pass `--persistent`.
 
-`-C/--cd` is implemented by the manager changing the Claude worker's cwd. `--schema` maps to Claude's `--json-schema`. Claude-specific policy flags are `--permission-mode`, `--tools`, `--allowed-tools`, `--disallowed-tools`, and `--max-budget-usd`. Workers enable Agent Teams and add `SendMessage,ListAgents` to the effective allowed-tools list by default; caller allowances are preserved. Explicit tool availability or deny policy can still remove them. `--bare` is rejected because Claude 2.1.227 publishes no native peer socket in that mode.
+`-C/--cd` is applied by the daemon's Claude adapter to the native worker cwd. `--schema` maps to Claude's `--json-schema`. Claude-specific policy flags are `--permission-mode`, `--tools`, `--allowed-tools`, `--disallowed-tools`, and `--max-budget-usd`. Workers enable Agent Teams and add `SendMessage,ListAgents` to the effective allowed-tools list by default; caller allowances are preserved. Explicit tool availability or deny policy can still remove them. `--bare` is rejected because Claude 2.1.227 publishes no native peer socket in that mode.
 
-There is no Claude thread-archive API. Archive shuts down the manager, native stream worker, control socket, and discovery row while leaving Claude's transcript resumable.
+There is no Claude thread-archive API. Archive withdraws daemon publication and retires the adapter's native stream resources while leaving Claude's transcript resumable.
 
 ## Events
 
@@ -23,11 +23,10 @@ There is no Claude thread-archive API. Archive shuts down the manager, native st
 - `error`: command failure; `timeout: true` distinguishes a collection bound from other errors
 - `lane.status`, `lane.list`, `lane.archived`, `lane.doctor`
 
-`lane.doctor` reports `contract_version`, runtime identity, `claude_available`,
-`claude_logged_in`, `claude_auth_method`, `claude_api_provider`, profile state, and supervisor
-reachability. Require `claude_logged_in: true` before starting work, but treat it only as Claude
-Code's local credential-state report. A successful first inference turn is the end-to-end
-authentication and entitlement proof.
+`lane.doctor` reports `ready: true`, `authority: "daemon"`, and product `claude`; product-specific
+credential and profile checks belong to the daemon's Claude adapter. Treat any local credential
+report only as local state. A successful first inference turn is the end-to-end authentication and
+entitlement proof.
 
 Claude accounting can include `total_cost_usd`; `accounting.cost_available` is true only when Claude supplied it.
 
@@ -49,7 +48,7 @@ Unknown Claude stream frame types are ignored. Only the authoritative `result` f
 ## Identity and messaging
 
 Claude's SDK worker is the lane's sole discoverable identity and owns the address returned by
-`lane.ready`. It receives native peer messages directly. The manager observes peer-origin user and
+`lane.ready`. It receives native peer messages directly. The daemon adapter observes peer-origin user and
 result frames and records them as lane turns; it does not proxy the message or rewrite the worker's
 registry row. Workers pass `--settings '{"crossSessionInbound":"accept"}'` because a headless lane
 has no approval UI for native inbound messages. The override is process-local and never rewrites
@@ -73,5 +72,5 @@ expose a per-thread host PID, so the session bridge provides the stable owner id
 are retained for addressing and notification but are not trusted as process identity because a
 long-lived Claude process can rotate its session ID.
 
-Terminal pointers are persisted and retried by the manager. Failed delivery postpones automatic archive for at most 30 seconds; explicit archive remains authoritative and may discard an undelivered pointer.
+Terminal pointers are persisted and retried by the daemon. Failed delivery postpones automatic archive for at most 30 seconds; explicit archive remains authoritative and may discard an undelivered pointer.
 Pointers are collected with `wait`, not answered through their `from` address; a crash-retry may be delivered after the native worker address has retired.

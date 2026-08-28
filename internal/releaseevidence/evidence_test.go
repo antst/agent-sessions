@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/releasepkg"
 )
 
@@ -62,6 +65,7 @@ func TestCanonicalizeRejectsSchemaViolationAndSupportsRFC8785Unicode(t *testing.
 
 func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	root := t.TempDir()
+	version := testDeclaredReleaseVersion(t)
 	archiveDir := filepath.Join(root, "archives")
 	gateDir := filepath.Join(root, "gates")
 	if err := os.Mkdir(archiveDir, 0o700); err != nil {
@@ -71,9 +75,9 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	document := testEvidenceDocument(t, root, archiveDir, gateDir)
-	schema := filepath.Join("..", "..", "specs", "001-qwen-support", "contracts", "release-evidence.schema.json")
+	schema := filepath.Join("..", "..", "specs", "002-unified-user-daemon", "contracts", "release-evidence.schema.json")
 	input := filepath.Join(root, "input.json")
-	canonical := filepath.Join(root, "agent-sessions-v0.2.4-release-evidence.json")
+	canonical := filepath.Join(root, "agent-sessions-v"+version+"-release-evidence.json")
 	writeJSONTestFile(t, input, document)
 	if err := Canonicalize(schema, input, canonical); err != nil {
 		t.Fatal(err)
@@ -97,6 +101,25 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	if err := CrossCheck(schema, nonCanonical, archiveDir, gateDir, testCommit, testTree, testRunID); err == nil {
 		t.Fatal("non-canonical evidence bytes escaped cross-check")
 	}
+	linuxArchive := filepath.Join(archiveDir, "agent-sessions-"+version+"-linux-x64.tar.gz")
+	linuxSidecar := linuxArchive + ".sha256"
+	sidecarBody, err := os.ReadFile(linuxSidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(linuxSidecar); err != nil {
+		t.Fatal(err)
+	}
+	if err := CrossCheck(schema, canonical, archiveDir, gateDir, testCommit, testTree, testRunID); err == nil {
+		t.Fatal("missing archive checksum sidecar escaped cross-check")
+	}
+	writeTestFile(t, linuxSidecar, "0"+string(sidecarBody[1:]))
+	if err := CrossCheck(schema, canonical, archiveDir, gateDir, testCommit, testTree, testRunID); err == nil {
+		t.Fatal("inconsistent archive checksum sidecar escaped cross-check")
+	}
+	if err := os.WriteFile(linuxSidecar, sidecarBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	gateArtifact := filepath.Join(gateDir, "linux-normal.txt")
 	originalGate, err := os.ReadFile(gateArtifact)
 	if err != nil {
@@ -112,7 +135,7 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	archive := filepath.Join(archiveDir, "agent-sessions-0.2.4-linux-x64.tar.gz")
+	archive := filepath.Join(archiveDir, "agent-sessions-"+version+"-linux-x64.tar.gz")
 	file, err := os.OpenFile(archive, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +154,7 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 
 func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 	root := t.TempDir()
+	version := testDeclaredReleaseVersion(t)
 	archiveDir, gateDir := filepath.Join(root, "archives"), filepath.Join(root, "gates")
 	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -152,11 +176,11 @@ func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 	writeJSONTestFile(t, macosPath, map[string]any{
 		"toolchain": toolchains["macos"], "native_clients": clients["macos"], "gates": gates["macos"],
 	})
-	output := filepath.Join(root, "agent-sessions-v0.2.4-release-evidence.json")
+	output := filepath.Join(root, "agent-sessions-v"+version+"-release-evidence.json")
 	err := Generate(GenerateOptions{
-		SchemaPath:    filepath.Join("..", "..", "specs", "001-qwen-support", "contracts", "release-evidence.schema.json"),
+		SchemaPath:    filepath.Join("..", "..", "specs", "002-unified-user-daemon", "contracts", "release-evidence.schema.json"),
 		InventoryPath: inventoryPath, PlatformsPath: platformsPath, ArchiveDir: archiveDir, GateDir: gateDir,
-		LinuxGatePath: linuxPath, MacOSGatePath: macosPath, OutputPath: output, Version: "0.2.4",
+		LinuxGatePath: linuxPath, MacOSGatePath: macosPath, OutputPath: output, Version: version,
 		Commit: testCommit, Tree: testTree, RunID: testRunID, RunAttempt: 1,
 		RunURL: "https://github.com/antst/agent-sessions/actions/runs/123456",
 	})
@@ -174,6 +198,7 @@ func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 
 func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[string]any {
 	t.Helper()
+	version := testDeclaredReleaseVersion(t)
 	executables := []string{
 		"agent-sessions", "agent-sessions-hub",
 	}
@@ -185,7 +210,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 	}
 	archives := map[string]any{}
 	for _, platform := range []string{"linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"} {
-		packageName := "agent-sessions-0.2.4-" + platform
+		packageName := "agent-sessions-" + version + "-" + platform
 		stage := filepath.Join(root, "stage-"+platform)
 		packageRoot := filepath.Join(stage, packageName)
 		for _, executable := range executables {
@@ -217,6 +242,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 				}
 			}
 		}
+		writeFixtureArchiveMetadata(t, packageRoot, version, platform, executables, plugins)
 		archivePath := filepath.Join(archiveDir, packageName+".tar.gz")
 		if err := releasepkg.Create(stage, packageName, archivePath); err != nil {
 			t.Fatal(err)
@@ -229,6 +255,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		if err != nil {
 			t.Fatal(err)
 		}
+		writeTestFile(t, archivePath+".sha256", digest+"  "+filepath.Base(archivePath)+"\n")
 		archives[platform] = map[string]any{
 			"platform": platform, "filename": packageName + ".tar.gz", "byte_size": info.Size(),
 			"sha256": digest, "source_commit": testCommit, "inventory_verified": true,
@@ -243,7 +270,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		digest := sha256.Sum256(body)
 		return map[string]any{
 			"status":            "passed",
-			"job_url":           "https://github.com/antst/agent-sessions/actions/runs/123456/job/" + map[string]string{"linux": "1", "macos": "2"}[osName] + string(rune('0'+index)),
+			"job_url":           "https://github.com/antst/agent-sessions/actions/runs/123456/job/" + map[string]string{"linux": "1", "macos": "2"}[osName] + strconv.Itoa(index),
 			"evidence_artifact": artifact,
 			"evidence_sha256":   hex.EncodeToString(digest[:]),
 		}
@@ -251,7 +278,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 	gates := map[string]any{}
 	for _, osName := range []string{"linux", "macos"} {
 		set := map[string]any{}
-		for index, name := range []string{"normal", "race", "vet", "lint", "focused_contracts", "quickstart", "permissions", "federation", "prebuilt_install", "owner_nonmutation"} {
+		for index, name := range []string{"normal", "race", "vet", "lint", "focused_contracts", "source_pointers", "quickstart", "permissions", "federation", "prebuilt_install", "owner_nonmutation"} {
 			set[name] = gate(osName, name, index)
 		}
 		gates[osName] = set
@@ -259,11 +286,11 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 	toolchain := map[string]any{"go": "go1.25.0", "golangci_lint": "2.12.2"}
 	clients := map[string]any{"qwen": "0.22.0", "codex": "0.148.0", "claude": "2.1.237", "grok": "1.0.0"}
 	return map[string]any{
-		"schema_version": 1, "release_version": "0.2.4", "intended_tag": "v0.2.4",
+		"schema_version": 1, "release_version": version, "intended_tag": "v" + version,
 		"commit_sha": testCommit, "tree_sha": testTree,
 		"artifact": map[string]any{
-			"file_name":              "agent-sessions-v0.2.4-release-evidence.json",
-			"workflow_artifact_name": "agent-sessions-v0.2.4-release-evidence-" + testCommit,
+			"file_name":              "agent-sessions-v" + version + "-release-evidence.json",
+			"workflow_artifact_name": "agent-sessions-v" + version + "-release-evidence-" + testCommit,
 			"retention_days":         90,
 		},
 		"workflow": map[string]any{
@@ -275,6 +302,75 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		"gates":          gates, "archives": archives,
 		"package_inventory": map[string]any{"executables": executables, "plugin_payloads": plugins},
 	}
+}
+
+func testDeclaredReleaseVersion(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "deploy", "agent-sessions", "VERSION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := strings.TrimSpace(string(body))
+	if version == "" {
+		t.Fatal("declared source-release version is empty")
+	}
+	return version
+}
+
+func writeFixtureArchiveMetadata(
+	t *testing.T,
+	packageRoot, version, platform string,
+	executables []string,
+	plugins []map[string]any,
+) {
+	t.Helper()
+	hostService := "deploy/agent-sessions/systemd/user/agent-sessions.service"
+	hubService := "deploy/agent-sessions-hub/systemd/user/agent-sessions-hub.service"
+	for _, service := range []string{hostService, hubService} {
+		path := filepath.Join(packageRoot, filepath.FromSlash(service))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, path, "fixture service\n")
+	}
+	manifestExecutables := make([]map[string]any, 0, len(executables))
+	for _, executable := range executables {
+		role := "hub"
+		if executable == "agent-sessions" {
+			role = "host"
+		}
+		manifestExecutables = append(manifestExecutables, map[string]any{
+			"name": executable, "role": role, "path": "bin/" + platform + "/" + executable,
+		})
+	}
+	writeJSONTestFile(t, filepath.Join(packageRoot, "manifest.json"), map[string]any{
+		"schema_version": 1, "release_version": version, "hub_protocol_version": productcatalog.ProtocolVersion,
+		"platform": platform, "checksums": "SHA256SUMS", "executables": manifestExecutables,
+		"connector_payloads": plugins,
+		"service_assets":     map[string]any{"host": []string{hostService}, "hub": []string{hubService}},
+	})
+	var lines []string
+	if err := filepath.Walk(packageRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.Mode().IsRegular() || filepath.Base(path) == "SHA256SUMS" {
+			return nil
+		}
+		relative, err := filepath.Rel(packageRoot, path)
+		if err != nil {
+			return err
+		}
+		digest, err := fileSHA256(path)
+		if err != nil {
+			return err
+		}
+		lines = append(lines, digest+"  "+filepath.ToSlash(relative))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(packageRoot, "SHA256SUMS"), strings.Join(lines, "\n")+"\n")
 }
 
 func writeJSONTestFile(t *testing.T, path string, value any) {

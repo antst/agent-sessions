@@ -13,7 +13,7 @@ The host daemon embeds the existing host federation-agent responsibilities. It
 connects to one separately operated central hub, but no standalone host
 federation-agent service remains in the unified steady state.
 
-`VERSION` is seeded from `deploy/peer-federator/VERSION`. The legacy marker is
-intentionally retained until the release-inventory migration proves that this
-file is the sole declared source-release authority.
-
+`VERSION` is the sole declared source-release authority. Release `0.3.0`
+intentionally starts the incompatible unified-daemon and federation protocol
+generation; deployed host and hub versions may still differ when their exact
+hub-protocol versions match.

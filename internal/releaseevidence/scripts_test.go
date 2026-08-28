@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+func TestUnifiedServiceAcceptanceIsolatesTMPDIRBeforeInstall(t *testing.T) {
+	script := filepath.Join("..", "..", "scripts", "test-unified-service")
+	body, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		`"$outer_root/tmp"`,
+		`TMPDIR="$outer_root/tmp"`,
+		`acceptance_tmp="$acceptance_root/tmp"`,
+		`export TMPDIR="$acceptance_tmp"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("unified service acceptance omitted isolated temp contract %q", required)
+		}
+	}
+	export := strings.Index(text, `export TMPDIR="$acceptance_tmp"`)
+	install := strings.Index(text, "make -s install-all")
+	if export < 0 || install < 0 || export >= install {
+		t.Fatalf("acceptance TMPDIR is not isolated before production install: export=%d install=%d", export, install)
+	}
+}
+
 func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	source := filepath.Join("..", "..", "scripts", "release-tag-preflight")
 	body, err := os.ReadFile(source)
@@ -77,7 +101,7 @@ exit 2
 		t.Fatal(err)
 	}
 	run := func(extra ...string) ([]byte, error) {
-		command := exec.Command(script, "v0.2.4", "agent-sessions-0.2.4-linux-x64.tar.gz")
+		command := exec.Command(script, "v9.8.7", "agent-sessions-9.8.7-linux-x64.tar.gz")
 		command.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "GITHUB_REPOSITORY=antst/agent-sessions")
 		command.Env = append(command.Env, extra...)
 		return command.CombinedOutput()
@@ -85,10 +109,10 @@ exit 2
 	if output, err := run(); err != nil {
 		t.Fatalf("unused release boundary was rejected: %v: %s", err, output)
 	}
-	if output, err := run("FAKE_RELEASE_EXISTS=1"); err == nil || !strings.Contains(string(output), "release v0.2.4 already exists") {
+	if output, err := run("FAKE_RELEASE_EXISTS=1"); err == nil || !strings.Contains(string(output), "release v9.8.7 already exists") {
 		t.Fatalf("existing release collision = %v: %s", err, output)
 	}
-	if output, err := run("FAKE_RELEASE_EXISTS=1", "FAKE_TARGET_ASSETS=agent-sessions-0.2.4-linux-x64.tar.gz"); err == nil || !strings.Contains(string(output), "release asset") {
+	if output, err := run("FAKE_RELEASE_EXISTS=1", "FAKE_TARGET_ASSETS=agent-sessions-9.8.7-linux-x64.tar.gz"); err == nil || !strings.Contains(string(output), "release asset") {
 		t.Fatalf("existing asset collision = %v: %s", err, output)
 	}
 	if output, err := run("FAKE_GH_FAILURE=1"); err == nil ||

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	sharedfederation "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/statestore"
 )
 
@@ -83,8 +85,13 @@ type RuntimeOptions struct {
 	RecoveryHooks      map[RecoveryStage]RecoveryHook
 	AttachmentAdapters map[string]AttachmentAdapter
 	DeliveryAdapters   map[string]DeliveryAdapter
+	LaneAdapters       map[string]LaneAdapter
 	DeliveryPreflight  func(context.Context, DeliveryRequest) error
 	ObserveDelivery    func(DeliveryObservation)
+	LanePreflight      func(context.Context, LaneStartRequest) error
+	ObserveLane        func(LaneObservation)
+	FederationDial     sharedfederation.DialContextFunc
+	ObserveFederation  func(FederationStateRecord)
 }
 
 // Runtime is the in-process composition root for every host responsibility.
@@ -102,7 +109,9 @@ type Runtime struct {
 	completedStage []RecoveryStage
 	attachments    *AttachmentRegistry
 	deliveries     *DeliveryEngine
+	lanes          *LaneEngine
 	mcp            *MCPService
+	federation     *federationComponent
 }
 
 // NewRuntime constructs one closed host composition root.
@@ -158,6 +167,12 @@ func (runtime *Runtime) Start(ctx context.Context) error {
 	runtime.completedStage = nil
 	runtime.startedAt = runtime.options.Now().UnixMilli()
 	runtime.mu.Unlock()
+	startedSuccessfully := false
+	defer func() {
+		if !startedSuccessfully {
+			runtime.abortFederationStart()
+		}
+	}()
 
 	previous, revision, err := runtime.options.State.ReadRuntime(ctx)
 	switch {
@@ -192,11 +207,9 @@ func (runtime *Runtime) Start(ctx context.Context) error {
 			runtime.closeAdmission()
 			return fmt.Errorf("recovery stage %s: %w", stage, err)
 		}
-		if hook := runtime.options.RecoveryHooks[stage]; hook != nil {
-			if err := hook(ctx, runtime); err != nil {
-				runtime.closeAdmission()
-				return fmt.Errorf("recovery stage %s: %w", stage, err)
-			}
+		if err := runtime.runRecoveryStageHook(ctx, stage); err != nil {
+			runtime.closeAdmission()
+			return fmt.Errorf("recovery stage %s: %w", stage, err)
 		}
 		runtime.mu.Lock()
 		runtime.completedStage = append(runtime.completedStage, stage)
@@ -214,10 +227,23 @@ func (runtime *Runtime) Start(ctx context.Context) error {
 	runtime.mu.Lock()
 	runtime.admission = AdmissionReady
 	runtime.mu.Unlock()
+	startedSuccessfully = true
 	return nil
 }
 
-func (runtime *Runtime) recoverOwnedStage(ctx context.Context, stage RecoveryStage) error {
+func (runtime *Runtime) runRecoveryStageHook(ctx context.Context, stage RecoveryStage) error {
+	if hook := runtime.options.RecoveryHooks[stage]; hook != nil {
+		if err := hook(ctx, runtime); err != nil {
+			return err
+		}
+	}
+	if stage == RecoveryTransactions {
+		return runtime.applyAdoptedHostConfiguration(ctx)
+	}
+	return nil
+}
+
+func (runtime *Runtime) recoverOwnedStage(ctx context.Context, stage RecoveryStage) error { //nolint:gocyclo // Recovery ownership remains centralized by stage.
 	switch stage {
 	case RecoveryAttachments:
 		registry, err := NewAttachmentRegistry(AttachmentRegistryOptions{
@@ -231,12 +257,30 @@ func (runtime *Runtime) recoverOwnedStage(ctx context.Context, stage RecoverySta
 		runtime.mu.Lock()
 		runtime.attachments = registry
 		runtime.mu.Unlock()
+		lanes, err := NewLaneEngine(LaneEngineOptions{
+			State: runtime.options.State, Attachments: registry, Adapters: runtime.options.LaneAdapters,
+			Generation: runtime.generation, Lifetime: ctx, Now: runtime.options.Now,
+			Preflight: runtime.options.LanePreflight, Observe: runtime.observeLane,
+		})
+		if err != nil {
+			return err
+		}
+		runtime.mu.Lock()
+		runtime.lanes = lanes
+		runtime.mu.Unlock()
 	case RecoveryNativeActors:
 		registry := runtime.attachmentRegistry()
 		if registry == nil {
 			return errors.New("attachment registry was not recovered")
 		}
-		return registry.Reconcile(ctx)
+		if err := registry.Reconcile(ctx); err != nil {
+			return err
+		}
+		lanes := runtime.laneEngine()
+		if lanes == nil {
+			return errors.New("lane engine was not recovered")
+		}
+		return lanes.Reconcile(ctx)
 	case RecoveryRouting:
 		registry := runtime.attachmentRegistry()
 		if registry == nil {
@@ -250,16 +294,50 @@ func (runtime *Runtime) recoverOwnedStage(ctx context.Context, stage RecoverySta
 		if err != nil {
 			return err
 		}
-		mcp, err := newMCPService(registry, engine)
+		mcp, err := newMCPService(registry, engine, runtime.laneEngine())
 		if err != nil {
 			return err
+		}
+		mcp.laneCommand = func(ctx context.Context, principal controlPrincipal, request LaneCommandRequest) (map[string]any, error) {
+			if strings.TrimSpace(request.Host) == "" {
+				return executeLaneCommand(ctx, runtime.laneEngine(), registry, principal.AttachmentID, request)
+			}
+			runtime.mu.RLock()
+			component := runtime.federation
+			runtime.mu.RUnlock()
+			if component == nil {
+				return nil, errors.New("federation authority is not ready")
+			}
+			return component.executeRemoteLaneCommand(ctx, runtime.laneEngine(), registry, principal.AttachmentID, request)
 		}
 		runtime.mu.Lock()
 		runtime.deliveries = engine
 		runtime.mcp = mcp
 		runtime.mu.Unlock()
+	case RecoveryFederation:
+		registry := runtime.attachmentRegistry()
+		if registry == nil {
+			return errors.New("attachment registry was not recovered")
+		}
+		component, err := newFederationComponent(federationComponentOptions{
+			configuration: runtime.options.Configuration, generation: runtime.generation,
+			runtimeVersion: runtime.options.RuntimeVersion, runtimeIdentity: runtime.options.RuntimeIdentity,
+			attachments: registry, deliveries: runtime.deliveryEngine(),
+			lanes: runtime.laneEngine(), laneAdapters: runtime.options.LaneAdapters,
+			dialContext: runtime.options.FederationDial, observe: runtime.options.ObserveFederation,
+			now: runtime.options.Now,
+		})
+		if err != nil {
+			return err
+		}
+		if err := component.start(); err != nil {
+			return err
+		}
+		runtime.mu.Lock()
+		runtime.federation = component
+		runtime.mu.Unlock()
 	case RecoveryValidateAuthority, RecoveryLoadConfiguration, RecoveryTransactions, RecoveryCatalog,
-		RecoveryFederation, RecoveryCommitAuthority, RecoverySyntheticService:
+		RecoveryCommitAuthority, RecoverySyntheticService:
 		// These stages are owned by their existing hooks or lifecycle commit.
 	}
 	return nil
@@ -277,10 +355,43 @@ func (runtime *Runtime) deliveryEngine() *DeliveryEngine {
 	return runtime.deliveries
 }
 
+func (runtime *Runtime) laneEngine() *LaneEngine {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.lanes
+}
+
+func (runtime *Runtime) observeLane(observation LaneObservation) {
+	if observe := runtime.options.ObserveLane; observe != nil {
+		observe(observation)
+	}
+	if observation.Outcome == "" {
+		return
+	}
+	runtime.mu.RLock()
+	component := runtime.federation
+	runtime.mu.RUnlock()
+	if component != nil {
+		go component.observeLaneTerminal(observation)
+	}
+}
+
 func (runtime *Runtime) mcpService() *MCPService {
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
 	return runtime.mcp
+}
+
+// FederationStatus returns the metadata-only state of the embedded host
+// connection for status and doctor projections.
+func (runtime *Runtime) FederationStatus() FederationStateRecord {
+	runtime.mu.RLock()
+	component := runtime.federation
+	runtime.mu.RUnlock()
+	if component == nil {
+		return FederationStateRecord{}
+	}
+	return component.snapshot()
 }
 
 // Stop closes admission and commits the stopping lifecycle state.
@@ -293,11 +404,28 @@ func (runtime *Runtime) Stop(ctx context.Context) error {
 	runtime.admission = AdmissionStopping
 	runtime.mu.Unlock()
 	committedAt := runtime.options.Now().UnixMilli()
-	if err := runtime.commitLifecycle(ctx, HostRuntimeStopping, committedAt); err != nil {
-		return err
+	commitErr := runtime.commitLifecycle(ctx, HostRuntimeStopping, committedAt)
+	federationErr := runtime.stopFederation(ctx)
+	if commitErr == nil {
+		runtime.closeAdmission()
 	}
-	runtime.closeAdmission()
-	return nil
+	return errors.Join(commitErr, federationErr)
+}
+
+func (runtime *Runtime) stopFederation(ctx context.Context) error {
+	runtime.mu.RLock()
+	component := runtime.federation
+	runtime.mu.RUnlock()
+	if component == nil {
+		return nil
+	}
+	return component.stop(ctx)
+}
+
+func (runtime *Runtime) abortFederationStart() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = runtime.stopFederation(ctx)
 }
 
 // Run starts, waits for cancellation, and performs bounded foreground shutdown.

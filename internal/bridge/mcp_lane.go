@@ -6,14 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/federator"
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 )
 
 const (
@@ -29,7 +26,7 @@ var mcpLaneCommands = map[string]bool{
 	"wait": true, "status": true, "interrupt": true, "archive": true,
 }
 
-var mcpLaneRuntimeExecutable = os.Executable
+var queryMCPLaneDaemon = daemonpkg.QueryLocalControl
 
 type mcpLaneRequest struct {
 	product string
@@ -49,15 +46,6 @@ func callMCPParentLane(paths nativePaths, args map[string]any, callerSessionID s
 	if err != nil {
 		return nil, err
 	}
-	runtimeDir, err := requireGroupedAgentRuntime(paths, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	parent, err := federator.ResolveParentContext(runtimeDir, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve lane parent context: %w", err)
-	}
-
 	commandTimeout, err := mcpLaneRequestTimeout(request)
 	if err != nil {
 		return nil, err
@@ -65,7 +53,7 @@ func callMCPParentLane(paths nativePaths, args map[string]any, callerSessionID s
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 	stdout, stderr := &mcpCappedBuffer{limit: maxMCPLaneOutputBytes}, &mcpCappedBuffer{limit: maxMCPLaneOutputBytes}
-	exitCode, runErr := runMCPParentLaneRequest(ctx, paths, runtimeDir, sessionID, parent, request, stdout, stderr)
+	exitCode, runErr := runMCPParentLaneRequest(ctx, paths, sessionID, request, stdout, stderr)
 	proxyTimedOut := ctx.Err() != nil
 	if proxyTimedOut {
 		exitCode, runErr = 124, ctx.Err()
@@ -145,19 +133,12 @@ func mcpLaneTimeoutArgument(arguments []string) (float64, bool, error) {
 func runMCPParentLaneRequest(
 	ctx context.Context,
 	paths nativePaths,
-	runtimeDir, sessionID string,
-	parent federator.ParentContext,
+	sessionID string,
 	request mcpLaneRequest,
 	stdout, stderr *mcpCappedBuffer,
 ) (int, error) {
-	if request.host != "" {
-		return federator.RunRemoteLane(ctx, federator.RemoteLaneOptions{
-			RuntimeDir: runtimeDir, Host: request.host, Product: request.product,
-			SourceSession: sessionID, Args: request.args,
-		}, strings.NewReader(request.input), stdout, stderr)
-	}
 	return runLocalMCPParentLane(
-		ctx, paths, runtimeDir, parent, request.role, request.args, request.input, stdout, stderr,
+		ctx, paths, sessionID, request.role, request.args, request.input, request.host, stdout, stderr,
 	)
 }
 
@@ -192,40 +173,34 @@ func mcpLaneResult(
 
 func runLocalMCPParentLane(
 	ctx context.Context,
-	paths nativePaths,
-	runtimeDir string,
-	parent federator.ParentContext,
+	_ nativePaths,
+	_ string,
 	role string,
 	args []string,
 	input string,
+	host string,
 	stdout, stderr *mcpCappedBuffer,
 ) (int, error) {
-	executable, err := mcpLaneRuntimeExecutable()
+	product, ok := bridgeProductByLaneRole(role)
+	if !ok || len(args) == 0 {
+		return 1, errors.New("local MCP lane request has an invalid product or command")
+	}
+	identity := daemonpkg.InheritedConnectorIdentity("")
+	response, err := queryMCPLaneDaemon(ctx, identity, "lane.command", daemonpkg.LaneCommandRequest{
+		Product: product.descriptor.ID, Command: args[0], Host: host,
+		Arguments: append([]string(nil), args[1:]...), Input: input,
+	})
 	if err != nil {
+		_, _ = stderr.Write([]byte(err.Error()))
 		return 1, err
 	}
-	command := exec.CommandContext(ctx, executable, append([]string{role}, args...)...) //nolint:gosec // exact runtime and validated argv vector.
-	command.Env = envutil.Replace(os.Environ(), map[string]string{
-		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     runtimeDir,
-		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": "",
-		"AGENT_SESSIONS_SESSION_ID":            parent.SessionID,
-		"AGENT_SESSIONS_PRODUCT":               parent.Product,
-		"CLAUDE_PEER_DATA_DIR":                 paths.dataRoot,
-		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        paths.claudeRoot,
-		"CODEX_HOME":                           paths.codexHome,
-		"CODEX_THREAD_ID":                      parent.SessionID,
-		"GROK_PEER_NATIVE_RUNTIME":             executable,
-	})
-	command.Stdin, command.Stdout, command.Stderr = strings.NewReader(input), stdout, stderr
-	err = command.Run()
-	if err == nil {
-		return 0, nil
+	if len(response.Result) == 0 {
+		err := errors.New("daemon returned an empty lane result")
+		_, _ = stderr.Write([]byte(err.Error()))
+		return 1, err
 	}
-	var exitError *exec.ExitError
-	if errors.As(err, &exitError) {
-		return exitError.ExitCode(), err
-	}
-	return 1, err
+	_, _ = stdout.Write(response.Result)
+	return 0, nil
 }
 
 func mcpLaneArguments(value any) ([]string, error) {

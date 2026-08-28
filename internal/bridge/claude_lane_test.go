@@ -19,8 +19,9 @@ import (
 	"testing"
 	"time"
 
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/claudeprofile"
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 type bufferWriteCloser struct {
@@ -1404,7 +1405,7 @@ func TestClaudeLaneCleanupRemovesOnlyItsDeadNativeWorkerPeer(t *testing.T) {
 			if err := writeJSONAtomic(registry, row); err != nil {
 				t.Fatal(err)
 			}
-			keyName, err := federator.ClaudeServiceKeyName(deadPID, socket)
+			keyName, err := federation.ClaudeServiceKeyName(deadPID, socket)
 			if err != nil {
 				t.Fatal(err)
 			}

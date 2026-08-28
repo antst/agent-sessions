@@ -27,10 +27,11 @@ const grokDaemonLeaderReadyTimeout = 10 * time.Second
 // clients as goroutines and child processes of the one user daemon. It never
 // creates a grok-host process or per-session Agent Sessions listener.
 type grokNativeCoordinator struct {
-	mu        sync.Mutex
-	actors    map[string]*grokDaemonActor
-	sessions  map[string]string
-	recovered bool
+	mu         sync.Mutex
+	actors     map[string]*grokDaemonActor
+	sessions   map[string]string
+	laneActors map[string]*grokDaemonLaneActor
+	recovered  bool
 }
 
 type grokDaemonActor struct {
@@ -79,7 +80,10 @@ type grokDaemonActorRecord struct {
 }
 
 func newGrokNativeCoordinator() *grokNativeCoordinator {
-	return &grokNativeCoordinator{actors: make(map[string]*grokDaemonActor), sessions: make(map[string]string)}
+	return &grokNativeCoordinator{
+		actors: make(map[string]*grokDaemonActor), sessions: make(map[string]string),
+		laneActors: make(map[string]*grokDaemonLaneActor),
+	}
 }
 
 // PrepareInteractive starts one daemon-owned native leader and returns the direct Grok TUI handoff.
@@ -186,6 +190,222 @@ func (coordinator *grokNativeCoordinator) InterjectFrame(ctx context.Context, se
 	return actor.interject(ctx, frame)
 }
 
+// StartGrokTurn starts or reuses one daemon-owned ACP lane actor. The daemon
+// has already committed the turn before this method is called.
+func (coordinator *grokNativeCoordinator) StartGrokTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	actor, err := coordinator.grokLaneActor(lane, turn)
+	if err != nil {
+		return nil, err
+	}
+	result, err := actor.startTurn(ctx, lane, turn)
+	if err != nil && actor.unstarted() {
+		coordinator.mu.Lock()
+		if coordinator.laneActors[lane.LaneSessionID] == actor {
+			delete(coordinator.laneActors, lane.LaneSessionID)
+		}
+		coordinator.mu.Unlock()
+		actor.close()
+	}
+	return result, err
+}
+
+// ReconnectGrokTurn classifies an accepted turn without dispatching it again.
+func (coordinator *grokNativeCoordinator) ReconnectGrokTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor != nil {
+		return actor.reconnectTurn(ctx, lane, turn)
+	}
+	return inspectUnattachableGrokLaneTurn(lane, turn)
+}
+
+// InterruptGrokTurn interrupts the exact daemon-owned Grok native turn.
+func (coordinator *grokNativeCoordinator) InterruptGrokTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) error {
+	actor, err := coordinator.exactGrokLaneActor(lane)
+	if err != nil {
+		return err
+	}
+	return actor.interruptTurn(ctx, lane, turn)
+}
+
+// CollectGrokTurn returns stable terminal evidence for the exact Grok turn.
+func (coordinator *grokNativeCoordinator) CollectGrokTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	actor, err := coordinator.exactGrokLaneActor(lane)
+	if err != nil {
+		return nil, err
+	}
+	return actor.collectTurn(ctx, lane, turn)
+}
+
+// WaitGrokTurn blocks until the exact Grok turn has terminal native evidence.
+func (coordinator *grokNativeCoordinator) WaitGrokTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	actor, err := coordinator.exactGrokLaneActor(lane)
+	if err != nil {
+		return nil, err
+	}
+	return actor.waitTurn(ctx, lane, turn)
+}
+
+// ArchiveGrokLane retires the exact daemon-owned actor and its native worker.
+func (coordinator *grokNativeCoordinator) ArchiveGrokLane(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor == nil {
+		return verifyRetiredGrokLaneWorker(lane)
+	}
+	if err := actor.verify(ctx, lane); err != nil {
+		return err
+	}
+	coordinator.mu.Lock()
+	if coordinator.laneActors[lane.LaneSessionID] == actor {
+		delete(coordinator.laneActors, lane.LaneSessionID)
+	}
+	coordinator.mu.Unlock()
+	actor.close()
+	return awaitRetiredGrokLaneWorker(ctx, lane, 2*time.Second)
+}
+
+// CleanupGrokLane removes only runtime artifacts after proving worker retirement.
+func (coordinator *grokNativeCoordinator) CleanupGrokLane(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor == nil {
+		if err := verifyRetiredGrokLaneWorker(lane); err != nil {
+			return err
+		}
+		paths, err := daemonpkg.ResolveProductionPaths()
+		if err != nil {
+			return err
+		}
+		root := filepath.Join(paths.RuntimeRoot, "grok-lanes", safeID(lane.LaneSessionID))
+		_ = os.Remove(filepath.Join(root, "diagnostics.log"))
+		_ = os.Remove(root)
+		return nil
+	}
+	if err := actor.verify(ctx, lane); err != nil {
+		return err
+	}
+	coordinator.mu.Lock()
+	if coordinator.laneActors[lane.LaneSessionID] == actor {
+		delete(coordinator.laneActors, lane.LaneSessionID)
+	}
+	coordinator.mu.Unlock()
+	actor.close()
+	return nil
+}
+
+func (coordinator *grokNativeCoordinator) grokLaneActor(lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) (*grokDaemonLaneActor, error) {
+	coordinator.mu.Lock()
+	if actor := coordinator.laneActors[lane.LaneSessionID]; actor != nil {
+		coordinator.mu.Unlock()
+		return actor, nil
+	}
+	coordinator.mu.Unlock()
+	actor, err := newGrokDaemonLaneActor(lane, turn)
+	if err != nil {
+		return nil, err
+	}
+	coordinator.mu.Lock()
+	if existing := coordinator.laneActors[lane.LaneSessionID]; existing != nil {
+		coordinator.mu.Unlock()
+		actor.close()
+		return existing, nil
+	}
+	coordinator.laneActors[lane.LaneSessionID] = actor
+	coordinator.mu.Unlock()
+	return actor, nil
+}
+
+func (coordinator *grokNativeCoordinator) exactGrokLaneActor(lane daemonpkg.LaneRecord) (*grokDaemonLaneActor, error) {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor == nil {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return actor, nil
+}
+
+func verifyRetiredGrokLaneWorker(lane daemonpkg.LaneRecord) error {
+	retired, err := retiredGrokLaneWorker(lane)
+	if err != nil {
+		return err
+	}
+	if retired {
+		return nil
+	}
+	return errors.New("daemon-owned Grok lane worker is still live")
+}
+
+func awaitRetiredGrokLaneWorker(ctx context.Context, lane daemonpkg.LaneRecord, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		retired, err := retiredGrokLaneWorker(lane)
+		if err != nil {
+			return err
+		}
+		if retired {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("daemon-owned Grok lane worker is still live")
+		case <-ticker.C:
+		}
+	}
+}
+
+func retiredGrokLaneWorker(lane daemonpkg.LaneRecord) (bool, error) {
+	pid := intValue(lane.NativeActor["worker_pid"])
+	procStart := stringValue(lane.NativeActor["worker_proc_start"])
+	strongStart := stringValue(lane.NativeActor["worker_strong_start"])
+	if lane.LaneSessionID == "" || stringValue(lane.NativeActor["session_id"]) == "" ||
+		pid <= 1 || procStart == "" || strongStart == "" {
+		return false, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	identity := procinfo.Read(pid)
+	switch identity.Status {
+	case procinfo.Absent:
+		return true, nil
+	case procinfo.Known:
+		if identity.Start != procStart || identity.StrongStart != strongStart {
+			return false, daemonpkg.ErrAttachmentEvidenceChanged
+		}
+		return false, nil
+	case procinfo.Unknown:
+		return false, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return false, daemonpkg.ErrAttachmentEvidenceChanged
+}
+
 func (coordinator *grokNativeCoordinator) actorByID(coordinatorID string) *grokDaemonActor {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
@@ -205,10 +425,15 @@ func (coordinator *grokNativeCoordinator) actorSnapshot() []*grokDaemonActor {
 func (coordinator *grokNativeCoordinator) close() {
 	coordinator.mu.Lock()
 	actors := coordinator.actors
+	laneActors := coordinator.laneActors
 	coordinator.actors = make(map[string]*grokDaemonActor)
 	coordinator.sessions = make(map[string]string)
+	coordinator.laneActors = make(map[string]*grokDaemonLaneActor)
 	coordinator.mu.Unlock()
 	for _, actor := range actors {
+		actor.close()
+	}
+	for _, actor := range laneActors {
 		actor.close()
 	}
 }

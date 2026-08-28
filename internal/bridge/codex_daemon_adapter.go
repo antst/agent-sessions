@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,6 +34,15 @@ type codexDaemonClient interface {
 	PrepareInteractive(context.Context, daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error)
 	InspectThread(context.Context, string, string) (codexDaemonThread, error)
 	DeliverFrame(context.Context, string, string, federation.AgentFrame) error
+}
+
+type codexDaemonLaneClient interface {
+	StartTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (daemonpkg.LaneDispatchResult, error)
+	ReconnectTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (daemonpkg.LaneReconnectResult, error)
+	InterruptTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) error
+	CollectTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (daemonpkg.LaneTerminalResult, error)
+	Archive(context.Context, daemonpkg.LaneRecord) error
+	Cleanup(context.Context, daemonpkg.LaneRecord) error
 }
 
 // PrepareInteractive returns the direct Codex vendor handoff for one validated launch intent.
@@ -95,6 +105,97 @@ func (adapter *codexDaemonAdapter) Deliver(
 		return err
 	}
 	return adapter.client.DeliverFrame(ctx, codexRecordProfile(destination), destination.SessionID, frame)
+}
+
+// Dispatch preserves the daemon's minimum lane-adapter compatibility boundary.
+func (adapter *codexDaemonAdapter) Dispatch(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneDispatchResult, error) {
+	return adapter.StartTurn(ctx, lane, turn)
+}
+
+// StartTurn dispatches one already-committed lane turn through Codex App Server.
+func (adapter *codexDaemonAdapter) StartTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneDispatchResult, error) {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	return client.StartTurn(ctx, lane, turn)
+}
+
+// ReconnectTurn recovers one exact native turn without dispatching it again.
+func (adapter *codexDaemonAdapter) ReconnectTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneReconnectResult, error) {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	return client.ReconnectTurn(ctx, lane, turn)
+}
+
+// InterruptTurn interrupts only the exact current Codex native turn.
+func (adapter *codexDaemonAdapter) InterruptTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) error {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return err
+	}
+	return client.InterruptTurn(ctx, lane, turn)
+}
+
+// CollectTurn returns stable native terminal data without advancing the daemon cursor.
+func (adapter *codexDaemonAdapter) CollectTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneTerminalResult, error) {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	return client.CollectTurn(ctx, lane, turn)
+}
+
+// Archive invokes and verifies Codex's vendor-owned thread archive contract.
+func (adapter *codexDaemonAdapter) Archive(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return err
+	}
+	return client.Archive(ctx, lane)
+}
+
+// Cleanup removes only attributable Agent Sessions artifacts, including an
+// explicitly requested detached worktree. Vendor history remains untouched.
+func (adapter *codexDaemonAdapter) Cleanup(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return err
+	}
+	return client.Cleanup(ctx, lane)
+}
+
+func (adapter *codexDaemonAdapter) laneClient() (codexDaemonLaneClient, error) {
+	if adapter == nil || adapter.client == nil {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	client, ok := adapter.client.(codexDaemonLaneClient)
+	if !ok {
+		return nil, errors.New("codex daemon client does not implement lane lifecycle")
+	}
+	return client, nil
 }
 
 func (adapter *codexDaemonAdapter) inspectExact(
@@ -318,6 +419,509 @@ func (coordinator *codexAppServerCoordinator) DeliverFrame(
 	return codexAppServerRequest(ctx, client, 60*time.Second, "turn/start", map[string]any{
 		"threadId": threadID, "input": input,
 	}, nil)
+}
+
+// StartTurn starts one daemon-accepted Codex turn. A lane without native
+// thread evidence creates its vendor thread exactly once; follow-up turns
+// resume the already recorded thread before starting new native work.
+func (coordinator *codexAppServerCoordinator) StartTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneDispatchResult, error) {
+	if strings.TrimSpace(lane.LaneSessionID) == "" || strings.TrimSpace(turn.TurnID) == "" ||
+		turn.LaneSessionID != lane.LaneSessionID || lane.Product != "codex" {
+		return daemonpkg.LaneDispatchResult{}, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if strings.TrimSpace(stringValue(turn.NativeTurnIdentity["turn_id"])) != "" {
+		return daemonpkg.LaneDispatchResult{}, daemonpkg.ErrLaneIdempotencyConflict
+	}
+	prompt, err := codexDaemonLanePrompt(turn.InputReference)
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	options, err := codexDaemonNormalizedLaneOptions(lane, turn)
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	profile, client, err := coordinator.laneConnection(ctx, lane)
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+
+	threadID := strings.TrimSpace(stringValue(lane.NativeActor["thread_id"]))
+	var thread appThread
+	if threadID == "" {
+		thread, err = coordinator.startDaemonLaneThread(ctx, client, lane, options)
+	} else {
+		thread, err = coordinator.resumeLaneThread(ctx, client, profile, lane, threadID)
+	}
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	if thread.Cwd == "" {
+		thread.Cwd = lane.Cwd
+	}
+	params := laneTurnStartParams(options, thread.ID, prompt)
+	var started struct {
+		Turn appTurn `json:"turn"`
+	}
+	if err := codexAppServerRequest(ctx, client, 60*time.Second, "turn/start", params, &started); err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	if !validSessionID(started.Turn.ID) {
+		return daemonpkg.LaneDispatchResult{}, errors.New("codex App Server returned an invalid native turn identity")
+	}
+	dispatchState, _, err := codexDaemonLaneTurnState(started.Turn.Status)
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	actor := codexDaemonLaneActor(profile, thread, client)
+	copyDaemonLaneWorktreeEvidence(actor, daemonLaneNativeOptions(turn))
+	return daemonpkg.LaneDispatchResult{
+		LaneSessionID: lane.LaneSessionID,
+		NativeActor:   actor,
+		NativeTurnIdentity: codexDaemonLaneTurnIdentity(
+			thread.ID, started.Turn.ID, dispatchState,
+		),
+		DispatchState: dispatchState,
+	}, nil
+}
+
+func (coordinator *codexAppServerCoordinator) startDaemonLaneThread(
+	ctx context.Context,
+	client *appServerClient,
+	lane daemonpkg.LaneRecord,
+	options laneOptions,
+) (appThread, error) {
+	params, err := laneThreadStartParams(options)
+	if err != nil {
+		return appThread{}, err
+	}
+	params["serviceName"] = "agent-sessions"
+	var started struct {
+		Thread appThread `json:"thread"`
+	}
+	if err := codexAppServerRequest(ctx, client, 60*time.Second, "thread/start", params, &started); err != nil {
+		return appThread{}, err
+	}
+	if !validSessionID(started.Thread.ID) || validatePreparedRootThread(started.Thread) != nil {
+		return appThread{}, errors.New("codex App Server returned an invalid lane thread")
+	}
+	if err := codexAppServerRequest(ctx, client, 30*time.Second, "thread/name/set", map[string]any{
+		"threadId": started.Thread.ID, "name": sanitizeName(lane.Name),
+	}, nil); err != nil {
+		_ = codexAppServerRequest(context.Background(), client, 15*time.Second, "thread/delete", map[string]any{"threadId": started.Thread.ID}, nil)
+		return appThread{}, err
+	}
+	started.Thread.Name, started.Thread.Cwd = sanitizeName(lane.Name), lane.Cwd
+	return started.Thread, nil
+}
+
+func codexDaemonNormalizedLaneOptions(lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) (laneOptions, error) {
+	native := daemonLaneNativeOptions(turn)
+	options := laneOptions{laneCommonOptions: newLaneCommonOptions("THREAD_OR_NAME")}
+	options.command, options.name, options.cwd = "start", lane.Name, lane.Cwd
+	options.model = stringValue(native["model"])
+	options.effort = stringValue(native["effort"])
+	options.sandbox = stringValue(native["sandbox"])
+	options.approvalPolicy = stringValue(native["approval_policy"])
+	options.configs = daemonLaneStringSlice(native["config"])
+	options.schemaFile = ""
+	if value, ok := native["web"]; ok {
+		web := boolValue(value)
+		options.web = &web
+	}
+	schema, err := daemonLaneRawJSON(native["output_schema"])
+	if err != nil {
+		return laneOptions{}, err
+	}
+	options.outputSchema = schema
+	if options.approvalPolicy == "" && lane.PermissionMode == "bypassPermissions" {
+		options.approvalPolicy, options.sandbox = "never", "danger-full-access"
+	}
+	return options, nil
+}
+
+func copyDaemonLaneWorktreeEvidence(actor, native map[string]any) {
+	if path := strings.TrimSpace(stringValue(native["worktree_path"])); path != "" {
+		actor["worktree_path"] = path
+		actor["original_cwd"] = strings.TrimSpace(stringValue(native["original_cwd"]))
+	}
+}
+
+// ReconnectTurn resubscribes to the exact durable App Server thread and reads
+// the recorded native turn. It never calls thread/start or turn/start.
+func (coordinator *codexAppServerCoordinator) ReconnectTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneReconnectResult, error) {
+	threadID, turnID, err := codexDaemonLaneIdentities(lane, turn)
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	profile, client, err := coordinator.laneConnection(ctx, lane)
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	thread, err := coordinator.resumeLaneThread(ctx, client, profile, lane, threadID)
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	nativeTurn, err := readExactCodexDaemonLaneTurn(ctx, client, threadID, turnID, "full")
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	dispatchState, outcome, err := codexDaemonLaneTurnState(nativeTurn.Status)
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	result := daemonpkg.LaneReconnectResult{
+		NativeActor:        codexDaemonLaneActor(profile, thread, client),
+		NativeTurnIdentity: codexDaemonLaneTurnIdentity(threadID, turnID, dispatchState),
+		DispatchState:      dispatchState,
+		TerminalOutcome:    outcome,
+	}
+	if outcome != "" {
+		result.ResultReference = codexDaemonLaneResult(threadID, nativeTurn, outcome)
+	}
+	return result, nil
+}
+
+// InterruptTurn interrupts the exact daemon-recorded native turn after
+// revalidating its App Server process and thread evidence.
+func (coordinator *codexAppServerCoordinator) InterruptTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) error {
+	threadID, turnID, err := codexDaemonLaneIdentities(lane, turn)
+	if err != nil {
+		return err
+	}
+	profile, client, err := coordinator.laneConnection(ctx, lane)
+	if err != nil {
+		return err
+	}
+	thread, err := readCodexDaemonThread(ctx, client, threadID, false)
+	if err != nil {
+		return err
+	}
+	if err := validateCodexDaemonLaneThread(lane, profile, thread, client); err != nil {
+		return err
+	}
+	return codexAppServerRequest(ctx, client, 30*time.Second, "turn/interrupt", map[string]any{
+		"threadId": threadID, "turnId": turnID,
+	}, nil)
+}
+
+// CollectTurn returns a stable projection of one exact terminal App Server
+// turn. The daemon remains the sole owner of its collection cursor.
+func (coordinator *codexAppServerCoordinator) CollectTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneTerminalResult, error) {
+	threadID, turnID, err := codexDaemonLaneIdentities(lane, turn)
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	profile, client, err := coordinator.laneConnection(ctx, lane)
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	thread, err := readCodexDaemonThread(ctx, client, threadID, false)
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	if err := validateCodexDaemonLaneThread(lane, profile, thread, client); err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	nativeTurn, err := readExactCodexDaemonLaneTurn(ctx, client, threadID, turnID, "full")
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	_, outcome, err := codexDaemonLaneTurnState(nativeTurn.Status)
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	if outcome == "" {
+		return daemonpkg.LaneTerminalResult{}, daemonpkg.ErrLaneNotTerminal
+	}
+	if outcome == daemonpkg.LaneDispatchCompleted && !codexDaemonLaneHasFinalAnswer(nativeTurn) {
+		return daemonpkg.LaneTerminalResult{}, daemonpkg.ErrLaneNotTerminal
+	}
+	return daemonpkg.LaneTerminalResult{
+		TerminalOutcome:    outcome,
+		ResultReference:    codexDaemonLaneResult(threadID, nativeTurn, outcome),
+		NativeTurnIdentity: codexDaemonLaneTurnIdentity(threadID, turnID, outcome),
+	}, nil
+}
+
+// Archive invokes Codex's native archive call and then proves the exact thread
+// is present in the archived App Server membership.
+func (coordinator *codexAppServerCoordinator) Archive(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	threadID := strings.TrimSpace(stringValue(lane.NativeActor["thread_id"]))
+	if threadID == "" {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	profile, client, err := coordinator.laneConnection(ctx, lane)
+	if err != nil {
+		return err
+	}
+	archived, err := codexThreadMembership(ctx, client, true)
+	if err != nil {
+		return err
+	}
+	if archived[threadID] {
+		return nil
+	}
+	thread, err := readCodexDaemonThread(ctx, client, threadID, false)
+	if err != nil {
+		return err
+	}
+	if err := validateCodexDaemonLaneThread(lane, profile, thread, client); err != nil {
+		return err
+	}
+	if err := codexAppServerRequest(ctx, client, 30*time.Second, "thread/archive", map[string]any{
+		"threadId": threadID,
+	}, nil); err != nil {
+		return err
+	}
+	archived, err = codexThreadMembership(ctx, client, true)
+	if err != nil {
+		return err
+	}
+	if !archived[threadID] {
+		return errors.New("codex App Server did not confirm the archived lane thread")
+	}
+	return nil
+}
+
+// Cleanup is intentionally empty: the coordinator owns only in-process client
+// connections and creates no per-lane Agent Sessions files, sockets, or workers.
+func (*codexAppServerCoordinator) Cleanup(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if lane.Product != "codex" || strings.TrimSpace(lane.LaneSessionID) == "" {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return cleanupDaemonLaneWorktree(lane)
+}
+
+func (coordinator *codexAppServerCoordinator) laneConnection(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+) (string, *appServerClient, error) {
+	if lane.Product != "codex" {
+		return "", nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	profile, err := canonicalCodexProfile(stringValue(lane.NativeActor["profile"]))
+	if err != nil {
+		return "", nil, err
+	}
+	client, err := coordinator.client(ctx, profile)
+	if err != nil {
+		return "", nil, err
+	}
+	if !matchesOptionalNumber(lane.NativeActor["pid"], client.peerPID) ||
+		!matchesOptionalString(lane.NativeActor["proc_start"], client.peerProcStart) {
+		return "", nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return profile, client, nil
+}
+
+func (coordinator *codexAppServerCoordinator) resumeLaneThread(
+	ctx context.Context,
+	client *appServerClient,
+	profile string,
+	lane daemonpkg.LaneRecord,
+	threadID string,
+) (appThread, error) {
+	observed, err := readCodexDaemonThread(ctx, client, threadID, true)
+	if err != nil {
+		return appThread{}, err
+	}
+	if err := validateCodexDaemonLaneThread(lane, profile, observed, client); err != nil {
+		return appThread{}, err
+	}
+	if !codexThreadHistoryReady(observed) {
+		return appThread{}, fmt.Errorf("%w for %s; run `codex migrate-rollouts --apply` and retry", ErrCodexHistoryProjectionUnavailable, threadID)
+	}
+	var resumed struct {
+		Thread appThread `json:"thread"`
+	}
+	if err := codexAppServerRequest(ctx, client, 30*time.Second, "thread/resume", map[string]any{
+		"threadId": threadID, "excludeTurns": true,
+	}, &resumed); err != nil {
+		return appThread{}, err
+	}
+	if resumed.Thread.ID != threadID {
+		return appThread{}, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if resumed.Thread.Cwd == "" {
+		resumed.Thread.Cwd = observed.Cwd
+	}
+	if resumed.Thread.Source == nil {
+		resumed.Thread.Source = observed.Source
+	}
+	if err := validateCodexDaemonLaneThread(lane, profile, resumed.Thread, client); err != nil {
+		return appThread{}, err
+	}
+	return resumed.Thread, nil
+}
+
+func validateCodexDaemonLaneThread(
+	lane daemonpkg.LaneRecord,
+	profile string,
+	thread appThread,
+	client *appServerClient,
+) error {
+	expectedID := strings.TrimSpace(stringValue(lane.NativeActor["thread_id"]))
+	if expectedID != "" && thread.ID != expectedID {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	expectedCwd := lane.Cwd
+	if nativeCwd := strings.TrimSpace(stringValue(lane.NativeActor["cwd"])); nativeCwd != "" {
+		expectedCwd = nativeCwd
+	}
+	if !validSessionID(thread.ID) || validatePreparedRootThread(thread) != nil ||
+		(strings.TrimSpace(expectedCwd) != "" && thread.Cwd != expectedCwd) ||
+		!matchesOptionalString(lane.NativeActor["profile"], profile) ||
+		!matchesOptionalNumber(lane.NativeActor["pid"], client.peerPID) ||
+		!matchesOptionalString(lane.NativeActor["proc_start"], client.peerProcStart) {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return nil
+}
+
+func codexDaemonLaneActor(profile string, thread appThread, client *appServerClient) map[string]any {
+	return map[string]any{
+		"thread_id": thread.ID, "profile": profile, "cwd": thread.Cwd, "name": thread.Name,
+		"pid": client.peerPID, "proc_start": client.peerProcStart, "history_ready": true,
+	}
+}
+
+func codexDaemonLaneIdentities(lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) (string, string, error) {
+	if lane.Product != "codex" || turn.LaneSessionID != lane.LaneSessionID {
+		return "", "", daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	threadID := strings.TrimSpace(stringValue(lane.NativeActor["thread_id"]))
+	turnID := strings.TrimSpace(stringValue(turn.NativeTurnIdentity["turn_id"]))
+	expectedThreadID := strings.TrimSpace(stringValue(turn.NativeTurnIdentity["thread_id"]))
+	if threadID == "" || turnID == "" || (expectedThreadID != "" && expectedThreadID != threadID) {
+		return "", "", daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return threadID, turnID, nil
+}
+
+func codexDaemonLanePrompt(reference map[string]any) (string, error) {
+	prompt := stringValue(reference["content"])
+	if prompt == "" {
+		prompt = stringValue(reference["prompt"])
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return "", errors.New("codex lane turn requires a non-empty durable input reference")
+	}
+	return prompt, nil
+}
+
+func readExactCodexDaemonLaneTurn(
+	ctx context.Context,
+	client *appServerClient,
+	threadID, turnID, itemsView string,
+) (appTurn, error) {
+	turns, err := listCodexDaemonLaneTurns(ctx, client, threadID, itemsView)
+	if err != nil {
+		return appTurn{}, err
+	}
+	for _, turn := range turns {
+		if turn.ID == turnID {
+			return turn, nil
+		}
+	}
+	return appTurn{}, daemonpkg.ErrAttachmentEvidenceChanged
+}
+
+func codexDaemonLaneTurnState(status any) (string, string, error) {
+	normalized := statusType(status)
+	if normalized == "active" || normalized == "inProgress" || normalized == "in_progress" || normalized == "running" {
+		return daemonpkg.LaneDispatchRunning, "", nil
+	}
+	switch normalized {
+	case "completed":
+		return daemonpkg.LaneDispatchCompleted, daemonpkg.LaneDispatchCompleted, nil
+	case "interrupted":
+		return daemonpkg.LaneDispatchInterrupted, daemonpkg.LaneDispatchInterrupted, nil
+	case "failed":
+		return daemonpkg.LaneDispatchFailed, daemonpkg.LaneDispatchFailed, nil
+	default:
+		return "", "", fmt.Errorf("unsupported Codex native turn status %q", normalized)
+	}
+}
+
+func listCodexDaemonLaneTurns(
+	ctx context.Context,
+	client *appServerClient,
+	threadID, itemsView string,
+) ([]appTurn, error) {
+	turns := make([]appTurn, 0)
+	cursor := ""
+	seenCursors := make(map[string]struct{})
+	for len(turns) < 1000 {
+		params := map[string]any{
+			"threadId": threadID, "limit": 100, "sortDirection": "desc", "itemsView": itemsView,
+		}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var page struct {
+			Data       []appTurn `json:"data"`
+			NextCursor string    `json:"nextCursor"`
+		}
+		if err := codexAppServerRequest(ctx, client, 30*time.Second, "thread/turns/list", params, &page); err != nil {
+			return nil, err
+		}
+		turns = append(turns, page.Data...)
+		if page.NextCursor == "" {
+			return turns, nil
+		}
+		if _, duplicate := seenCursors[page.NextCursor]; duplicate {
+			return turns, nil
+		}
+		seenCursors[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
+	}
+	return turns, nil
+}
+
+func codexDaemonLaneHasFinalAnswer(turn appTurn) bool {
+	for _, raw := range turn.Items {
+		var item map[string]any
+		if json.Unmarshal(raw, &item) != nil {
+			continue
+		}
+		itemType := stringValue(item["type"])
+		if (itemType == "agentMessage" || itemType == "agent_message") && stringValue(item["phase"]) == "final_answer" {
+			return true
+		}
+	}
+	return false
+}
+
+func codexDaemonLaneTurnIdentity(threadID, turnID, status string) map[string]any {
+	return map[string]any{"thread_id": threadID, "turn_id": turnID, "status": status}
+}
+
+func codexDaemonLaneResult(threadID string, turn appTurn, outcome string) map[string]any {
+	items := append([]json.RawMessage(nil), turn.Items...)
+	return map[string]any{
+		"thread_id": threadID, "turn_id": turn.ID, "status": outcome, "items": items,
+		"error": turn.Error, "started_at": turn.StartedAt, "completed_at": turn.CompletedAt,
+		"duration_ms": turn.DurationMS,
+	}
 }
 
 func (coordinator *codexAppServerCoordinator) client(ctx context.Context, profile string) (*appServerClient, error) {

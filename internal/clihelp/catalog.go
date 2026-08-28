@@ -134,12 +134,15 @@ func commandInventory(products []productcatalog.ProductDescriptor) []CommandDesc
 		command("host.remove.apply", "agent-sessions", "agent-sessions lifecycle remove --role host --prefix PREFIX", "remove only the quiescent unified host role transaction", VisibilityService, hostRemoveOptions(), "service", false, ""),
 		command("host.connector.install", "agent-sessions", "agent-sessions connector install --product PRODUCT --source-root ROOT", "install one explicit native product connector transaction", VisibilityPublic, connectorInstallOptions(), "service", false, ""),
 		command("host.connector.remove", "agent-sessions", "agent-sessions connector remove --product PRODUCT", "remove one explicit native product connector through its supported installer", VisibilityPublic, connectorRemoveOptions(), "service", false, ""),
+		command("host.lane", "agent-sessions", "agent-sessions lane --host HOST --product PRODUCT -- COMMAND [ARGS...]", "run one lane operation through the connected host daemon", VisibilityPublic, []string{"--host", "--product", "--help", "-h"}, "launcher", true, ""),
 		command("hub.serve", "agent-sessions-hub", "agent-sessions-hub", "run the central federation hub", VisibilityHub, []string{"--listen", "--help", "-h"}, "service", false, ""),
 		command("hub.status", "agent-sessions-hub", "agent-sessions-hub status", "show metadata-only hub status", VisibilityHub, jsonHelp, "admin", true, "hub.status"),
 		command("hub.doctor", "agent-sessions-hub", "agent-sessions-hub doctor", "diagnose hub readiness without starting it", VisibilityHub, jsonHelp, "admin", true, "hub.doctor"),
 		command("hub.remove.inspect", "agent-sessions-hub", "agent-sessions-hub remove inspect", "inspect hub removal blockers and targets", VisibilityHub, jsonHelp, "admin", true, "remove.inspect"),
 		command("hub.purge.inspect", "agent-sessions-hub", "agent-sessions-hub purge inspect", "create or inspect a revision-bound hub purge plan", VisibilityHub, planOptions, "admin", false, "purge.inspect"),
 		command("hub.purge.apply", "agent-sessions-hub", "agent-sessions-hub purge apply", "apply an exact hub purge plan", VisibilityHub, planOptions, "admin", false, "purge.apply"),
+		command("hub.install", "agent-sessions-hub", "agent-sessions-hub lifecycle install --role hub --source-root ROOT --prefix PREFIX --version VERSION", "install or upgrade only the central hub role transaction", VisibilityService, hubInstallOptions(), "service", false, ""),
+		command("hub.remove.apply", "agent-sessions-hub", "agent-sessions-hub lifecycle remove --role hub --prefix PREFIX", "remove only the central hub role transaction", VisibilityService, hubRemoveOptions(), "service", false, ""),
 		command("peer", "agent-sessions", "peer PRODUCT", "launch or resume an interactive peer", VisibilityPublic, peerOptions(), "launcher", true, ""),
 	)
 	for _, product := range products {
@@ -149,7 +152,7 @@ func commandInventory(products []productcatalog.ProductDescriptor) []CommandDesc
 		for _, operation := range []string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"} {
 			commands = append(commands, command(
 				"lane."+product.ID+"."+operation, "agent-sessions", product.LaneAlias+" "+operation,
-				operation+" a "+product.Label+" lane", VisibilityPublic, laneOptions(operation), "launcher", true, "",
+				operation+" a "+product.Label+" lane", VisibilityPublic, laneOptions(product.ID, operation), "launcher", true, "",
 			))
 		}
 		commands = append(commands, command(
@@ -175,6 +178,14 @@ func hostRemoveOptions() []string {
 	return []string{"--role", "--prefix", "--codex", "--claude", "--grok", "--qwen", "--help", "-h"}
 }
 
+func hubInstallOptions() []string {
+	return []string{"--role", "--source-root", "--prefix", "--version", "--listen", "--help", "-h"}
+}
+
+func hubRemoveOptions() []string {
+	return []string{"--role", "--prefix", "--help", "-h"}
+}
+
 func connectorRemoveOptions() []string {
 	return []string{"--product", "--native", "--grok-user-root", "--help", "-h"}
 }
@@ -191,15 +202,34 @@ func peerOptions() []string {
 	return []string{"--name", "-n", "--group", "-g", "--inherit-groups", "--no-inherit-groups", "--yolo", "--no-yolo", "--help", "-h"}
 }
 
-func laneOptions(operation string) []string {
-	base := []string{"--json", "--help", "-h"}
+func laneOptions(product, operation string) []string {
+	base := []string{"--host", "--json", "--help", "-h"}
 	switch operation {
 	case "run", "start", "resume":
-		return append([]string{
+		options := []string{
 			"--name", "-n", "--peer-name", "--cd", "-C", "--cwd", "--timeout", "--prompt-file",
 			"--notify", "--no-notify", "--persistent", "--no-auto-archive", "--auto-archive-after",
 			"--group", "-g", "--inherit-groups", "--no-inherit-groups", "--allow-duplicate-name",
-		}, base...)
+		}
+		switch product {
+		case "codex":
+			options = append(options,
+				"--model", "-m", "--effort", "--reasoning-effort", "--sandbox", "--approval-policy",
+				"--config", "-c", "--web", "--no-web", "--schema", "--worktree", "--skip-git-repo-check",
+			)
+		case "claude":
+			options = append(options,
+				"--model", "-m", "--effort", "--permission-mode", "--max-budget-usd", "--tools",
+				"--allowed-tools", "--disallowed-tools", "--schema", "--bare", "--worktree",
+			)
+		case "grok":
+			options = append(options,
+				"--model", "-m", "--effort", "--reasoning-effort", "--permission-mode", "--always-approve", "--yolo",
+			)
+		case "qwen":
+			options = append(options, "--qwen-home", "--yolo", "--no-yolo", "--approval-mode")
+		}
+		return append(options, base...)
 	case "wait":
 		return append([]string{"--timeout"}, base...)
 	case "status", "list", "doctor":
@@ -259,11 +289,17 @@ func instantiateParser(key string) (*pflag.FlagSet, error) {
 	}
 	parser := pflag.NewFlagSet(key, pflag.ContinueOnError)
 	parser.SetInterspersed(true)
-	shorthands := map[string]string{"--name": "n", "--group": "g", "--cd": "C", "--help": "h"}
+	shorthands := map[string]string{
+		"--name": "n", "--group": "g", "--cd": "C", "--model": "m", "--config": "c", "--help": "h",
+	}
 	valueOptions := map[string]bool{
 		"--name": true, "--peer-name": true, "--group": true, "--cd": true, "--cwd": true,
-		"--timeout": true, "--prompt-file": true, "--auto-archive-after": true, "--plan": true, "--listen": true,
-		"--product": true, "--source-root": true, "--native": true, "--grok-user-root": true,
+		"--timeout": true, "--prompt-file": true, "--notify": true, "--auto-archive-after": true,
+		"--model": true, "--effort": true, "--reasoning-effort": true, "--sandbox": true,
+		"--approval-policy": true, "--config": true, "--schema": true, "--permission-mode": true,
+		"--max-budget-usd": true, "--tools": true, "--allowed-tools": true, "--disallowed-tools": true,
+		"--approval-mode": true, "--qwen-home": true, "--plan": true, "--listen": true,
+		"--host": true, "--product": true, "--source-root": true, "--native": true, "--grok-user-root": true,
 		"--role": true, "--prefix": true, "--version": true, "--codex": true, "--claude": true, "--grok": true, "--qwen": true,
 	}
 	declared := make(map[string]bool)
@@ -384,6 +420,8 @@ func resolveHostCommand(args []string) (CommandDescriptor, []string, error) {
 		return commandWithRemainder(key, args[2:])
 	case "peer":
 		return ResolveCommand("peer", args[1:])
+	case "lane":
+		return commandWithRemainder("host.lane", args[1:])
 	case "connector":
 		if len(args) >= 2 && (args[1] == "install" || args[1] == "remove") {
 			return commandWithRemainder("host.connector."+args[1], args[2:])
@@ -409,6 +447,12 @@ func resolveHubCommand(args []string) (CommandDescriptor, []string, error) {
 			return CommandDescriptor{}, nil, fmt.Errorf("hub %s operation is required", args[0])
 		}
 		return commandWithRemainder("hub."+args[0]+"."+args[1], args[2:])
+	case "lifecycle":
+		if len(args) < 2 || (args[1] != "install" && args[1] != "remove") {
+			return CommandDescriptor{}, nil, errors.New("hub lifecycle install or remove operation is required")
+		}
+		key := map[string]string{"install": "hub.install", "remove": "hub.remove.apply"}[args[1]]
+		return commandWithRemainder(key, args[2:])
 	default:
 		return CommandDescriptor{}, nil, fmt.Errorf("unknown hub command %q", args[0])
 	}

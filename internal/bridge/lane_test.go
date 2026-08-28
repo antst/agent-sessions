@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -43,15 +43,15 @@ func TestRegisteredPeerParentFallbackRequiresStrongLocalAttestation(t *testing.T
 	if identity.Status != procinfo.Known || identity.Start == "" || identity.StrongStart == "" {
 		t.Fatal("test process has no strong identity")
 	}
-	parent := federator.ParentContext{
+	parent := federation.ParentContext{
 		SessionID: sessionID, AdapterPID: os.Getpid(), AdapterProcStart: identity.Start,
 		AdapterStrongStart: identity.StrongStart, AdapterSocket: socket,
 		PID: os.Getpid(), ProcStart: identity.Start, StrongStart: identity.StrongStart,
 		PermissionMode: "bypassPermissions",
 	}
-	resolver := func(_ string, requested string) (federator.ParentContext, error) {
+	resolver := func(_ string, requested string) (federation.ParentContext, error) {
 		if requested != sessionID {
-			return federator.ParentContext{}, errors.New("unexpected parent session")
+			return federation.ParentContext{}, errors.New("unexpected parent session")
 		}
 		return parent, nil
 	}
@@ -309,11 +309,11 @@ func TestInferClaudeParentResolvesLateBoundAttachmentAlias(t *testing.T) {
 	t.Setenv(peerSessionIDEnvironment, attachmentID)
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", socket)
 	t.Setenv("CLAUDE_PID", strconv.Itoa(pid))
-	owner, ok := inferClaudeParentWithResolver(paths, pid, func(_, requested string) (federator.ParentContext, error) {
+	owner, ok := inferClaudeParentWithResolver(paths, pid, func(_, requested string) (federation.ParentContext, error) {
 		if requested != attachmentID {
 			t.Fatalf("resolved attachment %q", requested)
 		}
-		return federator.ParentContext{
+		return federation.ParentContext{
 			SessionID: actualID, Product: "claude", AdapterPID: pid, AdapterProcStart: procStart,
 			AdapterSocket: socket, PID: pid, ProcStart: procStart,
 		}, nil

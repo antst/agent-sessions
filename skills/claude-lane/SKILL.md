@@ -11,9 +11,9 @@ Use `claude-peer-lane` to run Claude Code as a named peer with durable lifecycle
 
 From a managed Codex peer, run every lifecycle operation through the attested
 `agent_sessions.lane` MCP tool. Do not invoke `claude-peer-lane` from a shell tool:
-the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
-Unix sockets even when their directories are writable. The MCP tool retains this
-session as the exact parent and returns `exit`, `stdout`, and `stderr`.
+the shell process does not carry the MCP call's exact attachment capability.
+The MCP tool routes through the fixed daemon control endpoint, retains this
+session as the exact parent, and returns `exit`, `stdout`, and `stderr`.
 
 Set `product` to `claude`, put the lifecycle verb in `command`, and pass only the
 arguments after that verb in `arguments`. Pass the briefing as `input`; do not use
@@ -32,30 +32,30 @@ operating as a Codex peer.
 When the user requests another host, use federation instead of SSH. First run:
 
 ```bash
-peer-federator status
-peer-federator hosts
-peer-federator lane --host HOST --product claude -- doctor --json
-peer-federator lane --host HOST --product claude -- list --all
+agent-sessions status --json
+agent-sessions lane --host HOST --product claude -- doctor --json
+agent-sessions lane --host HOST --product claude -- list --all
 ```
 
-Require the local agent to be connected, the host to advertise `claude-lane`, and remote doctor
-contract 1 to be healthy. A destination advertises this capability only after its operator has
-explicitly enabled remote lane execution. Then replace every `claude-peer-lane` invocation below with:
+Require the local daemon to be hub-connected, the destination roster to advertise `claude-lane`,
+and remote doctor to return `ready: true`, `authority: "remote-daemon"`, the exact requested host,
+and product `claude`. Then replace every `claude-peer-lane` invocation below with:
 
 ```bash
-peer-federator lane --host HOST --product claude --
+agent-sessions lane --host HOST --product claude --
 ```
 
 For remote `run`, `start`, and `resume`, federation carries this live parent’s attested context and
-returns terminal notices through grouped routing. Do not pass `--persistent`, `--notify`, `--no-notify`, or
-`--no-auto-archive` for those commands. Remote lanes therefore have no lifecycle owner and are
-excluded from `--mine`; use the remote plain `list`, names, or IDs. Their native JSONL, exit codes, collection rules, grace
-timer, and archive behavior are otherwise unchanged.
+returns terminal notices through grouped routing. Do not pass `--persistent`, `--notify`,
+`--no-notify`, or `--no-auto-archive` for those commands. A remote lane is source-proxy owned by
+this exact attested parent and remote host, so remote `--mine` includes it only for that source
+identity. Its native JSONL, exit codes, collection rules, grace timer, and archive behavior are
+otherwise unchanged.
 
 Pass `-C /absolute/remote/path` on remote `run` and `start` whenever the working directory matters;
 otherwise the native launcher inherits the destination agent service's cwd. `resume` retains the
-lane's established cwd and rejects a replacement. Send remote briefings on stdin (maximum 1 MiB).
-`--prompt-file` names an already-existing destination file; federation does not transfer it.
+lane's established cwd and rejects a replacement. Send remote briefings on stdin (maximum 1 MiB);
+remote `--prompt-file` is unsupported because federation does not transfer files.
 Remote auto-archive delay is capped at 86,400 seconds.
 
 Every remote operation requires the hub. If it is disconnected, fail closed and report it; never fall back to SSH
@@ -76,10 +76,10 @@ the stable process identity rather than a mutable session ID; persistent lanes a
 the unfiltered list for host-local lifecycle state. `--mine` fails rather than guessing when the
 caller is not a corroborated live Codex or Claude peer.
 
-Require `contract_version: 1`, `claude_available: true`, `claude_logged_in: true`, and
-`supervisor_reachable: true`. This is a local credential-state preflight; require the first real
-turn to succeed before claiming end-to-end authentication. Pick a descriptive name and retain the
-exact lane ID: messaging names are group-scoped, while bare lifecycle names can be host-ambiguous.
+Require `ready: true`, `authority: "daemon"`, and product `claude`. Product readiness and local
+credential diagnostics come from the daemon's Claude adapter; require the first real turn to
+succeed before claiming end-to-end authentication. Pick a descriptive name and retain the exact
+lane ID: messaging names are group-scoped, while bare lifecycle names can be host-ambiguous.
 
 ## Start and collect
 
@@ -123,7 +123,7 @@ Use only one collector for a lane. Select the `agent_message` with `phase: "fina
 An idle local lane is a normal Claude-visible peer. Send it a peer message by name or session ID,
 then collect the new turn with `wait`. For a remote lane, use the same group-filtered Agent
 Sessions discovery and send tools; no source-side shadow is created.
-The destination-local name and session ID are valid only for `peer-federator lane` lifecycle commands.
+The destination-local name and session ID are valid only for `agent-sessions lane` lifecycle commands.
 
 A peer message accepted while a lane is already working steers that active turn and shares its one
 result; it does not create another collection cursor. Only an idle-lane message starts a new turn.

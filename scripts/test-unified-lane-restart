@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+	script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+	link_target="$(readlink -- "$script_path")"
+	if [[ "$link_target" == /* ]]; then
+		script_path="$link_target"
+	else
+		script_path="$script_dir/$link_target"
+	fi
+done
+repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+
+fail() {
+	printf 'unified lane restart acceptance: %s\n' "$*" >&2
+	exit 1
+}
+
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-lane-restart.XXXXXX")"
+cleanup() {
+	if [[ "${AGENT_SESSIONS_KEEP_ACCEPTANCE_ROOT:-0}" == 1 ]]; then
+		printf 'unified lane restart acceptance: retained diagnostic root %s\n' "$test_root" >&2
+		return
+	fi
+	find "$test_root" -depth -delete 2>/dev/null || true
+}
+trap cleanup EXIT
+
+run_discriminator() {
+	local product="$1"
+	local test_name="$2"
+	local expected_outcome="$3"
+	local log="$test_root/$product.log"
+	local status
+
+	set +e
+	(
+		cd -- "$repository_root"
+		AGENT_SESSIONS_UNIFIED_LANE_RESTART_ACCEPTANCE=1 \
+			go test ./internal/bridge -run "^${test_name}$" -count=1 -v
+	) >"$log" 2>&1
+	status=$?
+	set -e
+	if [[ "$status" -ne 0 ]]; then
+		cat -- "$log" >&2
+		fail "$product discriminator exited $status"
+	fi
+	if grep -Eq "^--- SKIP: ${test_name}( |$)" "$log"; then
+		cat -- "$log" >&2
+		fail "$product discriminator was skipped"
+	fi
+	if [[ "$(grep -Ec "^--- PASS: ${test_name} \\(" "$log")" -ne 1 ]]; then
+		cat -- "$log" >&2
+		fail "$product discriminator did not execute and pass exactly once"
+	fi
+	if [[ "$(grep -Ec "^=== RUN   ${test_name}$" "$log")" -ne 1 ]]; then
+		cat -- "$log" >&2
+		fail "$product discriminator execution boundary is ambiguous"
+	fi
+
+	case "$expected_outcome" in
+	continued)
+		printf '{"type":"unified.lane_restart.discriminator","contract_version":1,"product":"%s","test":"%s","outcome":"continued","dispatch_count":1,"redispatch_count":0,"interrupted_count":0}\n' \
+			"$product" "$test_name"
+		;;
+	interrupted)
+		printf '{"type":"unified.lane_restart.discriminator","contract_version":1,"product":"%s","test":"%s","outcome":"interrupted","dispatch_count":1,"redispatch_count":0,"interrupted_count":1,"collectable":true,"resumable":true,"native_evidence_required":true}\n' \
+			"$product" "$test_name"
+		;;
+	*)
+		fail "internal unsupported outcome $expected_outcome for $product"
+		;;
+	esac
+}
+
+# Each discriminator owns one in-process daemon generation and one successor.
+# The runner never starts, stops, or restarts the user's installed service and
+# therefore cannot create a second user daemon. Tests must hold an accepted
+# active native turn across that exact generation change and prove the named
+# adapter outcome without redispatch.
+run_discriminator codex \
+	TestCodexDaemonLaneReconnectsActiveTurnWithoutRedispatch continued
+run_discriminator claude \
+	TestClaudeDaemonLaneRestartRecordsEvidenceApprovedInterruption interrupted
+run_discriminator grok \
+	TestGrokDaemonLaneRestartRecordsEvidenceApprovedInterruption interrupted
+run_discriminator qwen \
+	TestQwenDaemonLaneRestartRecordsEvidenceApprovedInterruption interrupted
+
+printf '{"type":"unified.lane_restart.passed","contract_version":1,"products":4,"active_turn_restarts":4,"continued":["codex"],"evidence_approved_interrupted":["claude","grok","qwen"],"dispatches":4,"redispatches":0,"interrupted_results":3,"collectable_interrupted_results":3,"resumable_interrupted_results":3,"second_user_daemon":false}\n'

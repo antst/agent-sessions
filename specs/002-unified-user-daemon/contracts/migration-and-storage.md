@@ -137,20 +137,30 @@ candidate list and adoption plan.
 
 - `active_managed_blocker`: an exact managed peer or lane is still active; name it and require the
   operator to close it.
-- `quiescent_authority`: an exact legacy Agent Sessions authority is live but owns no active managed
-  peer or lane and may be stopped through its supported lifecycle.
+- `live_legacy_authority`: an exact legacy Agent Sessions supervisor, product manager, routing agent,
+  or federation authority is responsive. It blocks installation even when it reports zero shims, peers,
+  lanes, or active work.
 - `stale`: exact alleged owner is proven absent; stale count/path cannot block.
 - `unknown` or `conflicting`: fail closed as retryable migration debt.
 
 No state changes occur while blockers remain. Migration does not transfer a live attachment, peer, or
-lane turn from a legacy authority.
+lane turn from a legacy authority and implements no compatibility drain protocol.
 
-### 3. Stop the old authority
+### 3. Verify the operator-stopped maintenance window
 
-After the global peer/lane quiescence gate passes, close admission where supported and stop every exact
-legacy Agent Sessions authority through its supported lifecycle. Re-attest its process and endpoint
-identity immediately before the stop and verify exit. Do not stop native vendor processes. The old and
-new host authorities are never concurrently accepting work.
+Before invoking the mutating install, the operator MUST:
+
+1. close every legacy managed peer and lane;
+2. explicitly stop every responsive legacy supervisor, product manager, routing agent, and federation
+   authority through the old release's supported lifecycle; and
+3. prevent service managers, login jobs, legacy commands, or other launchers from starting any new
+   legacy authority until installation completes.
+
+The installer re-inventories the entire closed source list. It fails before mutation, names every live
+authority, and preserves it untouched, including when a responsive authority reports zero shims or no
+active work. The installer never closes admission on, stops, signals, drains, hands off, or restarts a
+legacy authority. It also never stops native vendor processes. A successful absence proof is valid only
+inside the operator-held maintenance window and is rechecked before each artifact mutation.
 
 ### 4. Adopt durable state
 
@@ -173,11 +183,18 @@ Atomically select the staged state/release generation and start the service. The
 `recovering` and does not accept work until the legacy retirement gates complete. There are no live
 legacy managed attachments to reconstruct.
 
-### 6. Retire legacy authorities and endpoints
+### 6. Retire legacy artifacts and endpoints
 
-Immediately re-attest each stopped legacy process record, service, socket, lock, and disposable file.
-Stop/remove only the exact matching Agent Sessions target. A changed identity becomes debt and prevents
-ready status. Preserve unrelated native processes and all vendor data.
+Immediately re-attest each legacy process record, service, socket, lock, and disposable file. If any
+legacy authority is live again, fail closed and name it; do not signal it. Retire only an exact Agent
+Sessions endpoint, disabled service/job registration, lock, or disposable file whose owner remains
+proven absent. For a selected record file, keep its content-stripped adoption revision separate from a
+full-file artifact revision; unlink requires the latter plus descriptor-bound inode/type/owner identity
+to match immediately before mutation. A changed identity becomes debt and prevents ready status.
+Preserve unrelated native processes and all vendor data. Dormant or terminal session/lane rows—including idle, completed,
+interrupted, retired, and archived records—whose durable history was adopted are provenance, not
+disposable authority artifacts: retain them revision-bound under the legacy root until explicit cleanup,
+never re-import them, and never treat their continued presence as live authority.
 
 ### 7. Ready and retain provenance
 
@@ -189,15 +206,17 @@ revision-bound migration provenance until explicit cleanup; they are never activ
 
 Before the new authority becomes ready:
 
-- stop the candidate daemon if it started;
-- restore the exact prior release/state pointer;
-- restore prior connector and service-manager state;
-- restart a previously usable stopped legacy authority only when its exact identity and journal
-  revision still match;
+- stop the unified candidate if it started, leaving both it and every legacy authority stopped;
+- restore only the exact release/state selection and data changed by the installer;
+- restore only connector and service surfaces changed by the installer, without enabling or starting
+  either unified or legacy authority;
 - report any changed identity as debt rather than guessing.
+- instruct the operator to retry the unified install or manually relaunch the old release through its
+  supported lifecycle.
 
-After the new generation is ready, migration does not silently roll back to split authorities. Later
-failures use normal daemon recovery.
+Rollback never performs a live handoff, compatibility drain, or automatic legacy restart. After the
+new generation is ready, migration does not silently roll back to split authorities. Later failures use
+normal daemon recovery.
 
 ## Restart reconciliation
 

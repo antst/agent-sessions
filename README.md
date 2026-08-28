@@ -4,23 +4,15 @@ Native, persistent session lifecycle for Codex, Claude Code, Grok, and Qwen Code
 cross-session messaging. Interactive sessions and durable worker lanes can be created, resumed,
 supervised, discovered, and messaged with nearly the same lifecycle on Linux and macOS.
 
-This repository is one Go module with shared implementation under `internal/`. It builds eleven
-separate native executables:
+This repository is one Go module with shared implementation under `internal/`. It builds exactly
+two native executables:
 
-- `agent-session-runtime` — the shared diagnostic/runtime multicall used by the launchers;
-- `peer` — product-neutral exact-session resume using the durable host-agent catalog;
-- `codex-peer` — an interactive Codex TUI on the shared App Server;
-- `codex-peer-lane` — project-neutral lifecycle commands for named orchestrated lanes (`run`,
-  `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list`, and `doctor`).
-- `claude-peer` — a native Claude TUI in the shared Claude profile, registered with the host agent;
-- `claude-peer-lane` — the symmetric lifecycle for named, messageable Claude Code workers.
-- `grok-peer` — an interactive Grok TUI backed by a private leader and an ACP wake client.
-- `grok-peer-lane` — durable named headless Grok ACP workers with messaging, collection, resume,
-  interrupt, and archive lifecycle.
-- `qwen-peer` — an interactive Qwen TUI using native dual output and remote input.
-- `qwen-peer-lane` — durable named Qwen ACP workers with native archive/unarchive.
-- `peer-federator` — a separate network process that projects live peers and lane commands across
-  trusted hosts. It shares this source tree but remains an independently operated binary/service.
+- `agent-sessions` — the sole per-user host daemon plus its administrative, peer, lane, and
+  stateless connector modes;
+- `agent-sessions-hub` — the independently installed central federation hub.
+
+Compatibility command names such as `peer`, `codex-peer`, and `codex-peer-lane` are links to the
+same `agent-sessions` image. They are not additional runtimes or authorities.
 
 ## Quick start
 
@@ -28,10 +20,9 @@ separate native executables:
 git clone https://github.com/antst/agent-sessions.git
 cd agent-sessions
 make test-race
-codex app-server daemon stop # after exiting every Codex client
 make install-all
 
-peer-federator agent --host "$(hostname)" # keep this under the user service manager
+agent-sessions status --json # the installed user service owns daemon lifetime
 codex-peer -g project-a -n reviewer
 claude-peer -g project-a -n implementer
 grok-peer -g project-a -n researcher
@@ -65,123 +56,51 @@ This is Codex's plugin-hook trust prompt, not a request to loosen the session's 
 approval policy. Restart any Codex TUI that was already open during installation so it loads the
 new plugin and presents the prompt.
 
-`codex-peer` creates each fresh root through the shared App Server and resolves an explicit UUID or
-unique-name resume target to one authoritative UUID. It binds that exact UUID to the
-wrapper process identity, then replaces the wrapper process with the TUI. The supervisor
-uses that durable owner record to remove the shim and thread-scoped MCP children even when Codex skips
-`SessionEnd` or the TUI is killed; PID reuse is rejected by the process-start token.
-Because remote Codex 0.147 delays `SessionStart` until the first user turn, fresh and resumed roots are
-published while their exact live wrapper owner is still marked prepared. A successful fresh publication
-commits the zero-turn thread as durable before the wrapper returns; failures before that commit delete it.
-The first SessionStart promotes the record to attached. If a committed wrapper exits before SessionStart,
-the reaper removes its shim but does not archive the still-loaded zero-turn thread. Its exact stale owner
-record becomes a one-use proof for immediate exact or name resume; the replacement transaction consumes it.
+The installed user service is the sole host authority. Peer launchers ask that daemon to prepare an
+exact attachment, then replace themselves with the native TUI using the daemon-issued launch
+handoff. The daemon's product adapter corroborates the resulting native session before it becomes
+discoverable. Resume by UUID or unambiguous durable name reuses the same Agent Sessions session
+identity; native selectors that cannot be resolved exactly fail before catalog mutation.
 
-Codex installs plugin hooks and MCP inventory daemon-wide. Ordinary Codex threads therefore see the
-`agent_sessions` tool names, but their hook executions are silent and tool calls fail closed before roster,
-inbox, or send access because the stdio server is not a child of the managed App Server or the thread
-has no exact interactive-owner/lane capability. Authorization is
-thread-scoped: a plain client deliberately attached to an already-authorized peer UUID is not
-distinguishable without an upstream per-attachment token.
-The plugin requests daemon-side approval for `agent_sessions` dispatch so ordinary calls reach that
-fail-closed authorization check instead of hanging at a global pre-dispatch prompt. This approves
-dispatch only; it does not grant a thread peer authority or change its sandbox/approval policy.
+Product connectors are stateless relays into the fixed per-user control endpoint. They do not own a
+listener, roster, session store, or fallback daemon. Each call is authorized from the
+inherited attachment identity and capability, so a bare native session may see installed tool names
+but cannot read the roster or send messages. PID/process-start, native identity, profile, and socket
+evidence are checked by the relevant adapter; stale or mismatched evidence fails closed.
 
-The Claude plugin installs a narrower `agent_sessions` MCP inventory for managed `claude-peer`
-sessions. It exposes structured grouped discovery, direct/multicast send, and broadcast; replies to
-an incoming delivery target the frame's `source.id`. The MCP process receives no model-selected
-identity: the runtime requires exact ancestry beneath the live native Claude adapter and lifecycle
-owner, then corroborates the same UUID, process starts, native registry row, messaging socket, and
-host-agent registration. Bare Claude and an unrelated process fail closed. Native Claude
-`SendMessage` to `agent-sessions--HOST` remains only a framed compatibility carrier; its carrier
-acknowledgment is not evidence that an unframed peer reply was delivered. Current Claude-facing
-skills never select that carrier as an automatic fallback: if a structured `agent_sessions` call is
-inactive or fails, they report the failure and stop instead of switching channels.
+Native behavior remains native. Codex arguments retain their relative order and App Server is used
+inside the Codex adapter for exact thread start/resume/reconnect. Claude preserves exact UUID and
+native title/chooser resume behavior, does not change profile-level `crossSessionInbound`, and uses
+launch-scoped settings for explicit permission choices. Grok preserves its UUID/title/picker and
+ACP/leader semantics while the daemon owns the durable attachment. Qwen uses its selected
+presence-sensitive profile and native extension manager. Agent Sessions records the effective
+permission class without widening a product's sandbox, approval, or tool policy.
 
-The launcher removes only its own `-n/--peer-name` and, for resume, the selector it resolves to one
-UUID. It invokes the managed `--remote unix:// resume UUID` target, supplies a canonical cwd when the
-caller did not provide one, then appends every remaining Codex argument unchanged and in its original
-relative order. This includes model, profile, config, feature, sandbox, approval, search, variadic
-image, hook-trust, and display options regardless of whether they appeared before or after the input
-`resume` selector. Explicit `--yolo` is additionally mirrored through the shared App Server lifecycle:
-fresh peers receive it at `thread/start`, while resumed peers receive it through `thread/resume` plus
-`thread/settings/update` before publication. The real Codex attachment still receives the caller's
-unchanged option. The update is durable thread state: later plain resumes of that thread remain in
-full-access mode until its settings are explicitly changed. Supported resume syntax is `codex-peer [GLOBAL_OPTIONS] resume [RESUME_OPTIONS]
-UUID_OR_NAME [PROMPT_OR_OPTIONS]`; options may appear on either side of the input selector. A name selects
-the newest usable exact-name session. Picker/`--last`, fork, caller-controlled remote endpoints, and
-already-loaded targets without an exact stale zero-turn owner proof remain unsupported. Resume
-inherits the thread's canonical cwd; an explicit `-C` must resolve to that same directory.
+`make install-all` installs or upgrades the host role and every locally available product
+integration. Product-specific targets remain strict; absent optional clients are reported and
+skipped only by the aggregate target. Install is a role-scoped transaction: it validates the exact
+release manifest, checksums, executable role, service assets, and connector inventory before
+switching the selected release. Active or ambiguous migration resources produce named blockers
+rather than being killed or silently adopted. Reinstall preserves product credentials, settings,
+transcripts, and unrelated plugins.
 
-`make install` copies the native runtime payload and the four Codex lane skills under
-`${PREFIX:-~/.local}/libexec/agent-sessions`, registers that installed marketplace, installs the
-plugin, and links all eleven commands under `${PREFIX:-~/.local}/bin`.
-`make dev-install` instead links the runtime, launchers, and marketplace to the checkout.
-`make install-claude` independently installs the text-only Claude plugin. `make install-grok`
-validates and copies the local Grok plugin into Grok's auto-trusted user plugin directory; that
-explicit install allows its `agent_sessions` MCP server to run the installed native runtime with
-the current user's privileges. Review the local source before granting it. Reinstallation migrates
-the older direct-install entry and replaces only `~/.grok/plugins/agent-sessions`. It uses a
-temporary trusted registration only to update Grok's enabled-plugin configuration, removes that
-row while preserving data, and fails unless `grok inspect --json` resolves the exact staged user
-plugin and MCP executable. Start a new Grok session or reload plugins after installing.
-Grok exposes `/agent-sessions` for grouped peer messaging and `/agent-lanes` for lane lifecycle.
-`make install-qwen` uses Qwen's native extension manager to install the exact
-`agent-sessions` plugin into the selected presence-sensitive Qwen profile. It
-verifies one MCP server and five skills, refuses mutation while a managed Qwen
-peer or lane uses that profile, and leaves credentials, settings, other
-extensions, and transcripts untouched.
-Every product surface uses the plugin identity `agent-sessions`; product-specific executable and
-lane names remain unchanged.
-Managed Grok peers also require a private leader with Grok's sandbox disabled; tool approval remains
-the TUI's native policy and its effective live mode is attested before publication.
-Installation never changes Claude's profile-level `crossSessionInbound` value. Managed Claude peers
-and lanes opt into inbound native messages only for their own launch. They also pass `--no-chrome`
-unless an interactive peer operator explicitly supplied `--chrome`, so a browser-extension
-first-run dialog cannot block native messaging-socket publication. Claude's native session row does
-not publish live Shift+Tab permission changes, so a managed peer uses one conservative permission
-class for its lifetime: constrained launches disable in-session bypass in their per-launch settings,
-and explicit bypass launches remain advertised as bypass until restart. Use
-`--yolo` (translated to native `--dangerously-skip-permissions`) or the native long option to opt in
-at launch; `--allow-dangerously-skip-permissions` is
-rejected because it would create an unattestable privilege change. Host settings remain untouched.
-`claude-peer --resume UUID_OR_NAME` uses Claude's native resume semantics. Exact UUIDs retain their
-pre-launch stable identity; every other target is passed to native Claude unchanged, including
-ordinary-session titles and duplicate titles that require Claude's interactive chooser. The wrapper
-owns cleanup through a provisional attachment ID, then atomically adopts the UUID in Claude's native
-session row without creating a provisional catalog session. Durable groups and parent choices are
-restored only after native selection and never replace it. Because the selected UUID is unknown
-before launch, a previously managed bypass session should be resumed by name with an explicit
-`--yolo`; exact-UUID resume can restore that permission policy before launch.
-Agent Sessions uses an explicit peer name or named resume target immediately, then refreshes the
-display name from the latest validated native Claude `custom-title` event for the selected UUID.
-This keeps fresh peers, title-based resumes, exact-UUID resumes, and later native `/rename` changes
-aligned instead of exposing Claude's cwd-derived registry fallback.
-`grok-peer --resume [UUID_OR_TITLE]` likewise preserves Grok's native exact-UUID,
-case-insensitive title, ambiguity, and picker behavior. Its private live roster
-is authoritative for the selected UUID and title. For both Claude and Grok, a
-launch-scoped attachment ID exists only to own startup and cleanup before
-selection; structured messaging and lane ownership resolve that attachment to
-the live native UUID under exact process/socket attestation.
-`make install-all` installs the shared runtime plus integrations for the native clients present on
-that host; absent Codex, Claude, Grok, or Qwen clients are reported and skipped rather than treated
-as failed dependencies. The product-specific targets remain strict when an operator explicitly
-requests one integration. A version-changing install requires App Server to
-be stopped and every managed `grok-peer` TUI to exit normally; its private leader and observer then
-stop automatically. The bridge never restarts a running server or replaces a live managed Grok
-host because doing so can interrupt active work. Supervisor reuse additionally requires an exact SHA-256 match with the installed runtime;
-a same-version rebuild replaces only the supervisor, without restarting App Server. CI archives carry prebuilt Linux and macOS binaries for x86-64 and arm64, so release
-installations do not require Go or Node.js.
+`make install-hub` independently installs the `agent-sessions-hub` role. Host and hub have disjoint
+release roots, service definitions, configuration, logs, and lifecycle operations even when they
+run under the same user on one machine. Neither role installation starts a second host daemon.
 
-For tags named `vX.Y.Z`, CI publishes four installable release archives plus `SHA256SUMS` on the
-Forgejo Release. Download the archive matching the host, verify it, extract it, exit all Codex
-clients, stop App Server, and run `make install-all` from the extracted directory. The packaged
-marker makes the installer use the bundled binary even if Go is installed.
+CI release archives contain the two role images for Linux and macOS on x86-64 and arm64 plus a
+schema-validated manifest and checksums, so archive installation does not require Go or Node.js.
+After verifying the archive checksum, run the desired host or hub install target from the extracted
+directory; the installer selects only the executable and service assets for that role.
 
 ## What it provides
 
-- One host agent owns the durable product/group catalog and group-filtered local routing. An
-  optional hub federates the same protocol; there is no global flat namespace.
+- One per-user host daemon owns the durable attachment, lane, name, group, delivery, notice,
+  migration, and federation-client catalogs. Product adapters share that authority; they do not
+  create parallel product runtimes.
+- An optional central hub joins connected hosts into one uniform multi-host space. Groups are
+  global routing and visibility boundaries, and duplicate display names remain ambiguous unless a
+  host-qualified identity such as `<peer>--<host>` is used.
 - The shared Claude registry contains ordinary Claude sessions, managed Claude peers and lanes,
   and exactly one Agent Sessions service row—never one remote row per peer. Native Claude direct
   messaging remains independent; groups constrain only AgentFrame discovery and routing.
@@ -193,24 +112,19 @@ marker makes the installer use the bundled binary even if Go is installed.
 - Peer delivery is push-based; active orchestrators should continue useful work rather than poll.
   `check_inbox` is only for messages queued past an automatic delivery boundary.
 - Native TUI rename changes flow immediately into Agent Sessions discovery; Claude's native listing
-  naturally shows ordinary and managed Claude sessions plus the one host-agent service.
-- Stable Agent Sessions IDs are re-registered when a TUI resumes the same thread. Codex and Grok
-  adapters keep session-scoped sockets; each Claude attachment uses a preparation-scoped socket
-  that rotates on resume without depending on PID reuse. Normal TUI exit removes the live
-  registration and owned children.
+  naturally shows ordinary and managed Claude sessions plus the one Agent Sessions host service.
+- Stable Agent Sessions IDs are reattached when a TUI resumes the same native session. Normal TUI
+  exit removes live visibility while retaining only the metadata required for exact future resume.
 - A native transcript can move between ordinary and peer mode. Exact UUIDs work for every product;
   Claude and Grok wrappers also preserve their native title and chooser selectors. Use the product
   wrapper once to adopt an ordinary session into the catalog; later managed resume restores its
   product/groups while an ordinary native resume remains an unregistered Agent Sessions opt-out.
-- Dead shim transports are replaced and garbage-collected without deleting queued messages.
 - Child Codex subagents remain private to their parent while the root is a published peer.
 - Generic lanes inherit normal user configuration and impose no model, reasoning, sandbox,
   approval, web, or project policy.
-- A lane is owned by its launching orchestrator by default. When that owner exits, active work is
-  interrupted and the lane is archived, stopping its discovery shim while retaining resumable
-  transcript history. For a corroborated Claude caller, the Claude session process is the owner—not
-  a short-lived Bash or Python wrapper that invokes the CLI. `--persistent` explicitly creates a
-  lane that survives its owner.
+- A lane is owned by its launching orchestrator by default. When that owner exits, the daemon applies
+  the lane's cleanup policy while retaining supported resumable transcript history. `--persistent`
+  explicitly creates a lane that survives its owner.
 - Completed lanes can take follow-up turns on the same transcript. Parent-owned Claude lanes notify
   their corroborated owner automatically; persistent lanes may nominate a peer with `--notify`.
   By default a terminal lane remains available for one minute, then auto-archives if no newer turn
@@ -221,12 +135,13 @@ marker makes the installer use the bundled binary even if Go is installed.
   available to orchestrators.
 - Versioned Codex, Claude, Grok, and Qwen skills let every supported parent product select every
   supported Codex, Claude, Grok, or Qwen target lane without duplicating target lifecycle logic.
-- A versioned Claude Code plugin teaches any local orchestrator this generic lane contract without
-  copying bridge logic or choosing model, effort, sandbox, approval, web, or project policy.
+- Versioned product skills teach the same daemon lane contract without copying lifecycle logic or
+  choosing model, effort, sandbox, approval, web, or project policy.
 - Parent groups are not propagated by default. Every lane gets its own private group and its
   immediate parent anchor; `--inherit-groups` is the parent’s explicit opt-in for the rest.
-- With the separate `peer-federator` protocol-3 agent/hub installed, all skills can run their native
-  lane CLI on a named connected host. Remote lifecycle traffic and ordinary peer messages remain
+- With the host daemon connected to an independently installed `agent-sessions-hub`, all skills can
+  run `agent-sessions lane --host HOST --product PRODUCT -- ...` on a named connected host. Remote
+  lifecycle traffic and ordinary peer messages remain
   hub-only; remote execution is an explicit destination opt-in, the cleanup fuse cannot be disabled
   remotely, the destination exposes no direct spawn listener, and there is no SSH fallback.
 
@@ -242,20 +157,21 @@ qwen/                       Qwen Agent Plugins v1 manifest, MCP, and skills
 .mcp.json                   MCP registration
 hooks/                      Codex lifecycle hook registration
 skills/                     Codex skills for orchestrating all four lane products
-cmd/                        eleven shipped executable entry points (plus build-only tooling)
-internal/bridge/            local session lifecycle and messaging runtime
-internal/launcher/          native launcher argument and bootstrap logic
-internal/federator/         independent cross-host federation runtime
-deploy/peer-federator/      systemd and launchd service templates
+cmd/                        the two canonical executable entry points
+internal/bridge/            product adapter and stateless connector mechanics
+internal/launcher/          native launcher argument and daemon handoff policy
+internal/federation/        shared hub protocol, routing, identity, and hub runtime
+internal/daemon/            the one per-user host authority, including federation client state
+deploy/agent-sessions/      host systemd and launchd service templates
+deploy/agent-sessions-hub/  independent hub systemd and launchd service templates
 scripts/                    hook/MCP trampoline, maintenance, packaging, and test tooling
 docs/                       installation, lane integration, and protocol notes
 .github/workflows/          tests, two-OS release gates, evidence, and four-platform release builds
 ```
 
 The command packages contain only process entry points. Shared implementation stays private under
-`internal/`; local session semantics remain in `internal/bridge`, launcher policy in
-`internal/launcher`, and host federation in `internal/federator`. Federation does not run inside
-the local session supervisor.
+`internal/`; adapter semantics remain in `internal/bridge`, launcher policy in `internal/launcher`,
+the host authority in `internal/daemon`, and logical hub protocol/routing in `internal/federation`.
 
 ## Development
 
@@ -264,15 +180,15 @@ make lint
 make test
 make test-race
 make build
-make dev-install        # source-linked Codex/runtime development install
+make dev-install        # source-linked host and Codex development install
 make dev-install-claude # source-linked Claude orchestration skill
 make dev-install-grok   # source-linked trusted Grok MCP plugin
 make dev-install-qwen   # source Qwen Agent Plugins payload in the selected profile
-make install-claude     # Claude skill from the stable installed runtime tree
-make install-grok       # trusted Grok MCP plugin from the stable installed runtime tree
-make install-qwen       # Qwen plugin from the stable installed runtime tree
+make install-claude     # Claude skill from the stable selected host release
+make install-grok       # trusted Grok MCP plugin from the stable selected host release
+make install-qwen       # Qwen plugin from the stable selected host release
 make remove-qwen        # remove only Agent Sessions from the selected Qwen profile
-make install-all        # shared runtime plus every locally available product integration
+make install-all        # host role plus every locally available product integration
 make reinstall   # refresh cachebuster, rebuild, and reinstall the local plugin
 make repair-projection THREAD_ID=<uuid>         # inspect known Codex 0.147 projection damage
 make repair-projection THREAD_ID=<uuid> APPLY=1 # back up and repair the exact known shape

@@ -3,6 +3,8 @@ package bridge
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +12,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,14 +19,727 @@ import (
 	"syscall"
 	"time"
 
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const claudeLaneContractVersion = 1
+
+const claudeDaemonStreamRestartLimitation = "claude_stream_stdio_is_not_reattachable"
+
+// claudeDaemonLaneActor is the callable in-process replacement for the legacy
+// detached lane manager. Claude remains an external vendor-owned stream-json
+// worker; only its pipes, exact process evidence, and current turn correlation
+// live here in the unified daemon.
+type claudeDaemonLaneActor struct {
+	mu sync.Mutex
+
+	laneSessionID string
+	sessionID     string
+	name          string
+	cwd           string
+	profile       string
+	permission    string
+	streamID      string
+	workerPID     int
+	workerStart   string
+	workerStrong  string
+	originalCwd   string
+	worktreePath  string
+
+	command *exec.Cmd
+	input   io.WriteCloser
+	stopped chan struct{}
+	closing bool
+	waitErr error
+	current *claudeDaemonStreamTurn
+}
+
+type claudeDaemonStreamTurn struct {
+	id          string
+	streamID    string
+	frames      []any
+	terminal    bool
+	interrupted bool
+	done        chan struct{}
+}
+
+// StartClaudeTurn starts or reuses one native stream-json worker without any
+// Agent Sessions listener, manager process, or wrapper-owned catalog.
+func (coordinator *claudeNativeCoordinator) StartClaudeTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	profile, err := canonicalClaudeProfile(stringValue(lane.NativeActor["profile"]))
+	if err != nil {
+		return nil, err
+	}
+	if err := coordinator.ensureSyntheticService(profile); err != nil {
+		return nil, err
+	}
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	if actor != nil && actor.hasStopped() {
+		delete(coordinator.laneActors, lane.LaneSessionID)
+		actor = nil
+	}
+	if actor == nil {
+		actor, err = startClaudeDaemonLaneActor(ctx, lane, turn)
+		if err != nil {
+			coordinator.mu.Unlock()
+			return nil, err
+		}
+		coordinator.laneActors[lane.LaneSessionID] = actor
+	}
+	coordinator.mu.Unlock()
+	return actor.startTurn(ctx, lane, turn)
+}
+
+func (actor *claudeDaemonLaneActor) hasStopped() bool {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	select {
+	case <-actor.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReconnectClaudeTurn never redispatches an accepted prompt. A live actor is
+// reused only in this daemon process; after reconstruction, the exact orphaned
+// worker is retired and absence plus native transcript evidence gates the one
+// permitted interrupted/resumable outcome.
+func (coordinator *claudeNativeCoordinator) ReconnectClaudeTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor != nil {
+		return actor.reconnect(lane, turn)
+	}
+
+	sessionID := defaultString(stringValue(lane.NativeActor["session_id"]), claudeDaemonLaneSessionID(lane.LaneSessionID))
+	nativeTurnID := defaultString(stringValue(turn.NativeTurnIdentity["native_turn_id"]), turn.TurnID)
+	streamID := defaultString(stringValue(turn.NativeTurnIdentity["stream_id"]), claudeDaemonTurnStreamID(turn.TurnID))
+	pid := intValue(lane.NativeActor["worker_pid"])
+	start := stringValue(lane.NativeActor["worker_proc_start"])
+	strong := stringValue(lane.NativeActor["worker_strong_start"])
+	if pid <= 1 || start == "" || strong == "" {
+		return nil, errors.New("claude recovery lacks exact native worker identity")
+	}
+	if err := retireReconstructedClaudeWorker(ctx, pid, start, strong); err != nil {
+		return nil, err
+	}
+	profile, err := canonicalClaudeProfile(stringValue(lane.NativeActor["profile"]))
+	if err != nil {
+		return nil, err
+	}
+	if !claudeDaemonNativeTranscriptExists(profile, sessionID) {
+		return nil, errors.New("claude recovery cannot prove a native resumable transcript")
+	}
+	return map[string]any{
+		"reconnectable": false, "session_id": sessionID, "native_turn_id": nativeTurnID,
+		"stream_id": streamID, "worker_status": "absent", "worker_pid": pid,
+		"worker_proc_start": start, "worker_strong_start": strong,
+		"profile": profile, "permission_mode": lane.PermissionMode,
+		"limitation": claudeDaemonStreamRestartLimitation,
+		"native_transcript": map[string]any{
+			"session_id": sessionID, "resume_supported": true,
+		},
+	}, nil
+}
+
+// InterruptClaudeTurn interrupts only an actor whose durable session, turn,
+// PID, display start, and strong start still match the daemon evidence.
+func (coordinator *claudeNativeCoordinator) InterruptClaudeTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor == nil {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return actor.interrupt(lane, turn)
+}
+
+// CollectClaudeTurn waits for and returns a copy of the exact terminal native
+// stream. Repeated calls return the same frames.
+func (coordinator *claudeNativeCoordinator) CollectClaudeTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor == nil {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return actor.collect(ctx, lane, turn)
+}
+
+// ArchiveClaudeLane retires the exact stream worker. Claude's transcript and
+// credentials remain vendor owned and are never removed here.
+func (coordinator *claudeNativeCoordinator) ArchiveClaudeLane(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	coordinator.mu.Lock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	coordinator.mu.Unlock()
+	if actor != nil {
+		if err := actor.matchesLane(lane); err != nil {
+			return err
+		}
+		return actor.stop(ctx)
+	}
+	pid := intValue(lane.NativeActor["worker_pid"])
+	if pid <= 1 {
+		return nil
+	}
+	return retireReconstructedClaudeWorker(ctx, pid,
+		stringValue(lane.NativeActor["worker_proc_start"]),
+		stringValue(lane.NativeActor["worker_strong_start"]))
+}
+
+// CleanupClaudeLane removes only this daemon's in-memory actor after the exact
+// worker is absent. It does not touch native registry, transcript, or profile
+// files.
+func (coordinator *claudeNativeCoordinator) CleanupClaudeLane(_ context.Context, lane daemonpkg.LaneRecord) error {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	actor := coordinator.laneActors[lane.LaneSessionID]
+	if actor == nil {
+		if err := exactClaudeWorkerAbsent(lane); err != nil {
+			return err
+		}
+		return cleanupDaemonLaneWorktree(lane)
+	}
+	if err := actor.matchesLane(lane); err != nil {
+		return err
+	}
+	actor.mu.Lock()
+	select {
+	case <-actor.stopped:
+		actor.mu.Unlock()
+		delete(coordinator.laneActors, lane.LaneSessionID)
+		return cleanupDaemonLaneWorktree(lane)
+	default:
+		actor.mu.Unlock()
+		return errors.New("claude lane worker is still live during cleanup")
+	}
+}
+
+func startClaudeDaemonLaneActor(ctx context.Context, lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) (*claudeDaemonLaneActor, error) {
+	profile, err := canonicalClaudeProfile(stringValue(lane.NativeActor["profile"]))
+	if err != nil {
+		return nil, err
+	}
+	source, err := claudeprofile.SharedSource(profile)
+	if err != nil {
+		return nil, err
+	}
+	executable, err := claudeDaemonExecutable()
+	if err != nil {
+		return nil, err
+	}
+	sessionID := defaultString(stringValue(lane.NativeActor["session_id"]), claudeDaemonLaneSessionID(lane.LaneSessionID))
+	state, native, err := claudeDaemonLaneWorkerState(lane, turn, profile, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.Command(executable, claudeLaneWorkerArgs(state)...) //nolint:gosec // resolved native Claude executable and validated lane options.
+	command.Dir = lane.Cwd
+	command.Env = claudeLaneWorkerEnv(os.Environ(), sessionID, source)
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	command.Stderr = io.Discard
+	if err := command.Start(); err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	identity, err := captureClaudeDaemonWorkerIdentity(ctx, command.Process.Pid)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return nil, err
+	}
+	actor := &claudeDaemonLaneActor{
+		laneSessionID: lane.LaneSessionID, sessionID: sessionID, name: state.Name,
+		cwd: lane.Cwd, profile: profile, permission: lane.PermissionMode,
+		streamID:  claudeDaemonTurnStreamID(lane.ActiveTurnID),
+		workerPID: command.Process.Pid, workerStart: identity.Start, workerStrong: identity.StrongStart,
+		originalCwd: stringValue(native["original_cwd"]), worktreePath: stringValue(native["worktree_path"]),
+		command: command, input: stdin, stopped: make(chan struct{}),
+	}
+	go actor.run(stdout)
+	return actor, nil
+}
+
+func claudeDaemonLaneWorkerState(
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+	profile, sessionID string,
+) (claudeLaneState, map[string]any, error) {
+	state := claudeLaneState{
+		Name: defaultString(strings.TrimSpace(lane.Name), lane.LaneSessionID), SessionID: sessionID,
+		Cwd: lane.Cwd, PermissionMode: lane.PermissionMode,
+		WorkerSessionStarted: stringValue(lane.NativeActor["session_id"]) == sessionID &&
+			claudeDaemonNativeTranscriptExists(profile, sessionID),
+	}
+	native := daemonLaneNativeOptions(turn)
+	state.Model = stringValue(native["model"])
+	state.Effort = stringValue(native["effort"])
+	state.MaxBudgetUSD = stringValue(native["max_budget_usd"])
+	state.Tools, state.ToolsSet = stringValue(native["tools"]), boolValue(native["tools_set"])
+	state.AllowedTools, state.AllowedToolsSet = stringValue(native["allowed_tools"]), boolValue(native["allowed_tools_set"])
+	state.DisallowedTools, state.DisallowedToolsSet = stringValue(native["disallowed_tools"]), boolValue(native["disallowed_tools_set"])
+	outputSchema, err := daemonLaneRawJSON(native["output_schema"])
+	if err != nil {
+		return claudeLaneState{}, nil, err
+	}
+	state.OutputSchema = outputSchema
+	return state, native, nil
+}
+
+func captureClaudeDaemonWorkerIdentity(ctx context.Context, pid int) (procinfo.Info, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for attempts := 0; attempts < 100; attempts++ {
+		identity := procinfo.Read(pid)
+		if identity.Status == procinfo.Known && identity.Start != "" && identity.StrongStart != "" {
+			return identity, nil
+		}
+		if identity.Status == procinfo.Absent {
+			return procinfo.Info{}, errors.New("claude stream worker exited before identity capture")
+		}
+		select {
+		case <-ctx.Done():
+			return procinfo.Info{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	return procinfo.Info{}, errors.New("cannot capture exact Claude stream worker identity")
+}
+
+func (actor *claudeDaemonLaneActor) run(stdout io.Reader) {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 4096), 16*maxFrameBytes)
+	for scanner.Scan() {
+		var frame map[string]any
+		if json.Unmarshal(append([]byte(nil), scanner.Bytes()...), &frame) != nil {
+			continue
+		}
+		actor.recordFrame(frame)
+	}
+	scanErr := scanner.Err()
+	waitErr := actor.command.Wait()
+	actor.finish(scanErr, waitErr)
+}
+
+func (actor *claudeDaemonLaneActor) recordFrame(frame map[string]any) {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	turn := actor.current
+	if turn == nil {
+		return
+	}
+	clonedFrame := cloneClaudeDaemonFrame(frame)
+	if stringValue(clonedFrame["session_id"]) == "" {
+		clonedFrame["session_id"] = actor.sessionID
+	}
+	if stringValue(clonedFrame["type"]) == "result" {
+		clonedFrame["native_turn_id"] = turn.id
+		if _, ok := clonedFrame["exit_code"]; !ok {
+			clonedFrame["exit_code"] = claudeDaemonResultExit(clonedFrame)
+		}
+		if turn.interrupted {
+			clonedFrame["subtype"], clonedFrame["terminal_reason"], clonedFrame["is_error"], clonedFrame["exit_code"] =
+				"interrupted", "interrupted", true, 130
+		}
+	}
+	turn.frames = append(turn.frames, clonedFrame)
+	if stringValue(clonedFrame["type"]) == "result" && !turn.terminal {
+		turn.terminal = true
+		close(turn.done)
+	}
+}
+
+func (actor *claudeDaemonLaneActor) finish(scanErr, waitErr error) {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	actor.waitErr = errors.Join(scanErr, waitErr)
+	if turn := actor.current; turn != nil && !turn.terminal {
+		subtype, exitCode := "error_during_execution", 1
+		if turn.interrupted || actor.closing {
+			subtype, exitCode = "interrupted", 130
+		}
+		frame := map[string]any{
+			"type": "result", "subtype": subtype, "session_id": actor.sessionID,
+			"native_turn_id": turn.id, "is_error": true, "exit_code": exitCode,
+		}
+		if actor.waitErr != nil {
+			frame["error"] = actor.waitErr.Error()
+		}
+		turn.frames = append(turn.frames, frame)
+		turn.terminal = true
+		close(turn.done)
+	}
+	close(actor.stopped)
+}
+
+func (actor *claudeDaemonLaneActor) startTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	if err := actor.matchesLaneForStart(lane); err != nil {
+		return nil, err
+	}
+	prompt := stringValue(turn.InputReference["prompt"])
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-actor.stopped:
+		return nil, errors.New("claude stream worker is no longer running")
+	default:
+	}
+	if actor.current != nil && actor.current.id == turn.TurnID {
+		return actor.evidenceLocked(turn.TurnID, actor.current.streamID, true), nil
+	}
+	if actor.current != nil && !actor.current.terminal {
+		return nil, errors.New("claude stream worker already has an active native turn")
+	}
+	streamID := claudeDaemonTurnStreamID(turn.TurnID)
+	native := &claudeDaemonStreamTurn{id: turn.TurnID, streamID: streamID, done: make(chan struct{})}
+	actor.current, actor.streamID = native, streamID
+	body, err := json.Marshal(map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user", "content": []map[string]any{{"type": "text", "text": prompt}},
+		},
+	})
+	if err != nil {
+		actor.current = nil
+		return nil, err
+	}
+	if _, err := actor.input.Write(append(body, '\n')); err != nil {
+		actor.current = nil
+		return nil, fmt.Errorf("submit Claude native stream turn: %w", err)
+	}
+	return actor.evidenceLocked(turn.TurnID, streamID, true), nil
+}
+
+func (actor *claudeDaemonLaneActor) reconnect(
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	if err := actor.matchesLane(lane); err != nil {
+		return nil, err
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if actor.current == nil || actor.current.id != stringValue(turn.NativeTurnIdentity["native_turn_id"]) ||
+		actor.current.streamID != stringValue(turn.NativeTurnIdentity["stream_id"]) {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if err := actor.exactProcessLocked(); err != nil {
+		return nil, err
+	}
+	result := actor.evidenceLocked(actor.current.id, actor.current.streamID, true)
+	result["reconnectable"], result["reconnect_token"] = true, actor.current.streamID
+	return result, nil
+}
+
+func (actor *claudeDaemonLaneActor) interrupt(lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) error {
+	if err := actor.matchesLane(lane); err != nil {
+		return err
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if actor.current == nil || actor.current.id != stringValue(turn.NativeTurnIdentity["native_turn_id"]) ||
+		actor.current.streamID != stringValue(turn.NativeTurnIdentity["stream_id"]) {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if actor.current.terminal {
+		return nil
+	}
+	if err := actor.exactProcessLocked(); err != nil {
+		return err
+	}
+	actor.current.interrupted = true
+	return actor.command.Process.Signal(os.Interrupt)
+}
+
+func (actor *claudeDaemonLaneActor) collect(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (map[string]any, error) {
+	if err := actor.matchesLane(lane); err != nil {
+		return nil, err
+	}
+	actor.mu.Lock()
+	if actor.current == nil || actor.current.id != stringValue(turn.NativeTurnIdentity["native_turn_id"]) ||
+		actor.current.streamID != stringValue(turn.NativeTurnIdentity["stream_id"]) {
+		actor.mu.Unlock()
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	done := actor.current.done
+	actor.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-done:
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	frames := make([]any, len(actor.current.frames))
+	for index, frame := range actor.current.frames {
+		frames[index] = cloneClaudeDaemonFrame(frame.(map[string]any))
+	}
+	return map[string]any{"frames": frames}, nil
+}
+
+func (actor *claudeDaemonLaneActor) matchesLaneForStart(lane daemonpkg.LaneRecord) error {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if lane.LaneSessionID != actor.laneSessionID || lane.Cwd != actor.cwd || lane.PermissionMode != actor.permission ||
+		!matchesOptionalString(lane.NativeActor["session_id"], actor.sessionID) {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return actor.exactProcessLocked()
+}
+
+func (actor *claudeDaemonLaneActor) matchesLane(lane daemonpkg.LaneRecord) error {
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	if lane.LaneSessionID != actor.laneSessionID || stringValue(lane.NativeActor["session_id"]) != actor.sessionID ||
+		intValue(lane.NativeActor["worker_pid"]) != actor.workerPID ||
+		stringValue(lane.NativeActor["worker_proc_start"]) != actor.workerStart ||
+		stringValue(lane.NativeActor["worker_strong_start"]) != actor.workerStrong {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return nil
+}
+
+func (actor *claudeDaemonLaneActor) exactProcessLocked() error {
+	identity := procinfo.Read(actor.workerPID)
+	if identity.Status != procinfo.Known || identity.Start != actor.workerStart || identity.StrongStart != actor.workerStrong {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return nil
+}
+
+func (actor *claudeDaemonLaneActor) evidenceLocked(turnID, streamID string, includeWorker bool) map[string]any {
+	result := map[string]any{
+		"session_id": actor.sessionID, "native_turn_id": turnID, "stream_id": streamID,
+		"profile": actor.profile, "permission_mode": actor.permission,
+	}
+	if actor.worktreePath != "" {
+		result["worktree_path"], result["original_cwd"], result["cwd"] = actor.worktreePath, actor.originalCwd, actor.cwd
+	}
+	if includeWorker {
+		result["worker_pid"], result["worker_proc_start"], result["worker_strong_start"] =
+			actor.workerPID, actor.workerStart, actor.workerStrong
+	}
+	return result
+}
+
+func (actor *claudeDaemonLaneActor) stop(ctx context.Context) error {
+	actor.mu.Lock()
+	select {
+	case <-actor.stopped:
+		actor.mu.Unlock()
+		return nil
+	default:
+	}
+	if err := actor.exactProcessLocked(); err != nil {
+		actor.mu.Unlock()
+		return err
+	}
+	actor.closing = true
+	if actor.current != nil && !actor.current.terminal {
+		actor.current.interrupted = true
+	}
+	_ = actor.input.Close()
+	_ = actor.command.Process.Signal(os.Interrupt)
+	stopped := actor.stopped
+	actor.mu.Unlock()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return errors.New("claude stream worker did not stop after exact interrupt")
+	case <-stopped:
+		return nil
+	}
+}
+
+//nolint:gocyclo // Exact identity revalidation and bounded retirement remain one fail-closed operation.
+func retireReconstructedClaudeWorker(ctx context.Context, pid int, start, strong string) error {
+	if pid <= 1 || start == "" || strong == "" {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	identity := procinfo.Read(pid)
+	switch identity.Status {
+	case procinfo.Absent:
+		return nil
+	case procinfo.Known:
+		if identity.Start != start || identity.StrongStart != strong {
+			return daemonpkg.ErrAttachmentEvidenceChanged
+		}
+	case procinfo.Unknown:
+		return errors.New("cannot determine reconstructed Claude worker status")
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return errors.New("reconstructed Claude stream worker did not stop after exact interrupt")
+		case <-ticker.C:
+			observed := procinfo.Read(pid)
+			if observed.Status == procinfo.Absent {
+				return nil
+			}
+			if observed.Status == procinfo.Known && (observed.Start != start || observed.StrongStart != strong) {
+				return daemonpkg.ErrAttachmentEvidenceChanged
+			}
+		}
+	}
+}
+
+func exactClaudeWorkerAbsent(lane daemonpkg.LaneRecord) error {
+	pid := intValue(lane.NativeActor["worker_pid"])
+	if pid <= 1 {
+		return nil
+	}
+	identity := procinfo.Read(pid)
+	if identity.Status == procinfo.Absent {
+		return nil
+	}
+	if identity.Status == procinfo.Known &&
+		(identity.Start != stringValue(lane.NativeActor["worker_proc_start"]) ||
+			identity.StrongStart != stringValue(lane.NativeActor["worker_strong_start"])) {
+		return daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	return errors.New("claude lane worker is still live during cleanup")
+}
+
+func claudeDaemonNativeTranscriptExists(profile, sessionID string) bool {
+	entries, err := os.ReadDir(filepath.Join(profile, "projects"))
+	if err != nil {
+		return false
+	}
+	matches := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, statErr := os.Lstat(filepath.Join(profile, "projects", entry.Name(), sessionID+".jsonl"))
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+			return false
+		}
+		matches++
+	}
+	return matches == 1
+}
+
+func claudeDaemonLaneSessionID(laneSessionID string) string {
+	if looksLikeUUID(laneSessionID) {
+		return laneSessionID
+	}
+	// randomID is not safe here: the native session identity must be derivable
+	// after a crash between durable acceptance and dispatch-result persistence.
+	digest := sha256.Sum256([]byte("claude-lane:" + laneSessionID))
+	digest[6] = (digest[6] & 0x0f) | 0x40
+	digest[8] = (digest[8] & 0x3f) | 0x80
+	encoded := hex.EncodeToString(digest[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", encoded[:8], encoded[8:12], encoded[12:16], encoded[16:20], encoded[20:])
+}
+
+func claudeDaemonTurnStreamID(turnID string) string {
+	digest := sha256.Sum256([]byte("claude-stream:" + turnID))
+	return "stream-" + hex.EncodeToString(digest[:12])
+}
+
+func claudeDaemonResultExit(frame map[string]any) int {
+	if !boolValue(frame["is_error"]) && stringValue(frame["subtype"]) == "success" {
+		return 0
+	}
+	if stringValue(frame["subtype"]) == "interrupted" || stringValue(frame["terminal_reason"]) == "interrupted" {
+		return 130
+	}
+	return 1
+}
+
+func cloneClaudeDaemonFrame(frame map[string]any) map[string]any {
+	result := make(map[string]any, len(frame))
+	for key, value := range frame {
+		switch typed := value.(type) {
+		case map[string]any:
+			result[key] = cloneClaudeDaemonFrame(typed)
+		case []any:
+			values := make([]any, len(typed))
+			for index, item := range typed {
+				if nested, ok := item.(map[string]any); ok {
+					values[index] = cloneClaudeDaemonFrame(nested)
+				} else {
+					values[index] = item
+				}
+			}
+			result[key] = values
+		default:
+			result[key] = value
+		}
+	}
+	return result
+}
 
 type claudeLaneOptions struct {
 	laneCommonOptions
@@ -296,21 +1010,6 @@ func claudeLaneOperationalOptions(o claudeLaneOptions) []laneOptionCheck {
 func claudeLaneNonWaitOptions(o claudeLaneOptions) []laneOptionCheck {
 	checks := claudeLaneOperationalOptions(o)
 	return append(checks, laneOption("--all", o.all), laneOption("--json", o.json))
-}
-
-//nolint:dupl // Declarative product binding is intentionally explicit; dispatch mechanics live in runProductLaneCommand.
-func runClaudeLaneCommand(argv []string) int {
-	return runProductLaneCommand(argv, productLaneCommands[claudeLaneOptions]{
-		binary: "claude-peer-lane", usage: claudeLaneUsage, parse: parseClaudeLaneArgs, parseExit: 1,
-		help: func(o claudeLaneOptions) bool { return o.help },
-		prepare: func(o claudeLaneOptions) (claudeLaneOptions, error) {
-			return withClaudeLaneLaunchContext(o), nil
-		},
-		command: func(o claudeLaneOptions) string { return o.command },
-		start:   startClaudeLane, resume: resumeClaudeLane, wait: waitClaudeLane, status: statusClaudeLane,
-		interrupt: interruptClaudeLane, archive: archiveClaudeLane, list: listClaudeLanes,
-		doctor: func(claudeLaneOptions) (int, error) { return doctorClaudeLane() },
-	})
 }
 
 func withClaudeLaneLaunchContext(o claudeLaneOptions) claudeLaneOptions {
@@ -1141,14 +1840,6 @@ func acknowledgeClaudeLaneTurn(paths nativePaths, sessionID, turnID string) erro
 	return writeClaudeLaneStateUnlocked(paths, state)
 }
 
-func statusClaudeLane(o claudeLaneOptions) (int, error) {
-	state, err := resolveClaudeLaneState(resolveNativePaths(), o.target)
-	if err != nil {
-		return 1, err
-	}
-	return 0, emitLane(claudeLaneStatusEvent(state))
-}
-
 func claudeLaneStatusEvent(state claudeLaneState) map[string]any {
 	var outcome, exit any
 	if turn := claudeLaneReportedTurn(state); turn != nil && turn.Outcome != "" {
@@ -1361,64 +2052,6 @@ func claudePrivateEnvironmentBlocked(name string) bool {
 	}
 }
 
-func interruptClaudeLane(o claudeLaneOptions) (int, error) {
-	state, err := resolveClaudeLaneState(resolveNativePaths(), o.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.Status == "archived" {
-		return 1, fmt.Errorf("claude lane %s is archived", state.SessionID)
-	}
-	response, err := requestControl(state.ControlSocket, map[string]any{"action": "interrupt", "sessionId": state.SessionID}, 5*time.Second)
-	if err != nil {
-		return 1, err
-	}
-	return 0, emitLane(map[string]any{"type": "turn.interrupted", "thread_id": state.SessionID, "turn_id": response["turnId"]})
-}
-
-func archiveClaudeLane(o claudeLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveClaudeLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.Status == "archived" {
-		if state.CleanupError != "" {
-			if err := forceArchiveClaudeLane(paths, state.SessionID, "retry failed cleanup"); err != nil {
-				return 1, fmt.Errorf("retry Claude lane cleanup after %s: %w", state.CleanupError, err)
-			}
-		}
-		return 0, emitLane(map[string]any{"type": "lane.archived", "product": "claude", "name": state.Name, "thread_id": state.SessionID, "already_archived": true})
-	}
-	if probeUnixSocket(state.ControlSocket, 250*time.Millisecond) {
-		if _, err := requestControl(state.ControlSocket, map[string]any{"action": "archive", "sessionId": state.SessionID}, 10*time.Second); err != nil {
-			return 1, err
-		}
-		if err := waitClaudeLaneArchived(paths, state.SessionID, 10*time.Second); err != nil {
-			return 1, err
-		}
-	} else if err := forceArchiveClaudeLane(paths, state.SessionID, "manager unavailable"); err != nil {
-		return 1, err
-	}
-	return 0, emitLane(map[string]any{"type": "lane.archived", "product": "claude", "name": state.Name, "thread_id": state.SessionID})
-}
-
-func waitClaudeLaneArchived(paths nativePaths, sessionID string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		state, err := readClaudeLaneState(paths, sessionID)
-		if err == nil && state.CleanupError != "" {
-			return fmt.Errorf("claude lane cleanup failed: %s", state.CleanupError)
-		}
-		if err == nil && state.Status == "archived" &&
-			state.ManagerPID == 0 && state.WorkerPID == 0 && state.WorkerSocket == "" {
-			return nil
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return errors.New("timed out waiting for claude lane cleanup")
-}
-
 type claudeLaneManager struct {
 	mu                 sync.Mutex
 	paths              nativePaths
@@ -1442,42 +2075,6 @@ type claudeLaneManager struct {
 type claudeLaneWrite struct {
 	turnID string
 	body   []byte
-}
-
-func runClaudeLaneManager(argv []string) int {
-	args := parseArgs(argv)
-	sessionID := args["session-id"]
-	if !validSessionID(sessionID) {
-		fmt.Fprintln(os.Stderr, "claude-lane-manager requires --session-id")
-		return 2
-	}
-	paths := resolveNativePaths()
-	state, err := readClaudeLaneState(paths, sessionID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "claude-lane-manager: %v\n", err)
-		return 1
-	}
-	m := &claudeLaneManager{
-		paths: paths, state: state, workerDone: make(chan error, 1), done: make(chan struct{}),
-		writeQueue: make(chan claudeLaneWrite, 1),
-	}
-	if err := m.start(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-lane-manager: %v\n", err)
-		_ = forceArchiveClaudeLane(paths, sessionID, "manager startup failed")
-		return 1
-	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	for {
-		select {
-		case <-signals:
-			if m.shutdown("manager signalled", true) {
-				return 0
-			}
-		case <-m.done:
-			return 0
-		}
-	}
 }
 
 func (m *claudeLaneManager) start() error {
@@ -2861,7 +3458,7 @@ func cleanupClaudeNativeWorkerPeer(paths nativePaths, state claudeLaneState) err
 	if !ownedClaudeWorkerSocketPath(workerSocket, paths.runtimeDir, state.WorkerPID) {
 		return errors.New("native Claude worker socket is not PID-bound")
 	}
-	keyName, err := federator.ClaudeServiceKeyName(state.WorkerPID, workerSocket)
+	keyName, err := federation.ClaudeServiceKeyName(state.WorkerPID, workerSocket)
 	if err != nil {
 		return errors.New("native Claude worker peer-token sidecar path is invalid")
 	}

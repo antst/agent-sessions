@@ -12,7 +12,7 @@ import subprocess
 
 
 GATES = (
-    "normal", "race", "vet", "lint", "focused_contracts", "quickstart",
+    "normal", "race", "vet", "lint", "focused_contracts", "source_pointers", "quickstart",
     "permissions", "federation", "prebuilt_install", "owner_nonmutation",
 )
 

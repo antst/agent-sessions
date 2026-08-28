@@ -20,3 +20,9 @@ func DarwinServiceObservabilityManifest() []ObservabilitySink {
 		{ID: "host.service.darwin.stdout.normal", Owner: DarwinServiceObservabilityOwner, Boundary: "launchd.stdout", Variant: "normal", Format: "text"},
 	}
 }
+
+// PlatformServiceObservabilityManifest returns the service-manager fragment
+// applicable to this test binary's platform.
+func PlatformServiceObservabilityManifest() []ObservabilitySink {
+	return append([]ObservabilitySink(nil), DarwinServiceObservabilityManifest()...)
+}

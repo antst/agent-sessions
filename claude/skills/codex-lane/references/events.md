@@ -18,7 +18,7 @@ to a file and parse it; do not rely on `jq` being installed.
 | `turn.interrupted` | `interrupt` | `thread_id`, `turn_id` |
 | `lane.status` | `status` | see below |
 | `lane.list` | `list` | `contract_version`, `lanes` |
-| `lane.doctor` | `doctor --json` | `contract_version`, reachability, runtime/profile paths |
+| `lane.doctor` | `doctor --json` | product, `ready`, and daemon authority |
 | `lane.archived` | `archive` | `name`, `thread_id`, `notices_dropped` or `already_archived`; repeated archive also reports `retirement_reasserted` |
 | `error` | any | `message`, `timeout` |
 
@@ -77,14 +77,12 @@ live Codex or Claude owner can be corroborated.
 
 `auto_archive_at` is a Unix-millisecond deadline or `null`. It is armed only after the latest turn
 has reached its final terminal state and cleared when a newer turn starts. It is a not-before
-deadline; cleanup normally occurs within five seconds afterward on the supervisor's next
-reconciliation tick.
+deadline; the daemon owns cleanup after it expires.
 `auto_archive_after_seconds` is the persisted grace duration and defaults to `60`.
 
-`lane.doctor` carries `runtime_version`, `runtime_path`, `appserver_reachable`,
-`appserver_socket`, `supervisor_reachable`, `supervisor_socket`, `codex_home`, and `state_root`.
-The command exits non-zero when either service is unreachable even though its JSON report is still
-complete.
+`lane.doctor` carries product, `ready`, and `authority`. Require `ready: true` and
+`authority: "daemon"`; the command exits non-zero when the fixed host control endpoint or product
+adapter is unavailable.
 
 ## Accounting
 

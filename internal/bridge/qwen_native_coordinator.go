@@ -16,7 +16,6 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
@@ -33,6 +32,7 @@ type qwenNativeCoordinator struct {
 	mu        sync.Mutex
 	actors    map[string]*qwenDaemonActor
 	sessions  map[string]string
+	lanes     map[string]*qwenDaemonLaneActor
 	recovered bool
 }
 
@@ -49,8 +49,8 @@ type qwenDaemonActor struct {
 	inputPath     string
 	eventPath     string
 	recordPath    string
-	inputIdentity federator.QwenArtifactAttestation
-	eventIdentity federator.QwenArtifactAttestation
+	inputIdentity qwenreadiness.ArtifactAttestation
+	eventIdentity qwenreadiness.ArtifactAttestation
 
 	ownerPID       int
 	ownerProcStart string
@@ -73,8 +73,8 @@ type qwenDaemonActorRecord struct {
 	Profile        qwenprofile.Identity              `json:"profile"`
 	Version        string                            `json:"version"`
 	ActorRoot      string                            `json:"actor_root"`
-	Input          federator.QwenArtifactAttestation `json:"input"`
-	Events         federator.QwenArtifactAttestation `json:"events"`
+	Input          qwenreadiness.ArtifactAttestation `json:"input"`
+	Events         qwenreadiness.ArtifactAttestation `json:"events"`
 	OwnerPID       int                               `json:"owner_pid,omitempty"`
 	OwnerStart     string                            `json:"owner_start,omitempty"`
 	ParentPID      int                               `json:"parent_pid,omitempty"`
@@ -86,7 +86,10 @@ type qwenDaemonActorRecord struct {
 }
 
 func newQwenNativeCoordinator() *qwenNativeCoordinator {
-	return &qwenNativeCoordinator{actors: make(map[string]*qwenDaemonActor), sessions: make(map[string]string)}
+	return &qwenNativeCoordinator{
+		actors: make(map[string]*qwenDaemonActor), sessions: make(map[string]string),
+		lanes: make(map[string]*qwenDaemonLaneActor),
+	}
 }
 
 // PrepareInteractive creates exact dual-output artifacts and returns a direct Qwen handoff.
@@ -259,11 +262,16 @@ func (coordinator *qwenNativeCoordinator) recoverActorsLocked() {
 func (coordinator *qwenNativeCoordinator) close() {
 	coordinator.mu.Lock()
 	actors := coordinator.actors
+	lanes := coordinator.lanes
 	coordinator.actors = make(map[string]*qwenDaemonActor)
 	coordinator.sessions = make(map[string]string)
+	coordinator.lanes = make(map[string]*qwenDaemonLaneActor)
 	coordinator.mu.Unlock()
 	for _, actor := range actors {
 		actor.suspend()
+	}
+	for _, lane := range lanes {
+		lane.stop()
 	}
 }
 
@@ -303,7 +311,7 @@ func (actor *qwenDaemonActor) prepare() error {
 			return err
 		}
 		closeErr := file.Close()
-		attestation, err := federator.QwenArtifactAttestationForPath(path)
+		attestation, err := qwenreadiness.AttestArtifact(path)
 		if err != nil {
 			return err
 		}
@@ -320,10 +328,10 @@ func (actor *qwenDaemonActor) prepare() error {
 }
 
 func (actor *qwenDaemonActor) rollbackPreparation() {
-	if federator.QwenArtifactIdentityMatches(actor.inputIdentity) {
+	if qwenreadiness.ArtifactIdentityMatches(actor.inputIdentity) {
 		_ = os.Remove(actor.inputPath)
 	}
-	if federator.QwenArtifactIdentityMatches(actor.eventIdentity) {
+	if qwenreadiness.ArtifactIdentityMatches(actor.eventIdentity) {
 		_ = os.Remove(actor.eventPath)
 	}
 	removeJSONIf(actor.recordPath, func(row map[string]any) bool {
@@ -391,8 +399,8 @@ func (actor *qwenDaemonActor) inspect() (qwenDaemonSession, error) {
 		return qwenDaemonSession{}, ErrQwenReadinessUnavailable
 	}
 	if exactProcessIdentityStatus(actor.ownerPID, actor.ownerProcStart).Status != processIdentityMatches ||
-		!federator.QwenArtifactIdentityMatches(actor.inputIdentity) ||
-		!federator.QwenArtifactIdentityMatches(actor.eventIdentity) {
+		!qwenreadiness.ArtifactIdentityMatches(actor.inputIdentity) ||
+		!qwenreadiness.ArtifactIdentityMatches(actor.eventIdentity) {
 		return qwenDaemonSession{}, daemonpkg.ErrAttachmentEvidenceChanged
 	}
 	return actor.sessionLocked(), nil
@@ -539,10 +547,10 @@ func (actor *qwenDaemonActor) retire() {
 		actor.input = nil
 	}
 	_ = actor.persist(false)
-	if federator.QwenArtifactIdentityMatches(actor.inputIdentity) {
+	if qwenreadiness.ArtifactIdentityMatches(actor.inputIdentity) {
 		_ = os.Remove(actor.inputPath)
 	}
-	if federator.QwenArtifactIdentityMatches(actor.eventIdentity) {
+	if qwenreadiness.ArtifactIdentityMatches(actor.eventIdentity) {
 		_ = os.Remove(actor.eventPath)
 	}
 	_ = os.Remove(actor.actorRoot)
@@ -564,7 +572,7 @@ func recoverQwenDaemonActor(path string) *qwenDaemonActor {
 	record, ok := readQwenDaemonActorRecord(path)
 	if !ok || !record.Active || !validSessionID(record.SessionID) || record.CoordinatorID == "" ||
 		!filepath.IsAbs(record.Cwd) || !filepath.IsAbs(record.ActorRoot) ||
-		!federator.QwenArtifactIdentityMatches(record.Input) || !federator.QwenArtifactIdentityMatches(record.Events) {
+		!qwenreadiness.ArtifactIdentityMatches(record.Input) || !qwenreadiness.ArtifactIdentityMatches(record.Events) {
 		return nil
 	}
 	actor := &qwenDaemonActor{

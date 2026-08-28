@@ -8,13 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
@@ -228,27 +226,6 @@ func readGrokLaunchRecord(path string) *grokLaunchRecord {
 		return nil
 	}
 	return &record
-}
-
-// runGrokSafetyCommand exposes the read-only process inventory needed by the
-// installer. It never terminates a TUI or leader: the user must exit the
-// owning grok-peer normally so its host can clean up the exact process group.
-func runGrokSafetyCommand(argv []string) int {
-	if len(argv) != 1 || argv[0] != "stopped" {
-		fmt.Fprintln(os.Stderr, "usage: agent-session-runtime grok stopped")
-		return 2
-	}
-	live, err := activeGrokLaunchSessions(resolveNativePaths())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok stopped: %v\n", err)
-		return 1
-	}
-	encoded, _ := json.Marshal(map[string]any{"stopped": len(live) == 0, "liveSessionIds": live})
-	fmt.Println(string(encoded))
-	if len(live) > 0 {
-		return 3
-	}
-	return 0
 }
 
 //nolint:gocyclo // Installer inventory deliberately validates every durable ownership source fail-closed.
@@ -806,7 +783,8 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 	}
 }
 
-func (c *grokACPClient) notifyRequest(method string, params map[string]any) error {
+func (c *grokACPClient) notifyRequest(params map[string]any) error {
+	const method = "session/cancel"
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "method": method, "params": params,
 	})
@@ -2202,58 +2180,3 @@ func (h *grokHost) ensurePeerPublished() error {
 }
 
 func strconvItoa(value int) string { return fmt.Sprintf("%d", value) }
-
-// runGrokHostCommand is the native runtime subcommand implementation. Main's
-// dispatch is deliberately a separate, one-line integration hook.
-func runGrokHostCommand(argv []string) int {
-	flags := flag.NewFlagSet("grok-host", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	var config grokHostConfig
-	flags.StringVar(&config.GrokBin, "grok-bin", "", "headless-capable Grok CLI")
-	flags.StringVar(&config.SessionID, "session-id", "", "exact Grok session id")
-	flags.StringVar(&config.Cwd, "cwd", "", "session cwd")
-	flags.IntVar(&config.OwnerPID, "owner-pid", 0, "TUI owner pid")
-	flags.StringVar(&config.OwnerProcStart, "owner-proc-start", "", "TUI owner process-start token")
-	flags.StringVar(&config.RuntimeDir, "runtime-dir", "", "private runtime parent")
-	flags.StringVar(&config.Name, "name", "", "published peer name")
-	flags.BoolVar(&config.NameSpecified, "name-specified", false, "published peer name was explicit")
-	flags.StringVar(&config.PermissionMode, "permission-mode", "default", "published permission class")
-	flags.StringVar(&config.AgentRuntimeDir, "agent-runtime-dir", "", "Agent Sessions host-agent runtime directory")
-	flags.BoolVar(&config.LateBoundResume, "late-bound-resume", false, "adopt the native Grok title selection")
-	groupsJSON := "[]"
-	flags.StringVar(&groupsJSON, "groups-json", groupsJSON, "explicit peer groups")
-	flags.BoolVar(&config.GroupsSpecified, "groups-specified", false, "explicit groups were supplied")
-	flags.StringVar(&config.ParentSession, "parent-session", "", "attested parent session")
-	flags.BoolVar(&config.ParentSpecified, "parent-specified", false, "parent session was supplied")
-	flags.BoolVar(&config.InheritGroups, "inherit-parent-groups", false, "inherit parent groups")
-	flags.BoolVar(&config.InheritSet, "inherit-groups-specified", false, "group inheritance was supplied")
-	flags.BoolVar(&config.AlwaysApprove, "always-approve", false, "requested durable yolo policy")
-	flags.BoolVar(&config.AlwaysSet, "always-approve-specified", false, "yolo policy was supplied")
-	if err := flags.Parse(argv); err != nil || flags.NArg() != 0 {
-		return 2
-	}
-	if json.Unmarshal([]byte(groupsJSON), &config.Groups) != nil {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: invalid groups JSON")
-		return 2
-	}
-	config.LaunchToken = strings.TrimSpace(os.Getenv(grokLaunchTokenEnv))
-	host, err := newGrokHost(config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: %v\n", err)
-		return 1
-	}
-	host.config.readyWriter = os.Stdout
-	ctx, stop := signalContext()
-	defer stop()
-	if err := host.run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-func signalContext() (context.Context, context.CancelFunc) {
-	// signal.NotifyContext is isolated here so tests can drive hosts with their
-	// own contexts without installing process-global handlers.
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-}

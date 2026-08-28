@@ -1,18 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Read-only preflight shipped inside the portable Codex lane skill.
-#
-# Resolves how to invoke the lane runtime, reports whether that runtime satisfies
-# adapter contract version 2, and prints a single JSON object on stdout. It never
-# starts, installs, configures, or mutates anything.
-
-expected_contract_version=2
-state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
+# Read-only preflight for the canonical host client. It never starts, installs,
+# configures, or repairs the user daemon.
 
 json_string() {
-  # Keep this expression portable to both GNU and BSD sed. In BSD sed, \r
-  # in a pattern matches the letter r rather than a carriage return.
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g')"
 }
 
@@ -20,87 +12,41 @@ json_bool() {
   if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi
 }
 
-runtime_path=""
-invocation=""
+launcher="$(command -v codex-peer-lane 2>/dev/null || true)"
 launcher_found=0
-if command -v codex-peer-lane >/dev/null 2>&1; then
-  launcher_found=1
-fi
-if [ -f "$state_root/native-runtime-path" ]; then
-  runtime_path="$(sed -n 1p "$state_root/native-runtime-path" 2>/dev/null || true)"
-  if [ -n "$runtime_path" ] && [ -x "$runtime_path" ]; then
-    # Report the exact binary this preflight validated. A launcher found on
-    # PATH may belong to a different installation root and select another
-    # runtime when it bootstraps.
-    invocation="$runtime_path lane"
-  else
-    runtime_path=""
-  fi
-fi
-
-run_lane() {
-  "$runtime_path" lane "$@"
-}
-
-runtime_found=0
-help_text=""
-if [ -n "$invocation" ]; then
-  runtime_found=1
-  help_text="$(run_lane --help 2>/dev/null || true)"
-fi
-
-list_supported=0
-doctor_supported=0
-case "$help_text" in
-  *"codex-peer-lane list"*) list_supported=1 ;;
-esac
-case "$help_text" in
-  *"codex-peer-lane doctor"*) doctor_supported=1 ;;
-esac
-
-doctor_json=""
-contract_version=""
+[ -z "$launcher" ] || launcher_found=1
+doctor_json=null
 doctor_exit=1
-if [ "$doctor_supported" = "1" ]; then
-  if doctor_json="$(run_lane doctor --json 2>/dev/null)"; then
+authority=""
+product=""
+ready=""
+
+if [ "$launcher_found" = "1" ]; then
+  if doctor_json="$("$launcher" doctor --json 2>/dev/null)"; then
     doctor_exit=0
   else
     doctor_exit=$?
   fi
-  case "$doctor_json" in
-    *'"contract_version"'*)
-      contract_version="$(printf '%s' "$doctor_json" |
-        sed -n 's/.*"contract_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-        sed -n 1p)"
-      ;;
-  esac
-fi
-[ -n "$doctor_json" ] || doctor_json="null"
-
-contract_ok=0
-if [ "$contract_version" = "$expected_contract_version" ] &&
-  [ "$list_supported" = "1" ] && [ "$doctor_supported" = "1" ]; then
-  contract_ok=1
+  authority="$(printf '%s' "$doctor_json" |
+    sed -n 's/.*"authority"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n 1p)"
+  product="$(printf '%s' "$doctor_json" |
+    sed -n 's/.*"product"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n 1p)"
+  ready="$(printf '%s' "$doctor_json" |
+    sed -n 's/.*"ready"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | sed -n 1p)"
 fi
 
-runtime_ready=0
-if [ "$contract_ok" = "1" ] && [ "$doctor_exit" = "0" ]; then
-  runtime_ready=1
+daemon_ready=0
+if [ "$doctor_exit" = "0" ] && [ "$authority" = "daemon" ] &&
+  [ "$product" = "codex" ] && [ "$ready" = "true" ]; then
+  daemon_ready=1
 fi
 
-if [ "$runtime_found" = "0" ]; then
-  if [ "$launcher_found" = "1" ]; then
-    summary="lane launcher is installed but the native runtime is not initialized; ask the user to run codex-peer-lane doctor once in a host terminal, then rerun preflight"
-  else
-    summary="lane runtime is not installed; show the commands from references/install.md and stop"
-  fi
-elif [ "$contract_ok" = "1" ]; then
-  summary="lane contract is compatible, but App Server or the peer supervisor is unreachable; stop and report runtime unavailable"
+if [ "$launcher_found" = "0" ]; then
+  summary="Codex lane launcher is not installed; show references/install.md and stop"
+elif [ "$daemon_ready" = "0" ]; then
+  summary="Codex lane daemon or adapter is unavailable; report doctor and stop"
 else
-  summary="lane runtime predates adapter contract ${expected_contract_version}; stop and report the version gap"
-fi
-if [ "$runtime_ready" = "1" ]; then
-  summary="ready"
+  summary=ready
 fi
 
 peer_discovery=0
@@ -108,20 +54,14 @@ command -v claude >/dev/null 2>&1 && peer_discovery=1
 
 printf '{\n'
 printf '  "summary": %s,\n' "$(json_string "$summary")"
-printf '  "runtime_found": %s,\n' "$(json_bool "$runtime_found")"
 printf '  "launcher_found": %s,\n' "$(json_bool "$launcher_found")"
-printf '  "invocation": %s,\n' "$(json_string "$invocation")"
-printf '  "runtime_path": %s,\n' "$(json_string "$runtime_path")"
-printf '  "state_root": %s,\n' "$(json_string "$state_root")"
-printf '  "expected_contract_version": %s,\n' "$expected_contract_version"
-printf '  "contract_version": %s,\n' "${contract_version:-null}"
-printf '  "contract_ok": %s,\n' "$(json_bool "$contract_ok")"
-printf '  "runtime_ready": %s,\n' "$(json_bool "$runtime_ready")"
+printf '  "invocation": %s,\n' "$(json_string "$launcher")"
+printf '  "daemon_ready": %s,\n' "$(json_bool "$daemon_ready")"
 printf '  "doctor_exit": %s,\n' "$doctor_exit"
-printf '  "list_supported": %s,\n' "$(json_bool "$list_supported")"
-printf '  "doctor_supported": %s,\n' "$(json_bool "$doctor_supported")"
+printf '  "authority": %s,\n' "$(json_string "$authority")"
+printf '  "product": %s,\n' "$(json_string "$product")"
 printf '  "peer_discovery_cli": %s,\n' "$(json_bool "$peer_discovery")"
 printf '  "doctor": %s\n' "$doctor_json"
 printf '}\n'
 
-[ "$runtime_ready" = "1" ] || exit 1
+[ "$daemon_ready" = "1" ]

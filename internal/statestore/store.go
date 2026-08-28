@@ -70,11 +70,8 @@ type recordEnvelope struct {
 
 // Open validates or creates one owner-only store root.
 func Open(options Options) (*Store, error) {
-	if options.MaxRecordBytes <= 0 {
-		return nil, errors.New("state store requires a positive record bound")
-	}
-	if !filepath.IsAbs(options.Root) || filepath.Clean(options.Root) != options.Root || options.Root == string(filepath.Separator) {
-		return nil, fmt.Errorf("%w: state root must be a clean absolute non-root path", ErrUnsafeRecord)
+	if err := validateOpenOptions(options); err != nil {
+		return nil, err
 	}
 	if info, err := os.Lstat(options.Root); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !ownedByCurrentUser(info) {
@@ -98,6 +95,35 @@ func Open(options Options) (*Store, error) {
 	return &Store{
 		root: options.Root, maxRecordBytes: options.MaxRecordBytes, injectFault: options.InjectFault,
 	}, nil
+}
+
+// OpenExisting opens one already-created owner-only store without changing
+// filesystem state. It is the read-only/offline counterpart to Open: missing
+// roots remain os.IsNotExist and unsafe permissions are rejected, never fixed.
+func OpenExisting(options Options) (*Store, error) {
+	if err := validateOpenOptions(options); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(options.Root)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !ownedByCurrentUser(info) || info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%w: state root is not an owner-only owned real directory", ErrUnsafeRecord)
+	}
+	return &Store{
+		root: options.Root, maxRecordBytes: options.MaxRecordBytes, injectFault: options.InjectFault,
+	}, nil
+}
+
+func validateOpenOptions(options Options) error {
+	if options.MaxRecordBytes <= 0 {
+		return errors.New("state store requires a positive record bound")
+	}
+	if !filepath.IsAbs(options.Root) || filepath.Clean(options.Root) != options.Root || options.Root == string(filepath.Separator) {
+		return fmt.Errorf("%w: state root must be a clean absolute non-root path", ErrUnsafeRecord)
+	}
+	return nil
 }
 
 // RecordPath returns a safe key's canonical record path or an empty string.

@@ -24,3 +24,9 @@ func LinuxServiceObservabilityManifest() []ObservabilitySink {
 		{ID: "linux.systemd.stderr.crash", Owner: LinuxServiceObservabilityOwner, Boundary: "stderr", Variant: "crash", Format: "json"},
 	}
 }
+
+// PlatformServiceObservabilityManifest returns the service-manager fragment
+// applicable to this test binary's platform.
+func PlatformServiceObservabilityManifest() []ObservabilitySink {
+	return append([]ObservabilitySink(nil), LinuxServiceObservabilityManifest()...)
+}

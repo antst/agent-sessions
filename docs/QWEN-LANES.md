@@ -1,87 +1,51 @@
-# Qwen Code worker lanes
+# Qwen lanes
 
-`qwen-peer-lane` is the durable, messageable Qwen target. One lane manager owns
-one stdio ACP client and one native Qwen conversation for the lane's lifetime.
-It never attaches a second writer to an interactive Qwen session.
+A Qwen lane is a durable daemon-owned Agent Sessions lane backed by a vendor-owned Qwen ACP/native
+session. `qwen-peer-lane` is an alias of the canonical `agent-sessions` image and a client of the
+already-running daemon. Native observation and input run as adapter goroutines; no Qwen host, lane
+manager, delivery listener, or remote watcher exists.
 
-## Commands
+## Lifecycle
 
-```text
-qwen-peer-lane run      --name NAME [OPTIONS] < prompt.md
-qwen-peer-lane start    --name NAME [OPTIONS] < prompt.md
-qwen-peer-lane resume   SESSION_OR_NAME [OPTIONS] < prompt.md
-qwen-peer-lane wait     SESSION_OR_NAME [--timeout SECONDS]
-qwen-peer-lane status   SESSION_OR_NAME
-qwen-peer-lane interrupt SESSION_OR_NAME
-qwen-peer-lane archive  SESSION_OR_NAME
-qwen-peer-lane list     [--all] [--mine]
-qwen-peer-lane doctor   --json
+```sh
+qwen-peer-lane start --name analysis --cd /srv/project --prompt-file prompt.txt
+qwen-peer-lane status --name analysis --json
+qwen-peer-lane wait --name analysis --json
+qwen-peer-lane interrupt --name analysis
+qwen-peer-lane resume --name analysis --prompt-file followup.txt
+qwen-peer-lane archive --name analysis
+qwen-peer-lane list --mine --json
+qwen-peer-lane doctor --json
 ```
 
-`start` returns after `lane.ready`; `run` starts and collects. Use exactly one
-`wait` collector. A successful collection acknowledges one terminal turn and
-is not replayed. `interrupt` normalizes to `outcome=interrupted`, exit 130.
-`archive` is idempotent. `resume` preserves the Agent Sessions lane UUID and
-resumes the persisted native Qwen UUID after native unarchive when necessary.
+`run` combines start and wait. The daemon commits a turn before native dispatch, records exact Qwen
+session/turn and event/input evidence, emits one terminal notice, and advances collection once. Resume,
+interrupt, and archive use the same exact durable identity.
 
-## ACP lifecycle
+Qwen owns the TUI/daemon/ACP worker, authentication, transcript, event/input and archive stores. The
+daemon owns parent context, existing global groups, permission proof, lane/turn state, notices,
+collection cursor, archive coordination, and cleanup debt.
 
-The manager launches `qwen --acp` with relaunch disabled, then performs one
-ordered client sequence:
+## Parent, groups, profiles, and permissions
 
-```text
-initialize
-session/new or session/resume
-session/set_mode (only when explicitly requested)
-session/prompt                 # serialized turns
-session/cancel                 # interrupt
-```
+The child always receives its private group and its parent's private group. Other parent groups are
+copied only with `--inherit-groups`; explicit `--group` values remain global across hosts.
 
-The `agent_sessions` MCP is injected exactly once into the new/resumed native
-session. Unknown notifications are ignored. Malformed, out-of-order, or
-unsupported-version responses fail closed. No second ACP client is created for
-follow-ups.
+`QWEN_HOME` and `QWEN_RUNTIME_DIR` select the exact native profile and runtime artifacts. They do not
+create another Agent Sessions daemon, state root, routing namespace, or access boundary. Permission
+mode is translated to native Qwen controls and the observed effective value is stored.
 
-Qwen owns native permission changes. `--no-yolo`, `--yolo`, and
-`--approval-mode MODE` select only the initial request; they conflict and are
-rejected before worker creation. Status distinguishes the durable launch
-preference, expected initial mode, and current observed mode or `unknown`.
+## Restart
 
-## Ownership, groups, and notices
+The daemon reconstructs the lane actor only from the admitted native session, event/input artifacts,
+and live ancestry. Accepted work is never redispatched. A supported Qwen session contract reconnects;
+otherwise the active turn becomes exactly one explicit interrupted, collectable, resumable result.
 
-A normal lane is owned by the exact live parent and archives when that parent
-exits. `--persistent` removes lifecycle ownership. Auto-archive defaults to a
-60-second terminal grace; use `--auto-archive-after SECONDS` or
-`--no-auto-archive` explicitly.
+## Archive and cleanup
 
-Every child receives its private destination anchor and the immediate parent's
-private anchor. Repeated `-g/--group` adds explicit groups. `--inherit-groups`
-adds the parent's non-private groups; `--no-inherit-groups` retains only the
-mandatory anchor. Parent-owned terminal notices route to the exact parent and
-carry a runnable `wait` command, including a non-default federator runtime dir.
-Remote federation owns lifecycle flags, so callers do not pass
-`--persistent`, `--notify`, or auto-archive flags to a remote lane request.
+Archive uses Qwen's native store and verifies the exact result before committing daemon state. Cleanup
+revalidates the profile, ancestry, native artifacts, session/turn, and revision. It never deletes Qwen
+credentials, profile settings, transcripts, native archive data, or unrelated files.
 
-## Native archive and cleanup
-
-Archive first closes turn admission, cancels an active turn, retires the exact
-ACP worker and detached tool roots, withdraws messaging, and then uses a short-
-lived token-authenticated loopback `qwen serve` helper for native
-archive/unarchive. The helper is capability-gated, bound to localhost on an
-ephemeral port, and stopped with its preheated child tree after the transaction.
-There is no long-lived Qwen network service.
-
-Manager, worker, tool-root, helper, owner, and socket identities are persisted
-with strong process starts. Crash reconciliation preserves reused PIDs and
-changed artifacts, records retryable debt, and removes only exact owned state.
-
-## Doctor
-
-`doctor --json` is session-free. It checks the exact executable/package and
-version floor, parser semantics, ACP `initialize` only, required session/MCP
-capabilities, native archive capability, trusted canonical cwd, selected
-profile identity, exact plugin inventory, and non-secret provider/credential
-configuration state. It does not create a transcript, authenticate a live
-model session, or claim the effective mode of a launch that has not happened.
-
-See [QWEN-ADAPTER.md](QWEN-ADAPTER.md) and [QWEN-INSTALL.md](QWEN-INSTALL.md).
+Remote Qwen lanes use the same destination daemon lane engine through the central hub. There is no
+SSH or alternate carrier fallback.

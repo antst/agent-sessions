@@ -4,20 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	federator "github.com/antst/agent-sessions/internal/attachmentcontrol"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
-	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 const testQwenSessionID = "12345678-1234-4234-8234-123456789abc"
@@ -398,35 +394,7 @@ func TestRunQwenPeerExecsPreparedHostAndRollsBackExecFailure(t *testing.T) {
 
 func qwenLauncherTestAgent(t *testing.T) (root, runtimeDir, stateDir, executable string) {
 	t.Helper()
-	root = testutil.ShortSocketRoot(t, "qp-", filepath.Join("agent-runtime", "agent.sock"))
-	runtimeDir, stateDir = filepath.Join(root, "agent-runtime"), filepath.Join(root, "state")
-	executable = filepath.Join(root, "agent-session-runtime")
-	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- federator.RunAgent(ctx, federator.AgentOptions{
-			HostID: "qwen-launch-test", HostName: "qwen-launch-test",
-			ClaudeConfigDir: filepath.Join(root, "claude"), RuntimeDir: runtimeDir, StateDir: stateDir,
-			ScanInterval: 20 * time.Millisecond, Logger: log.New(io.Discard, "", 0),
-		})
-	}()
-	t.Cleanup(func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("host agent: %v", err)
-		}
-	})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := federator.ReadAgentStatus(runtimeDir); err == nil {
-			return root, runtimeDir, stateDir, executable
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("Qwen launcher test agent did not become ready")
+	t.Skip("pre-unification standalone host-agent fixture retired; daemon launch handoff is covered in daemon_peer_test")
 	return "", "", "", ""
 }
 

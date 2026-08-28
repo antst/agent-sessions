@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1200,46 +1199,13 @@ func TestOrdinaryHookCommandWritesNoOutput(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
 	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "run", "missing-supervisor.sock"))
 
-	input, err := os.CreateTemp(root, "hook-input")
-	if err != nil {
-		t.Fatal(err)
+	input := strings.NewReader(`{"hook_event_name":"SessionStart","session_id":"00000000-0000-0000-0000-000000000a09","cwd":"` + root + `"}`)
+	var stdout, stderr bytes.Buffer
+	if code := RunHook(input, &stdout, &stderr); code != 0 {
+		t.Fatalf("ordinary hook command exit=%d", code)
 	}
-	if _, err := input.WriteString(`{"hook_event_name":"SessionStart","session_id":"00000000-0000-0000-0000-000000000a09","cwd":"` + root + `"}`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := input.Seek(0, 0); err != nil {
-		t.Fatal(err)
-	}
-	stdoutRead, stdoutWrite, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stderrRead, stderrWrite, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	originalStdin, originalStdout, originalStderr := os.Stdin, os.Stdout, os.Stderr
-	restored := false
-	restoreProcessIO := func() {
-		if restored {
-			return
-		}
-		restored = true
-		os.Stdin, os.Stdout, os.Stderr = originalStdin, originalStdout, originalStderr
-		_ = input.Close()
-		_ = stdoutWrite.Close()
-		_ = stderrWrite.Close()
-	}
-	t.Cleanup(restoreProcessIO)
-	os.Stdin, os.Stdout, os.Stderr = input, stdoutWrite, stderrWrite
-	runHookCommand()
-	restoreProcessIO()
-	stdout, _ := io.ReadAll(stdoutRead)
-	stderr, _ := io.ReadAll(stderrRead)
-	_ = stdoutRead.Close()
-	_ = stderrRead.Close()
-	if !bytes.Equal(stdout, nil) || !bytes.Equal(stderr, nil) {
-		t.Fatalf("ordinary hook command stdout=%q stderr=%q", stdout, stderr)
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("ordinary hook command stdout=%q stderr=%q", stdout.Bytes(), stderr.Bytes())
 	}
 }
 
@@ -1632,7 +1598,7 @@ func TestReconcileDoesNotReadResumeOrSubscribeOrdinaryLoadedThread(t *testing.T)
 		return map[string]any{}, nil
 	})
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", socket)
-	supervisor, err := newNativeSupervisor("test")
+	supervisor, err := newNativeSupervisor()
 	if err != nil {
 		t.Fatal(err)
 	}

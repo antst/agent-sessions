@@ -28,6 +28,23 @@ while [[ -L "$script_path" ]]; do
 	fi
 done
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+declared_version="$(<"$plugin_root/deploy/agent-sessions/VERSION")"
+if [[ "$version" != "$declared_version" ]]; then
+	printf 'release version %s does not match deploy/agent-sessions/VERSION (%s)\n' \
+		"$version" "$declared_version" >&2
+	exit 1
+fi
+known_platform=false
+while IFS='|' read -r _ _ release_platform; do
+	if [[ "$release_platform" == "$platform" ]]; then
+		known_platform=true
+		break
+	fi
+done < <("$plugin_root/scripts/release-inventory" platforms)
+if [[ "$known_platform" != true ]]; then
+	printf 'release platform is not in the authoritative four-platform inventory: %s\n' "$platform" >&2
+	exit 1
+fi
 binaries=()
 while IFS= read -r binary; do binaries+=("$binary"); done < <("$plugin_root/scripts/release-inventory" binaries)
 # This builds one transport archive containing the two independently deployed
@@ -41,7 +58,7 @@ for binary in "${binaries[@]}"; do
 		exit 1
 	fi
 done
-packager="${AGENT_SESSIONS_RELEASE_PACKAGER:-$binary_dir/agent-session-runtime}"
+packager="${AGENT_SESSIONS_RELEASE_PACKAGER:-$binary_dir/agent-sessions}"
 if [[ "$packager" != /* ]]; then
 	printf 'release packager must be an absolute path: %s\n' "$packager" >&2
 	exit 2
@@ -56,10 +73,26 @@ output_dir="$(cd -- "$output_dir" && pwd -P)"
 package_name="agent-sessions-${version}-${platform}"
 temporary_parent="$(cd -P -- "${TMPDIR:-/tmp}" && pwd)"
 stage="$(mktemp -d "$temporary_parent/agent-sessions-release.XXXXXX")"
+checksum_temporary=
 cleanup() {
 	rm -rf -- "$stage"
+	if [[ -n "$checksum_temporary" ]]; then
+		rm -f -- "$checksum_temporary"
+	fi
 }
 trap cleanup EXIT
+
+sha256_file() {
+	local path=$1
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum -- "$path" | awk '{print $1}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 -- "$path" | awk '{print $1}'
+	else
+		printf 'packaging requires sha256sum or shasum\n' >&2
+		return 127
+	fi
+}
 
 package_root="$stage/$package_name"
 mkdir -p "$package_root/bin/$platform"
@@ -71,7 +104,14 @@ for binary in "${binaries[@]}"; do
 	chmod 0755 "$package_root/bin/$platform/$binary"
 done
 : >"$package_root/.agent-sessions-prebuilt"
+bash "$plugin_root/scripts/stage-release-metadata" "$package_root" "$platform" "$version"
 
 archive="$output_dir/$package_name.tar.gz"
 "$packager" release-package "$stage" "$package_name" "$archive"
+archive_digest="$(sha256_file "$archive")"
+checksum="$archive.sha256"
+checksum_temporary="$(mktemp "$output_dir/.agent-sessions-archive-checksum.XXXXXX")"
+printf '%s  %s\n' "$archive_digest" "$(basename -- "$archive")" >"$checksum_temporary"
+mv -- "$checksum_temporary" "$checksum"
+checksum_temporary=
 printf '%s\n' "$archive"

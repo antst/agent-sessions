@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path=${BASH_SOURCE[0]}
+while [[ -L "$script_path" ]]; do
+	script_dir=$(cd -P -- "$(dirname -- "$script_path")" && pwd)
+	link_target=$(readlink -- "$script_path")
+	if [[ "$link_target" == /* ]]; then script_path=$link_target; else script_path=$script_dir/$link_target; fi
+done
+repository_root=$(cd -- "$(dirname -- "$script_path")/../.." && pwd -P)
+cd -- "$repository_root"
+
+root=$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-binary-builds.XXXXXX")
+cleanup() {
+	chmod -R u+w -- "$root" 2>/dev/null || true
+	rm -rf -- "$root"
+}
+trap cleanup EXIT
+
+snapshot_unrelated_commit() {
+	local label=$1 marker=$2
+	local source=$root/$label
+	mkdir -p "$source"
+	cp -- go.mod go.sum "$source/"
+	cp -R -- cmd internal "$source/"
+	printf '%s\n' "$marker" >"$source/.t074-build-identity"
+	(
+		cd -- "$source"
+		git init -q
+		git -c user.name='Agent Sessions acceptance' -c user.email='acceptance.invalid' add .
+		git -c user.name='Agent Sessions acceptance' -c user.email='acceptance.invalid' \
+			commit -q -m "T074 unrelated build $label"
+	)
+}
+
+build_revision() {
+	local label=$1
+	local source=$root/$label identity
+	identity=$(git -C "$source" rev-parse HEAD)
+	mkdir -p "$root/$label-bin"
+	(
+		cd -- "$source"
+		CGO_ENABLED=0 go build -trimpath \
+			-ldflags="-s -w -X github.com/antst/agent-sessions/internal/daemon.BuildVersion=commit-${identity:0:12}" \
+			-o "$root/$label-bin/agent-sessions" ./cmd/agent-sessions
+		CGO_ENABLED=0 go build -trimpath \
+			-ldflags="-s -w -X main.version=commit-${identity:0:12}" \
+			-o "$root/$label-bin/agent-sessions-hub" ./cmd/agent-sessions-hub
+	)
+}
+
+snapshot_unrelated_commit first first-independent-root
+snapshot_unrelated_commit second second-independent-root
+first_identity=$(git -C "$root/first" rev-parse HEAD)
+second_identity=$(git -C "$root/second" rev-parse HEAD)
+if git -C "$root/first" cat-file -e "$second_identity^{commit}" 2>/dev/null ||
+	git -C "$root/second" cat-file -e "$first_identity^{commit}" 2>/dev/null; then
+	printf 'binary-pair acceptance commits unexpectedly share an object database\n' >&2
+	exit 1
+fi
+build_revision first
+build_revision second
+
+# Build an actual incompatible hub image from the first exact source commit.
+# Only the protocol constant changes in this disposable source tree.
+mismatch_source=$root/mismatch
+cp -R -- "$root/first" "$mismatch_source"
+python3 - "$mismatch_source/internal/productcatalog/catalog.go" <<'PY'
+import pathlib,sys
+path=pathlib.Path(sys.argv[1])
+body=path.read_text()
+old="ProtocolVersion = 3"
+if body.count(old) != 1:
+    raise SystemExit("protocol constant was not an exact single replacement target")
+path.write_text(body.replace(old,"ProtocolVersion = 4"))
+PY
+mkdir -p "$root/mismatch-bin"
+(
+	cd -- "$mismatch_source"
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -X main.version=protocol-4-acceptance' \
+		-o "$root/mismatch-bin/agent-sessions-hub" ./cmd/agent-sessions-hub
+)
+
+python3 "$repository_root/scripts/federation/binary_pair_test.py" \
+	"$root/first-bin/agent-sessions" "$root/first-bin/agent-sessions-hub" \
+	"$root/second-bin/agent-sessions" "$root/second-bin/agent-sessions-hub" \
+	"$root/mismatch-bin/agent-sessions-hub"

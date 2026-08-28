@@ -1,68 +1,63 @@
 #!/bin/sh
 set -eu
 
-expected_contract_version=1
-state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
+# Read-only preflight for the canonical host client. It never starts, installs,
+# configures, or repairs the user daemon.
 
 json_string() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g')"
 }
+
 json_bool() {
-  if [ "$1" = 1 ]; then printf true; else printf false; fi
+  if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi
 }
 
-runtime_path=""
-if [ -f "$state_root/native-runtime-path" ]; then
-  runtime_path="$(sed -n 1p "$state_root/native-runtime-path" 2>/dev/null || true)"
-  [ -x "$runtime_path" ] || runtime_path=""
-fi
-path_launcher="$(command -v grok-peer-lane 2>/dev/null || true)"
+launcher="$(command -v grok-peer-lane 2>/dev/null || true)"
 launcher_found=0
-[ -z "$path_launcher" ] || launcher_found=1
-launcher_path=""
-if [ -n "$runtime_path" ]; then
-  candidate="$(dirname -- "$runtime_path")/grok-peer-lane"
-  [ ! -x "$candidate" ] || launcher_path="$candidate"
-fi
-invocation=""
-[ -z "$runtime_path" ] || [ -z "$launcher_path" ] || invocation="$launcher_path"
-
+[ -z "$launcher" ] || launcher_found=1
 doctor_json=null
 doctor_exit=1
-contract_version=""
-runtime_ready=0
-if [ -n "$invocation" ]; then
-  if doctor_json="$($invocation doctor --json 2>/dev/null)"; then
+authority=""
+product=""
+ready=""
+
+if [ "$launcher_found" = "1" ]; then
+  if doctor_json="$("$launcher" doctor --json 2>/dev/null)"; then
     doctor_exit=0
   else
     doctor_exit=$?
   fi
-  contract_version="$(printf '%s' "$doctor_json" |
-    sed -n 's/.*"contract_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | sed -n 1p)"
-  if [ "$doctor_exit" = 0 ] && [ "$contract_version" = "$expected_contract_version" ]; then
-    runtime_ready=1
-  fi
+  authority="$(printf '%s' "$doctor_json" |
+    sed -n 's/.*"authority"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n 1p)"
+  product="$(printf '%s' "$doctor_json" |
+    sed -n 's/.*"product"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n 1p)"
+  ready="$(printf '%s' "$doctor_json" |
+    sed -n 's/.*"ready"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | sed -n 1p)"
 fi
 
-if [ "$runtime_ready" = 1 ]; then
-  summary=ready
-elif [ -z "$runtime_path" ]; then
-  summary="Grok lane runtime is not installed; show references/install.md and stop"
+daemon_ready=0
+if [ "$doctor_exit" = "0" ] && [ "$authority" = "daemon" ] &&
+  [ "$product" = "grok" ] && [ "$ready" = "true" ]; then
+  daemon_ready=1
+fi
+
+if [ "$launcher_found" = "0" ]; then
+  summary="Grok lane launcher is not installed; show references/install.md and stop"
+elif [ "$daemon_ready" = "0" ]; then
+  summary="Grok lane daemon or adapter is unavailable; report doctor and stop"
 else
-  summary="Grok lane runtime or Grok Build preflight failed; report doctor and stop"
+  summary=ready
 fi
 
 printf '{\n'
 printf '  "summary": %s,\n' "$(json_string "$summary")"
 printf '  "launcher_found": %s,\n' "$(json_bool "$launcher_found")"
-printf '  "runtime_found": %s,\n' "$(if [ -n "$runtime_path" ]; then printf true; else printf false; fi)"
-printf '  "runtime_path": %s,\n' "$(json_string "$runtime_path")"
-printf '  "invocation": %s,\n' "$(json_string "$invocation")"
-printf '  "expected_contract_version": %s,\n' "$expected_contract_version"
-printf '  "contract_version": %s,\n' "${contract_version:-null}"
-printf '  "runtime_ready": %s,\n' "$(json_bool "$runtime_ready")"
+printf '  "invocation": %s,\n' "$(json_string "$launcher")"
+printf '  "daemon_ready": %s,\n' "$(json_bool "$daemon_ready")"
 printf '  "doctor_exit": %s,\n' "$doctor_exit"
+printf '  "authority": %s,\n' "$(json_string "$authority")"
+printf '  "product": %s,\n' "$(json_string "$product")"
 printf '  "doctor": %s\n' "$doctor_json"
 printf '}\n'
 
-[ "$runtime_ready" = 1 ]
+[ "$daemon_ready" = "1" ]

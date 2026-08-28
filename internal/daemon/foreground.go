@@ -35,11 +35,12 @@ func RunForeground(ctx context.Context) error {
 type ForegroundOptions struct {
 	AttachmentAdapters map[string]AttachmentAdapter
 	DeliveryAdapters   map[string]DeliveryAdapter
+	LaneAdapters       map[string]LaneAdapter
 }
 
 // RunForegroundWithOptions runs the canonical foreground authority with
 // callable product adapters embedded in the same process.
-func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) error {
+func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) error { //nolint:gocyclo // Startup keeps the canonical component order visible.
 	paths, err := ResolveProductionPaths()
 	if err != nil {
 		return err
@@ -65,10 +66,31 @@ func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) er
 		return err
 	}
 	manager, unit := hostServiceIdentity()
+	legacyLifecycle, err := newProductionLegacyRetirementLifecycle(paths, state)
+	if err != nil {
+		return err
+	}
+	legacyRetirement, err := NewLegacyRetirementEngine(LegacyRetirementEngineOptions{
+		State: state, Lifecycle: legacyLifecycle,
+	})
+	if err != nil {
+		return err
+	}
+	firstMigrationRecovery, err := NewFirstMigrationRecovery(FirstMigrationRecoveryOptions{
+		State: state, Retirement: legacyRetirement,
+	})
+	if err != nil {
+		return err
+	}
 	recoveryHooks, err := ComposeRecoveryHooks(RecoveryStep{
 		Stage: RecoveryTransactions,
 		Run: func(recoveryContext context.Context, candidate *Runtime) error {
-			return candidate.RecoverDurableState(recoveryContext)
+			if err := candidate.RecoverDurableState(recoveryContext); err != nil {
+				return err
+			}
+			return firstMigrationRecovery.Recover(
+				recoveryContext, candidate.options.RuntimeIdentity, candidate.Generation(), candidate.options.Now().UnixMilli(),
+			)
 		},
 	})
 	if err != nil {
@@ -80,6 +102,7 @@ func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) er
 		ProcStart: identity.Start, StrongStart: identity.StrongStart,
 		ServiceManager: manager, ServiceUnit: unit, RecoveryHooks: recoveryHooks,
 		AttachmentAdapters: options.AttachmentAdapters, DeliveryAdapters: options.DeliveryAdapters,
+		LaneAdapters: options.LaneAdapters,
 	})
 	if err != nil {
 		return err
@@ -183,60 +206,75 @@ func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPee
 		}
 		principal := controlPrincipal{Role: hello.Role, Product: hello.Product, AttachmentID: hello.AttachmentID}
 		switch hello.Role {
-		case controlRoleAdmin, controlRoleService, controlRoleLauncher:
+		case controlRoleAdmin, controlRoleService:
 			return principal, nil
-		case controlRoleConnector, controlRoleHook:
-			if hello.Role == controlRoleConnector && hello.AttachmentID == "" && hello.SessionID == "" &&
+		case controlRoleLauncher:
+			if hello.AttachmentID == "" && hello.SessionID == "" && hello.Capability == "" && len(hello.NativeActor) == 0 {
+				return principal, nil
+			}
+		case controlRoleConnector:
+			if hello.AttachmentID == "" && hello.SessionID == "" &&
 				hello.Capability == "" && len(hello.NativeActor) == 0 {
 				return principal, nil
 			}
-			registry := runtime.attachmentRegistry()
-			if registry == nil {
-				return controlPrincipal{}, &controlError{Code: "runtime_recovering", Message: "attachment authority is not ready", Retryable: true}
-			}
-			record, ok := registry.attachmentByID(hello.AttachmentID)
-			if !ok || record.Product != hello.Product || hello.Capability == "" {
-				return controlPrincipal{}, &controlError{Code: "attachment_not_attested", Message: "connector does not identify one prepared attachment"}
-			}
-			var err error
-			if record.State == AttachmentStatePrepared && hello.SessionID == "" {
-				record, err = registry.AdoptObservedConnector(ctx, hello.Product, hello.AttachmentID, hello.Capability, ConnectorProcessEvidence{
-					PID: peer.PID, ProcStart: peer.ProcStart, StrongStart: peer.StrongStart,
-				})
-				if errors.Is(err, ErrAttachmentSelecting) {
-					_, err = registry.PreparedConnector(hello.Product, hello.AttachmentID, hello.Capability)
-					if err != nil {
-						return controlPrincipal{}, controlFailure(err)
-					}
-					return principal, nil
-				}
+		case controlRoleHook:
+			// Hooks always identify one daemon-prepared attachment below.
+		default:
+			return controlPrincipal{}, &controlError{Code: "role_not_ready", Message: "workflow role is not available in this daemon generation", Retryable: true}
+		}
+		if hello.Product == "" || hello.AttachmentID == "" || hello.Capability == "" {
+			return controlPrincipal{}, &controlError{Code: "attachment_not_attested", Message: "control client does not identify one prepared attachment"}
+		}
+		registry := runtime.attachmentRegistry()
+		if registry == nil {
+			return controlPrincipal{}, &controlError{Code: "runtime_recovering", Message: "attachment authority is not ready", Retryable: true}
+		}
+		record, ok := registry.attachmentByID(hello.AttachmentID)
+		if !ok || record.Product != hello.Product || hello.Capability == "" {
+			return controlPrincipal{}, &controlError{Code: "attachment_not_attested", Message: "connector does not identify one prepared attachment"}
+		}
+		var err error
+		if record.State == AttachmentStatePrepared && hello.SessionID == "" {
+			record, err = registry.AdoptObservedConnector(ctx, hello.Product, hello.AttachmentID, hello.Capability, ConnectorProcessEvidence{
+				PID: peer.PID, ProcStart: peer.ProcStart, StrongStart: peer.StrongStart,
+			})
+			if errors.Is(err, ErrAttachmentSelecting) {
+				_, err = registry.PreparedConnector(hello.Product, hello.AttachmentID, hello.Capability)
 				if err != nil {
 					return controlPrincipal{}, controlFailure(err)
 				}
-				principal.SessionID = record.SessionID
-				principal.Attested = true
 				return principal, nil
 			}
-			if record.State == AttachmentStatePrepared {
-				record, err = registry.Adopt(ctx, AttachmentAdoptRequest{
-					AttachmentID: record.AttachmentID, Capability: hello.Capability,
-					SessionID: hello.SessionID, NativeActor: hello.NativeActor,
-				})
-			} else {
-				record, err = registry.AttestConnector(ctx, ConnectorAttestation{
-					Product: hello.Product, AttachmentID: hello.AttachmentID,
-					SessionID: hello.SessionID, Capability: hello.Capability, NativeActor: hello.NativeActor,
-				})
-			}
 			if err != nil {
+				return controlPrincipal{}, controlFailure(err)
+			}
+			if err := runtime.reconcileAdoptedDeliveries(ctx); err != nil {
 				return controlPrincipal{}, controlFailure(err)
 			}
 			principal.SessionID = record.SessionID
 			principal.Attested = true
 			return principal, nil
-		default:
-			return controlPrincipal{}, &controlError{Code: "role_not_ready", Message: "workflow role is not available in this daemon generation", Retryable: true}
 		}
+		if record.State == AttachmentStatePrepared {
+			record, err = registry.Adopt(ctx, AttachmentAdoptRequest{
+				AttachmentID: record.AttachmentID, Capability: hello.Capability,
+				SessionID: hello.SessionID, NativeActor: hello.NativeActor,
+			})
+		} else {
+			record, err = registry.AttestConnector(ctx, ConnectorAttestation{
+				Product: hello.Product, AttachmentID: hello.AttachmentID,
+				SessionID: hello.SessionID, Capability: hello.Capability, NativeActor: hello.NativeActor,
+			})
+		}
+		if err != nil {
+			return controlPrincipal{}, controlFailure(err)
+		}
+		if err := runtime.reconcileAdoptedDeliveries(ctx); err != nil {
+			return controlPrincipal{}, controlFailure(err)
+		}
+		principal.SessionID = record.SessionID
+		principal.Attested = true
+		return principal, nil
 	}
 }
 

@@ -15,7 +15,7 @@ versions. They interoperate only when their explicitly declared federation
 protocol versions match; release version, build identity, installation time,
 and advertised host capabilities do not couple their lifecycle transactions.
 
-The hub service assets will be added here independently of the host service
-assets under `deploy/agent-sessions/`. Existing `deploy/peer-federator` assets
-remain available until their later migration and retirement tasks complete.
-
+The service definitions in this directory select only
+`hub/current/bin/agent-sessions-hub`. The install transaction replaces
+`@PREFIX@`, `@LISTEN@`, and `@STATE_ROOT@` from the exact hub role state; it
+never reads or changes the host role's selection or configuration.

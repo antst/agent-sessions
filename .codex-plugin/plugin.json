@@ -1,6 +1,6 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Give grouped Codex, Claude, Grok, and Qwen sessions a durable lifecycle, all-target lanes, and local or federated messaging.",
   "author": {
     "name": "Agent Sessions contributors"

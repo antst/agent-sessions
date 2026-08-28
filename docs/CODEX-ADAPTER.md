@@ -1,65 +1,54 @@
-# Codex interactive peer adapter
+# Codex daemon adapter
 
-`codex-peer` runs the ordinary Codex TUI while giving its exact root thread a managed Agent
-Sessions identity. Bare `codex` remains outside Agent Sessions: it receives no discovery row,
-group membership, messaging authority, or lifecycle owner record.
+The Codex integration is an in-process adapter of the one per-user-host `agent-sessions` daemon. The
+Codex CLI/TUI and App Server remain external vendor processes. Agent Sessions no longer runs a
+profile supervisor, per-thread shim, per-lane shim, or Codex-specific listener.
 
-## Invocation and identity
+## Interactive peers
 
-Start a fresh managed peer with an optional name and one or more groups:
+`codex-peer` is an installed alias of the canonical `agent-sessions` image. It asks the running daemon
+to prepare a launch or resume, resolves one exact root thread and canonical cwd, then execs the native
+Codex client. It never starts or supervises the daemon.
 
-```bash
-codex-peer -n reviewer -g project-a
-codex-peer --peer-name reviewer --group project-a --group release
+The daemon publishes the peer only after its prepared capability, profile, cwd, thread ID, native TUI
+owner, hook context, App Server identity, and effective permission mode agree. Ordinary Codex sessions
+have no capability and remain bare/unmanaged even though the connector is installed.
+
+The adapter maintains one App Server coordinator per configured Codex profile inside the daemon. It
+uses native thread operations for delivery and lifecycle observation; durable message acceptance,
+groups, retries, and at-most-once destination results belong to the daemon.
+
+## Restart and resume
+
+Daemon restart does not restart the Codex TUI or App Server. Recovery reopens the App Server client,
+loads durable attachment evidence, and re-corroborates the exact live owner before republishing it.
+An ambiguous owner stays unavailable and records debt.
+
+Codex owns rollout history and its paginated history projection. If a large legacy thread opens with
+blank history through the App Server while native standalone resume can read it, run the vendor
+maintenance command:
+
+```sh
+codex migrate-rollouts --apply
 ```
 
-`-g` and `--group` are equivalent and repeatable on every interactive peer launcher. The adapter
-selects a native thread UUID before publication, starts the managed App Server, and publishes only
-after the exact TUI owner, thread, cwd, shim, process starts, and delivery socket agree.
+Close active writers first or rerun for threads reported busy. Agent Sessions does not copy or repair
+Codex history databases.
 
-Resume by exact UUID or by an unambiguous managed name:
+## Codex lanes
 
-```bash
-codex-peer resume 019fe660-1c86-7700-b462-6ff16de00fc5
-codex-peer resume reviewer
-```
+Codex lane state and turn ownership live in the daemon. The adapter starts, reconnects, interrupts,
+collects, and archives through the App Server using the committed thread/turn identity. Restart must
+not redispatch an accepted turn. A terminal notice and collection cursor are daemon-owned metadata;
+the native transcript remains Codex-owned.
 
-Name resolution is performed by the local host agent. Multiple usable matches are rejected and
-require an exact UUID. Resume retains the canonical thread cwd and durable Agent Sessions
-preferences unless the caller supplies a supported explicit override.
+See [CODEX-LANES.md](CODEX-LANES.md) for commands and lane behavior.
 
-## Permissions
+## Safety boundary
 
-Normal launches inherit Codex policy. `--yolo` is the managed shorthand for Codex's native
-`--dangerously-bypass-approvals-and-sandbox` behavior and is also mirrored through App Server before
-publication so the advertised permission class matches the durable thread setting:
+Before delivery, interruption, archive, or cleanup the adapter revalidates the exact thread, profile,
+cwd, App Server, and native owner evidence. PID or thread ID alone is insufficient. Cleanup removes
+only exact Agent Sessions records; it never deletes Codex rollouts, archived sessions, settings,
+credentials, or the App Server's native state.
 
-```bash
-codex-peer --yolo -n isolated-reviewer -g project-a
-```
-
-This is an explicit full-access opt-in. Group membership and messaging do not grant tool approval,
-change the sandbox, or widen a thread's permission mode.
-
-## Messaging
-
-The installed `agent-sessions` Codex plugin supplies the process-attested `agent_sessions` MCP tools.
-Only a live managed root thread can list visible peers, send or broadcast messages, or launch a
-lane through those tools. A model-provided session ID never grants authority; App Server thread
-identity, the TUI owner, hook context, shim, and host registration must corroborate it.
-
-Messages are routed through the local host agent and filtered by shared groups. A peer always has a
-private session anchor in addition to its explicit groups. Native Claude registry rows are a local
-carrier and presentation surface, not a global namespace or a substitute for Agent Sessions group
-checks.
-
-## Lifecycle
-
-The TUI owns the interactive peer lifetime. Normal exit removes the bridge-owned shim, row, key,
-and sockets while retaining the Codex transcript for resume. Exact process-start identities let the
-supervisor perform the same scoped cleanup after `SIGKILL` without acting on a recycled PID.
-Ordinary Codex threads and child subagents are never adopted heuristically.
-
-See [CODEX-INSTALL.md](CODEX-INSTALL.md) for installation,
-[CODEX-LANES.md](CODEX-LANES.md) for durable worker lanes, and
-[ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md) for the shared carrier and authorization details.
+For the shared contract, see [ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md).

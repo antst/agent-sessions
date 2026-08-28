@@ -60,16 +60,39 @@ is live, and both snapshot records share a group. Legacy `deliver` and
 
 ## Remote lane contract
 
-A remote lane request contains request ID, destination, target product, native
-argv, bounded stdin, and an agent-attested source `ParentContext`. The hub binds
-the source context to the currently advertised source peer and destination
-capability before forwarding it. The destination never derives the parent
-anchor using its own host ID: it persists the canonical source-host anchor.
+A `lane_exec` request contains a stable request ID, destination host, target
+product, lane/turn IDs, bounded structured input, and source-parent evidence.
+The hub replaces the caller's parent product, groups, permission, and identity
+with the currently registered source peer and verifies the destination
+capability before forwarding. The destination persists canonical source-host
+parentage and replies `lane_accepted` only after durable admission.
 
-The destination streams bounded stdout/stderr and one terminal exit/error.
-Disconnecting either agent drops the in-memory route and cancels its live CLI
-proxy. No agent-to-agent or SSH fallback exists; hub connectivity is mandatory
-only for cross-host operations. Local grouped routing continues without a hub.
+Exact `lane_exec` replay is idempotent across connection, host-daemon, and hub
+restart and never starts duplicate native work. Reusing a request ID for
+different work is rejected. Disconnecting a host preserves accepted route
+ownership; it does not cancel native work or manufacture a terminal failure.
+
+`lane_cancel` has an explicit decision: the destination replies
+`lane_cancelled` after durable acceptance or `lane_cancel_refused` with a
+bounded reason. Lost transport leaves the source cancellation pending for
+retry. Terminal metadata travels in bounded `lane_result`; the source must
+persist it and reply `lane_result_ack` before the destination publishes a
+content-free `terminal_notice_deliver`. `lane_result_refused` or a lost ACK
+keeps the destination's durable outbox pending. The source validates the exact
+destination lane and parent target before completing collection. Prompt and
+result content never enters the terminal notice or hub durable state.
+
+For a terminal lane, `lane_archive` carries the original accepted request and lane identity to the
+destination daemon. The destination replies `lane_archived` only after its native archive and cleanup
+contract succeeds, otherwise `lane_archive_refused`; loss is explicit and exact retry is idempotent.
+
+Protocol 3 retains bounded `lane_stdout`, `lane_stderr`, `lane_exit`, and
+`lane_error` frame names in its closed compatibility inventory, but the
+unified daemon's canonical completion path is the typed result/ACK plus
+content-free notice sequence above. No lane watcher, CLI proxy, per-request
+manager, agent-to-agent connection, SSH fallback, or local remote fallback
+exists. Hub connectivity is mandatory only for cross-host operations; local
+grouped routing continues without a hub.
 
 Current agents advertise one exact capability per ready target:
 `codex-lane`, `claude-lane`, `grok-lane`, and `qwen-lane`. Qwen capability
@@ -78,5 +101,5 @@ doctor and launch admission; an absent, unready, or explicitly misconfigured
 Qwen launcher is never advertised and remote execution never falls back to a
 different product or host.
 
-The network is assumed trusted. Authentication, encryption, offline storage,
-delivery retry, global broadcast, and a policy language are outside protocol 3.
+The network is assumed trusted. Authentication, encryption, arbitrary content
+storage at the hub, and a policy language are outside protocol 3.

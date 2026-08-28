@@ -51,13 +51,14 @@ if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 ]]; the
 		rm -rf -- "$outer_root"
 	}
 	trap cleanup_outer EXIT
-	mkdir -p "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state"
-	chmod 0700 "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state"
+	mkdir -p "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state" "$outer_root/tmp"
+	chmod 0700 "$outer_root/home" "$outer_root/runtime" "$outer_root/config" "$outer_root/state" "$outer_root/tmp"
 	set +e
 	dbus-run-session -- env \
 		AGENT_SESSIONS_NESTED_SYSTEMD=1 AGENT_SESSIONS_ACCEPTANCE_ROOT="$outer_root" \
 		HOME="$outer_root/home" XDG_RUNTIME_DIR="$outer_root/runtime" \
 		XDG_CONFIG_HOME="$outer_root/config" XDG_STATE_HOME="$outer_root/state" \
+		TMPDIR="$outer_root/tmp" \
 		GOMODCACHE="$go_module_cache" GOCACHE="$go_build_cache" GOPATH="$go_workspace" \
 		PATH="$PATH" "$script_path"
 	status=$?
@@ -86,6 +87,19 @@ elif [[ "$platform" != Linux ]]; then
 fi
 [[ -n "$acceptance_root" && -d "$acceptance_root" ]] || fail 'acceptance root is absent'
 
+# The first-migration inventory deliberately includes same-UID legacy roots
+# beneath the system temp directory. Bind that directory to this exact
+# acceptance user before any production install/inspection so ambient host
+# runtimes cannot become candidates. The short child name also keeps Darwin
+# Unix-domain socket paths within the platform sun_path budget.
+acceptance_tmp="$acceptance_root/tmp"
+if [[ ! -e "$acceptance_tmp" && ! -L "$acceptance_tmp" ]]; then
+	mkdir "$acceptance_tmp"
+fi
+[[ -d "$acceptance_tmp" && ! -L "$acceptance_tmp" ]] || fail 'acceptance TMPDIR is not a real directory'
+chmod 0700 "$acceptance_tmp"
+export TMPDIR="$acceptance_tmp"
+
 prefix="$HOME/.local"
 acceptance_started_epoch="$(date +%s)"
 plan="$acceptance_root/host-purge-plan.json"
@@ -94,9 +108,11 @@ mkdir -p "$missing_root"
 fake_native_root="$acceptance_root/native-products"
 fake_qwen_home="$acceptance_root/qwen-home"
 mkdir -p "$fake_native_root/bin" "$fake_native_root/state" "$fake_qwen_home"
-install -m 0755 "$repository_root/scripts/fixtures/fake-native-product.py" "$fake_native_root/bin/native-product"
 for product in codex claude grok qwen; do
-	ln -s native-product "$fake_native_root/bin/$product"
+	# The production connector boundary canonicalises the selected executable
+	# before invoking it. Use four real fixture executables so that secure
+	# symlink resolution cannot erase the vendor identity carried by argv[0].
+	install -m 0755 "$repository_root/scripts/fixtures/fake-native-product.py" "$fake_native_root/bin/$product"
 done
 export AGENT_SESSIONS_FAKE_NATIVE_ROOT="$fake_native_root" QWEN_HOME="$fake_qwen_home"
 service_manager_pid=

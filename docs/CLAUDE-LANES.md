@@ -1,165 +1,53 @@
-# Claude Code lanes from Codex
+# Claude lanes
 
-`claude-peer-lane` is the symmetric companion to `codex-peer-lane`: it lets Codex and other local orchestrators start a named Claude Code worker, keep it messageable between turns, collect structured results, resume it, and retire it without orphan processes or discovery rows.
+A Claude lane is a durable daemon-owned Agent Sessions lane backed by a vendor-owned Claude
+stream-JSON worker and native session. `claude-peer-lane` is an alias of the canonical
+`agent-sessions` image and a client of the already-running daemon; no detached Claude lane manager or
+control socket exists.
 
-## Quick start
+## Lifecycle
 
-```bash
+```sh
+claude-peer-lane start --name implementation --cd /srv/project --prompt-file prompt.txt
+claude-peer-lane status --name implementation --json
+claude-peer-lane wait --name implementation --json
+claude-peer-lane interrupt --name implementation
+claude-peer-lane resume --name implementation --prompt-file followup.txt
+claude-peer-lane archive --name implementation
+claude-peer-lane list --mine --json
 claude-peer-lane doctor --json
-
-claude-peer-lane run \
-  --name claude-review \
-  --permission-mode dontAsk \
-  --max-budget-usd 5 \
-  --auto-archive-after 300 \
-  - < review-brief.md
 ```
 
-`doctor` checks the selected Claude Code executable, its current authentication state, and the
-managed supervisor. It reports `claude_logged_in`, `claude_auth_method`, and
-`claude_api_provider`, and exits non-zero when the CLI is logged out or its authentication status
-cannot be established. Run it from the same environment that will launch the lane so API-key,
-OAuth, and cloud-provider configuration are evaluated consistently. This is a local readiness
-check; it does not spend a model turn and therefore cannot prove that a credential has not been
-revoked or that the account currently has inference entitlement. The first real lane turn is the
-end-to-end authentication check.
+`run` combines start and wait. The daemon commits the turn before starting the native worker, records
+exact UUID/process/stream evidence, emits one terminal notice, and advances collection once. Resume,
+interrupt, and archive operate on the exact durable lane/turn revision.
 
-Detached mode returns `lane.ready` before the result:
+Claude owns its transcript, authentication namespace, native permission behavior, resume selection,
+and stream worker. The daemon owns parent context, existing global groups, effective permission mode,
+lane/turn state, terminal notices, collection cursor, archive coordination, and cleanup debt.
 
-```bash
-claude-peer-lane start --name claude-review --max-budget-usd 5 - < review-brief.md
-claude-peer-lane wait claude-review --timeout 300
-claude-peer-lane status claude-review
-claude-peer-lane archive claude-review
-```
+## Parent, groups, and permissions
 
-While idle, the lane appears in both Claude and Codex peer discovery and accepts ordinary peer messages. A message creates the next queued Claude turn; collect it with another `wait`.
+Every child gets its private group and its parent's private group. Other parent groups are copied only
+with `--inherit-groups`; explicit `--group` values remain global across hosts. No profile, host, or
+product namespace is introduced.
 
-## Remote hosts
+The adapter passes the selected permission mode as a launch-only Claude overlay and records the proven
+effective class. It does not alter the shared Claude profile's permission or cross-session defaults.
 
-With `peer-federator` protocol 3 connected on both hosts, the same native CLI can run on a named
-destination without SSH:
+## Restart
 
-```bash
-peer-federator hosts
-peer-federator lane --host workstation-b --product claude -- \
-  start --name claude-review -C /srv/project --max-budget-usd 5 - < review-brief.md
-peer-federator lane --host workstation-b --product claude -- \
-  wait claude-review --timeout 300
-```
+The lane actor is a daemon goroutine. If the native stream worker exposes sufficient stable identity,
+restart reconnects without duplicate dispatch. Where real platform evidence proves inherited streams
+cannot be recovered safely, the daemon records exactly one explicit `interrupted` terminal result that
+is collectable and resumable. It does not keep an Agent Sessions proxy process solely to preserve a
+pipe.
 
-Federation preserves JSONL, stderr, and exit status. It automatically adds `--persistent` and a
-notify target back to the live originating peer for `run`, `start`, and `resume`; callers must not
-pass `--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` themselves. The destination advertises
-this capability only after its operator explicitly enables remote execution. A disconnected hub
-rejects new commands, and there is no direct agent listener or SSH fallback. Remote lanes use plain destination `list` rather than
-`--mine`, because they are persistent and have no destination lifecycle owner.
-Pass `-C`/`--cd` on remote `run` or `start` whenever the cwd matters; otherwise the launcher
-inherits the destination agent service's cwd. `resume` retains the established cwd. Remote stdin
-is capped at 1 MiB; `--prompt-file` refers to an existing destination file and transfers nothing.
-Remote auto-archive delays are capped at 86,400 seconds.
-Message a remote lane through its qualified source-side discovery name (`name--host [ref]`) or an
-incoming message's `from` UDS; its destination-local name and session ID are lifecycle addresses.
+## Archive and cleanup
 
-## Why there is a manager
+Archive and cleanup revalidate the exact Claude UUID, process/stream identity, profile/cwd, and daemon
+revision. Only Agent Sessions-owned lane records and connector artifacts may be retired. Claude
+credentials, secure-storage entries, settings, native registry, and transcripts remain vendor-owned.
 
-Claude Code's `--print --input-format stream-json` process is the lane's one managed worker and an
-ordinary row in the shared native Claude profile. Native peer messages start Claude turns directly;
-the bridge does not proxy, rewrite, or
-queue them through another peer socket. The manager observes those stream turns and their
-authoritative `result` frames so the same collection, notice, and accounting contract applies to
-both launcher-submitted and peer-submitted work. A `run`/`start`/`resume --timeout` applies to that
-launcher-submitted turn; native peer messages have no transport field for a durable execution
-deadline.
-
-The manager owns three resources as one lifecycle unit: durable lane state, the native Claude
-stream worker, and its local control socket. Explicit archive, owner exit, auto-archive, manager
-crash recovery, and install-time supervisor reconciliation converge on the same cleanup. The
-worker socket is unavailable briefly while an archived or crashed lane is being resumed; messages
-sent during that interval fail rather than being buffered by a proxy.
-
-A native peer message sent while the worker is idle starts a new collectable lane turn. A message
-accepted while Claude is already running a turn steers that active turn and shares its single
-terminal result; it does not create a second `wait` result. The manager waits for Claude's replayed
-local-user frame before marking a launcher-submitted turn active, so a simultaneous native message
-and CLI `resume` are attributed in the order Claude actually begins them.
-When no native turn is active, a 30-second acknowledgement watchdog fails and retires the worker
-if Claude never replays a submitted launcher envelope. A native turn that legitimately runs first
-refreshes that watchdog before the queued launcher turn begins. Native peer turns have no caller
-deadline, so a still-active native turn can defer this check; owner exit and explicit archive remain
-the lifecycle escape hatches.
-
-## Lifecycle defaults
-
-- A lane is owned by the launching Codex or Claude session when that owner can be corroborated by process ancestry and live peer discovery. It is interrupted and archived after that owner exits.
-- Otherwise the direct launcher process is the owner.
-- Completed work auto-archives after 60 seconds. The exact deadline is exposed as `auto_archive_at`; cleanup occurs on the manager's sub-second maintenance loop.
-- `--auto-archive-after S` changes the grace period. `--no-auto-archive` disables it and requires explicit archive.
-- `--persistent` detaches lifecycle ownership. `--notify TARGET` is persistent-only; parent-owned lanes notify their inferred owner without a flag.
-- Terminal notices are durably retried. A failed notice can delay automatic archive for up to 30 seconds so a short custom grace does not erase the only collection pointer.
-- A terminal notice is an infrastructure pointer, not a conversational message. Collect it with the printed `wait` command rather than replying to its sender address; after a worker crash that address may no longer be live.
-
-`claude-peer-lane list` returns all active Claude lanes in the profile and `--all` adds archived
-lanes. `list --mine` selects only lanes owned by the current Codex or Claude orchestrator, matching
-the stable owner PID plus process-start identity rather than a mutable session ID. Persistent lanes
-have no owner and are therefore excluded; use `--mine --all` to include owned archived lanes. The
-query fails if no live Codex or Claude owner can be corroborated rather than silently falling back
-to a transient shell process.
-
-Development builds that created Claude lanes in an Agent Sessions-private native profile are not
-silently migrated into the shared Claude profile. Their archived state is rejected before resume
-mutation or process launch; archive it and start a new shared-profile lane. Shared-profile lanes
-retain the exact registry and macOS secure-storage namespace advertised by the host agent and
-refuse resume after that agent profile changes.
-
-## Claude-specific policy
-
-Claude has no Codex sandbox axis. The launcher passes through Claude's `--permission-mode`, tool allow/deny lists, `--model`, `--effort`, `--json-schema`, and `--max-budget-usd` without pretending they are equivalent to Codex sandbox policy.
-
-The default permission mode is `dontAsk`, because a headless worker cannot answer an interactive
-approval. Workers start with `--settings '{"crossSessionInbound":"accept"}'` so native peer input
-does not wait for an approval UI the lane does not have. This is a per-process
-override; installation and lane lifecycle never modify the host default. Workers also start with
-`--no-chrome`: a headless lane cannot answer Claude in Chrome's first-run dialog, and browser
-integration is outside the lane lifecycle contract. When the launcher
-corroborates a bypass-mode Codex or Claude owner and the caller did not explicitly choose a mode,
-the lane inherits `bypassPermissions`; an explicit `--permission-mode` always wins. The launcher
-never trusts an inherited thread ID alone: it requires a live Codex-host ancestor as a launch-context
-precondition plus a live matching session bridge PID, process-start identity, session ID, and
-socket. Codex does not currently expose a per-thread host PID, so the bridge identity—not the
-shared host process—is the lifecycle owner.
-
-The worker enables Claude's Agent Teams tool set and always adds `SendMessage,ListAgents` to
-`--allowedTools`. An explicit `--allowed-tools` list is preserved and extended rather than
-replaced. This lets a lane discover and initiate messages to any reachable peer; ownership only
-controls lifecycle and automatic terminal notices. Explicit `--tools` or `--disallowed-tools`
-policy can still remove those capabilities. The SDK worker publishes and authors messages under
-the lane name, owns the address reported by `lane.ready`, and accepts inbound peer turns directly.
-
-For a federated parent, the destination receives an agent-attested source context and sends the
-terminal pointer back as an ordinary grouped Agent Sessions frame. No per-peer shadow or
-source-asserted native registry row is created.
-
-Claude emits real cost data. Autonomous callers should set `--max-budget-usd`; trivial turns can
-still be expensive because project instructions, plugins, skills, hooks, and MCP context load for
-each turn. Claude 2.1.227 does not publish a native peer socket in `--bare` mode, so
-`claude-peer-lane` rejects `--bare` rather than creating a lane that cannot receive messages.
-
-## Collection contract
-
-Stdout is JSONL. Diagnostics go to stderr. The normalized event sequence is:
-
-```text
-thread.started | thread.resumed
-turn.started
-lane.ready
-item.completed (user_message)
-item.completed (agent_message, phase=final_answer)
-turn.completed
-```
-
-Use the final `turn.completed.turn_id` to select the matching final answer. Unknown native Claude stream frames are tolerated and never interpreted as completion. `wait --timeout` only stops waiting; it does not interrupt the lane.
-
-Collect every outstanding turn before `resume`. Resume deliberately refuses to start a new turn while an older active, queued, or terminal turn is still owed, so its `turn.started` event can never be paired with another turn's result.
-
-See the installed Codex skill `claude-lane` for the orchestration recipe and `claude-peer-lane --help` for the complete flag list.
+Remote Claude lanes use the same destination daemon lane engine through the central hub. There is no
+remote watcher or SSH/direct-listener fallback.

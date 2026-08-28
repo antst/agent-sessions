@@ -115,19 +115,27 @@ release strings or commit identities.
 1. Acquire the host-role install lock.
 2. Validate archive/platform, complete product inventory, binary identity, connector payloads, service
    definition, configuration schema, and writable owned destinations.
-3. Discover installed native products. Mark absent products unavailable; do not fail aggregate install.
-4. Stage and fsync an immutable release on the same filesystem as the host-role current selection.
-5. Prepare recoverable vendor connector transactions for each installed Codex marketplace, Claude
+3. If the estate predates the unified daemon, verify the operator-stopped maintenance window through a
+   read-only closed inventory before any persistent install mutation.
+4. Discover installed native products. Mark absent products unavailable; do not fail aggregate install.
+5. Stage and fsync an immutable release on the same filesystem as the host-role current selection.
+6. Prepare recoverable vendor connector transactions for each installed Codex marketplace, Claude
    marketplace, Grok plugin, and Qwen extension without reading credential values.
-6. Install the standard service definition and preserve existing non-secret configuration.
-7. Atomically select `host/current`.
-8. Enable and start the user service once.
-9. Require readiness proof: exact runtime/release identity, generation, endpoint, state schema, local
+7. Install the standard service definition and preserve existing non-secret configuration.
+8. Atomically select `host/current`.
+9. Enable and start the user service once.
+10. Require readiness proof: exact runtime/release identity, generation, endpoint, state schema, local
    routing, product readiness, and configured federation state.
-10. Commit the install journal and all prepared connector mutations together.
+11. Commit the install journal and all prepared connector mutations together.
 
 The `install-all` target invokes the shared release engine with the host role and implements only this
 host transaction. It never installs, enables, starts, restarts, or removes the hub service.
+
+For a first migration, the operator first closes every legacy peer and lane, stops every responsive
+legacy supervisor, product manager, and federation authority through the old supported lifecycle, and
+prevents replacement legacy launches until installation completes. The installer fails closed naming
+any remaining live legacy authority, including one reporting zero shims. It never stops, signals, or
+restarts legacy authority; after absence is proven it may adopt metadata and retire exact artifacts.
 
 If any step before service start fails, the system publishes no daemon authority. If readiness fails,
 the installer disables/stops the candidate, restores exact prior connector/config state, and reports
@@ -137,8 +145,9 @@ the attributable cause.
 
 1. Acquire the selected role's install lock and recover or finish that role's prior journal.
 2. Read the current daemon generation and service-manager state.
-3. Offline-validate and stage the complete successor release.
-4. Run first-migration inspection if the current estate predates the unified daemon.
+3. If the current estate predates the unified daemon, verify the operator-stopped maintenance window
+   through a read-only closed inventory before any persistent upgrade mutation.
+4. Offline-validate and stage the complete successor release.
 5. Prepare Codex, Claude, Grok, and Qwen connector changes that apply to the installed product subset
    and record exact per-product rollback metadata.
 6. Atomically switch the selected role's current release to the staged release.
@@ -150,6 +159,11 @@ There is never a deliberate interval with two authoritative host daemons. If suc
 the transaction stops the candidate, restores that role's prior current selection and owned state, starts
 the previous service image, and verifies the previous generation is usable. This recovery is part of
 the failed administrative transaction; only a ready generation is committed as authority.
+
+That previous-unified-image restart rule does not apply to first migration. First-migration rollback
+leaves the unified candidate and all legacy authorities stopped, restores only installer-changed
+release/state/connector/service surfaces, and directs the operator to retry unified installation or
+manually relaunch the old supported lifecycle. It performs no live handoff or compatibility drain.
 
 Steady-state upgrade does not require closing supported managed native interactive sessions. Adapters
 reconstruct them after restart. Active lane behavior follows the adapter restart contract.
@@ -175,8 +189,8 @@ state and authorities. The gate:
 - does not stop a native vendor session or unrelated process;
 - adopts the existing host identity, global groups, session catalog, lane state, messages/notices, and
   federation configuration;
-- stops exact quiescent legacy Agent Sessions authorities through their supported lifecycle before the
-  unified daemon becomes authoritative;
+- requires the operator to stop every responsive legacy Agent Sessions authority through its old
+  supported lifecycle and proves their absence before any unified authority is published;
 - retires every old Agent Sessions supervisor, shim, host, lane manager, local routing/federation agent,
   service job, and listener before declaring the daemon ready.
 

@@ -34,14 +34,20 @@ type MCPForwardResult struct {
 type MCPService struct {
 	attachments *AttachmentRegistry
 	deliveries  *DeliveryEngine
+	lanes       *LaneEngine
 	messageID   func() (string, error)
+	laneCommand func(context.Context, controlPrincipal, LaneCommandRequest) (map[string]any, error)
 }
 
-func newMCPService(attachments *AttachmentRegistry, deliveries *DeliveryEngine) (*MCPService, error) {
-	if attachments == nil || deliveries == nil {
-		return nil, errors.New("MCP service requires attachment and delivery authorities")
+func newMCPService(attachments *AttachmentRegistry, deliveries *DeliveryEngine, lanes *LaneEngine) (*MCPService, error) {
+	if attachments == nil || deliveries == nil || lanes == nil {
+		return nil, errors.New("MCP service requires attachment, delivery, and lane authorities")
 	}
-	return &MCPService{attachments: attachments, deliveries: deliveries, messageID: randomControlRequestID}, nil
+	service := &MCPService{attachments: attachments, deliveries: deliveries, lanes: lanes, messageID: randomControlRequestID}
+	service.laneCommand = func(ctx context.Context, principal controlPrincipal, request LaneCommandRequest) (map[string]any, error) {
+		return executeLaneCommand(ctx, lanes, attachments, principal.AttachmentID, request)
+	}
+	return service, nil
 }
 
 // Forward handles one closed MCP method inventory without trusting model-supplied identity.
@@ -67,6 +73,7 @@ func (service *MCPService) Forward(ctx context.Context, principal controlPrincip
 	}
 }
 
+//nolint:gocyclo // Tool routing shares one attested-session authorization and protocol-error boundary.
 func (service *MCPService) call(ctx context.Context, principal controlPrincipal, params json.RawMessage) MCPForwardResult {
 	var call struct {
 		Name      string         `json:"name"`
@@ -99,7 +106,9 @@ func (service *MCPService) call(ctx context.Context, principal controlPrincipal,
 		result, err = service.send(ctx, principal, call.Arguments)
 	case "broadcast":
 		result, err = service.broadcast(ctx, principal, call.Arguments)
-	case "check_inbox", "rename_session", "lane":
+	case "lane":
+		result, err = service.lane(ctx, principal, call.Arguments)
+	case "check_inbox", "rename_session":
 		err = fmt.Errorf("%s is not available in this daemon generation", call.Name)
 	default:
 		err = fmt.Errorf("unknown tool: %s", call.Name)
@@ -108,6 +117,49 @@ func (service *MCPService) call(ctx context.Context, principal controlPrincipal,
 		return mcpToolFailure(err.Error())
 	}
 	return mcpToolSuccess(result)
+}
+
+func (service *MCPService) lane(ctx context.Context, principal controlPrincipal, arguments map[string]any) (map[string]any, error) {
+	product, err := requiredMCPArgument(arguments, "product")
+	if err != nil {
+		return nil, err
+	}
+	command, err := requiredMCPArgument(arguments, "command")
+	if err != nil {
+		return nil, err
+	}
+	host := strings.TrimSpace(mcpString(arguments["host"]))
+	nativeArguments, err := mcpLaneCommandArguments(arguments["arguments"])
+	if err != nil {
+		return nil, err
+	}
+	return service.laneCommand(ctx, principal, LaneCommandRequest{
+		Product: product, Command: command, Host: host, Arguments: nativeArguments, Input: mcpString(arguments["input"]),
+	})
+}
+
+func mcpLaneCommandArguments(value any) ([]string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	values, ok := value.([]any)
+	if !ok || len(values) > 256 {
+		return nil, errors.New("lane arguments must be an array of at most 256 strings")
+	}
+	result := make([]string, 0, len(values))
+	total := 0
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok || strings.ContainsRune(text, '\x00') || len(text) > 4096 {
+			return nil, errors.New("lane arguments must contain bounded valid strings")
+		}
+		total += len(text)
+		if total > 512*1024 {
+			return nil, errors.New("lane arguments exceed the size limit")
+		}
+		result = append(result, text)
+	}
+	return result, nil
 }
 
 func (service *MCPService) discover(ctx context.Context, principal controlPrincipal) (map[string]any, error) {
@@ -283,8 +335,11 @@ func daemonMCPToolDefinitions() []map[string]any {
 		mcpTool("identity", "Show this managed session's exact Agent Sessions identity", map[string]any{}, nil),
 		mcpTool("rename_session", "Update this managed session's display name", map[string]any{"name": map[string]any{"type": "string", "minLength": 1, "maxLength": 80}}, []string{"name"}),
 		mcpTool("lane", "Run one supported durable lane lifecycle operation for this attested parent", map[string]any{
-			"product": map[string]any{"type": "string", "enum": []string{"codex", "claude", "grok", "qwen"}},
-			"command": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"product":   map[string]any{"type": "string", "enum": []string{"codex", "claude", "grok", "qwen"}},
+			"command":   map[string]any{"type": "string", "enum": []string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"}},
+			"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"input":     map[string]any{"type": "string", "maxLength": maxLaneCommandInputBytes},
+			"host":      map[string]any{"type": "string", "description": "Reserved for connected-host routing"},
 		}, []string{"product", "command"}),
 	}
 }

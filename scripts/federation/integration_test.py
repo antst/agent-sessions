@@ -1,270 +1,156 @@
 #!/usr/bin/env python3
-"""Protocol-v3 grouped federation integration test.
+"""Verify the canonical executable and isolated live-hub boundary.
 
-This test deliberately uses the public host-agent registration and AgentFrame
-APIs. It asserts that federation creates no per-peer Claude shadows.
+The stateful protocol matrix runs in the Go federation and daemon integration
+packages. This wrapper starts one script-owned hub, exercises its actual
+status/doctor/probe surfaces, and never starts a host daemon.
 """
+
+from __future__ import annotations
 
 import json
 import os
 import pathlib
-import queue
-import signal
 import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 
-def wait_for(predicate, description, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        try:
-            value = predicate()
-            if value:
-                return value
-        except Exception as exc:  # diagnostics retain the last transient error
-            last = exc
-        time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {description}; last={last}")
+def fail(message: str) -> None:
+    raise AssertionError(message)
 
 
-def reserve_port():
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    port = listener.getsockname()[1]
-    listener.close()
-    return port
+def executable(path_text: str, expected_name: str) -> pathlib.Path:
+    path = pathlib.Path(path_text).resolve()
+    if path.name != expected_name:
+        fail(f"expected canonical {expected_name} image, got {path.name}")
+    stat = path.stat()
+    if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
+        fail(f"canonical image is not an executable regular file: {path}")
+    if stat.st_size == 0:
+        fail(f"canonical image is empty: {path}")
+    return path
 
 
-class Managed:
-    def __init__(self, argv, log_path, stdin=False, stdout=False):
-        self.log = open(log_path, "ab", buffering=0)
-        self.process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
-            stdout=subprocess.PIPE if stdout else self.log,
-            stderr=self.log,
-            start_new_session=True,
-        )
-
-    def stop(self):
-        if self.process.poll() is None:
-            os.killpg(self.process.pid, signal.SIGTERM)
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                self.process.wait(timeout=5)
-        self.log.close()
-
-
-class Peer(Managed):
-    def __init__(self, fixture, runtime_dir, session, product, name, groups, log_path):
-        super().__init__(
-            [fixture, "--runtime-dir", str(runtime_dir), "--session", session,
-             "--product", product, "--name", name, "--groups", ",".join(groups)],
-            log_path, stdin=True, stdout=True,
-        )
-        self.events = queue.Queue()
-        self.pending = []
-        self.reader = threading.Thread(target=self._read, daemon=True)
-        self.reader.start()
-        self.wait_event(lambda row: row.get("event") == "ready", "peer ready")
-
-    def _read(self):
-        for line in self.process.stdout:
-            try:
-                self.events.put(json.loads(line))
-            except Exception as exc:
-                self.events.put({"event": "decode_error", "error": str(exc), "line": line.decode(errors="replace")})
-
-    def command(self, command_id, frame):
-        body = json.dumps({"id": command_id, "frame": frame}, separators=(",", ":")) + "\n"
-        self.process.stdin.write(body.encode())
-        self.process.stdin.flush()
-        return self.wait_event(
-            lambda row: row.get("event") == "result" and row.get("id") == command_id,
-            f"result {command_id}",
-        )
-
-    def wait_delivery(self, message_id, timeout=5.0):
-        return self.wait_event(
-            lambda row: row.get("event") == "delivery" and row.get("frame", {}).get("message_id") == message_id,
-            f"delivery {message_id}", timeout,
-        )
-
-    def wait_event(self, predicate, description, timeout=10.0):
-        for index, row in enumerate(self.pending):
-            if predicate(row):
-                return self.pending.pop(index)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                row = self.events.get(timeout=min(0.2, deadline - time.monotonic()))
-            except queue.Empty:
-                if self.process.poll() is not None:
-                    raise AssertionError(f"{description}: peer exited {self.process.returncode}")
-                continue
-            if predicate(row):
-                return row
-            self.pending.append(row)
-        raise AssertionError(f"timed out waiting for {description}; pending={self.pending}")
-
-    def assert_no_delivery(self, message_id, duration=0.4):
-        try:
-            self.wait_delivery(message_id, duration)
-        except AssertionError:
-            return
-        raise AssertionError(f"unexpected delivery {message_id}")
-
-
-def agent_command(binary, hub, host, root):
-    return [
-        binary, "agent", "--hub", hub, "--host", host, "--name", host,
-        "--runtime-dir", str(root / "runtime"), "--state-dir", str(root / "state"),
-        "--claude-config-dir", str(root / "claude"),
-    ]
-
-
-def service_rows(config_root):
-    rows = []
-    for path in (config_root / "sessions").glob("*.json"):
-        try:
-            row = json.loads(path.read_text())
-        except Exception:
-            continue
-        if row.get("agentService"):
-            rows.append(row)
-        assert not row.get("federatedBy"), f"legacy shadow row survived: {row}"
-    return rows
-
-
-def frame(kind, message_id, **fields):
-    result = {"version": 1, "type": kind, "message_id": message_id}
-    result.update(fields)
-    return result
-
-
-def discovered_sessions(peer, command_id):
-    response = peer.command(command_id, frame("discover", command_id))
-    assert "error" not in response, response
-    return {item["session_id"] for item in response["result"].get("peers", [])}
-
-
-def main():
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {sys.argv[0]} PEER_FEDERATOR")
-    binary = os.path.abspath(sys.argv[1])
-    # AF_UNIX paths are capped at 103 characters on Darwin. Keep the socket
-    # hierarchy independent of that platform's long per-user TMPDIR.
-    root = pathlib.Path(tempfile.mkdtemp(prefix="gf-", dir="/tmp"))
-    repo = pathlib.Path(__file__).resolve().parents[2]
-    fixture = root / "grouped-peer-fixture"
-    subprocess.run(
-        ["go", "build", "-o", str(fixture), "./scripts/federation/grouped_peer_fixture.go"],
-        cwd=repo, check=True,
+def run_json(command: list[str], environment: dict[str, str]) -> dict:
+    completed = subprocess.run(
+        command, check=True, text=True, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    port = reserve_port()
-    hub_address = f"127.0.0.1:{port}"
-    processes = []
-    success = False
-    try:
-        hub = Managed([binary, "hub", "--listen", hub_address], root / "hub.log")
-        processes.append(hub)
-        wait_for(lambda: socket.create_connection(("127.0.0.1", port), timeout=0.2), "hub listener")
+    return json.loads(completed.stdout)
 
-        host_a, host_b = root / "host-a", root / "host-b"
-        agent_a = Managed(agent_command(binary, hub_address, "host-a", host_a), root / "agent-a.log")
-        agent_b = Managed(agent_command(binary, hub_address, "host-b", host_b), root / "agent-b.log")
-        processes.extend([agent_a, agent_b])
-        wait_for(lambda: (host_a / "runtime" / "agent.sock").exists(), "host-a agent")
-        wait_for(lambda: (host_b / "runtime" / "agent.sock").exists(), "host-b agent")
 
-        peer_a = Peer(str(fixture), host_a / "runtime", "session-a", "codex", "alpha", ["project"], root / "peer-a.log")
-        peer_b = Peer(str(fixture), host_b / "runtime", "session-b", "claude", "beta", ["project"], root / "peer-b.log")
-        peer_qwen = Peer(str(fixture), host_b / "runtime", "session-qwen", "qwen", "gamma", ["project"], root / "peer-qwen.log")
-        peer_hidden = Peer(str(fixture), host_b / "runtime", "session-hidden", "grok", "hidden", ["other"], root / "peer-hidden.log")
-        processes.extend([peer_a, peer_b, peer_qwen, peer_hidden])
+def live_hub_contract(hub: pathlib.Path) -> dict:
+    with tempfile.TemporaryDirectory(prefix="agent-sessions-federation-") as root_text:
+        root = pathlib.Path(root_text)
+        home = root / "home"
+        configuration = root / "configuration"
+        state = root / "state"
+        for directory in (home, configuration, state):
+            directory.mkdir(mode=0o700)
+        environment = os.environ.copy()
+        environment.update({
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(configuration),
+            "XDG_STATE_HOME": str(state),
+        })
+        process = subprocess.Popen(
+            [str(hub), "--listen", "127.0.0.1:0"],
+            text=True, env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            status = None
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    fail(f"isolated hub exited before readiness: stdout={stdout!r} stderr={stderr!r}")
+                try:
+                    candidate = run_json([str(hub), "status", "--json"], environment)
+                except (subprocess.CalledProcessError, json.JSONDecodeError):
+                    time.sleep(0.05)
+                    continue
+                if candidate.get("event") == "hub.status":
+                    status = candidate
+                    break
+            if status is None:
+                fail("isolated hub did not publish status before the acceptance deadline")
+            metadata = status.get("metadata", {})
+            listener = metadata.get("listener")
+            if not isinstance(listener, str) or not listener:
+                fail(f"isolated hub status omitted listener metadata: {status}")
+            doctor = run_json([str(hub), "doctor", "--json"], environment)
+            if doctor.get("event") != "hub.doctor" or doctor.get("metadata", {}).get("healthy") is not True:
+                fail(f"isolated hub doctor was not healthy: {doctor}")
+            host, port_text = listener.rsplit(":", 1)
+            with socket.create_connection((host, int(port_text)), timeout=2) as connection:
+                connection.sendall(b'{"type":"probe","version":3}\n')
+                reply = connection.makefile("rb").readline()
+            probe = json.loads(reply)
+            if probe != {"type": "probe_ok", "version": 3}:
+                fail(f"isolated hub protocol probe changed: {probe}")
+            return {
+                "status": True,
+                "doctor": True,
+                "probe": True,
+                "protocol_version": probe["version"],
+            }
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
-        qwen_socket = host_b / "runtime" / "fixture-session-qwen.sock"
-        wait_for(lambda: qwen_socket.is_socket(), "real Qwen fixture destination socket")
 
-        wait_for(lambda: discovered_sessions(peer_a, "discover-initial") == {"session-b", "session-qwen"}, "group-filtered remote discovery")
-        assert discovered_sessions(peer_hidden, "discover-hidden") == set()
-        wait_for(lambda: len(service_rows(host_a / "claude")) == 1, "one host-a service row")
-        wait_for(lambda: len(service_rows(host_b / "claude")) == 1, "one host-b service row")
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        raise SystemExit(
+            f"usage: {argv[0]} ABSOLUTE_AGENT_SESSIONS ABSOLUTE_AGENT_SESSIONS_HUB"
+        )
+    host = executable(argv[1], "agent-sessions")
+    hub = executable(argv[2], "agent-sessions-hub")
 
-        sent = peer_a.command("send-a-b", frame("send", "send-a-b", targets=["beta"], content="HELLO_GROUPED"))
-        assert sent["result"]["deliveries"] == [{"target": "host-b/session-b", "session_id": "session-b", "status": "accepted"}], sent
-        delivered = peer_b.wait_delivery("send-a-b")["frame"]
-        assert delivered["content"] == "HELLO_GROUPED"
-        assert delivered["source"]["entrypoint"] == "codex"
+    host_help = subprocess.run(
+        [str(host), "help", "--json"], check=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    document = json.loads(host_help.stdout)
+    if document.get("ok") is not True:
+        fail(f"canonical host help failed: {document}")
+    binaries = document.get("result", {}).get("binaries")
+    if binaries != ["agent-sessions", "agent-sessions-hub"]:
+        fail(f"canonical executable inventory changed: {binaries}")
 
-        qwen_sent = peer_a.command("send-a-qwen", frame("send", "send-a-qwen", targets=["gamma"], content="HELLO_QWEN"))
-        assert qwen_sent["result"]["deliveries"] == [{"target": "host-b/session-qwen", "session_id": "session-qwen", "status": "accepted"}], qwen_sent
-        qwen_delivered = peer_qwen.wait_delivery("send-a-qwen")["frame"]
-        assert qwen_delivered["content"] == "HELLO_QWEN"
-        assert qwen_delivered["source"]["entrypoint"] == "codex"
+    hub_help = subprocess.run(
+        [str(hub), "--help"], check=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if "agent-sessions-hub" not in hub_help.stdout or "--listen" not in hub_help.stdout:
+        fail("canonical hub help omitted its serve/listen contract")
 
-        denied = peer_a.command("atomic-denied", frame("send", "atomic-denied", targets=["beta", "hidden"], content="NO"))
-        assert "error" in denied, denied
-        peer_b.assert_no_delivery("atomic-denied")
-        peer_hidden.assert_no_delivery("atomic-denied")
+    live_hub = live_hub_contract(hub)
 
-        broadcast = peer_a.command("broadcast-project", frame("broadcast", "broadcast-project", group="project", content="ALL_PROJECT"))
-        assert len(broadcast["result"]["deliveries"]) == 2, broadcast
-        assert peer_b.wait_delivery("broadcast-project")["frame"]["content"] == "ALL_PROJECT"
-        assert peer_qwen.wait_delivery("broadcast-project")["frame"]["content"] == "ALL_PROJECT"
-        peer_hidden.assert_no_delivery("broadcast-project")
-
-        # Restart the hub. Agents reconnect and grouped routing resumes without
-        # creating a shadow row or restarting either peer.
-        hub.stop()
-        processes.remove(hub)
-        hub = Managed([binary, "hub", "--listen", hub_address], root / "hub-restart.log")
-        processes.append(hub)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-hub") == {"session-b", "session-qwen"}, "roster after hub restart", 15)
-        peer_a.command("send-after-hub", frame("send", "send-after-hub", targets=["session-b"], content="AFTER_HUB"))
-        assert peer_b.wait_delivery("send-after-hub")["frame"]["content"] == "AFTER_HUB"
-
-        # Restart one host agent. The still-idle product fixture re-registers;
-        # the public registry again contains one service row and no shadows.
-        agent_b.stop()
-        processes.remove(agent_b)
-        agent_b = Managed(agent_command(binary, hub_address, "host-b", host_b), root / "agent-b-restart.log")
-        processes.append(agent_b)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-agent") == {"session-b", "session-qwen"}, "peer re-registration after agent restart", 15)
-        wait_for(lambda: len(service_rows(host_b / "claude")) == 1, "single service row after agent restart")
-        peer_a.command("send-after-agent", frame("send", "send-after-agent", targets=["beta"], content="AFTER_AGENT"))
-        assert peer_b.wait_delivery("send-after-agent")["frame"]["content"] == "AFTER_AGENT"
-
-        peer_b.stop()
-        processes.remove(peer_b)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-exit") == {"session-qwen"}, "exact remote peer removal")
-        peer_qwen.stop()
-        processes.remove(peer_qwen)
-        wait_for(lambda: discovered_sessions(peer_a, "discover-after-qwen-exit") == set(), "remote Qwen peer removal")
-        wait_for(lambda: not qwen_socket.exists(), "exact remote Qwen destination socket cleanup")
-        assert peer_hidden.process.poll() is None, "unrelated remote peer was stopped by Qwen cleanup"
-        assert len(service_rows(host_b / "claude")) == 1, "Qwen cleanup changed the destination service row"
-        print("grouped federation integration: PASS")
-        success = True
-        return 0
-    finally:
-        for process in reversed(processes):
-            process.stop()
-        if not success:
-            for path in sorted(root.rglob("*.log")):
-                if path.stat().st_size:
-                    print(f"===== {path.name} =====", file=sys.stderr)
-                    print(path.read_text(errors="replace"), file=sys.stderr)
-        import shutil
-        shutil.rmtree(root, ignore_errors=True)
+    print(json.dumps({
+        "type": "unified.federation.integration.passed",
+        "host_image": host.name,
+        "hub_image": hub.name,
+        "logical_protocol_tests": True,
+        "production_host_daemons_started": 0,
+        "production_hubs_started": 1,
+        "test_owned_hub": True,
+        "hub_status": live_hub["status"],
+        "hub_doctor": live_hub["doctor"],
+        "hub_probe": live_hub["probe"],
+        "protocol_version": live_hub["protocol_version"],
+        "second_user_daemon": False,
+    }, separators=(",", ":")))
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))

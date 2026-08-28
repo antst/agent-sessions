@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -110,7 +112,8 @@ type DeliveryEngine struct {
 	records       map[string]DeliveryRecord
 }
 
-// NewDeliveryEngine loads accepted operations before admitting new messages.
+// NewDeliveryEngine loads accepted operations and reconciles migration-tagged
+// pending work before admitting new messages.
 func NewDeliveryEngine(options DeliveryEngineOptions) (*DeliveryEngine, error) {
 	if options.State == nil || options.Attachments == nil {
 		return nil, errors.New("delivery engine requires state and attachment registry")
@@ -137,6 +140,9 @@ func NewDeliveryEngine(options DeliveryEngineOptions) (*DeliveryEngine, error) {
 		for _, record := range catalog.Records {
 			engine.records[record.MessageID] = cloneDeliveryRecord(record)
 		}
+	}
+	if err := engine.ReconcileAdoptedDeliveries(context.Background()); err != nil {
+		return nil, fmt.Errorf("reconcile adopted deliveries: %w", err)
 	}
 	return engine, nil
 }
@@ -197,6 +203,166 @@ func (engine *DeliveryEngine) Accept(ctx context.Context, request DeliveryReques
 	return engine.deliverAccepted(ctx, accepted, destinations)
 }
 
+// AcceptFederated durably admits one hub-attested destination delivery. The
+// remote source remains a wire identity and is never inserted into the local
+// attachment registry. Identical replays return the committed terminal result
+// without invoking the native adapter again.
+//
+//nolint:gocyclo // Attestation, replay, destination identity, and durable delivery are one fail-closed admission path.
+func (engine *DeliveryEngine) AcceptFederated(
+	ctx context.Context,
+	delivery federation.RoutedDelivery,
+) (DeliveryRecord, error) {
+	frame, digest, err := decodeFederatedDelivery(delivery)
+	if err != nil {
+		return DeliveryRecord{}, err
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if prior, ok := engine.records[frame.MessageID]; ok {
+		if prior.RequestDigest != digest {
+			return DeliveryRecord{}, ErrDeliveryIdempotencyConflict
+		}
+		switch prior.State {
+		case DeliveryStateDelivered:
+			return cloneDeliveryRecord(prior), nil
+		case DeliveryStateFailed:
+			return cloneDeliveryRecord(prior), errors.New("federated delivery previously failed")
+		default:
+			return cloneDeliveryRecord(prior), errors.New("federated delivery was accepted before interruption and will not be redispatched")
+		}
+	}
+	destination, err := engine.resolveFederatedDestination(delivery, frame)
+	if err != nil {
+		return DeliveryRecord{}, err
+	}
+	request := DeliveryRequest{
+		MessageID: frame.MessageID, Operation: delivery.Type,
+		Targets: []string{delivery.TargetID}, Group: frame.Group,
+		Content: frame.Content, Summary: frame.Summary, SentAt: frame.SentAt,
+	}
+	if engine.preflight != nil {
+		if err := engine.preflight(ctx, request); err != nil {
+			engine.emit(request, "rejected", 0, "resource_capacity")
+			return DeliveryRecord{}, err
+		}
+	}
+	now := engine.now().UnixMilli()
+	record := DeliveryRecord{
+		RecordHeader: RecordHeader{
+			SchemaVersion: HostRuntimeSchemaVersion, Revision: 1, Generation: destination.Generation,
+			CreatedAt: now, UpdatedAt: now,
+		},
+		MessageID: frame.MessageID, SourceHostID: frame.Source.HostID,
+		SourceSessionID: frame.Source.SessionID, Operation: delivery.Type,
+		RequestedTargets: []string{delivery.TargetID}, Group: frame.Group,
+		ResolvedDestinations: []string{delivery.TargetID}, Content: frame.Content,
+		Summary: frame.Summary, SentAt: frame.SentAt, State: DeliveryStateAccepted,
+		DestinationResults: map[string]string{delivery.TargetID: DeliveryDestinationPending},
+		AcceptedRevision:   1, AcceptedAt: now, RequestDigest: digest,
+	}
+	if err := engine.commitDeliveryCatalog(ctx, func(records map[string]DeliveryRecord) {
+		records[record.MessageID] = record
+	}); err != nil {
+		return DeliveryRecord{}, err
+	}
+	engine.emit(request, DeliveryStateAccepted, 1, "")
+
+	var deliveryErr error
+	current, attached := engine.attachments.attachedByID(destination.AttachmentID)
+	if !attached || current.Revision != destination.Revision ||
+		attachmentAddress(current) != delivery.TargetID || current.Product != destination.Product {
+		deliveryErr = ErrAttachmentNotFound
+	} else if err := federation.ValidateCurrentDeliveryGroups(*frame.Source, attachmentPeer(current), frame); err != nil {
+		deliveryErr = err
+	} else if adapter := engine.adapters[current.Product]; adapter == nil {
+		deliveryErr = fmt.Errorf("delivery adapter %s is unavailable", current.Product)
+	} else {
+		deliveryErr = adapter.Deliver(ctx, cloneAttachmentRecord(current), frame)
+	}
+	if deliveryErr == nil {
+		record.State = DeliveryStateDelivered
+		record.DestinationResults[delivery.TargetID] = DeliveryDestinationDelivered
+	} else {
+		record.State = DeliveryStateFailed
+		record.DestinationResults[delivery.TargetID] = DeliveryDestinationFailed
+	}
+	record.Revision++
+	record.UpdatedAt = engine.now().UnixMilli()
+	if err := engine.commitDeliveryCatalog(ctx, func(records map[string]DeliveryRecord) {
+		records[record.MessageID] = record
+	}); err != nil {
+		return DeliveryRecord{}, errors.Join(deliveryErr, err)
+	}
+	engine.emit(request, record.State, 1, deliveryErrorCode(deliveryErr))
+	return cloneDeliveryRecord(record), deliveryErr
+}
+
+//nolint:gocyclo // Wire bounds and exact source/destination identities are validated together before admission.
+func decodeFederatedDelivery(
+	delivery federation.RoutedDelivery,
+) (federation.AgentFrame, string, error) {
+	if delivery.Type != "group_deliver" && delivery.Type != "terminal_notice_deliver" {
+		return federation.AgentFrame{}, "", errors.New("unsupported federated delivery type")
+	}
+	if delivery.RequestID == "" || delivery.SourceID == "" || delivery.TargetID == "" ||
+		len(delivery.Frame) == 0 || len(delivery.Frame) > federation.MaxAgentFrameBytes {
+		return federation.AgentFrame{}, "", ErrDeliveryUnauthorized
+	}
+	decoder := json.NewDecoder(bytes.NewReader(delivery.Frame))
+	decoder.DisallowUnknownFields()
+	var frame federation.AgentFrame
+	if err := decoder.Decode(&frame); err != nil {
+		return federation.AgentFrame{}, "", fmt.Errorf("decode federated delivery: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return federation.AgentFrame{}, "", errors.New("federated delivery contains trailing JSON")
+	}
+	if frame.Version != federation.AgentFrameVersion || frame.Type != "delivery" || frame.MessageID == "" ||
+		frame.Source == nil || frame.Source.ID != delivery.SourceID ||
+		frame.SourceSessionID != frame.Source.SessionID || frame.Content == "" {
+		return federation.AgentFrame{}, "", ErrDeliveryUnauthorized
+	}
+	if err := federation.ValidateSnapshotPeer(*frame.Source, frame.Source.HostID); err != nil {
+		return federation.AgentFrame{}, "", err
+	}
+	digestBody, err := json.Marshal(struct {
+		Type     string                `json:"type"`
+		SourceID string                `json:"source_id"`
+		TargetID string                `json:"target_id"`
+		Frame    federation.AgentFrame `json:"frame"`
+	}{Type: delivery.Type, SourceID: delivery.SourceID, TargetID: delivery.TargetID, Frame: frame})
+	if err != nil {
+		return federation.AgentFrame{}, "", fmt.Errorf("encode federated delivery identity: %w", err)
+	}
+	digestValue := sha256.Sum256(append([]byte(frame.MessageID+"\x00"), digestBody...))
+	return frame, hex.EncodeToString(digestValue[:]), nil
+}
+
+func (engine *DeliveryEngine) resolveFederatedDestination(
+	delivery federation.RoutedDelivery,
+	frame federation.AgentFrame,
+) (AttachmentRecord, error) {
+	var destination AttachmentRecord
+	found := false
+	for _, candidate := range engine.attachments.attachedRecords() {
+		if attachmentAddress(candidate) != delivery.TargetID {
+			continue
+		}
+		if found {
+			return AttachmentRecord{}, ErrAttachmentAmbiguous
+		}
+		destination, found = candidate, true
+	}
+	if !found || frame.Source.HostID == destination.HostID {
+		return AttachmentRecord{}, ErrAttachmentNotFound
+	}
+	if err := federation.ValidateCurrentDeliveryGroups(*frame.Source, attachmentPeer(destination), frame); err != nil {
+		return AttachmentRecord{}, err
+	}
+	return destination, nil
+}
+
 // Read returns one exact durable message operation.
 func (engine *DeliveryEngine) Read(_ context.Context, messageID string) (DeliveryRecord, error) {
 	engine.mu.Lock()
@@ -232,6 +398,7 @@ func (engine *DeliveryEngine) resolveDestinations(source AttachmentRecord, reque
 	return destinations, nil
 }
 
+//nolint:gocyclo // Address, ambiguity, visibility, and dedup checks are one authorization decision.
 func resolveExplicitDestinations(
 	source AttachmentRecord,
 	request DeliveryRequest,
@@ -240,13 +407,29 @@ func resolveExplicitDestinations(
 	if len(request.Targets) == 0 || (request.Operation == DeliveryOperationSend && len(request.Targets) != 1) {
 		return nil, ErrDeliveryUnauthorized
 	}
-	byAddress := make(map[string]AttachmentRecord, len(attached))
+	byAddress := make(map[string]AttachmentRecord, len(attached)*3)
+	ambiguous := make(map[string]struct{})
 	for _, record := range attached {
-		byAddress[attachmentAddress(record)] = record
+		for _, address := range []string{attachmentAddress(record), record.SessionID, record.Name} {
+			if address == "" {
+				continue
+			}
+			if prior, exists := byAddress[address]; exists && prior.AttachmentID != record.AttachmentID {
+				delete(byAddress, address)
+				ambiguous[address] = struct{}{}
+				continue
+			}
+			if _, isAmbiguous := ambiguous[address]; !isAmbiguous {
+				byAddress[address] = record
+			}
+		}
 	}
 	seen := make(map[string]struct{}, len(request.Targets))
 	destinations := make([]AttachmentRecord, 0, len(request.Targets))
 	for _, target := range request.Targets {
+		if _, isAmbiguous := ambiguous[target]; isAmbiguous {
+			return nil, ErrAttachmentAmbiguous
+		}
 		destination, ok := byAddress[target]
 		if !ok || destination.AttachmentID == source.AttachmentID || !attachmentsShareGroup(source, destination) {
 			return nil, ErrDeliveryUnauthorized
@@ -357,10 +540,30 @@ func (engine *DeliveryEngine) commitDeliveryCatalog(ctx context.Context, mutate 
 	sort.Slice(catalog.Records, func(i, j int) bool { return catalog.Records[i].MessageID < catalog.Records[j].MessageID })
 	next, err := engine.state.compareAndSwapDeliveryCatalog(ctx, engine.storeRevision, catalog)
 	if err != nil {
+		if errors.Is(err, statestore.ErrRevisionConflict) {
+			return errors.Join(err, engine.reloadDeliveryCatalog(ctx))
+		}
 		return err
 	}
 	engine.storeRevision = next
 	engine.records = records
+	return nil
+}
+
+// reloadDeliveryCatalog re-synchronizes the process-local revision after an
+// unexpected writer wins the durable CAS. The conflicting operation still
+// fails; a later idempotent request can recover instead of retrying the same
+// stale revision forever.
+func (engine *DeliveryEngine) reloadDeliveryCatalog(ctx context.Context) error {
+	catalog, revision, err := engine.state.readDeliveryCatalog(ctx)
+	if err != nil {
+		return fmt.Errorf("reload delivery catalog after revision conflict: %w", err)
+	}
+	records := make(map[string]DeliveryRecord, len(catalog.Records))
+	for _, record := range catalog.Records {
+		records[record.MessageID] = cloneDeliveryRecord(record)
+	}
+	engine.storeRevision, engine.records = revision, records
 	return nil
 }
 
@@ -374,6 +577,9 @@ func (engine *DeliveryEngine) emit(request DeliveryRequest, state string, destin
 }
 
 func deliveryRequestDigest(request DeliveryRequest) (string, error) {
+	// SentAt is presentation metadata and may be regenerated by a durable
+	// retry. Message identity is the source, operation, recipients, and body.
+	request.SentAt = ""
 	body, err := json.Marshal(request)
 	if err != nil {
 		return "", fmt.Errorf("encode delivery request identity: %w", err)

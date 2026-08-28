@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/statestore"
 )
 
 func TestDeliveryDiscoveryUsesOnlyExistingGlobalGroups(t *testing.T) {
@@ -127,6 +128,34 @@ func TestDeliveryAcceptanceIsDurableRetryableAndAtMostOncePerDestination(t *test
 	}
 }
 
+func TestDeliveryRevisionConflictReloadsAuthorityForNextRequest(t *testing.T) {
+	fixture := newDeliveryTestFixture(t, nil)
+	source := fixture.attach(t, "codex", "source", "source-id", []string{"team"})
+	target := fixture.attach(t, "claude", "target", "target-id", []string{"team"})
+	request := DeliveryRequest{
+		MessageID: "conflict-recovery", SourceAttachmentID: source.AttachmentID, Operation: DeliveryOperationSend,
+		Targets: []string{"host-test/" + target.SessionID}, Content: "deliver after revision refresh",
+	}
+	if _, err := fixture.state.compareAndSwapDeliveryCatalog(
+		context.Background(), 0, deliveryCatalog{Records: []DeliveryRecord{}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.engine.Accept(context.Background(), request); !errors.Is(err, statestore.ErrRevisionConflict) {
+		t.Fatalf("stale acceptance error = %v, want revision conflict", err)
+	}
+	if fixture.adapter.callCount() != 0 {
+		t.Fatal("revision conflict reached native delivery before durable acceptance")
+	}
+	delivered, err := fixture.engine.Accept(context.Background(), request)
+	if err != nil {
+		t.Fatalf("acceptance after catalog reload: %v", err)
+	}
+	if delivered.State != DeliveryStateDelivered || fixture.adapter.callCount() != 1 {
+		t.Fatalf("recovered delivery = %#v, native calls=%d", delivered, fixture.adapter.callCount())
+	}
+}
+
 func TestDeliveryDiagnosticsNeverContainMessageContent(t *testing.T) {
 	const canary = "MESSAGE_CONTENT_MUST_NOT_REACH_LOGS_91bce6"
 	observations := make([]DeliveryObservation, 0, 4)
@@ -215,21 +244,9 @@ func newDeliveryTestFixture(t *testing.T, observe func(DeliveryObservation)) *de
 
 func (fixture *deliveryTestFixture) attach(t *testing.T, product, name, sessionID string, groups []string) AttachmentRecord {
 	t.Helper()
-	prepared, capability, err := fixture.registry.Prepare(context.Background(), AttachmentPrepareRequest{
-		Product: product, Kind: "interactive", Cwd: "/work", Name: name, Groups: groups,
-		ExpectedNativeActor: map[string]any{"pid": len(sessionID) + 1000, "proc_start": "stable-" + sessionID},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	attached, err := fixture.registry.Adopt(context.Background(), AttachmentAdoptRequest{
-		AttachmentID: prepared.AttachmentID, Capability: capability, SessionID: sessionID,
-		NativeActor: map[string]any{"pid": len(sessionID) + 1000, "proc_start": "stable-" + sessionID},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return attached
+	return attachDeliveryLaneTestParticipant(
+		t, fixture.registry, product, name, sessionID, "/work", groups, len(sessionID)+1000,
+	)
 }
 
 type deliveryTestAdapter struct {

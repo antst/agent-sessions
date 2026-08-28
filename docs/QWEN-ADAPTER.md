@@ -1,99 +1,49 @@
-# Qwen Code peer adapter
+# Qwen daemon adapter
 
-`qwen-peer` runs an ordinary interactive Qwen Code session with Agent Sessions
-messaging and lane orchestration attached. Native Qwen remains the UI, transcript
-owner, authentication provider, model selector, and permission manager.
+The Qwen integration is an in-process adapter of the one per-user-host `agent-sessions` daemon.
+Qwen's TUI, native daemon/ACP worker, event and input artifacts, archive store, authentication, and
+transcript remain vendor-owned. Agent Sessions no longer runs `qwen-host`, a Qwen delivery listener,
+or a detached Qwen lane manager.
 
-Bare `qwen` is the explicit communication opt-out. It receives no Agent Sessions
-identity merely because the plugin is installed.
+## Interactive peers
 
-## Native integration
+`qwen-peer` is an alias of the canonical host image. It obtains a prepared launch from the running
+daemon and hands off to Qwen. Publication waits for the exact extension/readiness state, launch
+capability, selected UUID/name, profile, cwd, ancestry, and dual native output artifacts.
 
-The adapter uses Qwen Code 0.21.15 or newer and two supported native surfaces:
+The adapter observes native events and writes the corroborated native input path from daemon
+goroutines. The daemon owns durable delivery admission, existing global-group authorization, retries,
+and at-most-once outcome. A bare `qwen` invocation has no launch capability and its installed MCP relay
+returns inactive.
 
-- protocol-v2 dual output (`--json-file`) supplies the exact native UUID, cwd,
-  version, activity, and terminal events;
-- native remote input (`--input-file`) accepts one JSONL `submit` record for an
-  inbound AgentFrame.
+`QWEN_HOME` and `QWEN_RUNTIME_DIR` are presence-sensitive native selectors. They select exact Qwen
+resources; they do not create another Agent Sessions daemon, state authority, collaboration namespace,
+or group boundary.
 
-The launcher allocates private `0700` state, creates regular `0600` input and
-event files, and starts Qwen only after the selected profile passes the common
-readiness engine. Publication waits for the exact `session_start` UUID, cwd,
-version, protocol version, and event inventory. The stable delivery endpoint is
-a real owner-only Unix socket. It is never a symlink and callers never need a
-path-resolution workaround.
+## Restart
 
-Profile and cwd identity use the shared adapter platform contract. On macOS,
-the fixed `/tmp` and `/var` aliases are accepted only after resolving to the
-expected `/private/...` system targets; arbitrary symlink components remain a
-fail-closed error. Agent Sessions-owned sockets use the shared 103-byte macOS /
-107-byte Linux pathname budget and compact runtime roots. Process environment
-inspection that returns no entries is treated as unavailable, never as proof
-that a live process is unrelated. See [ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md#shared-host-platform-primitives).
+Daemon restart leaves Qwen's native TUI and worker intact. Recovery reconstructs an attachment only
+from the same admitted event/input artifacts and live ancestry. An absent, ambiguous, or changed
+artifact produces unavailability or debt rather than inferred ownership.
 
-`qwen-peer --resume UUID_OR_UNIQUE_MANAGED_NAME` restores the exact Agent
-Sessions catalog identity and Qwen transcript. `--continue` and
-`--fork-session` are deliberately left to bare Qwen because neither identifies
-one existing managed peer.
+## Qwen lanes
 
-## Permissions
+The daemon owns Qwen lane and turn state. The adapter starts or loads the native ACP session, observes
+events, writes follow-up input, interrupts the exact turn, collects a stable result, and archives via
+Qwen's native store. An accepted turn is never redispatched. Unsupported active-turn reconnection
+produces one explicit interrupted, collectable, resumable outcome with the native reference.
 
-Qwen owns permission behavior in a peer exactly as it does normally:
+See [QWEN-LANES.md](QWEN-LANES.md) for commands and lane behavior.
 
-- no flag keeps Qwen's native default;
-- `--no-yolo` requests initial native `default` mode;
-- `--yolo` requests initial native `yolo` mode;
-- `--approval-mode MODE` passes that supported native initial mode through.
+## Installation and safety
 
-Those choices conflict with each other and are rejected before state mutation.
-After launch, Qwen's normal UI may change mode. Agent Sessions records the
-launch preference and an observed current mode when the native protocol exposes
-one; it does not lock, emulate, or silently widen native permissions. Native
-permission state never grants Agent Sessions identity or group authorization.
+Connector installation uses Qwen's native Agent Plugins v1 extension manager and verifies the exact
+manifest, enabled state, `agent_sessions` MCP server, and shipped skills. Removal uses the same native
+manager and may leave Qwen's own bookkeeping; Agent Sessions does not edit the profile to hide it.
 
-## Identity and messaging
+Before delivery, interruption, archive, or cleanup, the adapter revalidates profile identity,
+ancestry, native artifacts, session/turn identity, and Agent Sessions revision. It never reads or
+copies authentication material and never deletes Qwen transcripts, settings, archive data, or unrelated
+native files.
 
-The installed `agent_sessions` MCP is active only when all of these agree:
-
-1. a per-launch unguessable capability (only its SHA-256 is persisted);
-2. exact process ancestry and PID plus strong process-start identity;
-3. the live Qwen session UUID and real delivery socket;
-4. the selected `QWEN_HOME`/`QWEN_RUNTIME_DIR` identity and canonical cwd; and
-5. the host-agent registration and group catalog.
-
-The Qwen extension starts that MCP through the Agent Plugins v1 contained
-`./scripts/native-entry` command. A managed peer supplies the exact
-launch-selected Agent Sessions runtime to that entrypoint; an ordinary Qwen
-session uses the runtime path published by the installed integration. Ambient
-`PATH` is never used to select the MCP runtime, so a stale system installation
-cannot silently provide the parent-side messaging or lane tools.
-
-Model-supplied IDs, names, paths, and permission labels are corroboration only.
-The MCP supports grouped discovery, direct send, atomic multicast, named-group
-broadcast, and all four lane products. An idle or busy Qwen TUI receives a
-queued native submit without terminal keystroke injection.
-
-## Cleanup
-
-Normal exit, Ctrl+C, SIGTERM, wrapper death, native failure, and agent restart
-converge on the same preparation journal. Cleanup re-attests exact process and
-file identities, withdraws the participant, closes the socket, and removes only
-the launch-owned input/event artifacts. PID reuse, changed files, path-type
-changes, or ambiguous legacy symlinks retain explicit cleanup debt instead of
-authorizing collateral deletion.
-
-## Operator smoke
-
-```bash
-qwen-peer -n qwen-reviewer -g review
-qwen-peer --resume qwen-reviewer -g review
-```
-
-From another managed peer in `review`, discover `qwen-reviewer`, exchange a
-correlated direct message and reply, then broadcast to `review`. A simultaneous
-bare `qwen` must remain absent from discovery. On exit, the participant row,
-real session socket, and private launch files must disappear while the native
-transcript and unrelated profile content remain.
-
-See [QWEN-INSTALL.md](QWEN-INSTALL.md), [QWEN-LANES.md](QWEN-LANES.md), and
-[ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md).
+For the shared contract, see [ADAPTER-PROTOCOL.md](ADAPTER-PROTOCOL.md).

@@ -1,51 +1,6 @@
 package bridge
 
-import (
-	"context"
-	"errors"
-	"os"
-	"os/exec"
-	"strings"
-	"time"
-
-	"github.com/antst/agent-sessions/internal/qwenreadiness"
-)
-
-func doctorQwenLane(o qwenLaneOptions) (int, error) {
-	executable := strings.TrimSpace(os.Getenv(qwenLaneExecutableEnv))
-	if executable == "" {
-		var err error
-		executable, err = exec.LookPath("qwen")
-		if err != nil {
-			return 1, errors.New("qwen was not found on PATH")
-		}
-	}
-	cwd, err := canonicalQwenLaneDirectory(o.cwd)
-	if err != nil {
-		return 1, err
-	}
-	profile, err := resolveQwenLaneProfile(o)
-	if err != nil {
-		return 1, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	report, err := qwenreadiness.Check(ctx, qwenreadiness.Request{
-		Executable: executable, Workspace: cwd, Profile: profile,
-		ExpectedIntegrationVersion: qwenreadiness.IntegrationVersion,
-		Source:                     qwenreadiness.NewNativeSource(os.Environ()),
-	})
-	cancel()
-	if err != nil {
-		return 1, err
-	}
-	if err := emitLane(qwenLaneDoctorEvent(report, o)); err != nil {
-		return 1, err
-	}
-	if !report.Ready {
-		return 1, errors.New("qwen lane readiness is not established")
-	}
-	return 0, nil
-}
+import "github.com/antst/agent-sessions/internal/qwenreadiness"
 
 func qwenLaneDoctorEvent(report qwenreadiness.Report, o qwenLaneOptions) map[string]any {
 	interactive := qwenreadiness.StateReady

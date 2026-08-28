@@ -18,7 +18,7 @@ const (
 	// IntegrationVersion is the exact Agent Sessions Qwen plugin contract
 	// shipped by this release. Interactive and lane admission share it so their
 	// readiness checks cannot drift from one another.
-	IntegrationVersion = "0.2.4"
+	IntegrationVersion = "0.3.0"
 )
 
 // State describes whether a probed readiness contract is usable.

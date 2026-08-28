@@ -112,7 +112,11 @@ func (osConnectorCommandRunner) LookPath(name string) (string, error) { return e
 
 // Output implements ConnectorCommandRunner.
 func (osConnectorCommandRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, executable, args...) //nolint:gosec // Executable is resolved from the operator-selected native product boundary; argv is structured.
+	// The unexported production runner receives an absolute executable resolved
+	// by resolveOptionalConnector and structured, product-driver-owned argv; no
+	// shell or command-string expansion is involved.
+	//nolint:gosec // G204: executable and argv are resolved/constructed at the closed connector boundary above.
+	command := exec.CommandContext(ctx, executable, args...)
 	var stdout bytes.Buffer
 	command.Stdout = &limitedConnectorWriter{writer: &stdout, remaining: 2 * 1024 * 1024}
 	command.Stderr = io.Discard
@@ -124,7 +128,11 @@ func (osConnectorCommandRunner) Output(ctx context.Context, executable string, a
 
 // Run implements ConnectorCommandRunner.
 func (osConnectorCommandRunner) Run(ctx context.Context, executable string, args ...string) error {
-	command := exec.CommandContext(ctx, executable, args...) //nolint:gosec // Executable is resolved from the operator-selected native product boundary; argv is structured.
+	// The unexported production runner receives an absolute executable resolved
+	// by resolveOptionalConnector and structured, product-driver-owned argv; no
+	// shell or command-string expansion is involved.
+	//nolint:gosec // G204: executable and argv are resolved/constructed at the closed connector boundary above.
+	command := exec.CommandContext(ctx, executable, args...)
 	command.Stdin, command.Stdout, command.Stderr = nil, io.Discard, io.Discard
 	if err := command.Run(); err != nil {
 		return connectorCommandError(executable, args, err)
@@ -159,10 +167,21 @@ type connectorStep struct {
 	undo  func(context.Context) error
 }
 
+type connectorMutationCheckpoint func(appliedSteps int, progress connectorProductProgress) error
+
+type durableConnectorMutation interface {
+	ConnectorMutation
+	recoveryProvenance() connectorMutationProvenance
+	recoveryStepCount() int
+	resumeRecovery(int, connectorMutationCheckpoint) error
+}
+
 type nativeConnectorMutation struct {
 	steps      []connectorStep
 	applied    int
 	rolledBack bool
+	provenance connectorMutationProvenance
+	checkpoint connectorMutationCheckpoint
 }
 
 // Commit implements ConnectorMutation.
@@ -171,11 +190,25 @@ func (mutation *nativeConnectorMutation) Commit(ctx context.Context) error {
 		return errors.New("connector mutation was already rolled back")
 	}
 	for mutation.applied < len(mutation.steps) {
+		if mutation.checkpoint != nil {
+			if err := mutation.checkpoint(mutation.applied, connectorProductApplying); err != nil {
+				return err
+			}
+		}
 		step := mutation.steps[mutation.applied]
 		if err := step.apply(ctx); err != nil {
 			return err
 		}
 		mutation.applied++
+		if mutation.checkpoint != nil {
+			progress := connectorProductProgressed
+			if mutation.applied == len(mutation.steps) {
+				progress = connectorProductApplied
+			}
+			if err := mutation.checkpoint(mutation.applied, progress); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -185,29 +218,70 @@ func (mutation *nativeConnectorMutation) Rollback(ctx context.Context) error {
 	if mutation.rolledBack {
 		return nil
 	}
-	var result error
 	for mutation.applied > 0 {
+		if mutation.checkpoint != nil {
+			if err := mutation.checkpoint(mutation.applied, connectorProductUndoing); err != nil {
+				return err
+			}
+		}
+		if undo := mutation.steps[mutation.applied-1].undo; undo != nil {
+			if err := undo(ctx); err != nil {
+				return err
+			}
+		}
 		mutation.applied--
-		if undo := mutation.steps[mutation.applied].undo; undo != nil {
-			result = errors.Join(result, undo(ctx))
+		if mutation.checkpoint != nil {
+			progress := connectorProductProgressed
+			if mutation.applied == 0 {
+				progress = connectorProductUndone
+			}
+			if err := mutation.checkpoint(mutation.applied, progress); err != nil {
+				return err
+			}
 		}
 	}
 	mutation.rolledBack = true
-	return result
+	return nil
 }
 
-type noConnectorMutation struct{}
+func (mutation *nativeConnectorMutation) recoveryProvenance() connectorMutationProvenance {
+	return mutation.provenance
+}
 
-// Commit implements ConnectorMutation.
-func (noConnectorMutation) Commit(context.Context) error { return nil }
+func (mutation *nativeConnectorMutation) recoveryStepCount() int { return len(mutation.steps) }
 
-// Rollback implements ConnectorMutation.
-func (noConnectorMutation) Rollback(context.Context) error { return nil }
+func (mutation *nativeConnectorMutation) resumeRecovery(
+	appliedSteps int,
+	checkpoint connectorMutationCheckpoint,
+) error {
+	if appliedSteps < 0 || appliedSteps > len(mutation.steps) {
+		return errors.New("connector recovery progress exceeds its prepared mutation")
+	}
+	mutation.applied = appliedSteps
+	mutation.rolledBack = false
+	mutation.checkpoint = checkpoint
+	return nil
+}
+
+func unavailableConnectorMutation(product, sourceRoot string) *nativeConnectorMutation {
+	return &nativeConnectorMutation{provenance: connectorMutationProvenance{
+		SchemaVersion: connectorRecoverySchemaVersion,
+		Product:       product, SourceRoot: sourceRoot,
+	}}
+}
 
 func resolveOptionalConnector(runner ConnectorCommandRunner, executable string) (string, bool, error) {
 	resolved, err := runner.LookPath(executable)
 	if err == nil {
-		return resolved, true, nil
+		absolute, absoluteErr := filepath.Abs(resolved)
+		if absoluteErr != nil {
+			return "", false, fmt.Errorf("canonicalize native executable %q: %w", executable, absoluteErr)
+		}
+		absolute = filepath.Clean(absolute)
+		if canonical, canonicalErr := filepath.EvalSymlinks(absolute); canonicalErr == nil {
+			absolute = canonical
+		}
+		return absolute, true, nil
 	}
 	// exec.LookPath reports a bare missing command as exec.ErrNotFound, but an
 	// explicitly selected missing absolute path as an *exec.Error wrapping
@@ -402,12 +476,54 @@ type preparedConnector struct {
 // HostInstallHooks composes the four optional product connector transactions
 // around one shared host release transaction.
 type HostInstallHooks struct {
-	drivers  map[string]ConnectorDriver
-	prepared []preparedConnector
+	drivers         map[string]ConnectorDriver
+	prepared        []preparedConnector
+	journalPath     string
+	recoveryRunner  ConnectorCommandRunner
+	crashCheckpoint func(string, string)
 }
 
 // NewHostInstallHooks validates one driver per authoritative product.
 func NewHostInstallHooks(drivers map[string]ConnectorDriver) (*HostInstallHooks, error) {
+	copyDrivers, err := copyConnectorDrivers(drivers)
+	if err != nil {
+		return nil, err
+	}
+	return &HostInstallHooks{drivers: copyDrivers}, nil
+}
+
+// NewDurableHostInstallHooks creates connector hooks whose exact prepared
+// mutations and step progress survive a fresh installer process. Drivers may
+// be nil while recovering an existing journal and must be configured before a
+// new Prepare or Remove operation.
+func NewDurableHostInstallHooks(
+	drivers map[string]ConnectorDriver,
+	journalPath string,
+) (*HostInstallHooks, error) {
+	if !cleanAbsoluteConnectorPath(journalPath) || filepath.Base(journalPath) != "connectors.json" {
+		return nil, errors.New("durable connector journal must be an exact absolute connectors.json path")
+	}
+	hooks := &HostInstallHooks{journalPath: journalPath, recoveryRunner: osConnectorCommandRunner{}}
+	if drivers != nil {
+		if err := hooks.ConfigureDrivers(drivers); err != nil {
+			return nil, err
+		}
+	}
+	return hooks, nil
+}
+
+// ConfigureDrivers supplies the authoritative new-request drivers after any
+// prior durable transaction has finished recovery.
+func (hooks *HostInstallHooks) ConfigureDrivers(drivers map[string]ConnectorDriver) error {
+	copyDrivers, err := copyConnectorDrivers(drivers)
+	if err != nil {
+		return err
+	}
+	hooks.drivers = copyDrivers
+	return nil
+}
+
+func copyConnectorDrivers(drivers map[string]ConnectorDriver) (map[string]ConnectorDriver, error) {
 	copyDrivers := make(map[string]ConnectorDriver, len(drivers))
 	for _, product := range productcatalog.Catalog().Products {
 		driver := drivers[product.ID]
@@ -419,13 +535,16 @@ func NewHostInstallHooks(drivers map[string]ConnectorDriver) (*HostInstallHooks,
 	if len(copyDrivers) != len(drivers) {
 		return nil, errors.New("connector driver inventory contains an unknown product")
 	}
-	return &HostInstallHooks{drivers: copyDrivers}, nil
+	return copyDrivers, nil
 }
 
 // Prepare stages every installed product connector in authoritative order.
 // Individual drivers may implement an explicit no-op mutation when their
 // native product is absent.
 func (hooks *HostInstallHooks) Prepare(ctx context.Context, request releaseinstall.InstallRequest) error {
+	if hooks.journalPath != "" {
+		return hooks.prepareDurable(ctx, request)
+	}
 	hooks.prepared = nil
 	for _, product := range productcatalog.Catalog().Products {
 		mutation, err := hooks.drivers[product.ID].Prepare(ctx, ConnectorRequest{
@@ -450,9 +569,13 @@ func (hooks *HostInstallHooks) Ready(context.Context, releaseinstall.InstalledRe
 	return nil
 }
 
-// Commit commits prepared connector mutations in authoritative order. Any
-// failure restores every exact prior connector state in reverse order.
+// Commit commits prepared connector mutations in authoritative order. The
+// durable production form leaves any failure checkpointed for the enclosing
+// release transaction to choose exact rollback or authority-safe roll-forward.
 func (hooks *HostInstallHooks) Commit(ctx context.Context) error {
+	if hooks.journalPath != "" {
+		return hooks.commitDurable(ctx)
+	}
 	for _, prepared := range hooks.prepared {
 		if err := prepared.mutation.Commit(ctx); err != nil {
 			rollbackErr := hooks.rollbackPrepared(ctx)
@@ -465,12 +588,18 @@ func (hooks *HostInstallHooks) Commit(ctx context.Context) error {
 
 // Rollback restores every prepared connector in reverse order.
 func (hooks *HostInstallHooks) Rollback(ctx context.Context) error {
+	if hooks.journalPath != "" {
+		return hooks.rollbackDurable(ctx)
+	}
 	return hooks.rollbackPrepared(ctx)
 }
 
 // Remove invokes every product's supported native connector removal in the
 // same authoritative order and does not delete vendor profiles or state.
 func (hooks *HostInstallHooks) Remove(ctx context.Context) error {
+	if len(hooks.drivers) == 0 {
+		return errors.New("host connector removal requires configured native drivers")
+	}
 	var result error
 	for _, product := range productcatalog.Catalog().Products {
 		if err := hooks.drivers[product.ID].Remove(ctx); err != nil {

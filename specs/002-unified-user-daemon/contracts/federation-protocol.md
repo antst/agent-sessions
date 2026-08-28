@@ -24,7 +24,7 @@ contract, not a release lifecycle or source revision.
 - bounds: frame 2 MiB; lane input 1 MiB; AgentFrame 1 MiB
 - AgentFrame version: 1
 - capabilities: `claude-lane`, `codex-lane`, `grok-lane`, `qwen-lane`
-- frame types: `hello`, `hello_ok`, `probe`, `probe_ok`, `snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`, `delivery_ack`, `delivery_error`, `lane_exec`, `lane_cancel`, `lane_stdout`, `lane_stderr`, `lane_exit`, `lane_error`, `ping`, `pong`
+- frame types: `hello`, `hello_ok`, `probe`, `probe_ok`, `snapshot`, `roster`, `group_deliver`, `terminal_notice_deliver`, `delivery_ack`, `delivery_error`, `lane_exec`, `lane_accepted`, `lane_cancel`, `lane_cancelled`, `lane_cancel_refused`, `lane_archive`, `lane_archived`, `lane_archive_refused`, `lane_result`, `lane_result_ack`, `lane_result_refused`, `lane_stdout`, `lane_stderr`, `lane_exit`, `lane_error`, `ping`, `pong`
 - legacy flat `deliver`: rejected
 <!-- END: generated federation protocol inventory -->
 
@@ -119,8 +119,11 @@ After hello, the host publishes `snapshot` frames containing its current live pe
 
 - grouped peer delivery: `group_deliver`, `terminal_notice_deliver`, `delivery_ack`, and
   `delivery_error`;
-- remote lanes: `lane_exec`, `lane_cancel`, `lane_stdout`, `lane_stderr`, `lane_exit`, and
-  `lane_error`;
+- remote lanes: `lane_exec` / `lane_accepted`; `lane_cancel` / `lane_cancelled` or
+  `lane_cancel_refused`; `lane_archive` / `lane_archived` or `lane_archive_refused`;
+  `lane_result` / `lane_result_ack` or `lane_result_refused`; the bounded
+  compatibility fragments `lane_stdout`, `lane_stderr`, `lane_exit`, and `lane_error`; and the
+  content-free `terminal_notice_deliver` / `delivery_ack` completion pointer;
 - liveness: `ping` and `pong`.
 
 Protocol version `3` rejects the flat `deliver` frame. Peer snapshots retain the established
@@ -130,6 +133,27 @@ create per-host or per-release namespaces.
 
 The neutral AgentFrame body remains independently versioned at `1`. Its current discover, direct send,
 explicit multicast, named-group broadcast, provenance, and result behavior is unchanged.
+
+Remote lane admission is durable before `lane_accepted`. Replaying the exact `lane_exec` request ID
+converges on the same accepted lane/turn and never starts duplicate native work; changing any request
+field under that ID is rejected. The hub replaces caller-supplied parent product, groups, permission,
+and identity with the currently registered source peer before forwarding. A destination disconnect
+does not turn accepted work into failure, and a source reconnect replays only the exact durable
+envelope needed to reconstruct routing ownership.
+
+Cancellation has an explicit durable decision: `lane_cancelled` records acceptance and
+`lane_cancel_refused` records the bounded refusal; a lost decision remains pending and is retried
+after reconnect. Terminal result metadata travels in bounded `lane_result` and must be durably
+accepted by the exact source via `lane_result_ack` before the destination sends a content-free
+terminal notice. `lane_result_refused` leaves the destination outbox pending. The exact result and
+notice are idempotent across daemon or hub restart, while prompt/result content is never placed in
+the terminal notice or hub durable state.
+
+After a lane is terminal, `lane_archive` identifies its original accepted request and durable lane.
+The hub revalidates the current source peer and destination product capability, the destination invokes
+native archive and cleanup through its daemon adapter, and only `lane_archived` advances the source
+proxy. A refusal or lost acknowledgement is explicit and safe to retry; the source never invokes a
+local product adapter for a remote archive.
 
 ## Lifecycle and evidence
 

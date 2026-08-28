@@ -1,23 +1,43 @@
 package launcher
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"testing"
 
-func TestGrokLaneLifecycleCommandsDoNotRequireGrokExecutable(t *testing.T) {
-	t.Parallel()
+	"github.com/antst/agent-sessions/internal/daemon"
+)
 
-	for _, command := range []string{"wait", "status", "interrupt", "archive", "list"} {
-		if grokLaneNeedsExecutable([]string{command, "lane-a"}) {
-			t.Fatalf("%s unexpectedly requires Grok executable resolution", command)
+func TestGrokLaneLifecycleCommandsUseDaemonWithoutExecutableResolution(t *testing.T) {
+	previousQuery, previousInput, previousOutput := queryLaneDaemon, laneInput, laneOutput
+	t.Cleanup(func() {
+		queryLaneDaemon, laneInput, laneOutput = previousQuery, previousInput, previousOutput
+	})
+	queries := 0
+	queryLaneDaemon = func(_ context.Context, _ daemon.LocalControlIdentity, operation string, payload any) (daemon.LocalControlResult, error) {
+		queries++
+		request, ok := payload.(daemon.LaneCommandRequest)
+		if !ok || operation != "lane.command" || request.Product != "grok" {
+			t.Fatalf("daemon lane query = %q %#v", operation, payload)
+		}
+		return daemon.LocalControlResult{Result: json.RawMessage(`{"type":"lane.result"}`)}, nil
+	}
+	laneOutput = discardWriter{}
+
+	for _, command := range []string{"wait", "status", "interrupt", "archive", "list", "doctor"} {
+		arguments := []string{command}
+		if command != "list" && command != "doctor" {
+			arguments = append(arguments, "lane-a")
+		}
+		if err := RunLane("grok-lane", arguments); err != nil {
+			t.Fatalf("%s: %v", command, err)
 		}
 	}
-	for _, args := range [][]string{nil, {"--help"}, {"start", "--help"}} {
-		if grokLaneNeedsExecutable(args) {
-			t.Fatalf("help argv %#v unexpectedly requires Grok executable resolution", args)
-		}
-	}
-	for _, command := range []string{"run", "start", "resume", "doctor"} {
-		if !grokLaneNeedsExecutable([]string{command}) {
-			t.Fatalf("%s must resolve the validated Grok executable", command)
-		}
+	if queries != 6 {
+		t.Fatalf("daemon queries = %d, want 6", queries)
 	}
 }
+
+type discardWriter struct{}
+
+func (discardWriter) Write(body []byte) (int, error) { return len(body), nil }

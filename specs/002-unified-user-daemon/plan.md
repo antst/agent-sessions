@@ -28,10 +28,14 @@ rollback, removal, and purge ownership.
 
 The implementation will reuse the existing product state machines rather than rewrite product
 behavior. It will replace their detached process, per-session listener, and duplicated ownership
-boundaries with daemon-owned attachment and lane actors. Installation will stage an immutable release,
-require all managed legacy peers and lanes to be closed, migrate the quiescent split-runtime state with
-exact identity checks, and perform one transactional systemd-user or launchd-user restart. No live
-legacy handoff mechanism is planned.
+boundaries with daemon-owned attachment and lane actors. First migration requires an operator-owned
+maintenance window: close all legacy peers and lanes, explicitly stop every responsive legacy
+supervisor, product manager, and federation authority through its old supported lifecycle, and prevent
+new legacy launches until installation completes. The installer fails closed naming any live legacy
+authority even when it reports zero shims; it never stops, signals, or restarts one. After proving
+absence, it stages an immutable release, adopts Agent Sessions metadata, retires exact legacy artifacts,
+and performs the unified service transition. Neither live handoff nor a compatibility drain protocol is
+planned.
 
 ## Technical Context
 
@@ -103,8 +107,10 @@ legacy split-runtime migration, optional installation of any product subset, and
   filesystem aliases, process visibility, sleep/wake, install, restart, and removal are tested on real
   installations of both systems.
 - **VI. Transactional Lifecycle and Zero Collateral — PASS**: durable acceptance precedes publication;
-  install and migration are journaled; exact cleanup is idempotent; vendor and unrelated state are
-  excluded.
+  install and migration are journaled; the operator owns legacy shutdown while the installer owns
+  absence verification and exact artifact retirement; first-migration rollback leaves unified and
+  legacy authorities stopped and restores only installer-changed surfaces; exact cleanup is
+  idempotent; vendor and unrelated state are excluded.
 - **VII. Explicit Protocols, Operability, and Documentation — PASS**: the local control protocol,
   service lifecycle, adapter boundary, storage migration, diagnostics, authoritative CLI/help
   inventory, exit classes, environment inputs, and operator actions are documented in Phase 1
@@ -137,7 +143,7 @@ specs/002-unified-user-daemon/
 │   ├── local-control-protocol.md
 │   ├── migration-and-storage.md
 │   └── service-lifecycle.md
-└── tasks.md                    # generated later by speckit-tasks
+└── tasks.md                    # dependency-ordered implementation and acceptance ledger
 ```
 
 ### Source Code (repository root)
@@ -234,7 +240,8 @@ context ambiguities are resolved.
 - [contracts/service-lifecycle.md](contracts/service-lifecycle.md) defines systemd/launchd ownership,
   transactional installation, restart, explicit stop, removal, and rollback.
 - [contracts/migration-and-storage.md](contracts/migration-and-storage.md) defines the canonical state
-  root, revision rules, legacy inventory, adoption, retirement, and purge exclusions.
+  root, revision rules, operator-owned maintenance window, fail-closed legacy absence proof, adoption,
+  exact artifact retirement, stopped-authority rollback, and purge exclusions.
 - [quickstart.md](quickstart.md) defines the end-to-end validation sequence without creating a second
   daemon for the same user.
 

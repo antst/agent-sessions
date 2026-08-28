@@ -13,9 +13,9 @@ JSONL.
 
 From a managed Codex peer, run every lifecycle operation through the attested
 `agent_sessions.lane` MCP tool. Do not invoke `grok-peer-lane` from a shell tool:
-the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
-Unix sockets even when their directories are writable. The MCP tool retains this
-session as the exact parent and returns `exit`, `stdout`, and `stderr`.
+the shell process does not carry the MCP call's exact attachment capability.
+The MCP tool routes through the fixed daemon control endpoint, retains this
+session as the exact parent, and returns `exit`, `stdout`, and `stderr`.
 
 Set `product` to `grok`, put the lifecycle verb in `command`, and pass only the
 arguments after that verb in `arguments`. Pass the briefing as `input`; do not use
@@ -34,18 +34,20 @@ operating as a Codex peer.
 When the user requests another host, use federation instead of SSH:
 
 ```bash
-peer-federator status
-peer-federator hosts
-peer-federator lane --host HOST --product grok -- doctor --json
-peer-federator lane --host HOST --product grok -- list --all
+agent-sessions status --json
+agent-sessions lane --host HOST --product grok -- doctor --json
+agent-sessions lane --host HOST --product grok -- list --all
 ```
 
-Require a connected hub, destination capability `grok-lane`, and healthy contract version 1. Then
+Require a connected hub, destination capability `grok-lane`, and remote doctor fields
+`ready: true`, `authority: "remote-daemon"`, the exact requested host, and product `grok`. Then
 replace each `grok-peer-lane` command below with
-`peer-federator lane --host HOST --product grok --`. Federation carries the attested parent context
+`agent-sessions lane --host HOST --product grok --`. Federation carries the attested parent context
 and returns terminal notices through grouped routing; do not pass `--persistent`, `--notify`,
-`--no-notify`, or `--no-auto-archive`. Pass `-C /absolute/remote/path` when cwd matters. Remote stdin
-is capped at 1 MiB; `--prompt-file` refers to a destination-local file. On disconnect fail closed;
+`--no-notify`, or `--no-auto-archive`. The remote lane is source-proxy owned by the exact attested
+parent and remote host, so remote `--mine` applies to that source identity. Pass
+`-C /absolute/remote/path` when cwd matters. Remote stdin is capped at 1 MiB; remote
+`--prompt-file` is unsupported. On disconnect fail closed;
 never use SSH or silently run locally.
 
 ## Preflight
@@ -57,10 +59,9 @@ grok-peer-lane doctor --json
 grok-peer-lane list --all
 ```
 
-Require `contract_version: 1`, `grok_available: true`, and no `grok_error`.
-`supervisor_reachable` is diagnostic only: the Grok manager directly owns ACP and supports
-persistent lanes from a plain host shell without the shared Codex App Server. The launcher validates
-the exact Grok Build executable and rejects a chat-only Grok product or macOS application helper.
+Require `ready: true`, `authority: "daemon"`, and product `grok`. The daemon's Grok adapter is the
+sole ACP client for the lane and validates the exact Grok Build executable, rejecting a chat-only
+Grok product or macOS application helper.
 Pick a unique descriptive name after checking the unfiltered list and current peer discovery.
 
 Headless Grok cannot answer approval prompts. Every lane uses explicit `always-approve`
@@ -123,8 +124,8 @@ grok-peer-lane archive review-api
 - Completed lanes auto-archive after 60 seconds. Extend it with `--auto-archive-after`; use
   `--no-auto-archive` only when you will explicitly archive.
 - `interrupt` sends ACP `session/cancel`; collect the interrupted terminal event afterward.
-- Archive is bridge-owned and idempotent: it withdraws the peer, worker, MCP children, sockets,
-  launch record, and registry state while retaining the native transcript for exact `session/load` resume.
+- Archive is daemon-owned and idempotent: it withdraws the lane publication and retires
+  adapter-owned resources while retaining the native transcript for exact `session/load` resume.
 - Always archive persistent or no-auto-archive lanes when orchestration ends.
 
 Read [references/contract.md](references/contract.md) for event fields, outcomes, collection debt,

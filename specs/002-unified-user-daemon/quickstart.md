@@ -1,7 +1,8 @@
 # Quickstart Validation: Unified User Daemon
 
-This guide describes the end-to-end acceptance flow after implementation. It is not an instruction to
-run unimplemented commands against the current installed estate.
+This guide describes the implemented end-to-end acceptance flow. Run live installation and migration
+steps only against a dedicated acceptance user or an owner-approved maintenance window; the commands
+below are implemented, but they are intentionally fail closed against an active or mixed legacy estate.
 
 ## Safety prerequisites
 
@@ -300,17 +301,32 @@ Expected:
 - unknown identity is explicit debt;
 - unrelated processes are excluded.
 
-After the operator closes every named managed peer and lane, rerun the normal install/upgrade
-transaction. Do not test or implement live handoff from the legacy processes.
+Establish the maintenance window before rerunning the normal install/upgrade transaction:
+
+1. close every named managed peer and lane;
+2. explicitly stop both supervisors, the product/lane manager, and the federation authority through
+   each old release's supported lifecycle; and
+3. disable or otherwise hold every legacy launch path so no replacement authority can start until the
+   install completes.
+
+First leave one responsive authority reporting zero shims. Verify installation fails before mutation,
+names that authority, and neither signals nor stops it. Stop it through the old supported lifecycle,
+continue holding the maintenance window, and retry. Do not test or implement live handoff or a
+compatibility drain protocol from the legacy processes.
 
 Expected:
 
 - catalog, global groups, names, lane state, collection cursors, notices, hub/host configuration, and
   debt migrate;
 - vendor transcripts/credentials/profiles remain untouched;
-- every old Agent Sessions authority/listener is retired;
+- the installer performs zero stop, signal, or restart operations against legacy authorities;
+- every old Agent Sessions authority is proven absent and every selected exact obsolete
+  listener/job/disposable artifact is retired; adopted dormant/terminal metadata remains revision-bound
+  provenance;
 - one ready daemon endpoint remains;
-- rollback restores the prior usable authority if successor readiness is fault-injected before commit.
+- rollback leaves the unified candidate and every legacy authority stopped, restores only the
+  installer-changed release/state/connector/service surfaces, and instructs either retrying the unified
+  install or manually relaunching the old supported lifecycle.
 
 ## 9. Upgrade transaction and crash injection
 
@@ -325,9 +341,12 @@ Stage a successor with a distinct release identity and inject failures at:
 7. legacy retirement;
 8. transaction-journal finalization.
 
-Expected: failures before committed readiness leave or restore the previous usable release; failures
-after durable acceptance retain exact recoverable debt; no sample at return or 1/5/10/30 seconds finds
-a mixed-version authoritative estate.
+Expected for steady-state unified upgrades: failures before committed readiness leave or restore the
+previous usable unified release; failures after durable acceptance retain exact recoverable debt.
+Expected for the first maintenance-window migration: a failure leaves both the unified candidate and
+all operator-stopped legacy authorities stopped, restores only installer-owned release/state/connector/
+service surfaces, and directs the operator to retry or manually relaunch the old supported lifecycle.
+In either case, no sample at return or 1/5/10/30 seconds finds a mixed-version authoritative estate.
 
 ## 10. Observability content canaries
 

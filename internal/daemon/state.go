@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -137,6 +138,7 @@ type DeliveryRecord struct {
 	AcceptedRevision         uint64            `json:"accepted_revision"`
 	AcceptedAt               int64             `json:"accepted_at"`
 	RequestDigest            string            `json:"request_digest"`
+	AdoptedSourceRevision    string            `json:"adopted_source_revision,omitempty"`
 }
 
 // LaneRecord is one daemon-owned durable vendor lane.
@@ -147,11 +149,14 @@ type LaneRecord struct {
 	Product             string         `json:"product"`
 	ParentHostID        string         `json:"parent_host_id"`
 	ParentSessionID     string         `json:"parent_session_id"`
+	ParentAttachmentID  string         `json:"parent_attachment_id,omitempty"`
+	ParentProduct       string         `json:"parent_product,omitempty"`
 	ParentGroups        []string       `json:"parent_groups,omitempty"`
 	InheritParentGroups bool           `json:"inherit_parent_groups"`
 	Groups              []string       `json:"groups"`
 	PermissionMode      string         `json:"permission_mode"`
 	Cwd                 string         `json:"cwd"`
+	RemoteHostID        string         `json:"remote_host_id,omitempty"`
 	State               string         `json:"state"`
 	ActiveTurnID        string         `json:"active_turn_id,omitempty"`
 	NativeActor         map[string]any `json:"native_actor,omitempty"`
@@ -163,17 +168,26 @@ type LaneRecord struct {
 // LaneTurnRecord is one accepted native turn within a lane.
 type LaneTurnRecord struct {
 	RecordHeader
-	TurnID                string         `json:"turn_id"`
-	LaneSessionID         string         `json:"lane_session_id"`
-	ParentContextRevision uint64         `json:"parent_context_revision"`
-	InputReference        map[string]any `json:"input_reference,omitempty"`
-	DispatchState         string         `json:"dispatch_state"`
-	NativeTurnIdentity    map[string]any `json:"native_turn_identity,omitempty"`
-	TerminalOutcome       string         `json:"terminal_outcome,omitempty"`
-	ResultReference       map[string]any `json:"result_reference,omitempty"`
-	TerminalNoticeID      string         `json:"terminal_notice_id,omitempty"`
-	CollectionRevision    uint64         `json:"collection_revision,omitempty"`
-	CollectedAt           int64          `json:"collected_at,omitempty"`
+	TurnID                     string         `json:"turn_id"`
+	LaneSessionID              string         `json:"lane_session_id"`
+	ParentContextRevision      uint64         `json:"parent_context_revision"`
+	RequestDigest              string         `json:"request_digest"`
+	RemoteRequestID            string         `json:"remote_request_id,omitempty"`
+	RemoteFingerprint          string         `json:"remote_fingerprint,omitempty"`
+	RemoteEnvelope             map[string]any `json:"remote_envelope,omitempty"`
+	RemoteCancellationState    string         `json:"remote_cancellation_state,omitempty"`
+	RemoteCancellationError    string         `json:"remote_cancellation_error,omitempty"`
+	RemoteResultOutcome        string         `json:"remote_result_outcome,omitempty"`
+	RemoteResultReference      map[string]any `json:"remote_result_reference,omitempty"`
+	RemoteNoticeAcknowledgedAt int64          `json:"remote_notice_acknowledged_at,omitempty"`
+	InputReference             map[string]any `json:"input_reference,omitempty"`
+	DispatchState              string         `json:"dispatch_state"`
+	NativeTurnIdentity         map[string]any `json:"native_turn_identity,omitempty"`
+	TerminalOutcome            string         `json:"terminal_outcome,omitempty"`
+	ResultReference            map[string]any `json:"result_reference,omitempty"`
+	TerminalNoticeID           string         `json:"terminal_notice_id,omitempty"`
+	CollectionRevision         uint64         `json:"collection_revision,omitempty"`
+	CollectedAt                int64          `json:"collected_at,omitempty"`
 }
 
 // FederationStateRecord is the host's durable central-hub connection state.
@@ -251,6 +265,17 @@ func OpenStateStore(root string, maxRecordBytes int64) (*StateStore, error) {
 	return &StateStore{records: records}, nil
 }
 
+// OpenStateStoreExisting opens an already-created host state root without
+// creating directories or changing permissions. Offline inspection uses this
+// boundary so a read-only command cannot become the first state mutation.
+func OpenStateStoreExisting(root string, maxRecordBytes int64) (*StateStore, error) {
+	records, err := statestore.OpenExisting(statestore.Options{Root: root, MaxRecordBytes: maxRecordBytes})
+	if err != nil {
+		return nil, err
+	}
+	return &StateStore{records: records}, nil
+}
+
 // ReadRuntime reads and validates the exact host authority record.
 func (store *StateStore) ReadRuntime(ctx context.Context) (HostRuntimeRecord, statestore.Revision, error) {
 	var record HostRuntimeRecord
@@ -289,7 +314,14 @@ func (store *StateStore) compareAndSwapAttachmentCatalog(
 func (store *StateStore) readDeliveryCatalog(ctx context.Context) (deliveryCatalog, statestore.Revision, error) {
 	var catalog deliveryCatalog
 	revision, err := store.records.Read(ctx, "deliveries", &catalog)
-	return catalog, revision, err
+	if err == nil || !os.IsNotExist(err) {
+		return catalog, revision, err
+	}
+	snapshot, adoptionErr := LoadAdoptedState(ctx, store)
+	if adoptionErr != nil {
+		return deliveryCatalog{}, 0, adoptionErr
+	}
+	return deliveryCatalog{Records: cloneLegacyDeliveries(snapshot.Deliveries)}, 0, nil
 }
 
 func (store *StateStore) compareAndSwapDeliveryCatalog(
@@ -298,6 +330,30 @@ func (store *StateStore) compareAndSwapDeliveryCatalog(
 	catalog deliveryCatalog,
 ) (statestore.Revision, error) {
 	return store.records.CompareAndSwap(ctx, "deliveries", expected, catalog)
+}
+
+func (store *StateStore) readLaneCatalog(ctx context.Context) (laneCatalog, statestore.Revision, error) {
+	var catalog laneCatalog
+	revision, err := store.records.Read(ctx, "lanes", &catalog)
+	if err == nil || !os.IsNotExist(err) {
+		return catalog, revision, err
+	}
+	snapshot, adoptionErr := LoadAdoptedState(ctx, store)
+	if adoptionErr != nil {
+		return laneCatalog{}, 0, adoptionErr
+	}
+	return laneCatalog{
+		Lanes: cloneMigrationLanes(snapshot.Lanes), Turns: cloneMigrationTurns(snapshot.Turns),
+		Notices: append([]LaneNotice(nil), snapshot.Notices...),
+	}, 0, nil
+}
+
+func (store *StateStore) compareAndSwapLaneCatalog(
+	ctx context.Context,
+	expected statestore.Revision,
+	catalog laneCatalog,
+) (statestore.Revision, error) {
+	return store.records.CompareAndSwap(ctx, "lanes", expected, catalog)
 }
 
 // ReadDebt reads and validates one exact lifecycle-debt record.
@@ -309,8 +365,21 @@ func (store *StateStore) ReadDebt(ctx context.Context, debtID string) (DebtRecor
 	revision, err := store.records.Read(ctx, "debt/"+debtID, &record)
 	if err == nil {
 		err = record.Validate()
+		return record, revision, err
 	}
-	return record, revision, err
+	if !os.IsNotExist(err) {
+		return DebtRecord{}, 0, err
+	}
+	snapshot, adoptionErr := LoadAdoptedState(ctx, store)
+	if adoptionErr != nil {
+		return DebtRecord{}, 0, adoptionErr
+	}
+	for _, adopted := range snapshot.Debt {
+		if adopted.DebtID == debtID {
+			return adopted, 0, adopted.Validate()
+		}
+	}
+	return DebtRecord{}, 0, os.ErrNotExist
 }
 
 // CompareAndSwapDebt commits one validated lifecycle-debt revision.

@@ -196,33 +196,6 @@ func validateGrokLaneCommandOptions(o grokLaneOptions) error {
 	return validateLaneCommandOptions(o.command, checks)
 }
 
-func runGrokLaneCommand(argv []string) int {
-	return runProductLaneCommand(argv, productLaneCommands[grokLaneOptions]{
-		binary: "grok-peer-lane", usage: grokLaneUsage, parse: parseGrokLaneArgs, parseExit: 1,
-		help: func(o grokLaneOptions) bool { return o.help },
-		prepare: func(o grokLaneOptions) (grokLaneOptions, error) {
-			if err := reconcileGrokLaneManagers(resolveNativePaths()); err != nil {
-				return o, err
-			}
-			return withGrokLaneLaunchContext(o), nil
-		},
-		command: func(o grokLaneOptions) string { return o.command },
-		start:   startGrokLane, resume: resumeGrokLane, wait: waitGrokLane, status: statusGrokLane,
-		interrupt: interruptGrokLane, archive: archiveGrokLane, list: listGrokLanes,
-		doctor: func(grokLaneOptions) (int, error) { return doctorGrokLane() },
-	})
-}
-
-func withGrokLaneLaunchContext(o grokLaneOptions) grokLaneOptions {
-	o.laneCommonOptions = withCurrentLaneParent(o.laneCommonOptions)
-	return o
-}
-
-func withGrokLaneResolvedParent(o grokLaneOptions, owner laneOwner) grokLaneOptions {
-	o.laneCommonOptions = withResolvedLaneParent(o.laneCommonOptions, owner)
-	return o
-}
-
 func grokLaneStatePath(paths nativePaths, sessionID string) string {
 	return filepath.Join(profileDataRoot(paths), "grok-lanes", sessionKey(sessionID)+".json")
 }
@@ -270,90 +243,9 @@ func resolveGrokLaneState(paths nativePaths, target string) (grokLaneState, erro
 	)
 }
 
-func newGrokLaneTurn(prompt string, timeout time.Duration) grokLaneTurn {
+func newGrokLaneTurn(prompt string) grokLaneTurn {
 	now := time.Now().UnixMilli()
-	return grokLaneTurn{ID: randomID(), Prompt: prompt, Status: "queued", CreatedAt: now, TimeoutMS: timeout.Milliseconds()}
-}
-
-func startGrokLane(o grokLaneOptions, wait bool) (int, error) {
-	if err := validateLaneOwner(o.persistent, o.ownerPID, o.ownerProcStart); err != nil {
-		return 1, err
-	}
-	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
-	if err != nil {
-		return 1, err
-	}
-	paths := resolveNativePaths()
-	name := sanitizeName(o.name)
-	nameLock, err := lockLaneNames(paths)
-	if err != nil {
-		return 1, err
-	}
-	defer func() {
-		if nameLock != nil {
-			unlockLaneStateFile(nameLock)
-		}
-	}()
-	// Names are group-scoped selectors; exact session IDs own lifecycle state.
-	cwd, err := canonicalGrokLaneDirectory(o.cwd)
-	if err != nil {
-		return 1, err
-	}
-	sessionID := randomID()
-	launchToken := randomID() + randomID()
-	hostPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), launchToken)
-	turn := newGrokLaneTurn(prompt, o.timeout)
-	now := time.Now().UnixMilli()
-	state := grokLaneState{
-		Type: "grok-peer-lane", Name: name, SessionID: sessionID, Cwd: cwd, Status: "starting",
-		ControlSocket:   hostPaths.ControlSocket,
-		ManagerLog:      filepath.Join(profileDataRoot(paths), "grok-lane-logs", sessionKey(sessionID)+".log"),
-		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: paths.runtimeDir,
-		OwnerPID: o.ownerPID, OwnerProcStart: o.ownerProcStart, OwnerSessionID: o.ownerSessionID,
-		NotifyTarget: o.notifyTarget,
-		Persistent:   o.persistent, AutoArchive: o.autoArchive, AutoArchiveDelayMS: o.autoArchiveDelay.Milliseconds(),
-		PermissionMode: o.permissionMode, Model: o.model, ReasoningEffort: o.reasoningEffort,
-		Turns: []grokLaneTurn{turn}, TurnID: turn.ID, LatestTurnID: turn.ID, CreatedAt: now, UpdatedAt: now,
-	}
-	groupState, _, err := resolveLaneGroupState(sessionID, "grok", o.groupOptions, true, true)
-	if err != nil {
-		return 1, fmt.Errorf("resolve lane groups: %w", err)
-	}
-	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
-	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
-	state.ParentHostID = groupState.ParentHostID
-	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
-	if err := writeGrokLaneState(paths, state); err != nil {
-		return 1, err
-	}
-	unlockLaneStateFile(nameLock)
-	nameLock = nil
-	managerPID, managerProcStart, err := spawnGrokLaneManager(state, launchToken)
-	if err != nil {
-		if removeErr := os.Remove(grokLaneStatePath(paths, sessionID)); removeErr != nil && !os.IsNotExist(removeErr) {
-			return 1, fmt.Errorf("%w; remove failed startup state: %w", err, removeErr)
-		}
-		return 1, err
-	}
-	ready, err := waitGrokLaneReady(paths, sessionID, managerPID, managerProcStart, grokLaneManagerReadyTimeout)
-	if err != nil {
-		stopExactGrokLaneManager(managerPID, managerProcStart)
-		if archiveErr := forceArchiveGrokLane(paths, sessionID, "manager readiness failed"); archiveErr != nil {
-			return 1, fmt.Errorf("%w; archive failed startup: %w", err, archiveErr)
-		}
-		return 1, err
-	}
-	_ = emitLane(map[string]any{"type": "thread.started", "thread_id": sessionID, "session_id": sessionID})
-	_ = emitLane(map[string]any{"type": "turn.started", "thread_id": sessionID, "turn_id": turn.ID})
-	if err := emitGrokLaneReady(ready); err != nil {
-		return 1, err
-	}
-	if !wait {
-		return 0, nil
-	}
-	return waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{
-		target: sessionID, timeout: laneCollectionBound(o.timeout),
-	}})
+	return grokLaneTurn{ID: randomID(), Prompt: prompt, Status: "queued", CreatedAt: now}
 }
 
 func canonicalGrokLaneDirectory(value string) (string, error) {
@@ -362,37 +254,6 @@ func canonicalGrokLaneDirectory(value string) (string, error) {
 		return "", fmt.Errorf("resolve Grok lane cwd: %w", err)
 	}
 	return cwd, nil
-}
-
-func spawnGrokLaneManager(state grokLaneState, launchToken string) (int, string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return 0, "", err
-	}
-	command := exec.Command(executable, "grok-lane-manager", "--session-id", state.SessionID) //nolint:gosec // current installed runtime.
-	if err := os.MkdirAll(filepath.Dir(state.ManagerLog), 0o700); err != nil {
-		return 0, "", err
-	}
-	logFile, err := os.OpenFile(state.ManagerLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return 0, "", err
-	}
-	defer func() { _ = logFile.Close() }()
-	command.Stdin, command.Stdout, command.Stderr = nil, logFile, logFile
-	command.Env = grokLaneManagerEnvironment(os.Environ(), launchToken, state.SessionID)
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := command.Start(); err != nil {
-		return 0, "", err
-	}
-	pid := command.Process.Pid
-	procStart, err := captureProcessStart(pid)
-	if err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return 0, "", fmt.Errorf("capture Grok lane manager identity: %w", err)
-	}
-	_ = command.Process.Release()
-	return pid, procStart, nil
 }
 
 func grokLaneManagerEnvironment(environment []string, launchToken, sessionID string) []string {
@@ -421,244 +282,6 @@ func waitGrokLaneReady(paths nativePaths, sessionID string, managerPID int, mana
 		"grok lane manager exited during startup; inspect its private manager log",
 		"timed out starting Grok lane manager; inspect its private manager log",
 	)
-}
-
-func emitGrokLaneReady(state grokLaneState) error {
-	return emitLane(map[string]any{
-		"type": "lane.ready", "contract_version": grokLaneContractVersion, "product": "grok",
-		"name": state.Name, "thread_id": state.SessionID, "session_id": state.SessionID,
-		"grok_session_id": emptyStringAsNil(state.GrokSessionID),
-		"turn_id":         state.TurnID, "cwd": state.Cwd, "address": encodeNativeAddress(state.MessagingSocket),
-		"owner_session_id": emptyStringAsNil(state.OwnerSessionID), "persistent": state.Persistent,
-		"notify_target": emptyStringAsNil(state.NotifyTarget),
-		"auto_archive":  state.AutoArchive, "auto_archive_after_seconds": float64(state.AutoArchiveDelayMS) / 1000,
-	})
-}
-
-func resumeGrokLane(o grokLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveGrokLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	desiredPersistent := state.Persistent || o.persistentSet
-	if o.notifyExplicit && !desiredPersistent {
-		return 1, errors.New("--notify requires a persistent lane; pass --persistent to promote this lane")
-	}
-	if err := validateLaneOwner(desiredPersistent, o.ownerPID, o.ownerProcStart); err != nil {
-		return 1, err
-	}
-	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
-	if err != nil {
-		return 1, err
-	}
-	if debt := firstGrokLaneDebt(state); debt != "" {
-		return 1, fmt.Errorf("collect outstanding Grok lane turn %s before resume", debt)
-	}
-	groupState, _, err := resolveLaneGroupState(state.SessionID, "grok", o.groupOptions, true, o.permissionModeSet)
-	if err != nil {
-		return 1, fmt.Errorf("resolve lane groups: %w", err)
-	}
-	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
-	state.ParentSessionID, state.InheritParentGroups = groupState.ParentSessionID, groupState.InheritParentGroups
-	state.ParentHostID = groupState.ParentHostID
-	state.ParentAgentRuntimeDir = groupState.ParentAgentRuntimeDir
-	turn := newGrokLaneTurn(prompt, o.timeout)
-	if grokLaneManagerLive(state) {
-		return resumeLiveGrokLane(paths, state, turn, o, desiredPersistent)
-	}
-	return resumeArchivedGrokLane(paths, state, turn, o, desiredPersistent)
-}
-
-func resumeLiveGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTurn, o grokLaneOptions, persistent bool) (int, error) {
-	request := map[string]any{
-		"action": "resume", "sessionId": state.SessionID, "turn": turn,
-		"persistent": persistent, "ownerPid": o.ownerPID, "ownerProcStart": o.ownerProcStart,
-		"ownerSessionId": o.ownerSessionID,
-		"groups":         state.Groups, "explicitGroups": state.ExplicitGroups,
-		"parentSessionId": state.ParentSessionID, "parentHostId": state.ParentHostID,
-		"parentAgentRuntimeDir": state.ParentAgentRuntimeDir,
-		"inheritParentGroups":   state.InheritParentGroups,
-	}
-	switch {
-	case o.notifyExplicit:
-		request["notifySet"], request["notifyTarget"] = true, o.notifyTarget
-	case o.disableNotify:
-		request["notifySet"], request["notifyTarget"] = true, ""
-	case !persistent:
-		request["notifySet"], request["notifyTarget"] = true, o.notifyTarget
-	}
-	if o.autoArchiveCustom {
-		request["autoArchive"] = true
-		request["autoArchiveDelayMs"] = o.autoArchiveDelay.Milliseconds()
-	}
-	if o.noAutoArchiveSet {
-		request["autoArchive"] = false
-	}
-	if _, err := requestControl(state.ControlSocket, request, 10*time.Second); err != nil {
-		return 1, err
-	}
-	_ = emitLane(map[string]any{"type": "thread.resumed", "thread_id": state.SessionID, "session_id": state.SessionID})
-	_ = emitLane(map[string]any{"type": "turn.started", "thread_id": state.SessionID, "turn_id": turn.ID})
-	if ready, readErr := readGrokLaneState(paths, state.SessionID); readErr == nil {
-		if err := emitGrokLaneReady(ready); err != nil {
-			return 1, err
-		}
-	}
-	return waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{
-		target: state.SessionID, timeout: laneCollectionBound(o.timeout),
-	}})
-}
-
-//nolint:gocyclo // Archived resume is one guarded state/ownership transaction with explicit rollback.
-func resumeArchivedGrokLane(paths nativePaths, state grokLaneState, turn grokLaneTurn, o grokLaneOptions, persistent bool) (int, error) {
-	desiredGroups := append([]string(nil), state.Groups...)
-	desiredExplicitGroups := append([]string(nil), state.ExplicitGroups...)
-	desiredParentSessionID := state.ParentSessionID
-	desiredParentHostID := state.ParentHostID
-	desiredParentAgentRuntimeDir := state.ParentAgentRuntimeDir
-	desiredInheritParentGroups := state.InheritParentGroups
-	if state.Status != "archived" {
-		if err := forceArchiveGrokLane(paths, state.SessionID, "stale manager before resume"); err != nil {
-			return 1, err
-		}
-	}
-	nameLock, err := lockLaneNames(paths)
-	if err != nil {
-		return 1, err
-	}
-	defer func() {
-		if nameLock != nil {
-			unlockLaneStateFile(nameLock)
-		}
-	}()
-	state, err = readGrokLaneState(paths, state.SessionID)
-	if err != nil {
-		return 1, err
-	}
-	lifecycle, err := lockLaneLifecycle(paths, "grok-"+state.SessionID)
-	if err != nil {
-		return 1, err
-	}
-	unlocked := false
-	defer func() {
-		if !unlocked {
-			unlockLaneLifecycle(lifecycle)
-		}
-	}()
-	latest, err := readGrokLaneState(paths, state.SessionID)
-	if err != nil {
-		return 1, err
-	}
-	if latest.Status != "archived" {
-		return 1, errors.New("grok lane changed lifecycle while resuming")
-	}
-	if debt := firstGrokLaneDebt(latest); debt != "" {
-		return 1, fmt.Errorf("collect outstanding Grok lane turn %s before resume", debt)
-	}
-	original := cloneGrokLaneState(latest)
-	state = latest
-	launchToken := randomID() + randomID()
-	startupID := randomID()
-	hostPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), launchToken)
-	state.Status, state.ControlSocket, state.LaunchTokenHash, state.RuntimeDir = "starting", hostPaths.ControlSocket, grokTokenHash(launchToken), paths.runtimeDir
-	state.ManagerPID, state.ManagerProcStart, state.WorkerPID, state.WorkerProcStart, state.WorkerStrongStart, state.WorkerSessionID, state.MessagingSocket = 0, "", 0, "", "", 0, ""
-	state.StartupID = startupID
-	state.Persistent = persistent
-	state.Groups, state.ExplicitGroups = desiredGroups, desiredExplicitGroups
-	state.ParentSessionID, state.InheritParentGroups = desiredParentSessionID, desiredInheritParentGroups
-	state.ParentHostID = desiredParentHostID
-	state.ParentAgentRuntimeDir = desiredParentAgentRuntimeDir
-	if persistent {
-		state.OwnerPID, state.OwnerProcStart, state.OwnerSessionID = 0, "", ""
-	} else {
-		state.OwnerPID, state.OwnerProcStart, state.OwnerSessionID = o.ownerPID, o.ownerProcStart, o.ownerSessionID
-	}
-	switch {
-	case o.notifyExplicit:
-		state.NotifyTarget = o.notifyTarget
-	case o.disableNotify:
-		state.NotifyTarget = ""
-	case !persistent:
-		state.NotifyTarget = o.notifyTarget
-	}
-	if o.autoArchiveCustom {
-		state.AutoArchive, state.AutoArchiveDelayMS = true, o.autoArchiveDelay.Milliseconds()
-	}
-	if o.noAutoArchiveSet {
-		state.AutoArchive, state.AutoArchiveAt = false, 0
-	}
-	state.Turns = append(state.Turns, turn)
-	state.TurnID, state.LatestTurnID, state.AutoArchiveAt = turn.ID, turn.ID, 0
-	if err := writeGrokLaneState(paths, state); err != nil {
-		return 1, err
-	}
-	managerPID, managerProcStart, err := spawnGrokLaneManager(state, launchToken)
-	if err != nil {
-		unlockLaneLifecycle(lifecycle)
-		unlocked = true
-		if rollbackErr := rollbackGrokLaneResume(paths, original, startupID); rollbackErr != nil {
-			return 1, fmt.Errorf("%w; rollback failed: %w", err, rollbackErr)
-		}
-		return 1, err
-	}
-	unlockLaneLifecycle(lifecycle)
-	unlocked = true
-	unlockLaneStateFile(nameLock)
-	nameLock = nil
-	ready, err := waitGrokLaneReady(paths, state.SessionID, managerPID, managerProcStart, grokLaneManagerReadyTimeout)
-	if err != nil {
-		stopExactGrokLaneManager(managerPID, managerProcStart)
-		if rollbackErr := rollbackGrokLaneResume(paths, original, startupID); rollbackErr != nil {
-			return 1, fmt.Errorf("%w; rollback failed: %w", err, rollbackErr)
-		}
-		return 1, err
-	}
-	_ = emitLane(map[string]any{"type": "thread.resumed", "thread_id": state.SessionID, "session_id": state.SessionID})
-	_ = emitLane(map[string]any{"type": "turn.started", "thread_id": state.SessionID, "turn_id": turn.ID})
-	if err := emitGrokLaneReady(ready); err != nil {
-		return 1, err
-	}
-	return waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{
-		target: state.SessionID, timeout: laneCollectionBound(o.timeout),
-	}})
-}
-
-func rollbackGrokLaneResume(paths nativePaths, original grokLaneState, startupID string) error {
-	lifecycle, err := lockLaneLifecycle(paths, "grok-"+original.SessionID)
-	if err != nil {
-		return err
-	}
-	defer unlockLaneLifecycle(lifecycle)
-	latest, err := readGrokLaneState(paths, original.SessionID)
-	if err != nil {
-		return err
-	}
-	if latest.StartupID != startupID {
-		return nil
-	}
-	if processIdentityMayBeLive(latest.ManagerPID, latest.ManagerProcStart) {
-		return errors.New("replacement Grok lane manager still owns failed resume")
-	}
-	registryGuard, cleanupRoots, err := grokLaneCleanupRoots(latest, true)
-	if err != nil {
-		return err
-	}
-	defer registryGuard.close()
-	if err := stopGrokTaggedProcesses(latest.LaunchTokenHash, 0, cleanupRoots...); err != nil {
-		return err
-	}
-	stopStaleGrokLaneWorker(grokLaneWorkerRoot(latest))
-	if err := stopGrokProcessSessionStrong(latest.WorkerSessionID, latest.WorkerProcStart, latest.WorkerStrongStart, 0); err != nil {
-		return err
-	}
-	if err := registryGuard.removeArtifacts(); err != nil {
-		return err
-	}
-	if err := cleanupGrokLaneOwnedFiles(paths, latest, 0, cleanupRoots...); err != nil {
-		return err
-	}
-	return writeGrokLaneState(paths, original)
 }
 
 func reconcileGrokLaneManagers(paths nativePaths) error {
@@ -750,18 +373,6 @@ func grokLaneRegistryResidue(paths nativePaths, sessionID string) bool {
 		}
 	}
 	return false
-}
-
-func laneCollectionBound(timeout time.Duration) time.Duration {
-	if timeout <= 0 {
-		return 0
-	}
-	return timeout + 5*time.Second
-}
-
-func grokLaneManagerLive(state grokLaneState) bool {
-	return state.ManagerPID > 1 && state.ManagerProcStart != "" && exactProcessIdentityMatch(state.ManagerPID, state.ManagerProcStart) &&
-		state.ControlSocket != "" && probeUnixSocket(state.ControlSocket, 250*time.Millisecond)
 }
 
 func firstGrokLaneDebt(state grokLaneState) string {
@@ -907,24 +518,6 @@ func acknowledgeGrokLaneTurn(paths nativePaths, sessionID, turnID string) error 
 	return writeGrokLaneStateUnlocked(paths, state)
 }
 
-func statusGrokLane(o grokLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveGrokLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.ManagerPID <= 1 || cleanupProcessIdentityStatus(state.ManagerPID, state.ManagerProcStart).Status == processIdentityStale {
-		if err := reconcileGrokLaneManager(paths, state, time.Now().UnixMilli()); err != nil {
-			return 1, err
-		}
-		state, err = readGrokLaneState(paths, state.SessionID)
-		if err != nil {
-			return 1, err
-		}
-	}
-	return 0, emitLane(grokLaneStatusEvent(state))
-}
-
 func grokLaneStatusEvent(state grokLaneState) map[string]any {
 	var turnStatus, outcome, exit any
 	if turn := grokLaneReportedTurn(state); turn != nil {
@@ -957,62 +550,6 @@ func grokLaneReportedTurn(state grokLaneState) *grokLaneTurn {
 		}
 	}
 	return nil
-}
-
-func listGrokLanes(o grokLaneOptions) (int, error) {
-	return listProductLaneStates(
-		o.laneCommonOptions, "grok", grokLaneContractVersion, readGrokLaneStates(resolveNativePaths()),
-		func(state *grokLaneState) string { return state.Status },
-		func(state *grokLaneState) (bool, int, string) {
-			return state.Persistent, state.OwnerPID, state.OwnerProcStart
-		},
-		grokLaneStatusEvent,
-	)
-}
-
-func interruptGrokLane(o grokLaneOptions) (int, error) {
-	state, err := resolveGrokLaneState(resolveNativePaths(), o.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.Status == "archived" || !grokLaneManagerLive(state) {
-		return 1, fmt.Errorf("grok lane %s is not live", state.SessionID)
-	}
-	response, err := requestControl(state.ControlSocket, map[string]any{"action": "interrupt", "sessionId": state.SessionID}, 5*time.Second)
-	if err != nil {
-		return 1, err
-	}
-	return 0, emitLane(map[string]any{"type": "turn.interrupted", "thread_id": state.SessionID, "turn_id": response["turnId"]})
-}
-
-func archiveGrokLane(o grokLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveGrokLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.Status == "archived" {
-		if grokLaneCleanupComplete(paths, state) && !grokLaneHasUnsentNotices(state) {
-			return 0, emitLane(map[string]any{"type": "lane.archived", "product": "grok", "name": state.Name, "thread_id": state.SessionID, "already_archived": true, "dropped_notices": 0})
-		}
-		if err := forceArchiveGrokLane(paths, state.SessionID, "explicit archive: reconcile archived Grok lane residue"); err != nil {
-			return 1, err
-		}
-		latest, _ := readGrokLaneState(paths, state.SessionID)
-		return 0, emitLane(map[string]any{"type": "lane.archived", "product": "grok", "name": state.Name, "thread_id": state.SessionID, "dropped_notices": latest.ArchiveDroppedNotices})
-	}
-	if grokLaneManagerLive(state) {
-		if _, err := requestControl(state.ControlSocket, map[string]any{"action": "archive", "sessionId": state.SessionID}, 10*time.Second); err != nil {
-			return 1, err
-		}
-		if err := waitGrokLaneArchived(paths, state.SessionID, 10*time.Second); err != nil {
-			return 1, err
-		}
-	} else if err := forceArchiveGrokLane(paths, state.SessionID, "explicit archive: manager unavailable"); err != nil {
-		return 1, err
-	}
-	latest, _ := readGrokLaneState(paths, state.SessionID)
-	return 0, emitLane(map[string]any{"type": "lane.archived", "product": "grok", "name": state.Name, "thread_id": state.SessionID, "dropped_notices": latest.ArchiveDroppedNotices})
 }
 
 func waitGrokLaneArchived(paths nativePaths, sessionID string, timeout time.Duration) error {

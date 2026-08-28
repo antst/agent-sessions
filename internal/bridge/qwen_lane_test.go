@@ -71,8 +71,12 @@ func TestParseQwenLaneArgsSelectorsAndExitContract(t *testing.T) {
 			t.Errorf("parse %q: %v", args, err)
 		}
 	}
-	if code := runQwenLaneCommand([]string{"start", "--name", "q", "--yolo", "--no-yolo"}); code != 2 {
-		t.Fatalf("usage-conflict exit = %d, want 2", code)
+	options, err := parseQwenLaneArgs([]string{"start", "--name", "q", "--yolo", "--no-yolo"})
+	if err == nil {
+		err = validateQwenLaneCommandOptions(options)
+	}
+	if err == nil {
+		t.Fatal("usage conflict was accepted")
 	}
 }
 
@@ -83,7 +87,7 @@ func TestQwenLaneStateSelectionStatusAndExactlyOnceCollection(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadID := "11111111-2222-4333-8444-555555555555"
-	turn := newQwenLaneTurn("return ok", 0)
+	turn := newQwenLaneTurn("return ok")
 	turn.Status, turn.Result, turn.Outcome, turn.TerminalRevision = "completed", "ok", "completed", randomID()
 	turn.CompletedAt = time.Now().UnixMilli()
 	state := qwenLaneState{
@@ -154,7 +158,7 @@ func TestQwenLaneTerminalNoticeIsExactAndDeduplicated(t *testing.T) {
 		t.Fatalf("terminal notices = %+v", state.Notices)
 	}
 	notice := state.Notices[0]
-	wantedCollect := "peer-federator lane -runtime-dir /private/runtime --host destination-host --product qwen -- wait " + threadID
+	wantedCollect := "agent-sessions lane --host destination-host --product qwen -- wait " + threadID
 	if notice.TurnID != turnID || notice.Target != "session:parent-session" ||
 		!strings.Contains(notice.Message, "status=completed outcome=completed exit=0") ||
 		!strings.Contains(notice.Message, "Collect: "+wantedCollect) {

@@ -9,18 +9,22 @@ description: Orchestrate named, messageable local or remote Grok Build worker la
 
 ## Remote host
 
-For another host, run `peer-federator status`, `peer-federator hosts`, then:
+For another host, confirm the local daemon is hub-connected with
+`agent-sessions status --json`, then run:
 
 ```sh
-peer-federator lane --host HOST --product grok -- doctor --json
-peer-federator lane --host HOST --product grok -- list --all
+agent-sessions lane --host HOST --product grok -- doctor --json
+agent-sessions lane --host HOST --product grok -- list --all
 ```
 
-Require capability `grok-lane` and doctor contract 1. Replace every local invocation below with
-`peer-federator lane --host HOST --product grok --`. Federation carries this Claude parent’s
+Require capability `grok-lane` and remote doctor fields `ready: true`,
+`authority: "remote-daemon"`, the exact requested host, and product `grok`. Replace every local invocation below with
+`agent-sessions lane --host HOST --product grok --`. Federation carries this Claude parent’s
 attested context and returns terminal notices through grouped routing; never pass `--persistent`,
-`--notify`, `--no-notify`, or `--no-auto-archive` remotely. Use a remote absolute `-C` when cwd
-matters. Hub disconnect is a hard failure; never fall back to SSH or local execution.
+`--notify`, `--no-notify`, or `--no-auto-archive` remotely. Remote `--mine` matches this exact
+source-proxy parent and remote host. Use a remote absolute `-C` when cwd matters, send prompts on
+bounded stdin, and treat remote `--prompt-file` as unsupported. Hub disconnect is a hard failure; never fall
+back to SSH or local execution.
 
 ## Preflight
 
@@ -30,9 +34,9 @@ Run the bundled read-only preflight:
 "${CLAUDE_PLUGIN_ROOT}/skills/grok-lane/scripts/lane-preflight"
 ```
 
-Require contract version 1, `runtime_ready: true`, `grok_available: true`, and no `grok_error`.
-The nested `supervisor_reachable` field is diagnostic only because the Grok manager directly owns
-ACP. Use the exact `invocation` reported by preflight. Check its `list --all` output plus current
+Require `daemon_ready: true`, `authority: "daemon"`, and product `grok`. The daemon's Grok
+adapter is the sole ACP client. Use the exact `invocation` reported by preflight. Check its
+`list --all` output plus current
 Agent Sessions discovery, and retain the exact lane ID. Messaging names are group-scoped; bare
 lifecycle names can still be ambiguous in host-local lane state.
 

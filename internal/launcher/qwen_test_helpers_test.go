@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 const (
@@ -186,7 +186,7 @@ func qwenLauncherWaitForProcessStart(t *testing.T, pid int, timeout time.Duratio
 	t.Helper()
 	var start string
 	qwenLauncherPoll(t, timeout, fmt.Sprintf("Qwen process %d identity", pid), func() (bool, error) {
-		start = federator.ProcessStart(pid)
+		start = procinfo.Start(pid)
 		return start != "", nil
 	})
 	return start

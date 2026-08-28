@@ -1,7 +1,6 @@
 package bridge
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -307,79 +306,6 @@ func withResolvedLaneParent(common laneCommonOptions, owner laneOwner) laneCommo
 		common.notifyTarget = "session:" + owner.SessionID
 	}
 	return common
-}
-
-type productLaneCommands[T any] struct {
-	binary    string
-	usage     func() string
-	parse     func([]string) (T, error)
-	parseExit int
-	help      func(T) bool
-	prepare   func(T) (T, error)
-	command   func(T) string
-	start     func(T, bool) (int, error)
-	resume    func(T) (int, error)
-	wait      func(T) (int, error)
-	status    func(T) (int, error)
-	interrupt func(T) (int, error)
-	archive   func(T) (int, error)
-	list      func(T) (int, error)
-	doctor    func(T) (int, error)
-}
-
-func runProductLaneCommand[T any](argv []string, product productLaneCommands[T]) int {
-	options, err := product.parse(argv)
-	if err != nil {
-		return reportLaneCommandError(product.binary, err, product.parseExit, false)
-	}
-	if product.help(options) {
-		fmt.Print(product.usage())
-		return 0
-	}
-	options, err = product.prepare(options)
-	if err != nil {
-		return reportLaneCommandError(product.binary, err, 1, true)
-	}
-	var code int
-	switch command := product.command(options); command {
-	case "run":
-		code, err = product.start(options, true)
-	case "start":
-		code, err = product.start(options, false)
-	case "resume":
-		code, err = product.resume(options)
-	case "wait":
-		code, err = product.wait(options)
-	case "status":
-		code, err = product.status(options)
-	case "interrupt":
-		code, err = product.interrupt(options)
-	case "archive":
-		code, err = product.archive(options)
-	case "list":
-		code, err = product.list(options)
-	case "doctor":
-		code, err = product.doctor(options)
-	default:
-		err = fmt.Errorf("unknown lane command %q", command)
-	}
-	if err != nil {
-		return reportLaneCommandError(product.binary, err, 1, true)
-	}
-	return code
-}
-
-func reportLaneCommandError(binary string, err error, fallbackExit int, includeTimeout bool) int {
-	result := map[string]any{"type": "error", "message": err.Error()}
-	if includeTimeout {
-		result["timeout"] = errors.Is(err, context.DeadlineExceeded)
-	}
-	_ = emitLane(result)
-	fmt.Fprintf(os.Stderr, "%s: %v\n", binary, err)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return 124
-	}
-	return fallbackExit
 }
 
 func parseLaneSeconds(value string, positive bool, flag string) (time.Duration, error) {

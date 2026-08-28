@@ -1,6 +1,6 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Start, collect, message, resume, and archive named Codex, Claude, Grok, and Qwen lanes.",
   "author": {
     "name": "Agent Sessions contributors"

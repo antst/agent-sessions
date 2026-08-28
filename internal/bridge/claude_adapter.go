@@ -19,7 +19,6 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 	"github.com/antst/agent-sessions/internal/socketpath"
@@ -47,6 +46,21 @@ type claudeDaemonClient interface {
 	DeliverFrame(context.Context, string, federation.AgentFrame) error
 }
 
+// claudeDaemonLaneClient is the product-native stream boundary used by the
+// daemon lane adapter. The untyped maps deliberately mirror Claude's native
+// stream frames; exact evidence is validated and converted to the shared lane
+// contract by claudeDaemonAdapter below.
+//
+//nolint:dupl // Product-native method names intentionally mirror Claude's coordinator contract.
+type claudeDaemonLaneClient interface {
+	StartClaudeTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (map[string]any, error)
+	ReconnectClaudeTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (map[string]any, error)
+	InterruptClaudeTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) error
+	CollectClaudeTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (map[string]any, error)
+	ArchiveClaudeLane(context.Context, daemonpkg.LaneRecord) error
+	CleanupClaudeLane(context.Context, daemonpkg.LaneRecord) error
+}
+
 // PrepareInteractive returns the direct Claude vendor handoff for one validated launch intent.
 func (adapter *claudeDaemonAdapter) PrepareInteractive(ctx context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
 	if adapter == nil || adapter.client == nil {
@@ -66,7 +80,9 @@ func NewClaudeDaemonAdapter() *claudeDaemonAdapter {
 	return newClaudeDaemonAdapter(newClaudeNativeCoordinator())
 }
 
-// Close removes only this daemon process's synthetic Claude service projection.
+// Close retires this daemon's in-process stream actors and removes only this
+// process's synthetic Claude service projection. Native transcripts and
+// credentials remain vendor owned.
 func (adapter *claudeDaemonAdapter) Close() {
 	if coordinator, ok := adapter.client.(*claudeNativeCoordinator); ok {
 		coordinator.close()
@@ -145,6 +161,271 @@ func (adapter *claudeDaemonAdapter) Deliver(
 	return adapter.client.DeliverFrame(ctx, stringValue(actor["socket"]), frame)
 }
 
+// Dispatch preserves the daemon's minimum lane-adapter compatibility boundary.
+func (adapter *claudeDaemonAdapter) Dispatch(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneDispatchResult, error) {
+	return adapter.StartTurn(ctx, lane, turn)
+}
+
+// StartTurn dispatches one already-committed turn to the callable Claude
+// stream worker. It does not start a lane manager or bind a control socket.
+func (adapter *claudeDaemonAdapter) StartTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneDispatchResult, error) {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	if err := validateClaudeLaneRequest(lane, turn); err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	raw, err := client.StartClaudeTurn(ctx, lane, turn)
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	actor, nativeTurn, err := validateClaudeLaneEvidence(lane, turn, raw, true, false)
+	if err != nil {
+		return daemonpkg.LaneDispatchResult{}, err
+	}
+	return daemonpkg.LaneDispatchResult{
+		LaneSessionID: lane.LaneSessionID, NativeActor: actor,
+		NativeTurnIdentity: nativeTurn, DispatchState: daemonpkg.LaneDispatchRunning,
+	}, nil
+}
+
+// ReconnectTurn reuses an in-process stream actor when it still exists. After
+// daemon reconstruction it accepts Claude's non-reattachable stdio limitation
+// only when exact worker absence and native transcript evidence are present.
+func (adapter *claudeDaemonAdapter) ReconnectTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneReconnectResult, error) {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	if err := validateClaudeLaneRequest(lane, turn); err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	raw, err := client.ReconnectClaudeTurn(ctx, lane, turn)
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	actor, nativeTurn, err := validateClaudeLaneEvidence(lane, turn, raw, true, true)
+	if err != nil {
+		return daemonpkg.LaneReconnectResult{}, err
+	}
+	if boolValue(raw["reconnectable"]) {
+		if strings.TrimSpace(stringValue(raw["reconnect_token"])) == "" ||
+			strings.TrimSpace(stringValue(raw["stream_id"])) == "" {
+			return daemonpkg.LaneReconnectResult{}, errors.New("claude reconnect omitted its native stream token")
+		}
+		return daemonpkg.LaneReconnectResult{
+			NativeActor: actor, NativeTurnIdentity: nativeTurn,
+			DispatchState: daemonpkg.LaneDispatchRunning,
+		}, nil
+	}
+	const limitation = "claude_stream_stdio_is_not_reattachable"
+	transcript, _ := raw["native_transcript"].(map[string]any)
+	if stringValue(raw["worker_status"]) != "absent" || stringValue(raw["limitation"]) != limitation ||
+		stringValue(transcript["session_id"]) != stringValue(actor["session_id"]) || !boolValue(transcript["resume_supported"]) {
+		return daemonpkg.LaneReconnectResult{}, errors.New("claude stream restart lacks evidence for an interrupted resumable turn")
+	}
+	return daemonpkg.LaneReconnectResult{
+		NativeActor: actor, NativeTurnIdentity: nativeTurn,
+		DispatchState: daemonpkg.LaneDispatchInterrupted, TerminalOutcome: daemonpkg.LaneTerminalInterrupted,
+		ResultReference: map[string]any{
+			"collectable": true, "resumable": true, "restart_evidence": limitation,
+		},
+	}, nil
+}
+
+// InterruptTurn interrupts only the exact current Claude native worker/turn.
+func (adapter *claudeDaemonAdapter) InterruptTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) error {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return err
+	}
+	if err := validateClaudeLaneRequest(lane, turn); err != nil {
+		return err
+	}
+	return client.InterruptClaudeTurn(ctx, lane, turn)
+}
+
+// CollectTurn returns one stable native result without advancing the daemon's
+// durable collection cursor.
+//
+//nolint:gocyclo // Native frame identity and terminal classification are one fail-closed validation path.
+func (adapter *claudeDaemonAdapter) CollectTurn(
+	ctx context.Context,
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+) (daemonpkg.LaneTerminalResult, error) {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	if err := validateClaudeLaneRequest(lane, turn); err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	raw, err := client.CollectClaudeTurn(ctx, lane, turn)
+	if err != nil {
+		return daemonpkg.LaneTerminalResult{}, err
+	}
+	frames, ok := raw["frames"].([]any)
+	if !ok || len(frames) == 0 {
+		return daemonpkg.LaneTerminalResult{}, errors.New("claude collection omitted native stream frames")
+	}
+	expectedSession := stringValue(lane.NativeActor["session_id"])
+	expectedTurn := stringValue(turn.NativeTurnIdentity["native_turn_id"])
+	var result map[string]any
+	for _, value := range frames {
+		frame, ok := value.(map[string]any)
+		if !ok {
+			return daemonpkg.LaneTerminalResult{}, errors.New("claude collection contains a malformed native stream frame")
+		}
+		if sessionID := stringValue(frame["session_id"]); sessionID != "" && sessionID != expectedSession {
+			return daemonpkg.LaneTerminalResult{}, daemonpkg.ErrAttachmentEvidenceChanged
+		}
+		if stringValue(frame["type"]) == "result" {
+			result = frame
+		}
+	}
+	if result == nil || stringValue(result["session_id"]) != expectedSession ||
+		stringValue(result["native_turn_id"]) != expectedTurn {
+		return daemonpkg.LaneTerminalResult{}, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	subtype := stringValue(result["subtype"])
+	outcome := daemonpkg.LaneTerminalFailed
+	if !boolValue(result["is_error"]) && subtype == "success" {
+		outcome = daemonpkg.LaneTerminalCompleted
+	} else if subtype == "interrupted" || stringValue(result["terminal_reason"]) == "interrupted" {
+		outcome = daemonpkg.LaneTerminalInterrupted
+	}
+	reference := map[string]any{"subtype": subtype}
+	if content := stringValue(result["result"]); content != "" {
+		reference["content"] = content
+	}
+	if _, ok := result["exit_code"]; ok {
+		reference["exit_code"] = intValue(result["exit_code"])
+	}
+	return daemonpkg.LaneTerminalResult{
+		TerminalOutcome: outcome, ResultReference: reference,
+		NativeTurnIdentity: map[string]any{
+			"session_id": expectedSession, "native_turn_id": expectedTurn,
+			"stream_id": stringValue(turn.NativeTurnIdentity["stream_id"]),
+		},
+	}, nil
+}
+
+// Archive retires the exact Claude stream worker while leaving Claude's
+// vendor-owned transcript and authentication material untouched.
+func (adapter *claudeDaemonAdapter) Archive(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return err
+	}
+	return client.ArchiveClaudeLane(ctx, lane)
+}
+
+// Cleanup removes only the coordinator's attributable in-memory actor state.
+func (adapter *claudeDaemonAdapter) Cleanup(ctx context.Context, lane daemonpkg.LaneRecord) error {
+	client, err := adapter.laneClient()
+	if err != nil {
+		return err
+	}
+	return client.CleanupClaudeLane(ctx, lane)
+}
+
+func (adapter *claudeDaemonAdapter) laneClient() (claudeDaemonLaneClient, error) {
+	if adapter == nil || adapter.client == nil {
+		return nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	client, ok := adapter.client.(claudeDaemonLaneClient)
+	if !ok {
+		return nil, errors.New("claude daemon client does not implement lane lifecycle")
+	}
+	return client, nil
+}
+
+func validateClaudeLaneRequest(lane daemonpkg.LaneRecord, turn daemonpkg.LaneTurnRecord) error {
+	if strings.TrimSpace(lane.LaneSessionID) == "" || lane.Product != "claude" ||
+		strings.TrimSpace(turn.TurnID) == "" || turn.LaneSessionID != lane.LaneSessionID ||
+		strings.TrimSpace(lane.Cwd) == "" {
+		return errors.New("claude lane request has incomplete durable identity")
+	}
+	if !containsString([]string{"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}, lane.PermissionMode) {
+		return fmt.Errorf("unsupported Claude permission mode %q", lane.PermissionMode)
+	}
+	return nil
+}
+
+//nolint:gocyclo // Exact Claude session, turn, stream, worker, profile, and permission evidence is intentionally co-located.
+func validateClaudeLaneEvidence(
+	lane daemonpkg.LaneRecord,
+	turn daemonpkg.LaneTurnRecord,
+	raw map[string]any,
+	requireWorker bool,
+	exactWorker bool,
+) (map[string]any, map[string]any, error) {
+	sessionID := strings.TrimSpace(stringValue(raw["session_id"]))
+	nativeTurnID := strings.TrimSpace(stringValue(raw["native_turn_id"]))
+	streamID := strings.TrimSpace(stringValue(raw["stream_id"]))
+	if !matchesOptionalString(lane.NativeActor["session_id"], sessionID) ||
+		!matchesOptionalString(turn.NativeTurnIdentity["session_id"], sessionID) ||
+		!matchesOptionalString(turn.NativeTurnIdentity["native_turn_id"], nativeTurnID) {
+		return nil, nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	if sessionID == "" || nativeTurnID == "" || streamID == "" {
+		return nil, nil, errors.New("claude lane result omitted native session, turn, or stream identity")
+	}
+	workerPID := intValue(raw["worker_pid"])
+	workerStart := strings.TrimSpace(stringValue(raw["worker_proc_start"]))
+	workerStrongStart := strings.TrimSpace(stringValue(raw["worker_strong_start"]))
+	if requireWorker && (workerPID <= 1 || workerStart == "" || workerStrongStart == "") {
+		return nil, nil, errors.New("claude lane result omitted exact worker identity")
+	}
+	if exactWorker && (!matchesOptionalInt(lane.NativeActor["worker_pid"], workerPID) ||
+		!matchesOptionalString(lane.NativeActor["worker_proc_start"], workerStart) ||
+		!matchesOptionalString(lane.NativeActor["worker_strong_start"], workerStrongStart)) {
+		return nil, nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	permission := strings.TrimSpace(stringValue(raw["permission_mode"]))
+	if permission == "" {
+		permission = lane.PermissionMode
+	}
+	if permission != lane.PermissionMode {
+		return nil, nil, daemonpkg.ErrAttachmentEvidenceChanged
+	}
+	actor := map[string]any{
+		"session_id": sessionID, "stream_id": streamID, "permission_mode": permission,
+		"worker_pid": workerPID, "worker_proc_start": workerStart,
+		"worker_strong_start": workerStrongStart,
+	}
+	if profile := strings.TrimSpace(stringValue(raw["profile"])); profile != "" {
+		actor["profile"] = profile
+	} else if profile := strings.TrimSpace(stringValue(lane.NativeActor["profile"])); profile != "" {
+		actor["profile"] = profile
+	}
+	return actor, map[string]any{
+		"session_id": sessionID, "native_turn_id": nativeTurnID, "stream_id": streamID,
+	}, nil
+}
+
+func matchesOptionalInt(expected any, actual int) bool {
+	return expected == nil || intValue(expected) == 0 || intValue(expected) == actual
+}
+
 func (adapter *claudeDaemonAdapter) inspectExact(
 	ctx context.Context,
 	record daemonpkg.AttachmentRecord,
@@ -194,6 +475,7 @@ type claudeNativeCoordinator struct {
 	mu           sync.Mutex
 	serviceToken string
 	projections  map[string]claudeServiceProjection
+	laneActors   map[string]*claudeDaemonLaneActor
 }
 
 type claudeServiceProjection struct {
@@ -226,7 +508,10 @@ type claudeRegistryRecord struct {
 }
 
 func newClaudeNativeCoordinator() *claudeNativeCoordinator {
-	return &claudeNativeCoordinator{projections: make(map[string]claudeServiceProjection)}
+	return &claudeNativeCoordinator{
+		projections: make(map[string]claudeServiceProjection),
+		laneActors:  make(map[string]*claudeDaemonLaneActor),
+	}
 }
 
 // PrepareInteractive returns a direct Claude launch with a daemon-owned stable
@@ -491,7 +776,7 @@ func (coordinator *claudeNativeCoordinator) createSyntheticService(profile strin
 		}
 		coordinator.serviceToken = hex.EncodeToString(token[:])
 	}
-	keyName, err := federator.ClaudeServiceKeyName(os.Getpid(), paths.ControlEndpoint)
+	keyName, err := federation.ClaudeServiceKeyName(os.Getpid(), paths.ControlEndpoint)
 	if err != nil {
 		return claudeServiceProjection{}, err
 	}
@@ -555,7 +840,14 @@ func (coordinator *claudeNativeCoordinator) close() {
 	coordinator.mu.Lock()
 	projections := coordinator.projections
 	coordinator.projections = make(map[string]claudeServiceProjection)
+	actors := coordinator.laneActors
+	coordinator.laneActors = make(map[string]*claudeDaemonLaneActor)
 	coordinator.mu.Unlock()
+	for _, actor := range actors {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = actor.stop(ctx)
+		cancel()
+	}
 	for _, projection := range projections {
 		removeJSONIf(projection.recordPath, func(row map[string]any) bool {
 			return intValue(row["pid"]) == projection.pid && stringValue(row["procStart"]) == projection.procStart && boolValue(row["agentService"])

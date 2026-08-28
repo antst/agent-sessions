@@ -23,12 +23,16 @@ func validatePlatformRoleDescriptor(descriptor RoleDescriptor) error {
 func platformServiceCommand(descriptor RoleDescriptor, operation serviceOperation) (string, []string, error) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	switch operation {
-	case serviceEnable, serviceStart:
+	case serviceEnable:
+		return "launchctl", []string{"enable", domain + "/" + descriptor.Label}, nil
+	case serviceStart:
 		return "launchctl", []string{"bootstrap", domain, descriptor.DefinitionPath}, nil
 	case serviceRestart:
 		return "launchctl", []string{"kickstart", "-k", domain + "/" + descriptor.Label}, nil
-	case serviceStop, serviceDisable:
+	case serviceStop:
 		return "launchctl", []string{"bootout", domain + "/" + descriptor.Label}, nil
+	case serviceDisable:
+		return "launchctl", []string{"disable", domain + "/" + descriptor.Label}, nil
 	case serviceStatus:
 		return "launchctl", []string{"print", domain + "/" + descriptor.Label}, nil
 	default:

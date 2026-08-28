@@ -18,9 +18,9 @@ the main way an orchestrator turns a recoverable condition into a duplicated or 
 | Symptom | What it means | Correct response |
 |---|---|---|
 | `codex-peer-lane` not found and no resolvable runtime path | The bridge is not installed on this host | Print the install commands and stop. Never install, build, or start a daemon. |
-| Runtime present but no `contract_version` / no `doctor --json` | Runtime predates contract 2 | Report the version gap and stop. Do not guess the event shape. |
+| Doctor omits `ready`, `authority`, or exact product | The installed client/daemon contract is incompatible | Report the mismatch and stop. Do not guess the event shape. |
 | bare name is ambiguous | Agent Sessions messaging found multiple group-visible peers, or a lane lifecycle command found multiple host-local lanes | Use the exact lane/session ID. |
-| `error` at `start`, supervisor or App Server unreachable | Runtime is not running | Report it. Recovery is a host-level operation, not an orchestrator's. |
+| `error` at `start`, daemon or product adapter not ready | Host lane authority is unavailable | Report it. Recovery is a host-level operation, not an orchestrator's. |
 | `error` at `start`, bad `--cd` | Directory missing or not permitted | Fix the path with the caller; do not silently substitute another directory. |
 | `wait` exits 124 | The **collection call** timed out | Not a lane failure. Re-`wait`, or `status` to check. |
 | `turn.completed` with `outcome: "timed_out"`, exit 124 | The lane's own durable deadline fired | This is a real terminal outcome. Report it; a partial answer may still exist. |

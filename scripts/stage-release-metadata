@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source_root=${1:-}
+platform=${2:-}
+version=${3:-}
+projection=${4:-}
+repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+
+[[ "$source_root" == /* && -d "$source_root" && ! -L "$source_root" ]] || {
+  printf 'release metadata requires an absolute real source root\n' >&2
+  exit 2
+}
+
+manifest_temporary=$(mktemp "$source_root/.manifest.XXXXXX")
+checksums_temporary=$(mktemp "$source_root/.checksums.XXXXXX")
+cleanup() {
+  rm -f -- "$manifest_temporary" "$checksums_temporary"
+}
+trap cleanup EXIT
+
+bash "$repository_root/scripts/release-inventory" source-release-manifest-json "$platform" "$version" "$projection" \
+  >"$manifest_temporary"
+chmod 0600 "$manifest_temporary"
+mv -f -- "$manifest_temporary" "$source_root/manifest.json"
+
+sha256_file() {
+  local path=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -- "$path" | awk '{print $1}'
+  else
+    printf 'release metadata requires sha256sum or shasum\n' >&2
+    return 127
+  fi
+}
+
+(
+  cd -- "$source_root"
+  while IFS= read -r path; do
+    [[ ! -L "$path" ]] || { printf 'release metadata refuses symlink %s\n' "$path" >&2; exit 1; }
+    printf '%s  %s\n' "$(sha256_file "$path")" "${path#./}"
+  done < <(find . -type f ! -path './SHA256SUMS' ! -name '.checksums.*' -print | LC_ALL=C sort)
+) >"$checksums_temporary"
+chmod 0600 "$checksums_temporary"
+mv -f -- "$checksums_temporary" "$source_root/SHA256SUMS"

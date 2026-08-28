@@ -1,22 +1,18 @@
 package bridge
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
-	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const (
@@ -241,30 +237,6 @@ func validateQwenLaneCommandOptions(o qwenLaneOptions) error {
 	return validateLaneCommandOptions(o.command, checks)
 }
 
-func runQwenLaneCommand(argv []string) int {
-	return runProductLaneCommand(argv, productLaneCommands[qwenLaneOptions]{
-		binary: "qwen-peer-lane", usage: qwenLaneUsage, parse: parseQwenLaneArgs, parseExit: 2,
-		help: func(o qwenLaneOptions) bool { return o.help },
-		prepare: func(o qwenLaneOptions) (qwenLaneOptions, error) {
-			o = withQwenLaneLaunchContext(o)
-			return o, reconcileQwenLaneManagers(resolveNativePaths())
-		},
-		command: func(o qwenLaneOptions) string { return o.command },
-		start:   startQwenLane, resume: resumeQwenLane, wait: waitQwenLane, status: statusQwenLane,
-		interrupt: interruptQwenLane, archive: archiveQwenLane, list: listQwenLanes, doctor: doctorQwenLane,
-	})
-}
-
-func withQwenLaneLaunchContext(o qwenLaneOptions) qwenLaneOptions {
-	o.laneCommonOptions = withCurrentLaneParent(o.laneCommonOptions)
-	return o
-}
-
-func withQwenLaneResolvedParent(o qwenLaneOptions, owner laneOwner) qwenLaneOptions {
-	o.laneCommonOptions = withResolvedLaneParent(o.laneCommonOptions, owner)
-	return o
-}
-
 func qwenLaneStatePath(paths nativePaths, threadID string) string {
 	return filepath.Join(profileDataRoot(paths), "qwen-lanes", sessionKey(threadID)+".json")
 }
@@ -317,11 +289,11 @@ func resolveQwenLaneState(paths nativePaths, target string) (qwenLaneState, erro
 	)
 }
 
-func newQwenLaneTurn(prompt string, timeout time.Duration) qwenLaneTurn {
+func newQwenLaneTurn(prompt string) qwenLaneTurn {
 	digest := sha256.Sum256([]byte(prompt))
 	return qwenLaneTurn{
 		ID: randomID(), Prompt: prompt, RequestDigest: hex.EncodeToString(digest[:]), Status: "queued",
-		CreatedAt: time.Now().UnixMilli(), TimeoutMS: timeout.Milliseconds(),
+		CreatedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -336,135 +308,6 @@ func resolveQwenLaneProfile(o qwenLaneOptions) (qwenprofile.Identity, error) {
 		}
 	}
 	return qwenprofile.ResolveEnvironment(lookup)
-}
-
-func canonicalQwenLaneDirectory(value string) (string, error) {
-	cwd, err := canonicalLaunchDirectory(value)
-	if err != nil {
-		return "", fmt.Errorf("resolve Qwen lane cwd: %w", err)
-	}
-	return cwd, nil
-}
-
-func startQwenLane(o qwenLaneOptions, wait bool) (int, error) {
-	if err := validateLaneOwner(o.persistent, o.ownerPID, o.ownerProcStart); err != nil {
-		return 1, err
-	}
-	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
-	if err != nil {
-		return 1, err
-	}
-	cwd, err := canonicalQwenLaneDirectory(o.cwd)
-	if err != nil {
-		return 1, err
-	}
-	profile, err := resolveQwenLaneProfile(o)
-	if err != nil {
-		return 1, err
-	}
-	if err := admitQwenLane(cwd, profile); err != nil {
-		return 1, err
-	}
-	paths := resolveNativePaths()
-	threadID := randomID()
-	turn := newQwenLaneTurn(prompt, o.timeout)
-	launchToken := randomID() + randomID()
-	now := time.Now().UnixMilli()
-	state := qwenLaneState{
-		Version: qwenLaneVersion, ContractVersion: qwenLaneContractVersion, Type: "qwen-peer-lane",
-		Name: sanitizeName(o.name), ThreadID: threadID, Cwd: cwd, Profile: profile, Status: "starting",
-		ControlSocket: qwenLaneControlSocket(paths, threadID), ManagerLog: filepath.Join(profileDataRoot(paths), "qwen-lane-logs", sessionKey(threadID)+".log"),
-		RuntimeDir: paths.runtimeDir, LaunchTokenHash: qwenLaneTokenHash(launchToken), LaunchPreference: o.launchPreference,
-		RequestedInitialMode: o.permissionMode, CurrentNativeMode: "unknown", NativeArchiveState: "active",
-		OwnerPID: o.ownerPID, OwnerProcStart: o.ownerProcStart, OwnerSessionID: o.ownerSessionID,
-		NotifyTarget: o.notifyTarget, Persistent: o.persistent, AutoArchive: o.autoArchive, AutoArchiveDelayMS: o.autoArchiveDelay.Milliseconds(),
-		Turns: []qwenLaneTurn{turn}, PendingTurnIDs: []string{turn.ID}, LatestTurnID: turn.ID, CreatedAt: now, UpdatedAt: now,
-	}
-	groupState, _, err := resolveLaneGroupState(threadID, "qwen", o.groupOptions, o.permissionMode == "yolo", o.permissionModeSet)
-	if err != nil {
-		return 1, fmt.Errorf("resolve lane groups: %w", err)
-	}
-	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
-	state.ParentSessionID, state.ParentHostID, state.ParentAgentRuntimeDir = groupState.ParentSessionID, groupState.ParentHostID, groupState.ParentAgentRuntimeDir
-	state.InheritParentGroups = groupState.InheritParentGroups
-	if err := writeQwenLaneState(paths, state); err != nil {
-		return 1, err
-	}
-	managerPID, managerStart, err := spawnQwenLaneManager(state, launchToken)
-	if err != nil {
-		_ = os.Remove(qwenLaneStatePath(paths, threadID))
-		return 1, err
-	}
-	ready, err := waitQwenLaneReady(paths, threadID, managerPID, managerStart, qwenLaneManagerReadyTimeout)
-	if err != nil {
-		stopExactQwenLaneManager(managerPID, managerStart)
-		return 1, err
-	}
-	_ = emitLane(map[string]any{"type": "thread.started", "thread_id": threadID, "session_id": threadID})
-	_ = emitLane(map[string]any{"type": "turn.started", "thread_id": threadID, "turn_id": turn.ID})
-	if err := emitQwenLaneReady(ready); err != nil {
-		return 1, err
-	}
-	if !wait {
-		return 0, nil
-	}
-	return waitQwenLane(qwenLaneOptions{laneCommonOptions: laneCommonOptions{
-		target: threadID, timeout: laneCollectionBound(o.timeout),
-	}})
-}
-
-func spawnQwenLaneManager(state qwenLaneState, launchToken string) (int, string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return 0, "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(state.ManagerLog), 0o700); err != nil {
-		return 0, "", err
-	}
-	logFile, err := os.OpenFile(state.ManagerLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return 0, "", err
-	}
-	defer func() { _ = logFile.Close() }()
-	command := exec.Command(executable, "qwen-lane-manager", "--session-id", state.ThreadID) //nolint:gosec // current installed runtime.
-	command.Stdin, command.Stdout, command.Stderr = nil, logFile, logFile
-	command.Env = qwenLaneManagerEnvironment(os.Environ(), launchToken)
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := command.Start(); err != nil {
-		return 0, "", err
-	}
-	pid := command.Process.Pid
-	procStart, err := captureProcessStart(pid)
-	if err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return 0, "", fmt.Errorf("capture Qwen lane manager identity: %w", err)
-	}
-	_ = command.Process.Release()
-	return pid, procStart, nil
-}
-
-func qwenLaneManagerEnvironment(environment []string, token string) []string {
-	result := make([]string, 0, len(environment)+1)
-	for _, entry := range environment {
-		if !strings.HasPrefix(entry, qwenLaneLaunchTokenEnv+"=") {
-			result = append(result, entry)
-		}
-	}
-	return append(result, qwenLaneLaunchTokenEnv+"="+token)
-}
-
-func waitQwenLaneReady(paths nativePaths, threadID string, managerPID int, managerStart string, timeout time.Duration) (qwenLaneState, error) {
-	return waitProductLaneReady(
-		managerPID, managerStart, timeout,
-		func() (qwenLaneState, error) { return readQwenLaneState(paths, threadID) },
-		func(state *qwenLaneState) bool {
-			return state.ManagerPID == managerPID && state.Status != "starting" && state.MessagingSocket != "" &&
-				probeUnixSocket(state.MessagingSocket, 200*time.Millisecond)
-		},
-		"qwen lane manager exited during startup; inspect its private manager log",
-		"timed out starting Qwen lane manager; inspect its private manager log",
-	)
 }
 
 func emitQwenLaneReady(state qwenLaneState) error {
@@ -484,141 +327,6 @@ func emitQwenLaneReady(state qwenLaneState) error {
 func qwenLaneManagerLive(state qwenLaneState) bool {
 	return state.ManagerPID > 1 && state.ManagerProcStart != "" && exactProcessIdentityMatch(state.ManagerPID, state.ManagerProcStart) &&
 		state.ControlSocket != "" && probeUnixSocket(state.ControlSocket, 250*time.Millisecond)
-}
-
-//nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
-func resumeQwenLane(o qwenLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveQwenLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	profile, err := resolveQwenLaneProfile(o)
-	if err != nil {
-		return 1, err
-	}
-	if err := qwenprofile.MatchResume(state.Profile, profile); err != nil {
-		return 1, err
-	}
-	if err := admitQwenLane(state.Cwd, profile); err != nil {
-		return 1, err
-	}
-	if debt := firstQwenLaneDebt(state); debt != "" {
-		return 1, fmt.Errorf("collect outstanding Qwen lane turn %s before resume", debt)
-	}
-	desiredPersistent := state.Persistent || o.persistentSet
-	if o.notifyExplicit && !desiredPersistent {
-		return 1, errors.New("--notify requires a persistent lane; pass --persistent to promote this lane")
-	}
-	if err := validateLaneOwner(desiredPersistent, o.ownerPID, o.ownerProcStart); err != nil {
-		return 1, err
-	}
-	groupState, _, err := resolveLaneGroupState(state.ThreadID, "qwen", o.groupOptions, o.permissionMode == "yolo", o.permissionModeSet)
-	if err != nil {
-		return 1, fmt.Errorf("resolve lane groups: %w", err)
-	}
-	state.Groups, state.ExplicitGroups = groupState.Groups, groupState.ExplicitGroups
-	state.ParentSessionID, state.ParentHostID, state.ParentAgentRuntimeDir = groupState.ParentSessionID, groupState.ParentHostID, groupState.ParentAgentRuntimeDir
-	state.InheritParentGroups = groupState.InheritParentGroups
-	prompt, err := readLanePrompt(laneOptions{laneCommonOptions: laneCommonOptions{promptFile: o.promptFile}})
-	if err != nil {
-		return 1, err
-	}
-	turn := newQwenLaneTurn(prompt, o.timeout)
-	if qwenLaneManagerLive(state) {
-		request := map[string]any{
-			"action": "resume", "sessionId": state.ThreadID, "turn": turn,
-			"persistent": desiredPersistent, "ownerPid": o.ownerPID, "ownerProcStart": o.ownerProcStart, "ownerSessionId": o.ownerSessionID,
-			"groups": state.Groups, "explicitGroups": state.ExplicitGroups,
-			"parentSessionId": state.ParentSessionID, "parentHostId": state.ParentHostID,
-			"parentAgentRuntimeDir": state.ParentAgentRuntimeDir, "inheritParentGroups": state.InheritParentGroups,
-		}
-		if o.permissionModeSet {
-			request["requestedInitialMode"], request["launchPreference"] = o.permissionMode, o.launchPreference
-		}
-		switch {
-		case o.notifyExplicit:
-			request["notifySet"], request["notifyTarget"] = true, o.notifyTarget
-		case o.disableNotify:
-			request["notifySet"], request["notifyTarget"] = true, ""
-		case !desiredPersistent:
-			request["notifySet"], request["notifyTarget"] = true, o.notifyTarget
-		}
-		if o.autoArchiveCustom {
-			request["autoArchive"], request["autoArchiveDelayMs"] = true, o.autoArchiveDelay.Milliseconds()
-		}
-		if o.noAutoArchiveSet {
-			request["autoArchive"] = false
-		}
-		if _, err := requestControl(state.ControlSocket, request, 10*time.Second); err != nil {
-			return 1, err
-		}
-		_ = emitLane(map[string]any{"type": "thread.resumed", "thread_id": state.ThreadID, "session_id": state.ThreadID})
-		return waitQwenLane(qwenLaneOptions{laneCommonOptions: laneCommonOptions{
-			target: state.ThreadID, timeout: laneCollectionBound(o.timeout),
-		}})
-	}
-	if state.Status != "archived" || state.NativeArchiveState != "archived" {
-		return 1, errors.New("qwen lane is not cleanly archived")
-	}
-	archivedState := cloneQwenLaneState(state)
-	if err := executeQwenArchiveTransaction(state, "unarchive"); err != nil {
-		return 1, err
-	}
-	launchToken := randomID() + randomID()
-	state.Status, state.NativeArchiveState, state.StartupID = "starting", "active", randomID()
-	state.LaunchTokenHash, state.ControlSocket, state.RuntimeDir = qwenLaneTokenHash(launchToken), qwenLaneControlSocket(paths, state.ThreadID), paths.runtimeDir
-	state.ManagerPID, state.ManagerProcStart, state.ManagerStrongStart = 0, "", ""
-	state.WorkerPID, state.WorkerProcStart, state.WorkerStrongStart, state.MessagingSocket = 0, "", "", ""
-	state.ToolRegistryVersion, state.ToolWrapperPath, state.ToolRealBash = 0, "", ""
-	state.Persistent = desiredPersistent
-	if desiredPersistent {
-		state.OwnerPID, state.OwnerProcStart, state.OwnerSessionID = 0, "", ""
-	} else {
-		state.OwnerPID, state.OwnerProcStart, state.OwnerSessionID = o.ownerPID, o.ownerProcStart, o.ownerSessionID
-	}
-	switch {
-	case o.notifyExplicit:
-		state.NotifyTarget = o.notifyTarget
-	case o.disableNotify:
-		state.NotifyTarget = ""
-	case !desiredPersistent:
-		state.NotifyTarget = o.notifyTarget
-	}
-	if o.autoArchiveCustom {
-		state.AutoArchive, state.AutoArchiveDelayMS = true, o.autoArchiveDelay.Milliseconds()
-	}
-	if o.noAutoArchiveSet {
-		state.AutoArchive = false
-	}
-	if o.permissionModeSet {
-		state.RequestedInitialMode, state.LaunchPreference = o.permissionMode, o.launchPreference
-	} else {
-		state.RequestedInitialMode, state.LaunchPreference = "", "native_default"
-	}
-	state.Turns = append(state.Turns, turn)
-	state.PendingTurnIDs = append(state.PendingTurnIDs, turn.ID)
-	state.LatestTurnID, state.AutoArchiveAt = turn.ID, 0
-	if err := writeQwenLaneState(paths, state); err != nil {
-		return 1, compensateQwenLaneResume(paths, archivedState, state, err)
-	}
-	managerPID, managerStart, err := spawnQwenLaneManager(state, launchToken)
-	if err != nil {
-		return 1, compensateQwenLaneResume(paths, archivedState, state, err)
-	}
-	ready, err := waitQwenLaneReady(paths, state.ThreadID, managerPID, managerStart, qwenLaneManagerReadyTimeout)
-	if err != nil {
-		stopExactQwenLaneManager(managerPID, managerStart)
-		return 1, compensateQwenLaneResume(paths, archivedState, state, err)
-	}
-	_ = emitLane(map[string]any{"type": "thread.resumed", "thread_id": state.ThreadID, "session_id": state.ThreadID})
-	if err := emitQwenLaneReady(ready); err != nil {
-		stopExactQwenLaneManager(managerPID, managerStart)
-		return 1, compensateQwenLaneResume(paths, archivedState, state, err)
-	}
-	return waitQwenLane(qwenLaneOptions{laneCommonOptions: laneCommonOptions{
-		target: state.ThreadID, timeout: laneCollectionBound(o.timeout),
-	}})
 }
 
 func compensateQwenLaneResume(paths nativePaths, archived, attempted qwenLaneState, resumeErr error) error {
@@ -650,63 +358,6 @@ func firstQwenLaneDebt(state qwenLaneState) string {
 		}
 	}
 	return ""
-}
-
-func waitQwenLane(o qwenLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveQwenLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	lock, err := lockLaneStateFile(paths, "qwen-collect-"+state.ThreadID)
-	if err != nil {
-		return 1, err
-	}
-	defer unlockLaneStateFile(lock)
-	deadline := time.Time{}
-	if o.timeout > 0 {
-		deadline = time.Now().Add(o.timeout)
-	}
-	for {
-		state, err = readQwenLaneState(paths, state.ThreadID)
-		if err != nil {
-			return 1, err
-		}
-		for _, turn := range state.Turns {
-			if turn.Collected || !containsString([]string{"completed", "failed", "interrupted", "timed_out"}, turn.Status) {
-				continue
-			}
-			if err := emitQwenLaneTurn(state, turn); err != nil {
-				return 1, err
-			}
-			if err := acknowledgeQwenLaneTurn(paths, state.ThreadID, turn.ID); err != nil {
-				return 1, err
-			}
-			return turn.Exit, nil
-		}
-		if state.Status == "archived" {
-			return 1, fmt.Errorf("qwen lane %s is archived and has no collectable turn", state.ThreadID)
-		}
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return 124, context.DeadlineExceeded
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-func emitQwenLaneTurn(state qwenLaneState, turn qwenLaneTurn) error {
-	if err := emitLane(map[string]any{"type": "item.completed", "thread_id": state.ThreadID, "turn_id": turn.ID,
-		"item": map[string]any{"id": "user-" + first8(turn.ID), "type": "user_message", "text": turn.Prompt}}); err != nil {
-		return err
-	}
-	if turn.Result != "" {
-		if err := emitLane(map[string]any{"type": "item.completed", "thread_id": state.ThreadID, "turn_id": turn.ID,
-			"item": map[string]any{"id": "answer-" + first8(turn.ID), "type": "agent_message", "phase": "final_answer", "text": turn.Result}}); err != nil {
-			return err
-		}
-	}
-	return emitLane(map[string]any{"type": "turn.completed", "thread_id": state.ThreadID, "turn_id": turn.ID,
-		"status": turn.Status, "outcome": turn.Outcome, "exit": turn.Exit, "error": emptyStringAsNil(turn.Error), "stop_reason": emptyStringAsNil(turn.StopReason)})
 }
 
 func acknowledgeQwenLaneTurn(paths nativePaths, threadID, turnID string) error {
@@ -742,14 +393,6 @@ func acknowledgeQwenLaneTurn(paths nativePaths, threadID, turnID string) error {
 	return writeQwenLaneStateUnlocked(paths, state)
 }
 
-func statusQwenLane(o qwenLaneOptions) (int, error) {
-	state, err := resolveQwenLaneState(resolveNativePaths(), o.target)
-	if err != nil {
-		return 1, err
-	}
-	return 0, emitLane(qwenLaneStatusEvent(state))
-}
-
 func qwenLaneStatusEvent(state qwenLaneState) map[string]any {
 	return map[string]any{
 		"type": "lane.status", "product": "qwen", "contract_version": qwenLaneContractVersion,
@@ -764,59 +407,6 @@ func qwenLaneStatusEvent(state qwenLaneState) map[string]any {
 		"auto_archive_after_seconds": float64(state.AutoArchiveDelayMS) / 1000, "auto_archive_at": nilIfZero(state.AutoArchiveAt),
 		"cleanup_debt": state.CleanupDebt,
 	}
-}
-
-func listQwenLanes(o qwenLaneOptions) (int, error) {
-	return listProductLaneStates(
-		o.laneCommonOptions, "qwen", qwenLaneContractVersion, readQwenLaneStates(resolveNativePaths()),
-		func(state *qwenLaneState) string { return state.Status },
-		func(state *qwenLaneState) (bool, int, string) {
-			return state.Persistent, state.OwnerPID, state.OwnerProcStart
-		},
-		qwenLaneStatusEvent,
-	)
-}
-
-func interruptQwenLane(o qwenLaneOptions) (int, error) {
-	state, err := resolveQwenLaneState(resolveNativePaths(), o.target)
-	if err != nil {
-		return 1, err
-	}
-	if !qwenLaneManagerLive(state) {
-		return 1, fmt.Errorf("qwen lane %s is not live", state.ThreadID)
-	}
-	response, err := requestControl(state.ControlSocket, map[string]any{"action": "interrupt", "sessionId": state.ThreadID}, 5*time.Second)
-	if err != nil {
-		return 1, err
-	}
-	return 0, emitLane(map[string]any{"type": "turn.interrupted", "thread_id": state.ThreadID, "turn_id": response["turnId"]})
-}
-
-func archiveQwenLane(o qwenLaneOptions) (int, error) {
-	paths := resolveNativePaths()
-	state, err := resolveQwenLaneState(paths, o.target)
-	if err != nil {
-		return 1, err
-	}
-	if state.Status == "archived" && state.NativeArchiveState == "archived" && len(state.CleanupDebt) == 0 {
-		return 0, emitLane(map[string]any{"type": "lane.archived", "product": "qwen", "name": state.Name, "thread_id": state.ThreadID, "already_archived": true})
-	}
-	if qwenLaneManagerLive(state) {
-		if _, err := requestControl(state.ControlSocket, map[string]any{"action": "archive", "sessionId": state.ThreadID}, 30*time.Second); err != nil {
-			return 1, err
-		}
-	} else if err := forceArchiveQwenLane(paths, state.ThreadID, "explicit archive with manager unavailable"); err != nil {
-		return 1, err
-	}
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		latest, readErr := readQwenLaneState(paths, state.ThreadID)
-		if readErr == nil && latest.Status == "archived" && latest.NativeArchiveState == "archived" && len(latest.CleanupDebt) == 0 {
-			return 0, emitLane(map[string]any{"type": "lane.archived", "product": "qwen", "name": latest.Name, "thread_id": latest.ThreadID})
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return 1, errors.New("timed out waiting for Qwen lane archive")
 }
 
 func reconcileQwenLaneManagers(paths nativePaths) error {
@@ -844,7 +434,7 @@ func reconcileQwenLaneManager(paths nativePaths, state qwenLaneState, now int64)
 	missingManager := !containsString([]string{"starting", "archived"}, state.Status) && state.ManagerPID <= 1
 	archivedResidue := state.Status == "archived" && managerUnavailable && qwenLaneHasOwnedResidue(paths, state)
 	if startingOrphan || managerExited || missingManager || archivedResidue || (state.Status == "cleanup_debt" && managerUnavailable) {
-		return forceArchiveQwenLane(paths, state.ThreadID, "Qwen lane manager exited")
+		return forceArchiveQwenLane(paths, state.ThreadID)
 	}
 	return nil
 }
@@ -883,7 +473,8 @@ func qwenLaneBridgeResidue(paths nativePaths, state qwenLaneState) bool {
 }
 
 //nolint:gocyclo // Forced archive is an exact-identity lifecycle and cleanup-debt transaction.
-func forceArchiveQwenLane(paths nativePaths, threadID, reason string) error {
+func forceArchiveQwenLane(paths nativePaths, threadID string) error {
+	const reason = "Qwen lane manager exited"
 	observed, err := readQwenLaneState(paths, threadID)
 	if err != nil {
 		return err
@@ -907,9 +498,6 @@ func forceArchiveQwenLane(paths nativePaths, threadID, reason string) error {
 			turn.Status, turn.Outcome, turn.Exit, turn.Error, turn.CompletedAt = "interrupted", "interrupted", 130, reason, now
 			queueQwenLaneTerminalNotice(&state, *turn)
 		}
-	}
-	if strings.HasPrefix(reason, "explicit archive") {
-		cancelAllQwenLaneNotices(&state)
 	}
 	state.Status, state.AutoArchiveAt = "retiring", 0
 	state.CleanupDebt = nil
@@ -941,7 +529,7 @@ func forceArchiveQwenLane(paths nativePaths, threadID, reason string) error {
 		cleanupErr = registry.ledger.reconcileCleanup()
 	}
 	if cleanupErr == nil {
-		_ = cleanupStaleBridgeArtifacts(paths)
+		cleanupStaleBridgeArtifacts(paths)
 		if state.ControlSocket == qwenLaneControlSocket(paths, state.ThreadID) {
 			_ = os.Remove(state.ControlSocket)
 		}
@@ -1032,29 +620,4 @@ func validQwenLaneToken(token string) bool {
 
 func qwenLaneProcessIdentity(pid int, start, strong string) toolRootProcessIdentity {
 	return toolRootProcessIdentity{PID: pid, ProcStart: start, StrongStart: strong}
-}
-
-func admitQwenLane(cwd string, profile qwenprofile.Identity) error {
-	executable := strings.TrimSpace(os.Getenv(qwenLaneExecutableEnv))
-	if executable == "" {
-		return errors.New("validated Qwen executable is unavailable")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	report, err := qwenreadiness.Check(ctx, qwenreadiness.Request{
-		Executable: executable, Workspace: cwd, Profile: profile,
-		ExpectedIntegrationVersion: qwenreadiness.IntegrationVersion,
-		Source:                     qwenreadiness.NewNativeSource(os.Environ()),
-	})
-	if err != nil {
-		return fmt.Errorf("check Qwen lane readiness: %w", err)
-	}
-	if !report.Ready {
-		issues := make([]string, 0, len(report.Issues))
-		for _, issue := range report.Issues {
-			issues = append(issues, issue.Code+": "+issue.Message)
-		}
-		return fmt.Errorf("qwen lane is not ready: %s", strings.Join(issues, "; "))
-	}
-	return nil
 }

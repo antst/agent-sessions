@@ -9,8 +9,11 @@ import (
 	"github.com/antst/agent-sessions/internal/releaseevidence"
 )
 
+// RunReleaseEvidence executes the repository-internal release evidence helper
+// from the canonical host image. It is intentionally absent from public help.
+//
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
-func runReleaseEvidence(args []string) int {
+func RunReleaseEvidence(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: release-evidence generate|canonicalize|validate ...")
 		return 2

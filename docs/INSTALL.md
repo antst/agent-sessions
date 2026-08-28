@@ -1,294 +1,207 @@
-# Installation
+# Installation and service lifecycle
 
-## Requirements and targets
+Agent Sessions installs two executable roles from one release:
 
-Agent Sessions targets Linux and macOS on x86-64 and arm64. It requires Codex CLI with plugins,
-hooks, and managed App Server support; Claude Code with local cross-session messaging; Qwen Code
-0.21.15 or newer for Qwen peers/lanes; and Bash for
-installation and maintenance scripts. Building from source requires Go 1.22 or newer. CI/release
-artifacts include the eleven native binaries and require
-neither Go nor Node.js on the destination host.
+- `agent-sessions`: the single host image. One foreground instance runs per OS user-host. The
+  installed `peer`, product peer, and product lane command names are aliases of this exact image.
+- `agent-sessions-hub`: the distinct central federation hub image. It has no local product adapters,
+  attachments, lanes, connectors, or host runtime authority.
 
-| Host | Bundled binary |
-|---|---|
-| Linux x86-64 | `bin/linux-x64/agent-session-runtime` |
-| Linux arm64 | `bin/linux-arm64/agent-session-runtime` |
-| macOS Intel | `bin/darwin-x64/agent-session-runtime` |
-| macOS Apple Silicon | `bin/darwin-arm64/agent-session-runtime` |
+Linux and macOS archives are built for x86-64 and arm64. Each platform archive contains exactly these
+two executables, all four optional connector payloads, service definitions, documentation, and the
+release manifest. Building from source requires Go 1.22 or newer; a matching release archive uses its
+prebuilt executables.
 
-Each platform directory also contains the distinct `peer`, `codex-peer`, `claude-peer`, `qwen-peer`,
-`codex-peer-lane`, `claude-peer-lane`, `grok-peer`, `grok-peer-lane`, `qwen-peer-lane`, and `peer-federator`
-executables. `peer-federator` remains a separately
-operated process; installing the binary does not enable or load a federation service.
+## Host installation
 
-The release peer, lane, cleanup, and bidirectional federation matrix is exercised on real Linux and
-macOS hosts. CI additionally cross-builds every release for Linux and macOS on x86-64 and arm64.
-
-## Release archive installation
-
-A `vX.Y.Z` tag whose base version matches the plugin manifest creates a Forgejo Release containing
-four archives and `SHA256SUMS`. Choose exactly one archive for the destination host. Each archive
-has one top-level directory and contains the matching native executables plus the Codex, Claude, Grok, and Qwen
-plugin payloads, launchers, documentation, and installer; it deliberately omits Go source.
-
-```bash
-# Linux: verify the downloaded archive against the release checksum file.
-sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf agent-sessions-vX.Y.Z-linux-x64.tar.gz
-cd agent-sessions-vX.Y.Z-linux-x64
-
-# After exiting every Codex client:
-codex app-server daemon stop
+```sh
 make install-all
 ```
 
-On macOS, use `shasum -a 256 -c --ignore-missing SHA256SUMS` and the matching `darwin-x64` or
-`darwin-arm64` archive. The `.agent-sessions-prebuilt` marker makes `make build` and the install
-targets use the packaged executable even if Go is present. Extracting an archive on the wrong OS
-or architecture fails before installation with the missing platform name. `make install` installs
-only the native runtime and Codex side. `make install-all` installs the shared runtime and then each
-integration whose native client is present; absent Codex, Claude, Grok, or Qwen clients are named and
-skipped. An explicitly requested product target such as `make install-grok` remains strict and fails
-when that client is unavailable.
+`make install` and `make dev-install` are host-install aliases. Clean installs and steady-state unified
+upgrades use this host transaction; a split-runtime first migration must first pass the read-only
+maintenance-window gate described below:
 
-## Source installation
+1. validates and stages one immutable host release;
+2. discovers Codex, Claude, Grok, and Qwen without treating an absent product as an aggregate failure;
+3. prepares recoverable connector changes for the installed subset;
+4. installs and enables the standard user service;
+5. atomically selects `host/current` and performs one service-manager start or restart;
+6. verifies the exact binary identity, generation, one private endpoint, state schema, product
+   readiness, local routing, and configured federation state; and
+7. commits the release and connector journals together.
 
-```bash
-git clone https://github.com/antst/agent-sessions.git ~/agent-sessions
-cd ~/agent-sessions
+Explicit connector operations remain strict:
+
+```sh
+make install-codex
+make install-claude
+make install-grok
+make install-qwen
+make remove-qwen
+```
+
+They use each vendor's supported installer. They never copy, inspect, or repair credentials and do
+not manufacture a byte-clean uninstall by editing vendor state. Native installers may retain their
+own non-secret bookkeeping.
+
+The installed host service is:
+
+- Linux: `agent-sessions.service`, a systemd user service;
+- macOS: `net.antst.agent-sessions`, a launchd user agent.
+
+The service manager owns lifetime. The daemon runs `agent-sessions daemon` in the foreground and does
+not fork or supervise another copy. Peer, lane, connector, MCP, and federation workflow commands never
+start, stop, repair, or replace it. When it is unavailable they fail before accepting work.
+
+## Hub installation
+
+Install the one central hub separately:
+
+```sh
+make install-hub HUB_LISTEN=:7419
+```
+
+This installs only `agent-sessions-hub`, its non-secret configuration, and its own systemd or launchd
+service. It does not install the host service, command aliases, connectors, or vendor integrations.
+Host and hub releases, current selections, locks, journals, services, readiness decisions, removal,
+and purge roots are disjoint even when both roles use the same OS account.
+
+Upgrading a protocol-compatible host never restarts the hub. Upgrading the hub never restarts a host.
+Their release versions and source commits may differ; network interoperability requires only exact
+hub-protocol-version equality. See [FEDERATION.md](FEDERATION.md).
+
+## First migration from the split runtime
+
+The first unified host install requires an operator-owned maintenance window. Before invoking the
+mutating install:
+
+1. close every legacy managed peer and lane;
+2. explicitly stop every responsive legacy supervisor, product manager, routing agent, and federation
+   authority through the old release's supported lifecycle; and
+3. disable or otherwise hold all legacy service, login, and command launch paths so no new legacy
+   authority can start until installation completes.
+
+The installer then performs a closed inventory of previously shipped Agent Sessions-owned state,
+services, processes, and runtime roots. It fails before mutation and names every exact live peer, lane,
+or legacy authority. A responsive authority is a blocker even when it reports zero shims or active
+work. Stop it yourself through the old supported lifecycle, keep the maintenance window in force, and
+rerun the supported install command.
+
+The installer never closes admission on, stops, signals, or restarts a legacy authority. There is no
+live handoff or compatibility drain protocol for supervisors, shims, product hosts or managers, lane
+managers, routing agents, or the old federation authority.
+
+After the gate passes, the transaction:
+
+1. re-attests that every legacy authority remains absent and fails closed if any launch appears;
+2. adopts only Agent Sessions-owned catalogs, names, global groups, completed lane state, cursors,
+   notices, hub configuration, provenance, and cleanup debt;
+3. commits the successor generation before opening admission; and
+4. re-attests owner absence and retires the exact legacy endpoints, disabled jobs, and artifacts.
+
+Vendor credentials, profiles, settings, transcripts, native history, and unrelated processes are
+never migration inputs. Unknown or changed identity becomes retryable debt rather than cleanup
+authority.
+
+```sh
+agent-sessions migrate inspect --json
+agent-sessions migrate status --json
+```
+
+These commands are metadata-only and work offline during first migration. They name exact blockers or
+debt and the supported retry action; they do not start the service or repair state.
+
+If first-migration readiness or recovery fails, rollback stops the unified candidate and leaves all
+legacy authorities stopped. It restores only release/state/connector/service surfaces changed by the
+installer; it never restarts the old topology. Keep the maintenance window in force and either retry
+the unified install or manually relaunch the old release through its supported lifecycle.
+
+## Routine restart and upgrade
+
+After first migration, steady-state upgrades use the normal immutable host transaction. The service
+manager performs one restart. The daemon restores its catalogs, attachments, deliveries, lane actors,
+and embedded federation-client connection before opening the next generation.
+
+Native vendor processes remain external and are not stopped merely because Agent Sessions restarts.
+Codex, Claude, Grok, and Qwen adapters re-corroborate their existing native actors. Accepted messages
+are not duplicated. Active lane turns reconnect when the native protocol proves that safe; an
+adapter-specific unsupported case records exactly one explicit interrupted, collectable, resumable
+outcome.
+
+Explicit stop or disable suppresses service-manager restart until the user explicitly starts or
+enables the service. Sending a signal is not the supported persistent stop on launchd.
+
+## Status and troubleshooting
+
+```sh
+agent-sessions status --json
+agent-sessions doctor --json
+agent-sessions-hub status --json
+agent-sessions-hub doctor --json
+```
+
+Status and doctor report bounded non-secret identity, generation, endpoint, service, product,
+attachment, lane, federation, migration, and debt metadata. They never include message, prompt,
+result, tool, credential, or transcript content and never start an unavailable service.
+
+Common diagnoses:
+
+- `unavailable`: start the already-installed role through systemd-user or launchd; do not retry a
+  workflow expecting it to bootstrap the daemon.
+- `refused`: close every exact peer/lane or removal/migration blocker named by the command, then retry
+  the same supported operation.
+- `incompatible`: install a build supporting the recorded state or matching hub protocol; no downgrade
+  or alternate carrier is attempted.
+- `retryable`: satisfy the recorded identity predicate and retry. Do not delete sockets, journals, or
+  state by hand.
+- Codex history appears blank through the App Server: run Codex's own `codex migrate-rollouts` command.
+  Agent Sessions does not rewrite vendor history projections.
+
+## Removal and purge
+
+Normal host removal is state-preserving:
+
+```sh
+make remove
+```
+
+It refuses with zero mutation while any managed attachment or lane is active. Once quiescent, it stops
+the exact host service, removes supported connector registrations, command links, selected releases,
+and verified disposable runtime artifacts. It preserves Agent Sessions configuration, catalogs,
+completed lane metadata, cursors, federation configuration, migration provenance, and cleanup debt.
+It never removes native sessions, credentials, profiles, settings, or transcripts.
+
+Hub removal is independent:
+
+```sh
+make remove-hub
+```
+
+It stops and removes only the hub service, selected hub release, and disposable hub runtime state.
+Remote hosts continue running; hub configuration and durable hub metadata are preserved.
+
+Deleting preserved Agent Sessions state is always a separate offline, revision-bound operation:
+
+```sh
+make purge-inspect PURGE_PLAN=/absolute/path/host-plan.json
+make purge PURGE_PLAN=/absolute/path/host-plan.json
+make purge-hub-inspect PURGE_PLAN=/absolute/path/hub-plan.json
+make purge-hub PURGE_PLAN=/absolute/path/hub-plan.json
+```
+
+Apply revalidates the plan revision, file type, UID, root containment, and current identity before each
+deletion. It refuses a running role, changed identity, link ambiguity, vendor-owned path, other-role
+state, or unenumerated target. Interrupted purge is journaled and idempotently retryable.
+
+## Development checks
+
+```sh
+make test
 make test-race
-make install
+go vet ./...
+make lint
+make build-release-platform GOOS=linux GOARCH=amd64
 ```
 
-For a release archive with the matching prebuilt binary, run only `make install` or
-`make install-all`; Go is not needed.
-
-By default, `make install`:
-
-1. builds all eleven binaries under `bin/<platform>`;
-2. copies the runtime plugin payload into `~/.local/libexec/agent-sessions`;
-3. registers that installed tree's marketplace as `agent-sessions`;
-4. installs `agent-sessions@agent-sessions` into Codex's plugin cache; and
-5. creates command symlinks in `~/.local/bin` whose absolute targets are derived from the exact
-   configured `INSTALL_ROOT`, not from an assumed prefix layout; and
-6. starts the shared runtime only after App Server is stopped and no managed
-   `grok-peer` TUI/private leader is live, without interrupting either product.
-
-The first newly launched Codex session then asks for one-time approval of the installed plugin's
-lifecycle hooks. Approve `agent-sessions@agent-sessions`; otherwise `SessionStart`,
-`UserPromptSubmit`, and `Stop` do not run and owned-session registration plus fallback inbox
-delivery remain incomplete. Ordinary threads execute the same globally installed hooks as silent
-no-ops. This approval trusts the plugin hooks only—it does not change Codex's
-sandbox or normal tool approval policy. A TUI that was already open during installation must be
-restarted before it can load the new hook snapshot and present the prompt.
-
-After the replacement is registered, the installer removes older `claude-code-peer` installations
-from the repository, personal, and legacy `codex-messaging` marketplaces. This prevents both plugin
-identities from loading the same hooks and MCP server after an upgrade; it does not remove the
-user's `personal` marketplace.
-
-Override the destination with `PREFIX=/another/prefix` or `INSTALL_ROOT=/another/libexec/path`.
-Override the Codex executable with `CODEX=/path/to/codex`. Use `make dev-install` when you
-intentionally want the native runtime, launchers, and marketplace to track a mutable source checkout. Run install
-from a host terminal after exiting every Codex client, running
-`codex app-server daemon stop`, and normally exiting every `grok-peer` TUI.
-The installer refuses to replace any running App Server—even an idle one—because a separate
-quiescence check followed by restart has an unavoidable race with native clients starting work.
-It also refuses while a managed Grok launch record has any live or unverifiable
-owner, host, private leader, or observer identity. Normal Grok TUI exit removes
-that private process group automatically; see
-[Grok leader shutdown](GROK-INSTALL.md#stop-leaders-safely).
-Packagers can use `START_RUNTIME=0` to stage files without starting host services.
-
-`make install` deliberately changes only the Codex/runtime side. To install the reusable Claude
-orchestration skill plus Grok and Qwen MCP plugins, use `make install-all`; on a host where the runtime
-is already installed, `make install-claude`, `make install-grok`, and `make install-qwen` update those surfaces
-independently. The Claude target stages its cache-busted payload under a
-versioned, immutable directory below `$(PREFIX)/share/agent-sessions/claude-marketplaces` before
-updating the marketplace, so later native-only installs cannot change an active Claude plugin.
-Use `make dev-install-claude` only when the Claude
-marketplace should deliberately follow the mutable checkout. Claude plugin installation is explicit because it
-changes the user's Claude Code marketplace and plugin settings. See
-[CLAUDE-INSTALL.md](./CLAUDE-INSTALL.md).
-
-The Grok target validates the local plugin and copies it into Grok's documented
-auto-trusted user directory, `~/.grok/plugins/agent-sessions`, which allows its
-native MCP command to execute as the current user. It migrates only a prior
-single-plugin direct installation and keeps separate plugin data. Grok's
-official trusted installer is used only to update the enabled-plugin setting;
-that temporary registry row is then removed with `--keep-data`. Installation
-fails unless `grok inspect --json` resolves exactly one enabled user plugin and
-the exact staged `agent_sessions` MCP executable. See
-[GROK-INSTALL.md](./GROK-INSTALL.md).
-
-The Qwen target invokes Qwen's native Agent Plugins v1 extension manager in the
-exact profile selected by presence-sensitive `QWEN_HOME` and
-`QWEN_RUNTIME_DIR`. It verifies manifest/version/enabled-state drift, one
-`agent_sessions` stdio MCP server, and all five skills before admitting a
-managed launch. `make upgrade-qwen` is the same idempotent verified transaction;
-`make remove-qwen` removes only that extension. Both refuse while a managed
-Qwen process uses the selected profile. See [QWEN-INSTALL.md](./QWEN-INSTALL.md).
-
-The equivalent source-linked development command is:
-
-```bash
-make -C ~/agent-sessions dev-install
-```
-
-Codex marketplace registration also accepts the Forgejo Git URL directly:
-
-```bash
-codex plugin marketplace add \
-  https://github.com/antst/agent-sessions.git
-codex plugin add agent-sessions@agent-sessions
-```
-
-The plugin must be installed, not merely checked out: managed App Server loads hooks and MCP
-configuration from the installed plugin cache. Start a new TUI after installation and approve the
-plugin hooks when prompted. A TUI that was already running retains its previous hook snapshot until
-it is restarted.
-
-The launcher consumes only `-n/--peer-name` and an explicit resume selector. It resolves the selector
-to one UUID, owns the `--remote unix:// resume UUID` prefix, and supplies the canonical cwd only when
-`-C/--cd` was absent. The remaining native Codex argv is appended unchanged, preserving relative
-ordering without splitting variadic values. Model, profile, config, feature, sandbox, approval, search,
-image, hook-trust, and display options may therefore appear before or after the input `resume` selector.
-Explicit `--yolo` is also mirrored through the App Server before publication: at `thread/start` for a
-fresh peer, and through `thread/resume` plus `thread/settings/update` for a resumed peer. This changes
-durable thread settings, so later plain resumes remain full-access until those settings are changed.
-For an externally isolated host, `codex-peer --yolo -n NAME`
-remains an intentional opt-in.
-Supported resume syntax is `codex-peer [GLOBAL_OPTIONS] resume [RESUME_OPTIONS] UUID_OR_NAME
-[PROMPT_OR_OPTIONS]`; options may appear on either side of the input selector. A name selects the newest
-usable exact-name session. Without explicit `--yolo`, resume preparation uses the existing thread's
-effective App Server policy. Resume inherits the thread's canonical cwd;
-an explicit `-C` is accepted only when it resolves to that same directory.
-
-## Build and update commands
-
-```bash
-make lint          # verify config and run golangci-lint
-make test          # shell checks and Go tests
-make test-race     # race-enabled Go tests
-make build         # current host, under bin/<platform>
-make build GOOS=darwin GOARCH=arm64
-make install-claude # install/update agent-sessions in Claude Code
-make install-grok   # validate/trust/install the Grok MCP plugin
-make install-qwen   # install/verify Qwen support in the selected profile
-make upgrade-qwen   # idempotent verified Qwen update
-make remove-qwen    # remove only Agent Sessions from the selected Qwen profile
-make install-all    # shared runtime plus every locally available product integration
-make reinstall     # new cachebuster, rebuild, reinstall
-make repair-projection THREAD_ID=<uuid>          # inspect the known duplicate-ordinal failure
-make repair-projection THREAD_ID=<uuid> APPLY=1  # back up and repair only that exact failure
-make clean
-```
-
-The native launchers and installation bootstrap use `bin/<platform>/agent-session-runtime` directly.
-Source installs build that executable before activation; packaged installs require the matching prebuilt
-binary. There is no separate shell bootstrap or lazy shadow build.
-
-## Runtime ownership
-
-Managed App Server and the bridge supervisor are shared per user and `CODEX_HOME`, not per lane.
-Each canonical `CODEX_HOME` has a hashed supervisor socket, version marker, exact interactive-owner
-records,
-lane registry, and retirement state, so two profiles under one Unix user cannot attach their hooks
-or lanes to each other's App Server. Peer discovery sockets remain global per user because Claude
-must see every profile in one local roster.
-Both launchers start them idempotently, so no manual daemon start is required after reboot: the
-first launcher used after boot starts everything. To make managed App Server durable before any
-launcher invocation, Codex also provides:
-
-```bash
-codex app-server daemon bootstrap
-```
-
-Each advertised root thread runs the same binary in `shim` mode because Claude discovery is keyed
-by a live PID. Child Codex subagents remain private and do not create extra registry entries.
-
-The TUI owns an interactive peer's live lifetime. Normal exit of an attached peer removes its registry
-and sockets,
-unloads the App Server runtime and thread-scoped MCP children, and leaves the transcript resumable
-but not messageable until another TUI resumes it. For a fresh root, `codex-peer` first creates the
-thread using the real canonical cwd. Explicit UUID or unique-name resume resolves one authoritative,
-unarchived thread. The wrapper binds that UUID to its PID/process-start
-token and publishes the exact prepared owner before replacing the same process with a TUI resuming
-the UUID. A committed zero-turn TUI that exits before SessionStart loses its shim but remains loaded;
-its exact stale prepared-owner record authorizes one replacement resume without archive/unarchive,
-which would race the replacement TUI and move the rollout into the archived session tree. Only a failed
-fresh preparation before its publication commit is deleted. The supervisor therefore
-performs the same cleanup on its next
-five-second reconciliation tick when `SessionEnd` is skipped or the TUI dies with `SIGKILL`.
-Ordinary threads have no capability record, publish no peer shim, and cannot use peer tools. The
-public App Server and hook protocols identify a thread rather than a client attachment, so a plain
-client explicitly resuming an already-authorized peer UUID cannot be distinguished from its owner.
-Supervised lane cleanup uses its own durable owner
-identity. If a shim or supervisor itself dies,
-the existing startup/reconciliation sweep removes or replaces only bridge-owned stale transport;
-dead registry PIDs are never considered reachable, and queued inbox messages are retained.
-
-Persistent state defaults to `~/.local/state/claude-code-peer`. Runtime sockets use
-`$XDG_RUNTIME_DIR/codex-claude-peer-<uid>` and fall back to a private system-temporary directory
-when necessary. Startup rejects a symlink, non-directory, or directory owned by another uid and
-requires mode `0700` before touching any socket or alias. Linux process identity comes from
-`/proc`; macOS uses the kernel process table. Observation failures are distinct from proof of
-death, so an unknown identity neither authorizes a new owner nor triggers destructive cleanup.
-
-A version-changing update never restarts a running App Server. It requires the daemon to be
-stopped, repeats that check after acquiring its cross-launch lock, and starts a fresh server with
-the new plugin. The old peer supervisor is left intact until that start succeeds; the versioned
-supervisor start then replaces it. Supervisor identity includes the SHA-256 captured from its
-executable at startup, not only the plugin version. A same-version reinstall therefore replaces a
-stale or deleted supervisor binary without restarting App Server, and every new `SessionStart`
-performs the same identity check before registering its shim. When upgrading from the pre-profile layout, startup also
-validates and retires the responsive legacy `supervisor.sock`; it refuses an unknown or
-unresponsive owner instead of leaving two supervisors subscribed to one App Server. If a native client starts the server
-while the updater is waiting, activation exits 75 without stopping either process. This removes
-the non-atomic check-to-restart operation entirely. Same-version startup remains idempotent and
-does not restart App Server. These rules are the same on Linux and macOS; a user can still bypass
-them by invoking Codex's native `daemon restart` command directly.
-
-If the fresh App Server starts but versioned peer-supervisor replacement fails, the updater emits
-an explicit warning that messaging may be unavailable. The loaded-version/runtime markers are
-already durable at that point, so the next `codex-peer`, `codex-peer-lane`, or direct
-`agent-session-runtime bootstrap` retries only supervisor startup; it does not require another
-server stop or plugin reinstall.
-
-## Recovering the Codex 0.147 duplicate-ordinal projection failure
-
-Codex 0.147 can append the same rollout ordinal twice if App Server is replaced during an active
-turn. The canonical JSONL continues growing, but its derived `thread_history_*.sqlite` projection
-stops at the duplicate and a resumed TUI renders stale history. This bridge prevents its updater
-from creating that condition by requiring a cleanly stopped App Server for every version change.
-
-For a host already affected, exit every Codex client and stop managed App Server first:
-
-```bash
-codex app-server daemon stop
-cd ~/agent-sessions
-make repair-projection THREAD_ID=<uuid>
-make repair-projection THREAD_ID=<uuid> APPLY=1
-```
-
-The recovery command requires Python 3 only for this exceptional maintenance operation. Its dry
-run and applied mode both refuse to run inside a Codex turn or while managed App Server is
-reachable. It accepts only the proven three-record shape—`N-1`, duplicate `N-1`
-`thread_settings_applied`, then `N`—backs up the complete SQLite database, advances only the
-projection byte offset, and verifies that the rollout SHA-256 did not change. It never deletes or
-rewrites canonical rollout JSONL. Unknown corruption is rejected rather than guessed at. Resume
-through `codex-peer` after the repair; the materializer then catches the projection up to the
-rollout tail.
-
-## Verification
-
-```bash
-codex plugin list
-codex app-server daemon version
-codex-peer-lane --help
-codex-peer -n reviewer
-claude agents --json
-```
-
-See [CODEX-LANES.md](./CODEX-LANES.md) for Codex lane integration and the
-[documentation index](./README.md) for the other product and operator guides.
+The complete command, option, environment, JSON, and exit contract is generated in [CLI.md](CLI.md).

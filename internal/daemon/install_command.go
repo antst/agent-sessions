@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -29,53 +29,10 @@ func RunHostInstallCLI(ctx context.Context, args []string) error {
 		return errors.New("host installer accepts only --role host")
 	}
 	sourceRoot, prefix, version := values["--source-root"], values["--prefix"], values["--version"]
-	for name, path := range map[string]string{"source root": sourceRoot, "prefix": prefix} {
-		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
-			return fmt.Errorf("host install %s must be a clean absolute non-root path", name)
-		}
-	}
-	declaredVersion, err := os.ReadFile(filepath.Join(sourceRoot, "deploy", "agent-sessions", "VERSION")) //nolint:gosec // Exact selected release source.
-	if err != nil || strings.TrimSpace(string(declaredVersion)) != version {
-		return errors.New("host install version does not match the selected release source")
-	}
-	identity, err := releaseinstall.ContentIdentity(sourceRoot)
-	if err != nil {
-		return err
-	}
-	if err := writeReleaseManifest(sourceRoot, version, identity); err != nil {
-		return err
+	if !filepath.IsAbs(prefix) || filepath.Clean(prefix) != prefix || prefix == string(filepath.Separator) {
+		return errors.New("host install prefix must be a clean absolute non-root path")
 	}
 	paths, err := ResolveProductionPaths()
-	if err != nil {
-		return err
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	drivers, err := NewNativeConnectorDrivers(NativeConnectorOptions{
-		CodexExecutable: values["--codex"], ClaudeExecutable: values["--claude"],
-		GrokExecutable: values["--grok"], QwenExecutable: values["--qwen"],
-		GrokUserPluginRoot: filepath.Join(home, ".grok", "plugins", "agent-sessions"),
-	})
-	if err != nil {
-		return err
-	}
-	hooks, err := NewHostInstallHooks(drivers)
-	if err != nil {
-		return err
-	}
-	lifecycle, err := NewHostInstallLifecycle(hooks,
-		func(context.Context, releaseinstall.InstallRequest) error { return nil },
-		hostInstallReadiness(paths.ControlEndpoint),
-	)
-	if err != nil {
-		return err
-	}
-	roleHooks := &hostInstallRoleHooks{
-		lifecycle: lifecycle, prefix: prefix, stateRoot: paths.StateRoot, runtimeEndpoint: paths.ControlEndpoint,
-	}
-	service, err := newInstalledHostService(prefix)
 	if err != nil {
 		return err
 	}
@@ -83,21 +40,143 @@ func RunHostInstallCLI(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	hooks, err := NewDurableHostInstallHooks(nil, filepath.Join(layout.TransactionRoot, "connectors.json"))
+	if err != nil {
+		return err
+	}
+	service, err := newInstalledHostService(prefix)
+	if err != nil {
+		return err
+	}
+	gate := &productionHostMigrationGate{
+		stateRoot: paths.StateRoot,
+		retryDebt: func(ctx context.Context, state *StateStore, observedAt int64) (LegacyMigrationDebtRetryResult, error) {
+			observer, observerErr := newProductionLegacyRetirementLifecycle(paths, state)
+			if observerErr != nil {
+				return LegacyMigrationDebtRetryResult{}, observerErr
+			}
+			return RetrySelectedLegacyMigrationDebt(ctx, state, observer, observedAt)
+		},
+	}
+	buildLifecycle := func(existingOnly bool) (*HostInstallLifecycle, error) {
+		var state *StateStore
+		var openErr error
+		if existingOnly {
+			state, openErr = OpenStateStoreExisting(paths.StateRoot, defaultMaximumStateRecordBytes)
+		} else {
+			state, openErr = OpenStateStore(paths.StateRoot, defaultMaximumStateRecordBytes)
+		}
+		if openErr != nil {
+			return nil, openErr
+		}
+		legacyLifecycle, lifecycleErr := newProductionLegacyRetirementLifecycle(paths, state)
+		if lifecycleErr != nil {
+			return nil, lifecycleErr
+		}
+		retirement, lifecycleErr := NewLegacyRetirementEngine(LegacyRetirementEngineOptions{
+			State: state, Lifecycle: legacyLifecycle,
+		})
+		if lifecycleErr != nil {
+			return nil, lifecycleErr
+		}
+		firstMigration, lifecycleErr := NewFirstMigrationLifecycle(FirstMigrationLifecycleOptions{
+			State: state, Retirement: retirement, Inspect: gate.Inspect,
+		})
+		if lifecycleErr != nil {
+			return nil, lifecycleErr
+		}
+		return NewHostInstallLifecycle(hooks, firstMigration, hostInstallReadiness(paths.ControlEndpoint))
+	}
+	var lifecycle *HostInstallLifecycle
+	if _, openErr := OpenStateStoreExisting(paths.StateRoot, defaultMaximumStateRecordBytes); openErr == nil {
+		lifecycle, err = buildLifecycle(true)
+		if err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(openErr) {
+		return openErr
+	}
+	roleHooks := &hostInstallRoleHooks{
+		lifecycle: lifecycle, initialize: buildLifecycle, migrationGate: gate,
+		prefix: prefix, stateRoot: paths.StateRoot, runtimeEndpoint: paths.ControlEndpoint,
+	}
 	engine, err := releaseinstall.NewEngine(releaseinstall.EngineOptions{Layout: layout, Service: service, Hooks: roleHooks})
 	if err != nil {
+		return err
+	}
+	return recoverThenInstallHostSource(ctx, engine, sourceRoot, version, func() error {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		drivers, err := NewNativeConnectorDrivers(NativeConnectorOptions{
+			CodexExecutable: values["--codex"], ClaudeExecutable: values["--claude"],
+			GrokExecutable: values["--grok"], QwenExecutable: values["--qwen"],
+			GrokUserPluginRoot: filepath.Join(home, ".grok", "plugins", "agent-sessions"),
+		})
+		if err != nil {
+			return err
+		}
+		return hooks.ConfigureDrivers(drivers)
+	})
+}
+
+type hostReleaseTransaction interface {
+	Recover(context.Context) error
+	Install(context.Context, releaseinstall.InstallRequest) (releaseinstall.InstallResult, error)
+}
+
+func recoverThenInstallHost(
+	ctx context.Context,
+	engine hostReleaseTransaction,
+	request releaseinstall.InstallRequest,
+) error {
+	// Finish or roll back the exact durable release transaction before a new
+	// request can replace its FromRelease provenance.
+	if err := engine.Recover(ctx); err != nil {
+		return fmt.Errorf("recover host install transaction: %w", err)
+	}
+	_, err := engine.Install(ctx, request)
+	return err
+}
+
+func recoverThenInstallHostSource(
+	ctx context.Context,
+	engine hostReleaseTransaction,
+	sourceRoot string,
+	version string,
+	configureDrivers func() error,
+) error {
+	// Recovery is authority over an unfinished prior transaction. It uses the
+	// selected immutable release and durable connector provenance, and must
+	// finish before this invocation reads its new source or resolves its native
+	// product executables.
+	if err := engine.Recover(ctx); err != nil {
+		return fmt.Errorf("recover host install transaction: %w", err)
+	}
+	if !filepath.IsAbs(sourceRoot) || filepath.Clean(sourceRoot) != sourceRoot || sourceRoot == string(filepath.Separator) {
+		return errors.New("host install source root must be a clean absolute non-root path")
+	}
+	identity, err := releaseinstall.ContentIdentity(sourceRoot)
+	if err != nil {
+		return err
+	}
+	if configureDrivers == nil {
+		return errors.New("host install native connector configuration is unavailable")
+	}
+	if err := configureDrivers(); err != nil {
 		return err
 	}
 	_, err = engine.Install(ctx, releaseinstall.InstallRequest{
 		Version: version, ContentIdentity: identity, SourceRoot: sourceRoot, Executable: "agent-sessions",
 	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 type hostInstallRoleHooks struct {
 	lifecycle       *HostInstallLifecycle
+	initialize      func(bool) (*HostInstallLifecycle, error)
+	migrationGate   *productionHostMigrationGate
 	prefix          string
 	stateRoot       string
 	runtimeEndpoint string
@@ -105,13 +184,231 @@ type hostInstallRoleHooks struct {
 	restoreAliases  func() error
 }
 
+type productionHostMigrationGate struct {
+	mu         sync.Mutex
+	stateRoot  string
+	inspect    func(context.Context) (FirstMigrationInspection, error)
+	request    releaseinstall.InstallRequest
+	inspection FirstMigrationInspection
+	resume     bool
+	ready      bool
+	final      bool
+	retryDebt  func(context.Context, *StateStore, int64) (LegacyMigrationDebtRetryResult, error)
+}
+
+// Preflight performs the sole production first-migration observation while
+// releaseinstall holds the cross-process role lock. No unified state or
+// release transaction exists until this method succeeds.
+func (hooks *hostInstallRoleHooks) Preflight(
+	ctx context.Context,
+	request releaseinstall.InstallRequest,
+) error {
+	if hooks == nil || hooks.migrationGate == nil {
+		return nil
+	}
+	return hooks.migrationGate.Preflight(ctx, request)
+}
+
+// Preflight captures the exact migration inspection under the release lock.
+func (gate *productionHostMigrationGate) Preflight( //nolint:gocyclo // Recovery, debt refresh, and fresh inspection stay one lock-held admission decision.
+	ctx context.Context,
+	request releaseinstall.InstallRequest,
+) error {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if existing, err := OpenStateStoreExisting(gate.stateRoot, defaultMaximumStateRecordBytes); err == nil {
+		if current, _, currentErr := existing.ReadCurrentMigration(ctx); currentErr == nil {
+			journal, _, journalErr := existing.ReadMigration(ctx, current.MigrationID)
+			if journalErr != nil {
+				return journalErr
+			}
+			if journal.FreshInventoryRequired {
+				// The selected journal is historical rollback evidence, not recovery
+				// authority. Continue into a fresh production inspection below.
+				goto inspectFresh
+			}
+			if (journal.State == MigrationStateBlockedUnknownIdentity || journal.State == MigrationStateDebt) &&
+				gate.retryDebt != nil {
+				if _, retryErr := gate.retryDebt(ctx, existing, time.Now().UnixMilli()); retryErr != nil {
+					return retryErr
+				}
+				journal, _, journalErr = existing.ReadMigration(ctx, current.MigrationID)
+				if journalErr != nil {
+					return journalErr
+				}
+				if journal.FreshInventoryRequired {
+					goto inspectFresh
+				}
+			}
+			switch journal.State {
+			case MigrationStateLegacyAbsenceVerified, MigrationStateAdopting,
+				MigrationStateAuthorityCommitted, MigrationStateRetiringLegacyArtifacts, MigrationStateComplete:
+			case MigrationStateInventorying, MigrationStateBlockedActivePeerOrLane,
+				MigrationStateBlockedLiveAuthority, MigrationStateBlockedUnknownIdentity,
+				MigrationStateDebt, MigrationStateRetryRequired:
+				return fmt.Errorf("selected first migration %q requires recovery from state %q", current.MigrationID, journal.State)
+			default:
+				return fmt.Errorf("selected first migration %q has unsupported state %q", current.MigrationID, journal.State)
+			}
+			gate.request, gate.inspection, gate.resume, gate.ready, gate.final =
+				request, FirstMigrationInspection{}, true, true, true
+			return nil
+		} else if !os.IsNotExist(currentErr) {
+			return currentErr
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+inspectFresh:
+	inspect := gate.inspect
+	if inspect == nil {
+		inspect = InspectProductionFirstMigration
+	}
+	inspection, err := inspect(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect first migration: %w", err)
+	}
+	if inspection.Required {
+		if _, err := EvaluateLegacyQuiescence(ctx, LegacyQuiescenceRequest{Candidates: inspection.Candidates}); err != nil {
+			return err
+		}
+	}
+	gate.request, gate.inspection, gate.resume, gate.ready, gate.final = request, inspection, false, true, false
+	return nil
+}
+
+// FinalInspect repeats the exact production inventory immediately before the
+// first migration can create unified state or stop an authority. The operator
+// maintenance window is the cross-version admission exclusion boundary: this
+// second observation detects a legacy launch that violated that window, while
+// never pretending the new release lock is understood by old launchers.
+func (gate *productionHostMigrationGate) FinalInspect(
+	ctx context.Context,
+	request releaseinstall.InstallRequest,
+) error {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if !gate.ready || request.Version != gate.request.Version ||
+		request.ContentIdentity != gate.request.ContentIdentity || request.Executable != gate.request.Executable {
+		return errors.New("final first migration inspection lacks its exact lock-held preflight")
+	}
+	if gate.resume {
+		gate.final = true
+		return nil
+	}
+	inspect := gate.inspect
+	if inspect == nil {
+		inspect = InspectProductionFirstMigration
+	}
+	inspection, err := inspect(ctx)
+	if err != nil {
+		return fmt.Errorf("repeat first migration inspection before mutation: %w", err)
+	}
+	if inspection.Required {
+		if _, err := EvaluateLegacyQuiescence(ctx, LegacyQuiescenceRequest{Candidates: inspection.Candidates}); err != nil {
+			return err
+		}
+	}
+	gate.inspection, gate.final = inspection, true
+	return nil
+}
+
+// Inspect returns only the exact inspection authorized by the lock-held gate.
+func (gate *productionHostMigrationGate) Inspect(
+	_ context.Context,
+	request releaseinstall.InstallRequest,
+) (FirstMigrationInspection, error) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if !gate.ready || !gate.final || gate.resume || request.Version != gate.request.Version ||
+		request.ContentIdentity != gate.request.ContentIdentity || request.Executable != gate.request.Executable {
+		return FirstMigrationInspection{}, errors.New("first migration prepare lacks its exact lock-held preflight")
+	}
+	return gate.inspection, nil
+}
+
+func (gate *productionHostMigrationGate) migrationBinding(ctx context.Context) (string, error) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if !gate.ready {
+		return "", errors.New("host migration binding lacks its lock-held preflight")
+	}
+	if !gate.resume {
+		return gate.inspection.MigrationID, nil
+	}
+	state, err := OpenStateStoreExisting(gate.stateRoot, defaultMaximumStateRecordBytes)
+	if err != nil {
+		return "", err
+	}
+	current, _, err := state.ReadCurrentMigration(ctx)
+	if err != nil {
+		return "", err
+	}
+	journal, _, err := state.ReadMigration(ctx, current.MigrationID)
+	if err != nil {
+		return "", err
+	}
+	if journal.State == MigrationStateComplete {
+		return "", nil
+	}
+	return current.MigrationID, nil
+}
+
+func (hooks *hostInstallRoleHooks) ensureLifecycle(existingOnly bool) error {
+	if hooks.lifecycle != nil {
+		return nil
+	}
+	if hooks.initialize == nil {
+		return errors.New("host install role hooks require an initialized lifecycle")
+	}
+	lifecycle, err := hooks.initialize(existingOnly)
+	if err != nil {
+		return err
+	}
+	hooks.lifecycle = lifecycle
+	return nil
+}
+
 // Prepare implements releaseinstall.RoleHooks under the role install lock.
 func (hooks *hostInstallRoleHooks) Prepare(ctx context.Context, request releaseinstall.InstallRequest) error {
-	if hooks == nil || hooks.lifecycle == nil {
+	if hooks == nil {
 		return errors.New("host install role hooks require a lifecycle")
 	}
-	if err := hooks.lifecycle.Prepare(ctx, request); err != nil {
+	if hooks.migrationGate != nil {
+		if err := hooks.migrationGate.FinalInspect(ctx, request); err != nil {
+			return err
+		}
+	}
+	if err := hooks.ensureLifecycle(false); err != nil {
 		return err
+	}
+	var err error
+	migrationID := ""
+	if hooks.migrationGate != nil {
+		migrationID, err = hooks.migrationGate.migrationBinding(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	migrationTargetIdentity := ""
+	if migrationID != "" {
+		migrationTargetIdentity, err = stagedHostExecutableIdentity(request)
+		if err != nil {
+			return err
+		}
+	}
+	surface, err := captureHostSurfaceRollback(
+		hooks.prefix, hooks.stateRoot, migrationID, migrationTargetIdentity,
+	)
+	if err != nil {
+		return err
+	}
+	if err := saveHostSurfaceRollback(surface); err != nil {
+		return err
+	}
+	if err := hooks.lifecycle.Prepare(ctx, request); err != nil {
+		return errors.Join(err, hooks.rollbackSurface())
 	}
 	restoreService, err := installHostServiceDefinition(request.SourceRoot, hooks.prefix, hooks.stateRoot)
 	if err != nil {
@@ -126,14 +423,62 @@ func (hooks *hostInstallRoleHooks) Prepare(ctx context.Context, request releasei
 	return nil
 }
 
+// FailureDisposition prevents release rollback after first-migration
+// successor authority has durably crossed its irreversible commit boundary.
+func (hooks *hostInstallRoleHooks) FailureDisposition(
+	ctx context.Context,
+	_ releaseinstall.Phase,
+) (releaseinstall.FailureDisposition, error) {
+	record, err := loadHostSurfaceRollback(hooks.prefix, hooks.stateRoot)
+	if err != nil {
+		return releaseinstall.FailureDispositionRollForward, err
+	}
+	if record.MigrationID == "" {
+		return releaseinstall.FailureDispositionRollback, nil
+	}
+	state, err := OpenStateStoreExisting(hooks.stateRoot, defaultMaximumStateRecordBytes)
+	if err != nil {
+		return releaseinstall.FailureDispositionRollForward, err
+	}
+	current, _, err := state.ReadCurrentMigration(ctx)
+	if err != nil || current.MigrationID != record.MigrationID {
+		if err == nil {
+			err = errors.New("release rollback migration binding no longer matches the current selector")
+		}
+		return releaseinstall.FailureDispositionRollForward, err
+	}
+	journal, _, err := state.ReadMigration(ctx, current.MigrationID)
+	if err != nil {
+		return releaseinstall.FailureDispositionRollForward, err
+	}
+	if journal.TargetRuntimeIdentity != record.MigrationTargetIdentity {
+		return releaseinstall.FailureDispositionRollForward,
+			errors.New("release rollback migration target identity changed")
+	}
+	if migrationStateHasCommittedAuthority(journal.State) && journal.SuccessorStateDurable &&
+		journal.MaintenanceWindowState == MaintenanceWindowLegacyAbsenceVerified && journal.AuthorityGeneration > 0 {
+		return releaseinstall.FailureDispositionRollForward, nil
+	}
+	return releaseinstall.FailureDispositionRollback, nil
+}
+
 // Ready implements releaseinstall.RoleHooks.
 func (hooks *hostInstallRoleHooks) Ready(ctx context.Context, release releaseinstall.InstalledRelease) error {
+	if err := hooks.ensureLifecycle(true); err != nil {
+		return err
+	}
 	return hooks.lifecycle.Ready(ctx, release)
 }
 
 // Commit implements releaseinstall.RoleHooks.
 func (hooks *hostInstallRoleHooks) Commit(ctx context.Context) error {
+	if err := hooks.ensureLifecycle(true); err != nil {
+		return err
+	}
 	if err := hooks.lifecycle.Commit(ctx); err != nil {
+		return err
+	}
+	if err := removeHostSurfaceRollback(hooks.prefix); err != nil {
 		return err
 	}
 	hooks.restoreAliases, hooks.restoreService = nil, nil
@@ -142,6 +487,12 @@ func (hooks *hostInstallRoleHooks) Commit(ctx context.Context) error {
 
 // Rollback implements releaseinstall.RoleHooks.
 func (hooks *hostInstallRoleHooks) Rollback(ctx context.Context) error {
+	if err := hooks.ensureLifecycle(true); err != nil {
+		if os.IsNotExist(err) {
+			return hooks.rollbackSurface()
+		}
+		return errors.Join(hooks.rollbackSurface(), err)
+	}
 	return errors.Join(hooks.rollbackSurface(), hooks.lifecycle.Rollback(ctx))
 }
 
@@ -167,6 +518,16 @@ func (hooks *hostInstallRoleHooks) rollbackSurface() error {
 		result = errors.Join(result, hooks.restoreService())
 		hooks.restoreService = nil
 	}
+	record, err := loadHostSurfaceRollback(hooks.prefix, hooks.stateRoot)
+	if err == nil {
+		if restoreErr := restoreHostSurfaceRollback(record); restoreErr != nil {
+			result = errors.Join(result, restoreErr)
+		} else {
+			result = errors.Join(result, removeHostSurfaceRollback(hooks.prefix))
+		}
+	} else if !os.IsNotExist(err) {
+		result = errors.Join(result, err)
+	}
 	return result
 }
 
@@ -190,72 +551,26 @@ func parseHostInstallOptions(args []string) (map[string]string, error) {
 	return values, nil
 }
 
-func writeReleaseManifest(root, version, identity string) error {
-	body, err := json.Marshal(map[string]string{"version": version, "content_identity": identity})
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(root, "manifest.json")
-	if info, statErr := os.Lstat(path); statErr == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
-		return errors.New("release manifest changed filesystem type")
-	} else if statErr != nil && !os.IsNotExist(statErr) {
-		return statErr
-	}
-	temporary, err := os.CreateTemp(root, ".manifest-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(body); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
-}
-
-type aliasSnapshot struct {
-	path    string
-	present bool
-	target  string
-}
-
 func installHostAliases(prefix string) (func() error, error) {
+	return installHostAliasesWithHooks(prefix, nil)
+}
+
+func installHostAliasesWithHooks(
+	prefix string, mutationHooks *hostSurfaceMutationHooks,
+) (func() error, error) {
 	binRoot := filepath.Join(prefix, "bin")
-	if err := os.MkdirAll(binRoot, 0o755); err != nil { //nolint:gosec // User executable search directories must be traversable by conventional tools.
-		return nil, err
-	}
 	target := filepath.Join(prefix, "libexec", "agent-sessions", "host", "current", "bin", "agent-sessions")
 	names := hostAliasNames()
-	snapshots := make([]aliasSnapshot, 0, len(names))
+	snapshots := make([]hostSurfaceAliasRollback, 0, len(names))
 	for _, name := range names {
 		path := filepath.Join(binRoot, name)
-		snapshot := aliasSnapshot{path: path}
-		if info, err := os.Lstat(path); err == nil {
-			if info.Mode()&os.ModeSymlink == 0 {
-				return nil, fmt.Errorf("refuse to replace non-symlink host alias %s", path)
-			}
-			snapshot.present = true
-			snapshot.target, err = os.Readlink(path)
-			if err != nil {
-				return nil, err
-			}
-		} else if !os.IsNotExist(err) {
-			return nil, err
+		snapshot, err := snapshotHostSurfaceAlias(path, nil)
+		if err != nil {
+			return nil, errors.Join(err, restoreHostAliases(snapshots))
 		}
 		snapshots = append(snapshots, snapshot)
-		if err := replaceAlias(path, target); err != nil {
+		expected := &hostSurfaceEntryExpectation{present: snapshot.Present, identity: snapshot.observed}
+		if err := replaceHostSurfaceAliasExpected(path, target, mutationHooks, expected); err != nil {
 			return nil, errors.Join(err, restoreHostAliases(snapshots))
 		}
 	}
@@ -267,29 +582,13 @@ func hostAliasNames() []string {
 }
 
 func replaceAlias(path, target string) error {
-	temporary := path + ".new"
-	_ = os.Remove(temporary)
-	if err := os.Symlink(target, temporary); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return nil
+	return replaceHostSurfaceAlias(path, target, nil)
 }
 
-func restoreHostAliases(snapshots []aliasSnapshot) error {
+func restoreHostAliases(snapshots []hostSurfaceAliasRollback) error {
 	var result error
 	for index := len(snapshots) - 1; index >= 0; index-- {
-		snapshot := snapshots[index]
-		if !snapshot.present {
-			if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
-				result = errors.Join(result, err)
-			}
-			continue
-		}
-		result = errors.Join(result, replaceAlias(snapshot.path, snapshot.target))
+		result = errors.Join(result, restoreHostSurfaceAlias(snapshots[index], nil))
 	}
 	return result
 }

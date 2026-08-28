@@ -38,6 +38,10 @@ type Process struct {
 	Info
 }
 
+// Start returns the platform-native display start identity for one live PID.
+// Callers needing destructive authority must use Read and verify StrongStart.
+func Start(pid int) string { return Read(pid).Start }
+
 // observableEnvironment keeps identity-sensitive callers from treating an
 // empty result as authoritative proof that a process has no managed tags.
 // Some hosts report an unreadable environment as success with zero entries;

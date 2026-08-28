@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/daemon"
 )
 
 var requirePeerDaemon = requireUserDaemon
@@ -27,11 +28,11 @@ func RunPeer(args []string) error {
 		return err
 	}
 	sessionID := args[1]
-	resolved, err := federator.LookupSessionPreferences(agentRuntimeDir(), sessionID)
+	resolved, err := daemon.LookupManagedAttachment(context.Background(), daemon.AttachmentLookupRequest{SessionID: sessionID})
 	if err != nil {
 		return fmt.Errorf("look up session %s: %w", sessionID, err)
 	}
-	launcherName, productArgs, err := genericResumeInvocation(resolved.Preference.Product, resolved.Preference.Kind, sessionID, args[2:])
+	launcherName, productArgs, err := genericResumeInvocation(resolved.Product, resolved.Kind, sessionID, args[2:])
 	if err != nil {
 		return err
 	}

@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 const (
@@ -105,6 +108,86 @@ func DetachManagedAttachment(ctx context.Context, attachmentID, reason string) e
 	return err
 }
 
+// LookupManagedAttachment returns one daemon-owned durable session projection
+// for exact generic resume or product-scoped name selection.
+func LookupManagedAttachment(ctx context.Context, request AttachmentLookupRequest) (ManagedAttachment, error) {
+	response, err := QueryLocalControl(ctx, LocalControlIdentity{Role: LocalControlLauncher}, "attachment.lookup", request)
+	if err != nil {
+		return ManagedAttachment{}, err
+	}
+	var result ManagedAttachment
+	if err := decodeStrictControlFrame(response.Result, &result); err != nil {
+		return ManagedAttachment{}, fmt.Errorf("decode managed attachment: %w", err)
+	}
+	if result.SessionID == "" || result.Product == "" || result.Kind == "" {
+		return ManagedAttachment{}, errors.New("daemon returned an incomplete managed attachment")
+	}
+	return result, nil
+}
+
+// ResolveManagedParentContext returns the current connector's daemon-attested
+// attachment identity. The caller cannot inspect or borrow another session.
+func ResolveManagedParentContext(ctx context.Context, identity LocalControlIdentity, sessionID string) (federation.ParentContext, error) {
+	response, err := QueryLocalControl(ctx, identity, "attachment.context", AttachmentLookupRequest{SessionID: sessionID})
+	if err != nil {
+		return federation.ParentContext{}, err
+	}
+	var result federation.ParentContext
+	if err := decodeStrictControlFrame(response.Result, &result); err != nil {
+		return federation.ParentContext{}, fmt.Errorf("decode managed parent context: %w", err)
+	}
+	if result.InstanceID == "" || result.SessionID == "" || result.Product == "" {
+		return federation.ParentContext{}, errors.New("daemon returned an incomplete parent context")
+	}
+	return result, nil
+}
+
+// RouteManagedAgentFrame submits one product-neutral delivery through the
+// daemon's attachment and delivery authorities.
+func RouteManagedAgentFrame(ctx context.Context, identity LocalControlIdentity, frame federation.AgentFrame) (federation.AgentFrameResult, error) {
+	result := federation.AgentFrameResult{Version: federation.AgentFrameVersion, MessageID: frame.MessageID}
+	switch frame.Type {
+	case "discover":
+		response, err := QueryLocalControl(ctx, identity, "peer.discover", struct{}{})
+		if err != nil {
+			return federation.AgentFrameResult{}, err
+		}
+		if err := decodeStrictControlFrame(response.Result, &result.Peers); err != nil {
+			return federation.AgentFrameResult{}, fmt.Errorf("decode peer discovery: %w", err)
+		}
+		result.Type = "discover.result"
+		return result, nil
+	case "send", "broadcast":
+		operation := "peer.send"
+		payload := DeliveryRequest{
+			MessageID: frame.MessageID, Targets: append([]string(nil), frame.Targets...), Group: frame.Group,
+			Content: frame.Content, Summary: frame.Summary, SentAt: frame.SentAt,
+		}
+		if frame.Type == "broadcast" {
+			operation = "peer.broadcast"
+		}
+		response, err := QueryLocalControl(ctx, identity, operation, payload)
+		if err != nil {
+			return federation.AgentFrameResult{}, err
+		}
+		var delivery DeliveryRecord
+		if err := decodeStrictControlFrame(response.Result, &delivery); err != nil {
+			return federation.AgentFrameResult{}, fmt.Errorf("decode peer delivery: %w", err)
+		}
+		result.Type = frame.Type + ".result"
+		for target, status := range delivery.DestinationResults {
+			if status == DeliveryDestinationDelivered {
+				status = "accepted"
+			}
+			result.Deliveries = append(result.Deliveries, federation.DeliveryResult{Target: target, Status: status})
+		}
+		sort.Slice(result.Deliveries, func(i, j int) bool { return result.Deliveries[i].Target < result.Deliveries[j].Target })
+		return result, nil
+	default:
+		return federation.AgentFrameResult{}, fmt.Errorf("unsupported agent frame type %q", frame.Type)
+	}
+}
+
 // InheritedConnectorIdentity reads only daemon-issued internal launch metadata.
 // An ordinary native session has none and therefore remains a bare connector.
 func InheritedConnectorIdentity(product string) LocalControlIdentity {
@@ -117,6 +200,16 @@ func InheritedConnectorIdentity(product string) LocalControlIdentity {
 		SessionID:    strings.TrimSpace(os.Getenv(InternalSessionIDEnvironment)),
 		Capability:   strings.TrimSpace(os.Getenv(InternalCapabilityEnvironment)),
 	}
+}
+
+// InheritedLauncherIdentity carries the same daemon-issued attachment
+// capability through a short-lived public lane CLI. The daemon still derives
+// authority from the exact attachment record; the CLI cannot supply a parent
+// attachment in its lane payload.
+func InheritedLauncherIdentity(product string) LocalControlIdentity {
+	identity := InheritedConnectorIdentity(product)
+	identity.Role = LocalControlLauncher
+	return identity
 }
 
 // ForwardMCP relays one MCP method to the current daemon generation and returns its complete decision.

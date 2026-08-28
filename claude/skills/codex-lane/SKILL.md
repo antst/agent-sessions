@@ -5,10 +5,10 @@ description: Orchestrate named, messageable local or remote Codex lanes — star
 
 # Orchestrate Codex lanes
 
-A lane is a named Codex thread on the local shared App Server. It registers with
-the Agent Sessions host agent and is visible only to peers sharing one of its groups. Claude's
-shared native registry contains ordinary/managed Claude rows and the single host-agent service,
-not synthetic Codex rows. `--persistent` is an explicit opt-in for a lane that must survive its owner.
+A lane is a named Codex thread owned by the Agent Sessions daemon's Codex adapter and is visible
+only to peers sharing one of its groups. Claude's shared native registry contains ordinary and
+managed Claude rows, not synthetic Codex rows. `--persistent` is an explicit opt-in for a lane that
+must survive its owner.
 
 This skill is a pass-through to one CLI. It owns no policy: model, reasoning effort, sandbox,
 approval, web access, config overlays, output schema, and worktree isolation are all decided by
@@ -16,34 +16,34 @@ whoever asked for the lane. See `references/policy.md`.
 
 ## Remote host
 
-When the user requests another host, use federation instead of SSH. Run `peer-federator status`,
-`peer-federator hosts`, and:
+When the user requests another host, use federation instead of SSH. Confirm the
+local daemon is hub-connected with `agent-sessions status --json`, then run:
 
 ```
-peer-federator lane --host HOST --product codex -- doctor --json
-peer-federator lane --host HOST --product codex -- list --all
+agent-sessions lane --host HOST --product codex -- doctor --json
+agent-sessions lane --host HOST --product codex -- list --all
 ```
 
-Require the local agent to be connected, the destination to advertise `codex-lane`, and remote
-doctor contract 2 to be healthy. A destination advertises this capability only after its operator
-explicitly enables remote lane execution. For the rest of this skill, replace `codex-peer-lane` with:
+Require the local daemon to be connected, the destination to advertise `codex-lane`, and remote
+doctor fields `ready: true`, `authority: "remote-daemon"`, the exact requested host, and product
+`codex`. For the rest of this skill, replace `codex-peer-lane` with:
 
 ```
-peer-federator lane --host HOST --product codex --
+agent-sessions lane --host HOST --product codex --
 ```
 
 Do not run the local lane-preflight for a remote destination. Federation carries this live
 Claude parent’s attested context and returns terminal notices through grouped routing; never pass
 `--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` for those
-commands. Remote lanes have no lifecycle owner and are excluded from `--mine`; use the remote plain `list`, names, or IDs.
+commands. Remote `--mine` matches this exact source-proxy parent and remote host.
 The JSONL contract, one-consumer cursor, terminal notice, deadlines, and auto-archive grace remain
 native Codex lane behavior.
 
 Pass `-C /absolute/remote/path` on remote `run` and `start` whenever the working directory matters;
 otherwise the native launcher inherits the destination agent service's cwd. `resume` retains the
 lane's established cwd; a replacement `-C` is ignored. Send remote briefings on stdin (maximum
-1 MiB). `--prompt-file` names an already-existing destination file; federation does not transfer
-it. Remote auto-archive delay is capped at 86,400 seconds.
+1 MiB); remote `--prompt-file` is unsupported because federation does not transfer files. Remote
+auto-archive delay is capped at 86,400 seconds.
 
 Every remote operation requires the hub. On disconnect, stop and report the failure; never fall back to SSH
 or silently execute locally. Notifications are push-delivered through federation, so
@@ -58,19 +58,16 @@ Run `/agent-sessions:doctor`, or directly:
 ```
 
 Because the script is inside this skill, the same path relative to the skill directory works when
-the skill is copied into `~/.claude/skills`. It reads the installed runtime marker and calls the
-native binary directly, so it never bootstraps or changes host services. It reports whether the
-runtime is reachable, the exact validated `invocation`, and
-whether the runtime satisfies **contract version 2** (`list`, `doctor --json`, and
-`contract_version` in `lane.ready`).
+the skill is copied into `~/.claude/skills`. It calls the canonical installed lane alias, which is a
+short-lived client of the fixed daemon control endpoint and never bootstraps or changes host
+services. It reports the exact validated `invocation`, daemon readiness, product, and authority.
 
-- Runtime missing: stop and print the user-facing commands from `references/install.md`. Never try
+- Launcher missing: stop and print the user-facing commands from `references/install.md`. Never try
   to install, build, or start anything yourself.
-- Runtime older than contract 2: say so and stop. Do not fall back to guessing the event shape.
-- Compatible contract but `runtime_ready: false`: report which service is unreachable and stop.
-  Host runtime recovery is not an orchestrator action.
+- `daemon_ready: false`: report the fixed host daemon or adapter as unavailable and stop. Host
+  recovery is not an orchestrator action.
 - Use the report's exact `invocation` in place of `codex-peer-lane` in every command below. It
-  names the same native binary that preflight validated; do not substitute a different launcher.
+  names the canonical alias that preflight validated; do not substitute a different launcher.
 
 ## The one constraint that shapes everything
 A `Bash` call times out at 120s by default and 600s at most. A long lane can never be collected by
@@ -171,7 +168,7 @@ not return the result; a turn started by an inbound message is collected by a
 later `wait`.
 
 For a remote lane, use its current host-qualified identity from Agent Sessions discovery. The
-destination-local lane name and session ID are valid behind `peer-federator lane` for lifecycle
+destination-local lane name and session ID are valid behind `agent-sessions lane` for lifecycle
 commands; terminal notices include that remote collection command.
 
 If Claude asks for confirmation with a current `name [ref]`, use that token only for the immediate

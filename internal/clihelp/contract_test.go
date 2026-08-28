@@ -15,9 +15,9 @@ func TestCanonicalModesAliasesAndBinaryRolesAreComplete(t *testing.T) {
 	wantKeys = append(wantKeys,
 		"host.daemon", "host.help", "host.status", "host.doctor",
 		"host.migrate.inspect", "host.migrate.status", "host.remove.inspect",
-		"host.purge.inspect", "host.purge.apply", "host.install", "host.remove.apply", "host.connector.install", "host.connector.remove",
+		"host.purge.inspect", "host.purge.apply", "host.install", "host.remove.apply", "host.connector.install", "host.connector.remove", "host.lane",
 		"hub.serve", "hub.status", "hub.doctor", "hub.remove.inspect",
-		"hub.purge.inspect", "hub.purge.apply",
+		"hub.purge.inspect", "hub.purge.apply", "hub.install", "hub.remove.apply",
 		"peer", "peer.codex", "peer.claude", "peer.grok", "peer.qwen",
 	)
 	for _, product := range []string{"codex", "claude", "grok", "qwen"} {
@@ -58,6 +58,24 @@ func TestCanonicalModesAliasesAndBinaryRolesAreComplete(t *testing.T) {
 	}
 }
 
+func TestHubLifecycleModesAreDescriptorBackedAndRoleScoped(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		key  string
+	}{
+		{args: []string{"lifecycle", "install", "--role", "hub"}, key: "hub.install"},
+		{args: []string{"lifecycle", "remove", "--role", "hub"}, key: "hub.remove.apply"},
+	} {
+		command, remainder, err := ResolveCommand("agent-sessions-hub", test.args)
+		if err != nil {
+			t.Fatalf("resolve %v: %v", test.args, err)
+		}
+		if command.Key != test.key || len(remainder) != 2 || remainder[0] != "--role" || remainder[1] != "hub" {
+			t.Fatalf("resolve %v = key %q remainder %q", test.args, command.Key, remainder)
+		}
+	}
+}
+
 func TestPeerLaneAndConnectorDescriptorsCoverTheExistingWorkflowSurface(t *testing.T) {
 	contract := Contract()
 	byKey := make(map[string]CommandDescriptor, len(contract.Commands))
@@ -66,6 +84,7 @@ func TestPeerLaneAndConnectorDescriptorsCoverTheExistingWorkflowSurface(t *testi
 	}
 	peerOptions := []string{"--name", "--group", "--inherit-groups", "--no-inherit-groups", "--yolo", "--no-yolo", "--help"}
 	laneOptions := []string{
+		"--host",
 		"--name", "--peer-name", "--cd", "--cwd", "--timeout", "--prompt-file",
 		"--notify", "--no-notify", "--persistent", "--no-auto-archive", "--auto-archive-after",
 		"--group", "--inherit-groups", "--no-inherit-groups", "--allow-duplicate-name",

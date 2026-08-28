@@ -33,12 +33,22 @@ func TestMCPServiceOwnsToolInventoryAndBareSessionDecision(t *testing.T) {
 			t.Errorf("tools/list omits %q: %s", name, listed.Result)
 		}
 	}
+	if !strings.Contains(string(listed.Result), `"input"`) || !strings.Contains(string(listed.Result), `"command"`) {
+		t.Fatalf("lane tool schema omitted daemon lane input/command contract: %s", listed.Result)
+	}
 	called := service.Forward(context.Background(), controlPrincipal{Role: controlRoleConnector, Product: "qwen"}, MCPForwardRequest{
 		Method: "tools/call", Params: json.RawMessage(`{"name":"list_peers","arguments":{}}`),
 	})
 	if called.Error != nil || !strings.Contains(string(called.Result), "inactive outside an attested peer session") ||
 		!strings.Contains(string(called.Result), `"isError":true`) {
 		t.Fatalf("bare tools/call = %#v", called)
+	}
+	bareLane := service.Forward(context.Background(), controlPrincipal{Role: controlRoleConnector, Product: "qwen"}, MCPForwardRequest{
+		Method: "tools/call", Params: json.RawMessage(`{"name":"lane","arguments":{"product":"claude","command":"list"}}`),
+	})
+	if bareLane.Error != nil || !strings.Contains(string(bareLane.Result), "inactive outside an attested peer session") ||
+		!strings.Contains(string(bareLane.Result), `"isError":true`) {
+		t.Fatalf("bare lane tools/call = %#v", bareLane)
 	}
 }
 
@@ -68,6 +78,14 @@ func TestMCPServiceRoutesDiscoveryAndDeliveryThroughDaemonAuthorities(t *testing
 	if sent.Error != nil || !strings.Contains(string(sent.Result), `"state":"delivered"`) ||
 		!strings.Contains(string(sent.Result), `"isError":false`) {
 		t.Fatalf("send_message = %#v", sent)
+	}
+
+	lane := runtime.mcpService().Forward(context.Background(), principal, MCPForwardRequest{
+		Method: "tools/call", Params: json.RawMessage(`{"name":"lane","arguments":{"product":"qwen","command":"list","input":""}}`),
+	})
+	if lane.Error != nil || !strings.Contains(string(lane.Result), `"type":"lane.list"`) ||
+		!strings.Contains(string(lane.Result), `"isError":false`) {
+		t.Fatalf("lane list = %#v", lane)
 	}
 }
 

@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -13,7 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/federation"
 )
 
 func TestNativeEnvelopeKeepsExtensionsOutOfAttestedAttributes(t *testing.T) {
@@ -145,11 +147,6 @@ func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *tes
 
 	register := func(sessionID string, pid int, socket string) {
 		t.Helper()
-		if _, err := federator.ResolveSessionPreferences(runtimeDir, federator.ResolvePreferencesRequest{
-			SessionID: sessionID, Product: "claude", Groups: []string{"project"}, GroupsSpecified: true,
-		}); err != nil {
-			t.Fatal(err)
-		}
 		procStart := readProcStart(pid)
 		row, _ := json.Marshal(map[string]any{
 			"pid": pid, "sessionId": sessionID, "cwd": root, "name": "claude-parent",
@@ -159,14 +156,13 @@ func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *tes
 		if err := os.WriteFile(filepath.Join(configDir, "sessions", strconv.Itoa(pid)+".json"), row, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		registration := federator.PeerRegistration{
-			Version: federator.GroupProtocolVersion, SessionID: sessionID, Product: "claude", Name: "claude-parent",
-			PermissionMode: "default", PID: pid, ProcStart: procStart, Socket: socket,
-		}
-		if _, err := federator.RegisterPeer(runtimeDir, registration); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = federator.UnregisterPeer(runtimeDir, registration) })
+		identity := bridgeDaemonFixture(t, runtimeDir).attachProcess(
+			t, "claude", sessionID, "claude-parent", socket, []string{"project"}, pid,
+		)
+		t.Setenv(daemonpkg.InternalAttachmentIDEnvironment, identity.attachmentID)
+		t.Setenv(daemonpkg.InternalCapabilityEnvironment, identity.capability)
+		t.Setenv(daemonpkg.InternalProductEnvironment, identity.product)
+		t.Setenv(daemonpkg.InternalSessionIDEnvironment, identity.sessionID)
 	}
 
 	ownSocket := filepath.Join(root, "own.sock")
@@ -192,11 +188,11 @@ func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *tes
 	}
 	const attachmentID = "00000000-0000-4000-8000-0000000000ca"
 	t.Setenv(peerSessionIDEnvironment, attachmentID)
-	resolvedParent := func(_ string, requested string) (federator.ParentContext, error) {
+	resolvedParent := func(_ string, requested string) (federation.ParentContext, error) {
 		if requested != attachmentID {
-			return federator.ParentContext{}, errors.New("unexpected attachment")
+			return federation.ParentContext{}, errors.New("unexpected attachment")
 		}
-		return federator.ParentContext{
+		return federation.ParentContext{
 			SessionID: ownID, Product: "claude", AdapterPID: os.Getpid(),
 			AdapterProcStart: readProcStart(os.Getpid()), AdapterSocket: ownSocket,
 			PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), PermissionMode: "default",
@@ -289,11 +285,34 @@ func TestNativeMCPRejectsFlatRegistryForUngroupedSession(t *testing.T) {
 		{name: "list_peers", args: map[string]any{}, want: "ungrouped session"},
 		{name: "send_message", args: map[string]any{"session_id": ownID, "target": "peer-a", "message": "NO_FLAT_SEND"}, want: "ungrouped session"},
 		{name: "broadcast", args: map[string]any{"session_id": ownID, "group": "project", "message": "NO_GLOBAL_BROADCAST"}, want: "grouped host agent"},
-		{name: "lane", args: map[string]any{"session_id": ownID, "product": "claude", "command": "doctor"}, want: "ungrouped session"},
 	} {
 		if _, err := callNativePeerTool(call.name, call.args, ownID); err == nil || !strings.Contains(err.Error(), call.want) {
 			t.Fatalf("%s flat-registry rejection = %v", call.name, err)
 		}
+	}
+	previousQuery := queryMCPLaneDaemon
+	t.Cleanup(func() { queryMCPLaneDaemon = previousQuery })
+	for _, name := range []string{
+		daemonpkg.InternalProductEnvironment, daemonpkg.InternalAttachmentIDEnvironment,
+		daemonpkg.InternalSessionIDEnvironment, daemonpkg.InternalCapabilityEnvironment,
+	} {
+		t.Setenv(name, "")
+	}
+	queryMCPLaneDaemon = func(_ context.Context, identity daemonpkg.LocalControlIdentity, operation string, _ any) (daemonpkg.LocalControlResult, error) {
+		if identity.Role != daemonpkg.LocalControlConnector || identity.AttachmentID != "" || operation != "lane.command" {
+			t.Fatalf("flat registry became daemon authority: %#v %q", identity, operation)
+		}
+		return daemonpkg.LocalControlResult{}, errors.New("agent_sessions is inactive outside an attested peer session")
+	}
+	lane, err := callNativePeerTool("lane", map[string]any{
+		"session_id": ownID, "product": "claude", "command": "doctor",
+	}, ownID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := lane["data"].(map[string]any)
+	if intValue(data["exit"]) == 0 || !strings.Contains(stringValue(data["error"]), "inactive outside an attested peer session") {
+		t.Fatalf("unattested flat-registry lane result = %#v", lane)
 	}
 }
 

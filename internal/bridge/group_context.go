@@ -1,15 +1,17 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/federator"
 )
 
 const (
@@ -33,7 +35,7 @@ type laneGroupOptions struct {
 	parentErr              error
 }
 
-func laneCollectionPointer(product, sessionID, parentHostID, parentAgentRuntimeDir string, groups []string) string {
+func laneCollectionPointer(product, sessionID, parentHostID, _ string, groups []string) string {
 	local := fmt.Sprintf("%s-peer-lane wait %s", product, sessionID)
 	if parentHostID == "" {
 		return local
@@ -43,25 +45,12 @@ func laneCollectionPointer(product, sessionID, parentHostID, parentAgentRuntimeD
 		if strings.HasPrefix(group, "session:") && strings.HasSuffix(group, suffix) {
 			hostID := strings.TrimSuffix(strings.TrimPrefix(group, "session:"), suffix)
 			if hostID != "" && hostID != parentHostID {
-				runtimeOption := ""
-				if parentAgentRuntimeDir != "" {
-					runtimeOption = " -runtime-dir " + shellQuoteLanePointerArgument(parentAgentRuntimeDir)
-				}
-				return fmt.Sprintf("peer-federator lane%s --host %s --product %s -- wait %s", runtimeOption, hostID, product, sessionID)
+				return fmt.Sprintf("agent-sessions lane --host %s --product %s -- wait %s", hostID, product, sessionID)
 			}
 			break
 		}
 	}
 	return local
-}
-
-func shellQuoteLanePointerArgument(value string) string {
-	if value != "" && strings.IndexFunc(value, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("_./:-", r)
-	}) == -1 {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func deliverGroupedLaneNotice(sourceSessionID, target, messageID, content string) error {
@@ -75,14 +64,14 @@ func deliverGroupedLaneNotice(sourceSessionID, target, messageID, content string
 	if messageID == "" {
 		messageID = sessionKey(sourceSessionID + "\x00" + content)
 	}
-	result, err := federator.RouteAgentFrame(laneAgentRuntimeDir(), sourceSessionID, federation.AgentFrame{
+	result, err := routeDaemonAgentFrame(laneAgentRuntimeDir(), sourceSessionID, federation.AgentFrame{
 		Version: federation.AgentFrameVersion, Type: "send", MessageID: messageID,
 		Targets: []string{target}, Content: content, SentAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil && strings.Contains(err.Error(), "source session is not a live registered peer") {
-		result, err = federator.RouteTerminalNotice(laneAgentRuntimeDir(), sourceSessionID, target, federation.AgentFrame{
+		result, err = routeDaemonAgentFrame(laneAgentRuntimeDir(), sourceSessionID, federation.AgentFrame{
 			Version: federation.AgentFrameVersion, Type: "send", MessageID: messageID,
-			Content: content, SentAt: time.Now().UTC().Format(time.RFC3339Nano),
+			Targets: []string{target}, Content: content, SentAt: time.Now().UTC().Format(time.RFC3339Nano),
 		})
 	}
 	if err != nil {
@@ -110,12 +99,11 @@ func laneAgentRuntimeDir() string {
 	if value := strings.TrimSpace(os.Getenv(agentRuntimeDirEnvironment)); value != "" {
 		return value
 	}
-	return federator.DefaultRuntimeDir()
+	return ""
 }
 
 func laneAgentConfigured() bool {
-	_, err := federator.ReadAgentStatus(laneAgentRuntimeDir())
-	return err == nil
+	return daemonControlAvailable()
 }
 
 // applyAgentParentContext replaces legacy registry inference when a peer
@@ -127,7 +115,7 @@ func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGrou
 		// grants a destination-local lifecycle owner. Clear any ancestry hint
 		// inherited from the host process before parsing the attested context.
 		*owner = laneOwner{}
-		var parent federator.ParentContext
+		var parent federation.ParentContext
 		if json.Unmarshal([]byte(body), &parent) != nil || parent.HostID == "" || parent.SessionID == "" {
 			groups.parentErr = errors.New("invalid remote lane parent context")
 			return groups
@@ -154,7 +142,7 @@ func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGrou
 	if sessionID == "" {
 		return groups
 	}
-	parent, err := federator.ResolveParentContext(laneAgentRuntimeDir(), sessionID)
+	parent, err := resolveDaemonParentContext(laneAgentRuntimeDir(), sessionID)
 	if err != nil {
 		groups.parentErr = err
 		return groups
@@ -179,7 +167,7 @@ func applyAgentParentContext(groups laneGroupOptions, owner *laneOwner) laneGrou
 	return groups
 }
 
-func corroborateAgentParentContext(parent federator.ParentContext, inferred laneOwner, startPID int) bool {
+func corroborateAgentParentContext(parent federation.ParentContext, inferred laneOwner, startPID int) bool {
 	if inferred.SessionID != "" {
 		return inferred.SessionID == parent.SessionID && inferred.PID == parent.AdapterPID &&
 			inferred.ProcStart == parent.AdapterProcStart && processHasAncestor(inferred.PID, parent.PID)
@@ -211,25 +199,43 @@ func resolveLaneGroupState(
 	if !laneAgentConfigured() {
 		return laneGroupState{}, false, errors.New("grouped lanes require a running host agent")
 	}
-	resolved, err := federator.ResolveSessionPreferences(laneAgentRuntimeDir(), federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: product, Kind: federation.SessionKindLane,
-		Groups: groups.groups, GroupsSpecified: groups.groupsSpecified,
-		ParentSessionID: groups.parentSessionID, ParentSpecified: groups.parentSessionID != "",
-		ParentHostID: groups.parentHostID, ParentGroups: groups.parentGroups,
-		InheritParentGroups: groups.inheritParentGroups, InheritGroupsSpecified: groups.inheritGroupsSpecified,
-		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,
-	})
-	if err != nil {
-		return laneGroupState{}, false, err
+	effective := append([]string(nil), groups.groups...)
+	if groups.inheritParentGroups {
+		effective = append(effective, groups.parentGroups...)
+	}
+	effective = normalizeDaemonLaneGroups(effective)
+	permission := alwaysApprove
+	if !alwaysApproveSpecified {
+		if managed, err := daemonpkg.LookupManagedAttachment(context.Background(), daemonpkg.AttachmentLookupRequest{Product: product, SessionID: sessionID}); err == nil {
+			permission = managed.PermissionMode == "bypassPermissions" || managed.PermissionMode == "dontAsk"
+		}
 	}
 	return laneGroupState{
-		Groups:                append([]string(nil), resolved.EffectiveGroups...),
-		ExplicitGroups:        append([]string(nil), resolved.Preference.ExplicitGroups...),
-		ParentSessionID:       resolved.Preference.ParentSession,
-		ParentHostID:          resolved.Preference.ParentHostID,
+		Groups:                effective,
+		ExplicitGroups:        append([]string(nil), groups.groups...),
+		ParentSessionID:       groups.parentSessionID,
+		ParentHostID:          groups.parentHostID,
 		ParentAgentRuntimeDir: groups.parentAgentRuntimeDir,
-		InheritParentGroups:   resolved.Preference.InheritParentGroups,
-	}, resolved.Preference.AlwaysApprove, nil
+		InheritParentGroups:   groups.inheritParentGroups,
+	}, permission, nil
+}
+
+func normalizeDaemonLaneGroups(groups []string) []string {
+	seen := make(map[string]struct{}, len(groups))
+	result := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		if _, exists := seen[group]; exists {
+			continue
+		}
+		seen[group] = struct{}{}
+		result = append(result, group)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func validateLaneGroupCommand(command string, groups laneGroupOptions) error {

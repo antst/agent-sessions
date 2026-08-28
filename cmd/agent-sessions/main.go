@@ -19,6 +19,8 @@ import (
 )
 
 var runConnectorRelay = bridge.RunDaemonMCPRelay
+var runHostMigrationInspect = daemon.RunHostMigrationInspectCLI
+var runHostMigrationStatus = daemon.RunHostMigrationStatusCLI
 
 func main() {
 	code := run(filepathBase(os.Args[0]), os.Args[1:], os.Stdout, os.Stderr)
@@ -28,6 +30,9 @@ func main() {
 }
 
 func run(argv0 string, args []string, stdout, stderr io.Writer) int {
+	if code, handled := runInternalHelper(args, stdout, stderr); handled {
+		return code
+	}
 	command, remainder, err := clihelp.ResolveCommand(argv0, args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%s: %v\n", filepathBase(argv0), err)
@@ -67,6 +72,29 @@ func run(argv0 string, args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
+// Release construction and the stateless Codex hook use the canonical host
+// image too, but these repository-internal helpers are intentionally absent
+// from operator help.
+func runInternalHelper(args []string, stdout, stderr io.Writer) (int, bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	switch args[0] {
+	case "hook":
+		if len(args) != 1 {
+			_, _ = fmt.Fprintln(stderr, "agent-sessions: hook does not accept positional arguments")
+			return 2, true
+		}
+		return bridge.RunHook(os.Stdin, stdout, stderr), true
+	case "release-package":
+		return bridge.RunReleasePackage(args[1:]), true
+	case "release-evidence":
+		return bridge.RunReleaseEvidence(args[1:]), true
+	default:
+		return 0, false
+	}
+}
+
 func runConnectorCommand(command clihelp.CommandDescriptor, remainder []string, argv0 string, stdout, stderr io.Writer) int {
 	if len(remainder) != 0 {
 		_, _ = fmt.Fprintf(stderr, "%s: connector relay does not accept positional arguments\n", filepathBase(argv0))
@@ -81,6 +109,20 @@ func runConnectorCommand(command clihelp.CommandDescriptor, remainder []string, 
 }
 
 func runAdministrativeCommand(command clihelp.CommandDescriptor, options clihelp.ParsedOptions, stdout, stderr io.Writer) int {
+	if command.Key == "host.migrate.inspect" {
+		result, err := runHostMigrationInspect(context.Background())
+		if err != nil {
+			return renderAdministrativeFailure(command, options.JSON, err, stdout, stderr)
+		}
+		return renderAdministrativeResult(command, options.JSON, result, stdout, stderr)
+	}
+	if command.Key == "host.migrate.status" {
+		result, err := runHostMigrationStatus(context.Background())
+		if err != nil {
+			return renderAdministrativeFailure(command, options.JSON, err, stdout, stderr)
+		}
+		return renderAdministrativeResult(command, options.JSON, result, stdout, stderr)
+	}
 	if command.Key == "host.purge.inspect" {
 		result, err := daemon.RunHostPurgeInspectCLI(context.Background(), options.Plan)
 		if err != nil {
@@ -97,7 +139,7 @@ func runAdministrativeCommand(command clihelp.CommandDescriptor, options clihelp
 	}
 	operation := map[string]string{
 		"host.status": "runtime.status", "host.doctor": "runtime.doctor",
-		"host.migrate.inspect": "migration.inspect", "host.remove.inspect": "remove.inspect",
+		"host.remove.inspect": "remove.inspect",
 	}[command.Key]
 	if operation == "" {
 		return renderAdministrativeFailure(command, options.JSON, &commandUnavailableError{command: command.Key}, stdout, stderr)
@@ -145,8 +187,17 @@ func renderAdministrativeFailure(command clihelp.CommandDescriptor, machine bool
 	if errors.As(err, &unavailable) {
 		code, class, errorCode, retryable, nextAction = 3, "unavailable", "daemon_unavailable", true, unavailable.NextAction
 	} else {
+		var administrative *daemon.AdministrativeError
+		if errors.As(err, &administrative) {
+			code = administrative.ExitCode()
+			class, _, _, _ = mapExitFailure(code)
+			errorCode, retryable, nextAction = administrative.Code, administrative.Retryable, administrative.NextAction
+			if nextAction == "" {
+				_, _, _, nextAction = mapExitFailure(code)
+			}
+		}
 		var coded interface{ ExitCode() int }
-		if errors.As(err, &coded) {
+		if administrative == nil && errors.As(err, &coded) {
 			code = coded.ExitCode()
 			class, errorCode, retryable, nextAction = mapExitFailure(code)
 		}
@@ -205,11 +256,14 @@ func dispatchHostCommand(command clihelp.CommandDescriptor, args []string) error
 		return daemon.RunForegroundWithOptions(ctx, daemon.ForegroundOptions{
 			AttachmentAdapters: map[string]daemon.AttachmentAdapter{"codex": codex, "claude": claude, "grok": grok, "qwen": qwen},
 			DeliveryAdapters:   map[string]daemon.DeliveryAdapter{"codex": codex, "claude": claude, "grok": grok, "qwen": qwen},
+			LaneAdapters:       map[string]daemon.LaneAdapter{"codex": codex, "claude": claude, "grok": grok, "qwen": qwen},
 		})
 	case "host.connector.install":
 		return daemon.RunConnectorLifecycleCLI(context.Background(), "install", args)
 	case "host.connector.remove":
 		return daemon.RunConnectorLifecycleCLI(context.Background(), "remove", args)
+	case "host.lane":
+		return daemon.RunRemoteLaneCLI(context.Background(), args, os.Stdin, os.Stdout)
 	case "host.install":
 		return daemon.RunHostInstallCLI(context.Background(), args)
 	case "host.remove.apply":

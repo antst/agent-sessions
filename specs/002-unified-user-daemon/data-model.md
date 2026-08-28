@@ -303,24 +303,31 @@ The one-time convergence from legacy Agent Sessions authorities and roots.
 - `state`
 - `candidates`: references to exact legacy candidates
 - `adopted_records`
-- `active_managed_blockers`, `cleanup_debt_ids`
+- `active_managed_blockers`, `live_legacy_authority_blockers`, `cleanup_debt_ids`
+- `maintenance_window_state`: `unverified`, `blocked`, or `legacy_absence_verified`
 - `authority_generation`
 - `revision`, `started_at`, `updated_at`, `completed_at`
 
 ### State transitions
 
 ```text
-inventorying -> blocked_active_peer_or_lane -> ready_to_stop_legacy
-            +-> blocked_unknown_identity  -> ready_to_stop_legacy
-ready_to_stop_legacy -> stopping_legacy -> adopting -> authority_committed
+inventorying -> blocked_active_peer_or_lane
+            +-> blocked_live_legacy_authority
+            +-> blocked_unknown_identity
+inventorying -> legacy_absence_verified -> adopting -> authority_committed
 authority_committed -> retiring_legacy_artifacts -> complete
                      |                              |
                      +-> debt                       +-> debt
+candidate failure -> rollback_installer_surface -> retry_required
 ```
 
 The transaction cannot enter `authority_committed` until the staged successor state is durable and
-every exact legacy authority is verified stopped. Each stop or artifact retirement is re-attested
-immediately before mutation; obsolete endpoints and files are retired after commit.
+every exact legacy authority is verified absent inside the operator-held maintenance window. A blocked
+retry re-enters `inventorying`; the installer does not transition a live legacy candidate by stopping,
+signalling, draining, handing off, or restarting it. Each artifact retirement is re-attested
+immediately before mutation; obsolete endpoints, jobs, and files are retired only after owner absence
+is proven. Rollback stops the unified candidate and restores only installer-changed
+release/state/connector/service surfaces; legacy authorities remain stopped.
 
 ## Legacy Runtime Candidate
 
@@ -329,22 +336,33 @@ One pre-unification process, endpoint, service, or state owner.
 ### Fields
 
 - `candidate_id`, `kind`, `source_path`
+- `source_revision`: content-stripped canonical metadata identity used only for adoption/provenance comparison
+- `artifact_revision`: exact full-file digest used only with descriptor-bound filesystem identity to
+  authorize disposal of a selected record artifact
 - `reported_version`, `runtime_identity`
 - `pid`, `proc_start`, `strong_start`
 - `endpoint_identity`, `service_identity`
 - `related_session_ids`
-- `classification`: `active_managed_blocker`, `quiescent_authority`, `stale`, `conflicting`, `unknown`,
-  or `retired`
+- `classification`: `active_managed_blocker`, `live_legacy_authority`, `stale`, `conflicting`, `unknown`,
+  or `retired_artifact`
 - `evidence_revision`, `last_observed_at`
 
 ### Rules
 
 - Scalar counts, process names, paths, or PID liveness alone cannot classify a candidate as live.
 - A proven absent exact owner makes a stale count non-blocking.
+- `source_revision` never authorizes unlink; disposable record retirement re-attests both
+  `artifact_revision` and the exact descriptor/inode/type/owner identity immediately before mutation.
+- Dormant or terminal metadata rows adopted as durable history—including idle, completed, interrupted,
+  retired, and archived rows—are retained as revision-bound provenance, not selected as disposable
+  authority artifacts, and never confer authority by their continued presence.
 - An active managed blocker names the exact peer/lane and remains untouched; migration performs no
   live handoff.
-- A quiescent authority may be stopped only through its exact supported lifecycle after the global
-  peer/lane quiescence gate passes.
+- Any corroborated responsive legacy authority is a blocker even when it reports zero shims or active
+  work. The operator stops it through the old supported lifecycle and prevents replacement launches;
+  the installer never stops, signals, drains, hands off, or restarts it.
+- An authority-owned endpoint, job, or file becomes a retirement candidate only after its exact live
+  owner is proven absent.
 - Unknown/conflicting identity fails closed and creates retryable debt.
 
 ## Release Lifecycle Transaction
@@ -377,6 +395,10 @@ One staged install, upgrade, removal, or purge transaction driven by the selecte
 - Only one committed authority transition is visible.
 - Rollback restores the exact prior role release selection and role-owned state without inspecting credential
   values or mutating the other role.
+- First-migration rollback is narrower than steady-state unified upgrade rollback: it stops the unified
+  candidate, restores only installer-changed release/state/connector/service surfaces, leaves all
+  legacy authorities stopped, and records guidance to retry unified installation or manually invoke
+  the old supported lifecycle.
 - Normal removal preserves role configuration and durable metadata; purge requires an exact
   revision-bound plan for that role.
 

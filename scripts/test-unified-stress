@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+AGENT_SESSIONS_UNIFIED_STRESS=1 \
+  go test ./internal/daemon -run '^TestUnifiedAttachmentStress$' -count=1 -v

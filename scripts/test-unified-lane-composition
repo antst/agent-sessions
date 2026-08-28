@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+log_file=$(mktemp "${TMPDIR:-/tmp}/agent-sessions-unified-lane-composition.XXXXXX.log")
+cleanup() {
+  rm -f -- "$log_file"
+}
+trap cleanup EXIT
+
+cd -- "$root_dir"
+if ! AGENT_SESSIONS_UNIFIED_LANE_COMPOSITION=1 go test ./internal/daemon -run '^TestUnifiedLaneComposition$' -count=1 -v >"$log_file" 2>&1; then
+  tail -n 160 "$log_file" >&2
+  exit 1
+fi
+cat "$log_file"
+if [[ $(grep -c -- '^--- PASS: TestUnifiedLaneComposition ' "$log_file") -ne 1 ]]; then
+  echo "unified lane composition did not execute and pass exactly once" >&2
+  exit 1
+fi
+if grep -Eq -- '^--- SKIP: TestUnifiedLaneComposition|warning: no tests to run' "$log_file"; then
+  echo "unified lane composition was skipped" >&2
+  exit 1
+fi
+python3 - "$log_file" <<'PY'
+import itertools
+import json
+import pathlib
+import sys
+
+products = ("codex", "claude", "grok", "qwen")
+expected = set(itertools.product(products, repeat=2))
+records = {}
+for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if '"type":"unified.lane_composition.cell"' not in line:
+        continue
+    start = line.find("{")
+    record = json.loads(line[start:])
+    if record.get("type") != "unified.lane_composition.cell":
+        continue
+    cell = (record["parent_product"], record["target_product"])
+    if cell in records:
+        raise SystemExit(f"duplicate unified lane composition evidence for {cell}")
+    records[cell] = record
+
+if set(records) != expected:
+    missing = sorted(expected - set(records))
+    extra = sorted(set(records) - expected)
+    raise SystemExit(f"unified lane composition evidence mismatch: missing={missing} extra={extra}")
+
+for cell in sorted(expected):
+    record = records[cell]
+    parent, target = cell
+    wanted_outcome = "continued" if target == "codex" else "evidence-approved-interrupted"
+    required = {
+        "parent_session_id": f"parent-{parent}-{products.index(parent)}",
+        "lane_session_id": f"lane-{parent}-to-{target}",
+        "turn_id": f"turn-{parent}-to-{target}",
+        "active_before_restart": True,
+        "worker_survived_restart": True,
+        "restart_outcome": wanted_outcome,
+        "collectable": True,
+        "resumable": target != "codex",
+        "native_evidence_required": target != "codex",
+        "collection_revision": 1,
+        "dispatch_count": 1,
+        "reconnect_count": 1,
+        "redispatch_count": 0,
+    }
+    for key, value in required.items():
+        if record.get(key) != value:
+            raise SystemExit(f"{parent}->{target} {key}={record.get(key)!r}, want {value!r}")
+    if not record.get("parent_attachment_id"):
+        raise SystemExit(f"{parent}->{target} omitted parent attachment identity")
+    if record.get("native_pid", 0) <= 0 or not record.get("native_proc_start"):
+        raise SystemExit(f"{parent}->{target} omitted strong native worker identity")
+    if record.get("accepted_generation", 0) >= record.get("recovered_generation", 0):
+        raise SystemExit(f"{parent}->{target} did not cross a daemon generation")
+    print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+PY
+printf '%s\n' '{"type":"unified.lane_composition.passed","cells":16,"active_turn_restart":true,"redispatch_count":0,"obsolete_processes":0}'

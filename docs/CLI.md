@@ -16,6 +16,7 @@ Generated from `internal/clihelp`; edit the descriptor, not this table.
 | `host.doctor` | `agent-sessions doctor` | public | true | diagnose host readiness without starting it |
 | `host.help` | `agent-sessions help [MODE]` | public | false | render the canonical command contract |
 | `host.install` | `agent-sessions lifecycle install --role host --source-root ROOT --prefix PREFIX --version VERSION` | service-internal | false | install or upgrade only the unified host role transaction |
+| `host.lane` | `agent-sessions lane --host HOST --product PRODUCT -- COMMAND [ARGS...]` | public | true | run one lane operation through the connected host daemon |
 | `host.migrate.inspect` | `agent-sessions migrate inspect` | public | true | inspect exact legacy candidates and blockers |
 | `host.migrate.status` | `agent-sessions migrate status` | public | true | show the migration journal and retry action |
 | `host.purge.apply` | `agent-sessions purge apply` | public | false | apply an exact host purge plan |
@@ -24,8 +25,10 @@ Generated from `internal/clihelp`; edit the descriptor, not this table.
 | `host.remove.inspect` | `agent-sessions remove inspect` | public | true | inspect host removal blockers and targets |
 | `host.status` | `agent-sessions status` | public | true | show metadata-only host status |
 | `hub.doctor` | `agent-sessions-hub doctor` | hub-only | true | diagnose hub readiness without starting it |
+| `hub.install` | `agent-sessions-hub lifecycle install --role hub --source-root ROOT --prefix PREFIX --version VERSION` | service-internal | false | install or upgrade only the central hub role transaction |
 | `hub.purge.apply` | `agent-sessions-hub purge apply` | hub-only | false | apply an exact hub purge plan |
 | `hub.purge.inspect` | `agent-sessions-hub purge inspect` | hub-only | false | create or inspect a revision-bound hub purge plan |
+| `hub.remove.apply` | `agent-sessions-hub lifecycle remove --role hub --prefix PREFIX` | service-internal | false | remove only the central hub role transaction |
 | `hub.remove.inspect` | `agent-sessions-hub remove inspect` | hub-only | true | inspect hub removal blockers and targets |
 | `hub.serve` | `agent-sessions-hub` | hub-only | false | run the central federation hub |
 | `hub.status` | `agent-sessions-hub status` | hub-only | true | show metadata-only hub status |

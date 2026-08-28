@@ -7,20 +7,13 @@ import (
 	"strings"
 )
 
-type cleanupStats struct {
-	RegistryFiles int
-	StateFiles    int
-	SocketFiles   int
-}
-
 // cleanupStaleBridgeArtifacts deliberately keeps all ownership checks together
 // so removal cannot drift away from its process-identity validation.
 //
 //nolint:gocyclo
-func cleanupStaleBridgeArtifacts(paths nativePaths) cleanupStats {
+func cleanupStaleBridgeArtifacts(paths nativePaths) {
 	runtimeRoot := filepath.Dir(paths.supervisorSock)
 	registryRoot := filepath.Join(paths.claudeRoot, "sessions")
-	stats := cleanupStats{}
 	sessionsRoot := filepath.Join(paths.dataRoot, "sessions")
 	if entries, err := os.ReadDir(sessionsRoot); err == nil {
 		for _, entry := range entries {
@@ -28,14 +21,7 @@ func cleanupStaleBridgeArtifacts(paths nativePaths) cleanupStats {
 				continue
 			}
 			statePath := filepath.Join(sessionsRoot, entry.Name(), "state.json")
-			removedState, removedRegistry, removedSockets := cleanupStaleStateFile(statePath, runtimeRoot, registryRoot)
-			if removedState {
-				stats.StateFiles++
-			}
-			if removedRegistry {
-				stats.RegistryFiles++
-			}
-			stats.SocketFiles += removedSockets
+			cleanupStaleStateFile(statePath, runtimeRoot, registryRoot)
 		}
 	}
 	if entries, err := os.ReadDir(registryRoot); err == nil {
@@ -54,9 +40,6 @@ func cleanupStaleBridgeArtifacts(paths nativePaths) cleanupStats {
 				return ownedBridgeRegistry(current, pid, runtimeRoot) &&
 					cleanupProcessIdentityStatus(pid, stringValue(current["procStart"])).Status == processIdentityStale
 			})
-			if _, err := os.Lstat(file); os.IsNotExist(err) {
-				stats.RegistryFiles++
-			}
 		}
 	}
 	if entries, err := os.ReadDir(runtimeRoot); err == nil {
@@ -75,53 +58,39 @@ func cleanupStaleBridgeArtifacts(paths nativePaths) cleanupStats {
 					observeProcessIdentity(pid, "").Status != processIdentityStale {
 					continue
 				}
-				if os.Remove(stable) == nil {
-					stats.SocketFiles++
-				}
+				_ = os.Remove(stable)
 				continue
 			}
 			pid, ok := backendSocketPID(entry.Name())
 			if !ok || observeProcessIdentity(pid, "").Status != processIdentityStale {
 				continue
 			}
-			if os.Remove(filepath.Join(runtimeRoot, entry.Name())) == nil {
-				stats.SocketFiles++
-			}
+			_ = os.Remove(filepath.Join(runtimeRoot, entry.Name()))
 		}
 	}
-	return stats
 }
 
-func cleanupStaleStateFile(statePath, runtimeRoot, registryRoot string) (bool, bool, int) {
+func cleanupStaleStateFile(statePath, runtimeRoot, registryRoot string) {
 	state := readJSONMap(statePath)
 	pid := intValue(state["pid"])
 	if !ownedBridgeState(state, statePath, runtimeRoot, registryRoot) ||
 		cleanupProcessIdentityStatus(pid, stringValue(state["procStart"])).Status != processIdentityStale {
-		return false, false, 0
+		return
 	}
-	removedSockets := 0
 	backend := stringValue(state["backendSocketPath"])
 	stable := stringValue(state["socketPath"])
-	if removeOwnedStableAlias(stable, backend, runtimeRoot) {
-		removedSockets++
-	}
-	if os.Remove(backend) == nil {
-		removedSockets++
-	}
+	removeOwnedStableAlias(stable, backend, runtimeRoot)
+	_ = os.Remove(backend)
 	registry := stringValue(state["registryFile"])
-	_, registryBefore := os.Lstat(registry)
 	removeJSONIf(registry, func(row map[string]any) bool {
 		return ownedBridgeRegistry(row, pid, runtimeRoot) &&
 			stringValue(row["sessionId"]) == stringValue(state["sessionId"]) &&
 			samePath(stringValue(row["messagingSocketPath"]), stable)
 	})
-	_, registryErr := os.Lstat(registry)
 	removeJSONIf(statePath, func(current map[string]any) bool {
 		return ownedBridgeState(current, statePath, runtimeRoot, registryRoot) &&
 			intValue(current["pid"]) == pid && stringValue(current["sessionId"]) == stringValue(state["sessionId"])
 	})
-	_, err := os.Lstat(statePath)
-	return os.IsNotExist(err), registryBefore == nil && os.IsNotExist(registryErr), removedSockets
 }
 
 func ownedBridgeState(state map[string]any, statePath, runtimeRoot, registryRoot string) bool {

@@ -43,6 +43,18 @@ type qwenDaemonClient interface {
 	WriteInput(context.Context, string, federation.AgentFrame) error
 }
 
+// qwenDaemonLaneClient is the product-native ACP boundary retained inside the
+// user daemon. It deliberately contains no manager, listener, or control-socket
+// operation; the shared lane engine owns durable lifecycle decisions.
+type qwenDaemonLaneClient interface { //nolint:dupl // Product-native method names keep the ACP boundary explicit.
+	StartQwenTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (map[string]any, error)
+	ReconnectQwenTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (map[string]any, error)
+	InterruptQwenTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) error
+	CollectQwenTurn(context.Context, daemonpkg.LaneRecord, daemonpkg.LaneTurnRecord) (map[string]any, error)
+	ArchiveQwenLane(context.Context, daemonpkg.LaneRecord) error
+	CleanupQwenLane(context.Context, daemonpkg.LaneRecord) error
+}
+
 // PrepareInteractive returns the direct Qwen vendor handoff for one validated launch intent.
 func (adapter *qwenDaemonAdapter) PrepareInteractive(ctx context.Context, request daemonpkg.AttachmentPrepareRequest) (daemonpkg.NativeLaunchPlan, error) {
 	if adapter == nil || adapter.client == nil {
@@ -62,7 +74,8 @@ func NewQwenDaemonAdapter() *qwenDaemonAdapter {
 	return newQwenDaemonAdapter(newQwenNativeCoordinator())
 }
 
-// Close releases daemon descriptors without stopping vendor-owned Qwen processes.
+// Close releases interactive descriptors and stops daemon-owned Qwen ACP workers.
+// It never stops a vendor-owned interactive Qwen process.
 func (adapter *qwenDaemonAdapter) Close() {
 	if coordinator, ok := adapter.client.(*qwenNativeCoordinator); ok {
 		coordinator.close()

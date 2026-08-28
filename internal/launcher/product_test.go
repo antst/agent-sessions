@@ -3,22 +3,23 @@ package launcher
 import (
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 func TestLauncherProductProjectionCoversEveryDescriptor(t *testing.T) {
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.ProductDescriptors() {
 		product, ok := launcherProductByID(descriptor.ID)
 		if !ok {
 			t.Fatalf("launcher projection is missing %s", descriptor.ID)
 		}
-		for _, kind := range []string{federator.SessionKindInteractive, federator.SessionKindLane} {
+		for _, kind := range []string{federation.SessionKindInteractive, federation.SessionKindLane} {
 			executable, arguments, resumeOK := product.resume(kind, "session-a")
 			if !resumeOK || len(arguments) != 2 {
 				t.Fatalf("%s %s resume projection = %q %v, %v", descriptor.ID, kind, executable, arguments, resumeOK)
 			}
 			wantExecutable := descriptor.PeerAlias
-			if kind == federator.SessionKindLane {
+			if kind == federation.SessionKindLane {
 				wantExecutable = descriptor.LaneAlias
 			}
 			if executable != wantExecutable {

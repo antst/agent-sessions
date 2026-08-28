@@ -1,114 +1,147 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+	script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+	link_target="$(readlink -- "$script_path")"
+	if [[ "$link_target" == /* ]]; then script_path="$link_target"; else script_path="$script_dir/$link_target"; fi
+done
+project_root="$(cd -- "$(dirname -- "$script_path")/../.." && pwd -P)"
 
-bash -n "$project_root/scripts/federation/test"
-python3 - "$project_root" <<'PY'
+bash -n "$script_path"
+python3 - "$project_root/scripts/federation/integration_test.py" <<'PY'
 import pathlib
 import sys
-import xml.etree.ElementTree as ET
 
-root = pathlib.Path(sys.argv[1])
-for path in (root / "scripts" / "federation").glob("*.py"):
-    compile(path.read_bytes(), str(path), "exec")
-for path in (root / "deploy" / "peer-federator" / "launchd").glob("*.plist.example"):
-    ET.parse(path)
+path = pathlib.Path(sys.argv[1])
+compile(path.read_bytes(), str(path), "exec")
 PY
 
 cd -- "$project_root"
-if [[ "${SKIP_GO_TEST:-0}" != "1" ]]; then
-  if [[ "${RACE:-0}" == "1" ]]; then
-    go test -race ./internal/federator ./cmd/peer-federator
-  else
-    go test ./internal/federator ./cmd/peer-federator
-  fi
+if [[ "${SKIP_GO_TEST:-0}" != 1 ]]; then
+	mode=normal
+	go_test_options=(-count=1 -json)
+	if [[ "${RACE:-0}" == 1 ]]; then
+		mode=race
+		go_test_options=(-race "${go_test_options[@]}")
+	fi
+
+	run_go_cell() {
+		local cell="$1"
+		local package="$2"
+		local expression="$3"
+		local expected_csv="$4"
+		local log_file
+		log_file="$(mktemp "${TMPDIR:-/tmp}/agent-sessions-federation-cell.XXXXXX")"
+		if ! go test "${go_test_options[@]}" "$package" -run "^(${expression})$" >"$log_file"; then
+			cat -- "$log_file" >&2
+			rm -f -- "$log_file"
+			printf 'federation acceptance cell %s failed in %s mode\n' "$cell" "$mode" >&2
+			exit 1
+		fi
+		python3 - "$cell" "$mode" "$package" "$expected_csv" "$log_file" <<'PY'
+import json
+import pathlib
+import platform
+import sys
+
+cell, mode, package, expected_csv, log_name = sys.argv[1:]
+expected = set(expected_csv.split(","))
+ran: set[str] = set()
+passed: set[str] = set()
+skipped: set[str] = set()
+for line in pathlib.Path(log_name).read_text().splitlines():
+    event = json.loads(line)
+    test = event.get("Test")
+    action = event.get("Action")
+    if action == "skip" and isinstance(test, str) and any(
+        test == root or test.startswith(root + "/") for root in expected
+    ):
+        skipped.add(test)
+    if test not in expected:
+        continue
+    if action == "run":
+        ran.add(test)
+    elif action == "pass":
+        passed.add(test)
+if ran != expected or passed != expected or skipped:
+    raise SystemExit(
+        f"cell {cell} did not run and pass its exact test inventory: "
+        f"expected={sorted(expected)} ran={sorted(ran)} passed={sorted(passed)} skipped={sorted(skipped)}"
+    )
+print(json.dumps({
+    "type": "unified.federation.cell.passed",
+    "cell": cell,
+    "mode": mode,
+    "platform": platform.system().lower(),
+    "package": package,
+    "tests": sorted(expected),
+}, separators=(",", ":")))
+PY
+		rm -f -- "$log_file"
+	}
+
+	run_go_cell hub-cli-runtime ./cmd/agent-sessions-hub \
+		'TestHubServePublishesIndependentStatusAndSupportsProtocolProbe|TestHubStatusUnavailableDoesNotCreateStateOrStartService|TestAcceptanceResourcePreflightCoversExactInstalledFailureInventory' \
+		'TestHubServePublishesIndependentStatusAndSupportsProtocolProbe,TestHubStatusUnavailableDoesNotCreateStateOrStartService,TestAcceptanceResourcePreflightCoversExactInstalledFailureInventory'
+	run_go_cell hub-role-lifecycle ./internal/federation \
+		'TestHubRoleDescriptorUsesDistinctSelectedBinaryAndSharedServiceEngine|TestCoLocatedHostAndHubUseIndependentReleaseSelectionUpgradeRollbackAndRemoval|TestHubInstalledListenerIsStableInjectionSafeAndMatchesBoundWildcard' \
+		'TestHubRoleDescriptorUsesDistinctSelectedBinaryAndSharedServiceEngine,TestCoLocatedHostAndHubUseIndependentReleaseSelectionUpgradeRollbackAndRemoval,TestHubInstalledListenerIsStableInjectionSafeAndMatchesBoundWildcard'
+	run_go_cell hub-release-preservation ./internal/releaseinstall \
+		'TestRoleLayoutsAreDisjointAndReleaseIdentityIncludesContent|TestInstallStagesImmutableReleaseCommitsPointerAndRequiresReadiness|TestReadinessFailureRestoresExactPriorSelectionAndHookState|TestRoleNeutralRemovalPreservesStateAndPurgeIsRevisionBound' \
+		'TestRoleLayoutsAreDisjointAndReleaseIdentityIncludesContent,TestInstallStagesImmutableReleaseCommitsPointerAndRequiresReadiness,TestReadinessFailureRestoresExactPriorSelectionAndHookState,TestRoleNeutralRemovalPreservesStateAndPurgeIsRevisionBound'
+	run_go_cell hub-observability ./internal/federation \
+		'TestHubObservabilityManifestIsClosedCompleteAndIndependent|TestEveryHubCoreObservabilitySinkUsesMetadataOnlyContentCanary|TestHubServiceManagerCapturedOutputUsesTheSameContentPolicy|TestHubStatusAndDoctorHaveStableSharedEnvelopeWithoutHostAuthority|TestHubDoctorRetainsCauseSpecificBoundedRemediation|TestHubProductionListenerAppliesResourcePreflightAndEveryMetadataOnlySink' \
+		'TestHubObservabilityManifestIsClosedCompleteAndIndependent,TestEveryHubCoreObservabilitySinkUsesMetadataOnlyContentCanary,TestHubServiceManagerCapturedOutputUsesTheSameContentPolicy,TestHubStatusAndDoctorHaveStableSharedEnvelopeWithoutHostAuthority,TestHubDoctorRetainsCauseSpecificBoundedRemediation,TestHubProductionListenerAppliesResourcePreflightAndEveryMetadataOnlySink'
+	run_go_cell hub-resource-preflight ./internal/federation \
+		'TestHubResourceFailuresRejectBeforeDurableRegistrationOrWorkAcceptance|TestHubAdmissionReportsSuccessOnlyAfterDurableCommit|TestHubAdmissionHasNoAgentSessionsQuota' \
+		'TestHubResourceFailuresRejectBeforeDurableRegistrationOrWorkAcceptance,TestHubAdmissionReportsSuccessOnlyAfterDurableCommit,TestHubAdmissionHasNoAgentSessionsQuota'
+	run_go_cell three-host-peer-routing ./internal/federation \
+		'TestCapabilityPublicationAndHubRegistryAreProtocolAndGenerationBound|TestRouterUsesGlobalGroupsHostSuffixesAndIdempotentMessageAdmission|TestHubDeliveryAdmissionAndOutcomeOwnershipFailClosed' \
+		'TestCapabilityPublicationAndHubRegistryAreProtocolAndGenerationBound,TestRouterUsesGlobalGroupsHostSuffixesAndIdempotentMessageAdmission,TestHubDeliveryAdmissionAndOutcomeOwnershipFailClosed'
+	run_go_cell all-product-remote-lanes ./internal/federation \
+		'TestRemoteLaneDispatchCallsDestinationAuthorityDirectlyForEveryProduct|TestRemoteLaneDispatchPropagatesExactAttestedParentGroupsAndPermission|TestRemoteLaneDispatchIsIdempotentWithoutDuplicateDestinationWork|TestRemoteLaneResultPublishesOneContentFreeParentNotice|TestRemoteLaneDispatchHasNoLaneWatchProcessBoundary' \
+		'TestRemoteLaneDispatchCallsDestinationAuthorityDirectlyForEveryProduct,TestRemoteLaneDispatchPropagatesExactAttestedParentGroupsAndPermission,TestRemoteLaneDispatchIsIdempotentWithoutDuplicateDestinationWork,TestRemoteLaneResultPublishesOneContentFreeParentNotice,TestRemoteLaneDispatchHasNoLaneWatchProcessBoundary'
+	run_go_cell host-restart-reconnect ./internal/daemon \
+		'TestEmbeddedFederationAdvertisesStableHostIdentityAndOnlyReadyProducts|TestEmbeddedFederationRecoversConnectionGenerationAndReadvertisesCurrentReadyProducts|TestEmbeddedFederationSuccessorKeepsHostIdentityAndPublishesNewRuntimeGeneration|TestFederationHubOutageIsRetryableBeforeAcceptanceWithoutLocalFallback' \
+		'TestEmbeddedFederationAdvertisesStableHostIdentityAndOnlyReadyProducts,TestEmbeddedFederationRecoversConnectionGenerationAndReadvertisesCurrentReadyProducts,TestEmbeddedFederationSuccessorKeepsHostIdentityAndPublishesNewRuntimeGeneration,TestFederationHubOutageIsRetryableBeforeAcceptanceWithoutLocalFallback'
+	run_go_cell protocol-interoperability ./internal/federation \
+		'TestArbitrarySHABuildsInteroperateByProtocolVersionOnly|TestCapabilitiesGateOperationsWithoutCouplingReleases|TestProtocolMismatchNamesRequiredVersionBeforeRegistration|TestHostAgentHandshakesBeforePublishingSnapshot|TestHostAgentReconnectsWithTheSameAdvertisement|TestHostAgentRejectsMismatchedHelloBeforeSnapshot' \
+		'TestArbitrarySHABuildsInteroperateByProtocolVersionOnly,TestCapabilitiesGateOperationsWithoutCouplingReleases,TestProtocolMismatchNamesRequiredVersionBeforeRegistration,TestHostAgentHandshakesBeforePublishingSnapshot,TestHostAgentReconnectsWithTheSameAdvertisement,TestHostAgentRejectsMismatchedHelloBeforeSnapshot'
+
+	case "$(uname -s)" in
+		Linux)
+			run_go_cell hub-service-capture ./internal/servicecontrol \
+				'TestLinuxServiceLifecycleUsesExactRoleDescriptor|TestEveryLinuxServiceCaptureDelegatesToSharedContentCanary' \
+				'TestLinuxServiceLifecycleUsesExactRoleDescriptor,TestEveryLinuxServiceCaptureDelegatesToSharedContentCanary'
+			;;
+		Darwin)
+			run_go_cell hub-service-capture ./internal/servicecontrol \
+				'TestDarwinRoleDescriptorsRequireLoginStartKeepAliveAndSeparateOwnership|TestDarwinLaunchdCapturedOutputExcludesContentCanaries|TestDarwinSleepWakeObservesOneExistingOrReplacementJobWithoutLifecycleMutation' \
+				'TestDarwinRoleDescriptorsRequireLoginStartKeepAliveAndSeparateOwnership,TestDarwinLaunchdCapturedOutputExcludesContentCanaries,TestDarwinSleepWakeObservesOneExistingOrReplacementJobWithoutLifecycleMutation'
+			;;
+	esac
 fi
 
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/peer-federator-test.XXXXXX")"
-cleanup() {
-  rm -rf -- "$temporary_root"
-}
-trap cleanup EXIT
+make -s build
+platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+case "$platform" in
+	linux-x86_64) platform=linux-x64 ;;
+	linux-aarch64) platform=linux-arm64 ;;
+	darwin-x86_64) platform=darwin-x64 ;;
+	darwin-arm64) ;;
+	*) printf 'unsupported federation integration platform %s\n' "$platform" >&2; exit 2 ;;
+esac
 
-install_stage="$temporary_root/install-stage"
-systemd_root="$install_stage/config/systemd/user"
-config_root="$install_stage/config/peer-federator"
-mkdir -p "$config_root"
-printf '%s\n' 'keep-active-config' >"$config_root/agent.env"
-make -s install-systemd-user-files \
-  DESTDIR="$install_stage" \
-  USER_SYSTEMD_DIR=/config/systemd/user \
-  PEER_FEDERATOR_CONFIG_DIR=/config/peer-federator
-if [[ ! -f "$systemd_root/peer-federator-agent.service" ]] ||
-   [[ ! -f "$systemd_root/peer-federator-hub.service" ]] ||
-   [[ ! -f "$config_root/agent.env.example" ]] ||
-   [[ ! -f "$config_root/hub.env.example" ]] ||
-   [[ "$(<"$config_root/agent.env")" != 'keep-active-config' ]]; then
-  printf 'user systemd installation did not install templates safely\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'PEER_FEDERATOR_ENABLE_REMOTE_LANES=false' "$config_root/agent.env.example"; then
-  printf 'agent environment template does not keep remote execution opt-in\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'PEER_FEDERATOR_QWEN_LANE=' "$config_root/agent.env.example"; then
-  printf 'agent environment template omits the Qwen lane launcher\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'QWEN_PEER_QWEN_BIN=' "$config_root/agent.env.example"; then
-  printf 'agent environment template omits the independent native Qwen executable\n' >&2
-  exit 1
+python3 "$project_root/scripts/federation/integration_test.py" \
+	"$project_root/bin/$platform/agent-sessions" \
+	"$project_root/bin/$platform/agent-sessions-hub"
+
+if [[ "$(uname -s)" == Linux && "${RACE:-0}" != 1 && "${SKIP_INSTALLED_HUB:-0}" != 1 ]]; then
+	"$project_root/scripts/federation/test-installed-hub"
 fi
 
-launchd_root="$install_stage/Library/LaunchAgents"
-mkdir -p "$launchd_root"
-printf '%s\n' 'keep-active-plist' >"$launchd_root/net.antst.peer-federator.agent.plist"
-make -s install-launchd-user-files \
-  DESTDIR="$install_stage" \
-  USER_LAUNCHD_DIR=/Library/LaunchAgents
-if [[ ! -f "$launchd_root/net.antst.peer-federator.agent.plist.example" ]] ||
-   [[ ! -f "$launchd_root/net.antst.peer-federator.hub.plist.example" ]] ||
-   [[ "$(<"$launchd_root/net.antst.peer-federator.agent.plist")" != 'keep-active-plist' ]]; then
-  printf 'user launchd installation did not install templates safely\n' >&2
-  exit 1
+if [[ "${RACE:-0}" != 1 && "${SKIP_BINARY_PAIRS:-0}" != 1 ]]; then
+	"$project_root/scripts/federation/test-binary-pairs"
 fi
-
-build_args=(-trimpath -o "$temporary_root/peer-federator")
-if [[ "${RACE:-0}" == "1" ]]; then
-  build_args=(-race "${build_args[@]}")
-else
-  build_args=(-ldflags='-s -w -X main.version=test' "${build_args[@]}")
-fi
-go build "${build_args[@]}" ./cmd/peer-federator
-help_text="$("$temporary_root/peer-federator" help)"
-for command in hosts lane; do
-  if ! grep -Fq "peer-federator $command" <<<"$help_text"; then
-    printf 'CLI help is missing %s\n' "$command" >&2
-    exit 1
-  fi
-done
-if ! grep -Fq -- '--enable-remote-lanes' <<<"$help_text" ||
-   ! grep -Fq 'disabled by default' <<<"$help_text"; then
-  printf 'top-level CLI help is missing the remote-lane opt-in\n' >&2
-  exit 1
-fi
-agent_help="$({ "$temporary_root/peer-federator" agent --help || true; } 2>&1)"
-if ! grep -Fq -- '-enable-remote-lanes' <<<"$agent_help"; then
-  printf 'agent CLI help is missing the explicit remote-execution opt-in\n' >&2
-  exit 1
-fi
-if ! grep -Fq -- '-qwen-lane' <<<"$agent_help"; then
-  printf 'agent CLI help is missing the Qwen lane launcher\n' >&2
-  exit 1
-fi
-if ! grep -Fq -- '-qwen-bin' <<<"$agent_help"; then
-  printf 'agent CLI help is missing the independent native Qwen executable\n' >&2
-  exit 1
-fi
-if ! grep -Fq '# Federation protocol version 3' docs/federation/PROTOCOL.md ||
-   ! grep -Fq 'Local grouped routing continues without a hub' docs/federation/PROTOCOL.md; then
-  printf 'protocol documentation does not pin grouped protocol-3 behavior\n' >&2
-  exit 1
-fi
-python3 scripts/federation/integration_test.py "$temporary_root/peer-federator"

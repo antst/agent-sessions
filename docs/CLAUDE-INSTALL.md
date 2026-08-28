@@ -67,28 +67,24 @@ Or directly, from the checkout:
 ./claude/skills/codex-lane/scripts/lane-preflight
 ```
 
-The preflight is read-only: it starts, installs, and changes nothing. It invokes the native binary
-recorded in `native-runtime-path` directly rather than the bootstrapping launcher. It prints one
-JSON object and exits non-zero unless the runtime satisfies **adapter contract 2**. Interpretation:
+The preflight is read-only: it starts, installs, and changes nothing. It invokes the canonical
+`codex-peer-lane` alias as a short-lived client of the fixed host daemon control endpoint. It prints
+one JSON object and exits non-zero unless the daemon and Codex adapter are ready. Interpretation:
 
 | Field | Meaning |
 |---|---|
 | `summary` | `"ready"`, or the reason orchestration should not proceed |
-| `runtime_found` | Whether a lane runtime could be resolved at all |
-| `launcher_found` | Whether `codex-peer-lane` is on `PATH`; preflight never executes it |
-| `invocation` | Exact `<validated-native-runtime> lane` command to use |
-| `contract_version` / `contract_ok` | Whether the CLI implements contract 2 |
-| `runtime_ready` / `doctor_exit` | Whether App Server and the peer supervisor are reachable |
-| `list_supported`, `doctor_supported` | The contract-1 subcommands, probed individually |
+| `launcher_found` | Whether the canonical `codex-peer-lane` alias is on `PATH` |
+| `invocation` | Exact validated alias to use |
+| `daemon_ready` / `doctor_exit` | Whether the fixed host daemon and Codex adapter are ready |
+| `authority` / `product` | Must be `"daemon"` / `"codex"` |
 | `peer_discovery_cli` | Only whether the `claude` executable is on `PATH` |
 
-## How the runtime is located
+## How the host client is located
 
-Preflight reads the first line of
-`${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-code-peer}/native-runtime-path`
-and invokes that exact binary as `<path> lane …`. `launcher_found` separately reports whether
-`codex-peer-lane` is on `PATH`, but preflight never substitutes it: a PATH launcher could belong to
-a different installation root and select another runtime while bootstrapping.
+Preflight resolves `codex-peer-lane` from `PATH`. The installed alias points to the selected
+`agent-sessions` host image; the command itself connects only to the fixed per-user daemon endpoint
+and never discovers a second runtime or starts a service.
 
 ## Permissions
 
@@ -112,15 +108,13 @@ call regardless of permissions.
 
 ## Hosts and portability
 
-The plugin is text only, so it carries no platform requirements of its own; the runtime targets
-Linux and macOS on x86-64 and arm64.
+The plugin is text only, so it carries no platform requirements of its own; the host image targets
+Linux and macOS on x86-64 and arm64. Remote lane execution uses the configured federation hub and
+the canonical `agent-sessions lane --host ...` command. It never uses SSH as a transport fallback.
 
-A colleague on another host needs read access to this repository for the SSH marketplace URL. Where
-that is not available, the local-checkout and skills-directory routes above work from any copy of
-the tree.
+## Daemon contract
 
-## Contract version
-
-The skill targets adapter **contract version 2**: `list`, `doctor --json`, and `contract_version` in
-`lane.ready` and `doctor` output. A runtime that predates it is reported as a version gap rather
-than being driven on a guess. The contract is [CLAUDE-ADAPTER.md](./CLAUDE-ADAPTER.md).
+The skill uses `list` and `doctor --json` through the installed host client. Doctor must report the
+exact product, `ready: true`, and authority `daemon` locally or `remote-daemon` for an explicitly
+selected federated host. Missing fields are a contract mismatch, not permission to guess an older
+event shape. The adapter contract is [CLAUDE-ADAPTER.md](./CLAUDE-ADAPTER.md).
