@@ -34,7 +34,7 @@ print(json.dumps(value,separators=(",",":")) if isinstance(value,(dict,list,bool
 
 [[ $(uname -s) == Linux ]] || fail 'the installed systemd-user hub cell is Linux-only'
 
-if [[ ${AGENT_SESSIONS_NESTED_HUB_SYSTEMD:-0} != 1 ]]; then
+if [[ ${AGENT_SESSIONS_NESTED_HUB_SYSTEMD:-0} != 1 && ${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0} != 1 ]]; then
 	# Keep the disposable ancestor role-neutral. The host's closed legacy
 	# inventory deliberately rejects every path containing a hub boundary, so
 	# naming the synthetic HOME after the hub would make its otherwise valid
@@ -69,6 +69,16 @@ if [[ ${AGENT_SESSIONS_NESTED_HUB_SYSTEMD:-0} != 1 ]]; then
 fi
 
 acceptance_root=${AGENT_SESSIONS_HUB_ACCEPTANCE_ROOT:-}
+remove_acceptance_root=0
+if [[ ${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0} == 1 && -z "$acceptance_root" ]]; then
+	if systemctl --user is-active --quiet agent-sessions.service ||
+		systemctl --user is-active --quiet agent-sessions-hub.service; then
+		fail 'a standard Agent Sessions user service is already active'
+	fi
+	acceptance_root=$(mktemp -d "${TMPDIR:-/tmp}/unified-role-service.XXXXXX")
+	chmod 0700 "$acceptance_root"
+	remove_acceptance_root=1
+fi
 [[ -n "$acceptance_root" && -d "$acceptance_root" ]] || fail 'isolated acceptance root is absent'
 acceptance_started_epoch=$(date +%s)
 prefix=$HOME/.local
@@ -89,12 +99,21 @@ cleanup_inner() {
 		systemctl --user exit >/dev/null 2>&1 || true
 		wait "$service_manager_pid" 2>/dev/null || true
 	fi
+	if [[ "$remove_acceptance_root" == 1 ]]; then
+		chmod -R u+w -- "$acceptance_root" 2>/dev/null || true
+		rm -rf -- "$acceptance_root"
+	fi
 }
 trap cleanup_inner EXIT
 
-systemd --user --log-target=console >"$acceptance_root/systemd.stdout" 2>"$acceptance_root/systemd.stderr" &
-service_manager_pid=$!
-wait_for 'nested systemd user manager' systemctl --user is-system-running
+if [[ ${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0} != 1 ]]; then
+	systemd --user --log-target=console >"$acceptance_root/systemd.stdout" 2>"$acceptance_root/systemd.stderr" &
+	service_manager_pid=$!
+	wait_for 'nested systemd user manager' systemctl --user is-system-running
+else
+	: >"$acceptance_root/systemd.stdout"
+	: >"$acceptance_root/systemd.stderr"
+fi
 
 cd -- "$repository_root"
 make -s build

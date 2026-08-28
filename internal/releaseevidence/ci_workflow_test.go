@@ -88,8 +88,14 @@ func TestCIWorkflowGatesUnifiedReleaseOnBothPlatforms(t *testing.T) {
 			"AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ matrix.os == 'macos-latest' && '1' || '0' }}") {
 			t.Errorf("CI %s job does not derive clean-user acceptance from its matrix OS", jobName)
 		}
-		if strings.Contains(job, "runner.os") {
+		steps := strings.Index(job, "\n    steps:\n")
+		if steps < 0 {
+			t.Errorf("CI %s job has no bounded steps", jobName)
+		} else if strings.Contains(job[:steps], "runner.os") {
 			t.Errorf("CI %s job uses runner context in job-level env, which GitHub rejects before scheduling", jobName)
+		}
+		if !strings.Contains(job, "./scripts/ci-run-as-clean-systemd-user") {
+			t.Errorf("CI %s job does not exercise Linux under a dedicated real systemd user", jobName)
 		}
 	}
 

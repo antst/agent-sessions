@@ -308,7 +308,12 @@ func hubTestRelease(t *testing.T, version, identitySeed, executable string) rele
 			t.Fatal(err)
 		}
 	}
-	manifest := []byte(`{"schema_version":1,"release_version":"` + version + `","hub_protocol_version":3,"platform":"linux-x64","checksums":"SHA256SUMS","executables":[{"name":"` + executable + `","role":"` + role + `","path":"bin/` + executable + `"}],` + manifestInventory + `}`)
+	architecture := runtime.GOARCH
+	if architecture == "amd64" {
+		architecture = "x64"
+	}
+	platform := runtime.GOOS + "-" + architecture
+	manifest := []byte(`{"schema_version":1,"release_version":"` + version + `","hub_protocol_version":3,"platform":"` + platform + `","checksums":"SHA256SUMS","executables":[{"name":"` + executable + `","role":"` + role + `","path":"bin/` + executable + `"}],` + manifestInventory + `}`)
 	if err := os.WriteFile(filepath.Join(root, "manifest.json"), manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}

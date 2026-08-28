@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
@@ -23,6 +24,52 @@ type recordedInstalledServiceCommand struct {
 type recordingInstalledServiceRunner struct {
 	commands []recordedInstalledServiceCommand
 	err      error
+}
+
+func TestEnsureHostServiceLogRootCreatesExactOwnerOnlyDirectory(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHostServiceLogRoot(stateRoot); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(stateRoot, "logs"))
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		t.Fatalf("host log root = %+v, %v", info, err)
+	}
+}
+
+func TestEnsureHostServiceLogRootRejectsIndirectOrPermissiveDirectory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{name: "symlink", setup: func(t *testing.T, logRoot string) {
+			t.Helper()
+			target := t.TempDir()
+			if err := os.Symlink(target, logRoot); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "permissive", setup: func(t *testing.T, logRoot string) {
+			t.Helper()
+			if err := os.Mkdir(logRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stateRoot := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(stateRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			test.setup(t, filepath.Join(stateRoot, "logs"))
+			if err := ensureHostServiceLogRoot(stateRoot); err == nil {
+				t.Fatal("unsafe host log root was accepted")
+			}
+		})
+	}
 }
 
 func TestVerifyHostCandidateWaitsForCrashAmbiguousStartup(t *testing.T) {

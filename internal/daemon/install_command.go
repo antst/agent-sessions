@@ -410,6 +410,9 @@ func (hooks *hostInstallRoleHooks) Prepare(ctx context.Context, request releasei
 	if err := hooks.lifecycle.Prepare(ctx, request); err != nil {
 		return errors.Join(err, hooks.rollbackSurface())
 	}
+	if err := ensureHostServiceLogRoot(hooks.stateRoot); err != nil {
+		return errors.Join(err, hooks.lifecycle.Rollback(ctx))
+	}
 	restoreService, err := installHostServiceDefinition(request.SourceRoot, hooks.prefix, hooks.stateRoot)
 	if err != nil {
 		return errors.Join(err, hooks.lifecycle.Rollback(ctx))

@@ -16,7 +16,7 @@ const (
 	darwinTestRootMarker = ".agent-sessions-test-root"
 	darwinTestRootLock   = ".lock"
 	darwinTestRootMagic  = "agent-sessions bridge test root v1\n"
-	darwinTestRootBase   = "/private/tmp"
+	darwinTestRootBase   = "/tmp"
 )
 
 type darwinTestRootLease struct {

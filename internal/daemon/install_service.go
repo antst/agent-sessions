@@ -32,6 +32,23 @@ func installHostServiceDefinition(sourceRoot, prefix, stateRoot string) (func() 
 	return installHostServiceDefinitionWithHooks(sourceRoot, prefix, stateRoot, nil)
 }
 
+func ensureHostServiceLogRoot(stateRoot string) error {
+	logRoot := filepath.Join(stateRoot, "logs")
+	directory, err := openDaemonDirectory(logRoot, true, 0o700)
+	if err != nil {
+		return fmt.Errorf("open host service log root: %w", err)
+	}
+	defer func() { _ = directory.Close() }()
+	if err := requireCurrentUserOwnedDirectory(directory); err != nil {
+		return errors.New("host service log root is not an owner-only real directory")
+	}
+	info, err := directory.Stat()
+	if err != nil || info.Mode().Perm() != 0o700 {
+		return errors.New("host service log root is not an owner-only real directory")
+	}
+	return verifyHostSurfaceDirectoryPath(logRoot, directory)
+}
+
 func installHostServiceDefinitionWithHooks(
 	sourceRoot, prefix, stateRoot string, mutationHooks *hostSurfaceMutationHooks,
 ) (func() error, error) {

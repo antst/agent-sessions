@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -381,7 +382,11 @@ func TestProductionFirstMigrationCollectorNamesLiveAuthorityAsMaintenanceBlocker
 	stateRoot := filepath.Join(root, "state", "agent-sessions", "agents")
 	agentState := filepath.Join(stateRoot, "host-a")
 	runtimeRoot := filepath.Join(root, "run", "peer-federator")
+	serviceManager, serviceUnit := productionLegacyServiceIdentity()
 	servicePath := filepath.Join(root, "home", ".config", "systemd", "user", "peer-federator-agent.service")
+	if runtime.GOOS == "darwin" {
+		servicePath = filepath.Join(root, "home", "Library", "LaunchAgents", "net.antst.peer-federator.agent.plist")
+	}
 	for _, directory := range []string{agentState, runtimeRoot, filepath.Dir(servicePath), filepath.Join(agentState, "session-names")} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
@@ -473,12 +478,12 @@ func TestProductionFirstMigrationCollectorNamesLiveAuthorityAsMaintenanceBlocker
 		if !inspection.Required || len(inspection.Candidates) != 1 ||
 			inspection.Adoption.HostID != "host-a" || len(inspection.Adoption.Sessions) != 1 ||
 			inspection.Adoption.Sessions[0].PermissionMode != "bypassPermissions" ||
-			len(inspection.Adoption.Names) != 1 || inspection.PriorAuthority.ServiceUnit != "peer-federator-agent.service" {
+			len(inspection.Adoption.Names) != 1 || inspection.PriorAuthority.ServiceUnit != serviceUnit {
 			t.Fatalf("exact production inspection = %+v", inspection)
 		}
 		candidate := inspection.Candidates[0]
 		if candidate.Classification != LegacyClassificationActiveManagedBlocker || candidate.EndpointPath != endpoint ||
-			candidate.ServiceManager != "systemd-user" || candidate.ServiceUnit != "peer-federator-agent.service" ||
+			candidate.ServiceManager != serviceManager || candidate.ServiceUnit != serviceUnit ||
 			candidate.SourcePath != servicePath || !strings.HasPrefix(candidate.SourceRevision, "sha256:") {
 			t.Fatalf("production candidate does not reconcile process/endpoint/service ownership: %+v", candidate)
 		}

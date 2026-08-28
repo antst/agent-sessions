@@ -7,7 +7,11 @@ import (
 )
 
 func TestShortSocketRootCanonicalizesAmbientTempAlias(t *testing.T) {
-	realParent := t.TempDir()
+	realParent, err := os.MkdirTemp("/tmp", "asrp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(realParent) })
 	canonicalParent, err := filepath.EvalSymlinks(realParent)
 	if err != nil {
 		t.Fatal(err)

@@ -40,7 +40,8 @@ for key in sys.argv[1].split("."):
 print(json.dumps(value,separators=(",",":")) if isinstance(value,(dict,list,bool)) else value)' "$1"
 }
 
-if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 ]]; then
+if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 &&
+	"${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0}" != 1 ]]; then
 	outer_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-service.XXXXXX")"
 	go_module_cache="$(go env GOMODCACHE)"
 	go_build_cache="$(go env GOCACHE)"
@@ -74,6 +75,7 @@ if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 ]]; the
 fi
 
 acceptance_root="${AGENT_SESSIONS_ACCEPTANCE_ROOT:-}"
+remove_acceptance_root=0
 if [[ "$platform" == Darwin ]]; then
 	if [[ "${AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER:-0}" != 1 ]]; then
 		fail 'Darwin live acceptance requires AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER=1 under a dedicated clean user'
@@ -89,6 +91,20 @@ if [[ "$platform" == Darwin ]]; then
 	done
 	acceptance_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-service.XXXXXX")"
 	chmod 0700 "$acceptance_root"
+	remove_acceptance_root=1
+elif [[ "${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0}" == 1 ]]; then
+	if systemctl --user is-active --quiet agent-sessions.service; then
+		fail 'the standard systemd user service is already active'
+	fi
+	for path in \
+		"$XDG_CONFIG_HOME/systemd/user/agent-sessions.service" \
+		"$XDG_CONFIG_HOME/agent-sessions" "$XDG_STATE_HOME/agent-sessions" \
+		"$HOME/.local/libexec/agent-sessions/host"; do
+		[[ ! -e "$path" && ! -L "$path" ]] || fail "clean-user path already exists: $path"
+	done
+	acceptance_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-service.XXXXXX")"
+	chmod 0700 "$acceptance_root"
+	remove_acceptance_root=1
 elif [[ "$platform" != Linux ]]; then
 	fail "unsupported platform $platform"
 fi
@@ -135,11 +151,11 @@ cleanup_inner() {
 	else
 		launchctl bootout "gui/$UID/net.antst.agent-sessions" >/dev/null 2>&1 || true
 	fi
-	if [[ "$platform" == Darwin ]]; then rm -rf -- "$acceptance_root"; fi
+	if [[ "$remove_acceptance_root" == 1 ]]; then rm -rf -- "$acceptance_root"; fi
 }
 trap cleanup_inner EXIT
 
-if [[ "$platform" == Linux ]]; then
+if [[ "$platform" == Linux && "${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0}" != 1 ]]; then
 	systemd --user --log-target=console >"$acceptance_root/systemd.stdout" 2>"$acceptance_root/systemd.stderr" &
 	service_manager_pid=$!
 	systemd_ready=0

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$(uname -s)" == Linux ]] || { printf 'clean systemd CI user is Linux-only\n' >&2; exit 2; }
+[[ "$#" -gt 0 ]] || { printf 'usage: ci-run-as-clean-systemd-user COMMAND [ARGS...]\n' >&2; exit 2; }
+command -v sudo >/dev/null 2>&1 || { printf 'sudo is required to provision the disposable CI user\n' >&2; exit 127; }
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+	script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+	link_target="$(readlink -- "$script_path")"
+	if [[ "$link_target" == /* ]]; then script_path="$link_target"; else script_path="$script_dir/$link_target"; fi
+done
+repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+source_revision="$(git -C "$repository_root" rev-parse HEAD)"
+job_token="$(printf '%s' "${GITHUB_JOB:-job}" | tr -cd '[:alnum:]')"
+[[ -n "$job_token" ]] || job_token=job
+user_name="asci${GITHUB_RUN_ID:-$$}${GITHUB_RUN_ATTEMPT:-1}${job_token}"
+user_name="${user_name:0:30}"
+work_root="/tmp/agent-sessions-ci-user-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}-${job_token}"
+user_home="/home/$user_name"
+user_id=
+
+cleanup() {
+	set +e
+	if [[ -n "$user_id" ]]; then
+		sudo systemctl stop "user@$user_id.service" >/dev/null 2>&1 || true
+		sudo loginctl disable-linger "$user_name" >/dev/null 2>&1 || true
+	fi
+	if id "$user_name" >/dev/null 2>&1; then
+		sudo userdel --remove "$user_name" >/dev/null 2>&1 || true
+	fi
+	case "$work_root" in
+		/tmp/agent-sessions-ci-user-*) sudo rm -rf -- "$work_root" ;;
+	esac
+}
+trap cleanup EXIT
+
+if id "$user_name" >/dev/null 2>&1 || [[ -e "$work_root" || -L "$work_root" ]]; then
+	printf 'disposable CI user or root already exists: %s %s\n' "$user_name" "$work_root" >&2
+	exit 1
+fi
+sudo useradd --create-home --shell /bin/bash "$user_name"
+user_id="$(id -u "$user_name")"
+sudo loginctl enable-linger "$user_name"
+sudo systemctl start "user@$user_id.service"
+
+mkdir -m 0700 "$work_root"
+git clone --quiet --no-hardlinks "$repository_root" "$work_root/repository"
+git -C "$work_root/repository" checkout --quiet --detach "$source_revision"
+sudo chown -R "$user_name:$user_name" "$work_root"
+
+runtime_root="/run/user/$user_id"
+for _ in {1..200}; do
+	if [[ -S "$runtime_root/bus" ]] && sudo -u "$user_name" env \
+		HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
+		DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_root/bus" \
+		systemctl --user show-environment >/dev/null 2>&1; then
+		break
+	fi
+	sleep 0.05
+done
+[[ -S "$runtime_root/bus" ]] || { printf 'disposable CI user manager did not publish its D-Bus socket\n' >&2; exit 1; }
+
+sudo -u "$user_name" env \
+	HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
+	XDG_CONFIG_HOME="$user_home/.config" XDG_STATE_HOME="$user_home/.local/state" \
+	DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_root/bus" \
+	AGENT_SESSIONS_EXISTING_SYSTEMD_USER=1 \
+	GOTOOLCHAIN="${GOTOOLCHAIN:-local}" PATH="$PATH" \
+	bash -c 'cd -- "$1"; shift; exec "$@"' bash "$work_root/repository" "$@"

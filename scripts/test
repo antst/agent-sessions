@@ -30,8 +30,10 @@ bash -n \
 	"$plugin_root/scripts/release-tag-verify" \
 	"$plugin_root/scripts/repair-history-projection" \
 	"$plugin_root/scripts/native-entry" \
+	"$plugin_root/scripts/ci-run-as-clean-systemd-user" \
 	"$plugin_root/scripts/test-claude-contract" \
 	"$plugin_root/scripts/federation/test" \
+	"$plugin_root/scripts/federation/test-installed-hub" \
 	"$plugin_root/scripts/test-unified-peers" \
 	"$plugin_root/scripts/test-unified-lane-restart" \
 	"$plugin_root/scripts/test-unified-lane-composition" \

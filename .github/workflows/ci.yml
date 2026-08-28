@@ -66,7 +66,12 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: Test unified host, hub, native adapters, and federation
-        run: make test
+        run: |
+          if [[ "${{ runner.os }}" == Linux ]]; then
+            ./scripts/ci-run-as-clean-systemd-user make test
+          else
+            make test
+          fi
 
   race:
     strategy:
@@ -160,7 +165,12 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: Exercise the installed host service fixture
-        run: ./scripts/test-unified-service
+        run: |
+          if [[ "${{ runner.os }}" == Linux ]]; then
+            ./scripts/ci-run-as-clean-systemd-user ./scripts/test-unified-service
+          else
+            ./scripts/test-unified-service
+          fi
 
   release-linux:
     name: release-linux

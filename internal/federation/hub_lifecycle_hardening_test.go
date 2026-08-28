@@ -516,6 +516,11 @@ func hubLifecycleAssetPath(sourceRoot string) string {
 func writeHubLifecycleAsset(t *testing.T, body string) string {
 	t.Helper()
 	sourceRoot := t.TempDir()
+	home := filepath.Join(sourceRoot, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	asset := hubLifecycleAssetPath(sourceRoot)
 	if err := os.MkdirAll(filepath.Dir(asset), 0o700); err != nil {
 		t.Fatal(err)
