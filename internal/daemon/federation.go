@@ -180,6 +180,9 @@ func newFederationComponent(options federationComponentOptions) (*federationComp
 	if options.state != nil {
 		prior, revision, err := options.state.ReadFederation(context.Background())
 		if err == nil {
+			prior = normalizeAdoptedFederationSeed(
+				prior, revision, products, capabilities, options.runtimeVersion, options.runtimeIdentity,
+			)
 			if err := validateFederationStateRecord(prior); err != nil {
 				return nil, fmt.Errorf("recover federation state: %w", err)
 			}
@@ -267,6 +270,30 @@ func newFederationComponent(options federationComponentOptions) (*federationComp
 	component.client = client
 	component.updateStatus(client.Status())
 	return component, nil
+}
+
+// normalizeAdoptedFederationSeed replaces only ephemeral advertisement
+// evidence on the revision-zero first-migration projection. Legacy catalogs
+// and stopped-agent configuration establish stable host/hub identity, but
+// cannot attest which adapters the new daemon has made ready or the identity
+// of the new runtime image. Ordinary persisted federation revisions remain
+// fail-closed and are never repaired implicitly.
+func normalizeAdoptedFederationSeed(
+	state FederationStateRecord,
+	revision statestore.Revision,
+	products []string,
+	capabilities []string,
+	runtimeVersion string,
+	runtimeIdentity string,
+) FederationStateRecord {
+	if revision != 0 {
+		return state
+	}
+	state.AdvertisedProducts = append([]string(nil), products...)
+	state.AdvertisedCapabilities = append([]string(nil), capabilities...)
+	state.AdvertisedRuntimeVersion = runtimeVersion
+	state.AdvertisedRuntimeIdentity = runtimeIdentity
+	return state
 }
 
 func (component *federationComponent) acceptFederationRoster(ctx context.Context, roster sharedfederation.Roster) error {
