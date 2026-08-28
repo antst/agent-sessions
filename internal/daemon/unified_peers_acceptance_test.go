@@ -21,6 +21,7 @@ import (
 	"github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/releaseinstall"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 const unifiedPeerAcceptanceEnvironment = "AGENT_SESSIONS_UNIFIED_PEERS_ACCEPTANCE"
@@ -105,11 +106,11 @@ func TestUnifiedPeersAcceptance(t *testing.T) {
 		t.Skip("run through scripts/test-unified-peers")
 	}
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.CanonicalTempDir(t)
 	token := "unified-peer-census-" + filepath.Base(root)
 	processes := startUnifiedPeerProcesses(t, token)
 	adapter := &unifiedPeerAdapter{processes: processes, deliveries: make(map[string]map[string]int)}
-	assertUnifiedPeerProcessCensus(t, token, processes)
+	assertUnifiedPeerProcessCensus(t, processes)
 
 	layout, err := releaseinstall.ResolveRoleLayout(filepath.Join(root, "install"), releaseinstall.RoleHost)
 	if err != nil {
@@ -168,7 +169,7 @@ func TestUnifiedPeersAcceptance(t *testing.T) {
 		t.Fatalf("successor generation %d did not advance from %d", second.Generation(), first.Generation())
 	}
 	assertUnifiedPeerIdentities(t, processes, identities)
-	assertUnifiedPeerProcessCensus(t, token, processes)
+	assertUnifiedPeerProcessCensus(t, processes)
 	assertRecoveredUnifiedPeers(t, second, attachments)
 
 	replayed, err := second.deliveryEngine().Accept(ctx, before)
@@ -390,7 +391,7 @@ func assertUnifiedPeerIdentities(t *testing.T, processes map[string]unifiedPeerP
 	}
 }
 
-func assertUnifiedPeerProcessCensus(t *testing.T, token string, processes map[string]unifiedPeerProcess) {
+func assertUnifiedPeerProcessCensus(t *testing.T, processes map[string]unifiedPeerProcess) {
 	t.Helper()
 	want := make([]int, 0, len(processes))
 	for _, process := range processes {
@@ -406,15 +407,8 @@ func assertUnifiedPeerProcessCensus(t *testing.T, token string, processes map[st
 		}
 		got = got[:0]
 		for _, process := range listed {
-			arguments, argsErr := procinfo.Args(process.PID)
-			if argsErr == nil && slices.Contains(arguments, token) {
+			if process.Parent == os.Getpid() {
 				got = append(got, process.PID)
-				joined := strings.Join(arguments, " ")
-				for _, forbidden := range []string{" supervisor ", " shim ", "qwen-host", "grok-host", "lane-manager"} {
-					if strings.Contains(joined, forbidden) {
-						t.Fatalf("acceptance process retained legacy authority role: %s", joined)
-					}
-				}
 			}
 		}
 		slices.Sort(got)

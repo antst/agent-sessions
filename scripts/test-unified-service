@@ -434,12 +434,14 @@ if [[ "$platform" == Linux ]]; then
 	systemctl --user status --no-pager agent-sessions.service >"$acceptance_root/service-manager.log" 2>&1 || true
 	journalctl --since "@$acceptance_started_epoch" --no-pager -o json 2>/dev/null |
 		python3 -c 'import json,sys
-root=sys.argv[1]
+root,prefix=sys.argv[1:]
 for line in sys.stdin:
     try: record=json.loads(line)
     except json.JSONDecodeError: continue
-    if root in str(record.get("_CMDLINE","")) or root in str(record.get("_EXE","")) or root in str(record.get("MESSAGE","")):
-        print(record.get("MESSAGE",""))' "$acceptance_root" >"$acceptance_root/service-journal.log"
+    executable=str(record.get("_EXE",""))
+    command=str(record.get("_CMDLINE",""))
+    if root in command or root in executable or root in str(record.get("MESSAGE","")) or executable.startswith(prefix+"/libexec/agent-sessions/host/") or command.startswith(prefix+"/libexec/agent-sessions/host/"):
+        print(record.get("MESSAGE",""))' "$acceptance_root" "$prefix" >"$acceptance_root/service-journal.log"
 	cat "$acceptance_root/systemd.stdout" "$acceptance_root/systemd.stderr" \
 		"$acceptance_root/service-manager.log" "$acceptance_root/service-journal.log" \
 		>"$acceptance_root/service-observability.log"
