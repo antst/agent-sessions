@@ -14,12 +14,14 @@ cd ~/agent-sessions
 make test
 codex app-server daemon stop
 make install
+codex app-server daemon start
 ```
 
 From a release archive, verify `SHA256SUMS`, extract the archive for the current OS and
 architecture, stop every Codex client and managed App Server, then run `make install`. The target
-installs the nine native executables under the selected prefix, registers the
-`agent-sessions` marketplace, and installs `agent-sessions@agent-sessions` into Codex.
+installs the canonical host executable and its command aliases under the selected prefix, registers
+the `agent-sessions` marketplace, and installs `agent-sessions@agent-sessions` into Codex. Start the
+vendor-managed App Server again after the transaction completes.
 
 Use `make install-all` to install the shared runtime plus every product integration whose native
 client is present. Missing Claude, Grok, or Qwen clients are reported and skipped. The explicit
@@ -27,7 +29,13 @@ client is present. Missing Claude, Grok, or Qwen clients are reported and skippe
 
 ## Activate and verify
 
-Start a new Codex TUI after installation. Approve the one-time
+Ensure the external vendor App Server is running, then start a new Codex TUI after installation:
+
+```bash
+codex app-server daemon start
+```
+
+Approve the one-time
 `agent-sessions@agent-sessions` plugin hook prompt; the approval enables the installed lifecycle
 hooks but does not change Codex sandbox or tool-approval policy.
 
@@ -43,7 +51,8 @@ agent-sessions status --json
 
 An already-running TUI retains its old plugin snapshot and must be restarted. The installer refuses
 to replace a live App Server or an unverifiable managed Grok process tree; it does not silently
-restart active product sessions.
+restart active product sessions. Agent Sessions connects to the App Server but does not own its
+lifetime, so `codex-peer` fails clearly when the vendor daemon is stopped.
 
 ## Development installs
 
