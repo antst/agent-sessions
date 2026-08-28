@@ -4,7 +4,7 @@
 
 **Created**: 2026-08-26
 
-**Status**: Implementation complete; cross-platform release acceptance pending
+**Status**: Implementation and cross-platform release acceptance complete
 
 **Input**: User description: "Converge the existing Agent Sessions functionality into one stable
 user-space daemon per OS user on each host so adapters, sessions, lanes, local routing, cleanup, and

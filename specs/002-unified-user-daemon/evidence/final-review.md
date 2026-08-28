@@ -1,80 +1,72 @@
-# Final Constitution Review — Acceptance Draft
+# Final Constitution Review — Unified User Daemon
 
-**Review status**: **NOT FINAL — T034, T074, T094, and T095 remain open.**
+**Runtime candidate**: signed commit
+`8afd94f35d46b65f8c09f7662976cea53671303c`, tree
+`dd123b49b8b55805c54f6d00ee8e31931c34d346`.
 
-The implementation is complete in the feature worktree. This draft records the source, fixture, and
-installed Linux evidence available before the signed cross-platform release candidate is accepted.
-It deliberately does not bind results to the dirty worktree's base commit: final credit requires a
-clean signed commit/tree and the real Linux/macOS gates described below.
+**Review status**: **PASS**. T034, T074, T094, and T095 have attributable Linux/macOS evidence.
+No constitution exception is used.
 
-## Constitution review matrix
+## Review matrix
 
-| Required review item | Current evidence | Current result | Evidence still required |
-|---|---|---|---|
-| Shared contracts and one implementation | Authoritative product, binary, protocol, CLI, release, service, state, diagnostics, attachment, delivery, lane, and migration contracts are exercised from shared `internal/` packages. The obsolete `internal/federator` tree, standalone host commands, services, supervisors, shims, product hosts, lane managers, and lane-watch implementation are absent. | Source and fixture **PASS**. | Reconfirm the exact installed process/asset census on macOS and the final signed tree. |
-| Exact identity and fail-closed safety | Control, attachment, delivery, lane, release, service, filesystem, migration, and cleanup tests cover recycled/unknown process identity, changed type, nofollow access, ownership, revision CAS, ambiguous replies, and replacement launch. Independent T084 review is **ACCEPTED**. | Source, race, fixture, and independent review **PASS**. | Bind the same rules to final installed Linux/macOS identities. |
-| Lifecycle ordering and single host authority | Runtime lifecycle, crash restart, explicit stop, one-listener admission, host install/upgrade rollback, normal removal, purge, and installed nested-systemd acceptance pass. | Linux/source **PASS**. | Real launchd and final exact-commit Linux/macOS service acceptance. |
-| Rollback, recovery, and cleanup debt | Release/service/connector transactions restore exact prior selections and enabled/running states; crash-ambiguous operations reobserve before retry; migration rollback leaves unified and legacy authorities stopped and restores only installer-owned surfaces; cleanup debt is durable and retryable. | Source, race, fixture, and independent review **PASS**. | Final installed fault injection on both platforms. |
-| Permissions and model-facing authority | Role-scoped local control, exact native ancestry, inherited product permissions, bare-session refusal, parent/group propagation, and absence of daemon admin tools on model-facing MCP surfaces pass. | Fixture **PASS**. | Final real-product cells on Linux and macOS. |
-| Existing global groups and host-suffixed peer names | Local and federated discovery, direct send, multicast, broadcast, reply, duplicate admission, group isolation, and host suffix routing use the existing global group contract; no namespace or new visibility boundary exists. | Source and fixture **PASS**. | One-hub/three-real-host Linux/macOS matrix. |
-| Canonical CLI/help/environment/JSON/exit contracts | Generated descriptors, instantiated parsers, help, checked `docs/CLI.md`, environment bindings, JSON fields, and numeric exits pass parity gates for both binaries and all host aliases. | Source and packaged-fixture **PASS**. | Inspect final installed host and hub binaries on both platforms. |
-| Exactly two binaries and four archives | Release inventory and packaging tests require one `agent-sessions` image, one distinct `agent-sessions-hub` image, the exact alias set, connector payloads, role-specific service assets, manifests, checksums, and no obsolete binaries/assets. All four 0.3.0 archives build. | Source/package **PASS**. | Rebuild and install from the final signed commit. |
-| One hub with multiple embedded host agents | The host embeds its outbound agent; the distinct hub contains no host connectors or host lifecycle. Hub-only status/doctor/install/remove/reinstall/purge and co-located disjoint-role lifecycle pass the Linux systemd-user fixture. | Linux/source **PASS**. | Real one-hub/three-host matrix including macOS. |
-| Protocol-only interoperability | Independently rooted unrelated commits interoperate in both directions at protocol 3; a protocol-4 build fails before registration. Runtime SHA/release labels are diagnostics only. | Real binary/TCP fixture **PASS**. | Repeat with separately identified final network artifacts and real hosts. |
-| Independent host/hub lifecycle | Disjoint roots, selections, locks, journals, services, rollback, removal, reinstall, and purge pass fixture and installed nested-systemd tests; upgrading either role leaves the other role's selection and PID unchanged. | Linux installed fixture **PASS**. | Final macOS lifecycle and real network upgrade cells. |
-| No pre-unification interoperability obligation | The first migration requires an operator-held maintenance window, no live handoff or drain, zero installer legacy lifecycle actions, exact absence proof, adoption, and artifact retirement. | Contract, fixture, and independent review **PASS**. | Final installed maintenance-window evidence. |
-| No artificial quota | Pre-admission disk, memory, file-descriptor, process, and native-dependency failures retain their real cause. The stress cell passes with 100 attachments, four products, three groups, one listener, and zero duplicate turns. | Source and fixture **PASS**. | Repeat at the signed candidate. |
-| Metadata-only observability | Registered normal/debug/error/crash/service/status/doctor/metric/trace sinks pass secret/content canaries. Installed nested-systemd output contains the required output kinds and no private canary. | Linux/source **PASS**. | Real launchd output and final exact-commit rerun. |
-| No obsolete Agent Sessions processes | Source and archive inventories reject every obsolete entrypoint and service asset; peer/lane/migration fixtures report zero obsolete runtime processes and one current endpoint/listener. | Source and fixture **PASS**. | Final installed Linux/macOS process, socket, and service censuses. |
-| Linux and macOS parity | CI includes Linux/macOS lint, test, race, vet, build, package, and service-fixture gates. The coherent Linux worktree passes normal, race, vet, managed lint, quickstart fixtures, and all four builds. | Linux **PASS**, macOS pending. | Full Darwin S-tier and installed launchd acceptance at the same signed candidate. |
+| Required review item | Evidence and conclusion |
+|---|---|
+| Shared contracts, one implementation | PASS. One `agent-sessions` host composition root owns attachments, delivery, lanes, embedded federation, recovery, and diagnostics. Logical packages provide shared state, service, release, protocol, groups, routing, identity, and diagnostics. Product/role files contain only genuine native/host/hub differences. |
+| Exact identity and fail-closed safety | PASS. Kernel peer credentials, PID plus process start, native session/profile/ancestry, socket/file type, owner, revision, generation, and request digest are corroborated at the mutation boundary. Unknown, recycled, stale, malformed, changed-type, or conflicting evidence refuses without collateral action. |
+| Root-cause and class-closing fixes | PASS. The feature removes the independently versioned supervisor/shim/product-host/lane-manager/host-federator authority class. Acceptance also closed observed portability classes: BSD tools, Darwin aliases and socket budgets, immutable rename ordering, platform literals, ambient managed-session variables, deadlocked helpers, Darwin lint coverage, and service-test ordering. Failed/confounded evidence is not credited. |
+| Lifecycle ordering | PASS. Durable admission precedes publication; generation startup is exclusive; install validates and stages before transition; service restart/crash/explicit-stop semantics are platform-owned; peer/lane workflows never manage daemon lifetime. |
+| Rollback and cleanup debt | PASS. Release, connector, service, lane, delivery, and migration transactions use revision/identity checks. Ambiguous cleanup retains retryable debt. Upgrade rollback restores exact prior installer-owned surfaces; first-migration rollback leaves legacy and unified authorities stopped. |
+| Permissions and administration | PASS. The owning OS user is the administrative boundary. Model-facing MCP/peer/lane roles expose only attested operation surfaces. Native permission, cancellation, transcript, archive, and resume semantics remain product-owned. |
+| Groups and addressing | PASS. Existing global groups are the only collaboration boundary in one uniform multi-host space. Host suffixes disambiguate names. No profile/test/product namespace or ambient roster was added. |
+| Canonical CLI/help/environment/JSON/exits | PASS. One descriptor inventory drives both binaries, host aliases, parser/options, help, environment inputs, JSON schemas, semantic exit classes, and checked `docs/CLI.md`. Every parsed option is documented and model-facing tools contain no admin modes. |
+| Exactly two binaries | PASS. `cmd/` contains only `agent-sessions` and `agent-sessions-hub`; all host aliases resolve to the first image. Four 0.3.0 archives contain exactly those two executable basenames and validated payloads/checksums. No obsolete command/service asset is shipped. |
+| One-hub topology | PASS. One central hub serves multiple embedded host agents. The hub is a separate deployment role and never a host authority. Global groups, AgentFrame, host suffixes, direct/multicast/broadcast, and remote lanes preserve existing semantics. |
+| Network interoperability | PASS. Exact hub protocol equality is the sole software-version input. Independent Git object databases interoperate in both host/hub directions at protocol 3; actual protocol 4 fails before registration. SHA, release, binary identity, build age, capabilities, and upgrade order are diagnostic only. |
+| Independent host/hub lifecycle | PASS. Co-located roles use disjoint release roots, selections, locks, journals, services, rollback, removal, and purge. Upgrading, crashing, rolling back, removing, reinstalling, or purging one role leaves the other's PID, selection, readiness, and state unchanged. |
+| No pre-unification compatibility obligation | PASS. First migration is an operator maintenance window: all peers/lanes close and old authorities stop through their own supported lifecycle. The installer only inventories, verifies absence, adopts durable metadata, and retires exact artifacts. It implements no live handoff, drain, signalling, or legacy restart. |
+| No artificial quotas | PASS. The daemon has no Agent Sessions count limits. One hundred simultaneous attachments across four products and three groups pass with one listener and zero duplicate turns. Disk, memory, FD, process, and native-dependency failures retain their real pre-acceptance causes. |
+| Metadata-only observability | PASS. Closed normal/debug/error/crash/service/status/doctor/metric/trace sink manifests use bounded metadata envelopes. Content/secret canaries pass in daemon, hub, systemd, and launchd cells. No message, prompt, result, transcript, or credential content is an operational field. |
+| Zero obsolete processes | PASS. Source, package, runtime census, lane composition, restart, migration, and installed-service gates find no supervisor, per-session shim, product host, lane manager, lane watcher, or host federation-agent authority. Vendor-required children are stateless and daemon-generation-owned. |
+| Linux/macOS parity | PASS. Exact hosted candidate jobs are green for normal, race, vet, lint, real systemd/launchd service fixtures, both architectures, and package contracts. Independent Linux and physical Darwin gates corroborate runtime behavior. Toolchains, identity, preservation, and residue are in `final-linux.md` and `final-macos.md`. |
 
-## Current coherent Linux evidence
+## Evidence index
 
-The current feature worktree passes:
+- `final-linux.md`: exact Linux identity/toolchain, normal/race/vet/lint, real systemd service,
+  quickstart/baseline families, archive hashes, preservation, and residue.
+- `final-macos.md`: exact hosted real-launchd and physical-Darwin evidence, owner nonmutation, and the
+  disclosed race timing flake.
+- `us4-federation.md`: hub lifecycle, three-host routing, remote lanes, independent builds/upgrades,
+  protocol mismatch, content/resource canaries, and residue.
+- `us5-migration.md`: operator maintenance window, exact blockers, zero installer legacy lifecycle
+  action, adoption, artifact retirement, rollback, and collateral exclusion.
+- `us3-lanes.md`: four-product lane ownership, restart, composition, collection, resume, and cleanup.
+- `baseline-runtime-inventory.md` and `baseline-functional-cells.md`: closed pre-change topology and
+  individually named functional cells used as the acceptance naming authority.
 
-```text
-make test
-make test-race
-go vet ./...
-make lint                                  # 0 issues
-scripts/test-unified-service
-scripts/test-unified-peers
-scripts/test-unified-lane-restart
-scripts/test-unified-lane-composition
-scripts/test-unified-migration
-scripts/test-unified-stress
-scripts/federation/test
-scripts/federation/test-binary-pairs
-scripts/federation/test-installed-hub
-```
+## Exact release and CI decision
 
-All four `build-release-platform` cells produced 0.3.0 archives for Linux x64/arm64 and Darwin
-x64/arm64. The installed hub fixture uses a real nested `systemd --user` manager and proves host/hub
-independence, crash restart, resource refusal, rollback, removal/reinstall, purge, and metadata-only
-observability. The binary-pair runner builds independent repository histories and proves both equal-
-protocol directions plus mismatch refusal. These results remain provisional until rebound to a clean
-signed commit.
+GitHub Actions run `33142267923` at the exact runtime candidate concluded `success`. Linux and macOS
+normal, race, vet, lint, service-fixture, four build, inventory, and package-contract jobs passed.
+Release jobs were correctly skipped because the workflow's publication stage is main-only; no tag or
+release was created by feature acceptance.
 
-The unified migration fixture passes after replacing global process-table observation with bounded
-exact-PID reads. Independent review ran five consecutive additional passes and returned **ACCEPTED**;
-production enumeration remains unchanged and fail closed.
+Downloaded hosted artifacts provided exactly four archives. Every sidecar verified and every archive
+contained exactly `agent-sessions` plus `agent-sessions-hub`. The authoritative hashes are recorded in
+`final-linux.md`.
 
-## Remaining final gates
+## Known observation
 
-1. Create one clean signed candidate and record its commit, tree, signature, Go/tool versions, and
-   four archive identities.
-2. Run the complete Darwin normal/race/vet/lint/build and launchd installed-service acceptance at that
-   exact candidate.
-3. Run the final installed Linux acceptance at the same candidate.
-4. Exercise one hub and three real hosts, including Linux/macOS peer and remote-lane traffic,
-   independent host/hub restarts and protocol-preserving upgrades, unrelated-commit equal-protocol
-   artifacts, and protocol mismatch.
-5. Record exact process/service/socket/state baselines, preserved state, failures, cleanup, and residue
-   in `final-linux.md`, `final-macos.md`, and `us4-federation.md`.
-6. Re-run this review against those attributable artifacts and then mark T034/T074/T094/T095 complete.
+The independent physical Mac saw two non-deterministic full-suite bridge timing failures across seven
+race attempts, with zero race-detector reports. Five targeted/full-package/full-suite retries passed,
+including one exact-candidate full race run, and the exact hosted macOS race job passed. This evidence
+is disclosed rather than credited. No deterministic product-state failure was reproduced, and no
+timeout/assertion was weakened. It remains a reliability observation outside the accepted invariant,
+not a hidden constitution exception.
 
-## Decision
+## Final decision
 
-No known source, fixture, lifecycle, migration, packaging, or Linux gate remains RED. The feature is
-not yet release-accepted because the constitution requires real macOS parity and the final real
-multi-host matrix. **T095 remains unchecked until those results are bound to the signed candidate.**
+The signed runtime candidate satisfies the feature specification, plan, all 95 tasks, and every
+applicable constitution principle. It ships one user-managed host daemon plus one independently
+versioned central-hub binary, preserves existing product/group/federation semantics, requires only
+protocol equality across the network, and leaves no pre-unification runtime authority in the shipped
+or accepted topology.
