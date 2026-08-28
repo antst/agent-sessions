@@ -187,7 +187,9 @@ func TestUnifiedPeerVendorHelper(t *testing.T) {
 	if os.Getenv("AGENT_SESSIONS_UNIFIED_VENDOR_HELPER") != "1" {
 		t.Skip("acceptance subprocess only")
 	}
-	select {}
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func startUnifiedPeerProcesses(t *testing.T, token string) map[string]unifiedPeerProcess {
