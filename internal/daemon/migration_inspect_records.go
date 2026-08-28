@@ -462,25 +462,7 @@ func productionLegacyCodexLaneRecords( //nolint:gocyclo // Closed schema/status 
 		}
 		path := filepath.Join(directory, entry.Name())
 		record, artifactRevision, artifactIdentity, readErr := readProductionLegacyProjectionWithArtifact(path)
-		laneID, idErr := productionProjectionString(record, "sessionId", true)
-		status, statusErr := productionProjectionString(record, "status", true)
-		if readErr != nil || errors.Join(idErr, statusErr) != nil || !durableRecordID.MatchString(laneID) {
-			candidate, classifyErr := productionMalformedRecordCandidate(path, "supervisor", observedAt)
-			if classifyErr != nil {
-				return nil, nil, classifyErr
-			}
-			candidates = append(candidates, candidate)
-			continue
-		}
-		// A Codex lane row is durable conversation metadata. It contains no
-		// manager PID/start or endpoint owner identity and therefore can never
-		// independently authorize cleanup or become identity debt. Live authority
-		// is established only by the separately corroborated supervisor process;
-		// terminal rows remain adoptable metadata after that authority exits.
-		classification := LegacyClassificationRetired
-		switch status {
-		case "idle", "completed", "failed", "interrupted", "timed_out", "cancelled", "canceled", "archived":
-		default:
+		if readErr != nil {
 			candidate, classifyErr := productionMalformedRecordCandidate(path, "codex_lane_record", observedAt)
 			if classifyErr != nil {
 				return nil, nil, classifyErr
@@ -488,28 +470,57 @@ func productionLegacyCodexLaneRecords( //nolint:gocyclo // Closed schema/status 
 			candidates = append(candidates, candidate)
 			continue
 		}
+		laneID, idErr := productionProjectionString(record, "sessionId", true)
+		status, statusErr := productionProjectionString(record, "status", true)
 		revision, revisionErr := productionLegacyMetadataRevision(record)
 		if revisionErr != nil {
 			return nil, nil, revisionErr
 		}
+		// A Codex lane row is durable conversation metadata. It contains no
+		// manager PID/start or endpoint owner identity and therefore can never
+		// independently authorize cleanup or become identity debt. Live authority
+		// is established only by the separately corroborated supervisor process;
+		// terminal rows remain adoptable metadata after that authority exits. A
+		// bounded, valid-JSON row with incomplete lane identity is likewise
+		// preserved as retired source metadata; adoption records exact repair debt
+		// instead of misreporting it as unknown process identity.
+		relatedLaneIDs := []string(nil)
+		if durableRecordID.MatchString(laneID) {
+			relatedLaneIDs = []string{laneID}
+		}
+		candidateID := quiescenceRecordID("legacy-codex-lane-record", path)
+		if durableRecordID.MatchString(laneID) {
+			candidateID = quiescenceRecordID("legacy-codex-lane-record", path, laneID)
+		}
 		candidate := LegacyRuntimeCandidate{
 			SchemaVersion: MigrationSchemaVersion,
-			CandidateID:   quiescenceRecordID("legacy-codex-lane-record", path, laneID),
+			CandidateID:   candidateID,
 			Kind:          "codex_lane_record", SourcePath: path, SourceRevision: revision,
 			ArtifactRevision: artifactRevision, ArtifactIdentity: artifactIdentity,
 			ProcessStatus: "absent", EndpointStatus: "absent",
-			RelatedLaneIDs: []string{laneID}, Classification: classification,
+			RelatedLaneIDs: relatedLaneIDs, Classification: LegacyClassificationRetired,
 			EvidenceRevision: 1, LastObservedAt: observedAt,
 		}
 		if err := candidate.Validate(); err != nil {
 			return nil, nil, err
 		}
 		candidates = append(candidates, candidate)
-		if productionLegacyCodexLaneStatusMayBeLive(status) {
+		if errors.Join(idErr, statusErr) == nil && durableRecordID.MatchString(laneID) &&
+			productionLegacyCodexLaneStatusKnown(status) && productionLegacyCodexLaneStatusMayBeLive(status) {
 			lanes = append(lanes, laneID)
 		}
 	}
 	return lanes, candidates, nil
+}
+
+func productionLegacyCodexLaneStatusKnown(status string) bool {
+	switch status {
+	case "starting", "in_progress", "active", "running", "busy", "idle",
+		"completed", "failed", "interrupted", "timed_out", "cancelled", "canceled", "archived":
+		return true
+	default:
+		return false
+	}
 }
 
 func productionLegacyCodexLaneStatusMayBeLive(status string) bool {

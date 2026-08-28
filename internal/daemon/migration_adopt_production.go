@@ -416,7 +416,8 @@ func productionLegacyAdoptLaneDirectory(
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		record, err := readProductionLegacyProjection(filepath.Join(directory, entry.Name()))
+		path := filepath.Join(directory, entry.Name())
+		record, err := readProductionLegacyProjection(path)
 		if err != nil {
 			continue // Inventory already reports this exact malformed record as debt.
 		}
@@ -425,13 +426,52 @@ func productionLegacyAdoptLaneDirectory(
 			return err
 		}
 		lane, turns, notices, debt, ok := productionLegacyLaneProjection(record, family, revision, observedAt)
+		if family.product == "codex" && !productionLegacyCodexLaneStatusKnown(productionLegacyRawString(record, "status")) {
+			ok = false
+		}
 		if ok {
 			if err := accumulator.append(request, revision, lane, turns, notices, debt); err != nil {
 				return err
 			}
+		} else if family.product == "codex" {
+			debt := productionLegacyIncompleteLaneDebt(record, family, path, revision, observedAt)
+			if _, duplicate := accumulator.seenDebt[debt.DebtID]; !duplicate {
+				accumulator.seenDebt[debt.DebtID] = struct{}{}
+				request.Debt = append(request.Debt, debt)
+			}
+			accumulator.revisions = append(accumulator.revisions, revision)
 		}
 	}
 	return nil
+}
+
+func productionLegacyIncompleteLaneDebt(
+	record map[string]json.RawMessage,
+	family productionLegacyLaneFamily,
+	path string,
+	revision string,
+	observedAt int64,
+) DebtRecord {
+	identity := productionLegacyRawString(record, family.idField)
+	if !durableRecordID.MatchString(identity) {
+		identity = productionLegacyRawString(record, "threadId")
+	}
+	if !durableRecordID.MatchString(identity) {
+		identity = quiescenceRecordID("legacy-lane-record", path)
+	}
+	updatedAt := productionLegacyRawInt64(record, "updatedAt")
+	if updatedAt <= 0 {
+		updatedAt = observedAt
+	}
+	return DebtRecord{
+		RecordHeader: productionLegacyMigrationHeader(updatedAt),
+		DebtID:       quiescenceRecordID("legacy-lane-projection-debt", family.product, path),
+		Operation:    "migration_reconcile", ResourceKind: "legacy_lane_metadata",
+		ResourceIdentity: family.product + "/" + identity, ExpectedRevision: revision,
+		CauseCode:       "incomplete_legacy_lane_projection",
+		RetryPredicate:  "repair or explicitly retire the exact preserved Agent Sessions-owned lane record",
+		ProhibitedScope: "do not infer lane identity or content from vendor transcripts, profiles, content logs, or process names",
+	}
 }
 
 func (accumulator *productionLegacyAdoptionAccumulator) append(

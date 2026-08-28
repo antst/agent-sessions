@@ -774,6 +774,118 @@ func TestProductionCodexLaneRecordsKeepTerminalMetadataOutOfBlockersAndDebt(t *t
 	}
 }
 
+func TestProductionIncompleteCodexLaneMetadataBecomesPreservedDebtNotIdentityDebt(t *testing.T) {
+	root := t.TempDir()
+	bridgeRoot := filepath.Join(root, "claude-code-peer")
+	directory := filepath.Join(bridgeRoot, "profiles", "profile-a", "lanes")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]any{
+		"type": "", "name": "", "threadId": "thread-lane", "sessionId": "", "cwd": "", "status": "",
+		"turnId": "turn-wake", "collectedTurnId": "turn-old", "timedOutTurnId": "turn-wake",
+		"terminalOutcome": "timed_out", "createdAt": int64(0), "updatedAt": int64(100),
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, sessionkey.FromID("thread-lane")+".json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	liveLanes, candidates, err := productionLegacyCodexLaneRecords(context.Background(), directory, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(liveLanes) != 0 || len(candidates) != 1 ||
+		candidates[0].Kind != "codex_lane_record" ||
+		candidates[0].Classification != LegacyClassificationRetired ||
+		candidates[0].ProcessStatus != "absent" || candidates[0].EndpointStatus != "absent" {
+		t.Fatalf("incomplete lane inventory = live=%v candidates=%+v", liveLanes, candidates)
+	}
+	report, err := EvaluateLegacyQuiescence(context.Background(), LegacyQuiescenceRequest{Candidates: candidates})
+	if err != nil || len(report.Blockers) != 0 || len(report.Debt) != 0 {
+		t.Fatalf("incomplete metadata became authority debt: report=%+v err=%v", report, err)
+	}
+
+	adoption, err := productionLegacyBridgeAdoption(context.Background(), LegacyAdoptionRequest{
+		SourceRevision: "sha256:" + strings.Repeat("a", 64), HostID: "host-a",
+	}, []LegacyInventorySource{{ID: "bridge-state", Kind: "state", Path: bridgeRoot, Target: true}}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adoption.Lanes) != 0 || len(adoption.Debt) != 1 ||
+		adoption.Debt[0].CauseCode != "incomplete_legacy_lane_projection" ||
+		adoption.Debt[0].ResourceIdentity != "codex/thread-lane" {
+		t.Fatalf("incomplete lane adoption = %+v", adoption)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("preserved source lane metadata disappeared: %v", err)
+	}
+}
+
+func TestProductionUnreadableCodexLaneRecordStillFailsClosedAsIdentityDebt(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "lanes")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	liveLanes, candidates, err := productionLegacyCodexLaneRecords(context.Background(), directory, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(liveLanes) != 0 || len(candidates) != 1 || candidates[0].Classification != LegacyClassificationUnknown {
+		t.Fatalf("unreadable lane inventory = live=%v candidates=%+v", liveLanes, candidates)
+	}
+	report, err := EvaluateLegacyQuiescence(context.Background(), LegacyQuiescenceRequest{Candidates: candidates})
+	if !errors.Is(err, ErrLegacyQuiescenceBlocked) || len(report.Debt) != 1 || report.Debt[0].Code != "unknown_identity" {
+		t.Fatalf("unreadable lane did not fail closed: report=%+v err=%v", report, err)
+	}
+}
+
+func TestProductionUnknownCodexLaneStatusIsPreservedAsProjectionDebt(t *testing.T) {
+	root := t.TempDir()
+	bridgeRoot := filepath.Join(root, "claude-code-peer")
+	directory := filepath.Join(bridgeRoot, "profiles", "profile-a", "lanes")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"threadId": "thread-a", "sessionId": "lane-a", "name": "lane-a", "cwd": root,
+		"status": "future_status", "parentHostId": "host-parent", "parentSessionId": "session-parent",
+		"createdAt": int64(100), "updatedAt": int64(200),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, sessionkey.FromID("lane-a")+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	liveLanes, candidates, err := productionLegacyCodexLaneRecords(context.Background(), directory, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(liveLanes) != 0 || len(candidates) != 1 || candidates[0].Classification != LegacyClassificationRetired {
+		t.Fatalf("unknown-status lane inventory = live=%v candidates=%+v", liveLanes, candidates)
+	}
+	adoption, err := productionLegacyBridgeAdoption(context.Background(), LegacyAdoptionRequest{
+		SourceRevision: "sha256:" + strings.Repeat("b", 64), HostID: "host-a",
+	}, []LegacyInventorySource{{ID: "bridge-state", Kind: "state", Path: bridgeRoot, Target: true}}, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adoption.Lanes) != 0 || len(adoption.Debt) != 1 ||
+		adoption.Debt[0].CauseCode != "incomplete_legacy_lane_projection" ||
+		adoption.Debt[0].ResourceIdentity != "codex/lane-a" {
+		t.Fatalf("unknown-status lane adoption = %+v", adoption)
+	}
+}
+
 func TestProductionBridgeInventoryIncludesExactInteractiveOwnersAndRetiredRecords(t *testing.T) {
 	root := t.TempDir()
 	bridgeRoot := filepath.Join(root, "claude-code-peer")
