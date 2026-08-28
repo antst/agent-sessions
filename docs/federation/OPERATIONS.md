@@ -52,7 +52,7 @@ Managed Claude profiles and secure-storage overrides must use absolute paths so
 detached, local, and remote workers cannot reinterpret them under another cwd.
 Unreleased development builds that stored Claude transcripts in an Agent
 Sessions-private native profile are not copied into the shared profile; there
-is no collision-safe automatic migration for those development-only sessions.
+is no collision-safe automatic transfer for those development-only sessions.
 
 ## Remote lane execution
 

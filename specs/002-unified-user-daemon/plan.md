@@ -21,21 +21,17 @@ lifecycles are independent; host capability
 advertisement remains an operation-availability inventory, not a release-coupling handshake.
 Both roles use the same logically organized service-control and immutable-release transaction
 packages; role descriptors provide different executable, service, configuration, readiness, and
-connector/migration hooks without creating separate lifecycle implementations. A shared immutable
+connector hooks without creating separate lifecycle implementations. A shared immutable
 transaction algorithm does not mean shared deployment state: host and hub use separate role-owned
 release roots, current selections, locks, journals, service transitions, readiness decisions,
 rollback, removal, and purge ownership.
 
 The implementation will reuse the existing product state machines rather than rewrite product
 behavior. It will replace their detached process, per-session listener, and duplicated ownership
-boundaries with daemon-owned attachment and lane actors. First migration requires an operator-owned
-maintenance window: close all legacy peers and lanes, explicitly stop every responsive legacy
-supervisor, product manager, and federation authority through its old supported lifecycle, and prevent
-new legacy launches until installation completes. The installer fails closed naming any live legacy
-authority even when it reports zero shims; it never stops, signals, or restarts one. After proving
-absence, it stages an immutable release, adopts Agent Sessions metadata, retires exact legacy artifacts,
-and performs the unified service transition. Neither live handoff nor a compatibility drain protocol is
-planned.
+boundaries with daemon-owned attachment and lane actors. Version 0.3 is a greenfield boundary from the
+unreleased split-runtime prototypes: the operator stops the old stack and removes or archives only its
+Agent Sessions-owned roots before first install. The product contains no legacy inventory, adoption,
+retirement, handoff, drain, or state-conversion path.
 
 ## Technical Context
 
@@ -83,7 +79,7 @@ filesystem identity before mutation; no credential/profile/transcript ownership;
 host-suffixed-name, one-hub/multiple-agent behavior remains unchanged
 
 **Scale/Scope**: Four native products, every parent-target lane combination, local and remote routing,
-legacy split-runtime migration, optional installation of any product subset, and four release platforms
+greenfield first installation, optional installation of any product subset, and four release platforms
 
 ## Constitution Check
 
@@ -91,11 +87,11 @@ legacy split-runtime migration, optional installation of any product subset, and
 
 - **I. Shared Contracts, One Implementation — PASS**: one daemon composition root, attachment model,
   local protocol, delivery engine, lane contract, product inventory, shared host/hub service-control
-  and release-transaction packages, and migration engine replace the repeated process-local
+  and release-transaction packages replace the repeated process-local
   implementations. Role- and product-specific code remains separate only for genuine contract
   differences.
 - **II. Exact Identity and Fail-Closed Safety — PASS**: local clients are kernel-attributed, managed
-  attachments retain product-specific corroboration, and migration/cleanup re-attest PID plus process
+  attachments retain product-specific corroboration, and cleanup re-attests PID plus process
   start, socket/file identity, native identity, and durable revision immediately before mutation.
 - **III. Root-Cause Analysis Before Permanent Fixes — PASS**: the plan closes the observed class of
   missed restarts and mixed supervisor/shim/host/manager/federation versions by removing those separate
@@ -107,20 +103,18 @@ legacy split-runtime migration, optional installation of any product subset, and
   filesystem aliases, process visibility, sleep/wake, install, restart, and removal are tested on real
   installations of both systems.
 - **VI. Transactional Lifecycle and Zero Collateral — PASS**: durable acceptance precedes publication;
-  install and migration are journaled; the operator owns legacy shutdown while the installer owns
-  absence verification and exact artifact retirement; first-migration rollback leaves unified and
-  legacy authorities stopped and restores only installer-changed surfaces; exact cleanup is
+  install is journaled; the operator supplies a clean first-install boundary; exact cleanup is
   idempotent; vendor and unrelated state are excluded.
 - **VII. Explicit Protocols, Operability, and Documentation — PASS**: the local control protocol,
-  service lifecycle, adapter boundary, storage migration, diagnostics, authoritative CLI/help
+  service lifecycle, adapter boundary, durable storage, diagnostics, authoritative CLI/help
   inventory, exit classes, environment inputs, and operator actions are documented in Phase 1
   contracts and checked for parser/help/documentation parity.
 
 The host and hub are separate deployment roles built from this repository. Their software-version
 interoperability uses only exact hub-protocol-version equality; commit, release, executable, build
 age, and upgrade order do not participate. Tests cover unrelated host/hub build identities with an equal protocol and
-fail-closed protocol mismatch. No interoperability with pre-unification executables or process
-topology is required beyond the explicit quiescent migration contract.
+fail-closed protocol mismatch. No interoperability with pre-unification executables, process topology,
+or Agent Sessions-owned state is required.
 
 No constitutional exception is required. The central federation hub remains a separate deployment
 role because this feature replaces the per-host federation agent, not the existing one-hub topology.
@@ -141,7 +135,7 @@ specs/002-unified-user-daemon/
 │   ├── cli-surface.md
 │   ├── federation-protocol.md
 │   ├── local-control-protocol.md
-│   ├── migration-and-storage.md
+│   ├── durable-storage.md
 │   └── service-lifecycle.md
 └── tasks.md                    # dependency-ordered implementation and acceptance ledger
 ```
@@ -169,7 +163,6 @@ internal/
 │   ├── delivery.go             # durable AgentFrame admission and routing
 │   ├── lanes.go                # shared daemon-owned lane actors
 │   ├── federation.go           # embedded host agent and outbound hub connection
-│   ├── migration.go            # quiescence gate, durable adoption, retirement, debt
 │   └── diagnostics.go          # host status/doctor projection over shared diagnostics
 ├── bridge/                     # existing native product engines refactored into callable adapters
 ├── launcher/                   # short-lived clients that prepare and then exec native vendors
@@ -227,7 +220,7 @@ context ambiguities are resolved.
 ## Phase 1 Design
 
 - [data-model.md](data-model.md) defines daemon generations, attachments, deliveries, lane transactions,
-  federation state, migration candidates, and cleanup debt.
+  federation state and cleanup debt.
 - [contracts/local-control-protocol.md](contracts/local-control-protocol.md) defines the single private
   endpoint, client roles, attestation, request/response envelope, and unavailable behavior.
 - [contracts/cli-surface.md](contracts/cli-surface.md) defines the canonical modes and aliases, shared
@@ -239,9 +232,8 @@ context ambiguities are resolved.
   lifecycle and the genuine vendor-specific boundaries.
 - [contracts/service-lifecycle.md](contracts/service-lifecycle.md) defines systemd/launchd ownership,
   transactional installation, restart, explicit stop, removal, and rollback.
-- [contracts/migration-and-storage.md](contracts/migration-and-storage.md) defines the canonical state
-  root, revision rules, operator-owned maintenance window, fail-closed legacy absence proof, adoption,
-  exact artifact retirement, stopped-authority rollback, and purge exclusions.
+- [contracts/durable-storage.md](contracts/durable-storage.md) defines the canonical state
+  root, revision rules, greenfield boundary, unified recovery, and purge exclusions.
 - [quickstart.md](quickstart.md) defines the end-to-end validation sequence without creating a second
   daemon for the same user.
 

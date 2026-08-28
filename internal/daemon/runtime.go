@@ -233,12 +233,7 @@ func (runtime *Runtime) Start(ctx context.Context) error {
 
 func (runtime *Runtime) runRecoveryStageHook(ctx context.Context, stage RecoveryStage) error {
 	if hook := runtime.options.RecoveryHooks[stage]; hook != nil {
-		if err := hook(ctx, runtime); err != nil {
-			return err
-		}
-	}
-	if stage == RecoveryTransactions {
-		return runtime.applyAdoptedHostConfiguration(ctx)
+		return hook(ctx, runtime)
 	}
 	return nil
 }

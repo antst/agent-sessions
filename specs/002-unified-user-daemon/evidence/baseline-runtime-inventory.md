@@ -6,10 +6,9 @@ support`, tree `bb61de9f4ba4399cf0c62fb5b7a78a1896251189`). It is descriptive ev
 not a design for another namespace or a compatibility promise for old executables.
 
 The inventory is closed over shipped release roles, their documented service definitions, and their
-durable records. Migration may inspect only these sources and corroborating exact identities. It must
-not discover candidates through broad home-directory walks, process-name substring searches, or a
-scalar process count. Native vendor processes are listed separately because Agent Sessions coordinates
-but does not absorb or own them.
+durable records. It is comparison evidence only: the 0.3 installer does not inspect or adopt these
+sources. Native vendor processes are listed separately because Agent Sessions coordinates but does
+not absorb or own them.
 
 ## 1. Shipped release inventory
 
@@ -63,7 +62,7 @@ authority at baseline.
 ## 3. Native vendor process boundary
 
 These processes may remain external. Their existence does not violate the future one-daemon census,
-and migration/removal must never kill or rewrite them merely because Agent Sessions is changing.
+and install/removal must never kill or rewrite them merely because Agent Sessions is changing.
 
 | ID | Native process family | Agent Sessions relationship |
 |---|---|---|
@@ -97,15 +96,15 @@ in-process calls. SOCK-01 remains the separate central hub listener; SOCK-10 rem
 | STATE-01 | `${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-code-peer}` | Shared bridge root: `native-runtime-path`, `sessions/<key>/state.json` and inboxes, plus legacy global records. Derived in [`internal/bridge/supervisor.go`](../../../internal/bridge/supervisor.go). |
 | STATE-02 | `STATE-01/profiles/<CODEX_HOME-key>/` | Per-Codex-profile `supervisor.json`, interactive owners, retired records, Codex `lanes`, Claude/Grok/Qwen lane records and logs, worktrees, wakes, notices, Grok launches/locks, and cleanup debt. |
 | STATE-03 | `${XDG_STATE_HOME:-$HOME/.local/state}/agent-sessions/agents/<host>/` | PROC-02 authoritative host catalog `sessions.json`, durable name/group projection, preparation journals, cleanup debt, and product lifecycle roots. Derived by [`internal/federator/util.go`](../../../internal/federator/util.go), `DefaultStateDir`. |
-| STATE-04 | `<Claude-config>/sessions/` and product-native profiles | Vendor-owned native registry/profile/transcript state consulted for corroboration; never an Agent Sessions migration or purge target. |
+| STATE-04 | `<Claude-config>/sessions/` and product-native profiles | Vendor-owned native registry/profile/transcript state consulted for live operation; never an Agent Sessions install or purge target. |
 | STATE-05 | `$XDG_RUNTIME_DIR/codex-claude-peer-$UID`, compact `/tmp/ccp-$UID`, and shipped Darwin `TMPDIR` variants | Ephemeral bridge supervisor, session, and lane sockets/locks. The compact-root logic is in [`internal/bridge/runtime.go`](../../../internal/bridge/runtime.go) and [`internal/bridge/supervisor.go`](../../../internal/bridge/supervisor.go). |
 | STATE-06 | `${XDG_RUNTIME_DIR:-system-temp}/peer-federator[-$UID]` | PROC-02 `agent.sock` and instance/registry locks. Derived by [`internal/federator/agent.go`](../../../internal/federator/agent.go), `DefaultRuntimeDir`. |
 | STATE-07 | `<runtime>/agent-sessions-grok-$UID/g-<launch-key>/` | Grok private launch control/leader sockets and launch-owned runtime files. |
 | STATE-08 | Product-selected Qwen runtime plus bounded `qwen-tools-*` roots | Qwen native runtime/events and temporary authenticated archive helper; vendor state remains outside Agent Sessions ownership. |
 
-The authoritative migration-source closure is STATE-01, STATE-02, STATE-03, STATE-05, STATE-06, and
-STATE-07 plus the exact service records below. STATE-04 and vendor-owned portions of STATE-08 are
-corroboration/exclusion boundaries, never broad cleanup targets.
+STATE-01 through STATE-03 and STATE-05 through STATE-07 are obsolete prototype-owned roots. The
+operator removes or archives them before the greenfield 0.3 first install. STATE-04 and vendor-owned
+portions of STATE-08 remain exclusion boundaries and are never cleanup targets.
 
 ## 6. Service inventory
 
@@ -114,9 +113,9 @@ hosts and lane managers are detached or peer/lane-owned processes, not systemd/l
 
 | ID | Platform record | Baseline command/lifecycle | Unified disposition |
 |---|---|---|---|
-| SERVICE-01 | [`deploy/peer-federator/systemd/user/peer-federator-agent.service`](../../../deploy/peer-federator/systemd/user/peer-federator-agent.service) | `peer-federator agent`, restarted on failure | Legacy host-agent migration candidate; replaced by the one standard `agent-sessions` user service. |
-| SERVICE-02 | [`deploy/peer-federator/systemd/user/peer-federator-hub.service`](../../../deploy/peer-federator/systemd/user/peer-federator-hub.service) | `peer-federator hub`, restarted on failure | Replaced independently by `agent-sessions-hub`; never part of host migration. |
-| SERVICE-03 | [`deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example`](../../../deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example) | Example `net.antst.peer-federator.agent` job | Legacy host-agent candidate if installed; replaced by the standard Agent Sessions LaunchAgent. |
+| SERVICE-01 | [`deploy/peer-federator/systemd/user/peer-federator-agent.service`](../../../deploy/peer-federator/systemd/user/peer-federator-agent.service) | `peer-federator agent`, restarted on failure | Obsolete prototype service; the operator removes it before installing the one standard `agent-sessions` user service. |
+| SERVICE-02 | [`deploy/peer-federator/systemd/user/peer-federator-hub.service`](../../../deploy/peer-federator/systemd/user/peer-federator-hub.service) | `peer-federator hub`, restarted on failure | Obsolete prototype service; `agent-sessions-hub` is installed independently. |
+| SERVICE-03 | [`deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example`](../../../deploy/peer-federator/launchd/net.antst.peer-federator.agent.plist.example) | Example `net.antst.peer-federator.agent` job | Obsolete prototype job; the operator removes it before installing the standard Agent Sessions LaunchAgent. |
 | SERVICE-04 | [`deploy/peer-federator/launchd/net.antst.peer-federator.hub.plist.example`](../../../deploy/peer-federator/launchd/net.antst.peer-federator.hub.plist.example) | Example `net.antst.peer-federator.hub` job | Replaced independently by the hub LaunchAgent. |
 
 ## 7. Short-lived command inventory

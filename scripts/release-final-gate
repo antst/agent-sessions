@@ -35,7 +35,7 @@ run_gate source_pointers bash -c \
   'set -euo pipefail; "$1/scripts/release-inventory" verify-source-pointers; cd "$1"; go test ./internal/releaseinstall -run ^TestInstallStagesImmutableReleaseCommitsPointerAndRequiresReadiness$ -count=1' \
   release-source-pointers "$root"
 run_gate quickstart bash -c \
-  'set -euo pipefail; "$1/scripts/test-unified-service"; "$1/scripts/test-unified-peers"; "$1/scripts/test-unified-lane-restart"; "$1/scripts/test-unified-lane-composition"; "$1/scripts/test-unified-migration"' \
+  'set -euo pipefail; "$1/scripts/test-unified-service"; "$1/scripts/test-unified-peers"; "$1/scripts/test-unified-lane-restart"; "$1/scripts/test-unified-lane-composition"' \
   release-quickstart "$root"
 {
   printf 'gate=permissions os=%s derived_from=quickstart\n' "$os_name"

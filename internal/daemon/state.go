@@ -33,23 +33,22 @@ const (
 
 // HostRuntimeRecord is the exact durable identity of one host generation.
 type HostRuntimeRecord struct {
-	SchemaVersion     int              `json:"schema_version"`
-	Generation        uint64           `json:"generation"`
-	RuntimeVersion    string           `json:"runtime_version"`
-	RuntimeIdentity   string           `json:"runtime_identity"`
-	HostID            string           `json:"host_id"`
-	HostName          string           `json:"host_name"`
-	PID               int              `json:"pid"`
-	ProcStart         string           `json:"proc_start"`
-	StrongStart       string           `json:"strong_start"`
-	ControlEndpoint   string           `json:"control_endpoint"`
-	ServiceManager    string           `json:"service_manager"`
-	ServiceUnit       string           `json:"service_unit"`
-	StartedAt         int64            `json:"started_at"`
-	CommittedAt       int64            `json:"committed_at"`
-	State             HostRuntimeState `json:"state"`
-	StateRevision     uint64           `json:"state_revision"`
-	MigrationRevision uint64           `json:"migration_revision"`
+	SchemaVersion   int              `json:"schema_version"`
+	Generation      uint64           `json:"generation"`
+	RuntimeVersion  string           `json:"runtime_version"`
+	RuntimeIdentity string           `json:"runtime_identity"`
+	HostID          string           `json:"host_id"`
+	HostName        string           `json:"host_name"`
+	PID             int              `json:"pid"`
+	ProcStart       string           `json:"proc_start"`
+	StrongStart     string           `json:"strong_start"`
+	ControlEndpoint string           `json:"control_endpoint"`
+	ServiceManager  string           `json:"service_manager"`
+	ServiceUnit     string           `json:"service_unit"`
+	StartedAt       int64            `json:"started_at"`
+	CommittedAt     int64            `json:"committed_at"`
+	State           HostRuntimeState `json:"state"`
+	StateRevision   uint64           `json:"state_revision"`
 }
 
 // Validate checks exact authority, service, revision, and lifecycle fields.
@@ -138,7 +137,6 @@ type DeliveryRecord struct {
 	AcceptedRevision         uint64            `json:"accepted_revision"`
 	AcceptedAt               int64             `json:"accepted_at"`
 	RequestDigest            string            `json:"request_digest"`
-	AdoptedSourceRevision    string            `json:"adopted_source_revision,omitempty"`
 }
 
 // LaneRecord is one daemon-owned durable vendor lane.
@@ -208,7 +206,7 @@ type FederationStateRecord struct {
 	LastErrorCode             string   `json:"last_error_code,omitempty"`
 }
 
-// TransactionRecord is one install, migration, removal, or purge journal.
+// TransactionRecord is one install, removal, or purge journal.
 type TransactionRecord struct {
 	RecordHeader
 	TransactionID string         `json:"transaction_id"`
@@ -314,14 +312,7 @@ func (store *StateStore) compareAndSwapAttachmentCatalog(
 func (store *StateStore) readDeliveryCatalog(ctx context.Context) (deliveryCatalog, statestore.Revision, error) {
 	var catalog deliveryCatalog
 	revision, err := store.records.Read(ctx, "deliveries", &catalog)
-	if err == nil || !os.IsNotExist(err) {
-		return catalog, revision, err
-	}
-	snapshot, adoptionErr := LoadAdoptedState(ctx, store)
-	if adoptionErr != nil {
-		return deliveryCatalog{}, 0, adoptionErr
-	}
-	return deliveryCatalog{Records: cloneLegacyDeliveries(snapshot.Deliveries)}, 0, nil
+	return catalog, revision, err
 }
 
 func (store *StateStore) compareAndSwapDeliveryCatalog(
@@ -335,17 +326,7 @@ func (store *StateStore) compareAndSwapDeliveryCatalog(
 func (store *StateStore) readLaneCatalog(ctx context.Context) (laneCatalog, statestore.Revision, error) {
 	var catalog laneCatalog
 	revision, err := store.records.Read(ctx, "lanes", &catalog)
-	if err == nil || !os.IsNotExist(err) {
-		return catalog, revision, err
-	}
-	snapshot, adoptionErr := LoadAdoptedState(ctx, store)
-	if adoptionErr != nil {
-		return laneCatalog{}, 0, adoptionErr
-	}
-	return laneCatalog{
-		Lanes: cloneMigrationLanes(snapshot.Lanes), Turns: cloneMigrationTurns(snapshot.Turns),
-		Notices: append([]LaneNotice(nil), snapshot.Notices...),
-	}, 0, nil
+	return catalog, revision, err
 }
 
 func (store *StateStore) compareAndSwapLaneCatalog(
@@ -354,6 +335,13 @@ func (store *StateStore) compareAndSwapLaneCatalog(
 	catalog laneCatalog,
 ) (statestore.Revision, error) {
 	return store.records.CompareAndSwap(ctx, "lanes", expected, catalog)
+}
+
+// ReadFederation reads the daemon-owned hub connection state.
+func (store *StateStore) ReadFederation(ctx context.Context) (FederationStateRecord, statestore.Revision, error) {
+	var record FederationStateRecord
+	revision, err := store.records.Read(ctx, "federation/state", &record)
+	return record, revision, err
 }
 
 // ReadDebt reads and validates one exact lifecycle-debt record.
@@ -369,15 +357,6 @@ func (store *StateStore) ReadDebt(ctx context.Context, debtID string) (DebtRecor
 	}
 	if !os.IsNotExist(err) {
 		return DebtRecord{}, 0, err
-	}
-	snapshot, adoptionErr := LoadAdoptedState(ctx, store)
-	if adoptionErr != nil {
-		return DebtRecord{}, 0, adoptionErr
-	}
-	for _, adopted := range snapshot.Debt {
-		if adopted.DebtID == debtID {
-			return adopted, 0, adopted.Validate()
-		}
 	}
 	return DebtRecord{}, 0, os.ErrNotExist
 }

@@ -19,8 +19,6 @@ import (
 )
 
 var runConnectorRelay = bridge.RunDaemonMCPRelay
-var runHostMigrationInspect = daemon.RunHostMigrationInspectCLI
-var runHostMigrationStatus = daemon.RunHostMigrationStatusCLI
 var queryHostAdmin = daemon.QueryAdmin
 
 func main() {
@@ -110,20 +108,6 @@ func runConnectorCommand(command clihelp.CommandDescriptor, remainder []string, 
 }
 
 func runAdministrativeCommand(command clihelp.CommandDescriptor, options clihelp.ParsedOptions, stdout, stderr io.Writer) int {
-	if command.Key == "host.migrate.inspect" {
-		result, err := runHostMigrationInspect(context.Background())
-		if err != nil {
-			return renderAdministrativeFailure(command, options.JSON, err, stdout, stderr)
-		}
-		return renderAdministrativeResult(command, options.JSON, result, stdout, stderr)
-	}
-	if command.Key == "host.migrate.status" {
-		result, err := runHostMigrationStatus(context.Background())
-		if err != nil {
-			return renderAdministrativeFailure(command, options.JSON, err, stdout, stderr)
-		}
-		return renderAdministrativeResult(command, options.JSON, result, stdout, stderr)
-	}
 	if command.Key == "host.purge.inspect" {
 		result, err := daemon.RunHostPurgeInspectCLI(context.Background(), options.Plan)
 		if err != nil {

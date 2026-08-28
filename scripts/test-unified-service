@@ -127,11 +127,8 @@ elif [[ "$platform" != Linux ]]; then
 fi
 [[ -n "$acceptance_root" && -d "$acceptance_root" ]] || fail 'acceptance root is absent'
 
-# The first-migration inventory deliberately includes same-UID legacy roots
-# beneath the system temp directory. Bind that directory to this exact
-# acceptance user before any production install/inspection so ambient host
-# runtimes cannot become candidates. The short child name also keeps Darwin
-# Unix-domain socket paths within the platform sun_path budget.
+# Use an acceptance-owned short temporary root so native sockets remain within
+# Darwin's sun_path budget and no fixture can escape the clean account.
 acceptance_tmp="$acceptance_root/tmp"
 if [[ ! -e "$acceptance_tmp" && ! -L "$acceptance_tmp" ]]; then
 	mkdir "$acceptance_tmp"
@@ -269,7 +266,7 @@ help_json="$($prefix/bin/agent-sessions help --json)"
 python3 -c 'import json,sys
 document=json.load(sys.stdin)
 keys={mode["key"] for mode in document["result"]["modes"]}
-required={"host.status","host.doctor","host.migrate.inspect","host.migrate.status","host.remove.inspect","host.purge.inspect","host.purge.apply"}
+required={"host.status","host.doctor","host.remove.inspect","host.purge.inspect","host.purge.apply"}
 missing=sorted(required-keys)
 if missing:
     raise SystemExit("machine help omitted canonical modes: "+", ".join(missing))' <<<"$help_json" ||

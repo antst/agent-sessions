@@ -112,8 +112,7 @@ type DeliveryEngine struct {
 	records       map[string]DeliveryRecord
 }
 
-// NewDeliveryEngine loads accepted operations and reconciles migration-tagged
-// pending work before admitting new messages.
+// NewDeliveryEngine loads accepted operations before admitting new messages.
 func NewDeliveryEngine(options DeliveryEngineOptions) (*DeliveryEngine, error) {
 	if options.State == nil || options.Attachments == nil {
 		return nil, errors.New("delivery engine requires state and attachment registry")
@@ -140,9 +139,6 @@ func NewDeliveryEngine(options DeliveryEngineOptions) (*DeliveryEngine, error) {
 		for _, record := range catalog.Records {
 			engine.records[record.MessageID] = cloneDeliveryRecord(record)
 		}
-	}
-	if err := engine.ReconcileAdoptedDeliveries(context.Background()); err != nil {
-		return nil, fmt.Errorf("reconcile adopted deliveries: %w", err)
 	}
 	return engine, nil
 }

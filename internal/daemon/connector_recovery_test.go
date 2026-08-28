@@ -186,6 +186,39 @@ func TestDurableConnectorJournalRecordsEveryUnavailableProductAsExactNoop(t *tes
 	}
 }
 
+func TestDurableConnectorCommitRetargetsNativeSourcesToInstalledRelease(t *testing.T) {
+	fixture := newDurableConnectorFixture(t)
+	hooks := fixture.newHooks(t, true)
+	request := releaseinstall.InstallRequest{
+		Version: "1.2.3", ContentIdentity: "sha256:" + strings.Repeat("d", 64),
+		SourceRoot: fixture.sourceRoot, Executable: "agent-sessions",
+	}
+	if err := hooks.Prepare(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	installedRoot := filepath.Join(filepath.Dir(fixture.sourceRoot), "installed-release")
+	if err := os.Rename(fixture.sourceRoot, installedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := hooks.CommitInstalled(context.Background(), releaseinstall.InstalledRelease{
+		Role: releaseinstall.RoleHost, Version: request.Version, ContentIdentity: request.ContentIdentity,
+		Root: installedRoot, Executable: filepath.Join(installedRoot, "bin", "agent-sessions"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.sourceRoot = installedRoot
+	fixture.assertState(t, true)
+	record, err := loadConnectorRecoveryJournal(fixture.journalPath)
+	if err != nil || record.Phase != connectorRecoveryCommitted || record.SourceRoot != installedRoot {
+		t.Fatalf("retargeted connector journal = %+v, %v", record, err)
+	}
+	for _, product := range record.Products {
+		if product.Provenance.SourceRoot != installedRoot {
+			t.Errorf("%s source root = %q, want %q", product.Product, product.Provenance.SourceRoot, installedRoot)
+		}
+	}
+}
+
 func TestRunHostInstallCLIRecoversCrashedConnectorsBeforeReadingIndependentNewSource(t *testing.T) {
 	fixture := newDurableConnectorFixture(t)
 	prepared := fixture.newHooks(t, true)

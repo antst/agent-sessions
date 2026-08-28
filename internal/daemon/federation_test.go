@@ -12,45 +12,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/statestore"
 )
-
-func TestAdoptedFederationSeedUsesCurrentReadyAdvertisement(t *testing.T) {
-	prior := FederationStateRecord{
-		RecordHeader: RecordHeader{
-			SchemaVersion: HostRuntimeSchemaVersion, Revision: 1, Generation: 1,
-			CreatedAt: 100, UpdatedAt: 100,
-		},
-		HostID: "host-a", HostName: "host-a", HubAddress: "hub.example.test:7443",
-		ConnectionGeneration: 1, ProtocolVersion: federation.ProtocolVersion, State: "reconnecting",
-		AdvertisedProducts: []string{"claude", "codex", "grok", "qwen"},
-	}
-	products := []string{"codex", "qwen"}
-	capabilities := []string{"codex-lane", "qwen-lane"}
-	runtimeIdentity := "sha256:" + strings.Repeat("a", 64)
-	normalized := normalizeAdoptedFederationSeed(
-		prior, 0, products, capabilities, "0.3.0", runtimeIdentity,
-	)
-	if err := validateFederationStateRecord(normalized); err != nil {
-		t.Fatalf("normalized adopted federation seed: %v", err)
-	}
-	if !reflect.DeepEqual(normalized.AdvertisedProducts, products) ||
-		!reflect.DeepEqual(normalized.AdvertisedCapabilities, capabilities) ||
-		normalized.AdvertisedRuntimeVersion != "0.3.0" ||
-		normalized.AdvertisedRuntimeIdentity != runtimeIdentity {
-		t.Fatalf("normalized adopted advertisement = %+v", normalized)
-	}
-
-	ordinary := normalizeAdoptedFederationSeed(
-		prior, statestore.Revision(1), products, capabilities, "0.3.0", runtimeIdentity,
-	)
-	if !reflect.DeepEqual(ordinary, prior) {
-		t.Fatalf("ordinary federation revision was implicitly repaired: %+v", ordinary)
-	}
-	if err := validateFederationStateRecord(ordinary); err == nil {
-		t.Fatal("invalid ordinary federation revision did not remain fail-closed")
-	}
-}
 
 func TestEmbeddedFederationAdvertisesStableHostIdentityAndOnlyReadyProducts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

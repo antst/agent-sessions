@@ -24,7 +24,7 @@ func TestHostRuntimeRecordSchemaRoundTrip(t *testing.T) {
 	sort.Strings(gotKeys)
 	wantKeys := []string{
 		"committed_at", "control_endpoint", "generation", "host_id", "host_name",
-		"migration_revision", "pid", "proc_start", "runtime_identity", "runtime_version",
+		"pid", "proc_start", "runtime_identity", "runtime_version",
 		"schema_version", "service_manager", "service_unit", "started_at", "state",
 		"state_revision", "strong_start",
 	}
@@ -117,22 +117,21 @@ func TestHostRuntimeRecordAcceptsSupportedUserServiceManagers(t *testing.T) {
 
 func validHostRuntimeRecord() HostRuntimeRecord {
 	return HostRuntimeRecord{
-		SchemaVersion:     HostRuntimeSchemaVersion,
-		Generation:        7,
-		RuntimeVersion:    "0.3.0",
-		RuntimeIdentity:   "sha256:runtime",
-		HostID:            "host-0123456789abcdef",
-		HostName:          "builder",
-		PID:               4242,
-		ProcStart:         "123456789",
-		StrongStart:       "boot-id:123456789",
-		ControlEndpoint:   "/tmp/agent-sessions-1000/daemon.sock",
-		ServiceManager:    "systemd-user",
-		ServiceUnit:       "agent-sessions.service",
-		StartedAt:         1_787_600_000_000,
-		CommittedAt:       1_787_600_000_100,
-		State:             HostRuntimeReady,
-		StateRevision:     11,
-		MigrationRevision: 3,
+		SchemaVersion:   HostRuntimeSchemaVersion,
+		Generation:      7,
+		RuntimeVersion:  "0.3.0",
+		RuntimeIdentity: "sha256:runtime",
+		HostID:          "host-0123456789abcdef",
+		HostName:        "builder",
+		PID:             4242,
+		ProcStart:       "123456789",
+		StrongStart:     "boot-id:123456789",
+		ControlEndpoint: "/tmp/agent-sessions-1000/daemon.sock",
+		ServiceManager:  "systemd-user",
+		ServiceUnit:     "agent-sessions.service",
+		StartedAt:       1_787_600_000_000,
+		CommittedAt:     1_787_600_000_100,
+		State:           HostRuntimeReady,
+		StateRevision:   11,
 	}
 }

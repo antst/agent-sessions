@@ -35,10 +35,8 @@ print(json.dumps(value,separators=(",",":")) if isinstance(value,(dict,list,bool
 [[ $(uname -s) == Linux ]] || fail 'the installed systemd-user hub cell is Linux-only'
 
 if [[ ${AGENT_SESSIONS_NESTED_HUB_SYSTEMD:-0} != 1 && ${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0} != 1 ]]; then
-	# Keep the disposable ancestor role-neutral. The host's closed legacy
-	# inventory deliberately rejects every path containing a hub boundary, so
-	# naming the synthetic HOME after the hub would make its otherwise valid
-	# legacy-state candidates appear to cross that boundary.
+	# Keep the disposable ancestor role-neutral so host and hub fixture roots
+	# remain visibly disjoint throughout the installed-service acceptance.
 	outer_root=$(mktemp -d "${TMPDIR:-/tmp}/unified-role-service.XXXXXX")
 	chmod 0700 "$outer_root"
 	cleanup_outer() {

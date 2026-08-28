@@ -154,13 +154,13 @@ current retryable state rather than duplicating work.
 ## Operation inventory
 
 This is the inventory of operations accepted by the running daemon endpoint. Offline install,
-first-migration mutation, rollback, removal continuation after service stop, and explicit purge invoke
+rollback, removal continuation after service stop, and explicit purge invoke
 the same implementation packages directly from the canonical executable under the install lock. They
 do not start a daemon or send mutation requests to an unavailable daemon endpoint.
 
 | Operation | Allowed role | Contract |
 |---|---|---|
-| `runtime.status` | admin, service | Metadata-only runtime, adapter, lane, federation, migration, and debt state |
+| `runtime.status` | admin, service | Metadata-only runtime, adapter, lane, federation, and debt state |
 | `runtime.doctor` | admin | Read-only readiness and cause-specific remediation |
 | `attachment.prepare` | launcher | Durably reserve launch identity, preferences, capability hash, and expected native evidence |
 | `attachment.adopt` | launcher, hook | Atomically bind a late-selected authoritative native session ID |
@@ -181,7 +181,6 @@ do not start a daemon or send mutation requests to an unavailable daemon endpoin
 | `lane.interrupt` | launcher, connector | Interrupt one exact running native turn |
 | `lane.collect` | launcher, connector | Idempotently advance and return the durable collection cursor |
 | `lane.archive` | launcher, connector | Archive through the exact product-native contract |
-| `migration.inspect` | admin, service | Read-only exact legacy inventory and blockers |
 | `remove.inspect` | admin, service | Enumerate exact active blockers and removal targets |
 
 Connector role operations are further limited by the existing attested session, product, groups,

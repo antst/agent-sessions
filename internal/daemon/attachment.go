@@ -242,33 +242,8 @@ func NewAttachmentRegistry(options AttachmentRegistryOptions) (*AttachmentRegist
 		for _, preference := range catalog.Preferences {
 			registry.preferences[attachmentPreferenceKey(preference.Product, preference.SessionID)] = cloneAttachmentPreferences(preference)
 		}
-	} else {
-		if adoptionErr := registry.loadAdoptedAttachmentPreferences(context.Background()); adoptionErr != nil {
-			return nil, adoptionErr
-		}
 	}
 	return registry, nil
-}
-
-func (registry *AttachmentRegistry) loadAdoptedAttachmentPreferences(ctx context.Context) error {
-	adopted, _, err := registry.state.ReadSessionCatalog(ctx)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("load adopted attachment preferences: %w", err)
-	}
-	for _, session := range adopted.Sessions {
-		preference := AttachmentPreferences{
-			SessionID: session.SessionID, Product: session.Product, Kind: session.Kind,
-			Groups: sortedUniqueStrings(append(
-				append([]string(nil), session.ExplicitGroups...), session.InheritedGroups...,
-			)),
-			PermissionMode: session.PermissionMode, Revision: 1, UpdatedAt: session.UpdatedAt,
-		}
-		registry.preferences[attachmentPreferenceKey(preference.Product, preference.SessionID)] = preference
-	}
-	return nil
 }
 
 // Prepare commits launch intent before the vendor process can become managed.

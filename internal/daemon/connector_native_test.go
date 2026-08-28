@@ -321,6 +321,42 @@ func TestGrokConnectorPrepareAcceptsInstalledProductWithoutPriorConnector(t *tes
 	}
 }
 
+func TestGrokConnectorInventoryIgnoresWorkspaceMCPRow(t *testing.T) {
+	root := connectorReleaseFixture(t)
+	userRoot := filepath.Join(root, "grok")
+	workspaceServer := map[string]any{
+		"name": "agent_sessions", "transport": "stdio", "target": filepath.Join(root, "scripts", "native-entry"),
+		"source": map[string]any{"type": "mcpJson", "path": filepath.Join(root, ".mcp.json")},
+	}
+	pluginServer := map[string]any{
+		"name": "agent_sessions", "transport": "stdio", "target": filepath.Join(userRoot, "scripts", "native-entry"),
+		"source": map[string]any{"type": "plugin", "plugin_name": grokConnectorName, "path": userRoot},
+	}
+	body, err := json.Marshal(map[string]any{
+		"plugins": []any{map[string]any{
+			"name": grokConnectorName, "scope": "user", "path": userRoot, "enabled": true,
+			"provides": map[string]any{"skills": 2, "mcpServers": 1},
+		}},
+		"mcpServers": []any{workspaceServer, pluginServer},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeConnectorRunner{output: func(_ string, args []string) ([]byte, error) {
+		if !reflect.DeepEqual(args, []string{"inspect", "--json"}) {
+			return nil, errors.New("unexpected Grok inventory call")
+		}
+		return body, nil
+	}}
+	state, err := inspectGrokConnector(context.Background(), runner, "grok", userRoot)
+	if err != nil || !state.present || !state.enabled {
+		t.Fatalf("mixed workspace/plugin inventory = %+v, %v", state, err)
+	}
+	if err := VerifyGrokConnectorInventory(body, userRoot); err != nil {
+		t.Fatalf("verify mixed workspace/plugin inventory: %v", err)
+	}
+}
+
 func TestQwenConnectorMutationRestoresExactPriorSource(t *testing.T) {
 	root := connectorReleaseFixture(t)
 	home := filepath.Join(t.TempDir(), "qwen-home")

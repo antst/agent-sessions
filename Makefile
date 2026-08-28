@@ -14,13 +14,9 @@ GOLANGCI_LINT ?= $(TOOLS_BIN_DIR)/golangci-lint
 PREFIX ?= $(HOME)/.local
 INSTALL_ROOT ?= $(PREFIX)/libexec/agent-sessions
 MARKETPLACE ?= agent-sessions
-LEGACY_MARKETPLACE ?= codex-messaging
 PLUGIN ?= agent-sessions
-LEGACY_CODEX_PLUGIN ?= claude-code-peer
 CLAUDE_MARKETPLACE ?= agent-sessions
-LEGACY_CLAUDE_MARKETPLACE ?= codex-messaging
 CLAUDE_PLUGIN ?= agent-sessions
-LEGACY_CLAUDE_PLUGIN ?= codex-peer
 CLAUDE_SCOPE ?= user
 CLAUDE_PLUGIN_VERSION := $(shell sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' claude/.claude-plugin/plugin.json | head -1)
 CLAUDE_RELEASE_ROOT ?= $(PREFIX)/share/agent-sessions/claude-marketplaces
@@ -139,7 +135,6 @@ unified-live-contracts:
 	./scripts/test-unified-peers
 	./scripts/test-unified-lane-composition
 	./scripts/test-unified-lane-restart
-	./scripts/test-unified-migration
 	./scripts/test-unified-stress
 
 unified-service-contract:

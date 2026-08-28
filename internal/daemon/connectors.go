@@ -586,6 +586,22 @@ func (hooks *HostInstallHooks) Commit(ctx context.Context) error {
 	return nil
 }
 
+// CommitInstalled retargets durable connector provenance from the validated
+// invocation source to the immutable selected release, then commits it. The
+// non-durable test form has no persistent source pointer and commits directly.
+func (hooks *HostInstallHooks) CommitInstalled(
+	ctx context.Context,
+	release releaseinstall.InstalledRelease,
+) error {
+	if hooks.journalPath == "" {
+		return hooks.Commit(ctx)
+	}
+	if err := hooks.retargetDurableSource(release); err != nil {
+		return err
+	}
+	return hooks.commitDurable(ctx)
+}
+
 // Rollback restores every prepared connector in reverse order.
 func (hooks *HostInstallHooks) Rollback(ctx context.Context) error {
 	if hooks.journalPath != "" {

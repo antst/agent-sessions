@@ -14,7 +14,7 @@ func TestCanonicalModesAliasesAndBinaryRolesAreComplete(t *testing.T) {
 	wantKeys := make([]string, 0, 60)
 	wantKeys = append(wantKeys,
 		"host.daemon", "host.help", "host.status", "host.doctor",
-		"host.migrate.inspect", "host.migrate.status", "host.remove.inspect",
+		"host.remove.inspect",
 		"host.purge.inspect", "host.purge.apply", "host.install", "host.remove.apply", "host.connector.install", "host.connector.remove", "host.lane",
 		"hub.serve", "hub.status", "hub.doctor", "hub.remove.inspect",
 		"hub.purge.inspect", "hub.purge.apply", "hub.install", "hub.remove.apply",
@@ -188,16 +188,14 @@ func TestEnvironmentJSONAndNumericExitContractsAreExact(t *testing.T) {
 		t.Errorf("JSON envelope = %+v", contract.JSONEnvelope)
 	}
 	wantResults := map[string][]string{
-		"help":            {"binaries", "modes"},
-		"status":          {"runtime_version", "runtime_identity", "generation", "pid", "proc_start", "endpoint", "service", "products", "attachments", "lanes", "federation", "migration", "debt"},
-		"doctor":          {"healthy", "checks"},
-		"hub.status":      {"runtime_version", "runtime_identity", "pid", "proc_start", "listener", "service", "protocol_version", "connected_hosts", "routing", "debt"},
-		"hub.doctor":      {"healthy", "checks"},
-		"migrate.inspect": {"revision", "candidates", "blockers", "debt"},
-		"migrate.status":  {"transaction", "state", "next_action"},
-		"remove.inspect":  {"role", "revision", "blockers", "targets", "preserved"},
-		"purge.inspect":   {"role", "plan_revision", "targets", "exclusions"},
-		"purge.apply":     {"role", "plan_revision", "deleted", "debt"},
+		"help":           {"binaries", "modes"},
+		"status":         {"runtime_version", "runtime_identity", "generation", "pid", "proc_start", "endpoint", "service", "products", "attachments", "lanes", "federation", "debt"},
+		"doctor":         {"healthy", "checks"},
+		"hub.status":     {"runtime_version", "runtime_identity", "pid", "proc_start", "listener", "service", "protocol_version", "connected_hosts", "routing", "debt"},
+		"hub.doctor":     {"healthy", "checks"},
+		"remove.inspect": {"role", "revision", "blockers", "targets", "preserved"},
+		"purge.inspect":  {"role", "plan_revision", "targets", "exclusions"},
+		"purge.apply":    {"role", "plan_revision", "deleted", "debt"},
 	}
 	if len(contract.JSONResultFields) != len(wantResults) {
 		t.Errorf("JSON result schema count = %d, want %d", len(contract.JSONResultFields), len(wantResults))

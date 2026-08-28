@@ -113,7 +113,7 @@ func TestOpenExistingIsReadOnlyAndPreservesMissingRoot(t *testing.T) {
 
 	root := filepath.Join(parent, "state")
 	store := openStoreTest(t, root, Options{})
-	if _, err := store.CompareAndSwap(context.Background(), "migration/current", 0, storeTestRecord{Name: "selected"}); err != nil {
+	if _, err := store.CompareAndSwap(context.Background(), "records/current", 0, storeTestRecord{Name: "selected"}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(root)
@@ -125,7 +125,7 @@ func TestOpenExistingIsReadOnlyAndPreservesMissingRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got storeTestRecord
-	if _, err := opened.Read(context.Background(), "migration/current", &got); err != nil || got.Name != "selected" {
+	if _, err := opened.Read(context.Background(), "records/current", &got); err != nil || got.Name != "selected" {
 		t.Fatalf("existing store read = %+v, %v", got, err)
 	}
 	after, err := os.Stat(root)

@@ -82,15 +82,15 @@ GOOS=darwin GOARCH=arm64 make build-release-platform RELEASE_VERSION="$VERSION" 
 
 ## Installation and upgrade (`I/U`)
 
-Before mutation, require a clean source tree and exact migration inventory for every legacy
-authority, live attachment, lane, native adapter resource, service, endpoint, and cleanup debt.
-Installation must refuse named blockers and never infer safety from scalar counts.
+Before a greenfield 0.3 first install, require a clean source tree and an operator-established clean
+Agent Sessions boundary: no pre-unification peer, lane, service, runtime, or Agent Sessions-owned
+prototype root remains. The product contains no compatibility inventory or adoption path.
 
 | ID | Platforms | Assertion |
 |---|---|---|
 | U-01 | Linux, macOS | Clean install produces exact-revision role links, service assets, and plugin payloads. |
 | U-02 | Linux, macOS | Same-revision reinstall is idempotent and preserves plugin data. |
-| U-03 | Linux, macOS | Upgrade refuses named active attachment/lane or migration blockers before release mutation. |
+| U-03 | Linux, macOS | Unified upgrade refuses named active attachment/lane blockers before release mutation. |
 | U-04 | Linux, macOS | Host or hub install does not stop/reload the other role or an unrelated peer. |
 | U-05 | Linux, macOS | Codex hook/project trust prompts are surfaced; automation never approves them. |
 | U-06 | Linux, macOS | Grok plugin trust is explicit; validation precedes replacement of only `agent-sessions`. |
@@ -179,7 +179,7 @@ Installation must refuse named blockers and never infer safety from scalar count
 | Q-07 | Linux, macOS | Attested Qwen MCP discovery, direct send/reply, atomic multicast, named-group broadcast, idle/busy delivery, and deduplication work; copied environment, bare Qwen, stale process, wrong profile, wrong capability, and model-supplied ID fail closed. |
 | Q-08 | Linux, macOS | Agent restart republishes the same live peer without restarting Qwen or duplicating the service/participant. |
 | Q-09 | Linux, macOS | Normal exit, Ctrl+C, SIGTERM, wrapper/native crash, failure before/after publication, recycled PID, replaced file/socket, and legacy symlink cleanup remove only exact owned state and retain retryable debt on ambiguity. |
-| Q-10 | Linux, macOS | Ordinary→managed→ordinary transcript use requires no credential, settings, extension, skill, or transcript migration and leaves no Agent Sessions authority in the ordinary attachment. |
+| Q-10 | Linux, macOS | Ordinary→managed→ordinary transcript use requires no credential, settings, extension, skill, or transcript transfer and leaves no Agent Sessions authority in the ordinary attachment. |
 
 ## Pairwise peer messaging (`T/X`)
 

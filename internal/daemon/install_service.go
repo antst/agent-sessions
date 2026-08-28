@@ -113,7 +113,7 @@ func newInstalledHostService(prefix string) (*installedHostService, error) {
 	runner := servicecontrol.OSCommandRunner{}
 	return &installedHostService{
 		descriptor: descriptor, controller: servicecontrol.NewController(runner), runner: runner,
-		activity: productionLegacyServiceActivity,
+		activity: installedHostServiceActivity,
 	}, nil
 }
 
@@ -149,7 +149,7 @@ func (service *installedHostService) Stop(ctx context.Context) error {
 	}
 	observe := service.activity
 	if observe == nil {
-		observe = productionLegacyServiceActivity
+		observe = installedHostServiceActivity
 	}
 	manager, unit := installedHostServiceIdentity(service.descriptor)
 	activity, observeErr := observe(ctx, manager, unit)
@@ -160,6 +160,48 @@ func (service *installedHostService) Stop(ctx context.Context) error {
 		return errors.Join(stopErr, fmt.Errorf("reobserve failed host service stop: %w", observeErr))
 	}
 	return stopErr
+}
+
+func installedHostServiceActivity(ctx context.Context, manager, unit string) (string, error) {
+	var command *exec.Cmd
+	switch manager {
+	case "systemd-user":
+		command = exec.CommandContext(ctx, "systemctl", "--user", "show", unit,
+			"--property=LoadState", "--property=ActiveState", "--property=MainPID", "--no-pager") // #nosec G204 -- exact closed unit.
+	case "launchd-user":
+		command = exec.CommandContext(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), unit)) //nolint:gosec // Exact closed label.
+	default:
+		return "unknown", fmt.Errorf("unsupported host service manager %q", manager)
+	}
+	output, err := command.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return "absent", nil
+		}
+		return "unknown", err
+	}
+	if manager == "launchd-user" {
+		lower := strings.ToLower(string(output))
+		if strings.Contains(lower, "state = running") || strings.Contains(lower, "pid =") {
+			return "active", nil
+		}
+		return "inactive", nil
+	}
+	properties := make(map[string]string)
+	for _, line := range strings.Split(string(output), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if ok {
+			properties[strings.TrimSpace(name)] = strings.TrimSpace(value)
+		}
+	}
+	if properties["LoadState"] == "not-found" {
+		return "absent", nil
+	}
+	if properties["ActiveState"] == "active" || properties["MainPID"] != "" && properties["MainPID"] != "0" {
+		return "active", nil
+	}
+	return "inactive", nil
 }
 
 func installedHostServiceIdentity(descriptor servicecontrol.RoleDescriptor) (string, string) {

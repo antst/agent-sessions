@@ -104,7 +104,7 @@ func TestVerifyGrokPluginInspectionRequiresExactUserPluginAndMCP(t *testing.T) {
 			mutate: func(inspection map[string]any) {
 				inspection["mcpServers"].([]any)[0].(map[string]any)["source"].(map[string]any)["type"] = "mcpJson"
 			},
-			want: "not sourced from the expected user plugin",
+			want: "0 agent_sessions MCP rows",
 		},
 		{
 			name: "duplicate plugin",

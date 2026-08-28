@@ -17,8 +17,6 @@ Generated from `internal/clihelp`; edit the descriptor, not this table.
 | `host.help` | `agent-sessions help [MODE]` | public | false | render the canonical command contract |
 | `host.install` | `agent-sessions lifecycle install --role host --source-root ROOT --prefix PREFIX --version VERSION` | service-internal | false | install or upgrade only the unified host role transaction |
 | `host.lane` | `agent-sessions lane --host HOST --product PRODUCT -- COMMAND [ARGS...]` | public | true | run one lane operation through the connected host daemon |
-| `host.migrate.inspect` | `agent-sessions migrate inspect` | public | true | inspect exact legacy candidates and blockers |
-| `host.migrate.status` | `agent-sessions migrate status` | public | true | show the migration journal and retry action |
 | `host.purge.apply` | `agent-sessions purge apply` | public | false | apply an exact host purge plan |
 | `host.purge.inspect` | `agent-sessions purge inspect` | public | false | create or inspect a revision-bound host purge plan |
 | `host.remove.apply` | `agent-sessions lifecycle remove --role host --prefix PREFIX` | service-internal | false | remove only the quiescent unified host role transaction |

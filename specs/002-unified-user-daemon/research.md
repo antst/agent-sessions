@@ -72,7 +72,7 @@ runs and owns authority, not the established vendor behavior.
 ## Decision 3: One local socket; no loopback IPC between daemon modules
 
 **Decision**: Expose one private Unix socket for external local clients. In-process routing, lane,
-adapter, migration, and federation modules call shared Go APIs directly. The socket multiplexes
+adapter, lifecycle, and federation modules call shared Go APIs directly. The socket multiplexes
 administrative clients, launchers/hooks, and vendor-required connectors through role-scoped requests.
 
 **Rationale**: The existing host agent already provides a local control socket in
@@ -158,12 +158,12 @@ operations can be retried independently. The daemon serializes authoritative mut
 **Rationale**: Existing catalog, preparations, lane states, wakes, notices, inboxes, and cleanup debt
 already have atomic-file semantics in [`internal/federator/groups.go`](../../internal/federator/groups.go),
 [`internal/federator/registration.go`](../../internal/federator/registration.go), and
-[`internal/bridge`](../../internal/bridge). A database would add a second migration problem without
+[`internal/bridge`](../../internal/bridge). A database would add a second schema-evolution problem without
 solving the observed process-lifecycle defect.
 
 **Alternatives considered**:
 
-- SQLite or an embedded key-value database: rejected as unnecessary migration and dependency risk.
+- SQLite or an embedded key-value database: rejected as unnecessary schema-evolution and dependency risk.
 - One monolithic JSON snapshot: rejected because unrelated high-frequency operations would contend and
   one damaged record would affect the entire estate.
 - Continue using independent bridge and host-agent roots: rejected because they encode split ownership.
@@ -196,7 +196,7 @@ immutable same-filesystem release staging, independent stable host and hub curre
 role-specific crash-recoverable transaction journals,
 verified connector preparation, one service-manager restart transaction, successor readiness proof,
 and exact rollback to the previous pointer if readiness fails. One release-transaction engine serves
-both host and hub; role hooks select host connectors/migration or hub configuration/readiness without
+both host and hub; role hooks select host connectors or hub configuration/readiness without
 sharing invocation, current selection, lock, rollback decision, or service lifetime. Immutable release
 layout is role-owned as well, so removal or garbage collection never needs cross-role reference logic.
 
@@ -213,39 +213,25 @@ daemons concurrently.
 - Require a manual restart after every install: rejected because the clarified contract requires one
   validated installer-managed restart.
 
-## Decision 10: Treat first migration separately from steady upgrades
+## Decision 10: Make version 0.3 a greenfield boundary
 
-**Decision**: First migration inventories every known legacy state/root and exact live owner. The
-operator establishes a maintenance window by closing every managed legacy peer and lane, explicitly
-stopping each responsive legacy supervisor, product manager, and federation authority through its old
-supported lifecycle, and preventing any new legacy launch until installation completes. The installer
-fails closed naming any live authority even when it reports zero shims, and never stops, signals, or
-restarts legacy authority. Only after proving all such authorities absent does it adopt durable Agent
-Sessions state, retire exact legacy artifacts, and start the unified authority. A pre-ready failure
-leaves both unified candidate and legacy authorities stopped, restores only installer-changed
-release/state/connector/service surfaces, and directs either a unified-install retry or a manual old
-supported relaunch. It implements neither live handoff nor a compatibility drain protocol. Steady-state
-upgrades after unification never require supported native interactive sessions to close.
+**Decision**: Do not ship any pre-unification inventory, adoption, drain, retirement, fallback, or
+state-conversion subsystem. The operator stops the old Agent Sessions stack and removes or archives
+its Agent Sessions-owned state and install roots before first installation. Vendor-owned profiles,
+credentials, transcripts, and native history remain untouched. Once 0.3 is installed, ordinary
+steady-state upgrade and rollback preserve only the unified schemas.
 
-**Rationale**: Existing installations can contain supervisors, shims, product hosts, lane managers,
-and a host federation agent under several runtime roots. A stale scalar count caused the immediate
-upgrade deadlock that motivated this redesign. The software is not released and its three deployed
-hosts are operator-controlled, so a documented quiescence prerequisite closes the real migration need
-without inventing a one-use live handoff or compatibility drain protocol. Migration still uses exact
-process and filesystem identity primitives rather than trusting old counts or names, while leaving
-legacy lifecycle authority with the operator.
+**Rationale**: The software is unreleased and effectively deployed on three operator-controlled
+hosts. A large one-use compatibility subsystem created more lifecycle and identity failure modes than
+the clean reinstall it attempted to avoid.
 
 **Alternatives considered**:
 
-- Stop or signal corroborated legacy processes during install: rejected because the maintenance-window
-  contract assigns old supported lifecycle actions to the operator and makes any remaining live
-  authority a fail-closed blocker.
-- Implement live re-registration or handoff from every legacy runtime: rejected as one-use complexity
-  for an unreleased, operator-controlled deployment.
-- Let old processes drain indefinitely beside the daemon: rejected because it preserves mixed-version
-  authority.
-- Treat stale count-only state as a permanent blocker: rejected because absent owners are provable and
-  must not deadlock migration.
+- Inventory and convert every historical root: rejected as unnecessary compatibility machinery.
+- Live re-registration or drain from old processes: rejected as one-use complexity that violates the
+  single-authority goal.
+- Run old and new authorities together: rejected because it preserves the defect class this feature
+  exists to remove.
 
 ## Decision 11: Embed the host federation agent; preserve the hub protocol
 
@@ -309,8 +295,8 @@ requires a uniform, retryable lifecycle and prevents removal from becoming vendo
 ## Decision 14: Preserve the existing validation matrix and add topology/service discriminators
 
 **Decision**: Retain every existing peer, lane, group, resume, archive, cleanup, and federation test.
-Add exact process census, daemon-down behavior, accepted-operation restart injection, split-runtime
-migration, systemd/launchd lifecycle, optional-product, and install rollback tests. Live acceptance uses
+Add exact process census, daemon-down behavior, accepted-operation restart injection, clean first-install,
+systemd/launchd lifecycle, optional-product, and install rollback tests. Live acceptance uses
 the one installed daemon for that user; unit tests instantiate components in-process and do not create a
 second long-lived daemon.
 

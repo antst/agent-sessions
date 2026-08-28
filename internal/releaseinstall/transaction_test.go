@@ -1316,7 +1316,7 @@ func TestPreflightSourceSwapCannotRedirectStagingReads(t *testing.T) {
 
 func TestPrepareFailureRollsBackToDurableTerminalWithoutServiceTransition(t *testing.T) {
 	fixture := newTransactionFixture(t, RoleHost)
-	fixture.hooks.prepareErr = errors.New("prepared legacy shutdown failed after durable selection")
+	fixture.hooks.prepareErr = errors.New("prepared role hook failed after durable selection")
 	if _, err := fixture.engine.Install(context.Background(), fixture.release("1.2.3", "prepare-fail", "agent-sessions")); err == nil {
 		t.Fatal("prepare failure reported success")
 	}
@@ -1332,7 +1332,7 @@ func TestPrepareFailureRollsBackToDurableTerminalWithoutServiceTransition(t *tes
 	}
 }
 
-func TestRollbackRecoveryNeverStartsCandidateBesideRestoredLegacyAuthority(t *testing.T) {
+func TestRollbackRecoveryNeverStartsCandidateBesideRestoredPriorAuthority(t *testing.T) {
 	for _, test := range []struct {
 		name             string
 		crashRollingBack bool
@@ -1350,9 +1350,9 @@ func TestRollbackRecoveryNeverStartsCandidateBesideRestoredLegacyAuthority(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			tracker := &authorityTracker{legacy: 1, maximum: 1}
+			tracker := &authorityTracker{prior: 1, maximum: 1}
 			service := &trackedRoleService{tracker: tracker}
-			hooks := &migrationRollbackHooks{tracker: tracker, failRollbackOnce: test.failRollbackOnce}
+			hooks := &priorAuthorityRollbackHooks{tracker: tracker, failRollbackOnce: test.failRollbackOnce}
 			engine, err := NewEngine(EngineOptions{Layout: layout, Service: service, Hooks: hooks})
 			if err != nil {
 				t.Fatal(err)
@@ -1360,7 +1360,7 @@ func TestRollbackRecoveryNeverStartsCandidateBesideRestoredLegacyAuthority(t *te
 			if test.crashRollingBack {
 				engine.SetCrashPoint(PhaseRollingBack)
 			}
-			request := createReleaseSource(t, filepath.Join(root, "source"), "1.2.3", "migration", "agent-sessions")
+			request := createReleaseSource(t, filepath.Join(root, "source"), "1.2.3", "prior-authority", "agent-sessions")
 			if _, err := engine.Install(context.Background(), request); err == nil {
 				t.Fatal("candidate readiness failure reported success")
 			}
@@ -1383,14 +1383,14 @@ func TestRollbackRecoveryNeverStartsCandidateBesideRestoredLegacyAuthority(t *te
 			if !reflect.DeepEqual(service.calls, callsBefore) {
 				t.Fatalf("terminal rollback retry started a candidate: %q -> %q", callsBefore, service.calls)
 			}
-			if tracker.maximum > 1 || tracker.legacy != 1 || tracker.candidate != 0 {
+			if tracker.maximum > 1 || tracker.prior != 1 || tracker.candidate != 0 {
 				t.Fatalf("authority overlap/terminal state = %+v", tracker)
 			}
 		})
 	}
 }
 
-func TestRoleClassifiedPostAuthorityFailuresRollForwardWithoutRestoringLegacy(t *testing.T) {
+func TestRoleClassifiedPostAuthorityFailuresRollForwardWithoutRestoringPriorAuthority(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		readyErrOnce  bool
@@ -1399,7 +1399,7 @@ func TestRoleClassifiedPostAuthorityFailuresRollForwardWithoutRestoringLegacy(t 
 	}{
 		{name: "readiness fails after authority commit", readyErrOnce: true},
 		{name: "role commit fails after ready", commitErrOnce: true},
-		{name: "classifier uncertainty fails forward", readyErrOnce: true, classifierErr: errors.New("migration journal unavailable")},
+		{name: "classifier uncertainty fails forward", readyErrOnce: true, classifierErr: errors.New("role journal unavailable")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := releaseTestTempDir(t)
@@ -1921,12 +1921,12 @@ func (hooks *preflightRoleHooks) Preflight(ctx context.Context, _ InstallRequest
 
 type authorityTracker struct {
 	candidate int
-	legacy    int
+	prior     int
 	maximum   int
 }
 
 func (tracker *authorityTracker) observe() {
-	if total := tracker.candidate + tracker.legacy; total > tracker.maximum {
+	if total := tracker.candidate + tracker.prior; total > tracker.maximum {
 		tracker.maximum = total
 	}
 }
@@ -1973,34 +1973,34 @@ func (*trackedRoleService) VerifyCandidate(context.Context, InstalledRelease) er
 	return errors.New("candidate is not already verified")
 }
 
-type migrationRollbackHooks struct {
+type priorAuthorityRollbackHooks struct {
 	tracker          *authorityTracker
 	failRollbackOnce bool
 }
 
-func (hooks *migrationRollbackHooks) Prepare(context.Context, InstallRequest) error {
-	hooks.tracker.legacy = 0
+func (hooks *priorAuthorityRollbackHooks) Prepare(context.Context, InstallRequest) error {
+	hooks.tracker.prior = 0
 	hooks.tracker.observe()
 	return nil
 }
 
-func (*migrationRollbackHooks) Ready(context.Context, InstalledRelease) error {
+func (*priorAuthorityRollbackHooks) Ready(context.Context, InstalledRelease) error {
 	return errors.New("candidate is not ready")
 }
 
-func (*migrationRollbackHooks) Commit(context.Context) error { return nil }
+func (*priorAuthorityRollbackHooks) Commit(context.Context) error { return nil }
 
-func (hooks *migrationRollbackHooks) Rollback(context.Context) error {
+func (hooks *priorAuthorityRollbackHooks) Rollback(context.Context) error {
 	if hooks.failRollbackOnce {
 		hooks.failRollbackOnce = false
-		return errors.New("legacy restore is temporarily unavailable")
+		return errors.New("prior role restore is temporarily unavailable")
 	}
-	hooks.tracker.legacy = 1
+	hooks.tracker.prior = 1
 	hooks.tracker.observe()
 	return nil
 }
 
-func (*migrationRollbackHooks) Remove(context.Context) error { return nil }
+func (*priorAuthorityRollbackHooks) Remove(context.Context) error { return nil }
 
 type forwardRecoveryHooks struct {
 	readyErrOnce                     bool
@@ -2019,7 +2019,7 @@ func (hooks *forwardRecoveryHooks) Ready(context.Context, InstalledRelease) erro
 	hooks.authorityCommitted = true
 	if hooks.readyErrOnce {
 		hooks.readyErrOnce = false
-		return errors.New("legacy retirement requires retry after authority commit")
+		return errors.New("role finalization requires retry after authority commit")
 	}
 	return nil
 }

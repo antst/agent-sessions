@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,13 +34,12 @@ type hostSurfaceEntryExpectation struct {
 }
 
 type hostSurfaceRollbackRecord struct {
-	SchemaVersion           int                        `json:"schema_version"`
-	Prefix                  string                     `json:"prefix"`
-	StateRoot               string                     `json:"state_root"`
-	MigrationID             string                     `json:"migration_id,omitempty"`
-	MigrationTargetIdentity string                     `json:"migration_target_identity,omitempty"`
-	Service                 hostSurfaceServiceRollback `json:"service"`
-	Aliases                 []hostSurfaceAliasRollback `json:"aliases"`
+	SchemaVersion int                        `json:"schema_version"`
+	Prefix        string                     `json:"prefix"`
+	StateRoot     string                     `json:"state_root"`
+	Configuration hostSurfaceServiceRollback `json:"configuration"`
+	Service       hostSurfaceServiceRollback `json:"service"`
+	Aliases       []hostSurfaceAliasRollback `json:"aliases"`
 }
 
 type hostSurfaceServiceRollback struct {
@@ -64,14 +61,21 @@ func hostSurfaceRollbackPath(prefix string) string {
 	return filepath.Join(prefix, "libexec", "agent-sessions", "host", "transactions", "host-surface-rollback.json")
 }
 
-func captureHostSurfaceRollback(
-	prefix, stateRoot, migrationID, migrationTargetIdentity string,
-) (hostSurfaceRollbackRecord, error) {
+func captureHostSurfaceRollback(prefix, stateRoot string) (hostSurfaceRollbackRecord, error) {
+	paths, err := ResolveProductionPaths()
+	if err != nil {
+		return hostSurfaceRollbackRecord{}, err
+	}
 	record := hostSurfaceRollbackRecord{
 		SchemaVersion: hostSurfaceRollbackSchemaVersion, Prefix: prefix, StateRoot: stateRoot,
-		MigrationID: migrationID, MigrationTargetIdentity: migrationTargetIdentity,
-		Service: hostSurfaceServiceRollback{Path: hostServiceDefinitionPath()},
+		Configuration: hostSurfaceServiceRollback{Path: paths.ConfigurationFile},
+		Service:       hostSurfaceServiceRollback{Path: hostServiceDefinitionPath()},
 	}
+	configuration, err := snapshotHostSurfaceService(record.Configuration.Path, nil)
+	if err != nil {
+		return hostSurfaceRollbackRecord{}, err
+	}
+	record.Configuration = configuration
 	service, err := snapshotHostSurfaceService(record.Service.Path, nil)
 	if err != nil {
 		return hostSurfaceRollbackRecord{}, err
@@ -92,8 +96,13 @@ func captureHostSurfaceRollback(
 }
 
 func (record hostSurfaceRollbackRecord) validate(prefix, stateRoot string) error {
+	paths, err := ResolveProductionPaths()
+	if err != nil {
+		return err
+	}
 	if record.SchemaVersion != hostSurfaceRollbackSchemaVersion || record.Prefix != prefix ||
-		record.StateRoot != stateRoot || record.Service.Path != hostServiceDefinitionPath() ||
+		record.StateRoot != stateRoot || record.Configuration.Path != paths.ConfigurationFile ||
+		record.Service.Path != hostServiceDefinitionPath() ||
 		len(record.Aliases) != len(hostAliasNames()) {
 		return errors.New("host surface rollback provenance has incomplete exact identity")
 	}
@@ -101,42 +110,23 @@ func (record hostSurfaceRollbackRecord) validate(prefix, stateRoot string) error
 		!filepath.IsAbs(stateRoot) || filepath.Clean(stateRoot) != stateRoot {
 		return errors.New("host surface rollback provenance has noncanonical roots")
 	}
-	if err := record.validateMigrationBinding(); err != nil {
+	if err := validateHostSurfaceRegular(record.Configuration); err != nil {
 		return err
 	}
-	if err := record.validateService(); err != nil {
+	if err := validateHostSurfaceRegular(record.Service); err != nil {
 		return err
 	}
 	return record.validateAliases(prefix)
 }
 
-func (record hostSurfaceRollbackRecord) validateMigrationBinding() error {
-	if (record.MigrationID == "") != (record.MigrationTargetIdentity == "") {
-		return errors.New("host surface rollback provenance has an incomplete migration binding")
-	}
-	if record.MigrationID == "" {
-		return nil
-	}
-	if !durableRecordID.MatchString(record.MigrationID) ||
-		!strings.HasPrefix(record.MigrationTargetIdentity, "sha256:") ||
-		len(record.MigrationTargetIdentity) != len("sha256:")+sha256.Size*2 {
-		return errors.New("host surface rollback provenance has an invalid migration binding")
-	}
-	_, err := hex.DecodeString(strings.TrimPrefix(record.MigrationTargetIdentity, "sha256:"))
-	if err != nil {
-		return errors.New("host surface rollback provenance has an invalid migration target identity")
-	}
-	return nil
-}
-
-func (record hostSurfaceRollbackRecord) validateService() error {
-	if record.Service.Present {
-		if len(record.Service.Body) == 0 || len(record.Service.Body) > maxHostSurfaceServiceBytes ||
-			record.Service.Mode == 0 || record.Service.Mode&^uint32(0o777) != 0 {
-			return errors.New("host surface rollback service snapshot is invalid")
+func validateHostSurfaceRegular(record hostSurfaceServiceRollback) error {
+	if record.Present {
+		if len(record.Body) == 0 || len(record.Body) > maxHostSurfaceServiceBytes ||
+			record.Mode == 0 || record.Mode&^uint32(0o777) != 0 {
+			return errors.New("host surface rollback regular-file snapshot is invalid")
 		}
-	} else if len(record.Service.Body) != 0 || record.Service.Mode != 0 {
-		return errors.New("absent host service rollback retains content")
+	} else if len(record.Body) != 0 || record.Mode != 0 {
+		return errors.New("absent host surface rollback retains content")
 	}
 	return nil
 }
@@ -192,6 +182,7 @@ func restoreHostSurfaceRollback(record hostSurfaceRollbackRecord) error {
 		result = errors.Join(result, restoreHostSurfaceAlias(alias, nil))
 	}
 	result = errors.Join(result, restoreHostSurfaceService(record.Service, nil))
+	result = errors.Join(result, restoreHostSurfaceService(record.Configuration, nil))
 	return result
 }
 

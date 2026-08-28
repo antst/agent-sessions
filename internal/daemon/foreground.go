@@ -40,7 +40,7 @@ type ForegroundOptions struct {
 
 // RunForegroundWithOptions runs the canonical foreground authority with
 // callable product adapters embedded in the same process.
-func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) error { //nolint:gocyclo // Startup keeps the canonical component order visible.
+func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) error {
 	paths, err := ResolveProductionPaths()
 	if err != nil {
 		return err
@@ -66,31 +66,10 @@ func RunForegroundWithOptions(ctx context.Context, options ForegroundOptions) er
 		return err
 	}
 	manager, unit := hostServiceIdentity()
-	legacyLifecycle, err := newProductionLegacyRetirementLifecycle(paths, state)
-	if err != nil {
-		return err
-	}
-	legacyRetirement, err := NewLegacyRetirementEngine(LegacyRetirementEngineOptions{
-		State: state, Lifecycle: legacyLifecycle,
-	})
-	if err != nil {
-		return err
-	}
-	firstMigrationRecovery, err := NewFirstMigrationRecovery(FirstMigrationRecoveryOptions{
-		State: state, Retirement: legacyRetirement,
-	})
-	if err != nil {
-		return err
-	}
 	recoveryHooks, err := ComposeRecoveryHooks(RecoveryStep{
 		Stage: RecoveryTransactions,
 		Run: func(recoveryContext context.Context, candidate *Runtime) error {
-			if err := candidate.RecoverDurableState(recoveryContext); err != nil {
-				return err
-			}
-			return firstMigrationRecovery.Recover(
-				recoveryContext, candidate.options.RuntimeIdentity, candidate.Generation(), candidate.options.Now().UnixMilli(),
-			)
+			return candidate.RecoverDurableState(recoveryContext)
 		},
 	})
 	if err != nil {
@@ -248,9 +227,6 @@ func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPee
 			if err != nil {
 				return controlPrincipal{}, controlFailure(err)
 			}
-			if err := runtime.reconcileAdoptedDeliveries(ctx); err != nil {
-				return controlPrincipal{}, controlFailure(err)
-			}
 			principal.SessionID = record.SessionID
 			principal.Attested = true
 			return principal, nil
@@ -269,9 +245,6 @@ func authorizeForegroundHello(runtime *Runtime) func(context.Context, controlPee
 		if err != nil {
 			return controlPrincipal{}, controlFailure(err)
 		}
-		if err := runtime.reconcileAdoptedDeliveries(ctx); err != nil {
-			return controlPrincipal{}, controlFailure(err)
-		}
 		principal.SessionID = record.SessionID
 		principal.Attested = true
 		return principal, nil
@@ -286,18 +259,26 @@ func loadOrCreateDefaultConfiguration(paths ProductionPaths) (DaemonConfig, erro
 	if !os.IsNotExist(err) && !errors.Is(err, os.ErrNotExist) {
 		return DaemonConfig{}, err
 	}
+	configuration, err = newDefaultDaemonConfiguration(paths)
+	if err != nil {
+		return DaemonConfig{}, err
+	}
+	if err := writeDefaultConfiguration(paths.ConfigurationFile, configuration); err != nil {
+		return DaemonConfig{}, err
+	}
+	return configuration, nil
+}
+
+func newDefaultDaemonConfiguration(paths ProductionPaths) (DaemonConfig, error) {
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		return DaemonConfig{}, errors.New("cannot establish the host identity")
 	}
 	digest := sha256.Sum256([]byte(hostname + "\x00" + strconv.Itoa(os.Getuid())))
 	now := time.Now().UnixMilli()
-	configuration = DaemonConfig{
+	configuration := DaemonConfig{
 		SchemaVersion: DaemonConfigSchemaVersion, HostID: hex.EncodeToString(digest[:16]), HostName: hostname,
 		StateRoot: paths.StateRoot, RuntimeRoot: paths.RuntimeRoot, Revision: 1, UpdatedAt: now,
-	}
-	if err := writeDefaultConfiguration(paths.ConfigurationFile, configuration); err != nil {
-		return DaemonConfig{}, err
 	}
 	return configuration, nil
 }

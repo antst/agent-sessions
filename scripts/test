@@ -42,7 +42,6 @@ bash -n \
 	"$plugin_root/scripts/test-unified-peers" \
 	"$plugin_root/scripts/test-unified-lane-restart" \
 	"$plugin_root/scripts/test-unified-lane-composition" \
-	"$plugin_root/scripts/test-unified-migration" \
 	"$plugin_root/scripts/test-unified-service" \
 	"$plugin_root/scripts/test-unified-stress" \
 	"$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
@@ -118,10 +117,8 @@ done < <("$plugin_root/scripts/release-inventory" plugins)
 
 if [[ "${RACE:-0}" != 1 &&
 	( "$(uname -s)" != Darwin || "${AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER:-0}" == 1 ) ]]; then
-	# The installed-service cell owns the production-shaped first-migration
-	# inventory. Run it before any legacy bridge contract can publish test state
-	# under the clean acceptance user's normal home. Hosted Darwin CI opts in;
-	# ordinary workstations retain a usable non-destructive make test gate.
+	# Hosted Darwin CI opts into the clean installed-service cell; ordinary
+	# workstations retain a usable non-destructive make test gate.
 	make -s -C "$plugin_root" unified-service-contract
 fi
 

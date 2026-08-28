@@ -11,7 +11,7 @@ import (
 
 var controlRoleOperations = map[controlRole]map[string]struct{}{
 	controlRoleAdmin: operationSet(
-		"runtime.status", "runtime.doctor", "migration.inspect", "migration.status", "remove.inspect",
+		"runtime.status", "runtime.doctor", "remove.inspect",
 	),
 	controlRoleLauncher: operationSet(
 		"attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach", "attachment.lookup",
@@ -29,7 +29,7 @@ var controlRoleOperations = map[controlRole]map[string]struct{}{
 		"lane.start", "lane.resume", "lane.followup", "lane.status", "lane.list",
 		"lane.interrupt", "lane.collect", "lane.archive",
 	),
-	controlRoleService: operationSet("runtime.status", "migration.inspect", "remove.inspect"),
+	controlRoleService: operationSet("runtime.status", "remove.inspect"),
 }
 
 var controlRoleTopics = map[controlRole]map[string]struct{}{

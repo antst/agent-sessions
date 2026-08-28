@@ -67,7 +67,6 @@ type HostStatusProjection struct {
 	Attachments     int              `json:"attachments"`
 	Lanes           int              `json:"lanes"`
 	Federation      map[string]any   `json:"federation"`
-	Migration       map[string]any   `json:"migration"`
 	Debt            []map[string]any `json:"debt"`
 }
 
@@ -84,7 +83,7 @@ func (runtime *Runtime) StatusProjection() HostStatusProjection {
 			executable, _ = exec.LookPath(product.ID)
 		}
 		if executable != "" {
-			if info, err := os.Lstat(executable); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			if info, err := os.Stat(executable); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
 				state = "installed_unready"
 			}
 		}
@@ -96,7 +95,7 @@ func (runtime *Runtime) StatusProjection() HostStatusProjection {
 		Endpoint: runtime.options.Paths.ControlEndpoint,
 		Service:  map[string]any{"manager": runtime.options.ServiceManager, "unit": runtime.options.ServiceUnit},
 		Products: products, Federation: hostFederationStatus(runtime.options.Configuration, federationComponent),
-		Migration: map[string]any{"state": "none"}, Debt: []map[string]any{},
+		Debt: []map[string]any{},
 	}
 }
 

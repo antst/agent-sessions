@@ -13,8 +13,6 @@ The planned acceptance entry points cover:
 - `test-unified-lane-composition`: the complete parent-to-target lane matrix;
 - `test-unified-lane-restart`: accepted-turn restart, recovery, collection,
   archive, and cleanup behavior;
-- `test-unified-migration`: exact legacy-owner inventory, quiescence,
-  adoption, retirement, and retryable debt;
 - `test-unified-stress`: durable admission and real resource-failure behavior;
   and
 - the existing grouped federation acceptance under `scripts/federation/`,

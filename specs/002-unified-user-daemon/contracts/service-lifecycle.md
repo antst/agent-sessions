@@ -21,8 +21,8 @@ Host and hub have independent service instances and independently invoked transa
 mechanics are implemented once. A shared service-control package consumes an immutable role descriptor
 for executable, arguments, service name, configuration path, and readiness probe. A shared release
 transaction package owns locking, immutable staging, pointer commit, journaling, service transition,
-readiness, rollback, removal, and revision-bound purge. Host hooks add connector and first-migration
-steps; hub hooks add only hub configuration and network readiness. Neither role imports the other's
+readiness, rollback, removal, and revision-bound purge. Host hooks add connector steps; hub hooks add
+only hub configuration and network readiness. Neither role imports the other's
 orchestration package.
 
 ## Service definitions
@@ -112,30 +112,29 @@ release strings or commit identities.
 
 ## Clean host installation
 
+Before the first version-0.3 installation, the operator stops the unreleased split-runtime stack and
+removes or archives only its Agent Sessions-owned state and installation roots. The transaction below
+starts from that clean boundary and performs no legacy inventory or conversion.
+
 1. Acquire the host-role install lock.
 2. Validate archive/platform, complete product inventory, binary identity, connector payloads, service
    definition, configuration schema, and writable owned destinations.
-3. If the estate predates the unified daemon, verify the operator-stopped maintenance window through a
-   read-only closed inventory before any persistent install mutation.
-4. Discover installed native products. Mark absent products unavailable; do not fail aggregate install.
-5. Stage and fsync an immutable release on the same filesystem as the host-role current selection.
-6. Prepare recoverable vendor connector transactions for each installed Codex marketplace, Claude
+3. Discover installed native products. Mark absent products unavailable; do not fail aggregate install.
+4. Stage and fsync an immutable release on the same filesystem as the host-role current selection.
+5. Prepare recoverable vendor connector transactions for each installed Codex marketplace, Claude
    marketplace, Grok plugin, and Qwen extension without reading credential values.
-7. Install the standard service definition and preserve existing non-secret configuration.
-8. Atomically select `host/current`.
+6. Persist resolved native executable paths, install the standard service definition, and preserve
+   existing non-secret configuration.
+7. Atomically select `host/current`.
+8. Retarget and commit prepared connectors from the selected immutable release so the next daemon
+   generation observes the exact installed payloads.
 9. Enable and start the user service once.
 10. Require readiness proof: exact runtime/release identity, generation, endpoint, state schema, local
    routing, product readiness, and configured federation state.
-11. Commit the install journal and all prepared connector mutations together.
+11. Commit the install journal and confirm the already-applied connector journal.
 
 The `install-all` target invokes the shared release engine with the host role and implements only this
 host transaction. It never installs, enables, starts, restarts, or removes the hub service.
-
-For a first migration, the operator first closes every legacy peer and lane, stops every responsive
-legacy supervisor, product manager, and federation authority through the old supported lifecycle, and
-prevents replacement legacy launches until installation completes. The installer fails closed naming
-any remaining live legacy authority, including one reporting zero shims. It never stops, signals, or
-restarts legacy authority; after absence is proven it may adopt metadata and retire exact artifacts.
 
 If any step before service start fails, the system publishes no daemon authority. If readiness fails,
 the installer disables/stops the candidate, restores exact prior connector/config state, and reports
@@ -145,25 +144,19 @@ the attributable cause.
 
 1. Acquire the selected role's install lock and recover or finish that role's prior journal.
 2. Read the current daemon generation and service-manager state.
-3. If the current estate predates the unified daemon, verify the operator-stopped maintenance window
-   through a read-only closed inventory before any persistent upgrade mutation.
-4. Offline-validate and stage the complete successor release.
-5. Prepare Codex, Claude, Grok, and Qwen connector changes that apply to the installed product subset
+3. Offline-validate and stage the complete successor release.
+4. Prepare Codex, Claude, Grok, and Qwen connector changes that apply to the installed product subset
    and record exact per-product rollback metadata.
-6. Atomically switch the selected role's current release to the staged release.
+5. Atomically switch the selected role's current release to the staged release.
+6. Retarget and commit host connectors from that selected immutable release.
 7. Ask the service manager for one restart transaction.
 8. Verify the successor is the only authority and reports the exact target release/generation.
-9. Commit connector changes and transaction journal; retain the prior release until commit.
+9. Commit the release journal; retain the prior release until commit.
 
 There is never a deliberate interval with two authoritative host daemons. If successor readiness fails,
 the transaction stops the candidate, restores that role's prior current selection and owned state, starts
 the previous service image, and verifies the previous generation is usable. This recovery is part of
 the failed administrative transaction; only a ready generation is committed as authority.
-
-That previous-unified-image restart rule does not apply to first migration. First-migration rollback
-leaves the unified candidate and all legacy authorities stopped, restores only installer-changed
-release/state/connector/service surfaces, and directs the operator to retry unified installation or
-manually relaunch the old supported lifecycle. It performs no live handoff or compatibility drain.
 
 Steady-state upgrade does not require closing supported managed native interactive sessions. Adapters
 reconstruct them after restart. Active lane behavior follows the adapter restart contract.
@@ -176,25 +169,11 @@ follows its own immutable staging and service-manager transaction and leaves eve
 protocol-matching hosts reconnect without local upgrade. Protocol mismatch fails before host
 registration or work acceptance and names the exact version required at that connection boundary.
 
-## First migration gate
+## Greenfield compatibility boundary
 
-Before the first unified service becomes ready, the staged runtime inventories legacy Agent Sessions
-state and authorities. The gate:
-
-- refuses before mutation if any exactly corroborated managed legacy peer or lane remains active;
-- names every exact peer/lane and requires the operator to close it before retrying;
-- does not implement live legacy peer, attachment, or lane handoff;
-- ignores stale scalar counts after their alleged exact owners are proven absent;
-- records unknown/conflicting identity as retryable debt;
-- does not stop a native vendor session or unrelated process;
-- adopts the existing host identity, global groups, session catalog, lane state, messages/notices, and
-  federation configuration;
-- requires the operator to stop every responsive legacy Agent Sessions authority through its old
-  supported lifecycle and proves their absence before any unified authority is published;
-- retires every old Agent Sessions supervisor, shim, host, lane manager, local routing/federation agent,
-  service job, and listener before declaring the daemon ready.
-
-The central hub is not a migration target. An existing host federation agent is.
+The first unified service accepts only the version-0.3 configuration and state contracts. It has no
+pre-unification process discovery, state reader, conversion journal, compatibility drain, or artifact
+retirement authority. Vendor-owned stores are preserved outside this boundary.
 
 ## Status and doctor
 
@@ -204,7 +183,7 @@ The daemon status contract includes:
 - configured host/hub identity and federation connection state;
 - product readiness and non-secret profile identities;
 - managed attachment/lane counts and exact blocker references;
-- migration/install transaction state and cleanup debt;
+- install transaction state and cleanup debt;
 - no message, prompt, result, transcript, tool content, or credential value.
 
 Doctor validates the service-manager job, endpoint/record/process agreement, state schema, product
@@ -228,7 +207,7 @@ readiness, configured hub-protocol match, and exact debt remediation. It never s
    product installers, reporting native bookkeeping that the vendor retains.
 6. Remove the service definition, command links, host current selection, host releases, and disposable
    runtime endpoint after exact ownership checks.
-7. Preserve Agent Sessions configuration, durable metadata, and migration/cleanup debt.
+7. Preserve Agent Sessions configuration, durable metadata, and cleanup debt.
 8. Verify zero Agent Sessions host daemon or obsolete long-lived role remains.
 
 The operation is idempotent and resumes from its journal after interruption.

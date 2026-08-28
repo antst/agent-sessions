@@ -17,7 +17,7 @@ establish RCA before changing the design or weakening a gate.
 one `agent-sessions` daemon/image per OS user-host, one separately deployed `agent-sessions-hub` binary
 for the network's central hub, multiple embedded host agents, existing global groups, independently
 built same-repository hub/host deployments interoperating by exact hub-protocol equality, and no live
-handoff or compatibility drain protocol during first migration.
+handoff, compatibility drain, or state conversion from pre-unification prototypes.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -93,7 +93,7 @@ without resurrection, and verify workflow commands fail without starting it.
 - [X] T026 [US1] Implement descriptor-driven service-manager status/start/stop/restart/enable/disable operations once for both deployment roles in internal/servicecontrol/service.go, internal/servicecontrol/service_linux.go, and internal/servicecontrol/service_darwin.go; add only the host role descriptor in internal/daemon/service_role.go
 - [X] T027 [P] [US1] Add the standard foreground user services in deploy/agent-sessions/systemd/user/agent-sessions.service and deploy/agent-sessions/launchd/net.antst.agent-sessions.plist
 - [X] T028 [US1] Implement descriptor-generated human/JSON status, doctor, service diagnostics, stable semantic exit classes, cause-specific next actions, and admin CLI/help dispatch in internal/daemon/admin.go, internal/clihelp/catalog.go, and cmd/agent-sessions/main.go
-- [X] T029 [US1] Implement immutable same-filesystem release staging, disjoint role-owned release roots, install locks, transaction journals and current selections, role readiness hooks, removal/purge planning, and exact rollback once for both deployment roles in internal/releaseinstall/transaction.go and internal/releaseinstall/store.go; implement only host connector, migration, service descriptor, and readiness hooks in internal/daemon/install.go
+- [X] T029 [US1] Implement immutable same-filesystem release staging, disjoint role-owned release roots, install locks, transaction journals and current selections, role readiness hooks, removal/purge planning, and exact rollback once for both deployment roles in internal/releaseinstall/transaction.go and internal/releaseinstall/store.go; implement only host connector, service descriptor, and readiness hooks in internal/daemon/install.go
 - [X] T030 [US1] Implement recoverable optional connector prepare/commit/rollback orchestration for Codex marketplace, Claude marketplace, Grok plugin, and Qwen extension without credential reads in internal/daemon/connectors.go, internal/daemon/connector_codex.go, internal/daemon/connector_claude.go, internal/daemon/connector_grok.go, and internal/daemon/connector_qwen.go; refactor Makefile install-codex/install-claude and internal/bridge/grok_plugin.go and internal/bridge/qwen_plugin.go to use it
 - [X] T031 [US1] Replace in-place aggregate host installation with a deploy/agent-sessions/VERSION-driven role invocation of internal/releaseinstall, host aliases, optional-product probing, four-product connector transactions, host-service enablement, one validated host restart, removal of deploy/peer-federator/VERSION only after T024 proves the new sole-version contract RED, and an explicit prohibition on hub lifecycle mutation in Makefile, scripts/release-inventory, and scripts/package-release
 - [X] T032 [US1] Implement host-specific fail-closed four-product connector removal hooks and invoke shared revision-bound removal/purge planning with descriptor-backed CLI/help/exit behavior while preserving Agent Sessions metadata and all vendor state in internal/daemon/remove.go, internal/daemon/connectors.go, internal/releaseinstall/transaction.go, internal/clihelp/catalog.go, and Makefile
@@ -205,43 +205,22 @@ separate and unchanged in responsibility.
 
 ---
 
-## Phase 7: User Story 5 — Migrate and Diagnose Legacy Runtime State (Priority: P2)
+## Phase 7: User Story 5 — Establish a Clean First Installation (Priority: P2)
 
-**Goal**: Converge the three operator-controlled legacy hosts inside an operator-owned maintenance
-window: close all managed peers and lanes, explicitly stop all responsive legacy supervisors, product
-managers, and federation authorities through their old supported lifecycle, and prevent replacement
-legacy launches until installation completes. The installer verifies absence, preserves durable Agent
-Sessions metadata, retires exact obsolete artifacts, and performs neither live handoff nor a
-compatibility drain protocol.
+**Goal**: Make version 0.3 a greenfield boundary from the unreleased split-runtime prototypes. The
+operator stops the old stack and removes or archives only Agent Sessions-owned prototype state; the
+product implements no compatibility subsystem and never touches vendor-owned histories.
 
-**Independent Test**: Build a split legacy fixture with several runtime roots, two supervisors, stale
-counts, active peer/lane blockers, a product manager, a federation agent, and unrelated processes;
-prove zero mutation until the operator closes all work, stops all legacy authorities, and prevents new
-launches. Prove a responsive zero-shim authority still blocks, then migrate without installer process
-actions and leave one daemon with preserved metadata. Fault-injected rollback must leave unified and
-legacy authorities stopped and restore only installer-changed surfaces.
+**Independent Test**: Install on a clean acceptance account, prove exactly one service and endpoint,
+and prove vendor profiles and transcripts remain outside remove and purge targets.
 
-### Tests for User Story 5
+- [X] T075 [US5] Amend spec.md, plan.md, research.md, quickstart.md, contracts, and installation docs to define the clean first-install prerequisite and remove every promise of legacy inventory, adoption, drain, retirement, or migration commands
+- [X] T076 [US5] Delete the legacy migration/adoption/retirement implementation, state fallbacks, admin CLI, tests, and acceptance script from internal/daemon, internal/clihelp, cmd/agent-sessions, scripts, and Makefile
+- [X] T077 [US5] Simplify host installation and runtime recovery to the ordinary unified release, connector, service, readiness, catalog, and lifecycle-debt paths in internal/daemon/install.go, internal/daemon/install_command.go, internal/daemon/recovery.go, internal/daemon/state.go, and internal/daemon/foreground.go
+- [X] T078 [US5] Re-run clean-user installation, restart, upgrade/rollback, removal/purge exclusion, vendor-history preservation, and exact one-daemon acceptance through scripts/test-unified-service and the ordinary full repository gates
 
-- [X] T075 [P] [US5] Update the closed-list inventory and exact candidate classification tests for every shipped legacy state/runtime/service root so any responsive legacy authority, including zero-shim authority, is a named blocker in internal/daemon/migration_inventory_test.go
-- [X] T076 [P] [US5] Add failing operator-maintenance-window tests covering all-peer/all-lane closure, every live-authority refusal with zero mutation, prevention/rejection of replacement launches, stale-count non-blocking, unknown-identity debt, and no live-handoff or compatibility-drain behavior in internal/daemon/migration_quiescence_test.go
-- [X] T077 [P] [US5] Add failing durable catalog/group/name/lane, accepted delivery/cursor/wake/notice, preparation journal, cleanup/service provenance, host/hub configuration, terminal-work/debt adoption, restart-idempotency, and vendor-profile exclusion tests in internal/daemon/migration_adopt_test.go and internal/daemon/migration_adopt_delivery_test.go
-- [X] T078 [P] [US5] Replace installer-stop/prior-authority-restart expectations with failing tests for absence-only exact artifact retirement, zero legacy signals/stops/restarts, unrelated-process preservation, crash journals, and rollback that leaves unified and legacy authorities stopped while restoring only installer-changed surfaces in internal/daemon/migration_retire_test.go
-
-### Implementation for User Story 5
-
-- [X] T079 [US5] Update the revisioned migration transaction, candidate, live-authority blocker, operator-maintenance-window, stopped-authority rollback, provenance, and debt records in internal/daemon/migration.go
-- [X] T080 [US5] Implement bounded inventory of known claude-code-peer, agent-sessions agent, supervisor/shim/host/manager, historical Linux/Darwin runtime-root, service-job, and federation-agent records in internal/daemon/migration_inventory.go
-- [X] T081 [US5] Implement the operator-maintenance-window gate that enumerates every peer/lane and live legacy authority blocker, fails on responsive zero-shim authority or replacement launch, ignores disproven scalar counts, and performs no legacy lifecycle action, live handoff, or compatibility drain in internal/daemon/migration_quiescence.go
-- [X] T082 [US5] Implement staged transformation of durable Agent Sessions catalogs, groups, names, completed lane state, accepted deliveries, collection and delivery cursors, wakes/notices, preparation journals, cleanup/service provenance, host/hub configuration, terminal-work references, and debt without copying vendor data in internal/daemon/migration_adopt.go, internal/daemon/migration_adopt_delivery.go, and internal/daemon/migration_adopt_delivery_production.go
-- [X] T083 [US5] Replace legacy process lifecycle actions with re-attested retirement of exact supervisor, shim, product host/manager, routing/federation, job, socket, and file artifacts only after their authorities are operator-stopped and proven absent in internal/daemon/migration_retire.go
-- [X] T084 [US5] Integrate first-migration inspect/apply/recovery/rollback into the install transaction before unified-daemon readiness: fail closed naming any live legacy authority even at zero shims; never stop, signal, or restart it; reject replacement launches; after absence adopt metadata and retire exact artifacts; on failure leave unified and legacy authorities stopped, restore only installer-changed release/state/connector/service surfaces, and emit retry-unified/manual-old-relaunch guidance in internal/daemon/install.go and internal/daemon/recovery.go
-- [X] T085 [US5] Update descriptor-backed metadata-only `migrate inspect`, `migrate status`, blocker diagnostics, transaction status, generated help, stable JSON/error fields, exit classes, and retry guidance for live-authority and operator-maintenance-window results in internal/daemon/admin.go, internal/clihelp/catalog.go, and cmd/agent-sessions/main.go
-- [X] T086 [US5] Replace and run the split-runtime migration acceptance flow so operator-owned shutdown, responsive zero-shim refusal, replacement-launch refusal, zero installer legacy process actions, absence-only artifact retirement, stopped-authority rollback, and no live handoff/compatibility drain are evidenced in scripts/test-unified-migration and specs/002-unified-user-daemon/evidence/us5-migration.md
-
-**Checkpoint**: First migration works for the actual three-host unreleased estate only inside the
-operator-stopped maintenance window, without a live transfer or compatibility drain protocol;
-steady-state upgrades use the normal US1 restart contract afterward.
+**Checkpoint**: First install is deliberately clean and steady-state upgrades use the normal US1
+restart contract with no pre-unification compatibility code in the shipped product.
 
 ---
 
@@ -252,7 +231,7 @@ the complete release gate at one exact commit.
 
 - [X] T087 Remove obsolete standalone host command packages, assert cmd/peer-federator, deploy/peer-federator, the legacy version file, and every legacy host-agent service asset are absent in internal/releaseevidence/unified_inventory_test.go, prove every installed host command alias resolves to the exact agent-sessions image, and prove agent-sessions-hub is a distinct non-alias image while removing cmd/agent-session-runtime/main.go, cmd/codex-peer/main.go, cmd/claude-peer/main.go, cmd/grok-peer/main.go, cmd/qwen-peer/main.go, cmd/peer/main.go, cmd/codex-peer-lane/main.go, cmd/claude-peer-lane/main.go, cmd/grok-peer-lane/main.go, and cmd/qwen-peer-lane/main.go
 - [X] T088 Set the final declared source release in the already-authoritative deploy/agent-sessions/VERSION and update the four-platform two-binary archive layout, generated manifest, checksums, connector payloads, independent host/hub service assets, and source-pointer verification in scripts/release-inventory, scripts/package-release, and scripts/release-final-gate
-- [X] T089 [P] Re-run the already-green T005 parity gates to prove docs/CLI.md remains byte-consistent with the canonical two-binary descriptor and docs/FEDERATION.md remains field-for-field consistent with specs/002-unified-user-daemon/contracts/federation-protocol.md and the generated hub-protocol descriptor; update the remaining installation, shared host/hub lifecycle implementation, adapters, lanes, groups, hub-protocol interoperability, migration, removal, host/hub purge, and troubleshooting documentation in docs/INSTALL.md, docs/ADAPTER-PROTOCOL.md, docs/CODEX-ADAPTER.md, docs/CLAUDE-ADAPTER.md, docs/GROK-ADAPTER.md, docs/QWEN-ADAPTER.md, docs/CODEX-LANES.md, docs/CLAUDE-LANES.md, docs/GROK-LANES.md, docs/QWEN-LANES.md, docs/GROUPS.md, and docs/FEDERATION.md
+- [X] T089 [P] Re-run the already-green T005 parity gates to prove docs/CLI.md remains byte-consistent with the canonical two-binary descriptor and docs/FEDERATION.md remains field-for-field consistent with specs/002-unified-user-daemon/contracts/federation-protocol.md and the generated hub-protocol descriptor; update the remaining installation, shared host/hub lifecycle implementation, adapters, lanes, groups, hub-protocol interoperability, greenfield first-install, removal, host/hub purge, and troubleshooting documentation in docs/INSTALL.md, docs/ADAPTER-PROTOCOL.md, docs/CODEX-ADAPTER.md, docs/CLAUDE-ADAPTER.md, docs/GROK-ADAPTER.md, docs/QWEN-ADAPTER.md, docs/CODEX-LANES.md, docs/CLAUDE-LANES.md, docs/GROK-LANES.md, docs/QWEN-LANES.md, docs/GROUPS.md, and docs/FEDERATION.md
 - [X] T090 [P] Add and run an aggregate completeness harness in internal/daemon/security_test.go and internal/daemon/resource_failure_test.go that imports internal/testutil, validates its applicable-platform union of observability_manifest.go, observability_linux.go or observability_darwin.go, and observability_hub.go, and reruns every already-green normal/debug/error/crash, service-manager, status/doctor, metric, trace, peer, lane, and hub content/secret canary plus disk/memory/file-descriptor/process/native-dependency pre-acceptance failure; this final gate introduces no new behavioral invariant, duplicated inventory, or production sink registry
 - [X] T091 [P] Add and run a 100-simultaneous-attachment stress matrix spanning all four products and concurrent production, development, and test groups, proving exact identity, unchanged global-group authorization, one host daemon/listener, restart budgets, accepted-message durability, and no duplicate turn in internal/daemon/stress_test.go and scripts/test-unified-stress
 - [X] T092 Update repository orchestration so make test, make test-race, go vet, make lint, federation integration, and every unified live contract run without starting a second daemon in scripts/test and Makefile
@@ -272,7 +251,7 @@ the complete release gate at one exact commit.
 - **US2 (Phase 4)**: Depends on Foundational and US1's runnable service/control plane.
 - **US3 (Phase 5)**: Depends on US2 attachment/adapter contracts and US1 lifecycle.
 - **US4 (Phase 6)**: Depends on US2 delivery and US3 lane dispatch; it embeds remote routing without changing them.
-- **US5 (Phase 7)**: Depends on US1 install/recovery, the final US2/US3 durable schemas, and US4's final host/hub configuration schema; it does not depend on live handoff.
+- **US5 (Phase 7)**: Depends on US1 install/recovery and defines the greenfield first-install boundary.
 - **Polish (Phase 8)**: Depends on all selected stories and removes the now-unused legacy entrypoints.
 
 ### User Story Dependency Graph
@@ -286,7 +265,7 @@ US1 + US2 + US3 + US4 + US5 -> Polish/Release
 - **US2** adds interactive peers without changing service lifetime.
 - **US3** adds local lanes using the same adapter/attachment authority.
 - **US4** adds the existing remote topology by embedding the host agent.
-- **US5** is the deployment gate for the current three legacy hosts and runs only after peers/lanes close.
+- **US5** is the clean first-install gate for the three operator-controlled development hosts.
 
 ### Within Each Story
 
@@ -303,7 +282,7 @@ US1 + US2 + US3 + US4 + US5 -> Polish/Release
 - T035–T040 can run in parallel; T045–T048 can run in parallel after T041–T044.
 - T051–T057 can run in parallel; T059–T062 can run in parallel after T058.
 - T066–T068 can run in parallel before the federation implementation.
-- T075–T078 can run in parallel before the migration implementation.
+- T075–T078 are the coordinated greenfield-boundary remediation.
 - T089–T091 can run in parallel after functional completion.
 
 ---
@@ -348,10 +327,10 @@ Task T068: multi-host integration discriminators in scripts/federation/integrati
 ### User Story 5
 
 ```text
-Task T075: closed-list legacy inventory tests in internal/daemon/migration_inventory_test.go
-Task T076: quiescence/no-live-handoff tests in internal/daemon/migration_quiescence_test.go
-Task T077: durable adoption/vendor exclusion tests in internal/daemon/migration_adopt_test.go
-Task T078: exact retirement/rollback tests in internal/daemon/migration_retire_test.go
+Task T075: greenfield contract and documentation
+Task T076: remove compatibility code and acceptance assets
+Task T077: simplify install, state, and recovery seams
+Task T078: clean-user and vendor-exclusion acceptance
 ```
 
 ---
@@ -370,7 +349,7 @@ Task T078: exact retirement/rollback tests in internal/daemon/migration_retire_t
 1. Add US2 and prove four interactive peers survive service restart.
 2. Add US3 and prove the complete local lane matrix without manager processes.
 3. Add US4 and prove the existing one-hub/multiple-host topology.
-4. Add US5 and migrate the quiescent three-host legacy estate without live handoff.
+4. Add US5 and reinstall the three controlled hosts from clean Agent Sessions-owned state.
 5. Remove obsolete entrypoints, complete two-platform acceptance, and release only one signed green tree.
 
 ### Parallel Team Strategy
@@ -383,6 +362,6 @@ and adapter files, then integrate each batch through the one daemon before start
 - `[P]` means file-disjoint work after stated prerequisites, not permission to bypass a failing shared gate.
 - Tests precede implementation and must demonstrate the intended invariant rather than merely compile.
 - Unit/live tests use in-process fixtures or the user's one installed daemon; they never start a second daemon for the same OS user-host.
-- First migration requires every managed legacy peer and lane to be closed and contains no live-transfer task.
+- First install requires the operator to stop the old stack and supply clean Agent Sessions-owned roots.
 - Vendor credentials, profiles, transcripts, permissions, App Servers, and native workers remain vendor-owned.
 - Existing global groups remain the sole collaboration boundary in the one uniform multi-host space.

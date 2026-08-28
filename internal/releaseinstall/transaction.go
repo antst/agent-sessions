@@ -161,10 +161,18 @@ type RoleHooks interface {
 // install lock, against the original validated source request, and before the
 // engine creates a staged release, journal, or prepared role mutation.
 // Implementations must be read-only. The host uses this seam for the
-// quiescence-only first-migration inspection.
+// role-specific read-only admission checks.
 type RolePreflight interface {
 	// Preflight performs a read-only exact observation before install mutation.
 	Preflight(context.Context, InstallRequest) error
+}
+
+// RoleBeforeRestart is an optional role hook performed after the immutable
+// release is selected and before the service is restarted. It is the only
+// hook that may bind role-owned integrations to the installed release path.
+type RoleBeforeRestart interface {
+	// BeforeRestart commits integrations that the new service must observe at startup.
+	BeforeRestart(context.Context, InstalledRelease) error
 }
 
 // FailureDisposition tells the shared engine whether a role-specific
@@ -345,6 +353,13 @@ func (engine *Engine) Install(ctx context.Context, request InstallRequest) (Inst
 		return InstallResult{}, ErrInjectedCrash
 	}
 	installed := installedFromJournal(engine.layout, journal)
+	if hooks, ok := engine.hooks.(RoleBeforeRestart); ok {
+		if err := hooks.BeforeRestart(ctx, installed); err != nil {
+			return InstallResult{}, engine.rollback(
+				ctx, journal, "role_before_restart_failed", fmt.Errorf("prepare selected role integrations: %w", err),
+			)
+		}
+	}
 	journal.ServiceTransitionAttempted = true
 	if err := saveJournal(engine.layout, journal); err != nil {
 		return InstallResult{}, engine.rollback(ctx, journal, "service_transition_journal_failed", err)
@@ -410,6 +425,11 @@ func (engine *Engine) Recover(ctx context.Context) error {
 	}
 	forwardOnly := journal.Phase == PhaseRollForwardRetryable
 	if journal.Phase == PhasePointerCommitted {
+		if hooks, ok := engine.hooks.(RoleBeforeRestart); ok {
+			if err := hooks.BeforeRestart(ctx, installedFromJournal(engine.layout, journal)); err != nil {
+				return engine.rollback(ctx, journal, "role_before_restart_failed", err)
+			}
+		}
 		if !journal.ServiceTransitionAttempted {
 			journal.ServiceTransitionAttempted = true
 			if err := saveJournal(engine.layout, journal); err != nil {

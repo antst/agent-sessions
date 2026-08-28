@@ -100,16 +100,14 @@ func Contract() Descriptor {
 			ErrorFields:   []string{"class", "code", "retryable", "message", "next_action"},
 		},
 		JSONResultFields: map[string][]string{
-			"help":            {"binaries", "modes"},
-			"status":          {"runtime_version", "runtime_identity", "generation", "pid", "proc_start", "endpoint", "service", "products", "attachments", "lanes", "federation", "migration", "debt"},
-			"doctor":          {"healthy", "checks"},
-			"hub.status":      {"runtime_version", "runtime_identity", "pid", "proc_start", "listener", "service", "protocol_version", "connected_hosts", "routing", "debt"},
-			"hub.doctor":      {"healthy", "checks"},
-			"migrate.inspect": {"revision", "candidates", "blockers", "debt"},
-			"migrate.status":  {"transaction", "state", "next_action"},
-			"remove.inspect":  {"role", "revision", "blockers", "targets", "preserved"},
-			"purge.inspect":   {"role", "plan_revision", "targets", "exclusions"},
-			"purge.apply":     {"role", "plan_revision", "deleted", "debt"},
+			"help":           {"binaries", "modes"},
+			"status":         {"runtime_version", "runtime_identity", "generation", "pid", "proc_start", "endpoint", "service", "products", "attachments", "lanes", "federation", "debt"},
+			"doctor":         {"healthy", "checks"},
+			"hub.status":     {"runtime_version", "runtime_identity", "pid", "proc_start", "listener", "service", "protocol_version", "connected_hosts", "routing", "debt"},
+			"hub.doctor":     {"healthy", "checks"},
+			"remove.inspect": {"role", "revision", "blockers", "targets", "preserved"},
+			"purge.inspect":  {"role", "plan_revision", "targets", "exclusions"},
+			"purge.apply":    {"role", "plan_revision", "deleted", "debt"},
 		},
 	}
 	descriptor.Commands = commandInventory(catalog.Products)
@@ -125,8 +123,6 @@ func commandInventory(products []productcatalog.ProductDescriptor) []CommandDesc
 		command("host.help", "agent-sessions", "agent-sessions help [MODE]", "render the canonical command contract", VisibilityPublic, jsonHelp, "admin", false, "help"),
 		command("host.status", "agent-sessions", "agent-sessions status", "show metadata-only host status", VisibilityPublic, jsonHelp, "admin", true, "status"),
 		command("host.doctor", "agent-sessions", "agent-sessions doctor", "diagnose host readiness without starting it", VisibilityPublic, jsonHelp, "admin", true, "doctor"),
-		command("host.migrate.inspect", "agent-sessions", "agent-sessions migrate inspect", "inspect exact legacy candidates and blockers", VisibilityPublic, jsonHelp, "admin", true, "migrate.inspect"),
-		command("host.migrate.status", "agent-sessions", "agent-sessions migrate status", "show the migration journal and retry action", VisibilityPublic, jsonHelp, "admin", true, "migrate.status"),
 		command("host.remove.inspect", "agent-sessions", "agent-sessions remove inspect", "inspect host removal blockers and targets", VisibilityPublic, jsonHelp, "admin", true, "remove.inspect"),
 		command("host.purge.inspect", "agent-sessions", "agent-sessions purge inspect", "create or inspect a revision-bound host purge plan", VisibilityPublic, planOptions, "admin", false, "purge.inspect"),
 		command("host.purge.apply", "agent-sessions", "agent-sessions purge apply", "apply an exact host purge plan", VisibilityPublic, planOptions, "admin", false, "purge.apply"),
@@ -407,7 +403,7 @@ func resolveHostCommand(args []string) (CommandDescriptor, []string, error) {
 		return commandWithRemainder("host.help", nil)
 	case "daemon", "help", "status", "doctor":
 		return commandWithRemainder("host."+args[0], args[1:])
-	case "migrate", "remove", "purge":
+	case "remove", "purge":
 		if len(args) < 2 {
 			return CommandDescriptor{}, nil, fmt.Errorf("%s operation is required", args[0])
 		}

@@ -38,8 +38,6 @@ Sessions options.
 | Host CLI inventory | `agent-sessions help [MODE] [--json]` and `agent-sessions MODE --help` | Generated from the descriptor; JSON is the machine-readable host command contract |
 | Runtime inspection | `agent-sessions status [--json]` | Stable metadata-only status; online |
 | Diagnostics | `agent-sessions doctor [--json]` | Read-only cause-specific diagnosis; never starts service |
-| Migration inspection | `agent-sessions migrate inspect [--json]` | Exact read-only legacy inventory and blockers |
-| Migration transaction status | `agent-sessions migrate status [--json]` | Current journal, debt, and supported retry action |
 | Removal inspection | `agent-sessions remove inspect [--json]` | Exact online blocker/target inventory; no mutation |
 | Offline purge | `agent-sessions purge inspect --plan PATH` and `agent-sessions purge apply --plan PATH` | Revision-bound offline plan/apply; never starts service |
 | Central hub | `agent-sessions-hub [--listen ADDRESS]` and `agent-sessions-hub --help` | Separate central deployment binary, not a host authority |
@@ -146,12 +144,10 @@ values are forbidden. Command result objects use these stable top-level fields:
 | Command | Result fields |
 |---|---|
 | `help` | `binaries`, `modes` |
-| `status` | `runtime_version`, `runtime_identity`, `generation`, `pid`, `proc_start`, `endpoint`, `service`, `products`, `attachments`, `lanes`, `federation`, `migration`, `debt` |
+| `status` | `runtime_version`, `runtime_identity`, `generation`, `pid`, `proc_start`, `endpoint`, `service`, `products`, `attachments`, `lanes`, `federation`, `debt` |
 | `doctor` | `healthy`, `checks` |
 | hub `status` | `runtime_version`, `runtime_identity`, `pid`, `proc_start`, `listener`, `service`, `protocol_version`, `connected_hosts`, `routing`, `debt` |
 | hub `doctor` | `healthy`, `checks` |
-| `migrate inspect` | `revision`, `candidates`, `blockers`, `debt` |
-| `migrate status` | `transaction`, `state`, `next_action` |
 | `remove inspect` | `role`, `revision`, `blockers`, `targets`, `preserved` |
 | `purge inspect` | `role`, `plan_revision`, `targets`, `exclusions` |
 | `purge apply` | `role`, `plan_revision`, `deleted`, `debt` |

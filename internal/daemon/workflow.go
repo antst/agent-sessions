@@ -23,7 +23,7 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 	admin := runtimeAdminDispatch(runtime)
 	return func(ctx context.Context, principal controlPrincipal, request controlRequest) (controlDispatchResult, *controlError) {
 		switch request.Operation {
-		case "runtime.status", "runtime.doctor", "remove.inspect", "migration.inspect", "migration.status":
+		case "runtime.status", "runtime.doctor", "remove.inspect":
 			return admin(ctx, principal, request)
 		}
 		registry := runtime.attachmentRegistry()
@@ -61,9 +61,6 @@ func runtimeControlDispatch(runtime *Runtime) func(context.Context, controlPrinc
 				return controlDispatchResult{}, failure
 			}
 			result, err = registry.Adopt(ctx, payload)
-			if err == nil {
-				err = runtime.reconcileAdoptedDeliveries(ctx)
-			}
 		case "attachment.refresh":
 			var payload AttachmentRefreshRequest
 			if failure := decodeControlPayload(request.Payload, &payload); failure != nil {

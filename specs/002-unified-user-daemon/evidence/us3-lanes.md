@@ -63,7 +63,7 @@ interrupt, collection, archive, cleanup, exact-evidence reconnect, and the
 permitted interrupted recovery. Six daemon-engine tests passed normally and
 under race, covering parent-context admission, crash/reconstruction without a
 second dispatch, terminal watching and notice delivery, idempotent archive,
-durable cleanup debt, resource refusal, and completed-lane migration without
+durable cleanup debt, resource refusal, and completed-lane preservation without
 redispatch.
 
 ## Individually observed composition cells

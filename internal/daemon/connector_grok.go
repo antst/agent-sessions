@@ -180,7 +180,9 @@ func grokConnectorInventoryCounts(inventory any) (int, int) {
 		if connectorString(object, "name") == grokConnectorName && connectorString(object, "scope") == "user" {
 			pluginMatches++
 		}
-		if connectorString(object, "name") == "agent_sessions" && connectorString(object, "transport") != "" {
+		source, _ := object["source"].(map[string]any)
+		if connectorString(object, "name") == "agent_sessions" && connectorString(object, "transport") != "" &&
+			connectorString(source, "type") == "plugin" && connectorString(source, "plugin_name") == grokConnectorName {
 			serverMatches++
 		}
 	}
@@ -234,9 +236,12 @@ func VerifyGrokConnectorInventory(body []byte, expectedRoot string) error {
 		if connectorString(server, "name") != "agent_sessions" {
 			continue
 		}
+		source, _ := server["source"].(map[string]any)
+		if connectorString(source, "type") != "plugin" || connectorString(source, "plugin_name") != grokConnectorName {
+			continue
+		}
 		mcpMatches++
 		target, targetErr := filepath.EvalSymlinks(connectorString(server, "target"))
-		source, _ := server["source"].(map[string]any)
 		sourcePath, sourceErr := filepath.EvalSymlinks(connectorString(source, "path"))
 		if targetErr != nil || sourceErr != nil || target != wantedTarget || sourcePath != root ||
 			connectorString(server, "transport") != "stdio" || connectorString(source, "type") != "plugin" ||

@@ -535,6 +535,59 @@ func (hooks *HostInstallHooks) commitDurable(ctx context.Context) error {
 	return saveConnectorRecoveryJournal(hooks.journalPath, record)
 }
 
+func (hooks *HostInstallHooks) retargetDurableSource(release releaseinstall.InstalledRelease) error {
+	if release.Role != releaseinstall.RoleHost || !cleanAbsoluteConnectorPath(release.Root) ||
+		release.Version == "" || release.ContentIdentity == "" {
+		return errors.New("installed connector release identity is invalid")
+	}
+	record, err := loadConnectorRecoveryJournal(hooks.journalPath)
+	if err != nil {
+		return err
+	}
+	if record.Version != release.Version || record.ContentIdentity != release.ContentIdentity {
+		return errors.New("prepared connector transaction does not match the installed release")
+	}
+	if record.SourceRoot == release.Root {
+		return nil
+	}
+	if record.Phase != connectorRecoveryPrepared {
+		return fmt.Errorf("cannot retarget connector transaction from phase %q", record.Phase)
+	}
+	record.SourceRoot = release.Root
+	for index := range record.Products {
+		if err := retargetConnectorProduct(&record.Products[index], release.Root); err != nil {
+			return err
+		}
+	}
+	return saveConnectorRecoveryJournal(hooks.journalPath, record)
+}
+
+func retargetConnectorProduct(product *connectorProductRecovery, releaseRoot string) error {
+	if product.AppliedSteps != 0 || product.Progress != connectorProductPrepared {
+		return fmt.Errorf("cannot retarget applied %s connector", product.Product)
+	}
+	product.Provenance.SourceRoot = releaseRoot
+	if product.Provenance.Available {
+		payloadRoot, err := installedConnectorPayloadRoot(product.Product, releaseRoot)
+		if err != nil {
+			return err
+		}
+		product.Provenance.PayloadRoot = payloadRoot
+	}
+	return product.Provenance.validate(product.Product)
+}
+
+func installedConnectorPayloadRoot(product, releaseRoot string) (string, error) {
+	switch product {
+	case "codex":
+		return releaseRoot, nil
+	case "claude", "grok", "qwen":
+		return filepath.Join(releaseRoot, product), nil
+	default:
+		return "", errors.New("connector transaction names an unknown product")
+	}
+}
+
 func (hooks *HostInstallHooks) rollbackDurable(ctx context.Context) error {
 	record, err := loadConnectorRecoveryJournal(hooks.journalPath)
 	if err != nil {

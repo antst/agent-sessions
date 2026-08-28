@@ -48,7 +48,7 @@ var metadataFields = map[string]struct{}{
 	"state": {}, "revision": {}, "duration_ms": {}, "error_code": {}, "cause_detail": {},
 	"runtime_version": {}, "runtime_identity": {}, "generation": {}, "pid": {}, "proc_start": {},
 	"endpoint": {}, "service": {}, "host_id": {}, "host_name": {}, "protocol_version": {},
-	"products": {}, "attachments": {}, "lanes": {}, "federation": {}, "migration": {},
+	"products": {}, "attachments": {}, "lanes": {}, "federation": {},
 	"debt": {}, "healthy": {}, "checks": {}, "listener": {}, "connected_hosts": {}, "routing": {},
 	"admission": {}, "recovery_stage": {}, "retryable": {}, "next_action": {},
 }

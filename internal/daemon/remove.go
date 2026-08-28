@@ -402,7 +402,6 @@ func newHostRemovalEngine(prefix string, paths ProductionPaths, values map[strin
 	}
 	lifecycle, err := NewHostInstallLifecycle(
 		connectors,
-		MigrationInspector(func(context.Context, releaseinstall.InstallRequest) error { return nil }),
 		func(context.Context, releaseinstall.InstalledRelease) error { return nil },
 	)
 	if err != nil {

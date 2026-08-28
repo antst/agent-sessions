@@ -19,17 +19,18 @@ make install-all
 ```
 
 `make install` and `make dev-install` are host-install aliases. Clean installs and steady-state unified
-upgrades use this host transaction; a split-runtime first migration must first pass the read-only
-maintenance-window gate described below:
+upgrades use this host transaction:
 
 1. validates and stages one immutable host release;
 2. discovers Codex, Claude, Grok, and Qwen without treating an absent product as an aggregate failure;
-3. prepares recoverable connector changes for the installed subset;
-4. installs and enables the standard user service;
-5. atomically selects `host/current` and performs one service-manager start or restart;
+3. persists the resolved native executable inventory and prepares recoverable connector changes for
+   the installed subset;
+4. installs the standard user service definition and atomically selects `host/current`;
+5. commits connector changes from that immutable release before performing one service-manager start
+   or restart;
 6. verifies the exact binary identity, generation, one private endpoint, state schema, product
    readiness, local routing, and configured federation state; and
-7. commits the release and connector journals together.
+7. commits the release journal and confirms the already-applied connector journal.
 
 Explicit connector operations remain strict:
 
@@ -71,55 +72,20 @@ Upgrading a protocol-compatible host never restarts the hub. Upgrading the hub n
 Their release versions and source commits may differ; network interoperability requires only exact
 hub-protocol-version equality. See [FEDERATION.md](FEDERATION.md).
 
-## First migration from the split runtime
+## First installation of the unified daemon
 
-The first unified host install requires an operator-owned maintenance window. Before invoking the
-mutating install:
+Version 0.3 is a deliberate greenfield boundary from the unreleased split-runtime prototypes. Before
+the first install, close every old peer and lane, stop all old Agent Sessions processes and services,
+and remove or archive the old Agent Sessions-owned state and installation roots. The installer does
+not inventory, adopt, drain, retire, or repair the old topology.
 
-1. close every legacy managed peer and lane;
-2. explicitly stop every responsive legacy supervisor, product manager, routing agent, and federation
-   authority through the old release's supported lifecycle; and
-3. disable or otherwise hold all legacy service, login, and command launch paths so no new legacy
-   authority can start until installation completes.
-
-The installer then performs a closed inventory of previously shipped Agent Sessions-owned state,
-services, processes, and runtime roots. It fails before mutation and names every exact live peer, lane,
-or legacy authority. A responsive authority is a blocker even when it reports zero shims or active
-work. Stop it yourself through the old supported lifecycle, keep the maintenance window in force, and
-rerun the supported install command.
-
-The installer never closes admission on, stops, signals, or restarts a legacy authority. There is no
-live handoff or compatibility drain protocol for supervisors, shims, product hosts or managers, lane
-managers, routing agents, or the old federation authority.
-
-After the gate passes, the transaction:
-
-1. re-attests that every legacy authority remains absent and fails closed if any launch appears;
-2. adopts only Agent Sessions-owned catalogs, names, global groups, completed lane state, cursors,
-   notices, hub configuration, provenance, and cleanup debt;
-3. commits the successor generation before opening admission; and
-4. re-attests owner absence and retires the exact legacy endpoints, disabled jobs, and artifacts.
-
-Vendor credentials, profiles, settings, transcripts, native history, and unrelated processes are
-never migration inputs. Unknown or changed identity becomes retryable debt rather than cleanup
-authority.
-
-```sh
-agent-sessions migrate inspect --json
-agent-sessions migrate status --json
-```
-
-These commands are metadata-only and work offline during first migration. They name exact blockers or
-debt and the supported retry action; they do not start the service or repair state.
-
-If first-migration readiness or recovery fails, rollback stops the unified candidate and leaves all
-legacy authorities stopped. It restores only release/state/connector/service surfaces changed by the
-installer; it never restarts the old topology. Keep the maintenance window in force and either retry
-the unified install or manually relaunch the old release through its supported lifecycle.
+Vendor credentials, profiles, settings, transcripts, and native history belong to the vendor clients
+and are not part of this reset. Do not delete or rewrite them. After the clean first install, ordinary
+0.3 upgrades use the durable release transaction and preserve unified daemon state.
 
 ## Routine restart and upgrade
 
-After first migration, steady-state upgrades use the normal immutable host transaction. The service
+Steady-state upgrades use the normal immutable host transaction. The service
 manager performs one restart. The daemon restores its catalogs, attachments, deliveries, lane actors,
 and embedded federation-client connection before opening the next generation.
 
@@ -142,14 +108,14 @@ agent-sessions-hub doctor --json
 ```
 
 Status and doctor report bounded non-secret identity, generation, endpoint, service, product,
-attachment, lane, federation, migration, and debt metadata. They never include message, prompt,
+attachment, lane, federation, and debt metadata. They never include message, prompt,
 result, tool, credential, or transcript content and never start an unavailable service.
 
 Common diagnoses:
 
 - `unavailable`: start the already-installed role through systemd-user or launchd; do not retry a
   workflow expecting it to bootstrap the daemon.
-- `refused`: close every exact peer/lane or removal/migration blocker named by the command, then retry
+- `refused`: close every exact peer/lane or removal blocker named by the command, then retry
   the same supported operation.
 - `incompatible`: install a build supporting the recorded state or matching hub protocol; no downgrade
   or alternate carrier is attempted.
@@ -169,7 +135,7 @@ make remove
 It refuses with zero mutation while any managed attachment or lane is active. Once quiescent, it stops
 the exact host service, removes supported connector registrations, command links, selected releases,
 and verified disposable runtime artifacts. It preserves Agent Sessions configuration, catalogs,
-completed lane metadata, cursors, federation configuration, migration provenance, and cleanup debt.
+completed lane metadata, cursors, federation configuration, and cleanup debt.
 It never removes native sessions, credentials, profiles, settings, or transcripts.
 
 Hub removal is independent:
