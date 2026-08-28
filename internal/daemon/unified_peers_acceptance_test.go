@@ -391,31 +391,39 @@ func assertUnifiedPeerIdentities(t *testing.T, processes map[string]unifiedPeerP
 
 func assertUnifiedPeerProcessCensus(t *testing.T, token string, processes map[string]unifiedPeerProcess) {
 	t.Helper()
-	listed, err := procinfo.List()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make([]int, 0, len(processes))
-	for _, process := range listed {
-		arguments, argsErr := procinfo.Args(process.PID)
-		if argsErr == nil && slices.Contains(arguments, token) {
-			got = append(got, process.PID)
-			joined := strings.Join(arguments, " ")
-			for _, forbidden := range []string{" supervisor ", " shim ", "qwen-host", "grok-host", "lane-manager"} {
-				if strings.Contains(joined, forbidden) {
-					t.Fatalf("acceptance process retained legacy authority role: %s", joined)
-				}
-			}
-		}
-	}
 	want := make([]int, 0, len(processes))
 	for _, process := range processes {
 		want = append(want, process.pid)
 	}
-	slices.Sort(got)
 	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		t.Fatalf("exact vendor process census = %v, want %v", got, want)
+	deadline := time.Now().Add(5 * time.Second)
+	var got []int
+	for {
+		listed, err := procinfo.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = got[:0]
+		for _, process := range listed {
+			arguments, argsErr := procinfo.Args(process.PID)
+			if argsErr == nil && slices.Contains(arguments, token) {
+				got = append(got, process.PID)
+				joined := strings.Join(arguments, " ")
+				for _, forbidden := range []string{" supervisor ", " shim ", "qwen-host", "grok-host", "lane-manager"} {
+					if strings.Contains(joined, forbidden) {
+						t.Fatalf("acceptance process retained legacy authority role: %s", joined)
+					}
+				}
+			}
+		}
+		slices.Sort(got)
+		if slices.Equal(got, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exact vendor process census = %v, want %v", got, want)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

@@ -191,6 +191,13 @@ if [[ "$platform" == Linux && "${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0}" != 1 
 		fail 'timed out waiting for nested systemd user manager'
 	fi
 fi
+if [[ "$platform" == Linux && "${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0}" == 1 ]]; then
+	# An externally provisioned user manager writes to the journal rather than
+	# these nested-manager captures. Keep the later observability aggregation
+	# total without pretending either file contains service output.
+	: >"$acceptance_root/systemd.stdout"
+	: >"$acceptance_root/systemd.stderr"
+fi
 
 cd -- "$repository_root"
 make -s build

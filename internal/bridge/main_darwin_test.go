@@ -29,6 +29,9 @@ type darwinTestRootLease struct {
 // compact private namespace; helper subprocesses inherit and reuse that lease
 // instead of consuming another globally scarce one-character leaf.
 func TestMain(m *testing.M) {
+	if err := os.Unsetenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR"); err != nil {
+		panic(err)
+	}
 	if inherited := os.Getenv(darwinTestRootEnv); inherited != "" {
 		if err := validateDarwinTestRoot(inherited, darwinTestRootBase); err != nil {
 			panic(fmt.Sprintf("invalid inherited Darwin bridge test root: %v", err))

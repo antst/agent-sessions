@@ -13,6 +13,11 @@ while [[ -L "$script_path" ]]; do
 done
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 
+# A developer commonly invokes the suite from an attached peer. Unit and
+# isolated acceptance fixtures must never discover that live daemon unless a
+# test opts in with its own test-owned runtime root.
+unset AGENT_SESSIONS_AGENT_RUNTIME_DIR
+
 # Darwin's ambient TMPDIR is spelled through the /var -> /private/var alias.
 # Test fixtures that intentionally exercise no-follow walks must begin from the
 # canonical spelling, and socket fixtures benefit from the shorter root.

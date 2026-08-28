@@ -1882,6 +1882,11 @@ func TestGrokRuntimePathsStayCompactAndDoNotExposeToken(t *testing.T) {
 func startTestGrokHost(t *testing.T, ownerPID int, ownerStart, sessionID string) (*grokHost, context.CancelFunc, <-chan error, string) {
 	t.Helper()
 	root := t.TempDir()
+	// These tests exercise the private Grok host directly. A developer running
+	// them from an attached peer may carry the production daemon runtime in the
+	// environment; inheriting it would switch publication to the daemon adapter
+	// without the prepared attachment that only the launcher integration owns.
+	t.Setenv("AGENT_SESSIONS_AGENT_RUNTIME_DIR", "")
 	t.Setenv(grokFakeProcessEnv, "1")
 	record := filepath.Join(root, "fake.jsonl")
 	t.Setenv("GROK_FAKE_RECORD", record)

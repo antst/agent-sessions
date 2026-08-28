@@ -20,6 +20,7 @@ user_name="${user_name:0:30}"
 work_root="/tmp/agent-sessions-ci-user-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}-${job_token}"
 user_home="/home/$user_name"
 user_id=
+temp_root=
 
 cleanup() {
 	set +e
@@ -31,6 +32,9 @@ cleanup() {
 	if id "$user_name" >/dev/null 2>&1; then
 		sudo userdel --remove "$user_name" >/dev/null 2>&1 || true
 	fi
+	case "$temp_root" in
+		/tmp/asci-*) sudo rm -rf -- "$temp_root" ;;
+	esac
 	case "$work_root" in
 		/tmp/agent-sessions-ci-user-*) sudo rm -rf -- "$work_root" ;;
 	esac
@@ -43,6 +47,11 @@ if id "$user_name" >/dev/null 2>&1 || [[ -e "$work_root" || -L "$work_root" ]]; 
 fi
 sudo useradd --create-home --shell /bin/bash "$user_name"
 user_id="$(id -u "$user_name")"
+temp_root="/tmp/asci-$user_id"
+[[ ! -e "$temp_root" && ! -L "$temp_root" ]] || {
+	printf 'disposable CI temp root already exists: %s\n' "$temp_root" >&2
+	exit 1
+}
 sudo loginctl enable-linger "$user_name"
 sudo systemctl start "user-runtime-dir@$user_id.service"
 sudo systemctl start "user@$user_id.service"
@@ -50,8 +59,9 @@ sudo systemctl start "user@$user_id.service"
 mkdir -m 0700 "$work_root"
 git clone --quiet --no-hardlinks "$repository_root" "$work_root/repository"
 git -C "$work_root/repository" checkout --quiet --detach "$source_revision"
-mkdir -m 0700 "$work_root/tmp"
+mkdir -m 0700 "$temp_root"
 sudo chown -R "$user_name:$user_name" "$work_root"
+sudo chown "$user_name:$user_name" "$temp_root"
 
 runtime_root="/run/user/$user_id"
 for _ in {1..200}; do
@@ -74,13 +84,13 @@ fi
 sudo -u "$user_name" env \
 	HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
 	XDG_CONFIG_HOME="$user_home/.config" XDG_STATE_HOME="$user_home/.local/state" \
-	TMPDIR="$work_root/tmp" PATH="$PATH" \
+	TMPDIR="$temp_root" PATH="$PATH" \
 	systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_STATE_HOME TMPDIR PATH
 
 sudo -u "$user_name" env \
 	HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
 	XDG_CONFIG_HOME="$user_home/.config" XDG_STATE_HOME="$user_home/.local/state" \
-	TMPDIR="$work_root/tmp" \
+	TMPDIR="$temp_root" \
 	AGENT_SESSIONS_EXISTING_SYSTEMD_USER=1 \
 	GOTOOLCHAIN="${GOTOOLCHAIN:-local}" PATH="$PATH" \
 	bash -c 'cd -- "$1"; shift; exec "$@"' bash "$work_root/repository" "$@"
