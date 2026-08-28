@@ -3,15 +3,15 @@ set -euo pipefail
 
 script_path="${BASH_SOURCE[0]}"
 while [[ -L "$script_path" ]]; do
-  script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
-  link_target="$(readlink -- "$script_path")"
+  script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
+  link_target="$(readlink "$script_path")"
   if [[ "$link_target" == /* ]]; then
     script_path="$link_target"
   else
     script_path="$script_dir/$link_target"
   fi
 done
-plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+plugin_root="$(cd "$(dirname "$script_path")/.." && pwd -P)"
 
 preflight="$plugin_root/claude/skills/codex-lane/scripts/lane-preflight"
 grok_preflight="$plugin_root/claude/skills/grok-lane/scripts/lane-preflight"
@@ -19,6 +19,25 @@ sh -n "$preflight"
 sh -n "$grok_preflight"
 if [[ ! -x "$grok_preflight" ]]; then
   printf 'Claude Grok lane preflight is not executable\n' >&2
+  exit 1
+fi
+if [[ ! -x "$preflight" ]]; then
+  printf 'Claude Codex lane preflight is not executable: %s\n' "$preflight" >&2
+  exit 1
+fi
+for dependency in awk sed; do
+  if ! PATH=/usr/bin:/bin command -v "$dependency" >/dev/null 2>&1; then
+    printf 'Restricted macOS-compatible lane preflight PATH lacks %s\n' "$dependency" >&2
+    exit 1
+  fi
+done
+nonportable_preflight="$({
+  grep -nF '\|' "$preflight" "$grok_preflight" || true
+  grep -En 'sed[[:space:]]+(-E|-r|--)|grep[^[:cntrl:]]*[[:space:]]-P|readlink[[:space:]]+-f|xargs[[:space:]]+-r|stat[[:space:]]+-c|date[[:space:]]+-d' \
+    "$preflight" "$grok_preflight" || true
+})"
+if [[ -n "$nonportable_preflight" ]]; then
+  printf 'Lane preflight contains a GNU-only shell dependency:\n%s\n' "$nonportable_preflight" >&2
   exit 1
 fi
 
@@ -273,6 +292,11 @@ fi
 contract_binary_dir="$temporary_root/package-bin"
 contract_release_dir="$temporary_root/package-release"
 mkdir -p "$contract_binary_dir" "$contract_release_dir"
+contract_clean_bin="$temporary_root/clean-bin"
+if [[ -e "$contract_clean_bin" ]]; then
+  printf 'Clean-bin Claude contract fixture unexpectedly exists: %s\n' "$contract_clean_bin" >&2
+  exit 1
+fi
 while IFS= read -r binary; do
   printf '%s\n' '#!/bin/sh' 'exit 0' >"$contract_binary_dir/$binary"
   chmod 0700 "$contract_binary_dir/$binary"
@@ -342,7 +366,8 @@ FAKE_CLAUDE_RECORD="$claude_record" \
   FAKE_CLAUDE_PLUGIN_STATE="$claude_plugin_state" \
   FAKE_CLAUDE_MARKETPLACE_STATE="$claude_marketplace_state" \
   make -s -C "$plugin_root" install-claude CLAUDE="$fake_claude" \
-    CLAUDE_MARKETPLACE_ROOT="$plugin_root" CLAUDE_SCOPE=user
+    CLAUDE_MARKETPLACE_ROOT="$plugin_root" CLAUDE_SCOPE=user \
+    BIN_DIR="$contract_clean_bin" CONNECTOR_INSTALLER="$contract_binary_dir/agent-sessions"
 if ! grep -Fxq 'plugin uninstall --scope user agent-sessions@agent-sessions' "$claude_record" ||
    ! grep -Fxq 'plugin marketplace remove --scope user agent-sessions' "$claude_record" ||
    ! grep -Fxq "plugin marketplace add --scope user $plugin_root" "$claude_record" ||
@@ -359,7 +384,8 @@ FAKE_CLAUDE_RECORD="$claude_record" \
   FAKE_CLAUDE_PLUGIN_STATE="$claude_plugin_state" \
   FAKE_CLAUDE_MARKETPLACE_STATE="$claude_marketplace_state" \
   make -s -C "$plugin_root" install-claude CLAUDE="$fake_claude" \
-    CLAUDE_MARKETPLACE_ROOT="$plugin_root" CLAUDE_SCOPE=user
+    CLAUDE_MARKETPLACE_ROOT="$plugin_root" CLAUDE_SCOPE=user \
+    BIN_DIR="$contract_clean_bin" CONNECTOR_INSTALLER="$contract_binary_dir/agent-sessions"
 if ! grep -Fxq 'plugin install --scope user agent-sessions@agent-sessions' "$claude_record" ||
    ! grep -Fxq "plugin marketplace add --scope user $plugin_root" "$claude_record" ||
    grep -Fq 'plugin uninstall --scope user' "$claude_record" ||
@@ -375,6 +401,50 @@ if ! grep -Fq 'CLAUDE_MARKETPLACE_ROOT ?= $(CLAUDE_STAGED_ROOT)' "$plugin_root/M
   exit 1
 fi
 
+contract_assert_status() {
+  local scenario="$1" expected="$2" actual="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'Contract assertion failed: %s status\nexpected: %s\nactual: %s\n' \
+      "$scenario" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+contract_assert_contains() {
+  local scenario="$1" field="$2" expected="$3" report="$4"
+  if ! grep -Fq -- "$expected" <<<"$report"; then
+    printf 'Contract assertion failed: %s field %s\nexpected fragment: %s\nreport:\n%s\n' \
+      "$scenario" "$field" "$expected" "$report" >&2
+    exit 1
+  fi
+}
+
+contract_assert_command() {
+  local scenario="$1" expected="$2" record="$3" actual
+  actual="$(<"$record")"
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'Contract assertion failed: %s command\nexpected: %s\nactual: %s\n' \
+      "$scenario" "$expected" "$actual" >&2
+    exit 1
+  fi
+}
+
+assertion_diagnostic="$temporary_root/assertion-diagnostic"
+set +e
+(
+  contract_assert_contains 'diagnostic canary' daemon_ready '"daemon_ready": true' '{"daemon_ready":false}'
+) 2>"$assertion_diagnostic"
+assertion_diagnostic_status=$?
+set -e
+if ((assertion_diagnostic_status == 0)) ||
+   ! grep -Fq 'diagnostic canary field daemon_ready' "$assertion_diagnostic" ||
+   ! grep -Fq 'expected fragment: "daemon_ready": true' "$assertion_diagnostic" ||
+   ! grep -Fq 'report:' "$assertion_diagnostic"; then
+  printf 'Contract assertion diagnostic canary was silent or unattributable:\n' >&2
+  cat "$assertion_diagnostic" >&2
+  exit 1
+fi
+
 fake_lane="$temporary_root/bin/codex-peer-lane"
 codex_doctor_record="$temporary_root/codex-doctor-commands"
 printf '%s\n' \
@@ -382,7 +452,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"$FAKE_CODEX_DOCTOR_RECORD"' \
   '[ "$*" = "doctor --json" ] || exit 2' \
   'case "${FAKE_CODEX_DOCTOR_MODE:-ready}" in' \
-  '  ready) printf "%s\n" '\''{"type":"lane.doctor","authority":"daemon","product":"codex","ready":true}'\'' ;;' \
+  '  ready) printf "%s\n" '\''{'\'' '\''  "type":"lane.doctor",'\'' '\''  "authority":"daemon",'\'' '\''  "product":"codex",'\'' '\''  "ready":true'\'' '\''}'\'' ;;' \
   '  unavailable) printf "%s\n" '\''{"type":"lane.doctor","authority":"daemon","product":"codex","ready":false}'\''; exit 1 ;;' \
   '  wrong-product) printf "%s\n" '\''{"type":"lane.doctor","authority":"daemon","product":"grok","ready":true}'\'' ;;' \
   '  *) exit 2 ;;' \
@@ -390,19 +460,20 @@ printf '%s\n' \
 chmod 0700 "$fake_lane"
 
 : >"$codex_doctor_record"
+set +e
 ready_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
   FAKE_CODEX_DOCTOR_RECORD="$codex_doctor_record" FAKE_CODEX_DOCTOR_MODE=ready "$preflight")"
-if ! grep -Fq '"summary": "ready"' <<<"$ready_report" ||
-   ! grep -Fq '"launcher_found": true' <<<"$ready_report" ||
-   ! grep -Fq '"daemon_ready": true' <<<"$ready_report" ||
-   ! grep -Fq '"doctor_exit": 0' <<<"$ready_report" ||
-   ! grep -Fq '"authority": "daemon"' <<<"$ready_report" ||
-   ! grep -Fq '"product": "codex"' <<<"$ready_report" ||
-   ! grep -Fq "\"invocation\": \"$fake_lane\"" <<<"$ready_report" ||
-   [[ "$(<"$codex_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude lane preflight rejected a ready canonical daemon: %s\n' "$ready_report" >&2
-  exit 1
-fi
+ready_status=$?
+set -e
+contract_assert_status 'Codex ready preflight' 0 "$ready_status"
+contract_assert_contains 'Codex ready preflight' summary '"summary": "ready"' "$ready_report"
+contract_assert_contains 'Codex ready preflight' launcher_found '"launcher_found": true' "$ready_report"
+contract_assert_contains 'Codex ready preflight' daemon_ready '"daemon_ready": true' "$ready_report"
+contract_assert_contains 'Codex ready preflight' doctor_exit '"doctor_exit": 0' "$ready_report"
+contract_assert_contains 'Codex ready preflight' authority '"authority": "daemon"' "$ready_report"
+contract_assert_contains 'Codex ready preflight' product '"product": "codex"' "$ready_report"
+contract_assert_contains 'Codex ready preflight' invocation "\"invocation\": \"$fake_lane\"" "$ready_report"
+contract_assert_command 'Codex ready preflight' 'doctor --json' "$codex_doctor_record"
 
 : >"$codex_doctor_record"
 set +e
@@ -410,17 +481,14 @@ launcher_only_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporar
   FAKE_CODEX_DOCTOR_RECORD="$codex_doctor_record" FAKE_CODEX_DOCTOR_MODE=unavailable "$preflight")"
 launcher_only_status=$?
 set -e
-if (( launcher_only_status == 0 )) ||
-   ! grep -Fq '"launcher_found": true' <<<"$launcher_only_report" ||
-   ! grep -Fq '"daemon_ready": false' <<<"$launcher_only_report" ||
-   ! grep -Fq '"doctor_exit": 1' <<<"$launcher_only_report" ||
-   ! grep -Fq '"authority": "daemon"' <<<"$launcher_only_report" ||
-   ! grep -Fq '"product": "codex"' <<<"$launcher_only_report" ||
-   ! grep -Fq 'Codex lane daemon or adapter is unavailable' <<<"$launcher_only_report" ||
-   [[ "$(<"$codex_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude lane preflight did not fail closed for an unavailable canonical daemon: %s\n' "$launcher_only_report" >&2
-  exit 1
-fi
+contract_assert_status 'Codex unavailable preflight' 1 "$launcher_only_status"
+contract_assert_contains 'Codex unavailable preflight' launcher_found '"launcher_found": true' "$launcher_only_report"
+contract_assert_contains 'Codex unavailable preflight' daemon_ready '"daemon_ready": false' "$launcher_only_report"
+contract_assert_contains 'Codex unavailable preflight' doctor_exit '"doctor_exit": 1' "$launcher_only_report"
+contract_assert_contains 'Codex unavailable preflight' authority '"authority": "daemon"' "$launcher_only_report"
+contract_assert_contains 'Codex unavailable preflight' product '"product": "codex"' "$launcher_only_report"
+contract_assert_contains 'Codex unavailable preflight' summary 'Codex lane daemon or adapter is unavailable' "$launcher_only_report"
+contract_assert_command 'Codex unavailable preflight' 'doctor --json' "$codex_doctor_record"
 
 : >"$codex_doctor_record"
 set +e
@@ -428,15 +496,12 @@ unreachable_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_
   FAKE_CODEX_DOCTOR_RECORD="$codex_doctor_record" FAKE_CODEX_DOCTOR_MODE=wrong-product "$preflight")"
 unreachable_status=$?
 set -e
-if (( unreachable_status == 0 )) ||
-   ! grep -Fq '"daemon_ready": false' <<<"$unreachable_report" ||
-   ! grep -Fq '"doctor_exit": 0' <<<"$unreachable_report" ||
-   ! grep -Fq '"authority": "daemon"' <<<"$unreachable_report" ||
-   ! grep -Fq '"product": "grok"' <<<"$unreachable_report" ||
-   [[ "$(<"$codex_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude lane preflight accepted a different product daemon contract: %s\n' "$unreachable_report" >&2
-  exit 1
-fi
+contract_assert_status 'Codex wrong-product preflight' 1 "$unreachable_status"
+contract_assert_contains 'Codex wrong-product preflight' daemon_ready '"daemon_ready": false' "$unreachable_report"
+contract_assert_contains 'Codex wrong-product preflight' doctor_exit '"doctor_exit": 0' "$unreachable_report"
+contract_assert_contains 'Codex wrong-product preflight' authority '"authority": "daemon"' "$unreachable_report"
+contract_assert_contains 'Codex wrong-product preflight' product '"product": "grok"' "$unreachable_report"
+contract_assert_command 'Codex wrong-product preflight' 'doctor --json' "$codex_doctor_record"
 
 path_grok_lane="$temporary_root/bin/grok-peer-lane"
 grok_doctor_record="$temporary_root/grok-doctor-commands"
@@ -445,7 +510,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"$FAKE_GROK_DOCTOR_RECORD"' \
   '[ "$*" = "doctor --json" ] || exit 2' \
   'case "${FAKE_GROK_DOCTOR_MODE:-ready}" in' \
-  '  ready) printf "%s\n" '\''{"type":"lane.doctor","authority":"daemon","product":"grok","ready":true}'\'' ;;' \
+  '  ready) printf "%s\n" '\''{'\'' '\''  "type":"lane.doctor",'\'' '\''  "authority":"daemon",'\'' '\''  "product":"grok",'\'' '\''  "ready":true'\'' '\''}'\'' ;;' \
   '  unavailable) printf "%s\n" '\''{"type":"lane.doctor","authority":"daemon","product":"grok","ready":false}'\''; exit 1 ;;' \
   '  wrong-product) printf "%s\n" '\''{"type":"lane.doctor","authority":"daemon","product":"codex","ready":true}'\'' ;;' \
   '  wrong-authority) printf "%s\n" '\''{"type":"lane.doctor","authority":"legacy-runtime","product":"grok","ready":true}'\'' ;;' \
@@ -454,20 +519,21 @@ printf '%s\n' \
 chmod 0700 "$path_grok_lane"
 
 : >"$grok_doctor_record"
+set +e
 grok_ready_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary_root" \
   FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" \
   FAKE_GROK_DOCTOR_MODE=ready "$grok_preflight")"
-if ! grep -Fq '"summary": "ready"' <<<"$grok_ready_report" ||
-   ! grep -Fq '"launcher_found": true' <<<"$grok_ready_report" ||
-   ! grep -Fq '"daemon_ready": true' <<<"$grok_ready_report" ||
-   ! grep -Fq '"doctor_exit": 0' <<<"$grok_ready_report" ||
-   ! grep -Fq '"authority": "daemon"' <<<"$grok_ready_report" ||
-   ! grep -Fq '"product": "grok"' <<<"$grok_ready_report" ||
-   ! grep -Fq "\"invocation\": \"$path_grok_lane\"" <<<"$grok_ready_report" ||
-   [[ "$(<"$grok_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude Grok lane preflight rejected a ready canonical daemon: %s\n' "$grok_ready_report" >&2
-  exit 1
-fi
+grok_ready_status=$?
+set -e
+contract_assert_status 'Grok ready preflight' 0 "$grok_ready_status"
+contract_assert_contains 'Grok ready preflight' summary '"summary": "ready"' "$grok_ready_report"
+contract_assert_contains 'Grok ready preflight' launcher_found '"launcher_found": true' "$grok_ready_report"
+contract_assert_contains 'Grok ready preflight' daemon_ready '"daemon_ready": true' "$grok_ready_report"
+contract_assert_contains 'Grok ready preflight' doctor_exit '"doctor_exit": 0' "$grok_ready_report"
+contract_assert_contains 'Grok ready preflight' authority '"authority": "daemon"' "$grok_ready_report"
+contract_assert_contains 'Grok ready preflight' product '"product": "grok"' "$grok_ready_report"
+contract_assert_contains 'Grok ready preflight' invocation "\"invocation\": \"$path_grok_lane\"" "$grok_ready_report"
+contract_assert_command 'Grok ready preflight' 'doctor --json' "$grok_doctor_record"
 
 : >"$grok_doctor_record"
 set +e
@@ -475,17 +541,14 @@ grok_missing_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$temporary
   FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" FAKE_GROK_DOCTOR_MODE=unavailable "$grok_preflight")"
 grok_missing_status=$?
 set -e
-if (( grok_missing_status == 0 )) ||
-   ! grep -Fq '"launcher_found": true' <<<"$grok_missing_report" ||
-   ! grep -Fq '"daemon_ready": false' <<<"$grok_missing_report" ||
-   ! grep -Fq '"doctor_exit": 1' <<<"$grok_missing_report" ||
-   ! grep -Fq '"authority": "daemon"' <<<"$grok_missing_report" ||
-   ! grep -Fq '"product": "grok"' <<<"$grok_missing_report" ||
-   ! grep -Fq 'Grok lane daemon or adapter is unavailable' <<<"$grok_missing_report" ||
-   [[ "$(<"$grok_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude Grok lane preflight did not fail closed for an unavailable canonical daemon: %s\n' "$grok_missing_report" >&2
-  exit 1
-fi
+contract_assert_status 'Grok unavailable preflight' 1 "$grok_missing_status"
+contract_assert_contains 'Grok unavailable preflight' launcher_found '"launcher_found": true' "$grok_missing_report"
+contract_assert_contains 'Grok unavailable preflight' daemon_ready '"daemon_ready": false' "$grok_missing_report"
+contract_assert_contains 'Grok unavailable preflight' doctor_exit '"doctor_exit": 1' "$grok_missing_report"
+contract_assert_contains 'Grok unavailable preflight' authority '"authority": "daemon"' "$grok_missing_report"
+contract_assert_contains 'Grok unavailable preflight' product '"product": "grok"' "$grok_missing_report"
+contract_assert_contains 'Grok unavailable preflight' summary 'Grok lane daemon or adapter is unavailable' "$grok_missing_report"
+contract_assert_command 'Grok unavailable preflight' 'doctor --json' "$grok_doctor_record"
 
 : >"$grok_doctor_record"
 set +e
@@ -493,15 +556,12 @@ grok_wrong_contract_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$te
   FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" FAKE_GROK_DOCTOR_MODE=wrong-product "$grok_preflight")"
 grok_wrong_contract_status=$?
 set -e
-if (( grok_wrong_contract_status == 0 )) ||
-   ! grep -Fq '"daemon_ready": false' <<<"$grok_wrong_contract_report" ||
-   ! grep -Fq '"doctor_exit": 0' <<<"$grok_wrong_contract_report" ||
-   ! grep -Fq '"authority": "daemon"' <<<"$grok_wrong_contract_report" ||
-   ! grep -Fq '"product": "codex"' <<<"$grok_wrong_contract_report" ||
-   [[ "$(<"$grok_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude Grok lane preflight accepted a different product daemon contract: %s\n' "$grok_wrong_contract_report" >&2
-  exit 1
-fi
+contract_assert_status 'Grok wrong-product preflight' 1 "$grok_wrong_contract_status"
+contract_assert_contains 'Grok wrong-product preflight' daemon_ready '"daemon_ready": false' "$grok_wrong_contract_report"
+contract_assert_contains 'Grok wrong-product preflight' doctor_exit '"doctor_exit": 0' "$grok_wrong_contract_report"
+contract_assert_contains 'Grok wrong-product preflight' authority '"authority": "daemon"' "$grok_wrong_contract_report"
+contract_assert_contains 'Grok wrong-product preflight' product '"product": "codex"' "$grok_wrong_contract_report"
+contract_assert_command 'Grok wrong-product preflight' 'doctor --json' "$grok_doctor_record"
 
 : >"$grok_doctor_record"
 set +e
@@ -509,15 +569,12 @@ grok_unavailable_report="$(PATH="$temporary_root/bin:/usr/bin:/bin" HOME="$tempo
   FAKE_GROK_DOCTOR_RECORD="$grok_doctor_record" FAKE_GROK_DOCTOR_MODE=wrong-authority "$grok_preflight")"
 grok_unavailable_status=$?
 set -e
-if (( grok_unavailable_status == 0 )) ||
-   ! grep -Fq '"daemon_ready": false' <<<"$grok_unavailable_report" ||
-   ! grep -Fq '"doctor_exit": 0' <<<"$grok_unavailable_report" ||
-   ! grep -Fq '"authority": "legacy-runtime"' <<<"$grok_unavailable_report" ||
-   ! grep -Fq '"product": "grok"' <<<"$grok_unavailable_report" ||
-   [[ "$(<"$grok_doctor_record")" != 'doctor --json' ]]; then
-  printf 'Claude Grok lane preflight accepted a non-daemon authority: %s\n' "$grok_unavailable_report" >&2
-  exit 1
-fi
+contract_assert_status 'Grok wrong-authority preflight' 1 "$grok_unavailable_status"
+contract_assert_contains 'Grok wrong-authority preflight' daemon_ready '"daemon_ready": false' "$grok_unavailable_report"
+contract_assert_contains 'Grok wrong-authority preflight' doctor_exit '"doctor_exit": 0' "$grok_unavailable_report"
+contract_assert_contains 'Grok wrong-authority preflight' authority '"authority": "legacy-runtime"' "$grok_unavailable_report"
+contract_assert_contains 'Grok wrong-authority preflight' product '"product": "grok"' "$grok_unavailable_report"
+contract_assert_command 'Grok wrong-authority preflight' 'doctor --json' "$grok_doctor_record"
 
 mkdir -p "$temporary_root/cachebuster/.codex-plugin" "$temporary_root/cachebuster/claude/.claude-plugin" \
   "$temporary_root/cachebuster/grok/.grok-plugin" \

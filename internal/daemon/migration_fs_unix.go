@@ -21,8 +21,8 @@ type productionLegacyFileIdentity struct {
 
 func productionLegacyIdentity(stat unix.Stat_t) productionLegacyFileIdentity {
 	return productionLegacyFileIdentity{
-		device: uint64(stat.Dev), //nolint:unconvert // Darwin exposes Dev as a signed integer; identity uses one portable width.
-		inode:  uint64(stat.Ino), mode: uint32(stat.Mode), uid: stat.Uid,
+		device: productionLegacyStatDevice(&stat),
+		inode:  stat.Ino, mode: productionLegacyStatMode(&stat), uid: stat.Uid,
 	}
 }
 

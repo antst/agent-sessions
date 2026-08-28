@@ -12,6 +12,41 @@ json_bool() {
   if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi
 }
 
+json_string_field() {
+  awk -v key="\"$1\"" '
+    {
+      start = index($0, key)
+      if (start == 0) next
+      value = substr($0, start + length(key))
+      if (sub(/^[[:space:]]*:[[:space:]]*"/, "", value) != 1) next
+      finish = index(value, "\"")
+      if (finish > 0) {
+        print substr(value, 1, finish - 1)
+        exit
+      }
+    }
+  '
+}
+
+json_bool_field() {
+  awk -v key="\"$1\"" '
+    {
+      start = index($0, key)
+      if (start == 0) next
+      value = substr($0, start + length(key))
+      if (sub(/^[[:space:]]*:[[:space:]]*/, "", value) != 1) next
+      if (substr(value, 1, 4) == "true") {
+        print "true"
+        exit
+      }
+      if (substr(value, 1, 5) == "false") {
+        print "false"
+        exit
+      }
+    }
+  '
+}
+
 launcher="$(command -v grok-peer-lane 2>/dev/null || true)"
 launcher_found=0
 [ -z "$launcher" ] || launcher_found=1
@@ -27,12 +62,9 @@ if [ "$launcher_found" = "1" ]; then
   else
     doctor_exit=$?
   fi
-  authority="$(printf '%s' "$doctor_json" |
-    sed -n 's/.*"authority"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n 1p)"
-  product="$(printf '%s' "$doctor_json" |
-    sed -n 's/.*"product"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n 1p)"
-  ready="$(printf '%s' "$doctor_json" |
-    sed -n 's/.*"ready"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | sed -n 1p)"
+  authority="$(printf '%s\n' "$doctor_json" | json_string_field authority)"
+  product="$(printf '%s\n' "$doctor_json" | json_string_field product)"
+  ready="$(printf '%s\n' "$doctor_json" | json_bool_field ready)"
 fi
 
 daemon_ready=0

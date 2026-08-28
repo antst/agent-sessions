@@ -23,18 +23,41 @@ const HostCoreObservabilityOwner = "host-core"
 // service-manager and hub tasks add file-disjoint fragments and combine them
 // with MergeObservabilityManifests in tests.
 func HostCoreObservabilityManifest() []ObservabilitySink {
-	return []ObservabilitySink{
-		{ID: "host.log.normal", Owner: HostCoreObservabilityOwner, Boundary: "log", Variant: "normal", Format: "text"},
-		{ID: "host.log.debug", Owner: HostCoreObservabilityOwner, Boundary: "log", Variant: "debug", Format: "text"},
-		{ID: "host.log.error", Owner: HostCoreObservabilityOwner, Boundary: "log", Variant: "error", Format: "text"},
-		{ID: "host.crash-report", Owner: HostCoreObservabilityOwner, Boundary: "crash-report", Variant: "failure", Format: "json"},
-		{ID: "host.metric", Owner: HostCoreObservabilityOwner, Boundary: "metric", Variant: "export", Format: "text"},
-		{ID: "host.trace", Owner: HostCoreObservabilityOwner, Boundary: "trace", Variant: "export", Format: "json"},
-		{ID: "host.status.human", Owner: HostCoreObservabilityOwner, Boundary: "status", Variant: "human", Format: "text"},
-		{ID: "host.status.json", Owner: HostCoreObservabilityOwner, Boundary: "status", Variant: "json", Format: "json"},
-		{ID: "host.doctor.human", Owner: HostCoreObservabilityOwner, Boundary: "doctor", Variant: "human", Format: "text"},
-		{ID: "host.doctor.json", Owner: HostCoreObservabilityOwner, Boundary: "doctor", Variant: "json", Format: "json"},
+	return coreObservabilityManifest("host", HostCoreObservabilityOwner)
+}
+
+type coreObservabilitySink struct {
+	suffix   string
+	boundary string
+	variant  string
+	format   string
+}
+
+var coreObservabilitySinks = [...]coreObservabilitySink{
+	{suffix: "log.normal", boundary: "log", variant: "normal", format: "text"},
+	{suffix: "log.debug", boundary: "log", variant: "debug", format: "text"},
+	{suffix: "log.error", boundary: "log", variant: "error", format: "text"},
+	{suffix: "crash-report", boundary: "crash-report", variant: "failure", format: "json"},
+	{suffix: "metric", boundary: "metric", variant: "export", format: "text"},
+	{suffix: "trace", boundary: "trace", variant: "export", format: "json"},
+	{suffix: "status.human", boundary: "status", variant: "human", format: "text"},
+	{suffix: "status.json", boundary: "status", variant: "json", format: "json"},
+	{suffix: "doctor.human", boundary: "doctor", variant: "human", format: "text"},
+	{suffix: "doctor.json", boundary: "doctor", variant: "json", format: "json"},
+}
+
+func coreObservabilityManifest(prefix, owner string) []ObservabilitySink {
+	manifest := make([]ObservabilitySink, 0, len(coreObservabilitySinks))
+	for _, sink := range coreObservabilitySinks {
+		manifest = append(manifest, ObservabilitySink{
+			ID:       prefix + "." + sink.suffix,
+			Owner:    owner,
+			Boundary: sink.boundary,
+			Variant:  sink.variant,
+			Format:   sink.format,
+		})
 	}
+	return manifest
 }
 
 // MergeObservabilityManifests validates and combines test-owned fragments in

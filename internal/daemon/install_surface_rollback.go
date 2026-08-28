@@ -576,7 +576,7 @@ func validateHostSurfaceReplacementTarget(
 	if err != nil {
 		return err
 	}
-	mode := uint32(identity.Mode) //nolint:unconvert // Darwin exposes uint16 while Linux exposes uint32.
+	mode := hostSurfaceStatMode(&identity)
 	if mode&unix.S_IFMT != expectedType {
 		return errors.New("host surface target changed filesystem type")
 	}
