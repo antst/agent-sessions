@@ -320,7 +320,7 @@ func TestOfflineMigrationStatusReadsExistingStateWithoutCreatingAHostRoot(t *tes
 	}
 }
 
-func TestOfflineMigrationInspectUsesProductionInventoryWithoutCreatingUnifiedState(t *testing.T) {
+func TestOfflineMigrationInspectUsesReadOnlyInventoryWithoutCreatingUnifiedState(t *testing.T) {
 	base, err := os.MkdirTemp("/tmp", "ami-")
 	if err != nil {
 		t.Fatal(err)
@@ -339,6 +339,13 @@ func TestOfflineMigrationInspectUsesProductionInventoryWithoutCreatingUnifiedSta
 	t.Setenv("XDG_STATE_HOME", stateBase)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeBase)
 	t.Setenv("TMPDIR", tempBase)
+	previousInspect := inspectProductionFirstMigration
+	inspectCalls := 0
+	inspectProductionFirstMigration = func(context.Context) (FirstMigrationInspection, error) {
+		inspectCalls++
+		return FirstMigrationInspection{}, nil
+	}
+	t.Cleanup(func() { inspectProductionFirstMigration = previousInspect })
 
 	projection, err := RunHostMigrationInspectCLI(context.Background())
 	if err != nil {
@@ -346,10 +353,13 @@ func TestOfflineMigrationInspectUsesProductionInventoryWithoutCreatingUnifiedSta
 	}
 	if projection.Revision != 0 || projection.Candidates == nil || projection.Blockers == nil || projection.Debt == nil ||
 		len(projection.Candidates)+len(projection.Blockers)+len(projection.Debt) != 0 {
-		t.Fatalf("clean production migration inspection = %+v", projection)
+		t.Fatalf("clean injected migration inspection = %+v", projection)
 	}
 	if _, statErr := os.Lstat(filepath.Join(stateBase, stateDirectoryName)); !os.IsNotExist(statErr) {
 		t.Fatalf("offline migration inspection created unified state: %v", statErr)
+	}
+	if inspectCalls != 1 {
+		t.Fatalf("migration inventory calls = %d, want 1 injected read-only observation", inspectCalls)
 	}
 }
 

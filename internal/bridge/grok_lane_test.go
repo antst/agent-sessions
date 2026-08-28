@@ -880,9 +880,11 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GROK_PEER_GROK_BIN", fakeGrok)
+	runtimeDir := useBridgeTestAgent(t)
 
 	paths := resolveNativePaths()
 	sessionID := randomID()
+	prepareBridgeTestStandaloneLane(t, runtimeDir, sessionID, "grok")
 	launchToken := randomID() + randomID()
 	hostPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), launchToken)
 	now := time.Now().UnixMilli()
@@ -993,6 +995,7 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 		paths: paths, state: resumed, launchToken: resumedToken,
 		turnNotify: make(chan struct{}, 1), done: make(chan struct{}),
 	}
+	prepareBridgeTestStandaloneLane(t, runtimeDir, sessionID, "grok")
 	if err := second.start(); err != nil {
 		t.Fatalf("resume Grok lane manager: %v", err)
 	}
@@ -1195,8 +1198,10 @@ func startTestGrokLaneManager(t *testing.T, root string, autoArchive bool, delay
 
 func startTestGrokLaneManagerWithOwner(t *testing.T, root string, autoArchive bool, delay time.Duration, ownerPID int, ownerStart string) (*grokLaneManager, nativePaths, grokLaneState, string) {
 	t.Helper()
+	runtimeDir := useBridgeTestAgent(t)
 	paths := resolveNativePaths()
 	sessionID := randomID()
+	prepareBridgeTestStandaloneLane(t, runtimeDir, sessionID, "grok")
 	launchToken := randomID() + randomID()
 	hostPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), launchToken)
 	turn := newGrokLaneTurn("managed turn")

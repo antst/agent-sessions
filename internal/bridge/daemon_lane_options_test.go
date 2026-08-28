@@ -21,6 +21,15 @@ func TestDaemonLaneNormalizersReuseProductOptionContracts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var err error
+	qwenHome, err = filepath.EvalSymlinks(qwenHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qwenRuntime, err = filepath.EvalSymlinks(qwenRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("QWEN_RUNTIME_DIR", qwenRuntime)
 
 	for _, test := range []struct {

@@ -30,7 +30,7 @@ var (
 func TestCodexDaemonLaneAppServerStartInterruptCollectAndArchive(t *testing.T) {
 	serverState := newCodexDaemonLaneAppServerState()
 	_, socket := startFakeNativeAppServer(t, serverState.handle)
-	profile := t.TempDir()
+	profile := codexDaemonLaneTestProfile(t)
 	adapter := newConnectedCodexDaemonLaneAdapter(t, profile, socket)
 	lane, turn := codexDaemonLaneRecords(profile, t.TempDir())
 	turn.InputReference["options"] = map[string]any{"native": map[string]any{
@@ -121,7 +121,7 @@ func TestCodexDaemonLaneAppServerStartInterruptCollectAndArchive(t *testing.T) {
 func TestCodexDaemonLaneReconnectsActiveTurnWithoutRedispatch(t *testing.T) {
 	serverState := newCodexDaemonLaneAppServerState()
 	_, socket := startFakeNativeAppServer(t, serverState.handle)
-	profile := t.TempDir()
+	profile := codexDaemonLaneTestProfile(t)
 	lane, turn := codexDaemonLaneRecords(profile, t.TempDir())
 
 	first := newConnectedCodexDaemonLaneAdapter(t, profile, socket)
@@ -200,6 +200,15 @@ func codexDaemonLaneRecords(profile, cwd string) (daemonpkg.LaneRecord, daemonpk
 		InputReference: map[string]any{"kind": "inline", "content": "inspect the daemon boundary"}, DispatchState: "accepted",
 	}
 	return lane, turn
+}
+
+func codexDaemonLaneTestProfile(t *testing.T) string {
+	t.Helper()
+	profile, err := canonicalCodexProfile(t.TempDir())
+	if err != nil {
+		t.Fatalf("canonicalize Codex daemon lane profile: %v", err)
+	}
+	return profile
 }
 
 func newConnectedCodexDaemonLaneAdapter(t *testing.T, profile, socket string) *codexDaemonAdapter {

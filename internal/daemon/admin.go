@@ -15,6 +15,8 @@ import (
 	"github.com/antst/agent-sessions/internal/statestore"
 )
 
+var inspectProductionFirstMigration = InspectProductionFirstMigration
+
 // QueryAdmin performs one correlated read-only administrative request against
 // the already-running production daemon. It never starts service lifetime.
 func QueryAdmin(ctx context.Context, operation string) (json.RawMessage, error) {
@@ -261,7 +263,7 @@ func RunHostMigrationInspectCLI(ctx context.Context) (MigrationInspectProjection
 	} else if !os.IsNotExist(err) {
 		return MigrationInspectProjection{}, administrativeMigrationError("migration.inspect", err)
 	}
-	inspection, err := InspectProductionFirstMigration(ctx)
+	inspection, err := inspectProductionFirstMigration(ctx)
 	if err != nil {
 		return MigrationInspectProjection{}, administrativeMigrationError("migration.inspect", err)
 	}

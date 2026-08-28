@@ -161,6 +161,12 @@ func prepareBridgeTestLaneParentForProduct(t *testing.T, runtimeDir, childID, pa
 	if !ok {
 		t.Fatalf("parent %q is not attached to the unified daemon", parentID)
 	}
+	prepareBridgeTestStandaloneLane(t, runtimeDir, childID, product)
+}
+
+func prepareBridgeTestStandaloneLane(t *testing.T, runtimeDir, childID, product string) {
+	t.Helper()
+	fixture := bridgeDaemonFixture(t, runtimeDir)
 	identity := fixture.attach(t, product, childID, childID, "", []string{"bridge-test"})
 	t.Setenv(daemonpkg.InternalAttachmentIDEnvironment, identity.attachmentID)
 	t.Setenv(daemonpkg.InternalCapabilityEnvironment, identity.capability)

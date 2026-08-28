@@ -25,6 +25,7 @@ cleanup() {
 	set +e
 	if [[ -n "$user_id" ]]; then
 		sudo systemctl stop "user@$user_id.service" >/dev/null 2>&1 || true
+		sudo systemctl stop "user-runtime-dir@$user_id.service" >/dev/null 2>&1 || true
 		sudo loginctl disable-linger "$user_name" >/dev/null 2>&1 || true
 	fi
 	if id "$user_name" >/dev/null 2>&1; then
@@ -43,6 +44,7 @@ fi
 sudo useradd --create-home --shell /bin/bash "$user_name"
 user_id="$(id -u "$user_name")"
 sudo loginctl enable-linger "$user_name"
+sudo systemctl start "user-runtime-dir@$user_id.service"
 sudo systemctl start "user@$user_id.service"
 
 mkdir -m 0700 "$work_root"
@@ -52,20 +54,26 @@ sudo chown -R "$user_name:$user_name" "$work_root"
 
 runtime_root="/run/user/$user_id"
 for _ in {1..200}; do
-	if [[ -S "$runtime_root/bus" ]] && sudo -u "$user_name" env \
+	if sudo -u "$user_name" env \
 		HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
-		DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_root/bus" \
 		systemctl --user show-environment >/dev/null 2>&1; then
 		break
 	fi
 	sleep 0.05
 done
-[[ -S "$runtime_root/bus" ]] || { printf 'disposable CI user manager did not publish its D-Bus socket\n' >&2; exit 1; }
+if ! sudo -u "$user_name" env HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
+	systemctl --user show-environment >/dev/null 2>&1; then
+	printf 'disposable CI user manager did not become reachable\n' >&2
+	sudo systemctl --no-pager --full status "user-runtime-dir@$user_id.service" "user@$user_id.service" >&2 || true
+	sudo journalctl --no-pager -n 100 -u "user-runtime-dir@$user_id.service" -u "user@$user_id.service" >&2 || true
+	sudo loginctl show-user "$user_name" >&2 || true
+	sudo find "$runtime_root" -maxdepth 2 -printf '%M %u:%g %p\n' >&2 2>/dev/null || true
+	exit 1
+fi
 
 sudo -u "$user_name" env \
 	HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
 	XDG_CONFIG_HOME="$user_home/.config" XDG_STATE_HOME="$user_home/.local/state" \
-	DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_root/bus" \
 	AGENT_SESSIONS_EXISTING_SYSTEMD_USER=1 \
 	GOTOOLCHAIN="${GOTOOLCHAIN:-local}" PATH="$PATH" \
 	bash -c 'cd -- "$1"; shift; exec "$@"' bash "$work_root/repository" "$@"

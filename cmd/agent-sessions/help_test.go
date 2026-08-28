@@ -46,8 +46,9 @@ func TestAdministrativeHelpUsesTheCanonicalParsedOptionInventory(t *testing.T) {
 }
 
 func TestAdministrativeJSONUsesCanonicalEnvelopeSchemaAndExitClass(t *testing.T) {
-	previousInspect, previousStatus := runHostMigrationInspect, runHostMigrationStatus
+	previousInspect, previousStatus, previousQuery := runHostMigrationInspect, runHostMigrationStatus, queryHostAdmin
 	inspectCalls, statusCalls := 0, 0
+	queryCalls := 0
 	runHostMigrationInspect = func(context.Context) (daemon.MigrationInspectProjection, error) {
 		inspectCalls++
 		return daemon.MigrationInspectProjection{
@@ -58,7 +59,15 @@ func TestAdministrativeJSONUsesCanonicalEnvelopeSchemaAndExitClass(t *testing.T)
 		statusCalls++
 		return daemon.MigrationStatusProjection{State: "none", NextAction: "none"}, nil
 	}
-	t.Cleanup(func() { runHostMigrationInspect, runHostMigrationStatus = previousInspect, previousStatus })
+	queryHostAdmin = func(_ context.Context, _ string) (json.RawMessage, error) {
+		queryCalls++
+		return nil, &daemon.UnavailableError{
+			Endpoint: "/test/agent-sessions.sock", Cause: errors.New("fixture daemon is absent"), NextAction: "inspect fixture service",
+		}
+	}
+	t.Cleanup(func() {
+		runHostMigrationInspect, runHostMigrationStatus, queryHostAdmin = previousInspect, previousStatus, previousQuery
+	})
 
 	tests := []struct {
 		name     string
@@ -78,8 +87,8 @@ func TestAdministrativeJSONUsesCanonicalEnvelopeSchemaAndExitClass(t *testing.T)
 			if test.offline && code != 0 {
 				t.Fatalf("offline %s --json exit = %d, want 0 without a daemon; stdout=%q stderr=%q", test.name, code, stdout.String(), stderr.String())
 			}
-			if code != 0 && code != 3 {
-				t.Fatalf("%s --json exit = %d, want success or unavailable", test.name, code)
+			if !test.offline && code != 3 {
+				t.Fatalf("%s --json exit = %d, want deterministic unavailable", test.name, code)
 			}
 			if stderr.Len() != 0 {
 				t.Errorf("%s --json wrote non-JSON stderr: %q", test.name, stderr.String())
@@ -123,6 +132,9 @@ func TestAdministrativeJSONUsesCanonicalEnvelopeSchemaAndExitClass(t *testing.T)
 	}
 	if inspectCalls != 1 || statusCalls != 1 {
 		t.Fatalf("offline migration dispatch calls inspect=%d status=%d, want one each", inspectCalls, statusCalls)
+	}
+	if queryCalls != 2 {
+		t.Fatalf("online administrative transport calls = %d, want status and doctor only", queryCalls)
 	}
 }
 

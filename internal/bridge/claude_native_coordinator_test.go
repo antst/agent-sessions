@@ -17,7 +17,7 @@ import (
 )
 
 func TestClaudeNativeCoordinatorPublishesServiceDeliversAndRemovesExactProjection(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.CanonicalTempDir(t)
 	runtimeBase := testutil.ShortSocketRoot(t, "as-claude-native-", "agent-sessions/daemon.sock")
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))

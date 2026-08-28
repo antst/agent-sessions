@@ -9,6 +9,20 @@ import (
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
+// CanonicalTempDir returns testing.T's private temporary directory through
+// its real filesystem spelling. Darwin's ambient temporary root is commonly
+// reached through /var -> /private/var; production no-follow walkers must not
+// reject a fixture before reaching the deliberate path under test.
+func CanonicalTempDir(t testing.TB) string {
+	t.Helper()
+	root := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("canonicalize test root %s: %v", root, err)
+	}
+	return canonical
+}
+
 // ShortSocketRoot creates a private test directory whose longest declared
 // socket path fits the current platform without embedding testing.T's name.
 func ShortSocketRoot(t testing.TB, pattern, longestRelative string) string {

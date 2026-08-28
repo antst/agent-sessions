@@ -21,6 +21,7 @@ import (
 var runConnectorRelay = bridge.RunDaemonMCPRelay
 var runHostMigrationInspect = daemon.RunHostMigrationInspectCLI
 var runHostMigrationStatus = daemon.RunHostMigrationStatusCLI
+var queryHostAdmin = daemon.QueryAdmin
 
 func main() {
 	code := run(filepathBase(os.Args[0]), os.Args[1:], os.Stdout, os.Stderr)
@@ -144,7 +145,7 @@ func runAdministrativeCommand(command clihelp.CommandDescriptor, options clihelp
 	if operation == "" {
 		return renderAdministrativeFailure(command, options.JSON, &commandUnavailableError{command: command.Key}, stdout, stderr)
 	}
-	result, err := daemon.QueryAdmin(context.Background(), operation)
+	result, err := queryHostAdmin(context.Background(), operation)
 	if err != nil {
 		return renderAdministrativeFailure(command, options.JSON, err, stdout, stderr)
 	}

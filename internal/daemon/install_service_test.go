@@ -14,6 +14,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/releaseinstall"
 	"github.com/antst/agent-sessions/internal/servicecontrol"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 type recordedInstalledServiceCommand struct {
@@ -27,7 +28,7 @@ type recordingInstalledServiceRunner struct {
 }
 
 func TestEnsureHostServiceLogRootCreatesExactOwnerOnlyDirectory(t *testing.T) {
-	stateRoot := filepath.Join(t.TempDir(), "state")
+	stateRoot := filepath.Join(testutil.CanonicalTempDir(t), "state")
 	if err := os.Mkdir(stateRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func TestEnsureHostServiceLogRootRejectsIndirectOrPermissiveDirectory(t *testing
 	}{
 		{name: "symlink", setup: func(t *testing.T, logRoot string) {
 			t.Helper()
-			target := t.TempDir()
+			target := testutil.CanonicalTempDir(t)
 			if err := os.Symlink(target, logRoot); err != nil {
 				t.Fatal(err)
 			}
@@ -60,7 +61,7 @@ func TestEnsureHostServiceLogRootRejectsIndirectOrPermissiveDirectory(t *testing
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			stateRoot := filepath.Join(t.TempDir(), "state")
+			stateRoot := filepath.Join(testutil.CanonicalTempDir(t), "state")
 			if err := os.Mkdir(stateRoot, 0o700); err != nil {
 				t.Fatal(err)
 			}

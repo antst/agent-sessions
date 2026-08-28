@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestCanonicalTempDirReturnsRealPrivateFixtureRoot(t *testing.T) {
+	root := CanonicalTempDir(t)
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != canonical {
+		t.Fatalf("canonical temp root retained a path alias: root=%q canonical=%q", root, canonical)
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("canonical temp root mode = %v, want real directory", info.Mode())
+	}
+}
+
 func TestShortSocketRootCanonicalizesAmbientTempAlias(t *testing.T) {
 	realParent, err := os.MkdirTemp("/tmp", "asrp-")
 	if err != nil {

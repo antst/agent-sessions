@@ -55,7 +55,7 @@ if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 &&
 		# Installed release images are deliberately immutable (directories 0555),
 		# so restore owner write permission only inside this validated temp root
 		# before removing the disposable acceptance user.
-		chmod -R u+w -- "$outer_root" 2>/dev/null || true
+		chmod -R u+w "$outer_root" 2>/dev/null || true
 		rm -rf -- "$outer_root"
 	}
 	trap cleanup_outer EXIT
@@ -365,7 +365,7 @@ prior_selection="$(readlink "$prefix/libexec/agent-sessions/host/current")"
 prior_connectors="$(connector_semantics)"
 upgrade_source="$acceptance_root/upgrade-source"
 cp -R -- "$(readlink -f "$prefix/libexec/agent-sessions/host/current")" "$upgrade_source"
-chmod -R u+w -- "$upgrade_source"
+chmod -R u+w "$upgrade_source"
 sed -i '1s/$/ (acceptance rollback candidate)/' "$upgrade_source/docs/CLI.md"
 set +e
 AGENT_SESSIONS_FAKE_FAIL_PRODUCT=grok "$host_binary" lifecycle install \

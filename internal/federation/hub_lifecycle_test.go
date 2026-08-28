@@ -14,11 +14,12 @@ import (
 
 	"github.com/antst/agent-sessions/internal/releaseinstall"
 	"github.com/antst/agent-sessions/internal/servicecontrol"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestHubRoleDescriptorUsesDistinctSelectedBinaryAndSharedServiceEngine(t *testing.T) {
-	prefix := filepath.Join(t.TempDir(), "prefix")
-	definition := filepath.Join(t.TempDir(), "agent-sessions-hub.plist")
+	prefix := filepath.Join(testutil.CanonicalTempDir(t), "prefix")
+	definition := filepath.Join(testutil.CanonicalTempDir(t), "agent-sessions-hub.plist")
 	descriptor, err := HubServiceRole(prefix, definition, "127.0.0.1:7443")
 	if err != nil {
 		t.Fatalf("resolve hub service role: %v", err)
@@ -80,7 +81,7 @@ func TestHubRoleDescriptorUsesDistinctSelectedBinaryAndSharedServiceEngine(t *te
 }
 
 func TestCoLocatedHostAndHubUseIndependentReleaseSelectionUpgradeRollbackAndRemoval(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.CanonicalTempDir(t)
 	t.Cleanup(func() { makeHubTestTreeWritable(root) })
 	hostLayout, err := releaseinstall.ResolveRoleLayout(root, releaseinstall.RoleHost)
 	if err != nil {
@@ -259,7 +260,7 @@ func (hooks *hubTestRoleHooks) Remove(context.Context) error {
 
 func hubTestRelease(t *testing.T, version, identitySeed, executable string) releaseinstall.InstallRequest {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), version)
+	root := filepath.Join(testutil.CanonicalTempDir(t), version)
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o700); err != nil {
 		t.Fatal(err)
 	}

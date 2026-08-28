@@ -46,7 +46,7 @@ if [[ ${AGENT_SESSIONS_NESTED_HUB_SYSTEMD:-0} != 1 && ${AGENT_SESSIONS_EXISTING_
 			printf 'installed hub acceptance: retained diagnostic root %s\n' "$outer_root" >&2
 			return
 		fi
-		chmod -R u+w -- "$outer_root" 2>/dev/null || true
+		chmod -R u+w "$outer_root" 2>/dev/null || true
 		rm -rf -- "$outer_root"
 	}
 	trap cleanup_outer EXIT
@@ -100,7 +100,7 @@ cleanup_inner() {
 		wait "$service_manager_pid" 2>/dev/null || true
 	fi
 	if [[ "$remove_acceptance_root" == 1 ]]; then
-		chmod -R u+w -- "$acceptance_root" 2>/dev/null || true
+		chmod -R u+w "$acceptance_root" 2>/dev/null || true
 		rm -rf -- "$acceptance_root"
 	fi
 }
@@ -161,7 +161,7 @@ install_custom_hub() {
 	else
 		result=$?
 	fi
-	chmod -R u+w -- "$stage" 2>/dev/null || true
+	chmod -R u+w "$stage" 2>/dev/null || true
 	rm -rf -- "$stage"
 	return "$result"
 }
@@ -189,7 +189,7 @@ install_custom_host() {
 		--version "$declared_version" \
 		--codex "$missing_root/codex" --claude "$missing_root/claude" \
 		--grok "$missing_root/grok" --qwen "$missing_root/qwen"
-	chmod -R u+w -- "$stage" 2>/dev/null || true
+	chmod -R u+w "$stage" 2>/dev/null || true
 	rm -rf -- "$stage"
 }
 

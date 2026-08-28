@@ -79,17 +79,36 @@ func List() ([]Process, error) {
 			continue
 		}
 		info := Read(pid)
-		switch info.Status {
-		case Absent:
-			continue
-		case Known:
-			if info.State == "Z" || info.State == "X" {
-				continue
-			}
-			result = append(result, Process{PID: pid, Info: info})
-		case Unknown:
-			return nil, fmt.Errorf("cannot identify live process %d", pid)
+		process, present, classifyErr := reconcileListedProcess(pid, info, Read)
+		if classifyErr != nil {
+			return nil, classifyErr
+		}
+		if present {
+			result = append(result, process)
 		}
 	}
 	return result, nil
+}
+
+// reconcileListedProcess closes the unavoidable /proc readdir/read race. A
+// process that disappears after directory enumeration is not live evidence;
+// a process that remains unidentifiable after one immediate re-observation
+// still fails closed for identity-sensitive callers.
+func reconcileListedProcess(pid int, info Info, observe func(int) Info) (Process, bool, error) {
+	if info.Status == Unknown {
+		info = observe(pid)
+	}
+	switch info.Status {
+	case Absent:
+		return Process{}, false, nil
+	case Known:
+		if info.State == "Z" || info.State == "X" {
+			return Process{}, false, nil
+		}
+		return Process{PID: pid, Info: info}, true, nil
+	case Unknown:
+		return Process{}, false, fmt.Errorf("cannot identify live process %d", pid)
+	default:
+		return Process{}, false, fmt.Errorf("process %d has invalid identity status %d", pid, info.Status)
+	}
 }

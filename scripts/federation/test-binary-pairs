@@ -12,7 +12,7 @@ cd -- "$repository_root"
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-binary-builds.XXXXXX")
 cleanup() {
-	chmod -R u+w -- "$root" 2>/dev/null || true
+	chmod -R u+w "$root" 2>/dev/null || true
 	rm -rf -- "$root"
 }
 trap cleanup EXIT
