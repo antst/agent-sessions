@@ -141,6 +141,8 @@ func TestHostPurgeCLIUsesCanonicalAgentSessionsRootsAndExcludesVendorProfiles(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	paths.RuntimeRoot = filepath.Join(runtimeBase, stateDirectoryName)
+	paths.ControlEndpoint = filepath.Join(paths.RuntimeRoot, controlSocketName)
 	for _, owned := range []string{paths.ConfigurationRoot, paths.StateRoot} {
 		if err := os.MkdirAll(owned, 0o700); err != nil {
 			t.Fatal(err)
@@ -157,7 +159,8 @@ func TestHostPurgeCLIUsesCanonicalAgentSessionsRootsAndExcludesVendorProfiles(t 
 		t.Fatal(err)
 	}
 	planPath := filepath.Join(root, "purge-plan.json")
-	inspection, err := RunHostPurgeInspectCLI(context.Background(), planPath)
+	prefix := defaultInstallPrefix()
+	inspection, err := runHostPurgeInspectCLI(context.Background(), planPath, prefix, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +168,7 @@ func TestHostPurgeCLIUsesCanonicalAgentSessionsRootsAndExcludesVendorProfiles(t 
 		!slicesContain(inspection.Exclusions, vendor) {
 		t.Fatalf("host purge inspection = %+v", inspection)
 	}
-	result, err := RunHostPurgeApplyCLI(context.Background(), planPath)
+	result, err := runHostPurgeApplyCLI(context.Background(), planPath, prefix, paths)
 	if err != nil || !reflect.DeepEqual(result.Deleted, inspection.Targets) {
 		t.Fatalf("host purge apply = %+v, %v", result, err)
 	}

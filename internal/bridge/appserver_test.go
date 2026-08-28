@@ -280,7 +280,7 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 	forwardMCPToDaemon = func(context.Context, daemonpkg.LocalControlIdentity, string, json.RawMessage) (daemonpkg.MCPForwardResult, error) {
 		return daemonpkg.MCPForwardResult{Result: json.RawMessage(`{"content":[{"type":"text","text":"communication is inactive for this ungrouped session"}],"isError":true}`)}, nil
 	}
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "nsr-")
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
@@ -485,7 +485,7 @@ func TestNativeSupervisorDoesNotRepublishRetiredLoadedThread(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "nsr-")
 	supervisor := &nativeSupervisor{
 		paths: nativePaths{
 			dataRoot: filepath.Join(root, "state"), claudeRoot: filepath.Join(root, "claude"),

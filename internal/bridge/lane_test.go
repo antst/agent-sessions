@@ -452,9 +452,9 @@ func TestLaneListIncludesArchivedOnlyWhenRequested(t *testing.T) {
 	}
 }
 
-func startLaneTestSupervisor(t *testing.T, root string) string {
+func startLaneTestSupervisor(t *testing.T) string {
 	t.Helper()
-	supervisorSocket := filepath.Join(root, "supervisor.sock")
+	supervisorSocket := filepath.Join(shortSocketTestRoot(t, "lts-"), "supervisor.sock")
 	listener, err := net.Listen("unix", supervisorSocket)
 	if err != nil {
 		t.Fatal(err)
@@ -536,7 +536,7 @@ func TestArchiveInterruptsActiveLaneAndPersistsTerminalOutcome(t *testing.T) {
 					return map[string]any{}, nil
 				}
 			})
-			supervisorSocket := startLaneTestSupervisor(t, root)
+			supervisorSocket := startLaneTestSupervisor(t)
 			t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
 			t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
 			t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
@@ -614,7 +614,7 @@ func TestArchiveDeletesFailedLaneThatNeverCreatedRollout(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	supervisorSocket := startLaneTestSupervisor(t, root)
+	supervisorSocket := startLaneTestSupervisor(t)
 	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
 	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
 	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))

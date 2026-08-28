@@ -20,7 +20,7 @@ import (
 )
 
 func TestProductionControlEndpointIsFixedAndTMPDIRIndependent(t *testing.T) {
-	runtimeRoot := t.TempDir()
+	runtimeRoot := testutil.ShortSocketRoot(t, "asr-", filepath.Join("agent-sessions", "daemon.sock"))
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "first-choice-must-be-ignored"))
 

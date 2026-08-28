@@ -458,7 +458,7 @@ func TestSharedClaudeLaneSourceUsesNativeProfileWithoutCopyingState(t *testing.T
 }
 
 func TestClaudeLaneCapturesNativeWorkerWithoutRewritingPeer(t *testing.T) {
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "clw-")
 	paths := nativePaths{
 		claudeRoot: filepath.Join(root, "claude"), runtimeDir: filepath.Join(root, "runtime"),
 	}

@@ -12,7 +12,7 @@ import (
 )
 
 func TestGrokNativeActorOwnsLeaderACPAndDeliveryWithoutHostListener(t *testing.T) {
-	root := t.TempDir()
+	root := shortSocketTestRoot(t, "gna-")
 	sessionID := "55555555-5555-4555-8555-555555555555"
 	t.Setenv(grokFakeProcessEnv, "1")
 	t.Setenv("GROK_FAKE_GENERATED_SESSION_ID", sessionID)

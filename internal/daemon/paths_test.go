@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestResolveProductionPathsUsesOnlyCanonicalUserRoots(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.ShortSocketRoot(t, "asp-", filepath.Join("runtime", "agent-sessions", "daemon.sock"))
 	configurationBase := filepath.Join(home, "configuration")
 	stateBase := filepath.Join(home, "state")
 	runtimeBase := filepath.Join(home, "runtime")

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -505,7 +506,12 @@ func unifiedPeerRelease(t *testing.T, root, version, seed string) releaseinstall
 			t.Fatal(err)
 		}
 	}
-	manifest := []byte(`{"schema_version":1,"release_version":"` + version + `","hub_protocol_version":3,"platform":"linux-x64","checksums":"SHA256SUMS","executables":[{"name":"agent-sessions","role":"host","path":"bin/agent-sessions"}],"connector_payloads":[{"product":"codex","plugin_id":"agent-sessions","archive_paths":[".agents",".codex-plugin",".mcp.json","hooks","scripts","skills"]},{"product":"claude","plugin_id":"agent-sessions","archive_paths":[".claude-plugin","claude"]},{"product":"grok","plugin_id":"agent-sessions","archive_paths":["grok"]},{"product":"qwen","plugin_id":"agent-sessions","archive_paths":["qwen"]}],"service_assets":{"host":["` + strings.Join(servicePaths, `","`) + `"],"hub":[]}}`)
+	architecture := runtime.GOARCH
+	if architecture == "amd64" {
+		architecture = "x64"
+	}
+	platform := runtime.GOOS + "-" + architecture
+	manifest := []byte(`{"schema_version":1,"release_version":"` + version + `","hub_protocol_version":3,"platform":"` + platform + `","checksums":"SHA256SUMS","executables":[{"name":"agent-sessions","role":"host","path":"bin/agent-sessions"}],"connector_payloads":[{"product":"codex","plugin_id":"agent-sessions","archive_paths":[".agents",".codex-plugin",".mcp.json","hooks","scripts","skills"]},{"product":"claude","plugin_id":"agent-sessions","archive_paths":[".claude-plugin","claude"]},{"product":"grok","plugin_id":"agent-sessions","archive_paths":["grok"]},{"product":"qwen","plugin_id":"agent-sessions","archive_paths":["qwen"]}],"service_assets":{"host":["` + strings.Join(servicePaths, `","`) + `"],"hub":[]}}`)
 	if err := os.WriteFile(filepath.Join(source, "manifest.json"), manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}

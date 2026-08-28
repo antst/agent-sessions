@@ -1443,7 +1443,7 @@ func TestStdioMCPRequiresHostAttestationBeforeEveryTool(t *testing.T) {
 
 func startAuthorizationControlServer(t *testing.T, handler func(map[string]any) map[string]any) string {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "supervisor.sock")
+	socket := filepath.Join(shortSocketTestRoot(t, "acs-"), "supervisor.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

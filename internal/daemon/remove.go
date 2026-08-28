@@ -320,7 +320,15 @@ func RunHostRemoveCLI(ctx context.Context, args []string) error {
 // RunHostPurgeInspectCLI creates one offline exact plan and writes it to the
 // operator-selected regular file without starting or contacting the daemon.
 func RunHostPurgeInspectCLI(ctx context.Context, planPath string) (PurgeInspection, error) {
-	engine, paths, err := newHostPurgeEngine(defaultInstallPrefix())
+	paths, err := ResolveProductionPaths()
+	if err != nil {
+		return PurgeInspection{}, err
+	}
+	return runHostPurgeInspectCLI(ctx, planPath, defaultInstallPrefix(), paths)
+}
+
+func runHostPurgeInspectCLI(ctx context.Context, planPath, prefix string, paths ProductionPaths) (PurgeInspection, error) {
+	engine, err := newHostPurgeEngine(prefix, paths)
 	if err != nil {
 		return PurgeInspection{}, err
 	}
@@ -339,7 +347,15 @@ func RunHostPurgeInspectCLI(ctx context.Context, planPath string) (PurgeInspecti
 
 // RunHostPurgeApplyCLI applies only a still-current exact offline plan.
 func RunHostPurgeApplyCLI(ctx context.Context, planPath string) (PurgeApplyResult, error) {
-	engine, paths, err := newHostPurgeEngine(defaultInstallPrefix())
+	paths, err := ResolveProductionPaths()
+	if err != nil {
+		return PurgeApplyResult{}, err
+	}
+	return runHostPurgeApplyCLI(ctx, planPath, defaultInstallPrefix(), paths)
+}
+
+func runHostPurgeApplyCLI(ctx context.Context, planPath, prefix string, paths ProductionPaths) (PurgeApplyResult, error) {
+	engine, err := newHostPurgeEngine(prefix, paths)
 	if err != nil {
 		return PurgeApplyResult{}, err
 	}
@@ -410,29 +426,25 @@ func newHostRemovalEngine(prefix string, paths ProductionPaths, values map[strin
 	})
 }
 
-func newHostPurgeEngine(prefix string) (hostPurgeEngine, ProductionPaths, error) {
-	paths, err := ResolveProductionPaths()
-	if err != nil {
-		return hostPurgeEngine{}, ProductionPaths{}, err
-	}
+func newHostPurgeEngine(prefix string, paths ProductionPaths) (hostPurgeEngine, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return hostPurgeEngine{}, ProductionPaths{}, err
+		return hostPurgeEngine{}, err
 	}
 	layout, err := releaseinstall.ResolveRoleLayout(filepath.Join(prefix, "libexec", "agent-sessions"), releaseinstall.RoleHost)
 	if err != nil {
-		return hostPurgeEngine{}, ProductionPaths{}, err
+		return hostPurgeEngine{}, err
 	}
 	service, err := newInstalledHostService(prefix)
 	if err != nil {
-		return hostPurgeEngine{}, ProductionPaths{}, err
+		return hostPurgeEngine{}, err
 	}
 	engine, err := releaseinstall.NewEngine(releaseinstall.EngineOptions{
 		Layout: layout, Service: service, Hooks: noRoleHooks{},
 		PurgeTargets:    []string{paths.ConfigurationRoot, paths.StateRoot},
 		PurgeExclusions: hostVendorExclusions(home),
 	})
-	return hostPurgeEngine{engine: engine, layout: layout}, paths, err
+	return hostPurgeEngine{engine: engine, layout: layout}, err
 }
 
 type noRoleHooks struct{}

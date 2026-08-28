@@ -45,7 +45,13 @@ if id "$user_name" >/dev/null 2>&1 || [[ -e "$work_root" || -L "$work_root" ]]; 
 	printf 'disposable CI user or root already exists: %s %s\n' "$user_name" "$work_root" >&2
 	exit 1
 fi
-sudo useradd --create-home --shell /bin/bash "$user_name"
+journal_group_args=()
+if getent group systemd-journal >/dev/null 2>&1; then
+	# The acceptance audits the real user-service journal. Ubuntu restricts
+	# complete journal reads to this group even for a user's own service.
+	journal_group_args=(--groups systemd-journal)
+fi
+sudo useradd --create-home --shell /bin/bash "${journal_group_args[@]}" "$user_name"
 user_id="$(id -u "$user_name")"
 temp_root="/tmp/asci-$user_id"
 [[ ! -e "$temp_root" && ! -L "$temp_root" ]] || {
