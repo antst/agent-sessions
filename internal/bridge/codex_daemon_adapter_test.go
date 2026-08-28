@@ -3,6 +3,8 @@ package bridge
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +12,73 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/federation"
 )
+
+func TestCodexAppServerCoordinatorStartsMissingVendorDaemonOnFirstUse(t *testing.T) {
+	profile := t.TempDir()
+	want := &appServerClient{done: make(chan struct{})}
+	dialCalls, startCalls := 0, 0
+	coordinator := &codexAppServerCoordinator{
+		clients: make(map[string]*appServerClient),
+		dial: func(_ context.Context, socket string) (*appServerClient, error) {
+			dialCalls++
+			if socket != filepath.Join(profile, "app-server-control", "app-server-control.sock") {
+				t.Fatalf("App Server socket = %q", socket)
+			}
+			if dialCalls == 1 {
+				return nil, os.ErrNotExist
+			}
+			return want, nil
+		},
+		start: func(_ context.Context, executable, selectedProfile string) error {
+			startCalls++
+			if executable != "/test/codex" || selectedProfile != profile {
+				t.Fatalf("start App Server = %q profile %q", executable, selectedProfile)
+			}
+			return nil
+		},
+		executable: func() (string, error) { return "/test/codex", nil },
+	}
+	first, err := coordinator.client(context.Background(), profile)
+	if err != nil || first != want {
+		t.Fatalf("first App Server client = %p, %v", first, err)
+	}
+	second, err := coordinator.client(context.Background(), profile)
+	if err != nil || second != want {
+		t.Fatalf("reused App Server client = %p, %v", second, err)
+	}
+	if dialCalls != 2 || startCalls != 1 {
+		t.Fatalf("App Server calls = dial %d start %d, want 2/1", dialCalls, startCalls)
+	}
+}
+
+func TestCodexAppServerCoordinatorDoesNotStartForUntrustedSocketFailure(t *testing.T) {
+	startCalls := 0
+	coordinator := &codexAppServerCoordinator{
+		clients: make(map[string]*appServerClient),
+		dial: func(context.Context, string) (*appServerClient, error) {
+			return nil, os.ErrPermission
+		},
+		start: func(context.Context, string, string) error {
+			startCalls++
+			return nil
+		},
+		executable: func() (string, error) { return "/test/codex", nil },
+	}
+	if _, err := coordinator.client(context.Background(), t.TempDir()); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("untrusted socket error = %v", err)
+	}
+	if startCalls != 0 {
+		t.Fatalf("untrusted socket failure started vendor daemon %d time(s)", startCalls)
+	}
+}
+
+func TestCodexAppServerEnvironmentSelectsExactProfile(t *testing.T) {
+	got := codexAppServerEnvironment([]string{"PATH=/bin", "CODEX_HOME=/old", "OTHER=value"}, "/new")
+	want := []string{"PATH=/bin", "OTHER=value", "CODEX_HOME=/new"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Codex App Server environment = %#v, want %#v", got, want)
+	}
+}
 
 func TestCodexDaemonAdapterCorroboratesExactAppServerThread(t *testing.T) {
 	client := &codexDaemonTestClient{thread: codexDaemonThread{

@@ -81,15 +81,9 @@ not inventory, adopt, drain, retire, or repair the old topology.
 
 Vendor credentials, profiles, settings, transcripts, and native history belong to the vendor clients
 and are not part of this reset. Do not delete or rewrite them. After the clean first install, ordinary
-0.3 upgrades use the durable release transaction and preserve unified daemon state. If Codex is
-installed, restart its external vendor service after the greenfield transaction that required it to
-be stopped:
-
-```sh
-codex app-server daemon start
-```
-
-Agent Sessions connects to that service but does not own or bootstrap its lifetime.
+0.3 upgrades use the durable release transaction and preserve unified daemon state. The first managed
+Codex launch asks the unified daemon to start the external App Server through Codex's supported
+vendor command; installation itself does not start an unused vendor process.
 
 ## Routine restart and upgrade
 
@@ -129,9 +123,9 @@ Common diagnoses:
   or alternate carrier is attempted.
 - `retryable`: satisfy the recorded identity predicate and retry. Do not delete sockets, journals, or
   state by hand.
-- `connect Codex App Server ... no such file or directory`: run
-  `codex app-server daemon start`, verify it with `codex app-server daemon version`, and retry. Peer
-  and lane commands never bootstrap this external vendor service.
+- `start Codex App Server`: inspect `codex app-server daemon version`, run the vendor start command
+  directly for its native diagnostic when needed, and retry. The peer command never bootstraps the
+  service itself; the unified daemon owns the lazy coordination step.
 - Codex history appears blank through the App Server: run Codex's own `codex migrate-rollouts` command.
   Agent Sessions does not rewrite vendor history projections.
 

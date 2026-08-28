@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
@@ -235,12 +237,18 @@ func codexRecordProfile(record daemonpkg.AttachmentRecord) string {
 // profile supervisor. It owns only reusable client connections; Codex owns the
 // App Server process, TUI processes, threads, and transcript history.
 type codexAppServerCoordinator struct {
-	mu      sync.Mutex
-	clients map[string]*appServerClient
+	mu         sync.Mutex
+	clients    map[string]*appServerClient
+	dial       func(context.Context, string) (*appServerClient, error)
+	start      func(context.Context, string, string) error
+	executable func() (string, error)
 }
 
 func newCodexAppServerCoordinator() *codexAppServerCoordinator {
-	return &codexAppServerCoordinator{clients: make(map[string]*appServerClient)}
+	return &codexAppServerCoordinator{
+		clients: make(map[string]*appServerClient),
+		dial:    dialAppServer, start: startCodexAppServerDaemon, executable: codexDaemonExecutable,
+	}
 }
 
 // PrepareInteractive performs one supported App Server selection transaction
@@ -936,7 +944,17 @@ func (coordinator *codexAppServerCoordinator) client(ctx context.Context, profil
 		}
 	}
 	socket := filepath.Join(profile, "app-server-control", "app-server-control.sock")
-	client, err := dialAppServer(ctx, socket)
+	client, err := coordinator.dial(ctx, socket)
+	if err != nil && codexAppServerUnavailable(err) {
+		executable, executableErr := coordinator.executable()
+		if executableErr != nil {
+			return nil, executableErr
+		}
+		if startErr := coordinator.start(ctx, executable, profile); startErr != nil {
+			return nil, fmt.Errorf("start Codex App Server for profile %s: %w", profile, startErr)
+		}
+		client, err = coordinator.dial(ctx, socket)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("connect Codex App Server for profile %s: %w", profile, err)
 	}
@@ -952,6 +970,33 @@ func (coordinator *codexAppServerCoordinator) close() {
 	for _, client := range clients {
 		client.close()
 	}
+}
+
+func codexAppServerUnavailable(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+func startCodexAppServerDaemon(ctx context.Context, executable, profile string) error {
+	startContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(startContext, executable, "app-server", "daemon", "start")
+	command.Env = codexAppServerEnvironment(os.Environ(), profile)
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("run vendor daemon start: %w", err)
+	}
+	return nil
+}
+
+func codexAppServerEnvironment(environment []string, profile string) []string {
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, "CODEX_HOME=") {
+			result = append(result, entry)
+		}
+	}
+	return append(result, "CODEX_HOME="+profile)
 }
 
 func canonicalCodexProfile(configured string) (string, error) {
