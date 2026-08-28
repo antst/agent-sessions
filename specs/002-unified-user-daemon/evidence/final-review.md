@@ -1,8 +1,8 @@
 # Final Constitution Review — Unified User Daemon
 
 **Runtime candidate**: signed commit
-`08e915da6b91ddb54eb4790054d1fc818d4b4dec`, tree
-`dd448d5e9c3d0a412fee88f001cf15ed03cfe755`.
+`37e1977356299f6cd741685df566835e80c96abf`, tree
+`4bd400c4e8b1494e1cd0ea3b10c9de1e85307bbd`.
 
 **Review status**: **PENDING CONTROLLED-MAC INSTALLATION**. Local Linux and the complete hosted
 Linux/macOS matrix are green at the exact runtime tree.
@@ -25,11 +25,13 @@ Linux/macOS matrix are green at the exact runtime tree.
   removal, purge, and four-platform package gates are green.
 - The installed exact candidate has one daemon, one endpoint, zero obsolete processes, and healthy
   metadata-only status/doctor output.
+- A stopped Codex App Server is started lazily by the unified daemon on the first managed Codex
+  attachment; the peer wrapper remains a thin client, the managed TUI uses `--remote unix://`, and
+  the external vendor daemon remains available for subsequent sessions.
 - Hosted workflow run
-  [`33178722467`](https://github.com/antst/agent-sessions/actions/runs/33178722467) passed Linux and
+  [`33181867525`](https://github.com/antst/agent-sessions/actions/runs/33181867525) passed Linux and
   macOS normal, race, vet, lint, clean-user installed-service, package-contract, inventory, and all
-  four release-build jobs. The run's evidence-only head `76f11f3` is a direct child of this unchanged
-  runtime tree.
+  four release-build jobs at the exact runtime head.
 
 ## Pending before final PASS
 

@@ -1,16 +1,15 @@
-# macOS Hosted Acceptance — Greenfield Runtime Candidate 08e915d
+# macOS Hosted Acceptance — Greenfield Runtime Candidate 37e1977
 
 ## Attributable identity
 
-- Commit: `08e915da6b91ddb54eb4790054d1fc818d4b4dec`
-- Tree: `dd448d5e9c3d0a412fee88f001cf15ed03cfe755`
-- Subject: `Establish greenfield unified daemon install`
+- Commit: `37e1977356299f6cd741685df566835e80c96abf`
+- Tree: `4bd400c4e8b1494e1cd0ea3b10c9de1e85307bbd`
+- Subject: `Restore lazy Codex App Server startup`
 - Signature key: `SHA256:lgAnkhJdgKV1odY8EpHWrEpCwDRVj0NWAJijtWvpeXU`
-- Hosted evidence head: `76f11f3ad5a5296c9d6fa65765ace82dc65990bf`
-- Hosted workflow: [`33178722467`](https://github.com/antst/agent-sessions/actions/runs/33178722467)
+- Hosted runtime head: `37e1977356299f6cd741685df566835e80c96abf`
+- Hosted workflow: [`33181867525`](https://github.com/antst/agent-sessions/actions/runs/33181867525)
 
-The evidence-only head is the direct child of the runtime candidate and does not change its runtime,
-service, connector, package, or test tree.
+The hosted workflow ran at the exact runtime candidate; no intermediate evidence-only head was used.
 
 ## Hosted Darwin result
 

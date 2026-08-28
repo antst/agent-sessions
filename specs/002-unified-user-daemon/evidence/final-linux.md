@@ -1,18 +1,17 @@
-# Linux Acceptance — Greenfield Runtime Candidate 08e915d
+# Linux Acceptance — Greenfield Runtime Candidate 37e1977
 
 ## Attributable identity
 
-- Commit: `08e915da6b91ddb54eb4790054d1fc818d4b4dec`
-- Tree: `dd448d5e9c3d0a412fee88f001cf15ed03cfe755`
-- Parent: `e3a52b141617674f36a3a564bd944ad43486720c`
-- Subject: `Establish greenfield unified daemon install`
+- Commit: `37e1977356299f6cd741685df566835e80c96abf`
+- Tree: `4bd400c4e8b1494e1cd0ea3b10c9de1e85307bbd`
+- Parent: `f46a4d7d3adc27293a23947f6a1cd1cf9ed56aa2`
+- Subject: `Restore lazy Codex App Server startup`
 - Signature: good SSH signature from
   `SHA256:lgAnkhJdgKV1odY8EpHWrEpCwDRVj0NWAJijtWvpeXU`
 - Branch: `feature/unified-user-daemon`
 
-The hosted run used evidence-only head
-`76f11f3ad5a5296c9d6fa65765ace82dc65990bf`. Its parent is the runtime candidate above, and the
-evidence-only commit does not change the runtime, service, connector, package, or test tree.
+The hosted run used this exact runtime head. No result from an earlier candidate is substituted for
+the runtime, service, connector, package, or test tree.
 
 ## Host and toolchain
 
@@ -61,13 +60,14 @@ remain recoverably archived at:
 
 `/home/antst/.local/state/agent-sessions-pre-0.3.R0iCWq`
 
-The exact candidate was then installed through `make install-all`. The same-revision transaction
-completed at daemon generation 5 with:
+The initial greenfield candidate was installed through `make install-all`, then the same supported
+transaction upgraded the host to the exact candidate above. The latter transaction completed at
+daemon generation 6 with:
 
 - one active `systemd --user` service and one process;
 - endpoint `/run/user/1000/agent-sessions/daemon.sock`;
 - runtime version `0.3.0` and identity
-  `sha256:f33d59b32cd2a3d51a5a7e7098f35e98fe6abb47418c4f2cf798a3c2ba9873de`;
+  `sha256:a84e0f2c66c204e9190feca1e748e6642a74922c8104a1e1849cd4fac870ef53`;
 - zero attachments, zero lanes, and zero lifecycle debt;
 - all four native executables discovered;
 - a committed four-product connector journal whose source and payload paths are inside the selected
@@ -75,9 +75,16 @@ completed at daemon generation 5 with:
 - healthy service-manager, runtime-identity, state-schema, product-inventory, federation-protocol,
   and lifecycle-debt doctor checks.
 
-The exact process census contained only the unified `agent-sessions daemon`. No
-`agent-session-runtime`, supervisor, shim, product manager, lane manager, or `peer-federator`
-process remained. The unrelated signing `ssh-agent` was not touched.
+Before the live Codex discriminator, the exact Agent Sessions process census contained only the
+unified `agent-sessions daemon`. No `agent-session-runtime`, supervisor, shim, product manager, lane
+manager, or `peer-federator` process remained. The unrelated signing `ssh-agent` was not touched.
+
+The Codex App Server socket and process were then stopped and verified absent. Starting a fresh
+managed Codex peer caused the unified daemon's `attachment.prepare` operation to invoke Codex's
+supported vendor daemon start, publish the profile socket, and open the TUI through
+`codex --remote unix://`. The App Server process was a direct child of the unified daemon; the peer
+wrapper did not bootstrap it. The throwaway peer exited cleanly, no remote Codex process remained,
+and the vendor App Server stayed available for reuse as intended.
 
 Grok inspection reported exactly one enabled user-scope `agent-sessions` plugin and exactly one
 plugin-sourced `agent_sessions` stdio MCP. The repository workspace's own `.mcp.json` row is ignored
@@ -90,10 +97,10 @@ basenames `agent-sessions` and `agent-sessions-hub`:
 
 | Archive | SHA-256 |
 |---|---|
-| `agent-sessions-0.3.0-darwin-arm64.tar.gz` | `6c628c497f994c57d9a28fef37254b2319b03cea9be1eecfa4204cf35ef4ee3e` |
-| `agent-sessions-0.3.0-darwin-x64.tar.gz` | `9b171dda9a3fd37c8f38812900db362ad0f9ac6c51874e3d8d0f94733b6d46d1` |
-| `agent-sessions-0.3.0-linux-arm64.tar.gz` | `5e2afa59480ec321f35e9246d1c4e1bbfb948ec05215784f2ae5b49dedf3fd6e` |
-| `agent-sessions-0.3.0-linux-x64.tar.gz` | `703adb2c4110c66267fd39252f3abca49bd877bec11fa8dd1562635b8f25fc08` |
+| `agent-sessions-0.3.0-darwin-arm64.tar.gz` | `fa1eb4d15e9fa828ac1364fc268fc78b28f411a31c397be0e96a8fb1e0d0162f` |
+| `agent-sessions-0.3.0-darwin-x64.tar.gz` | `9c5cb1da35adabed9e98b2f7cc5e93a969d7f1a7c25e03f57ca3ac3c4618f3dd` |
+| `agent-sessions-0.3.0-linux-arm64.tar.gz` | `caf1a370e03b7098dfc7263eb93343f7ce9f19ec2fe622b199a97b862f1dffb6` |
+| `agent-sessions-0.3.0-linux-x64.tar.gz` | `a2b40adbe5eb9c83590fd8d518c042b8e44c5c8bae9257e4e23a3fbb1e9b5174` |
 
 There is no obsolete runtime, product-peer image, supervisor, shim, product host, lane manager, or
 host federation-agent image in a release archive.
@@ -101,7 +108,7 @@ host federation-agent image in a release archive.
 ## Linux decision
 
 The Linux candidate is green locally and in hosted CI. Workflow run
-[`33178722467`](https://github.com/antst/agent-sessions/actions/runs/33178722467) completed successfully
-at evidence-only head `76f11f3`, whose runtime parent is the exact candidate above. Its Linux normal,
-race, vet, lint, installed-service fixture, package contract, inventory, and both Linux release-build
-jobs passed. No result from an older runtime candidate is carried forward as exact-candidate credit.
+[`33181867525`](https://github.com/antst/agent-sessions/actions/runs/33181867525) completed successfully
+at exact runtime head `37e1977`. Its Linux normal, race, vet, lint, installed-service fixture, package
+contract, inventory, and both Linux release-build jobs passed. No result from an older runtime
+candidate is carried forward as exact-candidate credit.
