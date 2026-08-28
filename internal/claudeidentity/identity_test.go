@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestManagedClaudePathsAreDeterministicAndSocketBounded(t *testing.T) {
@@ -12,7 +14,8 @@ func TestManagedClaudePathsAreDeterministicAndSocketBounded(t *testing.T) {
 	if first != LifecycleRootInState(state, "session-a") || first == LifecycleRootInState(state, "session-b") {
 		t.Fatal("Claude lifecycle root is not deterministic and session-scoped")
 	}
-	socket := MessagingSocketPath(t.TempDir(), "session-a")
+	socketRoot := testutil.ShortSocketRoot(t, "aci-", filepath.Join("session-a", "messaging.sock"))
+	socket := MessagingSocketPath(socketRoot, "session-a")
 	if err := ValidateMessagingSocketPath(socket); err != nil {
 		t.Fatalf("managed socket path: %v", err)
 	}

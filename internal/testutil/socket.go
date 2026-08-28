@@ -13,9 +13,19 @@ import (
 // socket path fits the current platform without embedding testing.T's name.
 func ShortSocketRoot(t testing.TB, pattern, longestRelative string) string {
 	t.Helper()
-	parents := []string{os.TempDir()}
-	if filepath.Clean(os.TempDir()) != "/tmp" {
-		parents = append(parents, "/tmp")
+	parents := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	for _, candidate := range []string{os.TempDir(), "/tmp"} {
+		parent, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		parent = filepath.Clean(parent)
+		if _, duplicate := seen[parent]; duplicate {
+			continue
+		}
+		seen[parent] = struct{}{}
+		parents = append(parents, parent)
 	}
 	for _, parent := range parents {
 		root, err := os.MkdirTemp(parent, pattern)

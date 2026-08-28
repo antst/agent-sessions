@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestLegacyInventorySourcesCloseEveryShippedLinuxRoot(t *testing.T) {
@@ -82,11 +84,7 @@ func TestLegacyInventorySourcesCloseEveryShippedDarwinRootAndRecordedTMPDIRSpell
 }
 
 func TestProductionDarwinSupervisorEndpointInventoryFindsOrphanAcrossThreeRoots(t *testing.T) {
-	root, err := os.MkdirTemp("", "darwin-inventory-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.RemoveAll(root) }()
+	root := testutil.ShortSocketRoot(t, "mdi-", filepath.Join("recorded-temp", "ccp-501", "supervisor-new-profile.sock"))
 	uid := strconv.Itoa(os.Getuid())
 	roots := []string{
 		filepath.Join(root, "system-temp", "ccp-"+uid),

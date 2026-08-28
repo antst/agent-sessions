@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 const productionSupervisorMaintenanceVersion = "test-supervisor-maintenance-window"
@@ -28,11 +29,7 @@ func TestMain(main *testing.M) {
 
 func TestProductionSupervisorMustBeOperatorStoppedAndStaleSocketIsRetirable(t *testing.T) {
 	ctx := context.Background()
-	root, err := os.MkdirTemp("", "asmig-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := testutil.ShortSocketRoot(t, "asm-", filepath.Join("profiles", "non-default-profile", "app-server-control", "app-server-control.sock"))
 	dataRoot := filepath.Join(root, "legacy-state", "claude-code-peer")
 	agentsRoot := filepath.Join(root, "legacy-state", "agent-sessions", "agents")
 	runtimeRoot := filepath.Join(root, "runtime", "ccp")

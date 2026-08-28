@@ -34,7 +34,7 @@ type fakeAppServer struct {
 
 func startFakeNativeAppServer(t *testing.T, handler func(map[string]any) (any, error)) (*fakeAppServer, string) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "app-server.sock")
+	socket := filepath.Join(shortSocketTestRoot(t, "asa-"), "app-server.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

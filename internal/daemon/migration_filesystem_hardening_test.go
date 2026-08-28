@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestProductionLegacyInventoryReadsRejectSymlinksAndFIFOsWithoutBlocking(t *testing.T) {
@@ -121,7 +122,7 @@ func TestProductionLegacyInventoryReadPinsOpenedInode(t *testing.T) {
 }
 
 func TestProductionLegacyEndpointRetirementPreservesReplacementSocket(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.ShortSocketRoot(t, "mfr-", "original.sock")
 	endpoint := filepath.Join(root, "legacy.sock")
 	listener, err := net.Listen("unix", endpoint)
 	if err != nil {
@@ -174,7 +175,7 @@ func TestProductionLegacyEndpointRetirementPreservesReplacementSocket(t *testing
 }
 
 func TestProductionLegacyEndpointRetirementDoesNotUnlinkConnectedUnresponsiveSocket(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.ShortSocketRoot(t, "mfh-", "hung-supervisor.sock")
 	endpoint := filepath.Join(root, "hung-supervisor.sock")
 	listener, err := net.Listen("unix", endpoint)
 	if err != nil {

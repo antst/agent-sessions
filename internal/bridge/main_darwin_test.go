@@ -16,6 +16,7 @@ const (
 	darwinTestRootMarker = ".agent-sessions-test-root"
 	darwinTestRootLock   = ".lock"
 	darwinTestRootMagic  = "agent-sessions bridge test root v1\n"
+	darwinTestRootBase   = "/private/tmp"
 )
 
 type darwinTestRootLease struct {
@@ -29,7 +30,7 @@ type darwinTestRootLease struct {
 // instead of consuming another globally scarce one-character leaf.
 func TestMain(m *testing.M) {
 	if inherited := os.Getenv(darwinTestRootEnv); inherited != "" {
-		if err := validateDarwinTestRoot(inherited, "/tmp"); err != nil {
+		if err := validateDarwinTestRoot(inherited, darwinTestRootBase); err != nil {
 			panic(fmt.Sprintf("invalid inherited Darwin bridge test root: %v", err))
 		}
 		if err := validateInheritedDarwinTestRootLease(inherited); err != nil {
@@ -84,7 +85,7 @@ func compactDarwinTestRoot() (*darwinTestRootLease, error) {
 	// The 64 choices preserve sun_path headroom while leaving enough leases for
 	// hosts carrying marked roots from abruptly terminated older test binaries.
 	const leaves = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
-	return claimDarwinTestRoot("/tmp", leaves)
+	return claimDarwinTestRoot(darwinTestRootBase, leaves)
 }
 
 func claimDarwinTestRoot(base, leaves string) (*darwinTestRootLease, error) {

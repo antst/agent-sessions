@@ -251,10 +251,14 @@ func TestAcquireControlEndpointRemovesStaleSocketOnlyWithExactAbsentIdentity(t *
 						t.Errorf("close replacement endpoint: %v", closeErr)
 					}
 				})
-				after := mustSocketInfo(t, endpoint)
-				if os.SameFile(before, after) {
-					t.Fatal("corroborated stale socket was not replaced")
+				if _, statErr := os.Lstat(endpoint); statErr != nil {
+					t.Fatalf("replacement socket is absent: %v", statErr)
 				}
+				connection, dialErr := net.DialTimeout("unix", endpoint, time.Second)
+				if dialErr != nil {
+					t.Fatalf("replacement socket is not accepting connections: %v", dialErr)
+				}
+				_ = connection.Close()
 				return
 			}
 

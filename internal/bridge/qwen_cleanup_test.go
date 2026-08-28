@@ -78,10 +78,11 @@ func TestQwenCleanupPreservesReplacedArtifactAndRecordsDebt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(events); err != nil {
+	replacement := filepath.Join(root, "replacement-events.jsonl")
+	qwenTestCreatePrivateFile(t, replacement, []byte("unrelated\n"))
+	if err := os.Rename(replacement, events); err != nil {
 		t.Fatal(err)
 	}
-	qwenTestCreatePrivateFile(t, events, []byte("unrelated\n"))
 	err = cleanupQwenOwnedArtifacts(qwenCleanupRequest{LifecyclePID: 999999, LifecycleStart: "absent-owner", Root: root, Artifacts: owned})
 	var debt *qwenCleanupDebtError
 	if !errors.As(err, &debt) || len(debt.Paths) != 1 || debt.Paths[0] != events {

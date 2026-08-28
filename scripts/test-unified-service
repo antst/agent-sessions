@@ -10,6 +10,13 @@ done
 repository_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 platform="$(uname -s)"
 
+# Keep Darwin acceptance roots both canonical for no-follow release validation
+# and bounded for AF_UNIX fixtures. The service switches to its private
+# acceptance TMPDIR after the clean-user gate below.
+if [[ "$platform" == Darwin ]]; then
+	export TMPDIR=/private/tmp
+fi
+
 fail() {
 	printf 'unified service acceptance: %s\n' "$*" >&2
 	exit 1
@@ -135,12 +142,33 @@ trap cleanup_inner EXIT
 if [[ "$platform" == Linux ]]; then
 	systemd --user --log-target=console >"$acceptance_root/systemd.stdout" 2>"$acceptance_root/systemd.stderr" &
 	service_manager_pid=$!
-	wait_for 'nested systemd user manager' systemctl --user is-system-running
+	systemd_ready=0
+	for _ in {1..400}; do
+		if systemctl --user is-system-running >/dev/null 2>&1; then
+			systemd_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [[ "$systemd_ready" != 1 ]]; then
+		printf '%s\n' '--- nested systemd stdout ---' >&2
+		cat "$acceptance_root/systemd.stdout" >&2 || true
+		printf '%s\n' '--- nested systemd stderr ---' >&2
+		cat "$acceptance_root/systemd.stderr" >&2 || true
+		fail 'timed out waiting for nested systemd user manager'
+	fi
 fi
 
 cd -- "$repository_root"
 make -s build
-host_binary="$repository_root/bin/$(case "$platform/$(uname -m)" in Linux/x86_64) echo linux-x64;; Linux/aarch64) echo linux-arm64;; Darwin/x86_64) echo darwin-x64;; Darwin/arm64) echo darwin-arm64;; *) exit 1;; esac)/agent-sessions"
+case "$platform/$(uname -m)" in
+	Linux/x86_64) host_platform=linux-x64 ;;
+	Linux/aarch64) host_platform=linux-arm64 ;;
+	Darwin/x86_64) host_platform=darwin-x64 ;;
+	Darwin/arm64) host_platform=darwin-arm64 ;;
+	*) fail "unsupported service acceptance architecture: $platform/$(uname -m)" ;;
+esac
+host_binary="$repository_root/bin/$host_platform/agent-sessions"
 [[ -x "$host_binary" ]] || fail "host binary is absent: $host_binary"
 
 missing_codex="$missing_root/codex"

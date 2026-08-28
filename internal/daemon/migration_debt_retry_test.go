@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/releaseinstall"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestProductionLegacyMigrationDebtRetryFreshProcessPathAmbiguity(t *testing.T) {
@@ -29,7 +30,7 @@ func TestProductionLegacyMigrationDebtRetryFreshProcessPathAmbiguity(t *testing.
 			candidate.EndpointOwnerPID = candidate.PID
 			candidate.EndpointOwnerStart = candidate.ProcStart
 			candidate.EndpointOwnerUID = os.Getuid()
-			candidate.EndpointPath = filepath.Join(t.TempDir(), "legacy.sock")
+			candidate.EndpointPath = filepath.Join(testutil.ShortSocketRoot(t, "mdr-", "legacy.sock"), "legacy.sock")
 			if err := replaceSelectedDebtCandidate(t, state, candidate, debt); err != nil {
 				t.Fatal(err)
 			}

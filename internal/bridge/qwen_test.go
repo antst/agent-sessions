@@ -77,10 +77,11 @@ func TestQwenDualOutputCursorRejectsTruncationReplacementAndChangedType(t *testi
 					t.Fatal(err)
 				}
 			case "replace":
-				if err := os.Remove(path); err != nil {
+				replacement := filepath.Join(root, mutation+"-replacement.jsonl")
+				writeQwenTestEvents(t, replacement, qwenSessionStartEvent(qwenInteractiveTestSessionID, cwd, "0.21.15", 2))
+				if err := os.Rename(replacement, path); err != nil {
 					t.Fatal(err)
 				}
-				writeQwenTestEvents(t, path, qwenSessionStartEvent(qwenInteractiveTestSessionID, cwd, "0.21.15", 2))
 			case "directory":
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)

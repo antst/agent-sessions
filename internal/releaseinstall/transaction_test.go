@@ -174,6 +174,55 @@ func TestMakeTreeImmutableNeverFollowsOrCommitsSwappedSymlink(t *testing.T) {
 	assertTreeChmodSwapIsBoundToOpenedEntry(t, 0o600, makeTreeImmutableWithHook)
 }
 
+func TestReleaseStageDefersRootSealUntilAfterRename(t *testing.T) {
+	parent := releaseTestTempDir(t)
+	stage := filepath.Join(parent, "stage")
+	destination := filepath.Join(parent, "release")
+	t.Cleanup(func() { _ = makeTreeWritableForRemoval(destination) })
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(stage, "payload")
+	if err := os.WriteFile(payload, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := openSecureReleaseSource(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = source.close() }()
+	if err := makeSecureReleaseContentsImmutable(source, nil); err != nil {
+		t.Fatal(err)
+	}
+	stageInfo, err := os.Stat(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stageInfo.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("stage root was sealed before rename: mode=%04o", stageInfo.Mode().Perm())
+	}
+	payloadInfo, err := os.Stat(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payloadInfo.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("stage payload remained writable before publication: mode=%04o", payloadInfo.Mode().Perm())
+	}
+	if err := os.Rename(stage, destination); err != nil {
+		t.Fatalf("rename owner-writable stage: %v", err)
+	}
+	if err := source.directory.Chmod(0o555); err != nil {
+		t.Fatalf("seal renamed stage through its descriptor: %v", err)
+	}
+	destinationInfo, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destinationInfo.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("committed release root remained writable: mode=%04o", destinationInfo.Mode().Perm())
+	}
+}
+
 func TestMakeTreeWritableForRemovalNeverFollowsSwappedSymlink(t *testing.T) {
 	assertTreeChmodSwapIsBoundToOpenedEntry(t, 0o400, makeTreeWritableForRemovalWithHook)
 }

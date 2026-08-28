@@ -1134,25 +1134,55 @@ func stageImmutableRelease(request InstallRequest, destination string) error {
 	if identity != request.ContentIdentity {
 		return errors.New("release source changed while staging its exact payload")
 	}
-	stagedSource, err := openSecureReleaseSource(temporary)
+	stagedSource, err := prepareStagedReleaseForRename(request, temporary)
 	if err != nil {
 		return err
 	}
-	stagedRequest := request
-	stagedRequest.SourceRoot = temporary
-	validationErr := validateInstallSource(stagedSource, stagedRequest, false)
-	closeErr := stagedSource.close()
-	if err := errors.Join(validationErr, closeErr); err != nil {
-		return fmt.Errorf("validate exact staged release: %w", err)
-	}
-	if err := makeTreeImmutable(temporary); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, destination); err != nil {
+	if err := commitStagedRelease(stagedSource, temporary, destination); err != nil {
 		return err
 	}
 	committed = true
 	return syncDirectory(filepath.Dir(destination))
+}
+
+func prepareStagedReleaseForRename(request InstallRequest, temporary string) (*secureReleaseSource, error) {
+	stagedSource, err := openSecureReleaseSource(temporary)
+	if err != nil {
+		return nil, err
+	}
+	stagedRequest := request
+	stagedRequest.SourceRoot = temporary
+	if err := validateInstallSource(stagedSource, stagedRequest, false); err != nil {
+		return nil, errors.Join(fmt.Errorf("validate exact staged release: %w", err), stagedSource.close())
+	}
+	if err := makeSecureReleaseContentsImmutable(stagedSource, nil); err != nil {
+		return nil, errors.Join(fmt.Errorf("seal exact staged release contents: %w", err), stagedSource.close())
+	}
+	return stagedSource, nil
+}
+
+func commitStagedRelease(stagedSource *secureReleaseSource, temporary, destination string) error {
+	// Darwin rejects moving a directory after its own mode has been sealed
+	// read-only. Keep the already-open stage root owner-writable across the
+	// rename, then seal that exact directory inode through its descriptor.
+	// Descendants are immutable before publication on every platform.
+	if err := os.Rename(temporary, destination); err != nil {
+		return errors.Join(err, stagedSource.close())
+	}
+	if err := stagedSource.directory.Chmod(0o555); err != nil {
+		closeErr := stagedSource.close()
+		cleanupErr := cleanupUncommittedRelease(destination)
+		return errors.Join(fmt.Errorf("seal committed release root: %w", err), closeErr, cleanupErr)
+	}
+	if err := stagedSource.close(); err != nil {
+		cleanupErr := cleanupUncommittedRelease(destination)
+		return errors.Join(fmt.Errorf("close committed release root: %w", err), cleanupErr)
+	}
+	return nil
+}
+
+func cleanupUncommittedRelease(root string) error {
+	return errors.Join(makeTreeWritableForRemoval(root), os.RemoveAll(root))
 }
 
 func validateExistingImmutableRelease(request InstallRequest, root string) error {
@@ -1191,6 +1221,13 @@ func makeTreeImmutableWithHook(root string, beforeChmod func(string)) error {
 		return err
 	}
 	defer func() { _ = source.close() }()
+	if err := makeSecureReleaseContentsImmutable(source, beforeChmod); err != nil {
+		return err
+	}
+	return source.directory.Chmod(0o555)
+}
+
+func makeSecureReleaseContentsImmutable(source *secureReleaseSource, beforeChmod func(string)) error {
 	if err := source.walk(func(relative string, info os.FileInfo, file *os.File) error {
 		if beforeChmod != nil {
 			beforeChmod(relative)
@@ -1203,7 +1240,7 @@ func makeTreeImmutableWithHook(root string, beforeChmod func(string)) error {
 	}); err != nil {
 		return err
 	}
-	return source.directory.Chmod(0o555)
+	return nil
 }
 
 func makeTreeWritableForRemoval(root string) error {

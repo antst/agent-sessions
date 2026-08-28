@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestProductionDarwinRecordedFederatorRootRecoversLiveAndRetiresStableStaleAgentSocket(t *testing.T) {
@@ -254,12 +255,7 @@ func legacyInventorySourceByID(sources []LegacyInventorySource, id string) (Lega
 
 func shortMigrationAgentSocketRoot(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("", "mas-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
+	return testutil.ShortSocketRoot(t, "mas-", filepath.Join("prior-tmp", "peer-federator-501", "agent.sock"))
 }
 
 func legacyCandidateByKind(t *testing.T, candidates []LegacyRuntimeCandidate, kind string) LegacyRuntimeCandidate {

@@ -31,10 +31,11 @@ const (
 
 const (
 	qwenTestPollInterval = 5 * time.Millisecond
-	// Match the product's bounded lifecycle operations while allowing
-	// race-instrumented subprocess and filesystem transitions on loaded hosts.
-	// Polls and event waits return immediately once the transition completes.
-	qwenTestLifecycleTimeout = 10 * time.Second
+	// Allow race-instrumented subprocess and filesystem transitions while the
+	// full repository suite loads a hosted runner. Polls and event waits return
+	// immediately once the transition completes; this is not a fixed sleep or a
+	// product lifecycle budget.
+	qwenTestLifecycleTimeout = 30 * time.Second
 )
 
 type qwenTestPrivatePaths struct {

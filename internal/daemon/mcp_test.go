@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -140,6 +141,12 @@ func TestBareConnectorCanInitializeButCannotAcquirePeerAuthority(t *testing.T) {
 	}
 	server := newControlTestServer(controlServerConfig{
 		Generation: runtime.Generation(), RuntimeVersion: "test",
+		OwnerUID: os.Getuid(),
+		ObservePeer: func(net.Conn) (controlPeerEvidence, error) {
+			peer := controlTestPeerEvidence
+			peer.UID = os.Getuid()
+			return peer, nil
+		},
 		AuthorizeHello: authorizeForegroundHello(runtime), Dispatch: runtimeControlDispatch(runtime),
 	})
 	client, serverErr := startControlTestSession(t, server)
