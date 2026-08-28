@@ -4,8 +4,8 @@
 `08e915da6b91ddb54eb4790054d1fc818d4b4dec`, tree
 `dd448d5e9c3d0a412fee88f001cf15ed03cfe755`.
 
-**Review status**: **PENDING CROSS-PLATFORM CLOSURE**. Linux is green. Hosted CI and exact-candidate
-macOS acceptance have not yet been credited.
+**Review status**: **PENDING CONTROLLED-MAC INSTALLATION**. Local Linux and the complete hosted
+Linux/macOS matrix are green at the exact runtime tree.
 
 ## Satisfied at the exact Linux candidate
 
@@ -25,13 +25,20 @@ macOS acceptance have not yet been credited.
   removal, purge, and four-platform package gates are green.
 - The installed exact candidate has one daemon, one endpoint, zero obsolete processes, and healthy
   metadata-only status/doctor output.
+- Hosted workflow run
+  [`33178722467`](https://github.com/antst/agent-sessions/actions/runs/33178722467) passed Linux and
+  macOS normal, race, vet, lint, clean-user installed-service, package-contract, inventory, and all
+  four release-build jobs. The run's evidence-only head `76f11f3` is a direct child of this unchanged
+  runtime tree.
 
 ## Pending before final PASS
 
-- hosted Linux/macOS workflow results at the exact candidate;
-- hosted clean-user launchd service acceptance at the exact candidate;
-- independent physical-Darwin normal/race/vet/lint and nonmutation checks; and
-- final comparison of hosted archive artifacts with the declared two-image inventory.
+- install the exact candidate on the controlled physical Mac after its old Agent Sessions processes
+  and prototype roots are quiescent;
+- prove the physical-host nonmutation boundary for vendor credential, history, settings, and
+  transcript stores; and
+- record the resulting one-daemon/no-obsolete-process census.
 
 The older `8afd94f` cross-platform evidence is historical and is not silently composed with this
-candidate. T094 and T095 remain open until these pending checks are complete.
+candidate. T094 and T095 remain open only for the controlled physical-Mac installation and final
+constitution sign-off.

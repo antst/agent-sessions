@@ -10,8 +10,9 @@
   `SHA256:lgAnkhJdgKV1odY8EpHWrEpCwDRVj0NWAJijtWvpeXU`
 - Branch: `feature/unified-user-daemon`
 
-The evidence-only completion commit containing this file does not change the runtime, service,
-connector, package, or test tree above.
+The hosted run used evidence-only head
+`76f11f3ad5a5296c9d6fa65765ace82dc65990bf`. Its parent is the runtime candidate above, and the
+evidence-only commit does not change the runtime, service, connector, package, or test tree.
 
 ## Host and toolchain
 
@@ -99,6 +100,8 @@ host federation-agent image in a release archive.
 
 ## Linux decision
 
-The Linux candidate is green. Cross-platform final acceptance remains pending until the same signed
-runtime candidate is exercised by hosted CI and independent macOS validation; no result from the
-older candidate is carried forward as exact-candidate credit.
+The Linux candidate is green locally and in hosted CI. Workflow run
+[`33178722467`](https://github.com/antst/agent-sessions/actions/runs/33178722467) completed successfully
+at evidence-only head `76f11f3`, whose runtime parent is the exact candidate above. Its Linux normal,
+race, vet, lint, installed-service fixture, package contract, inventory, and both Linux release-build
+jobs passed. No result from an older runtime candidate is carried forward as exact-candidate credit.
