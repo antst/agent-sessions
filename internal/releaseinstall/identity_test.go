@@ -7,7 +7,7 @@ import (
 )
 
 func TestContentIdentityBindsTreeBytesModesAndIgnoresOnlyManifest(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	path := filepath.Join(root, "bin", "agent-sessions")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestContentIdentityBindsTreeBytesModesAndIgnoresOnlyManifest(t *testing.T) 
 }
 
 func TestContentIdentityRejectsSymlinkedReleaseEntries(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "payload"), []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}

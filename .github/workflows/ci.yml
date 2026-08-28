@@ -58,7 +58,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
-      AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ runner.os == 'macOS' && '1' || '0' }}
+      AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ matrix.os == 'macos-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
@@ -152,7 +152,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
-      AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ runner.os == 'macOS' && '1' || '0' }}
+      AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ matrix.os == 'macos-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0

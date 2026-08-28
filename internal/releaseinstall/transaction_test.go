@@ -46,7 +46,7 @@ func invalidSourceEntryCases() []invalidSourceEntryCase {
 }
 
 func TestInstallRequestAcceptsGeneratedSourceReleaseManifestWithExactChecksumBinding(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	executable := filepath.Join(root, "bin", "agent-sessions")
 	if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestInstallRequestAcceptsGeneratedSourceReleaseManifestWithExactChecksumBin
 }
 
 func TestInstallRequestRejectsLegacySelfAssertedManifest(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestInstallRequestRejectsLegacySelfAssertedManifest(t *testing.T) {
 func TestSourceReleaseChecksumValidationRejectsIndirectAndUnsupportedEntries(t *testing.T) {
 	for _, test := range invalidSourceEntryCases() {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := releaseTestTempDir(t)
 			entry := filepath.Join(root, "indirect")
 			test.create(t, entry)
 			checksums := strings.Repeat("0", 64) + "  indirect\n"
@@ -156,7 +156,7 @@ func TestSourceReleaseChecksumValidationRejectsIndirectAndUnsupportedEntries(t *
 		})
 	}
 	t.Run("checksum symlink", func(t *testing.T) {
-		root := t.TempDir()
+		root := releaseTestTempDir(t)
 		target := filepath.Join(root, "outside-checksums")
 		if err := os.WriteFile(target, []byte(strings.Repeat("0", 64)+"  payload\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -184,9 +184,9 @@ func assertTreeChmodSwapIsBoundToOpenedEntry(
 	operation func(string, func(string)) error,
 ) {
 	t.Helper()
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	target := filepath.Join(root, "payload")
-	outside := filepath.Join(t.TempDir(), "outside")
+	outside := filepath.Join(releaseTestTempDir(t), "outside")
 	if err := os.WriteFile(target, []byte("payload"), initialMode); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func assertTreeChmodSwapIsBoundToOpenedEntry(
 }
 
 func TestInstallRequestRejectsIntermediateSymlinkInAbsoluteSourceRoot(t *testing.T) {
-	parent := t.TempDir()
+	parent := releaseTestTempDir(t)
 	realParent := filepath.Join(parent, "real-parent")
 	realRoot := filepath.Join(realParent, "release")
 	request := createReleaseSource(t, realRoot, "1.2.3", "root-link", "agent-sessions")
@@ -236,14 +236,14 @@ func TestInstallRequestRejectsIntermediateSymlinkInAbsoluteSourceRoot(t *testing
 func TestSourceReleaseManifestRequiresExactCanonicalRoleInventory(t *testing.T) {
 	t.Run("valid host and hub", func(t *testing.T) {
 		for _, role := range []Role{RoleHost, RoleHub} {
-			request := createReleaseSource(t, filepath.Join(t.TempDir(), string(role)), "1.2.3", "exact", roleExecutable(role))
+			request := createReleaseSource(t, filepath.Join(releaseTestTempDir(t), string(role)), "1.2.3", "exact", roleExecutable(role))
 			if err := validateInstallRequest(request); err != nil {
 				t.Fatalf("exact %s inventory was rejected: %v", role, err)
 			}
 		}
 	})
 	t.Run("connector roots", func(t *testing.T) {
-		request := createReleaseSource(t, filepath.Join(t.TempDir(), "host"), "1.2.3", "connector", "agent-sessions")
+		request := createReleaseSource(t, filepath.Join(releaseTestTempDir(t), "host"), "1.2.3", "connector", "agent-sessions")
 		request = rewriteTestSourceManifest(t, request, func(manifest *sourceReleaseManifest) {
 			manifest.ConnectorPayloads[0].ArchivePaths = []string{".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "docs"}
 		})
@@ -252,7 +252,7 @@ func TestSourceReleaseManifestRequiresExactCanonicalRoleInventory(t *testing.T) 
 		}
 	})
 	t.Run("current platform", func(t *testing.T) {
-		request := createReleaseSource(t, filepath.Join(t.TempDir(), "host"), "1.2.3", "platform", "agent-sessions")
+		request := createReleaseSource(t, filepath.Join(releaseTestTempDir(t), "host"), "1.2.3", "platform", "agent-sessions")
 		request = rewriteTestSourceManifest(t, request, func(manifest *sourceReleaseManifest) {
 			if currentReleasePlatform() == "linux-x64" {
 				manifest.Platform = "darwin-arm64"
@@ -265,7 +265,7 @@ func TestSourceReleaseManifestRequiresExactCanonicalRoleInventory(t *testing.T) 
 		}
 	})
 	t.Run("host service assets", func(t *testing.T) {
-		request := createReleaseSource(t, filepath.Join(t.TempDir(), "host"), "1.2.3", "host-service", "agent-sessions")
+		request := createReleaseSource(t, filepath.Join(releaseTestTempDir(t), "host"), "1.2.3", "host-service", "agent-sessions")
 		request = rewriteTestSourceManifest(t, request, func(manifest *sourceReleaseManifest) {
 			manifest.ServiceAssets.Host[0], manifest.ServiceAssets.Host[1] = manifest.ServiceAssets.Host[1], manifest.ServiceAssets.Host[0]
 		})
@@ -274,7 +274,7 @@ func TestSourceReleaseManifestRequiresExactCanonicalRoleInventory(t *testing.T) 
 		}
 	})
 	t.Run("hub service assets", func(t *testing.T) {
-		request := createReleaseSource(t, filepath.Join(t.TempDir(), "hub"), "1.2.3", "hub-service", "agent-sessions-hub")
+		request := createReleaseSource(t, filepath.Join(releaseTestTempDir(t), "hub"), "1.2.3", "hub-service", "agent-sessions-hub")
 		request = rewriteTestSourceManifest(t, request, func(manifest *sourceReleaseManifest) {
 			manifest.ServiceAssets.Hub = manifest.ServiceAssets.Hub[:2]
 		})
@@ -295,7 +295,7 @@ func TestSourceReleaseManifestRequiresExactCanonicalRoleInventory(t *testing.T) 
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := createReleaseSource(t, filepath.Join(t.TempDir(), "host"), "1.2.3", test.name, "agent-sessions")
+			request := createReleaseSource(t, filepath.Join(releaseTestTempDir(t), "host"), "1.2.3", test.name, "agent-sessions")
 			path := filepath.Join(request.SourceRoot, test.relative)
 			if err := os.RemoveAll(path); err != nil {
 				t.Fatal(err)
@@ -316,7 +316,7 @@ func TestInvalidSourceFilesystemTypesAreRejectedBeforeInstallMutation(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			source, version := generatedHostSource(t)
 			test.create(t, filepath.Join(source, "unsupported-entry"))
-			layout, err := ResolveRoleLayout(filepath.Join(t.TempDir(), "install"), RoleHost)
+			layout, err := ResolveRoleLayout(filepath.Join(releaseTestTempDir(t), "install"), RoleHost)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -352,7 +352,7 @@ func generatedHostSource(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	version := strings.TrimSpace(string(versionBody))
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	for _, path := range []string{
 		".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills",
 		".claude-plugin", "claude", "grok", "qwen", "bin",
@@ -399,7 +399,7 @@ func TestHostInstallStagingUsesCanonicalReleaseMetadataAndValidationIsReadOnly(t
 		t.Fatal(err)
 	}
 	version := strings.TrimSpace(string(versionBody))
-	dryRun := exec.Command("make", "-n", "install-all", "PREFIX="+filepath.Join(t.TempDir(), "prefix"))
+	dryRun := exec.Command("make", "-n", "install-all", "PREFIX="+filepath.Join(releaseTestTempDir(t), "prefix"))
 	dryRun.Dir = repositoryRoot
 	dryRunBody, err := dryRun.CombinedOutput()
 	if err != nil {
@@ -410,7 +410,7 @@ func TestHostInstallStagingUsesCanonicalReleaseMetadataAndValidationIsReadOnly(t
 	if metadataIndex < 0 || installIndex < 0 || metadataIndex >= installIndex {
 		t.Fatalf("install-all does not stage canonical metadata before lifecycle install: %s", dryRunBody)
 	}
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	executable := filepath.Join(root, "bin", "agent-sessions")
 	if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
 		t.Fatal(err)
@@ -470,7 +470,7 @@ func TestHostInstallStagingUsesCanonicalReleaseMetadataAndValidationIsReadOnly(t
 }
 
 func TestRoleLayoutsAreDisjointAndReleaseIdentityIncludesContent(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	host, err := ResolveRoleLayout(root, RoleHost)
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +506,7 @@ func TestCurrentReleaseSelectionRequiresExactGeneratedRoleRelativeTarget(t *test
 		"releases/a/b", "releases/../evil", "releases/not-generated", "/tmp/outside",
 	} {
 		t.Run(strings.ReplaceAll(target, "/", "_"), func(t *testing.T) {
-			layout, err := ResolveRoleLayout(filepath.Join(t.TempDir(), "install"), RoleHost)
+			layout, err := ResolveRoleLayout(filepath.Join(releaseTestTempDir(t), "install"), RoleHost)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -597,7 +597,7 @@ func TestLoadActiveJournalRejectsIndirectUnboundedAndPermissiveState(t *testing.
 	}{
 		{name: "symlink", create: func(t *testing.T, path string) {
 			t.Helper()
-			outside := filepath.Join(t.TempDir(), "outside.json")
+			outside := filepath.Join(releaseTestTempDir(t), "outside.json")
 			if err := os.WriteFile(outside, []byte(`{}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -625,7 +625,7 @@ func TestLoadActiveJournalRejectsIndirectUnboundedAndPermissiveState(t *testing.
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			layout, err := ResolveRoleLayout(filepath.Join(t.TempDir(), "install"), RoleHost)
+			layout, err := ResolveRoleLayout(filepath.Join(releaseTestTempDir(t), "install"), RoleHost)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -639,7 +639,7 @@ func TestLoadActiveJournalRejectsIndirectUnboundedAndPermissiveState(t *testing.
 		})
 	}
 	t.Run("permissive transaction directory", func(t *testing.T) {
-		layout, err := ResolveRoleLayout(filepath.Join(t.TempDir(), "install"), RoleHost)
+		layout, err := ResolveRoleLayout(filepath.Join(releaseTestTempDir(t), "install"), RoleHost)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -654,7 +654,7 @@ func TestLoadActiveJournalRejectsIndirectUnboundedAndPermissiveState(t *testing.
 		if os.Geteuid() != 0 {
 			t.Skip("requires privilege to construct a wrong-owner journal")
 		}
-		layout, err := ResolveRoleLayout(filepath.Join(t.TempDir(), "install"), RoleHost)
+		layout, err := ResolveRoleLayout(filepath.Join(releaseTestTempDir(t), "install"), RoleHost)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -675,7 +675,7 @@ func TestLoadActiveJournalRejectsIndirectUnboundedAndPermissiveState(t *testing.
 }
 
 func TestReleaseStateDirectoryCreationRequiresDurableParentEntry(t *testing.T) {
-	parent := t.TempDir()
+	parent := releaseTestTempDir(t)
 	target := filepath.Join(parent, "transactions")
 	wantErr := errors.New("parent sync failed")
 	directory, err := openOwnedReleaseDirectoryWithParentSync(target, true, func(int) error { return wantErr })
@@ -705,7 +705,7 @@ func TestInstallLockRejectsIndirectAndPermissiveState(t *testing.T) {
 	}{
 		{name: "symlink", create: func(t *testing.T, path string) {
 			t.Helper()
-			if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), path); err != nil {
+			if err := os.Symlink(filepath.Join(releaseTestTempDir(t), "outside"), path); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -723,7 +723,7 @@ func TestInstallLockRejectsIndirectAndPermissiveState(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			layout, err := ResolveRoleLayout(filepath.Join(t.TempDir(), "install"), RoleHost)
+			layout, err := ResolveRoleLayout(filepath.Join(releaseTestTempDir(t), "install"), RoleHost)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -980,7 +980,7 @@ func (service *candidateReplayAwareRoleService) VerifyCandidate(context.Context,
 }
 
 func TestFreshRecoveryDoesNotRepeatCrashAmbiguousCandidateRestart(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 	layout, err := ResolveRoleLayout(filepath.Join(root, "install"), RoleHost)
 	if err != nil {
@@ -1139,7 +1139,7 @@ func TestReadyPhaseRecoveryDoesNotRestartTheAlreadyReadyCandidate(t *testing.T) 
 }
 
 func TestRolePreflightRunsUnderSharedLockBeforeAnySecondRequestMutation(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 	layout, err := ResolveRoleLayout(filepath.Join(root, "install"), RoleHost)
 	if err != nil {
@@ -1295,7 +1295,7 @@ func TestRollbackRecoveryNeverStartsCandidateBesideRestoredLegacyAuthority(t *te
 		{name: "retryable hook restoration", failRollbackOnce: true, wantFirstPhase: PhaseRollbackRetryable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := releaseTestTempDir(t)
 			t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 			layout, err := ResolveRoleLayout(filepath.Join(root, "install"), RoleHost)
 			if err != nil {
@@ -1353,7 +1353,7 @@ func TestRoleClassifiedPostAuthorityFailuresRollForwardWithoutRestoringLegacy(t 
 		{name: "classifier uncertainty fails forward", readyErrOnce: true, classifierErr: errors.New("migration journal unavailable")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := releaseTestTempDir(t)
 			t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 			layout, err := ResolveRoleLayout(filepath.Join(root, "install"), RoleHost)
 			if err != nil {
@@ -1411,7 +1411,7 @@ func TestUnclassifiedRoleCommitFailureRetainsRoleNeutralRollback(t *testing.T) {
 }
 
 func TestDurableRollForwardRecoveryCannotReclassifyBackToRollback(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 	layout, err := ResolveRoleLayout(filepath.Join(root, "install"), RoleHost)
 	if err != nil {
@@ -1527,7 +1527,7 @@ func TestRoleInstallRejectsOppositeExecutableBeforeMutation(t *testing.T) {
 }
 
 func TestHostRemovalAndPurgeNeverSelectHubOwnedRoots(t *testing.T) {
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 	hostLayout, err := ResolveRoleLayout(root, RoleHost)
 	if err != nil {
@@ -1572,8 +1572,8 @@ func TestHostRemovalAndPurgeNeverSelectHubOwnedRoots(t *testing.T) {
 
 func TestPurgePlanBindsEveryTargetAndResumesAfterAnInterruptedPrefix(t *testing.T) {
 	fixture := newTransactionFixture(t, RoleHost)
-	first := filepath.Join(fixture.t.TempDir(), "configuration")
-	second := filepath.Join(fixture.t.TempDir(), "state")
+	first := filepath.Join(releaseTestTempDir(fixture.t), "configuration")
+	second := filepath.Join(releaseTestTempDir(fixture.t), "state")
 	for _, root := range []string{first, second} {
 		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
@@ -1584,7 +1584,7 @@ func TestPurgePlanBindsEveryTargetAndResumesAfterAnInterruptedPrefix(t *testing.
 	}
 	engine, err := NewEngine(EngineOptions{
 		Layout: fixture.layout, Service: fixture.service, Hooks: &fakeRoleHooks{},
-		PurgeTargets: []string{first, second}, PurgeExclusions: []string{filepath.Join(fixture.t.TempDir(), "vendor")},
+		PurgeTargets: []string{first, second}, PurgeExclusions: []string{filepath.Join(releaseTestTempDir(fixture.t), "vendor")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1617,7 +1617,7 @@ type transactionFixture struct {
 
 func newTransactionFixture(t *testing.T, role Role) transactionFixture {
 	t.Helper()
-	root := t.TempDir()
+	root := releaseTestTempDir(t)
 	t.Cleanup(func() { makeTestReleaseTreeWritable(root) })
 	layout, err := ResolveRoleLayout(root, role)
 	if err != nil {

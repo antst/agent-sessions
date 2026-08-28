@@ -75,11 +75,21 @@ func TestCIWorkflowGatesUnifiedReleaseOnBothPlatforms(t *testing.T) {
 	for _, token := range []string{
 		"os: [ubuntu-latest, macos-latest]",
 		"runs-on: ${{ matrix.os }}",
-		"AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER:",
+		"AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ matrix.os == 'macos-latest' && '1' || '0' }}",
 		"./scripts/test-unified-service",
 	} {
 		if !strings.Contains(service, token) {
 			t.Errorf("CI installed service fixture job omits %q", token)
+		}
+	}
+	for _, jobName := range []string{"test", "service-fixture"} {
+		job := ciWorkflowJob(t, workflow, jobName)
+		if !strings.Contains(job,
+			"AGENT_SESSIONS_CLEAN_ACCEPTANCE_USER: ${{ matrix.os == 'macos-latest' && '1' || '0' }}") {
+			t.Errorf("CI %s job does not derive clean-user acceptance from its matrix OS", jobName)
+		}
+		if strings.Contains(job, "runner.os") {
+			t.Errorf("CI %s job uses runner context in job-level env, which GitHub rejects before scheduling", jobName)
 		}
 	}
 
