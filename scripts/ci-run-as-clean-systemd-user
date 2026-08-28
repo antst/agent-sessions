@@ -50,6 +50,7 @@ sudo systemctl start "user@$user_id.service"
 mkdir -m 0700 "$work_root"
 git clone --quiet --no-hardlinks "$repository_root" "$work_root/repository"
 git -C "$work_root/repository" checkout --quiet --detach "$source_revision"
+mkdir -m 0700 "$work_root/tmp"
 sudo chown -R "$user_name:$user_name" "$work_root"
 
 runtime_root="/run/user/$user_id"
@@ -70,10 +71,16 @@ if ! sudo -u "$user_name" env HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" 
 	sudo find "$runtime_root" -maxdepth 2 -printf '%M %u:%g %p\n' >&2 2>/dev/null || true
 	exit 1
 fi
+sudo -u "$user_name" env \
+	HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
+	XDG_CONFIG_HOME="$user_home/.config" XDG_STATE_HOME="$user_home/.local/state" \
+	TMPDIR="$work_root/tmp" PATH="$PATH" \
+	systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_STATE_HOME TMPDIR PATH
 
 sudo -u "$user_name" env \
 	HOME="$user_home" XDG_RUNTIME_DIR="$runtime_root" \
 	XDG_CONFIG_HOME="$user_home/.config" XDG_STATE_HOME="$user_home/.local/state" \
+	TMPDIR="$work_root/tmp" \
 	AGENT_SESSIONS_EXISTING_SYSTEMD_USER=1 \
 	GOTOOLCHAIN="${GOTOOLCHAIN:-local}" PATH="$PATH" \
 	bash -c 'cd -- "$1"; shift; exec "$@"' bash "$work_root/repository" "$@"

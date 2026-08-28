@@ -40,6 +40,23 @@ for key in sys.argv[1].split("."):
 print(json.dumps(value,separators=(",",":")) if isinstance(value,(dict,list,bool)) else value)' "$1"
 }
 
+print_service_diagnostics() {
+	printf '%s\n' '--- unified service manager diagnostics ---' >&2
+	if [[ "$platform" == Linux ]]; then
+		systemctl --user --no-pager --full status agent-sessions.service >&2 || true
+		journalctl --user --no-pager -n 100 -u agent-sessions.service >&2 || true
+	else
+		launchctl print "gui/$UID/net.antst.agent-sessions" >&2 || true
+		for log in \
+			"$HOME/.local/state/agent-sessions/logs/agent-sessions.stdout.log" \
+			"$HOME/.local/state/agent-sessions/logs/agent-sessions.stderr.log"; do
+			[[ -f "$log" && ! -L "$log" ]] || continue
+			printf '%s\n' "--- $log ---" >&2
+			tail -n 100 "$log" >&2 || true
+		done
+	fi
+}
+
 if [[ "$platform" == Linux && "${AGENT_SESSIONS_NESTED_SYSTEMD:-0}" != 1 &&
 	"${AGENT_SESSIONS_EXISTING_SYSTEMD_USER:-0}" != 1 ]]; then
 	outer_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-service.XXXXXX")"
@@ -191,9 +208,16 @@ missing_codex="$missing_root/codex"
 missing_claude="$missing_root/claude"
 missing_grok="$missing_root/grok"
 missing_qwen="$missing_root/qwen"
+set +e
 make -s install-all \
 	PREFIX="$prefix" INSTALL_ROOT="$prefix/libexec/agent-sessions" HOST_INSTALLER="$host_binary" \
 	CODEX="$missing_codex" CLAUDE="$missing_claude" GROK="$missing_grok" QWEN="$missing_qwen"
+install_status=$?
+set -e
+if [[ "$install_status" != 0 ]]; then
+	print_service_diagnostics
+	fail "initial supported install failed with exit $install_status"
+fi
 
 service_active() {
 	if [[ "$platform" == Linux ]]; then
@@ -366,7 +390,15 @@ prior_connectors="$(connector_semantics)"
 upgrade_source="$acceptance_root/upgrade-source"
 cp -R -- "$(readlink -f "$prefix/libexec/agent-sessions/host/current")" "$upgrade_source"
 chmod -R u+w "$upgrade_source"
-sed -i '1s/$/ (acceptance rollback candidate)/' "$upgrade_source/docs/CLI.md"
+python3 - "$upgrade_source/docs/CLI.md" <<'PY'
+import pathlib,sys
+path=pathlib.Path(sys.argv[1])
+body=path.read_bytes()
+if not body:
+    raise SystemExit("upgrade fixture CLI document is empty")
+head,separator,tail=body.partition(b"\n")
+path.write_bytes(head+b" (acceptance rollback candidate)"+separator+tail)
+PY
 set +e
 AGENT_SESSIONS_FAKE_FAIL_PRODUCT=grok "$host_binary" lifecycle install \
 	--role host --source-root "$upgrade_source" --prefix "$prefix" \

@@ -48,6 +48,8 @@ def write_host_configuration(root: pathlib.Path, listener: str, host_id: str) ->
     configuration_root = root / "configuration" / "agent-sessions"
     state_root = root / "state" / "agent-sessions"
     runtime_root = root / "runtime" / "agent-sessions"
+    if sys.platform == "darwin":
+        runtime_root = pathlib.Path("/tmp") / f"agent-sessions-{os.getuid()}"
     configuration_root.mkdir(parents=True, mode=0o700)
     configuration = {
         "schema_version": 1,
@@ -78,7 +80,7 @@ def stop(process: subprocess.Popen[str]) -> None:
 
 def run_pair(host: pathlib.Path, hub: pathlib.Path, host_id: str, compatible: bool) -> dict:
     with tempfile.TemporaryDirectory(prefix="agent-sessions-binary-pair-") as root_text:
-        root = pathlib.Path(root_text)
+        root = pathlib.Path(os.path.realpath(root_text))
         for name in ("home", "configuration", "state", "runtime"):
             (root / name).mkdir(mode=0o700)
         environment = os.environ.copy()
