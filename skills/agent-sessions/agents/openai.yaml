@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Sessions"
+  short_description: "Discover peers, message them, and control durable lanes"
+  default_prompt: "Use $agent-sessions to list my visible Agent Sessions peers."

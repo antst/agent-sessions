@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Sessions central hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/agent-sessions/hub.env
+ExecStart=@PREFIX@/libexec/agent-sessions/hub/current/bin/agent-sessions-hub
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

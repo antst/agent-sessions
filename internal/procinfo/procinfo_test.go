@@ -20,3 +20,14 @@ func TestLooksLikeCodexHost(t *testing.T) {
 		}
 	}
 }
+
+func TestObservableEnvironmentRejectsMissingIdentityEvidence(t *testing.T) {
+	if _, err := observableEnvironment(42, nil); err == nil {
+		t.Fatal("empty process environment was accepted as authoritative")
+	}
+	want := []string{"AGENT_SESSIONS_PRODUCT=qwen"}
+	got, err := observableEnvironment(42, want)
+	if err != nil || len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("observable process environment = %v, %v", got, err)
+	}
+}

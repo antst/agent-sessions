@@ -33,6 +33,11 @@ type fakeAppServer struct {
 func startFakeNativeAppServer(t *testing.T, handler func(map[string]any) (any, error)) (*fakeAppServer, string) {
 	t.Helper()
 	socket := filepath.Join(t.TempDir(), "app-server.sock")
+	return startFakeNativeAppServerAt(t, socket, handler), socket
+}
+
+func startFakeNativeAppServerAt(t *testing.T, socket string, handler func(map[string]any) (any, error)) *fakeAppServer {
+	t.Helper()
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +47,7 @@ func startFakeNativeAppServer(t *testing.T, handler func(map[string]any) (any, e
 	}
 	go fake.accept()
 	t.Cleanup(fake.close)
-	return fake, socket
+	return fake
 }
 
 func TestAppServerClientCapturesUnixPeerProcessIdentity(t *testing.T) {
@@ -274,7 +279,7 @@ func TestAppServerSocketRunning(t *testing.T) {
 
 func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	threadID := "00000000-0000-0000-0000-000000000031"
@@ -284,8 +289,8 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 		case "initialize", "trigger/dynamic":
 			return map[string]any{}, nil
 		case "mcpServer/tool/call":
-			t.Fatal("claude_peer dynamic tools must be handled with the App Server-attested thread id")
-			return nil, errors.New("unexpected claude_peer MCP relay")
+			t.Fatal("agent_sessions dynamic tools must be handled with the App Server-attested thread id")
+			return nil, errors.New("unexpected agent_sessions MCP relay")
 		default:
 			return map[string]any{}, nil
 		}
@@ -298,7 +303,7 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 			"id": "dynamic-request-1", "method": "item/tool/call",
 			"params": map[string]any{
 				"threadId": threadID, "turnId": "turn-dynamic", "callId": "call-dynamic",
-				"namespace": nil, "tool": "mcp__claude_peer__list_peers", "arguments": map[string]any{},
+				"namespace": nil, "tool": "mcp__agent_sessions__list_peers", "arguments": map[string]any{},
 			},
 		})
 		_ = writeTestFrame(conn, body)
@@ -313,31 +318,12 @@ func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
 	if err := client.request(ctx, "trigger/dynamic", map[string]any{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case request := <-fake.requests:
-			if request["id"] != "dynamic-request-1" || request["method"] != nil {
-				continue
-			}
-			result := request["result"].(map[string]any)
-			if success, _ := result["success"].(bool); success {
-				t.Fatalf("ungrouped dynamic call unexpectedly succeeded: %v", result)
-			}
-			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "communication is inactive for this ungrouped session") {
-				t.Fatalf("unexpected dynamic content: %v", items)
-			}
-			return
-		case <-deadline:
-			t.Fatal("timed out waiting for dynamic tool response")
-		}
-	}
+	waitForDynamicToolError(t, fake.requests, "dynamic-request-1", "communication is inactive for this ungrouped session")
 }
 
 func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	callerID := "00000000-0000-0000-0000-000000000041"
@@ -358,7 +344,7 @@ func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
 			"id": "dynamic-foreign-session", "method": "item/tool/call",
 			"params": map[string]any{
 				"threadId": "00000000-0000-0000-0000-000000000041", "turnId": "turn-dynamic", "callId": "call-dynamic",
-				"namespace": nil, "tool": "mcp__claude_peer__identity",
+				"namespace": nil, "tool": "mcp__agent_sessions__identity",
 				"arguments": map[string]any{"session_id": "00000000-0000-0000-0000-000000000042"},
 			},
 		})
@@ -374,24 +360,29 @@ func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
 	if err := client.request(ctx, "trigger/dynamic", map[string]any{}, nil); err != nil {
 		t.Fatal(err)
 	}
+	waitForDynamicToolError(t, fake.requests, "dynamic-foreign-session", "cannot act as")
+}
+
+func waitForDynamicToolError(t *testing.T, requests <-chan map[string]any, requestID, message string) {
+	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
-		case request := <-fake.requests:
-			if request["id"] != "dynamic-foreign-session" || request["method"] != nil {
+		case request := <-requests:
+			if request["id"] != requestID || request["method"] != nil {
 				continue
 			}
 			result := request["result"].(map[string]any)
 			if success, _ := result["success"].(bool); success {
-				t.Fatalf("foreign session claim succeeded: %v", result)
+				t.Fatalf("dynamic tool error unexpectedly succeeded: %v", result)
 			}
 			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), "cannot act as") {
-				t.Fatalf("unexpected identity rejection: %v", items)
+			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), message) {
+				t.Fatalf("dynamic tool error content = %v, want substring %q", items, message)
 			}
 			return
 		case <-deadline:
-			t.Fatal("timed out waiting for dynamic identity rejection")
+			t.Fatalf("timed out waiting for dynamic tool error %q", requestID)
 		}
 	}
 }

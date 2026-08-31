@@ -12,18 +12,18 @@ From a source checkout:
 git clone https://github.com/antst/agent-sessions.git ~/agent-sessions
 cd ~/agent-sessions
 make test
-codex app-server daemon stop
 make install
 ```
 
 From a release archive, verify `SHA256SUMS`, extract the archive for the current OS and
-architecture, stop every Codex client and managed App Server, then run `make install`. The target
-installs the nine native executables under the selected prefix, registers the
+architecture, then run `make install`. The target installs the unified host image and its command
+aliases under the selected prefix, registers the
 `agent-sessions` marketplace, and installs `agent-sessions@agent-sessions` into Codex.
 
-Use `make install-all` when the same operation should also install the Claude and Grok plugins.
-`make install-claude` and `make install-grok` update only those optional product surfaces after the
-native runtime already exists.
+Use `make install-all` to install the shared runtime plus every product integration whose native
+client is present. Missing Claude, Grok, or Qwen clients are reported and skipped. `make install`
+and `make install-all` are the same atomic host transaction; per-product Make installers do not
+exist.
 
 ## Activate and verify
 
@@ -35,20 +35,24 @@ Verify the installed side from a host terminal:
 
 ```bash
 codex plugin list
-codex app-server daemon version
+agent-sessions status
 codex-peer -n reviewer -g project-a
 codex-peer-lane doctor --json
-peer-federator status
 ```
 
-An already-running TUI retains its old plugin snapshot and must be restarted. The installer refuses
-to replace a live App Server or an unverifiable managed Grok process tree; it does not silently
-restart active product sessions.
+An already-running TUI retains its old plugin snapshot and may need to be restarted to load changed
+plugin hooks. Installation restarts only the Agent Sessions user daemon; it does not restart the
+Codex App Server or any vendor session.
+
+In a managed Codex session, invoke `$agent-sessions list peers` to select the
+cross-product Agent Sessions transport explicitly. The same semantic skill name
+is installed for Claude, Grok, and Qwen; its MCP calls fail closed in ordinary
+unmanaged sessions.
 
 ## Development installs
 
-`make dev-install` deliberately points the installed native runtime and Codex marketplace at a
-mutable checkout. `make reinstall` refreshes the plugin cachebuster, rebuilds, and reinstalls. Use
+`make dev-install` is a compatibility alias for the same staged, immutable install transaction.
+`make reinstall` refreshes the plugin cachebuster, rebuilds, and reinstalls. Use
 the repository's `make lint`, `make test`, and `make test-race` targets rather than an unrelated
 system-linter invocation.
 

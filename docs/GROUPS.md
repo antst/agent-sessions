@@ -1,4 +1,4 @@
-# Agent Sessions groups and host agent
+# Agent Sessions groups and user-host daemon
 
 Agent Sessions has no global peer namespace. A participating peer belongs to
 one or more groups and can discover or address only peers with which it shares
@@ -7,23 +7,26 @@ at least one group.
 This document intentionally defines only the operations required now. It does
 not introduce a general policy engine or an extension framework.
 
-## Host agent
+## User-host daemon
 
-One Agent Sessions agent runs per host and profile. It is authoritative for:
+Exactly one service-managed Agent Sessions daemon runs per operating-system
+user and host. It is authoritative for:
 
 - local peer registration and liveness;
 - explicit and inherited group membership;
 - group-filtered discovery;
 - direct, multicast, and group-broadcast routing; and
-- federation with agents on other hosts.
+- federation with daemons on other hosts.
 
-Federation is an optional transport of the same host agent. Local routing must
+Federation is an optional transport of the same daemon. Local routing must
 work without a federation hub.
 
-Product-specific managers retain sole ownership of Codex threads, Claude
-processes, Grok ACP sessions, and future product sessions. Restarting the host
-agent must not terminate those sessions; live participants reconnect and
-register again.
+The daemon's in-process product adapters retain Agent Sessions lifecycle
+ownership while native Codex, Claude, Grok, and Qwen processes retain their
+vendor state and transcripts. Restarting the daemon must not terminate those
+native sessions; live participants reconnect and register again. Short-lived
+`agent-sessions connector ...` processes are stdio MCP relays owned by vendor
+clients, not additional daemons or authorities.
 
 The agent keeps one small durable session catalog keyed by stable Agent
 Sessions ID. Its initial schema stores the product, explicit groups, parent and
@@ -34,7 +37,7 @@ need.
 
 ## Membership
 
-`codex-peer`, `claude-peer`, and `grok-peer` accept repeatable
+`codex-peer`, `claude-peer`, `grok-peer`, and `qwen-peer` accept repeatable
 `-g NAME` or `--group NAME` arguments. Group names are opaque, case-sensitive strings after
 basic length and character validation.
 
@@ -51,11 +54,11 @@ explicitly requests group inheritance for that launch. Omission on resume
 restores the child's last choice; it does not silently widen membership. A
 child may request more explicit groups but cannot remove its parent anchor.
 
-The host agent computes effective membership from the corroborated parent
+The daemon computes effective membership from the corroborated parent
 registration. A child process cannot grant itself membership by copying a
 group list into its own registry row.
 
-A bare product CLI that does not register with the host agent is not an Agent
+A bare product CLI that does not register with the daemon is not an Agent
 Sessions peer. This is the Agent Sessions communication opt-out.
 
 ## Delegation is separate from membership
@@ -72,16 +75,17 @@ names can be reused or changed. Delegation does not override the receiving sessi
 instructions, permission mode, sandbox, or approval requirements.
 
 The parent layer and target layer are independent. Any registered Codex,
-Claude, or Grok parent can launch any supported Codex, Claude, or Grok lane.
+Claude, Grok, or Qwen parent can launch any supported Codex, Claude, Grok, or Qwen lane.
 Parent resolution supplies lifecycle and group context; the selected target
 adapter continues to own its native thread/process/ACP semantics.
 
 ## Claude-native carrier
 
-The host agent publishes exactly one additional Claude-compatible service
-session in Claude's native session registry. Consequently, `claude agents
---json` shows ordinary and managed local Claude sessions plus one Agent
-Sessions service session.
+The daemon publishes exactly one additional Claude-compatible service
+session in Claude's native session registry. That row is internal transport
+plumbing, not the Agent Sessions discovery surface. Use the structured
+`agent_sessions.list_peers` operation from a managed peer to discover live
+local or federated peers visible through shared groups.
 
 Participating Claude sessions send messages to that service through Claude's
 native communication protocol. The native Claude envelope is only the outer
@@ -94,22 +98,28 @@ followed immediately by the compact JSON frame. This fixed carrier marker keeps
 Claude's `SendMessage` tool from coercing the JSON into one of Claude's own
 typed control messages; it is not a second routing protocol.
 
-Within the same-user trust boundary, the host agent maps the top-level native
+Within the same-user trust boundary, the daemon maps the top-level native
 `from` address to one live registered Claude socket and replaces the inner
 source fields before routing. The native stream does not independently prove
 that the connecting process owns the claimed reply socket. Delivery to Claude
 wraps the same Agent Sessions frame in a new Claude-native envelope. Codex,
-Grok, federation, and future product adapters carry the same inner frame.
+Grok, Qwen, and federation adapters carry the same inner frame.
 
 Claude's outer envelope remains unchanged and uses its exact native attribute
 grammar. Agent Sessions fields exist only in the inner frame. On a relayed
 message the outer sender and permission-mode attestation describe the host
-agent, not the original peer; original provenance remains in the inner frame
+daemon, not the original peer; original provenance remains in the inner frame
 and never upgrades the outer permission class.
 
 The service session is not a group member and is never a broadcast recipient.
 There is one service session per host/profile, not one service session per
 group or remote peer.
+
+This carrier remains a protocol compatibility surface, not an automatic retry
+policy. Current Claude-facing skills use the structured `agent_sessions` MCP
+tools exclusively for Agent Sessions operations. If those tools are inactive or
+fail, the model must report that failure and stop rather than retrying with
+native `ListAgents` or `SendMessage`.
 
 Installation does not change the profile's default `crossSessionInbound`
 policy. Each managed Claude peer or lane supplies `accept` only as a launch
@@ -153,10 +163,10 @@ not part of this first grouped protocol.
 
 ## Federation
 
-Each host agent is authoritative only for sessions registered on that host.
-Federated agents exchange peer identities and effective groups. Remote direct,
+Each daemon is authoritative only for sessions registered on that user-host.
+Federated daemons exchange peer identities and effective groups. Remote direct,
 multicast, and group-broadcast deliveries pass through the destination host
-agent, which applies the same membership checks before local delivery.
+daemon, which applies the same membership checks before local delivery.
 
 Legacy flat peers are not silently placed into a global compatibility group.
 Grouped and flat protocol versions fail closed rather than bypass group

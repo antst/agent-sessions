@@ -1,20 +1,20 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.3+codex.20260823133043",
-  "description": "Give grouped Codex, Claude, and Grok sessions a durable lifecycle, all-target lanes, and local or federated messaging.",
+  "version": "0.3.0",
+  "description": "Give grouped Codex, Claude, Grok, and Qwen sessions a durable lifecycle, all-target lanes, and local or federated messaging.",
   "author": {
     "name": "Agent Sessions contributors"
   },
   "interface": {
     "displayName": "Agent Sessions",
     "shortDescription": "Run and message durable agent sessions",
-    "longDescription": "Runs explicitly owned Codex, Claude, and Grok sessions with durable lane lifecycle, local discovery, and bidirectional messaging while ordinary Codex threads remain inactive.",
+    "longDescription": "Runs explicitly owned Codex, Claude, Grok, and Qwen sessions with durable lane lifecycle, local discovery, and bidirectional messaging while ordinary sessions remain inactive.",
     "developerName": "Agent Sessions contributors",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
-    "defaultPrompt": "List the local Codex, Claude Code, and Grok peer sessions I can message."
+    "defaultPrompt": "List the local Codex, Claude Code, Grok, and Qwen peer sessions I can message."
   },
   "mcpServers": "./.mcp.json"
 }

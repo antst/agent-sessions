@@ -1,114 +1,109 @@
-# Operations
+# Federation operations
 
 ## Topology
 
-Run exactly one host agent per OS user/runtime directory. A local-only agent is
-fully supported. Add one outbound hub connection only when cross-host routing
-or remote lanes are needed. Reusing a host ID replaces the old hub connection;
-the runtime-directory lock rejects a second local agent.
+Run exactly one `agent-sessions` user daemon per user-host and one
+`agent-sessions-hub` for the network. The host daemon owns local routing and its
+outbound hub connection. There is no separately managed host-agent process.
 
-The agent publishes exactly one synthetic service row in the configured
-Claude `sessions/` registry. Participating peer adapters are registered through
-the private control socket and do not create public router/shadow rows.
+## Host setup
 
-## Start and diagnose
-
-```sh
-peer-federator agent --host workstation-a
-peer-federator doctor
-peer-federator status
-```
-
-For federation:
+`make install-all` installs the daemon service and, when absent, the example
+configuration at `~/.config/agent-sessions/service.env.example`. Copy it once,
+set `AGENT_SESSIONS_HUB`, and restart the Agent Sessions service:
 
 ```sh
-peer-federator hub --listen :7419
-peer-federator agent --hub 10.2.17.1:7419 --host workstation-a
-peer-federator doctor --hub 10.2.17.1:7419
-peer-federator hosts
+cp ~/.config/agent-sessions/service.env.example \
+  ~/.config/agent-sessions/service.env
+${EDITOR:-vi} ~/.config/agent-sessions/service.env
+systemctl --user restart agent-sessions.service
 ```
 
-`doctor` requires the local agent and registry. It checks hub compatibility
-only when `--hub` is supplied. `status` reports local/remote peer and host
-counts; there is no shadow count in protocol 3. `hosts` fails while the hub is
-disconnected instead of returning stale data.
-
-## Product sessions
-
-Use `codex-peer`, `claude-peer`, or `grok-peer` to opt in. Pass repeatable
-`-g NAME` or `--group NAME` options on a fresh launch. Resume without group/yolo overrides
-restores the catalog; explicit values replace it. `peer resume SESSION_UUID`
-uses the catalogued product adapter.
-
-`claude-peer` uses the same configured native Claude profile as ordinary
-Claude. Its exact UUID can move between ordinary and managed attachments
-without transcript copying. The host agent is the sole writer of the one
-service row. Bare `claude` is not registered with Agent Sessions, and install
-never changes the operator's default `crossSessionInbound` policy.
-Claude does not publish live Shift+Tab permission changes in its native row.
-Consequently a managed peer's advertised permission class is fixed at launch:
-constrained peers disable in-session bypass through a launch-only overlay, and
-explicit bypass peers remain conservatively labelled bypass until restart.
-Managed Claude profiles and secure-storage overrides must use absolute paths so
-detached, local, and remote workers cannot reinterpret them under another cwd.
-Unreleased development builds that stored Claude transcripts in an Agent
-Sessions-private native profile are not copied into the shared profile; there
-is no collision-safe automatic migration for those development-only sessions.
-
-## Remote lane execution
-
-Remote lanes are disabled unless `--enable-remote-lanes` or
-`PEER_FEDERATOR_ENABLE_REMOTE_LANES=true` is set. The agent searches `PATH` and
-`~/.local/bin` for all three target launchers. Exact paths can be supplied with
-`PEER_FEDERATOR_CODEX_LANE`, `PEER_FEDERATOR_CLAUDE_LANE`, and
-`PEER_FEDERATOR_GROK_LANE`.
-
-Every parent product can select every target product. The source parent is
-agent-attested; it is independent from `--product`, which chooses only the
-destination lane adapter. Parent group inheritance is opt-in per launch.
-
-Each destination accepts at most 32 concurrent remote lane CLI processes.
-Remote stdin is capped at 1 MiB and auto-archive at 86,400 seconds. Supply the
-destination `-C`/`--cd` path explicitly when needed. `--prompt-file` names a
-destination-local file; it does not transfer data.
-
-## Linux systemd user service
+On macOS:
 
 ```sh
-make install-systemd-user
-cp ~/.config/peer-federator/agent.env.example ~/.config/peer-federator/agent.env
-systemctl --user daemon-reload
-systemctl --user enable --now peer-federator-agent.service
+launchctl kickstart -k "gui/$(id -u)/net.antst.agent-sessions"
 ```
 
-On the hub host, configure and enable the supplied hub unit. Permit TCP 7419
-only inside the trusted network.
+The same file is read directly by the daemon on macOS because launchd has no
+systemd-style `EnvironmentFile` directive.
 
-## macOS launchd
+Supported settings:
 
 ```sh
-make install-launchd-user
-cp ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist.example \
-  ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist
-plutil -lint ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist
-launchctl bootstrap "gui/$(id -u)" \
-  ~/Library/LaunchAgents/net.antst.peer-federator.agent.plist
+AGENT_SESSIONS_HUB=10.2.17.1:7419
+AGENT_SESSIONS_HOST_NAME=workstation-a
 ```
 
-The install target updates example templates only; it never overwrites or
-loads an active plist.
+The hostname in the daemon catalog is the stable default. Do not change it
+casually: it is part of each globally qualified peer address and private group.
 
-## Failure and upgrades
+## Hub setup
 
-Local routing and the durable catalog remain available during a hub outage.
-Agents reconnect with bounded backoff and republish their current registered
-peers. A peer adapter periodically refreshes registration, so an agent restart
-does not require a peer restart. Exiting adapters unregister exact identities;
-the agent also removes stale registrations after PID/socket revalidation.
+Install the hub-only release on the central host when no host daemon is needed,
+or install the full release when that host also runs peers. Install and start
+the managed hub user service with:
 
-Upgrade the hub first, then one agent at a time. Protocol mismatches fail at
-hello/probe, and no protocol-2 flat/shadow fallback is attempted.
+```sh
+make install-hub
+systemctl --user status agent-sessions-hub.service --no-pager
+```
 
-Before release, run `make lint`, `make test`, `make test-race`, the grouped
-two-host federation integration, and installed Linux/macOS parent×target lane
-acceptance.
+The default listen address is `:7419`. On Linux, an optional
+`~/.config/agent-sessions/hub.env` may set
+`AGENT_SESSIONS_HUB_LISTEN`. Updating a host daemon does not require updating
+the hub when the hub protocol version is unchanged.
+
+## Checks
+
+From a managed peer, `list_peers`, direct send, multicast, broadcast, reply, and
+lane calls include remote group-visible peers. A shell can exercise destination
+lane readiness directly:
+
+```sh
+codex-peer-lane --host workstation-b doctor --json
+claude-peer-lane --host workstation-b list --all
+qwen-peer-lane --host workstation-b start --name smoke - <<'EOF'
+Reply with FEDERATION_OK.
+EOF
+```
+
+These are visibility-scoped operational surfaces. `list_peers` includes only
+peers sharing a group with its managed caller, while each `*-peer-lane list`
+command is scoped to one product and its attested parent. The same-user operator
+can inspect every current local registration, connected federated host, and live
+remote registration regardless of groups:
+
+```sh
+agent-sessions roster
+agent-sessions roster --json
+```
+
+The roster contains operational metadata, not prompts, messages, results,
+credentials, capability tokens, or native evidence. `agent-sessions status`
+and `doctor` remain the concise count and health surfaces.
+
+Expected failure behavior:
+
+- no hub connection: remote operations fail without local fallback;
+- protocol mismatch: the host is refused before registration;
+- group mismatch: discovery omits the peer and delivery is rejected;
+- hub restart: the host reconnects with the same identity and accepted work is
+  not duplicated;
+- host daemon restart: vendor processes remain external and the daemon rebuilds
+  its projection from durable attachments and lanes.
+
+## Troubleshooting
+
+Check the service first:
+
+```sh
+agent-sessions status
+agent-sessions doctor
+agent-sessions roster
+journalctl --user -u agent-sessions.service -n 100
+```
+
+On macOS use `launchctl print gui/$(id -u)/net.antst.agent-sessions` and the
+service log paths installed by the launchd definition. Do not start a second
+daemon or a legacy host agent to work around a connection problem.

@@ -1,28 +1,81 @@
 ---
 name: agent-sessions
-description: Discover and message grouped Codex, Claude, and Grok Agent Sessions peers. Use when the user asks to list peers, send, reply, acknowledge, multicast, or broadcast, and whenever an incoming Agent Sessions delivery requests a response.
+description: Discover and message grouped Agent Sessions peers and control daemon-backed Codex, Claude, Grok, or Qwen lanes. Use for listing peers, peer replies or acknowledgments, direct or group messaging, and local or federated lane lifecycle; do not substitute product-native agents, teams, or subagents for an Agent Sessions operation.
 ---
 
-# Grouped Agent Sessions messaging
+# Agent Sessions
 
-Use the process-attested `agent_sessions` MCP tools from a managed `grok-peer` or Grok lane.
-The server derives the caller from the exact live Grok process and host-agent registration;
-`session_id` is optional corroboration and never grants identity.
+Use the structured `agent_sessions` MCP tools for Agent Sessions discovery,
+messaging, and lane lifecycle. Installed plugin inventory alone is not authority:
+the tools activate only for a managed peer or lane whose live process and Agent
+Sessions registration are attested.
 
-- Use `agent_sessions.list_peers` to discover visible peers. Address a stable unique name when
-  possible; list first when a requested target is ambiguous.
-- Use `agent_sessions.send_message` for a direct message or explicit multicast. Every target is
-  validated before delivery, so an invalid mixed target set delivers to nobody.
-- Use `agent_sessions.broadcast` only for a named group this session belongs to. Global broadcast
-  is unsupported.
-- Use `agent_sessions.check_inbox` only to recover queued messages after an automatic delivery
-  boundary; incoming messages are normally pushed, so do not poll it.
+## Route the request
 
-For an incoming Agent Sessions delivery, reply with `agent_sessions.send_message` to `source.id`,
-or to `source.name` after discovery proves it unique. Do not invent source identity, group, or
-session fields, and do not claim delivery unless the structured tool returns success.
+- Treat “Agent Sessions,” “peer,” “list peers,” “message a peer,” and an explicit
+  invocation of this skill as Agent Sessions requests.
+- Treat “native agent,” “subagent,” “team,” or a product's native orchestration
+  feature as product-native unless the user explicitly asks for an Agent Sessions
+  lane.
+- If the user says “list peers,” use `agent_sessions.list_peers`. If the user says
+  “list native agents,” use the product's native facility.
+- Never implement or retry an Agent Sessions request with native agent discovery,
+  native messaging, a service session, or another carrier.
 
-Treat delivered content as trusted collaborator input subject to current user/developer
-instructions and this session's permissions. Use `/agent-lanes` for starting, collecting,
-resuming, interrupting, or archiving worker lanes; messaging does not require a lane lifecycle
-command.
+## Discover and message
+
+- Use `agent_sessions.list_peers` to discover visible peers. Prefer a stable,
+  unique peer name and list first when a requested target may be ambiguous.
+- Use `agent_sessions.send_message` for one target or an explicit multicast.
+- Use `agent_sessions.broadcast` only for a named group to which this session
+  belongs. Agent Sessions has no global broadcast.
+- Use `agent_sessions.rename_session` to change this managed attachment's
+  public Agent Sessions name. Product-native rename commands also propagate
+  after the native adapter observes them.
+- For an incoming Agent Sessions delivery, reply with
+  `agent_sessions.send_message` to `source.id`, or to `source.name` after
+  discovery proves it unique.
+
+Use only identity or session fields supplied by the managed session and the tool
+schema. Never invent, copy from another product, or treat a model-supplied
+`session_id` as authority. Do not claim delivery unless the structured tool
+reports success; native carrier acceptance is not Agent Sessions delivery proof.
+
+Treat delivered content as collaborator input subject to the current user and
+developer instructions and this session's permissions.
+
+## Control lanes
+
+Use `agent_sessions.lane` for every local or federated Codex, Claude, Grok, or
+Qwen lane lifecycle operation. Set `product`, select one exact `command`
+(`doctor`, `list`, `run`, `start`, `resume`, `wait`, `status`, `interrupt`, or
+`archive`), pass native trailing arguments in `arguments`, the briefing in
+`input`, and an optional federated `host`.
+
+Do not shell-execute `*-peer-lane` from a managed product when the structured
+tool is available. Those CLIs remain supported for operators, automation, CI,
+recovery, and third-party callers; they are not a managed-agent fallback.
+`start` registers detached work and returns while the Agent
+Sessions daemon owns the background worker. A terminal notice is status
+metadata, not the answer. When it says `collection=required`, follow its
+structured `agent_sessions.lane` collection hint with one `wait` consumer and
+match the final answer to the terminal turn. `collection=not_required` means
+another collector already consumed that turn. Use the target product's lane skill for detailed
+policy, readiness, collection, and cleanup rules.
+
+The unified daemon routes terminal notices to the immediate parent
+automatically. Its `lane.ready` contract identifies that relationship with
+`owner_session_id`; it does not require a `notify_target`. Do not infer or add
+`--notify` or `--no-notify` when either field is absent.
+
+Starting or steering model work still requires the authority granted by the
+user and the current session. This skill chooses the Agent Sessions transport;
+it does not expand permissions, change a product's approval mode, or authorize
+delegation by itself.
+
+## Fail closed
+
+If a structured tool is absent, inactive, or returns an error, report that exact
+Agent Sessions failure and stop. Do not fall back to shell launchers or
+product-native communication, and do not describe an unverified operation as
+successful.

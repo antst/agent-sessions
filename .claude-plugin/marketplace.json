@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-sessions",
-  "description": "Claude Code orchestration surface for named, messageable Codex, Claude, and Grok sessions.",
+  "description": "Claude Code orchestration surface for named, messageable Codex, Claude, Grok, and Qwen sessions.",
   "owner": {
     "name": "Agent Sessions contributors"
   },
   "plugins": [
     {
       "name": "agent-sessions",
-      "description": "Start, collect, message, resume, and archive named Codex, Claude, and Grok sessions.",
+      "description": "Start, collect, message, resume, and archive named Codex, Claude, Grok, and Qwen sessions.",
       "author": {
         "name": "Agent Sessions contributors"
       },
@@ -16,7 +16,9 @@
       "category": "productivity",
       "keywords": [
         "codex",
+        "claude",
         "grok",
+        "qwen",
         "orchestration",
         "delegation",
         "cross-session-messaging"

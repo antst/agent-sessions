@@ -57,9 +57,12 @@ func Environment(pid int) ([]string, error) {
 	parts := bytes.Split(bytes.TrimRight(body, "\x00"), []byte{0})
 	environment := make([]string, 0, len(parts))
 	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
 		environment = append(environment, string(part))
 	}
-	return environment, nil
+	return observableEnvironment(pid, environment)
 }
 
 // List returns one best-effort coherent identity for every observable process.

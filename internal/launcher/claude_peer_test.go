@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 const claudePeerNativeHelperEnv = "AGENT_SESSIONS_TEST_CLAUDE_PEER_NATIVE"
@@ -38,6 +40,16 @@ func directoryEntryNames(entries []os.DirEntry) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+func TestDefaultClaudePeerNameFollowsNativeRename(t *testing.T) {
+	plan := claudePeerPlan{peerName: "wrapper-name"}
+	if got := defaultClaudePeerName(plan, claudeNativePeerRecord{Name: "native-default"}, "native-default"); got != "wrapper-name" {
+		t.Fatalf("initial explicit name = %q", got)
+	}
+	if got := defaultClaudePeerName(plan, claudeNativePeerRecord{Name: "renamed-in-claude"}, "native-default"); got != "renamed-in-claude" {
+		t.Fatalf("native renamed name = %q", got)
+	}
 }
 
 func TestClaudePeerNativeHelper(_ *testing.T) {
@@ -308,7 +320,7 @@ func containsClaudeArgValue(args []string, flag, value string) bool {
 func TestPrepareClaudePeerLaunchSettingsMergesWithoutChangingSource(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "operator-settings.json")
-	if err := os.WriteFile(source, []byte(`{"theme":"dark","crossSessionInbound":"reject","permissions":{"defaultMode":"plan"}}`), 0o600); err != nil {
+	if err := os.WriteFile(source, []byte(`{"theme":"dark","crossSessionInbound":"reject","disabledMcpjsonServers":["other"],"permissions":{"defaultMode":"plan","allow":["Read"]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(source)
@@ -335,6 +347,20 @@ func TestPrepareClaudePeerLaunchSettingsMergesWithoutChangingSource(t *testing.T
 		permissions["defaultMode"] != "plan" || permissions["disableBypassPermissionsMode"] != "disable" {
 		t.Fatalf("managed launch settings = %s", body)
 	}
+	disabled, _ := settings["disabledMcpjsonServers"].([]any)
+	if !reflect.DeepEqual(disabled, []any{"other", claudeprofile.ProjectMCPServerName}) {
+		t.Fatalf("disabled project MCP servers = %#v", disabled)
+	}
+	allowed, _ := permissions["allow"].([]any)
+	wantAllowed := append([]string{"Read"}, claudeprofile.ManagedAgentSessionsMCPTools()...)
+	if len(allowed) != len(wantAllowed) {
+		t.Fatalf("managed allow rules = %#v, want %v", allowed, wantAllowed)
+	}
+	for index, want := range wantAllowed {
+		if allowed[index] != want {
+			t.Fatalf("managed allow rule %d = %#v, want %q", index, allowed[index], want)
+		}
+	}
 	info, _ := os.Stat(settingsPath)
 	after, _ := os.ReadFile(source)
 	if info == nil || info.Mode().Perm() != 0o600 || string(after) != string(before) {
@@ -356,6 +382,29 @@ func TestPlanClaudePeerLaunchSettingsDoesNotMaterializeBeforePreparation(t *test
 	}, root, false)
 	if err != nil || bytes.Contains(bypassBody, []byte("disableBypassPermissionsMode")) {
 		t.Fatalf("explicit bypass launch was constrained: body=%s err=%v", bypassBody, err)
+	}
+	for _, tool := range claudeprofile.ManagedAgentSessionsMCPTools() {
+		if !bytes.Contains(bypassBody, []byte(tool)) {
+			t.Fatalf("explicit bypass launch omitted managed tool %q: %s", tool, bypassBody)
+		}
+	}
+}
+
+func TestPlanClaudePeerLaunchSettingsRejectsInvalidPermissionAllowShape(t *testing.T) {
+	_, _, err := planClaudePeerLaunchSettings([]string{
+		"--settings", `{"permissions":{"allow":"mcp__plugin_agent-sessions_agent_sessions__lane"}}`,
+	}, t.TempDir(), true)
+	if err == nil || !strings.Contains(err.Error(), "permissions.allow") {
+		t.Fatalf("invalid permissions.allow was accepted: %v", err)
+	}
+}
+
+func TestPlanClaudePeerLaunchSettingsRejectsInvalidDisabledMCPShape(t *testing.T) {
+	_, _, err := planClaudePeerLaunchSettings([]string{
+		"--settings", `{"disabledMcpjsonServers":"agent_sessions"}`,
+	}, t.TempDir(), true)
+	if err == nil || !strings.Contains(err.Error(), "disabledMcpjsonServers") {
+		t.Fatalf("invalid disabledMcpjsonServers was accepted: %v", err)
 	}
 }
 
@@ -1115,14 +1164,5 @@ func TestCleanupClaudePeerArtifactsRemovesOnlyNewTokenBeforeNativeRow(t *testing
 
 func shortClaudePeerTestRoot(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("", "cp-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(root); err != nil {
-			t.Errorf("remove short Claude peer test root: %v", err)
-		}
-	})
-	return root
+	return testutil.ShortSocketRoot(t, "cp-", "000000.sock")
 }

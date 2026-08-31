@@ -182,7 +182,7 @@ func discoverRuntime() (Runtime, error) {
 		if err != nil {
 			return Runtime{}, err
 		}
-		runtimePath = filepath.Join(pluginRoot, "bin", platform, "agent-session-runtime")
+		runtimePath = filepath.Join(pluginRoot, "bin", platform, "agent-sessions")
 	}
 	runtimePath, err = filepath.Abs(runtimePath)
 	if err != nil {
@@ -210,17 +210,17 @@ func readPluginVersion(path string) (string, error) {
 }
 
 func stateRoot() (string, error) {
-	root := os.Getenv("CLAUDE_PEER_DATA_DIR")
+	root := os.Getenv("AGENT_SESSIONS_STATE_ROOT")
 	if root == "" {
 		root = os.Getenv("XDG_STATE_HOME")
 		if root != "" {
-			root = filepath.Join(root, "claude-code-peer")
+			root = filepath.Join(root, "agent-sessions")
 		} else {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return "", fmt.Errorf("resolve home directory: %w", err)
 			}
-			root = filepath.Join(home, ".local", "state", "claude-code-peer")
+			root = filepath.Join(home, ".local", "state", "agent-sessions")
 		}
 	}
 	root, err := filepath.Abs(root)

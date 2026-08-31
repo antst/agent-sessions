@@ -71,7 +71,7 @@ func TestLocalMCPLaneProxyUsesAttestedParentEnvironment(t *testing.T) {
 	fake := filepath.Join(root, "runtime")
 	body := "#!/bin/sh\n" +
 		"printf 'argv=%s\\n' \"$*\"\n" +
-		"printf 'session=%s product=%s agent=%s remote=%s data=%s claude=%s codex=%s\\n' \"$AGENT_SESSIONS_SESSION_ID\" \"$AGENT_SESSIONS_PRODUCT\" \"$AGENT_SESSIONS_AGENT_RUNTIME_DIR\" \"$AGENT_SESSIONS_REMOTE_PARENT_CONTEXT\" \"$CLAUDE_PEER_DATA_DIR\" \"$CLAUDE_PEER_CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" >&2\n"
+		"printf 'session=%s product=%s agent=%s remote=%s data=%s claude=%s codex=%s\\n' \"$AGENT_SESSIONS_SESSION_ID\" \"$AGENT_SESSIONS_PRODUCT\" \"$AGENT_SESSIONS_AGENT_RUNTIME_DIR\" \"$AGENT_SESSIONS_REMOTE_PARENT_CONTEXT\" \"$AGENT_SESSIONS_STATE_ROOT\" \"$CLAUDE_PEER_CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" >&2\n"
 	if err := os.WriteFile(fake, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -115,5 +115,41 @@ func TestNativeMCPPublishesAttestedLaneProxy(t *testing.T) {
 	properties, _ := schema["properties"].(map[string]any)
 	if properties["product"] == nil || properties["command"] == nil || properties["session_id"] == nil {
 		t.Fatalf("lane tool schema = %#v", schema)
+	}
+}
+
+func TestEveryProductMCPPublishesAllFourLaneTargets(t *testing.T) {
+	for _, orchestrator := range []string{"codex", "claude", "grok", "qwen"} {
+		var lane map[string]any
+		for _, definition := range ProductMCPTools(orchestrator) {
+			if stringValue(definition["name"]) == "lane" {
+				lane = definition
+				break
+			}
+		}
+		if lane == nil {
+			t.Fatalf("%s MCP omitted the lane tool", orchestrator)
+		}
+		schema, _ := lane["inputSchema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		product, _ := properties["product"].(map[string]any)
+		values, _ := product["enum"].([]any)
+		got := make([]string, 0, len(values))
+		for _, value := range values {
+			got = append(got, stringValue(value))
+		}
+		for _, want := range []string{"codex", "claude", "grok", "qwen"} {
+			if !containsString(got, want) {
+				t.Fatalf("%s MCP lane products = %v; missing %q", orchestrator, got, want)
+			}
+		}
+		if orchestrator == "codex" {
+			continue
+		}
+		for _, required := range qwenRequiredSchemaProperties(schema["required"]) {
+			if required == "session_id" {
+				t.Fatalf("%s MCP lane tool trusts a model-supplied session ID", orchestrator)
+			}
+		}
 	}
 }

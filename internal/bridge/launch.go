@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 var exactLaunchThreadIDRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -28,12 +29,12 @@ func runLaunchCommand(argv []string) int {
 	if len(argv) == 2 && argv[0] == "proc-start" {
 		pid, err := strconv.Atoi(argv[1])
 		if err != nil || pid <= 1 {
-			fmt.Fprintln(os.Stderr, "claude-code-peer launch: proc-start requires a process PID")
+			fmt.Fprintln(os.Stderr, "agent-sessions launch: proc-start requires a process PID")
 			return 2
 		}
 		started, err := captureProcessStart(pid)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer launch: capture process identity: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agent-sessions launch: capture process identity: %v\n", err)
 			return 1
 		}
 		fmt.Print(started)
@@ -42,7 +43,7 @@ func runLaunchCommand(argv []string) int {
 	if len(argv) > 0 && argv[0] == "start" {
 		threadID, err := startPreparedLaunchNative(argv[1:])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer launch start failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agent-sessions launch start failed: %v\n", err)
 			return 1
 		}
 		fmt.Println(threadID)
@@ -51,13 +52,13 @@ func runLaunchCommand(argv []string) int {
 	if len(argv) > 0 && argv[0] == "bind" {
 		threadID, cwd, err := bindPreparedResumeNative(argv[1:])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer launch bind failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agent-sessions launch bind failed: %v\n", err)
 			return 1
 		}
 		fmt.Printf("%s\n%s\n", threadID, cwd)
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: agent-session-runtime launch start --cwd DIR --owner-pid PID --owner-proc-start TOKEN [--name NAME] [--name-source launch|explicit] [--approval-policy POLICY] [--sandbox MODE]\n       agent-session-runtime launch bind --target UUID_OR_NAME --cwd DIR --owner-pid PID --owner-proc-start TOKEN [--approval-policy POLICY] [--sandbox MODE]\n       agent-session-runtime launch proc-start PID")
+	fmt.Fprintln(os.Stderr, "usage: agent-sessions launch start --cwd DIR --owner-pid PID --owner-proc-start TOKEN [--name NAME] [--name-source launch|explicit] [--approval-policy POLICY] [--sandbox MODE]\n       agent-sessions launch bind --target UUID_OR_NAME --cwd DIR --owner-pid PID --owner-proc-start TOKEN [--approval-policy POLICY] [--sandbox MODE]\n       agent-sessions launch proc-start PID")
 	return 2
 }
 
@@ -693,20 +694,9 @@ func canonicalLaunchDirectory(value string) (string, error) {
 	if value == "" {
 		return "", errors.New("launch requires --cwd")
 	}
-	absolute, err := filepath.Abs(value)
+	canonical, err := pathidentity.ExistingDirectory(value)
 	if err != nil {
 		return "", fmt.Errorf("resolve launch cwd: %w", err)
-	}
-	canonical, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return "", fmt.Errorf("resolve launch cwd: %w", err)
-	}
-	info, err := os.Stat(canonical)
-	if err != nil {
-		return "", fmt.Errorf("inspect launch cwd: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("launch cwd is not a directory: %s", canonical)
 	}
 	if strings.ContainsAny(canonical, "\r\n") {
 		return "", errors.New("launch cwd cannot contain a line break")

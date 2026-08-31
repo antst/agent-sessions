@@ -5,15 +5,30 @@ description: Orchestrate named, messageable local or remote Claude Code lanes fr
 
 # Orchestrate Claude lanes
 
-Use `claude-peer-lane`; the parent happens to be Claude, while the target
-adapter is still the ordinary Claude lane runtime. Run `claude-peer-lane doctor
---json` and `list --all`, require contract version 1 and a logged-in Claude
-runtime, then pipe prompts on stdin:
+Use the process-attested `agent_sessions.lane` MCP tool. The parent happens to
+be Claude, while the target adapter is the ordinary Agent Sessions Claude lane
+runtime. This is intentionally separate from Claude-native subagents and makes
+the same orchestration instructions portable to Codex, Grok, and Qwen parents.
 
-```sh
-claude-peer-lane start --name review-a --permission-mode dontAsk - < brief.md
-claude-peer-lane wait review-a --timeout 300 > result.jsonl
+Call `lane` with `product: "claude"`, `command: "doctor"`, and arguments
+`["--json"]`; then call `list` with `["--all"]`. Require contract version 2,
+`ready: true`, and a logged-in Claude runtime.
+
+Start detached work with one structured call:
+
+```json
+{
+  "product": "claude",
+  "command": "start",
+  "arguments": ["--name", "review-a", "-"],
+  "input": "<briefing text>"
+}
 ```
+
+Do not execute `claude-peer-lane` through Bash and do not shell-background a
+foreground command. `start` returns after registration; the Agent Sessions
+daemon owns the background worker. Add model, effort, permission, budget,
+schema, worktree, or tool flags only when the caller supplied that policy.
 
 The child always joins its own private group and this immediate parent’s
 private group. Add `--inherit-groups` only when deliberately propagating the
@@ -21,16 +36,21 @@ parent’s other groups; use repeatable `--group NAME` for child-specific groups
 `--no-inherit-groups` resets optional inheritance without removing the anchor.
 Omitted resume flags restore the durable choice.
 
-Discover and message the child through the `agent-sessions` skill: send the
-complete `AGENT_SESSIONS_FRAME `-prefixed AgentFrame body to the single host-agent service projected into
-the shared Claude profile. The lane is also a real native Claude registry row;
-only AgentFrame discovery and routing are group-filtered.
+Discover and message the child through the `agent-sessions` skill using
+`agent_sessions.list_peers` and `agent_sessions.send_message`. The lane is also
+a real native Claude registry row, but native Claude messaging is not an Agent
+Sessions fallback; report a structured-tool failure instead of switching
+channels. Only Agent Sessions discovery and routing are group-filtered.
 
-For a remote target use `peer-federator lane --host HOST --product claude --`
-after `status`, `hosts`, and remote doctor. Never fall back to SSH. Federation
+For a remote target set `host` on the same `agent_sessions.lane` call after
+status, host discovery, and remote doctor. Never fall back to SSH. Federation
 supplies an attested parent context and grouped terminal notices.
 
-`lane.ready` and `CLAUDE_LANE_TERMINAL` are pointers, not answers. Use one
-collector, match terminal/result turn IDs, collect debt before `resume`, and
-archive persistent/no-auto-archive lanes. `--persistent` changes lifecycle
-ownership but never removes the parent communication anchor.
+`lane.ready` and `CLAUDE_LANE_TERMINAL` are pointers, not answers. Use exactly
+one collector: after the terminal pointer, call `lane` with command `wait` and
+arguments `["review-a", "--timeout", "300"]`, then parse its returned stdout.
+Match terminal/result turn IDs, collect debt before `resume`, and call `archive`
+when done. `--persistent` changes lifecycle ownership but never removes the
+parent communication anchor or disables the normal 60-second terminal
+auto-archive grace. Pair it with `--no-auto-archive` only for indefinite idle
+retention, then archive explicitly.

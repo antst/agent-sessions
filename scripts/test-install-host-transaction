@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+temporary_parent="${TMPDIR:-/tmp}"
+if [[ "$(uname -s)" == Darwin ]]; then
+  # The transaction still exercises the Linux service adapter, but the test
+  # binary has Darwin's shorter Unix-domain socket limit. Keep its isolated
+  # state root compact before the fixture replaces uname with its Linux shim.
+  temporary_parent=/tmp
+fi
+temporary_parent="$(cd -P -- "$temporary_parent" && pwd)"
+test_root="$(mktemp -d "$temporary_parent/agent-sessions-install-transaction.XXXXXX")"
+service_pid=""
+cleanup() {
+  status=$?
+  if [[ $status -ne 0 && -f "$test_root/service.log" ]]; then
+    printf '%s\n' '--- isolated host service log ---' >&2
+    sed -n '1,240p' "$test_root/service.log" >&2
+  fi
+  if [[ $status -ne 0 && -f "$test_root/claude-record" ]]; then
+    printf '%s\n' '--- isolated Claude command log ---' >&2
+    sed -n '1,240p' "$test_root/claude-record" >&2
+  fi
+  if [[ -f "$test_root/service.pid" ]]; then
+    service_pid=$(cat "$test_root/service.pid" 2>/dev/null || true)
+    if [[ "$service_pid" =~ ^[0-9]+$ ]]; then
+      kill "$service_pid" >/dev/null 2>&1 || true
+      for _ in {1..100}; do
+        if ! kill -0 "$service_pid" >/dev/null 2>&1; then break; fi
+        sleep 0.01
+      done
+    fi
+  fi
+  rm -rf -- "$test_root"
+}
+trap cleanup EXIT
+
+host_binary="${AGENT_SESSIONS_TEST_HOST_BINARY:-$test_root/agent-sessions}"
+if [[ -z "${AGENT_SESSIONS_TEST_HOST_BINARY:-}" ]]; then
+  go build -o "$host_binary" "$root/cmd/agent-sessions"
+fi
+[[ -x "$host_binary" && ! -L "$host_binary" ]] || {
+  printf 'transaction test requires a built Linux host binary: %s\n' "$host_binary" >&2
+  exit 2
+}
+
+home="$test_root/home"
+prefix="$test_root/prefix"
+fake_bin="$test_root/bin"
+state_root="$test_root/state"
+mkdir -p "$home" "$prefix" "$fake_bin" "$state_root"
+
+cat >"$fake_bin/qwen" <<'EOF'
+#!/bin/sh
+set -eu
+case "$1 $2" in
+  "extensions list")
+    if [ -s "$TEST_QWEN_STATE" ]; then printf '%s\n' 'agent-sessions enabled'; fi
+    ;;
+  "extensions uninstall")
+    rm -f -- "$TEST_QWEN_STATE"
+    ;;
+  "extensions install")
+    if [ "${TEST_QWEN_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$TEST_QWEN_FAILURE_MARKER" ]; then
+      : >"$TEST_QWEN_FAILURE_MARKER"
+      exit 44
+    fi
+    printf '%s\n' "$3" >"$TEST_QWEN_STATE"
+    ;;
+  *) exit 91 ;;
+esac
+EOF
+chmod 0700 "$fake_bin/qwen"
+
+cat >"$fake_bin/claude" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$TEST_CLAUDE_RECORD"
+case "$1 $2" in
+  "plugin validate") ;;
+  "plugin marketplace")
+    [ "$3" = add ] || exit 92
+    eval "marketplace=\${$#}"
+    printf '%s\n' "$marketplace" >"$TEST_CLAUDE_MARKETPLACE"
+    ;;
+  "plugin list")
+    if [ -e "$TEST_CLAUDE_STATE" ]; then
+      printf '[{"id":"agent-sessions@agent-sessions","scope":"user","installPath":"%s"}]\n' "$TEST_CLAUDE_CACHE"
+    else
+      printf '%s\n' '[]'
+    fi
+    ;;
+  "plugin update")
+    # Deliberately reproduce Claude's equal-version no-op.
+    ;;
+  "plugin uninstall")
+    if [ -d "$TEST_CLAUDE_CACHE" ]; then
+      find -P "$TEST_CLAUDE_CACHE" -type d -exec chmod u+rwx {} +
+    fi
+    rm -rf -- "$TEST_CLAUDE_CACHE"
+    rm -f -- "$TEST_CLAUDE_STATE"
+    ;;
+  "plugin install")
+    marketplace=$(cat "$TEST_CLAUDE_MARKETPLACE")
+    if [ -d "$TEST_CLAUDE_CACHE" ]; then
+      find -P "$TEST_CLAUDE_CACHE" -type d -exec chmod u+rwx {} +
+    fi
+    rm -rf -- "$TEST_CLAUDE_CACHE"
+    mkdir -p "$TEST_CLAUDE_CACHE"
+    cp -R -- "$marketplace/claude/." "$TEST_CLAUDE_CACHE/"
+    : >"$TEST_CLAUDE_STATE"
+    ;;
+  *) exit 91 ;;
+esac
+EOF
+chmod 0700 "$fake_bin/claude"
+
+cat >"$fake_bin/systemctl" <<'EOF'
+#!/bin/sh
+set -eu
+arguments=" $* "
+stop_service() {
+  if [ -f "$TEST_SERVICE_PID_FILE" ]; then
+    pid=$(cat "$TEST_SERVICE_PID_FILE" 2>/dev/null || true)
+    if [ -n "$pid" ]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      i=0
+      while kill -0 "$pid" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+        i=$((i + 1))
+        sleep 0.01
+      done
+    fi
+    rm -f -- "$TEST_SERVICE_PID_FILE"
+  fi
+}
+case "$arguments" in
+  *" disable --now agent-sessions.service "*) stop_service ;;
+  *" restart agent-sessions.service "*)
+    stop_service
+    AGENT_SESSIONS_STATE_ROOT="$AGENT_SESSIONS_STATE_ROOT" \
+      "$TEST_PREFIX/bin/agent-sessions" daemon >"$TEST_SERVICE_LOG" 2>&1 &
+    printf '%s\n' "$!" >"$TEST_SERVICE_PID_FILE"
+    ;;
+esac
+exit 0
+EOF
+chmod 0700 "$fake_bin/systemctl"
+
+# This transaction tests the Linux service adapter on every CI host. Without
+# an isolated uname, a macOS runner reaches its real launchd domain even
+# though the rest of the fixture (platform key, systemctl, paths, and service
+# process) is deliberately Linux-shaped.
+cat >"$fake_bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' Linux
+EOF
+chmod 0700 "$fake_bin/uname"
+
+candidate="$test_root/candidate-agent-sessions"
+cp -- "$host_binary" "$candidate"
+printf 'different-candidate\n' >>"$candidate"
+chmod 0755 "$candidate"
+
+common_env=(
+  "HOME=$home"
+  "XDG_CONFIG_HOME=$home/.config"
+  "AGENT_SESSIONS_STATE_ROOT=$state_root"
+  "PATH=$fake_bin:/usr/bin:/bin"
+  "CODEX=missing-codex"
+  "CLAUDE=claude"
+  "GROK=missing-grok"
+  "QWEN=qwen"
+  "TEST_PREFIX=$prefix"
+  "TEST_QWEN_STATE=$test_root/qwen-source"
+  "TEST_QWEN_FAILURE_MARKER=$test_root/qwen-failed-once"
+  "TEST_CLAUDE_STATE=$test_root/claude-installed"
+  "TEST_CLAUDE_CACHE=$test_root/claude-cache"
+  "TEST_CLAUDE_MARKETPLACE=$test_root/claude-marketplace"
+  "TEST_CLAUDE_RECORD=$test_root/claude-record"
+  "TEST_SERVICE_PID_FILE=$test_root/service.pid"
+  "TEST_SERVICE_LOG=$test_root/service.log"
+)
+
+env "${common_env[@]}" "$root/scripts/install-host" \
+  "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
+release="$prefix/libexec/agent-sessions/host/releases/0.3.0"
+prior_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
+[[ -n "$prior_hash" && "$(cat "$test_root/qwen-source")" == "$release/qwen" ]]
+diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null
+find -P "$release" -type d -exec chmod 0555 {} +
+
+# Reproduce an equal-version active cache that differs from the selected
+# release. The next install must refresh it through Claude's supported
+# lifecycle before the deliberately later Qwen failure exercises rollback.
+printf 'stale same-version cache\n' >>"$test_root/claude-cache/skills/codex-lane/SKILL.md"
+
+set +e
+env "${common_env[@]}" TEST_QWEN_FAIL_ONCE=1 "$root/scripts/install-host" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/failed.out" 2>"$test_root/failed.err"
+failed_status=$?
+set -e
+if [[ $failed_status -eq 0 ]] || ! grep -Fq 'restored the prior host release and integrations' "$test_root/failed.err"; then
+  printf 'failed_status=%s\n' "$failed_status" >&2
+  cat "$test_root/failed.out" >&2
+  cat "$test_root/failed.err" >&2
+  printf 'candidate integration failure did not execute the rollback transaction\n' >&2
+  exit 1
+fi
+after_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
+selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd)
+if [[ "$after_hash" != "$prior_hash" ]] ||
+   [[ "$selected_release" != "$release" ]] ||
+   [[ "$(cat "$test_root/qwen-source")" != "$release/qwen" ]] ||
+   ! diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null; then
+  printf 'failed host update did not restore the exact release selection and Qwen source\n' >&2
+  exit 1
+fi
+if ! grep -Fxq 'plugin uninstall --scope user --keep-data agent-sessions@agent-sessions' \
+    "$test_root/claude-record"; then
+  printf 'same-version Claude cache was not refreshed with persistent data preserved\n' >&2
+  exit 1
+fi
+if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
+  >"$test_root/status.out" 2>"$test_root/status.err"; then
+  cat "$test_root/status.err" >&2
+  if [[ -f "$test_root/service.pid" ]]; then
+    service_pid=$(cat "$test_root/service.pid" 2>/dev/null || true)
+    if [[ "$service_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$service_pid" >/dev/null 2>&1; then
+      printf 'isolated restored host service pid %s is not alive\n' "$service_pid" >&2
+    fi
+  fi
+  find "$state_root" -maxdepth 3 -print >&2
+  exit 1
+fi
+env "${common_env[@]}" "$root/scripts/install-host" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >/dev/null
+candidate_hash=$(sha256sum "$candidate" | awk '{print $1}')
+installed_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
+if [[ "$installed_hash" != "$candidate_hash" ]] ||
+   find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 \
+     -name '.previous-*' -print -quit | grep -q .; then
+  printf 'successful host update did not remove its immutable prior release\n' >&2
+  exit 1
+fi
+printf 'host install transaction rollback: PASS\n'

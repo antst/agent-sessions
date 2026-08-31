@@ -1,5 +1,5 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.3+codex.20260823133043",
-  "description": "Discover grouped Agent Sessions peers, and orchestrate Codex, Claude, and Grok lanes from Grok."
+  "version": "0.3.0",
+  "description": "Discover grouped Agent Sessions peers, and orchestrate Codex, Claude, Grok, and Qwen lanes from Grok."
 }

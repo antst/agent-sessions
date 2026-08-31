@@ -61,8 +61,8 @@ func TestKilledShimArtifactsAreGarbageCollected(t *testing.T) {
 			t.Fatalf("artifact disappeared before garbage collection: %s: %v", path, err)
 		}
 	}
-	stats := cleanupStaleBridgeArtifacts(paths)
-	if stats.StateFiles != 1 || stats.RegistryFiles != 1 || stats.SocketFiles != 2 {
+	stats := reconcileDeadConnectorArtifacts(paths)
+	if stats.StateFiles != 1 || stats.RegistryFiles != 1 || stats.SocketFiles != 1 {
 		t.Fatalf("unexpected cleanup stats: %#v", stats)
 	}
 	for _, path := range bridgeArtifactPaths(state) {
@@ -75,7 +75,7 @@ func TestKilledShimArtifactsAreGarbageCollected(t *testing.T) {
 	}
 }
 
-func TestDevelopEraTokenlessShimRowsAreGarbageCollectedAfterPIDExit(t *testing.T) {
+func TestDeadCurrentShimRowsWithoutStartTokenAreReconciledAfterProvenExit(t *testing.T) {
 	paths := isolatedNativePaths(t, t.TempDir())
 	runtimeRoot := filepath.Dir(paths.supervisorSock)
 	registryRoot := filepath.Join(paths.claudeRoot, "sessions")
@@ -88,10 +88,10 @@ func TestDevelopEraTokenlessShimRowsAreGarbageCollectedAfterPIDExit(t *testing.T
 	statePath := filepath.Join(paths.dataRoot, "sessions", key, "state.json")
 	registryPath := filepath.Join(registryRoot, strconv.Itoa(deadPID)+".json")
 	stable := filepath.Join(runtimeRoot, "session-"+key+".sock")
-	backend := filepath.Join(runtimeRoot, strconv.Itoa(deadPID)+".sock")
+	backend := stable
 	if err := writeJSONAtomic(registryPath, map[string]any{
 		"pid": deadPID, "procStart": "", "sessionId": sessionID, "entrypoint": "codex",
-		"version": "codex-claude-peer/0.1.0", "messagingSocketPath": stable,
+		"version": "agent-sessions/0.1.0", "messagingSocketPath": stable,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,13 +101,13 @@ func TestDevelopEraTokenlessShimRowsAreGarbageCollectedAfterPIDExit(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stats := cleanupStaleBridgeArtifacts(paths)
+	stats := reconcileDeadConnectorArtifacts(paths)
 	if stats.StateFiles != 1 || stats.RegistryFiles != 1 {
-		t.Fatalf("tokenless develop-era rows were not reaped: %#v", stats)
+		t.Fatalf("dead exact-owned rows were not reconciled: %#v", stats)
 	}
 	for _, path := range []string{statePath, registryPath} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Fatalf("tokenless stale row survived cleanup: %s: %v", path, err)
+			t.Fatalf("dead exact-owned row survived reconciliation: %s: %v", path, err)
 		}
 	}
 }
@@ -188,7 +188,7 @@ func TestCleanupPreservesNativeClaudeAndUnownedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleanupStaleBridgeArtifacts(paths)
+	reconcileDeadConnectorArtifacts(paths)
 	for _, path := range []string{nativeRegistry, foreignRegistry, statePath, victim} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("cleanup touched an unowned file %s: %v", path, err)
@@ -196,7 +196,7 @@ func TestCleanupPreservesNativeClaudeAndUnownedFiles(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesOrphanedBridgeSocketAliases(t *testing.T) {
+func TestReconciliationPreservesUnattributedSocketAliases(t *testing.T) {
 	paths := isolatedNativePaths(t, t.TempDir())
 	runtimeRoot := filepath.Dir(paths.supervisorSock)
 	if err := os.MkdirAll(runtimeRoot, 0700); err != nil {
@@ -211,13 +211,13 @@ func TestCleanupRemovesOrphanedBridgeSocketAliases(t *testing.T) {
 	if err := os.Symlink(backend, stable); err != nil {
 		t.Fatal(err)
 	}
-	stats := cleanupStaleBridgeArtifacts(paths)
-	if stats.SocketFiles != 2 {
-		t.Fatalf("unexpected orphan cleanup stats: %#v", stats)
+	stats := reconcileDeadConnectorArtifacts(paths)
+	if stats.SocketFiles != 0 {
+		t.Fatalf("unattributed sockets were removed: %#v", stats)
 	}
 	for _, path := range []string{backend, stable} {
-		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Fatalf("orphan socket survived cleanup: %s: %v", path, err)
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("unattributed socket was not preserved: %s: %v", path, err)
 		}
 	}
 }
@@ -235,7 +235,7 @@ func TestProcessIdentityTreatsLinuxZombieAsDead(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if probe := probeProcessIdentity(pid); probe.status == processIdentityProbeKnown && probe.state == "Z" {
-			if observeProcessIdentity(pid, "").Status != processIdentityStale {
+			if observeProcessIdentity(pid).Status != processIdentityStale {
 				t.Fatalf("zombie process %d was classified as live", pid)
 			}
 			return

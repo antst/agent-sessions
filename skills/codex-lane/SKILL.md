@@ -6,12 +6,12 @@ description: Spawn, supervise, message, collect, resume, and archive durable loc
 # Codex lane
 
 Use `codex-peer-lane` for the Codex target. Parent product and target product
-are independent: a Codex, Claude, or Grok parent may use this same target CLI.
+are independent: a Codex, Claude, Grok, or Qwen parent may use this same target CLI.
 
 ## Managed Codex execution boundary
 
 From a managed Codex peer, run every lifecycle operation through the attested
-`claude_peer.lane` MCP tool. Do not invoke `codex-peer-lane` from a shell tool:
+`agent_sessions.lane` MCP tool. Do not invoke `codex-peer-lane` from a shell tool:
 the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
 Unix sockets even when their directories are writable. The MCP tool retains this
 session as the exact parent and returns `exit`, `stdout`, and `stderr`.
@@ -30,7 +30,8 @@ operating as a Codex peer.
 
 Run `codex-peer-lane doctor --json` and `codex-peer-lane list --all`; require
 contract version 2 and a ready runtime. For another host use
-`peer-federator lane --host HOST --product codex --` after checking `hosts`.
+`codex-peer-lane --host HOST doctor --json` and then the same launcher with
+`--host HOST` on each lifecycle command.
 Never fall back to SSH or silently run locally.
 
 Pipe the briefing on stdin:
@@ -52,7 +53,9 @@ omission on resume restores the prior choice.
 Terminal notices are collection pointers. Collect outstanding debt before
 `resume`. Use `interrupt` for active work and `archive` when orchestration is
 finished. `--persistent` changes lifecycle ownership only; it does not remove
-the communication parent anchor.
+the communication parent anchor or disable terminal auto-archive. The normal
+60-second terminal grace still applies. Use `--persistent --no-auto-archive`
+only when the lane must remain idle indefinitely, then archive it explicitly.
 
 For a remote launch federation supplies the attested source parent context and
 returns terminal notices through grouped routing. The selected destination

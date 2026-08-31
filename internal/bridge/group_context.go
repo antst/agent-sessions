@@ -32,7 +32,7 @@ type laneGroupOptions struct {
 	parentErr              error
 }
 
-func laneCollectionPointer(product, sessionID, parentHostID, parentAgentRuntimeDir string, groups []string) string {
+func laneCollectionPointer(product, sessionID, parentHostID, _ string, groups []string) string {
 	local := fmt.Sprintf("%s-peer-lane wait %s", product, sessionID)
 	if parentHostID == "" {
 		return local
@@ -42,25 +42,12 @@ func laneCollectionPointer(product, sessionID, parentHostID, parentAgentRuntimeD
 		if strings.HasPrefix(group, "session:") && strings.HasSuffix(group, suffix) {
 			hostID := strings.TrimSuffix(strings.TrimPrefix(group, "session:"), suffix)
 			if hostID != "" && hostID != parentHostID {
-				runtimeOption := ""
-				if parentAgentRuntimeDir != "" {
-					runtimeOption = " -runtime-dir " + shellQuoteLanePointerArgument(parentAgentRuntimeDir)
-				}
-				return fmt.Sprintf("peer-federator lane%s --host %s --product %s -- wait %s", runtimeOption, hostID, product, sessionID)
+				return fmt.Sprintf("%s-peer-lane --host %s wait %s", product, hostID, sessionID)
 			}
 			break
 		}
 	}
 	return local
-}
-
-func shellQuoteLanePointerArgument(value string) string {
-	if value != "" && strings.IndexFunc(value, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("_./:-", r)
-	}) == -1 {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func deliverGroupedLaneNotice(sourceSessionID, target, messageID, content string) error {

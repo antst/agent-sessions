@@ -5,7 +5,7 @@ package bridge
 import "errors"
 
 func grokProcessSessionID(_ int) (int, error) {
-	return 0, errors.New("Grok lane process sessions are unsupported on this platform")
+	return 0, errors.New("grok lane process sessions are unsupported on this platform")
 }
 
 type grokSessionMember struct {
@@ -19,14 +19,14 @@ func grokProcessIdentityStatus(member grokSessionMember) processIdentityStatus {
 }
 
 func grokProcessSessionMembers(_ int) ([]grokSessionMember, error) {
-	return nil, errors.New("Grok lane process-session inspection is unsupported")
+	return nil, errors.New("grok lane process-session inspection is unsupported")
 }
 
 func stopGrokProcessSession(sessionID int, _ string, _ int) error {
 	if sessionID <= 1 {
 		return nil
 	}
-	return errors.New("Grok lane process-session cleanup is unsupported")
+	return errors.New("grok lane process-session cleanup is unsupported")
 }
 
 func stopGrokProcessSessionStrong(sessionID int, _, _ string, excludedPID int) error {
@@ -41,7 +41,7 @@ func stopGrokTaggedProcesses(tokenHash string, _ int, _ ...grokSessionMember) er
 	if tokenHash == "" {
 		return nil
 	}
-	return errors.New("Grok lane tagged-process cleanup is unsupported")
+	return errors.New("grok lane tagged-process cleanup is unsupported")
 }
 
 func grokTaggedProcessesRemain(tokenHash string, _ int, _ ...grokSessionMember) bool {

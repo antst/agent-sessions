@@ -13,11 +13,10 @@ type cleanupStats struct {
 	SocketFiles   int
 }
 
-// cleanupStaleBridgeArtifacts deliberately keeps all ownership checks together
-// so removal cannot drift away from its process-identity validation.
-//
-//nolint:gocyclo
-func cleanupStaleBridgeArtifacts(paths nativePaths) cleanupStats {
+// reconcileDeadConnectorArtifacts keeps current connector ownership checks
+// together so dead transport reconciliation cannot drift away from exact
+// process-identity validation.
+func reconcileDeadConnectorArtifacts(paths nativePaths) cleanupStats {
 	runtimeRoot := filepath.Dir(paths.supervisorSock)
 	registryRoot := filepath.Join(paths.claudeRoot, "sessions")
 	stats := cleanupStats{}
@@ -56,36 +55,6 @@ func cleanupStaleBridgeArtifacts(paths nativePaths) cleanupStats {
 			})
 			if _, err := os.Lstat(file); os.IsNotExist(err) {
 				stats.RegistryFiles++
-			}
-		}
-	}
-	if entries, err := os.ReadDir(runtimeRoot); err == nil {
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "session-") && strings.HasSuffix(entry.Name(), ".sock") {
-				stable := filepath.Join(runtimeRoot, entry.Name())
-				target, err := os.Readlink(stable)
-				if err != nil {
-					continue
-				}
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(runtimeRoot, target)
-				}
-				pid, ok := backendSocketPID(filepath.Base(filepath.Clean(target)))
-				if !ok || !samePath(filepath.Dir(filepath.Clean(target)), runtimeRoot) ||
-					observeProcessIdentity(pid, "").Status != processIdentityStale {
-					continue
-				}
-				if os.Remove(stable) == nil {
-					stats.SocketFiles++
-				}
-				continue
-			}
-			pid, ok := backendSocketPID(entry.Name())
-			if !ok || observeProcessIdentity(pid, "").Status != processIdentityStale {
-				continue
-			}
-			if os.Remove(filepath.Join(runtimeRoot, entry.Name())) == nil {
-				stats.SocketFiles++
 			}
 		}
 	}
@@ -134,9 +103,12 @@ func ownedBridgeState(state map[string]any, statePath, runtimeRoot, registryRoot
 		return false
 	}
 	key := sessionKey(sessionID)
+	backend := stringValue(state["backendSocketPath"])
+	stable := stringValue(state["socketPath"])
+	currentSocket := filepath.Join(runtimeRoot, "session-"+key+".sock")
+	validSocketShape := samePath(stable, currentSocket) && samePath(backend, currentSocket)
 	return filepath.Base(statePath) == "state.json" && filepath.Base(filepath.Dir(statePath)) == key &&
-		samePath(stringValue(state["backendSocketPath"]), filepath.Join(runtimeRoot, strconv.Itoa(pid)+".sock")) &&
-		samePath(stringValue(state["socketPath"]), filepath.Join(runtimeRoot, "session-"+key+".sock")) &&
+		validSocketShape &&
 		samePath(stringValue(state["registryFile"]), filepath.Join(registryRoot, strconv.Itoa(pid)+".json"))
 }
 
@@ -159,8 +131,8 @@ func removeOwnedStableAlias(stable, backend, runtimeRoot string) bool {
 func ownedBridgeRegistry(row map[string]any, pid int, runtimeRoot string) bool {
 	entrypoint := stringValue(row["entrypoint"])
 	return row != nil && intValue(row["pid"]) == pid &&
-		(entrypoint == "codex" || entrypoint == "grok") &&
-		strings.HasPrefix(stringValue(row["version"]), "codex-claude-peer/") &&
+		(entrypoint == "codex" || entrypoint == "grok" || entrypoint == "qwen") &&
+		strings.HasPrefix(stringValue(row["version"]), "agent-sessions/") &&
 		ownedRuntimePath(stringValue(row["messagingSocketPath"]), runtimeRoot)
 }
 
@@ -191,13 +163,5 @@ func registryPID(name string) (int, bool) {
 		return 0, false
 	}
 	pid, err := strconv.Atoi(strings.TrimSuffix(name, ".json"))
-	return pid, err == nil && pid > 0
-}
-
-func backendSocketPID(name string) (int, bool) {
-	if filepath.Ext(name) != ".sock" || strings.HasPrefix(name, "session-") || name == "supervisor.sock" {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(strings.TrimSuffix(name, ".sock"))
 	return pid, err == nil && pid > 0
 }

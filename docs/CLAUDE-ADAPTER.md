@@ -15,20 +15,19 @@ the contract and will change.
 A contract-2 runtime must provide:
 
 - the lifecycle subcommands below, including `list`;
-- `doctor --json`, returning at least `contract_version`, `runtime_version`,
-  `appserver_reachable`, `supervisor_reachable`, `codex_home`, and `state_root`;
+- `doctor --json`, returning at least `contract_version`, `authority`, `product`, `ready`, and
+  `native_path`;
 - `contract_version` in both `doctor --json` output and every `lane.ready` event.
 
 An orchestrator must check `contract_version` before parsing anything else, and must refuse a
 runtime whose major contract version it does not implement rather than guessing at the event shape.
 `claude/skills/codex-lane/scripts/lane-preflight` performs this check and exits non-zero when it is not satisfied. It
-calls the recorded native runtime directly; preflight never runs the bootstrapping launcher.
+calls the installed lane alias directly; preflight never starts or changes the user daemon.
 
 ## Invocation
 
-`codex-peer-lane` is the launcher. When it is not on `PATH`, read the first line of
-`${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-code-peer}/native-runtime-path`
-and invoke `<that path> lane …` instead. The two forms are equivalent.
+`codex-peer-lane` is the installed unified-runtime alias. When it is not on `PATH`, the host runtime
+is unavailable to this skill; report the missing installation and stop.
 
 Prompts are supplied on stdin (`-`) or through `--prompt-file FILE`. Never on argv.
 
@@ -69,14 +68,14 @@ Diagnostics go to stderr and are not part of the contract.
 | `thread.started` | `thread_id`, `session_id`, `peer_name` |
 | `thread.resumed` | `thread_id`, `session_id`, `peer_name` |
 | `turn.started` | `thread_id`, `turn_id` |
-| `lane.ready` | `contract_version`, `name`, `thread_id`, `session_id`, `address`, `turn_id`, `cwd`, `worktree_path`, `notify_target`, `persistent`, `auto_archive`, `auto_archive_after_seconds`, `owner_session_id`; resume also has `resumed: true` |
+| `lane.ready` | `contract_version`, `product`, `name`, `thread_id`, `session_id`, `turn_id`, `cwd`, `groups`, `permission_mode`, `state`, `persistent`, `collection_debt`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id` |
 | `item.completed` | `turn_id`, `item` |
 | `turn.schema_retry` | `thread_id`, `turn_id`, `attempt` |
 | `turn.completed` | `turn_id`, `status`, `outcome`, `exit`, `accounting`, `usage`, `error` |
 | `turn.interrupted` | `thread_id`, `turn_id` |
-| `lane.status` | `name`, `thread_id`, `session_id`, `status`, `cwd`, `turn_id`, `turn_status`, `collected_turn_id`, `worktree_path`, `notify_target`, `persistent`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`, `outcome`, `exit` |
+| `lane.status` | `name`, `thread_id`, `session_id`, `product`, `state`, `cwd`, `turn_id`, `persistent`, `collection_debt`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`, `outcome`, `exit` |
 | `lane.list` | `contract_version`, `lanes` |
-| `lane.doctor` | `contract_version`, `runtime_version`, `runtime_path`, `appserver_reachable`, `appserver_socket`, `supervisor_reachable`, `supervisor_socket`, `codex_home`, `state_root` |
+| `lane.doctor` | `authority`, `contract_version`, `product`, `ready`, `native_path` |
 | `lane.archived` | `name`, `thread_id`, and `notices_dropped` or `already_archived` |
 | `error` | `message`, `timeout` |
 
@@ -142,25 +141,27 @@ fields plus normalized token counters, and a `usage` block. `cost` is `null` wit
 
 ## Terminal notices
 
-Parent-owned lanes automatically register a durable supervisor-owned terminal job for their Claude
-owner. On any terminal outcome the owner receives a pointer carrying the lane name, thread ID,
-turn ID, raw status, normalized outcome, exit code, `collection=required`, and the exact `wait`
-command. `--no-notify` suppresses this pointer without changing ownership.
-Remote pointers include the source agent's effective `-runtime-dir`; an isolated parent can run the
-printed `peer-federator lane ... wait` command without reconstructing its agent socket path.
+The unified daemon automatically registers a durable terminal notice for the lane's immediate
+Agent Sessions parent. On any terminal outcome that parent receives a pointer carrying the lane
+name, thread ID, turn ID, raw status, normalized outcome, exit code, and current collection state.
+`collection=required` includes a structured `agent_sessions.lane` `wait` hint;
+`collection=not_required` means another collector already consumed the turn.
+Remote hints include `host=HOST`; collection goes through the source
+daemon and its current hub connection.
 
 Direct Claude ownership is accepted only when environment hints, the live registry row, socket,
 available process identity, and process ancestry all agree. The resulting owner is the corroborated
 Claude session process, not a short-lived shell or adapter subprocess. Other launchers use their
 direct parent process as owner and have no automatic peer notification. Inherited Claude environment without
-matching ancestry is ignored. `lane.ready.notify_target` and `owner_session_id` expose the result.
+matching ancestry is ignored. `lane.ready.owner_session_id` exposes the resulting Agent Sessions
+parent identity; it need not equal the vendor-native transcript UUID.
 
-`--persistent` removes parent ownership. Only persistent lanes accept `--notify PEER`; this creates
-the same durable pointer job for an explicitly selected peer. Persistent lanes survive every
-launcher or orchestrator exit; use `--no-auto-archive` as well when they must remain idle indefinitely.
+`--persistent` disables parent-exit cleanup but does not remove the immediate parent anchor or
+reroute notices. Persistent lanes survive every launcher or orchestrator exit; use
+`--no-auto-archive` as well when they must remain idle indefinitely. To inform another peer, send a
+normal Agent Sessions message; there is no lifecycle `notify_target` override.
 
-The notice describes the App Server turn. It never carries the answer and never attests that a
-collector received anything. `collection=required` means: call `wait`.
+The notice describes the App Server turn. It never carries the answer.
 
 `archive` makes one last delivery attempt, then cancels any undeliverable notice and reports
 `notices_dropped` rather than letting a hint block authoritative cleanup.
@@ -180,7 +181,7 @@ one-time archive rather than being guessed or adopted.
 `--persistent` is required when work must outlive the orchestrator. It disables owner cleanup but
 does not disable the default terminal grace timer.
 It is also required when the lane is launched from a plain shell, cron job, or CI runner rather than
-beneath a live Codex or Claude process; those callers have no stable lifecycle owner to corroborate.
+beneath a live managed Codex, Claude, Grok, or Qwen process; those callers have no stable lifecycle owner to corroborate.
 
 Auto-archive is independent of ownership and enabled by default. After the latest turn reaches its
 final terminal state, including any schema correction, the lane remains idle and messageable for one
@@ -208,10 +209,9 @@ All policy flags are optional and every omitted flag inherits the user's normal 
 The lane deadline defaults to zero (disabled). `wait --timeout` also defaults to zero and therefore
 waits without a bridge-imposed collection bound.
 
-`--persistent`, `--auto-archive-after`, `--no-auto-archive`, `--notify`, and `--no-notify` control lifecycle and result
-routing, not Codex model policy. `--notify` requires `--persistent`; parent-owned Claude lanes notify their owner
-automatically unless `--no-notify` is present. The runtime never infers model, sandbox, approval,
-or web policy.
+`--persistent`, `--auto-archive-after`, and `--no-auto-archive` control lifecycle, not Codex model
+policy. Terminal notice routing is fixed to the immediate Agent Sessions parent. The runtime never
+infers model, sandbox, approval, or web policy.
 
 An automatic terminal pointer is generated by the supervisor rather than by the lane model. Its
 transport envelope matches the live Claude target's permission class so the pointer is not held by
@@ -234,8 +234,8 @@ Use stable role-based names and retain exact IDs. Agent Sessions messaging names
 are resolved only among peers visible through a shared group, so the same name
 may exist in disjoint groups and a visible collision is reported as ambiguous.
 Lane lifecycle commands use host-local state, where bare names may still be
-ambiguous. The host Agent Sessions service, not `claude agents --json`, is the
-cross-product discovery and messaging surface.
+ambiguous. Structured Agent Sessions discovery, not a native Claude session
+listing, is the cross-product discovery and messaging surface.
 
 ## Failure handling
 
@@ -252,8 +252,9 @@ cross-product discovery and messaging surface.
 | `status` shows `archived` with an `outcome` | `resume` only to start a new follow-up turn; it cannot recover an uncollected prior answer. |
 
 Killing a collector does not stop a lane while its owner remains alive. Parent exit does: the
-supervisor interrupts active work and archives the lane. A persistent lane outlives launchers; add
-`--no-auto-archive` when it must also remain idle and messageable until explicit `interrupt` or `archive`.
+supervisor interrupts active work and archives the lane. A persistent lane outlives launchers but
+remains subject to the normal terminal auto-archive grace; add `--no-auto-archive` when it must also
+remain idle and messageable until explicit `interrupt` or `archive`.
 
 ## Related
 

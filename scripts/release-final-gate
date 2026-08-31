@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 2 )); then
+  printf 'usage: %s linux|macos EVIDENCE_DIR\n' "${0##*/}" >&2
+  exit 2
+fi
+os_name=$1
+evidence_dir=$2
+[[ "$os_name" == linux || "$os_name" == macos ]] || { printf 'invalid release gate OS\n' >&2; exit 2; }
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd -- "$evidence_dir" && pwd -P)"
+
+run_gate() {
+  local name=$1
+  shift
+  local log="$evidence_dir/$os_name-$name.txt"
+  {
+    printf 'gate=%s os=%s commit=%s tree=%s\n' "$name" "$os_name" \
+      "$(git -C "$root" rev-parse HEAD)" "$(git -C "$root" rev-parse HEAD^{tree})"
+    printf 'command='; printf ' %q' "$@"; printf '\n'
+    "$@"
+  } >"$log" 2>&1
+}
+
+run_gate normal "$root/scripts/test"
+run_gate race make -C "$root" test-race
+run_gate vet bash -c 'cd "$1"; go vet ./...' release-vet "$root"
+run_gate lint make -C "$root" lint
+run_gate focused_contracts bash -c \
+  'cd "$1"; go test ./internal/bridge ./internal/federator ./internal/launcher ./internal/qwenprofile ./internal/qwenreadiness' \
+  release-focused "$root"
+run_gate quickstart bash -c \
+  'set -euo pipefail; "$1/scripts/test-install-host-transaction"; "$1/scripts/test-install-hub-transaction"; "$1/scripts/test-removal-transaction"' \
+  release-quickstart "$root"
+{
+  printf 'gate=permissions os=%s derived_from=quickstart\n' "$os_name"
+  cat "$evidence_dir/$os_name-quickstart.txt"
+} >"$evidence_dir/$os_name-permissions.txt"
+run_gate federation "$root/scripts/federation/test"
+{
+  printf 'gate=prebuilt_install os=%s derived_from=normal\n' "$os_name"
+  cat "$evidence_dir/$os_name-normal.txt"
+} >"$evidence_dir/$os_name-prebuilt_install.txt"
+{
+  printf 'gate=owner_nonmutation os=%s derived_from=quickstart\n' "$os_name"
+  cat "$evidence_dir/$os_name-quickstart.txt"
+} >"$evidence_dir/$os_name-owner_nonmutation.txt"
+
+for required in normal race vet lint focused_contracts quickstart permissions federation prebuilt_install owner_nonmutation; do
+  [[ -s "$evidence_dir/$os_name-$required.txt" ]] || {
+    printf 'release gate %s did not produce evidence\n' "$required" >&2
+    exit 1
+  }
+done
+printf 'release %s gate: PASS\n' "$os_name"

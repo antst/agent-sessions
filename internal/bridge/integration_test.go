@@ -164,7 +164,7 @@ func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 	claudeRoot := filepath.Join(root, "claude")
 	codexHome := filepath.Join(root, "codex")
 	runtimeDir := filepath.Join(root, "run")
-	t.Setenv("CLAUDE_PEER_DATA_DIR", dataRoot)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", dataRoot)
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", claudeRoot)
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
@@ -186,13 +186,17 @@ func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 	t.Cleanup(d.shutdown)
 
 	state := readJSONMap(d.stateFile)
-	if stringValue(state["socketPath"]) != d.stableSocket || stringValue(state["backendSocketPath"]) != d.backendSocket {
+	if stringValue(state["socketPath"]) != d.stableSocket || stringValue(state["backendSocketPath"]) != d.stableSocket {
 		t.Fatalf("unexpected state: %#v", state)
 	}
-	if target, err := os.Readlink(d.stableSocket); err != nil || target != d.backendSocket {
-		t.Fatalf("stable alias = %q, %v", target, err)
+	stableInfo, err := os.Lstat(d.stableSocket)
+	if err != nil || stableInfo.Mode()&os.ModeSocket == 0 || stableInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("stable delivery endpoint is not a real socket: info=%v err=%v", stableInfo, err)
 	}
-	for _, file := range []string{d.backendSocket, d.registryFile, d.stateFile} {
+	if target, err := os.Readlink(d.stableSocket); err == nil {
+		t.Fatalf("stable delivery endpoint unexpectedly resolves as symlink to %q", target)
+	}
+	for _, file := range []string{d.stableSocket, d.registryFile, d.stateFile} {
 		info, err := os.Stat(file)
 		if err != nil {
 			t.Fatal(err)
@@ -269,6 +273,19 @@ func TestNativeShimNameSourcesPreserveExplicitAndFollowCodexTitles(t *testing.T)
 	if d.name != "wrapper-name" || d.nameSource != "launch" {
 		t.Fatalf("launch name was overwritten: %q (%s)", d.name, d.nameSource)
 	}
+	file, err := os.OpenFile(index, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("{\"id\":\"native-name-session\",\"thread_name\":\"renamed in codex\"}\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	d.refreshNameLocked()
+	if d.name != "renamed-in-codex" || d.nameSource != "codex" {
+		t.Fatalf("native Codex rename = %q (%s)", d.name, d.nameSource)
+	}
 	d.applyNameLocked("canonical name", "canonical")
 	if d.name != "canonical-name" || d.nameSource != "canonical" {
 		t.Fatalf("canonical name = %q (%s)", d.name, d.nameSource)
@@ -278,6 +295,64 @@ func TestNativeShimNameSourcesPreserveExplicitAndFollowCodexTitles(t *testing.T)
 	d.refreshNameLocked()
 	if d.name != "lane-name" || d.nameSource != "lane" {
 		t.Fatalf("lane name was overwritten: %q (%s)", d.name, d.nameSource)
+	}
+	d.mu.Unlock()
+}
+
+//nolint:dupl // Paired manual/automatic title fixtures intentionally differ only in the native title source.
+func TestNativeQwenTranscriptRenameUpdatesPeerName(t *testing.T) {
+	root := t.TempDir()
+	sessionID := "03b652b3-2809-4623-a563-744d5f00bb8c"
+	chatDir := filepath.Join(root, "qwen", "projects", "-workspace", "chats")
+	if err := os.MkdirAll(chatDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	chat := filepath.Join(chatDir, sessionID+".jsonl")
+	body := "{\"sessionId\":\"" + sessionID + "\",\"cwd\":\"" + root + "\",\"type\":\"user\"}\n" +
+		"{\"sessionId\":\"" + sessionID + "\",\"cwd\":\"" + root + "\",\"type\":\"system\",\"subtype\":\"custom_title\",\"systemPayload\":{\"customTitle\":\"Renamed in Qwen\",\"titleSource\":\"manual\"}}\n"
+	if err := os.WriteFile(chat, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if title, ok := QwenNativeSessionTitle(filepath.Join(root, "qwen"), sessionID, root); !ok || title != "Renamed in Qwen" {
+		t.Fatalf("structured Qwen native title = %q, ok=%v", title, ok)
+	}
+	d := newDaemon(map[string]string{
+		"session-id": sessionID, "cwd": root, "name": "qwen-wrapper", "name-source": "launch",
+		"entrypoint": "qwen", "qwen-home": filepath.Join(root, "qwen"),
+	})
+	d.mu.Lock()
+	d.refreshNameLocked()
+	if d.name != "Renamed-in-Qwen" || d.nameSource != "qwen" {
+		t.Fatalf("native Qwen rename = %q (%s)", d.name, d.nameSource)
+	}
+	d.mu.Unlock()
+}
+
+//nolint:dupl // Paired manual/automatic title fixtures intentionally differ only in the native title source.
+func TestNativeQwenAutomaticTitleDoesNotOverridePeerName(t *testing.T) {
+	root := t.TempDir()
+	sessionID := "03b652b3-2809-4626-b20f-ddebf83bb444"
+	chatDir := filepath.Join(root, "qwen", "projects", "-workspace", "chats")
+	if err := os.MkdirAll(chatDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	chat := filepath.Join(chatDir, sessionID+".jsonl")
+	body := "{\"sessionId\":\"" + sessionID + "\",\"cwd\":\"" + root + "\",\"type\":\"user\"}\n" +
+		"{\"sessionId\":\"" + sessionID + "\",\"cwd\":\"" + root + "\",\"type\":\"system\",\"subtype\":\"custom_title\",\"systemPayload\":{\"customTitle\":\"Automatic Qwen Title\",\"titleSource\":\"auto\"}}\n"
+	if err := os.WriteFile(chat, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if title, ok := QwenNativeSessionTitle(filepath.Join(root, "qwen"), sessionID, root); !ok || title != "" {
+		t.Fatalf("automatic Qwen native title = %q, ok=%v", title, ok)
+	}
+	d := newDaemon(map[string]string{
+		"session-id": sessionID, "cwd": root, "name": "qwen-wrapper", "name-source": "launch",
+		"entrypoint": "qwen", "qwen-home": filepath.Join(root, "qwen"),
+	})
+	d.mu.Lock()
+	d.refreshNameLocked()
+	if d.name != "qwen-wrapper" || d.nameSource != "launch" {
+		t.Fatalf("automatic Qwen title overwrote peer name: %q (%s)", d.name, d.nameSource)
 	}
 	d.mu.Unlock()
 }

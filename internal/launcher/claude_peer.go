@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -47,6 +49,121 @@ type claudeNativePeerRecord struct {
 	Entrypoint          string `json:"entrypoint"`
 	Kind                string `json:"kind"`
 	Status              string `json:"status"`
+}
+
+// ClaudeDaemonPrepareRequest is the exact pre-exec intent submitted by the
+// terminal-owning claude-peer client. Profile environment presence is carried
+// explicitly because an unset CLAUDE_CONFIG_DIR is observably different from
+// an explicitly empty value in native Claude.
+type ClaudeDaemonPrepareRequest struct {
+	AttachmentID           string
+	SessionID              string
+	ResumeTarget           string
+	Resume                 bool
+	Name                   string
+	Cwd                    string
+	AlwaysApprove          bool
+	YoloSpecified          bool
+	Owner                  procinfo.Identity
+	ConfigRoot             string
+	ConfigEnvSet           bool
+	ConfigEnvValue         string
+	SecureEnvSet           bool
+	SecureEnvValue         string
+	Groups                 []string
+	GroupsSpecified        bool
+	ParentSession          string
+	ParentSpecified        bool
+	InheritParentGroups    bool
+	InheritGroupsSpecified bool
+}
+
+// ClaudeDaemonPrepareResult is the durable launch boundary returned before
+// the client replaces itself with native Claude.
+type ClaudeDaemonPrepareResult struct {
+	AttachmentID  string
+	LifecycleRoot string
+	ManagedSocket string
+	AlwaysApprove bool
+}
+
+// ClaudeDaemonPrepare submits one parsed Claude launch intent.
+type ClaudeDaemonPrepare func(context.Context, ClaudeDaemonPrepareRequest) (ClaudeDaemonPrepareResult, error)
+
+// ClaudeNativePeerRecord is the bounded native row published by Claude. It is
+// intentionally metadata-only; transcript and credential content never cross
+// the daemon boundary.
+type ClaudeNativePeerRecord = claudeNativePeerRecord
+
+// RunClaudePeerWithDaemon keeps the proven native profile/settings/socket
+// launch behavior while replacing the legacy per-session supervisor with one
+// durable daemon transaction. This process is exec'd into Claude, so no Agent
+// Sessions process remains per interactive session.
+//
+//nolint:gocyclo // Native argv, profile, attachment handoff, exec, and rollback are one launch transaction.
+func RunClaudePeerWithDaemon(ctx context.Context, args []string, prepare ClaudeDaemonPrepare) error {
+	plan, err := parseClaudePeerArgs(args)
+	if err != nil {
+		return err
+	}
+	claude, err := claudeExecutable()
+	if err != nil {
+		return err
+	}
+	if plan.informational {
+		return Exec(claude, plan.args, nil)
+	}
+	if prepare == nil {
+		return errors.New("claude daemon preparation is unavailable")
+	}
+	source, err := claudeprofile.CurrentSource()
+	if err != nil {
+		return err
+	}
+	owner, err := procinfo.CaptureIdentity(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("capture Claude launcher identity: %w", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve Claude working directory: %w", err)
+	}
+	result, err := prepare(ctx, ClaudeDaemonPrepareRequest{
+		AttachmentID: plan.attachmentID, SessionID: plan.sessionID,
+		ResumeTarget: plan.resumeTarget, Resume: plan.resume, Name: plan.peerName,
+		Cwd: cwd, AlwaysApprove: plan.alwaysApprove, YoloSpecified: plan.yoloSpecified,
+		Owner: owner, ConfigRoot: source.ConfigRoot,
+		ConfigEnvSet: source.ConfigEnvSet, ConfigEnvValue: source.ConfigEnvValue,
+		SecureEnvSet: source.SecureEnvSet, SecureEnvValue: source.SecureConfig,
+		Groups: append([]string(nil), plan.context.groups...), GroupsSpecified: plan.context.groupsSpecified,
+		ParentSession: plan.context.parentSession, ParentSpecified: plan.context.parentSpecified,
+		InheritParentGroups:    plan.context.inheritParentGroups,
+		InheritGroupsSpecified: plan.context.inheritGroupsSpecified,
+	})
+	if err != nil {
+		return err
+	}
+	if result.AttachmentID != plan.attachmentID || strings.TrimSpace(result.LifecycleRoot) == "" ||
+		strings.TrimSpace(result.ManagedSocket) == "" {
+		return errors.New("daemon returned an invalid Claude launch boundary")
+	}
+	plan.args = insertClaudeManagedArgs(plan.args, "--messaging-socket-path", result.ManagedSocket)
+	if result.AlwaysApprove && !plan.alwaysApprove {
+		plan.alwaysApprove = true
+		plan.args = insertClaudeManagedArgs(plan.args, "--dangerously-skip-permissions")
+	} else if !result.AlwaysApprove && !claudePeerHasPermissionMode(plan.args) {
+		plan.args = insertClaudeManagedArgs(plan.args, "--permission-mode", "default")
+	}
+	var settingsBody []byte
+	plan.args, settingsBody, err = planClaudePeerLaunchSettings(plan.args, result.LifecycleRoot, !result.AlwaysApprove)
+	if err != nil {
+		return err
+	}
+	if err := writeClaudePeerLaunchSettings(filepath.Join(result.LifecycleRoot, "launch-settings.json"), settingsBody); err != nil {
+		return err
+	}
+	environment := claudeDaemonPeerEnvironment(os.Environ(), source, result.AttachmentID)
+	return Exec(claude, plan.args, environment)
 }
 
 // RunClaudePeer launches one native Claude session in the host agent's shared
@@ -258,7 +375,7 @@ func claudePeerAgentStatus() (federator.AgentStatus, error) {
 
 //nolint:gocyclo // CLI parsing preserves native Claude flags while extracting the shared peer layer.
 func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
-	contextArgs, context, err := extractPeerLaunchContext(args, claudeOptionConsumesNext)
+	contextArgs, context, err := scanPeerWrapperOptions("claude", args)
 	if err != nil {
 		return claudePeerPlan{}, err
 	}
@@ -381,20 +498,6 @@ func insertClaudeManagedArgs(args []string, managed ...string) []string {
 	return result
 }
 
-func claudeOptionConsumesNext(option string) bool {
-	name := strings.SplitN(option, "=", 2)[0]
-	switch name {
-	case "--add-dir", "--agent", "--agents", "--allowedTools", "--append-system-prompt", "--betas",
-		"--debug-file", "--disallowedTools", "--effort", "--fallback-model", "--ide", "--input-format",
-		"--json-schema", "--max-budget-usd", "--max-turns", "--mcp-config", "--model", "--name",
-		"--output-format", "--permission-mode", "--permission-prompt-tool", "--plugin-dir", "--resume", "-r",
-		"--session-id", "--settings", "--system-prompt", "--tools":
-		return !strings.Contains(option, "=")
-	default:
-		return false
-	}
-}
-
 func claudePeerHasPermissionMode(args []string) bool {
 	for _, argument := range beforeDoubleDash(args) {
 		if argument == "--permission-mode" || strings.HasPrefix(argument, "--permission-mode=") ||
@@ -492,6 +595,9 @@ func planClaudePeerLaunchSettings(args []string, lifecycleRoot string, constrain
 		settings = parsed
 	}
 	settings["crossSessionInbound"] = json.RawMessage(`"accept"`)
+	if err := configureManagedClaudePeerAgentSessions(settings); err != nil {
+		return nil, nil, err
+	}
 	if constrainPermissions {
 		if err := constrainClaudePeerPermissions(settings); err != nil {
 			return nil, nil, err
@@ -516,14 +622,83 @@ func planClaudePeerLaunchSettings(args []string, lifecycleRoot string, constrain
 	return result, append(body, '\n'), nil
 }
 
+func configureManagedClaudePeerAgentSessions(settings map[string]json.RawMessage) error {
+	if err := disableManagedClaudePeerProjectMCP(settings); err != nil {
+		return err
+	}
+	return allowManagedClaudePeerTools(settings)
+}
+
+func disableManagedClaudePeerProjectMCP(settings map[string]json.RawMessage) error {
+	disabled := make([]string, 0, 1)
+	if raw, exists := settings["disabledMcpjsonServers"]; exists {
+		if json.Unmarshal(raw, &disabled) != nil || disabled == nil {
+			return errors.New("claude --settings disabledMcpjsonServers must contain an array of server names")
+		}
+	}
+	for _, name := range disabled {
+		if name == claudeprofile.ProjectMCPServerName {
+			return nil
+		}
+	}
+	disabled = append(disabled, claudeprofile.ProjectMCPServerName)
+	body, err := json.Marshal(disabled)
+	if err != nil {
+		return err
+	}
+	settings["disabledMcpjsonServers"] = body
+	return nil
+}
+
+func allowManagedClaudePeerTools(settings map[string]json.RawMessage) error {
+	permissions, err := claudePeerPermissions(settings)
+	if err != nil {
+		return err
+	}
+	allowed := []string{}
+	if raw, exists := permissions["allow"]; exists {
+		if json.Unmarshal(raw, &allowed) != nil || allowed == nil {
+			return errors.New("claude --settings permissions.allow must contain an array of tool names")
+		}
+	}
+	seen := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		seen[name] = true
+	}
+	for _, name := range claudeprofile.ManagedAgentSessionsMCPTools() {
+		if !seen[name] {
+			allowed = append(allowed, name)
+			seen[name] = true
+		}
+	}
+	body, err := json.Marshal(allowed)
+	if err != nil {
+		return err
+	}
+	permissions["allow"] = body
+	return storeClaudePeerPermissions(settings, permissions)
+}
+
 func constrainClaudePeerPermissions(settings map[string]json.RawMessage) error {
+	permissions, err := claudePeerPermissions(settings)
+	if err != nil {
+		return err
+	}
+	permissions["disableBypassPermissionsMode"] = json.RawMessage(`"disable"`)
+	return storeClaudePeerPermissions(settings, permissions)
+}
+
+func claudePeerPermissions(settings map[string]json.RawMessage) (map[string]json.RawMessage, error) {
 	permissions := map[string]json.RawMessage{}
 	if raw, exists := settings["permissions"]; exists {
 		if json.Unmarshal(raw, &permissions) != nil || permissions == nil {
-			return errors.New("claude --settings permissions must contain a JSON object")
+			return nil, errors.New("claude --settings permissions must contain a JSON object")
 		}
 	}
-	permissions["disableBypassPermissionsMode"] = json.RawMessage(`"disable"`)
+	return permissions, nil
+}
+
+func storeClaudePeerPermissions(settings map[string]json.RawMessage, permissions map[string]json.RawMessage) error {
 	body, err := json.Marshal(permissions)
 	if err != nil {
 		return err
@@ -570,14 +745,7 @@ func removeClaudePeerLaunchSettings(path string) error {
 }
 
 func claudeExecutable() (string, error) {
-	if path := strings.TrimSpace(os.Getenv("CLAUDE_PEER_CLAUDE_BIN")); path != "" {
-		return path, nil
-	}
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		return "", &ExitError{Code: 127, Err: errors.New("claude was not found on PATH")}
-	}
-	return path, nil
+	return productExecutable("CLAUDE_PEER_CLAUDE_BIN", "claude")
 }
 
 func newClaudePeerSessionID() (string, error) {
@@ -695,10 +863,61 @@ func claudePeerEnvironment(environment []string, sharedRoot string, source claud
 		peerSessionIDEnv:          sessionID, peerProductEnv: "claude",
 	}
 	for key, value := range values {
-		environment = replaceLaneEnvironment(environment, key, value)
+		environment = envutil.Set(environment, key, value)
 	}
 	environment = applyClaudeProfileEnvironment(environment, source)
 	return environment
+}
+
+// claudeDaemonPeerEnvironment preserves the proven native Claude profile
+// selection and removes inherited nested-session markers, but deliberately
+// omits the retired federator runtime pointer. AGENT_SESSIONS_SESSION_ID is the
+// daemon attachment identity; for name-selected resumes it may intentionally
+// differ from Claude's native transcript UUID.
+func claudeDaemonPeerEnvironment(environment []string, source claudeprofile.Source, attachmentID string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name := entry
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			name = entry[:separator]
+		}
+		switch name {
+		case "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET",
+			"CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION",
+			"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_HARBOR_KITE",
+			"CLAUDE_PEER_CLAUDE_CONFIG_DIR", agentRuntimeDirEnv, peerSessionIDEnv, peerProductEnv:
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	filtered = envutil.Set(filtered, "CLAUDE_PEER_CLAUDE_CONFIG_DIR", source.ConfigRoot)
+	filtered = envutil.Set(filtered, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
+	filtered = envutil.Set(filtered, "CLAUDE_CODE_HARBOR_KITE", "1")
+	filtered = envutil.Set(filtered, peerSessionIDEnv, attachmentID)
+	filtered = envutil.Set(filtered, peerProductEnv, "claude")
+	return applyClaudeProfileEnvironment(filtered, source)
+}
+
+// ObserveClaudeNativePeer reuses the legacy exact PID/start/row/socket
+// attestation from the unified daemon coordinator.
+func ObserveClaudeNativePeer(configRoot string, pid int, expectedStart, expectedSocket string) (ClaudeNativePeerRecord, error) {
+	return readClaudeNativePeerRecord(configRoot, pid, expectedStart, expectedSocket)
+}
+
+// CleanupClaudeNativePeer reuses the legacy no-follow native artifact cleanup
+// after the exact Claude process is absent.
+func CleanupClaudeNativePeer(
+	configRoot string,
+	row ClaudeNativePeerRecord,
+	expectedStart string,
+	expectedStrongStart string,
+	expectedSessionID string,
+	keyBaseline []federator.ClaudeKeyBaselineEntry,
+	observedKeys []federator.ClaudeKeyBaselineEntry,
+) error {
+	return cleanupClaudePeerNativeArtifacts(
+		configRoot, row, expectedStart, expectedStrongStart, expectedSessionID, keyBaseline, observedKeys,
+	)
 }
 
 func applyClaudeProfileEnvironment(environment []string, source claudeprofile.Source) []string {
@@ -769,6 +988,7 @@ func superviseClaudePeer(
 	selectionPromoted := false
 	var selectedPreference federator.SessionPreferences
 	nativeRow := claudeNativePeerRecord{PID: childPID, MessagingSocketPath: managedSocket}
+	nativeNameBaseline := ""
 	var observedKeys []federator.ClaudeKeyBaselineEntry
 	observeKeys := func() error {
 		identity := procinfo.Read(childPID)
@@ -821,12 +1041,12 @@ func superviseClaudePeer(
 		if plan.sessionID != "" && row.SessionID != plan.sessionID {
 			_ = command.Process.Kill()
 			<-done
-			return errors.New("Claude published a different session ID than the requested stable session") //nolint:staticcheck // Claude is a product name.
+			return errors.New("claude published a different session ID than the requested stable session")
 		}
 		if !threadIDPattern.MatchString(row.SessionID) {
 			_ = command.Process.Kill()
 			<-done
-			return errors.New("Claude published an invalid native session UUID") //nolint:staticcheck // Claude is a product name.
+			return errors.New("claude published an invalid native session UUID")
 		}
 		nativeRow = row
 		if plan.sessionID == "" && !selectionPromoted {
@@ -852,21 +1072,24 @@ func superviseClaudePeer(
 			if actualYolo != selected.Preference.AlwaysApprove {
 				_ = command.Process.Kill()
 				<-done
-				return errors.New("Claude selected a session whose durable yolo preference differs from the native launch; pass --yolo or --no-yolo explicitly") //nolint:staticcheck // Claude is a product name.
+				return errors.New("claude selected a session whose durable yolo preference differs from the native launch; pass --yolo or --no-yolo explicitly")
 			}
 			selectedPreference = selected.Preference
 		}
 		if plan.yoloSpecified && actualYolo != plan.alwaysApprove {
 			_ = command.Process.Kill()
 			<-done
-			return errors.New("Claude published a permission mode that disagrees with the explicit claude-peer launch policy") //nolint:staticcheck // Claude is a product name.
+			return errors.New("claude published a permission mode that disagrees with the explicit claude-peer launch policy")
 		}
 		if !plan.yoloSpecified && actualYolo != durableYolo {
 			_ = command.Process.Kill()
 			<-done
-			return errors.New("Claude published a permission mode that disagrees with the prepared durable launch policy") //nolint:staticcheck // Claude is a product name.
+			return errors.New("claude published a permission mode that disagrees with the prepared durable launch policy")
 		}
-		registration = claudePeerRegistration(row, plan, actualYolo, childPID, childStart)
+		if nativeNameBaseline == "" {
+			nativeNameBaseline = strings.TrimSpace(row.Name)
+		}
+		registration = claudePeerRegistration(row, plan, actualYolo, childPID, childStart, nativeNameBaseline)
 		registration.LifecyclePID = os.Getpid()
 		registration.LifecycleProcStart = federator.ProcessStart(os.Getpid())
 		registration.LifecycleRoot = lifecycleRoot
@@ -926,9 +1149,12 @@ func superviseClaudePeer(
 			if effectiveClaudePeerYolo(row.PermissionMode, durableYolo) && !durableYolo {
 				_ = command.Process.Kill()
 				<-done
-				return errors.New("Claude entered bypass permissions outside the durable managed launch policy") //nolint:staticcheck // Claude is a product name.
+				return errors.New("claude entered bypass permissions outside the durable managed launch policy")
 			}
-			registration = claudePeerRegistration(row, plan, durableYolo, childPID, childStart)
+			if nativeNameBaseline == "" {
+				nativeNameBaseline = strings.TrimSpace(row.Name)
+			}
+			registration = claudePeerRegistration(row, plan, durableYolo, childPID, childStart, nativeNameBaseline)
 			registration.LifecyclePID = os.Getpid()
 			registration.LifecycleProcStart = federator.ProcessStart(os.Getpid())
 			registration.LifecycleRoot = lifecycleRoot
@@ -950,14 +1176,14 @@ func effectiveClaudePeerYolo(permissionMode string, fallback bool) bool {
 	return permissionMode == "bypassPermissions"
 }
 
-func claudePeerRegistration(row claudeNativePeerRecord, plan claudePeerPlan, yolo bool, pid int, procStart string) federator.PeerRegistration {
+func claudePeerRegistration(row claudeNativePeerRecord, plan claudePeerPlan, yolo bool, pid int, procStart, nativeNameBaseline string) federator.PeerRegistration {
 	permissionMode := "default"
 	if yolo {
 		permissionMode = "bypassPermissions"
 	}
 	registration := federator.PeerRegistration{
 		Version: federator.GroupProtocolVersion, SessionID: row.SessionID, Product: "claude",
-		Name: defaultClaudePeerName(plan, row), Status: defaultClaudePeerStatus(row.Status),
+		Name: defaultClaudePeerName(plan, row, nativeNameBaseline), Status: defaultClaudePeerStatus(row.Status),
 		PermissionMode: permissionMode, Cwd: row.Cwd, PID: pid, ProcStart: procStart,
 		Socket: row.MessagingSocketPath, StartedAt: row.StartedAt,
 	}
@@ -1047,10 +1273,9 @@ func cleanupClaudePeerNativeArtifacts(
 	}
 	keyPath := ""
 	keyPresent := false
+	managedSocketWithoutBaseline := false
 	if row.MessagingSocketPath != "" {
-		if filepath.Base(row.MessagingSocketPath) != strconv.Itoa(row.PID)+".sock" && keyBaseline == nil {
-			return errors.New("native Claude socket is not PID-bound")
-		}
+		managedSocketWithoutBaseline = filepath.Base(row.MessagingSocketPath) != strconv.Itoa(row.PID)+".sock" && keyBaseline == nil
 		keyName, keyErr := federator.ClaudeServiceKeyName(row.PID, row.MessagingSocketPath)
 		if keyErr != nil {
 			return errors.New("native Claude peer-token sidecar path is invalid")
@@ -1076,6 +1301,13 @@ func cleanupClaudePeerNativeArtifacts(
 		} else if !os.IsNotExist(statErr) {
 			return statErr
 		}
+	}
+	// After daemon restart the process-local key baseline is unavailable. An
+	// exact durable native row still binds the prepared managed socket and key
+	// to this PID/session. Without either that row or the original baseline,
+	// never unlink a non-PID-bound native artifact.
+	if managedSocketWithoutBaseline && !recordPresent && (socketPresent || keyPresent) {
+		return errors.New("native Claude managed artifacts have no durable row or key baseline")
 	}
 	// Keep the registry row until transport cleanup succeeds so a failed
 	// attempt retains the exact socket identity for agent reconciliation.
@@ -1142,8 +1374,11 @@ func parseClaudeNativePeerRecordForCleanup(
 	return row, nil
 }
 
-func defaultClaudePeerName(plan claudePeerPlan, row claudeNativePeerRecord) string {
+func defaultClaudePeerName(plan claudePeerPlan, row claudeNativePeerRecord, nativeNameBaseline string) string {
 	if explicit := strings.TrimSpace(plan.peerName); explicit != "" {
+		if native := strings.TrimSpace(row.Name); native != "" && nativeNameBaseline != "" && native != nativeNameBaseline {
+			return native
+		}
 		return explicit
 	}
 	if target := strings.TrimSpace(plan.resumeTarget); plan.resume && target != "" &&

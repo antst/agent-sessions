@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_directory/managed-tree"
+source "$script_directory/launchd-control"
+
+if [[ $# -ne 1 ]]; then
+  printf 'usage: %s PREFIX\n' "${0##*/}" >&2
+  exit 2
+fi
+prefix=$1
+[[ "$prefix" == /* && "$prefix" != *$'\n'* ]] || exit 2
+
+hub_root="$prefix/libexec/agent-sessions/hub"
+alias_path="$prefix/bin/agent-sessions-hub"
+if [[ ! -e "$hub_root" && ! -L "$hub_root" ]]; then
+  printf 'Agent Sessions hub is not installed under %s.\n' "$prefix"
+  exit 0
+fi
+[[ -d "$hub_root" && ! -L "$hub_root" && "$hub_root" == "$prefix"/libexec/agent-sessions/hub ]] || {
+  printf 'refuse to remove an indirect or unexpected hub root: %s\n' "$hub_root" >&2
+  exit 1
+}
+[[ -L "$hub_root/current" ]] || {
+  printf 'refuse to remove a hub without a selected managed release\n' >&2
+  exit 1
+}
+current=$(cd -P -- "$hub_root/current" && pwd)
+[[ "$current" == "$hub_root/releases/"* && -d "$current" && ! -L "$current" ]] || {
+  printf 'selected hub release is outside the managed release root: %s\n' "$current" >&2
+  exit 1
+}
+if [[ -L "$alias_path" ]]; then
+  target=$(readlink -- "$alias_path")
+  if [[ "$target" != /* ]]; then target="$(dirname -- "$alias_path")/$target"; fi
+  target_directory=$(cd -P -- "$(dirname -- "$target")" && pwd)
+  [[ "$target_directory/$(basename -- "$target")" == "$current/bin/agent-sessions-hub" ]] || {
+    printf 'refuse to remove a hub alias that selects another executable\n' >&2
+    exit 1
+  }
+elif [[ -e "$alias_path" ]]; then
+  printf 'refuse to remove a non-symbolic hub alias: %s\n' "$alias_path" >&2
+  exit 1
+fi
+
+case "$(uname -s)" in
+  Linux)
+    systemctl --user disable --now agent-sessions-hub.service
+    rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions-hub.service"
+    systemctl --user daemon-reload
+    ;;
+  Darwin)
+    domain="gui/$(id -u)"
+    launchd_bootout_exact "$domain/net.antst.agent-sessions-hub"
+    launchctl disable "$domain/net.antst.agent-sessions-hub" >/dev/null 2>&1 || true
+    rm -f -- "$HOME/Library/LaunchAgents/net.antst.agent-sessions-hub.plist"
+    ;;
+  *) exit 1 ;;
+esac
+
+if [[ -L "$alias_path" ]]; then rm -f -- "$alias_path"; fi
+rm -f -- "$hub_root/current"
+remove_managed_tree "$hub_root" "$prefix/libexec/agent-sessions"
+printf 'Removed the Agent Sessions hub service and releases; host state was preserved.\n'
