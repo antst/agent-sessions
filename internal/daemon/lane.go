@@ -137,50 +137,6 @@ func (e *LaneEngine) SetNativeSessionID(laneID, nativeID string) error {
 	})
 }
 
-// RecordCleanupDebt preserves an exact owned resource and prevents the lane
-// from being reported as cleanly archived.
-func (e *LaneEngine) RecordCleanupDebt(laneID string, debt CleanupDebt) error {
-	if debt.ID == "" || debt.Resource == "" || debt.Operation == "" {
-		return errors.New("lane cleanup debt is incomplete")
-	}
-	return e.mutate(func(catalog *Catalog) error {
-		lane, ok := catalog.Lanes[laneID]
-		if !ok {
-			return errors.New("lane state is missing")
-		}
-		lane.State, lane.CapabilityHash = "cleanup-debt", ""
-		catalog.Lanes[laneID] = lane
-		catalog.CleanupDebts[debt.ID] = debt
-		catalog.Host.LaneRevision++
-		catalog.Host.CleanupDebtRevision++
-		return nil
-	})
-}
-
-// ResolveCleanupDebt removes one verified debt and transitions its lane to the
-// caller's proven terminal state.
-func (e *LaneEngine) ResolveCleanupDebt(laneID, debtID, state string) error {
-	return e.mutate(func(catalog *Catalog) error {
-		lane, ok := catalog.Lanes[laneID]
-		if !ok || lane.State != "cleanup-debt" {
-			return errors.New("lane has no cleanup debt")
-		}
-		if _, ok := catalog.CleanupDebts[debtID]; !ok {
-			return errors.New("cleanup debt is missing")
-		}
-		lane.State = state
-		if state == "archived" {
-			lane.AutoArchiveAt = 0
-			lane.ArchiveRevision++
-		}
-		catalog.Lanes[laneID] = lane
-		delete(catalog.CleanupDebts, debtID)
-		catalog.Host.LaneRevision++
-		catalog.Host.CleanupDebtRevision++
-		return nil
-	})
-}
-
 func (e *LaneEngine) mutate(apply func(*Catalog) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

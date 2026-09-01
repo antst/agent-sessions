@@ -68,7 +68,7 @@ is impossible; it MUST NOT silently substitute a new native session ID.
 Errors exposed at the runtime boundary use stable machine categories:
 unavailable, incompatible, unauthorized, stale, ambiguous-session,
 unsupported-policy, unsupported-steer, unsupported-recovery, native-rejected,
-protocol, timed-out, and cleanup-debt. Diagnostics MAY add bounded redacted
+protocol, and timed-out. Diagnostics MAY add bounded redacted
 detail but MUST NOT change the category or expose a secret.
 
 ## Attachment and parent identity
@@ -192,20 +192,6 @@ terminal retirement. Count and byte limits fail before unbounded disk growth.
 
 This ledger also replaces volatile original-product pending input; queued
 messages must survive daemon restart.
-
-## Native-session leases and recovery
-
-Products whose native stores permit concurrent resume use a durable exclusive
-lease keyed by `(product ID, profile identity, native session ID)`. Lease state
-progresses through prepared, held, releasing, released, or cleanup-debt. A
-second owner is rejected. Reacquisition after an owner disappears requires
-proof of exact process death and generation fencing; elapsed time or PID reuse
-is insufficient.
-
-Recovery reopens the exact recorded session or reports unsupported recovery.
-Drivers MUST preserve the native ID across restart, resume, interrupt, and
-archive. Product protocols that expose no durable resume remain explicitly
-narrow rather than manufacturing continuity.
 
 DSH additionally requires one exact CLI/application/plugin version tuple,
 `pnpm`, the native `DSH_SESSION_ID` witness, and one lease per profile/session.

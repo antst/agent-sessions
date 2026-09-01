@@ -222,8 +222,7 @@ Existing `NativeSessionID`, `NativeName`, `Cwd`, `ExpectedEvidence`, `Evidence`,
 
 ```text
 Catalog
-├── existing Host / Attachments / Deliveries / Lanes / Turns / CleanupDebts
-├── LaneInputs map[ReceiptID]LaneInputReceipt
+├── existing Host / Attachments / Lanes
 ├── ComponentBindings map[BindingID]ComponentBinding
 └── ComponentSessions map[AttachmentID]ComponentSession
 ```
@@ -286,7 +285,6 @@ UnsupportedRecovery
 NativeRejected
 Protocol
 TimedOut
-CleanupDebt
 ```
 
 Machine categories remain stable; diagnostics may contain bounded redacted

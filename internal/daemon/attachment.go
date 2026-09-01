@@ -110,7 +110,7 @@ func (e *AttachmentEngine) Prepare(ctx context.Context, requested ManagedAttachm
 	requested.State = "preparing"
 	requested.ExpectedEvidence = NativeEvidence{}
 	requested.Evidence = NativeEvidence{}
-	prepared, err := e.commitAttachment(snapshot, requested, nil, false)
+	prepared, err := e.commitAttachment(snapshot, requested)
 	if err != nil {
 		return ManagedAttachment{}, err
 	}
@@ -131,7 +131,7 @@ func (e *AttachmentEngine) Prepare(ctx context.Context, requested ManagedAttachm
 	}
 	prepared.ExpectedEvidence = cloneEvidence(expected)
 	prepared.State = "prepared"
-	return e.commitAttachment(snapshot, prepared, nil, false)
+	return e.commitAttachment(snapshot, prepared)
 }
 
 // Adopt corroborates product-native evidence and grants authority only after
@@ -158,7 +158,7 @@ func (e *AttachmentEngine) Adopt(ctx context.Context, id string, observed Native
 	}
 	if attachment.State == "prepared" {
 		attachment.State = "selecting"
-		attachment, err = e.commitAttachment(snapshot, attachment, nil, false)
+		attachment, err = e.commitAttachment(snapshot, attachment)
 		if err != nil {
 			return ManagedAttachment{}, err
 		}
@@ -180,7 +180,7 @@ func (e *AttachmentEngine) Adopt(ctx context.Context, id string, observed Native
 	}
 	attachment.Evidence = cloneEvidence(corroborated)
 	attachment.State = "attached"
-	return e.commitAttachment(snapshot, attachment, nil, true)
+	return e.commitAttachment(snapshot, attachment)
 }
 
 // SelectNative binds a late native selection (for example Claude's interactive
@@ -211,7 +211,7 @@ func (e *AttachmentEngine) SelectNative(id, nativeSessionID, cwd, permissionMode
 		attachment.PermissionMode = permissionMode
 	}
 	attachment.State = "selecting"
-	return e.commitAttachment(snapshot, attachment, nil, false)
+	return e.commitAttachment(snapshot, attachment)
 }
 
 // Refresh asks the product adapter to recorroborate one active attachment.
@@ -234,11 +234,10 @@ func (e *AttachmentEngine) Refresh(ctx context.Context, id string) (ManagedAttac
 		return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentRefresh, err)
 	}
 	attachment.Evidence = cloneEvidence(evidence)
-	return e.commitAttachment(snapshot, attachment, nil, true)
+	return e.commitAttachment(snapshot, attachment)
 }
 
-// Detach withdraws authority durably before exact product cleanup. A cleanup
-// ambiguity leaves retryable debt and never keeps the attachment addressable.
+// Detach asks the product to clean up and records only confirmed success.
 func (e *AttachmentEngine) Detach(ctx context.Context, id, cause string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -253,11 +252,10 @@ func (e *AttachmentEngine) Detach(ctx context.Context, id, cause string) (Manage
 	if !ok || adapter.Detach == nil {
 		return ManagedAttachment{}, fmt.Errorf("%w: %s detach callback is unavailable", ErrAttachmentDetach, attachment.Product)
 	}
-	return e.detachLocked(ctx, id, cause, adapter.Detach, "detach-"+attachment.Product, ErrAttachmentDetach)
+	return e.detachLocked(ctx, id, adapter.Detach, ErrAttachmentDetach)
 }
 
-// Rollback retries product-specific preparation rollback and clears exact debt
-// only after the adapter proves cleanup complete.
+// Rollback asks the product to discard an incomplete preparation.
 func (e *AttachmentEngine) Rollback(ctx context.Context, id, cause string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -387,16 +385,19 @@ func (e *AttachmentEngine) Authorize(
 
 func (e *AttachmentEngine) rollbackLocked(ctx context.Context, id, cause string, adapter AttachmentAdapter) (ManagedAttachment, error) {
 	if adapter.Rollback == nil {
-		return e.recordAttachmentDebt(id, cause, "rollback-callback-unavailable", "rollback", ErrAttachmentRollback)
+		_, attachment, err := e.currentAttachment(id)
+		if err != nil {
+			return ManagedAttachment{}, err
+		}
+		return attachment, fmt.Errorf("%w: rollback callback is unavailable", ErrAttachmentRollback)
 	}
-	return e.detachLocked(ctx, id, cause, adapter.Rollback, "rollback", ErrAttachmentRollback)
+	return e.detachLocked(ctx, id, adapter.Rollback, ErrAttachmentRollback)
 }
 
 func (e *AttachmentEngine) detachLocked(
 	ctx context.Context,
-	id, cause string,
+	id string,
 	cleanup func(context.Context, ManagedAttachment) error,
-	operation string,
 	rootError error,
 ) (ManagedAttachment, error) {
 	snapshot, attachment, err := e.currentAttachment(id)
@@ -410,40 +411,20 @@ func (e *AttachmentEngine) detachLocked(
 		if !ValidLifecycleTransition("attachment", attachment.State, "detaching") {
 			return ManagedAttachment{}, fmt.Errorf("%w: attachment %s cannot clean up from %s", ErrAttachmentConflict, id, attachment.State)
 		}
-		attachment.State = "detaching"
-		attachment, err = e.commitAttachment(snapshot, attachment, nil, false)
-		if err != nil {
-			return ManagedAttachment{}, err
-		}
 	}
-	if err := cleanup(ctx, cloneAttachment(attachment)); err != nil {
-		return e.recordAttachmentDebt(id, cause, err.Error(), operationForAttachment(operation, attachment.Product), rootError)
+	cleanupTarget := cloneAttachment(attachment)
+	if cleanupTarget.State != "preparing" {
+		cleanupTarget.State = "detaching"
+	}
+	if err := cleanup(ctx, cleanupTarget); err != nil {
+		return cloneAttachment(attachment), fmt.Errorf("%w: %w", rootError, err)
 	}
 	snapshot, attachment, err = e.currentAttachment(id)
 	if err != nil {
 		return ManagedAttachment{}, err
 	}
 	attachment.State = "detached"
-	return e.commitAttachment(snapshot, attachment, nil, true)
-}
-
-func (e *AttachmentEngine) recordAttachmentDebt(id, cause, lastState, operation string, rootError error) (ManagedAttachment, error) {
-	snapshot, attachment, err := e.currentAttachment(id)
-	if err != nil {
-		return ManagedAttachment{}, err
-	}
-	attachment.State = "debt"
-	debt := CleanupDebt{
-		ID: attachmentDebtID(id), Resource: "attachment:" + id,
-		BaselineIdentity: attachmentEvidenceIdentity(attachment), IntendedState: "detached",
-		LastVerifiedState: "unknown", Cause: strings.TrimSpace(cause + ": " + lastState),
-		RetryRevision: attachment.CatalogRevision + 1, Operation: operationForAttachment(operation, attachment.Product),
-	}
-	committed, commitErr := e.commitAttachment(snapshot, attachment, &debt, false)
-	if commitErr != nil {
-		return ManagedAttachment{}, errors.Join(rootError, commitErr)
-	}
-	return committed, fmt.Errorf("%w: %s", rootError, lastState)
+	return e.commitAttachment(snapshot, attachment)
 }
 
 func (e *AttachmentEngine) currentAttachment(id string) (StateSnapshot, ManagedAttachment, error) {
@@ -464,8 +445,6 @@ func (e *AttachmentEngine) currentAttachment(id string) (StateSnapshot, ManagedA
 func (e *AttachmentEngine) commitAttachment(
 	snapshot StateSnapshot,
 	attachment ManagedAttachment,
-	debt *CleanupDebt,
-	clearDebt bool,
 ) (ManagedAttachment, error) {
 	if attachment.State != "attached" {
 		delete(e.titles, attachment.ID)
@@ -476,13 +455,6 @@ func (e *AttachmentEngine) commitAttachment(
 	attachment.DaemonGeneration = e.generation
 	attachment.CatalogRevision = catalog.Host.AttachmentRevision
 	catalog.Attachments[attachment.ID] = cloneAttachment(attachment)
-	if debt != nil {
-		debt.RetryRevision = attachment.CatalogRevision
-		catalog.CleanupDebts[debt.ID] = *debt
-	}
-	if clearDebt {
-		delete(catalog.CleanupDebts, attachmentDebtID(attachment.ID))
-	}
 	committed, err := e.store.Commit(snapshot.Revision, catalog)
 	if err != nil {
 		return ManagedAttachment{}, err
@@ -514,24 +486,6 @@ func validateAttachmentRequest(attachment ManagedAttachment) error {
 		return fmt.Errorf("%w: unknown product %q", ErrAttachmentConflict, attachment.Product)
 	}
 	return nil
-}
-
-func operationForAttachment(operation, product string) string {
-	if strings.Contains(operation, "-") {
-		return operation
-	}
-	return operation + "-" + product
-}
-
-func attachmentDebtID(id string) string { return "attachment-cleanup:" + id }
-
-func attachmentEvidenceIdentity(attachment ManagedAttachment) string {
-	evidence := attachment.Evidence
-	if evidence.Process.PID == 0 {
-		evidence = attachment.ExpectedEvidence
-	}
-	return fmt.Sprintf("product=%s,pid=%d,start=%s,artifact=%s,revision=%s",
-		attachment.Product, evidence.Process.PID, evidence.Process.StrongStart, evidence.ArtifactPath, evidence.ArtifactRevision)
 }
 
 func cloneAttachment(attachment ManagedAttachment) ManagedAttachment {

@@ -80,8 +80,7 @@ func TestStateStoreNormalizesRemainingMaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Catalog.Attachments == nil || snapshot.Catalog.CleanupDebts == nil ||
-		snapshot.Catalog.ComponentBindings == nil ||
+	if snapshot.Catalog.Attachments == nil || snapshot.Catalog.ComponentBindings == nil ||
 		snapshot.Catalog.ComponentSessions == nil {
 		t.Fatalf("remaining maps were not normalized: %#v", snapshot.Catalog)
 	}

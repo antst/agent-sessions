@@ -37,7 +37,6 @@ type Input struct {
 type Revisions struct {
 	Attachments uint64 `json:"attachments"`
 	Lanes       uint64 `json:"lanes"`
-	CleanupDebt uint64 `json:"cleanup_debt"`
 	Federation  uint64 `json:"federation"`
 }
 
@@ -49,7 +48,6 @@ type Records struct {
 	ActiveLanes       int `json:"active_lanes"`
 	Turns             int `json:"turns"`
 	UncollectedTurns  int `json:"uncollected_turns"`
-	CleanupDebts      int `json:"cleanup_debts"`
 }
 
 // Report is one fixed, metadata-only admin response.
@@ -158,7 +156,7 @@ func nonnegativeRecords(records Records) Records {
 	values := []*int{
 		&records.Attachments, &records.ActiveAttachments,
 		&records.Lanes, &records.ActiveLanes, &records.Turns,
-		&records.UncollectedTurns, &records.CleanupDebts,
+		&records.UncollectedTurns,
 	}
 	for _, value := range values {
 		if *value < 0 {
@@ -175,11 +173,10 @@ func doctorChecks(report Report) []Check {
 		}
 		return "fail"
 	}
-	checks := make([]Check, 0, 3+len(report.Products))
+	checks := make([]Check, 0, 2+len(report.Products))
 	checks = append(checks,
 		Check{Code: "daemon.ready", Status: status(report.Ready)},
 		Check{Code: "daemon.endpoint", Status: status(report.Daemon.EndpointPresent)},
-		Check{Code: "catalog.cleanup_debt_clear", Status: status(report.Records.CleanupDebts == 0)},
 	)
 	for _, product := range report.Products {
 		checkStatus := "unknown"

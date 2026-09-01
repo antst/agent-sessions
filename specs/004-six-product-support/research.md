@@ -49,8 +49,6 @@ compatible. DSH is an exact tuple rather than a semver range.
 
 ## 3. Current Architecture Findings
 
-- [F] `internal/daemon` is the sole durable host authority and already owns
-  product-neutral attachment, delivery, lane, turn, and cleanup-debt state.
 - [F] `daemon.AttachmentAdapter` is already a sound boundary for exact native
   evidence, but lane execution and delivery are product switches in
   `cmd/agent-sessions`.

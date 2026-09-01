@@ -29,17 +29,16 @@ type RecordSchema string
 
 // HostRuntime is the one user-host authority identity and its catalog revisions.
 type HostRuntime struct {
-	User                string            `json:"user"`
-	Host                string            `json:"host"`
-	Release             string            `json:"release,omitempty"`
-	Generation          uint64            `json:"generation"`
-	Endpoint            string            `json:"endpoint,omitempty"`
-	ServiceState        string            `json:"service_state,omitempty"`
-	ProductReadiness    map[string]string `json:"product_readiness,omitempty"`
-	AttachmentRevision  uint64            `json:"attachment_revision,omitempty"`
-	LaneRevision        uint64            `json:"lane_revision,omitempty"`
-	CleanupDebtRevision uint64            `json:"cleanup_debt_revision,omitempty"`
-	FederationRevision  uint64            `json:"federation_revision,omitempty"`
+	User               string            `json:"user"`
+	Host               string            `json:"host"`
+	Release            string            `json:"release,omitempty"`
+	Generation         uint64            `json:"generation"`
+	Endpoint           string            `json:"endpoint,omitempty"`
+	ServiceState       string            `json:"service_state,omitempty"`
+	ProductReadiness   map[string]string `json:"product_readiness,omitempty"`
+	AttachmentRevision uint64            `json:"attachment_revision,omitempty"`
+	LaneRevision       uint64            `json:"lane_revision,omitempty"`
+	FederationRevision uint64            `json:"federation_revision,omitempty"`
 }
 
 // NativeEvidence is the shared exact identity skeleton plus distinct optional
@@ -118,18 +117,6 @@ type Lane struct {
 	ArchiveRevision    uint64   `json:"archive_revision,omitempty"`
 }
 
-// CleanupDebt retains one exact owned resource whose safe terminal state is not yet proven.
-type CleanupDebt struct {
-	ID                string `json:"id"`
-	Resource          string `json:"resource"`
-	BaselineIdentity  string `json:"baseline_identity"`
-	IntendedState     string `json:"intended_state"`
-	LastVerifiedState string `json:"last_verified_state"`
-	Cause             string `json:"cause,omitempty"`
-	RetryRevision     uint64 `json:"retry_revision"`
-	Operation         string `json:"operation"`
-}
-
 type BindingState string
 
 const (
@@ -175,7 +162,6 @@ type Catalog struct {
 	Host              HostRuntime                  `json:"host"`
 	Attachments       map[string]ManagedAttachment `json:"attachments"`
 	Lanes             map[string]Lane              `json:"lanes"`
-	CleanupDebts      map[string]CleanupDebt       `json:"cleanup_debts"`
 	ComponentBindings map[string]ComponentBinding  `json:"component_bindings"`
 	ComponentSessions map[string]ComponentSession  `json:"component_sessions"`
 }
@@ -263,23 +249,21 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 	}
 	transitions := map[string]map[string][]string{
 		"attachment": {
-			"preparing": {"prepared", "detached", "debt"},
-			"prepared":  {"selecting", "attached", "detaching", "debt"},
-			"selecting": {"attached", "detaching", "debt"},
-			"attached":  {"detaching", "debt"},
-			"detaching": {"detached", "debt"},
-			"debt":      {"detaching", "detached"},
+			"preparing": {"prepared", "detached"},
+			"prepared":  {"selecting", "attached", "detaching", "detached"},
+			"selecting": {"attached", "detaching", "detached"},
+			"attached":  {"detaching", "detached"},
+			"detaching": {"detached"},
 			"detached":  {"preparing"},
 		},
 		"lane": {
-			"preparing":    {"idle", "running", "retiring", "terminal", "cleanup-debt"},
-			"idle":         {"preparing", "running", "terminal", "archived", "cleanup-debt"},
-			"running":      {"interrupting", "retiring", "terminal", "cleanup-debt"},
-			"interrupting": {"retiring", "terminal", "cleanup-debt"},
-			"retiring":     {"terminal", "archived", "cleanup-debt"},
-			"terminal":     {"idle", "archived", "cleanup-debt"},
-			"archived":     {"idle", "cleanup-debt"},
-			"cleanup-debt": {"idle", "archived"},
+			"preparing":    {"idle", "running", "retiring", "terminal"},
+			"idle":         {"preparing", "running", "terminal", "archived"},
+			"running":      {"interrupting", "retiring", "terminal"},
+			"interrupting": {"retiring", "terminal"},
+			"retiring":     {"terminal", "archived"},
+			"terminal":     {"idle", "archived"},
+			"archived":     {"idle"},
 		},
 		"component-binding": {
 			"binding": {"ready", "retiring", "closed"}, "ready": {"retiring", "closed"},
@@ -300,8 +284,8 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 
 func emptyCatalog() Catalog {
 	return Catalog{
-		Attachments: map[string]ManagedAttachment{},
-		Lanes:       map[string]Lane{}, CleanupDebts: map[string]CleanupDebt{},
+		Attachments:       map[string]ManagedAttachment{},
+		Lanes:             map[string]Lane{},
 		ComponentBindings: map[string]ComponentBinding{}, ComponentSessions: map[string]ComponentSession{},
 	}
 }
@@ -312,9 +296,6 @@ func normalizedCatalog(catalog Catalog) Catalog {
 	}
 	if catalog.Lanes == nil {
 		catalog.Lanes = map[string]Lane{}
-	}
-	if catalog.CleanupDebts == nil {
-		catalog.CleanupDebts = map[string]CleanupDebt{}
 	}
 	if catalog.ComponentBindings == nil {
 		catalog.ComponentBindings = map[string]ComponentBinding{}
@@ -365,11 +346,6 @@ func validateCatalog(catalog Catalog) error {
 		}
 		if _, ok := productcatalog.ByID(lane.Product); !ok {
 			return fmt.Errorf("lane %s has unknown product %q", id, lane.Product)
-		}
-	}
-	for id, debt := range catalog.CleanupDebts {
-		if id == "" || debt.ID != id || strings.TrimSpace(debt.Resource) == "" || strings.TrimSpace(debt.Operation) == "" {
-			return fmt.Errorf("invalid cleanup debt %q", id)
 		}
 	}
 	activeBindings := map[string]bool{}
@@ -514,8 +490,8 @@ func validateCatalogTransitions(current, next Catalog) error {
 
 func knownState(kind, state string) bool {
 	states := map[string]map[string]bool{
-		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true, "debt": true},
-		"lane":              {"preparing": true, "idle": true, "running": true, "interrupting": true, "retiring": true, "terminal": true, "archived": true, "cleanup-debt": true},
+		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true},
+		"lane":              {"preparing": true, "idle": true, "running": true, "interrupting": true, "retiring": true, "terminal": true, "archived": true},
 		"component-binding": {"binding": true, "ready": true, "retiring": true, "closed": true},
 		"component-session": {"announced": true, "idle": true, "busy": true, "closing": true, "closed": true},
 	}

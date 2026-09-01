@@ -408,7 +408,7 @@ func (c *hostCoordinator) localParentIsLive(runtime *daemonpkg.Runtime, id strin
 	c.mu.Lock()
 	federationHost := c.federation
 	actor := c.lanes[id]
-	laneLive := actor != nil && actor.state != "archived" && actor.state != "retiring" && actor.state != "cleanup-debt"
+	laneLive := actor != nil && actor.state != "archived" && actor.state != "retiring"
 	c.mu.Unlock()
 	if laneLive {
 		return true, nil
@@ -463,7 +463,7 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	c.mu.Lock()
 	for _, lane := range c.lanes {
 		durableState := snapshot.Catalog.Lanes[lane.id].State
-		if durableState != "archived" && durableState != "retiring" && durableState != "cleanup-debt" && groupsIntersect(sourceGroups, lane.groups) {
+		if durableState != "archived" && durableState != "retiring" && groupsIntersect(sourceGroups, lane.groups) {
 			targets = append(targets, localPeerTarget{lane: lane})
 		}
 	}

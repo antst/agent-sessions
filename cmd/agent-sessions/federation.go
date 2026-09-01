@@ -90,7 +90,7 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 	c.mu.Lock()
 	lanes := make([]laneActor, 0, len(c.lanes))
 	for _, actor := range c.lanes {
-		if actor.state == "archived" || actor.state == "retiring" || actor.state == "cleanup-debt" {
+		if actor.state == "archived" || actor.state == "retiring" {
 			continue
 		}
 		lanes = append(lanes, *actor)
@@ -185,13 +185,12 @@ func (c *hostCoordinator) localTargetByFederationID(runtime *daemonpkg.Runtime, 
 		return localPeerTarget{}, err
 	}
 	durableState := snapshot.Catalog.Lanes[sessionID].State
-	if durableState == "archived" ||
-		durableState == "retiring" || durableState == "cleanup-debt" {
+	if durableState == "archived" || durableState == "retiring" {
 		return localPeerTarget{}, errors.New("federated target is no longer local and live")
 	}
 	c.mu.Lock()
 	actor := c.lanes[sessionID]
-	if actor == nil || actor.state == "archived" || actor.state == "retiring" || actor.state == "cleanup-debt" {
+	if actor == nil || actor.state == "archived" || actor.state == "retiring" {
 		c.mu.Unlock()
 		return localPeerTarget{}, errors.New("federated target is no longer local and live")
 	}

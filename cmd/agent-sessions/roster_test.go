@@ -33,7 +33,6 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 			},
 			"archived": {ID: "archived", Product: "grok", Name: secret, State: "archived"},
 		},
-		CleanupDebts: map[string]daemonpkg.CleanupDebt{},
 	}}
 	remoteHosts := []federationpkg.Host{{
 		ID: "host-b", Name: "workstation-b", Generation: 4, Build: "0.3.0",

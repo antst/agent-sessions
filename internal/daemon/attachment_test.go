@@ -119,7 +119,7 @@ func TestAttachmentTransactionPreservesEveryProductEvidenceVariant(t *testing.T)
 	}
 }
 
-func TestAttachmentRollbackAndCleanupDebtAreExactAndRetryable(t *testing.T) {
+func TestAttachmentCleanupFailureDoesNotCreateDurableDebt(t *testing.T) {
 	store, err := OpenState(t.TempDir(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -165,12 +165,8 @@ func TestAttachmentRollbackAndCleanupDebtAreExactAndRetryable(t *testing.T) {
 	if got := snapshot.Catalog.Attachments["clean"].State; got != "detached" {
 		t.Fatalf("clean rollback state = %q", got)
 	}
-	if got := snapshot.Catalog.Attachments["debt"].State; got != "debt" {
-		t.Fatalf("ambiguous rollback state = %q", got)
-	}
-	debt, ok := snapshot.Catalog.CleanupDebts[attachmentDebtID("debt")]
-	if !ok || debt.Resource != "attachment:debt" || debt.Operation != "rollback-codex" || debt.LastVerifiedState != "unknown" {
-		t.Fatalf("cleanup debt = %+v, present=%v", debt, ok)
+	if got := snapshot.Catalog.Attachments["debt"].State; got != "selecting" {
+		t.Fatalf("failed cleanup changed durable state to %q", got)
 	}
 	if active := mustActiveAttachments(t, engine); len(active) != 0 {
 		t.Fatalf("rolled back attachments remained addressable: %+v", active)
@@ -181,13 +177,6 @@ func TestAttachmentRollbackAndCleanupDebtAreExactAndRetryable(t *testing.T) {
 	retried, err := engine.Rollback(context.Background(), "debt", "retry-cleanup")
 	if err != nil || retried.State != "detached" {
 		t.Fatalf("retry rollback = %+v, %v", retried, err)
-	}
-	snapshot, err = store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := snapshot.Catalog.CleanupDebts[attachmentDebtID("debt")]; ok {
-		t.Fatal("successful retry retained cleanup debt")
 	}
 }
 

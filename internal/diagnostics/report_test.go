@@ -9,8 +9,8 @@ func TestStatusAndDoctorHaveFixedTruthfulSchema(t *testing.T) {
 	input := Input{
 		RuntimeReady: true, Generation: 7, CatalogRevision: 18, ServiceState: "running",
 		ReleasePresent: true, EndpointPresent: true,
-		Revisions:     Revisions{Attachments: 5, Lanes: 7, CleanupDebt: 8, Federation: 9},
-		Records:       Records{Attachments: 4, ActiveAttachments: 3, Lanes: 8, ActiveLanes: 2, Turns: 12, UncollectedTurns: 1, CleanupDebts: 1},
+		Revisions:     Revisions{Attachments: 5, Lanes: 7, Federation: 9},
+		Records:       Records{Attachments: 4, ActiveAttachments: 3, Lanes: 8, ActiveLanes: 2, Turns: 12, UncollectedTurns: 1},
 		ProductStates: map[string]string{"codex": "ready", "claude": "missing", "grok": "opaque raw diagnostic"},
 	}
 	input.Operation = "status"
@@ -29,7 +29,7 @@ func TestStatusAndDoctorHaveFixedTruthfulSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doctor.Operation != "doctor" || len(doctor.Checks) != 7 || doctor.Checks[2].Status != "fail" {
+	if doctor.Operation != "doctor" || len(doctor.Checks) != 6 || doctor.Checks[2].Status != "unavailable" {
 		t.Fatalf("doctor report = %+v", doctor)
 	}
 }

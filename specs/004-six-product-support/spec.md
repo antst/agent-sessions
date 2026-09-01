@@ -220,13 +220,13 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   native-session persistence across resume, and externally reflected rename
   without TTY keystroke or output scraping.
 - **FR-004**: Lanes MUST support doctor, list, start, run, resume, wait, status,
-  interrupt, archive, collection-debt, and local/federated execution through
+  interrupt, archive, and local/federated execution through
   both MCP and `*-peer-lane` CLI surfaces.
 - **FR-005**: Parent operations MUST be authorized by independently attested
   product-native identity plus exact managed attachment evidence; model-supplied
   IDs and daemon-wide shared MCP identity MUST be insufficient.
 - **FR-006**: All products MUST reuse the existing AgentFrame, group admission,
-  delivery, attachment, lane, turn, cleanup-debt, and terminal-notice semantics
+  live delivery and lane-routing semantics
   unless this specification explicitly strengthens a shared contract.
 - **FR-007**: One data-only product catalog MUST author stable product identity,
   command aliases, native executable names, capabilities, tested versions,
