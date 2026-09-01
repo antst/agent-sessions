@@ -19,19 +19,75 @@ plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 bash -n \
   "$plugin_root/scripts/cachebuster" \
   "$plugin_root/scripts/package-release" \
+  "$plugin_root/scripts/release-final-gate" \
+  "$plugin_root/scripts/release-inventory" \
+  "$plugin_root/scripts/release-publication-preflight" \
+  "$plugin_root/scripts/release-tag-preflight" \
+  "$plugin_root/scripts/release-tag-verify" \
   "$plugin_root/scripts/repair-history-projection" \
+  "$plugin_root/scripts/install-host" \
+  "$plugin_root/scripts/install-hub" \
+  "$plugin_root/scripts/launchd-control" \
+  "$plugin_root/scripts/remove-host" \
+  "$plugin_root/scripts/remove-hub" \
+  "$plugin_root/scripts/test-install-host-transaction" \
+  "$plugin_root/scripts/test-install-hub-transaction" \
+  "$plugin_root/scripts/test-launchd-control" \
+  "$plugin_root/scripts/test-removal-transaction" \
   "$plugin_root/scripts/native-entry" \
-  "$plugin_root/scripts/test-claude-contract" \
   "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
   "$plugin_root/grok/scripts/native-entry" \
+  "$plugin_root/qwen/scripts/native-entry" \
   "$plugin_root/scripts/test"
 
-if ! cmp -s "$plugin_root/scripts/native-entry" "$plugin_root/grok/scripts/native-entry"; then
-  printf 'Grok plugin native-entry copy drifted from the shared installed entry point\n' >&2
+if grep -En 'agent-session-runtime-release-packager|AGENT_SESSIONS_RELEASE_PACKAGER' \
+  "$plugin_root/Makefile" "$plugin_root/scripts/package-release"; then
+  printf 'active release packaging still depends on the obsolete runtime image\n' >&2
   exit 1
 fi
 
-"$plugin_root/scripts/test-claude-contract"
+python3 - "$plugin_root/scripts/release-gate-manifest" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+compile(path.read_bytes(), str(path), "exec")
+PY
+
+
+for native_entry_copy in \
+  "$plugin_root/grok/scripts/native-entry" \
+  "$plugin_root/qwen/scripts/native-entry"; do
+  if ! cmp -s "$plugin_root/scripts/native-entry" "$native_entry_copy"; then
+    printf 'plugin native-entry copy drifted from the shared installed entry point: %s\n' \
+      "$native_entry_copy" >&2
+    exit 1
+  fi
+done
+
+release_matrix="$("$plugin_root/scripts/release-inventory" matrix-json)"
+release_package_inventory="$("$plugin_root/scripts/release-inventory" package-inventory-json)"
+release_host_aliases="$("$plugin_root/scripts/release-inventory" host-aliases)"
+python3 - "$release_matrix" "$release_package_inventory" "$release_host_aliases" <<'PY'
+import json
+import sys
+
+matrix = json.loads(sys.argv[1])
+inventory = json.loads(sys.argv[2])
+aliases = sys.argv[3].splitlines()
+platforms = {entry["platform"] for entry in matrix.get("include", [])}
+if platforms != {"linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"}:
+    raise SystemExit("authoritative release platform inventory is incomplete")
+if inventory.get("executables") != ["agent-sessions", "agent-sessions-hub"]:
+    raise SystemExit("authoritative release executable inventory is not the exact two-image contract")
+if {entry.get("product") for entry in inventory.get("plugin_payloads", [])} != {
+    "codex", "claude", "grok", "qwen"
+}:
+    raise SystemExit("authoritative release plugin inventory is incomplete")
+if aliases != [
+    "codex-peer", "claude-peer", "grok-peer", "qwen-peer",
+    "codex-peer-lane", "claude-peer-lane", "grok-peer-lane", "qwen-peer-lane",
+]:
+    raise SystemExit("authoritative installed host alias inventory is incomplete")
+PY
 
 codex_plugin_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_root/.codex-plugin/plugin.json" | head -1)"
 grok_plugin_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_root/grok/.grok-plugin/plugin.json" | head -1)"
@@ -46,34 +102,42 @@ if grep -Fq '"SessionEnd"' "$plugin_root/hooks/hooks.json"; then
 	exit 1
 fi
 
-claude_lane_help="$(go run "$plugin_root/cmd/agent-session-runtime" claude-lane --help)"
+codex_lane_help="$(go run "$plugin_root/cmd/agent-sessions" lane codex --help)"
+claude_lane_help="$(go run "$plugin_root/cmd/agent-sessions" lane claude --help)"
 for command in run start resume wait status interrupt archive list doctor; do
   if ! grep -Fq "claude-peer-lane $command" <<<"$claude_lane_help"; then
     printf 'Claude lane help is missing command %s\n' "$command" >&2
     exit 1
   fi
 done
-grok_lane_help="$(go run "$plugin_root/cmd/agent-session-runtime" grok-lane --help)"
+grok_lane_help="$(go run "$plugin_root/cmd/agent-sessions" lane grok --help)"
 for command in run start resume wait status interrupt archive list doctor; do
   if ! grep -Fq "grok-peer-lane $command" <<<"$grok_lane_help"; then
     printf 'Grok lane help is missing command %s\n' "$command" >&2
     exit 1
   fi
 done
+qwen_lane_help="$(go run "$plugin_root/cmd/agent-sessions" lane qwen --help)"
 for flag in --permission-mode --model --reasoning-effort --auto-archive-after --no-auto-archive --persistent --mine; do
   if ! grep -Fq -- "$flag" <<<"$grok_lane_help"; then
     printf 'Grok lane help is missing flag %s\n' "$flag" >&2
     exit 1
   fi
 done
-for flag in --permission-mode --max-budget-usd --auto-archive-after --no-auto-archive --persistent --notify --schema --bare --mine; do
+for flag in --permission-mode --max-budget-usd --auto-archive-after --no-auto-archive --persistent --schema --bare --mine; do
   if ! grep -Fq -- "$flag" <<<"$claude_lane_help"; then
     printf 'Claude lane help is missing flag %s\n' "$flag" >&2
     exit 1
   fi
 done
+for lane_help in "$codex_lane_help" "$claude_lane_help" "$grok_lane_help" "$qwen_lane_help"; do
+  if grep -Eq -- '(^|[[:space:]])--(no-)?notify([[:space:]]|$)' <<<"$lane_help"; then
+    printf 'Unified lane help still advertises a legacy notify flag\n' >&2
+    exit 1
+  fi
+done
 if grep -Rq '\[TODO' "$plugin_root/skills/claude-lane" ||
-   ! grep -Fq 'contract_version: 1' "$plugin_root/skills/claude-lane/SKILL.md" ||
+   ! grep -Fq 'contract_version: 2' "$plugin_root/skills/claude-lane/SKILL.md" ||
    ! grep -Fq 'claude-peer-lane' "$plugin_root/docs/CLAUDE-LANES.md"; then
   printf 'Codex Claude-lane skill or contract documentation is incomplete\n' >&2
   exit 1
@@ -93,28 +157,41 @@ if ! grep -Fq 'Do **not** poll' "$plugin_root/skills/claude-lane/SKILL.md"; then
   exit 1
 fi
 if grep -Rq '\[TODO' "$plugin_root/skills/grok-lane" ||
-   ! grep -Fq 'contract_version: 1' "$plugin_root/skills/grok-lane/SKILL.md" ||
+   ! grep -Fq 'contract_version: 2' "$plugin_root/skills/grok-lane/SKILL.md" ||
    ! grep -Fq 'grok-peer-lane' "$plugin_root/docs/GROK-LANES.md"; then
   printf 'Codex Grok-lane skill or contract documentation is incomplete\n' >&2
   exit 1
 fi
 if [[ ! -f "$plugin_root/grok/skills/agent-lanes/SKILL.md" ]] ||
-   ! grep -Fq 'Codex lanes require contract version **2**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
-   ! grep -Fq 'Claude and Grok lanes require contract version **1**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
+   ! grep -Fq 'All four unified daemon lanes require contract version **2**' "$plugin_root/grok/skills/agent-lanes/SKILL.md" ||
    ! grep -Fq 'report the lane cell as blocked; never "try anyway."' "$plugin_root/grok/skills/agent-lanes/SKILL.md"; then
-  printf 'Grok agent-lanes skill does not distinguish all target contracts\n' >&2
+  printf 'Grok agent-lanes skill does not enforce the unified lane contract\n' >&2
   exit 1
 fi
-if [[ ! -f "$plugin_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   ! grep -Fq 'agent_sessions.send_message' "$plugin_root/grok/skills/agent-sessions/SKILL.md" ||
-   ! grep -Fq 'Use `/agent-lanes`' "$plugin_root/grok/skills/agent-sessions/SKILL.md"; then
-  printf 'Grok agent-sessions messaging skill is incomplete\n' >&2
+canonical_agent_sessions_skill="$plugin_root/skills/agent-sessions/SKILL.md"
+for product_skill in \
+  "$plugin_root/claude/skills/agent-sessions/SKILL.md" \
+  "$plugin_root/grok/skills/agent-sessions/SKILL.md" \
+  "$plugin_root/qwen/skills/agent-sessions/SKILL.md"; do
+  if ! cmp -s "$canonical_agent_sessions_skill" "$product_skill"; then
+    printf 'Product agent-sessions skill drifted from canonical content: %s\n' "$product_skill" >&2
+    exit 1
+  fi
+done
+for contract_text in agent_sessions.list_peers agent_sessions.send_message agent_sessions.broadcast agent_sessions.lane owner_session_id; do
+  if ! grep -Fq "$contract_text" "$canonical_agent_sessions_skill"; then
+    printf 'Canonical agent-sessions skill is missing %s\n' "$contract_text" >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$plugin_root/skills/agent-sessions/agents/openai.yaml" ]]; then
+  printf 'Codex agent-sessions skill metadata is missing\n' >&2
   exit 1
 fi
 for skill in "$plugin_root/skills/claude-lane/SKILL.md" "$plugin_root/claude/skills/codex-lane/SKILL.md"; do
-  if ! grep -Fq 'peer-federator lane --host HOST' "$skill" ||
+  if ! grep -Fq 'agent_sessions.lane' "$skill" ||
      ! grep -Fq 'never fall back to SSH' "$skill"; then
-    printf 'Lane skill %s does not document hub-only remote execution\n' "$skill" >&2
+    printf 'Lane skill %s does not document daemon-owned remote execution\n' "$skill" >&2
     exit 1
   fi
 done
@@ -128,7 +205,6 @@ if grep -En '(^|[^[:alnum:]_])(node|flock)([^[:alnum:]_]|$)|readlink -f' \
   "$plugin_root/scripts/package-release" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/native-entry" \
-  "$plugin_root/scripts/test-claude-contract" \
   "$plugin_root/claude/skills/codex-lane/scripts/lane-preflight" \
   "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight"; then
   printf 'active scripts unexpectedly depend on Node, flock, or GNU readlink -f\n' >&2
@@ -153,787 +229,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fake_codex="$temporary_root/fake-codex"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@"' >"$fake_codex"
-chmod 0700 "$fake_codex"
-
-launcher_binary="$temporary_root/codex-peer"
-go build -o "$launcher_binary" "$plugin_root/cmd/codex-peer"
-runtime_binary="$temporary_root/agent-session-runtime"
-go build -o "$runtime_binary" "$plugin_root/cmd/agent-session-runtime"
-federator_binary="$temporary_root/peer-federator"
-go build -o "$federator_binary" "$plugin_root/cmd/peer-federator"
-agent_runtime="$temporary_root/agent-runtime"
-"$federator_binary" agent --host launcher-test --runtime-dir "$agent_runtime" \
-  --state-dir "$temporary_root/agent-state" --claude-config-dir "$temporary_root/agent-claude" \
-  >"$temporary_root/agent.out" 2>"$temporary_root/agent.err" &
-agent_pid=$!
-for _ in {1..100}; do
-	[[ -S "$agent_runtime/agent.sock" ]] && break
-	sleep 0.01
-done
-if [[ ! -S "$agent_runtime/agent.sock" ]]; then
-	printf 'grouped host agent did not start for launcher contract tests\n' >&2
-	exit 1
-fi
-export AGENT_SESSIONS_AGENT_RUNTIME_DIR="$agent_runtime"
-
-informational="$({
-  CODEX_PEER_CODEX_BIN="$fake_codex" \
-  CLAUDE_PEER_DATA_DIR="$temporary_root/state" \
-    "$launcher_binary" -n reviewer --version
-})"
-if [[ "$informational" != "--version" || -e "$temporary_root/state" ]]; then
-  printf 'codex-peer did not pass its informational invocation through cleanly\n' >&2
-  exit 1
-fi
-
-explicit_yolo="$({
-  CODEX_PEER_CODEX_BIN="$fake_codex" \
-  CLAUDE_PEER_DATA_DIR="$temporary_root/yolo-state" \
-    "$launcher_binary" -n reviewer --yolo --version
-})"
-if [[ "$explicit_yolo" != $'--yolo\n--version' || -e "$temporary_root/yolo-state" ]]; then
-  printf 'codex-peer did not preserve an explicit user-selected --yolo flag\n' >&2
-  exit 1
-fi
-
-# codex-peer owns the remote endpoint and resolves one canonical cwd for the
-# bridge transaction. Every other Codex argument remains byte-for-byte ordered.
-launcher_fixture="$temporary_root/launcher-fixture"
-launcher_cwd="$temporary_root/launcher-cwd"
-mkdir -p "$launcher_fixture" "$launcher_cwd/relative" "$launcher_cwd/one" "$launcher_cwd/two"
-printf '%s\n' \
-  '#!/bin/sh' \
-  'set -eu' \
-  'if [ -n "${NATIVE_RECORD-}" ]; then printf "%s\\n" "$@" >>"$NATIVE_RECORD"; fi' \
-	'case "${1-}:${2-}" in' \
-	'  appserver:profile-key) printf "%s\\n" 0123456789abcdefabcd ;;' \
-	'  appserver:stopped) exit 0 ;;' \
-	'  supervisor:start) exit 0 ;;' \
-	'  launch:proc-start) printf "%s\\n" owner_fixture ;;' \
-	'  launch:start) printf "%s\\n" 00000000-0000-0000-0000-000000000777 ;;' \
-	'  launch:bind)' \
-	'    shift 2; bind_cwd=' \
-	'    while [ "$#" -gt 1 ]; do [ "$1" = --cwd ] && bind_cwd="$2"; shift 2; done' \
-	'    [ -n "${FAKE_BIND_CWD-}" ] && bind_cwd="$FAKE_BIND_CWD"' \
-	'    printf "%s\\n%s\\n" 00000000-0000-0000-0000-000000000778 "$bind_cwd"' \
-	'    ;;' \
-	'  lane:*|claude-lane:*) exit 0 ;;' \
-  '  *) exit 64 ;;' \
-  'esac' \
-  >"$launcher_fixture/native-runtime"
-printf '%s\n' \
-  '#!/bin/sh' \
-  'for arg in "$@"; do' \
-  '  if [ "$arg" = --help ]; then' \
-  '    printf "%s\\n" "USAGE WORDING CHANGED" >&2' \
-  '    exit 97' \
-  '  fi' \
-  'done' \
-  'printf "%s\\n" "$@" >"$CODEX_RECORD"' \
-  >"$launcher_fixture/codex"
-chmod 0700 \
-  "$launcher_fixture/native-runtime" \
-  "$launcher_fixture/codex"
-launcher_record=
-run_launcher_case() {
-  local case_name="$1"
-  shift
-  launcher_record="$temporary_root/$case_name.argv"
-  local native_record="$temporary_root/$case_name.native"
-  (
-    cd "$launcher_cwd"
-    CODEX_THREAD_ID= CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
-      CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" \
-      CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-      CODEX_RECORD="$launcher_record" \
-      NATIVE_RECORD="$native_record" \
-      CLAUDE_PEER_DATA_DIR="$temporary_root/$case_name-state" \
-      "$launcher_binary" "$@"
-  )
-}
-run_launcher_failure() {
-  local case_name="$1" expected="$2"
-  shift 2
-  set +e
-  run_launcher_case "$case_name" "$@" >"$temporary_root/$case_name.out" 2>"$temporary_root/$case_name.err"
-  local status=$?
-  set -e
-  if ((status != 2)) || ! grep -Fq "$expected" "$temporary_root/$case_name.err"; then
-    printf 'codex-peer did not fail closed for %s (status=%s)\n' "$case_name" "$status" >&2
-    exit 1
-  fi
-}
-assert_launcher_argv() {
-  local expected
-  expected="$(printf '%s\n' "${@:2}")"
-  if [[ "$(<"$1")" != "$expected" ]]; then
-    printf 'codex-peer argv mismatch for %s\nexpected:\n%s\nactual:\n%s\n' \
-      "$1" "$expected" "$(<"$1")" >&2
-    exit 1
-  fi
-}
-
-run_launcher_case short-cd -C "$launcher_cwd/one" --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd/one" --no-alt-screen
-run_launcher_case fresh-no-args
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd"
-run_launcher_case fresh-name-only -n bash32-peer
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd"
-if ! grep -Fxq -- '--name-source' "$temporary_root/fresh-name-only.native" ||
-   ! grep -Fxq 'launch' "$temporary_root/fresh-name-only.native"; then
-  printf 'fresh launcher did not preserve the command-line name source\n' >&2
-  exit 1
-fi
-launcher_record="$temporary_root/fresh-env-name.argv"
-native_record="$temporary_root/fresh-env-name.native"
-(
-  cd "$launcher_cwd"
-  CODEX_THREAD_ID= CLAUDE_PEER_SESSION_NAME='environment peer' CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
-    CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-    CODEX_RECORD="$launcher_record" \
-    NATIVE_RECORD="$native_record" CLAUDE_PEER_DATA_DIR="$temporary_root/fresh-env-name-state" \
-    "$launcher_binary"
-)
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd"
-if ! grep -Fxq -- '--name-source' "$native_record" || ! grep -Fxq 'explicit' "$native_record" ||
-   ! grep -Fxq 'environment peer' "$native_record"; then
-  printf 'fresh launcher did not materialize CLAUDE_PEER_SESSION_NAME\n' >&2
-  exit 1
-fi
-run_launcher_case fresh-yolo --yolo --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" --yolo --no-alt-screen
-if ! grep -Fxq -- '--approval-policy' "$temporary_root/fresh-yolo.native" ||
-   ! grep -Fxq 'never' "$temporary_root/fresh-yolo.native" ||
-   ! grep -Fxq 'danger-full-access' "$temporary_root/fresh-yolo.native"; then
-	printf 'fresh launcher did not apply yolo policy at thread creation\n' >&2
-	exit 1
-fi
-run_launcher_case long-cd --cd "$launcher_cwd/two" --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 --cd "$launcher_cwd/two" --no-alt-screen
-run_launcher_case equals-cd --cd="$launcher_cwd/one" --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 --cd="$launcher_cwd/one" --no-alt-screen
-run_launcher_case relative-cd -C relative --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C relative --no-alt-screen
-run_launcher_case attached-absolute-cd -C"$launcher_cwd/one" --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C"$launcher_cwd/one" --no-alt-screen
-run_launcher_case attached-relative-cd -Crelative --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -Crelative --no-alt-screen
-run_launcher_case multiple-cd -C"$launcher_cwd/one" --cd "$launcher_cwd/two" -Crelative --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C"$launcher_cwd/one" --cd "$launcher_cwd/two" -Crelative --no-alt-screen
-run_launcher_case argument-boundary -C "$launcher_cwd/one" -- command -C literal --cd=literal -Cfoo
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd/one" -- command -C literal --cd=literal -Cfoo
-# Classification is independent of human-readable Codex help output; the
-# fixture deliberately fails every --help probe above.
-run_launcher_case prompt-boundary -- literal-prompt
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" -- literal-prompt
-run_launcher_case native-resume resume existing-thread --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --no-alt-screen
-run_launcher_case native-resume-no-options resume existing-thread
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd"
-if ! grep -Fxq -- '--cwd-explicit' "$temporary_root/native-resume.native" || ! grep -Fxq 'false' "$temporary_root/native-resume.native"; then
-  printf 'resumed launcher did not distinguish inherited cwd\n' >&2
-  exit 1
-fi
-launcher_record="$temporary_root/native-resume-inherited-cwd.argv"
-native_record="$temporary_root/native-resume-inherited-cwd.native"
-CODEX_THREAD_ID= FAKE_BIND_CWD="$launcher_cwd/two" CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
-  CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-  CODEX_RECORD="$launcher_record" \
-  NATIVE_RECORD="$native_record" CLAUDE_PEER_DATA_DIR="$temporary_root/native-resume-inherited-cwd-state" \
-  "$launcher_binary" resume existing-thread --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd/two" --no-alt-screen
-run_launcher_case native-resume-explicit-cwd -C "$launcher_cwd" resume existing-thread --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --no-alt-screen
-if ! grep -Fxq -- '--cwd-explicit' "$temporary_root/native-resume-explicit-cwd.native" || ! grep -Fxq 'true' "$temporary_root/native-resume-explicit-cwd.native"; then
-  printf 'resumed launcher did not distinguish explicit cwd\n' >&2
-  exit 1
-fi
-run_launcher_case native-resume-trailing-cwd resume existing-thread --model gpt-test -C relative --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 --model gpt-test -C relative --no-alt-screen
-run_launcher_case native-resume-yolo resume existing-thread --yolo --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --yolo --no-alt-screen
-if ! grep -Fxq -- '--approval-policy' "$temporary_root/native-resume-yolo.native" ||
-   ! grep -Fxq 'never' "$temporary_root/native-resume-yolo.native" ||
-   ! grep -Fxq 'danger-full-access' "$temporary_root/native-resume-yolo.native"; then
-  printf 'resumed yolo launcher did not persist policy before the native Codex attachment\n' >&2
-  exit 1
-fi
-run_launcher_case global-yolo-resume --yolo resume existing-thread --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --yolo --no-alt-screen
-if ! grep -Fxq -- '--approval-policy' "$temporary_root/global-yolo-resume.native" ||
-   ! grep -Fxq 'never' "$temporary_root/global-yolo-resume.native" ||
-   ! grep -Fxq 'danger-full-access' "$temporary_root/global-yolo-resume.native"; then
-  printf 'global yolo option did not persist policy before the native Codex attachment\n' >&2
-  exit 1
-fi
-run_launcher_case global-display-resume --no-alt-screen resume existing-thread
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --no-alt-screen
-for approval_args in '-a never' '--ask-for-approval never' '-anever' '-a=never' '--ask-for-approval=never'; do
-  # shellcheck disable=SC2086 # deliberate option spelling matrix
-  run_launcher_case "fresh-approval-${approval_args//[^a-zA-Z0-9]/-}" $approval_args
-  # shellcheck disable=SC2086 # deliberate option spelling matrix
-  run_launcher_case "resume-approval-${approval_args//[^a-zA-Z0-9]/-}" resume existing-thread $approval_args
-done
-run_launcher_case native-resume-options --strict-config -c model=gpt-test --enable feature-a --disable feature-b --model gpt-test --oss --local-provider ollama --profile testing --sandbox read-only --approve-for-me --ask-for-approval=on-request --search --no-alt-screen resume --all --include-non-interactive existing-thread --add-dir "$launcher_cwd/one" -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" --strict-config -c model=gpt-test --enable feature-a --disable feature-b --model gpt-test --oss --local-provider ollama --profile testing --sandbox read-only --approve-for-me --ask-for-approval=on-request --search --no-alt-screen --all --include-non-interactive --add-dir "$launcher_cwd/one" -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
-run_launcher_case fresh-variadic-image -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
-run_launcher_case resume-variadic-image resume existing-thread -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" -i "$launcher_cwd/one.png" "$launcher_cwd/two.png" -- literal-prompt
-run_launcher_failure native-resume-last 'picker and --last are unsupported' resume --last --model gpt-test --no-alt-screen
-run_launcher_failure native-resume-picker 'picker and --last are unsupported' resume --all --no-alt-screen
-run_launcher_case resume-model-value -m resume resume existing-thread --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" -m resume --no-alt-screen
-run_launcher_case resume-profile-value -p resume resume existing-thread --no-alt-screen
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000778 -C "$launcher_cwd" -p resume --no-alt-screen
-run_launcher_failure native-fork 'fork is not owner-attested yet' -n forked fork existing-thread --no-alt-screen
-run_launcher_failure native-remote 'caller-controlled --remote options are not supported' --remote unix:///tmp/foreign.sock
-run_launcher_failure native-remote-token 'caller-controlled --remote options are not supported' resume existing-thread --remote-auth-token-env TOKEN
-run_launcher_case native-fresh-options -c model=gpt-test --model gpt-test --sandbox workspace-write -a never --add-dir "$launcher_cwd/one" --search -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
-assert_launcher_argv "$launcher_record" --remote unix:// resume 00000000-0000-0000-0000-000000000777 -C "$launcher_cwd" -c model=gpt-test --model gpt-test --sandbox workspace-write -a never --add-dir "$launcher_cwd/one" --search -i "$launcher_cwd/image.png" --dangerously-bypass-hook-trust
-run_launcher_case noninteractive-exec exec -C "$launcher_cwd/two" -- echo ok
-assert_launcher_argv "$launcher_record" exec -C "$launcher_cwd/two" -- echo ok
-run_launcher_case noninteractive-app app
-assert_launcher_argv "$launcher_record" app
-run_launcher_case noninteractive-migrate-rollouts migrate-rollouts
-assert_launcher_argv "$launcher_record" migrate-rollouts
-run_launcher_case global-cd-before-subcommand -C "$launcher_cwd/two" completion bash
-assert_launcher_argv "$launcher_record" -C "$launcher_cwd/two" completion bash
-run_launcher_case informational-invalid-cd -C /definitely/not/here --version
-assert_launcher_argv "$launcher_record" -C /definitely/not/here --version
-
-# Production classification never parses human-readable help. When a real
-# Codex binary is available to the test environment, use its current Commands
-# block only as a drift detector: every discovered non-interactive command must
-# pass through without invoking runtime bootstrap or creating a peer thread.
-real_codex="$(command -v codex || true)"
-if [[ -n "$real_codex" ]]; then
-  real_commands="$({ "$real_codex" --help || true; } | awk '
-    /^Commands:$/ { commands=1; next }
-    commands && /^[^[:space:]]/ { exit }
-    commands && /^  [[:alnum:]][[:alnum:]-]*[[:space:]]/ { print $1 }
-  ')"
-  if [[ -z "$real_commands" ]] || ! grep -Fxq exec <<<"$real_commands" || ! grep -Fxq resume <<<"$real_commands"; then
-    printf 'could not extract the installed Codex command list for launcher drift validation\n' >&2
-    exit 1
-  fi
-  while IFS= read -r real_command; do
-    case "$real_command" in
-      resume|fork) continue ;;
-    esac
-    run_launcher_case "real-command-$real_command" "$real_command"
-    assert_launcher_argv "$launcher_record" "$real_command"
-    if [[ -e "$temporary_root/real-command-$real_command.native" ]]; then
-      printf 'installed Codex command %s was misclassified as a fresh peer\n' "$real_command" >&2
-      exit 1
-    fi
-  done <<<"$real_commands"
-fi
-
-# The lane launchers are separate native executables, not aliases to the
-# runtime or to each other. Exercise their final exec boundary explicitly.
-for lane_binary in codex-peer-lane claude-peer-lane; do
-  go build -o "$temporary_root/$lane_binary" "$plugin_root/cmd/$lane_binary"
-  lane_record="$temporary_root/$lane_binary.native"
-  lane_state="$temporary_root/$lane_binary-state"
-  CODEX_THREAD_ID= CODEX_PEER_CODEX_BIN="$launcher_fixture/codex" \
-    CODEX_PEER_NATIVE_RUNTIME="$launcher_fixture/native-runtime" \
-    CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-    CODEX_RECORD="$temporary_root/$lane_binary.codex" \
-    NATIVE_RECORD="$lane_record" CLAUDE_PEER_DATA_DIR="$lane_state" \
-    "$temporary_root/$lane_binary" doctor
-  expected_role=lane
-  [[ "$lane_binary" == claude-peer-lane ]] && expected_role=claude-lane
-  if ! tail -2 "$lane_record" | grep -Fxq "$expected_role" ||
-     ! tail -1 "$lane_record" | grep -Fxq doctor; then
-    printf '%s did not exec the expected shared-runtime role\n' "$lane_binary" >&2
-    exit 1
-  fi
-done
-
-# INSTALL_ROOT is independently configurable from PREFIX; installed launchers
-# must point at that exact tree rather than a hard-coded libexec relative path.
-custom_install_root="$temporary_root/custom-install"
-custom_prefix="$temporary_root/custom-prefix"
-install_codex="$temporary_root/install-codex"
-install_codex_record="$temporary_root/install-codex-commands"
-install_codex_state="$temporary_root/install-codex-state"
-printf '%s\n' \
-  '#!/bin/sh' \
-  'printf "%s\n" "$*" >>"$FAKE_CODEX_RECORD"' \
-  'if [ "$1 $2 $3" = "plugin add agent-sessions@agent-sessions" ]; then : >"$FAKE_CODEX_STATE"; fi' \
-  'if [ "$1 $2 $3" = "plugin list --json" ]; then' \
-  '  if [ -f "$FAKE_CODEX_STATE" ]; then' \
-  '    printf "%s\n" '\''[{"pluginId":"agent-sessions@agent-sessions"},{"pluginId":"claude-code-peer@agent-sessions"},{"pluginId":"claude-code-peer@personal"},{"pluginId":"claude-code-peer@codex-messaging"},{"pluginId":"agent-sessions@codex-messaging"}]'\''' \
-  '  else' \
-  '    printf "%s\n" '\''[{"pluginId":"claude-code-peer@agent-sessions"},{"pluginId":"claude-code-peer@personal"},{"pluginId":"claude-code-peer@codex-messaging"},{"pluginId":"agent-sessions@codex-messaging"}]'\''' \
-  '  fi' \
-  'elif [ "$1 $2 $3 $4" = "plugin marketplace list --json" ]; then' \
-  '  printf "%s\n" '\''[{"name":"agent-sessions"},{"name":"codex-messaging"}]'\''' \
-  'fi' >"$install_codex"
-chmod 0700 "$install_codex"
-install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=0 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-for launcher in peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer; do
-  if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/$launcher\" \"$custom_prefix/bin/$launcher\"" <<<"$install_plan"; then
-    printf 'install launcher %s does not target the configured INSTALL_ROOT\n' "$launcher" >&2
-    exit 1
-  fi
-done
-if ! grep -Eq "ln -sfn \"$custom_install_root/bin/(linux|darwin)-(x64|arm64)/agent-session-runtime\" \"$custom_prefix/bin/agent-session-runtime\"" <<<"$install_plan" ||
-   ! grep -Fq "rm -f -- \"$custom_prefix/bin/codex-messaging\"" <<<"$install_plan"; then
-  printf 'install runtime link does not target the configured INSTALL_ROOT\n' >&2
-  exit 1
-fi
-runtime_install_plan="$(make -n -C "$plugin_root" install START_RUNTIME=1 PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root")"
-if ! grep -Eq "CODEX_PEER_CODEX_BIN=.*agent-session-runtime\" bootstrap" <<<"$runtime_install_plan" ||
-   grep -Eq 'scripts/(ensure-runtime|build-runtime)' <<<"$runtime_install_plan"; then
-  printf 'install does not bootstrap through the installed native runtime\n' >&2
-  exit 1
-fi
-preflight_plan="$(make -n -C "$plugin_root" install-preflight CODEX=codex-test-cli)"
-if ! grep -Fq 'codex-test-cli app-server daemon stop' <<<"$preflight_plan"; then
-  printf 'install preflight does not print the App Server stop command\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$preflight_plan" ||
-   ! grep -Fq 'Exit every grok-peer TUI normally' <<<"$preflight_plan" ||
-   ! grep -Fq 'grok-peer-lane archive SESSION_OR_NAME' <<<"$preflight_plan"; then
-  printf 'install preflight does not require clean managed Grok shutdown\n' >&2
-  exit 1
-fi
-FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
-make -s -C "$plugin_root" install \
-  START_RUNTIME=0 CODEX="$install_codex" PREFIX="$custom_prefix" INSTALL_ROOT="$custom_install_root" \
-  >"$temporary_root/install.out"
-replacement="$(grep -nFx 'plugin add agent-sessions@agent-sessions' "$install_codex_record" | head -1 | cut -d: -f1)"
-for legacy_id in \
-  claude-code-peer@agent-sessions \
-  claude-code-peer@personal \
-  claude-code-peer@codex-messaging \
-  agent-sessions@codex-messaging; do
-  removal="$(grep -nFx "plugin remove $legacy_id" "$install_codex_record" | head -1 | cut -d: -f1)"
-  if [[ -z "$replacement" || -z "$removal" ]] || (( replacement >= removal )); then
-    printf 'Codex migration removed %s before accepting agent-sessions@agent-sessions\n' "$legacy_id" >&2
-    cat "$install_codex_record" >&2
-    exit 1
-  fi
-done
-installed_runtimes=("$custom_install_root"/bin/*/agent-session-runtime)
-installed_binary_dir="$(dirname -- "${installed_runtimes[0]}")"
-if (( ${#installed_runtimes[@]} != 1 )) || [[ ! -x "${installed_runtimes[0]}" ]] ||
-   [[ ! -f "$custom_install_root/.codex-plugin/plugin.json" ]] ||
-   [[ ! -f "$custom_install_root/skills/claude-lane/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/skills/codex-lane/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/skills/grok-lane/SKILL.md" ]] ||
-   [[ -e "$custom_install_root/.claude-plugin" ]] || [[ -e "$custom_install_root/claude" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/agent-session-runtime")" != "${installed_runtimes[0]}" ]] ||
-   [[ -e "$custom_prefix/bin/codex-messaging" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/codex-peer")" != "$installed_binary_dir/codex-peer" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/peer")" != "$installed_binary_dir/peer" ]] ||
-	[[ "$(readlink "$custom_prefix/bin/claude-peer")" != "$installed_binary_dir/claude-peer" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/codex-peer-lane")" != "$installed_binary_dir/codex-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/claude-peer-lane")" != "$installed_binary_dir/claude-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/grok-peer")" != "$installed_binary_dir/grok-peer" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/grok-peer-lane")" != "$installed_binary_dir/grok-peer-lane" ]] ||
-   [[ "$(readlink "$custom_prefix/bin/peer-federator")" != "$installed_binary_dir/peer-federator" ]]; then
-  printf 'copied-prefix installation did not produce usable payload and launcher links\n' >&2
-  exit 1
-fi
-for installed_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
-  if [[ ! -x "$installed_binary_dir/$installed_binary" ]]; then
-    printf 'copied-prefix installation omitted binary %s\n' "$installed_binary" >&2
-    exit 1
-  fi
-done
-if [[ ! -f "$custom_install_root/grok/.grok-plugin/plugin.json" ]] ||
-   [[ ! -f "$custom_install_root/grok/.mcp.json" ]] ||
-   [[ ! -f "$custom_install_root/grok/skills/agent-lanes/SKILL.md" ]] ||
-   [[ ! -f "$custom_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -x "$custom_install_root/grok/scripts/native-entry" ]] ||
-   ! grep -Fq '"grok-mcp"' "$custom_install_root/grok/.mcp.json" ||
-   ! grep -Fq '${GROK_PLUGIN_ROOT}/scripts/native-entry' "$custom_install_root/grok/.mcp.json"; then
-  printf 'copied-prefix installation omitted the Grok MCP plugin or its native runtime entry\n' >&2
-  exit 1
-fi
-grok_cache="$temporary_root/grok-cache"
-cp -R "$custom_install_root/grok" "$grok_cache"
-grok_cache_state="$temporary_root/grok-cache-state"
-mkdir -p "$grok_cache_state"
-grok_cache_runtime="$temporary_root/grok-cache-runtime"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@"' >"$grok_cache_runtime"
-chmod 0700 "$grok_cache_runtime"
-printf '%s\n' "$grok_cache_runtime" >"$grok_cache_state/native-runtime-path"
-grok_cache_result="$(CLAUDE_PEER_DATA_DIR="$grok_cache_state" "$grok_cache/scripts/native-entry" grok-mcp)"
-if [[ "$grok_cache_result" != grok-mcp ]]; then
-  printf 'cached Grok plugin did not resolve and invoke the installed native runtime\n' >&2
-  exit 1
-fi
-grok_exact_runtime="$temporary_root/grok-exact-runtime"
-printf '%s\n' '#!/bin/sh' 'printf "exact:%s\\n" "$*"' >"$grok_exact_runtime"
-chmod 0700 "$grok_exact_runtime"
-grok_exact_result="$(GROK_PEER_NATIVE_RUNTIME="$grok_exact_runtime" CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  "$grok_cache/scripts/native-entry" grok-mcp)"
-if [[ "$grok_exact_result" != exact:grok-mcp ]]; then
-  printf 'cached Grok plugin did not preserve the launch-selected native runtime\n' >&2
-  exit 1
-fi
-grok_user_plugin_root="$temporary_root/grok-user-plugins/agent-sessions"
-grok_install_plan="$(make -n -C "$plugin_root" install-grok GROK=grok-test-cli \
-  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-  GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root")"
-if ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_install_plan" ||
-   ! grep -Fq 'agent-session-runtime" grok stopped' <<<"$grok_install_plan" ||
-   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin uninstall \"agent-sessions\" --keep-data" <<<"$grok_install_plan" ||
-   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" plugin install \"$custom_install_root/grok\" --trust" <<<"$grok_install_plan" ||
-   ! grep -Fq "GROK_PEER_GROK_BIN=\"grok-test-cli\" \"$custom_prefix/bin/grok-peer\" inspect --json" <<<"$grok_install_plan" ||
-   ! grep -Fq "\"$custom_prefix/bin/agent-session-runtime\" grok-plugin-verify --root \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
-   ! grep -Fq "rm -rf -- \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
-   ! grep -Fq "mv \"\$stage_dir\" \"$grok_user_plugin_root\"" <<<"$grok_install_plan" ||
-   grep -Fq ' plugin enable ' <<<"$grok_install_plan"; then
-  printf 'Grok plugin install plan does not validate, stage, enable, and inspect the user payload\n' >&2
-  exit 1
-fi
-grok_auto_install_plan="$(GROK="$temporary_root/inherited-chat-grok" make -e -n -C "$plugin_root" install-grok \
-  GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root")"
-if grep -Fq 'GROK_PEER_GROK_BIN=' <<<"$grok_auto_install_plan" ||
-   ! grep -Fq "\"$custom_prefix/bin/grok-peer\" plugin validate \"$custom_install_root/grok\"" <<<"$grok_auto_install_plan"; then
-  printf 'default Grok plugin install does not ignore inherited GROK under make -e\n' >&2
-  exit 1
-fi
-
-grok_plugin_fixture="$temporary_root/grok-build-fixture"
-grok_plugin_log="$temporary_root/grok-plugin-commands.log"
-cat >"$grok_plugin_fixture" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >>"$GROK_PLUGIN_TEST_LOG"
-if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then
-  printf '%s\n' 'Grok Build TUI' 'Usage: grok [OPTIONS]' '--leader-socket <PATH>' 'Commands:' '  agent' '  leader'
-  exit 0
-fi
-if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
-  exit "${GROK_PLUGIN_TEST_LIST_STATUS:-0}"
-fi
-if [ "$1" = "plugin" ] && { [ "$2" = "validate" ] || [ "$2" = "install" ] || [ "$2" = "uninstall" ]; }; then
-  exit 0
-fi
-if [ "$1" = "inspect" ] && [ "$2" = "--json" ]; then
-  printf '{"plugins":[{"name":"agent-sessions","scope":"user","path":"%s","enabled":true,"provides":{"skills":2,"mcpServers":1}}],"mcpServers":[{"name":"agent_sessions","transport":"stdio","target":"%s/scripts/native-entry","source":{"type":"plugin","plugin_name":"agent-sessions","path":"%s"}}]}\n' \
-    "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT" "$GROK_PLUGIN_TEST_USER_ROOT"
-  exit "${GROK_PLUGIN_TEST_INSPECT_STATUS:-0}"
-fi
-exit 91
-EOF
-chmod 0700 "$grok_plugin_fixture"
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$grok_user_plugin_root" \
-  make -s -C "$plugin_root" install-grok \
-  GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-  GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-  GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-  GROK_USER_PLUGIN_ROOT="$grok_user_plugin_root"
-if [[ ! -f "$grok_user_plugin_root/.grok-plugin/plugin.json" ]] ||
-   [[ ! -f "$grok_user_plugin_root/.mcp.json" ]] ||
-   [[ ! -f "$grok_user_plugin_root/skills/agent-lanes/SKILL.md" ]] ||
-   [[ ! -f "$grok_user_plugin_root/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -x "$grok_user_plugin_root/scripts/native-entry" ]] ||
-   ! grep -Fq 'plugin validate' "$grok_plugin_log" ||
-   ! grep -Fq "plugin install $custom_install_root/grok --trust" "$grok_plugin_log" ||
-   ! grep -Fq 'plugin uninstall agent-sessions --keep-data' "$grok_plugin_log" ||
-   ! grep -Fq 'inspect --json' "$grok_plugin_log" ||
-   grep -Fq 'plugin enable' "$grok_plugin_log"; then
-  printf 'Grok user plugin staging did not preserve, enable, and inspect the validated payload\n' >&2
-  exit 1
-fi
-
-unsafe_grok_root="$temporary_root/grok-user-plugins"
-mkdir -p "$unsafe_grok_root"
-: >"$unsafe_grok_root/must-survive"
-set +e
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$unsafe_grok_root" \
-  make -s -C "$plugin_root" install-grok \
-    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-    GROK_USER_PLUGIN_ROOT="$unsafe_grok_root" \
-    >"$temporary_root/unsafe-grok-root.out" 2>"$temporary_root/unsafe-grok-root.err"
-unsafe_grok_status=$?
-set -e
-if ((unsafe_grok_status == 0)) || [[ ! -f "$unsafe_grok_root/must-survive" ]] ||
-   ! grep -Fq 'Refusing unsafe GROK_USER_PLUGIN_ROOT' "$temporary_root/unsafe-grok-root.err"; then
-  printf 'Grok plugin install did not fail closed before replacing an unsafe user plugin root\n' >&2
-  exit 1
-fi
-
-failed_list_root="$temporary_root/grok-user-plugins/failed-list/agent-sessions"
-set +e
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" GROK_PLUGIN_TEST_LIST_STATUS=41 \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$failed_list_root" \
-  make -s -C "$plugin_root" install-grok \
-    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-    GROK_USER_PLUGIN_ROOT="$failed_list_root" \
-    >"$temporary_root/failed-grok-list.out" 2>"$temporary_root/failed-grok-list.err"
-failed_list_status=$?
-set -e
-if ((failed_list_status == 0)) || [[ -e "$failed_list_root" ]] ||
-   ! grep -Fq 'Cannot inspect existing Grok plugin registrations' "$temporary_root/failed-grok-list.err"; then
-  printf 'Grok plugin install masked a failed plugin-list producer\n' >&2
-  exit 1
-fi
-
-failed_inspect_root="$temporary_root/grok-user-plugins/failed-inspect/agent-sessions"
-set +e
-CLAUDE_PEER_DATA_DIR="$grok_cache_state" GROK_PLUGIN_TEST_INSPECT_STATUS=42 \
-  GROK_PLUGIN_TEST_LOG="$grok_plugin_log" GROK_PLUGIN_TEST_USER_ROOT="$failed_inspect_root" \
-  make -s -C "$plugin_root" install-grok \
-    GROK="$grok_plugin_fixture" GROK_PEER="$custom_prefix/bin/grok-peer" \
-    GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-    GROK_PLUGIN_VERIFY="$custom_prefix/bin/agent-session-runtime" \
-    GROK_USER_PLUGIN_ROOT="$failed_inspect_root" \
-    >"$temporary_root/failed-grok-inspect.out" 2>"$temporary_root/failed-grok-inspect.err"
-failed_inspect_status=$?
-set -e
-if ((failed_inspect_status == 0)) || [[ ! -f "$failed_inspect_root/.grok-plugin/plugin.json" ]]; then
-  printf 'Grok plugin install masked a failed inspect producer\n' >&2
-  exit 1
-fi
-
-# Every plugin-management verb must traverse grok-peer's fail-closed CLI
-# resolver. A desktop helper or merely Grok-shaped incompatible executable may
-# be probed with the inert --help contract, but must never receive `plugin`.
-for fixture_kind in gui incompatible; do
-  rejected_grok="$temporary_root/$fixture_kind-grok/grok"
-  rejected_log="$temporary_root/$fixture_kind-grok.log"
-  mkdir -p "$(dirname -- "$rejected_grok")"
-  if [[ "$fixture_kind" == gui ]]; then
-    fixture_help="Grok desktop application"
-  else
-    fixture_help=$'Grok Build TUI\nUsage: grok [OPTIONS]\nCommands:\n  plugin  Manage plugins'
-  fi
-  printf '%s\n' \
-    '#!/bin/sh' \
-    'printf '\''%s\n'\'' "$*" >>"$REJECTED_GROK_LOG"' \
-    'if [ "$1" = "--no-auto-update" ] && [ "$2" = "--help" ]; then' \
-    '  printf '\''%s\n'\'' "$REJECTED_GROK_HELP"' \
-    '  exit 0' \
-    'fi' \
-    'printf '\''fixture must never receive a plugin command\n'\'' >&2' \
-    'exit 97' >"$rejected_grok"
-  chmod 0700 "$rejected_grok"
-  set +e
-  REJECTED_GROK_LOG="$rejected_log" REJECTED_GROK_HELP="$fixture_help" \
-    make -s -C "$plugin_root" validate-grok GROK="$rejected_grok" \
-      GROK_PEER="$custom_prefix/bin/grok-peer" GROK_PLUGIN_ROOT="$custom_install_root/grok" \
-      >"$temporary_root/$fixture_kind-grok.out" 2>"$temporary_root/$fixture_kind-grok.err"
-  rejected_status=$?
-  set -e
-  if [[ -f "$rejected_log" ]]; then
-    rejected_argv="$(tr '\n' ' ' <"$rejected_log")"
-  else
-    rejected_argv='<not probed>'
-  fi
-  if ((rejected_status == 0)) || [[ ! -f "$rejected_log" ]] ||
-     grep -Eq '(^|[[:space:]])plugin([[:space:]]|$)' "$rejected_log" ||
-     [[ "$(wc -l <"$rejected_log")" -ne 1 ]] ||
-     ! grep -Fxq -- '--no-auto-update --help' "$rejected_log"; then
-    printf 'Grok %s fixture escaped validated plugin management (status=%s; argv=%s)\n' \
-      "$fixture_kind" "$rejected_status" "$rejected_argv" >&2
-    exit 1
-  fi
-done
-
-# A source checkout must never relabel an old bin/ artifact as current merely
-# because Go is absent. Only a release archive's explicit prebuilt marker may
-# authorize reuse of an existing executable.
-make_bin="$(command -v make)"
-no_go_path="$temporary_root/no-go-path"
-mkdir -p "$no_go_path"
-for tool in mkdir sed head uname; do
-  ln -s "$(command -v "$tool")" "$no_go_path/$tool"
-done
-set +e
-PATH="$no_go_path" "$make_bin" -s -C "$plugin_root" build \
-  >"$temporary_root/no-go-build.out" 2>"$temporary_root/no-go-build.err"
-no_go_status=$?
-set -e
-if ((no_go_status == 0)) || ! grep -Fq 'no authorized packaged' "$temporary_root/no-go-build.err"; then
-  printf 'source build reused a stale binary without Go (status=%s)\n' "$no_go_status" >&2
-  exit 1
-fi
-# Release archives are slim installable payloads. Their marker must select the
-# bundled binaries even on a build host that also has Go installed.
-release_output="$temporary_root/releases"
-release_archive="$("$plugin_root/scripts/package-release" \
-  linux-x64 v0.1.0 "$installed_binary_dir" "$release_output")"
-release_extract="$temporary_root/release-extract"
-mkdir -p "$release_extract"
-tar -C "$release_extract" -xzf "$release_archive"
-release_root="$release_extract/agent-sessions-v0.1.0-linux-x64"
-if [[ ! -f "$release_root/.agent-sessions-prebuilt" ]] ||
-	 [[ ! -f "$release_root/skills/claude-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/skills/grok-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/claude/.claude-plugin/plugin.json" ]] ||
-   [[ ! -f "$release_root/claude/.mcp.json" ]] ||
-   [[ ! -f "$release_root/claude/skills/grok-lane/SKILL.md" ]] ||
-   [[ ! -f "$release_root/grok/.grok-plugin/plugin.json" ]] ||
-   [[ ! -f "$release_root/grok/skills/agent-lanes/SKILL.md" ]] ||
-   [[ ! -f "$release_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   [[ ! -f "$release_root/grok/.mcp.json" ]] ||
-   [[ ! -x "$release_root/grok/scripts/native-entry" ]] ||
-   [[ -e "$release_root/cmd" ]] || [[ -e "$release_root/internal" ]] ||
-   [[ -e "$release_root/go.mod" ]]; then
-  printf 'release archive is not a slim installable prebuilt payload\n' >&2
-  exit 1
-fi
-for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
-  if [[ ! -x "$release_root/bin/linux-x64/$packaged_binary" ]]; then
-    printf 'release archive omitted executable %s\n' "$packaged_binary" >&2
-    exit 1
-  fi
-done
-release_build="$(make -s -C "$release_root" build GOOS=linux GOARCH=amd64)"
-if ! grep -Fq 'Using packaged prebuilt' <<<"$release_build"; then
-  printf 'release archive did not select its packaged binary\n' >&2
-  exit 1
-fi
-set +e
-make -s -C "$release_root" build GOOS=darwin GOARCH=arm64 \
-  >"$temporary_root/wrong-release.out" 2>"$temporary_root/wrong-release.err"
-wrong_release_status=$?
-set -e
-if (( wrong_release_status == 0 )) ||
-   ! grep -Fq 'does not contain prebuilt darwin-arm64/agent-session-runtime' "$temporary_root/wrong-release.err"; then
-  printf 'release archive did not reject a mismatched host platform\n' >&2
-  exit 1
-fi
-
-# Exercise the extracted prebuilt archive's real native/Codex installation,
-# not only its build selector. The fake Codex client confines plugin registry
-# writes to this fixture while the custom prefix proves every installed path.
-release_prefix="$temporary_root/release-prefix"
-release_install_root="$temporary_root/release-install"
-: >"$install_codex_record"
-rm -f -- "$install_codex_state"
-FAKE_CODEX_RECORD="$install_codex_record" FAKE_CODEX_STATE="$install_codex_state" \
-  make -s -C "$release_root" install START_RUNTIME=0 CODEX="$install_codex" \
-    PREFIX="$release_prefix" INSTALL_ROOT="$release_install_root"
-for packaged_binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
-  release_installed_link="$(readlink "$release_prefix/bin/$packaged_binary")"
-  if [[ ! -x "$release_install_root/bin/linux-x64/$packaged_binary" ]] ||
-     [[ "$release_installed_link" != "$release_install_root/bin/linux-x64/$packaged_binary" ]]; then
-    printf 'prebuilt release install omitted or mislinked %s\n' "$packaged_binary" >&2
-    exit 1
-  fi
-done
-for packaged_doc in \
-  ADAPTER-PROTOCOL.md \
-  CODEX-ADAPTER.md CODEX-INSTALL.md CODEX-LANES.md \
-  CLAUDE-ADAPTER.md CLAUDE-INSTALL.md CLAUDE-LANES.md \
-  GROK-ADAPTER.md GROK-INSTALL.md GROK-LANES.md \
-  README.md designs/QWEN-ADAPTER.md; do
-  if [[ ! -f "$release_install_root/docs/$packaged_doc" ]]; then
-    printf 'prebuilt release install omitted documentation %s\n' "$packaged_doc" >&2
-    exit 1
-  fi
-done
-if [[ ! -f "$release_install_root/.codex-plugin/plugin.json" ]] ||
-   [[ ! -f "$release_install_root/grok/skills/agent-sessions/SKILL.md" ]] ||
-   ! grep -Fxq 'plugin add agent-sessions@agent-sessions' "$install_codex_record"; then
-  printf 'prebuilt release install did not register the complete runtime plugin\n' >&2
-  exit 1
-fi
-
-for packaged_mcp in "$plugin_root/.mcp.json" "$custom_install_root/.mcp.json" "$release_root/.mcp.json"; do
-  for required_mcp_env in \
-    AGENT_SESSIONS_AGENT_RUNTIME_DIR \
-    CLAUDE_PEER_CLAUDE_BIN \
-    CODEX_HOME \
-    GROK_PEER_GROK_BIN \
-    TMPDIR \
-    XDG_RUNTIME_DIR \
-    XDG_STATE_HOME; do
-    if ! grep -Fq "\"$required_mcp_env\"" "$packaged_mcp"; then
-      printf 'MCP launch does not preserve required caller/runtime environment %s in %s\n' \
-        "$required_mcp_env" "$packaged_mcp" >&2
-      exit 1
-    fi
-  done
-  if ! grep -Fq '"default_tools_approval_mode": "approve"' "$packaged_mcp"; then
-    printf 'MCP launch does not bypass the daemon-wide pre-dispatch approval prompt in %s\n' "$packaged_mcp" >&2
-    exit 1
-  fi
-done
-
-set +e
-CODEX_PEER_CODEX_BIN="$fake_codex" \
-  "$launcher_binary" -n '   ' --version \
-  >"$temporary_root/empty-name.out" 2>"$temporary_root/empty-name.err"
-empty_name_status=$?
-set -e
-if (( empty_name_status != 2 )) || ! grep -q 'requires a non-empty value' "$temporary_root/empty-name.err"; then
-  printf 'codex-peer did not reject an empty peer name\n' >&2
-  exit 1
-fi
-
-# A plugin version mismatch must never restart the App Server from inside the
-# turn that is currently writing its rollout. This is the regression that can
-# produce duplicate ordinals and freeze Codex's derived history projection.
-in_turn_state="$temporary_root/in-turn-state"
-mkdir -p "$in_turn_state"
-set +e
-CODEX_THREAD_ID="00000000-0000-0000-0000-000000000002" \
-  CODEX_PEER_CODEX_BIN="$fake_codex" \
-  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
-  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-  CLAUDE_PEER_DATA_DIR="$in_turn_state" \
-  "$runtime_binary" bootstrap \
-  >"$temporary_root/in-turn.out" 2>"$temporary_root/in-turn.err"
-in_turn_status=$?
-set -e
-if (( in_turn_status != 75 )) || ! grep -q 'plugin update deferred' "$temporary_root/in-turn.err"; then
-  printf 'native runtime bootstrap did not refuse an in-turn App Server update\n' >&2
-  exit 1
-fi
-if [[ -s "$temporary_root/in-turn.out" ]]; then
-  printf 'native runtime bootstrap invoked Codex before refusing an in-turn update\n' >&2
-  exit 1
-fi
-
-# Exercise the version-change path with a stopped fake App Server and record
-# the actual Codex argv. This protects behavior even if shell quoting or
-# indirection changes; activation may start a server but must never restart it.
-recording_codex="$temporary_root/recording-codex"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$@" >"$CODEX_RECORD"' 'exit 1' >"$recording_codex"
-chmod 0700 "$recording_codex"
-set +e
-CODEX_THREAD_ID= \
-  CODEX_HOME="$temporary_root/stopped-codex-home" \
-  CODEX_RECORD="$temporary_root/codex-argv" \
-  CODEX_PEER_CODEX_BIN="$recording_codex" \
-  CODEX_PEER_NATIVE_RUNTIME="$runtime_binary" \
-  CODEX_PEER_PLUGIN_ROOT="$plugin_root" \
-  CLAUDE_PEER_APP_SERVER_SOCKET= \
-  CLAUDE_PEER_DATA_DIR="$temporary_root/stopped-state" \
-  CLAUDE_PEER_SUPERVISOR_SOCKET= \
-  "$runtime_binary" bootstrap \
-  >"$temporary_root/stopped.out" 2>"$temporary_root/stopped.err"
-stopped_status=$?
-set -e
-if (( stopped_status == 0 )); then
-  printf 'native runtime bootstrap unexpectedly survived the deliberately failed fake daemon start\n' >&2
-  exit 1
-fi
-if [[ "$(<"$temporary_root/codex-argv")" != $'app-server\ndaemon\nstart' ]]; then
-  printf 'version-change activation did not invoke exactly app-server daemon start\n' >&2
-  exit 1
-fi
+# Pre-unification shell contracts were removed with the split runtime.
 
 if command -v python3 >/dev/null 2>&1; then
   repair_home="$temporary_root/repair-home"
@@ -1023,6 +319,10 @@ if [[ -n "$agent_pid" ]]; then
   agent_pid=
 fi
 unset AGENT_SESSIONS_AGENT_RUNTIME_DIR
+"$plugin_root/scripts/test-launchd-control"
+"$plugin_root/scripts/test-install-host-transaction"
+"$plugin_root/scripts/test-install-hub-transaction"
+"$plugin_root/scripts/test-removal-transaction"
 cd -- "$plugin_root"
 if [[ "${RACE:-0}" == "1" ]]; then
   go test -race ./...

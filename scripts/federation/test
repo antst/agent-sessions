@@ -7,92 +7,22 @@ bash -n "$project_root/scripts/federation/test"
 python3 - "$project_root" <<'PY'
 import pathlib
 import sys
-import xml.etree.ElementTree as ET
 
 root = pathlib.Path(sys.argv[1])
 for path in (root / "scripts" / "federation").glob("*.py"):
     compile(path.read_bytes(), str(path), "exec")
-for path in (root / "deploy" / "peer-federator" / "launchd").glob("*.plist.example"):
-    ET.parse(path)
 PY
 
 cd -- "$project_root"
 if [[ "${SKIP_GO_TEST:-0}" != "1" ]]; then
   if [[ "${RACE:-0}" == "1" ]]; then
-    go test -race ./internal/federator ./cmd/peer-federator
+    go test -race ./internal/federation ./internal/daemon ./cmd/agent-sessions ./cmd/agent-sessions-hub
   else
-    go test ./internal/federator ./cmd/peer-federator
+    go test ./internal/federation ./internal/daemon ./cmd/agent-sessions ./cmd/agent-sessions-hub
   fi
-fi
-
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/peer-federator-test.XXXXXX")"
-cleanup() {
-  rm -rf -- "$temporary_root"
-}
-trap cleanup EXIT
-
-install_stage="$temporary_root/install-stage"
-systemd_root="$install_stage/config/systemd/user"
-config_root="$install_stage/config/peer-federator"
-mkdir -p "$config_root"
-printf '%s\n' 'keep-active-config' >"$config_root/agent.env"
-make -s install-systemd-user-files \
-  DESTDIR="$install_stage" \
-  USER_SYSTEMD_DIR=/config/systemd/user \
-  PEER_FEDERATOR_CONFIG_DIR=/config/peer-federator
-if [[ ! -f "$systemd_root/peer-federator-agent.service" ]] ||
-   [[ ! -f "$systemd_root/peer-federator-hub.service" ]] ||
-   [[ ! -f "$config_root/agent.env.example" ]] ||
-   [[ ! -f "$config_root/hub.env.example" ]] ||
-   [[ "$(<"$config_root/agent.env")" != 'keep-active-config' ]]; then
-  printf 'user systemd installation did not install templates safely\n' >&2
-  exit 1
-fi
-if ! grep -Fq 'PEER_FEDERATOR_ENABLE_REMOTE_LANES=false' "$config_root/agent.env.example"; then
-  printf 'agent environment template does not keep remote execution opt-in\n' >&2
-  exit 1
-fi
-
-launchd_root="$install_stage/Library/LaunchAgents"
-mkdir -p "$launchd_root"
-printf '%s\n' 'keep-active-plist' >"$launchd_root/net.antst.peer-federator.agent.plist"
-make -s install-launchd-user-files \
-  DESTDIR="$install_stage" \
-  USER_LAUNCHD_DIR=/Library/LaunchAgents
-if [[ ! -f "$launchd_root/net.antst.peer-federator.agent.plist.example" ]] ||
-   [[ ! -f "$launchd_root/net.antst.peer-federator.hub.plist.example" ]] ||
-   [[ "$(<"$launchd_root/net.antst.peer-federator.agent.plist")" != 'keep-active-plist' ]]; then
-  printf 'user launchd installation did not install templates safely\n' >&2
-  exit 1
-fi
-
-build_args=(-trimpath -o "$temporary_root/peer-federator")
-if [[ "${RACE:-0}" == "1" ]]; then
-  build_args=(-race "${build_args[@]}")
-else
-  build_args=(-ldflags='-s -w -X main.version=test' "${build_args[@]}")
-fi
-go build "${build_args[@]}" ./cmd/peer-federator
-help_text="$("$temporary_root/peer-federator" help)"
-for command in hosts lane; do
-  if ! grep -Fq "peer-federator $command" <<<"$help_text"; then
-    printf 'CLI help is missing %s\n' "$command" >&2
-    exit 1
-  fi
-done
-if ! grep -Fq -- '--enable-remote-lanes' <<<"$help_text" ||
-   ! grep -Fq 'disabled by default' <<<"$help_text"; then
-  printf 'top-level CLI help is missing the remote-lane opt-in\n' >&2
-  exit 1
-fi
-agent_help="$({ "$temporary_root/peer-federator" agent --help || true; } 2>&1)"
-if ! grep -Fq -- '-enable-remote-lanes' <<<"$agent_help"; then
-  printf 'agent CLI help is missing the explicit remote-execution opt-in\n' >&2
-  exit 1
 fi
 if ! grep -Fq '# Federation protocol version 3' docs/federation/PROTOCOL.md ||
    ! grep -Fq 'Local grouped routing continues without a hub' docs/federation/PROTOCOL.md; then
   printf 'protocol documentation does not pin grouped protocol-3 behavior\n' >&2
   exit 1
 fi
-python3 scripts/federation/integration_test.py "$temporary_root/peer-federator"

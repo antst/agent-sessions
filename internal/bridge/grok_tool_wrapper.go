@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -24,24 +22,15 @@ const (
 	grokToolWrapperPathEnv  = "AGENT_SESSIONS_GROK_WRAPPER_PATH"
 )
 
-type grokToolRootRecord struct {
-	Version     int    `json:"version"`
-	SessionID   string `json:"sessionId"`
-	TokenHash   string `json:"tokenHash"`
-	PID         int    `json:"pid"`
-	ProcStart   string `json:"procStart"`
-	StrongStart string `json:"strongStart"`
-	CreatedAt   int64  `json:"createdAt"`
-}
-
 type grokToolRegistryPaths struct {
 	lock, roots, wrapper string
 }
 
 type grokToolRegistryGuard struct {
-	lock  *os.File
-	paths grokToolRegistryPaths
-	roots []grokSessionMember
+	lock   *os.File
+	paths  grokToolRegistryPaths
+	roots  []grokSessionMember
+	ledger *toolRootLedger
 }
 
 func grokToolRegistryPathsForState(state grokLaneState) (grokToolRegistryPaths, error) {
@@ -87,7 +76,6 @@ func selectGrokLaneRealShell(environment []string) (string, error) {
 	return "", errors.New("grok lane requires an absolute executable bash or zsh shell")
 }
 
-//nolint:gocyclo // Setup durably declares intent before creating each private registry artifact and validates preexisting paths.
 func (m *grokLaneManager) prepareToolRegistry() error {
 	realShell, err := selectGrokLaneRealShell(os.Environ())
 	if err != nil {
@@ -121,9 +109,6 @@ func (m *grokLaneManager) prepareToolRegistry() error {
 		return fmt.Errorf("create Grok lane tool registration lock: %w", err)
 	}
 	_ = lock.Close()
-	if err := os.Mkdir(paths.roots, 0o700); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("create Grok lane tool registry: %w", err)
-	}
 	if info, statErr := os.Lstat(paths.wrapper); statErr == nil {
 		if info.Mode()&os.ModeSymlink == 0 {
 			return errors.New("refuse non-symlink Grok lane tool wrapper")
@@ -138,6 +123,45 @@ func (m *grokLaneManager) prepareToolRegistry() error {
 		return fmt.Errorf("create Grok lane tool wrapper: %w", err)
 	}
 	return nil
+}
+
+func (m *grokLaneManager) prepareSharedToolRootLedger() error {
+	m.mu.Lock()
+	state := cloneGrokLaneState(m.state)
+	m.mu.Unlock()
+	config, err := grokToolRootLedgerConfig(state)
+	if err != nil {
+		return err
+	}
+	if _, err := prepareToolRootLedger(config); err != nil {
+		return fmt.Errorf("prepare shared Grok tool-root ledger: %w", err)
+	}
+	return nil
+}
+
+func grokToolRootLedgerConfig(state grokLaneState) (toolRootLedgerConfig, error) {
+	paths, err := grokToolRegistryPathsForState(state)
+	if err != nil {
+		return toolRootLedgerConfig{}, err
+	}
+	manager := toolRootProcessIdentity{
+		PID: state.ManagerPID, ProcStart: state.ManagerProcStart, StrongStart: state.ManagerStrongStart,
+	}
+	worker := toolRootProcessIdentity{
+		PID: state.WorkerPID, ProcStart: state.WorkerProcStart, StrongStart: state.WorkerStrongStart,
+	}
+	config := toolRootLedgerConfig{
+		Version: grokToolRegistryVersion, Product: "grok", ManagerIdentity: manager, WorkerIdentity: worker,
+		CapabilityDigest: state.LaunchTokenHash, IntentRevision: state.SessionID,
+		Root: paths.roots, ObserveProcess: procinfo.Read,
+	}
+	config.RetireRoot = func(root toolRootProcessIdentity) error {
+		return stopGrokTaggedProcesses(state.LaunchTokenHash, state.ManagerPID, grokSessionMember(root))
+	}
+	if err := validateToolRootLedgerConfig(config); err != nil {
+		return toolRootLedgerConfig{}, fmt.Errorf("invalid Grok tool-root ledger identity: %w", err)
+	}
+	return config, nil
 }
 
 func grokLaneWorkerEnvironment(environment []string, launchToken string, state grokLaneState, wrapperPath, realShell string) []string {
@@ -170,7 +194,7 @@ func grokLaneWorkerEnvironment(environment []string, launchToken string, state g
 
 func runGrokToolWrapper(argv []string) int {
 	if err := registerGrokToolRoot(); err != nil {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime: refuse untracked Grok tool shell")
+		fmt.Fprintln(os.Stderr, "agent-sessions: refuse untracked Grok tool shell")
 		return 126
 	}
 	realShell := strings.TrimSpace(os.Getenv(grokToolRealShellEnv))
@@ -179,7 +203,7 @@ func runGrokToolWrapper(argv []string) int {
 	}
 	arguments := append([]string{realShell}, argv...)
 	if err := syscall.Exec(realShell, arguments, os.Environ()); err != nil { //nolint:gosec // exact absolute shell validated and persisted by the manager.
-		fmt.Fprintln(os.Stderr, "agent-session-runtime: execute registered Grok tool shell failed")
+		fmt.Fprintln(os.Stderr, "agent-sessions: execute registered Grok tool shell failed")
 		return 126
 	}
 	return 0
@@ -246,25 +270,15 @@ func registerGrokToolRoot() error {
 	if info.Status != procinfo.Known || info.Start == "" || info.StrongStart == "" {
 		return errors.New("capture strong Grok tool process identity")
 	}
-	record := grokToolRootRecord{
-		Version: grokToolRegistryVersion, SessionID: sessionID, TokenHash: state.LaunchTokenHash,
-		PID: os.Getpid(), ProcStart: info.Start, StrongStart: info.StrongStart, CreatedAt: time.Now().UnixMilli(),
+	config, err := grokToolRootLedgerConfig(state)
+	if err != nil {
+		return err
 	}
-	recordPath := filepath.Join(paths.roots, strconv.Itoa(record.PID)+".json")
-	if existingBody, readErr := os.ReadFile(recordPath); readErr == nil { //nolint:gosec // numeric PID filename under the fixed private registry.
-		var existing grokToolRootRecord
-		if json.Unmarshal(existingBody, &existing) != nil || existing.PID != record.PID || existing.ProcStart == "" || existing.StrongStart == "" {
-			return errors.New("conflicting Grok tool process identity")
-		}
-		if existing.StrongStart != record.StrongStart && grokProcessIdentityStatus(grokSessionMember{
-			PID: existing.PID, ProcStart: existing.ProcStart, StrongStart: existing.StrongStart,
-		}) != processIdentityStale {
-			return errors.New("live or unverifiable Grok tool process identity conflict")
-		}
-	} else if !os.IsNotExist(readErr) {
-		return readErr
+	ledger, err := openToolRootLedger(config)
+	if err != nil {
+		return err
 	}
-	return writeJSONAtomic(recordPath, record)
+	return ledger.register(toolRootProcessIdentity{PID: os.Getpid(), ProcStart: info.Start, StrongStart: info.StrongStart})
 }
 
 //nolint:gocyclo // Registry validation deliberately fails closed on every malformed ownership field and filesystem state.
@@ -300,25 +314,30 @@ func lockGrokToolRegistry(state grokLaneState, exclusive bool) (*grokToolRegistr
 		return nil, errors.New("lock Grok tool registry")
 	}
 	guard := &grokToolRegistryGuard{lock: lock, paths: paths}
-	entries, err := os.ReadDir(paths.roots)
-	if err != nil && !os.IsNotExist(err) {
+	config, err := grokToolRootLedgerConfig(state)
+	if err != nil {
 		guard.close()
-		return nil, errors.New("read Grok tool registry")
+		return nil, err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+	ledger, err := openToolRootLedger(config)
+	if err != nil {
+		guard.close()
+		return nil, errors.New("open shared Grok tool-root ledger")
+	}
+	if exclusive {
+		if err := ledger.closeAdmission(); err != nil {
 			guard.close()
-			return nil, errors.New("malformed Grok tool registry entry")
+			return nil, errors.New("close Grok tool-root admission")
 		}
-		body, readErr := os.ReadFile(filepath.Join(paths.roots, entry.Name()))
-		var record grokToolRootRecord
-		if readErr != nil || json.Unmarshal(body, &record) != nil || record.Version != grokToolRegistryVersion ||
-			record.SessionID != state.SessionID || record.TokenHash != state.LaunchTokenHash || record.PID <= 1 ||
-			record.ProcStart == "" || record.StrongStart == "" || entry.Name() != strconv.Itoa(record.PID)+".json" {
-			guard.close()
-			return nil, errors.New("invalid Grok tool registry entry")
-		}
-		guard.roots = append(guard.roots, grokSessionMember{PID: record.PID, ProcStart: record.ProcStart, StrongStart: record.StrongStart})
+	}
+	snapshot, err := ledger.snapshot()
+	if err != nil {
+		guard.close()
+		return nil, errors.New("read shared Grok tool-root ledger")
+	}
+	guard.ledger = ledger
+	for _, root := range snapshot.Roots {
+		guard.roots = append(guard.roots, grokSessionMember(root))
 	}
 	return guard, nil
 }
@@ -365,10 +384,19 @@ func grokLaneCleanupRoots(state grokLaneState, exclusive bool) (*grokToolRegistr
 		return nil, nil, err
 	}
 	roots := make([]grokSessionMember, 0, len(guard.roots)+1)
+	seen := map[int]grokSessionMember{}
 	worker := grokLaneWorkerRoot(state)
 	if worker.PID > 1 && worker.ProcStart != "" {
-		roots = append(roots, worker)
+		seen[worker.PID] = worker
 	}
-	roots = append(roots, guard.roots...)
+	for _, root := range guard.roots {
+		if existing, ok := seen[root.PID]; ok && existing == root {
+			continue
+		}
+		seen[root.PID] = root
+	}
+	for _, root := range seen {
+		roots = append(roots, root)
+	}
 	return guard, roots, nil
 }

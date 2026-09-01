@@ -1,7 +1,7 @@
 # Claude-side installation
 
-The Claude payload is the `agent-sessions` plugin under [`claude/`](../claude). It contains the
-three lane skills, grouped messaging instructions, one read-only preflight command, and the
+The Claude payload is the `agent-sessions` plugin under [`claude/`](../claude). It contains four
+target-product lane skills, the canonical `agent-sessions` routing skill, one read-only preflight command, and the
 process-attested structured messaging MCP declaration. It ships no runtime, hooks, binary, settings,
 or permission grants. Its native dependencies are installed by the Codex/runtime side.
 
@@ -25,10 +25,9 @@ claude plugin install agent-sessions@agent-sessions
 The default user-scope installation is available to every new interactive Claude session and to
 non-interactive `claude -p` sessions on that host. Restart Claude Code afterwards, or use
 `/reload-plugins` in a development session. From a source checkout, `make install-all` installs
-both the native runtime and this Claude plugin into the stable installation tree. If that runtime
-tree is already populated, `make install-claude` updates only Claude. Use
-`make dev-install-claude` only when the marketplace should deliberately follow the checkout. Normal
-installation stages each cache-busted Claude plugin version under
+the shared runtime and every integration whose native client is present; missing products are
+reported and skipped. `make install` is the same atomic transaction, and there is no separate
+Claude-only Make installer. Installation stages each cache-busted Claude plugin version under
 `~/.local/share/agent-sessions/claude-marketplaces/`; the active version is immutable, so a later
 native-runtime-only install cannot change code beneath an already running Claude session.
 After the replacement is verified, the installer removes the historical `codex-peer` plugin IDs
@@ -40,6 +39,11 @@ Verify:
 claude plugin list
 claude plugin validate ~/agent-sessions/claude --strict
 ```
+
+In a managed Claude session, invoke `/agent-sessions:agent-sessions list peers`
+to select Agent Sessions rather than Claude's native agent/team discovery.
+Claude namespaces plugin-provided skills as `/PLUGIN:SKILL`; the plugin and
+skill intentionally share the same name, so the repeated form is expected.
 
 ## Installation without plugins
 
@@ -66,48 +70,41 @@ Or directly, from the checkout:
 ./claude/skills/codex-lane/scripts/lane-preflight
 ```
 
-The preflight is read-only: it starts, installs, and changes nothing. It invokes the native binary
-recorded in `native-runtime-path` directly rather than the bootstrapping launcher. It prints one
+The preflight is read-only: it starts, installs, and changes nothing. It resolves and validates the
+installed `codex-peer-lane` alias directly. It prints one
 JSON object and exits non-zero unless the runtime satisfies **adapter contract 2**. Interpretation:
 
 | Field | Meaning |
 |---|---|
 | `summary` | `"ready"`, or the reason orchestration should not proceed |
 | `runtime_found` | Whether a lane runtime could be resolved at all |
-| `launcher_found` | Whether `codex-peer-lane` is on `PATH`; preflight never executes it |
-| `invocation` | Exact `<validated-native-runtime> lane` command to use |
+| `launcher_found` | Whether `codex-peer-lane` is on `PATH` |
+| `invocation` | Exact validated `codex-peer-lane` alias to use |
 | `contract_version` / `contract_ok` | Whether the CLI implements contract 2 |
-| `runtime_ready` / `doctor_exit` | Whether App Server and the peer supervisor are reachable |
+| `runtime_ready` / `doctor_exit` | Whether the unified daemon and Codex App Server path are ready |
 | `list_supported`, `doctor_supported` | The contract-1 subcommands, probed individually |
 | `peer_discovery_cli` | Only whether the `claude` executable is on `PATH` |
 
 ## How the runtime is located
 
-Preflight reads the first line of
-`${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-code-peer}/native-runtime-path`
-and invokes that exact binary as `<path> lane …`. `launcher_found` separately reports whether
-`codex-peer-lane` is on `PATH`, but preflight never substitutes it: a PATH launcher could belong to
-a different installation root and select another runtime while bootstrapping.
+Preflight resolves `codex-peer-lane` from `PATH`, probes its contract, and reports that exact path as
+`invocation`. The alias is installed transactionally with the unified host runtime, so there is no
+separate runtime marker or launcher bootstrap step.
 
 ## Permissions
 
-Lane commands run through the `Bash` tool and prompt for approval like any other command. This
-plugin ships no permission grants — that decision belongs to the user, not to a plugin.
+`claude-peer` creates a lifecycle-owned settings overlay that allows exactly the
+four Agent Sessions MCP operations: peer listing, direct/multicast send, group
+broadcast, and lane lifecycle. The overlay disables only a project `.mcp.json`
+server named `agent_sessions` and approves the installed plugin's exact,
+origin-qualified tool identifiers. Claude lanes receive the same narrow policy.
+This prevents a repository from impersonating the trusted connector to inherit
+its approval, while avoiding a prompt on every structured Agent Sessions call.
+The user's global settings and unrelated tools are not changed. Bare `claude`,
+native model/tool permissions, and explicit deny/removal policy remain unchanged.
 
-A user who wants fewer prompts can add this to their own `settings.json`:
-
-```json
-{
-  "permissions": {
-    "allow": ["Bash(codex-peer-lane:*)"]
-  }
-}
-```
-
-Scope it to project settings when the lanes are project-specific. This allowlist covers explicit
-launcher use; the skill follows preflight's exact native invocation, which should be approved as
-shown. Note that `wait` blocks, so a long collection is best run as a bounded background `Bash`
-call regardless of permissions.
+Lane lifecycle is sent through the structured `lane` MCP tool; managed Claude
+does not need a `Bash(codex-peer-lane:*)` permission for normal orchestration.
 
 ## Hosts and portability
 

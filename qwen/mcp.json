@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "agent_sessions": {
+      "type": "stdio",
+      "command": "./scripts/native-entry",
+      "args": [
+        "connector",
+        "qwen",
+        "--release-identity",
+        "@AGENT_SESSIONS_RELEASE_ID@"
+      ]
+    }
+  }
+}

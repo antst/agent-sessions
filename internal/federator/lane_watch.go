@@ -18,7 +18,7 @@ func RunLaneWatch(ctx context.Context, livenessFD uintptr, args []string) (int, 
 	if livenessFD < 3 || len(args) == 0 {
 		return 1, errors.New("lane-watch requires a liveness fd and command")
 	}
-	liveness := os.NewFile(livenessFD, "peer-federator-agent-liveness")
+	liveness := os.NewFile(livenessFD, "agent-sessions-federation-agent-liveness")
 	if liveness == nil {
 		return 1, errors.New("lane-watch liveness fd is unavailable")
 	}

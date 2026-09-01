@@ -3,6 +3,8 @@ package bridge
 import (
 	"errors"
 	"strings"
+
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 type processIdentityStatus uint8
@@ -35,8 +37,8 @@ type processIdentityProbe struct {
 // observeProcessIdentity never collapses an observation failure into either
 // authorization or proof of death. Callers must explicitly choose whether
 // unknown means fail closed, retry, or preserve existing state.
-func observeProcessIdentity(pid int, expected string) processIdentityObservation {
-	return classifyProcessIdentityProbe(probeProcessIdentity(pid), expected)
+func observeProcessIdentity(pid int) processIdentityObservation {
+	return classifyProcessIdentityProbe(probeProcessIdentity(pid), "")
 }
 
 // exactProcessIdentityMatch authorizes a persisted process identity only when
@@ -49,16 +51,24 @@ func exactProcessIdentityStatus(pid int, expected string) processIdentityObserva
 	if pid <= 1 || expected == "" {
 		return processIdentityObservation{Status: processIdentityUnknown}
 	}
-	observation := observeProcessIdentity(pid, expected)
-	if observation.Status == processIdentityMatches && observation.ProcStart != expected {
+	shared := procinfo.ObserveIdentity(procinfo.Identity{PID: pid, Start: expected})
+	switch shared.Status {
+	case procinfo.IdentityMatches:
+		if shared.Current.Start != expected {
+			return processIdentityObservation{Status: processIdentityUnknown}
+		}
+		return processIdentityObservation{Status: processIdentityMatches, ProcStart: shared.Current.Start}
+	case procinfo.IdentityStale:
+		return processIdentityObservation{Status: processIdentityStale, ProcStart: shared.Current.Start}
+	case procinfo.IdentityUnknown:
 		return processIdentityObservation{Status: processIdentityUnknown}
 	}
-	return observation
+	return processIdentityObservation{Status: processIdentityUnknown}
 }
 
-// cleanupProcessIdentityStatus preserves tokenless legacy records while their
-// PID may still exist, but permits cleanup once absence is proven. It never
-// turns a live tokenless PID into authorization or a signal target.
+// cleanupProcessIdentityStatus permits exact-token reconciliation and also
+// recognizes a definitely absent process. Absence may authorize removal of
+// exact Agent Sessions-owned files, but never authorizes signaling a process.
 func cleanupProcessIdentityStatus(pid int, expected string) processIdentityObservation {
 	if pid <= 1 {
 		return processIdentityObservation{Status: processIdentityStale}
@@ -66,7 +76,7 @@ func cleanupProcessIdentityStatus(pid int, expected string) processIdentityObser
 	if expected != "" {
 		return exactProcessIdentityStatus(pid, expected)
 	}
-	observation := observeProcessIdentity(pid, "")
+	observation := observeProcessIdentity(pid)
 	if observation.Status == processIdentityStale {
 		return observation
 	}
@@ -74,11 +84,11 @@ func cleanupProcessIdentityStatus(pid int, expected string) processIdentityObser
 }
 
 func captureProcessStart(pid int) (string, error) {
-	observation := observeProcessIdentity(pid, "")
-	if observation.Status != processIdentityMatches || observation.ProcStart == "" {
+	identity, err := procinfo.CaptureIdentity(pid)
+	if err != nil || identity.Start == "" {
 		return "", errors.New("cannot capture a stable process identity")
 	}
-	return observation.ProcStart, nil
+	return identity.Start, nil
 }
 
 func processIdentityAllowsPIDPathRemoval(observation processIdentityObservation) bool {

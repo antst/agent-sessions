@@ -15,6 +15,7 @@ func TestGenericResumeInvocationUsesCatalogProduct(t *testing.T) {
 		"codex":  {launcher: "codex-peer", args: []string{"resume", "session", "--group", "project"}},
 		"claude": {launcher: "claude-peer", args: []string{"--resume", "session", "--group", "project"}},
 		"grok":   {launcher: "grok-peer", args: []string{"--resume", "session", "--group", "project"}},
+		"qwen":   {launcher: "qwen-peer", args: []string{"--resume", "session", "--group", "project"}},
 	}
 	for product, want := range tests {
 		t.Run(product, func(t *testing.T) {
@@ -28,7 +29,7 @@ func TestGenericResumeInvocationUsesCatalogProduct(t *testing.T) {
 		})
 	}
 	for product, launcherName := range map[string]string{
-		"codex": "codex-peer-lane", "claude": "claude-peer-lane", "grok": "grok-peer-lane",
+		"codex": "codex-peer-lane", "claude": "claude-peer-lane", "grok": "grok-peer-lane", "qwen": "qwen-peer-lane",
 	} {
 		launcher, args, err := genericResumeInvocation(product, federator.SessionKindLane, "session", nil)
 		if err != nil || launcher != launcherName || !reflect.DeepEqual(args, []string{"resume", "session"}) {

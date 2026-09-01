@@ -13,16 +13,16 @@ explicitly trust its local Grok plugin payload:
 
 ```bash
 make install
-make install-grok
 ```
 
 `grok-peer` validates candidates and skips unrelated chat/desktop executables
 also named `grok`. Plugin installation uses the same auto-discovery. On a host
 with multiple valid candidates, pin the intended Grok Build executable with
-`make install-grok GROK=/absolute/path/to/grok`; a pinned path is still
+`make install GROK=/absolute/path/to/grok`; a pinned path is still
 validated and never falls through silently.
 
-`make install-all` also installs the Codex and Claude integrations. The installer
+`make install-all` installs every integration whose native client is present; absent products are
+reported and skipped. It is an alias of `make install`; per-product Make installers do not exist. The installer
 copies the validated payload to Grok's documented auto-trusted user location,
 `~/.grok/plugins/agent-sessions`. Grok 1.0.4 has no direct command for enabling
 an auto-discovered user plugin, so the installer briefly registers the source
@@ -37,7 +37,7 @@ older direct-install registry entry because Grok can list that entry as enabled
 while omitting its MCP server from a live session. Start a new Grok process (or
 reload its plugins) after changing the plugin installation.
 
-Both `make install-grok` and `make install-all` refuse to replace the payload
+The unified install transaction refuses to replace the payload
 while any managed `grok-peer` owner, host, private leader, or observer is live
 or cannot be verified. `GROK_USER_PLUGIN_ROOT` overrides are accepted only when
 their final path component is exactly `agent-sessions`; the installer will not
@@ -112,9 +112,10 @@ official `x.ai/interject` extension; the wake client deliberately does not
 resident actor while the TUI is still starting its MCP processes. The installed `agent_sessions` MCP
 server lets Grok list/message peers and invoke the existing `codex-peer-lane`
 and `claude-peer-lane` launchers with process-attested lifecycle ownership.
-The plugin exposes `/agent-sessions` for peer discovery, send, reply, multicast, and broadcast,
-and `/agent-lanes` for worker-lane lifecycle. Natural-language requests may invoke the same
-structured MCP tools without an explicit slash command.
+The plugin exposes `/agent-sessions` as the canonical peer discovery, messaging,
+and all-product lane router. `/agent-lanes` remains the detailed worker-lane
+lifecycle skill. Natural-language requests may invoke the same structured MCP
+tools without an explicit slash command.
 The launcher pins that plugin process to the same selected native-runtime
 binary as the private host, preventing mixed-revision host/MCP operation.
 Native headless Grok worker lanes are provided through `grok-peer-lane`; they own separate ACP

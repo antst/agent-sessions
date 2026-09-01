@@ -64,6 +64,7 @@ func RunHub(ctx context.Context, options HubOptions) error {
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
+		hub.closeClients()
 	}()
 	for {
 		conn, acceptErr := listener.Accept()
@@ -74,6 +75,18 @@ func RunHub(ctx context.Context, options HubOptions) error {
 			return acceptErr
 		}
 		go hub.handleConnection(conn)
+	}
+}
+
+func (h *hub) closeClients() {
+	h.mu.Lock()
+	clients := make([]*hubClient, 0, len(h.clients))
+	for _, client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.Unlock()
+	for _, client := range clients {
+		_ = client.wire.conn.Close()
 	}
 }
 

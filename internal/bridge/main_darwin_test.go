@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 		if err := validateInheritedDarwinTestRootLease(inherited); err != nil {
 			panic(fmt.Sprintf("inactive inherited Darwin bridge test root: %v", err))
 		}
-		setDarwinTestRuntimeRoot(inherited)
+		setInheritedDarwinTestRuntimeRoot(inherited)
 		os.Exit(m.Run())
 	}
 
@@ -71,18 +71,54 @@ func validateInheritedDarwinTestRootLease(root string) error {
 }
 
 func setDarwinTestRuntimeRoot(root string) {
+	stateRoot := filepath.Join(root, "state")
+	if err := os.MkdirAll(stateRoot, 0700); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot); err != nil {
+		panic(err)
+	}
 	if err := os.Setenv("TMPDIR", root); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", root); err != nil {
 		panic(err)
 	}
+	if err := os.Setenv("AGENT_SESSIONS_COMPACT_RUNTIME_DIR", filepath.Join(root, "c")); err != nil {
+		panic(err)
+	}
+}
+
+func setInheritedDarwinTestRuntimeRoot(root string) {
+	// Preserve narrower state/runtime overrides inherited from the individual
+	// test that launched this helper process. The compact lease remains the
+	// fallback for helpers that did not receive an explicit override.
+	defaults := map[string]string{
+		"AGENT_SESSIONS_STATE_ROOT":          filepath.Join(root, "state"),
+		"TMPDIR":                             root,
+		"XDG_RUNTIME_DIR":                    root,
+		"AGENT_SESSIONS_COMPACT_RUNTIME_DIR": filepath.Join(root, "c"),
+	}
+	for name, value := range defaults {
+		if os.Getenv(name) != "" {
+			continue
+		}
+		if name == "AGENT_SESSIONS_STATE_ROOT" {
+			if err := os.MkdirAll(value, 0700); err != nil {
+				panic(err)
+			}
+		}
+		if err := os.Setenv(name, value); err != nil {
+			panic(err)
+		}
+	}
 }
 
 func compactDarwinTestRoot() (*darwinTestRootLease, error) {
-	// Punctuation extends the pool for hosts carrying unmarked roots leaked by
-	// older test binaries. Every entry remains one byte, preserving sun_path.
-	const leaves = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()+,-;=@[]^_{}~"
+	// Keep every one-byte leaf safe when a test path crosses a shell boundary.
+	// The 64 choices preserve sun_path headroom while leaving enough leases for
+	// hosts carrying marked roots from abruptly terminated older test binaries.
+	const leaves = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
 	return claimDarwinTestRoot("/tmp", leaves)
 }
 

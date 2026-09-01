@@ -5,6 +5,13 @@ on:
     branches: [main, develop]
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_candidate:
+        description: Run the exact-commit two-OS release evidence gate
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -14,10 +21,31 @@ env:
   GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:
-  lint:
+  inventory:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.release.outputs.matrix }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - id: release
+        name: Load authoritative release inventory
+        run: |
+          printf 'matrix=%s\n' "$(./scripts/release-inventory matrix-json)" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$(cat deploy/agent-sessions/VERSION)" >> "$GITHUB_OUTPUT"
+
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -28,9 +56,15 @@ jobs:
         run: make lint
 
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -39,9 +73,15 @@ jobs:
         run: ./scripts/test
 
   race:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -49,24 +89,27 @@ jobs:
       - name: Race test plugin, native runtime, and federation
         run: make test-race
 
-  build:
-    runs-on: ubuntu-latest
+  vet:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            platform: linux-x64
-          - goos: linux
-            goarch: arm64
-            platform: linux-arm64
-          - goos: darwin
-            goarch: amd64
-            platform: darwin-x64
-          - goos: darwin
-            goarch: arm64
-            platform: darwin-arm64
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Vet all packages
+        run: go vet ./...
+
+  build:
+    needs: inventory
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
@@ -78,24 +121,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
-          RELEASE_REF: ${{ github.ref }}
-          RELEASE_SHA: ${{ github.sha }}
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_OUTPUT_DIR: dist/release
         run: |
-          case "$RELEASE_REF" in
-            refs/tags/*) ;;
-            *) RELEASE_VERSION="$(printf '%.12s' "$RELEASE_SHA")" ;;
-          esac
-          mkdir -p "bin/${{ matrix.platform }}"
-          for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane; do
-            go build -trimpath -ldflags='-s -w' \
-              -o "bin/${{ matrix.platform }}/$binary" "./cmd/$binary"
-          done
-          go build -trimpath -ldflags="-s -w -X main.version=$RELEASE_VERSION" \
-            -o "bin/${{ matrix.platform }}/peer-federator" ./cmd/peer-federator
-          ./scripts/package-release \
-            "${{ matrix.platform }}" "$RELEASE_VERSION" \
-            "bin/${{ matrix.platform }}" dist/release
+          make build-release-platform \
+            GOOS="$GOOS" GOARCH="$GOARCH" \
+            RELEASE_VERSION="${{ needs.inventory.outputs.version }}" \
+            RELEASE_OUTPUT_DIR="$RELEASE_OUTPUT_DIR"
       - name: Upload platform archive
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -103,35 +134,194 @@ jobs:
           path: dist/release/*.tar.gz
           if-no-files-found: error
 
+  release-linux:
+    name: release-linux
+    if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
+    needs: [inventory, lint, test, race, vet, build]
+    runs-on: [self-hosted, linux, agent-sessions-release]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run exact Linux release gate
+        run: ./scripts/release-final-gate linux dist/gates
+      - name: Build Linux gate manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          job_url="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name == "release-linux") | .html_url' | tail -1)"
+          ./scripts/release-gate-manifest --os linux --job-url "$job_url" \
+            --evidence-dir dist/gates --output dist/gates/linux.json
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-gate-linux-${{ github.sha }}
+          path: dist/gates
+          if-no-files-found: error
+          retention-days: 90
+
+  release-macos:
+    name: release-macos
+    if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
+    needs: [inventory, lint, test, race, vet, build]
+    runs-on: [self-hosted, macos, agent-sessions-release]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run exact macOS release gate
+        run: ./scripts/release-final-gate macos dist/gates
+      - name: Build macOS gate manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          job_url="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name == "release-macos") | .html_url' | tail -1)"
+          ./scripts/release-gate-manifest --os macos --job-url "$job_url" \
+            --evidence-dir dist/gates --output dist/gates/macos.json
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-gate-macos-${{ github.sha }}
+          path: dist/gates
+          if-no-files-found: error
+          retention-days: 90
+
+  candidate-evidence:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
+    needs: [inventory, release-linux, release-macos, build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Require signed release commit
+        env:
+          RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
+        run: |
+          test -n "$RELEASE_ALLOWED_SIGNERS"
+          printf '%s\n' "$RELEASE_ALLOWED_SIGNERS" > "$RUNNER_TEMP/release-allowed-signers"
+          chmod 0600 "$RUNNER_TEMP/release-allowed-signers"
+          git config gpg.ssh.allowedSignersFile "$RUNNER_TEMP/release-allowed-signers"
+          git verify-commit "$GITHUB_SHA"
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: agent-sessions-*
+          path: dist/release
+          merge-multiple: true
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: release-gate-*-${{ github.sha }}
+          path: dist/gates
+          merge-multiple: true
+      - name: Generate and validate immutable release evidence
+        run: |
+          make build GOOS=linux GOARCH=amd64
+          ./scripts/release-inventory package-inventory-json > dist/package-inventory.json
+          ./scripts/release-inventory platforms > dist/platforms.txt
+          mkdir -p dist/evidence
+          tree_sha="$(git rev-parse HEAD^{tree})"
+          go run ./scripts/releasetool evidence generate \
+            --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
+            --inventory dist/package-inventory.json --platforms dist/platforms.txt \
+            --archive-dir dist/release --gate-dir dist/gates \
+            --linux-gate dist/gates/linux.json --macos-gate dist/gates/macos.json \
+            --output "dist/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" \
+            --version "${{ needs.inventory.outputs.version }}" --commit "$GITHUB_SHA" --tree "$tree_sha" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence-${{ github.sha }}
+          path: |
+            dist/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json
+            dist/gates/*.txt
+          if-no-files-found: error
+          retention-days: 90
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [lint, test, race, build]
+    needs: [inventory, lint, test, race, vet, build]
     permissions:
+      actions: read
       contents: write
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Validate release tag
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - id: tag
+        name: Require exact signed evidence-bound tag
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
         run: |
-          manifest_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-            .codex-plugin/plugin.json | head -1)"
-          tag_version="${RELEASE_TAG#v}"
-          if [ "${manifest_version%%+*}" != "$tag_version" ]; then
-            printf 'tag %s does not match manifest version %s\n' "$RELEASE_TAG" "$manifest_version" >&2
-            exit 1
-          fi
+          test -n "$RELEASE_ALLOWED_SIGNERS"
+          printf '%s\n' "$RELEASE_ALLOWED_SIGNERS" > "$RUNNER_TEMP/release-allowed-signers"
+          chmod 0600 "$RUNNER_TEMP/release-allowed-signers"
+          git config gpg.ssh.allowedSignersFile "$RUNNER_TEMP/release-allowed-signers"
+          git verify-commit "$GITHUB_SHA"
+          ./scripts/release-tag-verify "$GITHUB_REF_NAME" "$GITHUB_SHA" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
       - name: Download platform archives
         uses: actions/download-artifact@v8.0.1
         with:
           pattern: agent-sessions-*
           path: dist/release
           merge-multiple: true
-      - name: Generate checksums
+      - name: Download exact candidate evidence artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p dist/candidate
+          gh run download "${{ steps.tag.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "${{ steps.tag.outputs.artifact }}" --dir dist/candidate
+      - name: Rebuild trust and verify unchanged evidence
+        run: |
+          evidence="dist/candidate/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json"
+          test "$(sha256sum "$evidence" | cut -d' ' -f1)" = "${{ steps.tag.outputs.sha256 }}"
+          make build GOOS=linux GOARCH=amd64
+          go run ./scripts/releasetool evidence validate \
+            --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
+            --document "$evidence" --archive-dir dist/release --gate-dir dist/candidate \
+            --commit "$GITHUB_SHA" --tree "$(git rev-parse HEAD^{tree})" \
+            --run-id "${{ steps.tag.outputs.run_id }}"
+      - name: Refuse release and asset collisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=("agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" SHA256SUMS)
+          while IFS='|' read -r _ _ platform; do
+            assets+=("agent-sessions-${{ needs.inventory.outputs.version }}-$platform.tar.gz")
+          done < <(./scripts/release-inventory platforms)
+          ./scripts/release-publication-preflight "$GITHUB_REF_NAME" "${assets[@]}"
+      - name: Generate complete checksums
+        run: |
+          cp "dist/candidate/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" dist/release/
           cd dist/release
-          sha256sum agent-sessions-*.tar.gz > SHA256SUMS
+          sha256sum agent-sessions-*.tar.gz agent-sessions-v*-release-evidence.json > SHA256SUMS
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

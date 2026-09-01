@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# < 2 )); then
+  printf 'usage: %s TAG ASSET...\n' "${0##*/}" >&2
+  exit 2
+fi
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+tag=$1
+shift
+for asset in "$@"; do
+  [[ "$asset" == "${asset##*/}" && "$asset" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+    printf 'unsafe release asset name %s\n' "$asset" >&2
+    exit 2
+  }
+done
+set +e
+existing_assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+  --json assets --jq '.assets[]?.name' 2>&1)"
+release_view_status=$?
+set -e
+if (( release_view_status == 0 )); then
+  for asset in "$@"; do
+    if grep -Fxq -- "$asset" <<<"$existing_assets"; then
+      printf 'release asset %s already exists on %s; refusing replacement\n' "$asset" "$tag" >&2
+      exit 1
+    fi
+  done
+  printf 'GitHub release %s already exists; refusing replacement\n' "$tag" >&2
+  exit 1
+fi
+if [[ "$existing_assets" != "release not found" ]]; then
+  printf 'failed to inspect GitHub release %s; refusing publication preflight\n' "$tag" >&2
+  printf '%s\n' "$existing_assets" >&2
+  exit 1
+fi
+printf 'release %s and all requested asset names are unused\n' "$tag"

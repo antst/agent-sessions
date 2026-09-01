@@ -1,13 +1,15 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.3+codex.20260823133043",
-  "description": "Start, collect, message, resume, and archive named Codex, Claude, and Grok lanes.",
+  "version": "0.3.0",
+  "description": "Start, collect, message, resume, and archive named Codex, Claude, Grok, and Qwen lanes.",
   "author": {
     "name": "Agent Sessions contributors"
   },
   "keywords": [
     "codex",
+    "claude",
     "grok",
+    "qwen",
     "orchestration",
     "delegation",
     "cross-session-messaging"

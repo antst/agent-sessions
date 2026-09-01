@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+# Shared deletion primitive for Agent Sessions release trees. Native plugin
+# managers may make files and directories read-only after installation, so a
+# plain rm -rf can leave a partially removed release behind. Callers must pass
+# both the exact tree and its expected managed parent.
+remove_managed_tree() {
+  if [[ $# -ne 2 ]]; then
+    printf 'remove_managed_tree requires TREE EXPECTED_PARENT\n' >&2
+    return 2
+  fi
+
+  local tree=$1 expected_parent=$2 canonical_parent canonical_expected unexpected_link
+  [[ "$tree" == /* && "$tree" != / && "$tree" != *$'\n'* ]] || {
+    printf 'refuse to remove an unsafe managed tree: %s\n' "$tree" >&2
+    return 1
+  }
+  [[ "$expected_parent" == /* && "$expected_parent" != / && "$expected_parent" != *$'\n'* ]] || {
+    printf 'refuse to use an unsafe managed parent: %s\n' "$expected_parent" >&2
+    return 1
+  }
+  if [[ ! -e "$tree" && ! -L "$tree" ]]; then return 0; fi
+  [[ -d "$tree" && ! -L "$tree" ]] || {
+    printf 'refuse to remove an indirect managed tree: %s\n' "$tree" >&2
+    return 1
+  }
+  [[ -d "$expected_parent" && ! -L "$expected_parent" ]] || {
+    printf 'managed parent is not a real directory: %s\n' "$expected_parent" >&2
+    return 1
+  }
+
+  canonical_parent=$(cd -P -- "$(dirname -- "$tree")" && pwd)
+  canonical_expected=$(cd -P -- "$expected_parent" && pwd)
+  [[ "$canonical_parent" == "$canonical_expected" ]] || {
+    printf 'managed tree is outside its expected parent: %s\n' "$tree" >&2
+    return 1
+  }
+
+  unexpected_link=$(find -P "$tree" -mindepth 1 -type l -print -quit)
+  [[ -z "$unexpected_link" ]] || {
+    printf 'refuse to remove a managed tree containing a symbolic link: %s\n' "$unexpected_link" >&2
+    return 1
+  }
+
+  # Deleting read-only files requires write/search permission on their parent
+  # directories, not mutation of the files themselves. find -P never follows
+  # a link that could redirect chmod outside the validated managed tree.
+  find -P "$tree" -type d -exec chmod u+rwx {} +
+  rm -rf -- "$tree"
+  [[ ! -e "$tree" && ! -L "$tree" ]] || {
+    printf 'managed tree remains after removal: %s\n' "$tree" >&2
+    return 1
+  }
+}

@@ -6,13 +6,14 @@ It owns no project packet format, briefing, model, reasoning, sandbox, approval,
 postflight policy.
 
 Managed Codex peers invoke local and federated lane lifecycle operations through
-the attested `claude_peer.lane` MCP tool. Codex shell tools run inside an OS sandbox
+the attested `agent_sessions.lane` MCP tool. Codex shell tools run inside an OS sandbox
 that may correctly deny the App Server, supervisor, and host-agent Unix sockets;
 granting broader shell access is not a prerequisite for launching a lane. The MCP
 tool executes the exact packaged runtime outside that shell sandbox, binds the live
-registered Codex session as parent, and returns the native exit code, stdout, and
-stderr. Host-shell operators and Claude/Grok parents may continue to use the product
-lane CLIs directly.
+registered parent session, and returns the native exit code, stdout, and stderr.
+Codex, Claude, Grok, and Qwen orchestrators use this same tool for both self-product
+and cross-product lanes. Product lane CLIs remain the human/automation surface, not
+the model orchestration transport.
 
 The MCP transport permits one blocking `run`, `resume`, or `wait` call for at most
 24 hours. A positive native `--timeout` below that ceiling receives an additional
@@ -80,28 +81,25 @@ use `--persistent` there or the command fails closed with an actionable owner er
 
 ## Remote hosts
 
-`peer-federator` protocol 3 can proxy this unchanged native contract through its hub:
+The unified daemon can proxy this unchanged native contract through a protocol-3 hub:
 
 ```bash
-peer-federator hosts
-peer-federator lane --host workstation-b --product codex -- \
+codex-peer-lane --host workstation-b \
   start --name implementation-b -C /srv/project - < briefing.md
-peer-federator lane --host workstation-b --product codex -- \
-  wait implementation-b --timeout 2700
+codex-peer-lane --host workstation-b wait implementation-b --timeout 2700
 ```
 
 The proxy preserves stdout JSONL, stderr, and the native exit code. The source agent supplies an
 attested parent context; the destination always gives the child the source-host parent anchor and
 copies other parent groups only after explicit `--inherit-groups`. Remote lanes are persistent on
 the destination and terminal pointers return as ordinary grouped Agent Sessions frames. Every
-operation routes local UDS → hub → destination agent. Hub loss fails closed and cancels a
+operation routes local daemon → hub → destination daemon. Hub loss fails closed and cancels a
 still-blocking proxy; there is no direct network, shadow-socket, or SSH fallback.
 Pass `-C`/`--cd` on remote `run` or `start` whenever the cwd matters; otherwise the launcher
 inherits the destination agent service's cwd. `resume` retains the established cwd. Remote stdin
 is capped at 1 MiB; `--prompt-file` refers to an existing destination file and transfers nothing.
 Remote auto-archive delays are capped at 86,400 seconds.
-The destination advertises its lane capability only after its operator explicitly enables remote
-execution in `peer-federator`.
+The destination advertises its lane capability only while its native product adapter is ready.
 Message a remote lane through the same group-filtered Agent Sessions protocol used locally; its
 destination-local name and thread ID remain lifecycle addresses.
 
@@ -109,8 +107,9 @@ Parent-owned lanes automatically create a durable supervisor-owned terminal job 
 Codex or Claude session. On completed, failed, or interrupted outcomes—or a bridge-enforced timeout—the
 owner receives a small pointer
 containing lane name, thread ID, turn ID, raw App Server status, normalized outcome, wrapper exit
-code, `collection=required`, and the exact `wait` command. These fields describe the App Server
-turn; they never attest that a collector received its content. The job survives launcher exit and supervisor
+code, and the current collection state. `collection=required` includes a structured
+`agent_sessions.lane` `wait` hint; `collection=not_required` means another collector already
+consumed it. These fields describe the App Server turn. The job survives launcher exit and supervisor
 replacement: startup audits the stored turn, so a completion notification missed by a crashed or
 killed supervisor is reconstructed. Killing a discovery shim does not kill its App Server lane;
 the supervisor replaces the shim and the terminal notice is still emitted when the turn finishes.
@@ -119,8 +118,8 @@ owner exit, to retire discovery permanently. Lanes created by older runtimes hav
 and are never adopted heuristically; archive those legacy lanes explicitly.
 An explicit `archive` makes one last delivery attempt, then cancels any still-undeliverable notice
 and reports `notices_dropped` instead of allowing a hint to block authoritative cleanup.
-For a remote lane, the pointer retains the source agent's effective `-runtime-dir`, so its printed
-`peer-federator lane ... wait` command remains directly runnable from a non-default isolated estate.
+For a remote lane, the structured hint includes `host=HOST`, so collection uses
+the same daemon-owned federation path.
 
 The default lifecycle is parent-scoped. A direct Claude caller is identified only when its
 environment hints, current process ancestry, PID, available process-start identity, session ID,
@@ -128,8 +127,9 @@ and live registry socket agree. In that case the corroborated Claude session pro
 not the short-lived shell or adapter subprocess invoking `codex-peer-lane`. Other launchers are
 owned by their direct parent process. When the
 owner exits, the supervisor interrupts a running turn and archives the lane after it reaches a
-terminal state, removing its discovery shim while retaining normal archived Codex history. Use
-`--no-notify` when a parent-owned lane should not wake its Claude owner on completion.
+terminal state, removing its discovery shim while retaining normal archived Codex history. The
+unified daemon always routes the terminal collection pointer to the immediate Agent Sessions
+parent; this routing is not a model-policy option.
 Terminal pointers are supervisor-generated infrastructure messages. At delivery they use the live
 Claude target's permission class so Claude does not hold an ordinary completion pointer for a
 prompting/bypass mismatch. Ordinary peer messages from a parent-owned lane to that exact parent use
@@ -142,13 +142,12 @@ attested hub roster. The Claude outer carrier describes the local host agent and
 the source's permission class.
 
 `--persistent` is the explicit opt-out from parent cleanup. A persistent lane survives its launcher
-or orchestrator. Only a
-persistent lane accepts `--notify PEER`, because a parent-owned lane already has an authoritative
-notification target. `lane.ready` reports `persistent`, `auto_archive`, `owner_session_id`, and
-`notify_target`.
+or orchestrator while retaining its immediate Agent Sessions parent anchor. `lane.ready` reports
+`persistent`, `auto_archive`, and `owner_session_id`. The unified lifecycle has no
+`notify_target`, `--notify`, or `--no-notify` input.
 `resume` preserves whether the lane is persistent or parent-owned. Passing `--persistent` explicitly
-promotes a parent-owned lane; omitting it never silently demotes an existing persistent lane or clears
-its notification target. A parent-owned resume records the new launcher as its lifecycle owner.
+promotes a parent-owned lane; omitting it never silently demotes an existing persistent lane. A
+parent-owned resume records the new launcher as its lifecycle owner.
 
 Auto-archive is enabled by default. After the latest turn reaches its final terminal state (including
 any schema correction), the lane remains idle and messageable for one minute, then the supervisor
@@ -195,8 +194,9 @@ launching work.
 
 The repository also ships a self-contained Claude Code plugin, `agent-sessions`, which teaches this
 contract to any Claude orchestrator without copying a project-specific adapter. It adds no runtime,
-hooks, policy defaults, or permission grants. Its process-attested MCP declaration provides grouped
-messaging, while lane behavior remains in the native launchers.
+hooks, policy defaults, or global permission mutation. Managed Claude launchers grant only the exact
+Agent Sessions MCP tools in their lifecycle-owned settings/argv. Its process-attested MCP declaration
+provides grouped messaging and the same daemon-backed lane control used by the other products.
 
 `wait` is a single-consumer cursor over the lane's persisted turn history. Its first successful
 call collects the initial turn; each later call blocks for and returns the oldest uncollected turn,
@@ -296,13 +296,13 @@ configuration. Explicit values are overlays:
 The wrapper does not replace or disable user configuration. It internally overlays only
 `features.code_mode_host=false`, which is headless execution plumbing rather than agent policy:
 detached lanes have no attached TUI to act as an external code-mode host. Shell/patch tools remain
-available in App Server, and the supervisor dispatches nested MCP calls such as `claude_peer`.
+available in App Server, and the supervisor dispatches nested MCP calls such as `agent_sessions`.
 
 An autonomous lane cannot ask a human through a TUI. Orchestrators that intend unattended tool use
 should normally pass `--approval-policy never`; the wrapper deliberately does not choose this for
-them. Approval and sandboxing are independent: `claude_peer` messaging is client-side and works for
+them. Approval and sandboxing are independent: `agent_sessions` messaging is client-side and works for
 a `read-only` model sandbox. The supervisor auto-accepts only MCP approval elicitations for its own
-`claude_peer` server, reflecting the bridge's trusted-isolated-peer contract; it does not approve
+`agent_sessions` server, reflecting the bridge's trusted-isolated-peer contract; it does not approve
 foreign MCP servers or ordinary elicitations.
 
 Prompts should use stdin or `--prompt-file`; large briefings are never placed on argv.

@@ -48,12 +48,22 @@ type ResolvePreferencesRequest struct {
 	InheritGroupsSpecified bool
 	AlwaysApprove          bool
 	AlwaysApproveSpecified bool
+	Qwen                   *QwenSessionMetadata
 }
 
 // ResolvedPreferences is the durable preference plus computed effective groups.
 type ResolvedPreferences struct {
 	Preference      SessionPreferences
 	EffectiveGroups []string
+}
+
+// ManagedSession is the non-live durable identity needed by a product wrapper
+// to resume one exact managed interactive session. Live process details are
+// returned only to reject a second attachment.
+type ManagedSession struct {
+	Preference SessionPreferences
+	Name       string
+	Live       bool
 }
 
 // LookupSessionPreferences returns one durable catalog row without requiring
@@ -73,6 +83,26 @@ func LookupSessionPreferences(runtimeDir, sessionID string) (ResolvedPreferences
 		return ResolvedPreferences{}, errors.New("agent returned no session catalog row")
 	}
 	return ResolvedPreferences{Preference: *response.Preference, EffectiveGroups: response.Groups}, nil
+}
+
+// LookupManagedSession returns the durable preference/name pair and whether an
+// exact local attachment is already live.
+func LookupManagedSession(runtimeDir, sessionID string) (ManagedSession, error) {
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir()
+	}
+	response, err := requestAgentControl(runtimeDir, Message{
+		Type: "session_lookup", Version: GroupProtocolVersion, SessionID: sessionID,
+	})
+	if err != nil {
+		return ManagedSession{}, err
+	}
+	if response.Type != "session_lookup" || response.Preference == nil {
+		return ManagedSession{}, errors.New("agent returned no managed session record")
+	}
+	return ManagedSession{
+		Preference: *response.Preference, Name: response.Name, Live: len(response.Peers) != 0,
+	}, nil
 }
 
 // ResolveSessionName maps one unique durable product peer name to its stable
@@ -237,6 +267,7 @@ func preferenceMessage(requestType string, request ResolvePreferencesRequest) Me
 		ParentHostID: request.ParentHostID, ParentGroups: request.ParentGroups,
 		InheritParentGroups: request.InheritParentGroups, InheritGroupsSpecified: request.InheritGroupsSpecified,
 		AlwaysApprove: request.AlwaysApprove, AlwaysApproveSpecified: request.AlwaysApproveSpecified,
+		QwenSession: request.Qwen,
 	}
 }
 

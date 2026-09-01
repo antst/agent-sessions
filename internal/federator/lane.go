@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -53,6 +54,7 @@ type pendingLane struct {
 type laneRun struct {
 	mu        sync.Mutex
 	process   *os.Process
+	cancel    context.CancelFunc
 	cancelled bool
 	done      chan struct{}
 	stopOnce  sync.Once
@@ -81,7 +83,7 @@ func normalizeCapabilities(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
 	for _, value := range values {
-		if value != CapabilityCodexLane && value != CapabilityClaudeLane && value != CapabilityGrokLane || seen[value] {
+		if _, ok := ProductByCapability(value); !ok || seen[value] {
 			continue
 		}
 		seen[value] = true
@@ -95,9 +97,6 @@ func resolveLaneExecutable(configured, fallback string) string {
 	if configured != "" {
 		if path, err := exec.LookPath(configured); err == nil {
 			return path
-		}
-		if info, err := os.Stat(configured); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-			return configured
 		}
 		return ""
 	}
@@ -113,30 +112,39 @@ func resolveLaneExecutable(configured, fallback string) string {
 }
 
 func (a *agent) laneCapabilities() []string {
+	if a.embedded != nil {
+		return append([]string(nil), a.embedded.capabilities...)
+	}
 	if !a.options.EnableRemoteLanes {
 		return nil
 	}
-	capabilities := []string{}
-	if a.options.CodexLaneExecutable != "" {
-		capabilities = append(capabilities, CapabilityCodexLane)
-	}
-	if a.options.ClaudeLaneExecutable != "" {
-		capabilities = append(capabilities, CapabilityClaudeLane)
-	}
-	if a.options.GrokLaneExecutable != "" {
-		capabilities = append(capabilities, CapabilityGrokLane)
+	capabilities := make([]string, 0, len(productDescriptors))
+	for _, descriptor := range productDescriptors {
+		if a.laneExecutable(descriptor.ID) != "" {
+			capabilities = append(capabilities, descriptor.FederationCapability)
+		}
 	}
 	return capabilities
 }
 
 func capabilityForProduct(product string) string {
+	descriptor, ok := ProductByID(product)
+	if !ok {
+		return ""
+	}
+	return descriptor.FederationCapability
+}
+
+func (a *agent) laneExecutable(product string) string {
 	switch product {
 	case "codex":
-		return CapabilityCodexLane
+		return a.options.CodexLaneExecutable
 	case "claude":
-		return CapabilityClaudeLane
+		return a.options.ClaudeLaneExecutable
 	case "grok":
-		return CapabilityGrokLane
+		return a.options.GrokLaneExecutable
+	case "qwen":
+		return a.options.QwenLaneExecutable
 	default:
 		return ""
 	}
@@ -223,7 +231,7 @@ func randomLaneRequestID(hostID string) (string, error) {
 func (a *agent) handleLaneControl(conn net.Conn, request Message) {
 	capability := capabilityForProduct(request.Product)
 	if capability == "" || len(request.Args) == 0 {
-		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: "lane request requires --product codex|claude|grok and native lane arguments"})
+		_ = newWireConn(conn).Send(Message{Type: "lane_error", Error: "lane request requires a supported --product and native lane arguments"})
 		return
 	}
 	if len(request.Input) > maxLaneInputBytes {
@@ -360,17 +368,10 @@ func (a *agent) prepareRemoteLane(request Message) (string, []string, error) {
 	if !a.options.EnableRemoteLanes {
 		return "", nil, errors.New("remote lane execution is disabled on this host")
 	}
-	var executable string
-	switch request.Product {
-	case "codex":
-		executable = a.options.CodexLaneExecutable
-	case "claude":
-		executable = a.options.ClaudeLaneExecutable
-	case "grok":
-		executable = a.options.GrokLaneExecutable
-	default:
+	if _, ok := ProductByID(request.Product); !ok {
 		return "", nil, fmt.Errorf("unsupported lane product %q", request.Product)
 	}
+	executable := a.laneExecutable(request.Product)
 	if executable == "" {
 		return "", nil, fmt.Errorf("%s lane launcher is unavailable", request.Product)
 	}
@@ -443,6 +444,10 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		a.laneMu.Unlock()
 		close(run.done)
 	}()
+	if a.embedded != nil {
+		a.runEmbeddedRemoteLane(request, run)
+		return
+	}
 	executable, args, err := a.prepareRemoteLane(request)
 	if err != nil {
 		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})
@@ -463,11 +468,8 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 		_ = a.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: profileErr.Error()})
 		return
 	}
-	command.Env = claudeProfileEnvironment(replaceEnvironment(os.Environ(), map[string]string{
-		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     a.options.RuntimeDir,
-		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": string(parentBody),
-		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        a.options.ClaudeConfigDir,
-	}), claudeProfile)
+	environmentUpdates := remoteLaneEnvironmentUpdates(a.options, request.Product, string(parentBody))
+	command.Env = claudeProfileEnvironment(envutil.Replace(os.Environ(), environmentUpdates), claudeProfile)
 	command.Stdin = bytes.NewReader(request.Input)
 	livenessReader, livenessWriter, err := os.Pipe()
 	if err != nil {
@@ -527,6 +529,18 @@ func (a *agent) runRemoteLane(request Message, run *laneRun) {
 	_ = a.sendLaneMessage(Message{Type: "lane_exit", RequestID: request.RequestID, ExitCode: exitCode})
 }
 
+func remoteLaneEnvironmentUpdates(options AgentOptions, product, parentContext string) map[string]string {
+	updates := map[string]string{
+		"AGENT_SESSIONS_AGENT_RUNTIME_DIR":     options.RuntimeDir,
+		"AGENT_SESSIONS_REMOTE_PARENT_CONTEXT": parentContext,
+		"CLAUDE_PEER_CLAUDE_CONFIG_DIR":        options.ClaudeConfigDir,
+	}
+	if product == "qwen" && options.QwenExecutable != "" {
+		updates["QWEN_PEER_QWEN_BIN"] = options.QwenExecutable
+	}
+	return updates
+}
+
 func claudeProfileEnvironment(environment []string, profile claudeprofile.Source) []string {
 	result := make([]string, 0, len(environment)+2)
 	for _, entry := range environment {
@@ -579,7 +593,11 @@ func (r *laneRun) stop() {
 		r.mu.Lock()
 		r.cancelled = true
 		process := r.process
+		cancel := r.cancel
 		r.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		if process == nil {
 			return
 		}
@@ -796,13 +814,13 @@ func RunRemoteLane(ctx context.Context, options RemoteLaneOptions, stdin io.Read
 		options.RuntimeDir = DefaultRuntimeDir()
 	}
 	if options.Host == "" || capabilityForProduct(options.Product) == "" || len(options.Args) == 0 {
-		return 1, errors.New("remote lane requires --host, --product codex|claude|grok, and native lane arguments after --")
+		return 1, errors.New("remote lane requires --host, a supported --product, and native lane arguments after --")
 	}
 	if options.SourceSession == "" {
 		options.SourceSession = inferRemoteLaneSourceSession(os.Getpid())
 	}
 	if options.SourceSession == "" {
-		return 1, errors.New("cannot identify the originating Codex/Claude session; pass --source-session")
+		return 1, errors.New("cannot identify the originating product session; pass --source-session")
 	}
 	input := []byte(nil)
 	if remoteLaneReadsStdin(options.Product, options.Args) {

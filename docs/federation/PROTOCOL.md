@@ -1,13 +1,14 @@
 # Federation protocol version 3
 
-The host agent is authoritative for Agent Sessions protocol 1. The optional
-hub connects agents using federation protocol 3. Both use bounded
+The service-managed host daemon is authoritative for local Agent Sessions
+state and routing. The optional hub connects daemons using federation protocol
+3. Network frames use bounded
 newline-delimited JSON; federation frames are limited to 2 MiB.
 
 ## Local agent contract
 
-Product adapters first persist or restore a catalog row, then register a live
-delivery adapter using exact PID/process-start/socket identity. A catalog row
+Product adapters first persist or restore a daemon catalog row, then register a
+live delivery adapter using exact PID/process-start/socket identity. A catalog row
 contains only stable session ID, product, explicit groups, parent and inherited
 groups, yolo state, and update time. Live process addresses and status are not
 durable catalog data.
@@ -32,7 +33,7 @@ sender to belong to the named group and snapshots current members at admission.
 
 ## Claude native carrier
 
-The host agent publishes one service record and Unix socket. A Claude-native
+The host daemon publishes one service record and Unix socket. A Claude-native
 `user` frame sent to that socket is only an outer carrier. The complete
 `AgentFrame` JSON is encoded in the message body after the normal strict Claude
 envelope. Claude-originated requests prefix that compact JSON with the literal
@@ -47,8 +48,14 @@ group member or broadcast recipient.
 
 ## Hub contract
 
-The first agent frame is `hello` with protocol 3; diagnostics may send `probe`.
-An agent sends complete snapshots of explicitly registered peers. The hub
+The first host frame is `hello` with protocol 3; diagnostics may send `probe`.
+The hub refuses every other protocol version before registration. Build IDs are
+diagnostic only, so unrelated host and hub builds interoperate when their exact
+protocol version is equal. A daemon generation prevents an older reconnect from
+displacing a newer live host generation.
+
+A daemon sends complete snapshots of currently addressable attachments and
+lanes. The hub
 rejects malformed identities, a host/session ID mismatch, unsupported products
 or peer protocol, missing private anchors, duplicate IDs, and duplicate
 sessions. It retains the previous valid snapshot if a replacement is invalid.
@@ -67,9 +74,20 @@ capability before forwarding it. The destination never derives the parent
 anchor using its own host ID: it persists the canonical source-host anchor.
 
 The destination streams bounded stdout/stderr and one terminal exit/error.
-Disconnecting either agent drops the in-memory route and cancels its live CLI
+Disconnecting either daemon drops the in-memory route and cancels its live CLI
 proxy. No agent-to-agent or SSH fallback exists; hub connectivity is mandatory
 only for cross-host operations. Local grouped routing continues without a hub.
 
-The network is assumed trusted. Authentication, encryption, offline storage,
-delivery retry, global broadcast, and a policy language are outside protocol 3.
+Current agents advertise one exact capability per ready target:
+`codex-lane`, `claude-lane`, `grok-lane`, and `qwen-lane`. Qwen capability
+advertisement consumes the same selected-profile readiness report as local
+doctor and launch admission; an absent, unready, or explicitly misconfigured
+Qwen launcher is never advertised and remote execution never falls back to a
+different product or host.
+
+The network is assumed trusted. Authentication, encryption, hub-side offline
+storage, global broadcast, and a policy language are outside protocol 3. Each
+network delivery is destination-acknowledged; the destination daemon records a
+stable message-and-target identity before presentation, so caller replay and
+transport reconnect cannot duplicate an accepted delivery. The hub itself does
+not retain delivery state across restart.

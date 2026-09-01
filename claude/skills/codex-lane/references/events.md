@@ -11,7 +11,7 @@ to a file and parse it; do not rely on `jq` being installed.
 | `thread.started` | `run`, `start` | `thread_id`, `session_id`, `peer_name` |
 | `thread.resumed` | `resume` | `thread_id`, `session_id`, `peer_name` |
 | `turn.started` | `run`, `start`, `resume`, `wait` | `thread_id`, `turn_id` |
-| `lane.ready` | `run`, `start`, `resume` | `contract_version`, `name`, `thread_id`, `session_id`, `address`, `turn_id`, `cwd`, `worktree_path`, `notify_target`, `persistent`, `auto_archive`, `auto_archive_after_seconds`, `owner_session_id`; resume also has `resumed: true` |
+| `lane.ready` | `start` | `contract_version`, `product`, `name`, `thread_id`, `session_id`, `turn_id`, `cwd`, `groups`, `permission_mode`, `state`, `persistent`, `collection_debt`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id` |
 | `item.completed` | `run`, `resume`, `wait` | `turn_id`, `item` |
 | `turn.schema_retry` | `run`, `resume`, `wait` | `thread_id`, `turn_id`, `attempt` |
 | `turn.completed` | `run`, `resume`, `wait` | `turn_id`, `status`, `outcome`, `exit`, `accounting`, `usage`, `error` |
@@ -57,7 +57,7 @@ They differ when a durable deadline fires: raw `status` is usually `interrupted`
 ## `lane.status`
 
 `name`, `thread_id`, `session_id`, `status`, `cwd`, `turn_id`, `turn_status`, `collected_turn_id`,
-`worktree_path`, `notify_target`, `persistent`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`,
+`persistent`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`,
 `outcome`, `exit`.
 
 `outcome` and `exit` are `null` while a turn is still running. `collected_turn_id` is the `wait`
@@ -68,7 +68,7 @@ uncollected detached answer is no longer available through `wait`.
 ## Discovery and preflight
 
 `lane.list` contains a `lanes` array. Each row carries `name`, `thread_id`, `session_id`, `cwd`,
-`status`, `turn_id`, `collected_turn_id`, `worktree_path`, `notify_target`, `persistent`,
+`status`, `turn_id`, `collected_turn_id`, `persistent`,
 `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`, `outcome`, and `exit`.
 Active lanes are returned by default and `--all` adds archived, resumable lanes.
 `--mine` filters by the current orchestrator's owner PID and process-start identity. It excludes
@@ -81,8 +81,7 @@ deadline; cleanup normally occurs within five seconds afterward on the superviso
 reconciliation tick.
 `auto_archive_after_seconds` is the persisted grace duration and defaults to `60`.
 
-`lane.doctor` carries `runtime_version`, `runtime_path`, `appserver_reachable`,
-`appserver_socket`, `supervisor_reachable`, `supervisor_socket`, `codex_home`, and `state_root`.
+`lane.doctor` carries `authority`, `contract_version`, `product`, `ready`, and `native_path`.
 The command exits non-zero when either service is unreachable even though its JSON report is still
 complete.
 
@@ -94,13 +93,15 @@ fields plus normalized token counters, and a `usage` block. `cost` is deliberate
 
 ## Terminal notices
 
-Parent-owned Claude lanes deliver a durable terminal pointer to their corroborated owner unless
-`--no-notify` was passed. Persistent lanes deliver one only when launched with `--notify PEER`.
-The pointer contains lane, thread, turn, status, outcome, exit, `collection=required`, and the exact
-`wait` command. `lane.ready` reports the selected target, ownership, and persistence mode.
+The unified daemon delivers a durable terminal pointer to the lane's immediate Agent Sessions
+parent automatically. `owner_session_id` identifies that parent attachment; there is no
+`notify_target`, `--notify`, or `--no-notify` branch in this lifecycle surface.
+The notice contains lane, thread, turn, status, outcome, exit, and the current
+collection state. `collection=required` includes a structured
+`agent_sessions.lane` `wait` hint; `collection=not_required` means the turn was
+already consumed. `lane.ready` reports the selected target, ownership, and persistence mode.
 Terminal pointers, and ordinary peer messages sent by a parent-owned lane to its exact owner, use
 that established parent relationship and do not trigger a prompting/bypass mismatch approval.
 Messages from unrelated or persistent lanes retain their actual sender permission class.
 
-The notice describes the App Server turn. It never carries the answer and never attests that
-anything was collected. `collection=required` means: call `wait`.
+The notice describes the App Server turn. It never carries the answer.

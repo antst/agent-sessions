@@ -25,8 +25,6 @@ Map a caller's stated policy 1:1 onto flags. Nothing here has a default supplied
 | survive the owning orchestrator | `--persistent` |
 | custom terminal retention grace | `--auto-archive-after SECONDS` (minimum 0.001; default 60) |
 | keep a completed lane beyond its configured grace period | `--no-auto-archive` |
-| persistent-lane terminal notice target | `--persistent --notify PEER` |
-| suppress owner notification | `--no-notify` |
 | structured output | `--schema FILE` |
 | isolated checkout | `--worktree` |
 
@@ -37,15 +35,15 @@ interrupts or relabels the lane. An orchestrator may choose a bounded wait to st
 tool-call limit; exit 124 means it should wait again or inspect status.
 
 Lifecycle and notification routing are not model policy. Ordinary lanes belong to the launching
-orchestrator, notify a corroborated Claude owner automatically, and are interrupted/archived when
-that owner exits. Pass `--persistent` only when requested. Auto-archive is enabled by default and
+orchestrator, notify their immediate Agent Sessions parent automatically, and are interrupted/archived when
+that owner exits. `lane.ready.owner_session_id` exposes the parent attachment; the unified daemon
+does not use `notify_target`, `--notify`, or `--no-notify`. Pass `--persistent` only when requested. Auto-archive is enabled by default and
 retires an idle lane one minute after its latest final terminal turn; a newer turn cancels the timer.
 Pass `--auto-archive-after SECONDS` only when a different grace is requested. Pass
 `--no-auto-archive` only for indefinite retention, never together with a custom grace, and pair it
 with `--persistent` for a permanent lane.
 The configured grace sets an exact not-before deadline; actual cleanup normally follows within five
 seconds on the supervisor's next reconciliation tick.
-`--notify PEER` is valid only with `--persistent`; use `--no-notify` only when asked to suppress owner notices.
 
 ## Prohibitions
 

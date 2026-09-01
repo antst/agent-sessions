@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-launchd-control.XXXXXX")"
+trap 'rm -rf -- "$test_root"' EXIT
+mkdir -p "$test_root/bin"
+
+cat >"$test_root/bin/launchctl" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$TEST_LAUNCHCTL_LOG"
+case "$1" in
+  print)
+    test -e "$TEST_LAUNCHCTL_LOADED"
+    ;;
+  bootout)
+    if test ! -e "$TEST_LAUNCHCTL_BOOTOUT_RETRIED"; then
+      : >"$TEST_LAUNCHCTL_BOOTOUT_RETRIED"
+      printf '%s\n' 'Bootstrap failed: 5: Input/output error' >&2
+      exit 5
+    fi
+    rm -f -- "$TEST_LAUNCHCTL_LOADED"
+    ;;
+  bootstrap)
+    if test ! -e "$TEST_LAUNCHCTL_BOOTSTRAP_RETRIED"; then
+      : >"$TEST_LAUNCHCTL_BOOTSTRAP_RETRIED"
+      printf '%s\n' 'Bootstrap failed: 5: Input/output error' >&2
+      exit 5
+    fi
+    : >"$TEST_LAUNCHCTL_LOADED"
+    ;;
+  *) exit 91 ;;
+esac
+EOF
+chmod 0700 "$test_root/bin/launchctl"
+
+export TEST_LAUNCHCTL_LOG="$test_root/launchctl.log"
+export TEST_LAUNCHCTL_LOADED="$test_root/loaded"
+export TEST_LAUNCHCTL_BOOTOUT_RETRIED="$test_root/bootout-retried"
+export TEST_LAUNCHCTL_BOOTSTRAP_RETRIED="$test_root/bootstrap-retried"
+PATH="$test_root/bin:/usr/bin:/bin"
+export PATH
+source "$root/scripts/launchd-control"
+
+target="gui/501/net.antst.agent-sessions"
+: >"$TEST_LAUNCHCTL_LOADED"
+launchd_bootout_exact "$target"
+test ! -e "$TEST_LAUNCHCTL_LOADED"
+test -e "$TEST_LAUNCHCTL_BOOTOUT_RETRIED"
+
+plist="$test_root/net.antst.agent-sessions.plist"
+: >"$plist"
+launchd_bootstrap_exact "gui/501" "$target" "$plist"
+test -e "$TEST_LAUNCHCTL_LOADED"
+test -e "$TEST_LAUNCHCTL_BOOTSTRAP_RETRIED"
+
+escaped=$(launchd_xml_sed_replacement '/Users/a&b/<work>|tree')
+test "$escaped" = '/Users/a\&amp;b/\&lt;work\&gt;\|tree'
+rendered="$test_root/rendered.plist"
+launchd_render_host_plist \
+  "$root/deploy/agent-sessions/launchd/net.antst.agent-sessions.plist" "$rendered" \
+  '/Users/a&b/.local' '/Users/a&b/.local/state' '/Users/a&b' \
+  '/Users/a&b/.local/bin:/usr/bin' '/Applications/Codex & Tools/codex' \
+  '/usr/local/bin/claude' '' '/usr/local/bin/qwen'
+if grep -Eq '@(PREFIX|STATE_ROOT|HOME|SERVICE_PATH|CODEX_BIN|CLAUDE_BIN|GROK_BIN|QWEN_BIN)@' "$rendered"; then
+  printf 'rendered launchd plist retains a template placeholder\n' >&2
+  exit 1
+fi
+python3 - "$rendered" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], "rb") as stream:
+    document = plistlib.load(stream)
+assert document["WorkingDirectory"] == "/Users/a&b"
+assert document["EnvironmentVariables"]["CODEX_PEER_CODEX_BIN"] == "/Applications/Codex & Tools/codex"
+PY
+grep -Fxq "bootout $target" "$TEST_LAUNCHCTL_LOG"
+grep -Fxq "bootstrap gui/501 $plist" "$TEST_LAUNCHCTL_LOG"
+printf 'launchd exact-label retry and plist escaping: PASS\n'

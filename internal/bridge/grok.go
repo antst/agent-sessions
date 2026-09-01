@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const (
@@ -119,13 +120,13 @@ func grokRuntimePaths(runtimeDir string, uid int, launchToken string) grokHostPa
 
 func grokRuntimePathsForKey(runtimeDir string, uid int, launchKey string) grokHostPaths {
 	root := filepath.Join(runtimeDir, fmt.Sprintf("agent-sessions-grok-%d", uid))
-	// Darwin has a substantially shorter sockaddr_un budget. Prefer the caller's
-	// runtime directory, but fall back to the literal /tmp spelling before any
-	// socket is created. The root is still protected by ensurePrivateRuntimeDir.
-	longest := filepath.Join(root, "g-"+strings.Repeat("0", 20), "control.sock")
-	if len(longest) > 92 {
-		root = filepath.Join("/tmp", fmt.Sprintf("asg-%d", uid))
-	}
+	// Prefer the caller's runtime directory, but compact before any socket is
+	// created when the longest per-launch address would exceed sun_path.
+	root = socketpath.PreferRoot(
+		root,
+		filepath.Join("/tmp", fmt.Sprintf("asg-%d", uid)),
+		filepath.Join("g-"+strings.Repeat("0", 20), "control.sock"),
+	)
 	launchDir := filepath.Join(root, "g-"+launchKey)
 	return grokHostPaths{
 		Root:          root,
@@ -233,12 +234,12 @@ func readGrokLaunchRecord(path string) *grokLaunchRecord {
 // owning grok-peer normally so its host can clean up the exact process group.
 func runGrokSafetyCommand(argv []string) int {
 	if len(argv) != 1 || argv[0] != "stopped" {
-		fmt.Fprintln(os.Stderr, "usage: agent-session-runtime grok stopped")
+		fmt.Fprintln(os.Stderr, "usage: agent-sessions grok stopped")
 		return 2
 	}
 	live, err := activeGrokLaunchSessions(resolveNativePaths())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok stopped: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions grok stopped: %v\n", err)
 		return 1
 	}
 	encoded, _ := json.Marshal(map[string]any{"stopped": len(live) == 0, "liveSessionIds": live})
@@ -628,6 +629,7 @@ var errGrokRosterAuthorityLost = errors.New("live Grok roster authority lost")
 type grokRPCError struct {
 	Code    int
 	Message string
+	Data    any
 }
 
 func (e *grokRPCError) Error() string {
@@ -635,6 +637,25 @@ func (e *grokRPCError) Error() string {
 		return "Grok ACP: " + e.Message
 	}
 	return fmt.Sprintf("Grok ACP error %d: %s", e.Code, e.Message)
+}
+
+func (e *grokRPCError) diagnosticDetail() string {
+	if e == nil {
+		return ""
+	}
+	value, _ := e.Data.(string)
+	if value == "" {
+		if object, ok := e.Data.(map[string]any); ok {
+			value = stringValue(object["message"])
+		}
+	}
+	value = strings.Join(strings.Fields(strings.ToValidUTF8(value, "�")), " ")
+	const maxRunes = 512
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "…"
+	}
+	return value
 }
 
 func newGrokACPClient(
@@ -745,7 +766,9 @@ func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, mess
 				continue
 			}
 			if raw, ok := response["error"].(map[string]any); ok {
-				return &grokRPCError{Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected")}
+				return &grokRPCError{
+					Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected"), Data: raw["data"],
+				}
 			}
 			result, _ := response["result"].(map[string]any)
 			inner, _ := result["result"].(map[string]any)
@@ -795,7 +818,9 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 				continue
 			}
 			if raw, ok := response["error"].(map[string]any); ok {
-				return nil, &grokRPCError{Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected")}
+				return nil, &grokRPCError{
+					Code: intValue(raw["code"]), Message: defaultString(stringValue(raw["message"]), "request rejected"), Data: raw["data"],
+				}
 			}
 			result, _ := response["result"].(map[string]any)
 			return result, nil
@@ -813,9 +838,14 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 	}
 }
 
-func (c *grokACPClient) notifyRequest(method string, params map[string]any) error {
+func (c *grokACPClient) close() {
+	_ = c.stdin.Close()
+	stopGrokManagedProcess(c.process, 2*time.Second)
+}
+
+func (c *grokACPClient) notifyCancel(params map[string]any) error {
 	body, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "method": method, "params": params,
+		"jsonrpc": "2.0", "method": "session/cancel", "params": params,
 	})
 	if err != nil {
 		return err
@@ -824,14 +854,9 @@ func (c *grokACPClient) notifyRequest(method string, params map[string]any) erro
 	_, err = c.stdin.Write(append(body, '\n'))
 	c.writeMu.Unlock()
 	if err != nil {
-		return fmt.Errorf("write Grok ACP %s notification: %w", method, err)
+		return fmt.Errorf("write grok ACP session/cancel notification: %w", err)
 	}
 	return nil
-}
-
-func (c *grokACPClient) close() {
-	_ = c.stdin.Close()
-	stopGrokManagedProcess(c.process, 2*time.Second)
 }
 
 type grokWakeRecord struct {
@@ -876,6 +901,7 @@ type grokHost struct {
 	activeInterjectionValid bool
 	activeInterjectionAt    time.Time
 	lastRosterPushAt        time.Time
+	nativeRosterName        string
 	acpGeneration           uint64
 	rosterValid             bool
 
@@ -1101,6 +1127,9 @@ func (h *grokHost) start() error {
 	if err := h.waitForLeaderSocket(10 * time.Second); err != nil {
 		return err
 	}
+	if err := socketpath.Validate(h.paths.ControlSocket); err != nil {
+		return fmt.Errorf("validate Grok control socket: %w", err)
+	}
 	listener, err := net.Listen("unix", h.paths.ControlSocket)
 	if err != nil {
 		return fmt.Errorf("listen on Grok control socket: %w", err)
@@ -1245,7 +1274,7 @@ func (h *grokHost) ensureACPConnectedLocked(ctx context.Context) error {
 			h.closeACPLocked()
 			return process.attributedError("initialize official Grok ACP observer", err)
 		}
-		if !grokAuthMethodAdvertised(result, "cached_token") {
+		if !grokCachedTokenAdvertised(result) {
 			process := h.acp.process
 			h.closeACPLocked()
 			return process.attributedError("authenticate official Grok ACP observer", errors.New("cached_token authentication was not advertised"))
@@ -1405,10 +1434,14 @@ func (h *grokHost) applyRosterState(state grokRosterState) error {
 	pushObservedAt := h.reconcileRosterPushLocked(&state)
 	identity := h.identitySnapshot()
 	desiredName := identity.name
-	if !h.config.NameSpecified && state.name != "" {
-		desiredName = sanitizeName(state.name)
+	nativeName := sanitizeName(state.name)
+	if state.name != "" && (!h.config.NameSpecified || h.nativeRosterName != "" && nativeName != h.nativeRosterName) {
+		desiredName = nativeName
 	}
 	if state.permissionMode == h.mode && state.status == h.status && desiredName == identity.name {
+		if state.name != "" {
+			h.nativeRosterName = nativeName
+		}
 		h.rosterValid = true
 		if !pushObservedAt.IsZero() {
 			h.lastRosterPushAt = pushObservedAt
@@ -1418,7 +1451,7 @@ func (h *grokHost) applyRosterState(state grokRosterState) error {
 		h.activeInterjectionAt = time.Time{}
 		return nil
 	}
-	if err := h.publishRosterStateLocked(state); err != nil {
+	if err := h.publishRosterStateLocked(state, desiredName); err != nil {
 		return err
 	}
 	nextRecord := h.record
@@ -1438,6 +1471,9 @@ func (h *grokHost) applyRosterState(state grokRosterState) error {
 	h.mode = state.permissionMode
 	h.status = state.status
 	h.record = nextRecord
+	if state.name != "" {
+		h.nativeRosterName = nativeName
+	}
 	h.rosterValid = true
 	if !pushObservedAt.IsZero() {
 		h.lastRosterPushAt = pushObservedAt
@@ -1465,7 +1501,7 @@ func (h *grokHost) reconcileRosterPushLocked(state *grokRosterState) time.Time {
 // publishRosterStateLocked updates both native daemon records atomically from
 // the host's perspective and restores the previous in-memory values on error.
 // Callers hold peerMu and modeMu.
-func (h *grokHost) publishRosterStateLocked(state grokRosterState) error {
+func (h *grokHost) publishRosterStateLocked(state grokRosterState, desiredName string) error {
 	peer := h.peer
 	if peer == nil {
 		return nil
@@ -1478,8 +1514,8 @@ func (h *grokHost) publishRosterStateLocked(state grokRosterState) error {
 	previousNameSource := peer.nameSource
 	peer.permissionMode = state.permissionMode
 	peer.status = state.status
-	if !h.config.NameSpecified && state.name != "" {
-		peer.name = sanitizeName(state.name)
+	if desiredName != "" && desiredName != peer.name {
+		peer.name = desiredName
 		peer.nameSource = "canonical"
 	}
 	publisher := h.publishRosterState
@@ -1727,11 +1763,11 @@ func grokRosterActivityStatus(activity string) (string, error) {
 	}
 }
 
-func grokAuthMethodAdvertised(result map[string]any, wanted string) bool {
+func grokCachedTokenAdvertised(result map[string]any) bool {
 	methods, _ := result["authMethods"].([]any)
 	for _, raw := range methods {
 		method, _ := raw.(map[string]any)
-		if stringValue(method["id"]) == wanted {
+		if stringValue(method["id"]) == "cached_token" {
 			return true
 		}
 	}
@@ -2003,7 +2039,7 @@ func (h *grokHost) deliverWake(messageID string) {
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), grokACPInterjectTimeout)
-	err = h.acp.requestInterjection(ctx, h.identitySnapshot().sessionID, messageID, trustedPeerTextForProduct(item, "grok"))
+	err = h.acp.requestInterjection(ctx, h.identitySnapshot().sessionID, messageID, peerMessageText(item))
 	cancel()
 	if err != nil {
 		h.clearActiveInterjectionPermissionSnapshot()
@@ -2022,7 +2058,7 @@ func (h *grokHost) deliverWake(messageID string) {
 		h.acpMu.Unlock()
 		detail := "delivery outcome is unknown: " + err.Error()
 		h.setWakeResult(messageID, "in_flight", detail)
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: wake %s remains ambiguous and will not be replayed: %s\n", messageID, detail)
+		fmt.Fprintf(os.Stderr, "agent-sessions grok-host: wake %s remains ambiguous and will not be replayed: %s\n", messageID, detail)
 		return
 	}
 	h.acpMu.Unlock()
@@ -2108,12 +2144,12 @@ func (h *grokHost) cleanup() {
 		removeProvisionalOwnership()
 		if h.diagnostics != nil {
 			if err := h.diagnostics.close(); err != nil {
-				fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: close private diagnostic log failed")
+				fmt.Fprintln(os.Stderr, "agent-sessions grok-host: close private diagnostic log failed")
 			}
 		}
 		diagnosticPath := filepath.Join(h.paths.LaunchDir, "diagnostics.log")
 		if err := os.Remove(diagnosticPath); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: remove private diagnostic log failed")
+			fmt.Fprintln(os.Stderr, "agent-sessions grok-host: remove private diagnostic log failed")
 		}
 		// Unlink private endpoints before acquiring acpMu. The live failure this
 		// ordering guards against had already reaped both child groups but killed
@@ -2141,7 +2177,7 @@ func (h *grokHost) cleanup() {
 		select {
 		case <-workersDone:
 		case <-timer.C:
-			fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: cleanup workers did not stop before the bounded shutdown deadline")
+			fmt.Fprintln(os.Stderr, "agent-sessions grok-host: cleanup workers did not stop before the bounded shutdown deadline")
 		}
 	})
 }
@@ -2153,11 +2189,11 @@ func (h *grokHost) removePrivateRuntimeArtifacts(report bool) {
 		filepath.Join(h.paths.LaunchDir, "leader.lock"),
 	} {
 		if err := os.Remove(path); report && err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: remove private runtime artifact %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "agent-sessions grok-host: remove private runtime artifact %s: %v\n", path, err)
 		}
 	}
 	if err := os.Remove(h.paths.LaunchDir); report && err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: remove private launch directory %s: %v\n", h.paths.LaunchDir, err)
+		fmt.Fprintf(os.Stderr, "agent-sessions grok-host: remove private launch directory %s: %v\n", h.paths.LaunchDir, err)
 	}
 }
 
@@ -2237,20 +2273,20 @@ func runGrokHostCommand(argv []string) int {
 		return 2
 	}
 	if json.Unmarshal([]byte(groupsJSON), &config.Groups) != nil {
-		fmt.Fprintln(os.Stderr, "agent-session-runtime grok-host: invalid groups JSON")
+		fmt.Fprintln(os.Stderr, "agent-sessions grok-host: invalid groups JSON")
 		return 2
 	}
 	config.LaunchToken = strings.TrimSpace(os.Getenv(grokLaunchTokenEnv))
 	host, err := newGrokHost(config)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions grok-host: %v\n", err)
 		return 1
 	}
 	host.config.readyWriter = os.Stdout
 	ctx, stop := signalContext()
 	defer stop()
 	if err := host.run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-host: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions grok-host: %v\n", err)
 		return 1
 	}
 	return 0

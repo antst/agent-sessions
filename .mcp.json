@@ -1,9 +1,12 @@
 {
   "mcpServers": {
-    "claude_peer": {
+    "agent_sessions": {
       "command": "./scripts/native-entry",
       "args": [
-        "mcp"
+        "connector",
+        "auto",
+        "--release-identity",
+        "@AGENT_SESSIONS_RELEASE_ID@"
       ],
       "cwd": ".",
       "default_tools_approval_mode": "approve",
@@ -13,7 +16,7 @@
         "CLAUDE_PEER_CLAUDE_BIN",
         "CLAUDE_PLUGIN_DATA",
         "CLAUDE_PEER_CLAUDE_CONFIG_DIR",
-        "CLAUDE_PEER_DATA_DIR",
+        "AGENT_SESSIONS_STATE_ROOT",
         "CODEX_HOME",
         "GROK_PEER_GROK_BIN",
         "PLUGIN_DATA",
