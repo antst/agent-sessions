@@ -202,7 +202,7 @@ func TestQwenMCPGroupedMessagingUsesOneAgentRouteAndExactSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 	qwenTestWaitForPendingMessages(t, source.pendingDir, 1)
-	entries, err := os.ReadDir(source.pendingDir)
+	entries, err := qwenFinalizedPendingEntries(source.pendingDir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("source reply queue = %v, %v", entries, err)
 	}
@@ -219,7 +219,7 @@ func TestQwenMCPGroupedMessagingUsesOneAgentRouteAndExactSockets(t *testing.T) {
 func qwenTestWaitForPendingMessages(t *testing.T, directory string, count int) {
 	t.Helper()
 	if !waitForCondition(2*time.Second, func() bool {
-		entries, _ := os.ReadDir(directory)
+		entries, _ := qwenFinalizedPendingEntries(directory)
 		return len(entries) == count
 	}) {
 		t.Fatalf("pending queue %s did not reach %d entries", directory, count)
@@ -228,7 +228,7 @@ func qwenTestWaitForPendingMessages(t *testing.T, directory string, count int) {
 
 func qwenPendingMessages(t *testing.T, directory string) map[string]bool {
 	t.Helper()
-	entries, err := os.ReadDir(directory)
+	entries, err := qwenFinalizedPendingEntries(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func qwenPendingMessages(t *testing.T, directory string) map[string]bool {
 
 func qwenPendingMessageCount(t *testing.T, directory, message string) int {
 	t.Helper()
-	entries, err := os.ReadDir(directory)
+	entries, err := qwenFinalizedPendingEntries(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,6 +265,20 @@ func qwenPendingMessageCount(t *testing.T, directory, message string) int {
 		}
 	}
 	return count
+}
+
+func qwenFinalizedPendingEntries(directory string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	finalized := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			finalized = append(finalized, entry)
+		}
+	}
+	return finalized, nil
 }
 
 func TestQwenMCPAttestationRejectsMismatchedLifecycleAndSocket(t *testing.T) {
