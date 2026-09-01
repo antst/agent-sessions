@@ -93,6 +93,49 @@ func TestListenRejectsNonPrivateAndExistingSocketPaths(t *testing.T) {
 	}
 }
 
+func TestListenRejectsSymlinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realParent := filepath.Join(root, "real")
+	if err := os.Mkdir(realParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(realParent, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Listen(filepath.Join(alias, "component.sock"), DefaultLimits()); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Listen through ancestor symlink error = %v", err)
+	}
+}
+
+func TestDialRejectsParentReplacedWithSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "runtime")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "component.sock")
+	if _, err := os.Lstat(parent); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(root, "runtime-moved")
+	if err := os.Rename(parent, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, parent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Dial(path, DefaultLimits()); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Dial after ancestor swap error = %v", err)
+	}
+}
+
 type countingReader struct {
 	io.Reader
 	n int

@@ -35,15 +35,16 @@ test("ambient component is inert without the complete managed bootstrap", async 
   await client.stop();
 });
 
-test("managed client bootstraps, heartbeats, reconnects without a reusable secret, and correlates tools", async (t) => {
+test("managed client reconnects in the same generation and preserves delivery/tool correlation", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-component-"));
   const socketPath = path.join(root, "component.sock");
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   const received = [];
   let connections = 0;
-  let firstSocket;
+  let secondSend;
   const server = net.createServer((socket) => {
+    socket.on("error", () => {});
     connections += 1;
     const ordinal = connections;
     let outboundSeq = 0;
@@ -51,7 +52,7 @@ test("managed client bootstraps, heartbeats, reconnects without a reusable secre
       outboundSeq += 1;
       socket.write(encodeFrame({ version: 1, type, id, seq: outboundSeq, payload }));
     };
-    if (ordinal === 1) firstSocket = socket;
+    if (ordinal === 2) secondSend = send;
     const decoder = new FrameDecoder({ maxFrameBytes: 4096, maxNesting: 16, maxStringBytes: 1024 });
     socket.on("data", (chunk) => {
       for (const frame of decoder.push(chunk)) {
@@ -60,28 +61,32 @@ test("managed client bootstraps, heartbeats, reconnects without a reusable secre
           assert.equal(frame.payload.bootstrap_value, "ephemeral-secret");
           send("ready", frame.id, {
             binding_id: "binding-one", attachment_id: "attachment-life", daemon_generation: 1,
-            protocol_version: 1, max_frame_bytes: 4096, heartbeat_interval_ms: 20,
+            protocol_version: 1, max_frame_bytes: 4096, heartbeat_interval_ms: 100,
           });
         } else if (frame.type === "reconnect") {
           assert.equal(Object.hasOwn(frame.payload, "bootstrap_value"), false);
+          assert.equal(frame.payload.prior_generation, 1, "transient reconnect retains the current daemon generation");
           send("ready", frame.id, {
-            binding_id: "binding-two", attachment_id: "attachment-life", daemon_generation: 2,
-            protocol_version: 1, max_frame_bytes: 4096, heartbeat_interval_ms: 20,
+            binding_id: "binding-two", attachment_id: "attachment-life", daemon_generation: 1,
+            protocol_version: 1, max_frame_bytes: 4096, heartbeat_interval_ms: 100,
           });
         } else if (frame.type === "heartbeat") {
           send("heartbeat.ack", frame.id, {
             binding_id: ordinal === 1 ? "binding-one" : "binding-two", last_received_seq: frame.seq,
           });
         } else if (frame.type === "tool.call") {
-          send("tool.result", frame.id, {
-            call_id: frame.payload.call_id, success: true, result: { peers: 2 },
-          });
+          if (frame.payload.operation === "sessions.reject") {
+            send("reject", frame.id, { operation_id: frame.payload.call_id, category: "native-rejected", detail: "refused" });
+          } else {
+            send("tool.result", frame.id, {
+              call_id: frame.payload.call_id, success: true, result: { peers: 2 },
+            });
+          }
         }
       }
     });
   });
   await listen(server, socketPath);
-  t.after(() => server.close());
 
   const env = {
     AGENT_SESSIONS_COMPONENT_SOCKET: socketPath,
@@ -93,19 +98,56 @@ test("managed client bootstraps, heartbeats, reconnects without a reusable secre
     AGENT_SESSIONS_STRONG_START: "strong-start",
     AGENT_SESSIONS_COMPONENT_VERSION: "1.0.0",
   };
-  const client = new ComponentClient({ env, reconnectMinMs: 5, reconnectMaxMs: 20, maxQueue: 8, maxOutstanding: 4 });
-  t.after(() => client.stop());
+  const client = new ComponentClient({ env, reconnectMinMs: 5, reconnectMaxMs: 20, maxQueue: 3, maxJournal: 3, maxOutstanding: 1 });
+  t.after(async () => {
+    await client.stop();
+    await closeServer(server);
+  });
   const state = await client.start();
   assert.equal(state.active, true);
   assert.equal(client.bindingID, "binding-one");
   assert.equal(env.AGENT_SESSIONS_BOOTSTRAP_VALUE, undefined, "raw bootstrap is removed from the ephemeral env after use");
 
-  firstSocket.destroy();
+  const boundaryOperations = [
+    { type: "session.announce", id: "announce-boundary", payload: { binding_id: "binding-one", native_session_id: "native-session-distinct", cwd: "/work", native_name: "native", product_event_seq: 1 } },
+    { type: "delivery.accept", id: "delivery-boundary", payload: { delivery_id: "delivery-boundary", native_session_id: "native-session-distinct", native_message_id: "native-message-boundary", accepted_at: Date.now() } },
+    { type: "turn.event", id: "turn-boundary", payload: { native_session_id: "native-session-distinct", event_seq: 1, kind: "settled", metadata: {} } },
+  ];
+  for (const operation of boundaryOperations) client.send(operation.type, operation.id, operation.payload);
+  assert.throws(() => client.send("session.state", "journal-overflow", { native_session_id: "native-session-distinct", state: "idle", product_event_seq: 2 }), /journal/i);
+  await until(() => boundaryOperations.every((operation) => received.some(({ ordinal, frame }) => ordinal === 1 && frame.id === operation.id)));
+
+  client.socket.destroy();
   await until(() => client.bindingID === "binding-two");
   assert.equal(received.some(({ frame }) => frame.type === "reconnect"), true);
+  await until(() => boundaryOperations.every((operation) => received.some(({ ordinal, frame }) => ordinal === 2 && frame.id === operation.id)));
+  const replayedAnnounce = received.find(({ ordinal, frame }) => ordinal === 2 && frame.id === "announce-boundary").frame;
+  assert.equal(replayedAnnounce.payload.binding_id, "binding-two");
+  await until(() => received.some(({ ordinal, frame }) => ordinal === 2 && frame.type === "heartbeat"));
+  await until(() => client.outboundJournal.size === 0);
+
+  let deliveryPresents = 0;
+  client.on("delivery.present", (payload) => {
+    deliveryPresents += 1;
+    client.send("delivery.accept", payload.delivery_id, {
+      delivery_id: payload.delivery_id,
+      native_session_id: "native-session-distinct",
+      native_message_id: "native-message",
+      accepted_at: Date.now(),
+    });
+  });
+  secondSend("delivery.present", "delivery-1", {
+    delivery_id: "delivery-1", mode: "wake", body: { text: "hello" },
+  });
+  await until(() => received.some(({ ordinal, frame }) => ordinal === 2 && frame.type === "delivery.accept" && frame.id === "delivery-1"));
+  assert.equal(deliveryPresents, 1);
 
   const tool = await client.callTool("call-1", "sessions.list", {});
   assert.deepEqual(tool, { peers: 2 });
+  await assert.rejects(client.callTool("call-rejected", "sessions.reject", {}), (error) => error.category === "native-rejected");
+  assert.equal(client.pendingTools.has("call-rejected"), false);
+  const retriedTool = await client.callTool("call-after-reject", "sessions.list", {});
+  assert.deepEqual(retriedTool, { peers: 2 });
   await until(() => received.some(({ ordinal, frame }) => ordinal === 2 && frame.type === "heartbeat"));
 });
 
@@ -133,21 +175,24 @@ test("missing heartbeat acknowledgments force bounded reconnect", async (t) => {
   const socketPath = path.join(root, "component.sock");
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   let connections = 0;
+  const received = [];
   const server = net.createServer((socket) => {
+    socket.on("error", () => {});
     connections += 1;
+    const ordinal = connections;
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       for (const frame of decoder.push(chunk)) {
+        received.push({ ordinal, frame });
         if (frame.type !== "bootstrap" && frame.type !== "reconnect") continue;
         socket.write(encodeFrame({ version: 1, type: "ready", id: frame.id, seq: 1, payload: {
-          binding_id: `binding-${connections}`, attachment_id: "attachment", daemon_generation: connections,
+          binding_id: `binding-${ordinal}`, attachment_id: "attachment", daemon_generation: ordinal,
           protocol_version: 1, max_frame_bytes: 4096, heartbeat_interval_ms: 10,
         } }));
       }
     });
   });
   await listen(server, socketPath);
-  t.after(() => server.close());
   const client = new ComponentClient({
     env: {
       AGENT_SESSIONS_COMPONENT_SOCKET: socketPath,
@@ -163,15 +208,32 @@ test("missing heartbeat acknowledgments force bounded reconnect", async (t) => {
     reconnectMinMs: 5,
     reconnectMaxMs: 10,
   });
-  t.after(() => client.stop());
+  t.after(async () => {
+    await client.stop();
+    await closeServer(server);
+  });
   await client.start();
-  await until(() => connections >= 2);
+  client.send("session.state", "generation-scoped-state", { native_session_id: "native", state: "idle", product_event_seq: 1 });
+  await until(() => received.some(({ ordinal, frame }) => ordinal === 1 && frame.id === "generation-scoped-state"));
+  await until(() => client.daemonGeneration >= 2);
+  assert.equal(client.outboundJournal.size, 0, "cross-generation reconnect drops the ephemeral journal");
+  assert.equal(received.some(({ ordinal, frame }) => ordinal >= 2 && frame.id === "generation-scoped-state"), false);
 });
 
 function listen(server, socketPath) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, resolve);
+  });
+}
+
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close((error) => error ? reject(error) : resolve());
   });
 }
 

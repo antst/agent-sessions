@@ -77,7 +77,6 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 	want := map[string]int{
 		"cmd/agent-sessions/codex_host.go":                10,
 		"cmd/agent-sessions/connector.go":                 6,
-		"cmd/agent-sessions/federation.go":                4,
 		"cmd/agent-sessions/grok_host.go":                 1,
 		"cmd/agent-sessions/hook.go":                      1,
 		"cmd/agent-sessions/lane.go":                      32,

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -273,6 +274,359 @@ func TestLaneInputDispatchRequeueInjectionAmbiguityAndRetirement(t *testing.T) {
 	snapshot, _ := store.Read()
 	if snapshot.Catalog.LaneInputs[receipt.ReceiptID].State != ReceiptRetired {
 		t.Fatalf("retirement not durable: %+v", snapshot.Catalog.LaneInputs[receipt.ReceiptID])
+	}
+}
+
+func TestLaneInputAtomicTurnAcceptanceAndDispatchIntentShareOneRevision(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	laneEngine, err := NewLaneEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := laneEngine.Complete(
+		Lane{ID: "lane", Product: "codex", NativeSessionID: "native", State: "terminal"},
+		Turn{ID: "turn", LaneID: "lane", State: "terminal", Outcome: "completed", CompletedAt: 1},
+	); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := engine.AdmitWithID("atomic-receipt", "lane", []byte("exact body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatching, err := engine.AcceptTurnAndMarkDispatching(
+		receipt.ReceiptID,
+		Lane{ID: "lane", Product: "codex", NativeSessionID: "native"},
+		Turn{ID: "atomic-turn", LaneID: "lane"},
+		"atomic-attempt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+1 || dispatching.State != ReceiptDispatching ||
+		after.Catalog.Turns["atomic-turn"].State != "accepted" ||
+		after.Catalog.LaneInputs[receipt.ReceiptID].TargetTurnID != "atomic-turn" {
+		t.Fatalf("atomic acceptance revision: before=%d after=%d turn=%+v receipt=%+v",
+			before.Revision, after.Revision, after.Catalog.Turns["atomic-turn"], after.Catalog.LaneInputs[receipt.ReceiptID])
+	}
+	accepted, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "native", NativeMessageID: "native-turn", AcceptedAt: receipt.AcceptedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedSnapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acceptedSnapshot.Revision != after.Revision+1 || accepted.State != ReceiptInjected ||
+		accepted.NativeAcceptance == nil || accepted.NativeAcceptance.NativeMessageID != "native-turn" ||
+		acceptedSnapshot.Catalog.Turns["atomic-turn"].State != "dispatched" ||
+		acceptedSnapshot.Catalog.Turns["atomic-turn"].NativeDispatchID != "native-turn" {
+		t.Fatalf("atomic native acceptance revision: before=%d after=%d turn=%+v receipt=%+v",
+			after.Revision, acceptedSnapshot.Revision, acceptedSnapshot.Catalog.Turns["atomic-turn"], accepted)
+	}
+}
+
+func TestInitialLaneCreateStagesQueuedThenAtomicallyAcceptsTurnAndDispatchIntent(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane := Lane{ID: "initial-lane", Product: "claude", NativeSessionID: "initial-native", State: "idle"}
+	turn := Turn{ID: "initial-turn", LaneID: lane.ID}
+	receipt, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-initial-receipt", lane, turn, "initial-attempt", []byte("initial body"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+2 || after.Catalog.Lanes[lane.ID].State != "idle" ||
+		after.Catalog.Turns[turn.ID].State != "accepted" || receipt.State != ReceiptDispatching ||
+		receipt.TargetTurnID != turn.ID || receipt.Sequence != 1 || receipt.Revision != 2 {
+		t.Fatalf("atomic initial acceptance: before=%d after=%d lane=%+v turn=%+v receipt=%+v",
+			before.Revision, after.Revision, after.Catalog.Lanes[lane.ID], after.Catalog.Turns[turn.ID], receipt)
+	}
+	replayed, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-initial-receipt", lane, Turn{ID: "ignored-replay-turn", LaneID: lane.ID}, "ignored-replay-attempt", []byte("initial body"),
+	)
+	if err != nil || replayed.ReceiptID != receipt.ReceiptID || replayed.Sequence != receipt.Sequence {
+		t.Fatalf("stable initial replay = %+v err=%v", replayed, err)
+	}
+}
+
+func TestInitialLaneStableRetryAfterQueuedCommitUsesExactReceiptWithoutDuplicate(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	crash := errors.New("crash after queued commit")
+	engine.afterQueuedCommit = func() error { return crash }
+	lane := Lane{ID: "stable-initial-lane", Product: "claude", NativeSessionID: "stable-initial-native"}
+	body := []byte("stable initial body")
+	queued, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-stable-initial-receipt", lane, Turn{ID: "unused-crash-turn", LaneID: lane.ID}, "unused-crash-attempt", body,
+	)
+	if !errors.Is(err, crash) || queued.State != ReceiptQueued || queued.Revision != 1 {
+		t.Fatalf("queued crash boundary receipt=%+v err=%v", queued, err)
+	}
+	staged, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.Catalog.Lanes[lane.ID].State != "idle" || staged.Catalog.Turns["unused-crash-turn"].ID != "" || len(staged.Catalog.LaneInputs) != 1 {
+		t.Fatalf("staged initial state lane=%+v turns=%+v receipts=%+v", staged.Catalog.Lanes[lane.ID], staged.Catalog.Turns, staged.Catalog.LaneInputs)
+	}
+	engine.afterQueuedCommit = nil
+	replayed, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-stable-initial-receipt", lane, Turn{ID: "stable-retry-turn", LaneID: lane.ID}, "stable-retry-attempt", body,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed != queued {
+		t.Fatalf("queued replay changed receipt: queued=%+v replayed=%+v", queued, replayed)
+	}
+	dispatching, err := engine.AcceptStagedTurnAndMarkDispatching(
+		queued.ReceiptID, lane, Turn{ID: "stable-retry-turn", LaneID: lane.ID}, "stable-retry-attempt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatching.ReceiptID != queued.ReceiptID || dispatching.Sequence != queued.Sequence ||
+		dispatching.SpoolObjectID != queued.SpoolObjectID || dispatching.State != ReceiptDispatching ||
+		len(after.Catalog.LaneInputs) != 1 || len(after.Catalog.Turns) != len(staged.Catalog.Turns)+1 ||
+		after.Catalog.Turns["stable-retry-turn"].State != "accepted" {
+		t.Fatalf("stable retry receipt=%+v turns=%+v receipts=%+v", dispatching, after.Catalog.Turns, after.Catalog.LaneInputs)
+	}
+}
+
+func TestAcceptedIdleCrashTerminalizesTurnAndRequeuesExactReceiptAtomically(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	lane := Lane{ID: "crash-lane", Product: "qwen", State: "idle"}
+	turn := Turn{ID: "crash-turn", LaneID: lane.ID}
+	receipt, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-crash-receipt", lane, turn, "crash-attempt", []byte("body"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := engine.RecoverAcceptedTurnAndRequeue(receipt.ReceiptID, "daemon restarted before native I/O")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := after.Catalog.Turns[turn.ID]
+	if after.Revision != before.Revision+1 || requeued.State != ReceiptQueued || requeued.TargetTurnID != "" ||
+		after.Catalog.Lanes[lane.ID].State != "terminal" || terminal.State != "terminal" ||
+		terminal.Outcome != "interrupted" || terminal.Diagnostic == "" {
+		t.Fatalf("accepted crash recovery: before=%d after=%d lane=%+v turn=%+v receipt=%+v",
+			before.Revision, after.Revision, after.Catalog.Lanes[lane.ID], terminal, requeued)
+	}
+}
+
+func TestStagedCommandIsInertUntilExactReplayClaim(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	engine.afterQueuedCommit = func() error { return errors.New("stop after stage") }
+	lane := Lane{ID: "staged-inert-lane", ParentAttachmentID: "owner", Product: "qwen"}
+	queued, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-staged-inert", lane, Turn{ID: "discarded-turn", LaneID: lane.ID}, "discarded-attempt", []byte("body"),
+	)
+	if err == nil || queued.State != ReceiptQueued || queued.Revision != 1 {
+		t.Fatalf("staged receipt=%+v err=%v", queued, err)
+	}
+	if _, err := engine.AcceptTurnAndMarkDispatching(
+		queued.ReceiptID, lane, Turn{ID: "ordinary-turn", LaneID: lane.ID}, "ordinary-attempt",
+	); err == nil || !strings.Contains(err.Error(), "not dispatch eligible") {
+		t.Fatalf("ordinary staged claim error=%v", err)
+	}
+	snapshot, readErr := store.Read()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if snapshot.Catalog.Turns["ordinary-turn"].ID != "" || snapshot.Catalog.Turns["discarded-turn"].ID != "" ||
+		snapshot.Catalog.LaneInputs[queued.ReceiptID].State != ReceiptQueued {
+		t.Fatalf("staged command became dispatch eligible: turns=%+v receipt=%+v", snapshot.Catalog.Turns, snapshot.Catalog.LaneInputs[queued.ReceiptID])
+	}
+	claimed, err := engine.AcceptStagedTurnAndMarkDispatching(
+		queued.ReceiptID, lane, Turn{ID: "replay-turn", LaneID: lane.ID}, "replay-attempt",
+	)
+	if err != nil || claimed.State != ReceiptDispatching || claimed.TargetTurnID != "replay-turn" {
+		t.Fatalf("exact replay claim=%+v err=%v", claimed, err)
+	}
+}
+
+func TestQueuedLaneInputClaimAndFreshResumeEnforceFIFO(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	first, err := engine.AdmitWithID("fifo-first", "lane", []byte("first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.AdmitWithID("fifo-second", "lane", []byte("second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane := snapshot.Catalog.Lanes["lane"]
+	if _, err := engine.AcceptTurnAndMarkDispatching(
+		second.ReceiptID, lane, Turn{ID: "second-turn", LaneID: lane.ID}, "second-attempt",
+	); !errors.Is(err, ErrLaneInputEarlierQueued) {
+		t.Fatalf("out-of-order claim error=%v", err)
+	}
+	if _, err := engine.UpdateLaneAdmitAndMarkDispatching(
+		"command-fresh-resume", lane, Turn{ID: "resume-turn", LaneID: lane.ID}, "resume-attempt", []byte("resume"),
+	); !errors.Is(err, ErrLaneInputEarlierQueued) {
+		t.Fatalf("fresh resume with older queued error=%v", err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Catalog.LaneInputs[first.ReceiptID].State != ReceiptQueued || len(after.Catalog.LaneInputs) != 2 ||
+		after.Catalog.Turns["second-turn"].ID != "" || after.Catalog.Turns["resume-turn"].ID != "" {
+		t.Fatalf("FIFO rejection mutated state: receipts=%+v turns=%+v", after.Catalog.LaneInputs, after.Catalog.Turns)
+	}
+}
+
+func TestRetireStagedLaneArchivesReceiptAndLane(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	engine.afterQueuedCommit = func() error { return errors.New("stop after stage") }
+	lane := Lane{ID: "abandoned-stage", ParentAttachmentID: "owner", Product: "claude"}
+	queued, err := engine.CreateLaneAdmitAndMarkDispatching(
+		"command-abandoned-stage", lane, Turn{ID: "unused-turn", LaneID: lane.ID}, "unused-attempt", []byte("body"),
+	)
+	if err == nil {
+		t.Fatal("expected staged boundary failure")
+	}
+	retired, err := engine.RetireStagedLane(queued.ReceiptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.State != ReceiptRetired || snapshot.Catalog.Lanes[lane.ID].State != "archived" || snapshot.Catalog.Turns["unused-turn"].ID != "" {
+		t.Fatalf("staged retirement lane=%+v receipt=%+v turns=%+v", snapshot.Catalog.Lanes[lane.ID], retired, snapshot.Catalog.Turns)
+	}
+	if _, err := os.Stat(filepath.Join(spoolRoot, queued.SpoolObjectID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged spool still exists: %v", err)
+	}
+}
+
+func TestResumeLaneUpdateStagesQueuedThenAtomicallyAcceptsTurnAndDispatchIntent(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := snapshot.Catalog
+	lane := catalog.Lanes["lane"]
+	lane.State = "terminal"
+	catalog.Lanes[lane.ID] = lane
+	if _, err := store.Commit(snapshot.Revision, catalog); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane.Name, lane.State = "updated", "idle"
+	receipt, err := engine.UpdateLaneAdmitAndMarkDispatching(
+		"command-resume-receipt", lane, Turn{ID: "resume-turn", LaneID: lane.ID}, "resume-attempt", []byte("resume body"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+2 || after.Catalog.Lanes[lane.ID].Name != "updated" ||
+		after.Catalog.Turns["resume-turn"].State != "accepted" || receipt.State != ReceiptDispatching ||
+		receipt.TargetTurnID != "resume-turn" {
+		t.Fatalf("atomic resume acceptance: before=%d after=%d lane=%+v turn=%+v receipt=%+v",
+			before.Revision, after.Revision, after.Catalog.Lanes[lane.ID], after.Catalog.Turns["resume-turn"], receipt)
+	}
+}
+
+func TestResumeLaneStableRetryAfterQueuedCommitUsesExactReceiptWithoutDuplicate(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := snapshot.Catalog
+	lane := catalog.Lanes["lane"]
+	lane.State = "terminal"
+	catalog.Lanes[lane.ID] = lane
+	if _, err := store.Commit(snapshot.Revision, catalog); err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("crash after resume queued commit")
+	engine.afterQueuedCommit = func() error { return crash }
+	body := []byte("stable resume body")
+	queued, err := engine.UpdateLaneAdmitAndMarkDispatching(
+		"command-stable-resume-receipt", lane, Turn{ID: "unused-resume-turn", LaneID: lane.ID}, "unused-resume-attempt", body,
+	)
+	if !errors.Is(err, crash) || queued.State != ReceiptQueued || queued.Revision != 1 {
+		t.Fatalf("queued resume crash boundary receipt=%+v err=%v", queued, err)
+	}
+	staged, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.Catalog.Lanes[lane.ID].State != "terminal" || staged.Catalog.Turns["unused-resume-turn"].ID != "" ||
+		len(staged.Catalog.LaneInputs) != 1 {
+		t.Fatalf("staged resume state lane=%+v turns=%+v receipts=%+v", staged.Catalog.Lanes[lane.ID], staged.Catalog.Turns, staged.Catalog.LaneInputs)
+	}
+	engine.afterQueuedCommit = nil
+	replayed, err := engine.UpdateLaneAdmitAndMarkDispatching(
+		"command-stable-resume-receipt", lane, Turn{ID: "stable-resume-turn", LaneID: lane.ID}, "stable-resume-attempt", body,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed != queued {
+		t.Fatalf("queued replay changed receipt: queued=%+v replayed=%+v", queued, replayed)
+	}
+	dispatching, err := engine.AcceptStagedTurnAndMarkDispatching(
+		queued.ReceiptID, lane, Turn{ID: "stable-resume-turn", LaneID: lane.ID}, "stable-resume-attempt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatching.ReceiptID != queued.ReceiptID || dispatching.Sequence != queued.Sequence ||
+		dispatching.SpoolObjectID != queued.SpoolObjectID || dispatching.State != ReceiptDispatching ||
+		len(after.Catalog.LaneInputs) != 1 || after.Catalog.Turns["stable-resume-turn"].State != "accepted" {
+		t.Fatalf("stable resume retry receipt=%+v turns=%+v receipts=%+v", dispatching, after.Catalog.Turns, after.Catalog.LaneInputs)
 	}
 }
 

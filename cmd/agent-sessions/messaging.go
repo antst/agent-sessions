@@ -67,7 +67,11 @@ func (c *hostCoordinator) handleConnector(
 		if json.Unmarshal(envelope.Params, &call) != nil || strings.TrimSpace(call.Name) == "" {
 			return nil, errors.New("connector tool call is invalid")
 		}
-		result, err := c.callLocalTool(ctx, runtime, request.AttachmentID, call.Name, call.Arguments)
+		operationID := strings.TrimSpace(request.IdempotencyKey)
+		if operationID == "" {
+			operationID = strings.TrimSpace(request.ID)
+		}
+		result, err := c.callLocalToolWithID(ctx, runtime, request.AttachmentID, call.Name, call.Arguments, operationID)
 		if err != nil {
 			return json.Marshal(map[string]any{
 				"content": []map[string]any{{"type": "text", "text": err.Error()}}, "isError": true,
@@ -103,6 +107,19 @@ func (c *hostCoordinator) callLocalTool(
 	runtime *daemonpkg.Runtime,
 	sourceID, name string,
 	args map[string]any,
+) (localToolResult, error) {
+	return c.callLocalToolWithID(ctx, runtime, sourceID, name, args, "")
+}
+
+// callLocalToolWithID preserves the connector/MCP operation identity through
+// lane admission. The wrapper above remains for direct internal callers whose
+// operations are not retry-addressed by an upstream protocol.
+func (c *hostCoordinator) callLocalToolWithID(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	sourceID, name string,
+	args map[string]any,
+	operationID string,
 ) (localToolResult, error) {
 	source, ok, err := c.activeLocalParent(runtime, sourceID)
 	if err != nil {
@@ -209,7 +226,7 @@ func (c *hostCoordinator) callLocalTool(
 			return localToolResult{}, err
 		}
 		raw, err := c.handleLaneCommand(ctx, runtime, daemonpkg.ControlRequest{
-			AttachmentID: source.ID, Payload: payload,
+			ID: operationID, IdempotencyKey: operationID, AttachmentID: source.ID, Payload: payload,
 		})
 		if err != nil {
 			return localToolResult{}, err
@@ -242,6 +259,7 @@ func (c *hostCoordinator) routeMessageFrame(
 	}
 	peers := make([]federationpkg.Peer, 0, len(targets))
 	byID := make(map[string]messagePeerTarget, len(targets))
+	remoteReceipts := make(map[string]federatedLaneReceiptAck)
 	for _, target := range targets {
 		peer := routingPeer(target)
 		if strings.TrimSpace(peer.ID) == "" {
@@ -261,12 +279,63 @@ func (c *hostCoordinator) routeMessageFrame(
 		if !ok {
 			return errors.New("admitted message target disappeared")
 		}
-		return c.deliverMessageTarget(callCtx, runtime, source, selected, deliveryID, delivered.Content, delivered.Group)
+		data, err := c.deliverMessageTarget(callCtx, runtime, source, selected, deliveryID, delivered.Content, delivered.Group)
+		if err == nil && len(data) > 0 {
+			var receipt federatedLaneReceiptAck
+			if json.Unmarshal(data, &receipt) == nil && receipt.ReceiptID != "" && receipt.ReceiptSequence > 0 {
+				remoteReceipts[deliveryID] = receipt
+			}
+		}
+		return err
 	})
 	if err != nil {
 		return federationpkg.AgentFrameResult{}, err
 	}
-	return engine.Route(ctx, frame, sourcePeer, peers)
+	result, err := engine.RouteWithAcknowledgedPresentation(ctx, frame, sourcePeer, peers, func(peer federationpkg.Peer) bool {
+		target, ok := byID[peer.ID]
+		return ok && target.remote != nil
+	})
+	if err != nil {
+		return federationpkg.AgentFrameResult{}, err
+	}
+	// Lane delivery acceptance is the durable receipt commit. Project its
+	// stable identity and lane-local order without exposing private spool data.
+	// This read is strictly post-acceptance enrichment: losing it must not turn
+	// an accepted delivery into a retryable caller failure.
+	snapshot, readErr := runtime.State().Read()
+	result = projectLaneDeliveryReceipts(result, snapshot, readErr)
+	return projectFederatedLaneReceipts(result, remoteReceipts), nil
+}
+
+func projectFederatedLaneReceipts(
+	result federationpkg.AgentFrameResult,
+	receipts map[string]federatedLaneReceiptAck,
+) federationpkg.AgentFrameResult {
+	for index := range result.Deliveries {
+		if receipt, ok := receipts[result.Deliveries[index].DeliveryID]; ok {
+			result.Deliveries[index].ReceiptID = receipt.ReceiptID
+			result.Deliveries[index].ReceiptSequence = receipt.ReceiptSequence
+		}
+	}
+	return result
+}
+
+func projectLaneDeliveryReceipts(
+	result federationpkg.AgentFrameResult,
+	snapshot daemonpkg.StateSnapshot,
+	readErr error,
+) federationpkg.AgentFrameResult {
+	if readErr != nil {
+		return result
+	}
+	for index := range result.Deliveries {
+		delivery := &result.Deliveries[index]
+		if receipt, ok := snapshot.Catalog.LaneInputs[delivery.DeliveryID]; ok && receipt.LaneID == delivery.Target {
+			delivery.ReceiptID = receipt.ReceiptID
+			delivery.ReceiptSequence = receipt.Sequence
+		}
+	}
+	return result
 }
 
 func routingPeer(target messagePeerTarget) federationpkg.Peer {
@@ -335,24 +404,24 @@ func (c *hostCoordinator) deliverMessageTarget(
 	source daemonpkg.ManagedAttachment,
 	target messagePeerTarget,
 	messageID, body, group string,
-) error {
+) ([]byte, error) {
 	if target.local != nil {
-		return c.deliverUnified(ctx, runtime, source, *target.local, messageID, body)
+		return nil, c.deliverUnified(ctx, runtime, source, *target.local, messageID, body)
 	}
 	if target.remote == nil {
-		return errors.New("target disappeared")
+		return nil, errors.New("target disappeared")
 	}
 	c.mu.Lock()
 	host := c.federation
 	c.mu.Unlock()
 	if host == nil {
-		return errors.New("daemon federation component is unavailable")
+		return nil, errors.New("daemon federation component is unavailable")
 	}
 	sourcePeer, err := c.localFederationPeer(runtime, source)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return host.Send(ctx, sourcePeer, *target.remote, messageID, body, group)
+	return host.SendWithData(ctx, sourcePeer, *target.remote, messageID, body, group)
 }
 
 func publicMessageTargets(targets []messagePeerTarget) []map[string]any {
@@ -400,7 +469,7 @@ func (c *hostCoordinator) localParentIsLive(runtime *daemonpkg.Runtime, id strin
 	c.mu.Lock()
 	federationHost := c.federation
 	actor := c.lanes[id]
-	laneLive := actor != nil && actor.state != "archived" && actor.state != "retiring"
+	laneLive := actor != nil && actor.state != "archived" && actor.state != "retiring" && actor.state != "cleanup-debt"
 	c.mu.Unlock()
 	if laneLive {
 		return true, nil
@@ -441,6 +510,11 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return nil, err
+	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	targets := make([]localPeerTarget, 0, len(attachments)+len(c.lanes))
 	for index := range attachments {
 		attachment := attachments[index]
@@ -448,7 +522,8 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	}
 	c.mu.Lock()
 	for _, lane := range c.lanes {
-		if lane.state != "archived" && lane.state != "retiring" && groupsIntersect(sourceGroups, lane.groups) {
+		durableState := snapshot.Catalog.Lanes[lane.id].State
+		if !staged[lane.id] && durableState != "archived" && durableState != "retiring" && durableState != "cleanup-debt" && groupsIntersect(sourceGroups, lane.groups) {
 			targets = append(targets, localPeerTarget{lane: lane})
 		}
 	}
@@ -474,14 +549,23 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 	if source.PermissionMode == "bypassPermissions" {
 		mode = "bypass"
 	}
+	// Delivery.prepare commits SentAt before invoking this callback. Reusing it
+	// keeps the exact spooled body stable across retries of the delivery ID.
+	sentAt := time.Now().UTC()
+	if snapshot, readErr := runtime.State().Read(); readErr == nil {
+		if delivery, ok := snapshot.Catalog.Deliveries[messageID]; ok && delivery.SentAt > 0 {
+			sentAt = time.UnixMilli(delivery.SentAt).UTC()
+		}
+	}
 	message, err := sessiontools.WrapPeerMessage(
 		source.Product, "session:"+source.ID, source.NativeSessionID, source.Name, mode,
-		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
+		messageID, sentAt.Format(time.RFC3339Nano), body,
 	)
 	if err != nil {
 		return err
 	}
-	return c.deliverLaneMessage(runtime, target.lane, message)
+	_, err = c.deliverLaneMessageWithID(runtime, target.lane, messageID, message)
+	return err
 }
 
 func publicLocalTarget(target localPeerTarget) map[string]any {

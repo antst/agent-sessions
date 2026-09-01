@@ -19,12 +19,16 @@ import (
 const (
 	defaultTerminationGrace = 2 * time.Second
 	processExitPollInterval = 10 * time.Millisecond
+	bufferedFrameByteBudget = 8 << 20
+	maximumBufferedFrames   = 16
+	completedEvidenceLimit  = 128
 )
 
 var (
-	ErrNotOwned         = fmt.Errorf("%w: structured process reference is not exactly owned", productruntime.ErrCleanupDebt)
-	ErrNotRunning       = errors.New("structured process is not running")
-	ErrSupervisorClosed = errors.New("structured process supervisor is closed")
+	ErrNotOwned          = fmt.Errorf("%w: structured process reference is not exactly owned", productruntime.ErrCleanupDebt)
+	ErrNotRunning        = errors.New("structured process is not running")
+	ErrSupervisorClosed  = errors.New("structured process supervisor is closed")
+	ErrFrameBackpressure = fmt.Errorf("%w: structured process frame queue exceeded bounded capacity", productruntime.ErrProtocol)
 )
 
 // Options bounds framed I/O and graceful process-group termination.
@@ -43,16 +47,19 @@ type ExitEvidence struct {
 }
 
 // Supervisor creates private process groups and retains the exact identity
-// needed to signal only those groups. Cleanup can also consume an exact ref
-// after a supervisor restart; it re-attests the live leader and group before
-// the first destructive signal.
+// needed to signal only those groups. Completed children move from the live
+// map to a strictly bounded, in-memory evidence cache. Cleanup can also consume
+// an exact ref after a supervisor restart; it re-attests the live leader and
+// group before the first destructive signal.
 type Supervisor struct {
 	maxFrameBytes    int
 	terminationGrace time.Duration
 
-	mu        sync.Mutex
-	closed    bool
-	processes map[int]*processState
+	mu             sync.Mutex
+	closed         bool
+	processes      map[int]*processState
+	completed      map[productruntime.OwnedProcessRef]completedProcess
+	completedOrder []productruntime.OwnedProcessRef
 }
 
 type processState struct {
@@ -61,14 +68,17 @@ type processState struct {
 	framer    *Framer
 	startedAt time.Time
 
-	frames    chan frameResult
-	frameStop chan struct{}
-	readDone  chan struct{}
-	stopOnce  sync.Once
-	readErr   error
-	done      chan struct{}
-	evidence  ExitEvidence
-	waitErr   error
+	frames      chan frameResult
+	frameStop   chan struct{}
+	readDone    chan struct{}
+	stopOnce    sync.Once
+	queueMu     sync.Mutex
+	queueBytes  int
+	queueBudget int
+	readErr     error
+	done        chan struct{}
+	evidence    ExitEvidence
+	waitErr     error
 }
 
 type frameResult struct {
@@ -76,10 +86,16 @@ type frameResult struct {
 	err   error
 }
 
+type completedProcess struct {
+	evidence ExitEvidence
+	waitErr  error
+}
+
 // Process is a framed I/O handle for one child owned by a Supervisor.
 type Process struct {
 	supervisor *Supervisor
 	ref        productruntime.OwnedProcessRef
+	state      *processState
 }
 
 // NewSupervisor constructs a supervisor with bounded defaults. The optional
@@ -109,6 +125,7 @@ func NewSupervisor(options ...Options) (*Supervisor, error) {
 		maxFrameBytes:    configuration.MaxFrameBytes,
 		terminationGrace: configuration.TerminationGrace,
 		processes:        make(map[int]*processState),
+		completed:        make(map[productruntime.OwnedProcessRef]completedProcess),
 	}, nil
 }
 
@@ -192,14 +209,15 @@ func (supervisor *Supervisor) StartProcess(ctx context.Context, native productru
 	}
 	ref := productruntime.OwnedProcessRef{Process: identity, ProcessGroup: processGroup}
 	state := &processState{
-		ref:       ref,
-		command:   command,
-		framer:    framer,
-		startedAt: time.Now().UTC(),
-		frames:    make(chan frameResult, 1),
-		frameStop: make(chan struct{}),
-		readDone:  make(chan struct{}),
-		done:      make(chan struct{}),
+		ref:         ref,
+		command:     command,
+		framer:      framer,
+		startedAt:   time.Now().UTC(),
+		frames:      make(chan frameResult, maximumBufferedFrames),
+		frameStop:   make(chan struct{}),
+		readDone:    make(chan struct{}),
+		queueBudget: max(bufferedFrameByteBudget, supervisor.maxFrameBytes),
+		done:        make(chan struct{}),
 	}
 	supervisor.processes[identity.PID] = state
 	supervisor.mu.Unlock()
@@ -212,17 +230,18 @@ func (supervisor *Supervisor) StartProcess(ctx context.Context, native productru
 	if ctx.Done() != nil {
 		go supervisor.cancelOnContext(ctx, state)
 	}
-	return &Process{supervisor: supervisor, ref: ref}, nil
+	return &Process{supervisor: supervisor, ref: ref, state: state}, nil
 }
 
 // Open returns the in-memory framed handle for an exact process ref. Protocol
 // streams cannot be reconstructed after restart; Cleanup remains available for
 // a durable owner that replays the ref.
 func (supervisor *Supervisor) Open(ref productruntime.OwnedProcessRef) (*Process, error) {
-	if _, err := supervisor.ownedState(ref); err != nil {
+	state, err := supervisor.ownedState(ref)
+	if err != nil {
 		return nil, err
 	}
-	return &Process{supervisor: supervisor, ref: ref}, nil
+	return &Process{supervisor: supervisor, ref: ref, state: state}, nil
 }
 
 // Signal implements productruntime.OwnedProcessSupervisor. Unknown local refs
@@ -240,6 +259,9 @@ func (supervisor *Supervisor) Signal(ctx context.Context, ref productruntime.Own
 	}
 	state, known := supervisor.findState(ref)
 	if !known {
+		if _, completed := supervisor.findCompleted(ref); completed {
+			return ErrNotRunning
+		}
 		status, err := attestRestartedRef(ref)
 		if err != nil {
 			return err
@@ -269,9 +291,18 @@ func (supervisor *Supervisor) WaitEvidence(ctx context.Context, ref productrunti
 	if ctx == nil {
 		return ExitEvidence{}, errors.New("structured process wait requires context")
 	}
-	state, err := supervisor.ownedState(ref)
-	if err != nil {
-		return ExitEvidence{}, err
+	supervisor.mu.Lock()
+	state, active := supervisor.processes[ref.Process.PID]
+	if active && state.ref != ref {
+		active = false
+	}
+	completed, complete := supervisor.completed[ref]
+	supervisor.mu.Unlock()
+	if complete {
+		return completed.evidence, completed.waitErr
+	}
+	if !active {
+		return ExitEvidence{}, ErrNotOwned
 	}
 	select {
 	case <-ctx.Done():
@@ -292,6 +323,11 @@ func (supervisor *Supervisor) Cleanup(ctx context.Context, ref productruntime.Ow
 		return err
 	}
 	state, known := supervisor.findState(ref)
+	if !known {
+		if completed, ok := supervisor.findCompleted(ref); ok {
+			return completed.waitErr
+		}
+	}
 	if known {
 		state.stopFraming()
 		select {
@@ -350,9 +386,9 @@ func (process *Process) ReadFrame(ctx context.Context) ([]byte, error) {
 	if ctx == nil {
 		return nil, errors.New("structured process read requires context")
 	}
-	state, err := process.supervisor.ownedState(process.ref)
-	if err != nil {
-		return nil, err
+	state := process.state
+	if state == nil || state.ref != process.ref {
+		return nil, ErrNotOwned
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -367,14 +403,15 @@ func (process *Process) ReadFrame(ctx context.Context) ([]byte, error) {
 			}
 			return nil, io.EOF
 		}
+		state.releaseQueuedFrame(result)
 		return result.frame, result.err
 	}
 }
 
 func (process *Process) WriteFrame(ctx context.Context, frame []byte) error {
-	state, err := process.supervisor.ownedState(process.ref)
-	if err != nil {
-		return err
+	state := process.state
+	if state == nil || state.ref != process.ref {
+		return ErrNotOwned
 	}
 	return state.framer.WriteFrame(ctx, frame)
 }
@@ -384,14 +421,40 @@ func (process *Process) Signal(ctx context.Context, signal productruntime.Proces
 }
 
 func (process *Process) Wait(ctx context.Context) (productruntime.ProcessExit, error) {
-	return process.supervisor.Wait(ctx, process.ref)
+	evidence, err := process.WaitEvidence(ctx)
+	return evidence.Exit, err
 }
 
 func (process *Process) WaitEvidence(ctx context.Context) (ExitEvidence, error) {
-	return process.supervisor.WaitEvidence(ctx, process.ref)
+	if ctx == nil {
+		return ExitEvidence{}, errors.New("structured process wait requires context")
+	}
+	state := process.state
+	if state == nil || state.ref != process.ref {
+		return process.supervisor.WaitEvidence(ctx, process.ref)
+	}
+	select {
+	case <-ctx.Done():
+		return ExitEvidence{}, ctx.Err()
+	case <-state.done:
+		return state.evidence, state.waitErr
+	}
 }
 
 func (process *Process) Cleanup(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("structured process cleanup requires context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if process.state != nil && process.state.ref == process.ref {
+		select {
+		case <-process.state.done:
+			return process.state.waitErr
+		default:
+		}
+	}
 	return process.supervisor.Cleanup(ctx, process.ref)
 }
 
@@ -408,8 +471,25 @@ func (supervisor *Supervisor) reap(state *processState) {
 		StartedAt: state.startedAt,
 		ExitedAt:  exitedAt,
 	}
-	state.waitErr = errors.Join(evidenceErr, cleanupErr)
+	state.waitErr = errors.Join(evidenceErr, cleanupErr, state.readErr)
+	state.command = nil
+	supervisor.recordCompletion(state)
 	close(state.done)
+}
+
+func (supervisor *Supervisor) recordCompletion(state *processState) {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if current, ok := supervisor.processes[state.ref.Process.PID]; ok && current == state {
+		delete(supervisor.processes, state.ref.Process.PID)
+	}
+	supervisor.completed[state.ref] = completedProcess{evidence: state.evidence, waitErr: state.waitErr}
+	supervisor.completedOrder = append(supervisor.completedOrder, state.ref)
+	for len(supervisor.completedOrder) > completedEvidenceLimit {
+		oldest := supervisor.completedOrder[0]
+		supervisor.completedOrder = supervisor.completedOrder[1:]
+		delete(supervisor.completed, oldest)
+	}
 }
 
 func (supervisor *Supervisor) readFrames(state *processState, started chan<- struct{}) {
@@ -431,12 +511,43 @@ func (supervisor *Supervisor) readFrames(state *processState, started chan<- str
 			return
 		default:
 		}
-		select {
-		case <-state.frameStop:
+		if !state.queueFrame(result) {
+			select {
+			case <-state.frameStop:
+				return
+			default:
+			}
+			state.readErr = ErrFrameBackpressure
+			state.stopFraming()
+			if cleanupErr := supervisor.cleanupExitedGroup(state.ref.ProcessGroup); cleanupErr != nil {
+				state.readErr = errors.Join(state.readErr, cleanupErr)
+			}
 			return
-		case state.frames <- result:
 		}
 	}
+}
+
+func (state *processState) queueFrame(result frameResult) bool {
+	state.queueMu.Lock()
+	defer state.queueMu.Unlock()
+	if len(result.frame) > state.queueBudget-state.queueBytes {
+		return false
+	}
+	select {
+	case <-state.frameStop:
+		return false
+	case state.frames <- result:
+		state.queueBytes += len(result.frame)
+		return true
+	default:
+		return false
+	}
+}
+
+func (state *processState) releaseQueuedFrame(result frameResult) {
+	state.queueMu.Lock()
+	state.queueBytes -= len(result.frame)
+	state.queueMu.Unlock()
 }
 
 func (state *processState) stopFraming() {
@@ -571,6 +682,13 @@ func (supervisor *Supervisor) findState(ref productruntime.OwnedProcessRef) (*pr
 	defer supervisor.mu.Unlock()
 	state, ok := supervisor.processes[ref.Process.PID]
 	return state, ok && state.ref == ref
+}
+
+func (supervisor *Supervisor) findCompleted(ref productruntime.OwnedProcessRef) (completedProcess, bool) {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	completed, ok := supervisor.completed[ref]
+	return completed, ok
 }
 
 func attestRestartedRef(ref productruntime.OwnedProcessRef) (procinfo.IdentityStatus, error) {

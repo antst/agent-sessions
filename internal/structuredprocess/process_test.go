@@ -69,6 +69,19 @@ func TestStructuredProcessHelper(t *testing.T) {
 	case "delayed-frame":
 		time.Sleep(60 * time.Millisecond)
 		_, _ = fmt.Fprintln(os.Stdout, "ready")
+	case "multi-frame-exit":
+		for index := 0; index < 8; index++ {
+			_, _ = fmt.Fprintf(os.Stdout, "frame-%d\n", index)
+		}
+		os.Exit(0)
+	case "frame-flood":
+		for index := 0; index < 64; index++ {
+			_, _ = fmt.Fprintf(os.Stdout, "flood-%d\n", index)
+		}
+	case "queued-hang":
+		for index := 0; index < 4; index++ {
+			_, _ = fmt.Fprintf(os.Stdout, "queued-%d\n", index)
+		}
 	default:
 		os.Exit(93)
 	}
@@ -284,6 +297,86 @@ func TestSupervisorPreservesFinalFrameAfterProcessExit(t *testing.T) {
 	}
 }
 
+func TestSupervisorWaitDoesNotRequireDrainingMultipleFinalFrames(t *testing.T) {
+	supervisor := newTestSupervisor(t, 50*time.Millisecond)
+	process, err := supervisor.StartProcess(context.Background(), helperCommand("multi-frame-exit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := process.WaitEvidence(waitCtx); err != nil {
+		t.Fatalf("wait without reading frames = %v", err)
+	}
+	for index := 0; index < 8; index++ {
+		frame, err := process.ReadFrame(context.Background())
+		if err != nil || string(frame) != fmt.Sprintf("frame-%d", index) {
+			t.Fatalf("queued frame %d = %q, %v", index, frame, err)
+		}
+	}
+	if _, err := process.ReadFrame(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("read after queued frames = %v; want EOF", err)
+	}
+}
+
+func TestSupervisorFailsBoundedlyWhenNativeFramesOutrunConsumer(t *testing.T) {
+	supervisor := newTestSupervisor(t, 50*time.Millisecond)
+	process, err := supervisor.StartProcess(context.Background(), helperCommand("frame-flood"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	evidence, err := process.WaitEvidence(waitCtx)
+	if !errors.Is(err, ErrFrameBackpressure) || !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("non-reading wait = %#v, %v; want explicit protocol backpressure error", evidence, err)
+	}
+	if evidence.Exit.ExitLike == 0 {
+		t.Fatalf("backpressured child was not terminated: %#v", evidence.Exit)
+	}
+	for {
+		_, readErr := process.ReadFrame(context.Background())
+		if errors.Is(readErr, ErrFrameBackpressure) && errors.Is(readErr, productruntime.ErrProtocol) {
+			break
+		}
+		if readErr != nil {
+			t.Fatalf("drain after backpressure = %v", readErr)
+		}
+	}
+}
+
+func TestSupervisorCleanupDoesNotRequireFrameConsumer(t *testing.T) {
+	supervisor := newTestSupervisor(t, 50*time.Millisecond)
+	process, err := supervisor.StartProcess(context.Background(), helperCommand("queued-hang"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueDeadline := time.Now().Add(time.Second)
+	for len(process.state.frames) < 4 && time.Now().Before(queueDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if queued := len(process.state.frames); queued != 4 {
+		t.Fatalf("queued frames before cleanup = %d; want 4", queued)
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := process.Cleanup(cleanupCtx); err != nil {
+		t.Fatalf("cleanup without reading frames = %v", err)
+	}
+	if _, err := process.WaitEvidence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		frame, err := process.ReadFrame(context.Background())
+		if err != nil || string(frame) != fmt.Sprintf("queued-%d", index) {
+			t.Fatalf("preserved cleanup frame %d = %q, %v", index, frame, err)
+		}
+	}
+	if _, err := process.ReadFrame(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("read after cleanup frames = %v; want EOF", err)
+	}
+}
+
 func TestSupervisorCapturesVeryShortLivedChild(t *testing.T) {
 	executable, err := exec.LookPath("true")
 	if err != nil {
@@ -300,6 +393,50 @@ func TestSupervisorCapturesVeryShortLivedChild(t *testing.T) {
 	}
 	if evidence.Ref.Process.Start == "" || evidence.Ref.Process.StrongStart == "" || evidence.Exit.ExitLike != 0 {
 		t.Fatalf("short-lived child evidence = %#v", evidence)
+	}
+}
+
+func TestSupervisorPrunesHeavyStateForManyCompletedChildren(t *testing.T) {
+	executable, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("true executable is unavailable")
+	}
+	supervisor := newTestSupervisor(t, 50*time.Millisecond)
+	var oldestRef productruntime.OwnedProcessRef
+	var latest *Process
+	for index := 0; index < completedEvidenceLimit+32; index++ {
+		process, err := supervisor.StartProcess(context.Background(), productruntime.NativeCommand{Path: executable})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			oldestRef = process.Ref()
+		}
+		latest = process
+		if _, err := latest.WaitEvidence(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	supervisor.mu.Lock()
+	active := len(supervisor.processes)
+	retained := len(supervisor.completed)
+	supervisor.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("supervisor retained %d heavy completed process states", active)
+	}
+	if retained != completedEvidenceLimit {
+		t.Fatalf("supervisor retained %d compact evidence records; want %d", retained, completedEvidenceLimit)
+	}
+	latestEvidence, err := latest.WaitEvidence(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := supervisor.WaitEvidence(context.Background(), latest.Ref())
+	if err != nil || repeated != latestEvidence {
+		t.Fatalf("repeat compact evidence = %#v, %v; want %#v", repeated, err, latestEvidence)
+	}
+	if _, err := supervisor.WaitEvidence(context.Background(), oldestRef); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("evicted evidence wait = %v; want ErrNotOwned", err)
 	}
 }
 

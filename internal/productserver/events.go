@@ -246,8 +246,15 @@ func parseEventStream(
 	var data strings.Builder
 	var blockBytes int64
 	var retry time.Duration
+	pendingID := lastID
+	pendingIDSet := false
 	firstLine := true
 	dispatch := func() error {
+		if pendingIDSet {
+			lastID = pendingID
+		}
+		pendingID = lastID
+		pendingIDSet = false
 		if data.Len() == 0 {
 			eventType = ""
 			blockBytes = 0
@@ -274,6 +281,10 @@ func parseEventStream(
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
 			return lastID, retry, ErrInvalidEventStream
+		}
+		if errors.Is(err, io.EOF) && line == "" {
+			// EOF is not the blank line that commits an SSE event block.
+			return lastID, retry, nil
 		}
 		if firstLine {
 			line = strings.TrimPrefix(line, "\ufeff")
@@ -306,7 +317,8 @@ func parseEventStream(
 				eventType = value
 			case "id":
 				if !strings.ContainsRune(value, '\x00') {
-					lastID = value
+					pendingID = value
+					pendingIDSet = true
 				}
 			case "retry":
 				milliseconds, parseErr := strconv.ParseInt(value, 10, 64)
@@ -316,11 +328,7 @@ func parseEventStream(
 			}
 		}
 		if errors.Is(err, io.EOF) {
-			if data.Len() != 0 {
-				if dispatchErr := dispatch(); dispatchErr != nil {
-					return lastID, retry, dispatchErr
-				}
-			}
+			// Discard the unterminated block, including its pending event ID.
 			return lastID, retry, nil
 		}
 	}

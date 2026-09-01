@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,16 +31,39 @@ const (
 	// CapabilityQwenLane advertises remotely executable Qwen lanes.
 	CapabilityQwenLane = "qwen-lane"
 
-	maxWireBytes        = 2 * 1024 * 1024
-	maxLaneInputBytes   = 1024 * 1024
-	maxWireCapabilities = 64
-	maxCapabilityBytes  = 4096
-	wireWriteTimeout    = 10 * time.Second
+	// transportFeatureOpaquePeerProducts is an additive protocol-3 feature
+	// marker. It is advertised in the existing host capability list, but is
+	// reserved for roster projection and can never authorize lane dispatch.
+	transportFeatureOpaquePeerProducts = "federation-peer-products"
+
+	maxWireBytes            = 2 * 1024 * 1024
+	maxLaneInputBytes       = 1024 * 1024
+	maxWireCapabilities     = 64
+	maxCapabilityBytes      = 4096
+	maxHostIDBytes          = 128
+	maxHostNameBytes        = 256
+	maxBuildBytes           = 256
+	maxProductTokenBytes    = 64
+	maxPeerIDBytes          = maxHostIDBytes + 1 + maxSessionIDBytes
+	maxPeerGlobalIDBytes    = 128
+	maxPeerNameBytes        = 256
+	maxPeerDisplayNameBytes = 256
+	maxPeerStatusBytes      = 64
+	maxPeerCwdBytes         = 4096
+	maxPeerPermissionBytes  = 128
+	maxPeerInstanceIDBytes  = 512
+	maxPeerParentIDBytes    = maxPeerIDBytes
+	maxPeerGroups           = 128
+	maxSnapshotPeers        = 2048
+	maxRosterPeers          = 4096
+	maxRosterHosts          = 4096
+	wireWriteTimeout        = 10 * time.Second
 )
 
 // legacyV3LaneCapabilities is deliberately frozen to the products that sent
 // protocol-3 lane_exec frames before per-frame capability selection existed.
-// New products must always send exactly one explicit opaque capability.
+// It is the sole hub-side product-to-capability inference: new and unknown
+// products must always send exactly one explicit opaque capability.
 var legacyV3LaneCapabilities = map[string]string{
 	"codex": CapabilityCodexLane, "claude": CapabilityClaudeLane,
 	"grok": CapabilityGrokLane, "qwen": CapabilityQwenLane,
@@ -163,11 +187,14 @@ func validateHello(message Message) error {
 	if message.Type != "hello" || message.Version != ProtocolVersion {
 		return errors.New("first frame must be a compatible hello")
 	}
-	if !validSimpleID(message.HostID) {
+	if !validSimpleID(message.HostID) || len(message.HostID) > maxHostIDBytes {
 		return errors.New("hello requires a simple host_id")
 	}
-	if message.HostName == "" {
+	if strings.TrimSpace(message.HostName) == "" || len(message.HostName) > maxHostNameBytes {
 		return errors.New("hello requires host_name")
+	}
+	if len(message.Build) > maxBuildBytes {
+		return errors.New("hello build exceeds protocol bounds")
 	}
 	return nil
 }
@@ -211,6 +238,9 @@ func laneCapabilityForMessage(message Message) (capability string, legacy bool, 
 	case 1:
 		if err := productcatalog.ValidateToken(message.Capabilities[0]); err != nil {
 			return "", false, fmt.Errorf("invalid remote lane capability %q: %w", message.Capabilities[0], err)
+		}
+		if message.Capabilities[0] == transportFeatureOpaquePeerProducts {
+			return "", false, errors.New("transport feature marker is not a lane capability")
 		}
 		return message.Capabilities[0], false, nil
 	default:

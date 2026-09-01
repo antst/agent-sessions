@@ -129,6 +129,58 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	}
 }
 
+func TestCodexLaneRecoveryRejectsPreferredHistoricalTurnWhenDifferentTurnIsActive(t *testing.T) {
+	threadID := "00000000-0000-0000-0000-00000000c0aa"
+	native := &CodexNative{activeTurns: map[string]string{threadID: "turn-b"}}
+	if _, err := native.ResolveLaneTurnID(context.Background(), threadID, "turn-a"); err == nil ||
+		!strings.Contains(err.Error(), "does not match durable turn") {
+		t.Fatalf("active B versus preferred A error = %v", err)
+	}
+}
+
+func TestCodexLaneRecoveryAcceptsPreferredTurnCompletedDuringDowntimeWithoutCompetingActive(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID := "00000000-0000-0000-0000-00000000c0ab"
+	turnID := "turn-completed-during-downtime"
+	socket := filepath.Join(home, "app-server.sock")
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/turns/list":
+			return map[string]any{"data": []map[string]any{{
+				"id": turnID, "status": "completed", "items": []any{map[string]any{
+					"type": "agent_message", "phase": "final_answer", "text": "downtime terminal result",
+				}},
+			}}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", stringValue(request["method"]))
+		}
+	})
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+		Start: func(context.Context, string, []string, []string) error {
+			return errors.New("live app server must not restart")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	resolved, err := native.ResolveLaneTurnID(context.Background(), threadID, turnID)
+	if err != nil || resolved != turnID {
+		t.Fatalf("completed preferred recovery = %q, %v", resolved, err)
+	}
+	result, err := native.WaitLaneTurn(context.Background(), threadID, resolved)
+	if err != nil || result.TurnID != turnID || result.Outcome != "completed" || result.Result != "downtime terminal result" {
+		t.Fatalf("completed preferred collection = %+v, %v", result, err)
+	}
+}
+
 func TestCodexNativePostRestartIdleLaneResumesWithoutUnarchive(t *testing.T) {
 	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
 	workspace := codexNativeTestDirectory(t)

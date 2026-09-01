@@ -395,6 +395,14 @@ func (native *CodexNative) ResolveLaneTurnID(_ context.Context, threadID, prefer
 	if !validSessionID(threadID) {
 		return "", errors.New("codex lane recovery requires an exact thread id")
 	}
+	if preferred != "" {
+		native.mu.Lock()
+		active := native.activeTurns[threadID]
+		native.mu.Unlock()
+		if active != "" && active != preferred {
+			return "", fmt.Errorf("active Codex lane turn %q does not match durable turn %q", active, preferred)
+		}
+	}
 	turns, err := listLaneTurns(native.client, threadID, "notLoaded")
 	if err != nil {
 		return "", err
@@ -402,6 +410,12 @@ func (native *CodexNative) ResolveLaneTurnID(_ context.Context, threadID, prefer
 	if preferred != "" {
 		for _, turn := range turns {
 			if turn.ID == preferred {
+				native.mu.Lock()
+				active := native.activeTurns[threadID]
+				native.mu.Unlock()
+				if active == "" && !statusTerminal(normalizeStatus(turn.Status)) {
+					return "", fmt.Errorf("Codex lane turn %s is neither active nor terminal", preferred)
+				}
 				return preferred, nil
 			}
 		}

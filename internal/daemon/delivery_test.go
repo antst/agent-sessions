@@ -122,6 +122,48 @@ func TestDeliveryEngineRetryUsesStableIDAndAcknowledgedReplayDoesNotRedispatch(t
 	}
 }
 
+func TestDeliveryEngineSelectedAcknowledgedReplayRequeriesDestinationWithStableID(t *testing.T) {
+	store := openDeliveryTestState(t)
+	var calls []string
+	engine, err := NewDeliveryEngine(store, func(
+		_ context.Context,
+		_, target federation.Peer,
+		deliveryID string,
+		_ federation.AgentFrame,
+	) error {
+		calls = append(calls, target.ID+":"+deliveryID)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, peers := deliveryTestPeers()
+	frame := federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "remote-requery-1",
+		Targets: []string{"a"}, Content: "destination-owned receipt body",
+	}
+	first, err := engine.Route(context.Background(), frame, source, peers)
+	if err != nil || first.Deliveries[0].Status != "accepted" {
+		t.Fatalf("initial delivery = %+v, %v", first, err)
+	}
+	replayed, err := engine.RouteWithAcknowledgedPresentation(context.Background(), frame, source, peers, func(target federation.Peer) bool {
+		return target.ID == "a"
+	})
+	if err != nil || replayed.Deliveries[0].Status != "accepted" {
+		t.Fatalf("destination re-query = %+v, %v", replayed, err)
+	}
+	if len(calls) != 2 || calls[0] != calls[1] || replayed.Deliveries[0].DeliveryID != first.Deliveries[0].DeliveryID {
+		t.Fatalf("stable destination re-query calls=%v first=%+v replay=%+v", calls, first.Deliveries, replayed.Deliveries)
+	}
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Catalog.Deliveries) != 1 || snapshot.Catalog.Deliveries[first.Deliveries[0].DeliveryID].State != "acknowledged" {
+		t.Fatalf("source copied or duplicated destination metadata: %+v", snapshot.Catalog.Deliveries)
+	}
+}
+
 func TestDeliveryEngineAcknowledgedReplaySurvivesDaemonStateReopen(t *testing.T) {
 	root := t.TempDir()
 	store, err := OpenState(root, 1<<20)

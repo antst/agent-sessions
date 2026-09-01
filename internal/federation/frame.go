@@ -49,10 +49,13 @@ type AgentFrame struct {
 
 // DeliveryResult is the destination-visible result for one admitted target.
 type DeliveryResult struct {
-	Target    string `json:"target"`
-	SessionID string `json:"session_id,omitempty"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	Target          string `json:"target"`
+	SessionID       string `json:"session_id,omitempty"`
+	DeliveryID      string `json:"delivery_id,omitempty"`
+	ReceiptID       string `json:"receipt_id,omitempty"`
+	ReceiptSequence uint64 `json:"receipt_sequence,omitempty"`
+	Status          string `json:"status"`
+	Error           string `json:"error,omitempty"`
 }
 
 // AgentFrameResult is the product-neutral synchronous routing result.

@@ -142,6 +142,7 @@ func buildOperatorRoster(
 		Local: make([]operatorRosterEntry, 0), Remote: make([]operatorRosterEntry, 0),
 		FederatedHosts: append([]federationpkg.Host(nil), remoteHosts...),
 	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	for _, attachment := range snapshot.Catalog.Attachments {
 		if attachment.State == "detached" {
 			continue
@@ -157,7 +158,7 @@ func buildOperatorRoster(
 		report.Summary.LocalPeers++
 	}
 	for _, lane := range snapshot.Catalog.Lanes {
-		if lane.State == "archived" {
+		if staged[lane.ID] || lane.State == "archived" {
 			continue
 		}
 		report.Local = append(report.Local, operatorRosterEntry{

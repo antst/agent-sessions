@@ -52,6 +52,30 @@ func (e *DeliveryEngine) Route(
 	source federation.Peer,
 	peers []federation.Peer,
 ) (federation.AgentFrameResult, error) {
+	return e.route(ctx, frame, source, peers, nil)
+}
+
+// RouteWithAcknowledgedPresentation re-presents only selected already-
+// acknowledged destinations with the same stable delivery ID. This supports
+// destination-owned receipt re-query without changing or duplicating the
+// durable source delivery record.
+func (e *DeliveryEngine) RouteWithAcknowledgedPresentation(
+	ctx context.Context,
+	frame federation.AgentFrame,
+	source federation.Peer,
+	peers []federation.Peer,
+	represent func(federation.Peer) bool,
+) (federation.AgentFrameResult, error) {
+	return e.route(ctx, frame, source, peers, represent)
+}
+
+func (e *DeliveryEngine) route(
+	ctx context.Context,
+	frame federation.AgentFrame,
+	source federation.Peer,
+	peers []federation.Peer,
+	represent func(federation.Peer) bool,
+) (federation.AgentFrameResult, error) {
 	admission, err := federation.Admit(frame, source, peers)
 	if err != nil {
 		return federation.AgentFrameResult{}, err
@@ -67,8 +91,11 @@ func (e *DeliveryEngine) Route(
 	result.Deliveries = make([]federation.DeliveryResult, 0, len(admission.Targets))
 	for _, target := range admission.Targets {
 		deliveryID := stableDeliveryID(frame.MessageID, target.ID)
-		deliveryResult := federation.DeliveryResult{Target: target.ID, SessionID: target.SessionID, Status: "accepted"}
-		if err := e.presentOne(ctx, deliveryID, frame, delivered, admission.Source, target); err != nil {
+		deliveryResult := federation.DeliveryResult{
+			Target: target.ID, SessionID: target.SessionID, DeliveryID: deliveryID, Status: "accepted",
+		}
+		representAcknowledged := represent != nil && represent(target)
+		if err := e.presentOne(ctx, deliveryID, frame, delivered, admission.Source, target, representAcknowledged); err != nil {
 			deliveryResult.Status = "failed"
 			deliveryResult.Error = "destination did not accept the delivery"
 			result.Deliveries = append(result.Deliveries, deliveryResult)
@@ -84,6 +111,7 @@ func (e *DeliveryEngine) presentOne(
 	deliveryID string,
 	request, delivered federation.AgentFrame,
 	source, target federation.Peer,
+	representAcknowledged bool,
 ) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -93,6 +121,9 @@ func (e *DeliveryEngine) presentOne(
 	}
 	switch record.State {
 	case "acknowledged":
+		if representAcknowledged {
+			return e.present(ctx, source, target, deliveryID, delivered)
+		}
 		return nil
 	case "presented":
 		return e.transition(deliveryID, "acknowledged", "destination-accepted", "")

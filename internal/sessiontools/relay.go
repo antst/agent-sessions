@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -227,7 +227,7 @@ func (r *MCPRelay) forward(ctx context.Context, request relayRequest, attestatio
 	if err != nil {
 		return nil, &rpcError{Code: -32603, Message: "MCP relay request encoding failed"}
 	}
-	id := randomID()
+	id := stableMCPRelayOperationID(r.config.Product, request)
 	response, err := r.client.call(ctx, daemon.ControlRequest{ID: id, Role: daemon.RoleConnector, Operation: "connector.call", IdempotencyKey: id, AttachmentID: attestation.AttachmentID, Capability: attestation.Capability, Payload: payload})
 	if err != nil {
 		return nil, &rpcError{Code: -32603, Message: "Agent Sessions daemon is unavailable"}
@@ -274,12 +274,17 @@ func cloneEvidence(evidence daemon.NativeEvidence) daemon.NativeEvidence {
 	evidence.Ancestry = append([]procinfo.Identity(nil), evidence.Ancestry...)
 	return evidence
 }
-func randomID() string {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(value[:])
+func stableMCPRelayOperationID(product string, request relayRequest) string {
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("agent-sessions-mcp-operation\x00"))
+	_, _ = digest.Write([]byte(product))
+	_, _ = digest.Write([]byte{'\x00'})
+	_, _ = digest.Write([]byte(request.Method))
+	_, _ = digest.Write([]byte{'\x00'})
+	_, _ = digest.Write(request.ID)
+	_, _ = digest.Write([]byte{'\x00'})
+	_, _ = digest.Write(request.Params)
+	return "mcp-" + hex.EncodeToString(digest.Sum(nil)[:16])
 }
 
 type daemonControlClient struct {
@@ -310,7 +315,7 @@ func (c *daemonControlClient) call(ctx context.Context, request daemon.ControlRe
 	if err != nil {
 		return daemon.ControlResponse{}, err
 	}
-	request.Generation, request.ID = generation, randomID()
+	request.Generation = generation
 	return daemon.CallControl(ctx, c.endpoint, request)
 }
 

@@ -63,6 +63,22 @@ func TestHostReconnectsWhenHubStopsAnsweringHeartbeats(t *testing.T) {
 	<-serverDone
 }
 
+func TestDeliveryAcknowledgementDataIsAdditiveForProtocolThreePeers(t *testing.T) {
+	host := &EmbeddedHost{pendingDeliveries: map[string]chan deliveryOutcome{
+		"new": make(chan deliveryOutcome, 1), "old": make(chan deliveryOutcome, 1),
+	}}
+	host.completePendingDelivery(Message{Type: "delivery_ack", RequestID: "new", Data: []byte(`{"receipt_id":"exact","receipt_sequence":2}`)})
+	newOutcome := <-host.pendingDeliveries["new"]
+	if newOutcome.err != nil || string(newOutcome.data) != `{"receipt_id":"exact","receipt_sequence":2}` {
+		t.Fatalf("new protocol-3 acknowledgement = data %q err %v", newOutcome.data, newOutcome.err)
+	}
+	host.completePendingDelivery(Message{Type: "delivery_ack", RequestID: "old"})
+	oldOutcome := <-host.pendingDeliveries["old"]
+	if oldOutcome.err != nil || len(oldOutcome.data) != 0 {
+		t.Fatalf("old protocol-3 acknowledgement = data %q err %v", oldOutcome.data, oldOutcome.err)
+	}
+}
+
 func TestHostRefreshesDaemonSnapshotWhileHubIsDisconnected(t *testing.T) {
 	address := unusedTestAddress(t)
 	peer := mustTestPeer(t, "offline-host", "late", "codex", "project")
@@ -137,6 +153,7 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	source := mustTestPeer(t, "host-a", "source", "codex", "project")
 	target := mustTestPeer(t, "host-b", "target", "qwen", "project")
 	deliveries := make(chan string, 4)
+	laneKeys := make(chan string, 2)
 	hostA, err := NewEmbeddedHost(EmbeddedHostOptions{
 		Hub: address, HostID: "host-a", HostName: "host-a", Generation: 11, Build: "host-build-a",
 		ScanInterval: 20 * time.Millisecond, HeartbeatInterval: 30 * time.Millisecond, HeartbeatTimeout: time.Second,
@@ -162,6 +179,7 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 			if request.Parent.SessionID != source.SessionID || request.Product != "future" || request.Capability != "future-lane" {
 				return RemoteLaneResult{}, errors.New("remote parent attestation changed")
 			}
+			laneKeys <- request.IdempotencyKey
 			return RemoteLaneResult{Stdout: []byte("lane-ok\n"), ExitCode: 7}, nil
 		},
 	})
@@ -181,6 +199,10 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	if !hostA.Connected() || !hostB.Connected() {
 		t.Fatalf("connected state hostA=%t hostB=%t", hostA.Connected(), hostB.Connected())
 	}
+	remoteHosts := hostA.RemoteHosts()
+	if len(remoteHosts) != 1 || !contains(remoteHosts[0].Capabilities, transportFeatureOpaquePeerProducts) {
+		t.Fatalf("new host did not advertise opaque-peer transport feature: %#v", remoteHosts)
+	}
 	if err := hostA.Send(context.Background(), source, target, "message-before", "before restart", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -191,12 +213,21 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 		HostID: source.HostID, SessionID: source.SessionID, Product: source.Product,
 		InstanceID: source.InstanceID, Groups: append([]string(nil), source.Groups...),
 	}
-	result, err := hostA.RunRemoteLane(context.Background(), RemoteLaneRequest{
+	laneRequest := RemoteLaneRequest{
 		Source: source, Parent: parent, TargetHostID: "host-b", Product: "future", Capability: "future-lane",
-		Arguments: []string{"list", "--all"},
-	})
+		Arguments: []string{"list", "--all"}, IdempotencyKey: "stable-remote-lane",
+	}
+	result, err := hostA.RunRemoteLane(context.Background(), laneRequest)
 	if err != nil || string(result.Stdout) != "lane-ok\n" || result.ExitCode != 7 {
 		t.Fatalf("remote lane result = %#v, %v", result, err)
+	}
+	replayed, err := hostA.RunRemoteLane(context.Background(), laneRequest)
+	if err != nil || string(replayed.Stdout) != "lane-ok\n" || replayed.ExitCode != 7 {
+		t.Fatalf("remote lane idempotent re-query = %#v, %v", replayed, err)
+	}
+	firstKey, secondKey := <-laneKeys, <-laneKeys
+	if firstKey == "" || firstKey != secondKey {
+		t.Fatalf("destination remote lane idempotency keys = %q / %q", firstKey, secondKey)
 	}
 
 	hubCancel()
@@ -232,6 +263,9 @@ func TestHostPreservesUnknownCapabilitiesInOptionsAndRoster(t *testing.T) {
 	}
 	if !reflect.DeepEqual(host.options.Capabilities, []string{CapabilityCodexLane, "future-lane"}) {
 		t.Fatalf("host capabilities = %q", host.options.Capabilities)
+	}
+	if advertised := host.advertisedCapabilities(); !contains(advertised, transportFeatureOpaquePeerProducts) || len(advertised) != 3 {
+		t.Fatalf("advertised transport capabilities = %q", advertised)
 	}
 	host.network = &wireConn{}
 	if err := host.handleHubMessage(Message{

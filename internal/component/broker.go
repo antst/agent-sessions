@@ -2,9 +2,7 @@ package component
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -25,6 +23,7 @@ const (
 	defaultHeartbeatGrace   = 3
 	defaultHandshakeTimeout = 5 * time.Second
 	defaultAncestryDepth    = 32
+	defaultDeliveryArchives = 128
 )
 
 // PeerEvidence is captured by the broker before authorization. Process is an
@@ -34,11 +33,14 @@ type PeerEvidence struct {
 	Process procinfo.Identity
 }
 
-// Authorization is secret-free daemon evidence returned after one-time
-// bootstrap consumption or durable reconnect lookup. ProcessIdentity must
-// exactly match the broker's fresh capture. AncestorIdentity and Executable
-// add lineage checks when the prepared attachment requires them.
+// Authorization is secret-free daemon evidence returned after transactional
+// create-or-return of a durable ComponentBinding. BindingID is the exact
+// durable handshake-idempotency anchor and is never minted by the broker.
+// ProcessIdentity must exactly match the broker's fresh capture.
+// AncestorIdentity and Executable add lineage checks when the prepared
+// attachment requires them.
 type Authorization struct {
+	BindingID         string
 	AttachmentID      string
 	ProductID         string
 	ProcessIdentity   procinfo.Identity
@@ -47,9 +49,11 @@ type Authorization struct {
 	BootstrapRevision uint64
 }
 
-// Authorizer supplies daemon-owned bootstrap consumption and durable
-// attachment lookup. Implementations must validate capability hash/revision,
-// expected product, attachment, lineage evidence, and reconnect relationship.
+// Authorizer supplies daemon-owned bootstrap consumption and durable binding
+// lookup. Implementations must freshly validate capability hash/revision,
+// expected product, attachment, lineage evidence, and reconnect relationship
+// on every call. Exact unadopted handshake replay returns the same BindingID;
+// stale, conflicting, foreign-process, and adopted replay fails closed.
 type Authorizer interface {
 	Bootstrap(context.Context, BootstrapClaim, PeerEvidence) (Authorization, error)
 	Reconnect(context.Context, ReconnectClaim, PeerEvidence) (Authorization, error)
@@ -70,25 +74,34 @@ func (f HandlerFunc) HandleComponentFrame(ctx context.Context, binding BindingVi
 
 // Config fixes one daemon generation's component broker limits.
 type Config struct {
-	Generation        uint64
-	Authorizer        Authorizer
-	Handler           Handler
-	Limits            localtransport.Limits
-	ReplayWindow      uint64
-	MaxOutstanding    int
-	HeartbeatInterval time.Duration
-	HeartbeatGrace    int
-	HandshakeTimeout  time.Duration
-	MaxAncestryDepth  int
+	Generation          uint64
+	Authorizer          Authorizer
+	Handler             Handler
+	Limits              localtransport.Limits
+	ReplayWindow        uint64
+	MaxOutstanding      int
+	HeartbeatInterval   time.Duration
+	HeartbeatGrace      int
+	HandshakeTimeout    time.Duration
+	MaxAncestryDepth    int
+	MaxDeliveryArchives int
 }
 
 // Broker owns live generation-scoped component streams only. Durable
 // attachment/session/delivery authority remains behind Authorizer and Handler.
 type Broker struct {
-	config   Config
-	mu       sync.Mutex
-	bindings map[string]*binding
-	wg       sync.WaitGroup
+	config                  Config
+	mu                      sync.Mutex
+	bindings                map[string]*binding
+	attachmentBindings      map[string]*binding
+	attachmentDelivery      map[string]attachmentDeliveryState
+	attachmentDeliveryOrder []string
+	wg                      sync.WaitGroup
+}
+
+type attachmentDeliveryState struct {
+	priorBindingID string
+	tracker        *deliveryTracker
 }
 
 // NewBroker validates and normalizes one generation's fixed bounds.
@@ -98,6 +111,9 @@ func NewBroker(config Config) (*Broker, error) {
 	}
 	if config.Authorizer == nil {
 		return nil, errors.New("component broker authorizer is required")
+	}
+	if config.Handler == nil {
+		return nil, errors.New("component broker durable handler is required")
 	}
 	if config.Limits == (localtransport.Limits{}) {
 		config.Limits = localtransport.DefaultLimits()
@@ -140,7 +156,16 @@ func NewBroker(config Config) (*Broker, error) {
 	if config.MaxAncestryDepth < 0 || config.MaxAncestryDepth > 256 {
 		return nil, errors.New("component ancestry depth is invalid")
 	}
-	return &Broker{config: config, bindings: make(map[string]*binding)}, nil
+	if config.MaxDeliveryArchives == 0 {
+		config.MaxDeliveryArchives = defaultDeliveryArchives
+	}
+	if config.MaxDeliveryArchives < 1 || config.MaxDeliveryArchives > 4096 {
+		return nil, errors.New("component delivery archive bound is invalid")
+	}
+	return &Broker{
+		config: config, bindings: make(map[string]*binding), attachmentBindings: make(map[string]*binding),
+		attachmentDelivery: make(map[string]attachmentDeliveryState),
+	}, nil
 }
 
 // Serve listens only on the dedicated component.sock path and serves until
@@ -277,11 +302,7 @@ func (b *Broker) handleConnection(ctx context.Context, connection *localtranspor
 		body = nil
 		secret = ""
 	}
-	bindingID, err := newBindingID()
-	if err != nil {
-		b.writeHandshakeReject(connection, first.ID, CategoryInternal, "cannot allocate binding id")
-		return
-	}
+	bindingID := authorization.BindingID
 	live := &binding{
 		view: BindingView{
 			BindingID: bindingID, AttachmentID: authorization.AttachmentID, ProductID: authorization.ProductID,
@@ -289,21 +310,36 @@ func (b *Broker) handleConnection(ctx context.Context, connection *localtranspor
 			BootstrapRevision: authorization.BootstrapRevision, LastInboundSeq: first.Seq,
 		},
 		connection: connection, replayWindow: b.config.ReplayWindow, maxOutstanding: b.config.MaxOutstanding,
-		inboundDigests:   make(map[uint64][sha256.Size]byte),
-		pendingToolCalls: make(map[string][sha256.Size]byte), pendingDeliveries: make(map[string]struct{}),
-		completedDelivery: make(map[string][sha256.Size]byte),
-		lastHeartbeat:     time.Now(), heartbeatInterval: b.config.HeartbeatInterval, heartbeatGrace: b.config.HeartbeatGrace,
+		inboundDigests: make(map[uint64][sha256.Size]byte), pendingToolCalls: make(map[string][sha256.Size]byte),
+		deliveries:    newDeliveryTracker(b.config.MaxOutstanding, b.config.ReplayWindow),
+		lastHeartbeat: time.Now(), heartbeatInterval: b.config.HeartbeatInterval, heartbeatGrace: b.config.HeartbeatGrace,
 	}
-	b.mu.Lock()
-	b.bindings[bindingID] = live
-	b.mu.Unlock()
+	replaced, err := b.installBinding(first, live)
+	if err != nil {
+		b.writeHandshakeReject(connection, first.ID, categoryFromError(err, CategoryReplay), err.Error())
+		return
+	}
+	if replaced != nil {
+		_ = replaced.close()
+	}
 	defer func() {
+		_ = live.close()
 		b.mu.Lock()
 		if b.bindings[bindingID] == live {
 			delete(b.bindings, bindingID)
 		}
+		if b.attachmentBindings[authorization.AttachmentID] == live {
+			delete(b.attachmentBindings, authorization.AttachmentID)
+			if live.deliveries.hasState() {
+				b.archiveAttachmentDelivery(authorization.AttachmentID, attachmentDeliveryState{
+					priorBindingID: bindingID,
+					tracker:        live.deliveries,
+				})
+			} else {
+				b.deleteAttachmentDelivery(authorization.AttachmentID)
+			}
+		}
 		b.mu.Unlock()
-		_ = live.close()
 	}()
 	ready := Ready{
 		BindingID: bindingID, AttachmentID: authorization.AttachmentID, DaemonGeneration: b.config.Generation,
@@ -347,8 +383,8 @@ func (b *Broker) authorize(ctx context.Context, first Frame, evidence PeerEviden
 	if err := first.PayloadInto(&claim); err != nil {
 		return Authorization{}, "", err
 	}
-	if claim.PriorGeneration >= b.config.Generation {
-		return Authorization{}, "", &ProtocolError{Category: CategoryProtocol, Detail: "reconnect generation is not retired"}
+	if claim.PriorGeneration > b.config.Generation {
+		return Authorization{}, "", &ProtocolError{Category: CategoryProtocol, Detail: "reconnect generation is in the future"}
 	}
 	if claim.ProcessStart != evidence.Process.Start || claim.StrongStart != evidence.Process.StrongStart {
 		return Authorization{}, "", &ProtocolError{Category: CategoryStaleProcess, Detail: "reconnect process start does not match kernel peer"}
@@ -357,8 +393,74 @@ func (b *Broker) authorize(ctx context.Context, first Frame, evidence PeerEviden
 	return authorization, "", err
 }
 
+func (b *Broker) installBinding(first Frame, live *binding) (*binding, error) {
+	priorBindingID := ""
+	if first.Type == TypeReconnect {
+		var claim ReconnectClaim
+		if err := first.PayloadInto(&claim); err != nil {
+			return nil, err
+		}
+		priorBindingID = claim.PriorBindingID
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	existing := b.attachmentBindings[live.view.AttachmentID]
+	archived, hasArchived := b.attachmentDelivery[live.view.AttachmentID]
+	if existing != nil {
+		sameAuthorizedBinding := existing.view.BindingID == live.view.BindingID
+		validSuccessor := first.Type == TypeReconnect && existing.view.BindingID == priorBindingID
+		if !sameAuthorizedBinding && !validSuccessor {
+			return nil, &ProtocolError{Category: CategoryReplay, Detail: "attachment already has a newer live component binding"}
+		}
+		live.deliveries = existing.deliveries
+		delete(b.bindings, existing.view.BindingID)
+	} else if hasArchived {
+		sameAuthorizedBinding := archived.priorBindingID == live.view.BindingID
+		validSuccessor := first.Type == TypeReconnect && archived.priorBindingID == priorBindingID
+		if !sameAuthorizedBinding && !validSuccessor {
+			return nil, &ProtocolError{Category: CategoryReplay, Detail: "attachment delivery state belongs to another component binding"}
+		}
+		live.deliveries = archived.tracker
+	}
+	b.deleteAttachmentDelivery(live.view.AttachmentID)
+	b.bindings[live.view.BindingID] = live
+	b.attachmentBindings[live.view.AttachmentID] = live
+	return existing, nil
+}
+
+// archiveAttachmentDelivery retains only a fixed number of disconnected
+// attachments. Eviction is fail-closed: durable delivery authority can
+// re-present pending work, while this broker never guesses an acceptance.
+// b.mu must be held.
+func (b *Broker) archiveAttachmentDelivery(attachmentID string, state attachmentDeliveryState) {
+	b.deleteAttachmentDelivery(attachmentID)
+	b.attachmentDelivery[attachmentID] = state
+	b.attachmentDeliveryOrder = append(b.attachmentDeliveryOrder, attachmentID)
+	for len(b.attachmentDeliveryOrder) > b.config.MaxDeliveryArchives {
+		oldest := b.attachmentDeliveryOrder[0]
+		b.attachmentDeliveryOrder = b.attachmentDeliveryOrder[1:]
+		delete(b.attachmentDelivery, oldest)
+	}
+}
+
+// deleteAttachmentDelivery removes one archive and its bounded-order entry.
+// b.mu must be held.
+func (b *Broker) deleteAttachmentDelivery(attachmentID string) {
+	if _, exists := b.attachmentDelivery[attachmentID]; !exists {
+		return
+	}
+	delete(b.attachmentDelivery, attachmentID)
+	for index, current := range b.attachmentDeliveryOrder {
+		if current == attachmentID {
+			b.attachmentDeliveryOrder = append(b.attachmentDeliveryOrder[:index], b.attachmentDeliveryOrder[index+1:]...)
+			break
+		}
+	}
+}
+
 func (b *Broker) validateAuthorization(first Frame, evidence PeerEvidence, authorization Authorization) error {
-	if !validIdentifier(authorization.AttachmentID) || !validProductID(authorization.ProductID) || authorization.BootstrapRevision == 0 {
+	if !validIdentifier(authorization.BindingID) || !validIdentifier(authorization.AttachmentID) ||
+		!validProductID(authorization.ProductID) || authorization.BootstrapRevision == 0 {
 		return errors.New("authorizer returned incomplete attachment evidence")
 	}
 	if authorization.ProcessIdentity != evidence.Process {
@@ -466,6 +568,7 @@ func (b *Broker) readBinding(ctx context.Context, live *binding) {
 		}
 		if b.config.Handler != nil {
 			if err := b.config.Handler.HandleComponentFrame(ctx, live.snapshot(), frame); err != nil {
+				live.rollbackOperation(frame)
 				b.rejectLive(live, frame.ID, err)
 			}
 		}
@@ -566,14 +669,6 @@ func safeOperationID(value string) string {
 		return value
 	}
 	return "invalid-frame"
-}
-
-func newBindingID() (string, error) {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
-	}
-	return "binding-" + hex.EncodeToString(value[:]), nil
 }
 
 func wipeBytes(value []byte) {

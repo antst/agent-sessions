@@ -388,17 +388,55 @@ func callExistingDaemon(ctx context.Context, stateRoot string, request daemonpkg
 	if err != nil {
 		return daemonpkg.ControlResponse{}, err
 	}
+	return callDaemonWithStableRetry(ctx, endpoint, request, daemonpkg.CallControl)
+}
+
+const (
+	maxDaemonControlAttempts = 3
+	daemonControlRetryDelay  = 10 * time.Millisecond
+)
+
+type daemonControlCaller func(context.Context, string, daemonpkg.ControlRequest) (daemonpkg.ControlResponse, error)
+
+func callDaemonWithStableRetry(
+	ctx context.Context,
+	endpoint string,
+	request daemonpkg.ControlRequest,
+	call daemonControlCaller,
+) (daemonpkg.ControlResponse, error) {
 	request.Generation = 0
-	response, err := daemonpkg.CallControl(ctx, endpoint, request)
-	if err != nil {
-		return daemonpkg.ControlResponse{}, fmt.Errorf("agent sessions daemon is unavailable: %w", err)
+	for attempt := 0; attempt < maxDaemonControlAttempts; attempt++ {
+		response, err := call(ctx, endpoint, request)
+		if err != nil {
+			if attempt+1 == maxDaemonControlAttempts {
+				return daemonpkg.ControlResponse{}, fmt.Errorf("agent sessions daemon is unavailable: %w", err)
+			}
+			if err := waitDaemonControlRetry(ctx); err != nil {
+				return daemonpkg.ControlResponse{}, fmt.Errorf("agent sessions daemon is unavailable: %w", err)
+			}
+			continue
+		}
+		if response.Error == nil || response.Error.Code != daemonpkg.ErrorStaleGeneration ||
+			response.Generation == 0 || response.Generation == request.Generation {
+			return response, nil
+		}
+		if attempt+1 == maxDaemonControlAttempts {
+			return response, nil
+		}
+		request.Generation = response.Generation
 	}
-	if response.Error == nil || response.Error.Code != daemonpkg.ErrorStaleGeneration || response.Generation == 0 {
-		return response, nil
+	return daemonpkg.ControlResponse{}, errors.New("agent sessions daemon retry loop ended without a response")
+}
+
+func waitDaemonControlRetry(ctx context.Context) error {
+	timer := time.NewTimer(daemonControlRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	request.Generation = response.Generation
-	request.ID = commandRequestID()
-	return daemonpkg.CallControl(ctx, endpoint, request)
 }
 
 func parseStateRoot(command string, args []string) (string, error) {

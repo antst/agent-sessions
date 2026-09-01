@@ -21,8 +21,42 @@ var (
 	ErrEndpointInUse   = errors.New("product server endpoint is already in use")
 	ErrServerNotReady  = errors.New("owned product server did not become ready")
 	ErrServerExited    = errors.New("owned product server exited before readiness")
+	ErrServerWait      = errors.New("owned product server exit observation failed")
 	ErrInvalidOwnedRef = errors.New("owned product server returned an invalid process reference")
+	ErrCleanupDebt     = errors.New("owned product server cleanup is incomplete")
 )
+
+// CleanupDebtError preserves the only exact process reference when cleanup
+// cannot authoritatively prove exit. Its text and Go formatting omit the
+// underlying failure; errors.Is/errors.As retain the machine-readable causes.
+type CleanupDebtError struct {
+	Ref   productruntime.OwnedProcessRef
+	cause error
+}
+
+func (*CleanupDebtError) Error() string    { return ErrCleanupDebt.Error() }
+func (*CleanupDebtError) GoString() string { return "productserver.CleanupDebtError{[REDACTED]}" }
+func (debt *CleanupDebtError) Unwrap() []error {
+	causes := []error{ErrCleanupDebt}
+	if debt != nil && debt.cause != nil {
+		causes = append(causes, debt.cause)
+	}
+	return causes
+}
+
+type serverWaitError struct{ cause error }
+
+func (serverWaitError) Error() string { return ErrServerWait.Error() }
+func (failure serverWaitError) Unwrap() []error {
+	return []error{ErrServerWait, failure.cause}
+}
+
+type cleanupOutcomeError struct{ cause error }
+
+func (cleanupOutcomeError) Error() string { return "owned product server cleanup reported an error" }
+func (failure cleanupOutcomeError) Unwrap() error {
+	return failure.cause
+}
 
 const (
 	defaultServerReadHeaderTimeout = 10 * time.Second
@@ -261,6 +295,11 @@ type ownedExit struct {
 	err  error
 }
 
+type stopAttempt struct {
+	done chan struct{}
+	err  error
+}
+
 // OwnedServer supervises exactly the ephemeral process reference returned by
 // OwnedProcessSupervisor.Start. It never signals a PID or process group derived
 // from an endpoint or process-table search.
@@ -274,12 +313,14 @@ type OwnedServer struct {
 	exitDone        chan struct{}
 	exitMu          sync.Mutex
 	exitResult      ownedExit
-	stopOnce        sync.Once
-	stopDone        chan struct{}
 	stopMu          sync.Mutex
-	stopErr         error
+	activeStop      *stopAttempt
 }
 
+// StartOwnedServer starts and observes one exact owned server. When post-start
+// cleanup cannot prove exit it deliberately returns both a non-nil server and
+// an error matching ErrCleanupDebt; callers must retain the server or the
+// CleanupDebtError.Ref and retry exact cleanup.
 func StartOwnedServer(ctx context.Context, config OwnedServerConfig) (*OwnedServer, error) {
 	if ctx == nil || config.Supervisor == nil || config.Ready == nil || config.Command.Path == "" {
 		return nil, ErrServerNotReady
@@ -304,39 +345,70 @@ func StartOwnedServer(ctx context.Context, config OwnedServerConfig) (*OwnedServ
 	}
 	ref, err := config.Supervisor.Start(ctx, config.Command)
 	if err != nil {
-		client.CloseIdleConnections()
-		return nil, fmt.Errorf("start owned product server: %w", err)
+		startFailure := fmt.Errorf("start owned product server: %w", err)
+		if ref == (productruntime.OwnedProcessRef{}) {
+			client.CloseIdleConnections()
+			return nil, startFailure
+		}
+		server := newOwnedServer(ref, client, config.Supervisor, interruptGrace, terminateGrace, shutdownTimeout)
+		return server.failAfterStart(startFailure)
 	}
+	server := newOwnedServer(ref, client, config.Supervisor, interruptGrace, terminateGrace, shutdownTimeout)
 	if !validOwnedRef(ref) {
-		client.CloseIdleConnections()
-		return nil, ErrInvalidOwnedRef
+		return server.failAfterStart(ErrInvalidOwnedRef)
 	}
-	server := &OwnedServer{
-		ref: ref, client: client, supervisor: config.Supervisor,
-		interruptGrace: interruptGrace, terminateGrace: terminateGrace,
-		shutdownTimeout: shutdownTimeout, exitDone: make(chan struct{}), stopDone: make(chan struct{}),
-	}
-	go server.waitOnce()
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
 	if err := server.awaitReady(startupCtx, probeInterval, config.Ready); err != nil {
-		server.startStop()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), shutdownTimeout+interruptGrace+terminateGrace)
-		defer cleanupCancel()
-		select {
-		case <-server.stopDone:
-		case <-cleanupCtx.Done():
-		}
-		client.CloseIdleConnections()
-		if errors.Is(err, ErrServerExited) {
-			return nil, err
+		failure := error(ErrServerNotReady)
+		if errors.Is(err, ErrServerExited) || errors.Is(err, ErrServerWait) {
+			failure = err
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			failure = ctx.Err()
 		}
-		return nil, ErrServerNotReady
+		return server.failAfterStart(failure)
 	}
 	return server, nil
+}
+
+func newOwnedServer(
+	ref productruntime.OwnedProcessRef,
+	client *Client,
+	supervisor productruntime.OwnedProcessSupervisor,
+	interruptGrace time.Duration,
+	terminateGrace time.Duration,
+	shutdownTimeout time.Duration,
+) *OwnedServer {
+	server := &OwnedServer{
+		ref: ref, client: client, supervisor: supervisor,
+		interruptGrace: interruptGrace, terminateGrace: terminateGrace,
+		shutdownTimeout: shutdownTimeout, exitDone: make(chan struct{}),
+	}
+	go server.waitOnce()
+	return server
+}
+
+func (server *OwnedServer) failAfterStart(failure error) (*OwnedServer, error) {
+	attempt := server.startStop()
+	cleanupTimer := time.NewTimer(server.shutdownTimeout + time.Second)
+	defer cleanupTimer.Stop()
+	var cleanupErr error
+	select {
+	case <-attempt.done:
+		cleanupErr = attempt.err
+	case <-cleanupTimer.C:
+		cleanupErr = context.DeadlineExceeded
+	}
+	if server.authoritativeExitObserved() {
+		server.client.CloseIdleConnections()
+		if cleanupErr != nil {
+			return nil, errors.Join(failure, cleanupOutcomeError{cause: cleanupErr})
+		}
+		return nil, failure
+	}
+	debt := &CleanupDebtError{Ref: server.ref, cause: cleanupErr}
+	return server, errors.Join(failure, debt)
 }
 
 func durationOrDefault(value, fallback time.Duration) time.Duration {
@@ -367,26 +439,53 @@ func (server *OwnedServer) waitOnce() {
 	close(server.exitDone)
 }
 
+func (server *OwnedServer) completedWait() (ownedExit, bool) {
+	select {
+	case <-server.exitDone:
+		server.exitMu.Lock()
+		defer server.exitMu.Unlock()
+		return server.exitResult, true
+	default:
+		return ownedExit{}, false
+	}
+}
+
+func (server *OwnedServer) authoritativeExitObserved() bool {
+	result, completed := server.completedWait()
+	return completed && result.err == nil
+}
+
+func (server *OwnedServer) waitCompletionError() error {
+	result, completed := server.completedWait()
+	if !completed {
+		return nil
+	}
+	if result.err != nil {
+		return serverWaitError{cause: result.err}
+	}
+	return ErrServerExited
+}
+
 func (server *OwnedServer) awaitReady(ctx context.Context, interval time.Duration, ready ReadyFunc) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-server.exitDone:
-			return ErrServerExited
+			return server.waitCompletionError()
 		default:
 		}
 		if err := ready(ctx, server.client); err == nil {
 			select {
 			case <-server.exitDone:
-				return ErrServerExited
+				return server.waitCompletionError()
 			default:
 				return nil
 			}
 		}
 		select {
 		case <-server.exitDone:
-			return ErrServerExited
+			return server.waitCompletionError()
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
@@ -432,40 +531,55 @@ func (server *OwnedServer) Close(ctx context.Context) error {
 	if ctx == nil {
 		return ErrServerClosed
 	}
-	server.startStop()
+	attempt := server.startStop()
 	select {
-	case <-server.stopDone:
-		server.stopMu.Lock()
-		defer server.stopMu.Unlock()
-		return server.stopErr
+	case <-attempt.done:
+		if !server.authoritativeExitObserved() {
+			return &CleanupDebtError{Ref: server.ref, cause: attempt.err}
+		}
+		return attempt.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-func (server *OwnedServer) startStop() {
-	server.stopOnce.Do(func() {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), server.shutdownTimeout)
-			defer cancel()
-			err := server.stop(ctx)
+func (server *OwnedServer) startStop() *stopAttempt {
+	server.stopMu.Lock()
+	if server.activeStop != nil {
+		attempt := server.activeStop
+		server.stopMu.Unlock()
+		return attempt
+	}
+	attempt := &stopAttempt{done: make(chan struct{})}
+	server.activeStop = attempt
+	server.stopMu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), server.shutdownTimeout)
+		defer cancel()
+		attempt.err = server.stop(ctx)
+		if server.authoritativeExitObserved() {
 			server.client.CloseIdleConnections()
-			server.stopMu.Lock()
-			server.stopErr = err
-			server.stopMu.Unlock()
-			close(server.stopDone)
-		}()
-	})
+		}
+		server.stopMu.Lock()
+		if server.activeStop == attempt {
+			server.activeStop = nil
+		}
+		close(attempt.done)
+		server.stopMu.Unlock()
+	}()
+	return attempt
 }
 
 func (server *OwnedServer) stop(ctx context.Context) error {
-	select {
-	case <-server.exitDone:
-		_, err := server.Wait(context.Background())
-		return err
-	default:
+	if result, completed := server.completedWait(); completed && result.err == nil {
+		return nil
 	}
 	var signalErrors []error
+	waitFailed := false
+	if result, completed := server.completedWait(); completed && result.err != nil {
+		signalErrors = append(signalErrors, serverWaitError{cause: result.err})
+		waitFailed = true
+	}
 	sequence := []struct {
 		signal productruntime.ProcessSignal
 		grace  time.Duration
@@ -478,11 +592,32 @@ func (server *OwnedServer) stop(ctx context.Context) error {
 		if err := server.supervisor.Signal(ctx, server.ref, step.signal); err != nil {
 			signalErrors = append(signalErrors, err)
 		}
+		if waitFailed {
+			if step.grace == 0 {
+				return errors.Join(signalErrors...)
+			}
+			timer := time.NewTimer(step.grace)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return errors.Join(append(signalErrors, ctx.Err())...)
+			}
+			continue
+		}
 		if step.grace == 0 {
 			select {
 			case <-server.exitDone:
-				_, waitErr := server.Wait(context.Background())
-				return errors.Join(append(signalErrors, waitErr)...)
+				result, _ := server.completedWait()
+				if result.err == nil {
+					return errors.Join(signalErrors...)
+				}
+				return errors.Join(append(signalErrors, serverWaitError{cause: result.err})...)
 			case <-ctx.Done():
 				return errors.Join(append(signalErrors, ctx.Err())...)
 			}
@@ -496,8 +631,12 @@ func (server *OwnedServer) stop(ctx context.Context) error {
 				default:
 				}
 			}
-			_, waitErr := server.Wait(context.Background())
-			return errors.Join(append(signalErrors, waitErr)...)
+			result, _ := server.completedWait()
+			if result.err == nil {
+				return errors.Join(signalErrors...)
+			}
+			signalErrors = append(signalErrors, serverWaitError{cause: result.err})
+			waitFailed = true
 		case <-timer.C:
 		case <-ctx.Done():
 			if !timer.Stop() {

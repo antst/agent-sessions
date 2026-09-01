@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -90,9 +93,12 @@ type laneActor struct {
 	turnID                                     string
 	state, outcome, result, failure            string
 	startedAt, completedAt, deadlineAt         int64
+	inputSequence                              uint64
 	cancel                                     context.CancelFunc
 	done                                       chan struct{}
-	pending                                    []string
+	inputPump                                  bool
+	activeReceiptID                            string
+	namePromoting                              bool
 	collecting                                 bool
 	interruptRequested                         bool
 }
@@ -160,9 +166,68 @@ func (c *hostCoordinator) handleLaneCommand(
 		return nil, err
 	}
 	if strings.TrimSpace(envelope.Host) != "" {
-		return c.handleRemoteLaneCommand(ctx, runtime, parent, envelope)
+		return c.handleRemoteLaneCommand(ctx, runtime, parent, envelope, laneCommandInputID(request))
 	}
-	return c.dispatchLaneCommand(ctx, runtime, parent, envelope.Product, parsed, envelope.Input)
+	return c.dispatchLaneCommand(ctx, runtime, parent, envelope.Product, parsed, envelope.Input, laneCommandInputID(request))
+}
+
+func laneCommandInputID(request daemonpkg.ControlRequest) string {
+	key := strings.TrimSpace(request.IdempotencyKey)
+	if key == "" {
+		key = strings.TrimSpace(request.ID)
+	}
+	if key == "" {
+		key = commandRequestID()
+	}
+	digest := sha256.Sum256([]byte("lane-input\x00" + key))
+	return daemonpkg.LaneCommandReceiptPrefix + hex.EncodeToString(digest[:16])
+}
+
+func laneIDForInitialReceipt(receiptID string) string {
+	const operationReceiptLength = len(daemonpkg.LaneCommandReceiptPrefix) + 32
+	if strings.HasPrefix(receiptID, daemonpkg.LaneCommandReceiptPrefix) && len(receiptID) >= operationReceiptLength {
+		receiptID = receiptID[:operationReceiptLength]
+	}
+	digest := sha256.Sum256([]byte("lane-start\x00" + receiptID))
+	encoded := hex.EncodeToString(digest[:16])
+	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:]
+}
+
+func initialLaneReceiptID(operationID string, actor *laneActor, input string, wait bool) string {
+	identity := struct {
+		OperationID        string   `json:"operation_id"`
+		ParentAttachmentID string   `json:"parent_attachment_id"`
+		Product            string   `json:"product"`
+		Name               string   `json:"name"`
+		Cwd                string   `json:"cwd"`
+		Groups             []string `json:"groups"`
+		ExplicitGroups     []string `json:"explicit_groups"`
+		InheritGroups      bool     `json:"inherit_groups"`
+		PermissionMode     string   `json:"permission_mode"`
+		ApprovalPolicy     string   `json:"approval_policy"`
+		Sandbox            string   `json:"sandbox"`
+		Effort             string   `json:"effort"`
+		Schema             string   `json:"schema"`
+		Arguments          []string `json:"arguments"`
+		Persistent         bool     `json:"persistent"`
+		AutoArchive        bool     `json:"auto_archive"`
+		AutoArchiveDelayMS int64    `json:"auto_archive_delay_ms"`
+		TurnTimeoutNS      int64    `json:"turn_timeout_ns"`
+		Wait               bool     `json:"wait"`
+		InputDigest        string   `json:"input_digest"`
+	}{
+		OperationID: operationID, ParentAttachmentID: actor.parentID, Product: actor.product,
+		Name: actor.name, Cwd: actor.cwd, Groups: append([]string(nil), actor.groups...),
+		ExplicitGroups: append([]string(nil), actor.explicitGroups...), InheritGroups: actor.inheritGroups,
+		PermissionMode: actor.permission, ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox,
+		Effort: actor.effort, Schema: actor.schema, Arguments: append([]string(nil), actor.arguments...),
+		Persistent: actor.persistent, AutoArchive: actor.autoArchive,
+		AutoArchiveDelayMS: actor.autoArchiveDelay.Milliseconds(), TurnTimeoutNS: actor.turnTimeout.Nanoseconds(),
+		Wait: wait, InputDigest: fmt.Sprintf("%x", sha256.Sum256([]byte(input))),
+	}
+	body, _ := json.Marshal(identity)
+	digest := sha256.Sum256(body)
+	return operationID + "-" + hex.EncodeToString(digest[:16])
 }
 
 func (c *hostCoordinator) dispatchLaneCommand(
@@ -172,14 +237,15 @@ func (c *hostCoordinator) dispatchLaneCommand(
 	product string,
 	parsed parsedLaneCommand,
 	input string,
+	inputID string,
 ) (json.RawMessage, error) {
 	var err error
 	var result map[string]any
 	switch parsed.command {
 	case "run", "start":
-		result, err = c.startLane(ctx, runtime, parent, product, parsed, input, parsed.command == "run")
+		result, err = c.startLane(ctx, runtime, parent, product, parsed, input, parsed.command == "run", inputID)
 	case "resume":
-		result, err = c.resumeLane(ctx, runtime, parent, product, parsed, input)
+		result, err = c.resumeLane(ctx, runtime, parent, product, parsed, input, inputID)
 	case "wait":
 		result, err = c.waitLane(ctx, runtime, parent, product, parsed)
 	case "status":
@@ -370,7 +436,7 @@ func laneNativeOptionTakesValue(argument string) bool {
 }
 
 //nolint:gocyclo // Start is one durable authorization, native dispatch, publication, and rollback transaction.
-func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string, wait bool) (map[string]any, error) {
+func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string, wait bool, inputID string) (map[string]any, error) {
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(options.name) == "" {
 		return nil, errors.New("lane start/run requires --name and non-empty input")
 	}
@@ -405,10 +471,8 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if permission == "" {
 		permission = laneDefaultPermission(product, parent.PermissionMode)
 	}
-	id, err := newLaneUUID()
-	if err != nil {
-		return nil, err
-	}
+	operationInputID := inputID
+	id := laneIDForInitialReceipt(operationInputID)
 	groups, err = c.anchorLaneGroups(runtime, groups, parent.ID, id)
 	if err != nil {
 		return nil, err
@@ -420,8 +484,10 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		autoArchive: !options.noAutoArchive, autoArchiveDelay: defaultUnifiedLaneAutoArchiveDelay,
 		approvalPolicy: options.approvalPolicy, sandbox: options.sandbox,
 		effort: options.effort, schema: options.schema,
-		arguments: append([]string(nil), options.native...), done: make(chan struct{}), state: "preparing",
+		arguments: append([]string(nil), options.native...), state: "idle",
 	}
+	actor.done = make(chan struct{})
+	close(actor.done)
 	if options.autoArchiveAfterSet {
 		actor.autoArchive, actor.autoArchiveDelay = true, options.autoArchiveAfter
 	}
@@ -434,32 +500,117 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if product == "claude" {
 		actor.nativeID = id
 	}
+	inputID = initialLaneReceiptID(operationInputID, actor, input, wait)
+	inputEngine, err := c.laneInputEngine(runtime)
+	if err != nil {
+		return nil, err
+	}
+	priorSnapshot, err := runtime.State().Read()
+	if err != nil {
+		return nil, err
+	}
+	priorReceipt, replay := priorSnapshot.Catalog.LaneInputs[inputID]
+	for _, candidate := range priorSnapshot.Catalog.LaneInputs {
+		if candidate.LaneID == id && candidate.ReceiptID != inputID &&
+			(candidate.ReceiptID == operationInputID || strings.HasPrefix(candidate.ReceiptID, operationInputID+"-")) {
+			return nil, daemonpkg.ErrLaneInputConflict
+		}
+	}
+	if replay && priorReceipt.LaneID != id {
+		return nil, daemonpkg.ErrLaneInputConflict
+	}
+	if replay && !exactLaneStartReplay(priorSnapshot.Catalog.Lanes[id], durableLane(actor, "idle")) {
+		return nil, daemonpkg.ErrLaneInputConflict
+	}
+	queuedReplay := replay && priorReceipt.State == daemonpkg.ReceiptQueued
+	stagedReplay := queuedReplay && priorReceipt.Revision == 1
+	requestedTurnTimeout := actor.turnTimeout
 	c.mu.Lock()
-	if conflict := c.liveLaneNameLocked(runtime, parent, options.name); conflict {
+	existingActor := c.lanes[id]
+	if stagedReplay && c.liveLaneNameExceptLocked(runtime, parent, options.name, id) {
+		c.mu.Unlock()
+		return nil, daemonpkg.ErrLaneInputConflict
+	}
+	if !stagedReplay && existingActor == nil && c.liveLaneNameLocked(runtime, parent, options.name) {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("visible lane name %q is already live", options.name)
 	}
-	c.lanes[id] = actor
-	c.mu.Unlock()
-	turnID := commandRequestID()
-	actor.turnID = turnID
-	if err := c.commitNewLane(runtime, actor); err != nil {
-		c.mu.Lock()
-		delete(c.lanes, id)
-		c.mu.Unlock()
-		return nil, err
+	reserved := existingActor == nil
+	if reserved {
+		if !replay {
+			prepareLaneTurnLocked(actor)
+			actor.inputPump, actor.activeReceiptID = true, inputID
+		}
+		if stagedReplay {
+			actor.namePromoting = true
+		}
+		c.lanes[id] = actor
+	} else {
+		actor = existingActor
+		if queuedReplay {
+			actor.turnTimeout = requestedTurnTimeout
+		}
+		if stagedReplay {
+			actor.namePromoting = true
+		}
 	}
-	if err := c.dispatchLaneTurn(runtime, actor, input, false, false); err != nil {
-		return nil, err
+	c.mu.Unlock()
+	if stagedReplay {
+		defer func() {
+			c.mu.Lock()
+			actor.namePromoting = false
+			c.mu.Unlock()
+		}()
+	}
+	receipt, err := inputEngine.CreateLaneAdmitAndMarkDispatching(
+		inputID, durableLane(actor, "idle"), durableTurn(actor, 0, "accepted"), commandRequestID(), []byte(input),
+	)
+	if err != nil {
+		recoverableQueuedError := receipt.ReceiptID != "" && receipt.State == daemonpkg.ReceiptQueued
+		c.mu.Lock()
+		if recoverableQueuedError {
+			resetStagedLaneTurnLocked(actor, "idle")
+			queuedReplay = true
+		} else if reserved && c.lanes[id] == actor {
+			delete(c.lanes, id)
+		}
+		c.mu.Unlock()
+		if !recoverableQueuedError {
+			return nil, err
+		}
+	}
+	c.mu.Lock()
+	if receipt.Sequence > actor.inputSequence {
+		actor.inputSequence = receipt.Sequence
+	}
+	c.mu.Unlock()
+	if receipt.State == daemonpkg.ReceiptQueued {
+		_ = c.kickLaneInputCommandReplay(runtime, actor)
+		acceptedSnapshot, readErr := runtime.State().Read()
+		if readErr != nil {
+			return nil, readErr
+		}
+		receipt = acceptedSnapshot.Catalog.LaneInputs[inputID]
+		if receipt.Revision <= 1 {
+			return nil, errors.New("lane input did not cross the accepted turn boundary")
+		}
+	} else if replay {
+		_ = c.kickLaneInput(runtime, actor)
+	} else {
+		_ = c.dispatchCommittedLaneInput(runtime, actor, inputEngine, receipt, false, false)
 	}
 	if !wait {
-		return laneReadyResult(actor), nil
+		return laneResultWithReceipt(laneReadyResult(actor), receipt), nil
 	}
-	return c.waitLaneActor(ctx, runtime, actor)
+	result, currentReceipt, err := c.waitLaneReceipt(ctx, runtime, actor, receipt.ReceiptID)
+	if err != nil {
+		return nil, err
+	}
+	return laneResultWithReceipt(result, currentReceipt), nil
 }
 
 //nolint:gocyclo // Resume revalidates ownership, native identity, permissions, and dispatch atomically.
-func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string) (map[string]any, error) {
+func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string, inputID string) (map[string]any, error) {
 	if strings.TrimSpace(options.target) == "" || strings.TrimSpace(input) == "" {
 		return nil, errors.New("lane resume requires one selector and non-empty input")
 	}
@@ -468,6 +619,44 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	}
 	actor, err := c.resolveLaneActor(runtime, parent, product, options.target, true)
 	if err != nil {
+		return nil, err
+	}
+	inputEngine, err := c.laneInputEngine(runtime)
+	if err != nil {
+		return nil, err
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		return nil, err
+	}
+	if existing, replay := before.Catalog.LaneInputs[inputID]; replay {
+		if existing.LaneID != actor.id {
+			return nil, daemonpkg.ErrLaneInputConflict
+		}
+		receipt, admitErr := inputEngine.AdmitWithID(inputID, actor.id, []byte(input))
+		if admitErr != nil {
+			return nil, admitErr
+		}
+		if receipt.State == daemonpkg.ReceiptQueued {
+			_ = c.kickLaneInputCommandReplay(runtime, actor)
+			acceptedSnapshot, readErr := runtime.State().Read()
+			if readErr != nil {
+				return nil, readErr
+			}
+			receipt = acceptedSnapshot.Catalog.LaneInputs[inputID]
+			if receipt.Revision <= 1 {
+				return nil, errors.New("lane input did not cross the accepted turn boundary")
+			}
+		} else {
+			_ = c.kickLaneInput(runtime, actor)
+		}
+		result, currentReceipt, waitErr := c.waitLaneReceipt(ctx, runtime, actor, receipt.ReceiptID)
+		if waitErr != nil {
+			return nil, waitErr
+		}
+		return laneResultWithReceipt(result, currentReceipt), nil
+	}
+	if err := c.resolveLegacyLaneInputRetryDebt(runtime, actor); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
@@ -482,8 +671,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 		c.mu.Unlock()
 		return nil, errors.New("collect or interrupt the active lane turn before resume")
 	}
-	unarchive := actor.state == "archived"
-	prepareLaneTurnLocked(actor)
+	priorActor := cloneLaneActor(actor)
 	actor.parentID = parent.ID
 	if len(options.groups) > 0 {
 		actor.explicitGroups = uniqueStrings(options.groups)
@@ -525,23 +713,44 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if options.timeout != "" {
 		actor.turnTimeout, err = parseLaneSeconds(options.timeout, false, "--timeout")
 		if err != nil {
+			*actor = priorActor
 			c.mu.Unlock()
 			return nil, err
 		}
 	}
 	actor.groups, err = c.effectiveLaneGroups(runtime, actor, parent)
 	if err != nil {
+		*actor = priorActor
 		c.mu.Unlock()
 		return nil, err
 	}
+	unarchive := priorActor.state == "archived"
+	actor.state, actor.autoArchiveAt = "idle", 0
+	prepareLaneTurnLocked(actor)
+	actor.inputPump, actor.activeReceiptID = true, inputID
 	c.mu.Unlock()
-	if err := c.commitResumeLane(runtime, actor, false); err != nil {
+	receipt, err := inputEngine.UpdateLaneAdmitAndMarkDispatching(
+		inputID, durableLane(actor, "idle"), durableTurn(actor, 0, "accepted"), commandRequestID(), []byte(input),
+	)
+	if err != nil {
+		c.mu.Lock()
+		if receipt.ReceiptID != "" && receipt.State == daemonpkg.ReceiptQueued {
+			resetStagedLaneTurnLocked(actor, priorActor.state)
+		} else {
+			*actor = priorActor
+		}
+		c.mu.Unlock()
 		return nil, err
 	}
-	if err := c.dispatchLaneTurn(runtime, actor, input, true, unarchive); err != nil {
+	c.mu.Lock()
+	actor.inputSequence = receipt.Sequence
+	c.mu.Unlock()
+	_ = c.dispatchCommittedLaneInput(runtime, actor, inputEngine, receipt, true, unarchive)
+	result, currentReceipt, err := c.waitLaneReceipt(ctx, runtime, actor, receipt.ReceiptID)
+	if err != nil {
 		return nil, err
 	}
-	return c.waitLaneActor(ctx, runtime, actor)
+	return laneResultWithReceipt(result, currentReceipt), nil
 }
 
 func (c *hostCoordinator) waitLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand) (map[string]any, error) {
@@ -636,6 +845,75 @@ waitForCollectable:
 	return result, nil
 }
 
+// waitLaneReceipt follows the receipt's current TargetTurnID instead of the
+// lane collection cursor. Recovery may leave an older synthetic terminal audit
+// while requeueing the same receipt onto a fresh turn; that audit must never be
+// mistaken for the command caller's result.
+func (c *hostCoordinator) waitLaneReceipt(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	actor *laneActor,
+	receiptID string,
+) (map[string]any, daemonpkg.LaneInputReceipt, error) {
+	c.mu.Lock()
+	if actor.collecting {
+		c.mu.Unlock()
+		return nil, daemonpkg.LaneInputReceipt{}, errors.New("lane already has an active collector")
+	}
+	actor.collecting = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		actor.collecting = false
+		c.mu.Unlock()
+	}()
+
+	for {
+		snapshot, err := runtime.State().Read()
+		if err != nil {
+			return nil, daemonpkg.LaneInputReceipt{}, err
+		}
+		receipt, ok := snapshot.Catalog.LaneInputs[receiptID]
+		if !ok || receipt.LaneID != actor.id {
+			return nil, daemonpkg.LaneInputReceipt{}, errors.New("lane input receipt is missing or changed lane")
+		}
+		if receipt.TargetTurnID != "" {
+			turn, turnOK := snapshot.Catalog.Turns[receipt.TargetTurnID]
+			if !turnOK || turn.LaneID != actor.id {
+				return nil, receipt, errors.New("lane input target turn is missing or changed lane")
+			}
+			switch turn.State {
+			case "terminal":
+				result := durableLaneTurnResult(actor, turn)
+				remainingDebt, collectErr := c.collectLane(runtime, actor.id, turn.ID)
+				if collectErr != nil {
+					return nil, receipt, collectErr
+				}
+				c.mu.Lock()
+				if !remainingDebt && actor.state == "terminal" && actor.turnID == turn.ID {
+					actor.state = "idle"
+				}
+				c.mu.Unlock()
+				if !remainingDebt {
+					c.armLaneAutoArchive(runtime, actor)
+				}
+				return result, receipt, nil
+			case "collected":
+				return durableLaneTurnResult(actor, turn), receipt, nil
+			}
+		} else if receipt.State == daemonpkg.ReceiptRetired || receipt.State == daemonpkg.ReceiptAmbiguous {
+			return nil, receipt, fmt.Errorf("lane input receipt became %s before an exact result was available", receipt.State)
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, receipt, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func archivedLaneCollectableTurn(runtime *daemonpkg.Runtime, laneID string) (daemonpkg.Turn, error) {
 	turn, ok, err := oldestUncollectedLaneTurn(runtime, laneID)
 	if err != nil {
@@ -668,19 +946,22 @@ func (c *hostCoordinator) listLanes(runtime *daemonpkg.Runtime, parent daemonpkg
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return nil, err
+	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	c.mu.Lock()
 	lanes := make([]map[string]any, 0)
 	for _, actor := range c.lanes {
-		if actor.product != product || options.mine && actor.parentID != parent.ID || !options.all && actor.state == "archived" || !groupsIntersect(parentGroups, actor.groups) && actor.parentID != parent.ID {
+		durableState := snapshot.Catalog.Lanes[actor.id].State
+		if staged[actor.id] || actor.product != product || options.mine && actor.parentID != parent.ID || !options.all && durableState == "archived" ||
+			!groupsIntersect(parentGroups, actor.groups) && actor.parentID != parent.ID {
 			continue
 		}
 		lanes = append(lanes, laneActorStatus(actor))
 	}
 	c.mu.Unlock()
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return nil, err
-	}
 	for _, lane := range lanes {
 		id, _ := lane["thread_id"].(string)
 		lane["collection_debt"] = catalogHasUncollectedLaneTurn(snapshot.Catalog, id)
@@ -754,37 +1035,133 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 			"session_id": actor.nativeID, "name": actor.name, "already_archived": true,
 		}
 		c.mu.Unlock()
-		return result, nil
+		cleanupErr := c.retireLaneInputs(runtime, actor.id, true)
+		nativeErr := c.archiveNativeLaneTracked(runtime, actor)
+		parentErr := c.retireParentLanes(runtime, actor.id)
+		return result, errors.Join(cleanupErr, nativeErr, parentErr)
 	}
-	if actor.state == "running" {
+	if actor.state == "cleanup-debt" {
+		// Addressability was already withdrawn when the debt was recorded. Retry
+		// every remaining cleanup operation without first overwriting the durable
+		// cleanup-debt state that ResolveCleanupDebt must reconcile.
+		result := map[string]any{
+			"type": "lane.archived", "product": product, "thread_id": actor.id,
+			"session_id": actor.nativeID, "name": actor.name,
+		}
+		c.mu.Unlock()
+		cleanupErr := c.retireLaneInputs(runtime, actor.id, true)
+		nativeErr := c.archiveNativeLaneTracked(runtime, actor)
+		parentErr := c.retireParentLanes(runtime, actor.id)
+		stateErr := requireLaneArchivedAfterCleanup(runtime, actor.id)
+		return result, errors.Join(cleanupErr, nativeErr, parentErr, stateErr)
+	}
+	if actor.state == "running" || actor.state == "preparing" || actor.state == "interrupting" || actor.inputPump {
 		c.mu.Unlock()
 		return nil, errors.New("refuse to archive a lane with an active turn")
 	}
-	actor.state = "archived"
-	actor.pending = nil
 	c.mu.Unlock()
 	if err := c.commitLaneState(runtime, actor.id, "archived"); err != nil {
 		return nil, err
 	}
-	if err := c.archiveNativeLane(actor); err != nil {
-		return nil, err
-	}
-	if err := c.retireParentLanes(runtime, actor.id); err != nil {
-		return nil, err
-	}
-	return map[string]any{"type": "lane.archived", "product": product, "thread_id": actor.id, "session_id": actor.nativeID, "name": actor.name}, nil
+	c.mu.Lock()
+	actor.state = "archived"
+	c.mu.Unlock()
+	cleanupErr := c.retireLaneInputs(runtime, actor.id, true)
+	nativeErr := c.archiveNativeLaneTracked(runtime, actor)
+	parentErr := c.retireParentLanes(runtime, actor.id)
+	return map[string]any{"type": "lane.archived", "product": product, "thread_id": actor.id, "session_id": actor.nativeID, "name": actor.name}, errors.Join(cleanupErr, nativeErr, parentErr)
 }
 
-func (c *hostCoordinator) deliverLaneMessage(runtime *daemonpkg.Runtime, actor *laneActor, message string) error {
-	message = laneInboundPrompt(actor.product, message)
-	dispatch, err := c.claimLaneMessage(actor, message)
-	if err != nil || !dispatch {
+// retireLaneInputs gives archive/retirement an explicit receipt disposition.
+// Dispatching is made ambiguous because archive cannot prove whether native
+// I/O occurred. Ambiguous receipts retain that evidence until an explicit
+// ambiguity-resolution operation proves injection or abandons them; an
+// automatic lane archive must never collapse unproven native I/O to Retired.
+// Queued and injected receipts can retire directly. Cleanup failure remains
+// durable debt and is returned to the caller.
+func (c *hostCoordinator) retireLaneInputs(runtime *daemonpkg.Runtime, laneID string, includeDispatching bool) error {
+	engine, err := c.laneInputEngine(runtime)
+	if err != nil {
 		return err
 	}
-	if err := c.commitResumeLane(runtime, actor, false); err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
 	}
-	return c.dispatchLaneTurn(runtime, actor, message, true, false)
+	receipts := make([]daemonpkg.LaneInputReceipt, 0)
+	for _, receipt := range snapshot.Catalog.LaneInputs {
+		if receipt.LaneID == laneID {
+			receipts = append(receipts, receipt)
+		}
+	}
+	sort.Slice(receipts, func(i, j int) bool { return receipts[i].Sequence < receipts[j].Sequence })
+	var retirementErr error
+	for _, receipt := range receipts {
+		switch receipt.State {
+		case daemonpkg.ReceiptDispatching:
+			if !includeDispatching {
+				continue
+			}
+			if _, err := engine.MarkAmbiguous(receipt.ReceiptID, daemonpkg.AmbiguityNativeAcceptanceUnproven); err != nil {
+				retirementErr = errors.Join(retirementErr, err)
+			}
+			continue
+		case daemonpkg.ReceiptAmbiguous:
+			continue
+		case daemonpkg.ReceiptQueued, daemonpkg.ReceiptInjected:
+			_, err = engine.Retire(receipt.ReceiptID)
+		default:
+			continue
+		}
+		retirementErr = errors.Join(retirementErr, err)
+	}
+	if includeDispatching {
+		retirementErr = errors.Join(retirementErr, c.resolveRetiredLaneInputRetryDebt(runtime, laneID))
+	}
+	return retirementErr
+}
+
+func (c *hostCoordinator) deliverLaneMessageWithID(
+	runtime *daemonpkg.Runtime,
+	actor *laneActor,
+	deliveryID, message string,
+) (daemonpkg.LaneInputReceipt, error) {
+	message = laneInboundPrompt(actor.product, message)
+	engine, err := c.laneInputEngine(runtime)
+	if err != nil {
+		return daemonpkg.LaneInputReceipt{}, err
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		return daemonpkg.LaneInputReceipt{}, err
+	}
+	if stagedUnacknowledgedLaneInputs(before.Catalog)[actor.id] {
+		return daemonpkg.LaneInputReceipt{}, daemonpkg.ErrLaneInputUnavailable
+	}
+	_, replay := before.Catalog.LaneInputs[deliveryID]
+	// Serialize receipt admission with lane lifecycle commits so a durable lane
+	// projection can never regress the frozen InputSequence authority.
+	c.laneInputCommitMu.Lock()
+	receipt, err := engine.AdmitWithID(deliveryID, actor.id, []byte(message))
+	c.laneInputCommitMu.Unlock()
+	if err != nil {
+		return daemonpkg.LaneInputReceipt{}, err
+	}
+	c.mu.Lock()
+	if receipt.Sequence > actor.inputSequence {
+		actor.inputSequence = receipt.Sequence
+	}
+	c.mu.Unlock()
+	// Durable admission is the caller-visible acceptance boundary. Dispatch is
+	// deliberately best-effort after this point: a failure is represented by the
+	// receipt lifecycle and must not turn an accepted delivery into a retry that
+	// creates competing native I/O.
+	if replay {
+		_ = c.kickLaneInput(runtime, actor)
+	} else {
+		_ = c.kickLaneInputExplicit(runtime, actor)
+	}
+	return receipt, nil
 }
 
 // Claude Code treats a top-level <cross-session-message> argument as native
@@ -802,28 +1179,328 @@ func laneInboundPrompt(product, message string) string {
 		"Act on its enclosed content and preserve its sender metadata.\n\n" + message
 }
 
-func (c *hostCoordinator) claimLaneMessage(actor *laneActor, message string) (bool, error) {
+func (c *hostCoordinator) laneInputEngine(runtime *daemonpkg.Runtime) (*daemonpkg.LaneInputEngine, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	switch actor.state {
-	case "archived", "retiring":
-		return false, errors.New("lane has no live message recipient")
-	case "running", "preparing", "transitioning", "interrupting":
-		actor.pending = append(actor.pending, message)
-		return false, nil
+	engine := c.laneInputs
+	c.mu.Unlock()
+	if engine != nil {
+		return engine, nil
 	}
+	created, err := daemonpkg.NewLaneInputEngine(
+		runtime.State(), filepath.Join(c.stateRoot, "lane-input-spool"), daemonpkg.DefaultLaneInputLimits(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	if c.laneInputs == nil {
+		c.laneInputs = created
+	}
+	engine = c.laneInputs
+	c.mu.Unlock()
+	return engine, nil
+}
+
+type lanePreNativeDispatchError struct{ cause error }
+
+func (e lanePreNativeDispatchError) Error() string { return e.cause.Error() }
+func (e lanePreNativeDispatchError) Unwrap() error { return e.cause }
+
+func preNativeLaneDispatch(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return lanePreNativeDispatchError{cause: cause}
+}
+
+func isPreNativeLaneDispatch(cause error) bool {
+	var target lanePreNativeDispatchError
+	return errors.As(cause, &target)
+}
+
+// kickLaneInput claims one process-local pump for a lane. Durable receipt state,
+// not this boolean, remains the acceptance and recovery authority.
+func (c *hostCoordinator) kickLaneInput(runtime *daemonpkg.Runtime, actor *laneActor) error {
+	return c.kickLaneInputMode(runtime, actor, false, false)
+}
+
+func (c *hostCoordinator) kickLaneInputExplicit(runtime *daemonpkg.Runtime, actor *laneActor) error {
+	return c.kickLaneInputMode(runtime, actor, true, false)
+}
+
+func (c *hostCoordinator) kickLaneInputCommandReplay(runtime *daemonpkg.Runtime, actor *laneActor) error {
+	return c.kickLaneInputMode(runtime, actor, true, true)
+}
+
+func (c *hostCoordinator) kickLaneInputMode(runtime *daemonpkg.Runtime, actor *laneActor, allowRetryCeiling, allowStaged bool) error {
+	c.mu.Lock()
+	if actor.inputPump {
+		c.mu.Unlock()
+		return nil
+	}
+	switch actor.state {
+	case "running", "preparing", "interrupting", "retiring", "archived", "cleanup-debt":
+		c.mu.Unlock()
+		return nil
+	}
+	actor.inputPump = true
+	c.mu.Unlock()
+
+	engine, err := c.laneInputEngine(runtime)
+	if err != nil {
+		c.releaseLaneInputPump(actor, "")
+		return err
+	}
+	stagedSnapshot, err := runtime.State().Read()
+	if err != nil {
+		c.releaseLaneInputPump(actor, "")
+		return err
+	}
+	staged := stagedUnacknowledgedLaneInputs(stagedSnapshot.Catalog)[actor.id]
+	if staged && !allowStaged {
+		c.releaseLaneInputPump(actor, "")
+		return nil
+	}
+	receipt, ok, err := engine.EarliestQueued(actor.id)
+	if err != nil || !ok {
+		c.releaseLaneInputPump(actor, "")
+		return err
+	}
+	if laneInputDispatchAttempts(receipt) >= maxAutomaticLaneInputDispatchAttempts && !allowRetryCeiling {
+		c.releaseLaneInputPump(actor, "")
+		return nil
+	}
+	dispatchSnapshot, err := runtime.State().Read()
+	if err != nil {
+		c.releaseLaneInputPump(actor, "")
+		return err
+	}
+	resumeNative, ledgerCreatedLane := false, false
+	for _, candidate := range dispatchSnapshot.Catalog.LaneInputs {
+		if candidate.LaneID != actor.id {
+			continue
+		}
+		if candidate.Sequence == 1 && laneIDForInitialReceipt(candidate.ReceiptID) == actor.id {
+			ledgerCreatedLane = true
+		}
+		if candidate.NativeAcceptance != nil {
+			resumeNative = true
+			break
+		}
+	}
+	if !resumeNative && !ledgerCreatedLane {
+		for _, turn := range dispatchSnapshot.Catalog.Turns {
+			if turn.LaneID == actor.id {
+				resumeNative = true
+				break
+			}
+		}
+	}
+	unarchiveNative := dispatchSnapshot.Catalog.Lanes[actor.id].ArchiveRevision > 0
+
+	c.mu.Lock()
+	if actor.state == "running" || actor.state == "preparing" || actor.state == "interrupting" ||
+		actor.state == "retiring" || actor.state == "archived" || actor.state == "cleanup-debt" {
+		actor.inputPump = false
+		c.mu.Unlock()
+		return nil
+	}
+	priorState := actor.state
 	prepareLaneTurnLocked(actor)
-	return true, nil
+	actor.activeReceiptID = receipt.ReceiptID
+	c.mu.Unlock()
+
+	// The turn and its receipt dispatch intent share one StateStore commit.
+	// Queued input intentionally bypasses older terminal collection debt;
+	// collection and input retirement are independent cursors.
+	attemptID := commandRequestID()
+	c.laneInputCommitMu.Lock()
+	var dispatching daemonpkg.LaneInputReceipt
+	if staged {
+		dispatching, err = engine.AcceptStagedTurnAndMarkDispatching(
+			receipt.ReceiptID, durableLane(actor, "idle"), durableTurn(actor, 0, "accepted"), attemptID,
+		)
+	} else {
+		dispatching, err = engine.AcceptTurnAndMarkDispatching(
+			receipt.ReceiptID, durableLane(actor, "idle"), durableTurn(actor, 0, "accepted"), attemptID,
+		)
+	}
+	c.laneInputCommitMu.Unlock()
+	if err != nil {
+		c.mu.Lock()
+		actor.state, actor.activeReceiptID, actor.inputPump = priorState, "", false
+		c.mu.Unlock()
+		return err
+	}
+	return c.dispatchCommittedLaneInput(runtime, actor, engine, dispatching, resumeNative, unarchiveNative)
+}
+
+func (c *hostCoordinator) dispatchCommittedLaneInput(
+	runtime *daemonpkg.Runtime,
+	actor *laneActor,
+	engine *daemonpkg.LaneInputEngine,
+	receipt daemonpkg.LaneInputReceipt,
+	resumeNative, unarchiveNative bool,
+) error {
+	reader, metadata, err := engine.OpenVerified(receipt.ReceiptID)
+	if err != nil {
+		return c.failVerifiedLaneInput(runtime, actor, engine, receipt.ReceiptID, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(reader, metadata.Bytes+1))
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || int64(len(body)) != metadata.Bytes {
+		return c.failVerifiedLaneInput(runtime, actor, engine, receipt.ReceiptID, errors.Join(readErr, closeErr, errors.New("verified lane input length changed")))
+	}
+	if err := c.dispatchLaneTurn(runtime, actor, string(body), resumeNative, unarchiveNative); err != nil {
+		if snapshot, readErr := runtime.State().Read(); readErr == nil &&
+			snapshot.Catalog.LaneInputs[receipt.ReceiptID].State == daemonpkg.ReceiptInjected {
+			_, _ = engine.Retire(receipt.ReceiptID)
+			c.releaseLaneInputPump(actor, receipt.ReceiptID)
+			_ = c.kickLaneInput(runtime, actor)
+			return err
+		}
+		if isPreNativeLaneDispatch(err) {
+			requeued, requeueErr := engine.RequeueProvenNotInjected(receipt.ReceiptID)
+			c.releaseLaneInputPump(actor, receipt.ReceiptID)
+			if requeueErr == nil {
+				if laneInputDispatchAttempts(requeued) < maxAutomaticLaneInputDispatchAttempts {
+					c.scheduleLaneInputRetry(runtime, actor, requeued)
+				}
+			}
+		} else {
+			_, _ = engine.MarkAmbiguous(receipt.ReceiptID, daemonpkg.AmbiguityNativeAcceptanceUnproven)
+			c.releaseLaneInputPump(actor, receipt.ReceiptID)
+			_ = c.kickLaneInput(runtime, actor)
+		}
+		return err
+	}
+	return nil
+}
+
+// scheduleLaneInputRetry gives proven-pre-I/O failures a deterministic wake
+// without converting a permanent local configuration error into a busy loop.
+// The receipt revision is durable, so a daemon restart cannot reset the bound.
+func (c *hostCoordinator) scheduleLaneInputRetry(runtime *daemonpkg.Runtime, actor *laneActor, receipt daemonpkg.LaneInputReceipt) {
+	attempts := laneInputDispatchAttempts(receipt)
+	if attempts >= maxAutomaticLaneInputDispatchAttempts {
+		return
+	}
+	delay := time.Duration(attempts+1) * 100 * time.Millisecond
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-timer.C:
+			_ = c.kickLaneInput(runtime, actor)
+		}
+	}()
+}
+
+const maxAutomaticLaneInputDispatchAttempts = uint64(3)
+
+func laneInputDispatchAttempts(receipt daemonpkg.LaneInputReceipt) uint64 {
+	if receipt.Revision <= 1 {
+		return 0
+	}
+	return (receipt.Revision - 1) / 2
+}
+
+func (c *hostCoordinator) resolveLegacyLaneInputRetryDebt(runtime *daemonpkg.Runtime, actor *laneActor) error {
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	if snapshot.Catalog.Lanes[actor.id].State != "cleanup-debt" {
+		return nil
+	}
+	for receiptID, receipt := range snapshot.Catalog.LaneInputs {
+		debtID := "lane-input-retry-" + receiptID
+		if receipt.LaneID != actor.id || receipt.State != daemonpkg.ReceiptQueued {
+			continue
+		}
+		if _, ok := snapshot.Catalog.CleanupDebts[debtID]; !ok {
+			continue
+		}
+		engine, engineErr := daemonpkg.NewLaneEngine(runtime.State())
+		if engineErr != nil {
+			return engineErr
+		}
+		if engineErr = engine.ResolveCleanupDebt(actor.id, debtID, "terminal"); engineErr != nil {
+			return engineErr
+		}
+		c.mu.Lock()
+		actor.state = "terminal"
+		c.mu.Unlock()
+		return nil
+	}
+	return errors.New("lane cleanup debt is not an exact retry-ceiling receipt")
+}
+
+func (c *hostCoordinator) resolveRetiredLaneInputRetryDebt(runtime *daemonpkg.Runtime, laneID string) error {
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	if snapshot.Catalog.Lanes[laneID].State != "cleanup-debt" {
+		return nil
+	}
+	for receiptID, receipt := range snapshot.Catalog.LaneInputs {
+		debtID := "lane-input-retry-" + receiptID
+		if receipt.LaneID != laneID || receipt.State != daemonpkg.ReceiptRetired {
+			continue
+		}
+		if _, ok := snapshot.Catalog.CleanupDebts[debtID]; !ok {
+			continue
+		}
+		engine, engineErr := daemonpkg.NewLaneEngine(runtime.State())
+		if engineErr != nil {
+			return engineErr
+		}
+		return engine.ResolveCleanupDebt(laneID, debtID, "archived")
+	}
+	return nil
+}
+
+func (c *hostCoordinator) failVerifiedLaneInput(
+	runtime *daemonpkg.Runtime,
+	actor *laneActor,
+	engine *daemonpkg.LaneInputEngine,
+	receiptID string,
+	cause error,
+) error {
+	_, _ = engine.RequeueProvenNotInjected(receiptID)
+	// Recovery records exact-object cleanup debt for a changed body. It never
+	// opens or removes a replacement object by name alone.
+	_, _ = engine.Recover()
+	_ = c.failLaneDispatch(runtime, actor, cause)
+	c.releaseLaneInputPump(actor, receiptID)
+	return cause
+}
+
+func (c *hostCoordinator) releaseLaneInputPump(actor *laneActor, receiptID string) {
+	c.mu.Lock()
+	if receiptID == "" || actor.activeReceiptID == receiptID {
+		actor.activeReceiptID = ""
+		actor.inputPump = false
+	}
+	c.mu.Unlock()
 }
 
 func (c *hostCoordinator) reconcileOrphanedLanes(runtime *daemonpkg.Runtime) error {
 	if err := c.ensureLaneActors(runtime); err != nil {
 		return err
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	stagedInputs := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	c.mu.Lock()
 	candidates := make([]*laneActor, 0)
 	for _, actor := range c.lanes {
-		if !actor.persistent && actor.state != "archived" {
+		if !actor.persistent && (actor.state != "archived" || stagedInputs[actor.id]) {
 			candidates = append(candidates, actor)
 		}
 	}
@@ -857,53 +1534,106 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 		actor                        *laneActor
 		state, product, thread, turn string
 		cancel                       context.CancelFunc
+		stagedInput                  bool
+		alreadyArchived              bool
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	stagedInputs := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	c.mu.Lock()
 	candidates := make([]transition, 0)
 	for _, actor := range c.lanes {
-		if actor.parentID != parentID || actor.persistent || actor.state == "archived" || actor.state == "retiring" {
+		stagedInput := stagedInputs[actor.id]
+		if actor.parentID != parentID || actor.persistent || actor.state == "archived" && !stagedInput {
 			continue
 		}
+		alreadyArchived := actor.state == "archived"
 		state := "archived"
 		var cancel context.CancelFunc
-		if (actor.state == "running" || actor.state == "preparing" || actor.state == "interrupting") && actor.cancel != nil {
+		if stagedInput && actor.state == "preparing" {
+			state = "retiring"
+		} else if (actor.state == "running" || actor.state == "preparing" || actor.state == "interrupting" ||
+			actor.state == "retiring" || actor.state == "cleanup-debt") && actor.cancel != nil {
 			state, cancel = "retiring", actor.cancel
 			actor.interruptRequested = true
 		}
 		actor.state = state
-		actor.pending = nil
 		candidates = append(candidates, transition{
 			actor: actor, state: state, product: actor.product,
-			thread: actor.nativeID, turn: actor.nativeTurnID, cancel: cancel,
+			thread: actor.nativeID, turn: actor.nativeTurnID, cancel: cancel, stagedInput: stagedInput,
+			alreadyArchived: alreadyArchived,
 		})
 	}
 	c.mu.Unlock()
+	var retirementErr error
 	for _, candidate := range candidates {
-		if err := c.commitLaneState(runtime, candidate.actor.id, candidate.state); err != nil {
-			return err
+		if candidate.stagedInput {
+			inputEngine, engineErr := c.laneInputEngine(runtime)
+			if engineErr != nil {
+				retirementErr = errors.Join(retirementErr, engineErr)
+				continue
+			}
+			stagedSnapshot, readErr := runtime.State().Read()
+			if readErr != nil {
+				retirementErr = errors.Join(retirementErr, readErr)
+				continue
+			}
+			retired := false
+			for _, receipt := range stagedSnapshot.Catalog.LaneInputs {
+				if receipt.LaneID != candidate.actor.id || receipt.State != daemonpkg.ReceiptQueued ||
+					receipt.Revision != 1 || !strings.HasPrefix(receipt.ReceiptID, daemonpkg.LaneCommandReceiptPrefix) {
+					continue
+				}
+				if _, retireErr := inputEngine.RetireStagedLane(receipt.ReceiptID); retireErr != nil {
+					retirementErr = errors.Join(retirementErr, retireErr)
+				} else {
+					retired = true
+				}
+				break
+			}
+			if retired {
+				c.mu.Lock()
+				candidate.actor.state, candidate.actor.inputPump, candidate.actor.activeReceiptID = "archived", false, ""
+				c.mu.Unlock()
+			}
+			continue
+		}
+		if !candidate.alreadyArchived {
+			if err := c.commitLaneState(runtime, candidate.actor.id, candidate.state); err != nil {
+				retirementErr = errors.Join(retirementErr, err)
+				continue
+			}
+		}
+		if err := c.retireLaneInputs(runtime, candidate.actor.id, candidate.state == "archived" || candidate.stagedInput); err != nil {
+			retirementErr = errors.Join(retirementErr, err)
+			continue
 		}
 		if candidate.state == "archived" {
-			if err := c.archiveNativeLane(candidate.actor); err != nil {
-				return err
+			if err := c.archiveNativeLaneTracked(runtime, candidate.actor); err != nil {
+				retirementErr = errors.Join(retirementErr, err)
 			}
 		}
 		if candidate.cancel != nil {
 			if candidate.product == "codex" {
 				native, err := c.codexNative()
 				if err != nil {
-					return err
-				}
-				interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err = native.InterruptLaneTurn(interruptCtx, candidate.thread, candidate.turn)
-				interruptCancel()
-				if err != nil {
-					return err
+					retirementErr = errors.Join(retirementErr, err)
+				} else {
+					interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					err = native.InterruptLaneTurn(interruptCtx, candidate.thread, candidate.turn)
+					interruptCancel()
+					retirementErr = errors.Join(retirementErr, err)
+					if err != nil {
+						retirementErr = errors.Join(retirementErr, c.recordNativeLaneCleanupDebt(runtime, candidate.actor))
+					}
 				}
 			}
 			candidate.cancel()
 		}
 	}
-	return nil
+	return retirementErr
 }
 
 func doctorLane(ctx context.Context, product, cwd string) (map[string]any, error) {
@@ -1043,13 +1773,13 @@ func qwenLaneDoctorProjection(report qwenreadiness.Report) map[string]any {
 func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string, resume, unarchive bool) error {
 	capability, err := randomCapability()
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	c.mu.Lock()
 	actor.capability = capability
 	c.mu.Unlock()
 	if err := c.commitLaneAuthorization(runtime, actor, "preparing"); err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	c.mu.Lock()
 	actor.state = "preparing"
@@ -1062,7 +1792,7 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	}
 	command, err := laneNativeCommand(actor, prompt, resume)
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	turnCtx, cancel := laneTurnContext(c.ctx, actor.turnTimeout)
 	command = exec.CommandContext(turnCtx, command.Path, command.Args[1:]...) //nolint:gosec // path and argv are constructed from the installed product inventory.
@@ -1081,7 +1811,7 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Start(); err != nil {
 		cancel()
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	if actor.product == "claude" {
 		if err := c.claudeLanes.Register(actor.id, cancel); err != nil {
@@ -1147,7 +1877,7 @@ func (c *hostCoordinator) dispatchCodexLaneTurn(
 ) error {
 	native, err := c.codexNative()
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	return c.dispatchCodexLaneTurnWithNative(runtime, actor, prompt, resume, unarchive, native)
 }
@@ -1161,7 +1891,7 @@ func (c *hostCoordinator) dispatchCodexLaneTurnWithNative(
 ) error {
 	adapter, err := newCodexLaneAdapter(native)
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	thread, err := adapter.Prepare(c.ctx, daemonpkg.CodexLaneRequest{
 		LaneID: actor.id, NativeSession: actor.nativeID, Cwd: actor.cwd, Name: actor.name,
@@ -1169,13 +1899,13 @@ func (c *hostCoordinator) dispatchCodexLaneTurnWithNative(
 		Resume: resume, Unarchive: unarchive,
 	})
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	if err := c.recordLaneNativeID(runtime, actor, thread.ID); err != nil {
 		if !resume {
 			_ = adapter.Archive(context.Background(), thread.ID)
 		}
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	nativeTurnID, err := adapter.StartTurn(c.ctx, daemonpkg.CodexLanePrompt{
 		ThreadID: thread.ID, Prompt: prompt, Effort: actor.effort,
@@ -1191,6 +1921,11 @@ func (c *hostCoordinator) dispatchCodexLaneTurnWithNative(
 	c.mu.Lock()
 	actor.nativeTurnID = nativeTurnID
 	c.mu.Unlock()
+	// turn/start returned an exact thread+turn identity. This is the native
+	// acceptance boundary, independent of whether the turn later succeeds.
+	if err := c.markActiveLaneInputInjected(runtime, actor, thread.ID, nativeTurnID); err != nil {
+		return c.failLaneDispatch(runtime, actor, err)
+	}
 	turnCtx, cancel := laneTurnContext(c.ctx, actor.turnTimeout)
 	if err := c.beginLaneExecution(runtime, actor, cancel); err != nil {
 		cancel()
@@ -1206,8 +1941,13 @@ func (c *hostCoordinator) dispatchCodexLaneTurnWithNative(
 
 func (c *hostCoordinator) persistCodexNativeTurnID(runtime *daemonpkg.Runtime, actor *laneActor) {
 	c.mu.Lock()
-	turnID, nativeTurnID := actor.turnID, actor.nativeTurnID
+	turnID, nativeTurnID, receiptID := actor.turnID, actor.nativeTurnID, actor.activeReceiptID
 	c.mu.Unlock()
+	if receiptID != "" {
+		// Receipt-backed Codex dispatch committed this anchor atomically with
+		// NativeAcceptanceRef at the exact StartTurn acknowledgement.
+		return
+	}
 	engine, engineErr := daemonpkg.NewLaneEngine(runtime.State())
 	if engineErr != nil {
 		return
@@ -1264,11 +2004,11 @@ func (c *hostCoordinator) watchCodexLaneTurn(
 func (c *hostCoordinator) dispatchACPLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string) error {
 	executable, err := laneExecutable(actor.product)
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	hostExecutable, err := os.Executable()
 	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+		return c.failLaneDispatch(runtime, actor, preNativeLaneDispatch(err))
 	}
 	c.mu.Lock()
 	product, cwd, laneID := actor.product, actor.cwd, actor.id
@@ -1447,12 +2187,27 @@ func prepareLaneTurnLocked(actor *laneActor) {
 	actor.state = "preparing"
 }
 
+func resetStagedLaneTurnLocked(actor *laneActor, state string) {
+	if state == "" {
+		state = "preparing"
+	}
+	select {
+	case <-actor.done:
+	default:
+		close(actor.done)
+	}
+	actor.state, actor.turnID, actor.nativeTurnID = state, "", ""
+	actor.outcome, actor.result, actor.failure = "", "", ""
+	actor.startedAt, actor.completedAt, actor.deadlineAt = 0, 0, 0
+	actor.cancel, actor.interruptRequested = nil, false
+	actor.inputPump, actor.activeReceiptID = false, ""
+}
+
 func cloneLaneActor(actor *laneActor) laneActor {
 	copyActor := *actor
 	copyActor.groups = append([]string(nil), actor.groups...)
 	copyActor.arguments = append([]string(nil), actor.arguments...)
 	copyActor.explicitGroups = append([]string(nil), actor.explicitGroups...)
-	copyActor.pending = append([]string(nil), actor.pending...)
 	return copyActor
 }
 
@@ -1481,42 +2236,116 @@ func (c *hostCoordinator) completeLaneTurn(
 	if completion.nativeID != "" && (actor.nativeID == "" || completion.replaceNativeID) {
 		actor.nativeID = completion.nativeID
 	}
+	nativeMessageID := actor.nativeTurnID
 	actor.state, actor.outcome, actor.result = "terminal", completion.outcome, completion.result
 	actor.failure, actor.completedAt, actor.cancel = completion.failure, time.Now().UnixMilli(), nil
 	if completion.clearNativeTurn {
 		actor.nativeTurnID = ""
 	}
-	pending := append([]string(nil), actor.pending...)
-	actor.pending, actor.capability = nil, ""
+	receiptID := actor.activeReceiptID
+	nativeSessionID := actor.nativeID
+	actor.capability = ""
+	if receiptID != "" {
+		if diagnostic := c.finalizeLaneInput(runtime, receiptID, nativeSessionID, nativeMessageID, actor.outcome); diagnostic != "" {
+			actor.outcome = "failed"
+			if actor.failure == "" {
+				actor.failure = diagnostic
+			} else {
+				actor.failure += "; " + diagnostic
+			}
+		}
+	}
 	if persistErr := c.markLaneTerminal(runtime, actor); persistErr != nil {
 		actor.outcome = "failed"
 		actor.failure = fmt.Sprintf("persist terminal lane state: %v", persistErr)
 	}
 	terminal := cloneLaneActor(actor)
-	if len(pending) > 0 {
-		actor.state = "transitioning"
-	}
 	close(dispatchedDone)
 	c.mu.Unlock()
+	c.releaseLaneInputPump(actor, receiptID)
 	c.queueLaneTerminalNotice(runtime, &terminal)
 	archived := c.archiveOrphanedCompletedLane(runtime, actor)
-	if len(pending) == 0 || archived {
+	if archived {
 		return
 	}
+	_ = c.kickLaneInput(runtime, actor)
+}
+
+func (c *hostCoordinator) finalizeLaneInput(
+	runtime *daemonpkg.Runtime,
+	receiptID, nativeSessionID, nativeMessageID, outcome string,
+) string {
+	// Completion calls this while holding c.mu so the diagnostic is included in
+	// the same terminal/notice projection. Receipt-backed dispatch always
+	// initialized this engine at admission.
+	engine := c.laneInputs
+	if engine == nil {
+		return "finalize lane input receipt: durable engine unavailable"
+	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return "finalize lane input receipt: durable state unavailable"
+	}
+	receipt, ok := snapshot.Catalog.LaneInputs[receiptID]
+	if !ok || receipt.State == daemonpkg.ReceiptRetired || receipt.State == daemonpkg.ReceiptAmbiguous {
+		return ""
+	}
+	if receipt.State == daemonpkg.ReceiptInjected {
+		if _, err := engine.Retire(receiptID); err != nil {
+			return "retire verified lane input: cleanup debt"
+		}
+		return ""
+	}
+	// Successful terminal evidence proves that a non-Codex adapter accepted
+	// this prompt. Every failed/timed-out/interrupted path remains ambiguous;
+	// a native session identifier alone is never proof of prompt acceptance.
+	if receipt.State != daemonpkg.ReceiptDispatching || outcome != "completed" || nativeSessionID == "" {
+		if receipt.State == daemonpkg.ReceiptDispatching {
+			_, _ = engine.MarkAmbiguous(receiptID, daemonpkg.AmbiguityNativeAcceptanceUnproven)
+		}
+		return ""
+	}
+	acceptedAt := time.Now().Unix()
+	if acceptedAt <= 0 {
+		acceptedAt = 1
+	}
+	if _, err := engine.MarkInjected(receiptID, daemonpkg.NativeAcceptanceRef{
+		NativeSessionID: nativeSessionID, NativeMessageID: nativeMessageID, AcceptedAt: acceptedAt,
+	}); err != nil {
+		if _, ambiguityErr := engine.MarkAmbiguous(receiptID, daemonpkg.AmbiguityNativeAcceptanceUnproven); ambiguityErr != nil {
+			return "lane input native acceptance commit failed; ambiguity evidence also requires reconciliation"
+		}
+		return "lane input native acceptance commit failed; receipt retained as ambiguous"
+	}
+	if _, err := engine.Retire(receiptID); err != nil {
+		return "retire verified lane input: cleanup debt"
+	}
+	return ""
+}
+
+func (c *hostCoordinator) markActiveLaneInputInjected(
+	runtime *daemonpkg.Runtime,
+	actor *laneActor,
+	nativeSessionID, nativeMessageID string,
+) error {
 	c.mu.Lock()
-	if actor.state != "transitioning" {
-		c.mu.Unlock()
-		return
-	}
-	pending = append(pending, actor.pending...)
-	actor.pending = nil
-	prepareLaneTurnLocked(actor)
+	receiptID := actor.activeReceiptID
 	c.mu.Unlock()
-	if err := c.commitResumeLane(runtime, actor, true); err != nil {
-		_ = c.failLaneDispatch(runtime, actor, err)
-		return
+	if receiptID == "" {
+		return nil
 	}
-	_ = c.dispatchLaneTurn(runtime, actor, strings.Join(pending, "\n"), true, false)
+	engine, err := c.laneInputEngine(runtime)
+	if err != nil {
+		return err
+	}
+	acceptedAt := time.Now().Unix()
+	if acceptedAt <= 0 {
+		acceptedAt = 1
+	}
+	_, err = engine.MarkInjectedAndSetNativeDispatch(receiptID, daemonpkg.NativeAcceptanceRef{
+		NativeSessionID: nativeSessionID, NativeMessageID: nativeMessageID, AcceptedAt: acceptedAt,
+	})
+	return err
 }
 
 func (c *hostCoordinator) archiveOrphanedCompletedLane(runtime *daemonpkg.Runtime, actor *laneActor) bool {
@@ -1536,9 +2365,13 @@ func (c *hostCoordinator) archiveOrphanedCompletedLane(runtime *daemonpkg.Runtim
 		return false
 	}
 	actor.state = "archived"
-	actor.pending = nil
 	c.mu.Unlock()
-	return c.commitLaneState(runtime, actor.id, "archived") == nil && c.archiveNativeLane(actor) == nil
+	if c.commitLaneState(runtime, actor.id, "archived") != nil {
+		return false
+	}
+	cleanupErr := c.retireLaneInputs(runtime, actor.id, true)
+	nativeErr := c.archiveNativeLaneTracked(runtime, actor)
+	return cleanupErr == nil && nativeErr == nil
 }
 
 func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
@@ -1568,6 +2401,79 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 	default:
 		return errors.New("unsupported lane product")
 	}
+}
+
+func (c *hostCoordinator) archiveNativeLaneTracked(runtime *daemonpkg.Runtime, actor *laneActor) error {
+	archiveErr := c.archiveNativeLane(actor)
+	if archiveErr == nil {
+		debtID := "lane-native-archive-" + actor.id
+		snapshot, readErr := runtime.State().Read()
+		if readErr != nil {
+			return readErr
+		}
+		if _, exists := snapshot.Catalog.CleanupDebts[debtID]; !exists {
+			return nil
+		}
+		engine, engineErr := daemonpkg.NewLaneEngine(runtime.State())
+		if engineErr != nil {
+			return engineErr
+		}
+		// The archive acknowledgement is the live absence confirmation that
+		// permits this exact debt to resolve. Reassert cleanup-debt first because
+		// a concurrent terminal projection may have advanced the lane state while
+		// preserving the still-unresolved debt record.
+		if engineErr = engine.RecordCleanupDebt(actor.id, snapshot.Catalog.CleanupDebts[debtID]); engineErr != nil {
+			return engineErr
+		}
+		if engineErr = engine.ResolveCleanupDebt(actor.id, debtID, "archived"); engineErr != nil {
+			return engineErr
+		}
+		c.mu.Lock()
+		actor.state = "archived"
+		c.mu.Unlock()
+		return nil
+	}
+	engineErr := c.recordNativeLaneCleanupDebt(runtime, actor)
+	return errors.Join(archiveErr, engineErr)
+}
+
+func (c *hostCoordinator) recordNativeLaneCleanupDebt(runtime *daemonpkg.Runtime, actor *laneActor) error {
+	debtID := "lane-native-archive-" + actor.id
+	retryRevision := uint64(1)
+	if snapshot, readErr := runtime.State().Read(); readErr == nil {
+		retryRevision = snapshot.Catalog.CleanupDebts[debtID].RetryRevision + 1
+	}
+	engine, err := daemonpkg.NewLaneEngine(runtime.State())
+	if err != nil {
+		return err
+	}
+	err = engine.RecordCleanupDebt(actor.id, daemonpkg.CleanupDebt{
+		ID: debtID, Resource: actor.product + "-native-session:" + actor.nativeID,
+		BaselineIdentity: actor.nativeID, IntendedState: "archived-and-absent",
+		LastVerifiedState: "native-absence-unconfirmed", Cause: "native-cleanup-unconfirmed",
+		RetryRevision: retryRevision, Operation: "archive-native-lane",
+	})
+	if err == nil {
+		c.mu.Lock()
+		actor.state = "cleanup-debt"
+		c.mu.Unlock()
+	}
+	return err
+}
+
+func requireLaneArchivedAfterCleanup(runtime *daemonpkg.Runtime, laneID string) error {
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	lane, ok := snapshot.Catalog.Lanes[laneID]
+	if !ok {
+		return errors.New("lane state is missing after cleanup retry")
+	}
+	if lane.State != "archived" {
+		return errors.New("lane cleanup debt remains unresolved")
+	}
+	return nil
 }
 
 type cappedLaneBuffer struct {
@@ -1797,11 +2703,18 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return nil, err
+	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var matches []*laneActor
 	for _, actor := range c.lanes {
-		if actor.product != product || actor.id != target && actor.name != target || !all && actor.state == "archived" || actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
+		durableState := snapshot.Catalog.Lanes[actor.id].State
+		if staged[actor.id] || actor.product != product || actor.id != target && actor.name != target || !all && durableState == "archived" ||
+			actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
 			continue
 		}
 		matches = append(matches, actor)
@@ -1816,12 +2729,47 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 }
 
 func (c *hostCoordinator) liveLaneNameLocked(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, name string) bool {
+	return c.liveLaneNameExceptLocked(runtime, parent, name, "")
+}
+
+// liveLaneNameExceptLocked revalidates a staged lane immediately before CAS2.
+// The exact staged lane is excluded, while every accepted durable lane and
+// every concurrent process-local reservation remains name authority.
+func (c *hostCoordinator) liveLaneNameExceptLocked(
+	runtime *daemonpkg.Runtime,
+	parent daemonpkg.ManagedAttachment,
+	name, excludeLaneID string,
+) bool {
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
 	if err != nil {
 		return true
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return true
+	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
+	for id, lane := range snapshot.Catalog.Lanes {
+		if id == excludeLaneID || lane.State == "archived" {
+			continue
+		}
+		promoting := c.lanes[id] != nil && c.lanes[id].namePromoting
+		if staged[id] && !promoting {
+			continue
+		}
+		if lane.Name == name && (lane.ParentAttachmentID == parent.ID || groupsIntersect(lane.Groups, parentGroups)) {
+			return true
+		}
+	}
 	for _, a := range c.lanes {
-		if a.name == name && a.state != "archived" && (a.parentID == parent.ID || groupsIntersect(a.groups, parentGroups)) {
+		if a.id == excludeLaneID {
+			continue
+		}
+		if _, durable := snapshot.Catalog.Lanes[a.id]; durable {
+			continue
+		}
+		if (!staged[a.id] || a.namePromoting) &&
+			a.name == name && (a.parentID == parent.ID || groupsIntersect(a.groups, parentGroups)) {
 			return true
 		}
 	}
@@ -1902,6 +2850,31 @@ func durableLaneTurnResult(a *laneActor, turn daemonpkg.Turn) map[string]any {
 	}
 }
 
+func laneResultWithReceipt(result map[string]any, receipt daemonpkg.LaneInputReceipt) map[string]any {
+	result["receipt_id"] = receipt.ReceiptID
+	result["receipt_sequence"] = receipt.Sequence
+	return result
+}
+
+func durableReceiptTurnResult(
+	runtime *daemonpkg.Runtime,
+	actor *laneActor,
+	receipt daemonpkg.LaneInputReceipt,
+) (map[string]any, bool, error) {
+	if receipt.TargetTurnID == "" {
+		return nil, false, nil
+	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return nil, false, err
+	}
+	turn, ok := snapshot.Catalog.Turns[receipt.TargetTurnID]
+	if !ok || turn.LaneID != receipt.LaneID || turn.State != "terminal" && turn.State != "collected" {
+		return nil, false, nil
+	}
+	return durableLaneTurnResult(actor, turn), true, nil
+}
+
 func laneOutcomeExit(outcome string) any {
 	if outcome == "" {
 		return nil
@@ -1973,23 +2946,129 @@ func newLaneUUID() (string, error) {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
 }
 
+// stagedUnacknowledgedLaneInputs identifies the internal first commit of a
+// start/resume command. Command receipt IDs occupy a coordinator-owned opaque
+// namespace, so the frozen receipt schema needs no new discriminator. Revision
+// one is the queued, not-yet-acknowledgeable phase; a requeue after a proven
+// pre-native failure has a later revision and remains ordinary accepted work.
+func stagedUnacknowledgedLaneInputs(catalog daemonpkg.Catalog) map[string]bool {
+	staged := make(map[string]bool)
+	for _, receipt := range catalog.LaneInputs {
+		if receipt.State == daemonpkg.ReceiptQueued && receipt.Revision == 1 && strings.HasPrefix(receipt.ReceiptID, daemonpkg.LaneCommandReceiptPrefix) {
+			staged[receipt.LaneID] = true
+		}
+	}
+	return staged
+}
+
 //nolint:gocyclo // Recovery classifies and reconstructs every durable lane state explicitly.
 func (c *hostCoordinator) ensureLaneActors(runtime *daemonpkg.Runtime) error {
 	c.mu.Lock()
 	if c.lanesLoaded {
 		c.mu.Unlock()
-		return nil
+		return c.startRecoveredLaneWork(runtime)
 	}
 	c.mu.Unlock()
 
+	inputEngine, err := c.laneInputEngine(runtime)
+	if err != nil {
+		return err
+	}
+	// Receipt/object recovery is the first readiness gate. In particular, no
+	// native watcher may resume while a dispatching receipt is still unclassified.
+	_, err = inputEngine.Recover()
+	if err != nil {
+		return err
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	// Recover intentionally omits unverified dispatching objects from its live
+	// report. Classify from durable receipt metadata so missing/changed objects
+	// can never remain silently detached in Dispatching.
+	dispatching := make([]daemonpkg.LaneInputReceipt, 0)
+	dispatchingCount := make(map[string]int)
+	activeReceiptCount := make(map[string]int)
+	latestTurn := make(map[string]daemonpkg.Turn)
+	for _, turn := range before.Catalog.Turns {
+		if current, ok := latestTurn[turn.LaneID]; !ok || turn.Sequence > current.Sequence {
+			latestTurn[turn.LaneID] = turn
+		}
+	}
+	for _, receipt := range before.Catalog.LaneInputs {
+		if receipt.State == daemonpkg.ReceiptDispatching {
+			dispatching = append(dispatching, receipt)
+			dispatchingCount[receipt.LaneID]++
+		}
+		if receipt.State == daemonpkg.ReceiptDispatching || receipt.State == daemonpkg.ReceiptInjected {
+			activeReceiptCount[receipt.LaneID]++
+		}
+	}
+	stagedInputs := stagedUnacknowledgedLaneInputs(before.Catalog)
+	sort.Slice(dispatching, func(i, j int) bool {
+		if dispatching[i].LaneID == dispatching[j].LaneID {
+			return dispatching[i].Sequence < dispatching[j].Sequence
+		}
+		return dispatching[i].LaneID < dispatching[j].LaneID
+	})
+	activeReceiptByLane := make(map[string]daemonpkg.LaneInputReceipt)
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
 		return err
 	}
-	if err := engine.ReconcileRestart(func(lane daemonpkg.Lane, _ daemonpkg.Turn) bool {
-		return lane.Product == "codex" && lane.NativeSessionID != ""
+	remainingDispatching := dispatching[:0]
+	for _, receipt := range dispatching {
+		lane := before.Catalog.Lanes[receipt.LaneID]
+		turn := latestTurn[receipt.LaneID]
+		provenPreNative := dispatchingCount[receipt.LaneID] == 1 && activeReceiptCount[receipt.LaneID] == 1 &&
+			receipt.TargetTurnID == turn.ID && turn.LaneID == receipt.LaneID &&
+			lane.State == "idle" && turn.State == "accepted"
+		if !provenPreNative {
+			remainingDispatching = append(remainingDispatching, receipt)
+			continue
+		}
+		if _, recoverErr := inputEngine.RecoverAcceptedTurnAndRequeue(
+			receipt.ReceiptID, "Agent Sessions daemon restarted before native lane I/O",
+		); recoverErr != nil {
+			return recoverErr
+		}
+		activeReceiptCount[receipt.LaneID]--
+	}
+	dispatching = remainingDispatching
+	if err := engine.ReconcileRestart(func(lane daemonpkg.Lane, turn daemonpkg.Turn) bool {
+		if stagedInputs[lane.ID] {
+			return true
+		}
+		// A Codex watcher resumes only an exact durable native turn. Lanes that
+		// originated outside the receipt path retain the same strict criterion.
+		return laneRestartIsRecoverable(lane, turn)
 	}, "Agent Sessions daemon restarted during the accepted turn"); err != nil {
 		return err
+	}
+	for _, receipt := range dispatching {
+		lane := before.Catalog.Lanes[receipt.LaneID]
+		turn := latestTurn[receipt.LaneID]
+		exactRecoverable := dispatchingCount[receipt.LaneID] == 1 && activeReceiptCount[receipt.LaneID] == 1 &&
+			receipt.TargetTurnID == turn.ID &&
+			turn.LaneID == receipt.LaneID && laneRestartIsRecoverable(lane, turn)
+		if exactRecoverable {
+			activeReceiptByLane[receipt.LaneID] = receipt
+			continue
+		}
+		if _, markErr := inputEngine.MarkAmbiguous(receipt.ReceiptID, daemonpkg.AmbiguityNativeAcceptanceUnproven); markErr != nil {
+			return markErr
+		}
+	}
+	for _, receipt := range before.Catalog.LaneInputs {
+		if receipt.State != daemonpkg.ReceiptInjected || activeReceiptCount[receipt.LaneID] != 1 {
+			continue
+		}
+		lane := before.Catalog.Lanes[receipt.LaneID]
+		turn := latestTurn[receipt.LaneID]
+		if receipt.TargetTurnID == turn.ID && turn.LaneID == receipt.LaneID && laneRestartIsRecoverable(lane, turn) {
+			activeReceiptByLane[receipt.LaneID] = receipt
+		}
 	}
 	snapshot, err := runtime.State().Read()
 	if err != nil {
@@ -2017,7 +3096,7 @@ func (c *hostCoordinator) ensureLaneActors(runtime *daemonpkg.Runtime) error {
 		if !active {
 			close(done)
 		}
-		hydrated[id] = &laneActor{
+		actor := &laneActor{
 			id: id, product: lane.Product, name: name, cwd: lane.Cwd,
 			parentID: lane.ParentAttachmentID, nativeID: lane.NativeSessionID,
 			groups: append([]string(nil), lane.Groups...), explicitGroups: append([]string(nil), lane.ExplicitGroups...), inheritGroups: lane.InheritGroups,
@@ -2026,8 +3105,12 @@ func (c *hostCoordinator) ensureLaneActors(runtime *daemonpkg.Runtime) error {
 			autoArchiveDelay: delay, autoArchiveAt: lane.AutoArchiveAt, state: lane.State, done: done,
 			turnID: latest.ID, nativeTurnID: latest.NativeDispatchID,
 			outcome: latest.Outcome, result: latest.Result, failure: latest.Diagnostic,
-			startedAt: latest.StartedAt, completedAt: latest.CompletedAt, deadlineAt: latest.DeadlineAt,
+			startedAt: latest.StartedAt, completedAt: latest.CompletedAt, deadlineAt: latest.DeadlineAt, inputSequence: lane.InputSequence,
 		}
+		if receipt, ok := activeReceiptByLane[id]; ok && receipt.TargetTurnID == latest.ID {
+			actor.inputPump, actor.activeReceiptID = true, receipt.ReceiptID
+		}
+		hydrated[id] = actor
 	}
 	c.mu.Lock()
 	if !c.lanesLoaded {
@@ -2039,30 +3122,123 @@ func (c *hostCoordinator) ensureLaneActors(runtime *daemonpkg.Runtime) error {
 		c.lanesLoaded = true
 	}
 	c.mu.Unlock()
-	for _, actor := range hydrated {
+	return c.startRecoveredLaneWork(runtime)
+}
+
+func (c *hostCoordinator) startRecoveredLaneWork(runtime *daemonpkg.Runtime) error {
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return err
+	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
+	c.mu.Lock()
+	if c.ownerReconciling || c.laneRecoveryStarted {
+		c.mu.Unlock()
+		return nil
+	}
+	c.laneRecoveryStarted = true
+	actors := make([]*laneActor, 0, len(c.lanes))
+	for _, actor := range c.lanes {
+		actors = append(actors, actor)
+	}
+	c.mu.Unlock()
+	for _, actor := range actors {
+		if staged[actor.id] {
+			c.scheduleStagedLaneRetirement(runtime, actor)
+			continue
+		}
 		if actor.product == "codex" && (actor.state == "preparing" || actor.state == "running") {
 			c.recoverCodexLaneTurn(runtime, actor)
 		} else {
+			_ = c.kickLaneInput(runtime, actor)
 			c.scheduleLaneAutoArchive(runtime, actor)
 		}
 	}
 	return nil
 }
 
+func (c *hostCoordinator) scheduleStagedLaneRetirement(runtime *daemonpkg.Runtime, actor *laneActor) {
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return
+	}
+	var staged daemonpkg.LaneInputReceipt
+	for _, receipt := range snapshot.Catalog.LaneInputs {
+		if receipt.LaneID == actor.id && receipt.State == daemonpkg.ReceiptQueued && receipt.Revision == 1 &&
+			strings.HasPrefix(receipt.ReceiptID, daemonpkg.LaneCommandReceiptPrefix) {
+			staged = receipt
+			break
+		}
+	}
+	if staged.ReceiptID == "" {
+		return
+	}
+	c.mu.Lock()
+	now, timeout := c.now, c.laneInputStagingTimeout
+	c.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	due := time.Unix(staged.AcceptedAt, 0).Add(timeout)
+	delay := due.Sub(now())
+	if delay < 0 {
+		delay = 0
+	}
+	go func(receiptID string) {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-timer.C:
+		}
+		engine, engineErr := c.laneInputEngine(runtime)
+		if engineErr != nil {
+			return
+		}
+		if _, retireErr := engine.RetireStagedLane(receiptID); retireErr != nil {
+			return
+		}
+		c.mu.Lock()
+		actor.state, actor.inputPump, actor.activeReceiptID = "archived", false, ""
+		c.mu.Unlock()
+	}(staged.ReceiptID)
+}
+
+func laneRestartIsRecoverable(lane daemonpkg.Lane, turn daemonpkg.Turn) bool {
+	return lane.Product == "codex" && lane.NativeSessionID != "" &&
+		turn.State == "dispatched" && turn.NativeDispatchID != ""
+}
+
 func (c *hostCoordinator) recoverCodexLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor) {
 	c.mu.Lock()
-	threadID := actor.nativeID
+	threadID, cwd := actor.nativeID, actor.cwd
 	preferredTurnID, deadlineAt := actor.nativeTurnID, actor.deadlineAt
 	c.mu.Unlock()
 	native, err := c.codexNative()
 	if err == nil {
-		_, err = native.ReattachThread(c.ctx, threadID)
+		var reattached bridge.CodexNativeThread
+		reattached, err = native.ReattachThread(c.ctx, threadID)
+		if err == nil {
+			err = validateCodexLaneReattachment(threadID, cwd, reattached)
+		}
 	}
 	nativeTurnID := ""
 	if err == nil {
 		nativeTurnID, err = native.ResolveLaneTurnID(c.ctx, threadID, preferredTurnID)
 	}
 	if err != nil {
+		c.finishUnrecoverableCodexLane(runtime, actor, err)
+		return
+	}
+	if nativeTurnID != preferredTurnID {
+		c.finishUnrecoverableCodexLane(runtime, actor, errors.New("active Codex turn changed from durable recovery anchor"))
+		return
+	}
+	if err := c.markActiveLaneInputInjected(runtime, actor, threadID, nativeTurnID); err != nil {
 		c.finishUnrecoverableCodexLane(runtime, actor, err)
 		return
 	}
@@ -2087,8 +3263,24 @@ func (c *hostCoordinator) recoverCodexLaneTurn(runtime *daemonpkg.Runtime, actor
 	go c.watchCodexLaneTurn(runtime, actor, adapter, threadID, nativeTurnID, turnCtx, cancel)
 }
 
+func validateCodexLaneReattachment(storedThreadID, storedCwd string, live bridge.CodexNativeThread) error {
+	if live.ID != storedThreadID {
+		return errors.New("native session gone: Codex returned a different thread identity")
+	}
+	expectedCwd, err := pathidentity.ExistingDirectory(storedCwd)
+	if err != nil {
+		return fmt.Errorf("native session gone: durable Codex cwd: %w", err)
+	}
+	liveCwd, err := pathidentity.ExistingDirectory(live.Cwd)
+	if err != nil || liveCwd != expectedCwd {
+		return errors.New("native session gone: Codex thread cwd/provenance changed")
+	}
+	return nil
+}
+
 func (c *hostCoordinator) finishUnrecoverableCodexLane(runtime *daemonpkg.Runtime, actor *laneActor, cause error) {
 	c.mu.Lock()
+	receiptID := actor.activeReceiptID
 	actor.state, actor.outcome = "terminal", "interrupted"
 	actor.failure = fmt.Sprintf("recover Codex lane after daemon restart: %v", cause)
 	actor.completedAt, actor.cancel, actor.nativeTurnID, actor.capability = time.Now().UnixMilli(), nil, "", ""
@@ -2096,32 +3288,47 @@ func (c *hostCoordinator) finishUnrecoverableCodexLane(runtime *daemonpkg.Runtim
 	terminal := cloneLaneActor(actor)
 	close(actor.done)
 	c.mu.Unlock()
-	c.queueLaneTerminalNotice(runtime, &terminal)
-}
-func (c *hostCoordinator) commitNewLane(r *daemonpkg.Runtime, a *laneActor) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
-	if err != nil {
-		return err
+	if receiptID != "" {
+		if engine, err := c.laneInputEngine(runtime); err == nil {
+			if snapshot, readErr := runtime.State().Read(); readErr == nil &&
+				snapshot.Catalog.LaneInputs[receiptID].State == daemonpkg.ReceiptInjected {
+				_, _ = engine.Retire(receiptID)
+			} else {
+				_, _ = engine.MarkAmbiguous(receiptID, daemonpkg.AmbiguityNativeAcceptanceUnproven)
+			}
+		}
 	}
-	return engine.Create(durableLane(a, "preparing"), durableTurn(a, 1, "accepted"))
+	c.releaseLaneInputPump(actor, receiptID)
+	c.queueLaneTerminalNotice(runtime, &terminal)
+	_ = c.kickLaneInput(runtime, actor)
 }
 func (c *hostCoordinator) markLaneRunning(r *daemonpkg.Runtime, a *laneActor) error {
+	c.laneInputCommitMu.Lock()
+	defer c.laneInputCommitMu.Unlock()
 	engine, err := daemonpkg.NewLaneEngine(r.State())
 	if err != nil {
 		return err
 	}
-	lane := durableLane(a, "running")
+	lane, err := c.durableLaneWithSequence(r, a, "running")
+	if err != nil {
+		return err
+	}
 	lane.CapabilityHash = daemonpkg.CapabilityDigest(a.capability)
 	turn := durableTurn(a, 0, "dispatched")
 	turn.NativeDispatchID, turn.StartedAt, turn.DeadlineAt = a.nativeTurnID, a.startedAt, a.deadlineAt
 	return engine.Dispatch(lane, turn)
 }
 func (c *hostCoordinator) markLaneTerminal(r *daemonpkg.Runtime, a *laneActor) error {
+	c.laneInputCommitMu.Lock()
+	defer c.laneInputCommitMu.Unlock()
 	engine, err := daemonpkg.NewLaneEngine(r.State())
 	if err != nil {
 		return err
 	}
-	lane := durableLane(a, "terminal")
+	lane, err := c.durableLaneWithSequence(r, a, "terminal")
+	if err != nil {
+		return err
+	}
 	turn := durableTurn(a, 0, "terminal")
 	turn.NativeDispatchID, turn.StartedAt, turn.DeadlineAt = a.nativeTurnID, a.startedAt, a.deadlineAt
 	turn.Outcome, turn.Result, turn.Diagnostic = a.outcome, a.result, a.failure
@@ -2164,16 +3371,16 @@ func catalogHasUncollectedLaneTurn(catalog daemonpkg.Catalog, laneID string) boo
 	}
 	return false
 }
-func (c *hostCoordinator) commitResumeLane(r *daemonpkg.Runtime, a *laneActor, queued bool) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
+func (c *hostCoordinator) durableLaneWithSequence(r *daemonpkg.Runtime, a *laneActor, state string) (daemonpkg.Lane, error) {
+	lane := durableLane(a, state)
+	snapshot, err := r.State().Read()
 	if err != nil {
-		return err
+		return daemonpkg.Lane{}, err
 	}
-	lane, turn := durableLane(a, "idle"), durableTurn(a, 0, "accepted")
-	if queued {
-		return engine.AcceptQueuedTurn(lane, turn)
+	if current, ok := snapshot.Catalog.Lanes[a.id]; ok {
+		lane.InputSequence = current.InputSequence
 	}
-	return engine.AcceptTurn(lane, turn)
+	return lane, nil
 }
 func (c *hostCoordinator) commitLaneState(r *daemonpkg.Runtime, id, state string) error {
 	engine, err := daemonpkg.NewLaneEngine(r.State())
@@ -2184,9 +3391,33 @@ func (c *hostCoordinator) commitLaneState(r *daemonpkg.Runtime, id, state string
 }
 
 func durableLane(a *laneActor, state string) daemonpkg.Lane {
-	lane := daemonpkg.Lane{ID: a.id, ParentAttachmentID: a.parentID, Product: a.product, Name: a.name, Cwd: a.cwd, State: state}
+	lane := daemonpkg.Lane{ID: a.id, ParentAttachmentID: a.parentID, Product: a.product, Name: a.name, Cwd: a.cwd, State: state, InputSequence: a.inputSequence}
 	copyLanePolicy(&lane, a)
 	return lane
+}
+
+// exactLaneStartReplay binds a stable command key to its complete immutable
+// authority/request tuple. Native anchors and lifecycle counters are mutable
+// projections and deliberately are not part of this comparison.
+func exactLaneStartReplay(stored, requested daemonpkg.Lane) bool {
+	return stored.ID != "" &&
+		stored.ID == requested.ID &&
+		stored.ParentAttachmentID == requested.ParentAttachmentID &&
+		stored.Product == requested.Product &&
+		stored.Name == requested.Name &&
+		stored.Cwd == requested.Cwd &&
+		slices.Equal(stored.Groups, requested.Groups) &&
+		slices.Equal(stored.ExplicitGroups, requested.ExplicitGroups) &&
+		stored.InheritGroups == requested.InheritGroups &&
+		stored.PermissionMode == requested.PermissionMode &&
+		stored.ApprovalPolicy == requested.ApprovalPolicy &&
+		stored.Sandbox == requested.Sandbox &&
+		stored.Effort == requested.Effort &&
+		stored.Schema == requested.Schema &&
+		slices.Equal(stored.Arguments, requested.Arguments) &&
+		stored.Persistent == requested.Persistent &&
+		stored.AutoArchive == requested.AutoArchive &&
+		stored.AutoArchiveDelayMS == requested.AutoArchiveDelayMS
 }
 
 func copyLanePolicy(lane *daemonpkg.Lane, a *laneActor) {
@@ -2244,9 +3475,14 @@ func (c *hostCoordinator) scheduleLaneAutoArchive(runtime *daemonpkg.Runtime, ac
 			c.mu.Unlock()
 			return
 		}
-		actor.state, actor.autoArchiveAt, actor.pending = "archived", 0, nil
+		actor.state, actor.autoArchiveAt = "archived", 0
 		c.mu.Unlock()
-		if c.commitLaneState(runtime, actor.id, "archived") == nil && c.archiveNativeLane(actor) == nil {
+		if c.commitLaneState(runtime, actor.id, "archived") != nil {
+			return
+		}
+		cleanupErr := c.retireLaneInputs(runtime, actor.id, true)
+		nativeErr := c.archiveNativeLaneTracked(runtime, actor)
+		if cleanupErr == nil && nativeErr == nil {
 			_ = c.retireParentLanes(runtime, actor.id)
 		}
 	}(due)

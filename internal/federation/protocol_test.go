@@ -185,3 +185,54 @@ func TestWirePeerSyntaxDoesNotRequireLocalCatalogAuthority(t *testing.T) {
 		t.Fatal("unknown local product bypassed catalog authority")
 	}
 }
+
+func TestHelloBoundsEveryRosterIdentityField(t *testing.T) {
+	valid := Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-a", HostName: "workstation", Build: "build-1",
+	}
+	if err := validateHello(valid); err != nil {
+		t.Fatal(err)
+	}
+	for label, mutate := range map[string]func(*Message){
+		"host id":   func(message *Message) { message.HostID = strings.Repeat("h", maxHostIDBytes+1) },
+		"host name": func(message *Message) { message.HostName = strings.Repeat("n", maxHostNameBytes+1) },
+		"build":     func(message *Message) { message.Build = strings.Repeat("b", maxBuildBytes+1) },
+	} {
+		t.Run(label, func(t *testing.T) {
+			message := valid
+			mutate(&message)
+			if err := validateHello(message); err == nil {
+				t.Fatalf("unbounded %s was accepted", label)
+			}
+		})
+	}
+}
+
+func TestWirePeerBoundsEveryStringFieldAndCollection(t *testing.T) {
+	valid := mustTestPeer(t, "host-a", "session", "codex", "project")
+	for label, mutate := range map[string]func(*Peer){
+		"id":                func(peer *Peer) { peer.ID = strings.Repeat("i", maxPeerIDBytes+1) },
+		"session id":        func(peer *Peer) { peer.SessionID = strings.Repeat("s", maxSessionIDBytes+1) },
+		"global id":         func(peer *Peer) { peer.GlobalID = strings.Repeat("g", maxPeerGlobalIDBytes+1) },
+		"name":              func(peer *Peer) { peer.Name = strings.Repeat("n", maxPeerNameBytes+1) },
+		"display name":      func(peer *Peer) { peer.DisplayName = strings.Repeat("d", maxPeerDisplayNameBytes+1) },
+		"host id":           func(peer *Peer) { peer.HostID = strings.Repeat("h", maxHostIDBytes+1) },
+		"host name":         func(peer *Peer) { peer.HostName = strings.Repeat("h", maxHostNameBytes+1) },
+		"product":           func(peer *Peer) { peer.Product = strings.Repeat("p", maxProductTokenBytes+1) },
+		"entrypoint":        func(peer *Peer) { peer.Entrypoint = strings.Repeat("e", maxProductTokenBytes+1) },
+		"status":            func(peer *Peer) { peer.Status = strings.Repeat("s", maxPeerStatusBytes+1) },
+		"cwd":               func(peer *Peer) { peer.Cwd = strings.Repeat("c", maxPeerCwdBytes+1) },
+		"permission mode":   func(peer *Peer) { peer.PermissionMode = strings.Repeat("p", maxPeerPermissionBytes+1) },
+		"instance id":       func(peer *Peer) { peer.InstanceID = strings.Repeat("i", maxPeerInstanceIDBytes+1) },
+		"parent session id": func(peer *Peer) { peer.ParentSessionID = strings.Repeat("p", maxPeerParentIDBytes+1) },
+		"groups per peer":   func(peer *Peer) { peer.Groups = make([]string, maxPeerGroups+1) },
+	} {
+		t.Run(label, func(t *testing.T) {
+			peer := clonePeer(valid)
+			mutate(&peer)
+			if err := validateWirePeer(peer, "host-a"); err == nil {
+				t.Fatalf("unbounded peer %s was accepted", label)
+			}
+		})
+	}
+}

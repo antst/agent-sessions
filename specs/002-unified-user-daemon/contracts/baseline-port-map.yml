@@ -688,7 +688,7 @@ entries:
       - internal/daemon/lane_test.go:TestLaneEngineRestartNoticeArchiveAndCleanupDebtAreDurable
       - cmd/agent-sessions/lane_test.go:TestLaneResumeTransfersDurableParentAndUnarchives
       - cmd/agent-sessions/lane_test.go:TestQueuedLaneFollowupAdvancesDurableTerminalLaneBeforePreparing
-      - cmd/agent-sessions/lane_test.go:TestConcurrentIdleLaneMessagesClaimExactlyOneNativeWriter
+      - cmd/agent-sessions/lane_test.go:TestConcurrentBusyLaneMessagesCommitOrderedReceiptsWithoutAggregation
       - cmd/agent-sessions/lane_test.go:TestLaneResumeRefusesUncollectedDurableTurnWithoutMutation
       - cmd/agent-sessions/lane_test.go:TestLaneWaitCollectsOldestTerminalTurnExactlyOnce
       - cmd/agent-sessions/lane_test.go:TestRestartCatalogPreservesOnlyRecoverableNativeCodexTurn
@@ -775,7 +775,7 @@ entries:
       - cmd/agent-sessions/lane_test.go:TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup
       - cmd/agent-sessions/lane_test.go:TestClaudeInboundPeerFrameDispatchesAsOrdinaryNativeQuery
       - cmd/agent-sessions/lane_test.go:TestParentDetachRetiresActiveLaneAndPreservesPersistentLane
-      - cmd/agent-sessions/lane_test.go:TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch
+      - cmd/agent-sessions/lane_test.go:TestCodexArchiveReaffirmsAlreadyArchivedAndRetriesNativeCleanup
       - cmd/agent-sessions/lane_test.go:TestCodexJSONStreamPublishesNativeIdentityBeforeProcessExit
       - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterPreservesAppServerStartResumePolicyAndNativeCallbacks
       - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterRejectsChangedResumeAndTerminalIdentity

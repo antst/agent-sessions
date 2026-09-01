@@ -67,6 +67,45 @@ func TestEventsReconnectWithLastIDAndDeduplicateReplay(t *testing.T) {
 	}
 }
 
+func TestEventsDoNotCheckpointOrDispatchUnterminatedEventAtEOF(t *testing.T) {
+	auth := testAuth(t)
+	var connections atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		switch connections.Add(1) {
+		case 1:
+			if got := request.Header.Get("Last-Event-ID"); got != "" {
+				t.Errorf("initial Last-Event-ID = %q", got)
+			}
+			_, _ = fmt.Fprint(response, "id: replay-id\ndata: truncated\n")
+		case 2:
+			if got := request.Header.Get("Last-Event-ID"); got != "" {
+				t.Errorf("truncated event checkpointed Last-Event-ID = %q", got)
+			}
+			_, _ = fmt.Fprint(response, "id: replay-id\ndata: complete replay\n\n")
+		default:
+			t.Errorf("unexpected reconnect %d", connections.Load())
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, auth, Limits{})
+	complete := errors.New("complete")
+	var got []Event
+	err := client.Subscribe(context.Background(), EventOptions{
+		MaxReconnects: 2, ReconnectDelay: time.Millisecond,
+	}, func(event Event) error {
+		got = append(got, event)
+		return complete
+	})
+	if !errors.Is(err, complete) {
+		t.Fatalf("Subscribe error = %v, want callback stop", err)
+	}
+	want := []Event{{ID: "replay-id", Data: "complete replay"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want only complete replay %#v", got, want)
+	}
+}
+
 func TestEventsBoundLinesEventsDecompressionAndReconnects(t *testing.T) {
 	auth := testAuth(t)
 	tests := []struct {

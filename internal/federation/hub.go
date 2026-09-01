@@ -55,6 +55,11 @@ type laneRoute struct {
 	stopOnce             sync.Once
 }
 
+type rosterDelivery struct {
+	client  *hubClient
+	message Message
+}
+
 // RunHub serves protocol-compatible federation hosts until ctx is canceled.
 func RunHub(ctx context.Context, options HubOptions) error {
 	if options.Listen == "" {
@@ -188,6 +193,9 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 	}
 	switch message.Type {
 	case "snapshot":
+		if len(message.Peers) > maxSnapshotPeers {
+			return fmt.Errorf("snapshot exceeds peer count limit %d", maxSnapshotPeers)
+		}
 		peers := make(map[string]Peer, len(message.Peers))
 		sessions := make(map[string]bool, len(message.Peers))
 		for _, peer := range message.Peers {
@@ -200,10 +208,16 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 			peers[peer.ID], sessions[peer.SessionID] = clonePeer(peer), true
 		}
 		h.mu.Lock()
-		if h.clients[client.hostID] == client {
-			client.peers = peers
-			client.ready = true
+		if h.clients[client.hostID] != client {
+			h.mu.Unlock()
+			return errors.New("host registration was superseded by another generation")
 		}
+		if err := h.validateProspectiveRosterLocked(client, peers); err != nil {
+			h.mu.Unlock()
+			return err
+		}
+		client.peers = peers
+		client.ready = true
 		h.mu.Unlock()
 		h.broadcastRoster()
 		return nil
@@ -540,11 +554,41 @@ func (h *hub) broadcastRoster() {
 	h.broadcastMu.Lock()
 	defer h.broadcastMu.Unlock()
 	h.mu.Lock()
+	deliveries := h.rosterDeliveriesLocked(nil, nil)
+	validationErr := validateRosterDeliveries(deliveries)
+	h.mu.Unlock()
+	if validationErr != nil {
+		h.logger.Printf("refusing to broadcast invalid roster invariant: %v", validationErr)
+		return
+	}
+	var wait sync.WaitGroup
+	for _, delivery := range deliveries {
+		delivery := delivery
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := delivery.client.wire.Send(delivery.message); err != nil {
+				_ = delivery.client.wire.conn.Close()
+			}
+		}()
+	}
+	wait.Wait()
+}
+
+func (h *hub) validateProspectiveRosterLocked(client *hubClient, peers map[string]Peer) error {
+	deliveries := h.rosterDeliveriesLocked(client, peers)
+	if err := validateRosterDeliveries(deliveries); err != nil {
+		return fmt.Errorf("prospective roster is not admissible: %w", err)
+	}
+	return nil
+}
+
+func (h *hub) rosterDeliveriesLocked(snapshotClient *hubClient, snapshotPeers map[string]Peer) []rosterDelivery {
 	clients := make([]*hubClient, 0, len(h.clients))
 	peers := []Peer{}
 	hosts := make([]Host, 0, len(h.clients))
 	for _, client := range h.clients {
-		if !client.ready {
+		if !client.ready && client != snapshotClient {
 			continue
 		}
 		clients = append(clients, client)
@@ -552,25 +596,64 @@ func (h *hub) broadcastRoster() {
 			ID: client.hostID, Name: client.hostName, Capabilities: append([]string(nil), client.capabilities...),
 			Generation: client.generation, Build: client.build,
 		})
-		for _, peer := range client.peers {
+		clientPeers := client.peers
+		if client == snapshotClient {
+			clientPeers = snapshotPeers
+		}
+		for _, peer := range clientPeers {
 			peers = append(peers, clonePeer(peer))
 		}
 	}
-	h.mu.Unlock()
 	sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].ID < hosts[j].ID })
-	message := Message{Type: "roster", Version: ProtocolVersion, Hosts: hosts, Peers: peers}
-	var wait sync.WaitGroup
+	deliveries := make([]rosterDelivery, 0, len(clients))
 	for _, client := range clients {
-		wait.Add(1)
-		go func(client *hubClient) {
-			defer wait.Done()
-			if err := client.wire.Send(message); err != nil {
-				_ = client.wire.conn.Close()
+		visiblePeers := peers
+		if !contains(client.capabilities, transportFeatureOpaquePeerProducts) {
+			// Pre-feature v3 hosts tolerate unknown Host.Capabilities but reject
+			// an entire roster on an unknown Peer.Product. Remove the complete
+			// peer row for those clients; never leak partial group/target state.
+			visiblePeers = make([]Peer, 0, len(peers))
+			for _, peer := range peers {
+				if legacyV3PeerProduct(peer) {
+					visiblePeers = append(visiblePeers, peer)
+				}
 			}
-		}(client)
+		}
+		deliveries = append(deliveries, rosterDelivery{
+			client: client,
+			message: Message{
+				Type: "roster", Version: ProtocolVersion, Hosts: hosts,
+				Peers: append([]Peer(nil), visiblePeers...),
+			},
+		})
 	}
-	wait.Wait()
+	return deliveries
+}
+
+func validateRosterDeliveries(deliveries []rosterDelivery) error {
+	for _, delivery := range deliveries {
+		if len(delivery.message.Hosts) > maxRosterHosts || len(delivery.message.Peers) > maxRosterPeers {
+			return errors.New("roster exceeds host or peer count bounds")
+		}
+		body, err := json.Marshal(delivery.message)
+		if err != nil {
+			return fmt.Errorf("encode roster: %w", err)
+		}
+		if len(body) > maxWireBytes {
+			return fmt.Errorf("encoded roster exceeds %d bytes", maxWireBytes)
+		}
+	}
+	return nil
+}
+
+func legacyV3PeerProduct(peer Peer) bool {
+	product := peer.Product
+	if product == "" {
+		product = peer.Entrypoint
+	}
+	_, ok := legacyV3LaneCapabilities[product]
+	return ok
 }
 
 func clientHost(client *hubClient) string {

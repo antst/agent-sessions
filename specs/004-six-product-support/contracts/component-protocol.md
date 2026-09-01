@@ -66,6 +66,33 @@ ready { binding_id, attachment_id, daemon_generation, protocol_version,
 An ambient globally installed component without a prepared bootstrap remains
 inert and does not retry privileged operations.
 
+### Handshake idempotency and adoption
+
+1. `ComponentBinding` keyed by `(attachment_id, bootstrap_revision)` is the
+   durable handshake-idempotency anchor. `Authorizer.Bootstrap` and
+   `Authorizer.Reconnect` MUST transactionally create-or-return its exact
+   secret-free `binding_id`; the broker MUST use that ID and MUST NOT mint a
+   replacement after authorization.
+2. A lost `ready` MAY be retried only with the identical capability ID/value,
+   attachment, product, bootstrap revision, and freshly recaptured kernel
+   PID/UID, process start/strong-start, executable, and ancestry. While the
+   binding remains unadopted, an exact retry returns the same committed
+   `binding_id`, including after daemon restart. Any foreign, stale,
+   conflicting, or already-adopted replay is rejected.
+3. A returned binding remains in `binding` state until the first authenticated
+   non-handshake component frame that names its `binding_id` is durably
+   admitted. That admission adopts the binding; no `ready` acknowledgment or
+   new wire field is introduced.
+4. Reconnect permits at most one unadopted successor per attachment and daemon
+   generation. Only the immediate predecessor may retry it; an exact, freshly
+   re-attested retry re-establishes the same successor binding, while a
+   conflicting predecessor is rejected. Adoption fences the predecessor, so
+   all later predecessor replay is rejected.
+5. Any broker-local predecessor/successor or delivery replay memory is
+   generation-scoped and strictly bounded (at most one unadopted successor per
+   attachment/generation); durable `ComponentBinding` and delivery state remain
+   authoritative across restart.
+
 ## 3. Reconnect
 
 After daemon restart, the same native process sends:

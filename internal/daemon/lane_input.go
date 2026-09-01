@@ -18,12 +18,18 @@ import (
 
 const laneInputMutationAttempts = 32
 
+// LaneCommandReceiptPrefix reserves the product-neutral opaque ID namespace
+// used by the two-commit start/resume caller acceptance boundary.
+const LaneCommandReceiptPrefix = "command-"
+
 var (
-	ErrLaneInputTooLarge    = errors.New("lane input exceeds the per-input bound")
-	ErrLaneInputQuota       = errors.New("lane input quota exceeded")
-	ErrLaneInputConflict    = errors.New("lane input idempotency key conflicts with prior acceptance")
-	ErrLaneInputUnavailable = errors.New("lane is not a live input recipient")
-	ErrLaneInputCleanupDebt = errors.New("lane input cleanup debt")
+	ErrLaneInputTooLarge      = errors.New("lane input exceeds the per-input bound")
+	ErrLaneInputQuota         = errors.New("lane input quota exceeded")
+	ErrLaneInputConflict      = errors.New("lane input idempotency key conflicts with prior acceptance")
+	ErrLaneInputUnavailable   = errors.New("lane is not a live input recipient")
+	ErrLaneInputCleanupDebt   = errors.New("lane input cleanup debt")
+	ErrLaneInputEarlierQueued = errors.New("lane has earlier queued input")
+	errLaneInputAlreadyExact  = errors.New("lane input native acceptance is already exact")
 )
 
 // LaneInputLimits bounds accepted private spool content by lane and host.
@@ -66,13 +72,14 @@ type LaneInputRecoveryReport struct {
 // LaneInputEngine owns durable receipt ordering and private spool mechanics;
 // it deliberately has no product-native dispatch callback.
 type LaneInputEngine struct {
-	store          *StateStore
-	spool          *laneInputSpool
-	limits         LaneInputLimits
-	now            func() time.Time
-	randomID       func() (string, error)
-	afterSpoolSync func() error
-	mu             sync.Mutex
+	store             *StateStore
+	spool             *laneInputSpool
+	limits            LaneInputLimits
+	now               func() time.Time
+	randomID          func() (string, error)
+	afterSpoolSync    func() error
+	afterQueuedCommit func() error
+	mu                sync.Mutex
 }
 
 func NewLaneInputEngine(store *StateStore, spoolRoot string, limits LaneInputLimits) (*LaneInputEngine, error) {
@@ -184,6 +191,273 @@ func (e *LaneInputEngine) AdmitWithID(receiptID, laneID string, body []byte) (La
 	return committed, nil
 }
 
+// CreateLaneAdmitAndMarkDispatching durably stages a new lane and queued input,
+// then atomically creates its accepted daemon turn and commits the receipt's
+// dispatch intent. Callers must not acknowledge acceptance until this method
+// returns the Dispatching receipt from the second commit.
+func (e *LaneInputEngine) CreateLaneAdmitAndMarkDispatching(
+	receiptID string, lane Lane, turn Turn, attemptID string, body []byte,
+) (LaneInputReceipt, error) {
+	return e.admitLaneMutationWithID(receiptID, lane, turn, attemptID, body, true)
+}
+
+// UpdateLaneAdmitAndMarkDispatching durably stages a validated lane resume and
+// queued input, then atomically creates its accepted daemon turn and commits
+// the receipt's dispatch intent. Active, retiring, and cleanup-debt lanes
+// remain ineligible.
+func (e *LaneInputEngine) UpdateLaneAdmitAndMarkDispatching(
+	receiptID string, lane Lane, turn Turn, attemptID string, body []byte,
+) (LaneInputReceipt, error) {
+	return e.admitLaneMutationWithID(receiptID, lane, turn, attemptID, body, false)
+}
+
+func (e *LaneInputEngine) admitLaneMutationWithID(
+	receiptID string,
+	lane Lane,
+	turn Turn,
+	attemptID string,
+	body []byte,
+	create bool,
+) (LaneInputReceipt, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !validDurableOpaqueID(receiptID) || !strings.HasPrefix(receiptID, LaneCommandReceiptPrefix) ||
+		!validDurableOpaqueID(lane.ID) || lane.Product == "" {
+		return LaneInputReceipt{}, errors.New("lane input identifier is invalid")
+	}
+	if int64(len(body)) > e.limits.MaxInputBytes {
+		return LaneInputReceipt{}, ErrLaneInputTooLarge
+	}
+	bodyDigest := sha256.Sum256(body)
+	snapshot, err := e.store.Read()
+	if err != nil {
+		return LaneInputReceipt{}, err
+	}
+	var committed LaneInputReceipt
+	existingQueued := false
+	if existing, ok := snapshot.Catalog.LaneInputs[receiptID]; ok {
+		committed, err = e.existingAdmission(existing, lane.ID, int64(len(body)), bodyDigest)
+		if err != nil {
+			return LaneInputReceipt{}, err
+		}
+		existingQueued = committed.State == ReceiptQueued
+	} else {
+		if turn.ID == "" || turn.LaneID != lane.ID || !validDurableOpaqueID(attemptID) {
+			return LaneInputReceipt{}, errors.New("lane input identifier is invalid")
+		}
+		if create {
+			if _, exists := snapshot.Catalog.Lanes[lane.ID]; exists {
+				return LaneInputReceipt{}, errors.New("lane input start lane already exists without its receipt")
+			}
+		} else {
+			current, exists := snapshot.Catalog.Lanes[lane.ID]
+			if !exists || current.Product != lane.Product {
+				return LaneInputReceipt{}, errors.New("lane input resume lane is missing or changed product")
+			}
+			for _, candidate := range snapshot.Catalog.LaneInputs {
+				if candidate.LaneID == lane.ID && candidate.State == ReceiptQueued {
+					return LaneInputReceipt{}, ErrLaneInputEarlierQueued
+				}
+			}
+			switch current.State {
+			case "idle", "terminal", "archived":
+			default:
+				return LaneInputReceipt{}, fmt.Errorf("%w: state=%s", ErrLaneInputUnavailable, current.State)
+			}
+		}
+		quotaCatalog := snapshot.Catalog
+		if create {
+			quotaCatalog.Lanes[lane.ID] = lane
+		}
+		if err := e.checkQuota(quotaCatalog, lane.ID, int64(len(body))); err != nil {
+			return LaneInputReceipt{}, err
+		}
+		randomID, randomErr := e.randomID()
+		if randomErr != nil {
+			return LaneInputReceipt{}, randomErr
+		}
+		objectID, digest, spoolErr := e.spool.create(randomID, body)
+		if spoolErr != nil {
+			return LaneInputReceipt{}, spoolErr
+		}
+		if e.afterSpoolSync != nil {
+			if syncErr := e.afterSpoolSync(); syncErr != nil {
+				return LaneInputReceipt{}, syncErr
+			}
+		}
+		acceptedAt := positiveUnix(e.now())
+		duplicate := false
+		err = e.mutate(func(catalog *Catalog) error {
+			if existing, ok := catalog.LaneInputs[receiptID]; ok {
+				if existing.LaneID != lane.ID || existing.Bytes != int64(len(body)) || existing.Digest != bodyDigest {
+					return ErrLaneInputConflict
+				}
+				committed, duplicate = existing, true
+				return nil
+			}
+			current, exists := catalog.Lanes[lane.ID]
+			if create {
+				if exists {
+					return errors.New("lane input start lane already exists without its receipt")
+				}
+				lane.InputSequence, lane.ArchiveRevision = 0, 0
+			} else {
+				if !exists || current.Product != lane.Product {
+					return errors.New("lane input resume lane is missing or changed product")
+				}
+				for _, candidate := range catalog.LaneInputs {
+					if candidate.LaneID == lane.ID && candidate.State == ReceiptQueued {
+						return ErrLaneInputEarlierQueued
+					}
+				}
+				switch current.State {
+				case "idle", "terminal", "archived":
+				default:
+					return fmt.Errorf("%w: state=%s", ErrLaneInputUnavailable, current.State)
+				}
+				lane.InputSequence, lane.ArchiveRevision = current.InputSequence, current.ArchiveRevision
+				if lane.NativeSessionID == "" {
+					lane.NativeSessionID = current.NativeSessionID
+				}
+			}
+			quotaCatalog := *catalog
+			if create {
+				quotaCatalog.Lanes[lane.ID] = lane
+			}
+			if err := e.checkQuota(quotaCatalog, lane.ID, int64(len(body))); err != nil {
+				return err
+			}
+			// The coordinator-owned receipt ID namespace distinguishes this
+			// unacknowledged queued phase without extending the frozen schema.
+			// Preserve an existing resume lifecycle until the atomic turn/dispatch
+			// commit; a newly created lane begins idle.
+			lane.State, lane.CapabilityHash, lane.AutoArchiveAt = "idle", "", 0
+			if !create {
+				lane.State = current.State
+			}
+			lane.InputSequence++
+			committed = LaneInputReceipt{
+				Schema: LaneInputReceiptRecordSchema, ReceiptID: receiptID, LaneID: lane.ID, Sequence: lane.InputSequence,
+				Digest: digest, Bytes: int64(len(body)), SpoolObjectID: objectID, State: ReceiptQueued,
+				Revision: 1, AcceptedAt: acceptedAt, UpdatedAt: acceptedAt,
+			}
+			catalog.Lanes[lane.ID] = cloneLane(lane)
+			catalog.LaneInputs[receiptID] = committed
+			catalog.Host.LaneRevision++
+			return nil
+		})
+		if err != nil {
+			return LaneInputReceipt{}, err
+		}
+		if duplicate {
+			orphan := LaneInputReceipt{SpoolObjectID: objectID, Digest: digest, Bytes: int64(len(body))}
+			_ = e.spool.removeVerified(orphan)
+		}
+		if e.afterQueuedCommit != nil {
+			if queuedErr := e.afterQueuedCommit(); queuedErr != nil {
+				return committed, queuedErr
+			}
+		}
+	}
+	if existingQueued {
+		// A replay never reuses the caller-supplied process-local Turn. The
+		// coordinator must select this receipt through the ordered queue and
+		// allocate a fresh Turn/attempt for every dispatch.
+		return committed, nil
+	}
+	if committed.State != ReceiptQueued {
+		return committed, nil
+	}
+	var dispatching LaneInputReceipt
+	err = e.mutate(func(catalog *Catalog) error {
+		receipt, ok := catalog.LaneInputs[receiptID]
+		if !ok || receipt.State != ReceiptQueued || receipt.LaneID != lane.ID {
+			return errors.New("lane input receipt is not queued for initial dispatch")
+		}
+		current, ok := catalog.Lanes[lane.ID]
+		if !ok || current.Product != lane.Product {
+			return errors.New("lane input target lane is missing or changed product")
+		}
+		switch current.State {
+		case "preparing", "idle", "terminal", "archived":
+		default:
+			return fmt.Errorf("lane cannot accept queued input from state %s", current.State)
+		}
+		if _, exists := catalog.Turns[turn.ID]; exists {
+			return errors.New("lane input target turn identity already exists")
+		}
+		turnSequence := uint64(1)
+		for _, candidate := range catalog.Turns {
+			if candidate.LaneID == lane.ID && candidate.Sequence >= turnSequence {
+				turnSequence = candidate.Sequence + 1
+			}
+		}
+		lane.InputSequence, lane.ArchiveRevision = current.InputSequence, current.ArchiveRevision
+		lane.State, lane.CapabilityHash, lane.AutoArchiveAt = "idle", "", 0
+		turn.State, turn.Sequence = "accepted", turnSequence
+		now := maxInt64(positiveUnix(e.now()), maxInt64(receipt.AcceptedAt, receipt.UpdatedAt))
+		receipt.State, receipt.TargetTurnID, receipt.DispatchAttempt = ReceiptDispatching, turn.ID, attemptID
+		receipt.Revision, receipt.UpdatedAt = receipt.Revision+1, now
+		catalog.Lanes[lane.ID] = cloneLane(lane)
+		catalog.Turns[turn.ID] = turn
+		catalog.LaneInputs[receiptID] = receipt
+		catalog.Host.LaneRevision++
+		dispatching = receipt
+		return nil
+	})
+	if err != nil {
+		return committed, err
+	}
+	return dispatching, nil
+}
+
+// RetireStagedLane atomically makes one never-acknowledged command receipt and
+// its lane non-addressable after the verified spool object has been removed.
+// Revision one in the command namespace is the sole staging proof.
+func (e *LaneInputEngine) RetireStagedLane(receiptID string) (LaneInputReceipt, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	snapshot, err := e.store.Read()
+	if err != nil {
+		return LaneInputReceipt{}, err
+	}
+	receipt, ok := snapshot.Catalog.LaneInputs[receiptID]
+	if !ok || receipt.State != ReceiptQueued || receipt.Revision != 1 ||
+		!strings.HasPrefix(receipt.ReceiptID, LaneCommandReceiptPrefix) {
+		return LaneInputReceipt{}, errors.New("lane input receipt is not staged")
+	}
+	if err := e.spool.removeVerified(receipt); err != nil {
+		if debtErr := e.recordCleanupDebtLocked(receipt, err); debtErr != nil {
+			return LaneInputReceipt{}, errors.Join(ErrLaneInputCleanupDebt, debtErr)
+		}
+		return receipt, fmt.Errorf("%w: %v", ErrLaneInputCleanupDebt, err)
+	}
+	var retired LaneInputReceipt
+	err = e.mutate(func(catalog *Catalog) error {
+		current, exists := catalog.LaneInputs[receiptID]
+		if !exists || current.State != ReceiptQueued || current.Revision != 1 || current.LaneID != receipt.LaneID {
+			return errors.New("lane input staging identity changed")
+		}
+		lane, exists := catalog.Lanes[current.LaneID]
+		if !exists {
+			return errors.New("staged lane disappeared")
+		}
+		switch lane.State {
+		case "idle", "terminal", "archived":
+		default:
+			return fmt.Errorf("staged lane cannot retire from %s", lane.State)
+		}
+		now := maxInt64(positiveUnix(e.now()), current.UpdatedAt)
+		current.State, current.Revision, current.UpdatedAt = ReceiptRetired, current.Revision+1, now
+		lane.State, lane.CapabilityHash, lane.AutoArchiveAt = "archived", "", 0
+		catalog.LaneInputs[receiptID], catalog.Lanes[lane.ID] = current, lane
+		catalog.Host.LaneRevision++
+		retired = current
+		return nil
+	})
+	return retired, err
+}
+
 func (e *LaneInputEngine) EarliestQueued(laneID string) (LaneInputReceipt, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -217,6 +491,91 @@ func (e *LaneInputEngine) MarkDispatching(receiptID, targetTurnID, attemptID str
 	})
 }
 
+// AcceptTurnAndMarkDispatching atomically creates the daemon turn targeted by
+// one queued receipt and commits its dispatch intent. There is no crash window
+// in which an accepted turn exists without the receipt that owns its input.
+func (e *LaneInputEngine) AcceptTurnAndMarkDispatching(
+	receiptID string,
+	lane Lane,
+	turn Turn,
+	attemptID string,
+) (LaneInputReceipt, error) {
+	return e.acceptTurnAndMarkDispatching(receiptID, lane, turn, attemptID, false)
+}
+
+// AcceptStagedTurnAndMarkDispatching is the same-key retry boundary for a
+// command whose first commit survived without caller acknowledgement. It is
+// the only public claim that may advance a revision-one command receipt.
+func (e *LaneInputEngine) AcceptStagedTurnAndMarkDispatching(
+	receiptID string,
+	lane Lane,
+	turn Turn,
+	attemptID string,
+) (LaneInputReceipt, error) {
+	return e.acceptTurnAndMarkDispatching(receiptID, lane, turn, attemptID, true)
+}
+
+func (e *LaneInputEngine) acceptTurnAndMarkDispatching(
+	receiptID string,
+	lane Lane,
+	turn Turn,
+	attemptID string,
+	allowStaged bool,
+) (LaneInputReceipt, error) {
+	if lane.ID == "" || turn.ID == "" || turn.LaneID != lane.ID || !validDurableOpaqueID(attemptID) {
+		return LaneInputReceipt{}, errors.New("lane input atomic dispatch intent is incomplete")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var updated LaneInputReceipt
+	err := e.mutate(func(catalog *Catalog) error {
+		receipt, ok := catalog.LaneInputs[receiptID]
+		if !ok || receipt.LaneID != lane.ID || receipt.State != ReceiptQueued {
+			return errors.New("lane input receipt is not queued for this lane")
+		}
+		staged := receipt.Revision == 1 && strings.HasPrefix(receipt.ReceiptID, LaneCommandReceiptPrefix)
+		if staged && !allowStaged {
+			return errors.New("unacknowledged staged lane input is not dispatch eligible")
+		}
+		for _, candidate := range catalog.LaneInputs {
+			if candidate.LaneID == lane.ID && candidate.State == ReceiptQueued && candidate.Sequence < receipt.Sequence {
+				return ErrLaneInputEarlierQueued
+			}
+		}
+		current, ok := catalog.Lanes[lane.ID]
+		if !ok || current.Product != lane.Product {
+			return errors.New("lane input target lane is missing or changed product")
+		}
+		if _, exists := catalog.Turns[turn.ID]; exists {
+			return errors.New("lane input target turn identity already exists")
+		}
+		switch current.State {
+		case "idle", "terminal":
+		default:
+			return fmt.Errorf("lane cannot accept queued input from state %s", current.State)
+		}
+		sequence := uint64(1)
+		for _, candidate := range catalog.Turns {
+			if candidate.LaneID == lane.ID && candidate.Sequence >= sequence {
+				sequence = candidate.Sequence + 1
+			}
+		}
+		lane.State, lane.CapabilityHash, lane.AutoArchiveAt = "idle", "", 0
+		lane.ArchiveRevision, lane.InputSequence = current.ArchiveRevision, current.InputSequence
+		turn.State, turn.Sequence = "accepted", sequence
+		now := maxInt64(positiveUnix(e.now()), maxInt64(receipt.AcceptedAt, receipt.UpdatedAt))
+		receipt.State, receipt.TargetTurnID, receipt.DispatchAttempt = ReceiptDispatching, turn.ID, attemptID
+		receipt.Revision, receipt.UpdatedAt = receipt.Revision+1, now
+		catalog.Lanes[lane.ID] = cloneLane(lane)
+		catalog.Turns[turn.ID] = turn
+		catalog.LaneInputs[receiptID] = receipt
+		catalog.Host.LaneRevision++
+		updated = receipt
+		return nil
+	})
+	return updated, err
+}
+
 // RequeueUnsupportedSteer preserves the exact receipt and ordering authority.
 func (e *LaneInputEngine) RequeueUnsupportedSteer(receiptID string) (LaneInputReceipt, error) {
 	return e.requeueDispatching(receiptID)
@@ -228,6 +587,41 @@ func (e *LaneInputEngine) RequeueUnsupportedSteer(receiptID string) (LaneInputRe
 // receipt ID and lane-local sequence.
 func (e *LaneInputEngine) RequeueProvenNotInjected(receiptID string) (LaneInputReceipt, error) {
 	return e.requeueDispatching(receiptID)
+}
+
+// RecoverAcceptedTurnAndRequeue closes the sole proven-pre-native crash window:
+// the receipt and accepted daemon turn were committed atomically, but the lane
+// never left idle and therefore no native authorization or I/O could occur.
+// The orphan accepted turn is terminalized in the same revision that restores
+// the exact receipt to its ordered queue.
+func (e *LaneInputEngine) RecoverAcceptedTurnAndRequeue(receiptID, diagnostic string) (LaneInputReceipt, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var updated LaneInputReceipt
+	err := e.mutate(func(catalog *Catalog) error {
+		receipt, ok := catalog.LaneInputs[receiptID]
+		if !ok || receipt.State != ReceiptDispatching || receipt.TargetTurnID == "" {
+			return errors.New("lane input receipt has no recoverable accepted turn")
+		}
+		lane, laneOK := catalog.Lanes[receipt.LaneID]
+		turn, turnOK := catalog.Turns[receipt.TargetTurnID]
+		if !laneOK || !turnOK || turn.LaneID != lane.ID || lane.State != "idle" || turn.State != "accepted" {
+			return errors.New("lane input accepted turn is not proven pre-native")
+		}
+		now := maxInt64(positiveUnix(e.now()), maxInt64(receipt.AcceptedAt, receipt.UpdatedAt))
+		catalog.Host.LaneRevision++
+		turn.State, turn.Outcome, turn.Diagnostic = "terminal", "interrupted", diagnostic
+		turn.CompletedAt, turn.TerminalRevision = e.now().UnixMilli(), catalog.Host.LaneRevision
+		lane.State, lane.CapabilityHash = "terminal", ""
+		receipt.State, receipt.TargetTurnID, receipt.DispatchAttempt = ReceiptQueued, "", ""
+		receipt.Revision, receipt.UpdatedAt = receipt.Revision+1, now
+		catalog.Lanes[lane.ID] = lane
+		catalog.Turns[turn.ID] = turn
+		catalog.LaneInputs[receiptID] = receipt
+		updated = receipt
+		return nil
+	})
+	return updated, err
 }
 
 func (e *LaneInputEngine) requeueDispatching(receiptID string) (LaneInputReceipt, error) {
@@ -251,6 +645,60 @@ func (e *LaneInputEngine) MarkInjected(receiptID string, acceptance NativeAccept
 		receipt.State, receipt.NativeAcceptance, receipt.AmbiguityCause = ReceiptInjected, &acceptance, ""
 		return nil
 	})
+}
+
+// MarkInjectedAndSetNativeDispatch atomically commits exact native acceptance
+// evidence and the daemon turn reattachment anchor returned by the same native
+// acknowledgement. A crash can therefore observe neither fact or both facts,
+// but never an injected receipt whose target turn cannot be reattached.
+func (e *LaneInputEngine) MarkInjectedAndSetNativeDispatch(
+	receiptID string,
+	acceptance NativeAcceptanceRef,
+) (LaneInputReceipt, error) {
+	if strings.TrimSpace(acceptance.NativeSessionID) == "" ||
+		strings.TrimSpace(acceptance.NativeMessageID) == "" || acceptance.AcceptedAt <= 0 {
+		return LaneInputReceipt{}, errors.New("exact native acceptance is incomplete")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var updated LaneInputReceipt
+	alreadyExact := false
+	err := e.mutate(func(catalog *Catalog) error {
+		receipt, ok := catalog.LaneInputs[receiptID]
+		if !ok || receipt.TargetTurnID == "" {
+			return errors.New("lane input receipt has no dispatching target")
+		}
+		turn, ok := catalog.Turns[receipt.TargetTurnID]
+		if !ok || turn.LaneID != receipt.LaneID {
+			return errors.New("lane input target turn is missing or changed lane")
+		}
+		if receipt.State == ReceiptInjected && receipt.NativeAcceptance != nil &&
+			receipt.NativeAcceptance.NativeSessionID == acceptance.NativeSessionID &&
+			receipt.NativeAcceptance.NativeMessageID == acceptance.NativeMessageID &&
+			turn.NativeDispatchID == acceptance.NativeMessageID {
+			updated, alreadyExact = receipt, true
+			return errLaneInputAlreadyExact
+		}
+		if receipt.State != ReceiptDispatching {
+			return errors.New("lane input receipt has no dispatching target")
+		}
+		if turn.NativeDispatchID != "" && turn.NativeDispatchID != acceptance.NativeMessageID {
+			return errors.New("lane input target turn native identity changed")
+		}
+		now := maxInt64(positiveUnix(e.now()), maxInt64(receipt.UpdatedAt, acceptance.AcceptedAt))
+		receipt.State, receipt.NativeAcceptance, receipt.AmbiguityCause = ReceiptInjected, &acceptance, ""
+		receipt.Revision, receipt.UpdatedAt = receipt.Revision+1, now
+		turn.State, turn.NativeDispatchID = "dispatched", acceptance.NativeMessageID
+		catalog.LaneInputs[receiptID] = receipt
+		catalog.Turns[turn.ID] = turn
+		catalog.Host.LaneRevision++
+		updated = receipt
+		return nil
+	})
+	if errors.Is(err, errLaneInputAlreadyExact) && alreadyExact {
+		return updated, nil
+	}
+	return updated, err
 }
 
 func (e *LaneInputEngine) MarkAmbiguous(receiptID string, category AmbiguityCategory) (LaneInputReceipt, error) {

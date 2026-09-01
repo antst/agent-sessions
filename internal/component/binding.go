@@ -32,13 +32,33 @@ type binding struct {
 	maxOutstanding    int
 	inboundDigests    map[uint64][sha256.Size]byte
 	pendingToolCalls  map[string][sha256.Size]byte
-	pendingDeliveries map[string]struct{}
-	completedDelivery map[string][sha256.Size]byte
-	completedOrder    []string
+	deliveries        *deliveryTracker
 	lastHeartbeat     time.Time
 	heartbeatInterval time.Duration
 	heartbeatGrace    int
 	closed            bool
+}
+
+// deliveryTracker is shared only by successive, re-attested bindings for the
+// same attachment in one daemon generation. It preserves bounded delivery
+// admission across a transient stream loss without becoming reconnect
+// authority.
+type deliveryTracker struct {
+	mu             sync.Mutex
+	maxOutstanding int
+	replayWindow   uint64
+	pending        map[string]struct{}
+	completed      map[string][sha256.Size]byte
+	completedOrder []string
+}
+
+func newDeliveryTracker(maxOutstanding int, replayWindow uint64) *deliveryTracker {
+	return &deliveryTracker{
+		maxOutstanding: maxOutstanding,
+		replayWindow:   replayWindow,
+		pending:        make(map[string]struct{}),
+		completed:      make(map[string][sha256.Size]byte),
+	}
 }
 
 func (b *binding) snapshot() BindingView {
@@ -98,29 +118,103 @@ func (b *binding) trackOperation(frame Frame) (bool, error) {
 			return false, &ProtocolError{Category: CategoryProtocol, Detail: "tool cancel does not name an outstanding call"}
 		}
 	case TypeDeliveryAccept, TypeDeliveryReject:
-		deliveryID, err := deliveryOperationID(frame)
-		if err != nil {
-			return false, err
-		}
-		digest := sha256.Sum256(frame.Payload)
-		if _, exists := b.pendingDeliveries[deliveryID]; !exists {
-			if completed, ok := b.completedDelivery[deliveryID]; ok {
-				if completed == digest {
-					return true, nil
-				}
-				return false, &ProtocolError{Category: CategoryReplay, Detail: "delivery result conflicts with prior native evidence"}
-			}
-			return false, &ProtocolError{Category: CategoryProtocol, Detail: "delivery result does not name an outstanding delivery"}
-		}
-		delete(b.pendingDeliveries, deliveryID)
-		b.completedDelivery[deliveryID] = digest
-		b.completedOrder = append(b.completedOrder, deliveryID)
-		if len(b.completedOrder) > int(b.replayWindow) {
-			delete(b.completedDelivery, b.completedOrder[0])
-			b.completedOrder = b.completedOrder[1:]
-		}
+		return b.deliveries.track(frame)
 	}
 	return false, nil
+}
+
+// rollbackOperation restores only the binding-local pre-admission mutation
+// made by trackOperation. Durable handler state is authoritative and is not
+// modified here.
+func (b *binding) rollbackOperation(frame Frame) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch frame.Type {
+	case TypeToolCall:
+		var call ToolCall
+		if err := frame.PayloadInto(&call); err != nil {
+			return
+		}
+		digest := sha256.Sum256(frame.Payload)
+		if current, exists := b.pendingToolCalls[call.CallID]; exists && current == digest {
+			delete(b.pendingToolCalls, call.CallID)
+		}
+	case TypeDeliveryAccept, TypeDeliveryReject:
+		b.deliveries.rollback(frame)
+	}
+}
+
+func (d *deliveryTracker) track(frame Frame) (bool, error) {
+	deliveryID, err := deliveryOperationID(frame)
+	if err != nil {
+		return false, err
+	}
+	digest := sha256.Sum256(frame.Payload)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, exists := d.pending[deliveryID]; !exists {
+		if completed, ok := d.completed[deliveryID]; ok {
+			if completed == digest {
+				return true, nil
+			}
+			return false, &ProtocolError{Category: CategoryReplay, Detail: "delivery result conflicts with prior native evidence"}
+		}
+		return false, &ProtocolError{Category: CategoryProtocol, Detail: "delivery result does not name an outstanding delivery"}
+	}
+	delete(d.pending, deliveryID)
+	d.completed[deliveryID] = digest
+	d.completedOrder = append(d.completedOrder, deliveryID)
+	if len(d.completedOrder) > int(d.replayWindow) {
+		delete(d.completed, d.completedOrder[0])
+		d.completedOrder = d.completedOrder[1:]
+	}
+	return false, nil
+}
+
+func (d *deliveryTracker) rollback(frame Frame) {
+	deliveryID, err := deliveryOperationID(frame)
+	if err != nil {
+		return
+	}
+	digest := sha256.Sum256(frame.Payload)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if completed, exists := d.completed[deliveryID]; !exists || completed != digest {
+		return
+	}
+	delete(d.completed, deliveryID)
+	d.pending[deliveryID] = struct{}{}
+	for index := len(d.completedOrder) - 1; index >= 0; index-- {
+		if d.completedOrder[index] == deliveryID {
+			d.completedOrder = append(d.completedOrder[:index], d.completedOrder[index+1:]...)
+			break
+		}
+	}
+}
+
+func (d *deliveryTracker) reserve(deliveryID string) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, exists := d.pending[deliveryID]; exists {
+		return false, nil
+	}
+	if len(d.pending) >= d.maxOutstanding {
+		return false, &ProtocolError{Category: CategoryTooManyOutstanding, Detail: "too many deliveries are outstanding"}
+	}
+	d.pending[deliveryID] = struct{}{}
+	return true, nil
+}
+
+func (d *deliveryTracker) release(deliveryID string) {
+	d.mu.Lock()
+	delete(d.pending, deliveryID)
+	d.mu.Unlock()
+}
+
+func (d *deliveryTracker) hasState() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.pending) > 0 || len(d.completed) > 0
 }
 
 func deliveryOperationID(frame Frame) (string, error) {
@@ -145,14 +239,17 @@ func (b *binding) send(frameType FrameType, id string, payload any) error {
 		return errors.New("component binding is closed")
 	}
 	deliveryID := ""
+	deliveryReserved := false
 	toolResultID := ""
+	var err error
 	if frameType == TypeDeliveryPresent {
 		value, ok := payload.(DeliveryPresent)
 		if !ok || !validIdentifier(value.DeliveryID) {
 			return errors.New("delivery.present requires a typed delivery payload")
 		}
-		if _, exists := b.pendingDeliveries[value.DeliveryID]; !exists && len(b.pendingDeliveries) >= b.maxOutstanding {
-			return &ProtocolError{Category: CategoryTooManyOutstanding, Detail: "too many deliveries are outstanding"}
+		deliveryReserved, err = b.deliveries.reserve(value.DeliveryID)
+		if err != nil {
+			return err
 		}
 		deliveryID = value.DeliveryID
 	}
@@ -170,18 +267,24 @@ func (b *binding) send(frameType FrameType, id string, payload any) error {
 	frame, err := NewFrame(frameType, id, b.view.LastOutboundSeq, payload)
 	if err != nil {
 		b.view.LastOutboundSeq--
+		if deliveryReserved {
+			b.deliveries.release(deliveryID)
+		}
 		return err
 	}
 	body, err := EncodeFrame(frame)
 	if err != nil {
 		b.view.LastOutboundSeq--
+		if deliveryReserved {
+			b.deliveries.release(deliveryID)
+		}
 		return err
 	}
 	if err := b.connection.WriteFrame(body); err != nil {
+		if deliveryReserved {
+			b.deliveries.release(deliveryID)
+		}
 		return err
-	}
-	if deliveryID != "" {
-		b.pendingDeliveries[deliveryID] = struct{}{}
 	}
 	if toolResultID != "" {
 		delete(b.pendingToolCalls, toolResultID)

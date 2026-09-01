@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
@@ -206,7 +207,9 @@ func Listen(path string, limits Limits) (*Listener, error) {
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
-	if err := socketpath.Validate(path); err != nil {
+	var err error
+	path, err = noFollowSocketPath(path)
+	if err != nil {
 		return nil, err
 	}
 	if err := validatePrivateParent(filepath.Dir(path)); err != nil {
@@ -257,7 +260,9 @@ func Dial(path string, limits Limits) (*Conn, error) {
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
-	if err := socketpath.Validate(path); err != nil {
+	var err error
+	path, err = noFollowSocketPath(path)
+	if err != nil {
 		return nil, err
 	}
 	if err := validatePrivateParent(filepath.Dir(path)); err != nil {
@@ -289,6 +294,20 @@ func validatePrivateParent(parent string) error {
 		return errors.New("local socket parent must be user-owned mode 0700")
 	}
 	return nil
+}
+
+func noFollowSocketPath(path string) (string, error) {
+	if err := socketpath.Validate(path); err != nil {
+		return "", err
+	}
+	canonical, err := pathidentity.FuturePath(path)
+	if err != nil {
+		return "", fmt.Errorf("validate no-follow local socket path: %w", err)
+	}
+	if err := socketpath.Validate(canonical); err != nil {
+		return "", err
+	}
+	return canonical, nil
 }
 
 func fileUID(info os.FileInfo) int {

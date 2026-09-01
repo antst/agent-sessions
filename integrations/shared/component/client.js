@@ -15,6 +15,8 @@ const ENV = Object.freeze({
   componentVersion: "AGENT_SESSIONS_COMPONENT_VERSION",
 });
 
+const NON_JOURNALED_TYPES = new Set(["bootstrap", "reconnect", "heartbeat", "heartbeat.ack", "reject"]);
+
 class InactiveError extends Error {
   constructor(reason) {
     super(`Agent Sessions component is inactive: ${reason}`);
@@ -35,6 +37,7 @@ class ComponentClient extends EventEmitter {
       throw new Error("component client limits cannot widen protocol defaults");
     }
     this.maxQueue = boundedOption(options.maxQueue, 128, 1, 4096, "maxQueue");
+    this.maxJournal = boundedOption(options.maxJournal, this.maxQueue, 1, this.maxQueue, "maxJournal");
     this.maxOutstanding = boundedOption(options.maxOutstanding, 128, 1, 4096, "maxOutstanding");
     this.heartbeatGrace = boundedOption(options.heartbeatGrace, 3, 1, 10, "heartbeatGrace");
     this.reconnectMinMs = boundedOption(options.reconnectMinMs, 50, 1, 60000, "reconnectMinMs");
@@ -67,6 +70,10 @@ class ComponentClient extends EventEmitter {
     this.inboundReplay = new Map();
     this.lastReceivedSeq = 0;
     this.queue = [];
+    this.outboundJournal = new Map();
+    this.journalOrder = 0;
+    this.connectionEpoch = 0;
+    this.lastOutboundAckSeq = 0;
     this.pendingTools = new Map();
     this.heartbeatTimer = null;
     this.lastHeartbeatAckAt = 0;
@@ -91,13 +98,35 @@ class ComponentClient extends EventEmitter {
 
   send(type, id, payload) {
     if (!this.active || this.stopping) return false;
-    const operation = { type, id, payload };
-    if (this.ready && !this.wireBlocked) {
+    const operation = snapshotOperation(type, id, payload);
+    encodeFrame(makeFrame(operation.type, operation.id, 1, operation.payload), this.limits);
+    if (NON_JOURNALED_TYPES.has(type)) {
+      if (!this.ready || this.wireBlocked) return false;
       this._writeOperation(operation);
       return true;
     }
-    if (this.queue.length >= this.maxQueue) throw new Error("component outbound queue is full");
-    this.queue.push(operation);
+    const fingerprint = JSON.stringify({ type: operation.type, payload: operation.payload });
+    const existing = this.outboundJournal.get(id);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) throw new Error("component operation id conflicts with its outbound journal");
+      return true;
+    }
+    if (this.outboundJournal.size >= this.maxJournal) throw new Error("component outbound journal is full");
+    const entry = {
+      ...operation,
+      fingerprint,
+      order: ++this.journalOrder,
+      generation: this.ready ? this.daemonGeneration : 0,
+      epoch: 0,
+      sentSeq: 0,
+      queued: false,
+    };
+    this.outboundJournal.set(id, entry);
+    if (this.ready && !this.wireBlocked) {
+      this._tryWriteJournalEntry(entry);
+      return true;
+    }
+    this._enqueueJournal(entry);
     return true;
   }
 
@@ -112,7 +141,7 @@ class ComponentClient extends EventEmitter {
       rejectCall = reject;
     });
     const operationFrame = { type: "tool.call", id: callID, payload: { call_id: callID, operation, arguments: argumentsValue ?? {} } };
-    this.pendingTools.set(callID, { resolve: resolveCall, reject: rejectCall, operation: operationFrame, sent: false });
+    this.pendingTools.set(callID, { resolve: resolveCall, reject: rejectCall });
     try {
       this.send(operationFrame.type, operationFrame.id, operationFrame.payload);
     } catch (error) {
@@ -137,6 +166,7 @@ class ComponentClient extends EventEmitter {
     for (const pending of this.pendingTools.values()) pending.reject(error);
     this.pendingTools.clear();
     this.queue.length = 0;
+    this.outboundJournal.clear();
   }
 
   _open() {
@@ -153,9 +183,11 @@ class ComponentClient extends EventEmitter {
     }
     this.socket = socket;
     this.decoder = new FrameDecoder(this.limits);
+    this.connectionEpoch += 1;
     this.outboundSeq = 0;
     this.inboundSeq = 0;
     this.inboundReplay.clear();
+    this.lastOutboundAckSeq = 0;
     this.wireBlocked = false;
     socket.once("connect", () => this._onConnect(socket));
     socket.on("data", (chunk) => this._onData(socket, chunk));
@@ -244,6 +276,10 @@ class ComponentClient extends EventEmitter {
         this.socket.destroy();
         return;
       }
+      const priorGeneration = this.priorGeneration;
+      const reconnecting = this.everReady;
+      const sameGeneration = reconnecting && frame.payload.daemon_generation === priorGeneration;
+      if (reconnecting && !sameGeneration) this._dropGenerationJournal();
       this.bindingID = frame.payload.binding_id;
       this.daemonGeneration = frame.payload.daemon_generation;
       this.priorBindingID = this.bindingID;
@@ -257,6 +293,7 @@ class ComponentClient extends EventEmitter {
       this.limits.maxStringBytes = Math.min(this.limits.maxStringBytes, this.limits.maxFrameBytes);
       this.decoder.limits.maxFrameBytes = this.limits.maxFrameBytes;
       this.decoder.limits.maxStringBytes = this.limits.maxStringBytes;
+      this._prepareJournalForReady();
       this._startHeartbeat(frame.payload.heartbeat_interval_ms);
       this._flush();
       if (this.resolveStart) {
@@ -267,6 +304,7 @@ class ComponentClient extends EventEmitter {
       return;
     }
     if (frame.type === "tool.result") {
+      this._dropJournal(frame.payload?.call_id);
       const pending = this.pendingTools.get(frame.payload?.call_id);
       if (pending) {
         this.pendingTools.delete(frame.payload.call_id);
@@ -278,11 +316,28 @@ class ComponentClient extends EventEmitter {
         }
       }
     } else if (frame.type === "heartbeat.ack") {
-      if (frame.payload?.binding_id === this.bindingID) this.lastHeartbeatAckAt = Date.now();
+      if (frame.payload?.binding_id === this.bindingID) {
+        const acknowledged = frame.payload.last_received_seq;
+        if (Number.isSafeInteger(acknowledged) && acknowledged >= this.lastOutboundAckSeq && acknowledged <= this.outboundSeq) {
+          this.lastOutboundAckSeq = acknowledged;
+          this.lastHeartbeatAckAt = Date.now();
+          this._acknowledgeJournal(acknowledged);
+        }
+      }
     } else if (frame.type === "generation.retire") {
       if (frame.payload?.binding_id === this.bindingID && frame.payload?.generation === this.daemonGeneration) this.socket.destroy();
     } else if (frame.type === "reject") {
-      this.emit("reject", { ...frame.payload, detail: redact(frame.payload?.detail ?? "") });
+      const operationID = frame.payload?.operation_id;
+      const detail = redact(frame.payload?.detail ?? "");
+      this._dropJournal(operationID);
+      const pending = this.pendingTools.get(operationID);
+      if (pending) {
+        this.pendingTools.delete(operationID);
+        const error = new Error(detail || frame.payload?.category || "component operation rejected");
+        error.category = frame.payload?.category ?? "protocol";
+        pending.reject(error);
+      }
+      this.emit("reject", { ...frame.payload, detail });
     }
     this.emit("frame", frame);
     this.emit(frame.type, frame.payload);
@@ -298,10 +353,15 @@ class ComponentClient extends EventEmitter {
         this.socket?.destroy();
         return;
       }
-      this._writeOperation({ type: "heartbeat", id: this._nextOperationID("heartbeat"), payload: {
-        binding_id: this.bindingID,
-        last_received_seq: this.lastReceivedSeq,
-      } });
+      try {
+        this._writeOperation({ type: "heartbeat", id: this._nextOperationID("heartbeat"), payload: {
+          binding_id: this.bindingID,
+          last_received_seq: this.lastReceivedSeq,
+        } });
+      } catch (error) {
+        this.emit("diagnostic", redact(error.message, this.bootstrapValue));
+        this.socket?.destroy();
+      }
     }, intervalMs);
     this.heartbeatTimer.unref?.();
   }
@@ -312,14 +372,16 @@ class ComponentClient extends EventEmitter {
     const frame = makeFrame(operation.type, operation.id, this.outboundSeq, operation.payload);
     const wire = encodeFrame(frame, this.limits);
     if (!this.socket.write(wire)) this.wireBlocked = true;
-    if (operation.type === "tool.call") {
-      const pending = this.pendingTools.get(operation.payload.call_id);
-      if (pending) pending.sent = true;
-    }
+    return this.outboundSeq;
   }
 
   _flush() {
-    while (this.ready && !this.wireBlocked && this.queue.length > 0) this._writeOperation(this.queue.shift());
+    while (this.ready && !this.wireBlocked && this.queue.length > 0) {
+      const entry = this.queue.shift();
+      entry.queued = false;
+      if (this.outboundJournal.get(entry.id) !== entry) continue;
+      if (!this._tryWriteJournalEntry(entry)) break;
+    }
   }
 
   _onClose(socket) {
@@ -329,17 +391,84 @@ class ComponentClient extends EventEmitter {
     this.ready = false;
     clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
-    for (const pending of this.pendingTools.values()) {
-      if (!pending.sent) continue;
-      if (this.queue.length >= this.maxQueue) {
-        pending.reject(new Error("component outbound queue is full during reconnect"));
-        this.pendingTools.delete(pending.operation.payload.call_id);
-        continue;
-      }
-      pending.sent = false;
-      this.queue.unshift(pending.operation);
-    }
+    if (!this.stopping) this._prepareJournalForReconnect();
     if (!this.stopping) this._scheduleReconnect();
+  }
+
+  _writeJournalEntry(entry) {
+    const operation = this._operationForCurrentBinding(entry);
+    entry.sentSeq = this._writeOperation(operation);
+    entry.epoch = this.connectionEpoch;
+    entry.generation = this.daemonGeneration;
+  }
+
+  _tryWriteJournalEntry(entry) {
+    try {
+      this._writeJournalEntry(entry);
+      return true;
+    } catch (error) {
+      entry.sentSeq = 0;
+      entry.epoch = 0;
+      this.emit("diagnostic", redact(error.message, this.bootstrapValue));
+      this.socket?.destroy();
+      return false;
+    }
+  }
+
+  _operationForCurrentBinding(entry) {
+    if (entry.type !== "session.announce" && entry.type !== "session.rebind") return entry;
+    return { ...entry, payload: { ...entry.payload, binding_id: this.bindingID } };
+  }
+
+  _enqueueJournal(entry) {
+    if (entry.queued) return;
+    if (this.queue.length >= this.maxQueue) throw new Error("component outbound queue is full");
+    entry.queued = true;
+    this.queue.push(entry);
+  }
+
+  _prepareJournalForReconnect() {
+    this.queue.length = 0;
+    const entries = [...this.outboundJournal.values()].sort((left, right) => left.order - right.order);
+    for (const entry of entries) {
+      entry.sentSeq = 0;
+      entry.epoch = 0;
+      entry.queued = false;
+      this._enqueueJournal(entry);
+    }
+  }
+
+  _prepareJournalForReady() {
+    for (const entry of this.outboundJournal.values()) {
+      entry.generation = this.daemonGeneration;
+    }
+    this._prepareJournalForReconnect();
+  }
+
+  _acknowledgeJournal(sequence) {
+    for (const entry of [...this.outboundJournal.values()]) {
+      if (entry.epoch !== this.connectionEpoch || entry.sentSeq === 0 || entry.sentSeq > sequence) continue;
+      if (entry.type === "tool.call") continue;
+      this._dropJournal(entry.id);
+    }
+  }
+
+  _dropJournal(operationID) {
+    if (typeof operationID !== "string" || operationID === "") return;
+    const entry = this.outboundJournal.get(operationID);
+    if (!entry) return;
+    this.outboundJournal.delete(operationID);
+    if (entry.queued) this.queue = this.queue.filter((candidate) => candidate !== entry);
+    entry.queued = false;
+  }
+
+  _dropGenerationJournal() {
+    const error = new Error("component daemon generation changed before operation completion");
+    error.category = "generation-changed";
+    for (const pending of this.pendingTools.values()) pending.reject(error);
+    this.pendingTools.clear();
+    this.outboundJournal.clear();
+    this.queue.length = 0;
   }
 
   _scheduleReconnect() {
@@ -386,6 +515,17 @@ function boundedOption(value, fallback, minimum, maximum, name) {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < minimum || result > maximum) throw new Error(`${name} is outside its fixed bound`);
   return result;
+}
+
+function snapshotOperation(type, id, payload) {
+  let encoded;
+  try {
+    encoded = JSON.stringify(payload);
+  } catch (error) {
+    throw new Error(`component operation payload is not JSON: ${redact(error.message)}`);
+  }
+  if (encoded === undefined) throw new Error("component operation payload is not JSON");
+  return { type, id, payload: JSON.parse(encoded) };
 }
 
 function createComponentClient(options) {

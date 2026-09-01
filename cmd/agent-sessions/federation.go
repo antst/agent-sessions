@@ -38,7 +38,7 @@ func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemon
 		Snapshot: func(_ context.Context) ([]federationpkg.Peer, error) {
 			return c.federationSnapshot(runtime, hostID, hostName)
 		},
-		Deliver: func(ctx context.Context, source, target federationpkg.Peer, frame federationpkg.AgentFrame) error {
+		DeliverData: func(ctx context.Context, source, target federationpkg.Peer, frame federationpkg.AgentFrame) ([]byte, error) {
 			return c.deliverFederated(ctx, runtime, source, target, frame)
 		},
 		RunLane: func(ctx context.Context, request federationpkg.RemoteLaneRequest) (federationpkg.RemoteLaneResult, error) {
@@ -71,6 +71,11 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return nil, err
+	}
+	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	peers := make([]federationpkg.Peer, 0, len(attachments))
 	for _, attachment := range attachments {
 		groups, groupErr := c.attachmentVisibilityGroups(runtime, attachment)
@@ -90,7 +95,8 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 	c.mu.Lock()
 	lanes := make([]laneActor, 0, len(c.lanes))
 	for _, actor := range c.lanes {
-		if actor.state == "archived" || actor.state == "retiring" {
+		durableState := snapshot.Catalog.Lanes[actor.id].State
+		if staged[actor.id] || durableState == "archived" || durableState == "retiring" || durableState == "cleanup-debt" {
 			continue
 		}
 		lanes = append(lanes, *actor)
@@ -180,9 +186,18 @@ func (c *hostCoordinator) localTargetByFederationID(runtime *daemonpkg.Runtime, 
 	} else if ok {
 		return localPeerTarget{attachment: &attachment}, nil
 	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		return localPeerTarget{}, err
+	}
+	durableState := snapshot.Catalog.Lanes[sessionID].State
+	if stagedUnacknowledgedLaneInputs(snapshot.Catalog)[sessionID] || durableState == "archived" ||
+		durableState == "retiring" || durableState == "cleanup-debt" {
+		return localPeerTarget{}, errors.New("federated target is no longer local and live")
+	}
 	c.mu.Lock()
 	actor := c.lanes[sessionID]
-	if actor == nil || actor.state == "archived" || actor.state == "retiring" {
+	if actor == nil || actor.state == "archived" || actor.state == "retiring" || actor.state == "cleanup-debt" {
 		c.mu.Unlock()
 		return localPeerTarget{}, errors.New("federated target is no longer local and live")
 	}
@@ -195,16 +210,17 @@ func (c *hostCoordinator) deliverFederated(
 	runtime *daemonpkg.Runtime,
 	source, target federationpkg.Peer,
 	frame federationpkg.AgentFrame,
-) error {
+) ([]byte, error) {
 	local, err := c.localTargetByFederationID(runtime, target.SessionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request := frame
 	request.Type = "send"
 	request.Source = nil
 	request.SourceSessionID = ""
 	request.Targets = []string{target.ID}
+	var receiptData []byte
 	engine, err := daemonpkg.NewDeliveryEngine(runtime.State(), func(
 		callCtx context.Context,
 		_, admittedTarget federationpkg.Peer,
@@ -232,16 +248,55 @@ func (c *hostCoordinator) deliverFederated(
 		if local.lane == nil {
 			return errors.New("federated target disappeared")
 		}
-		return c.deliverLaneMessage(runtime, local.lane, message)
+		receipt, err := c.deliverLaneMessageWithID(runtime, local.lane, deliveryID, message)
+		if err == nil {
+			receiptData, err = json.Marshal(federatedLaneReceiptAck{ReceiptID: receipt.ReceiptID, ReceiptSequence: receipt.Sequence})
+		}
+		return err
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	result, err := engine.Route(ctx, request, source, []federationpkg.Peer{target})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return requireAcceptedDeliveries(result.Deliveries)
+	if err := requireAcceptedDeliveries(result.Deliveries); err != nil {
+		return nil, err
+	}
+	// An already-acknowledged delivery skips the presenter callback. Re-project
+	// its exact destination receipt so idempotent remote retries receive the
+	// same receipt identity and sequence as the first acknowledgement.
+	if len(receiptData) == 0 {
+		if snapshot, readErr := runtime.State().Read(); readErr == nil {
+			receiptData = projectFederatedDestinationReceipt(result.Deliveries, snapshot, local.lane)
+		}
+	}
+	return receiptData, nil
+}
+
+type federatedLaneReceiptAck struct {
+	ReceiptID       string `json:"receipt_id"`
+	ReceiptSequence uint64 `json:"receipt_sequence"`
+}
+
+func projectFederatedDestinationReceipt(
+	deliveries []federationpkg.DeliveryResult,
+	snapshot daemonpkg.StateSnapshot,
+	lane *laneActor,
+) []byte {
+	if lane == nil || len(deliveries) != 1 || deliveries[0].Status != "accepted" {
+		return nil
+	}
+	receipt, ok := snapshot.Catalog.LaneInputs[deliveries[0].DeliveryID]
+	if !ok || receipt.LaneID != lane.id || receipt.ReceiptID == "" || receipt.Sequence == 0 {
+		return nil
+	}
+	data, err := json.Marshal(federatedLaneReceiptAck{ReceiptID: receipt.ReceiptID, ReceiptSequence: receipt.Sequence})
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func (c *hostCoordinator) handleRemoteLaneCommand(
@@ -249,6 +304,7 @@ func (c *hostCoordinator) handleRemoteLaneCommand(
 	runtime *daemonpkg.Runtime,
 	parent daemonpkg.ManagedAttachment,
 	envelope laneCommandEnvelope,
+	inputID string,
 ) (json.RawMessage, error) {
 	c.mu.Lock()
 	host := c.federation
@@ -273,7 +329,7 @@ func (c *hostCoordinator) handleRemoteLaneCommand(
 			PermissionMode: source.PermissionMode,
 		},
 		TargetHostID: strings.TrimSpace(envelope.Host), Product: envelope.Product, Capability: capability,
-		Arguments: append([]string(nil), envelope.Arguments...), Input: []byte(envelope.Input),
+		Arguments: append([]string(nil), envelope.Arguments...), Input: []byte(envelope.Input), IdempotencyKey: inputID,
 	})
 	if err != nil {
 		return nil, err
@@ -316,7 +372,7 @@ func (c *hostCoordinator) runFederatedLane(
 		Cwd: destinationCwd, Groups: append([]string(nil), request.Parent.Groups...),
 		PermissionMode: request.Parent.PermissionMode, State: "attached",
 	}
-	raw, err := c.dispatchLaneCommand(ctx, runtime, parent, request.Product, parsed, string(request.Input))
+	raw, err := c.dispatchLaneCommand(ctx, runtime, parent, request.Product, parsed, string(request.Input), laneCommandInputID(daemonpkg.ControlRequest{IdempotencyKey: request.IdempotencyKey}))
 	if err != nil {
 		return federationpkg.RemoteLaneResult{}, err
 	}
