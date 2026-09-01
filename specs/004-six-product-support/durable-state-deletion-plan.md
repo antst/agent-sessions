@@ -213,7 +213,7 @@
 - `cmd/agent-sessions/lane_notice.go` stored turn/result notices → live product response → delete durable notice ordering and emit only the current synchronous result.
 - `cmd/agent-sessions/native_session_binding_arch_test.go` → removed daemon native-session writers → delete the tripwire with the fields it guards.
 - Admin/status durable readiness and counts → live product probes/connections → delete state-derived counts/readiness and never expose candidate-row contents or counts as existing lanes.
-- Federation durable delivery metadata and receipt `Message.Data` → live destination carrier → delete receipt metadata/requery paths while retaining live protocol framing, roster bounds, and synchronous delivery result.
+- Federation durable delivery metadata and receipt `Message.Data` → live destination carrier → delete receipt metadata/requery paths; retain framing, hello/version, complete live roster exchange, reconnect-on-drop, and an in-memory resend set for unacknowledged daemon↔hub frames.
 - `specs/004-six-product-support/contracts/lane-input-ledger.md` → product owns acceptance/queue/history → delete the contract.
 - Durable-record sections in `specs/004-six-product-support/contracts/runtime-product.md` → live product/OS authority → delete attachment/receipt/lease/binding/session persistence requirements.
 - Durable-replay sections in `specs/004-six-product-support/contracts/component-protocol.md` → current live component connection → delete cross-restart binding/session authority and retained operation state.
@@ -223,3 +223,10 @@
 - Ledger/component/state evidence files under `specs/004-six-product-support/evidence` → deleted machinery is not a product capability → delete the evidence ceremony instead of preserving historical acceptance claims.
 - `docs/designs/PERSISTENCE-AND-STATE.md` allowances beyond the approved lane-candidate row → owner-issued ceiling → rewrite it to zero peer/session/message/turn persistence and the candidate-only lane lookup rule.
 - Acceptance tests that credit mocked durable product state → real product is authoritative → delete those credits and require live product confirmation for list, name resolution, resume, unarchive, message acceptance, and turn acceptance.
+- Caller acknowledgment persistence/requery → product's synchronous acknowledgment → delete durable acknowledgment state and retain only a process-local pending-ack map until the caller reconnects.
+- `internal/launchhandoff` → deleted launch secrets and defensive handoff protocol → delete the package and use `exec.Command` with explicit args and env.
+- `internal/localtransport` → deleted peer-identity and ancestry trust boundary → delete ancestor-chain/peer-identity machinery and use plain `net.Listen("unix")`.
+- `internal/component`, `internal/componentruntime`, and the JavaScript client journal/replay → live component socket connection → delete broker fencing, replay windows, operation journals, heartbeat acks, and generation retirement; use plain JSON-RPC and treat disconnect as gone.
+- `internal/structuredprocess` → product process pipes and exit → delete frame-retention/evidence caches and use spawn, pipes, and wait.
+- `internal/productserver` → product HTTP/SSE endpoints → delete cleanup debt, auth/redirect bounds, and SSE checkpoint state; retain only a plain HTTP/SSE client.
+- `internal/federation` snapshot admission and generation machinery → one live daemon↔hub connection → delete amplification projection/rejection and pending-generation promotion; keep framing, hello/version, reconnect, and an in-memory resend set for unacknowledged frames.
