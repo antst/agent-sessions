@@ -26,6 +26,7 @@ import (
 	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/fileutil"
 	"github.com/antst/agent-sessions/internal/sessionkey"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
@@ -1132,7 +1133,7 @@ func sanitizeName(value string) string {
 
 // NormalizePeerName applies the stable public peer-address normalization used
 // by launchers and structured rename_session calls.
-func NormalizePeerName(value string) string { return sanitizeName(value) }
+func NormalizePeerName(value string) string { return sessiontools.NormalizePeerName(value) }
 
 func sessionKey(id string) string {
 	return sessionkey.FromID(id)

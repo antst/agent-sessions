@@ -111,6 +111,7 @@ type parsedLaneCommand struct {
 	command, target, name, cwd, timeout, permission string
 	approvalPolicy, sandbox, effort, schema         string
 	groups                                          []string
+	permissionExplicit                              bool
 	inheritGroups, noInheritGroups                  bool
 	persistent, persistentSet, all, mine            bool
 	noAutoArchive, autoArchiveAfterSet              bool
@@ -248,12 +249,14 @@ func parseUnifiedLaneCommand(arguments []string) (parsedLaneCommand, error) { //
 			if err != nil {
 				return parsedLaneCommand{}, err
 			}
+			result.permissionExplicit = true
 		case "--approval-policy":
 			var err error
 			result.approvalPolicy, err = value(argument)
 			if err != nil {
 				return parsedLaneCommand{}, err
 			}
+			result.permissionExplicit = true
 		case "--sandbox":
 			var err error
 			result.sandbox, err = value(argument)
@@ -302,8 +305,10 @@ func parseUnifiedLaneCommand(arguments []string) (parsedLaneCommand, error) { //
 			return parsedLaneCommand{}, errors.New("unified daemon lanes notify their immediate parent automatically; --no-notify is not supported")
 		case "--yolo", "--always-approve", "--dangerously-bypass-approvals-and-sandbox":
 			result.permission = "bypassPermissions"
+			result.permissionExplicit = true
 		case "--no-yolo":
 			result.permission = "default"
+			result.permissionExplicit = true
 		default:
 			switch {
 			case strings.HasPrefix(argument, "-"):
@@ -368,6 +373,9 @@ func laneNativeOptionTakesValue(argument string) bool {
 func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string, wait bool) (map[string]any, error) {
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(options.name) == "" {
 		return nil, errors.New("lane start/run requires --name and non-empty input")
+	}
+	if err := validateGrokLanePermission(product, options, true); err != nil {
+		return nil, err
 	}
 	cwd := options.cwd
 	if cwd == "" {
@@ -454,6 +462,9 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string) (map[string]any, error) {
 	if strings.TrimSpace(options.target) == "" || strings.TrimSpace(input) == "" {
 		return nil, errors.New("lane resume requires one selector and non-empty input")
+	}
+	if err := validateGrokLanePermission(product, options, false); err != nil {
+		return nil, err
 	}
 	actor, err := c.resolveLaneActor(runtime, parent, product, options.target, true)
 	if err != nil {
@@ -1089,16 +1100,22 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	if err := c.markLaneRunning(runtime, actor); err != nil {
 		cancel()
 		_ = command.Wait()
+		if actor.product == "claude" {
+			c.claudeLanes.Complete(actor.id)
+		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	go func() {
-		if actor.product == "claude" {
-			defer c.claudeLanes.Complete(actor.id)
-		}
 		c.mu.Lock()
 		dispatchedTurnID, dispatchedDone := actor.turnID, actor.done
 		c.mu.Unlock()
 		err := command.Wait()
+		if actor.product == "claude" {
+			// A queued turn is dispatched synchronously by completeLaneTurn.
+			// Release the exited per-turn worker before that dispatch registers
+			// its successor, while retaining one-worker-at-a-time serialization.
+			c.claudeLanes.Complete(actor.id)
+		}
 		outcome := "completed"
 		if err != nil {
 			outcome = "failed"
@@ -1912,10 +1929,25 @@ func laneDefaultPermission(product, parent string) string {
 	if product == "claude" {
 		return "dontAsk"
 	}
-	if product == "grok" {
-		return "bypassPermissions"
-	}
 	return "default"
+}
+
+// validateGrokLanePermission prevents the generic option layer from silently
+// widening a Grok lane. A new Grok lane requires an explicit request that
+// canonicalizes to bypassPermissions; inheriting a bypass parent is not that
+// request. Resume keeps the permission recorded by a previously accepted lane,
+// but an explicitly supplied replacement must still be the supported mode.
+func validateGrokLanePermission(product string, options parsedLaneCommand, start bool) error {
+	if product != "grok" {
+		return nil
+	}
+	if options.permissionExplicit && options.permission == "bypassPermissions" {
+		return nil
+	}
+	if !start && !options.permissionExplicit {
+		return nil
+	}
+	return errors.New("grok lanes require an explicit bypassPermissions permission selection")
 }
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}

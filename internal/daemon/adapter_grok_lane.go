@@ -3,9 +3,15 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 )
+
+// ErrGrokUnsupportedPermissionMode marks a policy the Grok ACP lane cannot
+// represent without widening authority. Runtime adapters map this category to
+// productruntime.ErrUnsupportedPolicy when the registry boundary is composed.
+var ErrGrokUnsupportedPermissionMode = errors.New("grok ACP lane permission mode is unsupported")
 
 // GrokACPLaneRequest identifies one daemon-owned Grok ACP lane turn.
 type GrokACPLaneRequest struct {
@@ -39,7 +45,9 @@ func (a *GrokLaneAdapter) Run(
 	if request.LaneID == "" || strings.TrimSpace(request.Prompt) == "" || run == nil {
 		return NativeACPLaneResult{}, errors.New("grok ACP lane request is incomplete")
 	}
-	request.PermissionMode = "bypassPermissions"
+	if request.PermissionMode != "bypassPermissions" {
+		return NativeACPLaneResult{}, fmt.Errorf("%w: %q", ErrGrokUnsupportedPermissionMode, request.PermissionMode)
+	}
 	turnCtx, cancel := context.WithCancel(ctx)
 	if err := a.register(request.LaneID, cancel); err != nil {
 		cancel()

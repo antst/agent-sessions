@@ -339,6 +339,12 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   integration enables, how to install and configure it, its permission and
   sandbox differences, version requirements, failure modes, and local/cross-host
   workflows.
+- **FR-035**: Each new durable record domain MUST carry a dedicated exact
+  namespaced record-format schema (`agent-sessions.<domain>.vN`). Absent maps
+  in a legacy catalog normalize to empty maps, but every present record with a
+  missing or unknown record schema MUST fail closed and use exact-match
+  migration dispatch. Record-format schemas MUST NOT reuse semantic user
+  attributes such as `Lane.Schema`.
 
 ### Key Entities
 

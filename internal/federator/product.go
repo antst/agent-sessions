@@ -1,19 +1,20 @@
 package federator
 
-const (
-	// CapabilityCodexLane is the Codex lane host-roster feature identifier.
-	CapabilityCodexLane = "codex-lane"
-	// CapabilityClaudeLane is the Claude lane host-roster feature identifier.
-	CapabilityClaudeLane = "claude-lane"
-	// CapabilityGrokLane is the Grok lane host-roster feature identifier.
-	CapabilityGrokLane = "grok-lane"
-	// CapabilityQwenLane is the Qwen lane host-roster feature identifier.
-	CapabilityQwenLane = "qwen-lane"
+import "github.com/antst/agent-sessions/internal/productcatalog"
+
+// Compatibility names retained for existing federation callers/tests. Their
+// values are projected from the sole productcatalog inventory, not authored a
+// second time in this package.
+var (
+	CapabilityCodexLane  = mustProductCapability("codex")
+	CapabilityClaudeLane = mustProductCapability("claude")
+	CapabilityGrokLane   = mustProductCapability("grok")
+	CapabilityQwenLane   = mustProductCapability("qwen")
 )
 
-// ProductDescriptor is the authoritative product inventory used by
-// federation and projected into launcher/runtime surfaces. Product-specific
-// behavior remains behind the referenced roles and executables.
+// ProductDescriptor is the legacy federation/launcher view projected from the
+// sole data-only product catalog. It remains until consumers move to the
+// runtime registry in the central integration phase.
 type ProductDescriptor struct {
 	ID                    string
 	Label                 string
@@ -27,69 +28,35 @@ type ProductDescriptor struct {
 	interactiveResumeFlag bool
 }
 
-var productDescriptors = [...]ProductDescriptor{
-	{
-		ID: "codex", Label: "Codex", PeerExecutable: "codex-peer",
-		LaneExecutable: "codex-peer-lane", LaneRuntimeRole: "lane",
-		FederationCapability: CapabilityCodexLane,
-	},
-	{
-		ID: "claude", Label: "Claude Code", PeerExecutable: "claude-peer",
-		LaneExecutable: "claude-peer-lane", LaneRuntimeRole: "claude-lane",
-		LaneManagerRole: "claude-lane-manager", FederationCapability: CapabilityClaudeLane,
-		TranscriptNameIndex:   true,
-		interactiveResumeFlag: true,
-	},
-	{
-		ID: "grok", Label: "Grok", PeerExecutable: "grok-peer",
-		LaneExecutable: "grok-peer-lane", LaneRuntimeRole: "grok-lane",
-		LaneManagerRole: "grok-lane-manager", FederationCapability: CapabilityGrokLane,
-		DynamicPermission:     true,
-		interactiveResumeFlag: true,
-	},
-	{
-		ID: "qwen", Label: "Qwen Code", PeerExecutable: "qwen-peer",
-		LaneExecutable: "qwen-peer-lane", LaneRuntimeRole: "qwen-lane",
-		LaneManagerRole: "qwen-lane-manager", FederationCapability: CapabilityQwenLane,
-		DynamicPermission:     true,
-		interactiveResumeFlag: true,
-	},
-}
-
-// ProductDescriptors returns an isolated copy of the complete product table.
 func ProductDescriptors() []ProductDescriptor {
-	return append([]ProductDescriptor(nil), productDescriptors[:]...)
+	catalog := productcatalog.All()
+	result := make([]ProductDescriptor, 0, len(catalog))
+	for _, descriptor := range catalog {
+		result = append(result, projectProduct(descriptor))
+	}
+	return result
 }
 
-// ProductByID resolves one canonical, lower-case product identifier.
 func ProductByID(id string) (ProductDescriptor, bool) {
-	for _, descriptor := range productDescriptors {
-		if descriptor.ID == id {
-			return descriptor, true
-		}
+	descriptor, ok := productcatalog.ByID(id)
+	if !ok {
+		return ProductDescriptor{}, false
 	}
-	return ProductDescriptor{}, false
+	return projectProduct(descriptor), true
 }
 
-// ProductByCapability resolves the exact lane capability advertised by a
-// product host.
 func ProductByCapability(capability string) (ProductDescriptor, bool) {
-	for _, descriptor := range productDescriptors {
-		if descriptor.FederationCapability == capability {
-			return descriptor, true
-		}
+	descriptor, ok := productcatalog.ByLaneCapability(capability)
+	if !ok {
+		return ProductDescriptor{}, false
 	}
-	return ProductDescriptor{}, false
+	return projectProduct(descriptor), true
 }
 
-// SupportsResume reports whether the product owns the requested durable
-// session kind. All four current products support interactive and lane resume.
 func (p ProductDescriptor) SupportsResume(kind string) bool {
 	return kind == SessionKindInteractive || kind == SessionKindLane
 }
 
-// ResumeArguments returns the product-native wrapper syntax for one exact
-// managed session identity.
 func (p ProductDescriptor) ResumeArguments(kind, sessionID string) ([]string, bool) {
 	if !p.SupportsResume(kind) || sessionID == "" {
 		return nil, false
@@ -98,4 +65,23 @@ func (p ProductDescriptor) ResumeArguments(kind, sessionID string) ([]string, bo
 		return []string{"resume", sessionID}, true
 	}
 	return []string{"--resume", sessionID}, true
+}
+
+func projectProduct(descriptor productcatalog.Descriptor) ProductDescriptor {
+	return ProductDescriptor{
+		ID: descriptor.ID, Label: descriptor.Label, PeerExecutable: descriptor.PeerAlias,
+		LaneExecutable: descriptor.LaneAlias, LaneRuntimeRole: descriptor.LaneRuntimeRole,
+		LaneManagerRole: descriptor.LaneManagerRole, FederationCapability: descriptor.LaneCapability,
+		DynamicPermission:     descriptor.Has(productcatalog.CapabilityDynamicPermission),
+		TranscriptNameIndex:   descriptor.TranscriptNameIndex,
+		interactiveResumeFlag: descriptor.ResumeStyle == productcatalog.ResumeFlag,
+	}
+}
+
+func mustProductCapability(id string) string {
+	descriptor, ok := productcatalog.ByID(id)
+	if !ok || descriptor.LaneCapability == "" {
+		panic("product catalog lost baseline federation capability for " + id)
+	}
+	return descriptor.LaneCapability
 }

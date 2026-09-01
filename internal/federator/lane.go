@@ -118,8 +118,9 @@ func (a *agent) laneCapabilities() []string {
 	if !a.options.EnableRemoteLanes {
 		return nil
 	}
-	capabilities := make([]string, 0, len(productDescriptors))
-	for _, descriptor := range productDescriptors {
+	descriptors := ProductDescriptors()
+	capabilities := make([]string, 0, len(descriptors))
+	for _, descriptor := range descriptors {
 		if a.laneExecutable(descriptor.ID) != "" {
 			capabilities = append(capabilities, descriptor.FederationCapability)
 		}

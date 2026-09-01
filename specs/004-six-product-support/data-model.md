@@ -82,6 +82,7 @@ private spool.
 
 | Field | Meaning / validation |
 |---|---|
+| `RecordSchema` | Exact `agent-sessions.lane-input-receipt.v1`; a present record with a missing or unknown value fails closed |
 | `ReceiptID` | Stable unique receipt ID |
 | `LaneID` | Exact owning lane |
 | `Sequence` | Strictly increasing lane-local input order |
@@ -102,6 +103,7 @@ private spool.
 Prepared -> Queued -> Dispatching -> Injected -> Retired
                          |
                          +-> Ambiguous -> Retired
+                                      +-> Injected -> Retired (exact authoritative proof only)
 Queued -> Retired                    (lane retires before dispatch)
 ```
 
@@ -157,6 +159,7 @@ Composite key:
 
 | Field | Meaning |
 |---|---|
+| `RecordSchema` | Exact `agent-sessions.native-session-lease.v1`; a present record with a missing or unknown value fails closed |
 | `ProductID`, `ProfileIdentity`, `NativeSessionID` | Exact lease key |
 | `OwnerLaneID` | Exact daemon lane owner |
 | `Generation` | Current daemon generation |
@@ -183,6 +186,7 @@ Generation-scoped connection record used by `internal/component`.
 
 | Field | Meaning |
 |---|---|
+| `RecordSchema` | Exact `agent-sessions.component-binding.v1`; a present record with a missing or unknown value fails closed |
 | `BindingID` | Daemon-issued unique live binding |
 | `AttachmentID` | Exact managed attachment |
 | `ProcessIdentity` | PID/start/strong-start corroborated with kernel peer creds |
@@ -202,6 +206,7 @@ than one native session.
 
 | Field | Meaning |
 |---|---|
+| `RecordSchema` | Exact `agent-sessions.component-session.v1`; a present record with a missing or unknown value fails closed |
 | `BindingID` | Current component binding |
 | `AttachmentID` | Durable authority row |
 | `NativeSessionID` | Product-native session |
@@ -210,6 +215,18 @@ than one native session.
 
 Name, cwd, groups, permission, and native evidence remain authoritative on
 `ManagedAttachment`; they are not duplicated here.
+
+`AttachmentID` and `NativeSessionID` are deliberately different namespaces.
+Explicit re-attested resume may bind a fresh attachment to an existing native
+session; validation checks that durable relationship, never string equality
+between the two identifiers.
+
+These are record-format schemas, distinct from semantic user attributes such
+as `Lane.Schema`. Empty legacy catalogs normalize absent maps to empty maps;
+once a record is present, its record schema is mandatory, and exact-match
+migration dispatch fails closed on an unknown version. `NativeAcceptanceRef`
+is an embedded projection governed by the enclosing lane-input-receipt schema,
+not a separately versioned catalog domain.
 
 ## 8. Managed Attachment Extensions
 

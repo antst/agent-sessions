@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 var errConnectorGenerationRecovering = errors.New("connector attachment generation is recovering")
@@ -42,7 +42,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if err := refresher.refresh(); err != nil {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
-	relay, err := bridge.NewMCPRelay(bridge.MCPRelayConfig{
+	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
 		Product: product, Endpoint: endpoint,
 		Refresh: func(context.Context) error {
 			return refresher.refresh()
@@ -55,7 +55,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 			snapshot, readErr := state.Read()
 			return snapshot.Catalog.Host.Generation, readErr
 		},
-		Attest: func(callCtx context.Context, params json.RawMessage) (bridge.ConnectorAttestation, error) {
+		Attest: func(callCtx context.Context, params json.RawMessage) (sessiontools.ConnectorAttestation, error) {
 			return attestConnectorWithRecovery(callCtx, stateRoot, product, params, os.Getpid())
 		},
 	})
@@ -70,7 +70,7 @@ func attestConnectorWithRecovery(
 	stateRoot, product string,
 	params json.RawMessage,
 	pid int,
-) (bridge.ConnectorAttestation, error) {
+) (sessiontools.ConnectorAttestation, error) {
 	deadline := time.Now().Add(connectorRecoveryTimeout)
 	for {
 		attestation, err := attestConnectorFromState(stateRoot, product, params, pid)
@@ -83,7 +83,7 @@ func attestConnectorWithRecovery(
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return bridge.ConnectorAttestation{}, ctx.Err()
+			return sessiontools.ConnectorAttestation{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -120,24 +120,24 @@ func attestConnectorFromState(
 	stateRoot, product string,
 	params json.RawMessage,
 	pid int,
-) (bridge.ConnectorAttestation, error) {
-	caller, ancestry, err := bridge.CaptureNativeAncestry(pid, 32)
+) (sessiontools.ConnectorAttestation, error) {
+	caller, ancestry, err := sessiontools.CaptureNativeAncestry(pid, 32)
 	if err != nil {
-		return bridge.ConnectorAttestation{}, bridge.ErrConnectorInactive
+		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
 	}
 	state, err := daemonpkg.OpenState(stateRoot, 16<<20)
 	if err != nil {
-		return bridge.ConnectorAttestation{}, bridge.ErrConnectorInactive
+		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
 	}
 	snapshot, err := state.Read()
 	if err != nil {
-		return bridge.ConnectorAttestation{}, bridge.ErrConnectorInactive
+		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
 	}
 	if laneID, capability := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_SESSION_ID")), strings.TrimSpace(os.Getenv("AGENT_SESSIONS_LANE_CAPABILITY")); laneID != "" && capability != "" {
 		lane, exists := snapshot.Catalog.Lanes[laneID]
 		if exists && lane.Product == product && (lane.State == "preparing" || lane.State == "running") &&
 			lane.CapabilityHash == daemonpkg.CapabilityDigest(capability) {
-			return bridge.ConnectorAttestation{
+			return sessiontools.ConnectorAttestation{
 				AttachmentID: lane.ID, Capability: capability,
 				Evidence: daemonpkg.NativeEvidence{Process: caller, Ancestry: ancestry, ThreadID: lane.NativeSessionID},
 			}, nil
@@ -145,7 +145,7 @@ func attestConnectorFromState(
 	}
 	wantedThread := ""
 	if product == "codex" {
-		wantedThread, _ = bridge.StdioMCPThreadID(params)
+		wantedThread, _ = sessiontools.StdioMCPThreadID(params)
 	}
 	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
 	recoveringMatches := 0
@@ -172,14 +172,14 @@ func attestConnectorFromState(
 		}
 	}
 	if len(matches)+len(laneMatches) == 0 && recoveringMatches == 1 {
-		return bridge.ConnectorAttestation{}, errConnectorGenerationRecovering
+		return sessiontools.ConnectorAttestation{}, errConnectorGenerationRecovering
 	}
 	if len(matches)+len(laneMatches) != 1 {
-		return bridge.ConnectorAttestation{}, bridge.ErrConnectorInactive
+		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
 	}
 	if len(laneMatches) == 1 {
 		lane := laneMatches[0]
-		return bridge.ConnectorAttestation{
+		return sessiontools.ConnectorAttestation{
 			AttachmentID: lane.ID,
 			Evidence: daemonpkg.NativeEvidence{
 				Process: caller, Ancestry: ancestry, ThreadID: lane.NativeSessionID,
@@ -193,7 +193,7 @@ func attestConnectorFromState(
 		RegistryPath: attachment.Evidence.RegistryPath, ArtifactPath: attachment.Evidence.ArtifactPath,
 		ArtifactRevision: attachment.Evidence.ArtifactRevision,
 	}
-	return bridge.ConnectorAttestation{AttachmentID: attachment.ID, Evidence: evidence}, nil
+	return sessiontools.ConnectorAttestation{AttachmentID: attachment.ID, Evidence: evidence}, nil
 }
 
 func connectorAncestryMatches(

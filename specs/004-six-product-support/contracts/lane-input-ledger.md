@@ -81,6 +81,11 @@ next turn. It does not create another receipt or alter sequence.
 There is no generic force-replay action. Product-specific idempotent replay
 requires a reviewed capability and acceptance test.
 
+When a product-specific authoritative query proves the exact native operation,
+the durable lifecycle permits `Ambiguous -> Injected` with the exact
+`NativeAcceptanceRef`; no other automatic transition out of `Ambiguous` is
+allowed.
+
 ## 7. Existing-Four Migration
 
 Claude, Codex, Grok, and Qwen busy input must enter the same ledger. Existing

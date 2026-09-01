@@ -24,3 +24,20 @@ func TestFromArgsPreservesBoundariesAndPrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestTypedModeParsesWithoutChangingLegacyFromArgs(t *testing.T) {
+	for _, want := range []Mode{Default, BypassPermissions} {
+		got, err := Parse(string(want))
+		if err != nil || got != want || !got.Valid() {
+			t.Fatalf("Parse(%q) = %q, %v", want, got, err)
+		}
+	}
+	for _, value := range []string{"", "yolo", "bypass", "unknown"} {
+		if got, err := Parse(value); err == nil || got.Valid() {
+			t.Fatalf("Parse(%q) = %q, %v; want invalid", value, got, err)
+		}
+	}
+	if got := FromArgs([]string{"grok", "--always-approve"}); got != string(BypassPermissions) {
+		t.Fatalf("legacy FromArgs = %q", got)
+	}
+}

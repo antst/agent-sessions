@@ -40,7 +40,7 @@ func Parse(argv0 string, args []string) (Invocation, error) {
 		return Invocation{Command: "help"}, nil
 	case "version", "--version", "-version":
 		return Invocation{Command: "version"}, nil
-	case "daemon", "status", "doctor", "roster":
+	case "daemon", "status", "doctor", "roster", "catalog":
 		return Invocation{Command: command, Arguments: append([]string(nil), args[1:]...)}, nil
 	case "peer", "lane", "hook", "connector":
 		if len(args) < 2 {
@@ -75,6 +75,7 @@ Usage:
   agent-sessions status [--state-root PATH]
   agent-sessions doctor [--state-root PATH]
   agent-sessions roster [--json] [--state-root PATH]
+  agent-sessions catalog --json
   agent-sessions peer PRODUCT [ARGS...]
   agent-sessions lane PRODUCT [ARGS...]
   agent-sessions hook PRODUCT [ARGS...]

@@ -17,11 +17,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	"github.com/antst/agent-sessions/internal/clihelp"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/servicecontrol"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 var version = "dev"
@@ -32,8 +32,8 @@ var waitForServiceReady = waitForDaemonReady
 type commandRunner func(context.Context, clihelp.Invocation, io.Writer) error
 
 type commandRunners struct {
-	daemon, status, doctor, roster commandRunner
-	peer, lane, hook, connector    commandRunner
+	daemon, status, doctor, roster, catalog commandRunner
+	peer, lane, hook, connector             commandRunner
 }
 
 func main() {
@@ -61,7 +61,8 @@ func run(ctx context.Context, argv0 string, args []string, output io.Writer, run
 	}
 	runner := map[string]commandRunner{
 		"daemon": runners.daemon, "status": runners.status, "doctor": runners.doctor, "roster": runners.roster,
-		"peer": runners.peer, "lane": runners.lane, "hook": runners.hook, "connector": runners.connector,
+		"catalog": runners.catalog,
+		"peer":    runners.peer, "lane": runners.lane, "hook": runners.hook, "connector": runners.connector,
 	}[invocation.Command]
 	if runner == nil {
 		return fmt.Errorf("%s command runner is unavailable", invocation.Command)
@@ -78,7 +79,8 @@ func defaultCommandRunners() commandRunners {
 		doctor: func(ctx context.Context, invocation clihelp.Invocation, output io.Writer) error {
 			return runAdmin(ctx, invocation, output, "doctor")
 		},
-		roster: runRoster,
+		roster:  runRoster,
+		catalog: runCatalog,
 		peer: func(ctx context.Context, invocation clihelp.Invocation, output io.Writer) error {
 			if invocation.Product == "codex" {
 				return launcher.RunCodexPeerWithDaemon(ctx, invocation.Arguments, requestCodexPreparation)
@@ -108,11 +110,11 @@ func defaultCommandRunners() commandRunners {
 func runLaneWorkflow(ctx context.Context, invocation clihelp.Invocation, output io.Writer) error {
 	if len(invocation.Arguments) == 1 &&
 		(invocation.Arguments[0] == "--help" || invocation.Arguments[0] == "-h" || invocation.Arguments[0] == "help") {
-		usage, ok := bridge.LaneUsage(invocation.Product)
-		if !ok {
-			return fmt.Errorf("lane product %q is unsupported", invocation.Product)
+		usage, err := sessiontools.LaneUsage(invocation.Product)
+		if err != nil {
+			return err
 		}
-		_, err := fmt.Fprint(output, usage)
+		_, err = fmt.Fprint(output, usage)
 		return err
 	}
 	host, arguments, err := extractLaneHost(invocation.Arguments)

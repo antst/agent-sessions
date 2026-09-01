@@ -79,8 +79,62 @@ func TestParseUnifiedLaneCommandRejectsMissingValuesAndPreservesNativeArguments(
 		t.Fatal(err)
 	}
 	if got.name != "worker" || !got.inheritGroups || got.permission != "bypassPermissions" ||
-		!reflect.DeepEqual(got.native, []string{"--model", "native-model"}) {
+		!got.permissionExplicit || !reflect.DeepEqual(got.native, []string{"--model", "native-model"}) {
 		t.Fatalf("parsed command = %+v", got)
+	}
+}
+
+func TestGrokLaneStartRequiresExplicitBypassBeforeRuntimeAccess(t *testing.T) {
+	coordinator := &hostCoordinator{}
+	parent := daemonpkg.ManagedAttachment{
+		ID: "parent", Cwd: t.TempDir(), PermissionMode: "bypassPermissions",
+	}
+	for _, arguments := range [][]string{
+		{"start", "--name", "worker"},
+		{"start", "--name", "worker", "--permission-mode", "default"},
+		{"start", "--name", "worker", "--no-yolo"},
+	} {
+		parsed, err := parseUnifiedLaneCommand(arguments)
+		if err != nil {
+			t.Fatalf("parse %v: %v", arguments, err)
+		}
+		// A nil runtime is deliberate: rejection must happen before readiness,
+		// catalog mutation, adapter dispatch, or native invocation.
+		if _, err = coordinator.startLane(context.Background(), nil, parent, "grok", parsed, "prompt", false); err == nil ||
+			!strings.Contains(err.Error(), "explicit bypassPermissions") {
+			t.Fatalf("start %v error = %v", arguments, err)
+		}
+	}
+
+	for _, arguments := range [][]string{
+		{"start", "--name", "worker", "--permission-mode", "bypassPermissions"},
+		{"start", "--name", "worker", "--always-approve"},
+		{"start", "--name", "worker", "--approval-policy", "never"},
+	} {
+		parsed, err := parseUnifiedLaneCommand(arguments)
+		if err != nil {
+			t.Fatalf("parse %v: %v", arguments, err)
+		}
+		if err := validateGrokLanePermission("grok", parsed, true); err != nil {
+			t.Fatalf("explicit bypass %v rejected: %v", arguments, err)
+		}
+	}
+}
+
+func TestGrokLaneResumeRejectsExplicitSaferReplacementButKeepsRecordedMode(t *testing.T) {
+	omitted, err := parseUnifiedLaneCommand([]string{"resume", "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGrokLanePermission("grok", omitted, false); err != nil {
+		t.Fatalf("recorded permission reuse rejected: %v", err)
+	}
+	explicitDefault, err := parseUnifiedLaneCommand([]string{"resume", "worker", "--permission-mode", "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGrokLanePermission("grok", explicitDefault, false); err == nil {
+		t.Fatal("explicit unsupported Grok resume permission succeeded")
 	}
 }
 
@@ -386,6 +440,112 @@ esac
 	}
 	if result["outcome"] != "completed" || result["result"] != "wrapped peer query completed" || result["diagnostic"] != "" {
 		t.Fatalf("Claude peer-frame result = %#v", result)
+	}
+}
+
+func TestClaudeBusyLaneMessageDispatchesExactlyOnceAfterWorkerExitWithoutCollector(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	claudeBin := filepath.Join(root, "claude")
+	promptLog := filepath.Join(root, "prompts.log")
+	firstStarted := filepath.Join(root, "first-started")
+	if err := os.WriteFile(claudeBin, []byte(`#!/bin/sh
+last=
+for argument do
+  last="$argument"
+done
+printf '%s\n' "$last" >> "$CLAUDE_BUSY_TEST_LOG"
+case "$last" in
+  turn-one)
+    : > "$CLAUDE_BUSY_TEST_STARTED"
+    sleep 1
+    printf '%s\n' '{"session_id":"00000000-0000-0000-0000-000000000001","result":"turn one complete"}'
+    ;;
+  busy-message-nonce)
+    printf '%s\n' '{"session_id":"00000000-0000-0000-0000-000000000001","result":"turn two complete"}'
+    ;;
+  *)
+    printf '%s\n' "unexpected prompt: $last" >&2
+    exit 31
+    ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
+	t.Setenv("CLAUDE_BUSY_TEST_LOG", promptLog)
+	t.Setenv("CLAUDE_BUSY_TEST_STARTED", firstStarted)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: filepath.Join(root, "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	actor := &laneActor{
+		id: "00000000-0000-0000-0000-000000000002", parentID: "parent", product: "claude", name: "worker",
+		cwd: root, nativeID: "00000000-0000-0000-0000-000000000001", permission: "dontAsk",
+		persistent: true, state: "idle", done: closedLaneDone(),
+	}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := snapshot.Catalog
+	catalog.Lanes[actor.id] = durableLane(actor, "idle")
+	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := newHostCoordinator(context.Background(), root)
+	if err := coordinator.deliverLaneMessage(runtime, actor, "turn-one"); err != nil {
+		t.Fatalf("dispatch slow Claude turn: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(firstStarted); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow Claude turn did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := coordinator.deliverLaneMessage(runtime, actor, "busy-message-nonce"); err != nil {
+		t.Fatalf("queue message for busy Claude lane: %v", err)
+	}
+	for {
+		after, readErr := runtime.State().Read()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		turns := make([]daemonpkg.Turn, 0, 2)
+		for _, turn := range after.Catalog.Turns {
+			if turn.LaneID == actor.id {
+				turns = append(turns, turn)
+			}
+		}
+		if len(turns) == 2 && after.Catalog.Lanes[actor.id].State == "terminal" {
+			for _, turn := range turns {
+				if turn.State != "terminal" || turn.Outcome != "completed" || strings.Contains(turn.Diagnostic, "active stream worker") {
+					t.Fatalf("Claude queued turns = %+v", turns)
+				}
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("busy Claude message did not complete exactly once: lane=%+v turns=%+v", after.Catalog.Lanes[actor.id], turns)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	body, err := os.ReadFile(promptLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := strings.Fields(string(body))
+	if !reflect.DeepEqual(prompts, []string{"turn-one", "busy-message-nonce"}) {
+		t.Fatalf("Claude native prompts = %q, want exactly one delivery of each turn", prompts)
+	}
+	if err := coordinator.claudeLanes.Archive(actor.id); err != nil {
+		t.Fatalf("Claude worker registry remained active after terminal turn: %v", err)
 	}
 }
 

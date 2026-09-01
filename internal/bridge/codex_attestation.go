@@ -8,18 +8,19 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 // StdioMCPThreadID extracts the Codex-owned thread identity from native MCP
 // metadata. Model arguments are deliberately ignored.
 func StdioMCPThreadID(params json.RawMessage) (string, error) {
-	return attestStdioMCPCaller(params)
+	return sessiontools.StdioMCPThreadID(params)
 }
 
 // CaptureNativeAncestry returns the exact caller and bounded parent chain for
 // a short-lived hook or connector process.
 func CaptureNativeAncestry(startPID, limit int) (procinfo.Identity, []procinfo.Identity, error) {
-	return captureNativeAncestry(startPID, limit)
+	return sessiontools.CaptureNativeAncestry(startPID, limit)
 }
 
 // CodexHookThreadIDFromInput preserves the established transcript-confined

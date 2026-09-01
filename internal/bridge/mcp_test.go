@@ -244,10 +244,15 @@ func TestGrokEnvelopePublishesProductIdentity(t *testing.T) {
 
 func TestNativePeerProductLabel(t *testing.T) {
 	for entrypoint, want := range map[string]string{
-		"codex": "Codex", "grok": "Grok", "claude": "Claude Code", "": "Claude Code",
+		"codex": "Codex", "grok": "Grok", "claude": "Claude Code",
 	} {
-		if got := nativePeerProductLabel(entrypoint); got != want {
+		if got, err := nativePeerProductLabel(entrypoint); err != nil || got != want {
 			t.Fatalf("nativePeerProductLabel(%q) = %q, want %q", entrypoint, got, want)
+		}
+	}
+	for _, entrypoint := range []string{"", "unknown"} {
+		if got, err := nativePeerProductLabel(entrypoint); err == nil || got != "" {
+			t.Fatalf("nativePeerProductLabel(%q) = %q, %v; want explicit failure", entrypoint, got, err)
 		}
 	}
 }

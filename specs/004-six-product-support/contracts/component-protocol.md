@@ -81,6 +81,12 @@ ancestry and compares them with durable `ManagedAttachment` evidence. Any
 change rejects reconnect. Success creates a new generation-scoped binding and
 rebinds the exact durable attachment/native session.
 
+Attachment IDs and product-native session IDs are separate namespaces. An
+explicitly selected and re-attested resume may bind a fresh attachment to an
+existing native session (for example, Claude resume-by-name). Reconnect must
+validate the recorded attachment-to-native-session relationship and exact
+process evidence; it must not require the two identifier strings to be equal.
+
 ## 4. Component-to-Daemon Frames
 
 | Type | Required payload | Meaning |

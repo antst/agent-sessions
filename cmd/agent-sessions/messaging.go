@@ -15,6 +15,7 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/envutil"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 type connectorCallEnvelope struct {
@@ -45,14 +46,22 @@ func (c *hostCoordinator) handleConnector(
 		if protocol == "" {
 			protocol = "2025-06-18"
 		}
+		instructions, err := sessiontools.ProductMCPInstructions(envelope.Product)
+		if err != nil {
+			return nil, err
+		}
 		return json.Marshal(map[string]any{
 			"protocolVersion": protocol,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "agent-sessions", "version": version},
-			"instructions":    bridge.ProductMCPInstructions(envelope.Product),
+			"instructions":    instructions,
 		})
 	case "connector.tools":
-		return json.Marshal(map[string]any{"tools": bridge.ProductMCPTools(envelope.Product)})
+		tools, err := sessiontools.ProductMCPTools(envelope.Product)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"tools": tools})
 	case "connector.call":
 		var call connectorToolCall
 		if json.Unmarshal(envelope.Params, &call) != nil || strings.TrimSpace(call.Name) == "" {
@@ -122,7 +131,7 @@ func (c *hostCoordinator) callLocalTool(
 	case "identity":
 		return localToolResult{Text: source.Name + " — session:" + source.ID, Data: publicAttachment(source)}, nil
 	case "rename_session":
-		name := bridge.NormalizePeerName(mapString(args, "name"))
+		name := sessiontools.NormalizePeerName(mapString(args, "name"))
 		if strings.TrimSpace(mapString(args, "name")) == "" {
 			return localToolResult{}, errors.New("name is required")
 		}
@@ -465,10 +474,13 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 	if source.PermissionMode == "bypassPermissions" {
 		mode = "bypass"
 	}
-	message := bridge.WrapPeerMessage(
+	message, err := sessiontools.WrapPeerMessage(
 		source.Product, "session:"+source.ID, source.NativeSessionID, source.Name, mode,
 		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
 	)
+	if err != nil {
+		return err
+	}
 	return c.deliverLaneMessage(runtime, target.lane, message)
 }
 
@@ -554,10 +566,13 @@ func (c *hostCoordinator) deliverLocal(
 	if source.PermissionMode == "bypassPermissions" {
 		mode = "bypass"
 	}
-	message := bridge.WrapPeerMessage(
+	message, err := sessiontools.WrapPeerMessage(
 		source.Product, "session:"+source.ID, source.NativeSessionID, source.Name, mode,
 		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
 	)
+	if err != nil {
+		return err
+	}
 	return c.deliverPreparedMessage(ctx, target, messageID, "session:"+source.ID, message)
 }
 

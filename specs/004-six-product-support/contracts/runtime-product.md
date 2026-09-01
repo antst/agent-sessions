@@ -237,6 +237,18 @@ Drivers receive narrow capabilities rather than the coordinator or catalog:
 - component/product-server registries appropriate to the product;
 - clock and bounded test hooks.
 
+The source contract exposes those capabilities through product-neutral
+interfaces: `ReceiptReader`, `ProcessInspector`, `OwnedProcessSupervisor`,
+`ComponentLookup`, `ProductServerLookup`, and `TestHooks`. Component and server
+lookups return secret-free session views; protocol clients and credentials stay
+ephemeral inside their owning driver/mechanics package. Test hook points use the
+same bounded token grammar and production hosts leave the hook interface nil.
+
+`RedactedString` has private storage and is constructed only through the
+bounded sanitizer, which normalizes controls and replaces explicitly supplied
+or commonly formatted bearer/credential values. Product code cannot cast raw
+native stderr into a probe diagnostic.
+
 Drivers cannot commit daemon lifecycle state directly. They return native facts
 to the shared engines.
 

@@ -45,18 +45,18 @@ re-reviewed. Production interface work may start.
 durable input semantics, shared transports, live federation behavior, and test
 fixtures before any new product is composed.
 
-- [ ] T011 Add explicit `CapabilityParent`, shared bounded product/federation token validation, tested-version/support/install/transport/federation projection fields, and validation tests to `internal/productcatalog/catalog.go` and `internal/productcatalog/catalog_test.go`
-- [ ] T012 Add deterministic `agent-sessions catalog --json` schema/projection implementation and tests in `internal/productcatalog/projection.go`, `internal/productcatalog/projection_test.go`, and `cmd/agent-sessions/catalog.go`
-- [ ] T013 Define frozen runtime records, driver interfaces, typed errors, redaction types, and permission contract in `internal/productruntime/{types.go,drivers.go,errors.go}`
-- [ ] T014 Implement explicit runtime registry validation, synthetic-product extension proof, fake drivers, and no-init-registration tests in `internal/productruntime/{registry.go,registry_test.go,fakes_test.go}`
-- [ ] T015 Extend daemon catalog structs/validation/cloning for lane inputs, leases, and component records in `internal/daemon/{state.go,state_test.go}`
+- [x] T011 Add nonbreaking typed `permissionmode.Mode`, the type-only platform-neutral `localtransport.PeerIdentity`, explicit `CapabilityParent`, shared bounded product/federation token validation, tested-version/support/install/transport/federation projection fields, and validation tests in `internal/{permissionmode,localtransport,productcatalog}/`
+- [x] T012 Add deterministic `agent-sessions catalog --json` schema/projection implementation and tests in `internal/productcatalog/projection.go`, `internal/productcatalog/projection_test.go`, `internal/clihelp/{commands.go,commands_test.go}`, and `cmd/agent-sessions/{catalog.go,main.go,main_test.go}`
+- [x] T013 Define frozen runtime records, driver interfaces, typed errors, redaction types, and permission contract in `internal/productruntime/{types.go,drivers.go,errors.go}`
+- [x] T014 Implement explicit runtime registry validation against an injected inventory, synthetic-product extension proof, fake drivers, and no-init-registration tests in `internal/productruntime/{registry.go,registry_test.go,fakes_test.go}`
+- [x] T015 Extend daemon catalog structs/validation/cloning/old-catalog normalization for lane inputs, leases, and component records in `internal/daemon/{state.go,state_test.go}`
 
 ### Central Interface Freeze
 
-- [ ] T016 Apply S5's extract-and-freeze decision, move live MCP/AgentFrame/instruction/name helpers into `internal/sessiontools/`, add a shrinking no-new-legacy-import baseline, and update only pre-agreed imports in `cmd/agent-sessions/{connector.go,messaging.go,main.go}`
-- [ ] T017 Rewrite the normative unified daemon/runtime/component/ledger acceptance contract in `docs/ADAPTER-PROTOCOL.md`
-- [ ] T018 Collapse `internal/federator` product metadata onto `internal/productcatalog` and add conformance/static tests banning duplicate product inventories and dispatch switches in `internal/productcatalog/catalog_test.go` and `scripts/test`
-- [ ] T019 Remove or explicitly gate Grok's unconditional permission widening and add fail-closed regression coverage in `internal/daemon/{adapter_grok_lane.go,adapter_grok_lane_test.go}`
+- [x] T016 Apply S5's extract-and-freeze decision, move live MCP relay/AgentFrame/instruction/name/help helpers into `internal/sessiontools/`, add an exact shrinking no-new-legacy-import baseline, preserve bridge compatibility wrappers, and update only pre-agreed imports in `cmd/agent-sessions/{connector.go,messaging.go,main.go}`
+- [x] T017 Rewrite the normative unified daemon/runtime/component/ledger acceptance contract in `docs/ADAPTER-PROTOCOL.md`
+- [x] T018 Break the catalog-test import cycle, collapse `internal/federator` product metadata onto a one-way `internal/productcatalog` compatibility projection, and add conformance/static tests banning duplicate product inventories and dispatch switches in `internal/{productcatalog,federator}/*_test.go` and `scripts/test`
+- [x] T019 Gate Grok lanes to an explicitly requested `bypassPermissions` policy without mutation, reject every other mode before native invocation, and add fail-closed regression coverage in `internal/daemon/{adapter_grok_lane.go,adapter_grok_lane_test.go}`
 - [ ] T020 Run runtime/schema/static/original-four focused gates and obtain visible Fable sign-off on the frozen Phase-A interfaces in `specs/004-six-product-support/evidence/phase0/interface-freeze.md`
 
 **Interface Freeze Checkpoint**: Runtime records and authority boundaries are

@@ -781,7 +781,7 @@ entries:
       - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterRejectsChangedResumeAndTerminalIdentity
       - internal/daemon/adapter_claude_lane_test.go:TestClaudeLaneAdapterBuildsExactWorkerTranscriptAndPermissionArguments
       - internal/daemon/adapter_claude_lane_test.go:TestClaudeLaneAdapterAllowsOneStreamWorkerAndInterruptsBeforeArchive
-      - internal/daemon/adapter_grok_lane_test.go:TestGrokLaneAdapterIsSoleACPDriverAndForcesHeadlessApproval
+      - internal/daemon/adapter_grok_lane_test.go:TestGrokLaneAdapterIsSoleACPDriverAndPreservesExplicitPolicy
       - internal/daemon/adapter_qwen_lane_test.go:TestQwenLaneAdapterIsSoleACPClientAndPreservesResumeAndYoloMode
     acceptance_cells: [L-20, L-21, L-22, L-23, L-24, L-25, L-26, L-27, L-28, L-29, L-30, P-C-C, P-C-CL, P-C-G, P-C-Q, P-CL-C, P-CL-CL, P-CL-G, P-CL-Q, P-G-C, P-G-CL, P-G-G, P-G-Q, P-Q-C, P-Q-CL, P-Q-G, P-Q-Q, A-C, A-CL, A-G, A-Q]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#product-lane-differences]

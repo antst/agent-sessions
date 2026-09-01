@@ -35,7 +35,7 @@ func (manager *recordingServiceManager) Restart(context.Context) error {
 }
 
 func TestRunDispatchesEveryCommandAndAliasExactlyOnce(t *testing.T) {
-	commands := []string{"daemon", "status", "doctor", "roster", "peer", "lane", "hook", "connector"}
+	commands := []string{"daemon", "status", "doctor", "roster", "catalog", "peer", "lane", "hook", "connector"}
 	for _, command := range commands {
 		t.Run(command, func(t *testing.T) {
 			calls := map[string]int{}
@@ -49,10 +49,13 @@ func TestRunDispatchesEveryCommandAndAliasExactlyOnce(t *testing.T) {
 				}
 			}
 			runners.daemon, runners.status, runners.doctor, runners.roster = set("daemon"), set("status"), set("doctor"), set("roster")
+			runners.catalog = set("catalog")
 			runners.peer, runners.lane, runners.hook, runners.connector = set("peer"), set("lane"), set("hook"), set("connector")
 			args := []string{command, "codex", "--", "native", "bytes"}
 			if command == "daemon" || command == "status" || command == "doctor" || command == "roster" {
 				args = []string{command, "--state-root", "/state"}
+			} else if command == "catalog" {
+				args = []string{command, "--json"}
 			}
 			var output bytes.Buffer
 			if err := run(context.Background(), "agent-sessions", args, &output, runners); err != nil {
@@ -74,6 +77,23 @@ func TestRunDispatchesEveryCommandAndAliasExactlyOnce(t *testing.T) {
 	}
 	if got.Command != "peer" || got.Product != "claude" || !reflect.DeepEqual(got.Arguments, []string{"--resume", "native title", "--", "prompt"}) {
 		t.Fatalf("alias dispatch = %+v", got)
+	}
+}
+
+func TestCatalogCommandIsDeterministicReadOnlyAndRejectsOtherArguments(t *testing.T) {
+	var first bytes.Buffer
+	if err := run(context.Background(), "agent-sessions", []string{"catalog", "--json"}, &first, defaultCommandRunners()); err != nil {
+		t.Fatal(err)
+	}
+	var second bytes.Buffer
+	if err := run(context.Background(), "agent-sessions", []string{"catalog", "--json"}, &second, defaultCommandRunners()); err != nil {
+		t.Fatal(err)
+	}
+	if first.String() != second.String() || !strings.HasSuffix(first.String(), "\n") || strings.HasSuffix(first.String(), "\n\n") {
+		t.Fatalf("catalog output is not canonical: %q", first.String())
+	}
+	if err := run(context.Background(), "agent-sessions", []string{"catalog"}, &bytes.Buffer{}, defaultCommandRunners()); err == nil {
+		t.Fatal("catalog accepted missing --json")
 	}
 }
 

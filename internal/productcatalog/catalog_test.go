@@ -8,88 +8,50 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/antst/agent-sessions/internal/federator"
 )
 
-func TestCatalogPreservesCompleteBaselineProductHelpPluginAndLaneInventory(t *testing.T) {
-	want := []Descriptor{
-		{
-			ID: "codex", Label: "Codex", NativeExecutable: "codex", PeerAlias: "codex-peer",
-			LaneAlias: "codex-peer-lane", LaneRuntimeRole: "lane", LaneCapability: "codex-lane",
-			PluginArchivePaths: []string{".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills"},
-			Capabilities:       []Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive},
-			ResumeStyle:        ResumeSubcommand,
-		},
-		{
-			ID: "claude", Label: "Claude Code", NativeExecutable: "claude", PeerAlias: "claude-peer",
-			LaneAlias: "claude-peer-lane", LaneRuntimeRole: "claude-lane", LaneManagerRole: "claude-lane-manager", LaneCapability: "claude-lane",
-			PluginArchivePaths:  []string{".claude-plugin", "claude"},
-			Capabilities:        []Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay},
-			ResumeStyle:         ResumeFlag,
-			TranscriptNameIndex: true,
-		},
-		{
-			ID: "grok", Label: "Grok", NativeExecutable: "grok", PeerAlias: "grok-peer",
-			LaneAlias: "grok-peer-lane", LaneRuntimeRole: "grok-lane", LaneManagerRole: "grok-lane-manager", LaneCapability: "grok-lane",
-			PluginArchivePaths: []string{"grok"},
-			Capabilities:       []Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission},
-			ResumeStyle:        ResumeFlag,
-		},
-		{
-			ID: "qwen", Label: "Qwen Code", NativeExecutable: "qwen", PeerAlias: "qwen-peer",
-			LaneAlias: "qwen-peer-lane", LaneRuntimeRole: "qwen-lane", LaneManagerRole: "qwen-lane-manager", LaneCapability: "qwen-lane",
-			PluginArchivePaths: []string{"qwen"},
-			Capabilities:       []Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission},
-			ResumeStyle:        ResumeFlag,
-		},
+func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
+	wantIDs := []string{"codex", "claude", "grok", "qwen"}
+	products := All()
+	if len(products) != len(wantIDs) {
+		t.Fatalf("product count = %d", len(products))
 	}
-	got := All()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("product catalog = %#v, want %#v", got, want)
+	if err := ValidateInventory(products); err != nil {
+		t.Fatal(err)
 	}
-	for _, descriptor := range want {
-		resolved, ok := ByID(descriptor.ID)
-		if !ok || !reflect.DeepEqual(resolved, descriptor) {
-			t.Fatalf("ByID(%q) = %#v, %v", descriptor.ID, resolved, ok)
+	for index, product := range products {
+		if product.ID != wantIDs[index] || !product.Has(CapabilityInteractive) || !product.Has(CapabilityLane) || !product.Has(CapabilityParent) {
+			t.Fatalf("descriptor %d = %#v", index, product)
 		}
-		if peer, ok := ByCommand(descriptor.PeerAlias); !ok || peer.ID != descriptor.ID {
-			t.Fatalf("ByCommand(%q) = %#v, %v", descriptor.PeerAlias, peer, ok)
+		if product.SupportState != SupportGeneral || product.TestedVersion == "" || product.InstallRoot != "integrations/"+product.ID {
+			t.Fatalf("shared metadata missing from %#v", product)
 		}
-		if lane, ok := ByCommand(descriptor.LaneAlias); !ok || lane.ID != descriptor.ID {
-			t.Fatalf("ByCommand(%q) = %#v, %v", descriptor.LaneAlias, lane, ok)
+		if !reflect.DeepEqual(product.FederationCapabilities, []string{product.LaneCapability}) {
+			t.Fatalf("%s federation capabilities = %v", product.ID, product.FederationCapabilities)
+		}
+		resolved, ok := ByID(product.ID)
+		if !ok || !reflect.DeepEqual(resolved, product) {
+			t.Fatalf("ByID(%q) = %#v, %v", product.ID, resolved, ok)
+		}
+		for _, alias := range []string{product.PeerAlias, product.LaneAlias} {
+			if got, ok := ByCommand(alias); !ok || got.ID != product.ID {
+				t.Fatalf("ByCommand(%q) = %#v, %v", alias, got, ok)
+			}
+		}
+		if got, ok := ByLaneCapability(product.LaneCapability); !ok || got.ID != product.ID {
+			t.Fatalf("ByLaneCapability(%q) = %#v, %v", product.LaneCapability, got, ok)
 		}
 	}
 	if _, ok := ByID("Codex"); ok {
-		t.Fatal("noncanonical product ID was accepted")
+		t.Fatal("noncanonical product ID accepted")
 	}
 	if _, ok := ByCommand("codex"); ok {
-		t.Fatal("native vendor executable was classified as a managed command")
+		t.Fatal("native executable classified as managed alias")
 	}
 }
 
-func TestCatalogMatchesWorkingFederationAndReleaseInventories(t *testing.T) {
+func TestCatalogMatchesReleaseInventoryWithoutASecondGoCatalog(t *testing.T) {
 	catalog := All()
-	legacy := federator.ProductDescriptors()
-	if len(catalog) != len(legacy) {
-		t.Fatalf("catalog products = %d, working federation products = %d", len(catalog), len(legacy))
-	}
-	for index, product := range catalog {
-		baseline := legacy[index]
-		if product.ID != baseline.ID || product.Label != baseline.Label ||
-			product.PeerAlias != baseline.PeerExecutable || product.LaneAlias != baseline.LaneExecutable ||
-			product.LaneRuntimeRole != baseline.LaneRuntimeRole || product.LaneManagerRole != baseline.LaneManagerRole ||
-			product.LaneCapability != baseline.FederationCapability ||
-			product.Has(CapabilityDynamicPermission) != baseline.DynamicPermission ||
-			product.TranscriptNameIndex != baseline.TranscriptNameIndex {
-			t.Fatalf("catalog product %#v drifted from working descriptor %#v", product, baseline)
-		}
-		args, ok := baseline.ResumeArguments(federator.SessionKindInteractive, "session-id")
-		if !ok || !reflect.DeepEqual(args, product.ResumeArguments("session-id")) {
-			t.Fatalf("%s resume arguments = %v/%v, want %v", product.ID, args, ok, product.ResumeArguments("session-id"))
-		}
-	}
-
 	root := productCatalogRepositoryRoot(t)
 	command := exec.Command(filepath.Join(root, "scripts", "release-inventory"), "plugins")
 	command.Dir = root
@@ -107,30 +69,20 @@ func TestCatalogMatchesWorkingFederationAndReleaseInventories(t *testing.T) {
 	}
 }
 
-func TestCatalogIsClosedUniqueAndReturnsIsolatedCopies(t *testing.T) {
+func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	products := All()
-	if len(products) != 4 {
-		t.Fatalf("product count = %d, want 4", len(products))
-	}
-	ids, commands, capabilities := map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, product := range products {
-		if ids[product.ID] || commands[product.PeerAlias] || commands[product.LaneAlias] || capabilities[product.LaneCapability] {
-			t.Fatalf("duplicate catalog identity in %#v", product)
-		}
-		ids[product.ID], commands[product.PeerAlias], commands[product.LaneAlias], capabilities[product.LaneCapability] = true, true, true, true
-		ordered := append([]Capability(nil), product.Capabilities...)
-		sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
-		for index := 1; index < len(ordered); index++ {
-			if ordered[index] == ordered[index-1] {
-				t.Fatalf("%s repeats capability %s", product.ID, ordered[index])
-			}
-		}
-	}
 	products[0].PluginArchivePaths[0] = "mutated"
 	products[0].Capabilities[0] = "mutated"
+	products[0].RequiredDoctorFeatures[0] = "mutated"
+	products[0].FederationCapabilities[0] = "mutated"
+	products[0].Compatibility.TupleMembers = []TupleMember{{Name: "mutated", Version: "1"}}
 	again, _ := ByID("codex")
-	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive {
+	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
+	}
+	ordered := again.SortedCapabilities()
+	if !sort.StringsAreSorted(ordered) {
+		t.Fatalf("capabilities not sorted: %v", ordered)
 	}
 }
 

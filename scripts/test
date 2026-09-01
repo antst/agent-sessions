@@ -195,7 +195,7 @@ for skill in "$plugin_root/skills/claude-lane/SKILL.md" "$plugin_root/claude/ski
     exit 1
   fi
 done
-if ! grep -Fq 'do not poll this tool' "$plugin_root/internal/bridge/mcp.go"; then
+if ! grep -Fq 'do not poll this tool' "$plugin_root/internal/sessiontools/mcp.go"; then
   printf 'Peer inbox tool does not identify itself as recovery-only\n' >&2
   exit 1
 fi

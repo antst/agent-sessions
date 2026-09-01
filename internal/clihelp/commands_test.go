@@ -31,7 +31,7 @@ func TestParseDispatchesEveryMultiCallAndAliasWithoutChangingPassthrough(t *test
 		}
 	}
 
-	for _, command := range []string{"daemon", "status", "doctor", "roster"} {
+	for _, command := range []string{"daemon", "status", "doctor", "roster", "catalog"} {
 		invocation, err := Parse("agent-sessions", []string{command, "--exact", "value"})
 		if err != nil || invocation.Command != command || invocation.Product != "" || !reflect.DeepEqual(invocation.Arguments, []string{"--exact", "value"}) {
 			t.Fatalf("admin parse %s = %+v, %v", command, invocation, err)
@@ -51,7 +51,7 @@ func TestParseDispatchesEveryMultiCallAndAliasWithoutChangingPassthrough(t *test
 
 func TestHelpUsesAuthoritativeProductAndAliasInventory(t *testing.T) {
 	help := Usage()
-	for _, literal := range []string{"agent-sessions daemon", "agent-sessions status", "agent-sessions doctor", "agent-sessions roster", "agent-sessions peer PRODUCT", "agent-sessions lane PRODUCT", "agent-sessions hook PRODUCT", "agent-sessions connector PRODUCT|auto"} {
+	for _, literal := range []string{"agent-sessions daemon", "agent-sessions status", "agent-sessions doctor", "agent-sessions roster", "agent-sessions catalog --json", "agent-sessions peer PRODUCT", "agent-sessions lane PRODUCT", "agent-sessions hook PRODUCT", "agent-sessions connector PRODUCT|auto"} {
 		if !strings.Contains(help, literal) {
 			t.Errorf("help omits %q", literal)
 		}
