@@ -388,45 +388,59 @@ func (fixture *processInspectorFixture) DescendsFrom(_ context.Context, child, a
 }
 
 func TestParentAttesterRequiresExactRegisteredComponentProcessAndSession(t *testing.T) {
-	process := procinfo.Identity{PID: 42, Start: "start", StrongStart: "strong"}
-	connector := procinfo.Identity{PID: 43, Start: "connector", StrongStart: "connector-strong"}
-	subagentChild := procinfo.Identity{PID: 44, Start: "subagent-child", StrongStart: "subagent-child-strong"}
-	peer := localtransport.PeerIdentity{PID: 42, UID: 1000}
-	binding := component.BindingView{
-		BindingID: "binding-parent", AttachmentID: "attachment-parent", ProductID: OMPProductID,
-		ProcessIdentity: process, PeerIdentity: peer, Generation: 4,
-	}
-	runtime, _, bindings := testComponentRuntime(t, OMPProductID, binding)
-	inspector := &processInspectorFixture{live: []procinfo.Identity{process, connector, subagentChild}, directChild: connector}
-	quirks, _ := QuirksFor(OMPProductID)
-	attester, err := NewParentAttester(quirks, runtime, bindings, inspector)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt := productruntime.ConnectorAttempt{
-		ProductID: OMPProductID, PeerCredential: localtransport.PeerIdentity{PID: connector.PID, UID: peer.UID}, ProcessIdentity: connector,
-		ClaimedNativeSessionID: "native-1", ComponentBindingID: "binding-parent",
-	}
-	parent, err := attester.Attest(context.Background(), attempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parent != (productruntime.ParentBinding{AttachmentID: "attachment-parent", NativeSessionID: "native-1", Verified: true}) || inspector.depth != 1 || inspector.ancestor != process {
-		t.Fatalf("parent = %+v, depth=%d ancestor=%+v", parent, inspector.depth, inspector.ancestor)
-	}
-	for name, mutate := range map[string]func(*productruntime.ConnectorAttempt){
-		"false session":   func(value *productruntime.ConnectorAttempt) { value.ClaimedNativeSessionID = "forged" },
-		"foreign binding": func(value *productruntime.ConnectorAttempt) { value.ComponentBindingID = "binding-other" },
-		"subagent process": func(value *productruntime.ConnectorAttempt) {
-			value.ProcessIdentity = subagentChild
-			value.PeerCredential.PID = 44
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			forged := attempt
-			mutate(&forged)
-			if _, err := attester.Attest(context.Background(), forged); !errors.Is(err, productruntime.ErrUnauthorized) {
-				t.Fatalf("forged attempt returned %v", err)
+	for _, productID := range []string{PiProductID, OMPProductID} {
+		t.Run(productID, func(t *testing.T) {
+			process := procinfo.Identity{PID: 42, Start: productID + "-start", StrongStart: productID + "-strong"}
+			connector := procinfo.Identity{PID: 43, Start: productID + "-connector", StrongStart: productID + "-connector-strong"}
+			subagentChild := procinfo.Identity{PID: 44, Start: productID + "-subagent", StrongStart: productID + "-subagent-strong"}
+			peer := localtransport.PeerIdentity{PID: process.PID, UID: 1000}
+			binding := component.BindingView{
+				BindingID: "binding-parent-" + productID, AttachmentID: "attachment-parent-" + productID,
+				ProductID: productID, ProcessIdentity: process, PeerIdentity: peer, Generation: 4,
+			}
+			runtime, _, bindings := testComponentRuntime(t, productID, binding)
+			inspector := &processInspectorFixture{live: []procinfo.Identity{process, connector, subagentChild}, directChild: connector}
+			quirks, err := QuirksFor(productID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attester, err := NewParentAttester(quirks, runtime, bindings, inspector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt := productruntime.ConnectorAttempt{
+				ProductID:       productID,
+				PeerCredential:  localtransport.PeerIdentity{PID: connector.PID, UID: peer.UID},
+				ProcessIdentity: connector, ClaimedNativeSessionID: "native-1",
+				ComponentBindingID: binding.BindingID,
+			}
+			parent, err := attester.Attest(context.Background(), attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := productruntime.ParentBinding{AttachmentID: binding.AttachmentID, NativeSessionID: "native-1", Verified: true}
+			if parent != want || inspector.depth != 1 || inspector.ancestor != process {
+				t.Fatalf("parent = %+v, want %+v, depth=%d ancestor=%+v", parent, want, inspector.depth, inspector.ancestor)
+			}
+			for name, mutate := range map[string]func(*productruntime.ConnectorAttempt){
+				"false session": func(value *productruntime.ConnectorAttempt) {
+					value.ClaimedNativeSessionID = "forged"
+				},
+				"foreign binding": func(value *productruntime.ConnectorAttempt) {
+					value.ComponentBindingID = "binding-other"
+				},
+				"subagent process": func(value *productruntime.ConnectorAttempt) {
+					value.ProcessIdentity = subagentChild
+					value.PeerCredential.PID = subagentChild.PID
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					forged := attempt
+					mutate(&forged)
+					if _, err := attester.Attest(context.Background(), forged); !errors.Is(err, productruntime.ErrUnauthorized) {
+						t.Fatalf("forged attempt returned %v", err)
+					}
+				})
 			}
 		})
 	}

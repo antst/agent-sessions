@@ -97,15 +97,15 @@ restart the daemon while preserving exact native identity.
 
 ### Tests for User Story 1
 
-- [ ] T038 [P] [US1] Write OpenCode/Kilo peer component, isolated full-attach exact-routing, `--mini` rejection, rename, resume, and reconnect tests in `internal/products/{opencode,kilocode,opencodefamily}/*_test.go`
-- [ ] T039 [P] [US1] Write Pi/OMP extension identity, idle-wake, busy-steer, rename, resume, and reconnect tests in `internal/products/{pi,omp,pifamily}/*_test.go`
+- [x] T038 [P] [US1] Write OpenCode/Kilo peer component, isolated full-attach exact-routing, `--mini` rejection, rename, resume, and reconnect tests in `internal/products/{opencode,kilocode,opencodefamily}/*_test.go`
+- [x] T039 [P] [US1] Write Pi/OMP extension identity, idle-wake, busy-steer, rename, resume, and reconnect tests in `internal/products/{pi,omp,pifamily}/*_test.go`
 - [x] T040 [P] [US1] Write CodeBuddy wrapper/registry/socket-to-PID correlation, reply-wake, CSRF, stale-row/port-reuse, cross-target, and daemon-restart tests in `internal/products/codebuddy/*_test.go`
 - [x] T041 [P] [US1] Write DSH Cordis session binding, followup/steer, tuple, reconnect, and sandbox-socket tests in `internal/products/dsh/*_test.go`
 
 ### Implementation for User Story 1
 
-- [ ] T042 [P] [US1] Implement verified common OpenCode/Kilo component/server peer mechanics in `internal/products/opencodefamily/` and product-specific peer drivers in `internal/products/{opencode,kilocode}/`
-- [ ] T043 [P] [US1] Implement the shared Pi/OMP component extension core and peer drivers with a typed quirk table in `internal/products/pifamily/`, `internal/products/{pi,omp}/`, and `integrations/{pi,omp}/`
+- [x] T042 [P] [US1] Implement verified common OpenCode/Kilo component/server peer mechanics in `internal/products/opencodefamily/` and product-specific peer drivers in `internal/products/{opencode,kilocode}/`
+- [x] T043 [P] [US1] Implement the shared Pi/OMP component extension core and peer drivers with a typed quirk table in `internal/products/pifamily/`, `internal/products/{pi,omp}/`, and `integrations/{pi,omp}/`
 - [x] T044 [P] [US1] Implement the CodeBuddy typed product-owned peer endpoint client and wrapper-adopt registry/process/socket evidence in `internal/products/codebuddy/` and `integrations/codebuddy/`
 - [x] T045 [P] [US1] Implement the exact-tuple DSH Cordis peer component and session binding in `internal/products/dsh/` and `integrations/dsh/`
 **Checkpoint**: All six peer drivers and integration components pass their
@@ -124,18 +124,18 @@ exact identity or explicit ambiguity.
 
 ### Tests for User Story 2
 
-- [ ] T046 [P] [US2] Write OpenCode/Kilo lane HTTP/SSE/session/permission/recovery tests in `internal/products/{opencode,kilocode,opencodefamily}/*_lane_test.go`
-- [ ] T047 [P] [US2] Write Pi/OMP RPC ready/turn/steer/settled/abort/resume tests in `internal/products/{pi,omp,pifamily}/*_lane_test.go`
+- [x] T046 [P] [US2] Write OpenCode/Kilo lane HTTP/SSE/session/permission/recovery tests in `internal/products/{opencode,kilocode,opencodefamily}/*_lane_test.go`
+- [x] T047 [P] [US2] Write Pi/OMP RPC ready/turn/steer/settled/abort/resume tests in `internal/products/{pi,omp,pifamily}/*_lane_test.go`
 - [x] T048 [P] [US2] Write CodeBuddy jobs/reply/stream/stop/respawn/archive lane tests in `internal/products/codebuddy/*_lane_test.go`
 - [x] T049 [P] [US2] Write DSH ACP new/resume/busy-queue/cancel-notification/stop/lease tests in `internal/products/dsh/*_lane_test.go`
 
 ### Implementation for User Story 2
 
-- [ ] T050 [P] [US2] Implement OpenCode and Kilo lane drivers above `internal/productserver` in `internal/products/{opencodefamily,opencode,kilocode}/`
-- [ ] T051 [P] [US2] Implement shared Pi/OMP JSONL RPC lane client and product drivers above `internal/structuredprocess` in `internal/products/{pifamily,pi,omp}/`
+- [x] T050 [P] [US2] Implement OpenCode and Kilo lane drivers above `internal/productserver` in `internal/products/{opencodefamily,opencode,kilocode}/`
+- [x] T051 [P] [US2] Implement shared Pi/OMP JSONL RPC lane client and product drivers above `internal/structuredprocess` in `internal/products/{pifamily,pi,omp}/`
 - [x] T052 [P] [US2] Implement CodeBuddy lane lifecycle above its typed HTTP/event client in `internal/products/codebuddy/`
 - [x] T053 [P] [US2] Implement DSH ACP lane lifecycle, exact tuple handling, and lease use above `internal/structuredprocess` in `internal/products/dsh/`
-- [ ] T054 [US2] Add fail-closed product-specific permission mappers and unsupported-policy tests for all six in `internal/products/*/permission.go` and `internal/products/*/permission_test.go`
+- [x] T054 [US2] Add fail-closed product-specific permission mappers and unsupported-policy tests for all six in `internal/products/*/permission.go` and `internal/products/*/permission_test.go`
 
 **Checkpoint**: All six lane drivers pass typed native lifecycle suites and are
 ready for shared ledger/coordinator/federation composition.
@@ -152,15 +152,15 @@ lane and reject a forged native-session claim.
 
 ### Tests for User Story 3
 
-- [ ] T055 [P] [US3] Write OpenCode/Kilo registered-tool and exact parent-session attestation tests in `internal/products/{opencode,kilocode,opencodefamily}/*_parent_test.go`
-- [ ] T056 [P] [US3] Write Pi/OMP registered-tool, extension env, ancestry, and false-ID tests in `internal/products/{pi,omp,pifamily}/*_parent_test.go`
+- [x] T055 [P] [US3] Write OpenCode/Kilo registered-tool and exact parent-session attestation tests in `internal/products/{opencode,kilocode,opencodefamily}/*_parent_test.go`
+- [x] T056 [P] [US3] Write Pi/OMP registered-tool, extension env, ancestry, and false-ID tests in `internal/products/{pi,omp,pifamily}/*_parent_test.go`
 - [x] T057 [P] [US3] Write CodeBuddy per-session MCP/tool ancestry and terminal-notice tests in `internal/products/codebuddy/*_parent_test.go`
 - [x] T058 [P] [US3] Write DSH native-tool/MCP, `DSH_SESSION_ID`, env-scrub, sandbox, and notice tests in `internal/products/dsh/*_parent_test.go`
 
 ### Implementation for User Story 3
 
-- [ ] T059 [P] [US3] Implement OpenCode/Kilo parent tools and exact component/session attesters in `internal/products/{opencodefamily,opencode,kilocode}/` and `integrations/{opencode,kilocode}/`
-- [ ] T060 [P] [US3] Implement Pi/OMP registered parent tools, commands, and exact session attesters in `internal/products/{pifamily,pi,omp}/` and `integrations/{pi,omp}/`
+- [x] T059 [P] [US3] Implement OpenCode/Kilo parent tools and exact component/session attesters in `internal/products/{opencodefamily,opencode,kilocode}/` and `integrations/{opencode,kilocode}/`
+- [x] T060 [P] [US3] Implement Pi/OMP registered parent tools, commands, and exact session attesters in `internal/products/{pifamily,pi,omp}/` and `integrations/{pi,omp}/`
 - [x] T061 [P] [US3] Implement CodeBuddy parent connector/tool injection and attester in `internal/products/codebuddy/` and `integrations/codebuddy/`
 - [x] T062 [P] [US3] Implement DSH parent facade selected by S2 and exact attester in `internal/products/dsh/` and `integrations/dsh/`
 **Checkpoint**: All six parent drivers/tools pass exact-identity suites and are

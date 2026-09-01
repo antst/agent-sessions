@@ -3,6 +3,10 @@ package opencodefamily
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -330,5 +334,77 @@ func TestParentAttesterRejectsFalseModelClaimAndForeignProcess(t *testing.T) {
 	foreignPID.PeerCredential.PID = 99
 	if _, err := attester.Attest(context.Background(), foreignPID); !errors.Is(err, productruntime.ErrUnauthorized) {
 		t.Fatalf("kernel/process mismatch = %v", err)
+	}
+}
+
+func TestRegisteredParentToolAssetsMatchExactAttestationContract(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate product-family test source")
+	}
+	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", ".."))
+	for _, product := range []struct {
+		id      string
+		asset   string
+		binding string
+		native  string
+	}{
+		{id: "opencode", asset: "opencode/agent-sessions.mjs", binding: "binding-opencode-parent", native: "ses_opencode_parent"},
+		{id: "kilo", asset: "kilo/agent-sessions.mjs", binding: "binding-kilo-parent", native: "ses_kilo_parent"},
+	} {
+		t.Run(product.id, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join(repositoryRoot, "integrations", product.asset))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(source)
+			for _, required := range []string{
+				"agent_sessions: tool({",
+				"if (!boundSessionID || context.sessionID !== boundSessionID)",
+				"component.callTool(callID, operation, {",
+				"...argumentsValue,",
+				"__agent_sessions_native_session_id: context.sessionID,",
+				`component.send("tool.cancel", callID`,
+				`"shell.env": async`,
+				"output.env.AGENT_SESSIONS_NATIVE_SESSION_ID = sessionID",
+			} {
+				if !strings.Contains(text, required) {
+					t.Fatalf("registered parent tool asset %q omitted exact-session contract %q", product.asset, required)
+				}
+			}
+			callStart := strings.Index(text, "component.callTool(callID, operation, {")
+			if callStart < 0 {
+				t.Fatalf("registered parent tool asset %q omitted component tool relay", product.asset)
+			}
+			callSource := text[callStart:]
+			spread := strings.Index(callSource, "...argumentsValue,")
+			exactSession := strings.Index(callSource, "__agent_sessions_native_session_id: context.sessionID,")
+			if spread < 0 || exactSession < 0 || spread >= exactSession {
+				t.Fatalf("registered parent tool asset %q does not overwrite model-supplied identity after argument spread", product.asset)
+			}
+
+			view := productruntime.ComponentSessionView{
+				BindingID: product.binding, AttachmentID: "attachment-" + product.id + "-parent",
+				NativeSessionID: product.native, Generation: 4,
+			}
+			attester, err := NewParentAttester(product.id, exactParentVerifierFake{view: view, rejectPID: 99})
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt := productruntime.ConnectorAttempt{
+				ProductID: product.id, PeerCredential: localtransport.PeerIdentity{PID: 55, UID: 1000},
+				ProcessIdentity:        procinfo.Identity{PID: 55, Start: "start", StrongStart: "strong"},
+				ClaimedNativeSessionID: product.native, ComponentBindingID: product.binding,
+			}
+			binding, err := attester.Attest(context.Background(), attempt)
+			if err != nil || !binding.Verified || binding.AttachmentID != view.AttachmentID || binding.NativeSessionID != product.native {
+				t.Fatalf("registered parent binding = %#v, %v", binding, err)
+			}
+			foreignProduct := attempt
+			foreignProduct.ProductID = "foreign"
+			if _, err := attester.Attest(context.Background(), foreignProduct); !errors.Is(err, productruntime.ErrUnauthorized) {
+				t.Fatalf("foreign registered-tool product = %v", err)
+			}
+		})
 	}
 }

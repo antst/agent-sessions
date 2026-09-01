@@ -1,6 +1,16 @@
 # Component Contract Narrow Re-freeze Evidence
 
-Status: **CANDIDATE — requires adversarial and fable-architect sign-off**
+Status: **PASS — adversarial review GREEN and fable-architect re-freeze granted**
+
+The reviewed candidate was the shared worktree at HEAD
+`1dd16eb2c4da88ca766470320c5bfbcbc7129d7d`; the exact reviewed delta was
+materialized immediately afterward as
+`039d25027afe9224ea32a91d4bf839aa550395b3`
+(`Refreeze component authority and native rename contract`), whose parent is
+`1dd16eb...`. Fable's round-1 ruling froze component contract revision
+`agent-sessions.component.v1-r1` with 21 frames while retaining protocol
+version 1. No product or physical-platform acceptance credit was granted by
+that contract review.
 
 Scope: one necessary daemon-to-component native rename operation. The frozen
 daemon/productruntime/state records, component envelope, and wire version are
@@ -37,13 +47,13 @@ unchanged.
 - [x] diagnostics redact sensitive native failure details;
 - [x] Go and JavaScript contract revisions match exactly;
 - [x] no wire-version bump or new envelope field;
-- [ ] adversarial review GREEN;
-- [ ] fable-architect re-freeze GREEN.
+- [x] adversarial review GREEN;
+- [x] fable-architect re-freeze GREEN.
 
 ## Verification commands
 
-Candidate source is the shared worktree diff over the Phase-B gate; no commit is
-made before review.
+The verification below was run against the reviewed shared-worktree candidate
+before it was committed as `039d250...`.
 
 ```text
 go test ./internal/component ./internal/componentruntime ./internal/daemon -count=10
@@ -70,5 +80,6 @@ namespace, forged-success/reject guards, callback deadline/disconnect/stop
 cancellation with late-result suppression, bounded replay, exact 21-frame
 vocabulary, and contract revision mismatch.
 
-Product peer rename receives no acceptance credit until both review cells above
-are green.
+Both review cells are green. This evidence freezes the shared component rename
+contract only; product peer rename still requires each product's focused tests
+and later central/physical acceptance gates.

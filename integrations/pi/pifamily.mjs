@@ -109,7 +109,7 @@ export function createPiFamilyExtension(productID, options = {}) {
     const assertExactContext = (ctx) => {
       const nativeSessionID = sessionID(ctx);
       if (!active || !current || nativeSessionID !== current.nativeSessionID ||
-          (boundNativeSessionID && boundNativeSessionID !== nativeSessionID)) {
+          !boundNativeSessionID || boundNativeSessionID !== nativeSessionID) {
         throw new Error("registered operation is not bound to the exact managed native session");
       }
       return nativeSessionID;

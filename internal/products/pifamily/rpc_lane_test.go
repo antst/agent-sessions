@@ -25,6 +25,7 @@ type scriptedRPCProcess struct {
 	answer                string
 	cleaned               bool
 	cleanupErr            error
+	commandErrors         map[string]error
 	suppressLastResponses int
 	closeOnLastResponse   bool
 }
@@ -53,6 +54,11 @@ func (process *scriptedRPCProcess) WriteFrame(_ context.Context, frame []byte) e
 	process.mu.Lock()
 	process.writes = append(process.writes, request)
 	command, id := request["type"].(string), request["id"].(string)
+	commandErr := process.commandErrors[command]
+	if commandErr != nil {
+		process.mu.Unlock()
+		return commandErr
+	}
 	streaming := process.streaming
 	suppressResponse := false
 	if command == "get_last_assistant_text" && process.suppressLastResponses > 0 {
@@ -133,6 +139,12 @@ type oneProcessFactory struct {
 type sequenceProcessFactory struct {
 	processes []*scriptedRPCProcess
 	next      int
+}
+
+type recoveryPlannerFunc func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error)
+
+func (planner recoveryPlannerFunc) PlanRecovery(ctx context.Context, request productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
+	return planner(ctx, request)
 }
 
 func (factory *sequenceProcessFactory) StartRPC(context.Context, productruntime.NativeCommand) (RPCProcess, error) {
@@ -350,6 +362,221 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	if got := process.commands(); !reflect.DeepEqual(got, []string{"get_state", "get_state", "prompt", "get_state", "steer", "get_last_assistant_text"}) {
 		t.Fatalf("commands = %q", got)
 	}
+}
+
+func TestLaneInterruptUsesCorrelatedAbortAndProductTerminalStrategy(t *testing.T) {
+	for _, test := range []struct {
+		productID     string
+		nativeID      string
+		wrongEvent    string
+		terminalEvent string
+		ready         bool
+	}{
+		{productID: PiProductID, nativeID: "pi-interrupt", wrongEvent: "agent_end", terminalEvent: "agent_settled"},
+		{productID: OMPProductID, nativeID: "omp-interrupt", wrongEvent: "agent_settled", terminalEvent: "agent_end", ready: true},
+	} {
+		t.Run(test.productID, func(t *testing.T) {
+			quirks, err := QuirksFor(test.productID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			process := newScriptedProcess(test.nativeID)
+			if test.ready {
+				process.emit(map[string]any{
+					"type": "ready", "protocolVersion": 1,
+					"supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes,
+				})
+			}
+			driver, err := NewLaneDriver(LaneConfig{
+				Quirks: quirks, Generation: 12, Processes: &oneProcessFactory{process: process},
+				Receipts: receiptReader{"interrupt-prompt": "run until interrupted"}, MapPermission: familyPermission,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
+				ProductID: test.productID, LaneID: "interrupt-" + test.productID,
+				Cwd: "/work", PermissionMode: permissionmode.Default,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{
+				ReceiptID: "interrupt-prompt", PermissionMode: permissionmode.Default,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := driver.Interrupt(ctx, turn); err != nil {
+				t.Fatal(err)
+			}
+			commands := process.commands()
+			abortIndex := -1
+			for index, command := range commands {
+				if command == "abort" {
+					abortIndex = index
+				}
+			}
+			if abortIndex < 0 || abortIndex == 0 || commands[abortIndex-1] != "get_state" {
+				t.Fatalf("interrupt commands = %q; want correlated state check then abort", commands)
+			}
+
+			process.emit(map[string]any{"type": test.wrongEvent, "messages": []any{map[string]any{"stopReason": "aborted"}}})
+			wrongCtx, wrongCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+			_, err = driver.WaitTurn(wrongCtx, turn)
+			wrongCancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("%s accepted %s as its terminal event: %v", test.productID, test.wrongEvent, err)
+			}
+			process.emit(map[string]any{"type": test.terminalEvent, "messages": []any{map[string]any{"stopReason": "aborted"}}})
+			terminal, err := driver.WaitTurn(ctx, turn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal.Outcome != productruntime.TurnInterrupted || terminal.NativeStopReason != "aborted" || terminal.Result != "native answer" {
+				t.Fatalf("interrupted terminal = %+v", terminal)
+			}
+		})
+	}
+}
+
+func TestLaneInterruptWriteFailureRollsBackInterruptedOutcome(t *testing.T) {
+	for _, productID := range []string{PiProductID, OMPProductID} {
+		t.Run(productID, func(t *testing.T) {
+			quirks, err := QuirksFor(productID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			process := newScriptedProcess(productID + "-abort-failure")
+			process.commandErrors = map[string]error{"abort": errors.New("native abort write rejected")}
+			if productID == OMPProductID {
+				process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+			}
+			driver, err := NewLaneDriver(LaneConfig{
+				Quirks: quirks, Generation: 13, Processes: &oneProcessFactory{process: process},
+				Receipts: receiptReader{"prompt": "complete after rejected abort"}, MapPermission: familyPermission,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
+				ProductID: productID, LaneID: "abort-failure-" + productID,
+				Cwd: "/work", PermissionMode: permissionmode.Default,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{
+				ReceiptID: "prompt", PermissionMode: permissionmode.Default,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := driver.Interrupt(ctx, turn); !errors.Is(err, productruntime.ErrProtocol) {
+				t.Fatalf("rejected abort returned %v", err)
+			}
+			process.emit(map[string]any{
+				"type":     quirks.TerminalEvent,
+				"messages": []any{map[string]any{"stopReason": "stop"}},
+			})
+			terminal, err := driver.WaitTurn(ctx, turn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal.Outcome != productruntime.TurnCompleted || terminal.NativeStopReason != "stop" {
+				t.Fatalf("abort error left an interrupted marker behind: %+v", terminal)
+			}
+		})
+	}
+}
+
+func TestLaneRecoveryAfterProcessDeathPreservesExactNativeSessionForBothProducts(t *testing.T) {
+	for _, productID := range []string{PiProductID, OMPProductID} {
+		t.Run(productID, func(t *testing.T) {
+			quirks, err := QuirksFor(productID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nativeID := productID + "-native-resume"
+			oldProcess := newScriptedProcess(nativeID)
+			if productID == OMPProductID {
+				oldProcess.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+			}
+			oldDriver, err := NewLaneDriver(LaneConfig{
+				Quirks: quirks, Generation: 20, Processes: &oneProcessFactory{process: oldProcess},
+				Receipts: receiptReader{"unused": "unused"}, MapPermission: familyPermission,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			oldRef, err := oldDriver.Open(ctx, productruntime.LaneOpenRequest{
+				ProductID: productID, LaneID: "recover-" + productID, Cwd: "/work",
+				PermissionMode: permissionmode.Default,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := oldDriver.Archive(ctx, oldRef); err != nil {
+				t.Fatal(err)
+			}
+			if !oldProcess.cleaned {
+				t.Fatal("old native RPC process was not killed before recovery")
+			}
+
+			resumedProcess := newScriptedProcess(nativeID)
+			if productID == OMPProductID {
+				resumedProcess.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+			}
+			factory := &oneProcessFactory{process: resumedProcess}
+			planner := recoveryPlannerFunc(func(_ context.Context, request productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
+				return productruntime.LaneOpenRequest{
+					ProductID: request.ProductID, LaneID: request.LaneID,
+					ResumeNativeID: request.PriorNativeSessionID, Cwd: "/work",
+					PermissionMode: permissionmode.Default,
+				}, nil
+			})
+			resumedDriver, err := NewLaneDriver(LaneConfig{
+				Quirks: quirks, Generation: 21, Processes: factory,
+				Receipts: receiptReader{"unused": "unused"}, MapPermission: familyPermission,
+				RecoveryPlans: planner,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumedRef, err := resumedDriver.Recover(ctx, productruntime.LaneRecoveryRequest{
+				ProductID: productID, LaneID: oldRef.LaneID,
+				PriorNativeSessionID: oldRef.NativeSessionID, PriorGeneration: oldRef.Generation,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumedRef.NativeSessionID != oldRef.NativeSessionID || resumedRef.Generation != 21 {
+				t.Fatalf("resumed ref = %+v, prior = %+v", resumedRef, oldRef)
+			}
+			wantResume := quirks.resumeArguments(nativeID)
+			if !containsContiguous(factory.command.Args, wantResume) {
+				t.Fatalf("resume args = %q, want exact selector %q", factory.command.Args, wantResume)
+			}
+		})
+	}
+}
+
+func containsContiguous(values, want []string) bool {
+	if len(want) == 0 || len(want) > len(values) {
+		return false
+	}
+	for start := 0; start+len(want) <= len(values); start++ {
+		if reflect.DeepEqual(values[start:start+len(want)], want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestOMPHandshakeRejectsHostileFirstOrIncompatibleReadyFrame(t *testing.T) {

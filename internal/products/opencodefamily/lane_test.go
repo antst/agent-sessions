@@ -162,6 +162,63 @@ func TestOpenCodeLaneLifecycleUsesReceiptAndExactRecovery(t *testing.T) {
 	}
 }
 
+func TestKiloLaneRecoveryRequiresExactNativeSession(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		responseID string
+		wantErr    error
+	}{
+		{name: "success", responseID: "ses_kilo_recover"},
+		{name: "native session substitution", responseID: "ses_kilo_other", wantErr: productruntime.ErrAmbiguousSession},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				requireBasicAuth(t, request)
+				if request.Method != http.MethodGet || request.URL.Path != "/session/ses_kilo_recover" {
+					http.NotFound(response, request)
+					return
+				}
+				_, _ = fmt.Fprintf(response, `{"id":%q,"title":""}`, test.responseID)
+			})
+			client, closeClient := newFamilyTestClient(t, DialectKilo, handler)
+			defer closeClient()
+			servers := &testServerManager{client: client}
+			driver, err := NewLaneDriver(LaneConfig{
+				ProductID: "kilo", Dialect: DialectKilo, Generation: 12,
+				Receipts: &testReceipts{bodies: map[string][]byte{"unused": []byte("unused")}},
+				Servers:  servers, MapPermission: MapPermissionRules,
+				RecoveryMode: func(context.Context, productruntime.LaneRecoveryRequest) (permissionmode.Mode, error) {
+					return permissionmode.BypassPermissions, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered, recoverErr := driver.Recover(context.Background(), productruntime.LaneRecoveryRequest{
+				ProductID: "kilo", LaneID: "lane-kilo-recover",
+				PriorNativeSessionID: "ses_kilo_recover", PriorGeneration: 11,
+			})
+			if test.wantErr == nil {
+				if recoverErr != nil || recovered != (productruntime.NativeSessionRef{
+					LaneID: "lane-kilo-recover", NativeSessionID: "ses_kilo_recover", Generation: 12,
+				}) {
+					t.Fatalf("Kilo recovery = %#v, %v", recovered, recoverErr)
+				}
+				if servers.recoverCount.Load() != 1 || servers.openCount.Load() != 0 {
+					t.Fatalf("Kilo recovery calls recover=%d open=%d", servers.recoverCount.Load(), servers.openCount.Load())
+				}
+				return
+			}
+			if !errors.Is(recoverErr, productruntime.ErrUnsupportedRecovery) || !errors.Is(recoverErr, test.wantErr) {
+				t.Fatalf("Kilo substituted-session recovery = %#v, %v", recovered, recoverErr)
+			}
+			if recovered != (productruntime.NativeSessionRef{}) || servers.closed.Load() != 1 {
+				t.Fatalf("failed Kilo recovery retained state: ref=%#v closes=%d", recovered, servers.closed.Load())
+			}
+		})
+	}
+}
+
 func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 	var deliveriesMu sync.Mutex
 	deliveries := []string{}

@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import componentModule from "../shared/component/client.js";
+import protocolModule from "../shared/component/protocol.js";
 import { createPiFamilyExtension } from "./pifamily.mjs";
+
+const { ComponentClient } = componentModule;
+const { CONTRACT_REVISION, FrameDecoder, encodeFrame } = protocolModule;
 
 class FakeComponent extends EventEmitter {
   constructor(active = true) {
@@ -62,6 +71,29 @@ function context(nativeSessionID, idle = true) {
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+async function until(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for component fixture state");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function listen(server, socketPath) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function closeServer(server) {
+  if (!server.listening) return;
+  await new Promise((resolve) => server.close(resolve));
+}
 
 test("ambient extension remains inert without the managed bootstrap", async () => {
   const component = new FakeComponent(false);
@@ -224,20 +256,107 @@ test("session switch restores exact-session native rename routing", async () => 
   assert.deepEqual(pi.names, ["new title"], "foreign old session must never reach the native writer");
 });
 
-test("component reconnect republishes exact session identity for post-admission routing", async () => {
-  const component = new FakeComponent();
-  const pi = new FakePi();
-  createPiFamilyExtension("pi", { componentClient: component })(pi);
-  const ctx = context("pi-reconnect", true);
-  await pi.fire("session_start", { reason: "startup" }, ctx);
-  component.emit("session.bound", { binding_id: "binding-1", native_session_id: "pi-reconnect" });
-  component.bindingID = "binding-2";
-  component.emit("ready", { bindingID: "binding-2", daemonGeneration: 8 });
-  const announces = component.sent.filter((frame) => frame.type === "session.announce");
-  assert.equal(announces.length, 2);
-  assert.equal(announces[1].payload.binding_id, "binding-2");
-  assert.equal(announces[1].payload.native_session_id, "pi-reconnect");
-  assert.equal(process.env.AGENT_SESSIONS_COMPONENT_BINDING_ID, "binding-2");
+test("real shared component transport preserves exact Pi and OMP peers across kill/resume and daemon-generation reconnect", async (t) => {
+  for (const productID of ["pi", "omp"]) {
+    await t.test(productID, async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `agent-sessions-${productID}-peer-`));
+      const socketPath = path.join(root, "component.sock");
+      const received = [];
+      const sockets = [];
+      let connections = 0;
+      const server = net.createServer((socket) => {
+        socket.on("error", () => {});
+        sockets.push(socket);
+        connections += 1;
+        const ordinal = connections;
+        let outboundSequence = 0;
+        const decoder = new FrameDecoder();
+        const send = (type, id, payload) => {
+          outboundSequence += 1;
+          socket.write(encodeFrame({ version: 1, type, id, seq: outboundSequence, payload }));
+        };
+        socket.on("data", (chunk) => {
+          for (const frame of decoder.push(chunk)) {
+            received.push({ ordinal, frame });
+            if (frame.type === "bootstrap" || frame.type === "reconnect") {
+              send("ready", frame.id, {
+                binding_id: `binding-${productID}-${ordinal}`,
+                attachment_id: `attachment-${productID}`,
+                daemon_generation: 30 + ordinal - 1,
+                protocol_version: 1,
+                max_frame_bytes: 1024 * 1024,
+                heartbeat_interval_ms: 1000,
+              });
+            } else if (frame.type === "session.announce") {
+              send("session.bound", frame.id, {
+                binding_id: `binding-${productID}-${ordinal}`,
+                native_session_id: frame.payload.native_session_id,
+              });
+            } else if (frame.type === "heartbeat") {
+              send("heartbeat.ack", frame.id, {
+                binding_id: `binding-${productID}-${ordinal}`,
+                last_received_seq: frame.seq,
+              });
+            }
+          }
+        });
+      });
+      await listen(server, socketPath);
+
+      const clientEnv = {
+        AGENT_SESSIONS_COMPONENT_SOCKET: socketPath,
+        AGENT_SESSIONS_PRODUCT_ID: productID,
+        AGENT_SESSIONS_ATTACHMENT_ID: `attachment-${productID}`,
+        AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID: `capability-${productID}`,
+        AGENT_SESSIONS_BOOTSTRAP_VALUE: `secret-${productID}`,
+        AGENT_SESSIONS_COMPONENT_VERSION: CONTRACT_REVISION,
+      };
+      const component = new ComponentClient({
+        env: clientEnv, reconnectMinMs: 5, reconnectMaxMs: 20,
+      });
+      const pi = new FakePi();
+      createPiFamilyExtension(productID, { componentClient: component })(pi);
+      const nativeSessionID = `${productID}-native-persistent`;
+      const ctx = context(nativeSessionID, true);
+      try {
+        await pi.fire("session_start", { reason: "startup" }, ctx);
+        await until(() => received.some(({ ordinal, frame }) => ordinal === 1 && frame.type === "session.announce"));
+        await until(() => component.bindingID === `binding-${productID}-1`);
+        const firstAnnounce = received.find(({ ordinal, frame }) => ordinal === 1 && frame.type === "session.announce").frame;
+        assert.equal(firstAnnounce.payload.native_session_id, nativeSessionID);
+        assert.equal(firstAnnounce.payload.binding_id, `binding-${productID}-1`);
+
+        await pi.fire("session_shutdown", { reason: "killed" }, ctx);
+        assert.equal(component.stopping, false, "native peer death must not stop the daemon component connection");
+        await pi.fire("session_start", { reason: "resume" }, ctx);
+        await until(() => received.some(({ ordinal, frame }) => ordinal === 1 && frame.type === "session.state" &&
+          frame.payload.native_session_id === nativeSessionID));
+        assert.equal(received.some(({ frame }) => frame.type === "session.rebind" &&
+          frame.payload.new_native_session_id !== nativeSessionID), false, "native resume must not substitute a session id");
+
+        sockets[0].destroy();
+        await until(() => component.daemonGeneration === 31 && component.bindingID === `binding-${productID}-2`);
+        await until(() => received.some(({ ordinal, frame }) => ordinal === 2 && frame.type === "session.announce"));
+        const reconnect = received.find(({ ordinal, frame }) => ordinal === 2 && frame.type === "reconnect").frame;
+        assert.equal(reconnect.payload.prior_binding_id, `binding-${productID}-1`);
+        assert.equal(reconnect.payload.prior_generation, 30);
+        const secondAnnounce = received.find(({ ordinal, frame }) => ordinal === 2 && frame.type === "session.announce").frame;
+        assert.equal(secondAnnounce.payload.binding_id, `binding-${productID}-2`);
+        assert.equal(secondAnnounce.payload.native_session_id, nativeSessionID);
+        assert.equal(process.env.AGENT_SESSIONS_SESSION_ID, nativeSessionID);
+        assert.equal(process.env.AGENT_SESSIONS_COMPONENT_BINDING_ID, `binding-${productID}-2`);
+      } finally {
+        await pi.fire("session_shutdown", { reason: "quit" }, ctx);
+        await component.stop();
+        for (const socket of sockets) socket.destroy();
+        await closeServer(server);
+        fs.rmSync(root, { recursive: true, force: true });
+        delete process.env.AGENT_SESSIONS_SESSION_ID;
+        delete process.env.AGENT_SESSIONS_NATIVE_SESSION_ID;
+        delete process.env.AGENT_SESSIONS_COMPONENT_BINDING_ID;
+      }
+    });
+  }
 });
 
 test("OMP leaves busy steer text unwrapped for native interjection framing", async () => {
@@ -259,25 +378,42 @@ test("OMP leaves busy steer text unwrapped for native interjection framing", asy
   assert.equal(component.sent.some((frame) => frame.type === "turn.event" && frame.payload.kind === "agent_end"), true);
 });
 
-test("registered tool rejects a foreign handler session and command uses the same attested route", async () => {
-  const component = new FakeComponent();
-  const pi = new FakePi();
-  createPiFamilyExtension("pi", { componentClient: component })(pi);
-  const exact = context("pi-parent", true);
-  await pi.fire("session_start", { reason: "startup" }, exact);
-  component.emit("session.bound", { binding_id: "binding-1", native_session_id: "pi-parent" });
+test("Pi and OMP registered parent surfaces require exact binding and session and export exact native identity", async (t) => {
+  for (const productID of ["pi", "omp"]) {
+    await t.test(productID, async () => {
+      const component = new FakeComponent();
+      const pi = new FakePi();
+      createPiFamilyExtension(productID, { componentClient: component })(pi);
+      const nativeSessionID = `${productID}-parent`;
+      const exact = context(nativeSessionID, true);
+      await pi.fire("session_start", { reason: "startup" }, exact);
+      assert.equal(process.env.AGENT_SESSIONS_SESSION_ID, nativeSessionID);
+      assert.equal(process.env.AGENT_SESSIONS_NATIVE_SESSION_ID, nativeSessionID);
 
-  const tool = pi.tools.get("agent_sessions");
-  const forged = await tool.execute("model-call", { operation: "peers.list", arguments: {} }, undefined, undefined, context("forged", true));
-  assert.equal(forged.isError, true);
-  assert.equal(component.calls.length, 0);
+      component.emit("session.bound", { binding_id: "foreign-binding", native_session_id: nativeSessionID });
+      const tool = pi.tools.get("agent_sessions");
+      const wrongBinding = await tool.execute("model-call-wrong-binding", { operation: "peers.list", arguments: {} }, undefined, undefined, exact);
+      assert.equal(wrongBinding.isError, true);
+      assert.equal(component.calls.length, 0);
 
-  const accepted = await tool.execute("model-call", { operation: "peers.list", arguments: {} }, undefined, undefined, exact);
-  assert.equal(accepted.isError, undefined);
-  assert.equal(component.calls[0].operation, "peers.list");
+      component.emit("session.bound", { binding_id: "binding-1", native_session_id: nativeSessionID });
+      const forged = await tool.execute("model-call-forged-session", { operation: "peers.list", arguments: {} }, undefined, undefined, context("forged", true));
+      assert.equal(forged.isError, true);
+      assert.equal(component.calls.length, 0);
 
-  const commandContext = context("pi-parent", true);
-  await pi.commands.get("lane").handler("lane.status {\"lane_id\":\"worker\"}", commandContext);
-  assert.equal(component.calls[1].operation, "lane.status");
-  assert.equal(commandContext.ui.notifications[0].level, "info");
+      const accepted = await tool.execute("model-call", { operation: "peers.list", arguments: {} }, undefined, undefined, exact);
+      assert.equal(accepted.isError, undefined);
+      assert.equal(component.calls[0].operation, "peers.list");
+
+      const commandContext = context(nativeSessionID, true);
+      await pi.commands.get("lane").handler("lane.status {\"lane_id\":\"worker\"}", commandContext);
+      assert.equal(component.calls[1].operation, "lane.status");
+      assert.equal(commandContext.ui.notifications[0].level, "info");
+
+      await pi.fire("session_shutdown", { reason: "quit" }, exact);
+      delete process.env.AGENT_SESSIONS_SESSION_ID;
+      delete process.env.AGENT_SESSIONS_NATIVE_SESSION_ID;
+      delete process.env.AGENT_SESSIONS_COMPONENT_BINDING_ID;
+    });
+  }
 });
