@@ -16,25 +16,28 @@ type Projection struct {
 }
 
 type ProjectedProduct struct {
-	ID                     string        `json:"id"`
-	Label                  string        `json:"label"`
-	SupportState           SupportState  `json:"support_state"`
-	NativeExecutable       string        `json:"native_executable"`
-	TestedVersion          string        `json:"tested_version"`
-	Compatibility          Compatibility `json:"compatibility"`
-	PeerAlias              string        `json:"peer_alias"`
-	LaneAlias              string        `json:"lane_alias"`
-	Capabilities           []string      `json:"capabilities"`
-	FederationCapabilities []string      `json:"federation_capabilities"`
-	PeerTransport          string        `json:"peer_transport"`
-	MessageTransport       string        `json:"message_transport"`
-	LaneTransport          string        `json:"lane_transport"`
-	ConnectorAttesterKey   string        `json:"connector_attester"`
-	DoctorProbeKey         string        `json:"doctor_probe"`
-	PermissionProfileKey   string        `json:"permission_profile"`
-	InstallRoot            string        `json:"install_root"`
-	PluginArchivePaths     []string      `json:"plugin_archive_paths"`
-	RequiredDoctorFeatures []string      `json:"required_doctor_features"`
+	ID                     string             `json:"id"`
+	Label                  string             `json:"label"`
+	SupportState           SupportState       `json:"support_state"`
+	NativeExecutable       string             `json:"native_executable"`
+	TestedVersion          string             `json:"tested_version"`
+	Compatibility          Compatibility      `json:"compatibility"`
+	PeerAlias              string             `json:"peer_alias"`
+	LaneAlias              string             `json:"lane_alias"`
+	Capabilities           []string           `json:"capabilities"`
+	FederationCapabilities []string           `json:"federation_capabilities"`
+	PeerTransport          string             `json:"peer_transport"`
+	MessageTransport       string             `json:"message_transport"`
+	LaneTransport          string             `json:"lane_transport"`
+	ConnectorAttesterKey   string             `json:"connector_attester"`
+	DoctorProbeKey         string             `json:"doctor_probe"`
+	PermissionProfileKey   string             `json:"permission_profile"`
+	InstallRoot            string             `json:"install_root"`
+	PluginArchivePaths     []string           `json:"plugin_archive_paths"`
+	RequiredDoctorFeatures []string           `json:"required_doctor_features"`
+	NativeRegistration     NativeRegistration `json:"native_registration"`
+	Acceptance             AcceptanceContract `json:"acceptance"`
+	Authority              *AuthorityContract `json:"authority,omitempty"`
 }
 
 // BuildProjection validates and deterministically sorts an injected inventory.
@@ -48,6 +51,8 @@ func BuildProjection(inventory []Descriptor) (Projection, error) {
 		doctorFeatures := append([]string(nil), descriptor.RequiredDoctorFeatures...)
 		archivePaths := append([]string(nil), descriptor.PluginArchivePaths...)
 		tuple := append([]TupleMember(nil), descriptor.Compatibility.TupleMembers...)
+		registrationArgs := append([]string(nil), descriptor.NativeRegistration.Args...)
+		externalCells := append([]ExternalAcceptanceCell(nil), descriptor.Acceptance.ExternalCells...)
 		sort.Strings(federation)
 		sort.Strings(doctorFeatures)
 		sort.Strings(archivePaths)
@@ -57,6 +62,13 @@ func BuildProjection(inventory []Descriptor) (Projection, error) {
 			}
 			return tuple[i].Name < tuple[j].Name
 		})
+		sort.Strings(registrationArgs)
+		sort.Slice(externalCells, func(i, j int) bool { return externalCells[i].ID < externalCells[j].ID })
+		var authority *AuthorityContract
+		if descriptor.Authority != nil {
+			copyAuthority := *descriptor.Authority
+			authority = &copyAuthority
+		}
 		products = append(products, ProjectedProduct{
 			ID: descriptor.ID, Label: descriptor.Label, SupportState: descriptor.SupportState,
 			NativeExecutable: descriptor.NativeExecutable, TestedVersion: descriptor.TestedVersion,
@@ -67,6 +79,9 @@ func BuildProjection(inventory []Descriptor) (Projection, error) {
 			LaneTransport: descriptor.LaneTransport, ConnectorAttesterKey: descriptor.ConnectorAttesterKey,
 			DoctorProbeKey: descriptor.DoctorProbeKey, PermissionProfileKey: descriptor.PermissionProfileKey,
 			InstallRoot: descriptor.InstallRoot, PluginArchivePaths: archivePaths, RequiredDoctorFeatures: doctorFeatures,
+			NativeRegistration: NativeRegistration{Strategy: descriptor.NativeRegistration.Strategy, Args: registrationArgs, AssetOnly: descriptor.NativeRegistration.AssetOnly},
+			Acceptance:         AcceptanceContract{RealProductRequired: descriptor.Acceptance.RealProductRequired, ExternalCells: externalCells},
+			Authority:          authority,
 		})
 	}
 	sort.Slice(products, func(i, j int) bool { return products[i].ID < products[j].ID })

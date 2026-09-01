@@ -26,6 +26,15 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 		if product.SupportState != SupportGeneral || product.TestedVersion == "" || product.InstallRoot != "integrations/"+product.ID {
 			t.Fatalf("shared metadata missing from %#v", product)
 		}
+		if product.NativeRegistration.Strategy != "legacy-native-plugin" || !reflect.DeepEqual(product.NativeRegistration.Args, []string{product.ID}) {
+			t.Fatalf("%s native registration = %#v", product.ID, product.NativeRegistration)
+		}
+		if !product.Acceptance.RealProductRequired || len(product.Acceptance.ExternalCells) != 0 {
+			t.Fatalf("%s acceptance = %#v", product.ID, product.Acceptance)
+		}
+		if product.Authority == nil || product.Authority.PeerAuth == "" || product.Authority.LaneAuth == "" || product.Authority.LaneAuthLifetime == "" {
+			t.Fatalf("%s authority = %#v", product.ID, product.Authority)
+		}
 		if !reflect.DeepEqual(product.FederationCapabilities, []string{product.LaneCapability}) {
 			t.Fatalf("%s federation capabilities = %v", product.ID, product.FederationCapabilities)
 		}
@@ -76,8 +85,12 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	products[0].RequiredDoctorFeatures[0] = "mutated"
 	products[0].FederationCapabilities[0] = "mutated"
 	products[0].Compatibility.TupleMembers = []TupleMember{{Name: "mutated", Version: "1"}}
+	products[0].NativeRegistration.Args[0] = "mutated"
+	products[0].NativeRegistration.AssetOnly = true
+	products[0].Acceptance.ExternalCells = []ExternalAcceptanceCell{{ID: "mutated"}}
+	products[0].Authority.PeerAuth = "mutated"
 	again, _ := ByID("codex")
-	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 {
+	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 || again.Authority.PeerAuth == "mutated" {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
 	}
 	ordered := again.SortedCapabilities()

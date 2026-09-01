@@ -49,6 +49,41 @@ type Compatibility struct {
 	TupleMembers   []TupleMember `json:"tuple_members,omitempty"`
 }
 
+// NativeRegistration is a secret-free strategy selector. Args are declarative
+// strategy parameters, never native argv, and must be unique and sorted.
+type NativeRegistration struct {
+	Strategy  string   `json:"strategy"`
+	Args      []string `json:"args,omitempty"`
+	AssetOnly bool     `json:"asset_only,omitempty"`
+}
+
+const (
+	maxNativeRegistrationArgs  = 32
+	maxExternalAcceptanceCells = 32
+)
+
+// ExternalAcceptanceCell identifies evidence which requires an external
+// account or entitlement and therefore cannot be credited by a protocol mock.
+type ExternalAcceptanceCell struct {
+	ID                 string `json:"id"`
+	RequiredForGeneral bool   `json:"required_for_general,omitempty"`
+}
+
+// AcceptanceContract describes real-product evidence requirements.
+type AcceptanceContract struct {
+	RealProductRequired bool                     `json:"real_product_required"`
+	ExternalCells       []ExternalAcceptanceCell `json:"external_cells,omitempty"`
+}
+
+// AuthorityContract is an optional, secret-free description of the native
+// authority boundary. It names mechanisms and lifetimes, not values.
+type AuthorityContract struct {
+	PeerAuth         string `json:"peer_auth,omitempty"`
+	PeerHeader       string `json:"peer_header,omitempty"`
+	LaneAuth         string `json:"lane_auth,omitempty"`
+	LaneAuthLifetime string `json:"lane_auth_lifetime,omitempty"`
+}
+
 type ResumeStyle string
 
 const (
@@ -84,6 +119,9 @@ type Descriptor struct {
 	InstallRoot            string
 	RequiredDoctorFeatures []string
 	FederationCapabilities []string
+	NativeRegistration     NativeRegistration
+	Acceptance             AcceptanceContract
+	Authority              *AuthorityContract
 }
 
 var descriptors = [...]Descriptor{
@@ -105,6 +143,11 @@ func baselineDescriptor(id, label, executable, peerAlias, laneAlias, runtimeRole
 		InstallRoot:            "integrations/" + id,
 		RequiredDoctorFeatures: []string{"native-cli", "peer", "lane"},
 		FederationCapabilities: []string{laneCapability},
+		NativeRegistration:     NativeRegistration{Strategy: "legacy-native-plugin", Args: []string{id}},
+		Acceptance:             AcceptanceContract{RealProductRequired: true},
+		Authority: &AuthorityContract{
+			PeerAuth: "wrapper-attestation", LaneAuth: "native-session", LaneAuthLifetime: "process",
+		},
 	}
 }
 
@@ -269,6 +312,56 @@ func validateDescriptor(descriptor Descriptor) error {
 	if descriptor.Has(CapabilityParent) && descriptor.ConnectorAttesterKey == "" {
 		return errors.New("parent product requires connector attester")
 	}
+	if err := ValidateToken(descriptor.NativeRegistration.Strategy); err != nil {
+		return fmt.Errorf("native registration strategy %q: %w", descriptor.NativeRegistration.Strategy, err)
+	}
+	if len(descriptor.NativeRegistration.Args) > maxNativeRegistrationArgs {
+		return fmt.Errorf("native registration has more than %d arguments", maxNativeRegistrationArgs)
+	}
+	for index, argument := range descriptor.NativeRegistration.Args {
+		if err := ValidateToken(argument); err != nil {
+			return fmt.Errorf("native registration argument %q: %w", argument, err)
+		}
+		if index > 0 && descriptor.NativeRegistration.Args[index-1] >= argument {
+			return errors.New("native registration arguments must be unique and sorted")
+		}
+	}
+	seenExternal := map[string]bool{}
+	if descriptor.SupportState != SupportHidden && !descriptor.Acceptance.RealProductRequired {
+		return errors.New("visible product acceptance requires real-product evidence")
+	}
+	if len(descriptor.Acceptance.ExternalCells) > maxExternalAcceptanceCells {
+		return fmt.Errorf("acceptance has more than %d external cells", maxExternalAcceptanceCells)
+	}
+	for index, cell := range descriptor.Acceptance.ExternalCells {
+		if err := ValidateToken(cell.ID); err != nil {
+			return fmt.Errorf("external acceptance cell %q: %w", cell.ID, err)
+		}
+		if seenExternal[cell.ID] {
+			return fmt.Errorf("duplicate external acceptance cell %q", cell.ID)
+		}
+		if index > 0 && descriptor.Acceptance.ExternalCells[index-1].ID >= cell.ID {
+			return errors.New("external acceptance cells must be unique and sorted")
+		}
+		seenExternal[cell.ID] = true
+	}
+	if descriptor.Authority != nil {
+		for _, field := range []struct{ name, value string }{
+			{"peer auth", descriptor.Authority.PeerAuth},
+			{"peer header", descriptor.Authority.PeerHeader},
+			{"lane auth", descriptor.Authority.LaneAuth},
+			{"lane auth lifetime", descriptor.Authority.LaneAuthLifetime},
+		} {
+			if field.value != "" {
+				if err := ValidateToken(field.value); err != nil {
+					return fmt.Errorf("authority %s %q: %w", field.name, field.value, err)
+				}
+			}
+		}
+		if descriptor.Authority.PeerAuth == "" && descriptor.Authority.PeerHeader == "" && descriptor.Authority.LaneAuth == "" {
+			return errors.New("authority contract must name at least one mechanism")
+		}
+	}
 	return nil
 }
 
@@ -346,6 +439,12 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.Compatibility.TupleMembers = append([]TupleMember(nil), descriptor.Compatibility.TupleMembers...)
 	descriptor.RequiredDoctorFeatures = append([]string(nil), descriptor.RequiredDoctorFeatures...)
 	descriptor.FederationCapabilities = append([]string(nil), descriptor.FederationCapabilities...)
+	descriptor.NativeRegistration.Args = append([]string(nil), descriptor.NativeRegistration.Args...)
+	descriptor.Acceptance.ExternalCells = append([]ExternalAcceptanceCell(nil), descriptor.Acceptance.ExternalCells...)
+	if descriptor.Authority != nil {
+		authority := *descriptor.Authority
+		descriptor.Authority = &authority
+	}
 	return descriptor
 }
 
