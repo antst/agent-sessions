@@ -88,8 +88,10 @@ session; string equality between those IDs is neither required nor sufficient.
 
 ## Other Phase A decisions encoded in source
 
-- Federation wire protocol remains version 3. Product and federation
-  capability tokens share one bounded validator.
+- The historical Phase-A federation decision was version 3. The
+  owner-authorized greenfield T125 amendment supersedes only that compatibility
+  projection with uniform version 4; product and federation capability tokens
+  still share one bounded validator.
 - `CapabilityParent` is an explicit catalog capability and must match a
   `ParentAttester`.
 - Live MCP relay, AgentFrame, instruction, identity, name, and help sources now

@@ -43,7 +43,7 @@ While idle, the lane appears in both Claude and Codex peer discovery and accepts
 
 ## Remote hosts
 
-With the unified daemons connected to a protocol-3 hub, the same native CLI can run on a named
+With the unified daemons connected to a protocol-4 hub, the same native CLI can run on a named
 destination without SSH:
 
 ```bash

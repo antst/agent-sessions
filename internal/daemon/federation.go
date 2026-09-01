@@ -71,7 +71,7 @@ func (f *Federation) Send(ctx context.Context, source, target federation.Peer, m
 }
 
 // SendWithData performs acknowledged delivery and returns additive destination
-// receipt metadata when supported by the remote protocol-3 host.
+// destination-owned receipt metadata from the uniform remote protocol.
 func (f *Federation) SendWithData(ctx context.Context, source, target federation.Peer, messageID, content, group string) ([]byte, error) {
 	if f == nil || f.host == nil {
 		return nil, errors.New("daemon federation component is unavailable")

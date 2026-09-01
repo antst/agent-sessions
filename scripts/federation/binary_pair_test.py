@@ -18,12 +18,16 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from typing import BinaryIO
 
 
-PROTOCOL_VERSION = 3
-START_TIMEOUT = 20.0
+PROTOCOL_VERSION = 4
+# A cold daemon rebuilds its complete live projection before publishing the
+# initial federation snapshot. Keep the production-binary gate above that
+# bounded startup path without weakening any per-connection protocol timeout.
+START_TIMEOUT = 45.0
 MISMATCH_HOST_ID = "mismatch-must-not-register"
 
 
@@ -94,6 +98,8 @@ class Observer:
         self.socket = socket.create_connection((host, int(raw_port)), timeout=5)
         self.socket.settimeout(START_TIMEOUT)
         self.reader: BinaryIO = self.socket.makefile("rb")
+        self.send_lock = threading.Lock()
+        self.stop_heartbeat = threading.Event()
         self.send({
             "type": "hello", "version": PROTOCOL_VERSION,
             "build": build_id, "generation": 1,
@@ -103,10 +109,21 @@ class Observer:
         if hello.get("type") != "hello_ok" or hello.get("version") != PROTOCOL_VERSION:
             raise RuntimeError(f"invalid hub handshake: {hello}")
         self.hub_build = str(hello.get("build", ""))
+        self.send({"type": "snapshot", "peers": []})
+        self.heartbeat = threading.Thread(target=self._heartbeat, daemon=True)
+        self.heartbeat.start()
 
     def send(self, message: dict[str, object]) -> None:
         body = json.dumps(message, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-        self.socket.sendall(body)
+        with self.send_lock:
+            self.socket.sendall(body)
+
+    def _heartbeat(self) -> None:
+        while not self.stop_heartbeat.wait(5):
+            try:
+                self.send({"type": "ping"})
+            except OSError:
+                return
 
     def read(self) -> dict[str, object]:
         line = self.reader.readline()
@@ -148,6 +165,8 @@ class Observer:
         raise RuntimeError("timed out waiting for a post-rejection roster")
 
     def close(self) -> None:
+        self.stop_heartbeat.set()
+        self.heartbeat.join(timeout=1)
         try:
             self.reader.close()
         finally:
@@ -272,6 +291,7 @@ def main() -> int:
                     "hub_builds": [first_hub_build, observer.hub_build],
                     "host_generations": [first["generation"], after_hub["generation"], after_host["generation"]],
                     "mismatch_refused_before_registration": True,
+                    "n_plus_one_clean_rejection": True,
                 }, sort_keys=True, separators=(",", ":")))
             finally:
                 if observer is not None:

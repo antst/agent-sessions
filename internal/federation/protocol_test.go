@@ -68,14 +68,12 @@ func TestProtocolDuplicateDeliveryAndReconnectGenerationRules(t *testing.T) {
 	}
 	currentServer, currentPeer := net.Pipe()
 	defer func() { _ = currentPeer.Close() }()
-	current := &hubClient{hostID: "host-a", generation: 9, wire: newWireConn(currentServer), peers: map[string]Peer{}}
-	if err := h.register(current); err != nil {
-		t.Fatal(err)
-	}
+	current := &hubClient{hostID: "host-a", generation: 9, ready: true, wire: newWireConn(currentServer), peers: map[string]Peer{}}
+	h.clients[current.hostID] = current
 	staleServer, stalePeer := net.Pipe()
 	defer func() { _ = staleServer.Close(); _ = stalePeer.Close() }()
 	stale := &hubClient{hostID: "host-a", generation: 8, wire: newWireConn(staleServer), peers: map[string]Peer{}}
-	if err := h.register(stale); err == nil || !strings.Contains(err.Error(), "older") {
+	if err := h.validateRegistrationCandidate(stale); err == nil || !strings.Contains(err.Error(), "older") {
 		t.Fatalf("stale reconnect result = %v", err)
 	}
 	if h.clients["host-a"] != current {
@@ -163,7 +161,7 @@ func TestNormalizeCapabilitiesPreservesUnknownTokensAndRejectsInvalidRawInput(t 
 
 func TestProtocolAcceptsAdditiveUnknownJSONFields(t *testing.T) {
 	var got Message
-	err := scanMessages(strings.NewReader(`{"type":"hello","version":3,"host_id":"host-a","host_name":"host-a","future":{"nested":true}}`+"\n"), func(message Message) error {
+	err := scanMessages(strings.NewReader(`{"type":"hello","version":4,"host_id":"host-a","host_name":"host-a","future":{"nested":true}}`+"\n"), func(message Message) error {
 		got = message
 		return nil
 	})

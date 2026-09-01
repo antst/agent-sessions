@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	// ProtocolVersion is the complete host/hub wire compatibility contract.
-	// Build identifiers are diagnostic and deliberately do not participate in
-	// compatibility decisions.
-	ProtocolVersion = 3
-	// GroupProtocolVersion is the grouped peer projection carried by protocol 3.
+	// ProtocolVersion is the complete, uniform host/hub wire contract. Every
+	// participant must send this exact version during the first handshake; the
+	// hub does not partially admit or downgrade mismatched participants.
+	ProtocolVersion = 4
+	// GroupProtocolVersion is the grouped peer projection carried by protocol 4.
 	GroupProtocolVersion = 1
 
 	// CapabilityCodexLane advertises remotely executable Codex lanes.
@@ -30,11 +30,6 @@ const (
 	CapabilityGrokLane = "grok-lane"
 	// CapabilityQwenLane advertises remotely executable Qwen lanes.
 	CapabilityQwenLane = "qwen-lane"
-
-	// transportFeatureOpaquePeerProducts is an additive protocol-3 feature
-	// marker. It is advertised in the existing host capability list, but is
-	// reserved for roster projection and can never authorize lane dispatch.
-	transportFeatureOpaquePeerProducts = "federation-peer-products"
 
 	maxWireBytes            = 2 * 1024 * 1024
 	maxLaneInputBytes       = 1024 * 1024
@@ -59,15 +54,6 @@ const (
 	maxRosterHosts          = 4096
 	wireWriteTimeout        = 10 * time.Second
 )
-
-// legacyV3LaneCapabilities is deliberately frozen to the products that sent
-// protocol-3 lane_exec frames before per-frame capability selection existed.
-// It is the sole hub-side product-to-capability inference: new and unknown
-// products must always send exactly one explicit opaque capability.
-var legacyV3LaneCapabilities = map[string]string{
-	"codex": CapabilityCodexLane, "claude": CapabilityClaudeLane,
-	"grok": CapabilityGrokLane, "qwen": CapabilityQwenLane,
-}
 
 // RuntimeVersion is diagnostic build metadata emitted during registration.
 // Equal protocol versions interoperate regardless of this value.
@@ -224,28 +210,17 @@ func normalizeCapabilities(values []string) ([]string, error) {
 	return result, nil
 }
 
-func laneCapabilityForMessage(message Message) (capability string, legacy bool, err error) {
+func laneCapabilityForMessage(message Message) (string, error) {
 	if err := productcatalog.ValidateToken(message.Product); err != nil {
-		return "", false, fmt.Errorf("invalid remote lane product %q: %w", message.Product, err)
+		return "", fmt.Errorf("invalid remote lane product %q: %w", message.Product, err)
 	}
-	switch len(message.Capabilities) {
-	case 0:
-		capability, legacy = legacyV3LaneCapabilities[message.Product]
-		if capability == "" {
-			return "", false, errors.New("remote lane request requires exactly one capability")
-		}
-		return capability, true, nil
-	case 1:
-		if err := productcatalog.ValidateToken(message.Capabilities[0]); err != nil {
-			return "", false, fmt.Errorf("invalid remote lane capability %q: %w", message.Capabilities[0], err)
-		}
-		if message.Capabilities[0] == transportFeatureOpaquePeerProducts {
-			return "", false, errors.New("transport feature marker is not a lane capability")
-		}
-		return message.Capabilities[0], false, nil
-	default:
-		return "", false, errors.New("remote lane request requires exactly one capability")
+	if len(message.Capabilities) != 1 {
+		return "", errors.New("remote lane request requires exactly one capability")
 	}
+	if err := productcatalog.ValidateToken(message.Capabilities[0]); err != nil {
+		return "", fmt.Errorf("invalid remote lane capability %q: %w", message.Capabilities[0], err)
+	}
+	return message.Capabilities[0], nil
 }
 
 func sortStrings(values []string) {

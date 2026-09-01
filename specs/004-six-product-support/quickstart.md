@@ -29,7 +29,7 @@ uname -a
 Before runtime interfaces freeze, execute the spike harness for:
 
 ```text
-S0  base/protocol-3 decoder proof
+S0  historical base decoder proof; protocol-4 uniform rewrite is T125
 S1  Kilo two-instance routing and attach parity
 S2  DSH exact tuple, Cordis wake/steer, parent facade
 S3  CodeBuddy wrapper/registry/socket ownership and restart isolation
@@ -82,7 +82,7 @@ Expected:
 - component bootstrap/reconnect fails on wrong PID/start/ancestry;
 - ledger crash matrix has no lost or duplicate accepted input;
 - dispatch ambiguity is explicit and not replayed;
-- opaque protocol-3 capability reaches only a ready exact destination;
+- one explicit opaque protocol-4 capability reaches only a ready exact destination;
 - loopback client rejects redirect, proxy, non-loopback, oversized, and
   malformed responses.
 
@@ -200,7 +200,7 @@ For each ready product:
 ```
 
 Expected: only advertised exact capabilities execute. Unknown products on an
-older protocol-3 hop are unavailable, never remapped. Groups and parent anchors
+protocol-mismatched hop are rejected before registration, never remapped. Groups and parent anchors
 remain source-host canonical.
 
 ## 11. Full Gate

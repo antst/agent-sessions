@@ -30,7 +30,7 @@ freeze. These are evidence tasks, not production implementation.
 - [x] T005 [P] Prove exact parent native-session context and the shared component frame set for OpenCode/Kilo/Pi/OMP in `scripts/spikes/six-product/component-context/` and record `specs/004-six-product-support/evidence/phase0/S4-component.json`
 - [x] T006 [P] Run static reachability/call inventory for live bridge/federator exports in `scripts/spikes/six-product/legacy/` and record the extract-and-freeze decision in `specs/004-six-product-support/evidence/phase0/S5-legacy.json`
 - [x] T007 [P] Prototype deterministic staged-binary ten-product catalog/install projection in `scripts/spikes/six-product/catalog/` and record `specs/004-six-product-support/evidence/phase0/S6-catalog.json`
-- [x] T008 Prove protocol-3 decoding requires no new field, record the opaque-capability/trusted-network decision in `specs/004-six-product-support/evidence/phase0/S0-federation.json`, and remove any obsolete v4 language from feature docs
+- [x] T008 Prove the historical protocol-3 decoder behavior and record the original opaque-capability/trusted-network decision in `specs/004-six-product-support/evidence/phase0/S0-federation.json` (superseded for the greenfield live protocol by T125)
 - [x] T009 Reconcile all spike outcomes into `specs/004-six-product-support/{spec.md,research.md,data-model.md,plan.md,contracts/}` before source interfaces freeze
 - [x] T010 Obtain visible `fable-architect` sign-off on S0-S6 evidence and reconciled planning artifacts in `specs/004-six-product-support/evidence/phase0/review.md`
 
@@ -78,7 +78,7 @@ reviewed and frozen. Shared-engine workers may now start against those types.
 - [x] T033 [P] Implement literal-loopback HTTP, memory auth, bounded event streams, and owned-server supervision in `internal/productserver/{client.go,events.go,server.go}`
 - [x] T034 [P] Implement the shared deterministic streaming/tool-call/slow-turn/cancel model fixture in `internal/testutil/mockprovider/{server.go,script.go,server_test.go}`
 - [x] T035 Write failing opaque-capability/live-hub/generation/malformed-client tests in `internal/federation/{hub_test.go,host_test.go,protocol_fuzz_test.go}` and `cmd/agent-sessions-hub/main_test.go`
-- [x] T036 Implement bounded opaque protocol-3 capabilities, destination registry resolution hooks, live-hub integration, and macOS hub environment parity in `internal/federation/{protocol.go,hub.go,host.go}`, `cmd/agent-sessions/federation.go`, and `internal/servicecontrol/`
+- [x] T036 Implement the original bounded opaque protocol-3 capability foundation, destination registry resolution hooks, live-hub integration, and macOS hub environment parity in `internal/federation/{protocol.go,hub.go,host.go}`, `cmd/agent-sessions/federation.go`, and `internal/servicecontrol/` (version/compatibility projection superseded by T125)
 - [x] T037 Run original-four focused/full normal/race/vet/lint gates, capture results in `specs/004-six-product-support/evidence/phase0/foundation-gate.md`, and obtain Fable review of the frozen foundation
 
 **Checkpoint**: Shared packages are green with no new product composed; original
@@ -294,6 +294,10 @@ to reproducible Linux/macOS evidence.
 - [ ] T123 Record and schedule live on-demand peer presence/attestation so a healthy process is not muted solely by a daemon-generation re-adoption window
 - [ ] T124 Record and schedule bounded garbage collection of detached attachment and terminal-delivery tombstones, with live ownership checks and no unrelated-state removal
 
+## Owner-Authorized Greenfield Federation Rewrite
+
+- [ ] T125 Replace released-binary protocol-3 compatibility machinery with the uniform protocol-4 handshake and one complete roster; delete the transport marker, per-client filtering, empty-capability inference, real-old binary test/scaffold/evidence; prove mismatch/N+1 rejection, roster equality, prospective amplification safety, normal/race/vet/fuzz/federation scripts; obtain isolated-commit Fable review and refreeze before federated-lane product credit
+
 ---
 
 ## Dependencies and Execution Order
@@ -373,5 +377,5 @@ Root integrator: central-only tasks after stream gates
 
 ## Task Format Validation
 
-All 124 tasks use the required checkbox, sequential ID, optional `[P]`, required
+All 125 tasks use the required checkbox, sequential ID, optional `[P]`, required
 story labels within story phases, and explicit file or evidence paths.

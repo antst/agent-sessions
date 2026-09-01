@@ -263,10 +263,12 @@ make safety review harder.
 
 ### Decision
 
-Keep federation protocol 3. Make lane capability strings bounded opaque values
-at the hub; the destination runtime registry decides whether product and
-capability are ready. Older hosts/hubs safely omit unknown products, yielding
-unavailability rather than misrouting.
+Use one uniform federation protocol 4. The exact first-frame version must match
+before registration; an N+1 participant against an N hub is rejected as a
+whole. Every accepted client receives the same complete roster. Lane
+capability strings remain bounded opaque values and exactly one must be present;
+the destination runtime registry decides whether product and capability are
+ready.
 
 Retain and document the trusted-network assumption. Authentication and
 encryption are separate security work.
@@ -276,15 +278,18 @@ encryption are separate security work.
 - [F] all six products fit existing `Product` and `Capabilities` wire fields;
   no additive struct field is required.
 - [F] the federation path does not use `DisallowUnknownFields`.
-- [F] protocol 3 currently has no negotiation; a version bump would break old
-  hub interoperation while adding no required wire representation.
+- [D] this is an unreleased greenfield boundary, so exact version rejection is
+  the forward-upgrade path and released-binary interoperation is not retained.
+- [D] future range negotiation may be introduced only in an explicit
+  first-frame contract that selects one complete version before registration.
 - [D] destination validation remains the final authority.
 
 ### Required test debt closure
 
 - Port command-level hub integration tests from the legacy federator to the
   live `internal/federation` hub.
-- Add malformed/oversized hostile-client fuzz and opaque-capability tests.
+- Add malformed/oversized hostile-client fuzz, exact mismatch/N+1 rejection,
+  identical complete-roster, amplification, and opaque-capability tests.
 - Preserve generation fencing and group/parent attestation tests.
 - Fix the macOS hub service environment projection while this surface changes.
 
@@ -341,7 +346,7 @@ mock model providers are allowed, mocked product protocols are not.
 
 | Gate | Exit criteria |
 |---|---|
-| S0 Base/federation | base equals 679fe9d; no unknown-field hard rejection; protocol 3 decision recorded |
+| S0 Base/federation | historical base equals 679fe9d and decoder accepts additive fields; the protocol-3 compatibility decision is superseded by owner-authorized T125 uniform protocol 4 |
 | S1 Kilo | PASS: two isolated authenticated serve+full-attach pairs receive zero cross-delivery and pass `/tui/*`, busy queue, events, background-process attribution, MCP, rename/resume; `--mini` is not peer-messageable |
 | S2 DSH | PASS: exact tuple boots; Cordis enumerates sessions; real idle followup and busy steer; native registered-tool parent facade selected; HOME/XDG socket and `DSH_SESSION_ID` verified; ACP cancel is notification and projcache is not liveness |
 | S3 CodeBuddy | RED reconciled: peer endpoint has no password/component/sidecar; wrapper Adopt/Refresh re-attests registry claim through socket owner and process ancestry; lane endpoint is separately AS-owned and password-authenticated; Linux negative isolation cells pass, physical macOS socket-owner cell remains |

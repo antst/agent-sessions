@@ -1,8 +1,8 @@
-# Federation protocol version 3
+# Federation protocol version 4
 
 The service-managed host daemon is authoritative for local Agent Sessions
 state and routing. The optional hub connects daemons using federation protocol
-3. Network frames use bounded
+4. Network frames use bounded
 newline-delimited JSON; federation frames are limited to 2 MiB.
 
 ## Local agent contract
@@ -48,22 +48,42 @@ group member or broadcast recipient.
 
 ## Hub contract
 
-The first host frame is `hello` with protocol 3; diagnostics may send `probe`.
-The hub refuses every other protocol version before registration. Build IDs are
-diagnostic only, so unrelated host and hub builds interoperate when their exact
-protocol version is equal. A daemon generation prevents an older reconnect from
-displacing a newer live host generation.
+The first host frame is `hello` with the explicit exact protocol version;
+diagnostics may send `probe` with that same version. The current supported
+range is exactly `[4, 4]`. The hub closes every non-matching handshake before
+registration and emits no `hello_ok`, snapshot request, or roster. Build IDs
+are diagnostic only, so unrelated host and hub builds interoperate when their
+exact protocol version is equal. A daemon generation prevents an older
+reconnect from displacing a newer live host generation.
+
+A same-host reconnect remains pending after `hello_ok`. The hub validates its
+initial snapshot against the complete prospective roster, atomically promotes
+it only when that roster is admissible, and only then retires the previous live
+generation. A malformed or amplifying candidate therefore cannot destroy the
+same-host last-good roster or connection.
+
+Version rejection is the forward-upgrade path. An N+1 participant connecting
+to an N hub is rejected as one unit and remains absent from the roster; it is
+never partially admitted using N semantics. A future version may introduce an
+explicit range negotiation in its own first frame, but it must select one
+complete protocol before registration. It must never infer compatibility from
+build identity, product names, capabilities, or binary age.
 
 A daemon sends complete snapshots of currently addressable attachments and
 lanes. The hub
-rejects malformed identities, a host/session ID mismatch, unsupported products
-or peer protocol, missing private anchors, duplicate IDs, and duplicate
+rejects malformed identities, a host/session ID mismatch, invalid product
+tokens or peer protocol, missing private anchors, duplicate IDs, and duplicate
 sessions. It retains the previous valid snapshot if a replacement is invalid.
+The hub computes one bounded post-update roster before replacing the snapshot.
+Every admitted client receives this same complete roster; there is no
+per-client product filtering or compatibility map. If the prospective roster
+exceeds its byte, host, or peer bounds, the update is rejected, the last-good
+snapshot remains authoritative, and unrelated incumbent clients stay live.
 
 `group_deliver` contains exact source ID, target ID, and one AgentFrame body.
 The hub verifies that the source belongs to the sending connection, the target
 is live, and both snapshot records share a group. Legacy `deliver` and
-`shadow_deliver` are rejected; protocol 3 has no remote shadow rows.
+`shadow_deliver` are rejected; protocol 4 has no remote shadow rows.
 
 ## Remote lane contract
 
@@ -78,6 +98,8 @@ Disconnecting either daemon drops the in-memory route and cancels its live CLI
 proxy. No agent-to-agent or SSH fallback exists; hub connectivity is mandatory
 only for cross-host operations. Local grouped routing continues without a hub.
 
+Every remote lane request carries exactly one explicit opaque capability; the
+hub never infers a capability from an empty field or from the product name.
 Current agents advertise one exact capability per ready target:
 `codex-lane`, `claude-lane`, `grok-lane`, and `qwen-lane`. Qwen capability
 advertisement consumes the same selected-profile readiness report as local
@@ -86,7 +108,7 @@ Qwen launcher is never advertised and remote execution never falls back to a
 different product or host.
 
 The network is assumed trusted. Authentication, encryption, hub-side offline
-storage, global broadcast, and a policy language are outside protocol 3. Each
+storage, global broadcast, and a policy language are outside protocol 4. Each
 network delivery is destination-acknowledged; the destination daemon records a
 stable message-and-target identity before presentation, so caller replay and
 transport reconnect cannot duplicate an accepted delivery. The hub itself does

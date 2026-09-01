@@ -9,7 +9,7 @@ import (
 )
 
 func FuzzScanMessages(f *testing.F) {
-	f.Add([]byte(`{"type":"hello","version":3,"host_id":"host-a","host_name":"host-a","unknown":1}` + "\n"))
+	f.Add([]byte(`{"type":"hello","version":4,"host_id":"host-a","host_name":"host-a","unknown":1}` + "\n"))
 	f.Add([]byte("{not-json}\n"))
 	f.Add(bytes.Repeat([]byte("x"), maxWireBytes+1))
 	f.Fuzz(func(t *testing.T, body []byte) {
@@ -50,15 +50,15 @@ func FuzzLaneCapabilityAdmission(f *testing.F) {
 		for index := range capabilities {
 			capabilities[index] = capability
 		}
-		resolved, legacy, err := laneCapabilityForMessage(Message{Product: product, Capabilities: capabilities})
+		resolved, err := laneCapabilityForMessage(Message{Product: product, Capabilities: capabilities})
 		if err != nil {
 			return
 		}
 		if resolved == "" || productcatalog.ValidateToken(resolved) != nil {
 			t.Fatalf("admission emitted invalid capability %q", resolved)
 		}
-		if legacy && len(capabilities) != 0 {
-			t.Fatal("non-empty capability frame was marked legacy")
+		if len(capabilities) != 1 || resolved != capabilities[0] {
+			t.Fatalf("admission changed explicit capability %q to %q", capabilities, resolved)
 		}
 	})
 }
@@ -81,7 +81,7 @@ func FuzzWirePeerValidation(f *testing.F) {
 	})
 }
 
-func FuzzProspectiveRosterProjection(f *testing.F) {
+func FuzzProspectiveUniformRoster(f *testing.F) {
 	seed := Message{Type: "snapshot", Peers: []Peer{
 		{
 			ID: "host-a/session", HostID: "host-a", HostName: "host-a", SessionID: "session",
@@ -91,9 +91,8 @@ func FuzzProspectiveRosterProjection(f *testing.F) {
 		},
 	}}
 	body, _ := json.Marshal(seed)
-	f.Add(body, true)
-	f.Add(body, false)
-	f.Fuzz(func(t *testing.T, body []byte, marked bool) {
+	f.Add(body)
+	f.Fuzz(func(t *testing.T, body []byte) {
 		var snapshot Message
 		if json.Unmarshal(body, &snapshot) != nil || len(snapshot.Peers) > maxSnapshotPeers {
 			return
@@ -108,31 +107,19 @@ func FuzzProspectiveRosterProjection(f *testing.F) {
 			}
 			peers[peer.ID] = peer
 		}
-		capabilities := []string(nil)
-		if marked {
-			capabilities = []string{transportFeatureOpaquePeerProducts}
-		}
 		client := &hubClient{
 			hostID: "host-a", hostName: "host-a", ready: true,
-			capabilities: capabilities, peers: peers,
+			capabilities: []string{"future-lane"}, peers: peers,
 		}
-		h := &hub{clients: map[string]*hubClient{client.hostID: client}}
-		deliveries := h.rosterDeliveriesLocked(nil, nil)
-		if err := validateRosterDeliveries(deliveries); err != nil {
+		observer := &hubClient{hostID: "observer", hostName: "observer", ready: true, peers: map[string]Peer{}}
+		h := &hub{clients: map[string]*hubClient{client.hostID: client, observer.hostID: observer}}
+		clients, roster := h.uniformRosterLocked(nil, nil)
+		if err := validateRoster(roster); err != nil {
 			return
 		}
-		for _, delivery := range deliveries {
-			encoded, err := json.Marshal(delivery.message)
-			if err != nil || len(encoded) > maxWireBytes || len(delivery.message.Peers) > maxRosterPeers {
-				t.Fatalf("admitted invalid roster: bytes=%d peers=%d err=%v", len(encoded), len(delivery.message.Peers), err)
-			}
-			if !marked {
-				for _, peer := range delivery.message.Peers {
-					if !legacyV3PeerProduct(peer) {
-						t.Fatalf("unmarked roster leaked product %q", peer.Product)
-					}
-				}
-			}
+		encoded, err := json.Marshal(roster)
+		if err != nil || len(encoded) > maxWireBytes || len(roster.Peers) > maxRosterPeers || len(clients) != 2 {
+			t.Fatalf("admitted invalid uniform roster: bytes=%d peers=%d clients=%d err=%v", len(encoded), len(roster.Peers), len(clients), err)
 		}
 	})
 }

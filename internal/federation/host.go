@@ -144,12 +144,6 @@ func NewEmbeddedHost(options EmbeddedHostOptions) (*EmbeddedHost, error) {
 		return nil, err
 	}
 	options.Capabilities = capabilities
-	if contains(options.Capabilities, transportFeatureOpaquePeerProducts) {
-		return nil, errors.New("embedded federation capabilities contain a reserved transport feature")
-	}
-	if _, err := normalizeCapabilities(append(append([]string(nil), options.Capabilities...), transportFeatureOpaquePeerProducts)); err != nil {
-		return nil, fmt.Errorf("embedded federation advertised capabilities: %w", err)
-	}
 	if len(options.Capabilities) != 0 && options.RunLane == nil {
 		return nil, errors.New("embedded federation lane capabilities require a lane callback")
 	}
@@ -226,7 +220,8 @@ func (h *EmbeddedHost) runHubSession(ctx context.Context) error {
 	wire := newWireConn(conn)
 	if err := wire.Send(Message{
 		Type: "hello", Version: ProtocolVersion, Build: h.options.Build, Generation: h.options.Generation,
-		HostID: h.options.HostID, HostName: h.options.HostName, Capabilities: h.advertisedCapabilities(),
+		HostID: h.options.HostID, HostName: h.options.HostName,
+		Capabilities: append([]string(nil), h.options.Capabilities...),
 	}); err != nil {
 		return err
 	}
@@ -245,13 +240,6 @@ func (h *EmbeddedHost) runHubSession(ctx context.Context) error {
 	}
 	h.logger.Printf("connected to hub %s as %s", h.options.Hub, h.options.HostID)
 	return h.serveHubSession(ctx, wire, readErr, lastHubActivity, previous)
-}
-
-func (h *EmbeddedHost) advertisedCapabilities() []string {
-	capabilities := append([]string(nil), h.options.Capabilities...)
-	capabilities = append(capabilities, transportFeatureOpaquePeerProducts)
-	sortStrings(capabilities)
-	return capabilities
 }
 
 func (h *EmbeddedHost) startHubSessionReader(conn net.Conn) (<-chan error, <-chan error, *atomic.Int64) {
@@ -498,8 +486,7 @@ func (h *EmbeddedHost) Send(ctx context.Context, source, target Peer, messageID,
 	return err
 }
 
-// SendWithData returns additive destination acknowledgement metadata. Older
-// protocol-3 hosts omit Data and remain compatible.
+// SendWithData returns destination-owned acknowledgement metadata.
 func (h *EmbeddedHost) SendWithData(ctx context.Context, source, target Peer, messageID, content, group string) ([]byte, error) {
 	if strings.TrimSpace(messageID) == "" || strings.TrimSpace(content) == "" {
 		return nil, errors.New("federated delivery requires message id and content")
@@ -757,7 +744,7 @@ func (h *EmbeddedHost) startRemoteLane(ctx context.Context, request RemoteLaneRe
 	if !sourceOK || source.InstanceID != request.Source.InstanceID {
 		return Message{}, nil, errors.New("remote lane source is no longer locally advertised")
 	}
-	capability, _, err := laneCapabilityForMessage(Message{
+	capability, err := laneCapabilityForMessage(Message{
 		Product: request.Product, Capabilities: []string{request.Capability},
 	})
 	if err != nil {
@@ -952,7 +939,7 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	source, sourceOK := h.remote[request.SourceID]
 	connected := h.network != nil
 	h.mu.RUnlock()
-	capability, _, capabilityErr := laneCapabilityForMessage(request)
+	capability, capabilityErr := laneCapabilityForMessage(request)
 	if !connected || !sourceOK || capabilityErr != nil || !contains(h.options.Capabilities, capability) ||
 		h.options.RunLane == nil || request.ParentContext == nil || len(request.Args) == 0 || len(request.Input) > maxLaneInputBytes {
 		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: "invalid or stale embedded remote lane request"})

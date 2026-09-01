@@ -13,13 +13,19 @@ Implementation and local Linux gates: **PASS**.
 Fable architecture review: **PASS** on 2026-09-01 for candidate `863032e` and
 this evidence at `055d748`. T037 is closed and Phase-C fan-out is authorized.
 
+The federation compatibility portion of that historical gate is superseded by
+the owner-authorized greenfield protocol-4 directive of 2026-09-01. The
+component, lane-input, receipt, single-writer, live-attestation, and native
+session invariants remain frozen. The protocol-4 replacement requires its own
+isolated commit review and refreeze before federated-lane product credit.
+
 No OpenCode, KiloCode, Pi, OMP, CodeBuddy, or DSH runtime product is registered
 at this checkpoint.
 
 ## Frozen-contract status
 
-- Protocol remains component v1 and federation v3; no new federation field was
-  introduced.
+- Component protocol remains v1. Live federation is uniformly protocol 4 and
+  uses the existing explicit `Message.Version` handshake field.
 - `internal/daemon/state.go` and the frozen `internal/productruntime` driver
   interfaces were not changed after T020.
 - Component Ready-loss handling is an idempotency/adoption clarification over
@@ -78,22 +84,26 @@ at this checkpoint.
   retry re-queries the destination using the same message ID; no durable
   destination-receipt copy is stored at the source.
 
-## Federation compatibility and robustness
+## Uniform federation protocol and robustness
 
-- New protocol-3 hosts advertise transport-only
-  `federation-peer-products` in the existing capability list.
-- A pre-feature-compatible validator proof demonstrates the required
-  asymmetry: it tolerates the unknown capability token but rejects a roster
-  containing an unknown `Peer.Product`.
-- The new hub strips whole new-product peer rows from every initial and updated
-  roster sent to unmarked clients. Marked clients receive the complete roster.
-- The marker is never lane-dispatchable. Empty-capability inference remains the
-  frozen four-product compatibility map only.
-- Hello/peer/count fields are bounded. Snapshot admission computes every actual
-  post-filter per-client roster before replacement and rejects amplification
-  without damaging the last-good roster or disconnecting incumbents.
-- Extra receipt keys in protocol-3 `Message.Data` are additive and ignored by
-  pre-feature peers.
+- `hello.version` is exact and uniform. Protocol 4 rejects every other value
+  before registration, including an N+1 participant against an N hub; no build,
+  product, or capability field participates in version inference.
+- Every accepted client receives the same complete sorted host/peer roster.
+  There is no transport marker, old-host asymmetry, product filtering,
+  per-client roster, or compatibility map.
+- Every remote lane request carries exactly one explicit opaque capability.
+  Empty-capability product inference is removed; exact destination
+  advertisement remains mandatory.
+- Hello, capability, peer, host, snapshot, roster, and encoded-frame bounds are
+  retained. Snapshot admission computes the single prospective uniform roster
+  before replacement and rejects amplification without damaging the last-good
+  roster or disconnecting incumbents.
+- Same-host reconnects remain pending until their initial snapshot passes that
+  prospective check. Promotion is atomic, and only a promoted generation may
+  retire the prior live connection and its last-good roster.
+- Destination-owned receipt data and its durable single-writer/ledger rules are
+  unchanged; the protocol rewrite adds no durable state.
 
 ## Adversarial regressions closed
 
@@ -104,7 +114,8 @@ at this checkpoint.
 - unread structured-process frame deadlock, producer overflow, and completed
   child retention;
 - product-server post-start cleanup ambiguity and incomplete SSE event replay;
-- old-v3 roster rejection and per-client roster amplification;
+- version-mismatch pre-registration rejection, uniform-roster equality, and
+  prospective roster amplification;
 - busy Claude queued-turn collision (#42 compatibility);
 - accepted-Turn/Dispatching atomicity, exact-native-ack crash, stale/mismatched
   recovery, competing intents, missing/changed spool, and non-Codex acceptance
@@ -152,14 +163,38 @@ The focused component reread additionally ran 20 normal repetitions, five race
 repetitions, vet, and three Node repetitions. The final staged-promotion reread
 ran ten normal and three race repetitions.
 
+### Uniform protocol-4 replacement verification
+
+The uncommitted isolated T125 slice ran the following replacement gates before
+its commit/review refreeze:
+
+```text
+go test ./internal/federation ./internal/daemon ./cmd/agent-sessions \
+  ./cmd/agent-sessions-hub -count=3                                      PASS
+go test -race ./internal/federation ./internal/daemon \
+  ./cmd/agent-sessions ./cmd/agent-sessions-hub                          PASS
+go vet ./internal/federation ./internal/daemon ./cmd/agent-sessions \
+  ./cmd/agent-sessions-hub                                               PASS
+go test ./internal/federation -run='^$' -fuzz=<each of 5 targets> \
+  -fuzztime=3s                                                           PASS
+./scripts/federation/test                                                 PASS
+RACE=1 ./scripts/federation/test                                          PASS
+python3 scripts/federation/binary_pair_test.py --repo .                  PASS
+git diff --check                                                          PASS
+```
+
+The five fuzz targets cover frame scanning, capability normalization, explicit
+lane-capability admission, peer validation, and prospective uniform-roster
+projection. A repository scan excluding historical specs 001/002 and the dead
+`internal/federator` package found no active marker, legacy map, old-binary
+scaffold/evidence reference, old-host filtering, or obsolete federation-version
+claim.
+
 ## Deferred and pending cells
 
-- **CLOSED after this gate:** mixed-version federation now passes against a
-  real binary compiled from the exact pre-feature v0.3.0 source. The old host
-  accepts the marker and additive receipt metadata, keeps the four baseline
-  peers usable, and never observes a new-product row. See
-  [federation-real-old.md](federation-real-old.md). The documented deployment
-  limit remains: a current hub must distribute the filtered roster.
+- The real-old-binary compatibility cell is deleted as not applicable to the
+  unreleased greenfield boundary. Protocol-4 credit instead requires the four
+  uniform-protocol cells in `contracts/federation-v4.md` and isolated review.
 - A statestore-backed production component `Authorizer` must be wired and
   exercised end to end before the first component-broker product peer receives
   acceptance credit. This gate proves the broker contract, durable record
@@ -175,8 +210,8 @@ ran ten normal and three race repetitions.
 
 The review request must cover, in one pass:
 
-1. federation marker asymmetry, complete roster filtering, and prospective
-   per-client amplification rejection;
+1. exact protocol-4 mismatch rejection, identical complete rosters, explicit
+   lane capabilities, and prospective uniform-roster amplification rejection;
 2. component Ready-loss idempotency/adoption and bounded memory-only replay;
 3. the full lane-input crash matrix, CAS1/CAS2 acceptance boundary, staged
    liveness/visibility, exact replay identity, native reconciliation, and

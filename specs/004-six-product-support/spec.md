@@ -196,8 +196,8 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   product-native session context or wrapper bootstrap capability.
 - The durable input spool is full, corrupt, symlinked, changed after receipt,
   or references content missing from disk.
-- A new capability crosses an older protocol-3 hub or host that does not know
-  the product; the result must be safe unavailability, never misrouting.
+- An N+1 federation participant reaches an N hub; the handshake must reject it
+  before registration without damaging the incumbent roster or misrouting.
 - A product cannot represent the requested permission mode without widening
   it; launch must fail instead of silently choosing a broader mode.
 - Native rename occurs during delivery or daemon restart; external naming must
@@ -292,13 +292,16 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   rejection as queueing; send cancel as a notification; and never use the lazy
   projection cache as a liveness signal. Its component socket MUST live below
   an Agent Sessions-owned HOME/XDG path and MUST NOT use sandbox-masked `/tmp`.
-- **FR-022**: Federation protocol 3 MUST remain the wire version unless a
-  phase-0 decoder test proves unknown additive fields are rejected. The hub
-  MUST bound, validate, deduplicate, and pass through opaque lane capability
-  strings; the destination product registry MUST make the support decision.
-- **FR-023**: Older protocol-3 hosts and hubs MUST fail closed for unknown
-  products. The feature MUST NOT add an unsafe compatibility shim or infer a
-  different product when a capability is unavailable.
+- **FR-022**: Federation protocol 4 MUST be one uniform wire contract. The
+  explicit handshake version MUST match exactly and every mismatch, including
+  N+1 against N, MUST fail before registration. The hub MUST bound, validate,
+  deduplicate, and pass through exactly one explicit opaque lane capability;
+  the destination product registry MUST make the support decision.
+- **FR-023**: Every accepted federation client MUST receive the same complete
+  roster. The protocol MUST NOT contain a binary-compatibility marker,
+  per-client product filter, empty-capability product inference, downgrade, or
+  partial admission path. Prospective roster amplification MUST be rejected
+  before last-good snapshot replacement without disconnecting incumbents.
 - **FR-024**: The existing trusted-network federation assumption MUST be stated
   explicitly. TLS/authentication and Windows support are outside this feature.
 - **FR-025**: Installation and removal MUST derive deterministic plans from
@@ -323,8 +326,8 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   permission, recovery, installation, or federation behavior.
 - **FR-030**: Hub tests MUST exercise the live `internal/federation` hub rather
   than a legacy implementation and MUST include hostile malformed-frame fuzz,
-  opaque-capability, generation-fencing, and mixed-known/unknown capability
-  cases.
+  exact mismatch/N+1 rejection, identical complete rosters, prospective roster
+  amplification, opaque capability, and generation-fencing cases.
 - **FR-031**: macOS host and hub services MUST receive the same configured
   product and federation environment as Linux services, subject to platform
   path normalization and AF_UNIX limits.

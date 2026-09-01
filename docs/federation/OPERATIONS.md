@@ -52,7 +52,10 @@ systemctl --user status agent-sessions-hub.service --no-pager
 The default listen address is `:7419`. On Linux, an optional
 `~/.config/agent-sessions/hub.env` may set
 `AGENT_SESSIONS_HUB_LISTEN`. Updating a host daemon does not require updating
-the hub when the hub protocol version is unchanged.
+the hub when the hub protocol version is unchanged. Protocol 4 is exact: an
+N+1 host against an N hub is rejected before registration, so a version-changing
+deployment must update the hub and hosts as one explicit rollout rather than
+relying on partial admission or per-client roster shims.
 
 ## Checks
 

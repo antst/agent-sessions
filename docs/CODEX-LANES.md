@@ -81,7 +81,7 @@ use `--persistent` there or the command fails closed with an actionable owner er
 
 ## Remote hosts
 
-The unified daemon can proxy this unchanged native contract through a protocol-3 hub:
+The unified daemon can proxy this unchanged native contract through a protocol-4 hub:
 
 ```bash
 codex-peer-lane --host workstation-b \

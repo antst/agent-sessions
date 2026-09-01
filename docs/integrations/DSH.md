@@ -205,9 +205,10 @@ removes the exact disposable home after every outcome; repeated probes leave
 the configured product store unchanged.
 
 For cross-host lanes, the destination advertises `dsh-lane` only while doctor
-is ready. Federation remains protocol 3 on a trusted network; an older or
-unready destination returns explicit unsupported/unavailable rather than
-mapping the request to another product.
+is ready. Federation uses uniform protocol 4 on a trusted network; an exact
+version mismatch is rejected before registration, while an unready destination
+returns explicit unsupported/unavailable rather than mapping the request to
+another product.
 
 ## Acceptance status
 

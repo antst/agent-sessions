@@ -10,7 +10,7 @@ CodeBuddy 2.143.0, and the exact DSH 0.1.2-alpha.3 tuple.
 | Gate | Result | Frozen consequence |
 |---|---|---|
 | S0 base | PASS | Build on released `origin/main`; the old feature history was squash-merged. |
-| S0 federation | PASS | Keep protocol 3. Capabilities become bounded opaque tokens; destination registry remains authoritative. Trusted-network scope is retained. |
+| S0 federation | PASS (historical; superseded by T125) | The original protocol-3 compatibility decision was later replaced by the owner-authorized uniform protocol-4 greenfield boundary. Bounded opaque capabilities, destination authority, and trusted-network scope remain. |
 | S1 Kilo | PASS | One authenticated server plus one full attach TUI per peer. `attach --mini` is not `/tui/*`-messageable and is unsupported. |
 | S2 DSH | PASS | Exact pnpm-managed 0.1.2-alpha.3 tuple; native Cordis registered tool is the parent facade; HOME/XDG socket; busy ACP rejection queues; cancel is a notification; projcache is not liveness. |
 | S3 CodeBuddy | RED, reconciled | No peer password/component/sidecar. Wrapper Adopt/Refresh re-attests registry claim -> socket-owner PID -> executable/start/ancestry. The separate Agent Sessions-owned lane server keeps memory-only password auth. |

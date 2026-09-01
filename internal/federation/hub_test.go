@@ -17,15 +17,13 @@ func TestHubRejectsStaleGenerationAndReplacesEqualOrNewerReconnect(t *testing.T)
 	}
 	server1, peer1 := net.Pipe()
 	defer func() { _ = peer1.Close() }()
-	current := &hubClient{hostID: "host-a", hostName: "host-a", generation: 9, wire: newWireConn(server1), peers: map[string]Peer{}}
-	if err := h.register(current); err != nil {
-		t.Fatal(err)
-	}
+	current := &hubClient{hostID: "host-a", hostName: "host-a", generation: 9, ready: true, wire: newWireConn(server1), peers: map[string]Peer{}}
+	h.clients[current.hostID] = current
 	server2, peer2 := net.Pipe()
 	defer func() { _ = server2.Close() }()
 	defer func() { _ = peer2.Close() }()
 	stale := &hubClient{hostID: "host-a", hostName: "host-a", generation: 8, wire: newWireConn(server2), peers: map[string]Peer{}}
-	if err := h.register(stale); err == nil || !strings.Contains(err.Error(), "older") {
+	if err := h.validateRegistrationCandidate(stale); err == nil || !strings.Contains(err.Error(), "older") {
 		t.Fatalf("stale generation result = %v", err)
 	}
 	if h.clients["host-a"] != current {
@@ -34,11 +32,32 @@ func TestHubRejectsStaleGenerationAndReplacesEqualOrNewerReconnect(t *testing.T)
 	server3, peer3 := net.Pipe()
 	defer func() { _ = peer3.Close() }()
 	reconnected := &hubClient{hostID: "host-a", hostName: "host-a", generation: 9, wire: newWireConn(server3), peers: map[string]Peer{}}
-	if err := h.register(reconnected); err != nil {
+	if err := h.validateRegistrationCandidate(reconnected); err != nil {
+		t.Fatal(err)
+	}
+	if h.clients["host-a"] != current {
+		t.Fatal("hello candidate replaced the current host before its initial snapshot")
+	}
+	received := make(chan Message, 1)
+	go func() {
+		_ = scanMessages(peer3, func(message Message) error {
+			received <- message
+			return nil
+		})
+	}()
+	if err := h.promoteInitialSnapshot(reconnected, Message{Type: "snapshot"}); err != nil {
 		t.Fatal(err)
 	}
 	if h.clients["host-a"] != reconnected {
-		t.Fatal("same-generation reconnect did not atomically replace the old connection")
+		t.Fatal("validated same-generation snapshot did not atomically replace the old connection")
+	}
+	select {
+	case roster := <-received:
+		if roster.Type != "roster" || len(roster.Hosts) != 1 || roster.Hosts[0].Generation != 9 {
+			t.Fatalf("promoted roster = %#v", roster)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("promoted reconnect did not receive the uniform roster")
 	}
 }
 
@@ -203,7 +222,7 @@ func TestHubRejectsStaleBroadcastThroughDifferentSharedGroup(t *testing.T) {
 	}
 }
 
-func TestHubRoutesUnknownOpaqueCapabilityOnlyToExactAdvertisement(t *testing.T) {
+func TestHubRoutesExplicitOpaqueCapabilityOnlyToExactAdvertisement(t *testing.T) {
 	sourcePeer := mustTestPeer(t, "host-a", "source", "codex", "project")
 	sourceHub, sourceConn := net.Pipe()
 	destinationHub, destinationConn := net.Pipe()
@@ -266,79 +285,39 @@ func TestHubRoutesUnknownOpaqueCapabilityOnlyToExactAdvertisement(t *testing.T) 
 	if response.Type != "lane_error" || !strings.Contains(response.Error, "lacks") {
 		t.Fatalf("wrong capability response = %#v", response)
 	}
-	destination.capabilities = []string{"future-lane", transportFeatureOpaquePeerProducts}
-	featureRequest := request
-	featureRequest.RequestID = "transport-feature-route"
-	featureRequest.Capabilities = []string{transportFeatureOpaquePeerProducts}
-	if err := h.routeLaneExec(source, featureRequest); err != nil {
+	empty := request
+	empty.RequestID = "empty-capability"
+	empty.Product = "codex"
+	empty.Capabilities = nil
+	if err := h.routeLaneExec(source, empty); err != nil {
 		t.Fatal(err)
 	}
-	featureResponse := <-sourceResponses
-	if featureResponse.Type != "lane_error" || !strings.Contains(featureResponse.Error, "transport feature") {
-		t.Fatalf("transport feature lane response = %#v", featureResponse)
+	emptyResponse := <-sourceResponses
+	if emptyResponse.Type != "lane_error" || !strings.Contains(emptyResponse.Error, "exactly one capability") {
+		t.Fatalf("empty capability response = %#v", emptyResponse)
 	}
-	if _, exists := h.laneRoutes[featureRequest.RequestID]; exists {
-		t.Fatal("transport feature marker was offered as a lane route")
+	if _, exists := h.laneRoutes[empty.RequestID]; exists {
+		t.Fatal("empty-capability request was offered as a lane route")
+	}
+
+	multiple := request
+	multiple.RequestID = "multiple-capabilities"
+	multiple.Capabilities = []string{"future-lane", "other-lane"}
+	if err := h.routeLaneExec(source, multiple); err != nil {
+		t.Fatal(err)
+	}
+	multipleResponse := <-sourceResponses
+	if multipleResponse.Type != "lane_error" || !strings.Contains(multipleResponse.Error, "exactly one capability") {
+		t.Fatalf("multiple capability response = %#v", multipleResponse)
 	}
 	select {
 	case leaked := <-forwarded:
-		t.Fatalf("transport feature request reached destination: %#v", leaked)
+		t.Fatalf("non-explicit capability request reached destination: %#v", leaked)
 	default:
 	}
-
-	destination.capabilities = []string{CapabilityCodexLane}
-	legacy := request
-	legacy.RequestID = "legacy-route"
-	legacy.Product = "codex"
-	legacy.Capabilities = nil
-	if err := h.routeLaneExec(source, legacy); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-forwarded:
-		if got.RequestID != "legacy-route" || len(got.Capabilities) != 0 {
-			t.Fatalf("forwarded legacy request = %#v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("legacy original-four lane request was not forwarded")
-	}
 }
 
-func TestMixedV3AsymmetryMarkerIsToleratedButUnknownPeerProductIsNot(t *testing.T) {
-	baseline := mustTestPeer(t, "host-old", "baseline", "codex", "project")
-	unknown := baseline
-	unknown.ID = "host-old/future"
-	unknown.SessionID = "future"
-	unknown.GlobalID = globalSessionID("host-old", "future")
-	unknown.Product, unknown.Entrypoint = "future-product", "future-product"
-	unknown.InstanceID = "future:instance"
-	unknown.Groups = []string{"project", PrivateGroup("host-old", "future")}
-	roster := Message{
-		Type: "roster", Version: ProtocolVersion,
-		Hosts: []Host{{
-			ID: "host-new", Name: "host-new",
-			Capabilities: []string{CapabilityCodexLane, transportFeatureOpaquePeerProducts},
-		}},
-		Peers: []Peer{baseline},
-	}
-	if got := normalizeOldHostCompatibleCapabilities(roster.Hosts[0].Capabilities); !reflect.DeepEqual(got, []string{CapabilityCodexLane}) {
-		t.Fatalf("old host feature normalization = %q", got)
-	}
-	if err := validateOldHostCompatibleRoster(roster); err != nil {
-		t.Fatalf("old host rejected additive feature marker: %v", err)
-	}
-	roster.Peers = append(roster.Peers, unknown)
-	if err := validateOldHostCompatibleRoster(roster); err == nil || !strings.Contains(err.Error(), "product") {
-		t.Fatalf("old host accepted unknown peer product: %v", err)
-	}
-	if _, _, err := laneCapabilityForMessage(Message{
-		Product: "future-product", Capabilities: []string{transportFeatureOpaquePeerProducts},
-	}); err == nil {
-		t.Fatal("transport feature marker was admitted as a lane capability")
-	}
-}
-
-func TestLiveHubFiltersNewPeerFromUnmarkedV3ClientAndMarkedClientSeesFullRoster(t *testing.T) {
+func TestLiveHubDeliversIdenticalCompleteRosterToEveryClient(t *testing.T) {
 	address := unusedTestAddress(t)
 	stopHub, hubDone := runTestHub(t, address)
 	defer func() {
@@ -348,88 +327,115 @@ func TestLiveHubFiltersNewPeerFromUnmarkedV3ClientAndMarkedClientSeesFullRoster(
 		}
 	}()
 
-	oldConn := connectRawHubClient(t, address, Message{
-		Type: "hello", Version: ProtocolVersion, HostID: "host-old", HostName: "host-old",
+	firstConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-first", HostName: "host-first",
 		Capabilities: []string{CapabilityCodexLane},
 	})
-	defer func() { _ = oldConn.Close() }()
-	oldDecoder := json.NewDecoder(oldConn)
-	expectRawFrameType(t, oldDecoder, "hello_ok")
-	baseline := mustTestPeer(t, "host-old", "baseline", "codex", "project")
-	if err := newWireConn(oldConn).Send(Message{Type: "snapshot", Peers: []Peer{baseline}}); err != nil {
-		t.Fatal(err)
-	}
-	initial := readOldCompatibleRoster(t, oldDecoder, 1)
-	if len(initial.Peers) != 1 || initial.Peers[0].ID != baseline.ID {
-		t.Fatalf("old initial roster = %#v", initial)
-	}
-
-	markedConn := connectRawHubClient(t, address, Message{
-		Type: "hello", Version: ProtocolVersion, HostID: "host-marked", HostName: "host-marked",
-		Capabilities: []string{transportFeatureOpaquePeerProducts},
-	})
-	defer func() { _ = markedConn.Close() }()
-	markedDecoder := json.NewDecoder(markedConn)
-	expectRawFrameType(t, markedDecoder, "hello_ok")
-	if err := newWireConn(markedConn).Send(Message{Type: "snapshot"}); err != nil {
+	defer func() { _ = firstConn.Close() }()
+	firstDecoder := json.NewDecoder(firstConn)
+	expectRawFrameType(t, firstDecoder, "hello_ok")
+	baseline := mustTestPeer(t, "host-first", "baseline", "codex", "project")
+	if err := newWireConn(firstConn).Send(Message{Type: "snapshot", Peers: []Peer{baseline}}); err != nil {
 		t.Fatal(err)
 	}
 
-	newConn := connectRawHubClient(t, address, Message{
-		Type: "hello", Version: ProtocolVersion, HostID: "host-new", HostName: "host-new",
-		Capabilities: []string{"future-lane", transportFeatureOpaquePeerProducts},
+	secondConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-second", HostName: "host-second",
+		Capabilities: []string{CapabilityQwenLane},
 	})
-	defer func() { _ = newConn.Close() }()
-	newDecoder := json.NewDecoder(newConn)
-	expectRawFrameType(t, newDecoder, "hello_ok")
-	future := mustTestPeer(t, "host-new", "future", "codex", "project")
+	defer func() { _ = secondConn.Close() }()
+	secondDecoder := json.NewDecoder(secondConn)
+	expectRawFrameType(t, secondDecoder, "hello_ok")
+	if err := newWireConn(secondConn).Send(Message{Type: "snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+
+	thirdConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-third", HostName: "host-third",
+		Capabilities: []string{"future-lane"},
+	})
+	defer func() { _ = thirdConn.Close() }()
+	thirdDecoder := json.NewDecoder(thirdConn)
+	expectRawFrameType(t, thirdDecoder, "hello_ok")
+	future := mustTestPeer(t, "host-third", "future", "codex", "project")
 	future.Product, future.Entrypoint = "future-product", "future-product"
 	future.InstanceID = "future:instance"
-	future.Groups = []string{"future-secret", PrivateGroup("host-new", "future")}
-	if err := newWireConn(newConn).Send(Message{Type: "snapshot", Peers: []Peer{future}}); err != nil {
+	future.Groups = []string{"future-group", PrivateGroup("host-third", "future")}
+	if err := newWireConn(thirdConn).Send(Message{Type: "snapshot", Peers: []Peer{future}}); err != nil {
 		t.Fatal(err)
 	}
 
-	oldRoster := readOldCompatibleRoster(t, oldDecoder, 3)
-	if !containsPeerID(oldRoster.Peers, baseline.ID) || containsPeerID(oldRoster.Peers, future.ID) {
-		t.Fatalf("unmarked client roster leaked new peer: %#v", oldRoster.Peers)
+	firstRoster := readCompleteRoster(t, firstDecoder, 3, baseline.ID, future.ID)
+	secondRoster := readCompleteRoster(t, secondDecoder, 3, baseline.ID, future.ID)
+	thirdRoster := readCompleteRoster(t, thirdDecoder, 3, baseline.ID, future.ID)
+	if !reflect.DeepEqual(firstRoster, secondRoster) || !reflect.DeepEqual(firstRoster, thirdRoster) {
+		t.Fatalf("clients received different rosters:\nfirst=%#v\nsecond=%#v\nthird=%#v", firstRoster, secondRoster, thirdRoster)
 	}
-	oldBody, _ := json.Marshal(oldRoster)
-	if strings.Contains(string(oldBody), "future-secret") || strings.Contains(string(oldBody), future.InstanceID) {
-		t.Fatalf("unmarked roster partially leaked filtered peer: %s", oldBody)
-	}
-	markedRoster := readRosterContaining(t, markedDecoder, future.ID)
-	if !containsPeerID(markedRoster.Peers, baseline.ID) || !containsPeerID(markedRoster.Peers, future.ID) {
-		t.Fatalf("marked client did not receive full roster: %#v", markedRoster.Peers)
-	}
+
 	future.Name = "future-updated"
-	if err := newWireConn(newConn).Send(Message{Type: "snapshot", Peers: []Peer{future}}); err != nil {
+	if err := newWireConn(thirdConn).Send(Message{Type: "snapshot", Peers: []Peer{future}}); err != nil {
 		t.Fatal(err)
 	}
-	updatedOldRoster := readOldCompatibleRoster(t, oldDecoder, 3)
-	if containsPeerID(updatedOldRoster.Peers, future.ID) {
-		t.Fatalf("unmarked client update leaked new peer: %#v", updatedOldRoster.Peers)
+	updated := []Message{
+		readRosterWithPeerName(t, firstDecoder, future.ID, future.Name),
+		readRosterWithPeerName(t, secondDecoder, future.ID, future.Name),
+		readRosterWithPeerName(t, thirdDecoder, future.ID, future.Name),
 	}
-	updatedMarkedRoster := readRosterContaining(t, markedDecoder, future.ID)
-	if peerName(updatedMarkedRoster.Peers, future.ID) != "future-updated" {
-		t.Fatalf("marked client did not receive peer update: %#v", updatedMarkedRoster.Peers)
+	if !reflect.DeepEqual(updated[0], updated[1]) || !reflect.DeepEqual(updated[0], updated[2]) {
+		t.Fatalf("clients received different updated rosters: %#v", updated)
 	}
-	baseline.Name = "baseline-updated"
-	if err := newWireConn(oldConn).Send(Message{Type: "snapshot", Peers: []Peer{baseline}}); err != nil {
+}
+
+func TestHubRejectsNPlusOneHandshakeBeforeRegistrationAndKeepsIncumbent(t *testing.T) {
+	address := unusedTestAddress(t)
+	stopHub, hubDone := runTestHub(t, address)
+	defer func() {
+		stopHub()
+		if err := <-hubDone; err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	incumbentConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "incumbent", HostName: "incumbent",
+	})
+	defer func() { _ = incumbentConn.Close() }()
+	incumbentDecoder := json.NewDecoder(incumbentConn)
+	expectRawFrameType(t, incumbentDecoder, "hello_ok")
+	if err := newWireConn(incumbentConn).Send(Message{Type: "snapshot"}); err != nil {
 		t.Fatal(err)
 	}
-	oldTriggeredRoster := readOldCompatibleRoster(t, oldDecoder, 3)
-	if containsPeerID(oldTriggeredRoster.Peers, future.ID) || peerName(oldTriggeredRoster.Peers, baseline.ID) != "baseline-updated" {
-		t.Fatalf("unmarked-triggered roster leaked or lost update: %#v", oldTriggeredRoster.Peers)
-	}
-	markedAfterOldUpdate := readRosterContaining(t, markedDecoder, future.ID)
-	if peerName(markedAfterOldUpdate.Peers, baseline.ID) != "baseline-updated" {
-		t.Fatalf("marked roster lost baseline update: %#v", markedAfterOldUpdate.Peers)
-	}
-	if err := newWireConn(oldConn).Send(Message{Type: "ping"}); err != nil {
+	readCompleteRoster(t, incumbentDecoder, 1)
+
+	mismatch, err := net.DialTimeout("tcp", address, time.Second)
+	if err != nil {
 		t.Fatal(err)
 	}
-	expectOldCompatibleFrameType(t, oldDecoder, "pong")
+	if err := mismatch.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := newWireConn(mismatch).Send(Message{
+		Type: "hello", Version: ProtocolVersion + 1, HostID: "n-plus-one", HostName: "n-plus-one",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var response Message
+	if err := json.NewDecoder(mismatch).Decode(&response); err == nil {
+		t.Fatalf("N+1 participant received partial admission response %#v", response)
+	}
+	_ = mismatch.Close()
+
+	if err := newWireConn(incumbentConn).Send(Message{Type: "snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+	roster := readCompleteRoster(t, incumbentDecoder, 1)
+	if len(roster.Hosts) != 1 || roster.Hosts[0].ID != "incumbent" {
+		t.Fatalf("N+1 participant entered roster or displaced incumbent: %#v", roster.Hosts)
+	}
+	if err := newWireConn(incumbentConn).Send(Message{Type: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	expectRawFrameType(t, incumbentDecoder, "pong")
 }
 
 func TestHubRejectsProspectiveRosterAmplificationBeforeReplacingLastGoodSnapshot(t *testing.T) {
@@ -445,12 +451,12 @@ func TestHubRejectsProspectiveRosterAmplificationBeforeReplacingLastGoodSnapshot
 	lastGood := mustTestPeer(t, "host-attacker", "last-good", "codex", "project")
 	incumbent := &hubClient{
 		hostID: "host-incumbent", hostName: "incumbent", ready: true,
-		capabilities: []string{transportFeatureOpaquePeerProducts}, wire: newWireConn(incumbentHub),
+		capabilities: []string{CapabilityCodexLane}, wire: newWireConn(incumbentHub),
 		peers: peerMap(incumbentPeers),
 	}
 	attacker := &hubClient{
 		hostID: "host-attacker", hostName: "attacker", ready: true,
-		capabilities: []string{transportFeatureOpaquePeerProducts}, wire: newWireConn(attackerHub),
+		capabilities: []string{"future-lane"}, wire: newWireConn(attackerHub),
 		peers: map[string]Peer{lastGood.ID: lastGood},
 	}
 	h := &hub{
@@ -509,23 +515,87 @@ func TestHubRejectsProspectiveRosterAmplificationBeforeReplacingLastGoodSnapshot
 	case <-time.After(time.Second):
 		t.Fatal("unrelated incumbent was no longer responsive")
 	}
-	newcomerHub, newcomerConn := net.Pipe()
-	defer func() { _ = newcomerHub.Close(); _ = newcomerConn.Close() }()
-	newcomer := &hubClient{
-		hostID: "host-attacker", hostName: "newcomer", generation: 2,
-		capabilities: []string{transportFeatureOpaquePeerProducts}, wire: newWireConn(newcomerHub),
-		peers: map[string]Peer{},
+}
+
+func TestHubRejectsAmplifyingReconnectBeforeReplacingLiveSameHost(t *testing.T) {
+	address := unusedTestAddress(t)
+	stopHub, hubDone := runTestHub(t, address)
+	defer func() {
+		stopHub()
+		if err := <-hubDone; err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	incumbentPeers := largeValidPeerSet(t, "host-incumbent", 256*1024)
+	incumbentConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-incumbent", HostName: "incumbent", Generation: 3,
+	})
+	defer func() { _ = incumbentConn.Close() }()
+	incumbentDecoder := json.NewDecoder(incumbentConn)
+	expectRawFrameType(t, incumbentDecoder, "hello_ok")
+	if err := newWireConn(incumbentConn).Send(Message{Type: "snapshot", Peers: incumbentPeers}); err != nil {
+		t.Fatal(err)
 	}
-	h.clients[newcomer.hostID] = newcomer
-	if err := h.handleClientMessage(newcomer, Message{Type: "snapshot", Peers: hostilePeers}); err == nil || !strings.Contains(err.Error(), "roster") {
-		t.Fatalf("amplifying newcomer admission result = %v", err)
+	readCompleteRoster(t, incumbentDecoder, 1)
+
+	lastGood := mustTestPeer(t, "host-reconnect", "last-good", "codex", "project")
+	previousConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-reconnect", HostName: "previous", Generation: 7,
+		Capabilities: []string{"future-lane"},
+	})
+	defer func() { _ = previousConn.Close() }()
+	previousDecoder := json.NewDecoder(previousConn)
+	expectRawFrameType(t, previousDecoder, "hello_ok")
+	if err := newWireConn(previousConn).Send(Message{Type: "snapshot", Peers: []Peer{lastGood}}); err != nil {
+		t.Fatal(err)
 	}
-	if newcomer.ready || len(newcomer.peers) != 0 {
-		t.Fatalf("amplifying newcomer became ready: ready=%t peers=%d", newcomer.ready, len(newcomer.peers))
+	initial := readCompleteRoster(t, previousDecoder, 2, lastGood.ID)
+	if generation := hostGeneration(initial.Hosts, "host-reconnect"); generation != 7 {
+		t.Fatalf("initial reconnect host generation = %d, want 7", generation)
 	}
-	if h.clients[incumbent.hostID] != incumbent {
-		t.Fatal("amplifying newcomer displaced unrelated incumbent")
+
+	hostilePeers := largeValidPeerSet(t, "host-reconnect", maxWireBytes-96*1024)
+	snapshotBody, err := json.Marshal(Message{Type: "snapshot", Peers: hostilePeers})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(snapshotBody) >= maxWireBytes || len(hostilePeers) > maxSnapshotPeers {
+		t.Fatalf("reconnect snapshot is not individually admissible: bytes=%d peers=%d", len(snapshotBody), len(hostilePeers))
+	}
+	candidateConn := connectRawHubClient(t, address, Message{
+		Type: "hello", Version: ProtocolVersion, HostID: "host-reconnect", HostName: "candidate", Generation: 8,
+		Capabilities: []string{"future-lane"},
+	})
+	candidateDecoder := json.NewDecoder(candidateConn)
+	expectRawFrameType(t, candidateDecoder, "hello_ok")
+	if err := newWireConn(candidateConn).Send(Message{Type: "snapshot", Peers: hostilePeers}); err != nil {
+		t.Fatal(err)
+	}
+	var candidateResponse Message
+	if err := candidateDecoder.Decode(&candidateResponse); err == nil {
+		t.Fatalf("amplifying reconnect received admission response %#v", candidateResponse)
+	}
+	_ = candidateConn.Close()
+
+	if err := newWireConn(previousConn).Send(Message{Type: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	expectRawFrameType(t, previousDecoder, "pong")
+	if err := newWireConn(previousConn).Send(Message{Type: "snapshot", Peers: []Peer{lastGood}}); err != nil {
+		t.Fatal(err)
+	}
+	preserved := readCompleteRoster(t, previousDecoder, 2, lastGood.ID)
+	if generation := hostGeneration(preserved.Hosts, "host-reconnect"); generation != 7 {
+		t.Fatalf("rejected reconnect displaced generation 7 with %d: %#v", generation, preserved.Hosts)
+	}
+	if peerName(preserved.Peers, lastGood.ID) != lastGood.Name {
+		t.Fatalf("rejected reconnect damaged last-good peer: %#v", preserved.Peers)
+	}
+	if err := newWireConn(incumbentConn).Send(Message{Type: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	expectRawFrameType(t, incumbentDecoder, "pong")
 }
 
 func TestHubRejectsSnapshotPeerCountBeforeReplacingLastGoodRoster(t *testing.T) {
@@ -549,35 +619,32 @@ func TestHubRejectsSnapshotPeerCountBeforeReplacingLastGoodRoster(t *testing.T) 
 	}
 }
 
-func TestHubMixedV3CapabilityAdmissionUsesFrozenLegacyMapOnly(t *testing.T) {
+func TestHubLaneCapabilityAdmissionRequiresOneExplicitOpaqueToken(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		product      string
 		capabilities []string
 		want         string
-		legacy       bool
 		wantError    bool
 	}{
-		{name: "legacy codex", product: "codex", want: CapabilityCodexLane, legacy: true},
-		{name: "legacy claude", product: "claude", want: CapabilityClaudeLane, legacy: true},
-		{name: "legacy grok", product: "grok", want: CapabilityGrokLane, legacy: true},
-		{name: "legacy qwen", product: "qwen", want: CapabilityQwenLane, legacy: true},
-		{name: "new empty", product: "future", wantError: true},
+		{name: "codex explicit", product: "codex", capabilities: []string{CapabilityCodexLane}, want: CapabilityCodexLane},
+		{name: "codex empty", product: "codex", wantError: true},
+		{name: "future empty", product: "future", wantError: true},
 		{name: "new exact", product: "future", capabilities: []string{"future-lane"}, want: "future-lane"},
 		{name: "multi", product: "future", capabilities: []string{"future-lane", "other-lane"}, wantError: true},
 		{name: "duplicate", product: "future", capabilities: []string{"future-lane", "future-lane"}, wantError: true},
 		{name: "invalid", product: "future", capabilities: []string{"Future-lane"}, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, legacy, err := laneCapabilityForMessage(Message{Product: test.product, Capabilities: test.capabilities})
+			got, err := laneCapabilityForMessage(Message{Product: test.product, Capabilities: test.capabilities})
 			if test.wantError {
 				if err == nil {
-					t.Fatalf("capability admission = %q, legacy=%t", got, legacy)
+					t.Fatalf("capability admission = %q", got)
 				}
 				return
 			}
-			if err != nil || got != test.want || legacy != test.legacy {
-				t.Fatalf("capability admission = %q, legacy=%t, err=%v", got, legacy, err)
+			if err != nil || got != test.want {
+				t.Fatalf("capability admission = %q, err=%v", got, err)
 			}
 		})
 	}
@@ -621,7 +688,7 @@ func TestHubFencesMessagesFromReplacedGeneration(t *testing.T) {
 		_ = newServer.Close()
 		_ = newPeer.Close()
 	}()
-	old := &hubClient{hostID: "host-a", generation: 7, wire: newWireConn(oldServer), peers: map[string]Peer{}}
+	old := &hubClient{hostID: "host-a", generation: 7, ready: true, wire: newWireConn(oldServer), peers: map[string]Peer{}}
 	current := &hubClient{hostID: "host-a", generation: 8, wire: newWireConn(newServer), peers: map[string]Peer{}}
 	h.clients[old.hostID] = current
 	if err := h.handleClientMessage(old, Message{Type: "snapshot"}); err == nil || !strings.Contains(err.Error(), "superseded") {
@@ -669,53 +736,6 @@ func testParentContext(peer Peer) *ParentContext {
 	}
 }
 
-func validateOldHostCompatibleRoster(message Message) error {
-	if message.Type != "roster" || message.Version != ProtocolVersion {
-		return fmt.Errorf("old host received incompatible roster")
-	}
-	for _, host := range message.Hosts {
-		if !validSimpleID(host.ID) || host.Name == "" {
-			return fmt.Errorf("old host received invalid host")
-		}
-		// The pre-feature normalizer silently discarded capabilities outside
-		// its original-four catalog, so the additive marker is tolerated here.
-		_ = normalizeOldHostCompatibleCapabilities(host.Capabilities)
-	}
-	for _, peer := range message.Peers {
-		if err := validateWirePeer(peer, peer.HostID); err != nil {
-			return err
-		}
-		product := peer.Product
-		if product == "" {
-			product = peer.Entrypoint
-		}
-		if _, known := legacyV3LaneCapabilities[product]; !known {
-			return fmt.Errorf("old host rejected unknown peer product %q", product)
-		}
-	}
-	return nil
-}
-
-func normalizeOldHostCompatibleCapabilities(capabilities []string) []string {
-	result := make([]string, 0, len(capabilities))
-	for _, capability := range capabilities {
-		if productForLegacyCapability(capability) != "" {
-			result = append(result, capability)
-		}
-	}
-	sortStrings(result)
-	return result
-}
-
-func productForLegacyCapability(capability string) string {
-	for product, candidate := range legacyV3LaneCapabilities {
-		if candidate == capability {
-			return product
-		}
-	}
-	return ""
-}
-
 func connectRawHubClient(t *testing.T, address string, hello Message) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", address, time.Second)
@@ -745,42 +765,28 @@ func expectRawFrameType(t *testing.T, decoder *json.Decoder, wanted string) Mess
 	}
 }
 
-func readOldCompatibleRoster(t *testing.T, decoder *json.Decoder, minimumHosts int) Message {
+func readCompleteRoster(t *testing.T, decoder *json.Decoder, minimumHosts int, peerIDs ...string) Message {
 	t.Helper()
 	for {
 		message := expectRawFrameType(t, decoder, "roster")
-		if err := validateOldHostCompatibleRoster(message); err != nil {
-			t.Fatal(err)
+		if message.Version != ProtocolVersion || len(message.Hosts) < minimumHosts {
+			continue
 		}
-		if len(message.Hosts) >= minimumHosts {
+		complete := true
+		for _, peerID := range peerIDs {
+			complete = complete && containsPeerID(message.Peers, peerID)
+		}
+		if complete {
 			return message
 		}
 	}
 }
 
-func expectOldCompatibleFrameType(t *testing.T, decoder *json.Decoder, wanted string) Message {
-	t.Helper()
-	for {
-		var message Message
-		if err := decoder.Decode(&message); err != nil {
-			t.Fatalf("read old-compatible %s frame: %v", wanted, err)
-		}
-		if message.Type == "roster" {
-			if err := validateOldHostCompatibleRoster(message); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if message.Type == wanted {
-			return message
-		}
-	}
-}
-
-func readRosterContaining(t *testing.T, decoder *json.Decoder, peerID string) Message {
+func readRosterWithPeerName(t *testing.T, decoder *json.Decoder, peerID, name string) Message {
 	t.Helper()
 	for {
 		message := expectRawFrameType(t, decoder, "roster")
-		if containsPeerID(message.Peers, peerID) {
+		if peerName(message.Peers, peerID) == name {
 			return message
 		}
 	}
@@ -802,6 +808,15 @@ func peerName(peers []Peer, peerID string) string {
 		}
 	}
 	return ""
+}
+
+func hostGeneration(hosts []Host, hostID string) uint64 {
+	for _, host := range hosts {
+		if host.ID == hostID {
+			return host.Generation
+		}
+	}
+	return 0
 }
 
 func largeValidPeerSet(t *testing.T, hostID string, budget int) []Peer {

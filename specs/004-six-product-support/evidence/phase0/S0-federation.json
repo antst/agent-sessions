@@ -10,9 +10,10 @@
     "Message.Capabilities",
     "Host.Capabilities"
   ],
-  "mixed_build_outcome": "unknown new-product capability may be omitted by an old hop, causing explicit unavailability rather than misrouting",
+  "mixed_build_outcome": "historical protocol-3 conclusion; superseded by exact protocol-4 mismatch rejection before registration",
   "new_wire_fields_required": false,
   "protocol_version": 3,
+  "superseded_by": "T125 uniform federation protocol 4",
   "reproducer": "scripts/spikes/six-product/base/run.sh",
   "security_scope": "trusted-network assumption retained; TLS/authentication deferred to a separate design",
   "status": "pass",

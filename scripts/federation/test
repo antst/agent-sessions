@@ -21,8 +21,9 @@ if [[ "${SKIP_GO_TEST:-0}" != "1" ]]; then
     go test ./internal/federation ./internal/daemon ./cmd/agent-sessions ./cmd/agent-sessions-hub
   fi
 fi
-if ! grep -Fq '# Federation protocol version 3' docs/federation/PROTOCOL.md ||
+if ! grep -Fq '# Federation protocol version 4' docs/federation/PROTOCOL.md ||
+   ! grep -Fq 'Every admitted client receives this same complete roster' docs/federation/PROTOCOL.md ||
    ! grep -Fq 'Local grouped routing continues without a hub' docs/federation/PROTOCOL.md; then
-  printf 'protocol documentation does not pin grouped protocol-3 behavior\n' >&2
+  printf 'protocol documentation does not pin uniform protocol-4 behavior\n' >&2
   exit 1
 fi

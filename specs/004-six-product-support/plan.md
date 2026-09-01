@@ -52,7 +52,7 @@ roster and existing-product latency remain within current gates
 
 **Constraints**: Exact identity, no TTY scraping, no credential persistence,
 no permission widening, durable accepted input, fail-closed recovery,
-transactional install/remove, trusted-network protocol-3 federation, same-UID
+transactional install/remove, trusted-network uniform protocol-4 federation, same-UID
 local trust, CodeBuddy model GA cell account-gated, DSH exact alpha tuple
 
 **Scale/Scope**: Ten supported products, six new peer aliases, six lane aliases,
@@ -97,7 +97,7 @@ specs/004-six-product-support/
 │   ├── acceptance-matrix.md
 │   ├── catalog-projection.md
 │   ├── component-protocol.md
-│   ├── federation-v3.md
+│   ├── federation-v4.md
 │   ├── lane-input-ledger.md
 │   └── runtime-product.md
 └── evidence/
@@ -132,7 +132,7 @@ internal/
 │   ├── omp/
 │   ├── codebuddy/
 │   └── dsh/
-├── federation/               # live protocol-3 opaque-capability hub/host
+├── federation/               # live uniform protocol-4 opaque-capability hub/host
 └── releaseinstall/           # catalog-derived transactional install registry
 
 integrations/
@@ -163,7 +163,7 @@ native RPC/ACP child ─ structuredprocess ───┘                  │
 caller/MCP/CLI -> host control -> daemon engines -> runtime registry
                                      │
                                      ├─ catalog + input spool + leases
-                                     └─ federation v3 -> destination registry
+                                     └─ federation v4 -> destination registry
 ```
 
 Authority rules:
@@ -190,7 +190,7 @@ updated and re-reviewed.
 - Prove worktree is exact `679fe9d` plus planning artifacts.
 - Prove current federation decoder accepts additive unknown JSON fields; record
   that no new wire field is required.
-- Freeze protocol 3 and trusted-network scope.
+- Freeze uniform protocol 4, exact-version rejection, and trusted-network scope.
 
 ### S1 — Kilo exact routing and attach parity
 

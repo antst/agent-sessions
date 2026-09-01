@@ -250,18 +250,20 @@ In particular, the Grok ACP lane accepts only an explicit
 are rejected unchanged before native dispatch. Interactive native permission
 changes remain product-owned where the product exposes them.
 
-## Federation protocol 3
+## Federation protocol 4
 
-Federation wire protocol 3 remains current. Capabilities are bounded opaque
+Federation wire protocol 4 is uniform. Capabilities are bounded opaque
 catalog tokens. The hub validates syntax, size, count, deduplication, and that
 the destination advertised the requested capability; it does not resolve a
 closed product switch. The destination runtime registry is authoritative for
 product support, doctor readiness, parent proof, and driver selection.
 
-An older protocol-3 host that does not know a new capability cannot initiate
-or advertise it. That is explicit unavailability, not misrouting, and needs no
-wire-version bump. Generation fencing and destination-side authorization still
-apply.
+The first handshake carries exact version 4. Any other version, including an
+N+1 participant against an N hub, is rejected before registration. Every
+accepted client receives the same complete roster, and every lane request must
+carry one explicit capability; there is no partial admission, per-client
+filter, or empty-capability inference. Generation fencing and destination-side
+authorization still apply.
 
 Federation currently assumes a trusted network and has no TLS or peer
 authentication. That limitation MUST be documented in deployments; adding an
