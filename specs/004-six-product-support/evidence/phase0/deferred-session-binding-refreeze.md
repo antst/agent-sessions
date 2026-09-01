@@ -1,7 +1,7 @@
 # LaneDriver Deferred Native-Session Binding Re-freeze Evidence
 
-Status: **CANDIDATE — Fable-approved semantics implemented; independent source
-review GREEN; Amendment Round 2 re-stamp pending**
+Status: **PASS — Fable Amendment Round 2 re-stamped on commit
+`89fce56b50727600f6ca69da334e37cf8278fcc8`**
 
 Scope: product-neutral support for a native product whose session is created
 only by its first accepted turn. Candidate base: `039d25027afe9224ea32a91d4bf839aa550395b3`.
@@ -118,7 +118,8 @@ reconciliation; every generic lane path tolerates the unbound window by
   session/job creation and possible-write reconciliation uses authoritative
   product APIs rather than cwd-only adoption;
 - [x] adversarial review GREEN;
-- [ ] fable-architect Amendment Round 2 re-freeze GREEN.
+- [x] fable-architect Amendment Round 2 re-freeze GREEN, independently
+  verified in an isolated detached worktree at `89fce56`.
 
 The two unchecked production/product cells are deliberately outside this
 product-neutral fenced task. They block product credit, not this shared seam.
