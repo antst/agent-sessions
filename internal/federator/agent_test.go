@@ -18,6 +18,7 @@ func TestUnreadyDiscoveredQwenLauncherIsNotAdvertised(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", bin)
+	t.Setenv("QWEN_PEER_QWEN_BIN", "")
 	previous := evaluateQwenLaneReadiness
 	evaluateQwenLaneReadiness = func(got string) error {
 		if got != native {

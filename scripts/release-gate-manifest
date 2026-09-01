@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
+import shutil
 import subprocess
 
 
@@ -15,6 +17,12 @@ GATES = (
     "normal", "race", "vet", "lint", "focused_contracts", "quickstart",
     "permissions", "federation", "prebuilt_install", "owner_nonmutation",
 )
+NATIVE_CLIENTS = {
+    "qwen": ("QWEN_PEER_QWEN_BIN", ("qwen", "~/.local/bin/qwen")),
+    "codex": ("CODEX_PEER_CODEX_BIN", ("codex", "~/.local/bin/codex")),
+    "claude": ("CLAUDE_PEER_CLAUDE_BIN", ("claude", "~/.local/bin/claude")),
+    "grok": ("GROK_PEER_GROK_BIN", ("grok", "~/.grok/bin/grok")),
+}
 
 
 def version(command: list[str]) -> str:
@@ -24,6 +32,20 @@ def version(command: list[str]) -> str:
     if not line or len(line) > 256:
         raise SystemExit(f"invalid version output from {command[0]}")
     return line
+
+
+def native_client(env_name: str, *candidates: str) -> str:
+    configured = os.environ.get(env_name, "").strip()
+    if configured:
+        resolved = shutil.which(os.path.expanduser(configured))
+        if resolved is None:
+            raise SystemExit(f"configured native client is not executable: {env_name}")
+        return resolved
+    for candidate in candidates:
+        resolved = shutil.which(os.path.expanduser(candidate))
+        if resolved is not None:
+            return resolved
+    raise SystemExit(f"native client is not executable: {candidates[0]}")
 
 
 def main() -> int:
@@ -55,10 +77,8 @@ def main() -> int:
             "golangci_lint": version(["bin/tools/golangci-lint", "version"]),
         },
         "native_clients": {
-            "qwen": version(["qwen", "--version"]),
-            "codex": version(["codex", "--version"]),
-            "claude": version(["claude", "--version"]),
-            "grok": version(["grok", "--version"]),
+            product: version([native_client(env_name, *candidates), "--version"])
+            for product, (env_name, candidates) in NATIVE_CLIENTS.items()
         },
         "gates": gates,
     }

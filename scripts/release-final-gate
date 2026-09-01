@@ -15,13 +15,18 @@ evidence_dir="$(cd -- "$evidence_dir" && pwd -P)"
 run_gate() {
   local name=$1
   shift
-  local log="$evidence_dir/$os_name-$name.txt"
+  local log="$evidence_dir/$os_name-$name.txt" status
   {
     printf 'gate=%s os=%s commit=%s tree=%s\n' "$name" "$os_name" \
       "$(git -C "$root" rev-parse HEAD)" "$(git -C "$root" rev-parse HEAD^{tree})"
     printf 'command='; printf ' %q' "$@"; printf '\n'
     "$@"
-  } >"$log" 2>&1
+  } >"$log" 2>&1 || {
+    status=$?
+    printf 'release gate %s failed on %s; tail of %s follows\n' "$name" "$os_name" "$log" >&2
+    tail -n 200 "$log" >&2
+    return "$status"
+  }
 }
 
 run_gate normal "$root/scripts/test"
