@@ -73,7 +73,10 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 	if err != nil {
 		return productruntime.RuntimeProduct{}, err
 	}
-	return productruntime.RuntimeProduct{Descriptor: descriptor, Peer: peer, Message: message, Lane: lane, Parent: parent, Doctor: doctor}, nil
+	return productruntime.RuntimeProduct{
+		Descriptor: descriptor, Peer: peer, Message: message, NativeTitle: peer,
+		Lane: lane, Parent: parent, Doctor: doctor,
+	}, nil
 }
 
 // NewComponentObserver constructs the ephemeral post-admission observer used

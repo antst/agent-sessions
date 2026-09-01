@@ -3,7 +3,7 @@
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 const VERSION = 1;
-const CONTRACT_REVISION = "agent-sessions.component.v1-r1";
+const CONTRACT_REVISION = "agent-sessions.component.v1-r2";
 const DAEMON_RENAME_PREFIX = "daemon.rename.";
 const COMPONENT_RENAME_PREFIX = "component.rename.";
 const DEFAULT_LIMITS = Object.freeze({
@@ -40,16 +40,25 @@ function validateFrame(frame, limits = DEFAULT_LIMITS) {
   if (!Number.isSafeInteger(frame.seq) || frame.seq <= 0) throw new Error("component frame sequence is invalid");
   if (!frame.payload || Array.isArray(frame.payload) || typeof frame.payload !== "object") throw new Error("component frame payload must be an object");
   validateJSONBounds(frame, limits);
-  validateRenameFrame(frame);
+  validateSessionTitleFrame(frame);
   return frame;
 }
 
-function validateRenameFrame(frame) {
+function validateSessionTitleFrame(frame) {
+  if (frame.type === "session.announce") {
+    if (!validID(frame.payload.binding_id) || !validID(frame.payload.native_session_id) ||
+        typeof frame.payload.cwd !== "string" || frame.payload.cwd.length === 0 ||
+        !validNativeTitleObservation(frame.payload.native_name) ||
+        !Number.isSafeInteger(frame.payload.product_event_seq) || frame.payload.product_event_seq <= 0) {
+      throw new Error("component session announce title or identity is invalid");
+    }
+    return;
+  }
   if (frame.type === "session.rename.request") {
     if (!frame.id.startsWith(DAEMON_RENAME_PREFIX) || frame.id.length === DAEMON_RENAME_PREFIX.length) {
       throw new Error("component rename request id uses the wrong namespace");
     }
-    if (!validID(frame.payload.native_session_id) || !validNativeName(frame.payload.requested_name)) {
+    if (!validID(frame.payload.native_session_id) || !validNativeRenameName(frame.payload.requested_name)) {
       throw new Error("component rename request payload is invalid");
     }
     return;
@@ -57,8 +66,10 @@ function validateRenameFrame(frame) {
   if (frame.type !== "session.rename") return;
   const daemonResponse = frame.id.startsWith(DAEMON_RENAME_PREFIX) && frame.id.length > DAEMON_RENAME_PREFIX.length;
   const componentObservation = frame.id.startsWith(COMPONENT_RENAME_PREFIX) && frame.id.length > COMPONENT_RENAME_PREFIX.length;
-  if ((!daemonResponse && !componentObservation) || !validID(frame.payload.native_session_id) ||
-      !validNativeName(frame.payload.native_name) || !Number.isSafeInteger(frame.payload.product_event_seq) || frame.payload.product_event_seq <= 0) {
+  const validTitle = daemonResponse ? validNativeRenameName(frame.payload.native_name) :
+    componentObservation ? validNativeTitleObservation(frame.payload.native_name) : false;
+  if (!validTitle || !validID(frame.payload.native_session_id) ||
+      !Number.isSafeInteger(frame.payload.product_event_seq) || frame.payload.product_event_seq <= 0) {
     throw new Error("component rename payload or id namespace is invalid");
   }
 }
@@ -176,9 +187,13 @@ function validID(value) {
   return typeof value === "string" && value.trim() === value && value.length > 0 && Buffer.byteLength(value, "utf8") <= 256 && !/[\0\r\n]/u.test(value);
 }
 
-function validNativeName(value) {
-  return typeof value === "string" && value.trim() === value && value.length > 0 &&
-    Buffer.byteLength(value, "utf8") <= 1024 && !/[\0\r\n]/u.test(value);
+function validNativeTitleObservation(value) {
+  return typeof value === "string" && Buffer.from(value, "utf8").toString("utf8") === value &&
+    Buffer.byteLength(value, "utf8") <= 1024 && !/\p{Cc}/u.test(value);
+}
+
+function validNativeRenameName(value) {
+  return validNativeTitleObservation(value) && value.length > 0 && value.trim() === value;
 }
 
 function daemonRenameOperationID(stableID) {
@@ -224,6 +239,7 @@ module.exports = {
   makeFrame,
   daemonRenameOperationID,
   componentRenameObservationID,
+  validNativeTitleObservation,
   redact,
   validateFrame,
   validateContractRevision,

@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import componentProtocolModule from "../shared/component/protocol.js";
+
+const { validNativeTitleObservation } = componentProtocolModule;
 
 class FakeComponent extends EventEmitter {
   constructor(active = true) {
@@ -34,6 +37,7 @@ fakeTool.schema = {
 
 async function loadPlugin(component, deliveryDeadlineMS = 10_000) {
   globalThis.__agentSessionsTestTool = fakeTool;
+  globalThis.__agentSessionsTestValidNativeTitleObservation = validNativeTitleObservation;
   globalThis.__agentSessionsTestComponentFactory = (options = {}) => {
     component.renameSession = options.renameSession;
     return component;
@@ -41,7 +45,10 @@ async function loadPlugin(component, deliveryDeadlineMS = 10_000) {
   let source = await readFile(new URL("./agent-sessions.mjs", import.meta.url), "utf8");
   source = source
     .replace('import { tool } from "@opencode-ai/plugin";', "const tool = globalThis.__agentSessionsTestTool;")
-    .replace('import componentModule from "../shared/component/client.js";\n\nconst { createComponentClient } = componentModule;', "const createComponentClient = globalThis.__agentSessionsTestComponentFactory;")
+    .replace('import componentModule from "../shared/component/client.js";', "")
+    .replace('const { createComponentClient } = componentModule;', "const createComponentClient = globalThis.__agentSessionsTestComponentFactory;")
+    .replace('import componentProtocolModule from "../shared/component/protocol.js";', "")
+    .replace('const { validNativeTitleObservation } = componentProtocolModule;', "const validNativeTitleObservation = globalThis.__agentSessionsTestValidNativeTitleObservation;")
     .replace("const DELIVERY_DEADLINE_MS = 10_000;", `const DELIVERY_DEADLINE_MS = ${deliveryDeadlineMS};`);
   const encoded = Buffer.from(source).toString("base64");
   return (await import(`data:text/javascript;base64,${encoded}#${Date.now()}-${Math.random()}`)).default;
@@ -55,6 +62,39 @@ test("OpenCode plugin is inert without managed component activation", async () =
   const plugin = await loadPlugin(component);
   assert.deepEqual(await plugin({ client: {}, directory: "/work/project" }), {});
   assert.equal(component.sent.length, 0);
+});
+
+test("OpenCode projects genuine empty titles, clear events, and no shell fabrication", async () => {
+  const component = new FakeComponent();
+  const plugin = await loadPlugin(component);
+  const hooks = await plugin({ client: {}, directory: "/work/project" });
+
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_title", title: "", directory: "/work/project" } } } });
+  const announce = component.sent.find((frame) => frame.type === "session.announce" && frame.payload.native_session_id === "ses_title");
+  assert.equal(announce?.payload.native_name, "");
+
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_title", title: "native", directory: "/work/project" } } } });
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_title", title: "", directory: "/work/project" } } } });
+  assert.deepEqual(component.observed.slice(-2).map((entry) => entry.nativeName), ["native", ""]);
+
+  const beforeUnsafe = component.sent.length + component.observed.length;
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_missing", directory: "/work/project" } } } });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_null", title: null, directory: "/work/project" } } } });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_unsafe", title: "bad\ntitle", directory: "/work/project" } } } });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_oversized", title: "x".repeat(1025), directory: "/work/project" } } } });
+  assert.equal(component.sent.length + component.observed.length, beforeUnsafe, "missing, null, unsafe, and oversized title evidence must stay unavailable");
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_unsafe", title: "", directory: "/work/project" } } } });
+  assert.equal(component.sent.at(-1).payload.native_name, "", "unsafe title must not mutate follower state");
+
+  const noEvidenceOutput = { env: {} };
+  const beforeShell = component.sent.length;
+  await hooks["shell.env"]({ sessionID: "ses_shell", cwd: "/work/project" }, noEvidenceOutput);
+  assert.equal(component.sent.length, beforeShell, "shell context without title evidence must not fabricate an announcement");
+  assert.equal(noEvidenceOutput.env.AGENT_SESSIONS_NATIVE_SESSION_ID, "ses_shell");
+
+  await hooks["shell.env"]({ sessionID: "ses_shell_empty", cwd: "/work/project", title: "" }, { env: {} });
+  const shellAnnounce = component.sent.find((frame) => frame.type === "session.announce" && frame.payload.native_session_id === "ses_shell_empty");
+  assert.equal(shellAnnounce?.payload.native_name, "");
 });
 
 test("OpenCode plugin binds delivery, rename, and parent tool to one exact native session", async () => {
@@ -212,8 +252,8 @@ test("OpenCode rename serializes one writer and correlates early and late native
 
   const second = component.renameSession({ nativeSessionID: "ses_exact", requestedName: "managed-again", signal: new AbortController().signal });
   await tick();
-  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_exact", title: "external", directory: "/work/project" } } } });
-  assert.equal(component.observed.at(-1).nativeName, "external");
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_exact", title: "", directory: "/work/project" } } } });
+  assert.equal(component.observed.at(-1).nativeName, "", "empty native title must conflict with a pending nonempty rename");
   resolvers.shift()({ data: { id: "ses_exact", title: "managed-again" }, response: { status: 200 } });
   await assert.rejects(second, (error) => error?.category === "ambiguous-session");
 

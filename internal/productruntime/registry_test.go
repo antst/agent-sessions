@@ -51,6 +51,39 @@ func TestRegistryAllowsTruthfulUnsupportedRenameDriver(t *testing.T) {
 	}
 }
 
+func TestRegistryScopesOptionalNativeTitleProjectorToInteractiveProducts(t *testing.T) {
+	descriptor := syntheticDescriptor("synthetic")
+	product := completeRuntime(descriptor)
+	product.NativeTitle = fakeNativeTitleProjector{}
+	registry, err := NewRegistry([]productcatalog.Descriptor{descriptor}, []RuntimeProduct{product})
+	if err != nil {
+		t.Fatalf("compose optional native title projector: %v", err)
+	}
+	got, ok := registry.ByID(descriptor.ID)
+	if !ok || got.NativeTitle == nil {
+		t.Fatalf("native title projector = %#v, %v", got.NativeTitle, ok)
+	}
+	projection, err := got.NativeTitle.ProjectNativeTitle(context.Background(), daemon.ManagedAttachment{})
+	if err != nil || projection != (NativeTitleProjection{NativeSessionID: "native", Title: "title"}) {
+		t.Fatalf("native title projection = %#v, %v", projection, err)
+	}
+
+	withoutProjector := completeRuntime(descriptor)
+	if _, err := NewRegistry([]productcatalog.Descriptor{descriptor}, []RuntimeProduct{withoutProjector}); err != nil {
+		t.Fatalf("optional native title projector became mandatory: %v", err)
+	}
+
+	nonInteractiveDescriptor := descriptor
+	nonInteractiveDescriptor.Capabilities = []productcatalog.Capability{productcatalog.CapabilityLane, productcatalog.CapabilityParent}
+	nonInteractive := completeRuntime(nonInteractiveDescriptor)
+	nonInteractive.Peer = nil
+	nonInteractive.Message = nil
+	nonInteractive.NativeTitle = fakeNativeTitleProjector{}
+	if _, err := NewRegistry([]productcatalog.Descriptor{nonInteractiveDescriptor}, []RuntimeProduct{nonInteractive}); err == nil {
+		t.Fatal("native title projector accepted without interactive capability")
+	}
+}
+
 func TestRegistryRejectsMissingExtraAndMismatchedDrivers(t *testing.T) {
 	descriptor := syntheticDescriptor("synthetic")
 	complete := completeRuntime(descriptor)

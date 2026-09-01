@@ -108,15 +108,25 @@ func TestProductRuntimeRequiresAndUsesExactPrewiredObserver(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if runtimeProduct.NativeTitle == nil {
+				t.Fatal("Pi-family runtime omitted its live native-title projector")
+			}
 			announce, err := component.NewFrame(component.TypeSessionAnnounce, "announce", 1, component.SessionAnnounce{
 				BindingID: binding.BindingID, NativeSessionID: "native-" + productID,
-				Cwd: "/work", NativeName: productID + " session", ProductEventSeq: 1,
+				Cwd: "/work", NativeName: "", ProductEventSeq: 1,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := observer.HandleComponentFrame(context.Background(), binding, announce); err != nil {
 				t.Fatal(err)
+			}
+			projected, err := runtimeProduct.NativeTitle.ProjectNativeTitle(context.Background(), daemon.ManagedAttachment{
+				ID: binding.AttachmentID, Product: productID, NativeSessionID: "native-" + productID,
+				State: "attached", DaemonGeneration: binding.Generation,
+			})
+			if err != nil || projected != (productruntime.NativeTitleProjection{NativeSessionID: "native-" + productID, Title: ""}) {
+				t.Fatalf("prewired native title = %+v, %v", projected, err)
 			}
 			renamed, err := runtimeProduct.Peer.Rename(context.Background(), daemon.ManagedAttachment{
 				ID: binding.AttachmentID, Product: productID, NativeSessionID: "native-" + productID, State: "attached",

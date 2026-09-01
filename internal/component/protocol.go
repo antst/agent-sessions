@@ -10,6 +10,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -18,10 +19,14 @@ const (
 	// ContractRevision identifies the pinned daemon/client frame vocabulary.
 	// It is deliberately separate from ProtocolVersion: v1 has not shipped as
 	// an independently versioned client protocol and therefore remains wire v1.
-	ContractRevision = "agent-sessions.component.v1-r1"
+	ContractRevision = "agent-sessions.component.v1-r2"
 	RedactedValue    = "<redacted>"
 	maxIdentifier    = 256
 	maxDetailBytes   = 512
+	// MaxNativeTitleBytes bounds one product-native title observation in its
+	// UTF-8 wire representation. Empty observations are valid and mean the
+	// product currently has no title.
+	MaxNativeTitleBytes = 1024
 
 	DaemonRenameOperationPrefix      = "daemon.rename."
 	ComponentRenameObservationPrefix = "component.rename."
@@ -109,11 +114,49 @@ type Frame struct {
 // NewFrame constructs an envelope. EncodeFrame and ValidatePayload enforce
 // protocol constraints at the boundary.
 func NewFrame(frameType FrameType, id string, seq uint64, payload any) (Frame, error) {
+	if err := validateNativeTitleBeforeJSON(frameType, id, payload); err != nil {
+		return Frame{}, err
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return Frame{}, fmt.Errorf("encode component payload: %w", err)
 	}
 	return Frame{Version: ProtocolVersion, Type: frameType, ID: id, Seq: seq, Payload: body}, nil
+}
+
+func validateNativeTitleBeforeJSON(frameType FrameType, id string, payload any) error {
+	invalid := func() error {
+		return protocolError(CategoryInvalidFrame, "%s payload carries an invalid native title", frameType)
+	}
+	switch value := payload.(type) {
+	case SessionAnnounce:
+		if !ValidNativeTitleObservation(value.NativeName) {
+			return invalid()
+		}
+	case *SessionAnnounce:
+		if value == nil || !ValidNativeTitleObservation(value.NativeName) {
+			return invalid()
+		}
+	case SessionRename:
+		if (validDaemonRenameOperationID(id) && !validNativeRenameName(value.NativeName)) ||
+			(validComponentRenameObservationID(id) && !ValidNativeTitleObservation(value.NativeName)) {
+			return invalid()
+		}
+	case *SessionRename:
+		if value == nil || (validDaemonRenameOperationID(id) && !validNativeRenameName(value.NativeName)) ||
+			(validComponentRenameObservationID(id) && !ValidNativeTitleObservation(value.NativeName)) {
+			return invalid()
+		}
+	case SessionRenameRequest:
+		if !validNativeRenameName(value.RequestedName) {
+			return invalid()
+		}
+	case *SessionRenameRequest:
+		if value == nil || !validNativeRenameName(value.RequestedName) {
+			return invalid()
+		}
+	}
+	return nil
 }
 
 // EncodeFrame encodes one known valid v1 frame as a JSON object. Local
@@ -135,6 +178,9 @@ func EncodeFrame(frame Frame) ([]byte, error) {
 // DecodeFrame decodes the additive v1 envelope. Unknown frame types and
 // versions fail before any payload field can be treated as authority.
 func DecodeFrame(body []byte) (Frame, error) {
+	if !utf8.Valid(body) {
+		return Frame{}, protocolError(CategoryInvalidFrame, "component frame is not valid UTF-8")
+	}
 	var frame Frame
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&frame); err != nil {
@@ -172,7 +218,8 @@ func validateEnvelope(frame Frame) error {
 	if frame.Seq == 0 {
 		return protocolError(CategoryInvalidFrame, "frame sequence must be positive")
 	}
-	if len(frame.Payload) == 0 || !json.Valid(frame.Payload) || bytes.Equal(bytes.TrimSpace(frame.Payload), []byte("null")) {
+	if len(frame.Payload) == 0 || !utf8.Valid(frame.Payload) || !json.Valid(frame.Payload) ||
+		bytes.Equal(bytes.TrimSpace(frame.Payload), []byte("null")) {
 		return protocolError(CategoryInvalidFrame, "frame payload must be a JSON object")
 	}
 	trimmed := bytes.TrimSpace(frame.Payload)
@@ -375,7 +422,9 @@ func ValidatePayload(frame Frame) error { //nolint:gocyclo // Explicit frame voc
 		}
 	case TypeSessionAnnounce:
 		var value SessionAnnounce
-		if frame.PayloadInto(&value) != nil || !required(value.BindingID, value.NativeSessionID) || !validText(value.Cwd, 4096) || !validText(value.NativeName, 1024) || value.ProductEventSeq == 0 {
+		if frame.PayloadInto(&value) != nil || !required(value.BindingID, value.NativeSessionID) ||
+			!payloadHasJSONStringField(frame.Payload, "native_name") || !validText(value.Cwd, 4096) ||
+			!ValidNativeTitleObservation(value.NativeName) || value.ProductEventSeq == 0 {
 			return invalid()
 		}
 	case TypeSessionRebind:
@@ -385,13 +434,14 @@ func ValidatePayload(frame Frame) error { //nolint:gocyclo // Explicit frame voc
 		}
 	case TypeSessionRename:
 		var value SessionRename
-		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID) || !validNativeName(value.NativeName) ||
-			value.ProductEventSeq == 0 || !validRenameFrameID(frame.ID) {
+		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID) ||
+			!payloadHasJSONStringField(frame.Payload, "native_name") || value.ProductEventSeq == 0 ||
+			!validSessionRenameTitle(frame.ID, value.NativeName) {
 			return invalid()
 		}
 	case TypeSessionRenameRequest:
 		var value SessionRenameRequest
-		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID) || !validNativeName(value.RequestedName) ||
+		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID) || !validNativeRenameName(value.RequestedName) ||
 			!validDaemonRenameOperationID(frame.ID) {
 			return invalid()
 		}
@@ -466,6 +516,23 @@ func ValidatePayload(frame Frame) error { //nolint:gocyclo // Explicit frame voc
 	return nil
 }
 
+func payloadHasJSONStringField(payload json.RawMessage, field string) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(payload, &object) != nil {
+		return false
+	}
+	raw, ok := object[field]
+	if !ok {
+		return false
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	_, ok = value.(string)
+	return ok
+}
+
 func validOptionalProcessCorroboration(processStart, strongStart string) bool {
 	if processStart == "" && strongStart == "" {
 		return true
@@ -473,12 +540,34 @@ func validOptionalProcessCorroboration(processStart, strongStart string) bool {
 	return validIdentifier(processStart) && validIdentifier(strongStart)
 }
 
-func validNativeName(value string) bool {
-	return value != "" && strings.TrimSpace(value) == value && validText(value, 1024) && !strings.ContainsAny(value, "\r\n")
+// ValidNativeTitleObservation is the single component-side rule for a title
+// read from the product. Empty is a confirmed absence, whitespace is data,
+// and every Unicode control rune is rejected.
+func ValidNativeTitleObservation(value string) bool {
+	if len([]byte(value)) > MaxNativeTitleBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
-func validRenameFrameID(value string) bool {
-	return validDaemonRenameOperationID(value) || validComponentRenameObservationID(value)
+func validNativeRenameName(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value && ValidNativeTitleObservation(value)
+}
+
+func validSessionRenameTitle(operationID, value string) bool {
+	switch {
+	case validDaemonRenameOperationID(operationID):
+		return validNativeRenameName(value)
+	case validComponentRenameObservationID(operationID):
+		return ValidNativeTitleObservation(value)
+	default:
+		return false
+	}
 }
 
 func validDaemonRenameOperationID(value string) bool {

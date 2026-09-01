@@ -11,6 +11,7 @@ type RuntimeProduct struct {
 	Descriptor        productcatalog.Descriptor
 	Peer              PeerDriver
 	Message           MessageDriver
+	NativeTitle       NativeTitleProjector
 	Lane              LaneDriver
 	Parent            ParentAttester
 	Doctor            DoctorProbe
@@ -26,6 +27,14 @@ type PeerDriver interface {
 
 type MessageDriver interface {
 	Deliver(context.Context, daemon.ManagedAttachment, DeliveryRequest) (NativeAcceptance, error)
+}
+
+// NativeTitleProjector reads the product-owned title of one exact live native
+// session. A successful projection is a live observation; implementations may
+// query the product directly or follow authenticated generation-local native
+// observations, but must never treat a durable daemon copy as authority.
+type NativeTitleProjector interface {
+	ProjectNativeTitle(context.Context, daemon.ManagedAttachment) (NativeTitleProjection, error)
 }
 
 type LaneDriver interface {

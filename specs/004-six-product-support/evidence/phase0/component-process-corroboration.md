@@ -4,8 +4,9 @@ Status: **FABLE-APPROVED NARROW AMENDMENT**
 
 Amendment round: **1**
 
-The component wire remains protocol version `1` and contract revision
-`agent-sessions.component.v1-r1`. No frame, envelope, durable record, or state
+The component wire remains protocol version `1`; the current pinned contract is
+`agent-sessions.component.v1-r2`. This pre-existing process-corroboration
+amendment remains unchanged: no frame, envelope, durable record, or state
 transition is added.
 
 `bootstrap` and `reconnect` retain `process_start` and `strong_start` as an

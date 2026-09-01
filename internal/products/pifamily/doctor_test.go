@@ -51,7 +51,7 @@ func TestDoctorPinsVersionFeaturesAndManagedExtension(t *testing.T) {
 			}
 			runner := doctorRunnerFixture{
 				path: "/usr/bin/" + quirks.Executable, version: quirks.Executable + " v" + quirks.TestedVersion + "\n",
-				help: help, info: fileInfoFixture{}, asset: `const CONTRACT_REVISION = "agent-sessions.component.v1-r1";`,
+				help: help, info: fileInfoFixture{}, asset: `const CONTRACT_REVISION = "agent-sessions.component.v1-r2";`,
 			}
 			probe, err := NewDoctorProbe(DoctorConfig{
 				Quirks: quirks, ExtensionPath: "/managed/extension.mjs", Runner: runner,
@@ -83,7 +83,7 @@ func TestDoctorRejectsReadableStaleComponentContractAsset(t *testing.T) {
 		asset string
 		state productruntime.ProbeState
 	}{
-		"exact": {asset: `const CONTRACT_REVISION = "agent-sessions.component.v1-r1";`, state: productruntime.ProbeReady},
+		"exact": {asset: `const CONTRACT_REVISION = "agent-sessions.component.v1-r2";`, state: productruntime.ProbeReady},
 		"stale": {asset: `const CONTRACT_REVISION = "agent-sessions.component.v1";`, state: productruntime.ProbeIncompatible},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -171,6 +171,10 @@ func (driver *PeerDriver) Rename(ctx context.Context, attachment daemon.ManagedA
 	return driver.config.Runtime.Rename(ctx, attachment, name)
 }
 
+func (driver *PeerDriver) ProjectNativeTitle(ctx context.Context, attachment daemon.ManagedAttachment) (productruntime.NativeTitleProjection, error) {
+	return driver.config.Runtime.ProjectNativeTitle(ctx, attachment)
+}
+
 type MessageDriver struct{ runtime *ComponentRuntime }
 
 func NewMessageDriver(runtime *ComponentRuntime) (*MessageDriver, error) {

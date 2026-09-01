@@ -74,6 +74,8 @@ type componentIdentity struct {
 	generation      uint64
 	eventSequence   uint64
 	state           string
+	nativeTitle     string
+	titleObserved   bool
 }
 
 type pendingDelivery struct {
@@ -141,7 +143,7 @@ func (runtime *ComponentRuntime) HandleComponentFrame(ctx context.Context, bindi
 		if value.BindingID != binding.BindingID {
 			return fmt.Errorf("%w: announce binding id mismatch", productruntime.ErrUnauthorized)
 		}
-		return runtime.recordIdentity(binding, value.NativeSessionID, value.ProductEventSeq)
+		return runtime.recordIdentity(binding, value.NativeSessionID, value.NativeName, value.ProductEventSeq)
 	case component.TypeSessionRebind:
 		var value component.SessionRebind
 		if err := frame.PayloadInto(&value); err != nil {
@@ -267,6 +269,48 @@ func (runtime *ComponentRuntime) Rename(ctx context.Context, attachment daemon.M
 	return productruntime.NativeName{Applied: result.NativeName, NativeConfirmed: true}, nil
 }
 
+// ProjectNativeTitle reads only the authenticated generation-local component
+// follower. Durable daemon attachment fields never participate in title
+// authority, and an empty observed native title remains a successful result.
+func (runtime *ComponentRuntime) ProjectNativeTitle(ctx context.Context, attachment daemon.ManagedAttachment) (productruntime.NativeTitleProjection, error) {
+	if ctx == nil || runtime == nil || attachment.ID == "" || attachment.Product != runtime.config.Quirks.ProductID ||
+		attachment.State != "attached" || attachment.NativeSessionID == "" || attachment.DaemonGeneration == 0 {
+		return productruntime.NativeTitleProjection{}, fmt.Errorf("%w: native title destination is stale", productruntime.ErrStale)
+	}
+	select {
+	case <-ctx.Done():
+		return productruntime.NativeTitleProjection{}, ctx.Err()
+	default:
+	}
+	runtime.mu.Lock()
+	identity, exists := runtime.sessions[attachment.ID]
+	runtime.mu.Unlock()
+	if !exists {
+		return productruntime.NativeTitleProjection{}, fmt.Errorf("%w: native title has no live observation", productruntime.ErrUnavailable)
+	}
+	if identity.nativeSessionID != attachment.NativeSessionID || identity.generation != attachment.DaemonGeneration {
+		return productruntime.NativeTitleProjection{}, fmt.Errorf("%w: native title identity changed", productruntime.ErrStale)
+	}
+	binding, err := runtime.liveBinding(attachment.ID, attachment.NativeSessionID)
+	if err != nil {
+		return productruntime.NativeTitleProjection{}, err
+	}
+	if binding.Generation != attachment.DaemonGeneration {
+		return productruntime.NativeTitleProjection{}, fmt.Errorf("%w: native title binding generation changed", productruntime.ErrStale)
+	}
+	runtime.mu.Lock()
+	identity, exists = runtime.sessions[attachment.ID]
+	runtime.mu.Unlock()
+	if !exists || identity.bindingID != binding.BindingID || identity.nativeSessionID != attachment.NativeSessionID ||
+		identity.generation != binding.Generation {
+		return productruntime.NativeTitleProjection{}, fmt.Errorf("%w: native title identity changed", productruntime.ErrStale)
+	}
+	if !identity.titleObserved {
+		return productruntime.NativeTitleProjection{}, fmt.Errorf("%w: native title has not been observed", productruntime.ErrUnavailable)
+	}
+	return productruntime.NativeTitleProjection{NativeSessionID: identity.nativeSessionID, Title: identity.nativeTitle}, nil
+}
+
 func mapRenameError(err error) error {
 	var renameError *component.RenameError
 	if !errors.As(err, &renameError) {
@@ -285,8 +329,8 @@ func mapRenameError(err error) error {
 	}
 }
 
-func (runtime *ComponentRuntime) recordIdentity(binding component.BindingView, nativeSessionID string, sequence uint64) error {
-	if strings.TrimSpace(nativeSessionID) == "" || binding.Generation == 0 || sequence == 0 {
+func (runtime *ComponentRuntime) recordIdentity(binding component.BindingView, nativeSessionID, nativeTitle string, sequence uint64) error {
+	if strings.TrimSpace(nativeSessionID) == "" || binding.Generation == 0 || sequence == 0 || !component.ValidNativeTitleObservation(nativeTitle) {
 		return fmt.Errorf("%w: session announce omitted exact identity evidence", productruntime.ErrProtocol)
 	}
 	runtime.mu.Lock()
@@ -295,12 +339,17 @@ func (runtime *ComponentRuntime) recordIdentity(binding component.BindingView, n
 	if exists && current.nativeSessionID != nativeSessionID {
 		return fmt.Errorf("%w: session announce changed the native identity without rebind", productruntime.ErrAmbiguousSession)
 	}
-	if exists && sequence <= current.eventSequence {
-		return fmt.Errorf("%w: product event sequence did not advance", productruntime.ErrStale)
+	if exists {
+		if binding.Generation < current.generation || binding.Generation == current.generation && binding.BindingID != current.bindingID {
+			return fmt.Errorf("%w: session announce changed the generation-local binding", productruntime.ErrStale)
+		}
+		if binding.Generation == current.generation && sequence <= current.eventSequence {
+			return fmt.Errorf("%w: product event sequence did not advance", productruntime.ErrStale)
+		}
 	}
 	runtime.sessions[binding.AttachmentID] = componentIdentity{
 		bindingID: binding.BindingID, nativeSessionID: nativeSessionID, generation: binding.Generation,
-		eventSequence: sequence, state: current.state,
+		eventSequence: sequence, state: current.state, nativeTitle: nativeTitle, titleObserved: true,
 	}
 	return nil
 }
@@ -312,23 +361,32 @@ func (runtime *ComponentRuntime) rebindIdentity(binding component.BindingView, v
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	current, exists := runtime.sessions[binding.AttachmentID]
-	if !exists || current.bindingID != binding.BindingID || current.nativeSessionID != value.OldNativeSessionID || value.ProductEventSeq <= current.eventSequence {
+	if !exists || current.bindingID != binding.BindingID || current.generation != binding.Generation ||
+		current.nativeSessionID != value.OldNativeSessionID || value.ProductEventSeq <= current.eventSequence {
 		return fmt.Errorf("%w: session rebind does not continue the exact live identity", productruntime.ErrStale)
 	}
 	current.nativeSessionID = value.NewNativeSessionID
 	current.eventSequence = value.ProductEventSeq
+	current.nativeTitle = ""
+	current.titleObserved = false
 	runtime.sessions[binding.AttachmentID] = current
 	return nil
 }
 
 func (runtime *ComponentRuntime) recordRename(binding component.BindingView, value component.SessionRename) error {
+	if !component.ValidNativeTitleObservation(value.NativeName) {
+		return fmt.Errorf("%w: rename carries an unsafe native title", productruntime.ErrProtocol)
+	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	current, exists := runtime.sessions[binding.AttachmentID]
-	if !exists || current.bindingID != binding.BindingID || current.nativeSessionID != value.NativeSessionID || value.ProductEventSeq <= current.eventSequence {
+	if !exists || current.bindingID != binding.BindingID || current.generation != binding.Generation ||
+		current.nativeSessionID != value.NativeSessionID || value.ProductEventSeq <= current.eventSequence {
 		return fmt.Errorf("%w: rename does not match the exact current session", productruntime.ErrStale)
 	}
 	current.eventSequence = value.ProductEventSeq
+	current.nativeTitle = value.NativeName
+	current.titleObserved = true
 	runtime.sessions[binding.AttachmentID] = current
 	return nil
 }
@@ -337,7 +395,8 @@ func (runtime *ComponentRuntime) recordState(binding component.BindingView, valu
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	current, exists := runtime.sessions[binding.AttachmentID]
-	if !exists || current.bindingID != binding.BindingID || current.nativeSessionID != value.NativeSessionID || value.ProductEventSeq <= current.eventSequence {
+	if !exists || current.bindingID != binding.BindingID || current.generation != binding.Generation ||
+		current.nativeSessionID != value.NativeSessionID || value.ProductEventSeq <= current.eventSequence {
 		return fmt.Errorf("%w: state event does not match the exact current session", productruntime.ErrStale)
 	}
 	current.eventSequence = value.ProductEventSeq
@@ -350,7 +409,7 @@ func (runtime *ComponentRuntime) recordClose(binding component.BindingView, valu
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	current, exists := runtime.sessions[binding.AttachmentID]
-	if !exists || current.bindingID != binding.BindingID || current.nativeSessionID != value.NativeSessionID {
+	if !exists || current.bindingID != binding.BindingID || current.generation != binding.Generation || current.nativeSessionID != value.NativeSessionID {
 		return fmt.Errorf("%w: close does not match the exact current session", productruntime.ErrStale)
 	}
 	delete(runtime.sessions, binding.AttachmentID)

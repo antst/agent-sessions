@@ -108,13 +108,13 @@ Implemented clauses:
 - exact component delivery/rename behavior and parent-bound tool execution in
   both integration JavaScript suites.
 
-The formerly stale `evidence/phase0/component-contract-refreeze.md` now records
-the already-granted round-1 sign-off accurately: the reviewed worktree at
-`1dd16eb...` was materialized as `039d250...`, both adversarial and Fable cells
-are GREEN, and `agent-sessions.component.v1-r1` is frozen. This does not invent
-product acceptance: T038's product-local rename credit comes from the exact
-OpenCode/Kilo Go and JavaScript regressions above; central and physical gates
-remain separate.
+The earlier 21-frame rename vocabulary was reviewed at `1dd16eb...` and
+materialized as `039d250...`. The current shared client is pinned to
+`agent-sessions.component.v1-r2`, whose empty-capable title-observation
+amendment requires its own re-freeze review. This does not invent product
+acceptance: T038's product-local rename evidence comes from the exact
+OpenCode/Kilo Go and JavaScript regressions above; central, r2, and physical
+gates remain separate.
 
 ### T042 — implemented
 

@@ -1,6 +1,8 @@
 import componentModule from "../shared/component/client.js";
+import protocolModule from "../shared/component/protocol.js";
 
 const { createComponentClient } = componentModule;
+const { validNativeTitleObservation } = protocolModule;
 
 const OPERATIONS = Object.freeze([
   "peers.list", "message.send",
@@ -99,11 +101,12 @@ export function createPiFamilyExtension(productID, options = {}) {
       });
     };
 
-    const effectiveNativeName = (value) => {
-      if (typeof value === "string" && value.trim() && value === value.trim()) {
-        return boundedText(value, 1024);
+    const observedNativeTitle = (value) => {
+      const title = value === undefined || value === null ? "" : value;
+      if (!validNativeTitleObservation(title)) {
+        throw new Error("native session title is unsafe or outside its bound");
       }
-      return `${productID} session`;
+      return title;
     };
 
     const assertExactContext = (ctx) => {
@@ -215,6 +218,14 @@ export function createPiFamilyExtension(productID, options = {}) {
     });
 
     pi.on("session_start", async (_event, ctx) => {
+      let initialNativeTitle;
+      try {
+        initialNativeTitle = observedNativeTitle(pi.getSessionName?.());
+      } catch {
+        // A product-owned title outside the shared component contract cannot
+        // be truncated or replaced. Stay inactive until a later clean start.
+        return;
+      }
       current = { ctx, nativeSessionID: sessionID(ctx) };
       const activation = await component.start();
       if (!activation.active) {
@@ -234,6 +245,12 @@ export function createPiFamilyExtension(productID, options = {}) {
       if (!deliveryHandler) {
         readyHandler = ({ bindingID, daemonGeneration }) => {
           if (!active || !current || !bindingID) return;
+          let nativeTitle;
+          try {
+            nativeTitle = observedNativeTitle(pi.getSessionName?.());
+          } catch {
+            return;
+          }
           boundNativeSessionID = "";
           runtime.boundNativeSessionID = "";
           runtime.daemonGeneration = daemonGeneration;
@@ -241,7 +258,7 @@ export function createPiFamilyExtension(productID, options = {}) {
           sendSession("session.announce", current.nativeSessionID, {
             binding_id: bindingID,
             cwd: boundedText(current.ctx.cwd),
-            native_name: effectiveNativeName(pi.getSessionName?.()),
+            native_name: nativeTitle,
           });
         };
         boundHandler = (payload) => {
@@ -306,7 +323,7 @@ export function createPiFamilyExtension(productID, options = {}) {
         sendSession("session.announce", current.nativeSessionID, {
           binding_id: component.bindingID,
           cwd: boundedText(ctx.cwd),
-          native_name: effectiveNativeName(pi.getSessionName?.()),
+          native_name: initialNativeTitle,
         });
       } else {
         sendSession("session.state", current.nativeSessionID, { state: ctx.isIdle() ? "idle" : "busy" });
@@ -316,12 +333,17 @@ export function createPiFamilyExtension(productID, options = {}) {
 
     pi.on("session_info_changed", (event, ctx) => {
       const nativeSessionID = assertExactContext(ctx);
-      if (event.name !== undefined &&
-          (typeof event.name !== "string" || !event.name.trim() || event.name !== event.name.trim())) return;
-      // Pi emits name:undefined when its native title is cleared. Project the
-      // same stable nonempty fallback used by session.announce so the daemon
-      // cannot retain a stale old title.
-      const nativeName = effectiveNativeName(event.name);
+      let nativeName;
+      try {
+        // Pi emits name:undefined when its native title is cleared. Empty is
+        // the genuine product observation; it must never be replaced with a
+        // fabricated Agent Sessions title.
+        nativeName = observedNativeTitle(event.name);
+      } catch {
+        // Unsafe or oversized product data cannot mutate the follower or be
+        // sent as a false observation. Wait for a later valid product event.
+        return;
+      }
       runtime.counter += 1;
       const productEventSeq = runtime.counter;
       if (pendingNativeRename && pendingNativeRename.nativeSessionID === nativeSessionID && pendingNativeRename.requestedName === nativeName) {

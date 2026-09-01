@@ -1,7 +1,9 @@
 import { tool } from "@kilocode/plugin";
 import componentModule from "../shared/component/client.js";
+import componentProtocolModule from "../shared/component/protocol.js";
 
 const { createComponentClient } = componentModule;
+const { validNativeTitleObservation } = componentProtocolModule;
 const OPERATIONS = [
   "peers.list", "message.send",
   "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
@@ -61,6 +63,10 @@ function eventSessionID(event) {
     return properties.info?.id ?? properties.session?.id ?? properties.sessionID ?? "";
   }
   return properties.sessionID ?? properties.info?.sessionID ?? properties.permission?.sessionID ?? event?.data?.sessionID ?? "";
+}
+
+function eventNativeTitle(value) {
+  return typeof value === "string" && validNativeTitleObservation(value) ? value : undefined;
 }
 
 async function boundedNativeCall(invoke, deadline, controller) {
@@ -179,6 +185,7 @@ export default async function agentSessionsKiloPlugin({ client, directory }) {
 
   const sendSession = (type, sessionID, extra = {}) => {
     if (!validNativeID(sessionID, "ses_")) return;
+    if (type === "session.rename" && !validNativeTitleObservation(extra.native_name)) return;
     productEventSeq += 1;
     if (type === "session.rename") {
       component.observeRename(`${sessionID}.${productEventSeq}`, sessionID, extra.native_name, productEventSeq);
@@ -249,32 +256,35 @@ export default async function agentSessionsKiloPlugin({ client, directory }) {
         case "session.created":
         case "session.updated": {
           if (!sessionID) break;
+          if (!Object.hasOwn(info, "title")) break;
+          const nativeTitle = eventNativeTitle(info?.title);
+          if (nativeTitle === undefined) break;
           const prior = known.get(sessionID);
-          known.set(sessionID, { title: info?.title ?? "", cwd: info?.directory ?? directory });
+          known.set(sessionID, { title: nativeTitle, cwd: info?.directory ?? directory });
           const pending = pendingRenames.get(sessionID);
-          if (pending?.nativeName === info?.title) {
+          if (pending?.nativeName === nativeTitle) {
             if (!pending.held) {
               productEventSeq += 1;
               pending.held = {
                 nativeEventID: `${sessionID}.${productEventSeq}`,
-                nativeName: info.title,
+                nativeName: nativeTitle,
                 productEventSeq,
               };
             }
             break;
           }
-          if (pending && info?.title && info.title !== pending.nativeName) pending.conflicted = true;
+          if (pending && nativeTitle !== pending.nativeName) pending.conflicted = true;
           if (!prior) {
             productEventSeq += 1;
             component.send("session.announce", `announce-${sessionID}-${productEventSeq}`, {
               binding_id: component.bindingID,
               native_session_id: sessionID,
               cwd: info?.directory ?? directory,
-              native_name: info?.title || "Kilo Code session",
+              native_name: nativeTitle,
               product_event_seq: productEventSeq,
             });
-          } else if (info?.title && info.title !== prior.title) {
-            sendSession("session.rename", sessionID, { native_name: info.title });
+          } else if (nativeTitle !== prior.title) {
+            sendSession("session.rename", sessionID, { native_name: nativeTitle });
           }
           break;
         }
@@ -307,16 +317,18 @@ export default async function agentSessionsKiloPlugin({ client, directory }) {
       output.env.AGENT_SESSIONS_SESSION_ID = sessionID;
       output.env.AGENT_SESSIONS_NATIVE_SESSION_ID = sessionID;
       output.env.AGENT_SESSIONS_COMPONENT_BINDING_ID = component.bindingID;
-      if (!known.has(sessionID)) {
+      const hasNativeTitle = Object.hasOwn(input, "title") && typeof input.title === "string" &&
+        validNativeTitleObservation(input.title);
+      if (!known.has(sessionID) && hasNativeTitle) {
         productEventSeq += 1;
         component.send("session.announce", `shell-announce-${sessionID}-${productEventSeq}`, {
           binding_id: component.bindingID,
           native_session_id: sessionID,
           cwd: input.cwd ?? directory,
-          native_name: "Kilo Code session",
+          native_name: input.title,
           product_event_seq: productEventSeq,
         });
-        known.set(sessionID, { title: "Kilo Code session", cwd: input.cwd ?? directory });
+        known.set(sessionID, { title: input.title, cwd: input.cwd ?? directory });
       }
     },
 

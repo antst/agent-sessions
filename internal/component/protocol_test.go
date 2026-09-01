@@ -122,7 +122,7 @@ func TestProtocolPayloadValidation(t *testing.T) {
 }
 
 func TestRenameFrameNamespacesAndContractRevision(t *testing.T) {
-	if ProtocolVersion != 1 || ContractRevision != "agent-sessions.component.v1-r1" {
+	if ProtocolVersion != 1 || ContractRevision != "agent-sessions.component.v1-r2" {
 		t.Fatalf("component contract = wire %d / %q", ProtocolVersion, ContractRevision)
 	}
 	if err := ValidateContractRevision(ContractRevision); err != nil {
@@ -186,11 +186,111 @@ func TestRenameFrameNamespacesAndContractRevision(t *testing.T) {
 	}
 	for _, invalidName := range []string{strings.Repeat("n", 1025), "line\nbreak", " leading"} {
 		frame, err := NewFrame(TypeSessionRenameRequest, DaemonRenameOperationPrefix+"invalid-name", 1, SessionRenameRequest{NativeSessionID: "native", RequestedName: invalidName})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := ValidatePayload(frame); err == nil {
+		if err == nil && ValidatePayload(frame) == nil {
 			t.Fatalf("rename request accepted invalid name %q", invalidName)
+		}
+	}
+}
+
+func TestNativeTitleObservationsAllowAbsenceAndRejectEveryControlRune(t *testing.T) {
+	valid := []string{"", " ", "  product whitespace  ", strings.Repeat("n", MaxNativeTitleBytes), strings.Repeat("é", MaxNativeTitleBytes/2)}
+	for index, title := range valid {
+		if !ValidNativeTitleObservation(title) {
+			t.Fatalf("valid observation %d was rejected: %q", index, title)
+		}
+		announce, err := NewFrame(TypeSessionAnnounce, "announce", 1, SessionAnnounce{
+			BindingID: "binding", NativeSessionID: "native", Cwd: "/work", NativeName: title, ProductEventSeq: 1,
+		})
+		if err != nil || ValidatePayload(announce) != nil {
+			t.Fatalf("announce observation %d was rejected: %v", index, err)
+		}
+		observation, err := NewFrame(TypeSessionRename, ComponentRenameObservationPrefix+"event", 1, SessionRename{
+			NativeSessionID: "native", NativeName: title, ProductEventSeq: 2,
+		})
+		if err != nil || ValidatePayload(observation) != nil {
+			t.Fatalf("rename observation %d was rejected: %v", index, err)
+		}
+	}
+
+	invalid := []string{
+		strings.Repeat("n", MaxNativeTitleBytes+1), string([]byte{0xff}),
+		"nul\x00title", "tab\ttitle", "newline\ntitle", "c1\u0085title", "delete\u007ftitle",
+	}
+	for index, title := range invalid {
+		if ValidNativeTitleObservation(title) {
+			t.Fatalf("invalid observation %d was accepted: %q", index, title)
+		}
+		for _, candidate := range []struct {
+			typeID FrameType
+			id     string
+			body   any
+		}{
+			{TypeSessionAnnounce, "announce", SessionAnnounce{BindingID: "binding", NativeSessionID: "native", Cwd: "/work", NativeName: title, ProductEventSeq: 1}},
+			{TypeSessionRename, ComponentRenameObservationPrefix + "event", SessionRename{NativeSessionID: "native", NativeName: title, ProductEventSeq: 2}},
+		} {
+			frame, err := NewFrame(candidate.typeID, candidate.id, 1, candidate.body)
+			if err == nil && ValidatePayload(frame) == nil {
+				t.Fatalf("%s accepted invalid observation %d", candidate.typeID, index)
+			}
+		}
+	}
+}
+
+func TestNativeTitleObservationMustBeExplicitEvenWhenEmpty(t *testing.T) {
+	for _, candidate := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "announce missing native_name",
+			body: `{"version":1,"type":"session.announce","id":"announce","seq":1,"payload":{"binding_id":"binding","native_session_id":"native","cwd":"/work","product_event_seq":1}}`,
+		},
+		{
+			name: "announce null native_name",
+			body: `{"version":1,"type":"session.announce","id":"announce","seq":1,"payload":{"binding_id":"binding","native_session_id":"native","cwd":"/work","native_name":null,"product_event_seq":1}}`,
+		},
+		{
+			name: "observation missing native_name",
+			body: `{"version":1,"type":"session.rename","id":"component.rename.event","seq":1,"payload":{"native_session_id":"native","product_event_seq":2}}`,
+		},
+		{
+			name: "observation null native_name",
+			body: `{"version":1,"type":"session.rename","id":"component.rename.event","seq":1,"payload":{"native_session_id":"native","native_name":null,"product_event_seq":2}}`,
+		},
+	} {
+		t.Run(candidate.name, func(t *testing.T) {
+			frame, err := DecodeFrame([]byte(candidate.body))
+			if err != nil {
+				t.Fatalf("DecodeFrame: %v", err)
+			}
+			if err := ValidatePayload(frame); err == nil {
+				t.Fatal("ValidatePayload accepted an omitted or non-string native_name")
+			}
+		})
+	}
+}
+
+func TestDecodeFrameRejectsInvalidUTF8BeforeJSONReplacement(t *testing.T) {
+	body := append([]byte(`{"version":1,"type":"session.announce","id":"announce","seq":1,"payload":{"binding_id":"binding","native_session_id":"native","cwd":"/work","native_name":"`), 0xff)
+	body = append(body, []byte(`","product_event_seq":1}}`)...)
+	if _, err := DecodeFrame(body); err == nil {
+		t.Fatal("DecodeFrame accepted an invalid UTF-8 native title")
+	}
+}
+
+func TestDaemonRenameRequestAndCorrelatedResponseRemainNonemptyAndExactSafe(t *testing.T) {
+	for _, title := range []string{"", " ", " leading", "trailing ", "bad\u0085title"} {
+		request, err := NewFrame(TypeSessionRenameRequest, DaemonRenameOperationPrefix+"request", 1, SessionRenameRequest{
+			NativeSessionID: "native", RequestedName: title,
+		})
+		if err == nil && ValidatePayload(request) == nil {
+			t.Fatalf("daemon rename request accepted %q", title)
+		}
+		response, err := NewFrame(TypeSessionRename, DaemonRenameOperationPrefix+"request", 1, SessionRename{
+			NativeSessionID: "native", NativeName: title, ProductEventSeq: 1,
+		})
+		if err == nil && ValidatePayload(response) == nil {
+			t.Fatalf("daemon-correlated rename response accepted %q", title)
 		}
 	}
 }

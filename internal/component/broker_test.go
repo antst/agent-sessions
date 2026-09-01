@@ -108,7 +108,7 @@ func TestBrokerBootstrapReplayHeartbeatAndDistinctNativeSession(t *testing.T) {
 		t.Fatalf("ready = %#v", ready)
 	}
 
-	announce := SessionAnnounce{BindingID: ready.BindingID, NativeSessionID: "native-session-separate", Cwd: "/work", NativeName: "native", ProductEventSeq: 1}
+	announce := SessionAnnounce{BindingID: ready.BindingID, NativeSessionID: "native-session-separate", Cwd: "/work", NativeName: "", ProductEventSeq: 1}
 	writeTestFrame(t, connection, TypeSessionAnnounce, "announce", 2, announce)
 	writeTestFrame(t, connection, TypeSessionAnnounce, "announce", 2, announce)
 	writeTestFrame(t, connection, TypeHeartbeat, "heartbeat", 3, Heartbeat{BindingID: ready.BindingID, LastReceivedSeq: 1})
@@ -143,6 +143,10 @@ func TestBrokerBootstrapReplayHeartbeatAndDistinctNativeSession(t *testing.T) {
 	defer mu.Unlock()
 	if handled[0].Type != TypeSessionAnnounce {
 		t.Fatalf("handled frame = %s", handled[0].Type)
+	}
+	var handledAnnounce SessionAnnounce
+	if err := handled[0].PayloadInto(&handledAnnounce); err != nil || handledAnnounce.NativeName != "" {
+		t.Fatalf("authenticated empty-title announce = %#v / %v", handledAnnounce, err)
 	}
 	if handled[1].Type != TypeHeartbeat || handled[2].Type != TypeDeliveryAccept || handled[3].Type != TypeHeartbeat {
 		t.Fatalf("durably handled operation order = %s, %s, %s", handled[1].Type, handled[2].Type, handled[3].Type)

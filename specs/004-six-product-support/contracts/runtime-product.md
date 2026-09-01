@@ -11,6 +11,7 @@ type RuntimeProduct struct {
     Descriptor        productcatalog.Descriptor
     Peer              PeerDriver
     Message           MessageDriver
+    NativeTitle       NativeTitleProjector
     Lane              LaneDriver
     Parent            ParentAttester
     Doctor            DoctorProbe
@@ -31,6 +32,10 @@ without a doctor probe. The optional component resolver/rebinder fields are
 accepted only for an interactive descriptor whose peer transport is exactly
 `component`; a rebinder without its resolver is rejected. There is no
 package-init registration.
+
+`NativeTitle` is an optional read-only seam for interactive products. It is
+rejected on a product without the interactive capability and is never inferred
+from a durable daemon title field.
 
 ## 2. Peer Driver
 
@@ -63,11 +68,38 @@ type NativeName struct {
     Applied         string
     NativeConfirmed bool
 }
+
+type NativeTitleProjector interface {
+    ProjectNativeTitle(
+        context.Context,
+        daemon.ManagedAttachment,
+    ) (NativeTitleProjection, error)
+}
+
+type NativeTitleProjection struct {
+    NativeSessionID string
+    Title           string
+}
 ```
 
 `BuildLaunch` returns an exact exec-in-place command. It may not mutate global
 product settings to prepare a launch. `AttachmentAdapter` retains the existing
 daemon prepare/adopt/refresh/authorize/detach/rollback lifecycle.
+
+`Rename` is a pure write-through request to the product-owned native title. It
+does not authorize an independent daemon alias or durable mutable title copy.
+`ProjectNativeTitle` is the read side: success means the product or an
+authenticated generation-local in-memory follower observed the exact returned
+`NativeSessionID`. An empty `Title` is a confirmed native state and differs
+from a typed unavailable/stale error. Followers must admit observations in
+strict product-event order, discard them on rebind/generation change, and must
+not persist, log, or serialize the title as authority.
+
+Every native-title observation uses one shared safety rule: it is valid UTF-8,
+at most 1024 bytes, and contains no NUL, CR, LF, or other Unicode control
+character. Empty is valid and means confirmed title absence. Product followers
+validate this rule defensively even when the native component/client protocol
+is expected to have rejected an unsafe title already.
 
 ### Component Resolver/Rebinder
 

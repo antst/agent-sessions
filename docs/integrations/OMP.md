@@ -40,8 +40,9 @@ Delivery requires the exact current `session.bound` identity. Native title
 observations use `session_info_changed`; daemon-requested rename is a
 broker-correlated request with `pi.setSessionName` as the single writer and the
 matching native event as confirmation. A cleared native title is observed as
-the same nonempty `omp session` fallback used at announce and cannot confirm a
-pending nonempty daemon rename. The registered `agent_sessions` tool
+genuine empty data and cannot confirm a pending nonempty daemon rename.
+Product whitespace is preserved, while unsafe controls and oversized titles
+fail closed without an observation. The registered `agent_sessions` tool
 and `/lane` command execute in-process. Parent attestation compares the exact
 binding, live kernel socket credential, independently captured process identity,
 and native session, and rejects model-supplied false IDs. Declared
@@ -81,7 +82,7 @@ extension-defined arguments can inject model input before the receipt-backed
 Doctor checks the `omp` executable, exact version 18.0.11, required RPC,
 extension, resume, and approval-mode options, the readable managed extension
 asset, the exact exported shared component contract revision
-`agent-sessions.component.v1-r1`, and an injected central
+`agent-sessions.component.v1-r2`, and an injected central
 component-authority readiness check.
 Product-local Go and native-extension tests exercise ready
 negotiation, continuing terminal events, raw steer preservation, permission

@@ -108,7 +108,7 @@ func testComponentRuntime(t *testing.T, productID string, binding component.Bind
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.recordIdentity(binding, "native-1", 1); err != nil {
+	if err := runtime.recordIdentity(binding, "native-1", "initial title", 1); err != nil {
 		t.Fatal(err)
 	}
 	return runtime, sender, bindings
@@ -198,6 +198,123 @@ func TestComponentRejectsForeignAcceptanceAndUsesBrokerCorrelatedRename(t *testi
 	}
 }
 
+func TestNativeTitleProjectionFollowsExactMonotonicComponentObservations(t *testing.T) {
+	binding := component.BindingView{BindingID: "binding-title", AttachmentID: "attachment-title", ProductID: PiProductID, Generation: 9}
+	runtime, _, _ := testComponentRuntime(t, PiProductID, binding)
+	attachment := daemon.ManagedAttachment{
+		ID: binding.AttachmentID, Product: PiProductID, NativeSessionID: "native-1",
+		State: "attached", DaemonGeneration: binding.Generation,
+	}
+
+	projection, err := runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection != (productruntime.NativeTitleProjection{NativeSessionID: "native-1", Title: "initial title"}) {
+		t.Fatalf("initial native title = %+v, %v", projection, err)
+	}
+	if err := runtime.recordRename(binding, component.SessionRename{
+		NativeSessionID: "native-1", NativeName: "", ProductEventSeq: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err = runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection != (productruntime.NativeTitleProjection{NativeSessionID: "native-1", Title: ""}) {
+		t.Fatalf("confirmed empty native title = %+v, %v", projection, err)
+	}
+	if err := runtime.recordRename(binding, component.SessionRename{
+		NativeSessionID: "native-1", NativeName: "stale", ProductEventSeq: 2,
+	}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("equal-sequence conflicting title error = %v", err)
+	}
+	projection, err = runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection.Title != "" {
+		t.Fatalf("stale title changed follower = %+v, %v", projection, err)
+	}
+	staleBinding := binding
+	staleBinding.Generation--
+	if err := runtime.recordIdentity(staleBinding, "native-1", "stale generation", 20); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("stale-generation title error = %v", err)
+	}
+	projection, err = runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection.Title != "" {
+		t.Fatalf("stale-generation title changed follower = %+v, %v", projection, err)
+	}
+
+	if err := runtime.rebindIdentity(binding, component.SessionRebind{
+		BindingID: binding.BindingID, OldNativeSessionID: "native-1", NewNativeSessionID: "native-2", ProductEventSeq: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attachment.NativeSessionID = "native-2"
+	if _, err := runtime.ProjectNativeTitle(context.Background(), attachment); !errors.Is(err, productruntime.ErrUnavailable) {
+		t.Fatalf("unobserved rebound title error = %v", err)
+	}
+	if err := runtime.recordIdentity(binding, "native-2", "rebound title", 4); err != nil {
+		t.Fatal(err)
+	}
+	projection, err = runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection != (productruntime.NativeTitleProjection{NativeSessionID: "native-2", Title: "rebound title"}) {
+		t.Fatalf("rebound native title = %+v, %v", projection, err)
+	}
+	attachment.DaemonGeneration++
+	if _, err := runtime.ProjectNativeTitle(context.Background(), attachment); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("foreign-generation title error = %v", err)
+	}
+	attachment.DaemonGeneration--
+	if err := runtime.recordState(staleBinding, component.SessionState{
+		NativeSessionID: "native-2", State: "busy", ProductEventSeq: 5,
+	}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("wrong-generation state error = %v", err)
+	}
+	if err := runtime.recordClose(staleBinding, component.SessionClose{NativeSessionID: "native-2", Reason: "stale"}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("wrong-generation close error = %v", err)
+	}
+	projection, err = runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection.Title != "rebound title" {
+		t.Fatalf("wrong-generation event changed title follower = %+v, %v", projection, err)
+	}
+	if err := runtime.recordClose(binding, component.SessionClose{NativeSessionID: "native-2", Reason: "closed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ProjectNativeTitle(context.Background(), attachment); !errors.Is(err, productruntime.ErrUnavailable) {
+		t.Fatalf("closed title projection error = %v", err)
+	}
+}
+
+func TestNativeTitleFollowerRejectsUnsafeTextWithoutMutatingProjection(t *testing.T) {
+	binding := component.BindingView{BindingID: "binding-title", AttachmentID: "attachment-title", ProductID: PiProductID, Generation: 9}
+	runtime, _, _ := testComponentRuntime(t, PiProductID, binding)
+	attachment := daemon.ManagedAttachment{
+		ID: binding.AttachmentID, Product: PiProductID, NativeSessionID: "native-1",
+		State: "attached", DaemonGeneration: binding.Generation,
+	}
+	invalid := map[string]string{
+		"too long":     strings.Repeat("x", component.MaxNativeTitleBytes+1),
+		"invalid utf8": string([]byte{0xff}),
+		"nul":          "bad\x00title",
+		"carriage":     "bad\rtitle",
+		"newline":      "bad\ntitle",
+		"tab":          "bad\ttitle",
+		"unicode c1":   "bad\u0085title",
+	}
+	for name, title := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if err := runtime.recordRename(binding, component.SessionRename{
+				NativeSessionID: "native-1", NativeName: title, ProductEventSeq: 2,
+			}); !errors.Is(err, productruntime.ErrProtocol) {
+				t.Fatalf("unsafe rename title error = %v", err)
+			}
+			foreign := binding
+			foreign.AttachmentID = "unsafe-" + strings.ReplaceAll(name, " ", "-")
+			if err := runtime.recordIdentity(foreign, "native-unsafe", title, 1); !errors.Is(err, productruntime.ErrProtocol) {
+				t.Fatalf("unsafe announce title error = %v", err)
+			}
+		})
+	}
+	projection, err := runtime.ProjectNativeTitle(context.Background(), attachment)
+	if err != nil || projection.Title != "initial title" {
+		t.Fatalf("unsafe title mutated follower = %+v, %v", projection, err)
+	}
+}
+
 func TestCorrelatedDeliveryFrameIDMismatchCannotMutatePendingOperation(t *testing.T) {
 	for _, frameType := range []component.FrameType{component.TypeDeliveryAccept, component.TypeDeliveryReject} {
 		t.Run(string(frameType), func(t *testing.T) {
@@ -275,7 +392,7 @@ func TestParentToolOversizeAndSendFailureProduceBoundedFailureResult(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := runtime.recordIdentity(binding, "native-tool", 1); err != nil {
+			if err := runtime.recordIdentity(binding, "native-tool", "tool title", 1); err != nil {
 				t.Fatal(err)
 			}
 			frame, err := component.NewFrame(component.TypeToolCall, "call-1", 2, component.ToolCall{
@@ -322,7 +439,7 @@ func TestCorrelatedToolFrameIDMismatchCannotDispatchOrCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.recordIdentity(binding, "native-tool", 1); err != nil {
+	if err := runtime.recordIdentity(binding, "native-tool", "tool title", 1); err != nil {
 		t.Fatal(err)
 	}
 	callPayload := component.ToolCall{CallID: "call-exact", Operation: "peers.list", Arguments: json.RawMessage(`{}`)}

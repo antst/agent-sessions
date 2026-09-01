@@ -17,6 +17,7 @@ const {
   makeFrame,
   redact,
   validateContractRevision,
+  validNativeTitleObservation,
 } = require("./protocol.js");
 
 test("ambient component is inert without the complete managed bootstrap", async () => {
@@ -253,7 +254,7 @@ test("missing heartbeat acknowledgments force bounded reconnect", async (t) => {
 });
 
 test("rename contract revision and operation namespaces are exact", async () => {
-  assert.equal(CONTRACT_REVISION, "agent-sessions.component.v1-r1");
+  assert.equal(CONTRACT_REVISION, "agent-sessions.component.v1-r2");
   assert.equal(require("./protocol.js").FRAME_TYPES.size, 21);
   assert.equal(validateContractRevision(CONTRACT_REVISION), true);
   assert.throws(() => validateContractRevision("agent-sessions.component.v1-r0"), /unsupported/i);
@@ -283,6 +284,50 @@ test("rename contract revision and operation namespaces are exact", async () => 
   });
   assert.deepEqual(await stale.start(), { active: false, reason: "component-contract-mismatch" });
   assert.equal(staleConnects, 0, "mismatched component contract must remain inert before authentication");
+});
+
+test("title observations preserve empty and whitespace while requests stay nonempty and safe", () => {
+  for (const title of ["", " ", "  product whitespace  ", "é".repeat(512)]) {
+    assert.equal(validNativeTitleObservation(title), true);
+    assert.doesNotThrow(() => makeFrame("session.announce", "announce-title", 1, {
+      binding_id: "binding", native_session_id: "native", cwd: "/work",
+      native_name: title, product_event_seq: 1,
+    }));
+    assert.doesNotThrow(() => makeFrame("session.rename", "component.rename.title", 1, {
+      native_session_id: "native", native_name: title, product_event_seq: 2,
+    }));
+  }
+  for (const title of ["x".repeat(1025), "bad\0title", "bad\ttitle", "bad\u0085title", "bad\u007ftitle", "bad\ud800title"]) {
+    assert.equal(validNativeTitleObservation(title), false);
+    assert.throws(() => makeFrame("session.announce", "announce-title", 1, {
+      binding_id: "binding", native_session_id: "native", cwd: "/work",
+      native_name: title, product_event_seq: 1,
+    }), /title|invalid/i);
+    assert.throws(() => makeFrame("session.rename", "component.rename.title", 1, {
+      native_session_id: "native", native_name: title, product_event_seq: 2,
+    }), /rename|invalid/i);
+  }
+  for (const title of ["", " ", " leading", "trailing ", "bad\u0085title"]) {
+    assert.throws(() => makeFrame("session.rename.request", "daemon.rename.title", 1, {
+      native_session_id: "native", requested_name: title,
+    }), /rename|invalid/i);
+    assert.throws(() => makeFrame("session.rename", "daemon.rename.title", 1, {
+      native_session_id: "native", native_name: title, product_event_seq: 2,
+    }), /rename|invalid/i);
+  }
+
+  for (const payload of [
+    { binding_id: "binding", native_session_id: "native", cwd: "/work", product_event_seq: 1 },
+    { binding_id: "binding", native_session_id: "native", cwd: "/work", native_name: null, product_event_seq: 1 },
+  ]) {
+    assert.throws(() => makeFrame("session.announce", "announce-title", 1, payload), /title|invalid/i);
+  }
+  for (const payload of [
+    { native_session_id: "native", product_event_seq: 2 },
+    { native_session_id: "native", native_name: null, product_event_seq: 2 },
+  ]) {
+    assert.throws(() => makeFrame("session.rename", "component.rename.title", 1, payload), /rename|invalid/i);
+  }
 });
 
 test("native rename callback is correlated, bounded, replay-safe, and distinct from observations", async (t) => {
@@ -392,6 +437,13 @@ test("native rename callback is correlated, bounded, replay-safe, and distinct f
   const observation = received.find((frame) => frame.id === "component.rename.native-event");
   assert.equal(observation.type, "session.rename");
   assert.equal(observation.payload.native_name, "external");
+
+  assert.equal(client.observeRename("native-empty", "native", "", 51), true);
+  assert.equal(client.observeRename("native-whitespace", "native", "  ", 52), true);
+  await until(() => received.some((frame) => frame.id === "component.rename.native-empty") &&
+    received.some((frame) => frame.id === "component.rename.native-whitespace"));
+  assert.equal(received.find((frame) => frame.id === "component.rename.native-empty").payload.native_name, "");
+  assert.equal(received.find((frame) => frame.id === "component.rename.native-whitespace").payload.native_name, "  ");
 
   assert.ok(client.renameOperations.size <= 2, "completed rename replay cache must remain bounded");
 });

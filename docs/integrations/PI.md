@@ -29,8 +29,10 @@ Native title changes are observed through `session_info_changed`. A managed
 rename uses the broker-correlated `session.rename.request`, calls
 `pi.setSessionName` exactly once, and succeeds only after Pi emits the exact
 requested title. When native title clearing emits an undefined name, the
-extension observes the same nonempty `pi session` fallback used at announce;
+extension observes a genuine empty title and never fabricates a product name;
 that unsolicited change cannot confirm a pending nonempty daemon rename.
+Product whitespace is preserved, while unsafe controls and oversized titles
+fail closed without an observation.
 Delivery is not used as a rename side channel.
 
 The in-process `agent_sessions` registered tool and `/lane` command expose the
@@ -77,7 +79,7 @@ managed lane only through the receipt ledger.
 Doctor checks the `pi` executable, exact version `0.84.4`, the required RPC,
 extension, resume, and tools options, a readable managed extension asset, the
 exact exported shared component contract revision
-`agent-sessions.component.v1-r1`, and an injected central component-authority readiness check. Peer/parent readiness
+`agent-sessions.component.v1-r2`, and an injected central component-authority readiness check. Peer/parent readiness
 is reported only when that integration-depth check succeeds. Product-local
 tests cover hostile frame correlation, receipt tampering, exact resume,
 settled semantics, component identity, registered-tool false IDs, and native

@@ -41,18 +41,19 @@ class FakeComponent extends EventEmitter {
 }
 
 class FakePi {
-  constructor() {
+  constructor(sessionName = "native name") {
     this.handlers = new Map();
     this.tools = new Map();
     this.commands = new Map();
     this.messages = [];
     this.names = [];
+    this.sessionName = sessionName;
   }
   on(name, handler) { this.handlers.set(name, handler); }
   registerTool(tool) { this.tools.set(tool.name, tool); }
   registerCommand(name, command) { this.commands.set(name, command); }
   sendUserMessage(content, options) { this.messages.push({ content, options }); }
-  getSessionName() { return "native name"; }
+  getSessionName() { return this.sessionName; }
   setSessionName(name) { this.names.push(name); }
   async fire(name, event, ctx) {
     const handler = this.handlers.get(name);
@@ -194,7 +195,7 @@ test("daemon rename observes asynchronous native rejection without an unhandled 
   await tick();
 });
 
-test("cleared native title observes a nonempty fallback without confirming a pending rename", async () => {
+test("cleared native title observes genuine empty without confirming a pending rename", async () => {
   const component = new FakeComponent();
   const pi = new FakePi();
   pi.setSessionName = (name) => {
@@ -217,11 +218,48 @@ test("cleared native title observes a nonempty fallback without confirming a pen
   await tick();
   assert.equal(completed, false, "cleared title must not confirm a pending nonempty daemon rename");
   const observation = component.sent.find((frame) => frame.type === "session.rename");
-  assert.equal(observation.payload.native_name, "pi session");
+  assert.equal(observation.payload.native_name, "");
   assert.equal(Number.isSafeInteger(observation.payload.product_event_seq), true);
 
   await pi.fire("session_info_changed", { name: "daemon title" }, ctx);
   assert.equal((await resultPromise).nativeName, "daemon title");
+});
+
+test("Pi-family title observations preserve product data and fail closed on unsafe text", async (t) => {
+  for (const title of ["", "  "]) {
+    await t.test(`valid ${JSON.stringify(title)}`, async () => {
+      const component = new FakeComponent();
+      const pi = new FakePi(title);
+      createPiFamilyExtension("pi", { componentClient: component })(pi);
+      const ctx = context(`pi-title-${title.length}`, true);
+      await pi.fire("session_start", { reason: "startup" }, ctx);
+      const announce = component.sent.find((frame) => frame.type === "session.announce");
+      assert.equal(announce.payload.native_name, title);
+      component.emit("session.bound", { binding_id: "binding-1", native_session_id: ctx.sessionManager.getSessionId() });
+      await pi.fire("session_info_changed", { name: title }, ctx);
+      const observations = component.sent.filter((frame) => frame.type === "session.rename");
+      assert.equal(observations.at(-1).payload.native_name, title);
+    });
+  }
+
+  const component = new FakeComponent();
+  const pi = new FakePi("initial");
+  createPiFamilyExtension("omp", { componentClient: component })(pi);
+  const ctx = context("omp-title-hostile", true);
+  await pi.fire("session_start", { reason: "startup" }, ctx);
+  component.emit("session.bound", { binding_id: "binding-1", native_session_id: "omp-title-hostile" });
+  const before = component.sent.length;
+  for (const title of ["bad\0title", "bad\ttitle", "bad\u0085title", "x".repeat(1025)]) {
+    await pi.fire("session_info_changed", { name: title }, ctx);
+  }
+  assert.equal(component.sent.length, before, "unsafe title events must not mutate or emit an observation");
+
+  const invalidStartComponent = new FakeComponent();
+  const invalidStartPi = new FakePi("bad\u0085title");
+  createPiFamilyExtension("pi", { componentClient: invalidStartComponent })(invalidStartPi);
+  await invalidStartPi.fire("session_start", { reason: "startup" }, context("pi-invalid-title", true));
+  assert.equal(invalidStartComponent.starts, 0);
+  assert.equal(invalidStartComponent.sent.length, 0, "unsafe initial title must not be truncated or fabricated");
 });
 
 test("session switch restores exact-session native rename routing", async () => {

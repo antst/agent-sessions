@@ -32,7 +32,7 @@ fields are ignored only when the frame's version explicitly permits additive
 fields; authority never comes from an unknown field.
 
 The pinned daemon/client vocabulary revision is
-`agent-sessions.component.v1-r1`. `ProtocolVersion` remains `1`: no component
+`agent-sessions.component.v1-r2`. `ProtocolVersion` remains `1`: no component
 v1 client has been released independently, and every integration component is
 version-pinned and installed with its daemon. Doctor and tuple checks MUST
 verify the exact contract revision before crediting an integration. If clients
@@ -159,7 +159,7 @@ process evidence; it must not require the two identifier strings to be equal.
 
 | Type | Required payload | Meaning |
 |---|---|---|
-| `session.announce` | binding, native session ID, cwd, native name, product event seq | Corroborate/select exact session |
+| `session.announce` | binding, native session ID, cwd, native title observation, product event seq | Corroborate/select exact session; empty title is confirmed absence |
 | `session.rebind` | old/new native session ID evidence | Resume/switch; daemon applies product rules |
 | `session.rename` | native session ID, native name, product event seq | Native-confirmed external name update, or correlated response to `session.rename.request` |
 | `session.state` | native session ID, `idle|busy`, product event seq | Presence/turn observation |
@@ -217,6 +217,16 @@ namespaces. `daemon.rename.*` identifies an outstanding daemon write-through;
 other valid `session.rename` MUST use the component namespace and is an
 unsolicited observation. Namespace collisions and daemon-space responses with
 no outstanding request fail closed.
+
+Component-originated title observations have one rule in every Go and
+JavaScript boundary: the value is valid UTF-8, at most 1024 bytes, and contains
+no Unicode control rune. Empty is a confirmed absence and product whitespace
+is preserved. This rule applies to `session.announce.native_name` and to a
+`component.rename.*` `session.rename` observation. It does not relax the
+daemon write path: `session.rename.request.requested_name` and its correlated
+`daemon.rename.*` response remain nonempty, trim-safe, and exactly equal.
+Unsafe or oversized product observations fail closed and MUST NOT be
+truncated, fabricated, or admitted into a native-title follower.
 
 The product-native title is the single mutable writer. Agent Sessions sends a
 write-through request and derives its displayed name from the confirmed native

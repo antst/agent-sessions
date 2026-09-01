@@ -73,6 +73,9 @@ func validateRuntimeProduct(product RuntimeProduct) error {
 	if interactive != (product.Message != nil) {
 		return fmt.Errorf("interactive capability/message driver mismatch")
 	}
+	if !interactive && product.NativeTitle != nil {
+		return fmt.Errorf("native title projector requires interactive capability")
+	}
 	if lane != (product.Lane != nil) {
 		return fmt.Errorf("lane capability/driver mismatch")
 	}

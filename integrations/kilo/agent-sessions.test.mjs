@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import componentProtocolModule from "../shared/component/protocol.js";
+
+const { validNativeTitleObservation } = componentProtocolModule;
 
 class FakeComponent extends EventEmitter {
   constructor() {
@@ -31,6 +34,7 @@ fakeTool.schema = {
 
 async function loadPlugin(component) {
   globalThis.__agentSessionsTestTool = fakeTool;
+  globalThis.__agentSessionsTestValidNativeTitleObservation = validNativeTitleObservation;
   globalThis.__agentSessionsTestComponentFactory = (options = {}) => {
     component.renameSession = options.renameSession;
     return component;
@@ -38,12 +42,49 @@ async function loadPlugin(component) {
   let source = await readFile(new URL("./agent-sessions.mjs", import.meta.url), "utf8");
   source = source
     .replace('import { tool } from "@kilocode/plugin";', "const tool = globalThis.__agentSessionsTestTool;")
-    .replace('import componentModule from "../shared/component/client.js";\n\nconst { createComponentClient } = componentModule;', "const createComponentClient = globalThis.__agentSessionsTestComponentFactory;");
+    .replace('import componentModule from "../shared/component/client.js";', "")
+    .replace('const { createComponentClient } = componentModule;', "const createComponentClient = globalThis.__agentSessionsTestComponentFactory;");
+  source = source
+    .replace('import componentProtocolModule from "../shared/component/protocol.js";', "")
+    .replace('const { validNativeTitleObservation } = componentProtocolModule;', "const validNativeTitleObservation = globalThis.__agentSessionsTestValidNativeTitleObservation;");
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}-${Math.random()}`)).default;
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+test("Kilo projects genuine empty titles, clear events, and no shell fabrication", async () => {
+  const component = new FakeComponent();
+  const plugin = await loadPlugin(component);
+  const hooks = await plugin({ client: {}, directory: "/work/kilo" });
+
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_title", title: "", directory: "/work/kilo" } } } });
+  const announce = component.sent.find((frame) => frame.type === "session.announce" && frame.payload.native_session_id === "ses_title");
+  assert.equal(announce?.payload.native_name, "");
+
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_title", title: "native", directory: "/work/kilo" } } } });
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_title", title: "", directory: "/work/kilo" } } } });
+  assert.deepEqual(component.observed.slice(-2).map((entry) => entry.nativeName), ["native", ""]);
+
+  const beforeUnsafe = component.sent.length + component.observed.length;
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_missing", directory: "/work/kilo" } } } });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_null", title: null, directory: "/work/kilo" } } } });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_unsafe", title: "bad\ntitle", directory: "/work/kilo" } } } });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_oversized", title: "x".repeat(1025), directory: "/work/kilo" } } } });
+  assert.equal(component.sent.length + component.observed.length, beforeUnsafe, "missing, null, unsafe, and oversized title evidence must stay unavailable");
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_unsafe", title: "", directory: "/work/kilo" } } } });
+  assert.equal(component.sent.at(-1).payload.native_name, "", "unsafe title must not mutate follower state");
+
+  const noEvidenceOutput = { env: {} };
+  const beforeShell = component.sent.length;
+  await hooks["shell.env"]({ sessionID: "ses_shell", cwd: "/work/kilo" }, noEvidenceOutput);
+  assert.equal(component.sent.length, beforeShell, "shell context without title evidence must not fabricate an announcement");
+  assert.equal(noEvidenceOutput.env.AGENT_SESSIONS_NATIVE_SESSION_ID, "ses_shell");
+
+  await hooks["shell.env"]({ sessionID: "ses_shell_empty", cwd: "/work/kilo", title: "" }, { env: {} });
+  const shellAnnounce = component.sent.find((frame) => frame.type === "session.announce" && frame.payload.native_session_id === "ses_shell_empty");
+  assert.equal(shellAnnounce?.payload.native_name, "");
+});
 
 test("Kilo plugin uses only the bound full-TUI routes and exact native acceptance", async () => {
   const component = new FakeComponent();
@@ -194,8 +235,8 @@ test("Kilo rename serializes one writer and correlates early and late native eve
 
   const second = component.renameSession({ nativeSessionID: "ses_kilo", requestedName: "managed-again", signal: new AbortController().signal });
   await tick();
-  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_kilo", title: "external", directory: "/work/kilo" } } } });
-  assert.equal(component.observed.at(-1).nativeName, "external");
+  await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_kilo", title: "", directory: "/work/kilo" } } } });
+  assert.equal(component.observed.at(-1).nativeName, "", "empty native title must conflict with a pending nonempty rename");
   resolvers.shift()({ data: { id: "ses_kilo", title: "managed-again" }, response: { status: 200 } });
   await assert.rejects(second, (error) => error?.category === "ambiguous-session");
 
