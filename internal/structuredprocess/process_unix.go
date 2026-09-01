@@ -15,8 +15,6 @@ func configureOwnedProcessGroup(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func currentProcessGroup(pid int) (int, error) { return syscall.Getpgid(pid) }
-
 func sendProcessGroupSignal(processGroup int, signal productruntime.ProcessSignal) error {
 	native, err := nativeSignal(signal)
 	if err != nil {
@@ -26,18 +24,6 @@ func sendProcessGroupSignal(processGroup int, signal productruntime.ProcessSigna
 		return err
 	}
 	return nil
-}
-
-func processGroupExists(processGroup int) (bool, error) {
-	err := syscall.Kill(-processGroup, 0)
-	switch {
-	case err == nil, errors.Is(err, syscall.EPERM):
-		return true, nil
-	case errors.Is(err, syscall.ESRCH):
-		return false, nil
-	default:
-		return false, err
-	}
 }
 
 func nativeSignal(signal productruntime.ProcessSignal) (syscall.Signal, error) {
