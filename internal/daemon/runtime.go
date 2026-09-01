@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"os/user"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,14 +30,27 @@ type RuntimeComponent func(context.Context) error
 // thread and App Server process evidence instead.
 type LaneConnectorAuthorizer func(context.Context, Lane, NativeEvidence) error
 
+// ParentConnectorAuthorizer corroborates a connector tool call against one
+// exact active peer attachment. It is deliberately distinct from an
+// AttachmentAdapter: parent authority belongs to the product's per-session
+// attester and may never fall back to generic attachment authorization.
+type ParentConnectorAuthorizer func(context.Context, ManagedAttachment, NativeEvidence) error
+
+// ProductDiagnosticsProvider returns live, metadata-only readiness states for
+// one status or doctor request. Durable Host.ProductReadiness is legacy state
+// and is never an authority for runtime diagnostics.
+type ProductDiagnosticsProvider func(context.Context, string) (map[string]string, error)
+
 // RuntimeConfig composes the minimal user-host daemon authority.
 type RuntimeConfig struct {
-	StateRoot               string
-	MaxStateBytes           int64
-	Release                 string
-	Adapters                map[string]AttachmentAdapter
-	LaneConnectorAuthorizer LaneConnectorAuthorizer
-	Handler                 ControlHandler
+	StateRoot                  string
+	MaxStateBytes              int64
+	Release                    string
+	Adapters                   map[string]AttachmentAdapter
+	LaneConnectorAuthorizer    LaneConnectorAuthorizer
+	ParentConnectorAuthorizer  ParentConnectorAuthorizer
+	ProductDiagnosticsProvider ProductDiagnosticsProvider
+	Handler                    ControlHandler
 	// Initialize restores generation-scoped durable authority after the
 	// endpoint is bound but before any control request may observe readiness.
 	Initialize func(*Runtime) error
@@ -46,12 +60,14 @@ type RuntimeConfig struct {
 // Runtime owns the one local endpoint, durable store, attachments, and
 // cancellable in-process components for one daemon generation.
 type Runtime struct {
-	state                   *StateStore
-	attachments             *AttachmentEngine
-	control                 *ControlServer
-	generation              uint64
-	handler                 ControlHandler
-	laneConnectorAuthorizer LaneConnectorAuthorizer
+	state                      *StateStore
+	attachments                *AttachmentEngine
+	control                    *ControlServer
+	generation                 uint64
+	handler                    ControlHandler
+	laneConnectorAuthorizer    LaneConnectorAuthorizer
+	parentConnectorAuthorizer  ParentConnectorAuthorizer
+	productDiagnosticsProvider ProductDiagnosticsProvider
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -102,8 +118,10 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &Runtime{
 		state: state, attachments: attachments, generation: generation, handler: config.Handler,
-		laneConnectorAuthorizer: config.LaneConnectorAuthorizer,
-		ctx:                     ctx, cancel: cancel, done: make(chan struct{}),
+		laneConnectorAuthorizer:    config.LaneConnectorAuthorizer,
+		parentConnectorAuthorizer:  config.ParentConnectorAuthorizer,
+		productDiagnosticsProvider: config.ProductDiagnosticsProvider,
+		ctx:                        ctx, cancel: cancel, done: make(chan struct{}),
 	}
 	control, err := StartControlServer(ctx, config.StateRoot, generation, runtime.handleControl)
 	if err != nil {
@@ -275,12 +293,17 @@ func (r *Runtime) handleControl(ctx context.Context, request ControlRequest) (js
 	}
 	switch request.Operation {
 	case "status", "doctor":
-		return r.runtimeStatus(request.Operation)
+		return r.runtimeStatus(ctx, request.Operation)
 	case "attachment.prepare", "attachment.adopt", "attachment.refresh", "attachment.detach", "attachment.rollback":
 		return r.handleAttachmentControl(ctx, request)
 	}
-	if request.Role == RoleHook || request.Role == RoleConnector && request.Operation == "connector.call" {
+	if request.Role == RoleHook {
 		if err := r.authorizeAttachmentRequest(request); err != nil {
+			return nil, err
+		}
+	}
+	if request.Role == RoleConnector && request.Operation == "connector.call" {
+		if err := r.authorizeConnectorRequest(ctx, request); err != nil {
 			return nil, err
 		}
 	}
@@ -325,19 +348,48 @@ func (r *Runtime) authorizeAttachmentRequest(request ControlRequest) error {
 	if len(request.Payload) == 0 || json.Unmarshal(request.Payload, &envelope) != nil {
 		return InactiveControlError()
 	}
-	err := r.attachments.Authorize(
+	return r.attachments.Authorize(
 		r.ctx, request.AttachmentID, request.Capability, strings.TrimSpace(envelope.Product), envelope.Evidence,
 	)
-	if err == nil || request.Role != RoleConnector {
-		return err
+}
+
+func (r *Runtime) authorizeConnectorRequest(ctx context.Context, request ControlRequest) error {
+	var envelope struct {
+		Product  string         `json:"product"`
+		Evidence NativeEvidence `json:"evidence"`
 	}
-	snapshot, readErr := r.state.Read()
-	if readErr != nil {
+	if len(request.Payload) == 0 || json.Unmarshal(request.Payload, &envelope) != nil {
+		return InactiveControlError()
+	}
+	product := strings.TrimSpace(envelope.Product)
+	attachment, active, err := r.attachments.ActiveAttachment(request.AttachmentID)
+	if err != nil {
+		return InactiveControlError()
+	}
+	if active {
+		if product == "" || product != attachment.Product || r.parentConnectorAuthorizer == nil {
+			return InactiveControlError()
+		}
+		before := cloneAttachment(attachment)
+		if err := r.parentConnectorAuthorizer(ctx, before, cloneEvidence(envelope.Evidence)); err != nil {
+			return InactiveControlError()
+		}
+		// Parent attestation may perform live product I/O. Re-read after the
+		// callback so detach, rebind, generation, or native-identity changes
+		// during that window cannot inherit the earlier authorization.
+		after, stillActive, err := r.attachments.ActiveAttachment(request.AttachmentID)
+		if err != nil || !stillActive || !reflect.DeepEqual(before, after) {
+			return InactiveControlError()
+		}
+		return nil
+	}
+
+	snapshot, err := r.state.Read()
+	if err != nil {
 		return InactiveControlError()
 	}
 	lane, ok := snapshot.Catalog.Lanes[request.AttachmentID]
-	if !ok || lane.Product != strings.TrimSpace(envelope.Product) ||
-		(lane.State != "preparing" && lane.State != "running") {
+	if !ok || lane.Product != product || (lane.State != "preparing" && lane.State != "running") {
 		return InactiveControlError()
 	}
 	if strings.TrimSpace(request.Capability) != "" {
@@ -346,7 +398,7 @@ func (r *Runtime) authorizeAttachmentRequest(request ControlRequest) error {
 		}
 		return nil
 	}
-	if r.laneConnectorAuthorizer == nil || r.laneConnectorAuthorizer(r.ctx, lane, envelope.Evidence) != nil {
+	if r.laneConnectorAuthorizer == nil || r.laneConnectorAuthorizer(ctx, lane, envelope.Evidence) != nil {
 		return InactiveControlError()
 	}
 	return nil

@@ -1,13 +1,15 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/diagnostics"
 )
 
-func (r *Runtime) runtimeStatus(operation string) (json.RawMessage, error) {
+func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.RawMessage, error) {
 	snapshot, err := r.state.Read()
 	if err != nil {
 		return nil, err
@@ -32,6 +34,15 @@ func (r *Runtime) runtimeStatus(operation string) (json.RawMessage, error) {
 			records.UncollectedTurns++
 		}
 	}
+	var productStates map[string]string
+	if r.productDiagnosticsProvider != nil {
+		productStates, err = r.productDiagnosticsProvider(ctx, operation)
+		if err != nil {
+			// Product probes can return vendor diagnostics. Keep the admin
+			// failure surface fixed and metadata-only.
+			return nil, errors.New("live product diagnostics unavailable")
+		}
+	}
 	host := catalog.Host
 	return diagnostics.Marshal(diagnostics.Input{
 		Operation: operation, RuntimeReady: r.ready.Load(), Generation: r.generation,
@@ -43,6 +54,6 @@ func (r *Runtime) runtimeStatus(operation string) (json.RawMessage, error) {
 			Lanes: host.LaneRevision, CleanupDebt: host.CleanupDebtRevision,
 			Federation: host.FederationRevision,
 		},
-		Records: records, ProductStates: host.ProductReadiness,
+		Records: records, ProductStates: productStates,
 	})
 }
