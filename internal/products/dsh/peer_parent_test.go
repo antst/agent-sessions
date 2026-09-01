@@ -261,12 +261,13 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	}
 	validRoot := filepath.Join(home, ".local", "state", "agent-sessions")
 	dshHome := managedTestDSHHome(t)
-	profileManifest := writeManagedProfileManifest(t, dshHome, "blue", PinnedVersion)
+	writeManagedProfileManifest(t, dshHome, "blue", PinnedVersion)
+	writeManagedProfileManifest(t, dshHome, "green", PinnedVersion)
 	gateway, err := NewCordisGateway(&recordingComponentSender{frames: make(chan component.Frame, 1)}, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := NewPeerDriver(PeerConfig{Executable: "dsh", Profile: "blue", DSHHome: dshHome, ProfileManifest: profileManifest, ComponentSocket: filepath.Join(validRoot, "run", component.ComponentSocketName), Gateway: gateway, TupleVerifier: StaticTupleVerifier(PinnedTuple())})
+	peer, err := NewPeerDriver(PeerConfig{Executable: "dsh", DSHHome: dshHome, ComponentSocket: filepath.Join(validRoot, "run", component.ComponentSocketName), Gateway: gateway, TupleVerifier: StaticTupleVerifier(PinnedTuple())})
 	if err != nil {
 		t.Fatalf("NewPeerDriver(valid): %v", err)
 	}
@@ -274,8 +275,8 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "other", Cwd: "/work"}); !errors.Is(err, productruntime.ErrNativeRejected) {
-		t.Fatalf("wrong durable peer profile error = %v, want ErrNativeRejected", err)
+	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "green-attachment", Product: ProductID, ProfileIdentity: "green", Cwd: "/work"}); err != nil {
+		t.Fatalf("second exact durable peer profile: %v", err)
 	}
 	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
 		t.Fatalf("exact durable peer profile: %v", err)
@@ -300,11 +301,20 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	}
 	nonCanonicalCwd := request
 	nonCanonicalCwd.Cwd = "relative/work"
+	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := peer.BuildLaunch(context.Background(), nonCanonicalCwd); !errors.Is(err, productruntime.ErrNativeRejected) {
 		t.Fatalf("non-canonical launch cwd error = %v, want ErrNativeRejected", err)
 	}
+	if _, err := peer.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("non-canonical launch did not burn prepared profile: %v", err)
+	}
 	withoutDeclaredProcess := request
 	withoutDeclaredProcess.Env = nil
+	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
+		t.Fatal(err)
+	}
 	command, err = peer.BuildLaunch(context.Background(), withoutDeclaredProcess)
 	if err != nil {
 		t.Fatalf("BuildLaunch(without declared process evidence): %v", err)
@@ -316,13 +326,19 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	}
 	partialDeclaredProcess := request
 	partialDeclaredProcess.Env = []productruntime.EnvVar{{Name: EnvProcessStart, Value: "start"}}
+	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := peer.BuildLaunch(context.Background(), partialDeclaredProcess); !errors.Is(err, productruntime.ErrUnauthorized) {
 		t.Fatalf("partial process evidence error = %v, want ErrUnauthorized", err)
 	}
-	if _, err := NewPeerDriver(PeerConfig{Executable: "dsh", Profile: "blue", DSHHome: dshHome, ProfileManifest: profileManifest, ComponentSocket: "/tmp/agent-sessions/component.sock", TupleVerifier: StaticTupleVerifier(PinnedTuple())}); err == nil {
+	if _, err := peer.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("partial-evidence launch did not burn prepared profile: %v", err)
+	}
+	if _, err := NewPeerDriver(PeerConfig{Executable: "dsh", DSHHome: dshHome, ComponentSocket: "/tmp/agent-sessions/component.sock", TupleVerifier: StaticTupleVerifier(PinnedTuple())}); err == nil {
 		t.Fatal("/tmp component socket accepted")
 	}
-	if _, err := NewPeerDriver(PeerConfig{Executable: "dsh", Profile: "blue", DSHHome: dshHome, ProfileManifest: profileManifest, ComponentSocket: "/private/tmp/agent-sessions/component.sock", AllowedRoots: []string{"/private/tmp/agent-sessions"}, TupleVerifier: StaticTupleVerifier(PinnedTuple())}); err == nil {
+	if _, err := NewPeerDriver(PeerConfig{Executable: "dsh", DSHHome: dshHome, ComponentSocket: "/private/tmp/agent-sessions/component.sock", AllowedRoots: []string{"/private/tmp/agent-sessions"}, TupleVerifier: StaticTupleVerifier(PinnedTuple())}); err == nil {
 		t.Fatal("macOS /private/tmp component socket accepted")
 	}
 	symlinkRoot, err := os.MkdirTemp(home, ".agent-sessions-dsh-socket-")
@@ -333,20 +349,37 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	if err := os.Symlink(os.TempDir(), filepath.Join(symlinkRoot, "escape")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewPeerDriver(PeerConfig{
-		Executable: "dsh", Profile: "blue", DSHHome: dshHome, ProfileManifest: profileManifest, AllowedRoots: []string{symlinkRoot},
-		ComponentSocket: filepath.Join(symlinkRoot, "escape", component.ComponentSocketName), TupleVerifier: StaticTupleVerifier(PinnedTuple()),
-	}); err == nil {
-		t.Fatal("HOME path resolving through a symlink into the temporary root was accepted")
+	symlinkPeer, err := NewPeerDriver(PeerConfig{
+		Executable: "dsh", DSHHome: dshHome, AllowedRoots: []string{symlinkRoot},
+		ComponentSocket: filepath.Join(symlinkRoot, "escape", component.ComponentSocketName), Gateway: gateway, TupleVerifier: StaticTupleVerifier(PinnedTuple()),
+	})
+	if err != nil {
+		t.Fatalf("constructor performed live symlink validation: %v", err)
 	}
-	mismatch := PinnedTuple()
-	mismatch.Plugin = "0.1.2-alpha.4"
-	badPeer, err := NewPeerDriver(PeerConfig{Executable: "dsh", Profile: "blue", DSHHome: dshHome, ProfileManifest: profileManifest, ComponentSocket: filepath.Join(validRoot, "run", component.ComponentSocketName), TupleVerifier: StaticTupleVerifier(mismatch)})
+	symlinkAdapter, err := symlinkPeer.AttachmentAdapter(productruntime.HostDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := badPeer.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrIncompatible) {
-		t.Fatalf("mismatched tuple launch error = %v, want ErrIncompatible", err)
+	if _, err := symlinkAdapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "symlink", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
+		t.Fatal(err)
+	}
+	symlinkRequest := request
+	symlinkRequest.AttachmentID = "symlink"
+	if _, err := symlinkPeer.BuildLaunch(context.Background(), symlinkRequest); err == nil {
+		t.Fatal("HOME path resolving through a symlink into the temporary root was accepted at operation time")
+	}
+	mismatch := PinnedTuple()
+	mismatch.Plugin = "0.1.2-alpha.4"
+	badPeer, err := NewPeerDriver(PeerConfig{Executable: "dsh", DSHHome: dshHome, ComponentSocket: filepath.Join(validRoot, "run", component.ComponentSocketName), Gateway: gateway, TupleVerifier: StaticTupleVerifier(mismatch)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	badAdapter, err := badPeer.AttachmentAdapter(productruntime.HostDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badAdapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); !errors.Is(err, productruntime.ErrIncompatible) {
+		t.Fatalf("mismatched tuple prepare error = %v, want ErrIncompatible", err)
 	}
 	physicalCwd := t.TempDir()
 	symlinkParent := t.TempDir()
@@ -374,7 +407,7 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 		t.Fatalf("wrong durable cwd error = %v, want ErrStale", err)
 	}
 	writeManagedProfileManifest(t, dshHome, "blue", "0.1.2-alpha.4")
-	if _, err := peer.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrIncompatible) {
+	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "drift", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); !errors.Is(err, productruntime.ErrIncompatible) {
 		t.Fatalf("post-construction profile drift error = %v, want ErrIncompatible", err)
 	}
 }

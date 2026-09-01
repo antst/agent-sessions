@@ -63,9 +63,6 @@ func NewDoctorProbe(config DoctorConfig) (*DoctorProbe, error) {
 	if config.Commands == nil {
 		config.Commands = OSCommandProbe{}
 	}
-	if config.Environment == nil {
-		config.Environment = os.Environ()
-	}
 	if config.Timeout == 0 {
 		config.Timeout = 10 * time.Second
 	}
@@ -73,13 +70,28 @@ func NewDoctorProbe(config DoctorConfig) (*DoctorProbe, error) {
 		config.ACPProfile != strings.TrimSpace(config.ACPProfile) || strings.ContainsAny(config.ACPProfile, "\x00/\\") {
 		return nil, errors.New("DSH doctor requires bounded timeout and exact tuple manifest paths")
 	}
-	if err := validateManagedProfile(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
+	if filepath.Base(config.Executable) != "dsh" || filepath.Base(config.PNPMExecutable) != RequiredPNPM {
+		return nil, errors.New("DSH doctor executable identities are invalid")
+	}
+	if err := validateConfiguredProfileManifestShape(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
+		return nil, err
+	}
+	for _, path := range []string{config.ACPAppManifest, config.PluginManifest} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return nil, errors.New("DSH doctor tuple manifest paths must be absolute and clean")
+		}
+	}
+	if config.ProbeCwd != "" && !validCwd(config.ProbeCwd) {
+		return nil, errors.New("DSH doctor probe cwd must be absolute and clean")
+	}
+	if err := validateProfileIdentity(config.ACPProfile); err != nil {
 		return nil, err
 	}
 	return &DoctorProbe{config: config}, nil
 }
 
 func (doctor *DoctorProbe) VerifyTuple(ctx context.Context, profileIdentity string) (Tuple, error) {
+	profileIdentity = doctor.selectedProfile(profileIdentity)
 	cliPath, err := doctor.resolveExecutable(doctor.config.Executable)
 	if err != nil {
 		return Tuple{}, fmt.Errorf("%w: DSH CLI is missing", productruntime.ErrUnavailable)
@@ -91,10 +103,9 @@ func (doctor *DoctorProbe) VerifyTuple(ctx context.Context, profileIdentity stri
 }
 
 func (doctor *DoctorProbe) verifyResolvedTuple(ctx context.Context, profileIdentity, cliPath string) (Tuple, error) {
-	if doctor.config.ProfileIdentity != "" && profileIdentity != "" && profileIdentity != doctor.config.ProfileIdentity {
-		return Tuple{}, fmt.Errorf("%w: DSH doctor profile identity changed", productruntime.ErrIncompatible)
-	}
-	if err := validateManagedProfile(doctor.config.DSHHome, doctor.config.ACPProfile, doctor.config.ProfileManifest); err != nil {
+	profileIdentity = doctor.selectedProfile(profileIdentity)
+	profileManifest, err := validateManagedProfile(doctor.config.DSHHome, profileIdentity)
+	if err != nil {
 		return Tuple{}, err
 	}
 	pnpmPath, err := doctor.resolveExecutable(doctor.config.PNPMExecutable)
@@ -106,7 +117,7 @@ func (doctor *DoctorProbe) verifyResolvedTuple(ctx context.Context, profileIdent
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, doctor.config.Timeout)
 	defer cancel()
-	doctorEnvironment := setStringEnv(safeDoctorEnv(doctor.config.Environment), "DSH_HOME", doctor.config.DSHHome)
+	doctorEnvironment := setStringEnv(safeDoctorEnv(doctor.environment()), "DSH_HOME", doctor.config.DSHHome)
 	cliOutput, err := doctor.config.Commands.Output(probeCtx, cliPath, []string{"--version"}, doctorEnvironment)
 	if err != nil {
 		return Tuple{}, fmt.Errorf("%w: DSH CLI version probe failed", productruntime.ErrUnavailable)
@@ -119,7 +130,7 @@ func (doctor *DoctorProbe) verifyResolvedTuple(ctx context.Context, profileIdent
 		CLI: extractPinnedVersion(string(cliOutput)), PackageManager: RequiredPNPM, PNPMVersion: strings.TrimSpace(string(pnpmOutput)),
 		ACPApp:  manifestVersion(doctor.config.ACPAppManifest, ACPAppPackage),
 		Plugin:  manifestVersion(doctor.config.PluginManifest, PluginPackage),
-		Profile: manifestVersion(doctor.config.ProfileManifest, ProfilePackage),
+		Profile: manifestVersion(profileManifest, ProfilePackage),
 	}
 	if err := tuple.Validate(); err != nil {
 		return tuple, err
@@ -159,12 +170,14 @@ func (doctor *DoctorProbe) Probe(ctx context.Context, request productruntime.Pro
 		return report, nil
 	}
 
-	tuple, err := doctor.verifyResolvedTuple(ctx, doctor.config.ProfileIdentity, resolvedExecutable)
+	tuple, err := doctor.verifyResolvedTuple(ctx, doctor.selectedProfile(doctor.config.ProfileIdentity), resolvedExecutable)
 	report.NativeVersion = tuple.CLI
 	tupleOK := err == nil
 	report.TupleOK = &tupleOK
 	if err != nil {
-		if errors.Is(err, productruntime.ErrIncompatible) {
+		if errors.Is(err, errManagedProfileUnavailable) {
+			report.State = productruntime.ProbeUnconfigured
+		} else if errors.Is(err, productruntime.ErrIncompatible) {
 			report.State = productruntime.ProbeIncompatible
 		} else {
 			report.State = productruntime.ProbeError
@@ -215,6 +228,11 @@ func validProbeDepth(depth productruntime.ProbeDepth) bool {
 }
 
 func (doctor *DoctorProbe) keylessACPProbe(ctx context.Context, executable string) (failure error) {
+	profile := doctor.selectedProfile(doctor.config.ProfileIdentity)
+	profileManifest, err := validateManagedProfile(doctor.config.DSHHome, profile)
+	if err != nil {
+		return err
+	}
 	cwd := doctor.config.ProbeCwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
@@ -223,7 +241,7 @@ func (doctor *DoctorProbe) keylessACPProbe(ctx context.Context, executable strin
 	// Point DSH at a disposable home whose sole profile is a symlink to the
 	// already tuple-verified configured profile. Removal never traverses that
 	// symlink, so the installed profile and the user's native store stay inert.
-	probeBase := doctorEnvironmentValue(doctor.config.Environment, "HOME")
+	probeBase := doctorEnvironmentValue(doctor.environment(), "HOME")
 	if probeBase == "" {
 		probeBase, _ = os.UserHomeDir()
 	}
@@ -239,17 +257,17 @@ func (doctor *DoctorProbe) keylessACPProbe(ctx context.Context, executable strin
 	if err := os.Mkdir(profiles, 0o700); err != nil {
 		return fmt.Errorf("create isolated DSH doctor profiles: %w", err)
 	}
-	profileRoot, err := filepath.Abs(filepath.Dir(doctor.config.ProfileManifest))
+	profileRoot, err := filepath.Abs(filepath.Dir(profileManifest))
 	if err != nil {
 		return fmt.Errorf("resolve configured DSH profile: %w", err)
 	}
-	if err := os.Symlink(profileRoot, filepath.Join(profiles, doctor.config.ACPProfile)); err != nil {
+	if err := os.Symlink(profileRoot, filepath.Join(profiles, profile)); err != nil {
 		return fmt.Errorf("link exact DSH doctor profile: %w", err)
 	}
-	environment := setEnvVar(doctorRuntimeEnv(doctor.config.Environment), "DSH_PERMISSION_MODE", string(SandboxWorkspaceWrite))
+	environment := setEnvVar(doctorRuntimeEnv(doctor.environment()), "DSH_PERMISSION_MODE", string(SandboxWorkspaceWrite))
 	environment = setEnvVar(environment, "DSH_HOME", probeHome)
 	command := productruntime.NativeCommand{
-		Path: executable, Args: []string{"--profile", doctor.config.ACPProfile},
+		Path: executable, Args: []string{"--profile", profile},
 		Env: environment, Cwd: cwd,
 	}
 	processCtx, cancelProcess := context.WithCancel(context.Background())
@@ -288,6 +306,23 @@ func (doctor *DoctorProbe) keylessACPProbe(ctx context.Context, executable strin
 		return err
 	}
 	return nil
+}
+
+func (doctor *DoctorProbe) selectedProfile(profile string) string {
+	if profile != "" {
+		return profile
+	}
+	if doctor.config.ProfileIdentity != "" {
+		return doctor.config.ProfileIdentity
+	}
+	return doctor.config.ACPProfile
+}
+
+func (doctor *DoctorProbe) environment() []string {
+	if doctor.config.Environment == nil {
+		return os.Environ()
+	}
+	return append([]string(nil), doctor.config.Environment...)
 }
 
 func doctorEnvironmentValue(environment []string, name string) string {
@@ -354,23 +389,6 @@ func manifestVersion(path, expectedName string) string {
 		return ""
 	}
 	return manifest.Version
-}
-
-func validateManagedProfile(dshHome, profile, manifestPath string) error {
-	if err := validateManagedDSHHome(dshHome); err != nil {
-		return err
-	}
-	expectedManifest := filepath.Join(dshHome, "profiles", profile, "package.json")
-	configuredManifest, configuredErr := canonicalExistingPath(manifestPath)
-	expectedCanonical, expectedErr := canonicalExistingPath(expectedManifest)
-	if configuredErr != nil || expectedErr != nil || manifestPath != expectedManifest ||
-		configuredManifest != expectedCanonical || expectedCanonical != expectedManifest || filepath.Clean(manifestPath) != manifestPath {
-		return fmt.Errorf("%w: DSH profile manifest is not the configured managed profile", productruntime.ErrIncompatible)
-	}
-	if manifestVersion(manifestPath, ProfilePackage) != PinnedVersion {
-		return fmt.Errorf("%w: DSH managed profile manifest is not the exact pinned tuple", productruntime.ErrIncompatible)
-	}
-	return nil
 }
 
 func setStringEnv(environment []string, name, value string) []string {

@@ -63,9 +63,8 @@ func NewDrivers(config DriverConfig) (Drivers, error) {
 		return Drivers{}, err
 	}
 	if peer.config.Executable != lane.config.Executable || lane.config.Executable != doctor.config.Executable ||
-		lane.config.ACPProfile != doctor.config.ACPProfile || lane.config.ProfileManifest != doctor.config.ProfileManifest ||
 		peer.config.DSHHome != lane.config.DSHHome || lane.config.DSHHome != doctor.config.DSHHome {
-		return Drivers{}, errors.New("DSH drivers must share one exact CLI and ACP profile tuple")
+		return Drivers{}, errors.New("DSH drivers must share one DSH executable and managed home")
 	}
 	return Drivers{Gateway: gateway, Peer: peer, Message: message, Lane: lane, Parent: parent, Doctor: doctor}, nil
 }

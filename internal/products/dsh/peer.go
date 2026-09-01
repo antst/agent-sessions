@@ -344,41 +344,59 @@ func (driver *MessageDriver) Deliver(ctx context.Context, attachment daemon.Mana
 
 type PeerConfig struct {
 	Executable      string
-	Profile         string
 	DSHHome         string
-	ProfileManifest string
 	ComponentSocket string
 	AllowedRoots    []string
 	Gateway         *CordisGateway
 	TupleVerifier   TupleVerifier
 }
 
-type PeerDriver struct{ config PeerConfig }
+type preparedPeerLaunch struct {
+	profile string
+	cwd     string
+}
+
+type PeerDriver struct {
+	config PeerConfig
+
+	preparedMu sync.Mutex
+	prepared   map[string]preparedPeerLaunch
+}
 
 func NewPeerDriver(config PeerConfig) (*PeerDriver, error) {
 	if config.Executable == "" {
 		config.Executable = "dsh"
 	}
-	if filepath.Base(config.Executable) != "dsh" || strings.TrimSpace(config.Profile) == "" || len(config.Profile) > maxProfileBytes || config.Profile != strings.TrimSpace(config.Profile) || strings.ContainsAny(config.Profile, "\x00/\\") || config.TupleVerifier == nil {
-		return nil, errors.New("DSH peer requires one explicit profile and exact tuple verifier")
+	if filepath.Base(config.Executable) != "dsh" || config.TupleVerifier == nil {
+		return nil, errors.New("DSH peer requires the DSH executable and exact tuple verifier")
 	}
-	if err := validateManagedProfile(config.DSHHome, config.Profile, config.ProfileManifest); err != nil {
+	if err := validateManagedDSHHomeShape(config.DSHHome); err != nil {
 		return nil, err
 	}
-	if err := validateComponentSocket(config.ComponentSocket, config.AllowedRoots); err != nil {
+	if err := validateComponentSocketShape(config.ComponentSocket, config.AllowedRoots); err != nil {
 		return nil, err
 	}
-	return &PeerDriver{config: config}, nil
+	return &PeerDriver{config: config, prepared: make(map[string]preparedPeerLaunch)}, nil
 }
 
 func (driver *PeerDriver) BuildLaunch(ctx context.Context, request productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
+	staged, ok := driver.consumePrepared(request.AttachmentID)
+	if !ok {
+		return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH launch has no exact prepared attachment profile", productruntime.ErrStale)
+	}
 	if request.ProductID != ProductID || request.AttachmentID == "" || !validCwd(request.Cwd) || request.BootstrapCapabilityID == "" || request.BootstrapSecret.Empty() {
 		return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH peer launch is incomplete", productruntime.ErrNativeRejected)
 	}
-	if err := validateManagedProfile(driver.config.DSHHome, driver.config.Profile, driver.config.ProfileManifest); err != nil {
+	if staged.cwd != request.Cwd {
+		return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH launch has no exact prepared attachment profile", productruntime.ErrStale)
+	}
+	if _, err := validateManagedProfile(driver.config.DSHHome, staged.profile); err != nil {
 		return productruntime.NativeCommand{}, err
 	}
-	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, driver.config.Profile); err != nil {
+	if err := validateComponentSocket(driver.config.ComponentSocket, driver.config.AllowedRoots); err != nil {
+		return productruntime.NativeCommand{}, err
+	}
+	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, staged.profile); err != nil {
 		return productruntime.NativeCommand{}, err
 	}
 	for _, argument := range request.Args {
@@ -400,20 +418,58 @@ func (driver *PeerDriver) BuildLaunch(ctx context.Context, request productruntim
 	}
 	environment := replaceEnv(request.Env, replacements)
 	return productruntime.NativeCommand{
-		Path: driver.config.Executable, Args: append([]string{"--profile", driver.config.Profile}, request.Args...),
+		Path: driver.config.Executable, Args: append([]string{"--profile", staged.profile}, request.Args...),
 		Env: environment, SensitiveEnv: []productruntime.SensitiveEnvVar{{Name: EnvBootstrapValue, Value: request.BootstrapSecret}}, Cwd: request.Cwd,
 	}, nil
 }
 
+func (driver *PeerDriver) prepareAttachment(ctx context.Context, attachment daemon.ManagedAttachment) error {
+	driver.preparedMu.Lock()
+	defer driver.preparedMu.Unlock()
+	delete(driver.prepared, attachment.ID)
+	if attachment.Product != ProductID || attachment.ID == "" || validateProfileIdentity(attachment.ProfileIdentity) != nil || !validCwd(attachment.Cwd) {
+		return fmt.Errorf("%w: DSH prepared attachment requires exact profile", productruntime.ErrNativeRejected)
+	}
+	if _, err := validateManagedProfile(driver.config.DSHHome, attachment.ProfileIdentity); err != nil {
+		return err
+	}
+	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, attachment.ProfileIdentity); err != nil {
+		return err
+	}
+	staged := preparedPeerLaunch{profile: attachment.ProfileIdentity, cwd: attachment.Cwd}
+	driver.prepared[attachment.ID] = staged
+	return nil
+}
+
+func (driver *PeerDriver) consumePrepared(attachmentID string) (preparedPeerLaunch, bool) {
+	driver.preparedMu.Lock()
+	defer driver.preparedMu.Unlock()
+	staged, ok := driver.prepared[attachmentID]
+	delete(driver.prepared, attachmentID)
+	return staged, ok
+}
+
+func (driver *PeerDriver) clearPrepared(attachmentID string) {
+	driver.preparedMu.Lock()
+	delete(driver.prepared, attachmentID)
+	driver.preparedMu.Unlock()
+}
+
 func validateManagedDSHHome(path string) error {
-	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || temporaryPath(path) {
-		return fmt.Errorf("%w: DSH home must be a canonical Agent Sessions HOME/XDG-state path", productruntime.ErrUnsupportedPolicy)
+	if err := validateManagedDSHHomeShape(path); err != nil {
+		return err
 	}
 	canonical, err := canonicalExistingPath(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %w", productruntime.ErrUnavailable, errManagedProfileUnavailable)
+	}
 	if err != nil || canonical != path || temporaryPath(canonical) {
 		return fmt.Errorf("%w: DSH home is missing, non-canonical, or temporary", productruntime.ErrUnsupportedPolicy)
 	}
 	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %w", productruntime.ErrUnavailable, errManagedProfileUnavailable)
+	}
 	if err != nil || !info.IsDir() {
 		return fmt.Errorf("%w: DSH home is not an existing directory", productruntime.ErrUnsupportedPolicy)
 	}
@@ -436,9 +492,15 @@ func (driver *PeerDriver) AttachmentAdapter(deps productruntime.HostDeps) (daemo
 	if driver.config.Gateway == nil {
 		return daemon.AttachmentAdapter{}, errors.New("DSH peer attachment requires Cordis gateway")
 	}
-	corroborate := func(attachment daemon.ManagedAttachment, observed daemon.NativeEvidence) (daemon.NativeEvidence, error) {
-		if attachment.Product != ProductID || attachment.ID == "" || attachment.ProfileIdentity != driver.config.Profile || !validCwd(attachment.Cwd) {
+	corroborate := func(ctx context.Context, attachment daemon.ManagedAttachment, observed daemon.NativeEvidence) (daemon.NativeEvidence, error) {
+		if attachment.Product != ProductID || attachment.ID == "" || validateProfileIdentity(attachment.ProfileIdentity) != nil || !validCwd(attachment.Cwd) {
 			return daemon.NativeEvidence{}, fmt.Errorf("%w: DSH attachment identity is invalid", productruntime.ErrUnauthorized)
+		}
+		if _, err := validateManagedProfile(driver.config.DSHHome, attachment.ProfileIdentity); err != nil {
+			return daemon.NativeEvidence{}, err
+		}
+		if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, attachment.ProfileIdentity); err != nil {
+			return daemon.NativeEvidence{}, err
 		}
 		session, ok := driver.config.Gateway.SessionByAttachment(attachment.ID)
 		if !ok || attachment.NativeSessionID != "" && attachment.NativeSessionID != session.NativeID {
@@ -462,27 +524,33 @@ func (driver *PeerDriver) AttachmentAdapter(deps productruntime.HostDeps) (daemo
 		}, nil
 	}
 	return daemon.AttachmentAdapter{
-		Prepare: func(_ context.Context, attachment daemon.ManagedAttachment) (daemon.NativeEvidence, error) {
-			if attachment.Product != ProductID || attachment.ID == "" || attachment.ProfileIdentity != driver.config.Profile || !validCwd(attachment.Cwd) {
-				return daemon.NativeEvidence{}, fmt.Errorf("%w: DSH prepared attachment requires exact profile", productruntime.ErrNativeRejected)
+		Prepare: func(ctx context.Context, attachment daemon.ManagedAttachment) (daemon.NativeEvidence, error) {
+			if err := driver.prepareAttachment(ctx, attachment); err != nil {
+				return daemon.NativeEvidence{}, err
 			}
 			return daemon.NativeEvidence{}, nil
 		},
-		Adopt: func(_ context.Context, attachment daemon.ManagedAttachment, observed daemon.NativeEvidence) (daemon.NativeEvidence, error) {
-			return corroborate(attachment, observed)
+		Adopt: func(ctx context.Context, attachment daemon.ManagedAttachment, observed daemon.NativeEvidence) (daemon.NativeEvidence, error) {
+			return corroborate(ctx, attachment, observed)
 		},
-		Refresh: func(_ context.Context, attachment daemon.ManagedAttachment) (daemon.NativeEvidence, error) {
-			return corroborate(attachment, attachment.Evidence)
+		Refresh: func(ctx context.Context, attachment daemon.ManagedAttachment) (daemon.NativeEvidence, error) {
+			return corroborate(ctx, attachment, attachment.Evidence)
 		},
-		Authorize: func(_ context.Context, attachment daemon.ManagedAttachment, observed daemon.NativeEvidence) error {
-			corroborated, err := corroborate(attachment, observed)
+		Authorize: func(ctx context.Context, attachment daemon.ManagedAttachment, observed daemon.NativeEvidence) error {
+			corroborated, err := corroborate(ctx, attachment, observed)
 			if err == nil && !reflect.DeepEqual(corroborated, observed) {
 				return fmt.Errorf("%w: DSH authorization evidence changed", productruntime.ErrUnauthorized)
 			}
 			return err
 		},
-		Detach:   func(context.Context, daemon.ManagedAttachment) error { return nil },
-		Rollback: func(context.Context, daemon.ManagedAttachment) error { return nil },
+		Detach: func(_ context.Context, attachment daemon.ManagedAttachment) error {
+			driver.clearPrepared(attachment.ID)
+			return nil
+		},
+		Rollback: func(_ context.Context, attachment daemon.ManagedAttachment) error {
+			driver.clearPrepared(attachment.ID)
+			return nil
+		},
 	}, nil
 }
 
@@ -499,19 +567,18 @@ func (driver *PeerDriver) Rename(_ context.Context, attachment daemon.ManagedAtt
 }
 
 func validateComponentSocket(path string, allowedRoots []string) error {
-	if filepath.Base(path) != component.ComponentSocketName || socketpath.Validate(path) != nil {
-		return fmt.Errorf("%w: DSH component socket is invalid", productruntime.ErrUnsupportedPolicy)
+	if err := validateComponentSocketShape(path, allowedRoots); err != nil {
+		return err
 	}
 	clean := filepath.Clean(path)
 	canonical, err := canonicalExistingPath(clean)
-	if err != nil || temporaryPath(clean) || temporaryPath(canonical) {
-		return fmt.Errorf("%w: DSH sandbox masks /tmp component sockets", productruntime.ErrUnsupportedPolicy)
+	if err != nil || temporaryPath(canonical) {
+		return fmt.Errorf("%w: DSH component socket parent is unavailable or temporary", productruntime.ErrUnsupportedPolicy)
 	}
 	home, _ := os.UserHomeDir()
 	roots := []string{home, os.Getenv("XDG_STATE_HOME"), os.Getenv("XDG_RUNTIME_DIR"), os.Getenv("XDG_CONFIG_HOME")}
 	if len(allowedRoots) > 0 {
 		for _, allowed := range allowedRoots {
-			allowed = filepath.Clean(allowed)
 			for _, root := range roots {
 				if root != "" && canonicalWithin(allowed, root) && canonicalWithin(clean, allowed) {
 					return nil
@@ -526,6 +593,26 @@ func validateComponentSocket(path string, allowedRoots []string) error {
 		}
 	}
 	return fmt.Errorf("%w: DSH component socket is not below a HOME/XDG root", productruntime.ErrUnsupportedPolicy)
+}
+
+func validateComponentSocketShape(path string, allowedRoots []string) error {
+	if filepath.Base(path) != component.ComponentSocketName || socketpath.Validate(path) != nil {
+		return fmt.Errorf("%w: DSH component socket is invalid", productruntime.ErrUnsupportedPolicy)
+	}
+	clean := filepath.Clean(path)
+	if temporaryPathLexical(clean) {
+		return fmt.Errorf("%w: DSH sandbox masks /tmp component sockets", productruntime.ErrUnsupportedPolicy)
+	}
+	if len(allowedRoots) > 0 {
+		for _, allowed := range allowedRoots {
+			allowed = filepath.Clean(allowed)
+			if filepath.IsAbs(allowed) && !temporaryPathLexical(allowed) && within(clean, allowed) {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: DSH component socket is outside the configured static root", productruntime.ErrUnsupportedPolicy)
+	}
+	return nil
 }
 
 func canonicalWithin(candidate, root string) bool {

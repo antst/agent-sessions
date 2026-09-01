@@ -927,7 +927,7 @@ func TestLaneArchiveLostCloseResponseNeverResendsClose(t *testing.T) {
 	}
 }
 
-func TestLaneRequiresConfiguredProfileAndLiveResumeCwd(t *testing.T) {
+func TestLaneRequiresLiveSelectedProfileAndResumeCwd(t *testing.T) {
 	process := newScriptedACPProcess()
 	process.writeHook = func(frame map[string]any) {
 		switch frame["method"] {
@@ -938,8 +938,8 @@ func TestLaneRequiresConfiguredProfileAndLiveResumeCwd(t *testing.T) {
 		}
 	}
 	driver := newTestLane(t, process, &recordingLease{})
-	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "wrong-profile", Cwd: "/work", ProfileIdentity: "other"}); !errors.Is(err, productruntime.ErrIncompatible) {
-		t.Fatalf("profile mismatch error = %v, want ErrIncompatible", err)
+	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "missing-profile", Cwd: "/work", ProfileIdentity: "other"}); !errors.Is(err, productruntime.ErrUnavailable) {
+		t.Fatalf("missing selected profile error = %v, want ErrUnavailable", err)
 	}
 	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "wrong-cwd", ResumeNativeID: "native", Cwd: "/work", ProfileIdentity: "acp"}); !errors.Is(err, productruntime.ErrProtocol) {
 		t.Fatalf("live cwd mismatch error = %v, want ErrProtocol", err)

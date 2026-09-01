@@ -143,6 +143,31 @@ func TestDoctorFailsClosedOnTupleMismatchBeforeFeatureProbe(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsConfiguredCLIWithAbsentManagedProfileAsUnconfigured(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dshHome := filepath.Join(home, ".local", "state", "agent-sessions", "dsh-absent-profile-doctor-test")
+	doctor, err := NewDoctorProbe(DoctorConfig{
+		Commands: fakeCommandProbe{
+			paths:  map[string]string{"dsh": "/bin/dsh", "pnpm": "/bin/pnpm"},
+			output: map[string]string{"/bin/dsh": PinnedVersion, "/bin/pnpm": PinnedPNPM},
+		},
+		ACPAppManifest: filepath.Join(dshHome, "tuple", "acp-app.json"),
+		PluginManifest: filepath.Join(dshHome, "tuple", "plugin.json"),
+		DSHHome:        dshHome, ACPProfile: "acp",
+		ProfileManifest: filepath.Join(dshHome, "profiles", "acp", "package.json"),
+	})
+	if err != nil {
+		t.Fatalf("construct doctor before profile install: %v", err)
+	}
+	report, err := doctor.Probe(context.Background(), productruntime.ProbeRequest{ProductID: ProductID, Depth: productruntime.ProbeVersion})
+	if err != nil || report.State != productruntime.ProbeUnconfigured {
+		t.Fatalf("absent profile report = %+v, %v, want unconfigured", report, err)
+	}
+}
+
 func TestDoctorUsesKeylessInitializeAndSessionNew(t *testing.T) {
 	root := t.TempDir()
 	dshHome := managedTestDSHHome(t)

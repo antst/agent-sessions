@@ -123,7 +123,7 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 		config.Processes == nil || config.Leases == nil || config.Receipts == nil {
 		return nil, errors.New("DSH lane driver requires profile, generation, tuple, process, lease, and receipt dependencies")
 	}
-	if err := validateManagedProfile(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
+	if err := validateConfiguredProfileManifestShape(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
 		return nil, err
 	}
 	return &LaneDriver{config: config, sessions: make(map[string]*laneSession), opening: make(map[string]struct{}), archived: make(map[productruntime.NativeSessionRef]uint64)}, nil
@@ -144,10 +144,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		return productruntime.NativeSessionRef{}, err
 	}
 	defer driver.unreserveLane(request.LaneID)
-	if request.ProfileIdentity != driver.config.ACPProfile {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH lane profile identity does not match the configured ACP profile", productruntime.ErrIncompatible)
-	}
-	if err := validateManagedProfile(driver.config.DSHHome, driver.config.ACPProfile, driver.config.ProfileManifest); err != nil {
+	if _, err := validateManagedProfile(driver.config.DSHHome, request.ProfileIdentity); err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
 	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, request.ProfileIdentity); err != nil {
@@ -157,7 +154,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	process, client, cancel, permissions, err := driver.startClient(request.Cwd, request.Arguments, policy)
+	process, client, cancel, permissions, err := driver.startClient(request.ProfileIdentity, request.Cwd, request.Arguments, policy)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
@@ -428,10 +425,7 @@ func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.La
 	if err := validateOpenRequest(open); err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	if open.ProfileIdentity != driver.config.ACPProfile {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: recovered DSH profile identity does not match the configured ACP profile", productruntime.ErrIncompatible)
-	}
-	if err := validateManagedProfile(driver.config.DSHHome, driver.config.ACPProfile, driver.config.ProfileManifest); err != nil {
+	if _, err := validateManagedProfile(driver.config.DSHHome, open.ProfileIdentity); err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
 	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, open.ProfileIdentity); err != nil {
@@ -441,7 +435,7 @@ func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.La
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	process, client, cancel, permissions, err := driver.startClient(open.Cwd, open.Arguments, policy)
+	process, client, cancel, permissions, err := driver.startClient(open.ProfileIdentity, open.Cwd, open.Arguments, policy)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
@@ -495,7 +489,7 @@ func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.La
 	return reference, nil
 }
 
-func (driver *LaneDriver) startClient(cwd string, arguments []string, policy NativePolicy) (ACPProcess, *ACPClient, context.CancelFunc, *lanePermissionPolicy, error) {
+func (driver *LaneDriver) startClient(profile, cwd string, arguments []string, policy NativePolicy) (ACPProcess, *ACPClient, context.CancelFunc, *lanePermissionPolicy, error) {
 	for _, argument := range arguments {
 		if overridesDSHProfile(argument) || argument == "--resume" || strings.HasPrefix(argument, "--resume=") {
 			return nil, nil, nil, nil, fmt.Errorf("%w: DSH ACP profile/session cannot be overridden", productruntime.ErrUnsupportedPolicy)
@@ -506,7 +500,7 @@ func (driver *LaneDriver) startClient(cwd string, arguments []string, policy Nat
 	environment = setEnvVar(environment, "DSH_HOME", driver.config.DSHHome)
 	environment = setEnvVar(environment, lanePolicyEnv, string(policy.Sandbox)+":"+string(policy.Approval))
 	command := productruntime.NativeCommand{
-		Path: driver.config.Executable, Args: append([]string{"--profile", driver.config.ACPProfile}, arguments...),
+		Path: driver.config.Executable, Args: append([]string{"--profile", profile}, arguments...),
 		Env: environment, Cwd: cwd,
 	}
 	process, err := driver.config.Processes.StartACPProcess(processCtx, command)
