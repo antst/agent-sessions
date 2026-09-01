@@ -1,0 +1,12 @@
+{
+  "name": "@agent-sessions/opencode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test agent-sessions.test.mjs"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "1.18.25"
+  }
+}

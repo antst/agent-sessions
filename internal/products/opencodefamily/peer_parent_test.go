@@ -1,0 +1,253 @@
+package opencodefamily
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/localtransport"
+	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/productruntime"
+)
+
+type componentLookupFake struct {
+	view productruntime.ComponentSessionView
+}
+
+type reconnectingLookup struct {
+	mu   sync.Mutex
+	view productruntime.ComponentSessionView
+}
+
+func (lookup *reconnectingLookup) LookupComponent(_ context.Context, attachmentID, nativeID string) (productruntime.ComponentSessionView, error) {
+	lookup.mu.Lock()
+	defer lookup.mu.Unlock()
+	if lookup.view.AttachmentID != attachmentID || lookup.view.NativeSessionID != nativeID {
+		return productruntime.ComponentSessionView{}, productruntime.ErrStale
+	}
+	return lookup.view, nil
+}
+
+func (lookup *reconnectingLookup) set(view productruntime.ComponentSessionView) {
+	lookup.mu.Lock()
+	lookup.view = view
+	lookup.mu.Unlock()
+}
+
+type renameGatewayFake struct {
+	mu      sync.Mutex
+	result  productruntime.NativeName
+	binding string
+	native  string
+	name    string
+}
+
+func (*renameGatewayFake) Deliver(context.Context, string, string, productruntime.DeliveryRequest) (productruntime.NativeAcceptance, error) {
+	return productruntime.NativeAcceptance{}, productruntime.ErrStale
+}
+
+func (gateway *renameGatewayFake) Rename(_ context.Context, binding, native, name string) (productruntime.NativeName, error) {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	gateway.binding, gateway.native, gateway.name = binding, native, name
+	return gateway.result, nil
+}
+
+func (lookup componentLookupFake) LookupComponent(_ context.Context, attachmentID, nativeID string) (productruntime.ComponentSessionView, error) {
+	if lookup.view.AttachmentID != attachmentID || lookup.view.NativeSessionID != nativeID {
+		return productruntime.ComponentSessionView{}, productruntime.ErrStale
+	}
+	return lookup.view, nil
+}
+
+type processInspectorFake struct {
+	identity   procinfo.Identity
+	executable string
+}
+
+func (inspector processInspectorFake) CaptureIdentity(context.Context, int) (procinfo.Identity, error) {
+	return inspector.identity, nil
+}
+func (inspector processInspectorFake) ObserveIdentity(context.Context, procinfo.Identity) (procinfo.IdentityObservation, error) {
+	return procinfo.IdentityObservation{Status: procinfo.IdentityMatches, Current: inspector.identity}, nil
+}
+func (inspector processInspectorFake) Executable(context.Context, procinfo.Identity) (string, error) {
+	return inspector.executable, nil
+}
+func (inspector processInspectorFake) DescendsFrom(context.Context, procinfo.Identity, procinfo.Identity, int) (bool, error) {
+	return true, nil
+}
+
+type gatewayFake struct {
+	accepted productruntime.NativeAcceptance
+	renamed  productruntime.NativeName
+}
+
+func TestBootstrapEnvUsesCapabilityWithoutDeclaredProcessIdentity(t *testing.T) {
+	request := productruntime.PeerLaunchRequest{
+		ProductID: "opencode", AttachmentID: "attachment-bootstrap",
+		BootstrapCapabilityID: "capability-bootstrap",
+		BootstrapSecret:       productruntime.NewSensitiveValue("one-time-secret"),
+	}
+	environment, sensitive := BootstrapEnv(request)
+	got := make(map[string]string, len(environment))
+	for _, variable := range environment {
+		if variable.Name == "AGENT_SESSIONS_PROCESS_START" || variable.Name == "AGENT_SESSIONS_STRONG_START" {
+			t.Fatalf("bootstrap exported non-authoritative process declaration %q", variable.Name)
+		}
+		got[variable.Name] = variable.Value
+	}
+	if len(got) != 4 || got["AGENT_SESSIONS_PRODUCT_ID"] != "opencode" ||
+		got["AGENT_SESSIONS_ATTACHMENT_ID"] != "attachment-bootstrap" ||
+		got["AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID"] != "capability-bootstrap" ||
+		got["AGENT_SESSIONS_COMPONENT_VERSION"] != ComponentProtocol {
+		t.Fatalf("bootstrap environment = %#v", got)
+	}
+	if len(sensitive) != 1 || sensitive[0].Name != "AGENT_SESSIONS_BOOTSTRAP_VALUE" ||
+		sensitive[0].Value.Reveal() != "one-time-secret" {
+		t.Fatalf("bootstrap secret environment = %#v", sensitive)
+	}
+}
+
+func (gateway gatewayFake) Deliver(context.Context, string, string, productruntime.DeliveryRequest) (productruntime.NativeAcceptance, error) {
+	return gateway.accepted, nil
+}
+func (gateway gatewayFake) Rename(context.Context, string, string, string) (productruntime.NativeName, error) {
+	return gateway.renamed, nil
+}
+
+func TestComponentPeerRequiresExactLiveBindingAndNativeAcceptance(t *testing.T) {
+	process := procinfo.Identity{PID: 123, Start: "start", StrongStart: "strong"}
+	view := productruntime.ComponentSessionView{BindingID: "binding-one", AttachmentID: "attachment-one", NativeSessionID: "ses_one", Generation: 9, State: "idle"}
+	acceptedAt := time.Now().Add(-time.Second)
+	driver, err := NewPeerDriver(PeerConfig{
+		ProductID: "opencode", Executable: "opencode", IntegrationVersion: "1",
+		Deps: productruntime.HostDeps{
+			Generation: 9, Components: componentLookupFake{view: view},
+			Processes: processInspectorFake{identity: process, executable: "/usr/bin/opencode"},
+		},
+		Gateway: gatewayFake{accepted: productruntime.NativeAcceptance{NativeSessionID: "ses_one", NativeMessageID: "msg_one", AcceptedAt: acceptedAt}},
+		BuildLaunch: func(context.Context, productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
+			return productruntime.NativeCommand{Path: "opencode"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := driver.AttachmentAdapter(productruntime.HostDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment := daemon.ManagedAttachment{
+		ID: "attachment-one", Product: "opencode", NativeSessionID: "ses_one", State: "attached", DaemonGeneration: 9,
+		Evidence: NativeEvidenceForComponent(process, "/usr/bin/opencode", "ses_one", "1"),
+	}
+	if _, err := adapter.Adopt(context.Background(), attachment, attachment.Evidence); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := driver.Deliver(context.Background(), attachment, productruntime.DeliveryRequest{
+		DeliveryID: "delivery-one", Mode: productruntime.DeliveryIdleWake, Body: []byte(`{"version":1}`),
+	})
+	if err != nil || accepted.NativeMessageID != "msg_one" {
+		t.Fatalf("delivery = %#v, %v", accepted, err)
+	}
+	foreign := attachment
+	foreign.NativeSessionID = "ses_foreign"
+	if _, err := driver.Deliver(context.Background(), foreign, productruntime.DeliveryRequest{DeliveryID: "delivery-two", Mode: productruntime.DeliveryIdleWake, Body: []byte(`{}`)}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("foreign target = %v", err)
+	}
+}
+
+func TestComponentPeerRenameAndReconnectUseCurrentExactBinding(t *testing.T) {
+	process := procinfo.Identity{PID: 321, Start: "start", StrongStart: "strong"}
+	view := productruntime.ComponentSessionView{BindingID: "binding-before", AttachmentID: "attachment-rename", NativeSessionID: "ses_rename", Generation: 9, State: "idle"}
+	lookup := &reconnectingLookup{view: view}
+	gateway := &renameGatewayFake{result: productruntime.NativeName{Applied: "new native title", NativeConfirmed: true}}
+	driver, err := NewPeerDriver(PeerConfig{
+		ProductID: "opencode", Executable: "opencode", IntegrationVersion: "1",
+		Deps:    productruntime.HostDeps{Generation: 9, Components: lookup, Processes: processInspectorFake{identity: process, executable: "/usr/bin/opencode"}},
+		Gateway: gateway,
+		BuildLaunch: func(context.Context, productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
+			return productruntime.NativeCommand{Path: "opencode"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment := daemon.ManagedAttachment{
+		ID: "attachment-rename", Product: "opencode", NativeSessionID: "ses_rename", State: "attached", DaemonGeneration: 9,
+		Evidence: NativeEvidenceForComponent(process, "/usr/bin/opencode", "ses_rename", "1"),
+	}
+	adapter, err := driver.AttachmentAdapter(productruntime.HostDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.BindingID = "binding-after-reconnect"
+	lookup.set(view)
+	if _, err := adapter.Refresh(context.Background(), attachment); err != nil {
+		t.Fatalf("same-generation component reconnect = %v", err)
+	}
+	renamed, err := driver.Rename(context.Background(), attachment, "new native title")
+	if err != nil || !renamed.NativeConfirmed || renamed.Applied != "new native title" {
+		t.Fatalf("rename = %#v, %v", renamed, err)
+	}
+	gateway.mu.Lock()
+	binding, native, name := gateway.binding, gateway.native, gateway.name
+	gateway.mu.Unlock()
+	if binding != "binding-after-reconnect" || native != "ses_rename" || name != "new native title" {
+		t.Fatalf("rename route = %q %q %q", binding, native, name)
+	}
+	gateway.mu.Lock()
+	gateway.result = productruntime.NativeName{Applied: "different", NativeConfirmed: true}
+	gateway.mu.Unlock()
+	if _, err := driver.Rename(context.Background(), attachment, "requested"); !errors.Is(err, productruntime.ErrAmbiguousSession) {
+		t.Fatalf("conflicting native rename acceptance = %v", err)
+	}
+	view.Generation = 10
+	lookup.set(view)
+	if _, err := adapter.Refresh(context.Background(), attachment); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("foreign generation reconnect = %v", err)
+	}
+}
+
+type exactParentVerifierFake struct {
+	view      productruntime.ComponentSessionView
+	rejectPID int
+}
+
+func (verifier exactParentVerifierFake) VerifyComponentParent(_ context.Context, product string, attempt productruntime.ConnectorAttempt) (productruntime.ComponentSessionView, error) {
+	if product == "" || attempt.ProcessIdentity.PID == verifier.rejectPID {
+		return productruntime.ComponentSessionView{}, productruntime.ErrUnauthorized
+	}
+	return verifier.view, nil
+}
+
+func TestParentAttesterRejectsFalseModelClaimAndForeignProcess(t *testing.T) {
+	view := productruntime.ComponentSessionView{BindingID: "binding-parent", AttachmentID: "attachment-parent", NativeSessionID: "ses_parent", Generation: 4}
+	attester, err := NewParentAttester("opencode", exactParentVerifierFake{view: view, rejectPID: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := productruntime.ConnectorAttempt{
+		ProductID: "opencode", PeerCredential: localtransport.PeerIdentity{PID: 55, UID: 1000},
+		ProcessIdentity:        procinfo.Identity{PID: 55, Start: "start", StrongStart: "strong"},
+		ClaimedNativeSessionID: "ses_parent", ComponentBindingID: "binding-parent",
+	}
+	binding, err := attester.Attest(context.Background(), attempt)
+	if err != nil || !binding.Verified || binding.AttachmentID != "attachment-parent" {
+		t.Fatalf("binding = %#v, %v", binding, err)
+	}
+	falseClaim := attempt
+	falseClaim.ClaimedNativeSessionID = "ses_forged"
+	if _, err := attester.Attest(context.Background(), falseClaim); !errors.Is(err, productruntime.ErrUnauthorized) {
+		t.Fatalf("false claim = %v", err)
+	}
+	foreignPID := attempt
+	foreignPID.PeerCredential.PID = 99
+	if _, err := attester.Attest(context.Background(), foreignPID); !errors.Is(err, productruntime.ErrUnauthorized) {
+		t.Fatalf("kernel/process mismatch = %v", err)
+	}
+}

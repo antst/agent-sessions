@@ -1,0 +1,13 @@
+{
+  "name": "@agent-sessions/kilo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test agent-sessions.test.mjs"
+  },
+  "peerDependencies": {
+    "@kilocode/cli": "7.5.6",
+    "@kilocode/plugin": "7.5.6"
+  }
+}
