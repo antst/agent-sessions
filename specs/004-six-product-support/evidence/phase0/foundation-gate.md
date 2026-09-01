@@ -152,12 +152,14 @@ The focused component reread additionally ran 20 normal repetitions, five race
 repetitions, vet, and three Node repetitions. The final staged-promotion reread
 ran ten normal and three race repetitions.
 
-## Honest pending cells
+## Deferred and pending cells
 
-- Mixed-version federation against a real pre-feature binary remains required
-  before production cross-version rollout. This gate proves the asymmetry and
-  additive `Message.Data` behavior through the production validators and a
-  faithful old-host model, not a separately installed old executable.
+- **CLOSED after this gate:** mixed-version federation now passes against a
+  real binary compiled from the exact pre-feature v0.3.0 source. The old host
+  accepts the marker and additive receipt metadata, keeps the four baseline
+  peers usable, and never observes a new-product row. See
+  [federation-real-old.md](federation-real-old.md). The documented deployment
+  limit remains: a current hub must distribute the filtered roster.
 - A statestore-backed production component `Authorizer` must be wired and
   exercised end to end before the first component-broker product peer receives
   acceptance credit. This gate proves the broker contract, durable record
