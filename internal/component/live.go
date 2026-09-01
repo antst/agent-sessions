@@ -13,13 +13,12 @@ const ComponentSocketName = "component.sock"
 // BindingView identifies one process-local component connection. The view is
 // deliberately ephemeral; disconnecting the socket removes it.
 type BindingView struct {
-	BindingID         string
-	AttachmentID      string
-	ProductID         string
-	ProcessIdentity   procinfo.Identity
-	PeerIdentity      localtransport.PeerIdentity
-	Generation        uint64
-	BootstrapRevision uint64
+	BindingID       string
+	AttachmentID    string
+	ProductID       string
+	ProcessIdentity procinfo.Identity
+	PeerIdentity    localtransport.PeerIdentity
+	Generation      uint64
 }
 
 // Handler receives one decoded frame from a live component connection.

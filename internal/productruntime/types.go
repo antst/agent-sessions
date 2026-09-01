@@ -86,13 +86,11 @@ func (r RedactedString) MarshalJSON() ([]byte, error) {
 }
 
 type PeerLaunchRequest struct {
-	ProductID             string
-	AttachmentID          string
-	Cwd                   string
-	Args                  []string
-	Env                   []EnvVar
-	BootstrapCapabilityID string
-	BootstrapSecret       SensitiveValue
+	ProductID    string
+	AttachmentID string
+	Cwd          string
+	Args         []string
+	Env          []EnvVar
 }
 
 type NativeCommand struct {

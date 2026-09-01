@@ -47,7 +47,6 @@ scripts/spikes/six-product/base/run.sh
 scripts/spikes/six-product/kilo/run.sh
 scripts/spikes/six-product/dsh/run.sh
 scripts/spikes/six-product/codebuddy/run.sh
-scripts/spikes/six-product/component-context/run.sh
 scripts/spikes/six-product/legacy/run.sh
 scripts/spikes/six-product/catalog/run.sh
 ```

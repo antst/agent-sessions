@@ -13,15 +13,13 @@ const DEFAULT_LIMITS = Object.freeze({
 });
 
 const FRAME_TYPES = new Set([
-  "bootstrap", "ready", "reconnect",
   "session.announce", "session.rebind", "session.rename", "session.rename.request", "session.state", "session.close", "session.bound",
   "delivery.present", "delivery.accept", "delivery.reject", "turn.event",
-  "tool.call", "tool.cancel", "tool.result", "generation.retire",
-  "heartbeat", "heartbeat.ack", "reject",
+  "tool.call", "tool.cancel", "tool.result", "reject",
 ]);
 
-function makeFrame(type, id, seq, payload) {
-  const frame = { version: VERSION, type, id, seq, payload };
+function makeFrame(type, id, payload) {
+  const frame = { version: VERSION, type, id, payload };
   validateFrame(frame);
   return frame;
 }
@@ -37,7 +35,6 @@ function validateFrame(frame, limits = DEFAULT_LIMITS) {
   if (frame.version !== VERSION) throw new Error(`unsupported component version ${String(frame.version)}`);
   if (!FRAME_TYPES.has(frame.type)) throw new Error(`unknown component frame type ${String(frame.type)}`);
   if (!validID(frame.id)) throw new Error("component frame id is invalid");
-  if (!Number.isSafeInteger(frame.seq) || frame.seq <= 0) throw new Error("component frame sequence is invalid");
   if (!frame.payload || Array.isArray(frame.payload) || typeof frame.payload !== "object") throw new Error("component frame payload must be an object");
   validateJSONBounds(frame, limits);
   validateSessionTitleFrame(frame);
@@ -219,7 +216,7 @@ function redact(detail, ...secrets) {
   for (const secret of secrets) {
     if (secret) value = value.split(String(secret)).join("<redacted>");
   }
-  value = value.replace(/(bootstrap_value|password|secret|token)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/giu, "$1$2<redacted>");
+  value = value.replace(/(password|secret|token)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/giu, "$1$2<redacted>");
   const bytes = Buffer.from(value, "utf8");
   if (bytes.length <= 512) return value;
   let end = 512;

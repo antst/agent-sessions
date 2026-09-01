@@ -20,14 +20,10 @@ import (
 )
 
 const (
-	EnvComponentSocket       = "AGENT_SESSIONS_COMPONENT_SOCKET"
-	EnvProductID             = "AGENT_SESSIONS_PRODUCT_ID"
-	EnvAttachmentID          = "AGENT_SESSIONS_ATTACHMENT_ID"
-	EnvBootstrapCapabilityID = "AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID"
-	EnvBootstrapValue        = "AGENT_SESSIONS_BOOTSTRAP_VALUE"
-	EnvProcessStart          = "AGENT_SESSIONS_PROCESS_START"
-	EnvStrongStart           = "AGENT_SESSIONS_STRONG_START"
-	EnvComponentVersion      = "AGENT_SESSIONS_COMPONENT_VERSION"
+	EnvComponentSocket  = "AGENT_SESSIONS_COMPONENT_SOCKET"
+	EnvProductID        = "AGENT_SESSIONS_PRODUCT_ID"
+	EnvAttachmentID     = "AGENT_SESSIONS_ATTACHMENT_ID"
+	EnvComponentVersion = "AGENT_SESSIONS_COMPONENT_VERSION"
 )
 
 type ComponentSender interface {
@@ -49,8 +45,7 @@ type deliveryResult struct {
 	err        error
 }
 
-// CordisGateway is generation-local routing state only. Durable component,
-// attachment, delivery, and tool-call authority remains in the daemon/broker.
+// CordisGateway routes only the sessions on live component connections.
 type CordisGateway struct {
 	sender ComponentSender
 	now    func() time.Time
@@ -193,10 +188,8 @@ func (gateway *CordisGateway) HandleComponentFrame(ctx context.Context, binding 
 			return err
 		}
 		return gateway.finishDelivery(binding, rejected.DeliveryID, "", deliveryResult{err: componentCategoryError(rejected.Category, rejected.Detail)})
-	case component.TypeToolCall, component.TypeToolCancel, component.TypeHeartbeat:
-		// The central broker/Authority durably admitted and handled these shared
-		// operations before invoking this product observer. Calling central from
-		// here would recurse and could create a second admission path.
+	case component.TypeToolCall, component.TypeToolCancel:
+		// Shared tool operations are handled by the daemon.
 		return nil
 	default:
 		return fmt.Errorf("%w: DSH observer received non-component direction %s", productruntime.ErrProtocol, frame.Type)
@@ -318,8 +311,6 @@ func componentCategoryError(category component.Category, detail string) error {
 	switch category {
 	case component.CategoryUnauthorized:
 		base = productruntime.ErrUnauthorized
-	case component.CategoryStaleProcess, component.CategoryReplay:
-		base = productruntime.ErrStale
 	case component.CategoryProtocol, component.CategoryInvalidFrame, component.CategoryUnknownType, component.CategoryUnsupportedVersion:
 		base = productruntime.ErrProtocol
 	}
@@ -384,7 +375,7 @@ func (driver *PeerDriver) BuildLaunch(ctx context.Context, request productruntim
 	if !ok {
 		return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH launch has no exact prepared attachment profile", productruntime.ErrStale)
 	}
-	if request.ProductID != ProductID || request.AttachmentID == "" || !validCwd(request.Cwd) || request.BootstrapCapabilityID == "" || request.BootstrapSecret.Empty() {
+	if request.ProductID != ProductID || request.AttachmentID == "" || !validCwd(request.Cwd) {
 		return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH peer launch is incomplete", productruntime.ErrNativeRejected)
 	}
 	if staged.cwd != request.Cwd {
@@ -404,22 +395,15 @@ func (driver *PeerDriver) BuildLaunch(ctx context.Context, request productruntim
 			return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH managed profile composition cannot be overridden", productruntime.ErrUnsupportedPolicy)
 		}
 	}
-	processStart, strongStart := envValue(request.Env, EnvProcessStart), envValue(request.Env, EnvStrongStart)
-	if (processStart == "") != (strongStart == "") {
-		return productruntime.NativeCommand{}, fmt.Errorf("%w: DSH optional process-start evidence must be supplied as an exact pair", productruntime.ErrUnauthorized)
-	}
 	replacements := map[string]string{
 		EnvComponentSocket: driver.config.ComponentSocket, EnvProductID: ProductID,
-		EnvAttachmentID: request.AttachmentID, EnvBootstrapCapabilityID: request.BootstrapCapabilityID,
-		EnvComponentVersion: component.ContractRevision, "DSH_HOME": driver.config.DSHHome,
-	}
-	if processStart != "" {
-		replacements[EnvProcessStart], replacements[EnvStrongStart] = processStart, strongStart
+		EnvAttachmentID: request.AttachmentID, EnvComponentVersion: component.ContractRevision,
+		"DSH_HOME": driver.config.DSHHome,
 	}
 	environment := replaceEnv(request.Env, replacements)
 	return productruntime.NativeCommand{
 		Path: driver.config.Executable, Args: append([]string{"--profile", staged.profile}, request.Args...),
-		Env: environment, SensitiveEnv: []productruntime.SensitiveEnvVar{{Name: EnvBootstrapValue, Value: request.BootstrapSecret}}, Cwd: request.Cwd,
+		Env: environment, Cwd: request.Cwd,
 	}, nil
 }
 
@@ -690,8 +674,8 @@ func envValue(environment []productruntime.EnvVar, name string) string {
 
 func replaceEnv(environment []productruntime.EnvVar, replacements map[string]string) []productruntime.EnvVar {
 	result := make([]productruntime.EnvVar, 0, len(environment)+len(replacements))
-	ordered := []string{"DSH_HOME", EnvAttachmentID, EnvBootstrapCapabilityID, EnvComponentSocket, EnvComponentVersion, EnvProcessStart, EnvProductID, EnvStrongStart}
-	reserved := map[string]struct{}{EnvBootstrapValue: {}}
+	ordered := []string{"DSH_HOME", EnvAttachmentID, EnvComponentSocket, EnvComponentVersion, EnvProductID}
+	reserved := map[string]struct{}{}
 	for _, name := range ordered {
 		reserved[name] = struct{}{}
 	}

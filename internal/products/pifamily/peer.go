@@ -17,10 +17,6 @@ const (
 	EnvComponentSocket  = "AGENT_SESSIONS_COMPONENT_SOCKET"
 	EnvProductID        = "AGENT_SESSIONS_PRODUCT_ID"
 	EnvAttachmentID     = "AGENT_SESSIONS_ATTACHMENT_ID"
-	EnvCapabilityID     = "AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID"
-	EnvBootstrapValue   = "AGENT_SESSIONS_BOOTSTRAP_VALUE"
-	EnvProcessStart     = "AGENT_SESSIONS_PROCESS_START"
-	EnvStrongStart      = "AGENT_SESSIONS_STRONG_START"
 	EnvComponentVersion = "AGENT_SESSIONS_COMPONENT_VERSION"
 )
 
@@ -110,7 +106,7 @@ func (driver *PeerDriver) AttachmentAdapter(deps productruntime.HostDeps) (daemo
 }
 
 func (driver *PeerDriver) BuildLaunch(_ context.Context, request productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
-	if request.ProductID != driver.config.Quirks.ProductID || request.AttachmentID == "" || request.BootstrapCapabilityID == "" || request.BootstrapSecret.Empty() || strings.TrimSpace(request.Cwd) == "" {
+	if request.ProductID != driver.config.Quirks.ProductID || request.AttachmentID == "" || strings.TrimSpace(request.Cwd) == "" {
 		return productruntime.NativeCommand{}, fmt.Errorf("%w: managed Pi-family launch is incomplete", productruntime.ErrNativeRejected)
 	}
 	for _, argument := range request.Args {
@@ -118,52 +114,25 @@ func (driver *PeerDriver) BuildLaunch(_ context.Context, request productruntime.
 			return productruntime.NativeCommand{}, fmt.Errorf("%w: peer argument %q overrides managed component setup", productruntime.ErrUnsupportedPolicy, argument)
 		}
 	}
-	processStart, strongStart := "", ""
-	processStartDeclared, strongStartDeclared := false, false
-	environment := make([]productruntime.EnvVar, 0, len(request.Env)+7)
+	environment := make([]productruntime.EnvVar, 0, len(request.Env)+4)
 	for _, variable := range request.Env {
 		switch variable.Name {
-		case EnvProcessStart:
-			if processStartDeclared {
-				return productruntime.NativeCommand{}, fmt.Errorf("%w: duplicate process start corroboration", productruntime.ErrUnauthorized)
-			}
-			processStartDeclared = true
-			processStart = variable.Value
-		case EnvStrongStart:
-			if strongStartDeclared {
-				return productruntime.NativeCommand{}, fmt.Errorf("%w: duplicate strong-start corroboration", productruntime.ErrUnauthorized)
-			}
-			strongStartDeclared = true
-			strongStart = variable.Value
-		case EnvComponentSocket, EnvProductID, EnvAttachmentID, EnvCapabilityID, EnvBootstrapValue, EnvComponentVersion:
+		case EnvComponentSocket, EnvProductID, EnvAttachmentID, EnvComponentVersion:
 			return productruntime.NativeCommand{}, fmt.Errorf("%w: caller attempted to override managed component environment", productruntime.ErrUnauthorized)
 		default:
 			environment = append(environment, variable)
 		}
 	}
-	if processStartDeclared != strongStartDeclared || (processStartDeclared && (processStart == "" || strongStart == "")) {
-		return productruntime.NativeCommand{}, fmt.Errorf("%w: process start corroboration must be omitted or supplied as a complete pair", productruntime.ErrUnauthorized)
-	}
 	environment = append(environment,
 		productruntime.EnvVar{Name: EnvComponentSocket, Value: driver.config.ComponentSocket},
-	)
-	environment = append(environment,
 		productruntime.EnvVar{Name: EnvProductID, Value: request.ProductID},
 		productruntime.EnvVar{Name: EnvAttachmentID, Value: request.AttachmentID},
-		productruntime.EnvVar{Name: EnvCapabilityID, Value: request.BootstrapCapabilityID},
 		productruntime.EnvVar{Name: EnvComponentVersion, Value: component.ContractRevision},
 	)
-	if processStartDeclared {
-		environment = append(environment,
-			productruntime.EnvVar{Name: EnvProcessStart, Value: processStart},
-			productruntime.EnvVar{Name: EnvStrongStart, Value: strongStart},
-		)
-	}
 	arguments := driver.config.Quirks.extensionArguments(driver.config.ExtensionPath)
 	arguments = append(arguments, request.Args...)
 	return productruntime.NativeCommand{
 		Path: driver.config.Executable, Args: arguments, Env: environment, Cwd: request.Cwd,
-		SensitiveEnv: []productruntime.SensitiveEnvVar{{Name: EnvBootstrapValue, Value: request.BootstrapSecret}},
 	}, nil
 }
 

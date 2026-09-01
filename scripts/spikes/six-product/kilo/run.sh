@@ -8,7 +8,6 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
 PINNED_KILO_VERSION=7.5.6
 KEEP=${KILO_S1_KEEP:-0}
-S4_EVIDENCE=${KILO_S1_S4_EVIDENCE:-$REPO_ROOT/specs/004-six-product-support/evidence/phase0/S4-component.json}
 
 for command_name in curl git jq node npm tmux; do
   command -v "$command_name" >/dev/null 2>&1 || {
@@ -16,17 +15,6 @@ for command_name in curl git jq node npm tmux; do
     exit 2
   }
 done
-jq -e --arg version "$PINNED_KILO_VERSION" '
-  .status == "pass" and
-  any(.products[];
-    .product == "kilocode" and
-    .version == $version and
-    .identity_source == "shell.env.sessionID" and
-    .shell_environment_session_id_matched == true)
-' "$S4_EVIDENCE" >/dev/null || {
-  printf 'S1 requires passing Kilo parent-context evidence from S4: %s\n' "$S4_EVIDENCE" >&2
-  exit 2
-}
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/agent-sessions-kilo-s1.XXXXXX")
 chmod 700 "$scratch"
@@ -421,10 +409,8 @@ jq -n \
       background_process_exact_session:true,
       mcp_connected_both_pairs:true,
       rename_visible_and_resume_same_native_session:true,
-      completion_busy_idle_events:true,
-      exact_parent_context_from_shell_env:true
+      completion_busy_idle_events:true
     },
-    parent_context_evidence:"S4-component.json (same pinned Kilo 7.5.6)",
     negative:{mini_tui_route_supported:false,before:$miniBefore,after:$miniAfter},
     credentials_persisted:false
   }' >"$result"

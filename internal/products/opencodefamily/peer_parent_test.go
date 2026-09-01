@@ -111,29 +111,25 @@ type gatewayFake struct {
 	renamed  productruntime.NativeName
 }
 
-func TestBootstrapEnvUsesCapabilityWithoutDeclaredProcessIdentity(t *testing.T) {
+func TestComponentEnvReportsOnlyLiveComponentIdentity(t *testing.T) {
 	request := productruntime.PeerLaunchRequest{
-		ProductID: "opencode", AttachmentID: "attachment-bootstrap",
-		BootstrapCapabilityID: "capability-bootstrap",
-		BootstrapSecret:       productruntime.NewSensitiveValue("one-time-secret"),
+		ProductID: "opencode", AttachmentID: "attachment-live",
 	}
-	environment, sensitive := BootstrapEnv(request)
+	environment, sensitive := ComponentEnv(request)
 	got := make(map[string]string, len(environment))
 	for _, variable := range environment {
 		if variable.Name == "AGENT_SESSIONS_PROCESS_START" || variable.Name == "AGENT_SESSIONS_STRONG_START" {
-			t.Fatalf("bootstrap exported non-authoritative process declaration %q", variable.Name)
+			t.Fatalf("component environment exported process declaration %q", variable.Name)
 		}
 		got[variable.Name] = variable.Value
 	}
-	if len(got) != 4 || got["AGENT_SESSIONS_PRODUCT_ID"] != "opencode" ||
-		got["AGENT_SESSIONS_ATTACHMENT_ID"] != "attachment-bootstrap" ||
-		got["AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID"] != "capability-bootstrap" ||
+	if len(got) != 3 || got["AGENT_SESSIONS_PRODUCT_ID"] != "opencode" ||
+		got["AGENT_SESSIONS_ATTACHMENT_ID"] != "attachment-live" ||
 		got["AGENT_SESSIONS_COMPONENT_VERSION"] != ComponentProtocol {
-		t.Fatalf("bootstrap environment = %#v", got)
+		t.Fatalf("component environment = %#v", got)
 	}
-	if len(sensitive) != 1 || sensitive[0].Name != "AGENT_SESSIONS_BOOTSTRAP_VALUE" ||
-		sensitive[0].Value.Reveal() != "one-time-secret" {
-		t.Fatalf("bootstrap secret environment = %#v", sensitive)
+	if len(sensitive) != 0 {
+		t.Fatalf("component sensitive environment = %#v", sensitive)
 	}
 }
 

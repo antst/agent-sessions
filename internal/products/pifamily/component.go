@@ -98,13 +98,13 @@ func NewComponentRuntime(config ComponentRuntimeConfig) (*ComponentRuntime, erro
 		return nil, err
 	}
 	if config.Sender == nil || config.Bindings == nil {
-		return nil, errors.New("Pi-family component runtime requires a broker sender and binding source")
+		return nil, errors.New("Pi-family component runtime requires a live sender and binding source")
 	}
 	if config.Renamer == nil {
 		config.Renamer, _ = config.Sender.(ComponentRenamer)
 	}
 	if config.Renamer == nil {
-		return nil, errors.New("Pi-family component runtime requires broker-correlated native rename")
+		return nil, errors.New("Pi-family component runtime requires live native rename")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -197,7 +197,7 @@ func (runtime *ComponentRuntime) HandleComponentFrame(ctx context.Context, bindi
 			return fmt.Errorf("%w: parent tool cancellation frame id does not match its operation", productruntime.ErrProtocol)
 		}
 		return runtime.cancelTool(binding, value)
-	case component.TypeTurnEvent, component.TypeHeartbeat:
+	case component.TypeTurnEvent:
 		return runtime.requireCurrentBinding(binding)
 	default:
 		return fmt.Errorf("%w: Pi-family component cannot handle %s", productruntime.ErrProtocol, frame.Type)

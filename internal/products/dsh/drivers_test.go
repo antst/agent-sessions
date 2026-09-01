@@ -139,8 +139,7 @@ func TestPeerResolvesEachPreparedAttachmentProfileWithoutCrossTarget(t *testing.
 	launch := func(id, cwd string) productruntime.NativeCommand {
 		t.Helper()
 		command, err := peer.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-			ProductID: ProductID, AttachmentID: id, Cwd: cwd, BootstrapCapabilityID: "cap-" + id,
-			BootstrapSecret: productruntime.NewSensitiveValue("secret-" + id),
+			ProductID: ProductID, AttachmentID: id, Cwd: cwd,
 		})
 		if err != nil {
 			t.Fatalf("BuildLaunch(%s): %v", id, err)
@@ -152,8 +151,7 @@ func TestPeerResolvesEachPreparedAttachmentProfileWithoutCrossTarget(t *testing.
 		t.Fatalf("isolated commands blue=%v green=%v", blue.Args, green.Args)
 	}
 	if _, err := peer.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-		ProductID: ProductID, AttachmentID: "blue-peer", Cwd: "/work/blue", BootstrapCapabilityID: "again",
-		BootstrapSecret: productruntime.NewSensitiveValue("again"),
+		ProductID: ProductID, AttachmentID: "blue-peer", Cwd: "/work/blue",
 	}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("consumed prepare was cross-target reusable: %v", err)
 	}
@@ -165,8 +163,7 @@ func TestPeerResolvesEachPreparedAttachmentProfileWithoutCrossTarget(t *testing.
 		t.Fatal(err)
 	}
 	if _, err := peer.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-		ProductID: ProductID, AttachmentID: rollbackAttachment.ID, Cwd: rollbackAttachment.Cwd, BootstrapCapabilityID: "rollback",
-		BootstrapSecret: productruntime.NewSensitiveValue("rollback"),
+		ProductID: ProductID, AttachmentID: rollbackAttachment.ID, Cwd: rollbackAttachment.Cwd,
 	}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("rolled-back prepare remained launchable: %v", err)
 	}
@@ -252,8 +249,7 @@ func TestFailedReprepareBurnsPriorProfile(t *testing.T) {
 	}
 	adapter, _ := peer.AttachmentAdapter(productruntime.HostDeps{})
 	request := productruntime.PeerLaunchRequest{
-		ProductID: ProductID, AttachmentID: "peer", Cwd: "/work", BootstrapCapabilityID: "cap",
-		BootstrapSecret: productruntime.NewSensitiveValue("secret"),
+		ProductID: ProductID, AttachmentID: "peer", Cwd: "/work",
 	}
 	for _, failedProfile := range []string{"green", "missing"} {
 		if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "peer", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
@@ -281,13 +277,12 @@ func TestInvalidBuildLaunchBurnsPreparedProfile(t *testing.T) {
 	if _, err := adapter.Prepare(context.Background(), attachment); err != nil {
 		t.Fatal(err)
 	}
-	invalid := productruntime.PeerLaunchRequest{ProductID: ProductID, AttachmentID: "peer", Cwd: "/work"}
+	invalid := productruntime.PeerLaunchRequest{AttachmentID: "peer", Cwd: "/work"}
 	if _, err := peer.BuildLaunch(context.Background(), invalid); !errors.Is(err, productruntime.ErrNativeRejected) {
 		t.Fatalf("invalid launch = %v, want native rejected", err)
 	}
 	valid := invalid
-	valid.BootstrapCapabilityID = "cap"
-	valid.BootstrapSecret = productruntime.NewSensitiveValue("secret")
+	valid.ProductID = ProductID
 	if _, err := peer.BuildLaunch(context.Background(), valid); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("valid retry reused profile after invalid launch: %v", err)
 	}
@@ -322,8 +317,7 @@ func TestConcurrentPreparedProfilesNeverCrossTargets(t *testing.T) {
 				return
 			}
 			command, err := peer.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-				ProductID: ProductID, AttachmentID: id, Cwd: cwd, BootstrapCapabilityID: "cap-" + id,
-				BootstrapSecret: productruntime.NewSensitiveValue("secret-" + id),
+				ProductID: ProductID, AttachmentID: id, Cwd: cwd,
 			})
 			if err != nil {
 				errorsCh <- err

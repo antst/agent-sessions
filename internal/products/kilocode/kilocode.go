@@ -163,7 +163,7 @@ func (driver *PeerDriver) buildLaunch(ctx context.Context, request productruntim
 	driver.launching[request.AttachmentID] = launch
 	driver.mu.Unlock()
 	defer driver.finishLaunching(request.AttachmentID, launch)
-	bootstrapEnv, bootstrapSensitive := opencodefamily.BootstrapEnv(request)
+	bootstrapEnv, bootstrapSensitive := opencodefamily.ComponentEnv(request)
 	server, err := driver.openServer(ctx, opencodefamily.ServerOpenRequest{
 		Key: "peer-" + request.AttachmentID, Cwd: request.Cwd,
 		Env:          append(append([]productruntime.EnvVar(nil), request.Env...), bootstrapEnv...),

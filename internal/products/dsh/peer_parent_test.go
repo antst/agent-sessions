@@ -282,12 +282,8 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 		t.Fatalf("exact durable peer profile: %v", err)
 	}
 	request := productruntime.PeerLaunchRequest{
-		ProductID: ProductID, AttachmentID: "attachment", Cwd: "/work", BootstrapCapabilityID: "capability",
-		BootstrapSecret: productruntime.NewSensitiveValue("secret"),
-		Env: []productruntime.EnvVar{
-			{Name: EnvProcessStart, Value: "start"}, {Name: EnvStrongStart, Value: "strong"},
-			{Name: "DSH_HOME", Value: filepath.Join(t.TempDir(), "foreign-home")},
-		},
+		ProductID: ProductID, AttachmentID: "attachment", Cwd: "/work",
+		Env: []productruntime.EnvVar{{Name: "DSH_HOME", Value: filepath.Join(t.TempDir(), "foreign-home")}},
 	}
 	command, err := peer.BuildLaunch(context.Background(), request)
 	if err != nil || command.Path != "dsh" {
@@ -309,31 +305,6 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	}
 	if _, err := peer.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("non-canonical launch did not burn prepared profile: %v", err)
-	}
-	withoutDeclaredProcess := request
-	withoutDeclaredProcess.Env = nil
-	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
-		t.Fatal(err)
-	}
-	command, err = peer.BuildLaunch(context.Background(), withoutDeclaredProcess)
-	if err != nil {
-		t.Fatalf("BuildLaunch(without declared process evidence): %v", err)
-	}
-	for _, variable := range command.Env {
-		if variable.Name == EnvProcessStart || variable.Name == EnvStrongStart {
-			t.Fatalf("optional process evidence was emitted without a supplied pair: %+v", command.Env)
-		}
-	}
-	partialDeclaredProcess := request
-	partialDeclaredProcess.Env = []productruntime.EnvVar{{Name: EnvProcessStart, Value: "start"}}
-	if _, err := adapter.Prepare(context.Background(), daemon.ManagedAttachment{ID: "attachment", Product: ProductID, ProfileIdentity: "blue", Cwd: "/work"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := peer.BuildLaunch(context.Background(), partialDeclaredProcess); !errors.Is(err, productruntime.ErrUnauthorized) {
-		t.Fatalf("partial process evidence error = %v, want ErrUnauthorized", err)
-	}
-	if _, err := peer.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrStale) {
-		t.Fatalf("partial-evidence launch did not burn prepared profile: %v", err)
 	}
 	if _, err := NewPeerDriver(PeerConfig{Executable: "dsh", DSHHome: dshHome, ComponentSocket: "/tmp/agent-sessions/component.sock", TupleVerifier: StaticTupleVerifier(PinnedTuple())}); err == nil {
 		t.Fatal("/tmp component socket accepted")

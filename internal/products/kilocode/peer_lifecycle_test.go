@@ -193,7 +193,6 @@ func newKiloLifecycleDriver(t *testing.T, native *kiloLifecycleNative) (*PeerDri
 func kiloLaunchRequest(attachmentID, cwd string) productruntime.PeerLaunchRequest {
 	return productruntime.PeerLaunchRequest{
 		ProductID: ProductID, AttachmentID: attachmentID, Cwd: cwd,
-		BootstrapCapabilityID: "capability", BootstrapSecret: productruntime.NewSensitiveValue("bootstrap-secret"),
 	}
 }
 

@@ -63,14 +63,6 @@
     "exact_parent_context": true,
     "no_credentials_persisted": true
   },
-  "parent_context": {
-    "source": "S4-component.json",
-    "product": "kilocode",
-    "version": "7.5.6",
-    "identity_source": "shell.env.sessionID",
-    "shell_environment_session_id_matched": true,
-    "note": "S4 independently owns the exact parent-context proof; S1 consumes rather than duplicates it."
-  },
   "rename_resume_probe": {
     "native_session_ids": [
       "ses_fa439d8f9ffelhunfD2nvzsnhg",

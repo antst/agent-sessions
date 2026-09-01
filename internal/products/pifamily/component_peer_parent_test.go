@@ -1,7 +1,6 @@
 package pifamily
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -494,7 +493,7 @@ func TestAttachmentAdapterLooksUpComponentByAttachmentAndNativeSession(t *testin
 	}
 }
 
-func TestPeerLaunchInjectsManagedExtensionAndSecretWithoutCallerOverride(t *testing.T) {
+func TestPeerLaunchInjectsManagedExtensionAndLiveComponentIdentity(t *testing.T) {
 	for _, productID := range []string{PiProductID, OMPProductID} {
 		t.Run(productID, func(t *testing.T) {
 			binding := component.BindingView{BindingID: "binding", AttachmentID: "attachment", ProductID: productID, Generation: 1}
@@ -507,11 +506,9 @@ func TestPeerLaunchInjectsManagedExtensionAndSecretWithoutCallerOverride(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			secret := productruntime.NewSensitiveValue("one-time-secret")
 			command, err := driver.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
 				ProductID: productID, AttachmentID: "attachment", Cwd: "/work", Args: []string{"--model", "fixture"},
-				Env:                   []productruntime.EnvVar{{Name: EnvProcessStart, Value: "start"}, {Name: EnvStrongStart, Value: "strong"}},
-				BootstrapCapabilityID: "capability", BootstrapSecret: secret,
+				Env: []productruntime.EnvVar{{Name: "TERM", Value: "xterm"}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -520,69 +517,29 @@ func TestPeerLaunchInjectsManagedExtensionAndSecretWithoutCallerOverride(t *test
 			if !reflect.DeepEqual(command.Args[:len(wantPrefix)], wantPrefix) || command.Cwd != "/work" {
 				t.Fatalf("command = %+v", command)
 			}
-			if len(command.SensitiveEnv) != 1 || command.SensitiveEnv[0].Name != EnvBootstrapValue || command.SensitiveEnv[0].Value.Reveal() != "one-time-secret" {
+			if len(command.SensitiveEnv) != 0 {
 				t.Fatalf("sensitive env = %+v", command.SensitiveEnv)
 			}
-			encoded, _ := json.Marshal(command.Env)
-			if bytes.Contains(encoded, []byte("one-time-secret")) {
-				t.Fatal("bootstrap secret leaked into ordinary environment")
-			}
-			componentRevision := ""
+			componentRevision, socket, attachment := "", "", ""
 			for _, variable := range command.Env {
-				if variable.Name == EnvComponentVersion {
+				switch variable.Name {
+				case EnvComponentVersion:
 					componentRevision = variable.Value
+				case EnvComponentSocket:
+					socket = variable.Value
+				case EnvAttachmentID:
+					attachment = variable.Value
 				}
 			}
 			if componentRevision != component.ContractRevision || componentRevision == IntegrationVersion {
 				t.Fatalf("component bootstrap revision = %q, product integration revision = %q", componentRevision, IntegrationVersion)
 			}
-			corroboration := map[string]string{}
-			for _, variable := range command.Env {
-				if variable.Name == EnvProcessStart || variable.Name == EnvStrongStart {
-					corroboration[variable.Name] = variable.Value
-				}
-			}
-			if !reflect.DeepEqual(corroboration, map[string]string{EnvProcessStart: "start", EnvStrongStart: "strong"}) {
-				t.Fatalf("preserved process corroboration = %v", corroboration)
-			}
-
-			omitted, err := driver.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-				ProductID: productID, AttachmentID: "attachment", Cwd: "/work",
-				BootstrapCapabilityID: "capability", BootstrapSecret: secret,
-			})
-			if err != nil {
-				t.Fatalf("omitted process corroboration: %v", err)
-			}
-			for _, variable := range omitted.Env {
-				if variable.Name == EnvProcessStart || variable.Name == EnvStrongStart {
-					t.Fatalf("omitted process corroboration was synthesized: %+v", omitted.Env)
-				}
-			}
-
-			for name, environment := range map[string][]productruntime.EnvVar{
-				"process-start only":  {{Name: EnvProcessStart, Value: "start"}},
-				"strong-start only":   {{Name: EnvStrongStart, Value: "strong"}},
-				"empty process-start": {{Name: EnvProcessStart}, {Name: EnvStrongStart, Value: "strong"}},
-				"duplicate pair member": {
-					{Name: EnvProcessStart, Value: "start"}, {Name: EnvProcessStart, Value: "start"},
-					{Name: EnvStrongStart, Value: "strong"},
-				},
-			} {
-				t.Run(name, func(t *testing.T) {
-					_, err := driver.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-						ProductID: productID, AttachmentID: "attachment", Cwd: "/work", Env: environment,
-						BootstrapCapabilityID: "capability", BootstrapSecret: secret,
-					})
-					if !errors.Is(err, productruntime.ErrUnauthorized) {
-						t.Fatalf("malformed process corroboration returned %v", err)
-					}
-				})
+			if socket != "/runtime/agent-sessions/component.sock" || attachment != "attachment" {
+				t.Fatalf("live component environment = %+v", command.Env)
 			}
 			for _, argument := range []string{"--extension=/tmp/foreign", "--session-id=forged", "--approval-mode=yolo"} {
 				request := productruntime.PeerLaunchRequest{
 					ProductID: productID, AttachmentID: "attachment", Cwd: "/work", Args: []string{argument},
-					Env:                   []productruntime.EnvVar{{Name: EnvProcessStart, Value: "start"}, {Name: EnvStrongStart, Value: "strong"}},
-					BootstrapCapabilityID: "capability", BootstrapSecret: secret,
 				}
 				if _, err := driver.BuildLaunch(context.Background(), request); !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
 					t.Fatalf("reserved %q returned %v", argument, err)

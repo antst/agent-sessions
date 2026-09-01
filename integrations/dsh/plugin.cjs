@@ -1,7 +1,7 @@
 "use strict";
 
 const path = require("node:path");
-const { createComponentClient, readBootstrap } = require("../shared/component/client.js");
+const { createComponentClient, readConfiguration } = require("../shared/component/client.js");
 const { validateSocket } = require("./mcp-env.cjs");
 
 const name = "agent-sessions";
@@ -263,7 +263,7 @@ function applyWithEnvironment(ctx, environment, loadNative = async () => {
   const { effectiveApprovalPolicy, setApprovalPolicy } = require("@deepseek-ai/dsh-user-approval");
   return { effectiveApprovalPolicy, setApprovalPolicy, setSandboxMode };
 }) {
-  const gate = readBootstrap(environment);
+  const gate = readConfiguration(environment);
   const lanePolicy = readLanePolicy(environment);
   if (gate.active && lanePolicy) throw new Error("DSH process cannot be both a component peer and an ACP lane");
   if (lanePolicy) {
@@ -273,8 +273,8 @@ function applyWithEnvironment(ctx, environment, loadNative = async () => {
   if (!gate.active) return { active: false, reason: gate.reason };
   validateSocket(gate.socketPath, environment);
   const client = createComponentClient({ env: environment });
-  // Load DSH's ESM-only native helpers only after managed bootstrap succeeds;
-  // an ambient profile remains entirely inert.
+  // Load DSH's ESM-only native helpers only for a managed live connection; an
+  // ambient profile remains entirely inert.
   return Promise.resolve(loadNative()).then(({ defineTool, createUserMessage }) =>
     createCordisPlugin({ client, defineTool, createUserMessage }).apply(ctx));
 }

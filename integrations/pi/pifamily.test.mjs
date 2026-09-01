@@ -96,7 +96,7 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-test("ambient extension remains inert without the managed bootstrap", async () => {
+test("ambient extension remains inert without managed connection settings", async () => {
   const component = new FakeComponent(false);
   const pi = new FakePi();
   delete process.env.AGENT_SESSIONS_SESSION_ID;
@@ -294,7 +294,7 @@ test("session switch restores exact-session native rename routing", async () => 
   assert.deepEqual(pi.names, ["new title"], "foreign old session must never reach the native writer");
 });
 
-test("real shared component transport preserves exact Pi and OMP peers across kill/resume and daemon-generation reconnect", async (t) => {
+test("real shared component transport reports Pi and OMP sessions again after reconnect", async (t) => {
   for (const productID of ["pi", "omp"]) {
     await t.test(productID, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), `agent-sessions-${productID}-peer-`));
@@ -307,33 +307,17 @@ test("real shared component transport preserves exact Pi and OMP peers across ki
         sockets.push(socket);
         connections += 1;
         const ordinal = connections;
-        let outboundSequence = 0;
         const decoder = new FrameDecoder();
         const send = (type, id, payload) => {
-          outboundSequence += 1;
-          socket.write(encodeFrame({ version: 1, type, id, seq: outboundSequence, payload }));
+          socket.write(encodeFrame({ version: 1, type, id, payload }));
         };
         socket.on("data", (chunk) => {
           for (const frame of decoder.push(chunk)) {
             received.push({ ordinal, frame });
-            if (frame.type === "bootstrap" || frame.type === "reconnect") {
-              send("ready", frame.id, {
-                binding_id: `binding-${productID}-${ordinal}`,
-                attachment_id: `attachment-${productID}`,
-                daemon_generation: 30 + ordinal - 1,
-                protocol_version: 1,
-                max_frame_bytes: 1024 * 1024,
-                heartbeat_interval_ms: 1000,
-              });
-            } else if (frame.type === "session.announce") {
+            if (frame.type === "session.announce") {
               send("session.bound", frame.id, {
-                binding_id: `binding-${productID}-${ordinal}`,
+                binding_id: `attachment-${productID}`,
                 native_session_id: frame.payload.native_session_id,
-              });
-            } else if (frame.type === "heartbeat") {
-              send("heartbeat.ack", frame.id, {
-                binding_id: `binding-${productID}-${ordinal}`,
-                last_received_seq: frame.seq,
               });
             }
           }
@@ -345,8 +329,6 @@ test("real shared component transport preserves exact Pi and OMP peers across ki
         AGENT_SESSIONS_COMPONENT_SOCKET: socketPath,
         AGENT_SESSIONS_PRODUCT_ID: productID,
         AGENT_SESSIONS_ATTACHMENT_ID: `attachment-${productID}`,
-        AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID: `capability-${productID}`,
-        AGENT_SESSIONS_BOOTSTRAP_VALUE: `secret-${productID}`,
         AGENT_SESSIONS_COMPONENT_VERSION: CONTRACT_REVISION,
       };
       const component = new ComponentClient({
@@ -359,10 +341,10 @@ test("real shared component transport preserves exact Pi and OMP peers across ki
       try {
         await pi.fire("session_start", { reason: "startup" }, ctx);
         await until(() => received.some(({ ordinal, frame }) => ordinal === 1 && frame.type === "session.announce"));
-        await until(() => component.bindingID === `binding-${productID}-1`);
+        await until(() => component.bindingID === `attachment-${productID}`);
         const firstAnnounce = received.find(({ ordinal, frame }) => ordinal === 1 && frame.type === "session.announce").frame;
         assert.equal(firstAnnounce.payload.native_session_id, nativeSessionID);
-        assert.equal(firstAnnounce.payload.binding_id, `binding-${productID}-1`);
+        assert.equal(firstAnnounce.payload.binding_id, `attachment-${productID}`);
 
         await pi.fire("session_shutdown", { reason: "killed" }, ctx);
         assert.equal(component.stopping, false, "native peer death must not stop the daemon component connection");
@@ -373,16 +355,13 @@ test("real shared component transport preserves exact Pi and OMP peers across ki
           frame.payload.new_native_session_id !== nativeSessionID), false, "native resume must not substitute a session id");
 
         sockets[0].destroy();
-        await until(() => component.daemonGeneration === 31 && component.bindingID === `binding-${productID}-2`);
+        await until(() => connections === 2 && component.ready);
         await until(() => received.some(({ ordinal, frame }) => ordinal === 2 && frame.type === "session.announce"));
-        const reconnect = received.find(({ ordinal, frame }) => ordinal === 2 && frame.type === "reconnect").frame;
-        assert.equal(reconnect.payload.prior_binding_id, `binding-${productID}-1`);
-        assert.equal(reconnect.payload.prior_generation, 30);
         const secondAnnounce = received.find(({ ordinal, frame }) => ordinal === 2 && frame.type === "session.announce").frame;
-        assert.equal(secondAnnounce.payload.binding_id, `binding-${productID}-2`);
+        assert.equal(secondAnnounce.payload.binding_id, `attachment-${productID}`);
         assert.equal(secondAnnounce.payload.native_session_id, nativeSessionID);
         assert.equal(process.env.AGENT_SESSIONS_SESSION_ID, nativeSessionID);
-        assert.equal(process.env.AGENT_SESSIONS_COMPONENT_BINDING_ID, `binding-${productID}-2`);
+        assert.equal(process.env.AGENT_SESSIONS_COMPONENT_BINDING_ID, `attachment-${productID}`);
       } finally {
         await pi.fire("session_shutdown", { reason: "quit" }, ctx);
         await component.stop();

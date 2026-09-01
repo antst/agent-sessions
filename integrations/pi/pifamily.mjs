@@ -79,10 +79,10 @@ export function createPiFamilyExtension(productID, options = {}) {
   return function agentSessionsPiFamilyExtension(pi) {
     const runtime = createRuntime(options);
     const component = runtime.client;
-    // Bootstrap activity is fixed synchronously by the shared client from the
+    // Connection activity is fixed synchronously by the shared client from the
     // complete managed environment. Ambient/global loads must not alter the
     // model prompt, command UI, or native hook set while waiting for a later
-    // session event to discover that no bootstrap exists.
+    // session event.
     if (component?.active !== true) return;
     let current = null;
     let boundNativeSessionID = runtime.boundNativeSessionID ?? "";

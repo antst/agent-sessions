@@ -117,8 +117,7 @@ func (driver *PeerDriver) validateEvidence(ctx context.Context, attachment daemo
 }
 
 func (driver *PeerDriver) BuildLaunch(ctx context.Context, request productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
-	if request.ProductID != driver.config.ProductID || strings.TrimSpace(request.AttachmentID) == "" || !validDirectory(request.Cwd) ||
-		request.BootstrapCapabilityID == "" || request.BootstrapSecret.Empty() {
+	if request.ProductID != driver.config.ProductID || strings.TrimSpace(request.AttachmentID) == "" || !validDirectory(request.Cwd) {
 		return productruntime.NativeCommand{}, productruntime.ErrProtocol
 	}
 	return driver.config.BuildLaunch(ctx, request)
@@ -166,22 +165,17 @@ func (driver *PeerDriver) Deliver(ctx context.Context, attachment daemon.Managed
 	return accepted, nil
 }
 
-// BootstrapEnv deliberately omits process-start declarations. The component
-// broker derives authoritative PID/start/strong-start from the live local
-// socket's kernel credentials; a declaration could only corroborate that
-// independently captured identity and is unnecessary for these launches.
-func BootstrapEnv(request productruntime.PeerLaunchRequest) ([]productruntime.EnvVar, []productruntime.SensitiveEnvVar) {
+// ComponentEnv reports the live component socket and product/session identity.
+func ComponentEnv(request productruntime.PeerLaunchRequest) ([]productruntime.EnvVar, []productruntime.SensitiveEnvVar) {
 	return []productruntime.EnvVar{
 		{Name: "AGENT_SESSIONS_PRODUCT_ID", Value: request.ProductID},
 		{Name: "AGENT_SESSIONS_ATTACHMENT_ID", Value: request.AttachmentID},
-		{Name: "AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID", Value: request.BootstrapCapabilityID},
 		{Name: "AGENT_SESSIONS_COMPONENT_VERSION", Value: ComponentProtocol},
-	}, []productruntime.SensitiveEnvVar{{Name: "AGENT_SESSIONS_BOOTSTRAP_VALUE", Value: request.BootstrapSecret}}
+	}, nil
 }
 
-// ExactParentVerifier binds the connector's kernel/process evidence to a
-// durable component session. It is host-owned because product packages cannot
-// access attachment persistence or broker credentials.
+// ExactParentVerifier resolves a connector against its current component
+// session. It is host-owned because product packages do not own live routing.
 type ExactParentVerifier interface {
 	VerifyComponentParent(context.Context, string, productruntime.ConnectorAttempt) (productruntime.ComponentSessionView, error)
 }

@@ -215,14 +215,6 @@ connected MCP, visible rename, same-ID resume/history, `--mini` rejection, and
 no persisted raw server password. Only the model provider is a deterministic
 local fixture.
 
-`S4-component.json` is PASS evidence on the same base with real pinned OpenCode
-1.18.25 and Kilo 7.5.6. For both, `shell.env.sessionID` matches the authoritative
-native session, the component is inert without the bootstrap secret and active
-with it, and the raw secret is absent from artifacts. S4 explicitly says it is
-a native-identity/frame-expressiveness spike, not an implemented daemon broker;
-only `session.announce` was observed for the OpenCode/Kilo runs while the full
-frame vocabulary was a contract mapping.
-
 These spikes validate the selected product mechanics but predate the product
 implementation commit and do not execute the current Go/JavaScript slice
 end-to-end. They are not physical-macOS evidence and are not credited as

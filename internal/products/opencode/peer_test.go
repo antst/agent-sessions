@@ -40,7 +40,7 @@ func (inertGateway) Rename(context.Context, string, string, string) (productrunt
 	return productruntime.NativeName{}, productruntime.ErrStale
 }
 
-func TestOpenCodeBuildLaunchIsPluginTUIAndSecretIsTransient(t *testing.T) {
+func TestOpenCodeBuildLaunchIsPluginTUIWithLiveComponentIdentity(t *testing.T) {
 	driver, err := NewPeerDriver(Config{
 		Deps:    productruntime.HostDeps{Generation: 1, Components: inertComponents{}, Processes: inertProcesses{}},
 		Gateway: inertGateway{}, Executable: "/native/opencode",
@@ -51,13 +51,12 @@ func TestOpenCodeBuildLaunchIsPluginTUIAndSecretIsTransient(t *testing.T) {
 	request := productruntime.PeerLaunchRequest{
 		ProductID: ProductID, AttachmentID: "attachment-one", Cwd: "/work/project",
 		Args: []string{"--continue"}, Env: []productruntime.EnvVar{{Name: "TERM", Value: "xterm"}},
-		BootstrapCapabilityID: "capability-one", BootstrapSecret: productruntime.NewSensitiveValue("raw-bootstrap-secret"),
 	}
 	command, err := driver.BuildLaunch(context.Background(), request)
 	if err != nil || command.Path != "/native/opencode" || len(command.Args) != 1 || command.Args[0] != "--continue" || command.Cwd != request.Cwd {
 		t.Fatalf("command = %#v, %v", command, err)
 	}
-	if len(command.SensitiveEnv) != 1 || command.SensitiveEnv[0].Name != "AGENT_SESSIONS_BOOTSTRAP_VALUE" || command.SensitiveEnv[0].Value.Reveal() != "raw-bootstrap-secret" {
+	if len(command.SensitiveEnv) != 0 {
 		t.Fatalf("sensitive env = %#v", command.SensitiveEnv)
 	}
 	componentRevision := ""

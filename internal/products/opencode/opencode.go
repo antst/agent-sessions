@@ -65,7 +65,7 @@ func NewPeerDriver(config Config) (*opencodefamily.PeerDriver, error) {
 			if unsafePeerArguments(request.Args) {
 				return productruntime.NativeCommand{}, productruntime.ErrUnsupportedPolicy
 			}
-			environment, sensitive := opencodefamily.BootstrapEnv(request)
+			environment, sensitive := opencodefamily.ComponentEnv(request)
 			return productruntime.NativeCommand{
 				Path: executable, Args: append([]string(nil), request.Args...), Cwd: request.Cwd,
 				Env: append(append([]productruntime.EnvVar(nil), request.Env...), environment...), SensitiveEnv: sensitive,

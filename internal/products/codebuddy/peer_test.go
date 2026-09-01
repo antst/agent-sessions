@@ -157,11 +157,6 @@ func TestPeerLaunchInjectsOnlyConnectorIdentityAndNoSecret(t *testing.T) {
 			t.Fatal("peer launch acquired a password")
 		}
 	}
-	if _, err := peer.BuildLaunch(context.Background(), productruntime.PeerLaunchRequest{
-		ProductID: ProductID, AttachmentID: "peer-1", Cwd: "/work", BootstrapSecret: productruntime.NewSensitiveValue("wrong-sidecar-secret"),
-	}); err == nil {
-		t.Fatal("peer launch accepted a sidecar/bootstrap secret")
-	}
 	for _, arguments := range [][]string{
 		{"--", "prompt text"},
 		{"--", "--session-id", "attacker"},

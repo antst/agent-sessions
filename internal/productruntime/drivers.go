@@ -8,14 +8,12 @@ import (
 )
 
 type RuntimeProduct struct {
-	Descriptor        productcatalog.Descriptor
-	Peer              PeerDriver
-	Message           MessageDriver
-	Lane              LaneDriver
-	Parent            ParentAttester
-	Doctor            DoctorProbe
-	ComponentResolver ComponentResolver
-	ComponentRebinder ComponentSessionRebinder
+	Descriptor productcatalog.Descriptor
+	Peer       PeerDriver
+	Message    MessageDriver
+	Lane       LaneDriver
+	Parent     ParentAttester
+	Doctor     DoctorProbe
 }
 
 type PeerDriver interface {

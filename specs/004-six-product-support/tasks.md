@@ -27,7 +27,6 @@ freeze. These are evidence tasks, not production implementation.
 - [x] T002 [P] Run the Kilo two-server/two-attach exact-routing and attach-parity spike in `scripts/spikes/six-product/kilo/` and record `specs/004-six-product-support/evidence/phase0/S1-kilo.json`
 - [x] T003 [P] Run the exact DSH 0.1.2-alpha.3 tuple/Cordis idle-wake/busy-steer/parent-facade spike in `scripts/spikes/six-product/dsh/` and record `specs/004-six-product-support/evidence/phase0/S2-dsh.json`
 - [x] T004 [P] Run the CodeBuddy managed-wrapper/registry/socket-to-PID daemon-restart, stale-row/port-reuse, cross-target, and no-peer-secret spike in `scripts/spikes/six-product/codebuddy/` and record `specs/004-six-product-support/evidence/phase0/S3-codebuddy.json`
-- [x] T005 [P] Prove exact parent native-session context and the shared component frame set for OpenCode/Kilo/Pi/OMP in `scripts/spikes/six-product/component-context/` and record `specs/004-six-product-support/evidence/phase0/S4-component.json`
 - [x] T006 [P] Run static reachability/call inventory for live bridge/federator exports in `scripts/spikes/six-product/legacy/` and record the extract-and-freeze decision in `specs/004-six-product-support/evidence/phase0/S5-legacy.json`
 - [x] T007 [P] Prototype deterministic staged-binary ten-product catalog/install projection in `scripts/spikes/six-product/catalog/` and record `specs/004-six-product-support/evidence/phase0/S6-catalog.json`
 - [x] T008 Prove the historical protocol-3 decoder behavior and record the original opaque-capability/trusted-network decision in `specs/004-six-product-support/evidence/phase0/S0-federation.json` (superseded for the greenfield live protocol by T125)
@@ -349,7 +348,6 @@ serialized by the integrator.
 Agent A: T002 Kilo spike
 Agent B: T003 DSH spike
 Agent C: T004 CodeBuddy spike
-Agent D: T005 component-context spike
 Agent E: T006 legacy audit
 Agent F: T007 catalog projection spike
 ```

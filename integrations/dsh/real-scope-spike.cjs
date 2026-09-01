@@ -13,7 +13,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
-const { FrameDecoder, CONTRACT_REVISION, encodeFrame, makeFrame } = require("../shared/component/protocol.js");
+const { FrameDecoder } = require("../shared/component/protocol.js");
 
 const PINNED = "0.1.2-alpha.3";
 const PINNED_PNPM = "10.28.1";
@@ -140,33 +140,18 @@ function prepareProfiles() {
   fs.symlinkSync(path.join(profilesRoot, "scope-a", "node_modules"), path.join(assembledRoot, "node_modules"));
 }
 
-function startBroker() {
+function startComponentServer() {
   return new Promise((resolve, reject) => {
     const server = net.createServer((socket) => {
       const decoder = new FrameDecoder();
-      let outboundSequence = 0;
       socket.on("data", (chunk) => {
         try {
           for (const frame of decoder.push(chunk)) {
-            const attachment = frame.payload?.attachment_id || captured.get(socket)?.attachment;
+            const attachment = frame.payload?.binding_id || captured.get(socket)?.attachment;
             if (!captured.has(socket)) captured.set(socket, { attachment, frames: [] });
             const record = captured.get(socket);
             if (attachment) record.attachment = attachment;
             record.frames.push(frame);
-            if (frame.type === "bootstrap") {
-              assert.equal(frame.payload.product_id, "dsh");
-              assert.equal(frame.payload.component_version, CONTRACT_REVISION);
-              socket.write(encodeFrame(makeFrame("ready", "ready-" + record.attachment, ++outboundSequence, {
-                binding_id: "binding-" + record.attachment,
-                attachment_id: record.attachment,
-                daemon_generation: 1,
-                protocol_version: 1,
-                max_frame_bytes: 1024 * 1024,
-                heartbeat_interval_ms: 60000,
-              })));
-            } else if (frame.type === "heartbeat") {
-              socket.write(encodeFrame(makeFrame("heartbeat.ack", frame.id, ++outboundSequence, frame.payload)));
-            }
           }
         } catch (error) {
           reject(error);
@@ -194,8 +179,6 @@ function runACP(profile, attachment, options = {}) {
     AGENT_SESSIONS_COMPONENT_SOCKET: socketPath,
     AGENT_SESSIONS_PRODUCT_ID: "dsh",
     AGENT_SESSIONS_ATTACHMENT_ID: attachment,
-    AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID: "capability-" + attachment,
-    AGENT_SESSIONS_BOOTSTRAP_VALUE: "one-shot-" + attachment,
     AGENT_SESSIONS_COMPONENT_VERSION: CONTRACT_REVISION,
   } : {};
   const laneEnvironment = options.lanePolicy ? {
@@ -378,7 +361,7 @@ async function exercisePersistedPolicyOverride() {
   let server;
   try {
     prepareProfiles();
-    server = await startBroker();
+    server = await startComponentServer();
     const first = await exercise("scope-a", "attachment-a");
     const second = await exercise("scope-b", "attachment-b");
     assert.notEqual(first, second);

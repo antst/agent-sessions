@@ -94,7 +94,7 @@ func (driver *PeerDriver) AttachmentAdapter(productruntime.HostDeps) (daemon.Att
 
 func (driver *PeerDriver) BuildLaunch(_ context.Context, request productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
 	if driver == nil || driver.mechanics == nil || request.ProductID != ProductID || !validNativeID(request.AttachmentID) ||
-		!filepath.IsAbs(request.Cwd) || !request.BootstrapSecret.Empty() || request.BootstrapCapabilityID != "" {
+		!filepath.IsAbs(request.Cwd) {
 		return productruntime.NativeCommand{}, ErrInvalidConfiguration
 	}
 	if hasForbiddenLaunchArgument(request.Args) {
