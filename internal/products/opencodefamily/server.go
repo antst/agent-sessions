@@ -163,9 +163,6 @@ func (manager *OwnedServerManager) open(
 		},
 	})
 	if err != nil {
-		if owned != nil && errors.Is(err, productserver.ErrCleanupDebt) {
-			return &LiveServer{owned: owned, client: typed}, fmt.Errorf("%w: native server startup cleanup", productruntime.ErrCleanupDebt)
-		}
 		return nil, mapTransportError(err)
 	}
 	if typed == nil {

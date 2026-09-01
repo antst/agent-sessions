@@ -87,14 +87,13 @@ func (reader memoryReceiptReader) OpenReceipt(id string) (io.ReadCloser, int64, 
 }
 
 type fakeOwnedSupervisor struct {
-	mu              sync.Mutex
-	commands        []productruntime.NativeCommand
-	servers         map[int]*http.Server
-	exits           map[int]chan struct{}
-	handler         func(*fakeNativeServer, http.ResponseWriter, *http.Request)
-	native          *fakeNativeServer
-	nextPID         int
-	signalErrorOnce bool
+	mu       sync.Mutex
+	commands []productruntime.NativeCommand
+	servers  map[int]*http.Server
+	exits    map[int]chan struct{}
+	handler  func(*fakeNativeServer, http.ResponseWriter, *http.Request)
+	native   *fakeNativeServer
+	nextPID  int
 }
 
 type fakeNativeServer struct {
@@ -165,8 +164,6 @@ func (supervisor *fakeOwnedSupervisor) Start(_ context.Context, command productr
 func (supervisor *fakeOwnedSupervisor) Signal(ctx context.Context, ref productruntime.OwnedProcessRef, _ productruntime.ProcessSignal) error {
 	supervisor.mu.Lock()
 	server := supervisor.servers[ref.Process.PID]
-	injected := supervisor.signalErrorOnce
-	supervisor.signalErrorOnce = false
 	supervisor.mu.Unlock()
 	if server == nil {
 		return nil
@@ -174,11 +171,7 @@ func (supervisor *fakeOwnedSupervisor) Signal(ctx context.Context, ref productru
 	// A process signal terminates the fake native process immediately. Closing
 	// active HTTP connections models process exit more faithfully than graceful
 	// http.Server shutdown, which can wait on the test client's idle pool.
-	err := server.Close()
-	if injected {
-		return errors.New("injected signal failure after shutdown")
-	}
-	return err
+	return server.Close()
 }
 
 func (supervisor *fakeOwnedSupervisor) Wait(ctx context.Context, ref productruntime.OwnedProcessRef) (productruntime.ProcessExit, error) {

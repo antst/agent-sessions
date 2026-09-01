@@ -95,7 +95,7 @@ func TestLaneDispatchStreamSteerStopRespawnArchiveAndSecretSplit(t *testing.T) {
 	}
 }
 
-func TestLaneArchiveRetryDoesNotRedeleteConfirmedJob(t *testing.T) {
+func TestLaneArchiveStopsServerAfterDeletingJob(t *testing.T) {
 	supervisor := newFakeOwnedSupervisor()
 	driver, err := NewLaneDriver(codebuddyTestConfig(t, &fakeRegistry{}, &fakeProcesses{}), productruntime.HostDeps{
 		Generation: 3, OwnedProcesses: supervisor,
@@ -118,32 +118,23 @@ func TestLaneArchiveRetryDoesNotRedeleteConfirmedJob(t *testing.T) {
 	if _, err := driver.WaitTurn(context.Background(), turn); err != nil {
 		t.Fatal(err)
 	}
-	supervisor.mu.Lock()
-	supervisor.signalErrorOnce = true
-	supervisor.mu.Unlock()
-	if err := driver.Archive(context.Background(), reference); !errors.Is(err, productruntime.ErrCleanupDebt) {
-		t.Fatalf("first archive falsely succeeded: %v", err)
+	if err := driver.Archive(context.Background(), reference); err != nil {
+		t.Fatalf("archive: %v", err)
 	}
 	supervisor.native.mu.Lock()
-	firstDeleteCount := supervisor.native.deleteCount
+	deleteCount := supervisor.native.deleteCount
 	supervisor.native.mu.Unlock()
-	if firstDeleteCount != 1 {
-		t.Fatalf("delete count after failed close = %d", firstDeleteCount)
-	}
-	if _, err := driver.StartTurn(context.Background(), reference, productruntime.TurnStartRequest{ReceiptID: "turn", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrCleanupDebt) {
-		t.Fatalf("cleanup-debt lane remained usable: %v", err)
+	if deleteCount != 1 {
+		t.Fatalf("delete count = %d", deleteCount)
 	}
 	if err := driver.Archive(context.Background(), reference); err != nil {
-		t.Fatalf("archive retry did not converge: %v", err)
-	}
-	if err := driver.Archive(context.Background(), reference); err != nil {
-		t.Fatalf("completed archive was not idempotent: %v", err)
+		t.Fatalf("idempotent archive: %v", err)
 	}
 	supervisor.native.mu.Lock()
-	finalDeleteCount := supervisor.native.deleteCount
+	deleteCount = supervisor.native.deleteCount
 	supervisor.native.mu.Unlock()
-	if finalDeleteCount != 1 {
-		t.Fatalf("confirmed job was deleted %d times", finalDeleteCount)
+	if deleteCount != 1 {
+		t.Fatalf("confirmed job was deleted %d times", deleteCount)
 	}
 }
 

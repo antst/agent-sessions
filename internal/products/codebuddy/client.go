@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/antst/agent-sessions/internal/productruntime"
@@ -328,14 +327,10 @@ func (client *APIClient) StreamJob(ctx context.Context, jobID string, handle fun
 		return productruntime.ErrProtocol
 	}
 	options := productserver.EventOptions{
-		Path:              "/api/v1/jobs/" + url.PathEscape(jobID) + "/stream",
-		Header:            client.csrfHeader(),
-		MaxLineBytes:      maxNativeTextBytes,
-		MaxEventBytes:     maxNativeTextBytes,
-		MaxReconnects:     3,
-		ReconnectDelay:    50 * time.Millisecond,
-		MaxReconnectDelay: time.Second,
-		DedupWindow:       256,
+		Path:          "/api/v1/jobs/" + url.PathEscape(jobID) + "/stream",
+		Header:        client.csrfHeader(),
+		MaxLineBytes:  maxNativeTextBytes,
+		MaxEventBytes: maxNativeTextBytes,
 	}
 	if err := client.client.Subscribe(ctx, options, handle); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
