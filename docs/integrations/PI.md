@@ -79,7 +79,7 @@ managed lane only through the receipt ledger.
 Doctor checks the `pi` executable, exact version `0.84.4`, the required RPC,
 extension, resume, and tools options, a readable managed extension asset, the
 exact exported shared component contract revision
-`agent-sessions.component.v1-r2`, and an injected central component-authority readiness check. Peer/parent readiness
+`agent-sessions.component.v1-r1`, and an injected central component-authority readiness check. Peer/parent readiness
 is reported only when that integration-depth check succeeds. Product-local
 tests cover hostile frame correlation, receipt tampering, exact resume,
 settled semantics, component identity, registered-tool false IDs, and native

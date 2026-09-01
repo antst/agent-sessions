@@ -19,7 +19,7 @@ const (
 	// ContractRevision identifies the pinned daemon/client frame vocabulary.
 	// It is deliberately separate from ProtocolVersion: v1 has not shipped as
 	// an independently versioned client protocol and therefore remains wire v1.
-	ContractRevision = "agent-sessions.component.v1-r2"
+	ContractRevision = "agent-sessions.component.v1-r1"
 	RedactedValue    = "<redacted>"
 	maxIdentifier    = 256
 	maxDetailBytes   = 512
@@ -114,7 +114,7 @@ type Frame struct {
 // NewFrame constructs an envelope. EncodeFrame and ValidatePayload enforce
 // protocol constraints at the boundary.
 func NewFrame(frameType FrameType, id string, seq uint64, payload any) (Frame, error) {
-	if err := validateNativeTitleBeforeJSON(frameType, id, payload); err != nil {
+	if err := validateNativeTitleBeforeMarshal(frameType, id, payload); err != nil {
 		return Frame{}, err
 	}
 	body, err := json.Marshal(payload)
@@ -124,37 +124,29 @@ func NewFrame(frameType FrameType, id string, seq uint64, payload any) (Frame, e
 	return Frame{Version: ProtocolVersion, Type: frameType, ID: id, Seq: seq, Payload: body}, nil
 }
 
-func validateNativeTitleBeforeJSON(frameType FrameType, id string, payload any) error {
-	invalid := func() error {
-		return protocolError(CategoryInvalidFrame, "%s payload carries an invalid native title", frameType)
-	}
+func validateNativeTitleBeforeMarshal(frameType FrameType, id string, payload any) error {
+	valid := true
 	switch value := payload.(type) {
 	case SessionAnnounce:
-		if !ValidNativeTitleObservation(value.NativeName) {
-			return invalid()
-		}
+		valid = ValidNativeTitleObservation(value.NativeName)
 	case *SessionAnnounce:
-		if value == nil || !ValidNativeTitleObservation(value.NativeName) {
-			return invalid()
-		}
+		valid = value != nil && ValidNativeTitleObservation(value.NativeName)
 	case SessionRename:
-		if (validDaemonRenameOperationID(id) && !validNativeRenameName(value.NativeName)) ||
-			(validComponentRenameObservationID(id) && !ValidNativeTitleObservation(value.NativeName)) {
-			return invalid()
+		if validDaemonRenameOperationID(id) || validComponentRenameObservationID(id) {
+			valid = validSessionRenameTitle(id, value.NativeName)
 		}
 	case *SessionRename:
-		if value == nil || (validDaemonRenameOperationID(id) && !validNativeRenameName(value.NativeName)) ||
-			(validComponentRenameObservationID(id) && !ValidNativeTitleObservation(value.NativeName)) {
-			return invalid()
+		valid = value != nil
+		if valid && (validDaemonRenameOperationID(id) || validComponentRenameObservationID(id)) {
+			valid = validSessionRenameTitle(id, value.NativeName)
 		}
 	case SessionRenameRequest:
-		if !validNativeRenameName(value.RequestedName) {
-			return invalid()
-		}
+		valid = validNativeRenameName(value.RequestedName)
 	case *SessionRenameRequest:
-		if value == nil || !validNativeRenameName(value.RequestedName) {
-			return invalid()
-		}
+		valid = value != nil && validNativeRenameName(value.RequestedName)
+	}
+	if !valid {
+		return protocolError(CategoryInvalidFrame, "%s payload carries an invalid native title", frameType)
 	}
 	return nil
 }

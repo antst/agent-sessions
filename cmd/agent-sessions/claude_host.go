@@ -100,9 +100,8 @@ func (c *hostCoordinator) prepareClaude(
 	}
 	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
 		ID: request.AttachmentID, CapabilityHash: daemonpkg.CapabilityDigest(capability), Product: "claude",
-		ProfileIdentity: request.ConfigRoot, NativeSessionID: request.SessionID, Name: request.Name,
+		ProfileIdentity: request.ConfigRoot, NativeSessionID: request.SessionID,
 		Cwd: request.Cwd, Groups: append([]string(nil), request.Groups...), PermissionMode: permission,
-		NativeNameSet: true,
 	})
 	if err != nil {
 		c.mu.Lock()
@@ -186,8 +185,7 @@ func (c *hostCoordinator) startClaudeOwnerMonitor(runtime *daemonpkg.Runtime, id
 					_, _ = runtime.Attachments().Rollback(context.Background(), id, "native-permission-mismatch")
 					return
 				}
-				name := claudeSelectedName(pending.request, row)
-				if _, err := runtime.Attachments().SelectNative(id, row.SessionID, name, row.Cwd, permission); err != nil {
+				if _, err := runtime.Attachments().SelectNative(id, row.SessionID, row.Cwd, permission); err != nil {
 					_, _ = runtime.Attachments().Rollback(context.Background(), id, "native-selection-failed")
 					return
 				}
@@ -215,7 +213,9 @@ func (c *hostCoordinator) observeClaudeNativeName(runtime *daemonpkg.Runtime, at
 	if !ok {
 		return
 	}
-	_, _, _ = runtime.Attachments().ObserveNativeName(attachment.ID, bridge.NormalizePeerName(title))
+	_ = runtime.Attachments().ObserveNativeTitle(
+		attachment.ID, attachment.NativeSessionID, bridge.NormalizePeerName(title),
+	)
 }
 
 func (c *hostCoordinator) claudeSelectionMatches(pending *claudePending, row launcher.ClaudeNativePeerRecord) bool {
@@ -227,22 +227,6 @@ func (c *hostCoordinator) claudeSelectionMatches(pending *claudePending, row lau
 	}
 	title, ok := federator.ClaudeNativeSessionTitle(pending.request.ConfigRoot, row.SessionID)
 	return ok && strings.EqualFold(strings.TrimSpace(title), strings.TrimSpace(pending.request.ResumeTarget))
-}
-
-func claudeSelectedName(request launcher.ClaudeDaemonPrepareRequest, row launcher.ClaudeNativePeerRecord) string {
-	if value := strings.TrimSpace(request.Name); value != "" {
-		return value
-	}
-	if request.Resume && strings.TrimSpace(request.ResumeTarget) != "" {
-		return request.ResumeTarget
-	}
-	if value := strings.TrimSpace(row.Name); value != "" {
-		return value
-	}
-	if len(row.SessionID) >= 8 {
-		return "claude-" + row.SessionID[:8]
-	}
-	return "claude"
 }
 
 func (c *hostCoordinator) refreshClaudeAttachment(

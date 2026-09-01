@@ -107,8 +107,8 @@ func (c *hostCoordinator) prepareQwen(
 		ID: request.SessionID, CapabilityHash: daemonpkg.CapabilityDigest(capability), Product: "qwen",
 		LaunchIntent:    request.LaunchPreference,
 		ProfileIdentity: request.Profile.Fingerprint, NativeSessionID: request.SessionID,
-		NativeProfileRoot: qwenHome, NativeNameSet: true,
-		Name: qwenPeerName(request), Cwd: request.Cwd, Groups: append([]string(nil), request.Groups...),
+		NativeProfileRoot: qwenHome,
+		Cwd:               request.Cwd, Groups: append([]string(nil), request.Groups...),
 		PermissionMode: qwenPermissionMode(request.LaunchPreference),
 	})
 	if err != nil {
@@ -130,9 +130,6 @@ func inheritQwenResumeRequest(
 	selected daemonpkg.ManagedAttachment,
 ) launcher.QwenDaemonPrepareRequest {
 	request.SessionID, request.Cwd = selected.NativeSessionID, selected.Cwd
-	if !request.NameSpecified {
-		request.Name = selected.Name
-	}
 	if !request.GroupsSpecified {
 		request.Groups = append([]string(nil), selected.Groups...)
 	}
@@ -168,7 +165,7 @@ func resolveQwenDaemonResume(runtime *daemonpkg.Runtime, request launcher.QwenDa
 	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
 	for _, attachment := range snapshot.Catalog.Attachments {
 		if attachment.Product != "qwen" || attachment.ProfileIdentity != request.Profile.Fingerprint ||
-			(attachment.NativeSessionID != selector && attachment.ID != selector && attachment.Name != selector) {
+			(attachment.NativeSessionID != selector && attachment.ID != selector) {
 			continue
 		}
 		if attachment.State != "detached" {
@@ -208,17 +205,6 @@ func qwenEvidence(pending *qwenPending) (daemonpkg.NativeEvidence, error) {
 		RegistryPrefix:   events.Fingerprint,
 		RegistryBytes:    events.Size,
 	}, nil
-}
-
-func qwenPeerName(request launcher.QwenDaemonPrepareRequest) string {
-	if value := strings.TrimSpace(request.Name); value != "" {
-		return value
-	}
-	base := filepath.Base(request.Cwd)
-	if base == "" || base == "." || base == string(filepath.Separator) {
-		return "qwen"
-	}
-	return base
 }
 
 func qwenPermissionMode(preference string) string {
@@ -301,7 +287,9 @@ func (c *hostCoordinator) observeQwenNativeName(runtime *daemonpkg.Runtime, atta
 	if !ok {
 		return
 	}
-	_, _, _ = runtime.Attachments().ObserveNativeName(attachment.ID, bridge.NormalizePeerName(title))
+	_ = runtime.Attachments().ObserveNativeTitle(
+		attachment.ID, attachment.NativeSessionID, bridge.NormalizePeerName(title),
+	)
 }
 
 func qwenOwnerExecReady(pending *qwenPending) bool {

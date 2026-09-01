@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -47,6 +49,12 @@ type AttachmentEngine struct {
 	store      *StateStore
 	generation uint64
 	adapters   map[string]AttachmentAdapter
+	titles     map[string]liveNativeTitle
+}
+
+type liveNativeTitle struct {
+	nativeSessionID string
+	value           string
 }
 
 // NewAttachmentEngine creates an attachment authority over one durable store.
@@ -64,7 +72,10 @@ func NewAttachmentEngine(store *StateStore, generation uint64, adapters map[stri
 		}
 		copyAdapters[product] = adapter
 	}
-	return &AttachmentEngine{store: store, generation: generation, adapters: copyAdapters}, nil
+	return &AttachmentEngine{
+		store: store, generation: generation, adapters: copyAdapters,
+		titles: make(map[string]liveNativeTitle),
+	}, nil
 }
 
 // SetAdapter replaces one product callback set. Runtime composition uses this
@@ -176,7 +187,7 @@ func (e *AttachmentEngine) Adopt(ctx context.Context, id string, observed Native
 // resume-by-name picker) to an already prepared daemon attachment. It never
 // makes the attachment addressable; Adopt must still corroborate the complete
 // product-native evidence afterward.
-func (e *AttachmentEngine) SelectNative(id, nativeSessionID, name, cwd, permissionMode string) (ManagedAttachment, error) {
+func (e *AttachmentEngine) SelectNative(id, nativeSessionID, cwd, permissionMode string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if strings.TrimSpace(nativeSessionID) == "" {
@@ -193,9 +204,6 @@ func (e *AttachmentEngine) SelectNative(id, nativeSessionID, name, cwd, permissi
 		return ManagedAttachment{}, fmt.Errorf("%w: selected native session changed", ErrAttachmentConflict)
 	}
 	attachment.NativeSessionID = nativeSessionID
-	if strings.TrimSpace(name) != "" {
-		attachment.Name = name
-	}
 	if strings.TrimSpace(cwd) != "" {
 		attachment.Cwd = cwd
 	}
@@ -300,59 +308,45 @@ func (e *AttachmentEngine) ActiveAttachment(id string) (ManagedAttachment, bool,
 	return cloneAttachment(attachment), true, nil
 }
 
-// Rename changes only the public Agent Sessions address of one active
-// attachment. Product-native observers retain their independent baseline, so
-// a later native rename can still be distinguished from this explicit alias.
-func (e *AttachmentEngine) Rename(id, name string) (ManagedAttachment, error) {
+// ObserveNativeTitle follows one exact live product session's title in memory.
+// The observation is generation-local, never enters the durable catalog, and
+// is discarded whenever the attachment stops being active.
+func (e *AttachmentEngine) ObserveNativeTitle(id, nativeSessionID, title string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ManagedAttachment{}, fmt.Errorf("%w: attachment name is empty", ErrAttachmentConflict)
+	if !validNativeTitleObservation(title) {
+		return fmt.Errorf("%w: native title observation is unsafe", ErrAttachmentConflict)
 	}
-	snapshot, attachment, err := e.currentAttachment(id)
+	snapshot, err := e.store.Read()
 	if err != nil {
-		return ManagedAttachment{}, err
+		return err
 	}
-	if attachment.State != "attached" || attachment.DaemonGeneration != e.generation {
-		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s is not active", ErrAttachmentConflict, id)
+	attachment, ok := snapshot.Catalog.Attachments[id]
+	if !ok || attachment.State != "attached" || attachment.DaemonGeneration != e.generation ||
+		attachment.NativeSessionID == "" || attachment.NativeSessionID != nativeSessionID {
+		return fmt.Errorf("%w: attachment %s is not the exact live native session", ErrAttachmentConflict, id)
 	}
-	attachment.Name = name
-	return e.commitAttachment(snapshot, attachment, nil, false)
+	e.titles[id] = liveNativeTitle{nativeSessionID: nativeSessionID, value: title}
+	return nil
 }
 
-// ObserveNativeName records a product-native title baseline and propagates
-// only later changes into the public Agent Sessions address. This preserves an
-// explicit wrapper or rename_session alias until the user actually renames the
-// native session, including across daemon restarts.
-func (e *AttachmentEngine) ObserveNativeName(id, name string) (ManagedAttachment, bool, error) {
+// LiveNativeTitle returns a title only while its exact attachment/session is
+// active in this daemon generation. The boolean distinguishes an observed
+// empty native title from a connection that has not announced one.
+func (e *AttachmentEngine) LiveNativeTitle(id string) (string, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	name = strings.TrimSpace(name)
-	snapshot, attachment, err := e.currentAttachment(id)
+	snapshot, err := e.store.Read()
 	if err != nil {
-		return ManagedAttachment{}, false, err
+		return "", false, err
 	}
-	if attachment.State != "attached" || attachment.DaemonGeneration != e.generation {
-		return ManagedAttachment{}, false, fmt.Errorf("%w: attachment %s is not active", ErrAttachmentConflict, id)
+	attachment, ok := snapshot.Catalog.Attachments[id]
+	observation, observed := e.titles[id]
+	if !ok || attachment.State != "attached" || attachment.DaemonGeneration != e.generation ||
+		!observed || observation.nativeSessionID != attachment.NativeSessionID {
+		return "", false, nil
 	}
-	// An empty first observation is still a real baseline for products whose
-	// native title is absent until the user explicitly renames the session.
-	// Later empty observations are ignored so a transient unreadable title
-	// cannot erase a previously corroborated name.
-	if name == "" && attachment.NativeNameSet {
-		return cloneAttachment(attachment), false, nil
-	}
-	changed := attachment.NativeNameSet && attachment.NativeName != name
-	if attachment.NativeNameSet && !changed {
-		return cloneAttachment(attachment), false, nil
-	}
-	attachment.NativeName, attachment.NativeNameSet = name, true
-	if changed {
-		attachment.Name = name
-	}
-	committed, err := e.commitAttachment(snapshot, attachment, nil, false)
-	return committed, changed, err
+	return observation.value, true, nil
 }
 
 // Authorize corroborates one hook or connector against the active attachment.
@@ -473,6 +467,9 @@ func (e *AttachmentEngine) commitAttachment(
 	debt *CleanupDebt,
 	clearDebt bool,
 ) (ManagedAttachment, error) {
+	if attachment.State != "attached" {
+		delete(e.titles, attachment.ID)
+	}
 	catalog := snapshot.Catalog
 	catalog.Host.Generation = e.generation
 	catalog.Host.AttachmentRevision++
@@ -491,6 +488,18 @@ func (e *AttachmentEngine) commitAttachment(
 		return ManagedAttachment{}, err
 	}
 	return cloneAttachment(committed.Catalog.Attachments[attachment.ID]), nil
+}
+
+func validNativeTitleObservation(value string) bool {
+	if len([]byte(value)) > 1024 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateAttachmentRequest(attachment ManagedAttachment) error {

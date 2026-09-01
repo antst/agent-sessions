@@ -79,12 +79,12 @@ func TestCodexResumeUsesInvocationCwdWhenRecordedWorkspaceMoved(t *testing.T) {
 func TestCodexManagedResumeInheritsStableIntentWithoutOverridingExplicitFields(t *testing.T) {
 	selected := daemonpkg.ManagedAttachment{
 		ID: "native", Product: "codex", ProfileIdentity: codexHome(),
-		NativeSessionID: "native", Name: "stable-name", Cwd: "/original",
+		NativeSessionID: "native", Cwd: "/original",
 		Groups: []string{"group-a", "group-b"}, LaunchIntent: "yolo", PermissionMode: "bypassPermissions",
 		State: "detached",
 	}
 	inherited := inheritCodexResumeRequest(launcher.CodexDaemonPrepareRequest{}, selected)
-	if inherited.Name != "stable-name" || strings.Join(inherited.Groups, ",") != "group-a,group-b" || inherited.ApprovalPolicy != "never" ||
+	if inherited.Name != "" || strings.Join(inherited.Groups, ",") != "group-a,group-b" || inherited.ApprovalPolicy != "never" ||
 		inherited.Sandbox != "danger-full-access" {
 		t.Fatalf("inherited Codex resume = %+v", inherited)
 	}

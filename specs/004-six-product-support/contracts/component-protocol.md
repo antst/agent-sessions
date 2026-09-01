@@ -32,7 +32,7 @@ fields are ignored only when the frame's version explicitly permits additive
 fields; authority never comes from an unknown field.
 
 The pinned daemon/client vocabulary revision is
-`agent-sessions.component.v1-r2`. `ProtocolVersion` remains `1`: no component
+`agent-sessions.component.v1-r1`. `ProtocolVersion` remains `1`: no component
 v1 client has been released independently, and every integration component is
 version-pinned and installed with its daemon. Doctor and tuple checks MUST
 verify the exact contract revision before crediting an integration. If clients

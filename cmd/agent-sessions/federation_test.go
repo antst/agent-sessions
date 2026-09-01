@@ -60,7 +60,7 @@ func TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation(t *testing.T)
 	catalog := snapshot.Catalog
 	catalog.Host.Host = "host-a"
 	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
-		ID: "parent", Product: "codex", NativeSessionID: "native-parent", Name: "parent",
+		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "default",
 		State: "attached", DaemonGeneration: catalog.Host.Generation,
 	}
@@ -164,7 +164,7 @@ func TestFederationSnapshotProjectsCurrentDaemonAttachmentsAndLanes(t *testing.T
 	catalog := snapshot.Catalog
 	catalog.Host.Host = "host-a"
 	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
-		ID: "parent", Product: "codex", NativeSessionID: "native-parent", Name: "parent",
+		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
 		State: "attached", DaemonGeneration: catalog.Host.Generation,
 	}

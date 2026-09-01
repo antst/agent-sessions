@@ -46,7 +46,7 @@ Agent Sessions ACP lane selector. A bare or ambient DSH launch does not become
 managed merely because the plugin is installed.
 
 The bootstrap `component_version` is the separate shared wire revision
-`agent-sessions.component.v1-r2`; it is never populated with the DSH package
+`agent-sessions.component.v1-r1`; it is never populated with the DSH package
 version. The product tuple remains `0.1.2-alpha.3` metadata.
 
 Component admission has one writer. The central broker calls the durable

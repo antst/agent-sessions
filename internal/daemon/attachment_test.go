@@ -88,7 +88,7 @@ func TestAttachmentTransactionPreservesEveryProductEvidenceVariant(t *testing.T)
 			id := test.product + "-attachment"
 			prepared, err := engine.Prepare(context.Background(), ManagedAttachment{
 				ID: id, CapabilityHash: "capability", Product: test.product, ProfileIdentity: test.product + "-profile",
-				LaunchIntent: "fresh", Name: "worker", Cwd: "/workspace", Groups: []string{"project"}, PermissionMode: "default",
+				LaunchIntent: "fresh", Cwd: "/workspace", Groups: []string{"project"}, PermissionMode: "default",
 			})
 			active := mustActiveAttachments(t, engine)
 			if err != nil || prepared.State != "prepared" || !reflect.DeepEqual(prepared.ExpectedEvidence, test.expected) || len(active) != 0 {
@@ -273,26 +273,24 @@ func mustActiveAttachments(t *testing.T, engine *AttachmentEngine) []ManagedAtta
 	return attachments
 }
 
-func TestAttachmentRenameAndNativeNamePropagationRemainIndependent(t *testing.T) {
-	engine := activeAttachmentEngineForTest(t, "peer", "wrapper-name")
-	if renamed, err := engine.Rename("peer", "operator-alias"); err != nil || renamed.Name != "operator-alias" {
-		t.Fatalf("structured rename = %+v, %v", renamed, err)
+func TestAttachmentNativeTitleIsGenerationLocalAndNeverDurable(t *testing.T) {
+	engine := activeAttachmentEngineForTest(t, "peer")
+	if err := engine.ObserveNativeTitle("peer", "native-peer", "native-at-launch"); err != nil {
+		t.Fatal(err)
 	}
-	baseline, changed, err := engine.ObserveNativeName("peer", "native-at-launch")
-	if err != nil || changed || baseline.Name != "operator-alias" || !baseline.NativeNameSet || baseline.NativeName != "native-at-launch" {
-		t.Fatalf("native baseline = %+v, changed=%v, err=%v", baseline, changed, err)
+	if title, observed, err := engine.LiveNativeTitle("peer"); err != nil || !observed || title != "native-at-launch" {
+		t.Fatalf("live title = %q, observed=%v, err=%v", title, observed, err)
 	}
-	propagated, changed, err := engine.ObserveNativeName("peer", "renamed-natively")
-	if err != nil || !changed || propagated.Name != "renamed-natively" || propagated.NativeName != "renamed-natively" {
-		t.Fatalf("native rename = %+v, changed=%v, err=%v", propagated, changed, err)
+	restarted, err := NewAttachmentEngine(engine.store, 1, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	repeated, changed, err := engine.ObserveNativeName("peer", "renamed-natively")
-	if err != nil || changed || repeated.Name != "renamed-natively" {
-		t.Fatalf("repeated native name = %+v, changed=%v, err=%v", repeated, changed, err)
+	if title, observed, err := restarted.LiveNativeTitle("peer"); err != nil || observed || title != "" {
+		t.Fatalf("restarted title = %q, observed=%v, err=%v", title, observed, err)
 	}
 }
 
-func activeAttachmentEngineForTest(t *testing.T, id, name string) *AttachmentEngine {
+func activeAttachmentEngineForTest(t *testing.T, id string) *AttachmentEngine {
 	t.Helper()
 	state, err := OpenState(t.TempDir(), 16<<20)
 	if err != nil {
@@ -305,7 +303,7 @@ func activeAttachmentEngineForTest(t *testing.T, id, name string) *AttachmentEng
 	catalog := snapshot.Catalog
 	catalog.Host.Generation = 1
 	catalog.Attachments[id] = ManagedAttachment{
-		ID: id, Product: "codex", Name: name, State: "attached", DaemonGeneration: 1,
+		ID: id, Product: "codex", NativeSessionID: "native-" + id, State: "attached", DaemonGeneration: 1,
 	}
 	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)

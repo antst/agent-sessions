@@ -820,9 +820,6 @@ func prepareSessionAnnouncement(
 	if attachment.Cwd != "" && attachment.Cwd != announce.Cwd {
 		return false, unauthorizedError("session announce conflicts with durable cwd")
 	}
-	if attachment.NativeNameSet && attachment.NativeName != announce.NativeName {
-		return false, unauthorizedError("session announce conflicts with durable native name")
-	}
 	if existing, ok := catalog.ComponentSessions[binding.AttachmentID]; ok {
 		if existing.State == daemon.ComponentSessionClosed {
 			if existing.NativeSessionID != announce.NativeSessionID {

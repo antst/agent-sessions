@@ -18,12 +18,12 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 		Host: daemonpkg.HostRuntime{Host: "host-a", Release: "0.3.0", ServiceState: "running", Generation: 7},
 		Attachments: map[string]daemonpkg.ManagedAttachment{
 			"local-peer": {
-				ID: "local-peer", Product: "codex", NativeSessionID: "native-peer", Name: "reviewer",
+				ID: "local-peer", Product: "codex", NativeSessionID: "native-peer",
 				Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
 				State: "attached", DaemonGeneration: 7,
 				CapabilityHash: secret, Evidence: daemonpkg.NativeEvidence{Executable: secret},
 			},
-			"detached": {ID: "detached", Product: "claude", Name: secret, State: "detached"},
+			"detached": {ID: "detached", Product: "claude", State: "detached"},
 		},
 		Lanes: map[string]daemonpkg.Lane{
 			"local-lane": {

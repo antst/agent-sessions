@@ -66,9 +66,6 @@ func (c *hostCoordinator) prepareGrok(
 			request.SessionID = selected.NativeSessionID
 			request.Cwd = selected.Cwd
 			request.LateBoundResume = false
-			if !request.NameSpecified {
-				request.Name = selected.Name
-			}
 			if !request.GroupsSpecified {
 				request.Groups = append([]string(nil), selected.Groups...)
 			}
@@ -140,7 +137,7 @@ func (c *hostCoordinator) prepareGrok(
 	}
 	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
 		ID: request.SessionID, CapabilityHash: daemonpkg.CapabilityDigest(capability), Product: "grok",
-		ProfileIdentity: grokProfileRoot(), NativeSessionID: request.SessionID, Name: grokPeerName(request),
+		ProfileIdentity: grokProfileRoot(), NativeSessionID: request.SessionID,
 		Cwd: request.Cwd, Groups: append([]string(nil), request.Groups...), PermissionMode: request.PermissionMode,
 	})
 	if err != nil {
@@ -154,10 +151,9 @@ func (c *hostCoordinator) prepareGrok(
 	return launcher.GrokDaemonPrepareResult{SessionID: prepared.ID, Cwd: request.Cwd, LeaderSocket: leaderSocket}, nil
 }
 
-// resolveGrokDaemonResume restores the legacy launcher contract in which an
-// Agent Sessions peer name remains a stable resume selector even when Grok's
-// native conversation title differs. Unknown selectors are intentionally left
-// to Grok's established native title resolver.
+// resolveGrokDaemonResume accepts only stable daemon/native identifiers. A
+// mutable product title is resolved by Grok itself and is never a daemon-owned
+// selector.
 func resolveGrokDaemonResume(
 	runtime *daemonpkg.Runtime,
 	request launcher.GrokDaemonPrepareRequest,
@@ -170,8 +166,7 @@ func resolveGrokDaemonResume(
 	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
 	for _, attachment := range snapshot.Catalog.Attachments {
 		exactID := attachment.NativeSessionID == selector || attachment.ID == selector
-		nameInCwd := attachment.Name == selector && attachment.Cwd == request.Cwd
-		if attachment.Product != "grok" || attachment.ProfileIdentity != grokProfileRoot() || (!exactID && !nameInCwd) {
+		if attachment.Product != "grok" || attachment.ProfileIdentity != grokProfileRoot() || !exactID {
 			continue
 		}
 		if attachment.State != "detached" {
@@ -194,16 +189,6 @@ func grokEvidence(pending *grokPending) daemonpkg.NativeEvidence {
 		Executable: pending.request.GrokBin, SocketPath: pending.leaderSocket,
 		ThreadID: pending.request.SessionID,
 	}
-}
-
-func grokPeerName(request launcher.GrokDaemonPrepareRequest) string {
-	if value := strings.TrimSpace(request.Name); value != "" {
-		return value
-	}
-	if request.LateBoundResume && strings.TrimSpace(request.ResumeTarget) != "" {
-		return request.ResumeTarget
-	}
-	return "grok-" + request.SessionID[:8]
 }
 
 func grokProfileRoot() string {
@@ -313,7 +298,9 @@ func (c *hostCoordinator) observeDurableGrokNativeName(runtime *daemonpkg.Runtim
 	}
 	name, err := observer.SessionName(c.ctx)
 	if err == nil {
-		_, _, _ = runtime.Attachments().ObserveNativeName(attachment.ID, bridge.NormalizePeerName(name))
+		_ = runtime.Attachments().ObserveNativeTitle(
+			attachment.ID, attachment.NativeSessionID, bridge.NormalizePeerName(name),
+		)
 	}
 }
 
@@ -342,7 +329,9 @@ func (c *hostCoordinator) observeGrokNativeName(runtime *daemonpkg.Runtime, id s
 	}
 	name, err := pending.observer.SessionName(c.ctx)
 	if err == nil {
-		_, _, _ = runtime.Attachments().ObserveNativeName(id, bridge.NormalizePeerName(name))
+		_ = runtime.Attachments().ObserveNativeTitle(
+			id, pending.request.SessionID, bridge.NormalizePeerName(name),
+		)
 	}
 }
 

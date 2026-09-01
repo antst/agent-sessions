@@ -66,7 +66,7 @@ func TestOpenCodeBuildLaunchIsPluginTUIAndSecretIsTransient(t *testing.T) {
 			componentRevision = variable.Value
 		}
 	}
-	if componentRevision != "agent-sessions.component.v1-r2" {
+	if componentRevision != "agent-sessions.component.v1-r1" {
 		t.Fatalf("component bootstrap revision = %q", componentRevision)
 	}
 	if _, err := json.Marshal(command); err == nil {

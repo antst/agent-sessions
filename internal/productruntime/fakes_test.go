@@ -30,12 +30,6 @@ func (fakeMessageDriver) Deliver(context.Context, daemon.ManagedAttachment, Deli
 	return NativeAcceptance{}, nil
 }
 
-type fakeNativeTitleProjector struct{}
-
-func (fakeNativeTitleProjector) ProjectNativeTitle(context.Context, daemon.ManagedAttachment) (NativeTitleProjection, error) {
-	return NativeTitleProjection{NativeSessionID: "native", Title: "title"}, nil
-}
-
 type fakeLaneDriver struct{}
 
 func (fakeLaneDriver) Capabilities() LaneCapabilitySet { return LaneCapabilitySet{} }

@@ -74,7 +74,7 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 		return productruntime.RuntimeProduct{}, err
 	}
 	return productruntime.RuntimeProduct{
-		Descriptor: descriptor, Peer: peer, Message: message, NativeTitle: peer,
+		Descriptor: descriptor, Peer: peer, Message: message,
 		Lane: lane, Parent: parent, Doctor: doctor,
 	}, nil
 }

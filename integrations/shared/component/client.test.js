@@ -254,7 +254,7 @@ test("missing heartbeat acknowledgments force bounded reconnect", async (t) => {
 });
 
 test("rename contract revision and operation namespaces are exact", async () => {
-  assert.equal(CONTRACT_REVISION, "agent-sessions.component.v1-r2");
+  assert.equal(CONTRACT_REVISION, "agent-sessions.component.v1-r1");
   assert.equal(require("./protocol.js").FRAME_TYPES.size, 21);
   assert.equal(validateContractRevision(CONTRACT_REVISION), true);
   assert.throws(() => validateContractRevision("agent-sessions.component.v1-r0"), /unsupported/i);

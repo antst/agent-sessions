@@ -47,7 +47,7 @@ printf '%%s\n' '{"session_id":"%s","result":"mcp result"}'
 	}
 	catalog := snapshot.Catalog
 	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
-		ID: "parent", Product: "codex", NativeSessionID: "native-parent", Name: "parent", Cwd: root,
+		ID: "parent", Product: "codex", NativeSessionID: "native-parent", Cwd: root,
 		PermissionMode: "bypassPermissions", State: "attached", DaemonGeneration: catalog.Host.Generation,
 	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
@@ -142,7 +142,7 @@ func TestMessagingToolsAddressBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 			catalog := snapshot.Catalog
 			catalog.Host.Host = "host-a"
 			catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
-				ID: "parent", Product: "codex", NativeSessionID: "native-parent", Name: "parent",
+				ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 				Cwd: "/work", PermissionMode: "bypassPermissions",
 				State: "attached", DaemonGeneration: catalog.Host.Generation,
 			}
@@ -198,7 +198,7 @@ func TestMessagingToolsAddressBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 	}
 }
 
-func TestUnifiedRenameSessionChangesPublicAttachmentName(t *testing.T) {
+func TestUnifiedRenameNeverCreatesADurableDaemonAlias(t *testing.T) {
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -210,24 +210,28 @@ func TestUnifiedRenameSessionChangesPublicAttachmentName(t *testing.T) {
 	}
 	catalog := snapshot.Catalog
 	catalog.Attachments["peer"] = daemonpkg.ManagedAttachment{
-		ID: "peer", Product: "claude", NativeSessionID: "native", Name: "misspelled",
+		ID: "peer", Product: "claude", NativeSessionID: "native",
 		State: "attached", DaemonGeneration: catalog.Host.Generation,
 	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)
 	}
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
-	result, err := coordinator.callLocalTool(context.Background(), runtime, "peer", "rename_session", map[string]any{
+	_, err = coordinator.callLocalTool(context.Background(), runtime, "peer", "rename_session", map[string]any{
 		"name": "Builder Corrected",
 	})
+	if err == nil || !strings.Contains(err.Error(), "native rename driver") {
+		t.Fatalf("rename error = %v", err)
+	}
+	current, err := runtime.State().Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Data.(map[string]any)["name"] != "Builder-Corrected" {
-		t.Fatalf("rename result = %#v", result.Data)
+	encoded, err := json.Marshal(current.Catalog.Attachments["peer"])
+	if err != nil {
+		t.Fatal(err)
 	}
-	attachment, active, err := runtime.Attachments().ActiveAttachment("peer")
-	if err != nil || !active || attachment.Name != "Builder-Corrected" {
-		t.Fatalf("renamed attachment = %+v active=%v err=%v", attachment, active, err)
+	if strings.Contains(string(encoded), `"name"`) || strings.Contains(string(encoded), `"native_name"`) {
+		t.Fatalf("attachment retained a durable title: %s", encoded)
 	}
 }

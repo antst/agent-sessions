@@ -110,7 +110,7 @@ Implemented clauses:
 
 The earlier 21-frame rename vocabulary was reviewed at `1dd16eb...` and
 materialized as `039d250...`. The current shared client is pinned to
-`agent-sessions.component.v1-r2`, whose empty-capable title-observation
+`agent-sessions.component.v1-r1`, whose empty-capable title-observation
 amendment requires its own re-freeze review. This does not invent product
 acceptance: T038's product-local rename evidence comes from the exact
 OpenCode/Kilo Go and JavaScript regressions above; central, r2, and physical

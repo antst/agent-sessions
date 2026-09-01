@@ -26,11 +26,11 @@ func TestQwenDurableOwnerHelper(t *testing.T) {
 
 func TestQwenManagedResumeInheritsStableIntentWithoutOverridingExplicitFields(t *testing.T) {
 	selected := daemonpkg.ManagedAttachment{
-		ID: "native", NativeSessionID: "native", Name: "stable-name", Cwd: "/original",
+		ID: "native", NativeSessionID: "native", Cwd: "/original",
 		Groups: []string{"group-a", "group-b"}, LaunchIntent: "yolo", PermissionMode: "bypassPermissions",
 	}
 	inherited := inheritQwenResumeRequest(launcher.QwenDaemonPrepareRequest{}, selected)
-	if inherited.SessionID != "native" || inherited.Name != "stable-name" || inherited.Cwd != "/original" ||
+	if inherited.SessionID != "native" || inherited.Name != "" || inherited.Cwd != "/original" ||
 		strings.Join(inherited.Groups, ",") != "group-a,group-b" || inherited.LaunchPreference != "yolo" ||
 		inherited.ExpectedInitialMode != "yolo" {
 		t.Fatalf("inherited Qwen resume = %+v", inherited)

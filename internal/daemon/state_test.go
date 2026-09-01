@@ -95,7 +95,7 @@ func TestStateStoreRoundTripsEveryDurableEntityAndRetainsCleanupDebt(t *testing.
 	catalog := Catalog{
 		Host: HostRuntime{User: "1000", Host: "pdev", Release: "candidate", Generation: 7, Endpoint: "/run/agent-sessions.sock", ServiceState: "running"},
 		Attachments: map[string]ManagedAttachment{
-			"attachment": {ID: "attachment", Product: "codex", NativeSessionID: "thread", Name: "worker", Cwd: "/workspace", Groups: []string{"project"}, PermissionMode: "default", State: "attached", Evidence: NativeEvidence{Process: procinfo.Identity{PID: 42, Start: "start", StrongStart: "strong"}, Ancestry: []procinfo.Identity{{PID: 41, Start: "parent", StrongStart: "parent-strong"}}, Executable: "/bin/codex", ThreadID: "thread"}},
+			"attachment": {ID: "attachment", Product: "codex", NativeSessionID: "thread", Cwd: "/workspace", Groups: []string{"project"}, PermissionMode: "default", State: "attached", Evidence: NativeEvidence{Process: procinfo.Identity{PID: 42, Start: "start", StrongStart: "strong"}, Ancestry: []procinfo.Identity{{PID: 41, Start: "parent", StrongStart: "parent-strong"}}, Executable: "/bin/codex", ThreadID: "thread"}},
 		},
 		Deliveries: map[string]Delivery{
 			"message": {ID: "message", Sender: "source", Destinations: []string{"target"}, Groups: []string{"project"}, State: "accepted"},

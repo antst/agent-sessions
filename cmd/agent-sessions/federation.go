@@ -84,7 +84,7 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 		}
 		instance := attachmentFederationInstance(attachment)
 		peer, buildErr := federationpkg.BuildPeer(
-			hostID, hostName, attachment.ID, attachment.Name, "idle", attachment.Cwd,
+			hostID, hostName, attachment.ID, c.attachmentDisplayName(runtime, attachment), "idle", attachment.Cwd,
 			attachment.Product, attachment.PermissionMode, instance, "", groups,
 		)
 		if buildErr != nil {
@@ -135,7 +135,7 @@ func (c *hostCoordinator) localFederationPeer(runtime *daemonpkg.Runtime, attach
 	}
 	instance := attachmentFederationInstance(attachment)
 	return federationpkg.BuildPeer(
-		hostID, hostName, attachment.ID, attachment.Name, "idle", attachment.Cwd,
+		hostID, hostName, attachment.ID, c.attachmentDisplayName(runtime, attachment), "idle", attachment.Cwd,
 		attachment.Product, attachment.PermissionMode, instance, "", groups,
 	)
 }
@@ -365,7 +365,7 @@ func (c *hostCoordinator) runFederatedLane(
 	}
 	parent := daemonpkg.ManagedAttachment{
 		ID: request.Source.ID, Product: request.Source.Entrypoint,
-		NativeSessionID: request.Source.SessionID, Name: request.Source.DisplayName,
+		NativeSessionID: request.Source.SessionID,
 		// A source peer's cwd belongs to another host and may use another OS's
 		// path namespace. An omitted -C inherits the destination service cwd;
 		// an explicit -C is resolved by startLane against that local base.

@@ -82,7 +82,7 @@ extension-defined arguments can inject model input before the receipt-backed
 Doctor checks the `omp` executable, exact version 18.0.11, required RPC,
 extension, resume, and approval-mode options, the readable managed extension
 asset, the exact exported shared component contract revision
-`agent-sessions.component.v1-r2`, and an injected central
+`agent-sessions.component.v1-r1`, and an injected central
 component-authority readiness check.
 Product-local Go and native-extension tests exercise ready
 negotiation, continuing terminal events, raw steer preservation, permission

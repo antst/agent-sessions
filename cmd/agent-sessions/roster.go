@@ -118,6 +118,15 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 		snapshot, runtime.Generation(), hostName, daemonSetting("AGENT_SESSIONS_HUB") != "", connected,
 		remoteHosts, remotePeers,
 	)
+	for index := range report.Local {
+		entry := &report.Local[index]
+		if entry.Kind != "peer" || !entry.Live {
+			continue
+		}
+		if title, observed, titleErr := runtime.Attachments().LiveNativeTitle(entry.ID); titleErr == nil && observed && title != "" {
+			entry.Name = title
+		}
+	}
 	return json.Marshal(report)
 }
 
@@ -149,7 +158,7 @@ func buildOperatorRoster(
 		}
 		report.Local = append(report.Local, operatorRosterEntry{
 			Kind: "peer", Scope: "local", ID: attachment.ID, LocalID: attachment.ID,
-			NativeSessionID: attachment.NativeSessionID, Name: operatorDefaultString(attachment.Name, attachment.ID),
+			NativeSessionID: attachment.NativeSessionID, Name: attachment.ID,
 			HostID: host.Host, HostName: hostName, Product: attachment.Product, State: attachment.State,
 			Live: attachment.State == "attached" && attachment.DaemonGeneration == generation,
 			Cwd:  attachment.Cwd, Groups: operatorLocalGroups(host.Host, attachment.ID, attachment.Groups),

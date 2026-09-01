@@ -113,15 +113,6 @@ type NativeName struct {
 	NativeConfirmed bool
 }
 
-// NativeTitleProjection is a secret-free live read of the product-owned title.
-// An empty Title is a confirmed product state and is distinct from a typed
-// unavailable/stale error. NativeSessionID always names the exact observed
-// native session so callers can reject cross-session projections.
-type NativeTitleProjection struct {
-	NativeSessionID string
-	Title           string
-}
-
 type DeliveryMode string
 
 const (

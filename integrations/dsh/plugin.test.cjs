@@ -207,7 +207,7 @@ test("ACP lane policy rejects unknown presets and peer/lane role conflict", asyn
     AGENT_SESSIONS_ATTACHMENT_ID: "attachment",
     AGENT_SESSIONS_BOOTSTRAP_CAPABILITY_ID: "capability",
     AGENT_SESSIONS_BOOTSTRAP_VALUE: "secret",
-    AGENT_SESSIONS_COMPONENT_VERSION: "agent-sessions.component.v1-r2",
+    AGENT_SESSIONS_COMPONENT_VERSION: "agent-sessions.component.v1-r1",
   }), /cannot be both/);
 });
 

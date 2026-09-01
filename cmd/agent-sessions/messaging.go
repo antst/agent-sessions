@@ -94,6 +94,7 @@ type localToolResult struct {
 type localPeerTarget struct {
 	attachment *daemonpkg.ManagedAttachment
 	lane       *laneActor
+	name       string
 }
 
 type messagePeerTarget struct {
@@ -146,9 +147,9 @@ func (c *hostCoordinator) callLocalToolWithID(
 		}
 		return localToolResult{Text: text, Data: map[string]any{"peers": publicMessageTargets(peers)}}, nil
 	case "identity":
-		return localToolResult{Text: source.Name + " — session:" + source.ID, Data: publicAttachment(source)}, nil
+		displayName := c.attachmentDisplayName(runtime, source)
+		return localToolResult{Text: displayName + " — session:" + source.ID, Data: publicAttachment(runtime, source)}, nil
 	case "rename_session":
-		name := sessiontools.NormalizePeerName(mapString(args, "name"))
 		if strings.TrimSpace(mapString(args, "name")) == "" {
 			return localToolResult{}, errors.New("name is required")
 		}
@@ -157,14 +158,7 @@ func (c *hostCoordinator) callLocalToolWithID(
 		} else if !active {
 			return localToolResult{}, errors.New("lane names are managed by the lane lifecycle")
 		}
-		renamed, err := runtime.Attachments().Rename(source.ID, name)
-		if err != nil {
-			return localToolResult{}, err
-		}
-		return localToolResult{
-			Text: "Peer session renamed to " + renamed.Name + ".",
-			Data: map[string]any{"name": renamed.Name, "session_id": renamed.NativeSessionID, "id": renamed.ID},
-		}, nil
+		return localToolResult{}, errors.New("native rename driver is not composed")
 	case "send_message":
 		message := strings.TrimSpace(mapString(args, "message"))
 		if message == "" {
@@ -253,7 +247,7 @@ func (c *hostCoordinator) routeMessageFrame(
 		return federationpkg.AgentFrameResult{}, err
 	}
 	sourcePeer := federationpkg.Peer{
-		ID: source.ID, SessionID: source.NativeSessionID, Name: source.Name,
+		ID: source.ID, SessionID: source.NativeSessionID, Name: c.attachmentDisplayName(runtime, source),
 		Product: source.Product, Cwd: source.Cwd, PermissionMode: source.PermissionMode,
 		Groups: sourceGroups,
 	}
@@ -493,7 +487,7 @@ func (c *hostCoordinator) activeLaneAttachment(id string) (daemonpkg.ManagedAtta
 	}
 	return daemonpkg.ManagedAttachment{
 		ID: actor.id, Product: actor.product, NativeSessionID: actor.nativeID,
-		Name: actor.name, Cwd: actor.cwd, Groups: append([]string(nil), actor.groups...),
+		Cwd: actor.cwd, Groups: append([]string(nil), actor.groups...),
 		PermissionMode: actor.permission, State: "attached",
 	}, true
 }
@@ -518,7 +512,9 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	targets := make([]localPeerTarget, 0, len(attachments)+len(c.lanes))
 	for index := range attachments {
 		attachment := attachments[index]
-		targets = append(targets, localPeerTarget{attachment: &attachment})
+		targets = append(targets, localPeerTarget{
+			attachment: &attachment, name: c.attachmentDisplayName(runtime, attachment),
+		})
 	}
 	c.mu.Lock()
 	for _, lane := range c.lanes {
@@ -540,7 +536,7 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 
 func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg.Runtime, source daemonpkg.ManagedAttachment, target localPeerTarget, messageID, body string) error {
 	if target.attachment != nil {
-		return c.deliverLocal(ctx, source, *target.attachment, messageID, body)
+		return c.deliverLocal(ctx, runtime, source, *target.attachment, messageID, body)
 	}
 	if target.lane == nil {
 		return errors.New("target disappeared")
@@ -558,7 +554,8 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 		}
 	}
 	message, err := sessiontools.WrapPeerMessage(
-		source.Product, "session:"+source.ID, source.NativeSessionID, source.Name, mode,
+		source.Product, "session:"+source.ID, source.NativeSessionID,
+		c.attachmentDisplayName(runtime, source), mode,
 		messageID, sentAt.Format(time.RFC3339Nano), body,
 	)
 	if err != nil {
@@ -570,7 +567,12 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 
 func publicLocalTarget(target localPeerTarget) map[string]any {
 	if target.attachment != nil {
-		return publicAttachment(*target.attachment)
+		return map[string]any{
+			"id": target.attachment.ID, "session_id": target.attachment.NativeSessionID,
+			"name": target.name, "product": target.attachment.Product, "status": "live",
+			"cwd": target.attachment.Cwd, "groups": append([]string(nil), target.attachment.Groups...),
+			"permission_mode": target.attachment.PermissionMode,
+		}
 	}
 	if target.lane == nil {
 		return map[string]any{}
@@ -632,17 +634,13 @@ func (c *hostCoordinator) visiblePeers(
 			visible = append(visible, candidate)
 		}
 	}
-	sort.Slice(visible, func(i, j int) bool {
-		if visible[i].Name != visible[j].Name {
-			return visible[i].Name < visible[j].Name
-		}
-		return visible[i].ID < visible[j].ID
-	})
+	sort.Slice(visible, func(i, j int) bool { return visible[i].ID < visible[j].ID })
 	return visible, nil
 }
 
 func (c *hostCoordinator) deliverLocal(
 	ctx context.Context,
+	runtime *daemonpkg.Runtime,
 	source, target daemonpkg.ManagedAttachment,
 	messageID, body string,
 ) error {
@@ -651,7 +649,8 @@ func (c *hostCoordinator) deliverLocal(
 		mode = "bypass"
 	}
 	message, err := sessiontools.WrapPeerMessage(
-		source.Product, "session:"+source.ID, source.NativeSessionID, source.Name, mode,
+		source.Product, "session:"+source.ID, source.NativeSessionID,
+		c.attachmentDisplayName(runtime, source), mode,
 		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
 	)
 	if err != nil {
@@ -824,13 +823,28 @@ func requestedLocalTargets(args map[string]any) ([]string, error) {
 	return targets, nil
 }
 
-func publicAttachment(attachment daemonpkg.ManagedAttachment) map[string]any {
+func publicAttachment(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) map[string]any {
+	name := attachment.ID
+	if runtime != nil {
+		if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
+			name = title
+		}
+	}
 	return map[string]any{
 		"id": attachment.ID, "session_id": attachment.NativeSessionID,
-		"name": attachment.Name, "product": attachment.Product, "status": "live",
+		"name": name, "product": attachment.Product, "status": "live",
 		"cwd": attachment.Cwd, "groups": append([]string(nil), attachment.Groups...),
 		"permission_mode": attachment.PermissionMode,
 	}
+}
+
+func (c *hostCoordinator) attachmentDisplayName(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) string {
+	if runtime != nil {
+		if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
+			return title
+		}
+	}
+	return attachment.ID
 }
 
 func groupsIntersect(left, right []string) bool {

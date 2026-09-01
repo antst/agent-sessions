@@ -406,7 +406,7 @@ func (c *hostCoordinator) prepareCodex(
 	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
 		ID: thread.ID, CapabilityHash: daemonpkg.CapabilityDigest(capability), Product: "codex",
 		ProfileIdentity: codexHome(), LaunchIntent: launchIntent,
-		NativeSessionID: thread.ID, Name: codexAttachmentName(request, thread), Cwd: cwd,
+		NativeSessionID: thread.ID, Cwd: cwd,
 		Groups: append([]string(nil), request.Groups...), PermissionMode: permission,
 	})
 	if err == nil {
@@ -421,7 +421,7 @@ func (c *hostCoordinator) prepareCodex(
 		}
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
-	_, _, _ = runtime.Attachments().ObserveNativeName(thread.ID, bridge.NormalizePeerName(thread.Name))
+	_ = runtime.Attachments().ObserveNativeTitle(thread.ID, thread.ID, bridge.NormalizePeerName(thread.Name))
 	c.startCodexOwnerMonitor(runtime, thread.ID, request.Owner)
 	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Cwd: cwd}, nil
 }
@@ -465,17 +465,7 @@ func inheritCodexResumeRequest(
 			request.Sandbox = ""
 		}
 	}
-	if strings.TrimSpace(selected.Name) != "" {
-		request.Name = selected.Name
-	}
 	return request
-}
-
-func codexAttachmentName(request launcher.CodexDaemonPrepareRequest, thread bridge.CodexNativeThread) string {
-	if name := strings.TrimSpace(request.Name); name != "" {
-		return name
-	}
-	return thread.Name
 }
 
 func codexResumeCwd(request launcher.CodexDaemonPrepareRequest, _ bridge.CodexNativeThread) string {
@@ -601,7 +591,9 @@ func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent)
 	runtime := c.runtime
 	c.mu.Unlock()
 	if runtime != nil {
-		_, _, _ = runtime.Attachments().ObserveNativeName(event.ThreadID, bridge.NormalizePeerName(event.Name))
+		_ = runtime.Attachments().ObserveNativeTitle(
+			event.ThreadID, event.ThreadID, bridge.NormalizePeerName(event.Name),
+		)
 	}
 }
 

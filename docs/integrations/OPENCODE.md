@@ -29,7 +29,7 @@ An ambient plugin stays inert without the one-time wrapper bootstrap. A bare
 OpenCode launch is therefore an unmanaged opt-out. A flagless TUI without the
 installed plugin cannot be attached retroactively and requires restart.
 Managed launch claims the exact shared component revision
-`agent-sessions.component.v1-r2`; the independent product integration version
+`agent-sessions.component.v1-r1`; the independent product integration version
 is not accepted as a protocol credential.
 
 The bootstrap intentionally does not export process-start or strong-start

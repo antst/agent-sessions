@@ -3,7 +3,7 @@
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 const VERSION = 1;
-const CONTRACT_REVISION = "agent-sessions.component.v1-r2";
+const CONTRACT_REVISION = "agent-sessions.component.v1-r1";
 const DAEMON_RENAME_PREFIX = "daemon.rename.";
 const COMPONENT_RENAME_PREFIX = "component.rename.";
 const DEFAULT_LIMITS = Object.freeze({

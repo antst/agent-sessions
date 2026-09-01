@@ -68,7 +68,7 @@ An ambient plugin without a prepared one-time bootstrap remains inert. A
 foreign/shared Kilo daemon and an embedded-mode TUI are not adopted as managed
 peers.
 Managed launch claims the exact shared component revision
-`agent-sessions.component.v1-r2`; the independent product integration version
+`agent-sessions.component.v1-r1`; the independent product integration version
 is not accepted as a protocol credential.
 
 The bootstrap intentionally omits declared process-start and strong-start

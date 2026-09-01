@@ -83,9 +83,6 @@ type ManagedAttachment struct {
 	ProfileIdentity    string         `json:"profile_identity,omitempty"`
 	LaunchIntent       string         `json:"launch_intent,omitempty"`
 	NativeSessionID    string         `json:"native_session_id,omitempty"`
-	Name               string         `json:"name,omitempty"`
-	NativeName         string         `json:"native_name,omitempty"`
-	NativeNameSet      bool           `json:"native_name_set,omitempty"`
 	NativeProfileRoot  string         `json:"native_profile_root,omitempty"`
 	Cwd                string         `json:"cwd,omitempty"`
 	Groups             []string       `json:"groups,omitempty"`

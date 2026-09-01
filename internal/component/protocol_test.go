@@ -122,7 +122,7 @@ func TestProtocolPayloadValidation(t *testing.T) {
 }
 
 func TestRenameFrameNamespacesAndContractRevision(t *testing.T) {
-	if ProtocolVersion != 1 || ContractRevision != "agent-sessions.component.v1-r2" {
+	if ProtocolVersion != 1 || ContractRevision != "agent-sessions.component.v1-r1" {
 		t.Fatalf("component contract = wire %d / %q", ProtocolVersion, ContractRevision)
 	}
 	if err := ValidateContractRevision(ContractRevision); err != nil {
