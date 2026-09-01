@@ -300,8 +300,8 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
 - **FR-023**: Every accepted federation client MUST receive the same complete
   roster. The protocol MUST NOT contain a binary-compatibility marker,
   per-client product filter, empty-capability product inference, downgrade, or
-  partial admission path. Prospective roster amplification MUST be rejected
-  before last-good snapshot replacement without disconnecting incumbents.
+  partial admission path. A hello registers immediately, a same-host reconnect
+  replaces the old socket, and a snapshot directly replaces the live peer map.
 - **FR-024**: The existing trusted-network federation assumption MUST be stated
   explicitly. TLS/authentication and Windows support are outside this feature.
 - **FR-025**: Installation and removal MUST derive deterministic plans from
@@ -326,8 +326,8 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   permission, recovery, installation, or federation behavior.
 - **FR-030**: Hub tests MUST exercise the live `internal/federation` hub rather
   than a legacy implementation and MUST include hostile malformed-frame fuzz,
-  exact mismatch/N+1 rejection, identical complete rosters, prospective roster
-  amplification, opaque capability, and generation-fencing cases.
+  exact mismatch rejection, identical complete rosters, opaque capability,
+  reconnect/resend, and graceful shutdown-drain cases.
 - **FR-031**: macOS host and hub services MUST receive the same configured
   product and federation environment as Linux services, subject to platform
   path normalization and AF_UNIX limits.

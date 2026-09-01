@@ -29,7 +29,7 @@ func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemon
 	federationpkg.RuntimeVersion = version
 	return daemonpkg.NewFederation(federationpkg.EmbeddedHostOptions{
 		Hub: hub, HostID: hostID, HostName: hostName, Capabilities: capabilities,
-		Generation: runtime.Generation(), Build: version,
+		Build:  version,
 		Logger: log.New(os.Stderr, "agent-sessions federation: ", log.LstdFlags|log.Lmicroseconds),
 		Snapshot: func(_ context.Context) ([]federationpkg.Peer, error) {
 			return c.federationSnapshot(runtime, hostID, hostName)
@@ -258,7 +258,6 @@ func (c *hostCoordinator) handleRemoteLaneCommand(
 		Parent: federationpkg.ParentContext{
 			HostID: source.HostID, SessionID: source.SessionID, Product: source.Entrypoint,
 			InstanceID: source.InstanceID, Groups: append([]string(nil), source.Groups...),
-			AlwaysApprove:  source.PermissionMode == "bypassPermissions" || source.PermissionMode == "bypass",
 			PermissionMode: source.PermissionMode,
 		},
 		TargetHostID: strings.TrimSpace(envelope.Host), Product: envelope.Product, Capability: capability,

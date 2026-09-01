@@ -38,7 +38,6 @@ type EmbeddedHostOptions struct {
 	HostID            string
 	HostName          string
 	Capabilities      []string
-	Generation        uint64
 	Build             string
 	ScanInterval      time.Duration
 	HeartbeatInterval time.Duration
@@ -84,9 +83,15 @@ type deliveryOutcome struct {
 	err error
 }
 
+type pendingDelivery struct {
+	message Message
+	done    chan deliveryOutcome
+	sent    *wireConn
+}
+
 // EmbeddedHost is the actual outbound federation state machine owned by one
 // daemon. It owns reconnects, remote rosters, delivery acknowledgements and
-// deduplication, and remote lane streams.
+// remote lane streams.
 type EmbeddedHost struct {
 	options EmbeddedHostOptions
 	logger  *log.Logger
@@ -99,7 +104,10 @@ type EmbeddedHost struct {
 	localChanged chan struct{}
 
 	deliveryMu        sync.Mutex
-	pendingDeliveries map[string]chan deliveryOutcome
+	pendingDeliveries map[string]*pendingDelivery
+	workMu            sync.Mutex
+	stopping          bool
+	accepted          sync.WaitGroup
 
 	laneMu       sync.Mutex
 	pendingLanes map[string]*pendingLane
@@ -145,7 +153,7 @@ func NewEmbeddedHost(options EmbeddedHostOptions) (*EmbeddedHost, error) {
 		logger:  defaultLogger(options.Logger),
 		local:   map[string]Peer{}, remote: map[string]Peer{}, remoteHosts: map[string]Host{},
 		localChanged:      make(chan struct{}, 1),
-		pendingDeliveries: map[string]chan deliveryOutcome{},
+		pendingDeliveries: map[string]*pendingDelivery{},
 		pendingLanes:      map[string]*pendingLane{}, laneRuns: map[string]*laneRun{},
 	}, nil
 }
@@ -158,8 +166,10 @@ func (h *EmbeddedHost) Run(ctx context.Context) error {
 	}
 	defer func() {
 		h.setNetwork(nil)
+		h.failPendingDeliveries("federation host stopped")
 		h.clearRemote()
 	}()
+	defer h.stopAndDrain(2 * time.Second)
 	if h.options.Hub == "" {
 		<-ctx.Done()
 		return nil
@@ -206,7 +216,7 @@ func (h *EmbeddedHost) runHubSession(ctx context.Context) error {
 	defer func() { _ = conn.Close() }()
 	wire := newWireConn(conn)
 	if err := wire.Send(Message{
-		Type: "hello", Version: ProtocolVersion, Build: h.options.Build, Generation: h.options.Generation,
+		Type: "hello", Version: ProtocolVersion, Build: h.options.Build,
 		HostID: h.options.HostID, HostName: h.options.HostName,
 		Capabilities: append([]string(nil), h.options.Capabilities...),
 	}); err != nil {
@@ -220,11 +230,12 @@ func (h *EmbeddedHost) runHubSession(ctx context.Context) error {
 	if !handshakeReady {
 		return nil
 	}
-	h.setNetwork(wire)
 	previous := h.localSnapshot()
 	if err := wire.Send(Message{Type: "snapshot", Peers: previous}); err != nil {
 		return err
 	}
+	h.setNetwork(wire)
+	h.resendPendingDeliveries(wire)
 	h.logger.Printf("connected to hub %s as %s", h.options.Hub, h.options.HostID)
 	return h.serveHubSession(ctx, wire, readErr, lastHubActivity, previous)
 }
@@ -321,9 +332,6 @@ func (h *EmbeddedHost) refreshLocal(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(peers) > maxSnapshotPeers {
-		return fmt.Errorf("embedded federation snapshot exceeds peer count limit %d", maxSnapshotPeers)
-	}
 	next := make(map[string]Peer, len(peers))
 	for _, peer := range peers {
 		if err := validateLocalPeer(peer, h.options.HostID); err != nil {
@@ -359,7 +367,6 @@ func (h *EmbeddedHost) setNetwork(wire *wireConn) {
 	h.network = wire
 	h.mu.Unlock()
 	if wire == nil {
-		h.failPendingDeliveries("hub is disconnected")
 		h.failPendingLanes("hub is disconnected")
 		h.cancelAllLaneRuns()
 	}
@@ -380,9 +387,6 @@ func (h *EmbeddedHost) handleHubMessage(message Message) error {
 	case "roster":
 		if message.Version != ProtocolVersion {
 			return errors.New("hub roster protocol is incompatible")
-		}
-		if len(message.Hosts) > maxRosterHosts || len(message.Peers) > maxRosterPeers {
-			return errors.New("hub roster exceeds protocol count bounds")
 		}
 		remoteHosts := make(map[string]Host, len(message.Hosts))
 		for _, host := range message.Hosts {
@@ -415,8 +419,7 @@ func (h *EmbeddedHost) handleHubMessage(message Message) error {
 		h.mu.Unlock()
 		return nil
 	case "group_deliver", "terminal_notice_deliver":
-		err := h.deliverInbound(message)
-		h.sendDeliveryOutcome(message, err)
+		h.handleInboundDelivery(message)
 		return nil
 	case "delivery_ack", "delivery_error":
 		h.completePendingDelivery(message)
@@ -501,14 +504,18 @@ func (h *EmbeddedHost) Send(ctx context.Context, source, target Peer, messageID,
 }
 
 func (h *EmbeddedHost) sendRemoteDelivery(ctx context.Context, message Message) error {
+	if !h.beginAcceptedWork() {
+		return errors.New("federation host is shutting down")
+	}
+	defer h.accepted.Done()
 	requestID, err := randomRequestID(h.options.HostID)
 	if err != nil {
 		return err
 	}
 	message.RequestID = requestID
-	done := make(chan deliveryOutcome, 1)
+	pending := &pendingDelivery{message: message, done: make(chan deliveryOutcome, 1)}
 	h.deliveryMu.Lock()
-	h.pendingDeliveries[requestID] = done
+	h.pendingDeliveries[requestID] = pending
 	h.deliveryMu.Unlock()
 	defer func() {
 		h.deliveryMu.Lock()
@@ -518,21 +525,80 @@ func (h *EmbeddedHost) sendRemoteDelivery(ctx context.Context, message Message) 
 	h.mu.RLock()
 	wire := h.network
 	h.mu.RUnlock()
-	if wire == nil {
-		return errors.New("hub is disconnected")
-	}
-	if err := wire.Send(message); err != nil {
-		return err
+	if wire != nil {
+		h.sendPendingDelivery(wire, pending)
 	}
 	timer := time.NewTimer(wireWriteTimeout)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case outcome := <-done:
+	case outcome := <-pending.done:
 		return outcome.err
 	case <-timer.C:
 		return errors.New("remote delivery acknowledgement timed out")
+	}
+}
+
+func (h *EmbeddedHost) sendPendingDelivery(wire *wireConn, pending *pendingDelivery) {
+	h.deliveryMu.Lock()
+	if pending.sent == wire {
+		h.deliveryMu.Unlock()
+		return
+	}
+	pending.sent = wire
+	h.deliveryMu.Unlock()
+	if err := wire.Send(pending.message); err != nil {
+		_ = wire.conn.Close()
+	}
+}
+
+func (h *EmbeddedHost) resendPendingDeliveries(wire *wireConn) {
+	h.deliveryMu.Lock()
+	pending := make([]*pendingDelivery, 0, len(h.pendingDeliveries))
+	for _, delivery := range h.pendingDeliveries {
+		pending = append(pending, delivery)
+	}
+	h.deliveryMu.Unlock()
+	for _, delivery := range pending {
+		h.sendPendingDelivery(wire, delivery)
+	}
+}
+
+func (h *EmbeddedHost) handleInboundDelivery(message Message) {
+	if !h.beginAcceptedWork() {
+		h.sendDeliveryOutcome(message, errors.New("federation host is shutting down"))
+		return
+	}
+	defer h.accepted.Done()
+	err := h.deliverInbound(message)
+	h.sendDeliveryOutcome(message, err)
+}
+
+func (h *EmbeddedHost) beginAcceptedWork() bool {
+	h.workMu.Lock()
+	defer h.workMu.Unlock()
+	if h.stopping {
+		return false
+	}
+	h.accepted.Add(1)
+	return true
+}
+
+func (h *EmbeddedHost) stopAndDrain(timeout time.Duration) {
+	h.workMu.Lock()
+	h.stopping = true
+	h.workMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		h.accepted.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
 	}
 }
 
@@ -596,10 +662,13 @@ func (h *EmbeddedHost) completePendingDelivery(message Message) {
 	if pending == nil {
 		return
 	}
+	outcome := deliveryOutcome{}
 	if message.Type == "delivery_error" {
-		pending <- deliveryOutcome{err: errors.New(defaultString(message.Error, "remote delivery failed"))}
-	} else {
-		pending <- deliveryOutcome{}
+		outcome.err = errors.New(defaultString(message.Error, "remote delivery failed"))
+	}
+	select {
+	case pending.done <- outcome:
+	default:
 	}
 }
 
@@ -608,7 +677,7 @@ func (h *EmbeddedHost) failPendingDeliveries(reason string) {
 	for id, pending := range h.pendingDeliveries {
 		delete(h.pendingDeliveries, id)
 		select {
-		case pending <- deliveryOutcome{err: errors.New(reason)}:
+		case pending.done <- deliveryOutcome{err: errors.New(reason)}:
 		default:
 		}
 	}

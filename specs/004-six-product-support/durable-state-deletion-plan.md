@@ -217,7 +217,7 @@
 - `specs/004-six-product-support/contracts/lane-input-ledger.md` → product owns acceptance/queue/history → delete the contract.
 - Durable-record sections in `specs/004-six-product-support/contracts/runtime-product.md` → live product/OS authority → delete attachment/receipt/lease/binding/session persistence requirements.
 - Durable-replay sections in `specs/004-six-product-support/contracts/component-protocol.md` → current live component connection → delete cross-restart binding/session authority and retained operation state.
-- Delivery receipt/ack persistence in `specs/004-six-product-support/contracts/federation-v4.md` → live recipient carrier → delete durable receipt semantics while retaining versioning, live roster, and amplification bounds.
+- Delivery receipt/ack persistence in `specs/004-six-product-support/contracts/federation-v4.md` → live recipient carrier → delete durable receipt semantics while retaining exact versioning and the live roster.
 - `specs/004-six-product-support/data-model.md` → exact approved lane-candidate index → replace the durable model with the local/optional-parent-host row and live-query read path only.
 - Persistence/CAS/crash-matrix requirements in `specs/004-six-product-support/spec.md`, `plan.md`, and `tasks.md` → product-owned session behavior → delete the tasks and replace them with subtraction work plus live product acceptance cells.
 - Ledger/component/state evidence files under `specs/004-six-product-support/evidence` → deleted machinery is not a product capability → delete the evidence ceremony instead of preserving historical acceptance claims.

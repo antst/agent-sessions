@@ -64,12 +64,73 @@ func TestHostReconnectsWhenHubStopsAnsweringHeartbeats(t *testing.T) {
 }
 
 func TestDeliveryAcknowledgementCompletesLiveRequest(t *testing.T) {
-	host := &EmbeddedHost{pendingDeliveries: map[string]chan deliveryOutcome{
-		"request": make(chan deliveryOutcome, 1),
+	host := &EmbeddedHost{pendingDeliveries: map[string]*pendingDelivery{
+		"request": {done: make(chan deliveryOutcome, 1)},
 	}}
 	host.completePendingDelivery(Message{Type: "delivery_ack", RequestID: "request"})
-	if outcome := <-host.pendingDeliveries["request"]; outcome.err != nil {
+	if outcome := <-host.pendingDeliveries["request"].done; outcome.err != nil {
 		t.Fatalf("acknowledgement error = %v", outcome.err)
+	}
+}
+
+func TestPendingDeliveryResendsOnTheNextConnection(t *testing.T) {
+	pending := &pendingDelivery{
+		message: Message{Type: "group_deliver", RequestID: "request"},
+		done:    make(chan deliveryOutcome, 1),
+	}
+	host := &EmbeddedHost{pendingDeliveries: map[string]*pendingDelivery{"request": pending}}
+	firstHub, firstPeer := net.Pipe()
+	defer func() { _ = firstHub.Close(); _ = firstPeer.Close() }()
+	firstWire := newWireConn(firstHub)
+	firstSent := make(chan struct{})
+	go func() { host.resendPendingDeliveries(firstWire); close(firstSent) }()
+	var first Message
+	if err := json.NewDecoder(firstPeer).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	<-firstSent
+
+	secondHub, secondPeer := net.Pipe()
+	defer func() { _ = secondHub.Close(); _ = secondPeer.Close() }()
+	secondWire := newWireConn(secondHub)
+	secondSent := make(chan struct{})
+	go func() { host.resendPendingDeliveries(secondWire); close(secondSent) }()
+	var second Message
+	if err := json.NewDecoder(secondPeer).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	<-secondSent
+	if first.RequestID != "request" || !reflect.DeepEqual(first, second) {
+		t.Fatalf("resent delivery changed: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestShutdownStopsAcceptanceAndDrainsStartedWork(t *testing.T) {
+	host := &EmbeddedHost{}
+	if !host.beginAcceptedWork() {
+		t.Fatal("running host refused work")
+	}
+	drained := make(chan struct{})
+	go func() { host.stopAndDrain(time.Second); close(drained) }()
+	waitTest(t, func() bool {
+		host.workMu.Lock()
+		defer host.workMu.Unlock()
+		return host.stopping
+	}, "shutdown acceptance gate")
+	select {
+	case <-drained:
+		t.Fatal("shutdown returned before accepted work finished")
+	default:
+	}
+	host.accepted.Done()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not drain accepted work")
+	}
+	if host.beginAcceptedWork() {
+		host.accepted.Done()
+		t.Fatal("shutdown accepted new work")
 	}
 }
 
@@ -145,7 +206,7 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	deliveries := make(chan string, 4)
 	laneKeys := make(chan string, 2)
 	hostA, err := NewEmbeddedHost(EmbeddedHostOptions{
-		Hub: address, HostID: "host-a", HostName: "host-a", Generation: 11, Build: "host-build-a",
+		Hub: address, HostID: "host-a", HostName: "host-a", Build: "host-build-a",
 		ScanInterval: 20 * time.Millisecond, HeartbeatInterval: 30 * time.Millisecond, HeartbeatTimeout: time.Second,
 		Snapshot: func(context.Context) ([]Peer, error) { return []Peer{source}, nil },
 		Deliver:  func(context.Context, Peer, Peer, AgentFrame) error { return nil },
@@ -154,7 +215,7 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 		t.Fatal(err)
 	}
 	hostB, err := NewEmbeddedHost(EmbeddedHostOptions{
-		Hub: address, HostID: "host-b", HostName: "host-b", Generation: 22, Build: "host-build-b",
+		Hub: address, HostID: "host-b", HostName: "host-b", Build: "host-build-b",
 		Capabilities: []string{"future-lane"}, ScanInterval: 20 * time.Millisecond,
 		HeartbeatInterval: 30 * time.Millisecond, HeartbeatTimeout: time.Second,
 		Snapshot: func(context.Context) ([]Peer, error) { return []Peer{target}, nil },
@@ -231,8 +292,8 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	hubCancel, hubDone = runTestHub(t, address)
 	waitTest(t, func() bool {
 		hosts := hostA.RemoteHosts()
-		return len(hosts) == 1 && hosts[0].Generation == 22 && hosts[0].Build == "host-build-b"
-	}, "reconnected host generation")
+		return len(hosts) == 1 && hosts[0].Build == "host-build-b"
+	}, "reconnected host metadata")
 	if err := hostA.Send(context.Background(), source, target, "message-after", "after restart", ""); err != nil {
 		t.Fatal(err)
 	}

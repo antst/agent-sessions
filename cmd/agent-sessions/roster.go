@@ -236,11 +236,11 @@ func writeOperatorRoster(output io.Writer, report operatorRosterReport) error {
 	if err := writeOperatorRosterEntries(writer, "LOCAL REGISTRATIONS", report.Local); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "\nFEDERATED HOSTS (%d)\nHOST\tNAME\tGENERATION\tBUILD\tCAPABILITIES\n", len(report.FederatedHosts)); err != nil {
+	if _, err := fmt.Fprintf(writer, "\nFEDERATED HOSTS (%d)\nHOST\tNAME\tBUILD\tCAPABILITIES\n", len(report.FederatedHosts)); err != nil {
 		return err
 	}
 	for _, host := range report.FederatedHosts {
-		if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\n", host.ID, host.Name, host.Generation,
+		if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", host.ID, host.Name,
 			operatorDefaultString(host.Build, "-"), operatorDefaultString(strings.Join(host.Capabilities, ","), "-")); err != nil {
 			return err
 		}

@@ -22,8 +22,8 @@ if [[ "${SKIP_GO_TEST:-0}" != "1" ]]; then
   fi
 fi
 if ! grep -Fq '# Federation protocol version 4' docs/federation/PROTOCOL.md ||
-   ! grep -Fq 'Every admitted client receives this same complete roster' docs/federation/PROTOCOL.md ||
-   ! grep -Fq 'Local grouped routing continues without a hub' docs/federation/PROTOCOL.md; then
+   ! grep -Fq 'broadcasts one complete roster to every' docs/federation/PROTOCOL.md ||
+   ! grep -Fq 'drains accepted work' docs/federation/PROTOCOL.md; then
   printf 'protocol documentation does not pin uniform protocol-4 behavior\n' >&2
   exit 1
 fi

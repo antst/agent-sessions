@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func TestProtocolLiveDeliveryAndReconnectGenerationRules(t *testing.T) {
+func TestProtocolRelaysEachLiveDelivery(t *testing.T) {
 	source := mustTestPeer(t, "host-a", "source", "codex", "project")
 	target := mustTestPeer(t, "host-b", "target", "qwen", "project")
 	started := make(chan struct{})
@@ -61,24 +61,6 @@ func TestProtocolLiveDeliveryAndReconnectGenerationRules(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("two live requests were presented %d times", calls.Load())
 	}
-
-	h := &hub{
-		logger: discardTestLogger(), clients: map[string]*hubClient{},
-		laneRoutes: map[string]*laneRoute{}, deliveryRoutes: map[string]*deliveryRoute{},
-	}
-	currentServer, currentPeer := net.Pipe()
-	defer func() { _ = currentPeer.Close() }()
-	current := &hubClient{hostID: "host-a", generation: 9, ready: true, wire: newWireConn(currentServer), peers: map[string]Peer{}}
-	h.clients[current.hostID] = current
-	staleServer, stalePeer := net.Pipe()
-	defer func() { _ = staleServer.Close(); _ = stalePeer.Close() }()
-	stale := &hubClient{hostID: "host-a", generation: 8, wire: newWireConn(staleServer), peers: map[string]Peer{}}
-	if err := h.validateRegistrationCandidate(stale); err == nil || !strings.Contains(err.Error(), "older") {
-		t.Fatalf("stale reconnect result = %v", err)
-	}
-	if h.clients["host-a"] != current {
-		t.Fatal("stale reconnect displaced the current generation")
-	}
 }
 
 func TestProtocolRejectsEveryMismatchedVersionBeforeRegistration(t *testing.T) {
@@ -114,7 +96,7 @@ func TestEqualProtocolUnrelatedBuildsHandshake(t *testing.T) {
 	}
 	go h.handleConnection(server)
 	if err := newWireConn(client).Send(Message{
-		Type: "hello", Version: ProtocolVersion, Build: "unrelated-host-build", Generation: 7,
+		Type: "hello", Version: ProtocolVersion, Build: "unrelated-host-build",
 		HostID: "host-a", HostName: "host-a",
 	}); err != nil {
 		t.Fatal(err)

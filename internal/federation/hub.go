@@ -34,12 +34,10 @@ type hub struct {
 type hubClient struct {
 	hostID       string
 	hostName     string
-	generation   uint64
 	build        string
 	wire         *wireConn
 	peers        map[string]Peer
 	capabilities []string
-	ready        bool
 }
 
 type deliveryRoute struct {
@@ -128,16 +126,14 @@ func (h *hub) handleConnection(conn net.Conn) {
 				return err
 			}
 			candidate := &hubClient{
-				hostID: message.HostID, hostName: message.HostName, generation: message.Generation, build: message.Build,
+				hostID: message.HostID, hostName: message.HostName, build: message.Build,
 				wire: newWireConn(conn), peers: map[string]Peer{}, capabilities: capabilities,
-			}
-			if err := h.validateRegistrationCandidate(candidate); err != nil {
-				return err
 			}
 			client = candidate
 			if err := client.wire.Send(Message{Type: "hello_ok", Version: ProtocolVersion, Build: RuntimeVersion}); err != nil {
 				return err
 			}
+			h.register(client)
 			return nil
 		}
 		return h.handleClientMessage(client, message)
@@ -150,14 +146,18 @@ func (h *hub) handleConnection(conn net.Conn) {
 	}
 }
 
-func (h *hub) validateRegistrationCandidate(client *hubClient) error {
+func (h *hub) register(client *hubClient) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	previous := h.clients[client.hostID]
-	if previous != nil && previous.generation > client.generation {
-		return fmt.Errorf("host %s registration generation %d is older than live generation %d", client.hostID, client.generation, previous.generation)
+	h.clients[client.hostID] = client
+	h.mu.Unlock()
+	if previous != nil && previous != client {
+		h.dropLaneRoutes(previous)
+		h.dropDeliveryRoutes(previous)
+		_ = previous.wire.conn.Close()
 	}
-	return nil
+	h.logger.Printf("host %s (%s) build %s connected", client.hostName, client.hostID, client.build)
+	go h.broadcastRoster()
 }
 
 func (h *hub) unregister(client *hubClient) {
@@ -176,17 +176,11 @@ func (h *hub) unregister(client *hubClient) {
 
 //nolint:gocyclo // Hub protocol variants remain a closed audited switch.
 func (h *hub) handleClientMessage(client *hubClient, message Message) error {
-	if !client.ready {
-		if message.Type != "snapshot" {
-			return errors.New("initial host frame after hello must be a snapshot")
-		}
-		return h.promoteInitialSnapshot(client, message)
-	}
 	h.mu.Lock()
 	current := h.clients[client.hostID] == client
 	h.mu.Unlock()
 	if !current {
-		return errors.New("host registration was superseded by another generation")
+		return errors.New("host connection was replaced")
 	}
 	switch message.Type {
 	case "snapshot":
@@ -197,11 +191,7 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 		h.mu.Lock()
 		if h.clients[client.hostID] != client {
 			h.mu.Unlock()
-			return errors.New("host registration was superseded by another generation")
-		}
-		if err := h.validateProspectiveRosterLocked(client, peers); err != nil {
-			h.mu.Unlock()
-			return err
+			return errors.New("host connection was replaced")
 		}
 		client.peers = peers
 		h.mu.Unlock()
@@ -239,9 +229,6 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 }
 
 func validateSnapshot(message Message, hostID string) (map[string]Peer, error) {
-	if len(message.Peers) > maxSnapshotPeers {
-		return nil, fmt.Errorf("snapshot exceeds peer count limit %d", maxSnapshotPeers)
-	}
 	peers := make(map[string]Peer, len(message.Peers))
 	sessions := make(map[string]bool, len(message.Peers))
 	for _, peer := range message.Peers {
@@ -254,36 +241,6 @@ func validateSnapshot(message Message, hostID string) (map[string]Peer, error) {
 		peers[peer.ID], sessions[peer.SessionID] = clonePeer(peer), true
 	}
 	return peers, nil
-}
-
-func (h *hub) promoteInitialSnapshot(client *hubClient, message Message) error {
-	peers, err := validateSnapshot(message, client.hostID)
-	if err != nil {
-		return err
-	}
-	h.mu.Lock()
-	previous := h.clients[client.hostID]
-	if previous != nil && previous != client && previous.generation > client.generation {
-		h.mu.Unlock()
-		return fmt.Errorf("host %s registration generation %d is older than live generation %d", client.hostID, client.generation, previous.generation)
-	}
-	if err := h.validateProspectiveRosterLocked(client, peers); err != nil {
-		h.mu.Unlock()
-		return err
-	}
-	client.peers = peers
-	client.ready = true
-	h.clients[client.hostID] = client
-	h.mu.Unlock()
-
-	if previous != nil && previous != client {
-		h.dropLaneRoutes(previous)
-		h.dropDeliveryRoutes(previous)
-		_ = previous.wire.conn.Close()
-	}
-	h.logger.Printf("host %s (%s) generation %d build %s connected", client.hostName, client.hostID, client.generation, client.build)
-	h.broadcastRoster()
-	return nil
 }
 
 func (h *hub) routeGrouped(source *hubClient, message Message) error {
@@ -464,9 +421,6 @@ func (h *hub) admitLaneRoute(
 	sourcePeer, sourceExists := source.peers[message.SourceID]
 	parentValid := sourceExists && message.ParentContext != nil && parentMatchesPeer(*message.ParentContext, sourcePeer)
 	destination := h.clients[message.TargetHostID]
-	if destination != nil && !destination.ready {
-		destination = nil
-	}
 	_, duplicate := h.laneRoutes[message.RequestID]
 	switch {
 	case !sourceExists:
@@ -588,13 +542,8 @@ func (h *hub) broadcastRoster() {
 	h.broadcastMu.Lock()
 	defer h.broadcastMu.Unlock()
 	h.mu.Lock()
-	clients, roster := h.uniformRosterLocked(nil, nil)
-	validationErr := validateRoster(roster)
+	clients, roster := h.uniformRosterLocked()
 	h.mu.Unlock()
-	if validationErr != nil {
-		h.logger.Printf("refusing to broadcast invalid roster invariant: %v", validationErr)
-		return
-	}
 	var wait sync.WaitGroup
 	for _, client := range clients {
 		client := client
@@ -609,66 +558,24 @@ func (h *hub) broadcastRoster() {
 	wait.Wait()
 }
 
-func (h *hub) validateProspectiveRosterLocked(client *hubClient, peers map[string]Peer) error {
-	_, roster := h.uniformRosterLocked(client, peers)
-	if err := validateRoster(roster); err != nil {
-		return fmt.Errorf("prospective roster is not admissible: %w", err)
-	}
-	return nil
-}
-
-// uniformRosterLocked computes the one complete roster delivered to every
-// admitted client. There is no per-client projection or compatibility filter.
-func (h *hub) uniformRosterLocked(snapshotClient *hubClient, snapshotPeers map[string]Peer) ([]*hubClient, Message) {
+// uniformRosterLocked computes the one complete roster delivered to every client.
+func (h *hub) uniformRosterLocked() ([]*hubClient, Message) {
 	clients := make([]*hubClient, 0, len(h.clients))
 	peers := []Peer{}
 	hosts := make([]Host, 0, len(h.clients))
-	projectedSnapshot := false
-	appendClient := func(client *hubClient) {
-		if !client.ready && client != snapshotClient {
-			return
-		}
+	for _, client := range h.clients {
 		clients = append(clients, client)
 		hosts = append(hosts, Host{
 			ID: client.hostID, Name: client.hostName, Capabilities: append([]string(nil), client.capabilities...),
-			Generation: client.generation, Build: client.build,
+			Build: client.build,
 		})
-		clientPeers := client.peers
-		if client == snapshotClient {
-			clientPeers = snapshotPeers
-		}
-		for _, peer := range clientPeers {
+		for _, peer := range client.peers {
 			peers = append(peers, clonePeer(peer))
 		}
-	}
-	for _, current := range h.clients {
-		client := current
-		if snapshotClient != nil && current.hostID == snapshotClient.hostID {
-			client = snapshotClient
-			projectedSnapshot = true
-		}
-		appendClient(client)
-	}
-	if snapshotClient != nil && !projectedSnapshot {
-		appendClient(snapshotClient)
 	}
 	sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].ID < hosts[j].ID })
 	return clients, Message{Type: "roster", Version: ProtocolVersion, Hosts: hosts, Peers: peers}
-}
-
-func validateRoster(roster Message) error {
-	if len(roster.Hosts) > maxRosterHosts || len(roster.Peers) > maxRosterPeers {
-		return errors.New("roster exceeds host or peer count bounds")
-	}
-	body, err := json.Marshal(roster)
-	if err != nil {
-		return fmt.Errorf("encode roster: %w", err)
-	}
-	if len(body) > maxWireBytes {
-		return fmt.Errorf("encoded roster exceeds %d bytes", maxWireBytes)
-	}
-	return nil
 }
 
 func clientHost(client *hubClient) string {

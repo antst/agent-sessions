@@ -49,9 +49,6 @@ const (
 	maxPeerInstanceIDBytes  = 512
 	maxPeerParentIDBytes    = maxPeerIDBytes
 	maxPeerGroups           = 128
-	maxSnapshotPeers        = 2048
-	maxRosterPeers          = 4096
-	maxRosterHosts          = 4096
 	wireWriteTimeout        = 10 * time.Second
 )
 
@@ -64,31 +61,17 @@ type Host struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	Generation   uint64   `json:"generation,omitempty"`
 	Build        string   `json:"build,omitempty"`
 }
 
-// ParentContext is the source-daemon attestation inherited by a remote child
-// lane. Product adapters may use the optional native evidence, but the wire
-// engine treats it as opaque identity metadata after validating the routing
-// fields against the advertised source peer.
+// ParentContext carries the live source peer fields needed by a remote lane.
 type ParentContext struct {
-	HostID               string   `json:"host_id"`
-	SessionID            string   `json:"session_id"`
-	Product              string   `json:"product"`
-	InstanceID           string   `json:"instance_id"`
-	Groups               []string `json:"groups"`
-	AlwaysApprove        bool     `json:"always_approve"`
-	AgentRuntimeDir      string   `json:"agent_runtime_dir,omitempty"`
-	AdapterPID           int      `json:"adapter_pid,omitempty"`
-	AdapterProcStart     string   `json:"adapter_proc_start,omitempty"`
-	AdapterStrongStart   string   `json:"adapter_strong_start,omitempty"`
-	AdapterSocket        string   `json:"adapter_socket,omitempty"`
-	PID                  int      `json:"pid"`
-	ProcStart            string   `json:"proc_start"`
-	StrongStart          string   `json:"strong_start,omitempty"`
-	PermissionMode       string   `json:"permission_mode"`
-	QwenCapabilityDigest string   `json:"qwen_capability_digest,omitempty"`
+	HostID         string   `json:"host_id"`
+	SessionID      string   `json:"session_id"`
+	Product        string   `json:"product"`
+	InstanceID     string   `json:"instance_id"`
+	Groups         []string `json:"groups"`
+	PermissionMode string   `json:"permission_mode"`
 }
 
 // Message is one bounded newline-delimited host/hub protocol frame.
@@ -96,7 +79,6 @@ type Message struct {
 	Type          string          `json:"type"`
 	Version       int             `json:"version,omitempty"`
 	Build         string          `json:"build,omitempty"`
-	Generation    uint64          `json:"generation,omitempty"`
 	HostID        string          `json:"host_id,omitempty"`
 	HostName      string          `json:"host_name,omitempty"`
 	TargetHostID  string          `json:"target_host_id,omitempty"`

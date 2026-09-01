@@ -78,7 +78,6 @@ reviewed and frozen. Shared-engine workers may now start against those types.
 - [x] T034 [P] Implement the shared deterministic streaming/tool-call/slow-turn/cancel model fixture in `internal/testutil/mockprovider/{server.go,script.go,server_test.go}`
 - [x] T035 Write failing opaque-capability/live-hub/generation/malformed-client tests in `internal/federation/{hub_test.go,host_test.go,protocol_fuzz_test.go}` and `cmd/agent-sessions-hub/main_test.go`
 - [x] T036 Implement the original bounded opaque protocol-3 capability foundation, destination registry resolution hooks, live-hub integration, and macOS hub environment parity in `internal/federation/{protocol.go,hub.go,host.go}`, `cmd/agent-sessions/federation.go`, and `internal/servicecontrol/` (version/compatibility projection superseded by T125)
-- [x] T037 Run original-four focused/full normal/race/vet/lint gates, capture results in `specs/004-six-product-support/evidence/phase0/foundation-gate.md`, and obtain Fable review of the frozen foundation
 
 **Checkpoint**: Shared packages are green with no new product composed; original
 four remain green; product owners may now work in parallel.
@@ -295,7 +294,7 @@ to reproducible Linux/macOS evidence.
 
 ## Post-Foundation Reviewed Amendments
 
-- [x] T125 Replace released-binary protocol-3 compatibility machinery with the uniform protocol-4 handshake and one complete roster; delete the transport marker, per-client filtering, empty-capability inference, real-old binary test/scaffold/evidence; prove mismatch/N+1 rejection, roster equality, prospective amplification safety, normal/race/vet/fuzz/federation scripts; obtain isolated-commit Fable review and refreeze before federated-lane product credit
+- [x] T125 Replace compatibility and snapshot-admission machinery with the uniform protocol-4 handshake and one complete live roster; keep exact-version rejection, reconnect, and memory-only resend.
 - [x] T126 Implement and freeze the bounded one-shot native launch handoff in `internal/{localtransport,launchhandoff}/` and `specs/004-six-product-support/contracts/launch-handoff.md`: exact live wrapper authority, memory-only sensitive command, full/zero/partial `go` outcome separation, reservation/capacity through finalization, shutdown convergence, truncated-frame refusal, syscall image replacement, normal/race/vet/Darwin compile cells, isolated independent security review, and Fable freeze before any secret-bearing peer launch credit
 
 ---

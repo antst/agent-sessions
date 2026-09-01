@@ -823,14 +823,13 @@ entries:
       - internal/federation/host_test.go:TestHostRelaysEveryLiveDeliveryRequest
       - internal/federation/host_test.go:TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport
       - internal/federation/host_test.go:TestHostBoundsInboundRemoteLaneConcurrencyAndRequiresLiveHub
-      - internal/federation/hub_test.go:TestHubRejectsStaleGenerationAndReplacesEqualOrNewerReconnect
-      - internal/federation/hub_test.go:TestHubRejectsMalformedSnapshotWithoutReplacingLastGoodRoster
+      - internal/federation/hub_test.go:TestLiveHubDeliversIdenticalCompleteRosterToEveryClient
       - internal/federation/hub_test.go:TestHubRejectsDuplicateDeliveryWhileOriginalIsPending
       - internal/federation/hub_test.go:TestHubDestinationDisconnectFailsPendingDelivery
       - internal/federation/hub_test.go:TestHubRejectsStaleBroadcastThroughDifferentSharedGroup
       - internal/federation/protocol_test.go:TestProtocolRejectsEveryMismatchedVersionBeforeRegistration
       - internal/federation/protocol_test.go:TestProtocolRejectsMalformedAndOversizedFrames
-      - internal/federation/protocol_test.go:TestProtocolLiveDeliveryAndReconnectGenerationRules
+      - internal/federation/protocol_test.go:TestProtocolRelaysEachLiveDelivery
       - internal/federation/protocol_test.go:TestEqualProtocolUnrelatedBuildsHandshake
       - internal/daemon/federation_test.go:TestDaemonFederationOwnsExactlyOneHostLoop
       - cmd/agent-sessions/federation_test.go:TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation

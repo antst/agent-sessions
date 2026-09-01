@@ -21,7 +21,7 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 		CapabilityHash: secret, Evidence: daemonpkg.NativeEvidence{Executable: secret},
 	}}
 	remoteHosts := []federationpkg.Host{{
-		ID: "host-b", Name: "workstation-b", Generation: 4, Build: "0.3.0",
+		ID: "host-b", Name: "workstation-b", Build: "0.3.0",
 		Capabilities: []string{federationpkg.CapabilityCodexLane},
 	}}
 	remotePeers := []federationpkg.Peer{

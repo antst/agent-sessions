@@ -282,15 +282,6 @@ encryption are separate security work.
   first-frame contract that selects one complete version before registration.
 - [D] destination validation remains the final authority.
 
-### Required test debt closure
-
-- Port command-level hub integration tests from the legacy federator to the
-  live `internal/federation` hub.
-- Add malformed/oversized hostile-client fuzz, exact mismatch/N+1 rejection,
-  identical complete-roster, amplification, and opaque-capability tests.
-- Preserve generation fencing and group/parent attestation tests.
-- Fix the macOS hub service environment projection while this surface changes.
-
 ## 10. Product Catalog, Install, and Release Projection
 
 ### Decision
