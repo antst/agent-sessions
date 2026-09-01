@@ -363,6 +363,16 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   worked example and reference cost for durable busy-lane delivery; this rule
   does not reopen its frozen contract. State without that justification MUST
   remain bounded ephemeral state or MUST NOT be added.
+- **FR-038**: Sensitive launch material MUST move from the daemon to the exact
+  already-attested wrapper only through the bounded, generation-local,
+  memory-only `launch.sock` binary handoff. The ticket is correlation, never
+  authority; live UID/PID/start/strong-start evidence MUST match. A complete
+  `go` write transfers lifecycle to adoption, a proven zero-byte write permits
+  exact rollback, and a partial or possibly delivered write MUST enter typed
+  ambiguity reconciliation and MUST NOT replay or destructively roll back.
+  The public wrapper path MUST close its CLOEXEC socket and replace its image
+  through the platform exec syscall without serializing, logging, persisting,
+  or adding the sensitive values to argv or the wrapper's ambient environment.
 
 ### Key Entities
 
@@ -383,6 +393,9 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
 - **Native Session Lease**: Durable exclusive Agent Sessions ownership claim
   used where the native product does not prevent concurrent owners, notably
   DSH.
+- **Launch Handoff**: Bounded one-shot ephemeral transfer of one
+  `NativeCommand` to the exact prepared wrapper, with structurally disjoint
+  consume, rollback, and ambiguous-finalization outcomes.
 - **Install Projection**: Deterministic product-derived set of aliases, assets,
   native registrations, version checks, and rollback ownership receipts.
 

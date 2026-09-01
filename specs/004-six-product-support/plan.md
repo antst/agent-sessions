@@ -116,6 +116,7 @@ internal/
 ├── productcatalog/           # data-only sole product inventory
 ├── productruntime/           # interfaces, records, registry validation, fakes
 ├── localtransport/           # bounded AF_UNIX framing + peer identity
+├── launchhandoff/            # one-shot secret-safe native exec handoff
 ├── component/                # broker, bindings, component protocol
 ├── sessiontools/             # extracted AgentFrame/MCP/tool/instruction helpers
 ├── structuredprocess/        # exact owned structured child/framed stdio
@@ -315,10 +316,12 @@ files are off limits.
 ### Stream B1 — Local transport, component broker, shared client
 
 - `internal/localtransport`
+- `internal/launchhandoff`
 - `internal/component`
 - `integrations/shared/component`
 - protocol, bootstrap, reconnect, replay, redaction, heartbeat, wrong-process,
-  PID-reuse, malformed-frame, and Linux/macOS socket tests
+  PID-reuse, malformed-frame, full/zero/partial launch commit, secret absence,
+  exec-image-replacement, and Linux/macOS socket tests
 
 The central integrator later owns the small `cmd/agent-sessions` broker startup
 hook.
@@ -536,6 +539,6 @@ Those merges are serialized through the central integrator.
 - Shared component/local transport, structured process, product server, runtime
   registry, lane input ledger/spool, native lease, and session tools.
 - Catalog-derived install/release/acceptance projection.
-- Protocol-3 opaque-capability live hub with closed test debt.
+- Uniform protocol-4 opaque-capability live hub with closed test debt.
 - Updated adapter protocol, README/install/product/cross-host documentation.
 - Linux and physical macOS evidence for every non-account-gated capability.

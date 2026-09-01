@@ -99,15 +99,15 @@ restart the daemon while preserving exact native identity.
 
 - [ ] T038 [P] [US1] Write OpenCode/Kilo peer component, isolated full-attach exact-routing, `--mini` rejection, rename, resume, and reconnect tests in `internal/products/{opencode,kilocode,opencodefamily}/*_test.go`
 - [ ] T039 [P] [US1] Write Pi/OMP extension identity, idle-wake, busy-steer, rename, resume, and reconnect tests in `internal/products/{pi,omp,pifamily}/*_test.go`
-- [ ] T040 [P] [US1] Write CodeBuddy wrapper/registry/socket-to-PID correlation, reply-wake, CSRF, stale-row/port-reuse, cross-target, and daemon-restart tests in `internal/products/codebuddy/*_test.go`
-- [ ] T041 [P] [US1] Write DSH Cordis session binding, followup/steer, tuple, reconnect, and sandbox-socket tests in `internal/products/dsh/*_test.go`
+- [x] T040 [P] [US1] Write CodeBuddy wrapper/registry/socket-to-PID correlation, reply-wake, CSRF, stale-row/port-reuse, cross-target, and daemon-restart tests in `internal/products/codebuddy/*_test.go`
+- [x] T041 [P] [US1] Write DSH Cordis session binding, followup/steer, tuple, reconnect, and sandbox-socket tests in `internal/products/dsh/*_test.go`
 
 ### Implementation for User Story 1
 
 - [ ] T042 [P] [US1] Implement verified common OpenCode/Kilo component/server peer mechanics in `internal/products/opencodefamily/` and product-specific peer drivers in `internal/products/{opencode,kilocode}/`
 - [ ] T043 [P] [US1] Implement the shared Pi/OMP component extension core and peer drivers with a typed quirk table in `internal/products/pifamily/`, `internal/products/{pi,omp}/`, and `integrations/{pi,omp}/`
-- [ ] T044 [P] [US1] Implement the CodeBuddy typed product-owned peer endpoint client and wrapper-adopt registry/process/socket evidence in `internal/products/codebuddy/` and `integrations/codebuddy/`
-- [ ] T045 [P] [US1] Implement the exact-tuple DSH Cordis peer component and session binding in `internal/products/dsh/` and `integrations/dsh/`
+- [x] T044 [P] [US1] Implement the CodeBuddy typed product-owned peer endpoint client and wrapper-adopt registry/process/socket evidence in `internal/products/codebuddy/` and `integrations/codebuddy/`
+- [x] T045 [P] [US1] Implement the exact-tuple DSH Cordis peer component and session binding in `internal/products/dsh/` and `integrations/dsh/`
 **Checkpoint**: All six peer drivers and integration components pass their
 product-owned contract suites and are ready for serialized host composition.
 
@@ -126,15 +126,15 @@ exact identity or explicit ambiguity.
 
 - [ ] T046 [P] [US2] Write OpenCode/Kilo lane HTTP/SSE/session/permission/recovery tests in `internal/products/{opencode,kilocode,opencodefamily}/*_lane_test.go`
 - [ ] T047 [P] [US2] Write Pi/OMP RPC ready/turn/steer/settled/abort/resume tests in `internal/products/{pi,omp,pifamily}/*_lane_test.go`
-- [ ] T048 [P] [US2] Write CodeBuddy jobs/reply/stream/stop/respawn/archive lane tests in `internal/products/codebuddy/*_lane_test.go`
-- [ ] T049 [P] [US2] Write DSH ACP new/resume/busy-queue/cancel-notification/stop/lease tests in `internal/products/dsh/*_lane_test.go`
+- [x] T048 [P] [US2] Write CodeBuddy jobs/reply/stream/stop/respawn/archive lane tests in `internal/products/codebuddy/*_lane_test.go`
+- [x] T049 [P] [US2] Write DSH ACP new/resume/busy-queue/cancel-notification/stop/lease tests in `internal/products/dsh/*_lane_test.go`
 
 ### Implementation for User Story 2
 
 - [ ] T050 [P] [US2] Implement OpenCode and Kilo lane drivers above `internal/productserver` in `internal/products/{opencodefamily,opencode,kilocode}/`
 - [ ] T051 [P] [US2] Implement shared Pi/OMP JSONL RPC lane client and product drivers above `internal/structuredprocess` in `internal/products/{pifamily,pi,omp}/`
-- [ ] T052 [P] [US2] Implement CodeBuddy lane lifecycle above its typed HTTP/event client in `internal/products/codebuddy/`
-- [ ] T053 [P] [US2] Implement DSH ACP lane lifecycle, exact tuple handling, and lease use above `internal/structuredprocess` in `internal/products/dsh/`
+- [x] T052 [P] [US2] Implement CodeBuddy lane lifecycle above its typed HTTP/event client in `internal/products/codebuddy/`
+- [x] T053 [P] [US2] Implement DSH ACP lane lifecycle, exact tuple handling, and lease use above `internal/structuredprocess` in `internal/products/dsh/`
 - [ ] T054 [US2] Add fail-closed product-specific permission mappers and unsupported-policy tests for all six in `internal/products/*/permission.go` and `internal/products/*/permission_test.go`
 
 **Checkpoint**: All six lane drivers pass typed native lifecycle suites and are
@@ -154,15 +154,15 @@ lane and reject a forged native-session claim.
 
 - [ ] T055 [P] [US3] Write OpenCode/Kilo registered-tool and exact parent-session attestation tests in `internal/products/{opencode,kilocode,opencodefamily}/*_parent_test.go`
 - [ ] T056 [P] [US3] Write Pi/OMP registered-tool, extension env, ancestry, and false-ID tests in `internal/products/{pi,omp,pifamily}/*_parent_test.go`
-- [ ] T057 [P] [US3] Write CodeBuddy per-session MCP/tool ancestry and terminal-notice tests in `internal/products/codebuddy/*_parent_test.go`
-- [ ] T058 [P] [US3] Write DSH native-tool/MCP, `DSH_SESSION_ID`, env-scrub, sandbox, and notice tests in `internal/products/dsh/*_parent_test.go`
+- [x] T057 [P] [US3] Write CodeBuddy per-session MCP/tool ancestry and terminal-notice tests in `internal/products/codebuddy/*_parent_test.go`
+- [x] T058 [P] [US3] Write DSH native-tool/MCP, `DSH_SESSION_ID`, env-scrub, sandbox, and notice tests in `internal/products/dsh/*_parent_test.go`
 
 ### Implementation for User Story 3
 
 - [ ] T059 [P] [US3] Implement OpenCode/Kilo parent tools and exact component/session attesters in `internal/products/{opencodefamily,opencode,kilocode}/` and `integrations/{opencode,kilocode}/`
 - [ ] T060 [P] [US3] Implement Pi/OMP registered parent tools, commands, and exact session attesters in `internal/products/{pifamily,pi,omp}/` and `integrations/{pi,omp}/`
-- [ ] T061 [P] [US3] Implement CodeBuddy parent connector/tool injection and attester in `internal/products/codebuddy/` and `integrations/codebuddy/`
-- [ ] T062 [P] [US3] Implement DSH parent facade selected by S2 and exact attester in `internal/products/dsh/` and `integrations/dsh/`
+- [x] T061 [P] [US3] Implement CodeBuddy parent connector/tool injection and attester in `internal/products/codebuddy/` and `integrations/codebuddy/`
+- [x] T062 [P] [US3] Implement DSH parent facade selected by S2 and exact attester in `internal/products/dsh/` and `integrations/dsh/`
 **Checkpoint**: All six parent drivers/tools pass exact-identity suites and are
 ready for serialized host/tool composition.
 
@@ -294,9 +294,10 @@ to reproducible Linux/macOS evidence.
 - [ ] T123 Record and schedule live on-demand peer presence/attestation so a healthy process is not muted solely by a daemon-generation re-adoption window
 - [ ] T124 Record and schedule bounded garbage collection of detached attachment and terminal-delivery tombstones, with live ownership checks and no unrelated-state removal
 
-## Owner-Authorized Greenfield Federation Rewrite
+## Post-Foundation Reviewed Amendments
 
-- [ ] T125 Replace released-binary protocol-3 compatibility machinery with the uniform protocol-4 handshake and one complete roster; delete the transport marker, per-client filtering, empty-capability inference, real-old binary test/scaffold/evidence; prove mismatch/N+1 rejection, roster equality, prospective amplification safety, normal/race/vet/fuzz/federation scripts; obtain isolated-commit Fable review and refreeze before federated-lane product credit
+- [x] T125 Replace released-binary protocol-3 compatibility machinery with the uniform protocol-4 handshake and one complete roster; delete the transport marker, per-client filtering, empty-capability inference, real-old binary test/scaffold/evidence; prove mismatch/N+1 rejection, roster equality, prospective amplification safety, normal/race/vet/fuzz/federation scripts; obtain isolated-commit Fable review and refreeze before federated-lane product credit
+- [x] T126 Implement and freeze the bounded one-shot native launch handoff in `internal/{localtransport,launchhandoff}/` and `specs/004-six-product-support/contracts/launch-handoff.md`: exact live wrapper authority, memory-only sensitive command, full/zero/partial `go` outcome separation, reservation/capacity through finalization, shutdown convergence, truncated-frame refusal, syscall image replacement, normal/race/vet/Darwin compile cells, isolated independent security review, and Fable freeze before any secret-bearing peer launch credit
 
 ---
 
@@ -377,5 +378,5 @@ Root integrator: central-only tasks after stream gates
 
 ## Task Format Validation
 
-All 125 tasks use the required checkbox, sequential ID, optional `[P]`, required
+All 126 tasks use the required checkbox, sequential ID, optional `[P]`, required
 story labels within story phases, and explicit file or evidence paths.
