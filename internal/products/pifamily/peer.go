@@ -64,7 +64,7 @@ func (driver *PeerDriver) AttachmentAdapter(deps productruntime.HostDeps) (daemo
 		if !exactProcess(observed.Process) {
 			return daemon.NativeEvidence{}, fmt.Errorf("%w: component process identity is incomplete", productruntime.ErrUnauthorized)
 		}
-		view, err := deps.Components.LookupComponent(ctx, driver.config.Quirks.ProductID, attachment.ID)
+		view, err := deps.Components.LookupComponent(ctx, attachment.ID, attachment.NativeSessionID)
 		if err != nil {
 			return daemon.NativeEvidence{}, err
 		}
@@ -87,7 +87,7 @@ func (driver *PeerDriver) AttachmentAdapter(deps productruntime.HostDeps) (daemo
 		if err != nil || observation.Status != procinfo.IdentityMatches {
 			return daemon.NativeEvidence{}, fmt.Errorf("%w: component process is stale", productruntime.ErrStale)
 		}
-		view, err := deps.Components.LookupComponent(ctx, driver.config.Quirks.ProductID, attachment.ID)
+		view, err := deps.Components.LookupComponent(ctx, attachment.ID, attachment.NativeSessionID)
 		if err != nil || view.NativeSessionID != attachment.NativeSessionID {
 			return daemon.NativeEvidence{}, fmt.Errorf("%w: component session is stale", productruntime.ErrStale)
 		}

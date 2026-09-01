@@ -17,6 +17,27 @@ type componentLookupFake struct {
 	view productruntime.ComponentSessionView
 }
 
+type componentLookupCall struct {
+	attachmentID    string
+	nativeSessionID string
+}
+
+type recordingComponentLookup struct {
+	view  productruntime.ComponentSessionView
+	calls []componentLookupCall
+}
+
+func (lookup *recordingComponentLookup) LookupComponent(
+	_ context.Context,
+	attachmentID string,
+	nativeSessionID string,
+) (productruntime.ComponentSessionView, error) {
+	lookup.calls = append(lookup.calls, componentLookupCall{
+		attachmentID: attachmentID, nativeSessionID: nativeSessionID,
+	})
+	return lookup.view, nil
+}
+
 type reconnectingLookup struct {
 	mu   sync.Mutex
 	view productruntime.ComponentSessionView
@@ -210,6 +231,66 @@ func TestComponentPeerRenameAndReconnectUseCurrentExactBinding(t *testing.T) {
 	lookup.set(view)
 	if _, err := adapter.Refresh(context.Background(), attachment); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("foreign generation reconnect = %v", err)
+	}
+}
+
+func TestComponentPeerLooksUpComponentByAttachmentAndNativeSession(t *testing.T) {
+	process := procinfo.Identity{PID: 321, Start: "start", StrongStart: "strong"}
+	lookup := &recordingComponentLookup{view: productruntime.ComponentSessionView{
+		BindingID: "binding-lookup", AttachmentID: "attachment-lookup",
+		NativeSessionID: "ses_lookup", Generation: 9, State: "idle",
+	}}
+	driver, err := NewPeerDriver(PeerConfig{
+		ProductID: "opencode", Executable: "opencode", IntegrationVersion: "1",
+		Deps: productruntime.HostDeps{
+			Generation: 9, Components: lookup,
+			Processes: processInspectorFake{identity: process, executable: "/usr/bin/opencode"},
+		},
+		Gateway: gatewayFake{
+			accepted: productruntime.NativeAcceptance{
+				NativeSessionID: "ses_lookup", NativeMessageID: "message-lookup", AcceptedAt: time.Now(),
+			},
+			renamed: productruntime.NativeName{Applied: "renamed", NativeConfirmed: true},
+		},
+		BuildLaunch: func(context.Context, productruntime.PeerLaunchRequest) (productruntime.NativeCommand, error) {
+			return productruntime.NativeCommand{Path: "opencode"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment := daemon.ManagedAttachment{
+		ID: "attachment-lookup", Product: "opencode", NativeSessionID: "ses_lookup",
+		State: "attached", DaemonGeneration: 9,
+		Evidence: NativeEvidenceForComponent(process, "/usr/bin/opencode", "ses_lookup", "1"),
+	}
+	adapter, err := driver.AttachmentAdapter(productruntime.HostDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Refresh(context.Background(), attachment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Rename(context.Background(), attachment, "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Deliver(context.Background(), attachment, productruntime.DeliveryRequest{
+		DeliveryID: "delivery-lookup", Mode: productruntime.DeliveryIdleWake, Body: []byte(`{"version":1}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []componentLookupCall{
+		{attachmentID: "attachment-lookup", nativeSessionID: "ses_lookup"},
+		{attachmentID: "attachment-lookup", nativeSessionID: "ses_lookup"},
+		{attachmentID: "attachment-lookup", nativeSessionID: "ses_lookup"},
+	}
+	if len(lookup.calls) != len(want) {
+		t.Fatalf("component lookup calls = %+v, want %+v", lookup.calls, want)
+	}
+	for index := range want {
+		if lookup.calls[index] != want[index] {
+			t.Fatalf("component lookup call %d = %+v, want %+v", index, lookup.calls[index], want[index])
+		}
 	}
 }
 

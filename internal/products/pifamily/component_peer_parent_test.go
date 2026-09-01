@@ -26,6 +26,27 @@ func (source *bindingFixture) Bindings() []component.BindingView {
 	return append([]component.BindingView(nil), source.values...)
 }
 
+type componentLookupCall struct {
+	attachmentID    string
+	nativeSessionID string
+}
+
+type recordingComponentLookup struct {
+	view  productruntime.ComponentSessionView
+	calls []componentLookupCall
+}
+
+func (lookup *recordingComponentLookup) LookupComponent(
+	_ context.Context,
+	attachmentID string,
+	nativeSessionID string,
+) (productruntime.ComponentSessionView, error) {
+	lookup.calls = append(lookup.calls, componentLookupCall{
+		attachmentID: attachmentID, nativeSessionID: nativeSessionID,
+	})
+	return lookup.view, nil
+}
+
 type sentComponentFrame struct {
 	bindingID   string
 	typeName    component.FrameType
@@ -408,6 +429,54 @@ func TestParentAttesterRequiresExactRegisteredComponentProcessAndSession(t *test
 				t.Fatalf("forged attempt returned %v", err)
 			}
 		})
+	}
+}
+
+func TestAttachmentAdapterLooksUpComponentByAttachmentAndNativeSession(t *testing.T) {
+	process := procinfo.Identity{PID: 42, Start: "start", StrongStart: "strong"}
+	binding := component.BindingView{
+		BindingID: "binding-lookup", AttachmentID: "attachment-lookup",
+		ProductID: PiProductID, ProcessIdentity: process, Generation: 9,
+	}
+	runtime, _, _ := testComponentRuntime(t, PiProductID, binding)
+	quirks, err := QuirksFor(PiProductID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver, err := NewPeerDriver(PeerConfig{
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs",
+		ComponentSocket: "/runtime/agent-sessions/component.sock", Runtime: runtime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := &recordingComponentLookup{view: productruntime.ComponentSessionView{
+		BindingID: "binding-lookup", AttachmentID: "attachment-lookup",
+		NativeSessionID: "native-lookup", Generation: 9,
+	}}
+	inspector := &processInspectorFixture{live: []procinfo.Identity{process}}
+	adapter, err := driver.AttachmentAdapter(productruntime.HostDeps{Components: lookup, Processes: inspector})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment := daemon.ManagedAttachment{
+		ID: "attachment-lookup", Product: PiProductID, NativeSessionID: "native-lookup",
+		State: "attached", DaemonGeneration: 9,
+	}
+	evidence, err := adapter.Adopt(context.Background(), attachment, daemon.NativeEvidence{Process: process})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment.Evidence = evidence
+	if _, err := adapter.Refresh(context.Background(), attachment); err != nil {
+		t.Fatal(err)
+	}
+	want := []componentLookupCall{
+		{attachmentID: "attachment-lookup", nativeSessionID: "native-lookup"},
+		{attachmentID: "attachment-lookup", nativeSessionID: "native-lookup"},
+	}
+	if !reflect.DeepEqual(lookup.calls, want) {
+		t.Fatalf("component lookup calls = %+v, want %+v", lookup.calls, want)
 	}
 }
 
