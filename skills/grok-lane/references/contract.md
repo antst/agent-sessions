@@ -3,7 +3,7 @@
 ## Commands
 
 `run`, `start`, `resume`, `wait`, `status`, `interrupt`, `archive`, `list [--all] [--mine]`, and
-`doctor --json` form contract version 1. Non-persistent start/resume requires a corroborated live
+`doctor --json` form contract version 2. Non-persistent start/resume requires a corroborated live
 Codex or Claude owner; plain shells and CI must pass `--persistent`.
 
 Grok Build policy options are `-C/--cd`, `--model`, `--reasoning-effort`, `--timeout`, and the
@@ -49,6 +49,6 @@ Inbound peer messages are durable queued turns. One manager owns one ACP writer,
 can create a concurrent prompt. Duplicate message IDs with identical content are idempotent;
 conflicting fingerprints fail closed. Collected results remain acknowledged across resume.
 
-Remote execution uses `peer-federator lane --host HOST --product grok --`. The destination must
+Remote execution uses `grok-peer-lane --host HOST`. The destination must
 advertise `grok-lane`; federation owns remote persistence and notification flags, while native
 JSONL, collection, messaging, and archive semantics remain unchanged.

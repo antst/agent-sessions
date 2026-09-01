@@ -11,11 +11,11 @@ import (
 
 func runGrokPluginVerify(args []string) int {
 	if len(args) != 2 || args[0] != "--root" || args[1] == "" {
-		fmt.Fprintln(os.Stderr, "usage: agent-session-runtime grok-plugin-verify --root <user-plugin-root>")
+		fmt.Fprintln(os.Stderr, "usage: agent-sessions grok-plugin-verify --root <user-plugin-root>")
 		return 2
 	}
 	if err := verifyGrokPluginInspection(os.Stdin, args[1]); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-session-runtime grok-plugin-verify: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions grok-plugin-verify: %v\n", err)
 		return 1
 	}
 	return 0

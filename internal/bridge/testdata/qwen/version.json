@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "product": "qwen-code",
+  "package": "@qwen-code/qwen-code",
+  "version": "0.21.15",
+  "tag": "v0.21.15",
+  "commit": "5dce2515a778f9cf2013168962b4fbc3454636e3",
+  "source": "https://github.com/QwenLM/qwen-code/tree/v0.21.15",
+  "contracts": {
+    "dual_output": 2,
+    "acp": 1,
+    "serve": 1
+  }
+}

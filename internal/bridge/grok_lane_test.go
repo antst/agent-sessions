@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -121,6 +121,40 @@ func TestGrokLaneUsageAdvertisesGroupOptions(t *testing.T) {
 	}
 }
 
+func TestGrokMCPReadinessFailurePreservesRepeatedProtocolCause(t *testing.T) {
+	t.Parallel()
+
+	failures := grokMCPReadinessFailures{}
+	rpcFailure := &grokRPCError{Code: -32603, Message: "Internal error", Data: "server 'agent_sessions' not found"}
+	failures.record(grokMCPReadinessDiagnostic(rpcFailure))
+	failures.record(grokMCPReadinessDiagnostic(rpcFailure))
+	failures.record(fmt.Errorf("grok ACP _x.ai/sessions/list: %w", context.DeadlineExceeded))
+
+	summary := failures.summary(context.DeadlineExceeded)
+	if !strings.Contains(summary, "Grok ACP error -32603: Internal error") ||
+		!strings.Contains(summary, "server 'agent_sessions' not found") ||
+		!strings.Contains(summary, "repeated 2 times") ||
+		!strings.Contains(summary, "context deadline exceeded") {
+		t.Fatalf("Grok MCP readiness failure summary = %q", summary)
+	}
+}
+
+func TestGrokLanePrivateACPErrorPreservesBoundedProtocolCause(t *testing.T) {
+	t.Parallel()
+
+	failure := grokLanePrivateACPError("open headless Grok lane session", &grokRPCError{
+		Code: -32602, Message: "Invalid params",
+		Data: "data did not match any variant of untagged enum McpServer",
+	})
+	message := failure.Error()
+	if !strings.Contains(message, "open headless Grok lane session") ||
+		!strings.Contains(message, "Grok ACP error -32602: Invalid params") ||
+		!strings.Contains(message, "untagged enum McpServer") ||
+		strings.Contains(message, "managed process join incomplete") {
+		t.Fatalf("private Grok lane ACP failure = %q", message)
+	}
+}
+
 func TestParseGrokLaneArgsRejectsUnknownOrMissingTarget(t *testing.T) {
 	t.Parallel()
 
@@ -141,9 +175,9 @@ func TestDoctorGrokLaneReportsSuccessfulVersionProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GROK_PEER_GROK_BIN", bin)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
 
 	read, write, err := os.Pipe()
 	if err != nil {
@@ -170,7 +204,7 @@ func TestDoctorGrokLaneReportsSuccessfulVersionProbe(t *testing.T) {
 
 func TestAcknowledgeGrokLaneTurnDoesNotWriteBehindLiveManager(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -236,7 +270,7 @@ func TestWaitGrokLaneReadyDistinguishesManagerExit(t *testing.T) {
 
 func TestGrokLaneInfrastructureFailuresUseFailedTerminalTaxonomy(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -256,7 +290,7 @@ func TestGrokLaneInfrastructureFailuresUseFailedTerminalTaxonomy(t *testing.T) {
 
 func TestGrokLaneStartupShutdownKeepsFirstSignalOrArchiveCause(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -301,7 +335,7 @@ func TestGrokLaneStartupShutdownKeepsFirstSignalOrArchiveCause(t *testing.T) {
 
 func TestGrokLaneFinalOwnershipPersistFailureRemainsReconcileable(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -383,8 +417,9 @@ func TestGrokLaneWakeAndResumeRollbackFailedPersistence(t *testing.T) {
 		t.Fatalf("closing wake ownership = %#v, %v", result, err)
 	}
 	if len(manager.state.Turns) != 1 || manager.state.Turns[0].Status != "interrupted" ||
-		strings.Contains(manager.state.Turns[0].Prompt, "claude_peer.send_message") ||
-		!strings.Contains(manager.state.Turns[0].Prompt, "Agent Sessions send_message") {
+		!strings.Contains(manager.state.Turns[0].Prompt, "Message from an unidentified peer:") ||
+		!strings.Contains(manager.state.Turns[0].Prompt, "arrived at archive boundary") ||
+		strings.Contains(strings.ToLower(manager.state.Turns[0].Prompt), "trusted") {
 		t.Fatalf("closing wake state/instruction = %+v", manager.state.Turns)
 	}
 }
@@ -506,7 +541,7 @@ func TestGrokLaneMaintenanceRetriesTerminalNotice(t *testing.T) {
 
 func TestCleanupGrokLanePreservesReusedPIDBackendAndRejectsMalformedOwnership(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -624,7 +659,7 @@ func TestGrokProcessSessionHasMembersRejectsUnsetAuthority(t *testing.T) {
 
 func TestStopGrokTaggedProcessesRemovesDetachedLaunchChildren(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	launchToken := randomID() + randomID()
@@ -707,7 +742,7 @@ func TestStopGrokTaggedProcessesRemovesDetachedLaunchChildren(t *testing.T) {
 
 func TestWaitGrokLaneReconcilesCrashedManagerAndCollectsDebt(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -724,7 +759,7 @@ func TestWaitGrokLaneReconcilesCrashedManagerAndCollectsDebt(t *testing.T) {
 	if err := writeGrokLaneState(paths, state); err != nil {
 		t.Fatal(err)
 	}
-	code, err := waitGrokLane(grokLaneOptions{target: state.SessionID, timeout: 2 * time.Second})
+	code, err := waitGrokLane(grokLaneOptions{laneCommonOptions: laneCommonOptions{target: state.SessionID, timeout: 2 * time.Second}})
 	if err != nil || code != 130 {
 		t.Fatalf("collect crashed Grok lane = %d, %v", code, err)
 	}
@@ -748,7 +783,7 @@ func TestStoppedDaemonRefusesGrokLaneInboxResurrection(t *testing.T) {
 
 func TestGrokLaneShutdownDrainsAcceptedPeerFrameIntoTerminalOwnership(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -823,7 +858,7 @@ func TestGrokLaneShutdownDrainsAcceptedPeerFrameIntoTerminalOwnership(t *testing
 
 func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -831,6 +866,7 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 	t.Setenv("GROK_FAKE_YOLO", "1")
 	t.Setenv("GROK_FAKE_ANSWER", "LANE-ANSWER")
 	t.Setenv("GROK_FAKE_GENERATED_SESSION_ID", "native-grok-session")
+	t.Setenv("GROK_FAKE_REQUIRE_AGENT_SESSIONS_MCP", "1")
 	recordPath := filepath.Join(root, "fake.jsonl")
 	t.Setenv("GROK_FAKE_RECORD", recordPath)
 
@@ -981,7 +1017,7 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 
 func TestGrokLaneManagerInterruptsAndAutoArchives(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1026,7 +1062,7 @@ func TestGrokLaneManagerInterruptsAndAutoArchives(t *testing.T) {
 
 func TestGrokLaneShutdownCannotBeOverwrittenByActiveTurnCompletion(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1067,7 +1103,7 @@ func TestGrokLaneShutdownCannotBeOverwrittenByActiveTurnCompletion(t *testing.T)
 
 func TestGrokLaneManagerArchivesWhenOwnerExits(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1109,7 +1145,7 @@ func TestGrokLaneManagerArchivesWhenOwnerExits(t *testing.T) {
 
 func TestForceArchiveGrokLaneDoesNotBlockOnLiveManagerLock(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1269,7 +1305,8 @@ func TestGrokToolRegistrySerializesRegistrationWithArchive(t *testing.T) {
 	}
 	state := grokLaneState{
 		Type: "grok-peer-lane", SessionID: sessionID, Status: "idle",
-		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start,
+		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start, ManagerStrongStart: managerInfo.StrongStart,
+		WorkerPID: os.Getpid(), WorkerProcStart: managerInfo.Start, WorkerStrongStart: managerInfo.StrongStart,
 		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: runtimeDir,
 		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: "bash", ToolRealShell: "/bin/bash",
 	}
@@ -1282,10 +1319,17 @@ func TestGrokToolRegistrySerializesRegistrationWithArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = lock.Close()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(t.TempDir(), "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
 	statePath := grokLaneStatePath(resolveNativePaths(), sessionID)
 	if err := writeJSONAtomic(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	ledgerConfig, err := grokToolRootLedgerConfig(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareToolRootLedger(ledgerConfig); err != nil {
 		t.Fatal(err)
 	}
 	wrapperPath := filepath.Join(host.LaunchDir, "bash")
@@ -1418,7 +1462,8 @@ func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
 	}
 	state := grokLaneState{
 		Type: "grok-peer-lane", SessionID: sessionID, Status: "idle",
-		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start,
+		ManagerPID: os.Getpid(), ManagerProcStart: managerInfo.Start, ManagerStrongStart: managerInfo.StrongStart,
+		WorkerPID: os.Getpid(), WorkerProcStart: managerInfo.Start, WorkerStrongStart: managerInfo.StrongStart,
 		LaunchTokenHash: grokTokenHash(launchToken), RuntimeDir: runtimeDir,
 		ToolRegistryVersion: grokToolRegistryVersion, ToolShellName: filepath.Base(realShell), ToolRealShell: realShell,
 	}
@@ -1439,10 +1484,17 @@ func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
 	if err := os.Symlink(executable, wrapperPath); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(t.TempDir(), "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
 	statePath := grokLaneStatePath(resolveNativePaths(), sessionID)
 	if err := writeJSONAtomic(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	ledgerConfig, err := grokToolRootLedgerConfig(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareToolRootLedger(ledgerConfig); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command(wrapperPath, "-test.run=^TestGrokToolWrapperExecHelper$")
@@ -1453,11 +1505,13 @@ func TestGrokToolWrapperExecutesRealShellAndRegistersIdentity(t *testing.T) {
 	if err != nil || string(output) != "TOOL_WRAPPER_EXEC_OK" {
 		t.Fatalf("wrapper subprocess: err=%v output=%q", err, output)
 	}
-	recordPath := filepath.Join(host.LaunchDir, "tool-roots", strconv.Itoa(command.ProcessState.Pid())+".json")
-	var record grokToolRootRecord
-	body, err := os.ReadFile(recordPath)
-	if err != nil || json.Unmarshal(body, &record) != nil || record.PID != command.ProcessState.Pid() || record.StrongStart == "" {
-		t.Fatalf("wrapper record: err=%v record=%+v", err, record)
+	ledger, err := openToolRootLedger(ledgerConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ledger.snapshot()
+	if err != nil || len(snapshot.Roots) != 1 || snapshot.Roots[0].PID != command.ProcessState.Pid() || snapshot.Roots[0].StrongStart == "" {
+		t.Fatalf("wrapper ledger: err=%v snapshot=%+v", err, snapshot)
 	}
 }
 

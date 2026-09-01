@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_directory/managed-tree"
+source "$script_directory/launchd-control"
+
+if [[ $# -ne 5 ]]; then
+  printf 'usage: %s SOURCE_ROOT HUB_BINARY PREFIX VERSION PLATFORM\n' "${0##*/}" >&2
+  exit 2
+fi
+
+source_root=$1
+hub_binary=$2
+prefix=$3
+version=$4
+platform=$5
+[[ "$source_root" == /* && -d "$source_root" && ! -L "$source_root" ]] || exit 2
+[[ "$hub_binary" == /* && -x "$hub_binary" && ! -L "$hub_binary" ]] || exit 2
+[[ "$prefix" == /* && "$prefix" != *'|'* && "$prefix" != *$'\n'* ]] || exit 2
+[[ "$version" =~ ^[[:alnum:]][[:alnum:]._-]*$ ]] || exit 2
+
+hub_root="$prefix/libexec/agent-sessions/hub"
+releases="$hub_root/releases"
+release="$releases/$version"
+mkdir -p "$releases" "$prefix/bin"
+stage="$(mktemp -d "$releases/.stage.XXXXXX")"
+trap 'if [[ -d "$stage" ]]; then remove_managed_tree "$stage" "$releases"; fi' EXIT
+mkdir -p "$stage/bin" "$stage/deploy"
+install -m 0755 "$hub_binary" "$stage/bin/agent-sessions-hub"
+cp -R -- "$source_root/deploy/agent-sessions-hub" "$stage/deploy/"
+printf '%s\n' "$platform" >"$stage/PLATFORM"
+
+resolve_directory_link() {
+  local link=$1 target
+  target=$(readlink -- "$link") || return 1
+  if [[ "$target" != /* ]]; then
+    target="$(dirname -- "$link")/$target"
+  fi
+  [[ -d "$target" ]] || return 1
+  (cd -P -- "$target" && pwd)
+}
+
+write_hub_service_definition() {
+  local selected_release=$1
+  case "$(uname -s)" in
+    Linux)
+      local unit_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+      mkdir -p "$unit_root" "${XDG_CONFIG_HOME:-$HOME/.config}/agent-sessions"
+      sed "s|@PREFIX@|$prefix|g" \
+        "$selected_release/deploy/agent-sessions-hub/systemd/user/agent-sessions-hub.service" \
+        >"$unit_root/agent-sessions-hub.service"
+      systemctl --user daemon-reload
+      ;;
+    Darwin)
+      local unit_root="$HOME/Library/LaunchAgents"
+      local prefix_value
+      mkdir -p "$unit_root"
+      prefix_value=$(launchd_xml_sed_replacement "$prefix")
+      sed "s|@PREFIX@|$prefix_value|g" \
+        "$selected_release/deploy/agent-sessions-hub/launchd/net.antst.agent-sessions-hub.plist" \
+        >"$unit_root/net.antst.agent-sessions-hub.plist"
+      plutil -lint "$unit_root/net.antst.agent-sessions-hub.plist" >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+install_hub_service() {
+  local selected_release=$1
+  write_hub_service_definition "$selected_release"
+  case "$(uname -s)" in
+    Linux)
+      systemctl --user enable agent-sessions-hub.service
+      systemctl --user restart agent-sessions-hub.service
+      systemctl --user is-active --quiet agent-sessions-hub.service
+      ;;
+    Darwin)
+      local domain="gui/$(id -u)" target
+      target="$domain/net.antst.agent-sessions-hub"
+      launchd_bootout_exact "$target"
+      launchd_bootstrap_exact "$domain" "$target" "$HOME/Library/LaunchAgents/net.antst.agent-sessions-hub.plist"
+      launchctl enable "$target"
+      launchctl kickstart -k "$target"
+      launchctl print "$target" >/dev/null
+      ;;
+  esac
+}
+
+remove_hub_service() {
+  case "$(uname -s)" in
+    Linux)
+      systemctl --user disable --now agent-sessions-hub.service >/dev/null 2>&1 || true
+      rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions-hub.service"
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      ;;
+    Darwin)
+      local domain="gui/$(id -u)" target
+      target="$domain/net.antst.agent-sessions-hub"
+      launchd_bootout_exact "$target" || true
+      launchctl disable "$target" >/dev/null 2>&1 || true
+      rm -f -- "$HOME/Library/LaunchAgents/net.antst.agent-sessions-hub.plist"
+      ;;
+  esac
+}
+
+prior_service_definition=0
+prior_service_enabled=0
+prior_service_active=0
+case "$(uname -s)" in
+  Linux)
+    [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions-hub.service" ]] && prior_service_definition=1
+    systemctl --user is-enabled --quiet agent-sessions-hub.service >/dev/null 2>&1 && prior_service_enabled=1 || true
+    systemctl --user is-active --quiet agent-sessions-hub.service >/dev/null 2>&1 && prior_service_active=1 || true
+    ;;
+  Darwin)
+    [[ -f "$HOME/Library/LaunchAgents/net.antst.agent-sessions-hub.plist" ]] && prior_service_definition=1
+    launchctl print "gui/$(id -u)/net.antst.agent-sessions-hub" >/dev/null 2>&1 && prior_service_active=1 || true
+    if ! launchctl print-disabled "gui/$(id -u)" 2>/dev/null |
+      grep -Eq '"net\.antst\.agent-sessions-hub"[[:space:]]*=>[[:space:]]*true'; then
+      prior_service_enabled=1
+    fi
+    ;;
+esac
+
+restore_prior_hub_service() {
+  local selected_release=$1
+  if [[ $prior_service_definition -eq 0 ]]; then
+    remove_hub_service
+    return
+  fi
+  write_hub_service_definition "$selected_release"
+  case "$(uname -s)" in
+    Linux)
+      if [[ $prior_service_enabled -eq 1 ]]; then
+        systemctl --user enable agent-sessions-hub.service
+      else
+        systemctl --user disable agent-sessions-hub.service
+      fi
+      if [[ $prior_service_active -eq 1 ]]; then
+        systemctl --user restart agent-sessions-hub.service
+      else
+        systemctl --user stop agent-sessions-hub.service
+      fi
+      ;;
+    Darwin)
+      local domain="gui/$(id -u)" target
+      target="$domain/net.antst.agent-sessions-hub"
+      if [[ $prior_service_enabled -eq 1 ]]; then
+        launchctl enable "$target"
+      else
+        launchctl disable "$target"
+      fi
+      if [[ $prior_service_active -eq 1 ]]; then
+        launchd_bootstrap_exact "$domain" "$target" "$HOME/Library/LaunchAgents/net.antst.agent-sessions-hub.plist"
+        launchctl kickstart -k "$target"
+      fi
+      ;;
+  esac
+}
+
+prior_current=""
+if [[ -L "$hub_root/current" ]]; then
+  prior_current=$(resolve_directory_link "$hub_root/current" || true)
+  if [[ -z "$prior_current" || ! -d "$prior_current" || -L "$prior_current" || "$prior_current" != "$releases"/* ]]; then
+    printf 'selected prior hub release is outside the managed release root: %s\n' "$prior_current" >&2
+    exit 1
+  fi
+elif [[ -e "$hub_root/current" ]]; then
+  printf 'selected hub release is not a symbolic link: %s\n' "$hub_root/current" >&2
+  exit 1
+fi
+
+backup=""
+rollback_hub_install() {
+  local status=$1
+  trap - ERR EXIT
+  set +e
+  remove_hub_service
+  if [[ -n "$stage" && -d "$stage" ]]; then
+    remove_managed_tree "$stage" "$releases"
+  fi
+  if [[ -e "$release" || -L "$release" ]]; then
+    remove_managed_tree "$release" "$releases"
+  fi
+  if [[ -n "$backup" && -d "$backup" ]]; then mv -- "$backup" "$release"; fi
+  if [[ -n "$prior_current" && -d "$prior_current" ]]; then
+    ln -sfn "$prior_current" "$hub_root/current"
+    ln -sfn "$hub_root/current/bin/agent-sessions-hub" "$prefix/bin/agent-sessions-hub"
+    restore_prior_hub_service "$prior_current"
+  else
+    rm -f -- "$hub_root/current"
+    if [[ -L "$prefix/bin/agent-sessions-hub" ]]; then rm -f -- "$prefix/bin/agent-sessions-hub"; fi
+  fi
+  printf 'Agent Sessions hub installation failed; restored the prior hub release.\n' >&2
+  exit "$status"
+}
+trap 'rollback_hub_install $?' ERR
+
+if [[ -e "$release" || -L "$release" ]]; then
+  [[ -d "$release" && ! -L "$release" ]] || exit 1
+  backup="$releases/.previous-$version-$$"
+  mv -- "$release" "$backup"
+fi
+mv -- "$stage" "$release"
+stage=""
+ln -sfn "$release" "$hub_root/current"
+ln -sfn "$hub_root/current/bin/agent-sessions-hub" "$prefix/bin/agent-sessions-hub"
+install_hub_service "$release"
+
+if [[ -n "$backup" && -d "$backup" ]]; then
+  remove_managed_tree "$backup" "$releases"
+fi
+trap - ERR
+printf 'Installed Agent Sessions hub %s for %s.\n' "$version" "$platform"

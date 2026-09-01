@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestPeerRegistrationRequiresCatalogAndRestoresGroups(t *testing.T) {
@@ -181,6 +182,25 @@ func TestPreparedClaudePeerSurvivesAgentRestartAndRetiresOnLauncherCrash(t *test
 	}
 	if _, _, err := first.preparePeerLaunch(registration, update, expected); err != nil {
 		t.Fatal(err)
+	}
+	body, err := os.ReadFile(first.preparationPath(sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var durable map[string]any
+	if err := json.Unmarshal(body, &durable); err != nil {
+		t.Fatal(err)
+	}
+	version, _ := durable["version"].(float64)
+	product, _ := durable["product"].(string)
+	if int(version) != peerPreparationVersion || product != "claude" || durable["product_payload"] == nil {
+		t.Fatalf("durable preparation is not a versioned product envelope: %s", body)
+	}
+	durableRegistration, _ := durable["registration"].(map[string]any)
+	for _, key := range []string{"claude_config_root", "claude_key_baseline", "claude_socket_path"} {
+		if _, exists := durableRegistration[key]; exists {
+			t.Fatalf("Claude field %q escaped the product payload: %s", key, body)
+		}
 	}
 	// A restarted agent recovers the preparation before the native adapter has
 	// ever published or completed a full peer registration.
@@ -415,6 +435,66 @@ func TestLoadLegacyRawClaudePeerPreparation(t *testing.T) {
 	}
 }
 
+func TestLoadCurrentTransactionalClaudePeerPreparation(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "00000000-0000-4000-8000-000000000209"
+	registration := PeerRegistration{
+		Version: GroupProtocolVersion, SessionID: sessionID, Product: "claude",
+		PID: 2001, ProcStart: "adapter-start", AdapterStrongStart: "adapter-strong",
+		LifecyclePID: 2002, LifecycleProcStart: "lifecycle-start", LifecycleStrongStart: "lifecycle-strong",
+	}
+	agent := &agent{
+		preparations: map[string]peerPreparation{}, preparationDir: filepath.Join(root, "preparations"),
+	}
+	if err := os.MkdirAll(agent.preparationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	current := struct {
+		Registration        PeerRegistration    `json:"registration"`
+		PriorPreference     *SessionPreferences `json:"prior_preference,omitempty"`
+		DesiredPreference   SessionPreferences  `json:"desired_preference,omitempty"`
+		RollbackPreferences bool                `json:"rollback_preferences,omitempty"`
+		Committed           bool                `json:"committed,omitempty"`
+	}{Registration: registration, Committed: true}
+	if err := writeJSONAtomic(agent.preparationPath(sessionID), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.loadPeerPreparations(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := agent.preparations[sessionID]
+	if !ok || !samePreparedRegistration(loaded.Registration, registration) || !loaded.Committed {
+		t.Fatalf("current transactional preparation was not migrated: %+v", loaded)
+	}
+}
+
+func TestPeerPreparationTypedCleanupDebtRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "preparation.json")
+	registration := PeerRegistration{Version: GroupProtocolVersion, SessionID: "session-debt", Product: "claude"}
+	debt := PeerCleanupDebt{
+		Version: 1, DebtID: "debt-a", Revision: "revision-a", Product: "claude",
+		OwnerKind: "peer", OwnerID: registration.SessionID, Operation: "unlink",
+		ExpectedPath: filepath.Join(root, "owned.sock"), ExpectedDigest: strings.Repeat("a", 64),
+		ObservationState: "unknown", Attempts: 2, LastError: "identity unavailable",
+		UpdatedAt: 1234, TerminalWhenClean: "absent",
+	}
+	if err := writePeerPreparation(path, peerPreparation{Registration: registration, CleanupDebt: []PeerCleanupDebt{debt}}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := decodePeerPreparation(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.CleanupDebt) != 1 || loaded.CleanupDebt[0] != debt {
+		t.Fatalf("typed cleanup debt round trip = %+v, want %+v", loaded.CleanupDebt, debt)
+	}
+}
+
 func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
@@ -505,7 +585,7 @@ func TestPreparedClaudePeerRegisterAndCancelAreLinearizable(t *testing.T) {
 }
 
 func TestNamedClaudeSelectionPromotesAcrossAgentRestart(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.ShortSocketRoot(t, "ncs-", filepath.Join("runtime", "agent.sock"))
 	runtimeDir := filepath.Join(root, "runtime")
 	stateDir := filepath.Join(root, "state")
 	configRoot := filepath.Join(root, "claude")

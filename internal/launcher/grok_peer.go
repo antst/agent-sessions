@@ -12,9 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 const (
@@ -33,7 +38,7 @@ const (
 )
 
 var grokPassthroughCommands = map[string]struct{}{
-	"agent": {}, "completions": {}, "dashboard": {}, "doctor": {},
+	"agent": {}, "clone": {}, "completions": {}, "dashboard": {}, "doctor": {},
 	"du": {}, "disk-usage": {}, "export": {}, "help": {}, "inspect": {},
 	"leader": {}, "login": {}, "logout": {}, "mcp": {}, "memory": {},
 	"models": {}, "plugin": {}, "sessions": {}, "setup": {}, "trace": {},
@@ -95,6 +100,102 @@ type grokHostProcess struct {
 }
 
 type grokHostStarter func(runtimePath string, request grokHostRequest) (grokHostProcess, error)
+
+// GrokDaemonPrepareRequest is the exact parsed intent submitted before the
+// terminal client replaces itself with Grok. The unified daemon owns the
+// private native leader; no Grok host/supervisor process is spawned.
+type GrokDaemonPrepareRequest struct {
+	SessionID              string
+	Cwd                    string
+	Name                   string
+	ResumeTarget           string
+	LateBoundResume        bool
+	NameSpecified          bool
+	PermissionMode         string
+	PermissionSpecified    bool
+	GrokBin                string
+	LaunchToken            string
+	Owner                  procinfo.Identity
+	Groups                 []string
+	GroupsSpecified        bool
+	ParentSession          string
+	ParentSpecified        bool
+	InheritParentGroups    bool
+	InheritGroupsSpecified bool
+}
+
+// GrokDaemonPrepareResult returns the daemon-owned private leader handoff.
+type GrokDaemonPrepareResult struct {
+	SessionID    string
+	Cwd          string
+	LeaderSocket string
+}
+
+// GrokDaemonPrepare submits one native Grok launch intent.
+type GrokDaemonPrepare func(context.Context, GrokDaemonPrepareRequest) (GrokDaemonPrepareResult, error)
+
+// RunGrokPeerWithDaemon preserves the established Grok parser, exact CLI
+// discovery, private-leader argv, and launch environment while moving the
+// leader/ACP lifetime into the one user daemon.
+//
+//nolint:gocyclo // Native argv, executable, attachment handoff, exec, and rollback are one launch transaction.
+func RunGrokPeerWithDaemon(ctx context.Context, args []string, prepare GrokDaemonPrepare) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	plan, err := parseGrokPeerArgs(args, cwd)
+	if err != nil {
+		return err
+	}
+	grok, err := grokExecutable()
+	if err != nil {
+		return err
+	}
+	if plan.mode == grokModePassthrough || plan.informationalPass {
+		return Exec(grok, plan.originalArgs, nil)
+	}
+	if prepare == nil {
+		return errors.New("grok daemon preparation is unavailable")
+	}
+	owner, err := procinfo.CaptureIdentity(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("capture Grok launcher identity: %w", err)
+	}
+	launchToken, err := randomHex(32)
+	if err != nil {
+		return fmt.Errorf("generate Grok launch token: %w", err)
+	}
+	result, err := prepare(ctx, GrokDaemonPrepareRequest{
+		SessionID: plan.sessionID, Cwd: plan.requestedCwd, Name: plan.peerName,
+		ResumeTarget: plan.resumeTarget, LateBoundResume: plan.lateBoundResume,
+		NameSpecified: plan.peerName != "", PermissionMode: plan.permissionMode,
+		PermissionSpecified: plan.permissionSpecified,
+		GrokBin:             grok, LaunchToken: launchToken, Owner: owner,
+		Groups: append([]string(nil), plan.peerContext.groups...), GroupsSpecified: plan.peerContext.groupsSpecified,
+		ParentSession: plan.peerContext.parentSession, ParentSpecified: plan.peerContext.parentSpecified,
+		InheritParentGroups:    plan.peerContext.inheritParentGroups,
+		InheritGroupsSpecified: plan.peerContext.inheritGroupsSpecified,
+	})
+	if err != nil {
+		return err
+	}
+	resolvedManagedResume := plan.mode == grokModeResume && plan.lateBoundResume && result.SessionID != plan.sessionID
+	if (!resolvedManagedResume && result.SessionID != plan.sessionID) || !filepath.IsAbs(result.Cwd) || !filepath.IsAbs(result.LeaderSocket) {
+		return errors.New("daemon returned an invalid Grok leader handoff")
+	}
+	if resolvedManagedResume {
+		plan.sessionID = result.SessionID
+		plan.resumeTarget = result.SessionID
+		plan.lateBoundResume = false
+		plan.requestedCwd = result.Cwd
+	}
+	managed := grokInteractiveArguments(plan, grokHostReady{
+		Ready: true, SessionID: result.SessionID, Cwd: result.Cwd, LeaderSocket: result.LeaderSocket,
+	})
+	environment := replaceGrokDaemonLaunchEnvironment(os.Environ(), launchToken, result.SessionID)
+	return Exec(grok, managed, environment)
+}
 
 // RunGrokPeer starts an owner-attested Grok TUI backed by its own leader and
 // ACP waker host. Native informational and administrative commands pass
@@ -176,7 +277,7 @@ func runGrokPeer(args []string, startHost grokHostStarter) error {
 //nolint:gocyclo // CLI parsing preserves Grok arguments while extracting the shared peer layer.
 func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 	plan := grokPlan{mode: grokModeFresh, requestedCwd: cwd, permissionMode: "default"}
-	contextArgs, peerContext, err := extractPeerLaunchContext(args, grokOptionConsumesNext)
+	contextArgs, peerContext, err := scanPeerWrapperOptions("grok", args)
 	if err != nil {
 		return grokPlan{}, err
 	}
@@ -525,34 +626,7 @@ func grokPublishedPermissionMode(mode string) string {
 // removes native options; Grok remains the parsing authority for forwarded
 // argv. Optional-value --resume and --worktree are handled by managed parsing.
 func grokOptionConsumesNext(argument string) bool {
-	options := []string{
-		"--agent", "--agents", "--allow", "--allowedTools", "--cwd", "--debug-file", "--deny", "--disallowedTools",
-		"--disallowed-tools", "--json-schema", "--model", "--output-format",
-		"--permission-mode", "--prompt-file", "--prompt-json", "--reasoning-effort",
-		"--effort", "--rules", "--session-id", "--sandbox", "--single", "--system-prompt-override",
-		"--system-prompt", "--tools", "--worktree-ref", "--ref", "--peer-name", "-n",
-		"--compaction-mode", "--compaction-detail",
-	}
-	for _, option := range options {
-		if argument == option {
-			return true
-		}
-		if strings.HasPrefix(argument, option+"=") {
-			return false
-		}
-	}
-	if len(argument) > 2 {
-		switch argument[:2] {
-		case "-m", "-p", "-s":
-			return false
-		}
-	}
-	switch argument {
-	case "-m", "-p", "-s":
-		return true
-	default:
-		return false
-	}
+	return productOptionConsumesNext("grok", argument)
 }
 
 func grokExecutable() (string, error) {
@@ -610,7 +684,7 @@ func grokRuntimeExecutable() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		runtimePath = filepath.Join(pluginRoot, "bin", platform, "agent-session-runtime")
+		runtimePath = filepath.Join(pluginRoot, "bin", platform, "agent-sessions")
 	}
 	absolute, err := filepath.Abs(runtimePath)
 	if err != nil {
@@ -649,8 +723,87 @@ func grokExecutableCandidates() []string {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		add(filepath.Join(home, ".grok", "bin", "grok"))
+		for _, candidate := range grokManagedDownloadCandidates(filepath.Join(home, ".grok", "downloads")) {
+			add(candidate)
+		}
 	}
 	return candidates
+}
+
+// grokManagedDownloadCandidates covers Grok Build's native self-managed
+// installation layout. Some releases install no PATH shim and retain multiple
+// versioned binaries beside an older unversioned bootstrap, so candidates are
+// ordered by numeric release version before the unversioned fallback. Every
+// candidate still passes validateGrokCLI before it can be selected.
+//
+//nolint:gocyclo // Candidate expansion enumerates the vendor's supported OS/architecture spellings explicitly.
+func grokManagedDownloadCandidates(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	architectures := []string{runtime.GOARCH}
+	switch runtime.GOARCH {
+	case "amd64":
+		architectures = append(architectures, "x86_64")
+	case "arm64":
+		architectures = append(architectures, "aarch64")
+	}
+	type candidate struct {
+		path    string
+		version []int
+	}
+	var versioned []candidate
+	var unversioned []string
+	for _, architecture := range architectures {
+		suffix := "-" + runtime.GOOS + "-" + architecture
+		unversioned = append(unversioned, filepath.Join(root, "grok"+suffix))
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasPrefix(name, "grok-") || !strings.HasSuffix(name, suffix) {
+				continue
+			}
+			version := strings.TrimSuffix(strings.TrimPrefix(name, "grok-"), suffix)
+			parts := strings.Split(version, ".")
+			numeric := make([]int, len(parts))
+			valid := len(parts) > 0
+			for index, part := range parts {
+				value, parseErr := strconv.Atoi(part)
+				if parseErr != nil || value < 0 {
+					valid = false
+					break
+				}
+				numeric[index] = value
+			}
+			if valid {
+				versioned = append(versioned, candidate{path: filepath.Join(root, name), version: numeric})
+			}
+		}
+	}
+	sort.Slice(versioned, func(i, j int) bool {
+		limit := len(versioned[i].version)
+		if len(versioned[j].version) > limit {
+			limit = len(versioned[j].version)
+		}
+		for part := 0; part < limit; part++ {
+			left, right := 0, 0
+			if part < len(versioned[i].version) {
+				left = versioned[i].version[part]
+			}
+			if part < len(versioned[j].version) {
+				right = versioned[j].version[part]
+			}
+			if left != right {
+				return left > right
+			}
+		}
+		return versioned[i].path < versioned[j].path
+	})
+	result := make([]string, 0, len(versioned)+len(unversioned))
+	for _, item := range versioned {
+		result = append(result, item.path)
+	}
+	return append(result, unversioned...)
 }
 
 func validateGrokCLI(path string) error {
@@ -715,7 +868,7 @@ func startGrokHost(runtimePath string, request grokHostRequest) (grokHostProcess
 	// and exits as soon as that exec-preserved owner disappears.
 	configureGrokHostProcess(command)
 	command.Env = replaceGrokLaunchEnvironment(os.Environ(), request.LaunchToken, request.SessionID, runtimePath)
-	command.Env = replaceLaneEnvironment(command.Env, agentRuntimeDirEnv, request.AgentRuntimeDir)
+	command.Env = envutil.Set(command.Env, agentRuntimeDirEnv, request.AgentRuntimeDir)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return grokHostProcess{}, fmt.Errorf("capture Grok host readiness: %w", err)
@@ -852,4 +1005,29 @@ func replaceGrokLaunchEnvironment(environment []string, token, sessionID, runtim
 		updated = append(updated, entry)
 	}
 	return append(updated, prefixes[0]+token, prefixes[1]+sessionID, prefixes[2]+runtimePath)
+}
+
+func replaceGrokDaemonLaunchEnvironment(environment []string, token, sessionID string) []string {
+	prefixes := []string{
+		grokLaunchTokenEnv + "=", grokSessionIDEnv + "=", "GROK_PEER_NATIVE_RUNTIME=",
+		agentRuntimeDirEnv + "=", peerSessionIDEnv + "=", peerProductEnv + "=",
+	}
+	updated := make([]string, 0, len(environment)+4)
+	for _, entry := range environment {
+		drop := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(entry, prefix) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			updated = append(updated, entry)
+		}
+	}
+	updated = append(updated,
+		grokLaunchTokenEnv+"="+token, grokSessionIDEnv+"="+sessionID,
+		peerSessionIDEnv+"="+sessionID, peerProductEnv+"=grok",
+	)
+	return updated
 }

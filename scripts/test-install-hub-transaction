@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+temporary_parent="${TMPDIR:-/tmp}"
+if [[ "$(uname -s)" == Darwin ]]; then temporary_parent=/tmp; fi
+temporary_parent="$(cd -P -- "$temporary_parent" && pwd)"
+test_root="$(mktemp -d "$temporary_parent/agent-sessions-hub-transaction.XXXXXX")"
+cleanup() {
+  if [[ -d "$test_root" ]]; then
+    find -P "$test_root" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  fi
+  rm -rf -- "$test_root"
+}
+trap cleanup EXIT
+
+hub_binary="${AGENT_SESSIONS_TEST_HUB_BINARY:-$test_root/agent-sessions-hub}"
+if [[ -z "${AGENT_SESSIONS_TEST_HUB_BINARY:-}" ]]; then
+  go build -o "$hub_binary" "$root/cmd/agent-sessions-hub"
+fi
+[[ -x "$hub_binary" && ! -L "$hub_binary" ]] || {
+  printf 'hub transaction test requires a built hub binary: %s\n' "$hub_binary" >&2
+  exit 2
+}
+
+home="$test_root/home"
+prefix="$test_root/prefix"
+fake_bin="$test_root/bin"
+mkdir -p "$home" "$prefix" "$fake_bin"
+
+cat >"$fake_bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' Linux
+EOF
+
+cat >"$fake_bin/systemctl" <<'EOF'
+#!/bin/sh
+set -eu
+arguments=" $* "
+case "$arguments" in
+  *" is-enabled --quiet agent-sessions-hub.service "*)
+    [ -e "$TEST_HUB_ENABLED" ]
+    ;;
+  *" is-active --quiet agent-sessions-hub.service "*)
+    [ -e "$TEST_HUB_ACTIVE" ]
+    ;;
+  *" enable agent-sessions-hub.service "*) : >"$TEST_HUB_ENABLED" ;;
+  *" disable --now agent-sessions-hub.service "*)
+    rm -f -- "$TEST_HUB_ENABLED" "$TEST_HUB_ACTIVE" "$TEST_HUB_RUNNING_IDENTITY"
+    ;;
+  *" disable agent-sessions-hub.service "*) rm -f -- "$TEST_HUB_ENABLED" ;;
+  *" stop agent-sessions-hub.service "*) rm -f -- "$TEST_HUB_ACTIVE" "$TEST_HUB_RUNNING_IDENTITY" ;;
+  *" restart agent-sessions-hub.service "*)
+    if [ "${TEST_HUB_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$TEST_HUB_FAILURE_MARKER" ]; then
+      : >"$TEST_HUB_FAILURE_MARKER"
+      exit 44
+    fi
+    : >"$TEST_HUB_ACTIVE"
+    "$TEST_SHA256" "$TEST_PREFIX/bin/agent-sessions-hub" >"$TEST_HUB_RUNNING_IDENTITY"
+    ;;
+esac
+exit 0
+EOF
+
+cat >"$fake_bin/test-sha256" <<'EOF'
+#!/bin/sh
+set -eu
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$1" | awk '{print $1}'
+else
+  shasum -a 256 "$1" | awk '{print $1}'
+fi
+EOF
+chmod 0700 "$fake_bin/uname" "$fake_bin/systemctl" "$fake_bin/test-sha256"
+
+sha256=sha256sum
+if ! command -v "$sha256" >/dev/null 2>&1; then sha256="shasum -a 256"; fi
+candidate="$test_root/candidate-agent-sessions-hub"
+cp -- "$hub_binary" "$candidate"
+printf 'different-candidate\n' >>"$candidate"
+chmod 0755 "$candidate"
+
+common_env=(
+  "HOME=$home"
+  "XDG_CONFIG_HOME=$home/.config"
+  "PATH=$fake_bin:/usr/bin:/bin"
+  "TEST_PREFIX=$prefix"
+  "TEST_HUB_FAILURE_MARKER=$test_root/hub-failed-once"
+  "TEST_HUB_RUNNING_IDENTITY=$test_root/hub-running-identity"
+  "TEST_HUB_ENABLED=$test_root/hub-enabled"
+  "TEST_HUB_ACTIVE=$test_root/hub-active"
+  "TEST_SHA256=$fake_bin/test-sha256"
+)
+
+env "${common_env[@]}" "$root/scripts/install-hub" \
+  "$root" "$hub_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
+release="$prefix/libexec/agent-sessions/hub/releases/0.3.0"
+prior_hash=$($sha256 "$release/bin/agent-sessions-hub" | awk '{print $1}')
+[[ -n "$prior_hash" && "$(cat "$test_root/hub-running-identity")" == "$prior_hash" ]]
+find -P "$release" -type d -exec chmod 0555 {} +
+env "${common_env[@]}" systemctl --user disable agent-sessions-hub.service
+env "${common_env[@]}" systemctl --user stop agent-sessions-hub.service
+
+set +e
+env "${common_env[@]}" TEST_HUB_FAIL_ONCE=1 "$root/scripts/install-hub" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/failed.out" 2>"$test_root/failed.err"
+failed_status=$?
+set -e
+if [[ $failed_status -eq 0 ]] ||
+   ! grep -Fq 'restored the prior hub release' "$test_root/failed.err"; then
+  cat "$test_root/failed.out" >&2
+  cat "$test_root/failed.err" >&2
+  printf 'candidate hub service failure did not execute the rollback transaction\n' >&2
+  exit 1
+fi
+
+after_hash=$($sha256 "$release/bin/agent-sessions-hub" | awk '{print $1}')
+selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/hub/current" && pwd)
+if [[ "$after_hash" != "$prior_hash" ]] ||
+   [[ "$selected_release" != "$release" ]] ||
+   [[ -e "$test_root/hub-enabled" ]] ||
+   [[ -e "$test_root/hub-active" ]] ||
+   [[ -e "$test_root/hub-running-identity" ]] ||
+   [[ ! -f "$home/.config/systemd/user/agent-sessions-hub.service" ]]; then
+  printf 'failed hub update did not restore the exact stopped/disabled prior service state\n' >&2
+  exit 1
+fi
+env "${common_env[@]}" "$root/scripts/install-hub" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >/dev/null
+candidate_hash=$($sha256 "$candidate" | awk '{print $1}')
+installed_hash=$($sha256 "$release/bin/agent-sessions-hub" | awk '{print $1}')
+if [[ "$installed_hash" != "$candidate_hash" ]] ||
+   find "$prefix/libexec/agent-sessions/hub/releases" -maxdepth 1 \
+     -name '.previous-*' -print -quit | grep -q .; then
+  printf 'successful hub update did not remove its immutable prior release\n' >&2
+  exit 1
+fi
+printf 'hub install transaction rollback: PASS\n'

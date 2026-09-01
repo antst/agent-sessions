@@ -5,11 +5,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/federator"
 )
 
 const (
 	agentRuntimeDirEnv = "AGENT_SESSIONS_AGENT_RUNTIME_DIR"
+	nativeRuntimeEnv   = "AGENT_SESSIONS_NATIVE_RUNTIME"
 	peerSessionIDEnv   = "AGENT_SESSIONS_SESSION_ID"
 	peerProductEnv     = "AGENT_SESSIONS_PRODUCT"
 	remoteParentEnv    = "AGENT_SESSIONS_REMOTE_PARENT_CONTEXT"
@@ -28,6 +30,15 @@ type peerLaunchContext struct {
 	forceNoYolo            bool
 }
 
+// extractPeerLaunchContext retains the baseline callback surface until the
+// port-map deletion gate permits its removal. New production callers use the
+// product-keyed scanner in options.go.
+//
+//nolint:unused // Required as a named baseline symbol until the deletion gate advances.
+func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]string, peerLaunchContext, error) {
+	return scanPeerWrapperOptionsWithArity(args, consumesNext)
+}
+
 func persistentRuntimeEnvironment(environment []string) []string {
 	blocked := map[string]bool{
 		peerSessionIDEnv: true, peerProductEnv: true, remoteParentEnv: true,
@@ -43,60 +54,25 @@ func persistentRuntimeEnvironment(environment []string) []string {
 	return result
 }
 
-func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]string, peerLaunchContext, error) {
-	forwarded := make([]string, 0, len(args))
-	var context peerLaunchContext
-	remaining := args
-	for len(remaining) > 0 {
-		argument := remaining[0]
-		remaining = remaining[1:]
-		if argument == "--" {
-			forwarded = append(forwarded, argument)
-			forwarded = append(forwarded, remaining...)
-			break
-		}
-		switch {
-		case argument == "-g", argument == "--group":
-			if len(remaining) == 0 {
-				return nil, peerLaunchContext{}, usageError("-g/--group requires a non-empty value")
-			}
-			group := remaining[0]
-			remaining = remaining[1:]
-			if strings.TrimSpace(group) == "" {
-				return nil, peerLaunchContext{}, usageError("-g/--group requires a non-empty value")
-			}
-			context.groups = append(context.groups, group)
-			context.groupsSpecified = true
-		case strings.HasPrefix(argument, "-g="), strings.HasPrefix(argument, "--group="):
-			_, value, _ := strings.Cut(argument, "=")
-			if strings.TrimSpace(value) == "" {
-				return nil, peerLaunchContext{}, usageError("-g/--group requires a non-empty value")
-			}
-			context.groups = append(context.groups, value)
-			context.groupsSpecified = true
-		case argument == "--parent-session" || strings.HasPrefix(argument, "--parent-session="):
-			return nil, peerLaunchContext{}, usageError("--parent-session is internal; parent membership is assigned by an attested lane launch")
-		case argument == "--inherit-groups":
-			context.inheritParentGroups, context.inheritGroupsSpecified = true, true
-		case argument == "--no-inherit-groups":
-			context.inheritParentGroups, context.inheritGroupsSpecified = false, true
-		case argument == "--no-yolo":
-			context.forceNoYolo = true
-		default:
-			forwarded = append(forwarded, argument)
-			if consumesNext(argument) && len(remaining) > 0 {
-				forwarded = append(forwarded, remaining[0])
-				remaining = remaining[1:]
-			}
-		}
-	}
-	return forwarded, context, nil
+func peerEnvironment(environment []string, sessionID, product string) []string {
+	environment = envutil.Set(environment, agentRuntimeDirEnv, agentRuntimeDir())
+	environment = envutil.Set(environment, peerSessionIDEnv, sessionID)
+	return envutil.Set(environment, peerProductEnv, product)
 }
 
-func peerEnvironment(environment []string, sessionID, product string) []string {
-	environment = replaceLaneEnvironment(environment, agentRuntimeDirEnv, agentRuntimeDir())
-	environment = replaceLaneEnvironment(environment, peerSessionIDEnv, sessionID)
-	return replaceLaneEnvironment(environment, peerProductEnv, product)
+// daemonPeerEnvironment publishes only the attachment identity consumed by
+// product hooks/connectors. The retired per-host federator runtime pointer is
+// intentionally removed.
+func daemonPeerEnvironment(environment []string, sessionID, product string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if name != agentRuntimeDirEnv && name != peerSessionIDEnv && name != peerProductEnv {
+			filtered = append(filtered, entry)
+		}
+	}
+	filtered = envutil.Set(filtered, peerSessionIDEnv, sessionID)
+	return envutil.Set(filtered, peerProductEnv, product)
 }
 
 func (c peerLaunchContext) launchArguments(alwaysApprove bool, alwaysApproveSpecified bool) []string {

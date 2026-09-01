@@ -16,7 +16,7 @@ func acquireAgentInstanceLock(runtimeDir string) (*os.File, error) {
 
 func acquireAgentRegistryLock(configDir string) (*os.File, error) {
 	return acquireAgentFileLock(
-		filepath.Join(configDir, ".peer-federator-agent.lock"),
+		filepath.Join(configDir, ".agent-sessions-federation-agent.lock"),
 		"claude registry "+configDir,
 	)
 }
@@ -30,7 +30,7 @@ func acquireAgentFileLock(path, owner string) (*os.File, error) {
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, fmt.Errorf("another peer-federator agent already owns %s", owner)
+			return nil, fmt.Errorf("another agent-sessions-federation agent already owns %s", owner)
 		}
 		return nil, err
 	}

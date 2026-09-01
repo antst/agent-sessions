@@ -194,7 +194,7 @@ func withClaudePeerRetirementLock(peer localPeer, action func() error) error {
 		_ = lock.Close()
 	}()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("Claude peer profile is attached during retirement") //nolint:staticcheck // Claude is a product name.
+		return errors.New("claude peer profile is attached during retirement")
 	}
 	return action()
 }

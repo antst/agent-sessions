@@ -1,18 +1,20 @@
 # agent-sessions
 
-The Claude Code side of this repository. It teaches a Claude orchestrator how to drive
-`codex-peer-lane`, `claude-peer-lane`, and `grok-peer-lane`: start a named lane, collect its final answer, message or
-steer it while it runs, resume the same transcript, and archive it.
+The Claude Code side of this repository. It gives a Claude orchestrator the same
+daemon-backed Agent Sessions lifecycle surface as Codex, Grok, and Qwen: start a
+named Codex, Claude, Grok, or Qwen lane, collect its final answer, message or steer
+it while it runs, resume the same transcript, and archive it.
 
 ## Contents
 
 ```text
 .claude-plugin/plugin.json     plugin manifest
-.mcp.json                      process-attested structured peer messaging
+.mcp.json                      process-attested messaging and lane lifecycle control
 skills/codex-lane/             the Codex lane skill and its references
 skills/claude-lane/            the Claude self-lane skill
 skills/grok-lane/              the Grok lane skill and its references
-skills/agent-sessions/         grouped messaging through the one host-agent service
+skills/qwen-lane/              the Qwen lane skill
+skills/agent-sessions/         canonical discovery, messaging, and lane router
 commands/doctor.md             /agent-sessions:doctor — read-only preflight
 skills/codex-lane/scripts/     portable POSIX preflight included with the skill
 ```
@@ -32,14 +34,21 @@ A user-scope marketplace installation is loaded by new interactive sessions and 
 
 ## What it deliberately does not do
 
-- **One process-attested MCP server.** Managed Claude peers get structured grouped discovery and
-  messaging. The server remains inactive unless its process descends from the exact live Claude
-  adapter and the host agent corroborates the same UUID, socket, and lifecycle owner.
+- **One process-attested MCP server.** Managed Claude peers get structured grouped discovery,
+  messaging, and local or federated lifecycle control for all four lane products. The server
+  remains inactive unless its process descends from the exact live Claude adapter and the host
+  agent corroborates the same UUID, socket, and lifecycle owner. The daemon, not Claude's MCP
+  process or shell, owns background workers.
 - **No hooks.** Nothing runs on SessionStart, UserPromptSubmit, Stop, or SessionEnd.
 - **No subagent.** A subagent boundary would hide a running lane from the orchestrator that needs to
   message it.
-- **No settings and no permission grants.** Lane commands prompt like any other `Bash` call.
-- **No binary and no adapter code.** Runtime dependencies are the three product lane launchers;
+- **No global settings mutation.** Plugin installation never edits the operator's Claude profile.
+  `claude-peer` disables only a same-named project `.mcp.json` entry and merges the four exact,
+  plugin-qualified Agent Sessions tool approvals into its lifecycle-owned settings overlay. Claude
+  lanes receive the same narrow policy. This prevents an arbitrary project from inheriting the
+  installed connector's approval. Bare `claude` and unrelated MCP tools are unchanged; explicit
+  tool removal or denial remains caller-owned.
+- **No binary and no adapter code.** Runtime dependencies are the four product lane adapters;
   protocol, wake, and portability logic stay in the Go runtime where fixes are
   centralized.
 - **No policy defaults.** Model, effort, sandbox, approval, web access, config overlays, output
@@ -50,8 +59,8 @@ ships no binary and remains portable across supported hosts.
 
 ## Contract
 
-The Codex skill targets adapter **contract version 2**; Claude and Grok target **contract version
-1**. All require `list`, `doctor --json`, and `contract_version` in `lane.ready` and doctor output.
+All four lane skills target adapter **contract version 2** and require `list`, `doctor --json`,
+and `contract_version` in `lane.ready` and doctor output.
 Their `references/` directories are self-contained operational contracts loaded from Claude's
 plugin cache. The source repository also publishes the human-facing adapter specifications under
 `docs/`.

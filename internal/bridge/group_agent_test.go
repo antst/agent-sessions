@@ -14,18 +14,28 @@ import (
 
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestRemoteLaneCollectionPointerCarriesSourceAgentRuntime(t *testing.T) {
 	groups := []string{"project", "session:destination/child", "session:source/parent"}
 	got := laneCollectionPointer("claude", "child", "source", "/tmp/source runtime", groups)
-	want := "peer-federator lane -runtime-dir '/tmp/source runtime' --host destination --product claude -- wait child"
+	want := "claude-peer-lane --host destination wait child"
 	if got != want {
 		t.Fatalf("remote collection pointer = %q, want %q", got, want)
 	}
-	legacy := laneCollectionPointer("claude", "child", "source", "", groups)
-	if strings.Contains(legacy, "-runtime-dir") {
-		t.Fatalf("legacy collection pointer invented a runtime directory: %q", legacy)
+	withoutOldRuntime := laneCollectionPointer("claude", "child", "source", "", groups)
+	if withoutOldRuntime != want {
+		t.Fatalf("remote pointer depends on an obsolete agent runtime: %q", withoutOldRuntime)
+	}
+}
+
+func TestRemoteQwenCollectionPointerIsVerbatimAndSourceScoped(t *testing.T) {
+	groups := []string{"project", "session:destination/qwen-child", "session:source/qwen-parent"}
+	got := laneCollectionPointer("qwen", "qwen-child", "source", "/tmp/qwen source", groups)
+	want := "qwen-peer-lane --host destination wait qwen-child"
+	if got != want {
+		t.Fatalf("remote Qwen collection pointer = %q, want %q", got, want)
 	}
 }
 
@@ -40,7 +50,7 @@ func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", configDir)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", dataDir)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", dataDir)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -87,7 +97,7 @@ func TestManagedPeerUsesSingleAgentRegistryCarrierAndGroupedDelivery(t *testing.
 		t.Fatal(err)
 	}
 	defer func() { _ = federator.UnregisterPeer(runtimeDir, sourceRegistration) }()
-	for _, product := range []string{"codex", "claude", "grok"} {
+	for _, product := range mcpLaneProductIDs() {
 		childID := product + "-child"
 		state, _, err := resolveLaneGroupState(childID, product, laneGroupOptions{
 			groups: []string{"child-extra"}, groupsSpecified: true,
@@ -264,6 +274,10 @@ func TestAllLaneTargetParsersAcceptSharedGroupLayer(t *testing.T) {
 	if err != nil || !grok.groupOptions.groupsSpecified || !grok.groupOptions.inheritParentGroups {
 		t.Fatalf("Grok group options = %+v, %v", grok.groupOptions, err)
 	}
+	qwen, err := parseQwenLaneArgs([]string{"start", "--name", "q", "--group", "one", "--inherit-groups", "-"})
+	if err != nil || !qwen.groupOptions.groupsSpecified || !qwen.groupOptions.inheritParentGroups {
+		t.Fatalf("Qwen group options = %+v, %v", qwen.groupOptions, err)
+	}
 }
 
 func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
@@ -282,11 +296,13 @@ func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
 	t.Setenv("AGENT_SESSIONS_GROK_SESSION_ID", "")
 
 	localOwner := laneOwner{PID: os.Getpid(), ProcStart: readProcStart(os.Getpid()), SessionID: "destination-local-parent"}
-	codex := withLaneResolvedParent(laneOptions{command: "start", persistent: true}, localOwner)
-	claude := withClaudeLaneResolvedParent(claudeLaneOptions{command: "start", persistent: true}, localOwner)
-	grok := withGrokLaneResolvedParent(grokLaneOptions{command: "start", persistent: true}, localOwner)
+	common := laneCommonOptions{command: "start", persistent: true}
+	codex := withLaneResolvedParent(laneOptions{laneCommonOptions: common}, localOwner)
+	claude := withClaudeLaneResolvedParent(claudeLaneOptions{laneCommonOptions: common}, localOwner)
+	grok := withGrokLaneResolvedParent(grokLaneOptions{laneCommonOptions: common}, localOwner)
+	qwen := withQwenLaneResolvedParent(qwenLaneOptions{laneCommonOptions: common}, localOwner)
 	for product, state := range map[string]laneGroupOptions{
-		"codex": codex.groupOptions, "claude": claude.groupOptions, "grok": grok.groupOptions,
+		"codex": codex.groupOptions, "claude": claude.groupOptions, "grok": grok.groupOptions, "qwen": qwen.groupOptions,
 	} {
 		if state.parentSessionID != parent.SessionID || state.parentHostID != parent.HostID ||
 			state.parentAgentRuntimeDir != parent.AgentRuntimeDir ||
@@ -294,9 +310,9 @@ func TestRemoteParentContextSurvivesEveryTargetLaunchLayer(t *testing.T) {
 			t.Fatalf("%s remote parent = %+v", product, state)
 		}
 	}
-	if codex.ownerSessionID != "" || claude.ownerSessionID != "" || grok.ownerSessionID != "" {
-		t.Fatalf("remote communication parent became a local lifecycle owner: codex=%q claude=%q grok=%q",
-			codex.ownerSessionID, claude.ownerSessionID, grok.ownerSessionID)
+	if codex.ownerSessionID != "" || claude.ownerSessionID != "" || grok.ownerSessionID != "" || qwen.ownerSessionID != "" {
+		t.Fatalf("remote communication parent became a local lifecycle owner: codex=%q claude=%q grok=%q qwen=%q",
+			codex.ownerSessionID, claude.ownerSessionID, grok.ownerSessionID, qwen.ownerSessionID)
 	}
 }
 
@@ -314,7 +330,7 @@ func TestEveryParentProductComposesWithEveryTargetGroupLayer(t *testing.T) {
 	t.Setenv(remoteParentEnvironment, "")
 	t.Setenv("CODEX_THREAD_ID", "")
 
-	for _, parentProduct := range []string{"codex", "claude", "grok"} {
+	for _, parentProduct := range mcpLaneProductIDs() {
 		parentProduct := parentProduct
 		t.Run("parent-"+parentProduct, func(t *testing.T) {
 			parentID := "local-" + parentProduct + "-parent"
@@ -328,6 +344,9 @@ func TestEveryParentProductComposesWithEveryTargetGroupLayer(t *testing.T) {
 				Version: federator.GroupProtocolVersion, SessionID: parentID, Product: parentProduct,
 				Name: parentID, PID: os.Getpid(), ProcStart: procStart, Socket: socket,
 			}
+			if parentProduct == "qwen" {
+				registration.QwenCapabilityDigest = "sha256:" + strings.Repeat("a", 64)
+			}
 			if _, err := federator.RegisterPeer(runtimeDir, registration); err != nil {
 				t.Fatal(err)
 			}
@@ -336,7 +355,7 @@ func TestEveryParentProductComposesWithEveryTargetGroupLayer(t *testing.T) {
 			t.Setenv("AGENT_SESSIONS_PRODUCT", parentProduct)
 			owner := laneOwner{PID: os.Getpid(), ProcStart: procStart, SessionID: parentID, PermissionMode: "default"}
 
-			for _, targetProduct := range []string{"codex", "claude", "grok"} {
+			for _, targetProduct := range mcpLaneProductIDs() {
 				targetProduct := targetProduct
 				t.Run("target-"+targetProduct, func(t *testing.T) {
 					childID := parentProduct + "-to-" + targetProduct
@@ -401,7 +420,7 @@ func TestCorroboratedNativeParentWinsLeakedCodexThreadID(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", "unrelated-outer-codex-thread")
 	owner := laneOwner{PID: os.Getpid(), ProcStart: procStart, SessionID: parentID, PermissionMode: "bypassPermissions"}
 
-	for _, targetProduct := range []string{"codex", "claude", "grok"} {
+	for _, targetProduct := range mcpLaneProductIDs() {
 		launch := resolvedTargetLaunch(targetProduct, false, laneGroupOptions{}, owner)
 		if launch.groups.parentErr != nil {
 			t.Fatalf("%s target rejected corroborated Grok parent: %v", targetProduct, launch.groups.parentErr)
@@ -434,7 +453,7 @@ func TestRemoteParentTargetThenNestedLaneUsesImmediateParent(t *testing.T) {
 	}
 	t.Setenv(remoteParentEnvironment, string(remoteBody))
 
-	for _, firstTarget := range []string{"codex", "claude", "grok"} {
+	for _, firstTarget := range mcpLaneProductIDs() {
 		firstTarget := firstTarget
 		t.Run("first-target-"+firstTarget, func(t *testing.T) {
 			childID := "remote-to-" + firstTarget
@@ -465,6 +484,9 @@ func TestRemoteParentTargetThenNestedLaneUsesImmediateParent(t *testing.T) {
 			if firstTarget == "grok" {
 				registration.PermissionMode = "bypassPermissions"
 			}
+			if firstTarget == "qwen" {
+				registration.QwenCapabilityDigest = "sha256:" + strings.Repeat("a", 64)
+			}
 			if _, err := federator.RegisterPeer(runtimeDir, registration); err != nil {
 				t.Fatal(err)
 			}
@@ -474,7 +496,7 @@ func TestRemoteParentTargetThenNestedLaneUsesImmediateParent(t *testing.T) {
 			t.Setenv("AGENT_SESSIONS_PRODUCT", firstTarget)
 			childOwner := laneOwner{PID: os.Getpid(), ProcStart: procStart, SessionID: childID, PermissionMode: "default"}
 
-			for _, nestedTarget := range []string{"codex", "claude", "grok"} {
+			for _, nestedTarget := range mcpLaneProductIDs() {
 				nested := resolvedTargetLaunch(nestedTarget, false, laneGroupOptions{}, childOwner)
 				assertResolvedTargetParent(t, nested, childID, os.Getpid(), procStart, true)
 				assertContainsGroup(t, nested.groups.parentGroups, "session:test-host/"+childID)
@@ -497,13 +519,16 @@ type targetLaunchProjection struct {
 func resolvedTargetLaunch(product string, persistent bool, groups laneGroupOptions, owner laneOwner) targetLaunchProjection {
 	switch product {
 	case "codex":
-		got := withLaneResolvedParent(laneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withLaneResolvedParent(laneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	case "claude":
-		got := withClaudeLaneResolvedParent(claudeLaneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withClaudeLaneResolvedParent(claudeLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	case "grok":
-		got := withGrokLaneResolvedParent(grokLaneOptions{command: "start", persistent: persistent, groupOptions: groups}, owner)
+		got := withGrokLaneResolvedParent(grokLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
+		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
+	case "qwen":
+		got := withQwenLaneResolvedParent(qwenLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", persistent: persistent, groupOptions: groups}}, owner)
 		return targetLaunchProjection{got.groupOptions, got.ownerPID, got.ownerProcStart, got.ownerSessionID, got.notifyTarget}
 	default:
 		panic("unsupported test target product: " + product)
@@ -552,6 +577,8 @@ func assertTargetWorkerDropsRemoteParent(t *testing.T, product, sessionID, remot
 		})
 	case "grok":
 		environment = grokLaneWorkerEnvironment(input, strings.Repeat("a", 64), grokLaneState{SessionID: sessionID}, "/tmp/grok-shell", "/bin/bash")
+	case "qwen":
+		environment = qwenLaneWorkerEnvironment(input, qwenLaneState{ThreadID: sessionID}, strings.Repeat("a", 64))
 	}
 	joined := "\n" + strings.Join(environment, "\n") + "\n"
 	if strings.Contains(joined, "\n"+remoteParentEnvironment+"=") ||
@@ -594,16 +621,7 @@ func startLaneContextTestAgent(t *testing.T) (string, string) {
 // the full test name even when TMPDIR itself is already compact.
 func shortSocketTestRoot(t *testing.T, pattern string) string {
 	t.Helper()
-	root, err := os.MkdirTemp("", pattern)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(root); err != nil {
-			t.Errorf("remove short socket test root: %v", err)
-		}
-	})
-	return root
+	return testutil.ShortSocketRoot(t, pattern, filepath.Join("agent-runtime", "agent.sock"))
 }
 
 func equalStringSlices(left, right []string) bool {

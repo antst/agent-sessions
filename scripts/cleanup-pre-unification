@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""Plan and apply the one-time cleanup of unreleased pre-unification state.
+
+This repository-only tool intentionally has no installation or Make surface.
+It reads target *content* only from the public cleanup contract. Selected
+artifacts are identified with lstat metadata and deleted opaquely without
+opening or hashing their contents.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import platform
+import stat
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CONTRACT_PATH = REPO_ROOT / "specs/002-unified-user-daemon/contracts/pre-unification-cleanup.yml"
+TEST_ROOT_ENV = "AGENT_SESSIONS_CLEANUP_TEST_ROOT"
+
+
+class CleanupError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class SelectedTarget:
+    stable_id: str
+    path: str
+    expected_type: str
+    removal_scope: str
+    metadata: tuple[int | str, ...]
+    pre_remove: tuple[tuple[str, ...], ...]
+    tool_metadata: tuple[tuple[int | str, ...], ...]
+    allow_pre_remove_failure: bool
+
+    def revision_row(self) -> str:
+        values = (
+            self.stable_id, self.path, *self.metadata, self.pre_remove,
+            self.tool_metadata, self.allow_pre_remove_failure,
+        )
+        return "\0".join(str(value) for value in values)
+
+    def public(self) -> dict[str, object]:
+        kind, uid, gid, mode, device, inode, size, mtime_ns = self.metadata
+        return {
+            "id": self.stable_id,
+            "path": self.path,
+            "expected_type": self.expected_type,
+            "removal_scope": self.removal_scope,
+            "metadata": {
+                "type": kind,
+                "uid": uid,
+                "gid": gid,
+                "mode": mode,
+                "device": device,
+                "inode": inode,
+                "size": size,
+                "mtime_ns": mtime_ns,
+            },
+            "pre_remove": [list(command) for command in self.pre_remove],
+            "tool_metadata": [list(current) for current in self.tool_metadata],
+            "allow_pre_remove_failure": self.allow_pre_remove_failure,
+        }
+
+
+def fail(message: str) -> None:
+    raise CleanupError(message)
+
+
+def load_contract() -> dict[str, object]:
+    try:
+        # JSON is a strict subset of YAML. Keeping this contract in that subset
+        # lets the direct utility stay dependency-free on both Linux and macOS.
+        contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"cannot load cleanup contract: {error}")
+    if contract.get("schema_version") != 1 or not isinstance(contract.get("contract_id"), str):
+        fail("cleanup contract has an unsupported identity")
+    targets = contract.get("targets")
+    if not isinstance(targets, list) or not targets:
+        fail("cleanup contract has no targets")
+    seen: set[str] = set()
+    forbidden = ("*", "?", "[", "]")
+    for row in targets:
+        if not isinstance(row, dict):
+            fail("cleanup contract target is not an object")
+        stable_id = row.get("id")
+        raw_path = row.get("path")
+        if not isinstance(stable_id, str) or not stable_id or stable_id in seen:
+            fail("cleanup contract target IDs must be non-empty and unique")
+        seen.add(stable_id)
+        if not isinstance(raw_path, str) or not raw_path.startswith(
+            ("/", "${HOME}/", "${XDG_RUNTIME_DIR}/", "${TMPDIR_REAL}/")
+        ):
+            fail(f"cleanup target {stable_id} has no exact absolute path")
+        if any(character in raw_path for character in forbidden):
+            fail(f"cleanup target {stable_id} uses a glob")
+        if row.get("expected_type") not in {"directory", "regular", "symlink", "socket"}:
+            fail(f"cleanup target {stable_id} has an unsupported type")
+        if row.get("owner") != "current-user":
+            fail(f"cleanup target {stable_id} has an unsupported owner")
+        if row.get("removal_scope") not in {"entry", "opaque-tree"}:
+            fail(f"cleanup target {stable_id} has an unsupported removal scope")
+        if not isinstance(row.get("legacy_source"), str) or not row["legacy_source"]:
+            fail(f"cleanup target {stable_id} has no legacy source evidence")
+        pre_remove = row.get("pre_remove", [])
+        if not isinstance(pre_remove, list):
+            fail(f"cleanup target {stable_id} has invalid pre-remove commands")
+        for command in pre_remove:
+            if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
+                fail(f"cleanup target {stable_id} has invalid pre-remove argv")
+            if not command[0].startswith(("/", "${HOME}/")):
+                fail(f"cleanup target {stable_id} pre-remove tool is not an exact path")
+        allow_missing_tool = row.get("allow_missing_pre_remove_tool", False)
+        if not isinstance(allow_missing_tool, bool):
+            fail(f"cleanup target {stable_id} has invalid missing-tool policy")
+        if allow_missing_tool and (not pre_remove or row.get("removal_scope") != "opaque-tree"):
+            fail(f"cleanup target {stable_id} cannot allow a missing pre-remove tool")
+        allow_pre_remove_failure = row.get("allow_pre_remove_failure", False)
+        if not isinstance(allow_pre_remove_failure, bool):
+            fail(f"cleanup target {stable_id} has invalid pre-remove failure policy")
+        if allow_pre_remove_failure and not allow_missing_tool:
+            fail(f"cleanup target {stable_id} cannot tolerate failure from a mandatory pre-remove tool")
+    return contract
+
+
+def host_platform() -> str:
+    value = platform.system().lower()
+    if value == "linux":
+        return "linux"
+    if value == "darwin":
+        return "darwin"
+    fail(f"unsupported cleanup platform: {value}")
+    return ""
+
+
+def roots() -> tuple[str, str, str]:
+    fixture = os.environ.get(TEST_ROOT_ENV, "").strip()
+    if fixture:
+        if not os.path.isabs(fixture):
+            fail(f"{TEST_ROOT_ENV} must be absolute")
+        fixture = os.path.realpath(fixture)
+        if not os.path.isfile(os.path.join(fixture, ".agent-sessions-cleanup-fixture")):
+            fail(f"{TEST_ROOT_ENV} is not an explicit fixture-owned root")
+        return (
+            os.path.join(fixture, "home"),
+            os.path.join(fixture, "run"),
+            os.path.realpath(os.path.join(fixture, "tmp")),
+        )
+    home = os.path.realpath(os.path.expanduser("~"))
+    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    tmp = os.path.realpath(os.environ.get("TMPDIR", "/tmp"))
+    return home, runtime, tmp
+
+
+def expand_path(raw_path: str, home: str, runtime: str, tmp: str) -> str:
+    values = {
+        "${HOME}": home,
+        "${UID}": str(os.getuid()),
+        "${XDG_RUNTIME_DIR}": runtime,
+        "${TMPDIR_REAL}": tmp,
+    }
+    value = raw_path
+    for marker, replacement in values.items():
+        value = value.replace(marker, replacement)
+    fixture = os.environ.get(TEST_ROOT_ENV, "").strip()
+    if fixture:
+        fixture_tmp = os.path.realpath(tmp)
+        if os.path.commonpath((os.path.realpath(fixture), fixture_tmp)) != os.path.realpath(fixture):
+            fail(f"cleanup fixture tmp root escapes fixture ownership: {fixture_tmp}")
+        if raw_path.startswith("/private/tmp/"):
+            value = os.path.join(
+                fixture_tmp,
+                value.removeprefix("/private/tmp/"),
+            )
+        elif raw_path.startswith("/tmp/"):
+            value = os.path.join(
+                fixture_tmp,
+                value.removeprefix("/tmp/"),
+            )
+    elif raw_path.startswith("/tmp/"):
+        # macOS exposes /tmp as the system-owned /private/tmp symlink. Resolve
+        # that one fixed contract root before the no-symlink ancestor check;
+        # arbitrary target or ancestor symlinks remain forbidden.
+        value = os.path.join(os.path.realpath("/tmp"), value.removeprefix("/tmp/"))
+    if "${" in value or not os.path.isabs(value):
+        fail(f"cleanup path did not resolve exactly: {raw_path}")
+    return os.path.normpath(value)
+
+
+def path_kind(mode: int) -> str:
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "regular"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    return "other"
+
+
+def metadata(path: str) -> tuple[int | str, ...] | None:
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return (
+        path_kind(current.st_mode),
+        current.st_uid,
+        current.st_gid,
+        stat.S_IMODE(current.st_mode),
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+        current.st_mtime_ns,
+    )
+
+
+def tool_metadata(path: str) -> tuple[int | str, ...]:
+    """Return revision evidence for an exact pre-remove tool, including absence."""
+    return metadata(path) or ("absent",)
+
+
+def verify_ancestors(path: str, fixture_root: str | None) -> None:
+    boundary = fixture_root or os.path.dirname(path)
+    if fixture_root and os.path.commonpath((fixture_root, path)) != fixture_root:
+        fail(f"cleanup target escapes fixture root: {path}")
+    cursor = os.path.dirname(path)
+    checked: list[str] = []
+    while cursor and cursor != os.path.dirname(cursor):
+        checked.append(cursor)
+        if fixture_root and cursor == fixture_root:
+            break
+        cursor = os.path.dirname(cursor)
+    for ancestor in reversed(checked):
+        try:
+            current = os.lstat(ancestor)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(current.st_mode):
+            fail(f"cleanup target has a symlink ancestor: {ancestor}")
+        if not stat.S_ISDIR(current.st_mode):
+            fail(f"cleanup target has a non-directory ancestor: {ancestor}")
+    del boundary
+
+
+def build_plan(contract: dict[str, object]) -> tuple[list[SelectedTarget], str, list[str]]:
+    current_platform = host_platform()
+    home, runtime, tmp = roots()
+    fixture_root = os.environ.get(TEST_ROOT_ENV, "").strip() or None
+    if fixture_root:
+        fixture_root = os.path.realpath(fixture_root)
+
+    unified_root = os.path.join(home, ".local/libexec/agent-sessions/host")
+    if os.path.lexists(unified_root):
+        fail(f"refuse pre-unification cleanup after unified host installation: {unified_root}")
+
+    selected: list[SelectedTarget] = []
+    absent: list[str] = []
+    for row in contract["targets"]:  # type: ignore[index]
+        assert isinstance(row, dict)
+        if row["platform"] not in {"all", current_platform}:
+            continue
+        path = expand_path(str(row["path"]), home, runtime, tmp)
+        if path in {"/", home, runtime, tmp}:
+            fail(f"cleanup target is an unsafe broad root: {path}")
+        verify_ancestors(path, fixture_root)
+        current = metadata(path)
+        if current is None:
+            absent.append(str(row["id"]))
+            continue
+        if current[0] != row["expected_type"]:
+            fail(f"cleanup target {row['id']} type is {current[0]}, want {row['expected_type']}")
+        if current[1] != os.geteuid():
+            fail(f"cleanup target {row['id']} is not owned by uid {os.geteuid()}")
+        commands: list[tuple[str, ...]] = []
+        command_metadata: list[tuple[int | str, ...]] = []
+        for raw_command in row.get("pre_remove", []):
+            command = tuple(expand_path(part, home, runtime, tmp) if index == 0 else part
+                            for index, part in enumerate(raw_command))
+            tool_state = tool_metadata(command[0])
+            if tool_state == ("absent",) and row.get("allow_missing_pre_remove_tool", False):
+                commands.append(command)
+                command_metadata.append(tool_state)
+                continue
+            if tool_state[0] not in {"regular", "symlink"} or not os.access(command[0], os.X_OK):
+                fail(f"cleanup target {row['id']} requires unavailable exact tool {command[0]}")
+            commands.append(command)
+            command_metadata.append(tool_state)
+        selected.append(SelectedTarget(
+            stable_id=str(row["id"]),
+            path=path,
+            expected_type=str(row["expected_type"]),
+            removal_scope=str(row["removal_scope"]),
+            metadata=current,
+            pre_remove=tuple(commands),
+            tool_metadata=tuple(command_metadata),
+            allow_pre_remove_failure=bool(row.get("allow_pre_remove_failure", False)),
+        ))
+
+    selected.sort(key=lambda target: target.stable_id)
+    absent.sort()
+    digest = hashlib.sha256()
+    digest.update(str(contract["contract_id"]).encode())
+    digest.update(b"\0")
+    for target in selected:
+        digest.update(target.revision_row().encode())
+        digest.update(b"\0")
+    return selected, digest.hexdigest(), absent
+
+
+def remove_opaque(path: str) -> None:
+    current = os.lstat(path)
+    if not stat.S_ISDIR(current.st_mode) or stat.S_ISLNK(current.st_mode):
+        os.unlink(path)
+        return
+    if current.st_uid != os.geteuid():
+        fail(f"cleanup tree contains a directory not owned by uid {os.geteuid()}: {path}")
+    owner_access = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    current_mode = stat.S_IMODE(current.st_mode)
+    if current_mode & owner_access != owner_access:
+        # Legacy worktrees can contain read-only directories. Make only the
+        # current-user-owned directory traversable/removable; file contents are
+        # still never opened, hashed, or interpreted.
+        os.chmod(path, current_mode | owner_access, follow_symlinks=False)
+    with os.scandir(path) as entries:
+        names = [entry.name for entry in entries]
+    for name in names:
+        remove_opaque(os.path.join(path, name))
+    os.rmdir(path)
+
+
+def emit_plan(contract: dict[str, object], selected: list[SelectedTarget], revision: str,
+              absent: list[str], mode: str) -> None:
+    print(json.dumps({
+        "type": "pre_unification_cleanup.plan" if mode == "plan" else "pre_unification_cleanup.applied",
+        "contract_id": contract["contract_id"],
+        "platform": host_platform(),
+        "plan_revision": revision,
+        "selected": [target.public() for target in selected],
+        "absent_ids": absent,
+        "mutation": mode == "apply",
+    }, sort_keys=True, separators=(",", ":")))
+
+
+def main(argv: list[str]) -> int:
+    apply_revision: str | None = None
+    if argv:
+        if len(argv) != 2 or argv[0] != "--apply" or len(argv[1]) != 64:
+            print(f"usage: {Path(sys.argv[0]).name} [--apply PLAN_REVISION]", file=sys.stderr)
+            return 2
+        apply_revision = argv[1]
+
+    contract = load_contract()
+    selected, revision, absent = build_plan(contract)
+    if apply_revision is None:
+        emit_plan(contract, selected, revision, absent, "plan")
+        return 0
+    if apply_revision != revision:
+        fail(f"cleanup plan changed: reviewed {apply_revision}, current {revision}; nothing removed")
+
+    # Validate the complete selection once before the first mutation.
+    for target in selected:
+        if metadata(target.path) != target.metadata:
+            fail(f"cleanup target changed before apply: {target.stable_id}; nothing removed")
+        for command, expected in zip(target.pre_remove, target.tool_metadata):
+            if tool_metadata(command[0]) != expected:
+                fail(f"cleanup tool changed before apply: {target.stable_id}; nothing removed")
+    # A native registration remover may itself be one of the contracted legacy
+    # aliases (grok-peer in the c056fbc inventory). Keep referenced tools until
+    # every dependent target has run its exact pre-remove argv. This affects
+    # mutation order only; the public plan and revision remain stable-ID sorted.
+    referenced_tools = {
+        command[0]
+        for target in selected
+        for command, expected in zip(target.pre_remove, target.tool_metadata)
+        if expected != ("absent",)
+    }
+    deletion_order = (
+        [target for target in selected if target.path not in referenced_tools]
+        + [target for target in selected if target.path in referenced_tools]
+    )
+    for target in deletion_order:
+        if metadata(target.path) != target.metadata:
+            fail(f"cleanup target changed before deletion: {target.stable_id}")
+        for index, command in enumerate(target.pre_remove, start=1):
+            expected = target.tool_metadata[index - 1]
+            if tool_metadata(command[0]) != expected:
+                fail(f"cleanup tool changed before use: {target.stable_id}")
+            if expected == ("absent",):
+                continue
+            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, check=False)
+            if result.returncode != 0 and not target.allow_pre_remove_failure:
+                fail(f"native registration removal failed: {target.stable_id} command {index}")
+        if os.path.lexists(target.path):
+            remove_opaque(target.path)
+    emit_plan(contract, selected, revision, absent, "apply")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except CleanupError as error:
+        print(f"cleanup-pre-unification: {error}", file=sys.stderr)
+        raise SystemExit(1)

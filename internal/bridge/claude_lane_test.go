@@ -140,8 +140,8 @@ func TestClaudeLaneDoctorRequiresAuthentication(t *testing.T) {
 				return map[string]any{}
 			})
 			t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
-			t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
-			t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+			t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
+			t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 			t.Setenv(agentRuntimeDirEnvironment, filepath.Join(root, "no-agent"))
 
 			read, write, err := os.Pipe()
@@ -221,8 +221,8 @@ esac
 	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "outer")
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", sharedRoot)
 	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 	t.Setenv(agentRuntimeDirEnvironment, filepath.Join(root, "no-agent"))
 
 	read, write, err := os.Pipe()
@@ -349,7 +349,7 @@ func TestClaudeLaneCodexOwnerPeerRequiresMatchingPIDAndSession(t *testing.T) {
 
 func TestClaudeLaneListMineFiltersByProcessIdentity(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", root)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", root)
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	ownerPID, ownerProcStart := os.Getpid(), readProcStart(os.Getpid())
@@ -372,7 +372,9 @@ func TestClaudeLaneListMineFiltersByProcessIdentity(t *testing.T) {
 		original := os.Stdout
 		os.Stdout = write
 		code, listErr := listClaudeLanes(claudeLaneOptions{
-			mine: true, all: all, ownerPID: ownerPID, ownerProcStart: ownerProcStart,
+			laneCommonOptions: laneCommonOptions{
+				mine: true, all: all, ownerPID: ownerPID, ownerProcStart: ownerProcStart,
+			},
 		})
 		_ = write.Close()
 		os.Stdout = original
@@ -555,28 +557,28 @@ func TestClaudeLaneReadinessBudgetCoversWorkerPeerPublication(t *testing.T) {
 
 func TestClaudeLaneMineDoesNotUseTransientParent(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("CODEX_THREAD_ID", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", "")
 	t.Setenv("CLAUDE_PID", "")
-	mine := withClaudeLaneLaunchContext(claudeLaneOptions{command: "list", mine: true})
+	mine := withClaudeLaneLaunchContext(claudeLaneOptions{laneCommonOptions: laneCommonOptions{command: "list", mine: true}})
 	if mine.ownerPID != 0 || mine.ownerProcStart != "" {
 		t.Fatalf("unresolved Claude --mine fell back to a transient parent: %+v", mine)
 	}
-	fallback := withClaudeLaneLaunchContext(claudeLaneOptions{command: "start"})
+	fallback := withClaudeLaneLaunchContext(claudeLaneOptions{laneCommonOptions: laneCommonOptions{command: "start"}})
 	if fallback.ownerPID != 0 || fallback.ownerProcStart != "" {
 		t.Fatalf("ordinary shell unexpectedly became a Claude lifecycle owner: %+v", fallback)
 	}
 }
 
 func TestNonpersistentLaneStartRequiresCapturedOwnerIdentity(t *testing.T) {
-	if _, err := startLaneNative(laneOptions{command: "start", name: "missing-owner"}, false); err == nil || !strings.Contains(err.Error(), "cannot corroborate a stable lifecycle owner") {
+	if _, err := startLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{command: "start", name: "missing-owner"}}, false); err == nil || !strings.Contains(err.Error(), "cannot corroborate a stable lifecycle owner") {
 		t.Fatalf("Codex lane owner capture error = %v", err)
 	}
-	if _, err := startClaudeLane(claudeLaneOptions{command: "start", name: "missing-owner"}, false); err == nil || !strings.Contains(err.Error(), "cannot corroborate a stable lifecycle owner") {
+	if _, err := startClaudeLane(claudeLaneOptions{laneCommonOptions: laneCommonOptions{command: "start", name: "missing-owner"}}, false); err == nil || !strings.Contains(err.Error(), "cannot corroborate a stable lifecycle owner") {
 		t.Fatalf("Claude lane owner capture error = %v", err)
 	}
 }
@@ -616,7 +618,7 @@ func TestClaudeLaneResumePreservesPersistentLifecyclePolicyUnlessExplicitlyChang
 		NotifyTarget: "session:old-session",
 	}
 	applyClaudeLaneResumeOptions(&state, claudeLaneOptions{
-		ownerPID: 92, ownerProcStart: "new", ownerSessionID: "",
+		laneCommonOptions: laneCommonOptions{ownerPID: 92, ownerProcStart: "new", ownerSessionID: ""},
 	})
 	if !state.Persistent || state.OwnerPID != 0 || state.OwnerProcStart != "" ||
 		state.OwnerSessionID != "" || state.NotifyTarget != "session:old-session" {
@@ -627,13 +629,13 @@ func TestClaudeLaneResumePreservesPersistentLifecyclePolicyUnlessExplicitlyChang
 		NotifyTarget: "session:old-session",
 	}
 	applyClaudeLaneResumeOptions(&state, claudeLaneOptions{
-		ownerPID: 92, ownerProcStart: "new", ownerSessionID: "new-session",
+		laneCommonOptions: laneCommonOptions{ownerPID: 92, ownerProcStart: "new", ownerSessionID: "new-session"},
 	})
 	if state.Persistent || state.OwnerPID != 92 || state.OwnerProcStart != "new" ||
 		state.OwnerSessionID != "new-session" || state.NotifyTarget != "session:new-session" {
 		t.Fatalf("implicit parent-owned resume lifecycle = %+v", state)
 	}
-	applyClaudeLaneResumeOptions(&state, claudeLaneOptions{persistent: true, persistentSet: true})
+	applyClaudeLaneResumeOptions(&state, claudeLaneOptions{laneCommonOptions: laneCommonOptions{persistent: true, persistentSet: true}})
 	if !state.Persistent || state.OwnerPID != 0 || state.OwnerProcStart != "" || state.OwnerSessionID != "" {
 		t.Fatalf("persistent resume lifecycle = %+v", state)
 	}
@@ -692,16 +694,16 @@ func TestClaudeLaneMaintenanceRetriesFailedArchiveReservation(t *testing.T) {
 	}
 }
 
-func TestClaudeLaneLegacyManagerArgsRequireExactRoleAndSession(t *testing.T) {
-	for _, runtimeName := range []string{"agent-session-runtime", "codex-messaging"} {
-		valid := []string{"/opt/" + runtimeName, "claude-lane-manager", "--session-id", "session-old"}
-		if !processArgsIdentifyClaudeLaneManager(valid, "session-old") {
-			t.Fatalf("exact %s manager arguments were rejected", runtimeName)
-		}
+func TestClaudeLaneManagerArgsRequireUnifiedRuntimeRoleAndSession(t *testing.T) {
+	valid := []string{"/opt/agent-sessions", "claude-lane-manager", "--session-id", "session-old"}
+	if !processArgsIdentifyClaudeLaneManager(valid, "session-old") {
+		t.Fatal("exact unified runtime manager arguments were rejected")
 	}
 	for _, args := range [][]string{
 		{"/opt/agent-session-runtime", "shim", "--session-id", "session-old"},
-		{"/opt/agent-session-runtime", "claude-lane-manager", "--session-id", "session-other"},
+		{"/opt/agent-session-runtime", "claude-lane-manager", "--session-id", "session-old"},
+		{"/opt/codex-messaging", "claude-lane-manager", "--session-id", "session-old"},
+		{"/opt/agent-sessions", "claude-lane-manager", "--session-id", "session-other"},
 		{"/opt/not-agent-session-runtime", "claude-lane-manager", "--session-id", "session-old"},
 	} {
 		if processArgsIdentifyClaudeLaneManager(args, "session-old") {
@@ -774,7 +776,7 @@ func TestLiveClaudeLaneResumeRejectsUncorroboratedOwnerBeforeMutation(t *testing
 func TestNonpersistentLaneResumeRequiresCapturedOwnerBeforeDurableMutation(t *testing.T) {
 	root := t.TempDir()
 	dataRoot := filepath.Join(root, "state")
-	t.Setenv("CLAUDE_PEER_DATA_DIR", dataRoot)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", dataRoot)
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -804,10 +806,10 @@ func TestNonpersistentLaneResumeRequiresCapturedOwnerBeforeDurableMutation(t *te
 	}
 	for name, resume := range map[string]func() (int, error){
 		"codex": func() (int, error) {
-			return resumeLaneNative(laneOptions{command: "resume", target: "nonpersistent-codex", promptFile: filepath.Join(root, "missing-prompt")})
+			return resumeLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{command: "resume", target: "nonpersistent-codex", promptFile: filepath.Join(root, "missing-prompt")}})
 		},
 		"claude": func() (int, error) {
-			return resumeClaudeLane(claudeLaneOptions{command: "resume", target: "nonpersistent-claude", promptFile: filepath.Join(root, "missing-prompt")})
+			return resumeClaudeLane(claudeLaneOptions{laneCommonOptions: laneCommonOptions{command: "resume", target: "nonpersistent-claude", promptFile: filepath.Join(root, "missing-prompt")}})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -826,7 +828,7 @@ func TestNonpersistentLaneResumeRequiresCapturedOwnerBeforeDurableMutation(t *te
 
 func TestProcessArgsLookLikeCodexHostExcludesBridgeLaunchers(t *testing.T) {
 	for _, args := range [][]string{
-		{"/tmp/agent-session-runtime", "claude-lane", "run"},
+		{"/tmp/agent-sessions", "claude-lane", "run"},
 		{"/bin/bash", "-c", "codex-peer-lane start --name child"},
 		{"/home/user/.local/bin/codex-peer", "--version"},
 	} {
@@ -1199,11 +1201,11 @@ func TestClaudeLaneEmptyToolsFlagIsPreservedInWorkerArgv(t *testing.T) {
 	if !found {
 		t.Fatalf("worker argv omitted explicit empty tools: %#v", args)
 	}
-	if !containsArgValue(args, "--allowedTools", "SendMessage,ListAgents") {
+	if !containsArgValue(args, "--allowedTools", managedClaudeLaneAllowedTools()) {
 		t.Fatalf("worker argv did not allow lane messaging tools: %#v", args)
 	}
-	if !containsArgValue(args, "--settings", `{"crossSessionInbound":"accept"}`) {
-		t.Fatalf("worker argv did not accept native inbound lane messages: %#v", args)
+	if !containsArgValue(args, "--settings", `{"crossSessionInbound":"accept","disabledMcpjsonServers":["agent_sessions"]}`) {
+		t.Fatalf("worker argv did not accept native inbound lane messages and disable the project MCP collision: %#v", args)
 	}
 	if !containsString(args, "--no-chrome") {
 		t.Fatalf("worker argv can block on the Chrome extension interstitial: %#v", args)
@@ -1224,7 +1226,7 @@ func TestClaudeLaneWorkerMergesMessagingIntoExplicitAllowedTools(t *testing.T) {
 		SessionID: "session-test", Name: "reviewer", PermissionMode: "dontAsk",
 		AllowedTools: "Read,Bash(git *)", AllowedToolsSet: true,
 	})
-	if !containsArgValue(args, "--allowedTools", "Read,Bash(git *),SendMessage,ListAgents") {
+	if !containsArgValue(args, "--allowedTools", "Read,Bash(git *),"+managedClaudeLaneAllowedTools()) {
 		t.Fatalf("worker argv replaced caller allowed tools: %#v", args)
 	}
 }
@@ -1234,9 +1236,13 @@ func TestClaudeLaneWorkerNormalizesEmptyExplicitAllowedTools(t *testing.T) {
 		SessionID: "claude-session-test", Name: "lane", PermissionMode: "dontAsk",
 		AllowedToolsSet: true,
 	})
-	if !containsArgValue(args, "--allowedTools", "SendMessage,ListAgents") {
+	if !containsArgValue(args, "--allowedTools", managedClaudeLaneAllowedTools()) {
 		t.Fatalf("expected native messaging tools without an empty leading entry, got %q", args)
 	}
+}
+
+func managedClaudeLaneAllowedTools() string {
+	return strings.Join(append([]string{"SendMessage", "ListAgents"}, claudeprofile.ManagedAgentSessionsMCPTools()...), ",")
 }
 
 func containsArgValue(args []string, flag, value string) bool {
@@ -1259,19 +1265,19 @@ func TestClaudeLaneArchivedResumePolicyUpdatesOnlyExplicitFields(t *testing.T) {
 	}
 }
 
-func TestClaudeLaneWorkerNeverRestartsLegacyBareMode(t *testing.T) {
+func TestClaudeLaneWorkerRejectsUnsupportedBareOrPrivateState(t *testing.T) {
 	args := claudeLaneWorkerArgs(claudeLaneState{
 		SessionID: "session-test", Name: "legacy-bare", PermissionMode: "dontAsk", Bare: true,
 	})
 	if containsString(args, "--bare") {
 		t.Fatalf("current worker argv restarted a non-messageable legacy bare lane: %#v", args)
 	}
-	if err := validateClaudeLaneResumeState(claudeLaneState{Bare: true}); err == nil || !strings.Contains(err.Error(), "legacy lane used --bare") {
-		t.Fatalf("legacy bare resume did not fail with an actionable error: %v", err)
+	if err := validateClaudeLaneResumeState(claudeLaneState{Bare: true}); err == nil || !strings.Contains(err.Error(), "unsupported bare mode") {
+		t.Fatalf("bare resume did not fail with an actionable error: %v", err)
 	}
 	if err := validateClaudeLaneResumeState(claudeLaneState{}); err == nil ||
-		!strings.Contains(err.Error(), "legacy private Claude lane") {
-		t.Fatalf("legacy private-profile resume did not fail before mutation: %v", err)
+		!strings.Contains(err.Error(), "required shared native profile") {
+		t.Fatalf("private-profile resume did not fail before mutation: %v", err)
 	}
 }
 
@@ -1502,7 +1508,7 @@ func TestClaudeLaneWorkerCaptureFailureReapsChildWithoutPersistence(t *testing.T
 		manager.state.WorkerPID != 0 || manager.state.WorkerProcStart != "" {
 		t.Fatalf("worker ownership survived failed capture: pid=%d manager=%+v", workerPID, manager.state)
 	}
-	if observation := observeProcessIdentity(workerPID, ""); observation.Status != processIdentityStale {
+	if observation := observeProcessIdentity(workerPID); observation.Status != processIdentityStale {
 		t.Fatalf("worker was not reaped after failed identity capture: %+v", observation)
 	}
 	if _, err := os.Stat(claudeLaneStatePath(paths, manager.state.SessionID)); !os.IsNotExist(err) {
@@ -1749,7 +1755,7 @@ func TestClaudeLaneManagerCannotOverwriteArchivedState(t *testing.T) {
 func TestClaudeLaneUnknownCleanupPreservesStateAndTransport(t *testing.T) {
 	useBridgeTestAgent(t)
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1817,7 +1823,7 @@ func TestClaudeLaneUnknownCleanupPreservesStateAndTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := resumeClaudeLane(claudeLaneOptions{
-		command: "resume", target: sessionID, promptFile: prompt, persistent: true,
+		laneCommonOptions: laneCommonOptions{command: "resume", target: sessionID, promptFile: prompt, persistent: true},
 	}); err == nil || !strings.Contains(err.Error(), "cannot currently corroborate") {
 		t.Fatalf("resume unknown identity error = %v", err)
 	}
@@ -1892,7 +1898,7 @@ func TestClaudeLaneDeadLegacyIdentityCleanupRemovesOwnedTransport(t *testing.T) 
 
 func TestClaudeLaneCleanupEscalatesManagerBlockedOnLifecycleLock(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1903,7 +1909,7 @@ func TestClaudeLaneCleanupEscalatesManagerBlockedOnLifecycleLock(t *testing.T) {
 		"CLAUDE_CLEANUP_LOCK_HELPER=1",
 		"CLAUDE_CLEANUP_LOCK_SESSION="+sessionID,
 		"CLAUDE_CLEANUP_LOCK_READY="+ready,
-		"CLAUDE_PEER_DATA_DIR="+paths.dataRoot,
+		"AGENT_SESSIONS_STATE_ROOT="+paths.dataRoot,
 		"CLAUDE_PEER_CLAUDE_CONFIG_DIR="+paths.claudeRoot,
 		"CODEX_HOME="+paths.codexHome,
 	)

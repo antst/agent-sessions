@@ -20,5 +20,5 @@ session ID. This is a same-UID lifecycle boundary; names and model-supplied IDs 
 Archive is bridge-owned and preserves the native transcript for a fresh ACP owner to `session/load`;
 there is no native Grok archive/unarchive call. `GROK_LANE_TERMINAL` is a durable collection pointer
 with a stable native message ID, not answer content. Remote lifecycle uses
-`peer-federator lane --host HOST --product grok --`, requires advertised `grok-lane`, and retains
+`grok-peer-lane --host HOST`, requires advertised `grok-lane`, and retains
 this same JSONL and collection contract.

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installed hook and MCP entry point; never falls back to Node.
-
-state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
-native_runtime="${GROK_PEER_NATIVE_RUNTIME:-$(sed -n '1p' "$state_root/native-runtime-path" 2>/dev/null || true)}"
-if [[ -z "$native_runtime" || ! -x "$native_runtime" ]]; then
-  printf 'agent-sessions: native runtime is not installed; run make install first\n' >&2
+# Shared installed hook and MCP entry point. Product manifests pass the exact
+# multi-call command and product; this wrapper only selects the installed image.
+host_binary="${AGENT_SESSIONS_HOST_BINARY:-${HOME}/.local/bin/agent-sessions}"
+if [[ ! -x "$host_binary" ]]; then
+  printf 'agent-sessions: unified client is not installed; run make install-all first\n' >&2
   exit 1
 fi
-exec "$native_runtime" "$@"
+exec "$host_binary" "$@"

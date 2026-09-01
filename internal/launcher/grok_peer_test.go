@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -372,6 +373,41 @@ func TestGrokExecutableFallsBackToVendorCLIWhenPathContainsChatProduct(t *testin
 	}
 	if _, err := os.Stat(chatMarker); err != nil {
 		t.Fatalf("chat candidate was not contract-probed before fallback: %v", err)
+	}
+}
+
+func TestGrokExecutableSelectsNewestValidatedManagedDownload(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	downloads := filepath.Join(home, ".grok", "downloads")
+	if err := os.MkdirAll(downloads, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	architecture := runtime.GOARCH
+	switch architecture {
+	case "amd64":
+		architecture = "x86_64"
+	case "arm64":
+		architecture = "aarch64"
+	}
+	write := func(version string) string {
+		t.Helper()
+		path := filepath.Join(downloads, "grok-"+version+"-"+runtime.GOOS+"-"+architecture)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+validGrokHelpFixture()+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	_ = write("1.0.5")
+	want := write("1.0.13")
+	_ = write("1.0.9")
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", filepath.Join(root, "empty-path"))
+	t.Setenv("GROK_PEER_GROK_BIN", "")
+
+	got, err := grokExecutable()
+	if err != nil || got != want {
+		t.Fatalf("managed Grok executable = %q, %v; want newest %q", got, err, want)
 	}
 }
 

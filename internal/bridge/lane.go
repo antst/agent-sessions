@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,41 +18,22 @@ import (
 	"time"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
+
+	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 type laneOptions struct {
-	command            string
-	name               string
-	cwd                string
-	model              string
-	effort             string
-	sandbox            string
-	approvalPolicy     string
-	web                *bool
-	configs            []string
-	timeout            time.Duration
-	promptFile         string
-	notifyTarget       string
-	notifyExplicit     bool
-	disableNotify      bool
-	persistent         bool
-	persistentSet      bool
-	autoArchive        bool
-	noAutoArchiveSet   bool
-	autoArchiveDelay   time.Duration
-	autoArchiveCustom  bool
-	ownerPID           int
-	ownerProcStart     string
-	ownerSessionID     string
-	schemaFile         string
-	outputSchema       json.RawMessage
-	worktree           bool
-	target             string
-	allowDuplicateName bool
-	all                bool
-	mine               bool
-	help               bool
-	groupOptions       laneGroupOptions
+	laneCommonOptions
+	model          string
+	effort         string
+	sandbox        string
+	approvalPolicy string
+	web            *bool
+	configs        []string
+	schemaFile     string
+	outputSchema   json.RawMessage
+	worktree       bool
 }
 
 const laneContractVersion = 2
@@ -147,11 +127,9 @@ Policy options are optional pass-throughs; omitted values inherit Codex config:
       --persistent             survive the recorded lifecycle owner
       --auto-archive-after S   archive after S seconds (minimum 0.001)
       --no-auto-archive        keep an idle completed lane available
-      --notify PEER            persistent lanes: send terminal pointers here
-      --no-notify              parent-owned lanes: suppress owner notification
       --schema FILE            constrain and validate the final answer as JSON
       --worktree               create a detached git worktree for this lane
-	  --group GROUP           add a child group; repeatable
+	  -g, --group GROUP       add a child group; repeatable
 	  --inherit-groups        also inherit the parent's non-private groups
 	  --no-inherit-groups     retain only the mandatory parent anchor
       --json                   accepted for codex-exec compatibility
@@ -162,255 +140,72 @@ should normally pass --approval-policy never; the wrapper never chooses it.
 `
 }
 
-// parseLaneArgs keeps option validation in one switch so wrapper behavior is
-// auditable against the public command-line contract.
-//
-//nolint:gocyclo
 func parseLaneArgs(argv []string) (laneOptions, error) {
-	options := laneOptions{cwd: mustGetwd(), autoArchive: true, autoArchiveDelay: defaultLaneAutoArchiveDelay}
-	if len(argv) == 0 {
-		options.help = true
-		return options, nil
-	}
-	for _, argument := range argv {
-		if argument == "-h" || argument == "--help" {
-			options.help = true
-			return options, nil
-		}
-	}
-	options.command = argv[0]
-	if !containsString([]string{"run", "start", "resume", "wait", "status", "interrupt", "archive", "list", "doctor"}, options.command) {
-		return options, fmt.Errorf("unknown command %q", options.command)
-	}
-	positionals := []string{}
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		take := func() (string, error) {
-			if index+1 >= len(argv) || argv[index+1] == "" {
-				return "", fmt.Errorf("%s requires a value", argument)
-			}
-			index++
-			return argv[index], nil
-		}
-		var value string
-		var err error
-		switch argument {
-		case "-n", "--name", "--peer-name":
-			value, err = take()
-			options.name = value
-		case "-C", "--cd":
-			value, err = take()
-			options.cwd = value
-		case "-m", "--model":
-			value, err = take()
-			options.model = value
-		case "--effort", "--reasoning-effort":
-			value, err = take()
-			options.effort = value
-		case "--sandbox":
-			value, err = take()
-			options.sandbox = value
-		case "--approval-policy":
-			value, err = take()
-			options.approvalPolicy = value
-		case "--timeout":
-			value, err = take()
-			if err == nil {
-				seconds, parseErr := strconv.ParseFloat(value, 64)
-				if parseErr != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 || seconds >= float64(math.MaxInt64)/float64(time.Second) {
-					err = errors.New("--timeout must be a non-negative number of seconds")
-				} else {
-					options.timeout = time.Duration(seconds * float64(time.Second))
-				}
-			}
-		case "--prompt-file":
-			value, err = take()
-			options.promptFile = value
-		case "--notify":
-			value, err = take()
-			options.notifyTarget = value
-			options.notifyExplicit = true
-		case "--no-notify":
-			options.disableNotify = true
-		case "--persistent":
-			options.persistent, options.persistentSet = true, true
-		case "--no-auto-archive":
-			options.autoArchive, options.noAutoArchiveSet = false, true
-		case "--auto-archive-after":
-			value, err = take()
-			if err == nil {
-				seconds, parseErr := strconv.ParseFloat(value, 64)
-				if parseErr != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0.001 || seconds >= float64(math.MaxInt64)/float64(time.Second) {
-					err = errors.New("--auto-archive-after must be at least 0.001 seconds")
-				} else {
-					options.autoArchiveDelay = time.Duration(seconds * float64(time.Second))
-					options.autoArchiveCustom = true
-				}
-			}
-		case "--schema":
-			value, err = take()
-			options.schemaFile = value
-		case "--worktree":
-			options.worktree = true
-		case "--group":
-			value, err = take()
-			options.groupOptions.groups = append(options.groupOptions.groups, value)
-			options.groupOptions.groupsSpecified = true
-		case "--inherit-groups":
-			options.groupOptions.inheritParentGroups, options.groupOptions.inheritGroupsSpecified = true, true
-		case "--no-inherit-groups":
-			options.groupOptions.inheritParentGroups, options.groupOptions.inheritGroupsSpecified = false, true
-		case "-c", "--config":
-			value, err = take()
-			options.configs = append(options.configs, value)
-		case "--web":
-			value := true
-			options.web = &value
-		case "--no-web":
-			value := false
-			options.web = &value
-		case "--allow-duplicate-name":
-			options.allowDuplicateName = true
-		case "--all":
-			options.all = true
-		case "--mine":
-			options.mine = true
-		case "--json", "--skip-git-repo-check", "-":
-			// Compatibility options; JSONL and stdin are already the native behavior.
-		default:
-			if strings.HasPrefix(argument, "-") {
-				return options, fmt.Errorf("unknown option %s", argument)
-			}
-			positionals = append(positionals, argument)
-		}
-		if err != nil {
-			return options, err
-		}
-	}
-	if options.notifyTarget != "" && options.disableNotify {
-		return options, errors.New("--notify and --no-notify cannot be used together")
-	}
-	if options.autoArchiveCustom && !options.autoArchive {
-		return options, errors.New("--auto-archive-after and --no-auto-archive cannot be used together")
-	}
-	if options.autoArchiveCustom && !containsString([]string{"run", "start", "resume"}, options.command) {
-		return options, fmt.Errorf("--auto-archive-after is not valid for %s", options.command)
-	}
-	if options.notifyExplicit && !options.persistent && options.command != "resume" {
-		return options, errors.New("--notify requires --persistent; parent-owned lanes notify their owner automatically")
-	}
-	if options.mine && options.command != "list" {
-		return options, fmt.Errorf("--mine is not valid for %s", options.command)
-	}
-	if err := validateLaneGroupCommand(options.command, options.groupOptions); err != nil {
+	options := laneOptions{laneCommonOptions: newLaneCommonOptions("THREAD_OR_NAME")}
+	start, done, err := beginLaneOptionParse(argv, &options.laneCommonOptions)
+	if done || err != nil {
 		return options, err
 	}
-	switch options.command {
-	case "run", "start":
-		if strings.TrimSpace(options.name) == "" {
-			return options, fmt.Errorf("%s requires --name", options.command)
-		}
-		if len(positionals) != 0 {
-			return options, fmt.Errorf("%s does not accept a prompt on argv; use stdin or --prompt-file", options.command)
-		}
+	parser := newLaneFlagParser("codex-peer-lane", &options.laneCommonOptions)
+	parser.set.StringVarP(&options.model, "model", "m", options.model, "model")
+	parser.set.StringVar(&options.effort, "effort", options.effort, "reasoning effort")
+	parser.set.StringVar(&options.effort, "reasoning-effort", options.effort, "reasoning effort alias")
+	parser.set.StringVar(&options.sandbox, "sandbox", options.sandbox, "sandbox policy")
+	parser.set.StringVar(&options.approvalPolicy, "approval-policy", options.approvalPolicy, "approval policy")
+	parser.set.StringVar(&options.schemaFile, "schema", options.schemaFile, "output schema")
+	parser.set.BoolVar(&options.worktree, "worktree", options.worktree, "create a worktree")
+	parser.set.StringArrayVarP(&options.configs, "config", "c", options.configs, "configuration override")
+	webMode := ""
+	parser.set.StringVar(&webMode, "web", "", "enable web")
+	parser.set.Lookup("web").NoOptDefVal = "true"
+	parser.set.StringVar(&webMode, "no-web", "", "disable web")
+	parser.set.Lookup("no-web").NoOptDefVal = "false"
+	var skipGitRepoCheck bool
+	parser.set.BoolVar(&skipGitRepoCheck, "skip-git-repo-check", false, "compatibility no-op")
+	positionals, err := parser.parse(argv[start:])
+	if err != nil {
+		return options, err
+	}
+	if webMode != "" {
+		web := webMode == "true"
+		options.web = &web
+	}
+	if err := validateLaneCommonOptions(&options.laneCommonOptions, positionals); err != nil {
+		return options, err
+	}
+	if options.command == "run" || options.command == "start" {
 		if options.sandbox != "" && !containsString([]string{"read-only", "workspace-write", "danger-full-access"}, options.sandbox) {
 			return options, fmt.Errorf("unsupported sandbox %q", options.sandbox)
 		}
-	case "resume":
-		if len(positionals) != 1 {
-			return options, errors.New("resume requires exactly one THREAD_OR_NAME")
-		}
-		if options.worktree {
-			return options, errors.New("resume cannot create a new worktree; it reuses the lane's existing cwd")
-		}
-		options.target = positionals[0]
-	case "list", "doctor":
-		if len(positionals) != 0 {
-			return options, fmt.Errorf("%s does not accept positional arguments", options.command)
-		}
-	default:
-		if len(positionals) != 1 {
-			return options, fmt.Errorf("%s requires exactly one THREAD_OR_NAME", options.command)
-		}
-		options.target = positionals[0]
+	}
+	if options.command == "resume" && options.worktree {
+		return options, errors.New("resume cannot create a new worktree; it reuses the lane's existing cwd")
 	}
 	return options, nil
 }
 
+//nolint:dupl // Declarative product binding is intentionally explicit; dispatch mechanics live in runProductLaneCommand.
 func runLaneCommand(argv []string) int {
-	options, err := parseLaneArgs(argv)
-	if err != nil {
-		_ = emitLane(map[string]any{"type": "error", "message": err.Error()})
-		fmt.Fprintf(os.Stderr, "codex-peer-lane: %v\n", err)
-		return 1
-	}
-	if options.help {
-		fmt.Print(laneUsage())
-		return 0
-	}
-	options = withLaneLaunchContext(options)
-	var code int
-	switch options.command {
-	case "run":
-		code, err = startLaneNative(options, true)
-	case "start":
-		code, err = startLaneNative(options, false)
-	case "resume":
-		code, err = resumeLaneNative(options)
-	case "wait":
-		code, err = waitLaneNative(options)
-	case "status":
-		code, err = statusLaneNative(options)
-	case "interrupt":
-		code, err = interruptLaneNative(options)
-	case "archive":
-		code, err = archiveLaneNative(options)
-	case "list":
-		code, err = listLanesNative(options)
-	case "doctor":
-		code, err = doctorLaneNative()
-	}
-	if err != nil {
-		_ = emitLane(map[string]any{"type": "error", "message": err.Error(), "timeout": errors.Is(err, context.DeadlineExceeded)})
-		fmt.Fprintf(os.Stderr, "codex-peer-lane: %v\n", err)
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 124
-		}
-		return 1
-	}
-	return code
+	return runProductLaneCommand(argv, productLaneCommands[laneOptions]{
+		binary: "codex-peer-lane", usage: laneUsage, parse: parseLaneArgs, parseExit: 1,
+		help: func(o laneOptions) bool { return o.help },
+		prepare: func(o laneOptions) (laneOptions, error) {
+			return withLaneLaunchContext(o), nil
+		},
+		command: func(o laneOptions) string { return o.command },
+		start:   startLaneNative, resume: resumeLaneNative, wait: waitLaneNative, status: statusLaneNative,
+		interrupt: interruptLaneNative, archive: archiveLaneNative, list: listLanesNative,
+		doctor: func(laneOptions) (int, error) { return doctorLaneNative() },
+	})
 }
 
 func withLaneLaunchContext(options laneOptions) laneOptions {
-	listMine := options.command == "list" && options.mine
-	if !containsString([]string{"run", "start", "resume"}, options.command) && !listMine {
-		return options
-	}
-	owner := inferPeerParent(resolveNativePaths(), os.Getpid())
-	return withLaneResolvedParent(options, owner)
+	options.laneCommonOptions = withCurrentLaneParent(options.laneCommonOptions)
+	return options
 }
 
 func withLaneResolvedParent(options laneOptions, owner laneOwner) laneOptions {
-	listMine := options.command == "list" && options.mine
-	options.groupOptions = applyAgentParentContext(options.groupOptions, &owner)
-	peerOwner := owner.SessionID != ""
-	if listMine {
-		if peerOwner {
-			options.ownerPID, options.ownerProcStart, options.ownerSessionID = owner.PID, owner.ProcStart, owner.SessionID
-		}
-		return options
-	}
-	if peerOwner {
-		options.groupOptions.parentSessionID = owner.SessionID
-		if !options.persistent {
-			options.ownerPID = owner.PID
-			options.ownerProcStart = owner.ProcStart
-			options.ownerSessionID = owner.SessionID
-			if !options.disableNotify {
-				options.notifyTarget = "session:" + owner.SessionID
-			}
-		}
-	}
+	options.laneCommonOptions = withResolvedLaneParent(options.laneCommonOptions, owner)
 	return options
 }
 
@@ -1077,7 +872,7 @@ func validateLaneOwner(persistent bool, pid int, procStart string) error {
 		return nil
 	}
 	if !exactProcessIdentityMatch(pid, procStart) {
-		return errors.New("cannot corroborate a stable lifecycle owner; retry from a live Codex, Claude, or Grok session, or use --persistent")
+		return errors.New("cannot corroborate a stable lifecycle owner; retry from a live Codex, Claude, Grok, or Qwen session, or use --persistent")
 	}
 	return nil
 }
@@ -1087,7 +882,7 @@ func sameLaneOwner(leftPID int, leftProcStart string, rightPID int, rightProcSta
 }
 
 func inferPeerParent(paths nativePaths, startPID int) laneOwner {
-	candidates := make([]laneOwner, 0, 3)
+	candidates := make([]laneOwner, 0, 4)
 	if owner, ok := inferCodexParent(paths, startPID); ok {
 		candidates = append(candidates, owner)
 	}
@@ -1096,6 +891,14 @@ func inferPeerParent(paths nativePaths, startPID int) laneOwner {
 	}
 	if owner, ok := inferGrokParent(paths, startPID); ok {
 		candidates = append(candidates, owner)
+	}
+	if owner, ok := inferQwenParent(paths, startPID); ok {
+		candidates = append(candidates, owner)
+	}
+	if len(candidates) == 0 {
+		if owner, ok := inferRegisteredPeerParent(startPID, federator.ResolveParentContext); ok {
+			candidates = append(candidates, owner)
+		}
 	}
 	if len(candidates) == 0 {
 		return laneOwner{}
@@ -2063,7 +1866,7 @@ func unlockLaneItemSpool(file *os.File) {
 }
 
 func createLaneWorktree(paths nativePaths, name, cwd string) (string, error) {
-	canonicalCwd, err := filepath.EvalSymlinks(cwd)
+	canonicalCwd, err := pathidentity.ExistingDirectory(cwd)
 	if err != nil {
 		return "", fmt.Errorf("resolve lane cwd symlinks: %w", err)
 	}
@@ -2073,7 +1876,7 @@ func createLaneWorktree(paths nativePaths, name, cwd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("locate git repository for worktree: %w", err)
 	}
-	repository, err := filepath.EvalSymlinks(strings.TrimSpace(string(repositoryBody)))
+	repository, err := pathidentity.ExistingDirectory(strings.TrimSpace(string(repositoryBody)))
 	if err != nil {
 		return "", fmt.Errorf("resolve git repository symlinks: %w", err)
 	}
@@ -2317,31 +2120,27 @@ func acknowledgeLanePendingTurn(state *laneState, turnID string) {
 }
 
 func lockLaneStateFile(paths nativePaths, threadID string) (*os.File, error) {
-	directory := filepath.Join(profileDataRoot(paths), "lane-state-locks")
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(directory, sessionKey(threadID)+".lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // thread id is hashed.
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return lockLaneFile(paths, "lane-state-locks", threadID, false)
 }
 
 func lockLaneLifecycle(paths nativePaths, threadID string) (*os.File, error) {
-	directory := filepath.Join(profileDataRoot(paths), "lane-lifecycle-locks")
+	return lockLaneFile(paths, "lane-lifecycle-locks", threadID, false)
+}
+
+func lockLaneFile(paths nativePaths, directoryName, id string, nonBlocking bool) (*os.File, error) {
+	directory := filepath.Join(profileDataRoot(paths), directoryName)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(filepath.Join(directory, sessionKey(threadID)+".lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // thread id is hashed.
+	file, err := os.OpenFile(filepath.Join(directory, sessionKey(id)+".lock"), os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // id is hashed.
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+	operation := syscall.LOCK_EX
+	if nonBlocking {
+		operation |= syscall.LOCK_NB
+	}
+	if err := syscall.Flock(int(file.Fd()), operation); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -2383,23 +2182,9 @@ func laneStatePath(paths nativePaths, threadID string) string {
 
 func readLaneStates(paths nativePaths) []laneState {
 	directory := filepath.Join(profileDataRoot(paths), "lanes")
-	entries, _ := os.ReadDir(directory)
-	states := []laneState{}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // entry comes from ReadDir on the bridge-owned lane directory.
-		if err != nil {
-			continue
-		}
-		var state laneState
-		if json.Unmarshal(body, &state) == nil && state.Type == "codex-peer-lane" && state.ThreadID != "" &&
-			entry.Name() == sessionKey(state.ThreadID)+".json" {
-			states = append(states, state)
-		}
-	}
-	return states
+	return readProductLaneStates(directory, func(entryName string, state *laneState) bool {
+		return state.Type == "codex-peer-lane" && state.ThreadID != "" && entryName == sessionKey(state.ThreadID)+".json"
+	}, nil)
 }
 
 func resolveLaneState(paths nativePaths, target string) (laneState, error) {

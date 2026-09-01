@@ -5,6 +5,11 @@ orchestrator a durable, named Grok Build session that can receive peer
 messages, execute turns without a TUI, emit normalized JSONL results, resume
 by exact identity, and archive cleanly.
 
+Managed Codex, Claude, Grok, and Qwen orchestrators call the process-attested
+`agent_sessions.lane` MCP tool with `product: "grok"`; the daemon owns the
+manager and worker. The CLI spelling below is the host-operator and argument
+contract rather than the model orchestration transport.
+
 This document is the implementation and acceptance contract. Grok lanes use the same explicitly
 enabled, hub-routed remote lifecycle transport as Codex and Claude lanes; SSH is never a fallback.
 
@@ -106,7 +111,9 @@ auto-archive deadline, and lifecycle owner identity. Raw launch capabilities
 never reach argv, JSONL, logs, or disk; only their hashes are persisted.
 
 The manager survives the initiating shell. A parent-owned lane archives after
-its exact owner exits; `--persistent` has no lifecycle owner. Normal archive,
+its exact owner exits; `--persistent` has no lifecycle owner but remains subject
+to the normal terminal auto-archive grace. Use `--persistent --no-auto-archive`
+only for indefinite idle retention, then explicitly archive it. Normal archive,
 owner death, auto-archive, ACP failure, manager restart reconciliation, and
 install preflight converge on one idempotent cleanup path. Cleanup withdraws
 the peer before deleting sockets and state, stops only exact process identities,
@@ -133,8 +140,9 @@ a PID, session number, or token hash alone. Installed macOS acceptance must stil
 Grok Build, MCP, and tool descendants leave no process or artifact residue after normal archive and
 crash reconciliation.
 
-Terminal turns durably queue a `GROK_LANE_TERMINAL` collection pointer for the configured owner.
-The pointer contains a stable notice ID and exact `wait` command; it is never the answer. Its native
+Terminal turns durably queue a `GROK_LANE_TERMINAL` notice for the configured owner.
+The notice contains a stable notice ID and, while debt remains, a structured
+`agent_sessions.lane` `wait` hint; it is never the answer. Its native
 message ID is the same stable notice ID, so a retry after an ambiguous state write is deduplicated by
 the destination peer.
 Remote pointers retain the source agent's effective `-runtime-dir`, including for non-default
@@ -142,9 +150,8 @@ isolated estates.
 
 ## Remote lanes
 
-An operator must explicitly enable remote lane execution on the destination federator. A healthy
-destination advertises `grok-lane` only when its exact `grok-peer-lane` launcher is available. Use
-`peer-federator lane --host HOST --product grok -- COMMAND ...`; every lifecycle command remains the
+The destination daemon advertises `grok-lane` only when its exact native Grok adapter is ready. Use
+`grok-peer-lane --host HOST COMMAND ...`; every lifecycle command remains the
 native Grok JSONL contract. Federation carries an agent-attested parent context and returns
 terminal pointers through grouped routing. The child always receives the remote parent anchor;
 other parent groups are copied only after explicit `--inherit-groups`. Every remote operation

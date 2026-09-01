@@ -10,7 +10,7 @@ Use `claude-peer-lane` to run Claude Code as a named peer with durable lifecycle
 ## Managed Codex execution boundary
 
 From a managed Codex peer, run every lifecycle operation through the attested
-`claude_peer.lane` MCP tool. Do not invoke `claude-peer-lane` from a shell tool:
+`agent_sessions.lane` MCP tool. Do not invoke `claude-peer-lane` from a shell tool:
 the Codex OS sandbox is expected to deny the App Server, supervisor, and host-agent
 Unix sockets even when their directories are writable. The MCP tool retains this
 session as the exact parent and returns `exit`, `stdout`, and `stderr`.
@@ -32,22 +32,20 @@ operating as a Codex peer.
 When the user requests another host, use federation instead of SSH. First run:
 
 ```bash
-peer-federator status
-peer-federator hosts
-peer-federator lane --host HOST --product claude -- doctor --json
-peer-federator lane --host HOST --product claude -- list --all
+agent-sessions status
+claude-peer-lane --host HOST doctor --json
+claude-peer-lane --host HOST list --all
 ```
 
-Require the local agent to be connected, the host to advertise `claude-lane`, and remote doctor
-contract 1 to be healthy. A destination advertises this capability only after its operator has
-explicitly enabled remote lane execution. Then replace every `claude-peer-lane` invocation below with:
+Require the local daemon to be connected, the host to advertise `claude-lane`, and remote doctor
+contract 2 to be healthy. Then replace every local `claude-peer-lane` invocation below with:
 
 ```bash
-peer-federator lane --host HOST --product claude --
+claude-peer-lane --host HOST
 ```
 
 For remote `run`, `start`, and `resume`, federation carries this live parent’s attested context and
-returns terminal notices through grouped routing. Do not pass `--persistent`, `--notify`, `--no-notify`, or
+returns terminal notices through grouped routing. Do not pass `--persistent` or
 `--no-auto-archive` for those commands. Remote lanes therefore have no lifecycle owner and are
 excluded from `--mine`; use the remote plain `list`, names, or IDs. Their native JSONL, exit codes, collection rules, grace
 timer, and archive behavior are otherwise unchanged.
@@ -76,7 +74,7 @@ the stable process identity rather than a mutable session ID; persistent lanes a
 the unfiltered list for host-local lifecycle state. `--mine` fails rather than guessing when the
 caller is not a corroborated live Codex or Claude peer.
 
-Require `contract_version: 1`, `claude_available: true`, `claude_logged_in: true`, and
+Require `contract_version: 2`, `claude_available: true`, `claude_logged_in: true`, and
 `supervisor_reachable: true`. This is a local credential-state preflight; require the first real
 turn to succeed before claiming end-to-end authentication. Pick a descriptive name and retain the
 exact lane ID: messaging names are group-scoped, while bare lifecycle names can be host-ambiguous.
@@ -112,7 +110,7 @@ claude-peer-lane wait review-api --timeout 300
 ```
 
 Peer messages are pushed into the active Codex turn automatically. Do **not** poll
-`claude_peer.check_inbox`, sleep, or block waiting for a terminal pointer; continue other useful
+`agent_sessions.check_inbox`, sleep, or block waiting for a terminal pointer; continue other useful
 work and collect when the pointer arrives. `check_inbox` is only for recovery of content that was
 queued past a delivery boundary.
 
@@ -123,11 +121,12 @@ Use only one collector for a lane. Select the `agent_message` with `phase: "fina
 An idle local lane is a normal Claude-visible peer. Send it a peer message by name or session ID,
 then collect the new turn with `wait`. For a remote lane, use the same group-filtered Agent
 Sessions discovery and send tools; no source-side shadow is created.
-The destination-local name and session ID are valid only for `peer-federator lane` lifecycle commands.
+The destination-local name and session ID are valid only for the product lane launcher with `--host` lifecycle commands.
 
 A peer message accepted while a lane is already working steers that active turn and shares its one
 result; it does not create another collection cursor. Only an idle-lane message starts a new turn.
-Never reply conversationally to a `CLAUDE_LANE_TERMINAL` pointer—run its printed `wait` command.
+Never reply conversationally to a `CLAUDE_LANE_TERMINAL` notice. Follow its
+structured `agent_sessions.lane` `wait` hint only when `collection=required`.
 
 Claude workers also receive `ListAgents` and `SendMessage` by default. They may discover and send
 ordinary messages to any reachable local or federated peer, not only their lifecycle owner. An
@@ -147,12 +146,14 @@ Collect every outstanding turn first. `resume` refuses collection debt rather th
 - Default lanes belong to the launching Codex/Claude session and are interrupted and archived when that owner exits.
 - Completed lanes auto-archive after 60 seconds by default. Pass `--auto-archive-after S` when the orchestrator needs a larger collection window.
 - Pass `--no-auto-archive` only when you will explicitly archive the lane.
-- Pass `--persistent` to survive the owner. Explicit `--notify` is allowed only with `--persistent`.
+- Pass `--persistent` to survive the owner. It does not disable the normal 60-second terminal
+  auto-archive grace; add `--no-auto-archive` only for indefinite idle retention. Terminal notices
+  route to the immediate Agent Sessions parent automatically.
 - Every lane keeps the immediate parent anchor. Add `--inherit-groups` only when the parent
   deliberately propagates its other groups; use repeatable `--group NAME` for child-only groups.
 - `wait --timeout` bounds collection only and never interrupts Claude. `run/start/resume --timeout` is a durable turn deadline.
 - Launcher submission acknowledgement is bounded at 30 seconds whenever no native turn is active; a missing replay frame then fails and retires the worker. Native peer turns have no caller-supplied execution deadline and can defer that check until they finish.
-- Always archive a persistent or no-auto-archive lane when the task ends:
+- Always archive a retained lane when the task ends:
 
 ```bash
 claude-peer-lane archive review-api

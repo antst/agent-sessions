@@ -65,7 +65,7 @@ func TestGrokMCPToolsUseAttestedSessionWithoutRequiringModelID(t *testing.T) {
 }
 
 func TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity(t *testing.T) {
-	want := []string{"list_peers", "send_message", "broadcast"}
+	want := []string{"list_peers", "send_message", "broadcast", "rename_session", "lane"}
 	if len(claudeToolDefinitions) != len(want) {
 		t.Fatalf("Claude MCP tools = %d, want %d", len(claudeToolDefinitions), len(want))
 	}
@@ -85,8 +85,50 @@ func TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity(t *testing.T) 
 		}
 	}
 	if !strings.Contains(claudeMCPInstructions, "Never send plain text") ||
-		!strings.Contains(claudeMCPInstructions, "source.id") {
+		!strings.Contains(claudeMCPInstructions, "source.id") ||
+		!strings.Contains(claudeMCPInstructions, "Use lane instead") {
 		t.Fatalf("Claude MCP reply instructions are incomplete: %s", claudeMCPInstructions)
+	}
+}
+
+func TestPeerMessagePresentationIsNeutralProvenance(t *testing.T) {
+	item := map[string]any{
+		"from":        "pdev/session-id",
+		"fromName":    "reviewer",
+		"fromProduct": "claude",
+		"id":          "message-id",
+		"sentAt":      "2026-08-23T12:00:00Z",
+		"receivedAt":  "2026-08-23T12:00:01Z",
+		"message":     "Check this finding independently.",
+	}
+	want := "Message from reviewer (pdev/session-id):\n\n" +
+		"Message metadata: sender-type=claude, message-id=message-id, sent-at=2026-08-23T12:00:00Z, received-at=2026-08-23T12:00:01Z\n\n" +
+		"Check this finding independently."
+	if got := peerMessageText(item); got != want {
+		t.Fatalf("peer message presentation = %q, want %q", got, want)
+	}
+
+	hookWant := strings.ReplaceAll(want, "\n\n", "\n")
+	if got := formatNativeHookMessages([]map[string]any{item}); got != hookWant {
+		t.Fatalf("hook peer message presentation = %q, want %q", got, hookWant)
+	}
+
+	texts := map[string]string{
+		"codex MCP":     mcpInstructions,
+		"claude MCP":    claudeMCPInstructions,
+		"grok MCP":      grokMCPInstructions,
+		"qwen MCP":      qwenMCPInstructions,
+		"startup hook":  hookStartupContext(map[string]any{"name": "peer", "sessionId": "session"}),
+		"overflow hook": nativeInboxOverflowNotice(),
+		"delivery":      peerMessageText(item),
+	}
+	for label, value := range texts {
+		lower := strings.ToLower(value)
+		for _, forbidden := range []string{"trust", "authority", "subject to current user/developer instructions", "it remains subject to"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s injects trust or authority policy %q: %s", label, forbidden, value)
+			}
+		}
 	}
 }
 
@@ -98,7 +140,7 @@ func TestClaudeMCPCallerRequiresExactNativeAncestryAndGroupedRegistration(t *tes
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", configDir)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", dataDir)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", dataDir)
 	t.Setenv(agentRuntimeDirEnvironment, runtimeDir)
 	t.Setenv("AGENT_SESSIONS_PRODUCT", "claude")
 
@@ -236,7 +278,7 @@ func TestNativeAddressAndTargetResolution(t *testing.T) {
 func TestNativeMCPRejectsFlatRegistryForUngroupedSession(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
 	ownID := "00000000-0000-0000-0000-000000000061"
 	writeTestActiveCodexLane(t, resolveNativePaths(), ownID)
@@ -348,9 +390,9 @@ func TestSplitDynamicMCPName(t *testing.T) {
 		server    string
 		name      string
 	}{
-		{tool: "mcp__claude_peer__list_peers", server: "claude_peer", name: "list_peers"},
-		{tool: "tools.mcp__claude_peer__send_message", server: "claude_peer", name: "send_message"},
-		{namespace: "mcp__claude_peer", tool: "identity", server: "claude_peer", name: "identity"},
+		{tool: "mcp__agent_sessions__list_peers", server: "agent_sessions", name: "list_peers"},
+		{tool: "tools.mcp__agent_sessions__send_message", server: "agent_sessions", name: "send_message"},
+		{namespace: "mcp__agent_sessions", tool: "identity", server: "agent_sessions", name: "identity"},
 	}
 	for _, test := range tests {
 		server, name, ok := splitDynamicMCPName(test.namespace, test.tool)
@@ -365,7 +407,7 @@ func TestSplitDynamicMCPName(t *testing.T) {
 
 func TestNativePeerElicitationApprovalIsServerScoped(t *testing.T) {
 	trusted, _ := json.Marshal(map[string]any{
-		"serverName": "claude_peer", "mode": "form",
+		"serverName": "agent_sessions", "mode": "form",
 		"_meta": map[string]any{"codex_approval_kind": "mcp_tool_call", "tool_name": "send_message"},
 	})
 	response, ok := nativePeerElicitationResponse(trusted)
@@ -378,7 +420,7 @@ func TestNativePeerElicitationApprovalIsServerScoped(t *testing.T) {
 	if _, ok := nativePeerElicitationResponse(foreign); ok {
 		t.Fatal("foreign MCP server approval was trusted")
 	}
-	ordinary, _ := json.Marshal(map[string]any{"serverName": "claude_peer", "mode": "form", "_meta": map[string]any{}})
+	ordinary, _ := json.Marshal(map[string]any{"serverName": "agent_sessions", "mode": "form", "_meta": map[string]any{}})
 	if _, ok := nativePeerElicitationResponse(ordinary); ok {
 		t.Fatal("ordinary peer elicitation was auto-accepted")
 	}

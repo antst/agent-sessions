@@ -17,13 +17,6 @@ for component in "$platform" "$version"; do
 		exit 2
 	fi
 done
-for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
-	if [[ ! -x "$binary_dir/$binary" ]]; then
-		printf 'release binary is missing or not executable: %s\n' "$binary_dir/$binary" >&2
-		exit 1
-	fi
-done
-
 script_path="${BASH_SOURCE[0]}"
 while [[ -L "$script_path" ]]; do
 	script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
@@ -35,7 +28,16 @@ while [[ -L "$script_path" ]]; do
 	fi
 done
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
-
+binaries=()
+while IFS= read -r binary; do binaries+=("$binary"); done < <("$plugin_root/scripts/release-inventory" binaries)
+package_paths=()
+while IFS= read -r path; do package_paths+=("$path"); done < <("$plugin_root/scripts/release-inventory" package-paths)
+for binary in "${binaries[@]}"; do
+	if [[ ! -x "$binary_dir/$binary" ]]; then
+		printf 'release binary is missing or not executable: %s\n' "$binary_dir/$binary" >&2
+		exit 1
+	fi
+done
 mkdir -p "$output_dir"
 output_dir="$(cd -- "$output_dir" && pwd -P)"
 package_name="agent-sessions-${version}-${platform}"
@@ -48,29 +50,16 @@ trap cleanup EXIT
 
 package_root="$stage/$package_name"
 mkdir -p "$package_root/bin/$platform"
-cp -R \
-	"$plugin_root/.agents" \
-	"$plugin_root/.claude-plugin" \
-	"$plugin_root/.codex-plugin" \
-	"$plugin_root/claude" \
-	"$plugin_root/deploy" \
-	"$plugin_root/docs" \
-	"$plugin_root/grok" \
-	"$plugin_root/hooks" \
-	"$plugin_root/scripts" \
-	"$plugin_root/skills" \
-	"$package_root/"
-cp \
-	"$plugin_root/.mcp.json" \
-	"$plugin_root/Makefile" \
-	"$plugin_root/README.md" \
-	"$package_root/"
-for binary in agent-session-runtime peer codex-peer claude-peer codex-peer-lane claude-peer-lane grok-peer grok-peer-lane peer-federator; do
+for path in "${package_paths[@]}"; do
+	mkdir -p "$package_root/$(dirname -- "$path")"
+	cp -R "$plugin_root/$path" "$package_root/$path"
+done
+for binary in "${binaries[@]}"; do
 	cp "$binary_dir/$binary" "$package_root/bin/$platform/$binary"
 	chmod 0755 "$package_root/bin/$platform/$binary"
 done
 : >"$package_root/.agent-sessions-prebuilt"
 
 archive="$output_dir/$package_name.tar.gz"
-tar -C "$stage" -czf "$archive" "$package_name"
+go run "$plugin_root/scripts/releasetool" package "$stage" "$package_name" "$archive"
 printf '%s\n' "$archive"

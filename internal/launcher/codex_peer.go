@@ -1,14 +1,18 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
@@ -35,6 +39,99 @@ type codexPlan struct {
 	interactiveArgs   []string
 	selectionTarget   string
 	informationalPass bool
+}
+
+// CodexDaemonPrepareRequest is the parsed native launch intent sent to the
+// already-running user daemon. The launcher remains the terminal-owning
+// process and the daemon remains the sole Agent Sessions authority.
+type CodexDaemonPrepareRequest struct {
+	Mode                   string
+	Target                 string
+	Cwd                    string
+	CwdExplicit            bool
+	Name                   string
+	NameSource             string
+	ApprovalPolicy         string
+	Sandbox                string
+	PermissionSpecified    bool
+	Owner                  procinfo.Identity
+	Groups                 []string
+	GroupsSpecified        bool
+	ParentSession          string
+	ParentSpecified        bool
+	InheritParentGroups    bool
+	InheritGroupsSpecified bool
+}
+
+// CodexDaemonPrepareResult is the exact native handoff returned after durable
+// daemon preparation and App Server selection.
+type CodexDaemonPrepareResult struct {
+	ThreadID string
+	Cwd      string
+}
+
+// CodexDaemonPrepare submits one parsed Codex launch intent.
+type CodexDaemonPrepare func(context.Context, CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error)
+
+// RunCodexPeerWithDaemon preserves the baseline parser and native exec path
+// while replacing the legacy runtime/supervisor transaction with one daemon
+// call. It never starts or stops Agent Sessions authority.
+func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDaemonPrepare) error {
+	if ctx == nil || prepare == nil {
+		return errors.New("codex daemon launch coordinator is unavailable")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	plan, err := parseCodexPeerArgs(args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"))
+	if err != nil {
+		return err
+	}
+	codex, err := codexExecutable()
+	if err != nil {
+		return err
+	}
+	if plan.mode == modePassthrough || plan.informationalPass {
+		return Exec(codex, plan.originalArgs, nil)
+	}
+	owner, err := procinfo.CaptureIdentity(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("capture Codex launcher identity: %w", err)
+	}
+	approval, sandbox := "", ""
+	if plan.requestedYolo {
+		approval, sandbox = "never", "danger-full-access"
+	}
+	result, err := prepare(ctx, CodexDaemonPrepareRequest{
+		Mode: string(plan.mode), Target: plan.selectionTarget, Cwd: plan.requestedCwd,
+		CwdExplicit: plan.cwdExplicit, Name: plan.peerName, NameSource: plan.peerNameSource,
+		ApprovalPolicy: approval, Sandbox: sandbox, Owner: owner,
+		PermissionSpecified: plan.yoloSpecified,
+		Groups:              append([]string(nil), plan.peerContext.groups...),
+		GroupsSpecified:     plan.peerContext.groupsSpecified,
+		ParentSession:       plan.peerContext.parentSession, ParentSpecified: plan.peerContext.parentSpecified,
+		InheritParentGroups:    plan.peerContext.inheritParentGroups,
+		InheritGroupsSpecified: plan.peerContext.inheritGroupsSpecified,
+	})
+	if err != nil {
+		return err
+	}
+	if !threadIDPattern.MatchString(result.ThreadID) || strings.TrimSpace(result.Cwd) == "" {
+		return errors.New("daemon returned an invalid Codex native handoff")
+	}
+	if _, present := os.LookupEnv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT"); !present {
+		_ = os.Setenv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT", "1")
+	}
+	resetTerminalEnhancement()
+	launchArgs := []string{"--remote", "unix://", "resume", result.ThreadID}
+	if !plan.cwdExplicit {
+		launchArgs = append(launchArgs, "-C", result.Cwd)
+	}
+	launchArgs = append(launchArgs, plan.interactiveArgs...)
+	environment := envutil.Set(os.Environ(), peerSessionIDEnv, result.ThreadID)
+	environment = envutil.Set(environment, peerProductEnv, "codex")
+	return Exec(codex, launchArgs, environment)
 }
 
 // RunCodexPeer starts or resumes an owner-attested interactive Codex peer.
@@ -166,19 +263,12 @@ func execInteractiveCodex(codex, threadID, cwd string, plan codexPlan) error {
 }
 
 func codexExecutable() (string, error) {
-	if path := os.Getenv("CODEX_PEER_CODEX_BIN"); path != "" {
-		return path, nil
-	}
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return "", &ExitError{Code: 127, Err: errors.New("codex was not found on PATH")}
-	}
-	return path, nil
+	return productExecutable("CODEX_PEER_CODEX_BIN", "codex")
 }
 
 func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, error) {
 	plan := codexPlan{mode: modeFresh, peerNameSource: "launch", requestedCwd: cwd}
-	contextArgs, peerContext, err := extractPeerLaunchContext(args, codexOptionConsumesNext)
+	contextArgs, peerContext, err := scanPeerWrapperOptions("codex", args)
 	if err != nil {
 		return codexPlan{}, err
 	}
@@ -440,42 +530,15 @@ func explicitResumeTarget(args []string, commandIndex int) (int, error) {
 // or rejects the option. Unknown flags remain transparent boolean options;
 // their native parser remains the authority.
 func codexOptionConsumesNext(argument string) bool {
-	valueOptions := []string{
-		"--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "--image",
-		"--model", "--local-provider", "--profile", "--sandbox", "--cd", "--add-dir", "--ask-for-approval",
-	}
-	for _, option := range valueOptions {
-		if argument == option {
-			return true
-		}
-		if strings.HasPrefix(argument, option+"=") {
-			return false
-		}
-	}
-	if len(argument) > 2 {
-		switch argument[:2] {
-		case "-c", "-i", "-m", "-p", "-s", "-C", "-a":
-			return false
-		}
-	}
-	switch argument {
-	case "-c", "-i", "-m", "-p", "-s", "-C", "-a":
-		return true
-	default:
-		return false
-	}
+	return productOptionConsumesNext("codex", argument)
 }
 
 func canonicalDirectory(base, requested string) (string, error) {
 	if !filepath.IsAbs(requested) {
 		requested = filepath.Join(base, requested)
 	}
-	resolved, err := filepath.EvalSymlinks(requested)
+	resolved, err := pathidentity.ExistingDirectory(requested)
 	if err != nil {
-		return "", usageError("working directory does not exist: " + requested)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
 		return "", usageError("working directory does not exist: " + requested)
 	}
 	return resolved, nil

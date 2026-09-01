@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 1 )); then
+  printf 'usage: %s COMMIT\n' "${0##*/}" >&2
+  exit 2
+fi
+commit=$1
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { printf 'invalid release commit\n' >&2; exit 2; }
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+signers=${RELEASE_ALLOWED_SIGNERS:-}
+if [[ -n "$signers" ]]; then
+  signer_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agent-sessions-release-signers.XXXXXX")"
+  trap 'rm -f -- "$signer_file"' EXIT
+  printf '%s\n' "$signers" >"$signer_file"
+  chmod 0600 "$signer_file"
+  if git -C "$root" -c gpg.ssh.allowedSignersFile="$signer_file" verify-commit "$commit" >/dev/null 2>&1; then
+    printf 'release commit %s has an allowed maintainer signature\n' "$commit"
+    exit 0
+  fi
+fi
+
+repository=${GITHUB_REPOSITORY:-}
+[[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+  printf 'release commit lacks an allowed maintainer signature and GITHUB_REPOSITORY is unavailable\n' >&2
+  exit 1
+}
+verification="$(gh api "repos/$repository/commits/$commit" \
+  --jq '[.sha, .commit.verification.verified, .commit.verification.reason, .committer.login] | @tsv')" || {
+  printf 'cannot verify GitHub release commit %s\n' "$commit" >&2
+  exit 1
+}
+IFS=$'\t' read -r verified_sha verified reason committer <<<"$verification"
+if [[ "$verified_sha" != "$commit" || "$verified" != true || "$reason" != valid || "$committer" != web-flow ]]; then
+  printf 'release commit %s is not an allowed maintainer commit or verified GitHub web-flow merge\n' "$commit" >&2
+  exit 1
+fi
+printf 'release commit %s has a verified GitHub web-flow signature\n' "$commit"

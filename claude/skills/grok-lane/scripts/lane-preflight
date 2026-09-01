@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-expected_contract_version=1
-state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
+expected_contract_version=2
+state_root="${AGENT_SESSIONS_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/agent-sessions}"
 
 json_string() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g')"
@@ -11,21 +11,10 @@ json_bool() {
   if [ "$1" = 1 ]; then printf true; else printf false; fi
 }
 
-runtime_path=""
-if [ -f "$state_root/native-runtime-path" ]; then
-  runtime_path="$(sed -n 1p "$state_root/native-runtime-path" 2>/dev/null || true)"
-  [ -x "$runtime_path" ] || runtime_path=""
-fi
-path_launcher="$(command -v grok-peer-lane 2>/dev/null || true)"
+runtime_path="$(command -v grok-peer-lane 2>/dev/null || true)"
 launcher_found=0
-[ -z "$path_launcher" ] || launcher_found=1
-launcher_path=""
-if [ -n "$runtime_path" ]; then
-  candidate="$(dirname -- "$runtime_path")/grok-peer-lane"
-  [ ! -x "$candidate" ] || launcher_path="$candidate"
-fi
-invocation=""
-[ -z "$runtime_path" ] || [ -z "$launcher_path" ] || invocation="$launcher_path"
+[ -z "$runtime_path" ] || launcher_found=1
+invocation="$runtime_path"
 
 doctor_json=null
 doctor_exit=1

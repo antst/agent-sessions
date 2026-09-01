@@ -1,0 +1,442 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/antst/agent-sessions/specs/002-unified-user-daemon/contracts/release-evidence.schema.json",
+  "title": "Agent Sessions v0.3.0 release evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_version",
+    "intended_tag",
+    "commit_sha",
+    "tree_sha",
+    "artifact",
+    "workflow",
+    "toolchains",
+    "native_clients",
+    "gates",
+    "archives",
+    "package_inventory"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "release_version": {
+      "const": "0.3.0"
+    },
+    "intended_tag": {
+      "const": "v0.3.0"
+    },
+    "commit_sha": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "tree_sha": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_name",
+        "workflow_artifact_name",
+        "retention_days"
+      ],
+      "properties": {
+        "file_name": {
+          "const": "agent-sessions-v0.3.0-release-evidence.json"
+        },
+        "workflow_artifact_name": {
+          "type": "string",
+          "pattern": "^agent-sessions-v0\\.3\\.0-release-evidence-[0-9a-f]{40}$"
+        },
+        "retention_days": {
+          "const": 90
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "run_id",
+        "run_attempt",
+        "run_url"
+      ],
+      "properties": {
+        "path": {
+          "const": ".github/workflows/ci.yml"
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/.+/actions/runs/[0-9]+$"
+        }
+      }
+    },
+    "toolchains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/toolchain"
+        },
+        "macos": {
+          "$ref": "#/$defs/toolchain"
+        }
+      }
+    },
+    "native_clients": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/nativeClients"
+        },
+        "macos": {
+          "$ref": "#/$defs/nativeClients"
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/gateSet"
+        },
+        "macos": {
+          "$ref": "#/$defs/gateSet"
+        }
+      }
+    },
+    "archives": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux-x64",
+        "linux-arm64",
+        "darwin-x64",
+        "darwin-arm64"
+      ],
+      "properties": {
+        "linux-x64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/archive"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "const": "linux-x64"
+                },
+                "filename": {
+                  "const": "agent-sessions-0.3.0-linux-x64.tar.gz"
+                }
+              }
+            }
+          ]
+        },
+        "linux-arm64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/archive"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "const": "linux-arm64"
+                },
+                "filename": {
+                  "const": "agent-sessions-0.3.0-linux-arm64.tar.gz"
+                }
+              }
+            }
+          ]
+        },
+        "darwin-x64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/archive"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "const": "darwin-x64"
+                },
+                "filename": {
+                  "const": "agent-sessions-0.3.0-darwin-x64.tar.gz"
+                }
+              }
+            }
+          ]
+        },
+        "darwin-arm64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/archive"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "const": "darwin-arm64"
+                },
+                "filename": {
+                  "const": "agent-sessions-0.3.0-darwin-arm64.tar.gz"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "package_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executables",
+        "plugin_payloads"
+      ],
+      "properties": {
+        "executables": {
+          "const": [
+            "agent-sessions",
+            "agent-sessions-hub"
+          ]
+        },
+        "plugin_payloads": {
+          "const": [
+            {
+              "product": "codex",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                ".agents",
+                ".codex-plugin",
+                ".mcp.json",
+                "hooks",
+                "scripts",
+                "skills"
+              ]
+            },
+            {
+              "product": "claude",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                ".claude-plugin",
+                "claude"
+              ]
+            },
+            {
+              "product": "grok",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                "grok"
+              ]
+            },
+            {
+              "product": "qwen",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                "qwen"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonEmptyVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "go",
+        "golangci_lint"
+      ],
+      "properties": {
+        "go": {
+          "$ref": "#/$defs/nonEmptyVersion"
+        },
+        "golangci_lint": {
+          "$ref": "#/$defs/nonEmptyVersion"
+        }
+      }
+    },
+    "nativeClients": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qwen",
+        "codex",
+        "claude",
+        "grok"
+      ],
+      "properties": {
+        "qwen": {
+          "$ref": "#/$defs/nonEmptyVersion"
+        },
+        "codex": {
+          "$ref": "#/$defs/nonEmptyVersion"
+        },
+        "claude": {
+          "$ref": "#/$defs/nonEmptyVersion"
+        },
+        "grok": {
+          "$ref": "#/$defs/nonEmptyVersion"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "job_url",
+        "evidence_artifact",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "job_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/.+/actions/runs/[0-9]+/job/[0-9]+$"
+        },
+        "evidence_artifact": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "gateSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "race",
+        "vet",
+        "lint",
+        "focused_contracts",
+        "quickstart",
+        "permissions",
+        "federation",
+        "prebuilt_install",
+        "owner_nonmutation"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/gate"
+        },
+        "race": {
+          "$ref": "#/$defs/gate"
+        },
+        "vet": {
+          "$ref": "#/$defs/gate"
+        },
+        "lint": {
+          "$ref": "#/$defs/gate"
+        },
+        "focused_contracts": {
+          "$ref": "#/$defs/gate"
+        },
+        "quickstart": {
+          "$ref": "#/$defs/gate"
+        },
+        "permissions": {
+          "$ref": "#/$defs/gate"
+        },
+        "federation": {
+          "$ref": "#/$defs/gate"
+        },
+        "prebuilt_install": {
+          "$ref": "#/$defs/gate"
+        },
+        "owner_nonmutation": {
+          "$ref": "#/$defs/gate"
+        }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "filename",
+        "byte_size",
+        "sha256",
+        "source_commit",
+        "inventory_verified"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "linux-x64",
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64"
+          ]
+        },
+        "filename": {
+          "type": "string",
+          "pattern": "^agent-sessions-0\\.3\\.0-(linux|darwin)-(x64|arm64)\\.tar\\.gz$"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "inventory_verified": {
+          "const": true
+        }
+      }
+    }
+  }
+}

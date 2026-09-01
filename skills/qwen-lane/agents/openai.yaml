@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qwen Lane"
+  short_description: "Delegate durable work to a local or remote Qwen Code lane"
+  default_prompt: "Spawn a named Qwen Code lane, collect its final answer, and archive it when finished."

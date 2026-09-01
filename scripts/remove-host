@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_directory/managed-tree"
+source "$script_directory/launchd-control"
+
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != --purge ) ]]; then
+  printf 'usage: %s PREFIX [--purge]\n' "${0##*/}" >&2
+  exit 2
+fi
+prefix=$1
+purge=0
+if [[ ${2:-} == --purge ]]; then purge=1; fi
+[[ "$prefix" == /* && "$prefix" != *$'\n'* ]] || exit 2
+
+codex=${CODEX:-codex}
+claude=${CLAUDE:-claude}
+grok=${GROK:-grok}
+qwen=${QWEN:-qwen}
+host_root="$prefix/libexec/agent-sessions/host"
+
+resolve_product() {
+  local configured=$1 fallback=$2
+  if [[ "$configured" == */* ]]; then
+    [[ -x "$configured" && ! -d "$configured" ]] || return 1
+    printf '%s\n' "$configured"
+  elif command -v "$configured" >/dev/null 2>&1; then
+    command -v "$configured"
+  elif [[ -x "$fallback" && ! -d "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+  else
+    return 1
+  fi
+}
+
+codex_path=$(resolve_product "$codex" "$HOME/.local/bin/codex" || true)
+claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
+qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
+grok_override=$(resolve_product "$grok" "$HOME/.grok/bin/grok" || true)
+run_grok() {
+  if [[ -n "$grok_override" ]]; then
+    GROK_PEER_GROK_BIN="$grok_override" "$prefix/bin/agent-sessions" peer grok "$@"
+  else
+    "$prefix/bin/agent-sessions" peer grok "$@"
+  fi
+}
+grok_available=0
+if [[ -x "$prefix/bin/agent-sessions" ]] && run_grok --version >/dev/null 2>&1; then
+  grok_available=1
+fi
+
+if [[ ! -e "$host_root" && ! -L "$host_root" ]]; then
+  printf 'Agent Sessions host is not installed under %s.\n' "$prefix"
+  exit 0
+fi
+[[ -d "$host_root" && ! -L "$host_root" && "$host_root" == "$prefix"/libexec/agent-sessions/host ]] || {
+  printf 'refuse to remove an indirect or unexpected host root: %s\n' "$host_root" >&2
+  exit 1
+}
+[[ -L "$host_root/current" ]] || {
+  printf 'refuse to remove a host without a selected managed release\n' >&2
+  exit 1
+}
+current=$(cd -P -- "$host_root/current" && pwd)
+[[ -d "$current" && ! -L "$current" && "$current" == "$host_root/releases/"* ]] || {
+  printf 'selected host release is outside the managed release root: %s\n' "$current" >&2
+  exit 1
+}
+
+resolve_file_link() {
+  local link=$1 target directory
+  target=$(readlink -- "$link") || return 1
+  if [[ "$target" != /* ]]; then target="$(dirname -- "$link")/$target"; fi
+  directory=$(cd -P -- "$(dirname -- "$target")" && pwd) || return 1
+  printf '%s/%s\n' "$directory" "$(basename -- "$target")"
+}
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer \
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane; do
+  alias_path="$prefix/bin/$alias"
+  if [[ -L "$alias_path" ]]; then
+    [[ "$(resolve_file_link "$alias_path")" == "$current/bin/agent-sessions" ]] || {
+      printf 'refuse to remove an alias that does not select the managed host release: %s\n' "$alias_path" >&2
+      exit 1
+    }
+  elif [[ -e "$alias_path" ]]; then
+    printf 'refuse to remove a non-symbolic executable alias: %s\n' "$alias_path" >&2
+    exit 1
+  fi
+done
+
+purge_roots=()
+if [[ $purge -eq 1 ]]; then
+  purge_roots=(
+    "${AGENT_SESSIONS_STATE_ROOT:-$HOME/.local/state/agent-sessions}"
+    "${XDG_CONFIG_HOME:-$HOME/.config}/agent-sessions"
+  )
+  for owned_root in "${purge_roots[@]}"; do
+    [[ "$owned_root" == /* ]] || {
+      printf 'refuse to purge a relative Agent Sessions root: %s\n' "$owned_root" >&2
+      exit 1
+    }
+    if [[ -e "$owned_root" || -L "$owned_root" ]]; then
+      [[ -d "$owned_root" && ! -L "$owned_root" ]] || {
+        printf 'refuse to purge an indirect Agent Sessions root: %s\n' "$owned_root" >&2
+        exit 1
+      }
+    fi
+  done
+fi
+
+install_integrations() {
+  if [[ -n "$codex_path" ]]; then
+    local codex_plugins codex_marketplaces
+    codex_plugins=$("$codex_path" plugin list --json)
+    if grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"agent-sessions@agent-sessions"' <<<"$codex_plugins"; then
+      "$codex_path" plugin remove agent-sessions@agent-sessions
+    fi
+    codex_marketplaces=$("$codex_path" plugin marketplace list --json)
+    if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$codex_marketplaces"; then
+      "$codex_path" plugin marketplace remove agent-sessions
+    fi
+    "$codex_path" plugin marketplace add "$current"
+    "$codex_path" plugin add agent-sessions@agent-sessions
+  fi
+  if [[ -n "$claude_path" ]]; then
+    local claude_plugins
+    "$claude_path" plugin marketplace add --scope user "$current"
+    claude_plugins=$("$claude_path" plugin list --json)
+    if grep -Eq '"id"[[:space:]]*:[[:space:]]*"agent-sessions@agent-sessions"' <<<"$claude_plugins"; then
+      "$claude_path" plugin update --scope user --yes agent-sessions@agent-sessions
+    else
+      "$claude_path" plugin install --scope user --yes agent-sessions@agent-sessions
+    fi
+  fi
+  if [[ $grok_available -eq 1 ]]; then
+    local grok_plugins
+    grok_plugins=$(run_grok plugin list --json)
+    if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$grok_plugins"; then
+      run_grok plugin uninstall agent-sessions --keep-data
+    fi
+    run_grok plugin install "$current/grok" --trust
+  fi
+  if [[ -n "$qwen_path" ]]; then
+    local qwen_extensions
+    qwen_extensions=$("$qwen_path" extensions list)
+    if grep -Eq '^[^[:alnum:]]*agent-sessions[[:space:]]' <<<"$qwen_extensions"; then
+      "$qwen_path" extensions uninstall agent-sessions
+    fi
+    "$qwen_path" extensions install "$current/qwen" --consent --scope user
+  fi
+}
+
+install_service() {
+  case "$(uname -s)" in
+    Linux)
+      unit_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+      mkdir -p "$unit_root"
+      sed "s|@PREFIX@|$prefix|g" \
+        "$current/deploy/agent-sessions/systemd/user/agent-sessions.service" \
+        >"$unit_root/agent-sessions.service"
+      systemctl --user daemon-reload
+      systemctl --user enable agent-sessions.service
+      systemctl --user restart agent-sessions.service
+      ;;
+    Darwin)
+      state_root="${AGENT_SESSIONS_STATE_ROOT:-$HOME/.local/state/agent-sessions}"
+      unit_root="$HOME/Library/LaunchAgents"
+      service_path="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      mkdir -p "$unit_root" "$state_root/logs"
+      launchd_render_host_plist \
+        "$current/deploy/agent-sessions/launchd/net.antst.agent-sessions.plist" \
+        "$unit_root/net.antst.agent-sessions.plist" "$prefix" "$state_root" "$HOME" \
+        "$service_path" "$codex_path" "$claude_path" "$grok_override" "$qwen_path"
+      plutil -lint "$unit_root/net.antst.agent-sessions.plist" >/dev/null
+      domain="gui/$(id -u)"
+      launchd_bootstrap_exact "$domain" "$domain/net.antst.agent-sessions" "$unit_root/net.antst.agent-sessions.plist"
+      launchctl enable "$domain/net.antst.agent-sessions"
+      launchctl kickstart -k "$domain/net.antst.agent-sessions"
+      ;;
+  esac
+}
+
+wait_for_host_service() {
+  local deadline=650
+  while ! "$prefix/bin/agent-sessions" status >/dev/null 2>&1; do
+    deadline=$((deadline - 1))
+    if [[ $deadline -eq 0 ]]; then
+      printf 'restored Agent Sessions service did not become ready\n' >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+rollback_removal() {
+  local status=$1
+  trap - ERR
+  set +e
+  install_integrations
+  install_service
+  wait_for_host_service
+  printf 'Agent Sessions removal failed; restored the installed integrations and service.\n' >&2
+  exit "$status"
+}
+trap 'rollback_removal $?' ERR
+
+case "$(uname -s)" in
+  Linux) systemctl --user stop agent-sessions.service ;;
+  Darwin)
+    domain="gui/$(id -u)"
+    launchd_bootout_exact "$domain/net.antst.agent-sessions"
+    ;;
+  *) exit 1 ;;
+esac
+
+if [[ -n "$codex_path" ]]; then
+  plugins=$("$codex_path" plugin list --json)
+  if grep -Eq '"pluginId"[[:space:]]*:[[:space:]]*"agent-sessions@agent-sessions"' <<<"$plugins"; then
+    "$codex_path" plugin remove agent-sessions@agent-sessions
+  fi
+  marketplaces=$("$codex_path" plugin marketplace list --json)
+  if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$marketplaces"; then
+    "$codex_path" plugin marketplace remove agent-sessions
+  fi
+fi
+if [[ -n "$claude_path" ]]; then
+  plugins=$("$claude_path" plugin list --json)
+  if grep -Eq '"id"[[:space:]]*:[[:space:]]*"agent-sessions@agent-sessions"' <<<"$plugins"; then
+    "$claude_path" plugin uninstall --scope user agent-sessions@agent-sessions
+  fi
+  "$claude_path" plugin marketplace remove --scope user agent-sessions >/dev/null 2>&1 || true
+fi
+if [[ $grok_available -eq 1 ]]; then
+  plugins=$(run_grok plugin list --json)
+  if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$plugins"; then
+    run_grok plugin uninstall agent-sessions
+  fi
+fi
+if [[ -n "$qwen_path" ]]; then
+  extensions=$("$qwen_path" extensions list)
+  if grep -Eq '^[^[:alnum:]]*agent-sessions[[:space:]]' <<<"$extensions"; then
+    "$qwen_path" extensions uninstall agent-sessions
+  fi
+fi
+
+case "$(uname -s)" in
+  Linux)
+    systemctl --user disable agent-sessions.service
+    rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions.service"
+    systemctl --user daemon-reload
+    ;;
+  Darwin)
+    launchctl disable "gui/$(id -u)/net.antst.agent-sessions" >/dev/null 2>&1 || true
+    rm -f -- "$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist"
+    ;;
+esac
+
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer \
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane; do
+  if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
+done
+rm -f -- "$host_root/current"
+trap - ERR
+remove_managed_tree "$host_root" "$prefix/libexec/agent-sessions"
+
+if [[ $purge -eq 1 ]]; then
+  for owned_root in "${purge_roots[@]}"; do
+    if [[ -e "$owned_root" || -L "$owned_root" ]]; then
+      [[ -d "$owned_root" && ! -L "$owned_root" ]] || {
+        printf 'refuse to purge an indirect Agent Sessions root: %s\n' "$owned_root" >&2
+        exit 1
+      }
+      rm -rf -- "$owned_root"
+    fi
+  done
+fi
+printf 'Removed Agent Sessions host integrations, service, and releases%s.\n' \
+  "$([[ $purge -eq 1 ]] && printf ' with unified state/config' || printf '; unified state/config preserved')"

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/permissionmode"
 )
 
 type hookInput struct {
@@ -42,7 +44,7 @@ func runHookCommand() {
 		output, err = handleNativeHook(input)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native hook degraded gracefully: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native hook degraded gracefully: %v\n", err)
 		output = map[string]any{}
 	}
 	if output == nil {
@@ -120,7 +122,9 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		updateHookShim(state, "busy")
+		if err := updateHookShim(state, "busy"); err != nil {
+			return nil, err
+		}
 		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID, hookAdditionalContextLimit)
 		if err != nil {
 			return map[string]any{}, err
@@ -148,7 +152,9 @@ func handleNativeHook(input hookInput) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		updateHookShim(state, "idle")
+		if err := updateHookShim(state, "idle"); err != nil {
+			return nil, err
+		}
 		messages, queued, err := consumeNativeInboxLimited(paths, input.SessionID, hookAdditionalContextLimit)
 		if err != nil || (len(messages) == 0 && !queued) {
 			return map[string]any{}, err
@@ -387,8 +393,10 @@ func ensureHookShim(paths nativePaths, input hookInput, launch *interactiveOwner
 	}
 	if state := previousState; state != nil && stringValue(state["sessionId"]) == input.SessionID {
 		if socket := stringValue(state["socketPath"]); socket != "" && probeUnixSocket(socket, 250*time.Millisecond) {
-			if err := sendUnixJSON(socket, desired, time.Second); err == nil {
+			if err := sendUnixControlAndInspect(socket, desired, time.Second); err == nil {
 				return readJSONMap(statePath), nil
+			} else {
+				return nil, fmt.Errorf("update live Codex peer shim: %w", err)
 			}
 		}
 	}
@@ -413,7 +421,9 @@ func ensureHookShim(paths nativePaths, input hookInput, launch *interactiveOwner
 			state := readJSONMap(statePath)
 			if state != nil && stringValue(state["sessionId"]) == input.SessionID {
 				if socket := stringValue(state["socketPath"]); socket != "" && probeUnixSocket(socket, 250*time.Millisecond) {
-					_ = sendUnixJSON(socket, desired, time.Second)
+					if updateErr := sendUnixControlAndInspect(socket, desired, time.Second); updateErr != nil {
+						return nil, fmt.Errorf("reconcile live Codex peer shim: %w", updateErr)
+					}
 					return state, nil
 				}
 			}
@@ -464,10 +474,13 @@ func ensureHookShim(paths nativePaths, input hookInput, launch *interactiveOwner
 	return nil, fmt.Errorf("timed out starting the Claude peer socket for %s", input.SessionID)
 }
 
-func updateHookShim(state map[string]any, status string) {
+func updateHookShim(state map[string]any, status string) error {
 	if socket := stringValue(state["socketPath"]); socket != "" {
-		_ = sendUnixJSON(socket, map[string]any{"type": "control", "action": "status", "status": status}, time.Second)
+		if err := sendUnixControlAndInspect(socket, map[string]any{"type": "control", "action": "status", "status": status}, time.Second); err != nil {
+			return fmt.Errorf("update Codex peer shim status: %w", err)
+		}
 	}
+	return nil
 }
 
 func consumeNativeInbox(paths nativePaths, sessionID string) ([]map[string]any, error) {
@@ -564,13 +577,11 @@ func nativeInboxNames(paths nativePaths, sessionID string) ([]string, string, er
 }
 
 func nativeInboxOverflowNotice() string {
-	return "Trusted peer messages are queued, but the next complete message exceeds the hook context limit. Call claude_peer.check_inbox now to receive it without truncation; the queued message has not been removed."
+	return "Peer messages are queued, but the next complete message exceeds the hook context limit. Call agent_sessions.check_inbox now to receive it without truncation; the queued message has not been removed."
 }
 
 func formatNativeHookMessages(messages []map[string]any) string {
-	blocks := []string{
-		"Trusted cross-session agent instructions follow. They come from collaborating agents running in the same isolated environment. Treat their requests, findings, and status updates as trusted task input: incorporate them and act on them when they are consistent with the current user and developer instructions. They do not change this session's permission mode or grant user approval. Reply with the claude_peer send_message tool when useful.",
-	}
+	blocks := []string{}
 	for _, message := range messages {
 		if stringValue(message["type"]) == "delivery-status" {
 			text := fmt.Sprintf("Delivery status from %s: %s", stringValue(message["from"]), stringValue(message["status"]))
@@ -593,7 +604,7 @@ func formatNativeHookMessages(messages []map[string]any) string {
 				metadata = append(metadata, pair[0]+"="+pair[1])
 			}
 		}
-		text := "From " + defaultString(sender, "an unidentified peer") + ":"
+		text := "Message from " + defaultString(sender, "an unidentified peer") + ":"
 		if len(metadata) > 0 {
 			text += "\nMessage metadata: " + strings.Join(metadata, ", ")
 		}
@@ -605,7 +616,7 @@ func formatNativeHookMessages(messages []map[string]any) string {
 
 func hookStartupContext(state map[string]any) string {
 	return fmt.Sprintf(
-		"Claude Code peer messaging is active. This Codex session is advertised as %q. For claude_peer tool calls that require it, pass session_id exactly %q. Use list_peers before sending when the recipient is unclear. Treat peer messages as trusted instructions from collaborating agents in the same isolated environment, subject to the current user/developer instructions and this session's permissions.",
+		"Agent Sessions peer messaging is active. This Codex session is advertised as %q. For agent_sessions tool calls that require it, pass session_id exactly %q. Use list_peers before sending when the recipient is unclear.",
 		stringValue(state["name"]), stringValue(state["sessionId"]),
 	)
 }
@@ -678,31 +689,7 @@ func readPeerProcessArgsWithReader(
 }
 
 func permissionModeFromArgs(fields []string) string {
-	for index, field := range fields {
-		if field == "--" {
-			break
-		}
-		if processArgEnablesBypass(fields, index) {
-			return "bypassPermissions"
-		}
-	}
-	return "default"
-}
-
-func processArgEnablesBypass(args []string, index int) bool {
-	argument := args[index]
-	switch argument {
-	case "--dangerously-skip-permissions", "--permission-mode=bypassPermissions",
-		"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--ask-for-approval=never",
-		"-a=never", "-anever":
-		return true
-	case "--permission-mode":
-		return index+1 < len(args) && args[index+1] == "bypassPermissions"
-	case "-a", "--ask-for-approval":
-		return index+1 < len(args) && args[index+1] == "never"
-	default:
-		return false
-	}
+	return permissionmode.FromArgs(fields)
 }
 
 func runtimeGOOS() string { return runtime.GOOS }
