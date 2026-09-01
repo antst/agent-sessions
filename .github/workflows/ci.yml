@@ -297,12 +297,12 @@ jobs:
             --name "${{ steps.tag.outputs.artifact }}" --dir dist/candidate
       - name: Rebuild trust and verify unchanged evidence
         run: |
-          evidence="dist/candidate/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json"
+          evidence="dist/candidate/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json"
           test "$(sha256sum "$evidence" | cut -d' ' -f1)" = "${{ steps.tag.outputs.sha256 }}"
           make build GOOS=linux GOARCH=amd64
           go run ./scripts/releasetool evidence validate \
             --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
-            --document "$evidence" --archive-dir dist/release --gate-dir dist/candidate \
+            --document "$evidence" --archive-dir dist/release --gate-dir dist/candidate/gates \
             --commit "$GITHUB_SHA" --tree "$(git rev-parse HEAD^{tree})" \
             --run-id "${{ steps.tag.outputs.run_id }}"
       - name: Refuse release and asset collisions
@@ -316,7 +316,7 @@ jobs:
           ./scripts/release-publication-preflight "$GITHUB_REF_NAME" "${assets[@]}"
       - name: Generate complete checksums
         run: |
-          cp "dist/candidate/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" dist/release/
+          cp "dist/candidate/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" dist/release/
           cd dist/release
           sha256sum agent-sessions-*.tar.gz agent-sessions-v*-release-evidence.json > SHA256SUMS
       - name: Publish GitHub release
