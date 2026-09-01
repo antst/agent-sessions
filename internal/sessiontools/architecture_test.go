@@ -16,7 +16,6 @@ import (
 // This is an exact, shrinking compatibility allowlist. Extracted Phase-A code
 // must never add another dependency on the frozen bridge/federator trees.
 var frozenLegacyImporters = map[string]bool{
-	"cmd/agent-sessions/claude_host.go":    true,
 	"cmd/agent-sessions/codex_host.go":     true,
 	"cmd/agent-sessions/federation.go":     true,
 	"cmd/agent-sessions/grok_host.go":      true,
@@ -35,7 +34,6 @@ var frozenLegacyImporters = map[string]bool{
 	"internal/bridge/qwen_host.go":         true,
 	"internal/bridge/qwen_lane_manager.go": true,
 	"internal/bridge/runtime.go":           true,
-	"internal/launcher/claude_peer.go":     true,
 	"internal/launcher/lane.go":            true,
 	"internal/launcher/peer.go":            true,
 	"internal/launcher/peer_context.go":    true,

@@ -86,7 +86,7 @@ func defaultCommandRunners() commandRunners {
 				return launcher.RunCodexPeerWithDaemon(ctx, invocation.Arguments, requestCodexPreparation)
 			}
 			if invocation.Product == "claude" {
-				return launcher.RunClaudePeerWithDaemon(ctx, invocation.Arguments, requestClaudePreparation)
+				return launcher.RunClaudePeer(invocation.Arguments)
 			}
 			if invocation.Product == "grok" {
 				return launcher.RunGrokPeerWithDaemon(ctx, invocation.Arguments, requestGrokPreparation)

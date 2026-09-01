@@ -31,7 +31,6 @@ type hostCoordinator struct {
 	codex            *bridge.CodexNative
 	pending          map[string]daemonpkg.NativeEvidence
 	monitored        map[string]bool
-	claudePending    map[string]*claudePending
 	grokPending      map[string]*grokPending
 	grokObservers    map[string]*bridge.GrokNativeObserver
 	qwenPending      map[string]*qwenPending
@@ -54,7 +53,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		claudePending: map[string]*claudePending{},
 		grokPending:   map[string]*grokPending{},
 		grokObservers: map[string]*bridge.GrokNativeObserver{},
 		qwenPending:   map[string]*qwenPending{},
@@ -106,9 +104,8 @@ func (c *hostCoordinator) adapters() map[string]daemonpkg.AttachmentAdapter {
 				return nil
 			},
 		}),
-		"claude": c.claudeAdapter(),
-		"grok":   c.grokAdapter(),
-		"qwen":   c.qwenAdapter(),
+		"grok": c.grokAdapter(),
+		"qwen": c.qwenAdapter(),
 	}
 }
 
@@ -191,19 +188,6 @@ func (c *hostCoordinator) handle(
 			return nil, errors.New("decode Codex preparation failed")
 		}
 		result, err := c.prepareCodex(ctx, runtime, input)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(result)
-	case "attachment.claude.prepare":
-		if runtime == nil {
-			return nil, errors.New("runtime attachment authority is unavailable")
-		}
-		var input launcher.ClaudeDaemonPrepareRequest
-		if json.Unmarshal(request.Payload, &input) != nil {
-			return nil, errors.New("decode Claude preparation failed")
-		}
-		result, err := c.prepareClaude(ctx, runtime, input)
 		if err != nil {
 			return nil, err
 		}
