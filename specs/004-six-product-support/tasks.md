@@ -57,7 +57,7 @@ fixtures before any new product is composed.
 - [x] T017 Rewrite the normative unified daemon/runtime/component/ledger acceptance contract in `docs/ADAPTER-PROTOCOL.md`
 - [x] T018 Break the catalog-test import cycle, collapse `internal/federator` product metadata onto a one-way `internal/productcatalog` compatibility projection, and add conformance/static tests banning duplicate product inventories and dispatch switches in `internal/{productcatalog,federator}/*_test.go` and `scripts/test`
 - [x] T019 Gate Grok lanes to an explicitly requested `bypassPermissions` policy without mutation, reject every other mode before native invocation, and add fail-closed regression coverage in `internal/daemon/{adapter_grok_lane.go,adapter_grok_lane_test.go}`
-- [ ] T020 Run runtime/schema/static/original-four focused gates and obtain visible Fable sign-off on the frozen Phase-A interfaces in `specs/004-six-product-support/evidence/phase0/interface-freeze.md`
+- [x] T020 Run runtime/schema/static/original-four focused gates and obtain visible Fable sign-off on the frozen Phase-A interfaces in `specs/004-six-product-support/evidence/phase0/interface-freeze.md`
 
 **Interface Freeze Checkpoint**: Runtime records and authority boundaries are
 reviewed and frozen. Shared-engine workers may now start against those types.
