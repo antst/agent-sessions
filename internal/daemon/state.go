@@ -42,7 +42,6 @@ type HostRuntime struct {
 	ServiceState        string            `json:"service_state,omitempty"`
 	ProductReadiness    map[string]string `json:"product_readiness,omitempty"`
 	AttachmentRevision  uint64            `json:"attachment_revision,omitempty"`
-	DeliveryRevision    uint64            `json:"delivery_revision,omitempty"`
 	LaneRevision        uint64            `json:"lane_revision,omitempty"`
 	CleanupDebtRevision uint64            `json:"cleanup_debt_revision,omitempty"`
 	FederationRevision  uint64            `json:"federation_revision,omitempty"`
@@ -95,20 +94,6 @@ type ManagedAttachment struct {
 	ComponentRevision  uint64         `json:"component_revision,omitempty"`
 	IntegrationVersion string         `json:"integration_version,omitempty"`
 	State              string         `json:"state"`
-}
-
-// Delivery is one neutral durable local or remote message acceptance record.
-type Delivery struct {
-	ID             string   `json:"id"`
-	CorrelationID  string   `json:"correlation_id,omitempty"`
-	Sender         string   `json:"sender"`
-	Destinations   []string `json:"destinations"`
-	Groups         []string `json:"groups,omitempty"`
-	HostSuffix     string   `json:"host_suffix,omitempty"`
-	SentAt         int64    `json:"sent_at,omitempty"`
-	State          string   `json:"state"`
-	Acknowledgment string   `json:"acknowledgment,omitempty"`
-	RetryCause     string   `json:"retry_cause,omitempty"`
 }
 
 // Lane is one durable parent-owned native worker lane.
@@ -308,7 +293,6 @@ type ComponentSession struct {
 type Catalog struct {
 	Host              HostRuntime                                  `json:"host"`
 	Attachments       map[string]ManagedAttachment                 `json:"attachments"`
-	Deliveries        map[string]Delivery                          `json:"deliveries"`
 	Lanes             map[string]Lane                              `json:"lanes"`
 	Turns             map[string]Turn                              `json:"turns"`
 	CleanupDebts      map[string]CleanupDebt                       `json:"cleanup_debts"`
@@ -409,12 +393,6 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 			"debt":      {"detaching", "detached"},
 			"detached":  {"preparing"},
 		},
-		"delivery": {
-			"prepared":  {"accepted", "rejected"},
-			"accepted":  {"presented", "retryable", "rejected"},
-			"presented": {"acknowledged", "retryable", "rejected"},
-			"retryable": {"accepted", "rejected"},
-		},
 		"lane": {
 			"preparing":    {"idle", "running", "retiring", "terminal", "cleanup-debt"},
 			"idle":         {"preparing", "running", "terminal", "archived", "cleanup-debt"},
@@ -458,8 +436,8 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 
 func emptyCatalog() Catalog {
 	return Catalog{
-		Attachments: map[string]ManagedAttachment{}, Deliveries: map[string]Delivery{},
-		Lanes: map[string]Lane{}, Turns: map[string]Turn{}, CleanupDebts: map[string]CleanupDebt{},
+		Attachments: map[string]ManagedAttachment{},
+		Lanes:       map[string]Lane{}, Turns: map[string]Turn{}, CleanupDebts: map[string]CleanupDebt{},
 		LaneInputs: map[string]LaneInputReceipt{}, NativeLeases: map[NativeSessionLeaseKey]NativeSessionLease{},
 		ComponentBindings: map[string]ComponentBinding{}, ComponentSessions: map[string]ComponentSession{},
 	}
@@ -468,9 +446,6 @@ func emptyCatalog() Catalog {
 func normalizedCatalog(catalog Catalog) Catalog {
 	if catalog.Attachments == nil {
 		catalog.Attachments = map[string]ManagedAttachment{}
-	}
-	if catalog.Deliveries == nil {
-		catalog.Deliveries = map[string]Delivery{}
 	}
 	if catalog.Lanes == nil {
 		catalog.Lanes = map[string]Lane{}
@@ -610,11 +585,6 @@ func validateCatalog(catalog Catalog) error {
 			return fmt.Errorf("managed attachment %s has unknown product %q", id, attachment.Product)
 		}
 	}
-	for id, delivery := range catalog.Deliveries {
-		if id == "" || delivery.ID != id || !knownState("delivery", delivery.State) {
-			return fmt.Errorf("invalid delivery %q", id)
-		}
-	}
 	for id, lane := range catalog.Lanes {
 		if id == "" || lane.ID != id || !knownState("lane", lane.State) {
 			return fmt.Errorf("invalid lane %q", id)
@@ -752,15 +722,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 			}
 		} else if attachment.State != "detached" {
 			return fmt.Errorf("attachment %s cannot be removed from state %s", id, attachment.State)
-		}
-	}
-	for id, delivery := range current.Deliveries {
-		if candidate, ok := next.Deliveries[id]; ok {
-			if !ValidLifecycleTransition("delivery", delivery.State, candidate.State) {
-				return fmt.Errorf("delivery %s cannot transition from %s to %s", id, delivery.State, candidate.State)
-			}
-		} else if delivery.State != "acknowledged" && delivery.State != "rejected" {
-			return fmt.Errorf("delivery %s cannot be removed from state %s", id, delivery.State)
 		}
 	}
 	for id, lane := range current.Lanes {
@@ -940,7 +901,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 func knownState(kind, state string) bool {
 	states := map[string]map[string]bool{
 		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true, "debt": true},
-		"delivery":          {"prepared": true, "accepted": true, "presented": true, "acknowledged": true, "retryable": true, "rejected": true},
 		"lane":              {"preparing": true, "idle": true, "running": true, "interrupting": true, "retiring": true, "terminal": true, "archived": true, "cleanup-debt": true},
 		"turn":              {"accepted": true, "dispatched": true, "terminal": true, "collected": true},
 		"receipt":           {"prepared": true, "queued": true, "dispatching": true, "injected": true, "ambiguous": true, "retired": true},

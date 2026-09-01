@@ -28,7 +28,6 @@ func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
 	catalog.Host.Endpoint = canary
 	catalog.Host.ProductReadiness = map[string]string{"codex": "ready", "claude": canary}
 	catalog.Attachments["attachment"] = ManagedAttachment{ID: "attachment", Product: "codex", Cwd: canary, State: "attached", DaemonGeneration: runtime.Generation()}
-	catalog.Deliveries["delivery"] = Delivery{ID: "delivery", Sender: canary, Destinations: []string{canary}, Acknowledgment: canary, State: "accepted"}
 	catalog.Lanes["lane"] = Lane{ID: "lane", ParentAttachmentID: "attachment", Product: "codex", Name: canary, State: "terminal"}
 	catalog.Turns["turn"] = Turn{ID: "turn", LaneID: "lane", Sequence: 1, State: "terminal", Result: canary, Diagnostic: canary, TerminalRevision: 1}
 	catalog.CleanupDebts["debt"] = CleanupDebt{ID: "debt", Resource: "lane", BaselineIdentity: canary, IntendedState: "absent", LastVerifiedState: canary, Cause: canary, Operation: "archive"}

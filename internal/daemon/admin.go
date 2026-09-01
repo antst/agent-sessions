@@ -21,7 +21,7 @@ func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.Raw
 	catalog := snapshot.Catalog
 	records := diagnostics.Records{
 		Attachments: len(catalog.Attachments), ActiveAttachments: len(activeAttachments),
-		Deliveries: len(catalog.Deliveries), Lanes: len(catalog.Lanes),
+		Lanes: len(catalog.Lanes),
 		Turns: len(catalog.Turns), CleanupDebts: len(catalog.CleanupDebts),
 	}
 	for _, lane := range catalog.Lanes {
@@ -50,8 +50,8 @@ func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.Raw
 		ReleasePresent:  strings.TrimSpace(host.Release) != "",
 		EndpointPresent: strings.TrimSpace(host.Endpoint) != "",
 		Revisions: diagnostics.Revisions{
-			Attachments: host.AttachmentRevision, Deliveries: host.DeliveryRevision,
-			Lanes: host.LaneRevision, CleanupDebt: host.CleanupDebtRevision,
+			Attachments: host.AttachmentRevision,
+			Lanes:       host.LaneRevision, CleanupDebt: host.CleanupDebtRevision,
 			Federation: host.FederationRevision,
 		},
 		Records: records, ProductStates: productStates,

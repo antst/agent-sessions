@@ -3,215 +3,75 @@ package daemon
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/federation"
 )
 
-func TestDeliveryEngineRoutesDiscoverMulticastAndBroadcastWithDestinationAcceptance(t *testing.T) {
-	store := openDeliveryTestState(t)
-	var mu sync.Mutex
+func TestRouteDeliveryUsesOnlyLiveDestinationAcceptance(t *testing.T) {
+	source, peers := deliveryTestPeers()
 	accepted := []string{}
-	engine, err := NewDeliveryEngine(store, func(
+	present := func(
 		_ context.Context,
-		source, target federation.Peer,
+		gotSource, target federation.Peer,
 		deliveryID string,
 		frame federation.AgentFrame,
 	) error {
-		if source.ID != "source" || frame.Type != "delivery" || frame.Content != "hello" || deliveryID == "" {
-			t.Fatalf("presentation = source=%+v target=%+v id=%q frame=%+v", source, target, deliveryID, frame)
+		if gotSource.ID != source.ID || frame.Type != "delivery" || frame.Content != "hello" || deliveryID == "" {
+			t.Fatalf("presentation = source=%+v target=%+v id=%q frame=%+v", gotSource, target, deliveryID, frame)
 		}
-		mu.Lock()
 		accepted = append(accepted, target.ID)
-		mu.Unlock()
 		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	source, peers := deliveryTestPeers()
-	discovered, err := engine.Route(context.Background(), federation.AgentFrame{
+	discovered, err := RouteDelivery(context.Background(), federation.AgentFrame{
 		Version: federation.AgentFrameVersion, Type: "discover", MessageID: "discover-1",
-	}, source, peers)
-	if err != nil || len(discovered.Peers) != 2 {
-		t.Fatalf("discover = %+v, %v", discovered, err)
+	}, source, peers, present)
+	if err != nil || len(discovered.Peers) != 2 || len(accepted) != 0 {
+		t.Fatalf("discover = %+v accepted=%v err=%v", discovered, accepted, err)
 	}
-	multicast, err := engine.Route(context.Background(), federation.AgentFrame{
+	multicast, err := RouteDelivery(context.Background(), federation.AgentFrame{
 		Version: federation.AgentFrameVersion, Type: "send", MessageID: "send-1",
 		Targets: []string{"a", "reader-b"}, Content: "hello",
-	}, source, peers)
+	}, source, peers, present)
 	if err != nil || len(multicast.Deliveries) != 2 || multicast.Deliveries[0].Status != "accepted" || multicast.Deliveries[1].Status != "accepted" {
 		t.Fatalf("multicast = %+v, %v", multicast, err)
 	}
-	broadcast, err := engine.Route(context.Background(), federation.AgentFrame{
+	broadcast, err := RouteDelivery(context.Background(), federation.AgentFrame{
 		Version: federation.AgentFrameVersion, Type: "broadcast", MessageID: "broadcast-1",
 		Group: "team", Content: "hello",
-	}, source, peers)
-	if err != nil || len(broadcast.Deliveries) != 2 {
-		t.Fatalf("broadcast = %+v, %v", broadcast, err)
-	}
-	snapshot, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Catalog.Deliveries) != 4 {
-		t.Fatalf("durable deliveries = %+v", snapshot.Catalog.Deliveries)
-	}
-	for id, delivery := range snapshot.Catalog.Deliveries {
-		if delivery.State != "acknowledged" || delivery.Acknowledgment != "destination-accepted" || delivery.RetryCause != "" {
-			t.Fatalf("delivery %s = %+v", id, delivery)
-		}
-	}
-	if len(accepted) != 4 {
-		t.Fatalf("accepted callbacks = %v", accepted)
+	}, source, peers, present)
+	if err != nil || len(broadcast.Deliveries) != 2 || len(accepted) != 4 {
+		t.Fatalf("broadcast = %+v accepted=%v err=%v", broadcast, accepted, err)
 	}
 }
 
-func TestDeliveryEngineRetryUsesStableIDAndAcknowledgedReplayDoesNotRedispatch(t *testing.T) {
-	store := openDeliveryTestState(t)
+func TestRouteDeliveryReturnsTruthfulFailureAndCallerRetryRepresents(t *testing.T) {
+	source, peers := deliveryTestPeers()
 	var calls []string
 	fail := true
-	engine, err := NewDeliveryEngine(store, func(
-		_ context.Context,
-		_, _ federation.Peer,
-		deliveryID string,
-		_ federation.AgentFrame,
-	) error {
+	present := func(_ context.Context, _, _ federation.Peer, deliveryID string, _ federation.AgentFrame) error {
 		calls = append(calls, deliveryID)
 		if fail {
-			return errors.New("vendor diagnostic must not persist")
+			return errors.New("recipient unavailable")
 		}
 		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	source, peers := deliveryTestPeers()
 	frame := federation.AgentFrame{
-		Version: federation.AgentFrameVersion, Type: "send", MessageID: "retry-1", Targets: []string{"a"}, Content: "secret body",
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "retry-1",
+		Targets: []string{"a"}, Content: "sender retains this body",
 	}
-	first, err := engine.Route(context.Background(), frame, source, peers)
+	first, err := RouteDelivery(context.Background(), frame, source, peers, present)
 	if err != nil || len(first.Deliveries) != 1 || first.Deliveries[0].Status != "failed" {
-		t.Fatalf("failed delivery = %+v, %v", first, err)
+		t.Fatalf("first = %+v, %v", first, err)
 	}
 	fail = false
-	second, err := engine.Route(context.Background(), frame, source, peers)
+	second, err := RouteDelivery(context.Background(), frame, source, peers, present)
 	if err != nil || second.Deliveries[0].Status != "accepted" {
-		t.Fatalf("retried delivery = %+v, %v", second, err)
-	}
-	third, err := engine.Route(context.Background(), frame, source, peers)
-	if err != nil || third.Deliveries[0].Status != "accepted" {
-		t.Fatalf("replayed delivery = %+v, %v", third, err)
+		t.Fatalf("retry = %+v, %v", second, err)
 	}
 	if len(calls) != 2 || calls[0] != calls[1] {
-		t.Fatalf("stable presentation calls = %v", calls)
+		t.Fatalf("request-local product idempotency IDs = %v", calls)
 	}
-	snapshot, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, delivery := range snapshot.Catalog.Deliveries {
-		if delivery.State != "acknowledged" || delivery.RetryCause != "" ||
-			delivery.Acknowledgment != "destination-accepted" {
-			t.Fatalf("retried record = %+v", delivery)
-		}
-		if delivery.RetryCause == "vendor diagnostic must not persist" {
-			t.Fatal("vendor diagnostic persisted")
-		}
-	}
-}
-
-func TestDeliveryEngineSelectedAcknowledgedReplayRequeriesDestinationWithStableID(t *testing.T) {
-	store := openDeliveryTestState(t)
-	var calls []string
-	engine, err := NewDeliveryEngine(store, func(
-		_ context.Context,
-		_, target federation.Peer,
-		deliveryID string,
-		_ federation.AgentFrame,
-	) error {
-		calls = append(calls, target.ID+":"+deliveryID)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	source, peers := deliveryTestPeers()
-	frame := federation.AgentFrame{
-		Version: federation.AgentFrameVersion, Type: "send", MessageID: "remote-requery-1",
-		Targets: []string{"a"}, Content: "destination-owned receipt body",
-	}
-	first, err := engine.Route(context.Background(), frame, source, peers)
-	if err != nil || first.Deliveries[0].Status != "accepted" {
-		t.Fatalf("initial delivery = %+v, %v", first, err)
-	}
-	replayed, err := engine.RouteWithAcknowledgedPresentation(context.Background(), frame, source, peers, func(target federation.Peer) bool {
-		return target.ID == "a"
-	})
-	if err != nil || replayed.Deliveries[0].Status != "accepted" {
-		t.Fatalf("destination re-query = %+v, %v", replayed, err)
-	}
-	if len(calls) != 2 || calls[0] != calls[1] || replayed.Deliveries[0].DeliveryID != first.Deliveries[0].DeliveryID {
-		t.Fatalf("stable destination re-query calls=%v first=%+v replay=%+v", calls, first.Deliveries, replayed.Deliveries)
-	}
-	snapshot, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Catalog.Deliveries) != 1 || snapshot.Catalog.Deliveries[first.Deliveries[0].DeliveryID].State != "acknowledged" {
-		t.Fatalf("source copied or duplicated destination metadata: %+v", snapshot.Catalog.Deliveries)
-	}
-}
-
-func TestDeliveryEngineAcknowledgedReplaySurvivesDaemonStateReopen(t *testing.T) {
-	root := t.TempDir()
-	store, err := OpenState(root, 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	source, peers := deliveryTestPeers()
-	frame := federation.AgentFrame{
-		Version: federation.AgentFrameVersion, Type: "send", MessageID: "durable-replay-1",
-		Targets: []string{"a"}, Content: "never persisted",
-	}
-	calls := 0
-	engine, err := NewDeliveryEngine(store, func(context.Context, federation.Peer, federation.Peer, string, federation.AgentFrame) error {
-		calls++
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result, routeErr := engine.Route(context.Background(), frame, source, peers); routeErr != nil || result.Deliveries[0].Status != "accepted" {
-		t.Fatalf("initial durable delivery = %+v, %v", result, routeErr)
-	}
-	reopened, err := OpenState(root, 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replay, err := NewDeliveryEngine(reopened, func(context.Context, federation.Peer, federation.Peer, string, federation.AgentFrame) error {
-		calls++
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result, routeErr := replay.Route(context.Background(), frame, source, peers); routeErr != nil || result.Deliveries[0].Status != "accepted" {
-		t.Fatalf("reopened durable replay = %+v, %v", result, routeErr)
-	}
-	if calls != 1 {
-		t.Fatalf("acknowledged replay was presented %d times, want exactly once", calls)
-	}
-}
-
-func openDeliveryTestState(t *testing.T) *StateStore {
-	t.Helper()
-	store, err := OpenState(t.TempDir(), 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store
 }
 
 func deliveryTestPeers() (federation.Peer, []federation.Peer) {

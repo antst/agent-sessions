@@ -203,15 +203,10 @@ func (c *hostCoordinator) run(ctx context.Context) error {
 	c.mu.Unlock()
 	federationDone := make(chan error, 1)
 	go func() { federationDone <- federationHost.Run(ctx) }()
-	noticeTicker := time.NewTicker(laneNoticeRetryInterval)
-	defer noticeTicker.Stop()
-	c.replayLaneTerminalNotices(runtime)
 	for {
 		select {
 		case <-ctx.Done():
 			goto shutdown
-		case <-noticeTicker.C:
-			c.replayLaneTerminalNotices(runtime)
 		case err = <-federationDone:
 			if err != nil {
 				return fmt.Errorf("run daemon federation component: %w", err)

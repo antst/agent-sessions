@@ -515,16 +515,12 @@ func TestRemoteLaneTerminalNoticeIsAcknowledgedOnceAndPointsBackToDestination(t 
 		t.Fatal(err)
 	}
 	select {
-	case duplicate := <-delivered:
-		t.Fatalf("acknowledged terminal notice was resent: %#v", duplicate)
-	case <-time.After(150 * time.Millisecond):
-	}
-	snapshot, err = runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if delivery := snapshot.Catalog.Deliveries[laneTerminalNoticeID("lane", "turn")]; delivery.State != "acknowledged" || delivery.Acknowledgment != "destination-accepted" {
-		t.Fatalf("terminal delivery state = %#v", delivery)
+	case repeated := <-delivered:
+		if repeated.MessageID != laneTerminalNoticeID("lane", "turn") {
+			t.Fatalf("repeated live terminal frame = %#v", repeated)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("explicit second live terminal delivery was not presented")
 	}
 }
 

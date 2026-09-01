@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,52 +80,6 @@ printf '%%s\n' '{"session_id":"%s","result":"mcp result"}'
 	}
 }
 
-func TestLaneReceiptProjectionReadFailurePreservesAcceptedDelivery(t *testing.T) {
-	accepted := federationpkg.AgentFrameResult{
-		Version: federationpkg.AgentFrameVersion,
-		Type:    "send.result",
-		Deliveries: []federationpkg.DeliveryResult{{
-			Target: "lane-id", DeliveryID: "stable-delivery", Status: "accepted",
-		}},
-	}
-	got := projectLaneDeliveryReceipts(accepted, daemonpkg.StateSnapshot{}, errors.New("projection read failed"))
-	if len(got.Deliveries) != 1 || got.Deliveries[0].Status != "accepted" ||
-		got.Deliveries[0].DeliveryID != "stable-delivery" || got.Deliveries[0].ReceiptID != "" {
-		t.Fatalf("post-acceptance projection failure changed result: %+v", got)
-	}
-}
-
-func TestFederatedLaneReceiptAcknowledgementProjectsAtSource(t *testing.T) {
-	result := federationpkg.AgentFrameResult{Deliveries: []federationpkg.DeliveryResult{{
-		Target: "host-b/lane", DeliveryID: "delivery-id", Status: "accepted",
-	}}}
-	got := projectFederatedLaneReceipts(result, map[string]federatedLaneReceiptAck{
-		"delivery-id": {ReceiptID: "destination-receipt", ReceiptSequence: 9},
-	})
-	if got.Deliveries[0].ReceiptID != "destination-receipt" || got.Deliveries[0].ReceiptSequence != 9 {
-		t.Fatalf("federated receipt projection = %+v", got.Deliveries)
-	}
-}
-
-func TestFederatedDestinationReceiptProjectionSupportsIdempotentRetry(t *testing.T) {
-	deliveries := []federationpkg.DeliveryResult{{
-		Target: "lane-id", DeliveryID: "destination-delivery", Status: "accepted",
-	}}
-	snapshot := daemonpkg.StateSnapshot{Catalog: daemonpkg.Catalog{LaneInputs: map[string]daemonpkg.LaneInputReceipt{
-		"destination-delivery": {
-			ReceiptID: "destination-delivery", LaneID: "lane-id", Sequence: 4, State: daemonpkg.ReceiptQueued,
-		},
-	}}}
-	data := projectFederatedDestinationReceipt(deliveries, snapshot, &laneActor{id: "lane-id"})
-	var got federatedLaneReceiptAck
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.ReceiptID != "destination-delivery" || got.ReceiptSequence != 4 {
-		t.Fatalf("idempotent destination receipt = %+v", got)
-	}
-}
-
 func TestMessagingToolsAddressBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 	for _, target := range []string{"worker", "lane-id", "native-id"} {
 		t.Run(target, func(t *testing.T) {
@@ -178,8 +131,8 @@ func TestMessagingToolsAddressBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 				t.Fatalf("send to advertised target %q: %v", target, err)
 			}
 			deliveries := sent.Data.(map[string]any)["deliveries"].([]federationpkg.DeliveryResult)
-			if len(deliveries) != 1 || deliveries[0].DeliveryID == "" || deliveries[0].ReceiptID != deliveries[0].DeliveryID || deliveries[0].ReceiptSequence != 1 {
-				t.Fatalf("lane delivery receipt projection = %+v", deliveries)
+			if len(deliveries) != 1 || deliveries[0].DeliveryID == "" || deliveries[0].Status != "accepted" {
+				t.Fatalf("live lane delivery result = %+v", deliveries)
 			}
 			after, err := runtime.State().Read()
 			if err != nil {

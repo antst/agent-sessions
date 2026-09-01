@@ -225,51 +225,6 @@ func ReconcileRestartedLaneCatalog(
 	return changed
 }
 
-// PrepareTerminalNotice creates or reopens one metadata-only, stable terminal
-// notice delivery. Acknowledged notices are never emitted again.
-func (e *LaneEngine) PrepareTerminalNotice(notice Delivery) (bool, error) {
-	acknowledged := false
-	err := e.mutate(func(catalog *Catalog) error {
-		current, exists := catalog.Deliveries[notice.ID]
-		if exists && current.State == "acknowledged" {
-			acknowledged = true
-			return nil
-		}
-		if notice.ID == "" || notice.CorrelationID == "" || notice.Sender == "" || len(notice.Destinations) != 1 {
-			return errors.New("terminal notice metadata is incomplete")
-		}
-		notice.State = "accepted"
-		if exists && current.State == "presented" {
-			notice.State = "presented"
-		}
-		catalog.Deliveries[notice.ID] = notice
-		catalog.Host.DeliveryRevision++
-		return nil
-	})
-	return acknowledged, err
-}
-
-// TransitionTerminalNotice commits retry/presentation/acknowledgement state
-// without persisting message content or a vendor error.
-func (e *LaneEngine) TransitionTerminalNotice(noticeID, state, retryCause string) error {
-	return e.mutate(func(catalog *Catalog) error {
-		delivery, ok := catalog.Deliveries[noticeID]
-		if !ok {
-			return errors.New("terminal delivery state disappeared")
-		}
-		if delivery.State != state && !ValidLifecycleTransition("delivery", delivery.State, state) {
-			return fmt.Errorf("invalid terminal notice transition %s -> %s", delivery.State, state)
-		}
-		delivery.State, delivery.RetryCause = state, retryCause
-		if state == "acknowledged" {
-			delivery.Acknowledgment = "destination-accepted"
-		}
-		catalog.Deliveries[noticeID] = delivery
-		catalog.Host.DeliveryRevision++
-		return nil
-	})
-}
-
 func catalogHasCollectionDebt(catalog Catalog, laneID string) bool {
 	for _, turn := range catalog.Turns {
 		if turn.LaneID == laneID && turn.State == "terminal" {

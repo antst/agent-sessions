@@ -9,8 +9,8 @@ func TestStatusAndDoctorHaveFixedTruthfulSchema(t *testing.T) {
 	input := Input{
 		RuntimeReady: true, Generation: 7, CatalogRevision: 18, ServiceState: "running",
 		ReleasePresent: true, EndpointPresent: true,
-		Revisions:     Revisions{Attachments: 5, Deliveries: 6, Lanes: 7, CleanupDebt: 8, Federation: 9},
-		Records:       Records{Attachments: 4, ActiveAttachments: 3, Deliveries: 2, Lanes: 8, ActiveLanes: 2, Turns: 12, UncollectedTurns: 1, CleanupDebts: 1},
+		Revisions:     Revisions{Attachments: 5, Lanes: 7, CleanupDebt: 8, Federation: 9},
+		Records:       Records{Attachments: 4, ActiveAttachments: 3, Lanes: 8, ActiveLanes: 2, Turns: 12, UncollectedTurns: 1, CleanupDebts: 1},
 		ProductStates: map[string]string{"codex": "ready", "claude": "missing", "grok": "opaque raw diagnostic"},
 	}
 	input.Operation = "status"

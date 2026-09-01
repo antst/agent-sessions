@@ -161,7 +161,7 @@ func TestLaneEngineSerializesTurnsAndCollectsEveryTerminalExactlyOnce(t *testing
 	}
 }
 
-func TestLaneEngineRestartNoticeArchiveAndCleanupDebtAreDurable(t *testing.T) {
+func TestLaneEngineRestartArchiveAndCleanupDebtAreDurable(t *testing.T) {
 	engine, store := testLaneEngine(t)
 	now := time.Unix(1_700_000_100, 0).UTC()
 	engine.now = func() time.Time { return now }
@@ -194,26 +194,6 @@ func TestLaneEngineRestartNoticeArchiveAndCleanupDebtAreDurable(t *testing.T) {
 		t.Fatalf("restart reconciliation = %+v", snapshot.Catalog)
 	}
 
-	notice := Delivery{ID: "lane-terminal-stable", CorrelationID: "turn-qwen", Sender: "lane-qwen", Destinations: []string{"parent"}, State: "accepted"}
-	if acknowledged, err := engine.PrepareTerminalNotice(notice); err != nil || acknowledged {
-		t.Fatalf("prepare notice = %v, %v", acknowledged, err)
-	}
-	if err := engine.TransitionTerminalNotice(notice.ID, "retryable", "destination-unavailable"); err != nil {
-		t.Fatal(err)
-	}
-	if acknowledged, err := engine.PrepareTerminalNotice(notice); err != nil || acknowledged {
-		t.Fatalf("retry notice = %v, %v", acknowledged, err)
-	}
-	if err := engine.TransitionTerminalNotice(notice.ID, "presented", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.TransitionTerminalNotice(notice.ID, "acknowledged", ""); err != nil {
-		t.Fatal(err)
-	}
-	if acknowledged, err := engine.PrepareTerminalNotice(notice); err != nil || !acknowledged {
-		t.Fatalf("acknowledged notice replay = %v, %v", acknowledged, err)
-	}
-
 	debt := CleanupDebt{ID: "lane-debt", Resource: "/owned/native", BaselineIdentity: "pid/start", IntendedState: "absent", LastVerifiedState: "unknown", Operation: "archive-qwen"}
 	if err := engine.RecordCleanupDebt("lane-qwen", debt); err != nil {
 		t.Fatal(err)
@@ -225,9 +205,8 @@ func TestLaneEngineRestartNoticeArchiveAndCleanupDebtAreDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Catalog.Deliveries[notice.ID].State != "acknowledged" ||
-		snapshot.Catalog.Lanes["lane-qwen"].State != "archived" || len(snapshot.Catalog.CleanupDebts) != 0 {
-		t.Fatalf("notice/archive/debt state = %+v", snapshot.Catalog)
+	if snapshot.Catalog.Lanes["lane-qwen"].State != "archived" || len(snapshot.Catalog.CleanupDebts) != 0 {
+		t.Fatalf("archive/debt state = %+v", snapshot.Catalog)
 	}
 }
 

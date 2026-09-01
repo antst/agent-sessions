@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func TestProtocolDuplicateDeliveryAndReconnectGenerationRules(t *testing.T) {
+func TestProtocolLiveDeliveryAndReconnectGenerationRules(t *testing.T) {
 	source := mustTestPeer(t, "host-a", "source", "codex", "project")
 	target := mustTestPeer(t, "host-b", "target", "qwen", "project")
 	started := make(chan struct{})
@@ -58,8 +58,8 @@ func TestProtocolDuplicateDeliveryAndReconnectGenerationRules(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("concurrent duplicate was presented %d times", calls.Load())
+	if calls.Load() != 2 {
+		t.Fatalf("two live requests were presented %d times", calls.Load())
 	}
 
 	h := &hub{

@@ -33,7 +33,6 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 			},
 			"archived": {ID: "archived", Product: "grok", Name: secret, State: "archived"},
 		},
-		Deliveries:   map[string]daemonpkg.Delivery{"secret": {ID: "secret", Sender: secret}},
 		Turns:        map[string]daemonpkg.Turn{"secret": {ID: "secret", Result: secret, Diagnostic: secret}},
 		CleanupDebts: map[string]daemonpkg.CleanupDebt{},
 	}}

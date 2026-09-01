@@ -63,19 +63,13 @@ func TestHostReconnectsWhenHubStopsAnsweringHeartbeats(t *testing.T) {
 	<-serverDone
 }
 
-func TestDeliveryAcknowledgementDataMayBePresentOrEmpty(t *testing.T) {
+func TestDeliveryAcknowledgementCompletesLiveRequest(t *testing.T) {
 	host := &EmbeddedHost{pendingDeliveries: map[string]chan deliveryOutcome{
-		"new": make(chan deliveryOutcome, 1), "old": make(chan deliveryOutcome, 1),
+		"request": make(chan deliveryOutcome, 1),
 	}}
-	host.completePendingDelivery(Message{Type: "delivery_ack", RequestID: "new", Data: []byte(`{"receipt_id":"exact","receipt_sequence":2}`)})
-	newOutcome := <-host.pendingDeliveries["new"]
-	if newOutcome.err != nil || string(newOutcome.data) != `{"receipt_id":"exact","receipt_sequence":2}` {
-		t.Fatalf("acknowledgement with data = data %q err %v", newOutcome.data, newOutcome.err)
-	}
-	host.completePendingDelivery(Message{Type: "delivery_ack", RequestID: "old"})
-	oldOutcome := <-host.pendingDeliveries["old"]
-	if oldOutcome.err != nil || len(oldOutcome.data) != 0 {
-		t.Fatalf("acknowledgement without data = data %q err %v", oldOutcome.data, oldOutcome.err)
+	host.completePendingDelivery(Message{Type: "delivery_ack", RequestID: "request"})
+	if outcome := <-host.pendingDeliveries["request"]; outcome.err != nil {
+		t.Fatalf("acknowledgement error = %v", outcome.err)
 	}
 }
 
@@ -106,7 +100,7 @@ func TestHostRefreshesDaemonSnapshotWhileHubIsDisconnected(t *testing.T) {
 	waitTestHost(t, done)
 }
 
-func TestHostDeduplicatesAcknowledgedDeliveryAcrossReconnectBoundary(t *testing.T) {
+func TestHostRelaysEveryLiveDeliveryRequest(t *testing.T) {
 	source := mustTestPeer(t, "host-a", "source", "codex", "project")
 	target := mustTestPeer(t, "host-b", "target", "qwen", "project")
 	var calls atomic.Int32
@@ -133,17 +127,13 @@ func TestHostDeduplicatesAcknowledgedDeliveryAcrossReconnectBoundary(t *testing.
 	if err := host.deliverInbound(message); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate the same request arriving again after the transport reconnects.
+	// The carrier retains no mailbox or receipt state. A sender retry is another
+	// live delivery attempt whose acceptance comes directly from the recipient.
 	if err := host.deliverInbound(message); err != nil {
 		t.Fatal(err)
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("delivery callback count = %d, want exactly one", got)
-	}
-	conflict := message
-	conflict.TargetID = "host-b/other"
-	if err := host.deliverInbound(conflict); err == nil {
-		t.Fatal("conflicting reuse of a delivery id was accepted")
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("delivery callback count = %d, want two live attempts", got)
 	}
 }
 

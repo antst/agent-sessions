@@ -166,15 +166,14 @@ entries:
       - internal/federation/groups.go:ChildGroups
       - internal/federation/groups.go:Admit
       - internal/federation/groups.go:Resolve
-      - internal/daemon/delivery.go:NewDeliveryEngine
-      - internal/daemon/delivery.go:DeliveryEngine.Route
+      - internal/daemon/delivery.go:RouteDelivery
     replacement_tests:
       - internal/federation/frame_test.go:TestDeliveryFramePreservesNeutralProvenanceAndRequestIdentity
       - internal/federation/groups_test.go:TestChildGroupsAlwaysAnchorImmediateParentAndOptionallyInherit
       - internal/federation/groups_test.go:TestAdmitFiltersHiddenCollisionsAndSnapshotsMulticastAndBroadcast
       - internal/federation/groups_test.go:TestAdmitRejectsDuplicateResolutionAndUnauthorizedBroadcast
-      - internal/daemon/delivery_test.go:TestDeliveryEngineRoutesDiscoverMulticastAndBroadcastWithDestinationAcceptance
-      - internal/daemon/delivery_test.go:TestDeliveryEngineRetryUsesStableIDAndAcknowledgedReplayDoesNotRedispatch
+      - internal/daemon/delivery_test.go:TestRouteDeliveryUsesOnlyLiveDestinationAcceptance
+      - internal/daemon/delivery_test.go:TestRouteDeliveryReturnsTruthfulFailureAndCallerRetryRepresents
     acceptance_cells:
       - M-CP-CP
       - M-CP-CLP
@@ -681,11 +680,9 @@ entries:
       - internal/daemon/turn.go:LaneEngine.Complete
       - internal/daemon/turn.go:LaneEngine.Collect
       - internal/daemon/turn.go:LaneEngine.ReconcileRestart
-      - internal/daemon/turn.go:LaneEngine.PrepareTerminalNotice
-      - internal/daemon/turn.go:LaneEngine.TransitionTerminalNotice
     replacement_tests:
       - internal/daemon/lane_test.go:TestLaneEngineSerializesTurnsAndCollectsEveryTerminalExactlyOnce
-      - internal/daemon/lane_test.go:TestLaneEngineRestartNoticeArchiveAndCleanupDebtAreDurable
+      - internal/daemon/lane_test.go:TestLaneEngineRestartArchiveAndCleanupDebtAreDurable
       - cmd/agent-sessions/lane_test.go:TestLaneResumeTransfersDurableParentAndUnarchives
       - cmd/agent-sessions/lane_test.go:TestQueuedLaneFollowupAdvancesDurableTerminalLaneBeforePreparing
       - cmd/agent-sessions/lane_test.go:TestConcurrentBusyLaneMessagesCommitOrderedReceiptsWithoutAggregation
@@ -837,7 +834,7 @@ entries:
     replacement_tests:
       - internal/federation/host_test.go:TestHostReconnectsWhenHubStopsAnsweringHeartbeats
       - internal/federation/host_test.go:TestHostRefreshesDaemonSnapshotWhileHubIsDisconnected
-      - internal/federation/host_test.go:TestHostDeduplicatesAcknowledgedDeliveryAcrossReconnectBoundary
+      - internal/federation/host_test.go:TestHostRelaysEveryLiveDeliveryRequest
       - internal/federation/host_test.go:TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport
       - internal/federation/host_test.go:TestHostBoundsInboundRemoteLaneConcurrencyAndRequiresLiveHub
       - internal/federation/hub_test.go:TestHubRejectsStaleGenerationAndReplacesEqualOrNewerReconnect
@@ -847,10 +844,9 @@ entries:
       - internal/federation/hub_test.go:TestHubRejectsStaleBroadcastThroughDifferentSharedGroup
       - internal/federation/protocol_test.go:TestProtocolRejectsEveryMismatchedVersionBeforeRegistration
       - internal/federation/protocol_test.go:TestProtocolRejectsMalformedAndOversizedFrames
-      - internal/federation/protocol_test.go:TestProtocolDuplicateDeliveryAndReconnectGenerationRules
+      - internal/federation/protocol_test.go:TestProtocolLiveDeliveryAndReconnectGenerationRules
       - internal/federation/protocol_test.go:TestEqualProtocolUnrelatedBuildsHandshake
       - internal/daemon/federation_test.go:TestDaemonFederationOwnsExactlyOneHostLoop
-      - internal/daemon/delivery_test.go:TestDeliveryEngineAcknowledgedReplaySurvivesDaemonStateReopen
       - cmd/agent-sessions/federation_test.go:TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation
       - cmd/agent-sessions/federation_test.go:TestFederatedLaneUsesAttestedRemoteParentAndForcesPersistence
     acceptance_cells: [X-01, X-02, X-03, X-04, X-05, X-06, X-07, X-08]

@@ -29,7 +29,6 @@ const (
 	maxRemoteLaneRuns     = 32
 	maxRemoteLaneArgs     = 256
 	maxRemoteLaneArgBytes = 512 * 1024
-	maxDeliveryReceipts   = 4096
 )
 
 // EmbeddedHostOptions connects the one user daemon to a protocol-compatible
@@ -46,7 +45,6 @@ type EmbeddedHostOptions struct {
 	HeartbeatTimeout  time.Duration
 	Snapshot          func(context.Context) ([]Peer, error)
 	Deliver           func(context.Context, Peer, Peer, AgentFrame) error
-	DeliverData       func(context.Context, Peer, Peer, AgentFrame) ([]byte, error)
 	RunLane           func(context.Context, RemoteLaneRequest) (RemoteLaneResult, error)
 	Logger            *log.Logger
 }
@@ -82,17 +80,8 @@ type laneRun struct {
 	cancelled bool
 }
 
-type deliveryReceipt struct {
-	sourceID string
-	targetID string
-	data     []byte
-	err      string
-	done     chan struct{}
-}
-
 type deliveryOutcome struct {
-	data []byte
-	err  error
+	err error
 }
 
 // EmbeddedHost is the actual outbound federation state machine owned by one
@@ -111,8 +100,6 @@ type EmbeddedHost struct {
 
 	deliveryMu        sync.Mutex
 	pendingDeliveries map[string]chan deliveryOutcome
-	receipts          map[string]deliveryReceipt
-	receiptOrder      []string
 
 	laneMu       sync.Mutex
 	pendingLanes map[string]*pendingLane
@@ -127,7 +114,7 @@ func NewEmbeddedHost(options EmbeddedHostOptions) (*EmbeddedHost, error) {
 	if strings.TrimSpace(options.HostName) == "" {
 		options.HostName = options.HostID
 	}
-	if options.Snapshot == nil || options.Deliver == nil && options.DeliverData == nil {
+	if options.Snapshot == nil || options.Deliver == nil {
 		return nil, errors.New("embedded federation requires snapshot and delivery callbacks")
 	}
 	if options.ScanInterval <= 0 {
@@ -158,8 +145,8 @@ func NewEmbeddedHost(options EmbeddedHostOptions) (*EmbeddedHost, error) {
 		logger:  defaultLogger(options.Logger),
 		local:   map[string]Peer{}, remote: map[string]Peer{}, remoteHosts: map[string]Host{},
 		localChanged:      make(chan struct{}, 1),
-		pendingDeliveries: map[string]chan deliveryOutcome{}, receipts: map[string]deliveryReceipt{},
-		pendingLanes: map[string]*pendingLane{}, laneRuns: map[string]*laneRun{},
+		pendingDeliveries: map[string]chan deliveryOutcome{},
+		pendingLanes:      map[string]*pendingLane{}, laneRuns: map[string]*laneRun{},
 	}, nil
 }
 
@@ -428,8 +415,8 @@ func (h *EmbeddedHost) handleHubMessage(message Message) error {
 		h.mu.Unlock()
 		return nil
 	case "group_deliver", "terminal_notice_deliver":
-		data, err := h.deliverInboundData(message)
-		h.sendDeliveryOutcome(message, data, err)
+		err := h.deliverInbound(message)
+		h.sendDeliveryOutcome(message, err)
 		return nil
 	case "delivery_ack", "delivery_error":
 		h.completePendingDelivery(message)
@@ -482,47 +469,41 @@ func (h *EmbeddedHost) Connected() bool {
 // Send delivers one already-resolved grouped message and waits for the remote
 // daemon acknowledgement.
 func (h *EmbeddedHost) Send(ctx context.Context, source, target Peer, messageID, content, group string) error {
-	_, err := h.SendWithData(ctx, source, target, messageID, content, group)
-	return err
-}
-
-// SendWithData returns destination-owned acknowledgement metadata.
-func (h *EmbeddedHost) SendWithData(ctx context.Context, source, target Peer, messageID, content, group string) ([]byte, error) {
 	if strings.TrimSpace(messageID) == "" || strings.TrimSpace(content) == "" {
-		return nil, errors.New("federated delivery requires message id and content")
+		return errors.New("federated delivery requires message id and content")
 	}
 	if err := h.refreshLocal(ctx); err != nil {
-		return nil, err
+		return err
 	}
 	h.mu.RLock()
 	currentSource, sourceOK := h.local[source.ID]
 	currentTarget, targetOK := h.remote[target.ID]
 	h.mu.RUnlock()
 	if !sourceOK || currentSource.InstanceID != source.InstanceID {
-		return nil, errors.New("federated source is no longer locally advertised")
+		return errors.New("federated source is no longer locally advertised")
 	}
 	if !targetOK || currentTarget.InstanceID != target.InstanceID {
-		return nil, errors.New("federated target is no longer live")
+		return errors.New("federated target is no longer live")
 	}
 	frame := DeliveryFrame(AgentFrame{
 		Version: AgentFrameVersion, Type: "send", MessageID: messageID, Content: content, Group: group,
 	}, currentSource)
 	if err := validateDeliveryGroups(currentSource, currentTarget, frame); err != nil {
-		return nil, err
+		return err
 	}
 	body, err := json.Marshal(frame)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	return h.sendRemoteDelivery(ctx, Message{
 		Type: "group_deliver", SourceID: currentSource.ID, TargetID: currentTarget.ID, Frame: body,
 	})
 }
 
-func (h *EmbeddedHost) sendRemoteDelivery(ctx context.Context, message Message) ([]byte, error) {
+func (h *EmbeddedHost) sendRemoteDelivery(ctx context.Context, message Message) error {
 	requestID, err := randomRequestID(h.options.HostID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	message.RequestID = requestID
 	done := make(chan deliveryOutcome, 1)
@@ -538,51 +519,33 @@ func (h *EmbeddedHost) sendRemoteDelivery(ctx context.Context, message Message) 
 	wire := h.network
 	h.mu.RUnlock()
 	if wire == nil {
-		return nil, errors.New("hub is disconnected")
+		return errors.New("hub is disconnected")
 	}
 	if err := wire.Send(message); err != nil {
-		return nil, err
+		return err
 	}
 	timer := time.NewTimer(wireWriteTimeout)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
 	case outcome := <-done:
-		return append([]byte(nil), outcome.data...), outcome.err
+		return outcome.err
 	case <-timer.C:
-		return nil, errors.New("remote delivery acknowledgement timed out")
+		return errors.New("remote delivery acknowledgement timed out")
 	}
 }
 
 func (h *EmbeddedHost) deliverInbound(message Message) error {
-	_, err := h.deliverInboundData(message)
-	return err
-}
-
-func (h *EmbeddedHost) deliverInboundData(message Message) ([]byte, error) {
 	if message.RequestID == "" || message.SourceID == "" || message.TargetID == "" {
-		return nil, errors.New("federated delivery is missing routing identity")
-	}
-	if found, data, err := h.previousDelivery(message); found {
-		return data, err
+		return errors.New("federated delivery is missing routing identity")
 	}
 	source, target, frame, err := h.resolveInboundDelivery(message)
 	if err != nil {
-		return nil, err
-	}
-	if receipt, exists := h.claimDeliveryReceipt(message); exists {
-		return h.waitDeliveryReceipt(message, receipt)
+		return err
 	}
 	frame.Source = ptrPeer(source)
-	var data []byte
-	if h.options.DeliverData != nil {
-		data, err = h.options.DeliverData(context.Background(), source, target, frame)
-	} else {
-		err = h.options.Deliver(context.Background(), source, target, frame)
-	}
-	h.recordDelivery(message, data, err)
-	return data, err
+	return h.options.Deliver(context.Background(), source, target, frame)
 }
 
 func (h *EmbeddedHost) resolveInboundDelivery(message Message) (Peer, Peer, AgentFrame, error) {
@@ -610,71 +573,7 @@ func (h *EmbeddedHost) resolveInboundDelivery(message Message) (Peer, Peer, Agen
 	return source, target, frame, nil
 }
 
-func (h *EmbeddedHost) claimDeliveryReceipt(message Message) (deliveryReceipt, bool) {
-	h.deliveryMu.Lock()
-	if receipt, exists := h.receipts[message.RequestID]; exists {
-		h.deliveryMu.Unlock()
-		return receipt, true
-	}
-	h.receipts[message.RequestID] = deliveryReceipt{
-		sourceID: message.SourceID, targetID: message.TargetID, done: make(chan struct{}),
-	}
-	h.receiptOrder = append(h.receiptOrder, message.RequestID)
-	h.deliveryMu.Unlock()
-	return deliveryReceipt{}, false
-}
-
-func (h *EmbeddedHost) previousDelivery(message Message) (bool, []byte, error) {
-	h.deliveryMu.Lock()
-	receipt, exists := h.receipts[message.RequestID]
-	h.deliveryMu.Unlock()
-	if !exists {
-		return false, nil, nil
-	}
-	data, err := h.waitDeliveryReceipt(message, receipt)
-	return true, data, err
-}
-
-func (h *EmbeddedHost) waitDeliveryReceipt(message Message, receipt deliveryReceipt) ([]byte, error) {
-	if receipt.sourceID != message.SourceID || receipt.targetID != message.TargetID {
-		return nil, errors.New("duplicate delivery id has conflicting routing identity")
-	}
-	if receipt.done != nil {
-		<-receipt.done
-		h.deliveryMu.Lock()
-		receipt = h.receipts[message.RequestID]
-		h.deliveryMu.Unlock()
-	}
-	if receipt.err != "" {
-		return nil, errors.New(receipt.err)
-	}
-	return append([]byte(nil), receipt.data...), nil
-}
-
-func (h *EmbeddedHost) recordDelivery(message Message, data []byte, deliveryErr error) {
-	h.deliveryMu.Lock()
-	receipt := h.receipts[message.RequestID]
-	if deliveryErr != nil {
-		receipt.err = deliveryErr.Error()
-	}
-	receipt.data = append([]byte(nil), data...)
-	done := receipt.done
-	receipt.done = nil
-	h.receipts[message.RequestID] = receipt
-	if done != nil {
-		close(done)
-	}
-	for len(h.receiptOrder) > maxDeliveryReceipts {
-		oldest := h.receiptOrder[0]
-		h.receiptOrder = h.receiptOrder[1:]
-		if h.receipts[oldest].done == nil {
-			delete(h.receipts, oldest)
-		}
-	}
-	h.deliveryMu.Unlock()
-}
-
-func (h *EmbeddedHost) sendDeliveryOutcome(request Message, data []byte, deliveryErr error) {
+func (h *EmbeddedHost) sendDeliveryOutcome(request Message, deliveryErr error) {
 	h.mu.RLock()
 	wire := h.network
 	h.mu.RUnlock()
@@ -683,7 +582,6 @@ func (h *EmbeddedHost) sendDeliveryOutcome(request Message, data []byte, deliver
 	}
 	result := Message{
 		Type: "delivery_ack", RequestID: request.RequestID, SourceID: request.SourceID, TargetID: request.TargetID,
-		Data: append([]byte(nil), data...),
 	}
 	if deliveryErr != nil {
 		result.Type, result.Error = "delivery_error", deliveryErr.Error()
@@ -701,7 +599,7 @@ func (h *EmbeddedHost) completePendingDelivery(message Message) {
 	if message.Type == "delivery_error" {
 		pending <- deliveryOutcome{err: errors.New(defaultString(message.Error, "remote delivery failed"))}
 	} else {
-		pending <- deliveryOutcome{data: append([]byte(nil), message.Data...)}
+		pending <- deliveryOutcome{}
 	}
 }
 

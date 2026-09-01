@@ -253,7 +253,6 @@ func (c *hostCoordinator) routeMessageFrame(
 	}
 	peers := make([]federationpkg.Peer, 0, len(targets))
 	byID := make(map[string]messagePeerTarget, len(targets))
-	remoteReceipts := make(map[string]federatedLaneReceiptAck)
 	for _, target := range targets {
 		peer := routingPeer(target)
 		if strings.TrimSpace(peer.ID) == "" {
@@ -262,7 +261,7 @@ func (c *hostCoordinator) routeMessageFrame(
 		peers = append(peers, peer)
 		byID[peer.ID] = target
 	}
-	engine, err := daemonpkg.NewDeliveryEngine(runtime.State(), func(
+	return daemonpkg.RouteDelivery(ctx, frame, sourcePeer, peers, func(
 		callCtx context.Context,
 		_ federationpkg.Peer,
 		target federationpkg.Peer,
@@ -273,63 +272,9 @@ func (c *hostCoordinator) routeMessageFrame(
 		if !ok {
 			return errors.New("admitted message target disappeared")
 		}
-		data, err := c.deliverMessageTarget(callCtx, runtime, source, selected, deliveryID, delivered.Content, delivered.Group)
-		if err == nil && len(data) > 0 {
-			var receipt federatedLaneReceiptAck
-			if json.Unmarshal(data, &receipt) == nil && receipt.ReceiptID != "" && receipt.ReceiptSequence > 0 {
-				remoteReceipts[deliveryID] = receipt
-			}
-		}
+		_, err := c.deliverMessageTarget(callCtx, runtime, source, selected, deliveryID, delivered.Content, delivered.Group)
 		return err
 	})
-	if err != nil {
-		return federationpkg.AgentFrameResult{}, err
-	}
-	result, err := engine.RouteWithAcknowledgedPresentation(ctx, frame, sourcePeer, peers, func(peer federationpkg.Peer) bool {
-		target, ok := byID[peer.ID]
-		return ok && target.remote != nil
-	})
-	if err != nil {
-		return federationpkg.AgentFrameResult{}, err
-	}
-	// Lane delivery acceptance is the durable receipt commit. Project its
-	// stable identity and lane-local order without exposing private spool data.
-	// This read is strictly post-acceptance enrichment: losing it must not turn
-	// an accepted delivery into a retryable caller failure.
-	snapshot, readErr := runtime.State().Read()
-	result = projectLaneDeliveryReceipts(result, snapshot, readErr)
-	return projectFederatedLaneReceipts(result, remoteReceipts), nil
-}
-
-func projectFederatedLaneReceipts(
-	result federationpkg.AgentFrameResult,
-	receipts map[string]federatedLaneReceiptAck,
-) federationpkg.AgentFrameResult {
-	for index := range result.Deliveries {
-		if receipt, ok := receipts[result.Deliveries[index].DeliveryID]; ok {
-			result.Deliveries[index].ReceiptID = receipt.ReceiptID
-			result.Deliveries[index].ReceiptSequence = receipt.ReceiptSequence
-		}
-	}
-	return result
-}
-
-func projectLaneDeliveryReceipts(
-	result federationpkg.AgentFrameResult,
-	snapshot daemonpkg.StateSnapshot,
-	readErr error,
-) federationpkg.AgentFrameResult {
-	if readErr != nil {
-		return result
-	}
-	for index := range result.Deliveries {
-		delivery := &result.Deliveries[index]
-		if receipt, ok := snapshot.Catalog.LaneInputs[delivery.DeliveryID]; ok && receipt.LaneID == delivery.Target {
-			delivery.ReceiptID = receipt.ReceiptID
-			delivery.ReceiptSequence = receipt.Sequence
-		}
-	}
-	return result
 }
 
 func routingPeer(target messagePeerTarget) federationpkg.Peer {
@@ -415,7 +360,7 @@ func (c *hostCoordinator) deliverMessageTarget(
 	if err != nil {
 		return nil, err
 	}
-	return host.SendWithData(ctx, sourcePeer, *target.remote, messageID, body, group)
+	return nil, host.Send(ctx, sourcePeer, *target.remote, messageID, body, group)
 }
 
 func publicMessageTargets(targets []messagePeerTarget) []map[string]any {
@@ -545,18 +490,10 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 	if source.PermissionMode == "bypassPermissions" {
 		mode = "bypass"
 	}
-	// Delivery.prepare commits SentAt before invoking this callback. Reusing it
-	// keeps the exact spooled body stable across retries of the delivery ID.
-	sentAt := time.Now().UTC()
-	if snapshot, readErr := runtime.State().Read(); readErr == nil {
-		if delivery, ok := snapshot.Catalog.Deliveries[messageID]; ok && delivery.SentAt > 0 {
-			sentAt = time.UnixMilli(delivery.SentAt).UTC()
-		}
-	}
 	message, err := sessiontools.WrapPeerMessage(
 		source.Product, "session:"+source.ID, source.NativeSessionID,
 		c.attachmentDisplayName(runtime, source), mode,
-		messageID, sentAt.Format(time.RFC3339Nano), body,
+		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
 	)
 	if err != nil {
 		return err

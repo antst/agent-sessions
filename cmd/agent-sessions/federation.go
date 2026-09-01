@@ -38,7 +38,7 @@ func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemon
 		Snapshot: func(_ context.Context) ([]federationpkg.Peer, error) {
 			return c.federationSnapshot(runtime, hostID, hostName)
 		},
-		DeliverData: func(ctx context.Context, source, target federationpkg.Peer, frame federationpkg.AgentFrame) ([]byte, error) {
+		Deliver: func(ctx context.Context, source, target federationpkg.Peer, frame federationpkg.AgentFrame) error {
 			return c.deliverFederated(ctx, runtime, source, target, frame)
 		},
 		RunLane: func(ctx context.Context, request federationpkg.RemoteLaneRequest) (federationpkg.RemoteLaneResult, error) {
@@ -210,18 +210,17 @@ func (c *hostCoordinator) deliverFederated(
 	runtime *daemonpkg.Runtime,
 	source, target federationpkg.Peer,
 	frame federationpkg.AgentFrame,
-) ([]byte, error) {
+) error {
 	local, err := c.localTargetByFederationID(runtime, target.SessionID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	request := frame
 	request.Type = "send"
 	request.Source = nil
 	request.SourceSessionID = ""
 	request.Targets = []string{target.ID}
-	var receiptData []byte
-	engine, err := daemonpkg.NewDeliveryEngine(runtime.State(), func(
+	result, err := daemonpkg.RouteDelivery(ctx, request, source, []federationpkg.Peer{target}, func(
 		callCtx context.Context,
 		_, admittedTarget federationpkg.Peer,
 		deliveryID string,
@@ -248,55 +247,16 @@ func (c *hostCoordinator) deliverFederated(
 		if local.lane == nil {
 			return errors.New("federated target disappeared")
 		}
-		receipt, err := c.deliverLaneMessageWithID(runtime, local.lane, deliveryID, message)
-		if err == nil {
-			receiptData, err = json.Marshal(federatedLaneReceiptAck{ReceiptID: receipt.ReceiptID, ReceiptSequence: receipt.Sequence})
-		}
+		_, err := c.deliverLaneMessageWithID(runtime, local.lane, deliveryID, message)
 		return err
 	})
 	if err != nil {
-		return nil, err
-	}
-	result, err := engine.Route(ctx, request, source, []federationpkg.Peer{target})
-	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := requireAcceptedDeliveries(result.Deliveries); err != nil {
-		return nil, err
+		return err
 	}
-	// An already-acknowledged delivery skips the presenter callback. Re-project
-	// its exact destination receipt so idempotent remote retries receive the
-	// same receipt identity and sequence as the first acknowledgement.
-	if len(receiptData) == 0 {
-		if snapshot, readErr := runtime.State().Read(); readErr == nil {
-			receiptData = projectFederatedDestinationReceipt(result.Deliveries, snapshot, local.lane)
-		}
-	}
-	return receiptData, nil
-}
-
-type federatedLaneReceiptAck struct {
-	ReceiptID       string `json:"receipt_id"`
-	ReceiptSequence uint64 `json:"receipt_sequence"`
-}
-
-func projectFederatedDestinationReceipt(
-	deliveries []federationpkg.DeliveryResult,
-	snapshot daemonpkg.StateSnapshot,
-	lane *laneActor,
-) []byte {
-	if lane == nil || len(deliveries) != 1 || deliveries[0].Status != "accepted" {
-		return nil
-	}
-	receipt, ok := snapshot.Catalog.LaneInputs[deliveries[0].DeliveryID]
-	if !ok || receipt.LaneID != lane.id || receipt.ReceiptID == "" || receipt.Sequence == 0 {
-		return nil
-	}
-	data, err := json.Marshal(federatedLaneReceiptAck{ReceiptID: receipt.ReceiptID, ReceiptSequence: receipt.Sequence})
-	if err != nil {
-		return nil
-	}
-	return data
+	return nil
 }
 
 func (c *hostCoordinator) handleRemoteLaneCommand(

@@ -24,7 +24,6 @@ func validNewDomainCatalog(t *testing.T) (Catalog, NativeSessionLeaseKey) {
 			// native transcript.
 			"attachment-fresh": {ID: "attachment-fresh", Product: "codex", NativeSessionID: "native-transcript-existing", State: "attached"},
 		},
-		Deliveries: map[string]Delivery{},
 		Lanes: map[string]Lane{
 			"lane": {ID: "lane", ParentAttachmentID: "attachment-fresh", Product: "codex", ProfileIdentity: "profile", NativeSessionID: "lane-native", InputSequence: 1, State: "running"},
 		},
@@ -60,11 +59,6 @@ func TestLifecycleTransitionsAreMonotonicAndProductNeutral(t *testing.T) {
 		{kind: "attachment", from: "detaching", to: "detached", want: true},
 		{kind: "attachment", from: "attached", to: "debt", want: true},
 		{kind: "attachment", from: "detached", to: "attached"},
-		{kind: "delivery", from: "prepared", to: "accepted", want: true},
-		{kind: "delivery", from: "accepted", to: "presented", want: true},
-		{kind: "delivery", from: "presented", to: "acknowledged", want: true},
-		{kind: "delivery", from: "accepted", to: "retryable", want: true},
-		{kind: "delivery", from: "acknowledged", to: "accepted"},
 		{kind: "lane", from: "preparing", to: "idle", want: true},
 		{kind: "lane", from: "preparing", to: "running", want: true},
 		{kind: "lane", from: "idle", to: "preparing", want: true},
@@ -96,9 +90,6 @@ func TestStateStoreRoundTripsEveryDurableEntityAndRetainsCleanupDebt(t *testing.
 		Host: HostRuntime{User: "1000", Host: "pdev", Release: "candidate", Generation: 7, Endpoint: "/run/agent-sessions.sock", ServiceState: "running"},
 		Attachments: map[string]ManagedAttachment{
 			"attachment": {ID: "attachment", Product: "codex", NativeSessionID: "thread", Cwd: "/workspace", Groups: []string{"project"}, PermissionMode: "default", State: "attached", Evidence: NativeEvidence{Process: procinfo.Identity{PID: 42, Start: "start", StrongStart: "strong"}, Ancestry: []procinfo.Identity{{PID: 41, Start: "parent", StrongStart: "parent-strong"}}, Executable: "/bin/codex", ThreadID: "thread"}},
-		},
-		Deliveries: map[string]Delivery{
-			"message": {ID: "message", Sender: "source", Destinations: []string{"target"}, Groups: []string{"project"}, State: "accepted"},
 		},
 		Lanes: map[string]Lane{
 			"lane": {ID: "lane", ParentAttachmentID: "attachment", Product: "grok", ProfileIdentity: "profile", NativeSessionID: "native", InputSequence: 1, Cwd: "/workspace", Groups: []string{"project"}, PermissionMode: "bypass", State: "running"},

@@ -36,7 +36,6 @@ type Input struct {
 // Revisions exposes monotonic catalog family revisions only.
 type Revisions struct {
 	Attachments uint64 `json:"attachments"`
-	Deliveries  uint64 `json:"deliveries"`
 	Lanes       uint64 `json:"lanes"`
 	CleanupDebt uint64 `json:"cleanup_debt"`
 	Federation  uint64 `json:"federation"`
@@ -46,7 +45,6 @@ type Revisions struct {
 type Records struct {
 	Attachments       int `json:"attachments"`
 	ActiveAttachments int `json:"active_attachments"`
-	Deliveries        int `json:"deliveries"`
 	Lanes             int `json:"lanes"`
 	ActiveLanes       int `json:"active_lanes"`
 	Turns             int `json:"turns"`
@@ -158,7 +156,7 @@ func normalizedServiceState(value string) string {
 
 func nonnegativeRecords(records Records) Records {
 	values := []*int{
-		&records.Attachments, &records.ActiveAttachments, &records.Deliveries,
+		&records.Attachments, &records.ActiveAttachments,
 		&records.Lanes, &records.ActiveLanes, &records.Turns,
 		&records.UncollectedTurns, &records.CleanupDebts,
 	}

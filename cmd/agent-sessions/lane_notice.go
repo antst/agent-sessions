@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	laneNoticeRetryInterval   = time.Second
 	laneNoticeDeliveryTimeout = 10 * time.Second
 	laneNoticeSettleDelay     = 150 * time.Millisecond
 )
@@ -58,22 +57,6 @@ func (c *hostCoordinator) queueLaneTerminalNotice(runtime *daemonpkg.Runtime, ac
 	}()
 }
 
-func (c *hostCoordinator) replayLaneTerminalNotices(runtime *daemonpkg.Runtime) {
-	c.mu.Lock()
-	actors := make([]laneActor, 0, len(c.lanes))
-	for _, actor := range c.lanes {
-		if actor.state == "terminal" && actor.parentID != "" {
-			copyActor := *actor
-			copyActor.groups = append([]string(nil), actor.groups...)
-			actors = append(actors, copyActor)
-		}
-	}
-	c.mu.Unlock()
-	for index := range actors {
-		_ = c.publishLaneTerminalNotice(runtime, &actors[index])
-	}
-}
-
 func (c *hostCoordinator) publishLaneTerminalNotice(runtime *daemonpkg.Runtime, actor *laneActor) error {
 	if actor == nil || actor.state != "terminal" || actor.parentID == "" || actor.turnID == "" {
 		return nil
@@ -81,47 +64,9 @@ func (c *hostCoordinator) publishLaneTerminalNotice(runtime *daemonpkg.Runtime, 
 	c.noticeMu.Lock()
 	defer c.noticeMu.Unlock()
 	noticeID := laneTerminalNoticeID(actor.id, actor.turnID)
-	acknowledged, err := c.prepareLaneTerminalDelivery(runtime, *actor, noticeID)
-	if err != nil || acknowledged {
-		return err
-	}
 	deliveryCtx, cancel := context.WithTimeout(c.ctx, laneNoticeDeliveryTimeout)
 	defer cancel()
-	if err := c.presentLaneTerminalNotice(deliveryCtx, runtime, *actor, noticeID); err != nil {
-		_ = c.setLaneTerminalDeliveryState(runtime, noticeID, "retryable", "destination-unavailable")
-		return err
-	}
-	if err := c.setLaneTerminalDeliveryState(runtime, noticeID, "presented", ""); err != nil {
-		return err
-	}
-	return c.setLaneTerminalDeliveryState(runtime, noticeID, "acknowledged", "")
-}
-
-func (c *hostCoordinator) prepareLaneTerminalDelivery(
-	runtime *daemonpkg.Runtime,
-	actor laneActor,
-	noticeID string,
-) (bool, error) {
-	engine, err := daemonpkg.NewLaneEngine(runtime.State())
-	if err != nil {
-		return false, err
-	}
-	return engine.PrepareTerminalNotice(daemonpkg.Delivery{
-		ID: noticeID, CorrelationID: actor.turnID, Sender: actor.id,
-		Destinations: []string{actor.parentID}, Groups: append([]string(nil), actor.groups...),
-		SentAt: actor.completedAt, State: "accepted",
-	})
-}
-
-func (c *hostCoordinator) setLaneTerminalDeliveryState(
-	runtime *daemonpkg.Runtime,
-	noticeID, state, retryCause string,
-) error {
-	engine, err := daemonpkg.NewLaneEngine(runtime.State())
-	if err != nil {
-		return err
-	}
-	return engine.TransitionTerminalNotice(noticeID, state, retryCause)
+	return c.presentLaneTerminalNotice(deliveryCtx, runtime, *actor, noticeID)
 }
 
 func (c *hostCoordinator) presentLaneTerminalNotice(

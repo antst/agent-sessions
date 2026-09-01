@@ -70,15 +70,6 @@ func (f *Federation) Send(ctx context.Context, source, target federation.Peer, m
 	return f.host.Send(ctx, source, target, messageID, content, group)
 }
 
-// SendWithData performs acknowledged delivery and returns additive destination
-// destination-owned receipt metadata from the uniform remote protocol.
-func (f *Federation) SendWithData(ctx context.Context, source, target federation.Peer, messageID, content, group string) ([]byte, error) {
-	if f == nil || f.host == nil {
-		return nil, errors.New("daemon federation component is unavailable")
-	}
-	return f.host.SendWithData(ctx, source, target, messageID, content, group)
-}
-
 // RunRemoteLane performs one bounded cross-host lane operation.
 func (f *Federation) RunRemoteLane(ctx context.Context, request federation.RemoteLaneRequest) (federation.RemoteLaneResult, error) {
 	if f == nil || f.host == nil {
