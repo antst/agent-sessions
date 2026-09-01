@@ -254,35 +254,18 @@ func TestNativeShimNameSourcesPreserveExplicitAndFollowCodexTitles(t *testing.T)
 	if err := os.MkdirAll(codexHome, 0700); err != nil {
 		t.Fatal(err)
 	}
-	index := filepath.Join(codexHome, "session_index.jsonl")
-	if err := os.WriteFile(index, []byte("{\"id\":\"native-name-session\",\"thread_name\":\"first title\"}\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	d := newDaemon(map[string]string{
 		"session-id": sessionID, "cwd": root, "name": "fallback", "name-source": "generated",
 		"data-dir": filepath.Join(root, "state"), "claude-config-dir": filepath.Join(root, "claude"),
 		"codex-home": codexHome, "runtime-dir": filepath.Join(root, "run"),
 	})
 	d.mu.Lock()
-	d.refreshNameLocked()
+	d.applyNameLocked("first title", "codex")
 	if d.name != "first-title" || d.nameSource != "codex" {
 		t.Fatalf("first title = %q (%s)", d.name, d.nameSource)
 	}
 	d.applyNameLocked("wrapper name", "launch")
-	d.applyNameLocked("stale codex title", "codex")
-	if d.name != "wrapper-name" || d.nameSource != "launch" {
-		t.Fatalf("launch name was overwritten: %q (%s)", d.name, d.nameSource)
-	}
-	file, err := os.OpenFile(index, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.WriteString("{\"id\":\"native-name-session\",\"thread_name\":\"renamed in codex\"}\n"); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	_ = file.Close()
-	d.refreshNameLocked()
+	d.applyNameLocked("renamed in codex", "codex")
 	if d.name != "renamed-in-codex" || d.nameSource != "codex" {
 		t.Fatalf("native Codex rename = %q (%s)", d.name, d.nameSource)
 	}

@@ -202,6 +202,8 @@ type appThread struct {
 	Turns          []appTurn `json:"turns"`
 }
 
+const supervisorControlTimeout = 60 * time.Second
+
 type interactiveOwnerRecord struct {
 	ThreadID       string `json:"threadId"`
 	RequestID      string `json:"requestId"`
@@ -888,7 +890,7 @@ func (s *nativeSupervisor) acceptLoop() {
 
 func (s *nativeSupervisor) handleControlConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(preparedPublicationTimeout))
+	_ = conn.SetDeadline(time.Now().Add(supervisorControlTimeout))
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 4096), maxFrameBytes)
 	if !scanner.Scan() {

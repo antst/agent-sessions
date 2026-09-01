@@ -242,10 +242,9 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 	}, nil); err != nil {
 		return CodexNativeThread{}, err
 	}
-	// The working supervisor did not hand a freshly named thread directly to
-	// the TUI. Its register_prepared transaction first resumed the zero-turn
-	// thread with excludeTurns=true, which materializes Codex's source rollout
-	// and applies the effective settings. Without this step a remote TUI can
+	// Resume the freshly named zero-turn thread before handing it to the TUI.
+	// This materializes Codex's source rollout and applies the effective settings;
+	// without it a remote TUI can
 	// reject the otherwise valid UUID as a paginated lineage with no source
 	// rollout.
 	resumed, effectiveApproval, err := resumePreparedThread(native.client, threadID, map[string]any{
@@ -262,8 +261,8 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 	return exportedCodexThread(*resumed, effectiveApproval), nil
 }
 
-// ResolveThread preserves native exact-UUID, live-title, duplicate-recency,
-// and session-index fallback behavior without consulting daemon-owned names.
+// ResolveThread asks Codex for the exact UUID or the first live title match.
+// Agent Sessions owns neither a name index nor a fallback copy of product data.
 func (native *CodexNative) ResolveThread(ctx context.Context, target string) (CodexNativeThread, error) {
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
@@ -279,18 +278,14 @@ func (native *CodexNative) ResolveThread(ctx context.Context, target string) (Co
 		if membershipErr != nil {
 			return CodexNativeThread{}, membershipErr
 		}
-		listed, found, listErr := firstListedPreparedLaunchTarget(native.client, target, archived, map[string]bool{})
+		listed, found, listErr := firstListedPreparedLaunchTarget(native.client, target, archived)
 		if listErr != nil {
 			return CodexNativeThread{}, listErr
 		}
-		if found {
-			return exportedCodexThread(listed, ""), nil
+		if !found {
+			return CodexNativeThread{}, fmt.Errorf("codex thread %q was not found", target)
 		}
-		index, indexErr := readLaunchSessionIndex(native.paths)
-		if indexErr != nil {
-			return CodexNativeThread{}, indexErr
-		}
-		thread, err = resolveIndexedPreparedLaunchTarget(native.client, index, target, archived, map[string]bool{})
+		thread = listed
 	}
 	if err != nil {
 		return CodexNativeThread{}, err

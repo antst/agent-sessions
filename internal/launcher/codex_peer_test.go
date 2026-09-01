@@ -45,24 +45,6 @@ func TestCodexPeerNativeArgumentParity(t *testing.T) {
 	}
 }
 
-func TestResumedBindingMirrorsYoloInEitherInputPosition(t *testing.T) {
-	root := t.TempDir()
-	for _, input := range [][]string{
-		{"resume", "reviewer", "--yolo"},
-		{"--yolo", "resume", "reviewer"},
-	} {
-		plan, err := parseCodexPeerArgs(input, root, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := resumedBindArguments(plan, 42, "start-token")
-		wantSuffix := []string{"--approval-policy", "never", "--sandbox", "danger-full-access"}
-		if len(got) < len(wantSuffix) || !reflect.DeepEqual(got[len(got)-len(wantSuffix):], wantSuffix) {
-			t.Fatalf("bind args for %q = %q", input, got)
-		}
-	}
-}
-
 func TestCodexPeerInformationalAndPassthroughPreserveNativeArgv(t *testing.T) {
 	root := t.TempDir()
 	for _, args := range [][]string{

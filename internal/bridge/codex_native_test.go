@@ -129,6 +129,63 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	}
 }
 
+func TestCodexNativeResolvesExactIDAndFirstLiveNameFromProduct(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactID := "00000000-0000-0000-0000-00000000c011"
+	firstID := "00000000-0000-0000-0000-00000000c012"
+	secondID := "00000000-0000-0000-0000-00000000c013"
+	socket := filepath.Join(home, "app-server.sock")
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		method := stringValue(request["method"])
+		params, _ := request["params"].(map[string]any)
+		switch method {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/read":
+			if stringValue(params["threadId"]) != exactID {
+				return nil, errors.New("thread/read target changed")
+			}
+			return map[string]any{"thread": map[string]any{
+				"id": exactID, "name": "exact-id", "cwd": home, "source": "appServer",
+			}}, nil
+		case "thread/list":
+			archived, _ := params["archived"].(bool)
+			if archived {
+				return map[string]any{"data": []any{}}, nil
+			}
+			return map[string]any{"data": []any{
+				map[string]any{"id": firstID, "name": "shared-name", "cwd": home, "source": "appServer"},
+				map[string]any{"id": secondID, "name": "shared-name", "cwd": home, "source": "appServer"},
+			}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", method)
+		}
+	})
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+
+	exact, err := native.ResolveThread(context.Background(), exactID)
+	if err != nil || exact.ID != exactID || exact.Name != "exact-id" {
+		t.Fatalf("exact resolution = %+v, %v", exact, err)
+	}
+	byName, err := native.ResolveThread(context.Background(), "shared-name")
+	if err != nil || byName.ID != firstID {
+		t.Fatalf("live name resolution = %+v, %v", byName, err)
+	}
+	if _, err := native.ResolveThread(context.Background(), "not-live"); err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("missing live name error = %v", err)
+	}
+}
+
 func TestCodexLaneRecoveryRejectsPreferredHistoricalTurnWhenDifferentTurnIsActive(t *testing.T) {
 	threadID := "00000000-0000-0000-0000-00000000c0aa"
 	native := &CodexNative{activeTurns: map[string]string{threadID: "turn-b"}}

@@ -22,7 +22,6 @@ func TestHookDaemonParity(t *testing.T) {
 			"internal/bridge/peer_authorization_test.go:TestOrdinaryHookCommandWritesNoOutput",
 			"internal/bridge/peer_authorization_test.go:TestUserPromptLateAttachesPreparedCodex0148OwnerWithDistinctSessionFamily",
 			"internal/bridge/peer_authorization_test.go:TestHookRejectsMismatchedSupervisorWithoutRestart",
-			"internal/bridge/launch_test.go:TestPreparedLaunchRollsBackNameFailure",
 			"internal/launcher/claude_peer_test.go:TestReadClaudeNativePeerRecordRequiresExactLiveIdentityAndSocket",
 			"internal/launcher/claude_peer_test.go:TestClaudePeerSharedRegistryRegistersAndRestoresPreferences",
 			"internal/bridge/grok_test.go:TestGrokHostRefreshesRuntimePermissionMode",

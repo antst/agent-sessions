@@ -91,7 +91,7 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 		"internal/bridge/qwen_host.go":                    1,
 		"internal/bridge/qwen_lane.go":                    1,
 		"internal/bridge/qwen_plugin.go":                  2,
-		"internal/bridge/runtime.go":                      8,
+		"internal/bridge/runtime.go":                      7,
 		"internal/daemon/adapter_claude.go":               1,
 		"internal/daemon/adapter_codex.go":                1,
 		"internal/daemon/adapter_grok.go":                 1,

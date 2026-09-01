@@ -29,7 +29,6 @@ var frozenLegacyImporters = map[string]bool{
 	"internal/bridge/grok.go":              true,
 	"internal/bridge/group_context.go":     true,
 	"internal/bridge/lane.go":              true,
-	"internal/bridge/launch.go":            true,
 	"internal/bridge/mcp.go":               true,
 	"internal/bridge/mcp_lane.go":          true,
 	"internal/bridge/product.go":           true,

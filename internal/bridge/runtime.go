@@ -57,7 +57,6 @@ type daemon struct {
 	stateFile        string
 	inboxDir         string
 	pendingDir       string
-	sessionIndex     string
 	qwenHome         string
 	qwenTitlePath    string
 	qwenTitleOffset  int64
@@ -92,7 +91,7 @@ func Main() {
 		os.Exit(runGrokToolWrapper(os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-sessions requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok, grok-host, grok-plugin-verify, qwen-host, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, grok-mcp, or launch")
+		fmt.Fprintln(os.Stderr, "agent-sessions requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok, grok-host, grok-plugin-verify, qwen-host, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, or grok-mcp")
 		os.Exit(2)
 	}
 	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
@@ -133,8 +132,6 @@ func Main() {
 		os.Exit(runMCPCommand())
 	case "grok-mcp":
 		os.Exit(runGrokMCPCommand())
-	case "launch":
-		os.Exit(runLaunchCommand(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "agent-sessions: unknown command %q\n", os.Args[1])
 		os.Exit(2)
@@ -261,7 +258,6 @@ func newDaemon(args map[string]string) *daemon {
 		stateFile:     filepath.Join(dataDir, "sessions", key, "state.json"),
 		inboxDir:      filepath.Join(dataDir, "sessions", key, "inbox"),
 		pendingDir:    filepath.Join(dataDir, "sessions", key, "inbox", "pending"),
-		sessionIndex:  filepath.Join(codexHome, "session_index.jsonl"),
 		qwenHome:      strings.TrimSpace(args["qwen-home"]),
 		seen:          map[string]struct{}{}, done: make(chan struct{}),
 		connections: map[net.Conn]struct{}{},
@@ -625,8 +621,7 @@ func (d *daemon) applyNameLocked(value, source string) {
 	case "explicit":
 		allowed = d.nameSource != "manual"
 	case "codex":
-		allowed = d.nameSource != "explicit" && d.nameSource != "launch" && d.nameSource != "lane" &&
-			d.nameSource != "canonical" && d.nameSource != "manual"
+		allowed = d.nameSource != "lane" && d.nameSource != "canonical" && d.nameSource != "manual"
 	default:
 		allowed = d.nameSource == "generated"
 	}
@@ -669,37 +664,6 @@ func (d *daemon) maintenanceLoop() {
 func (d *daemon) refreshNameLocked() {
 	if d.entrypoint == "qwen" {
 		d.refreshQwenNameLocked()
-		return
-	}
-	if d.entrypoint != "codex" {
-		return
-	}
-	if d.nameSource == "lane" || d.nameSource == "manual" {
-		return
-	}
-	file, err := os.Open(d.sessionIndex)
-	if err != nil {
-		return
-	}
-	defer func() { _ = file.Close() }()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
-	latest := ""
-	for scanner.Scan() {
-		var row map[string]any
-		if json.Unmarshal(scanner.Bytes(), &row) != nil || stringValue(row["id"]) != d.sessionID {
-			continue
-		}
-		for _, key := range []string{"thread_name", "title", "name"} {
-			if value := stringValue(row[key]); value != "" {
-				latest = value
-				break
-			}
-		}
-	}
-	if latest != "" && sanitizeName(latest) != d.name {
-		d.name = sanitizeName(latest)
-		d.nameSource = "codex"
 	}
 }
 
