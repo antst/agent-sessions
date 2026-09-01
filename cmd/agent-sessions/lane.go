@@ -488,6 +488,10 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	}
 	actor.done = make(chan struct{})
 	close(actor.done)
+	initialNativeID := ""
+	if product == "claude" {
+		initialNativeID = id
+	}
 	if options.autoArchiveAfterSet {
 		actor.autoArchive, actor.autoArchiveDelay = true, options.autoArchiveAfter
 	}
@@ -496,9 +500,6 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		if err != nil {
 			return nil, err
 		}
-	}
-	if product == "claude" {
-		actor.nativeID = id
 	}
 	inputID = initialLaneReceiptID(operationInputID, actor, input, wait)
 	inputEngine, err := c.laneInputEngine(runtime)
@@ -562,8 +563,15 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 			c.mu.Unlock()
 		}()
 	}
+	initialLane := durableLane(actor, "idle")
+	if initialNativeID != "" {
+		// Claude's native session ID is AS-authored and known before launch.
+		// Put it in the durable create CAS first; the actor cache follows only
+		// after that CAS (or an exact replay of it) succeeds.
+		initialLane.NativeSessionID = initialNativeID
+	}
 	receipt, err := inputEngine.CreateLaneAdmitAndMarkDispatching(
-		inputID, durableLane(actor, "idle"), durableTurn(actor, 0, "accepted"), commandRequestID(), []byte(input),
+		inputID, initialLane, durableTurn(actor, 0, "accepted"), commandRequestID(), []byte(input),
 	)
 	if err != nil {
 		recoverableQueuedError := receipt.ReceiptID != "" && receipt.State == daemonpkg.ReceiptQueued
@@ -578,6 +586,11 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		if !recoverableQueuedError {
 			return nil, err
 		}
+	}
+	if initialNativeID != "" {
+		c.mu.Lock()
+		actor.nativeID = initialNativeID
+		c.mu.Unlock()
 	}
 	c.mu.Lock()
 	if receipt.Sequence > actor.inputSequence {
@@ -2096,7 +2109,7 @@ func (c *hostCoordinator) dispatchACPLaneTurn(runtime *daemonpkg.Runtime, actor 
 		}
 		c.completeLaneTurn(runtime, actor, dispatchedTurnID, dispatchedDone, laneTurnCompletion{
 			outcome: outcome, result: result.Output, failure: failure,
-			nativeID: result.NativeSessionID, replaceNativeID: true, failed: runErr != nil,
+			nativeID: result.NativeSessionID, failed: runErr != nil,
 		})
 	}()
 	return nil
@@ -2124,13 +2137,20 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 		c.mu.Unlock()
 		return fmt.Errorf("native lane identity changed from %s to %s", selected, nativeID)
 	}
-	actor.nativeID = nativeID
 	c.mu.Unlock()
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
 		return err
 	}
-	return engine.SetNativeSessionID(actor.id, nativeID)
+	if err := engine.SetNativeSessionID(actor.id, nativeID); err != nil {
+		return err
+	}
+	// The actor is only a cache. It follows the committed durable authority;
+	// it never advances before or despite a rejected durable write.
+	c.mu.Lock()
+	actor.nativeID = nativeID
+	c.mu.Unlock()
+	return nil
 }
 
 func parseCodexStartedThreadID(line []byte) string {
@@ -2215,7 +2235,6 @@ type laneTurnCompletion struct {
 	outcome, result, failure, nativeID string
 	failed                             bool
 	clearNativeTurn                    bool
-	replaceNativeID                    bool
 }
 
 func (c *hostCoordinator) completeLaneTurn(
@@ -2233,8 +2252,17 @@ func (c *hostCoordinator) completeLaneTurn(
 	if actor.interruptRequested && completion.failed {
 		completion.outcome = "interrupted"
 	}
-	if completion.nativeID != "" && (actor.nativeID == "" || completion.replaceNativeID) {
-		actor.nativeID = completion.nativeID
+	if completion.nativeID != "" && completion.nativeID != actor.nativeID {
+		completion.failed, completion.outcome = true, "failed"
+		identityFailure := "native lane completion identity did not match durable authority"
+		if actor.nativeID == "" {
+			identityFailure = "native lane completion arrived before durable identity binding"
+		}
+		if completion.failure == "" {
+			completion.failure = identityFailure
+		} else {
+			completion.failure += "; " + identityFailure
+		}
 	}
 	nativeMessageID := actor.nativeTurnID
 	actor.state, actor.outcome, actor.result = "terminal", completion.outcome, completion.result
@@ -2712,8 +2740,9 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 	defer c.mu.Unlock()
 	var matches []*laneActor
 	for _, actor := range c.lanes {
-		durableState := snapshot.Catalog.Lanes[actor.id].State
-		if staged[actor.id] || actor.product != product || actor.id != target && actor.name != target || !all && durableState == "archived" ||
+		durableLane, durable := snapshot.Catalog.Lanes[actor.id]
+		if !durable || staged[actor.id] || actor.nativeID != durableLane.NativeSessionID ||
+			actor.product != product || actor.id != target && actor.name != target || !all && durableLane.State == "archived" ||
 			actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
 			continue
 		}

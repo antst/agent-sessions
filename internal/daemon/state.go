@@ -622,6 +622,9 @@ func validateCatalog(catalog Catalog) error {
 		if id == "" || lane.ID != id || !knownState("lane", lane.State) {
 			return fmt.Errorf("invalid lane %q", id)
 		}
+		if lane.NativeSessionID != "" && strings.TrimSpace(lane.NativeSessionID) == "" {
+			return fmt.Errorf("lane %s has a blank native session identity", id)
+		}
 		if _, ok := productcatalog.ByID(lane.Product); !ok {
 			return fmt.Errorf("lane %s has unknown product %q", id, lane.Product)
 		}
@@ -767,6 +770,10 @@ func validateCatalogTransitions(current, next Catalog) error {
 		if candidate, ok := next.Lanes[id]; ok {
 			if candidate.InputSequence < lane.InputSequence {
 				return fmt.Errorf("lane %s input sequence authority regressed", id)
+			}
+			if lane.NativeSessionID != candidate.NativeSessionID &&
+				(lane.NativeSessionID != "" || candidate.NativeSessionID == "") {
+				return fmt.Errorf("lane %s native session identity changed after binding", id)
 			}
 			if !ValidLifecycleTransition("lane", lane.State, candidate.State) {
 				return fmt.Errorf("lane %s cannot transition from %s to %s", id, lane.State, candidate.State)

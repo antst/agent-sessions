@@ -2458,6 +2458,70 @@ func TestLaneReadyKeepsAgentSessionsOwnerDistinctFromNativeSession(t *testing.T)
 	}
 }
 
+func TestResolveLaneActorRequiresDurableRowAndExactNativeCache(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	coordinator := newHostCoordinator(context.Background(), root)
+	coordinator.lanesLoaded = true
+	actor := &laneActor{
+		id: "lane-routing-window", parentID: "parent", product: "qwen", name: "worker",
+		cwd: root, state: "idle", done: closedLaneDone(),
+	}
+	coordinator.lanes[actor.id] = actor
+	parent := daemonpkg.ManagedAttachment{ID: "parent", Cwd: root, State: "attached"}
+
+	// startLane installs its process-local reservation before the durable
+	// CreateLaneAdmit CAS. That reservation is name authority only; it must not
+	// become a routeable lane actor.
+	if _, err := coordinator.resolveLaneActor(runtime, parent, actor.product, actor.id, true); err == nil {
+		t.Fatal("pre-create actor without a durable lane row was routeable")
+	}
+
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := snapshot.Catalog
+	catalog.Lanes[actor.id] = daemonpkg.Lane{
+		ID: actor.id, ParentAttachmentID: actor.parentID, Product: actor.product, Name: actor.name,
+		Cwd: actor.cwd, State: "idle",
+	}
+	unbound, err := runtime.State().Commit(snapshot.Revision, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := coordinator.resolveLaneActor(runtime, parent, actor.product, actor.id, true)
+	if err != nil || resolved != actor {
+		t.Fatalf("exact unbound durable/cache actor did not route by LaneID: actor=%p resolved=%p err=%v", actor, resolved, err)
+	}
+
+	boundCatalog := unbound.Catalog
+	durableLane := boundCatalog.Lanes[actor.id]
+	durableLane.NativeSessionID = "durable-native"
+	boundCatalog.Lanes[actor.id] = durableLane
+	if _, err := runtime.State().Commit(unbound.Revision, boundCatalog); err != nil {
+		t.Fatal(err)
+	}
+
+	// A successful durable bind can be visible before the process-local cache
+	// assignment. The empty cache must not route as the bound durable session.
+	if _, err := coordinator.resolveLaneActor(runtime, parent, actor.product, actor.id, true); err == nil {
+		t.Fatal("actor with stale native-session cache was routeable")
+	}
+	coordinator.mu.Lock()
+	actor.nativeID = "durable-native"
+	coordinator.mu.Unlock()
+	resolved, err = coordinator.resolveLaneActor(runtime, parent, actor.product, actor.id, true)
+	if err != nil || resolved != actor {
+		t.Fatalf("exact durable/cache actor did not route: actor=%p resolved=%p err=%v", actor, resolved, err)
+	}
+}
+
 func TestLaneActorHydrationRestoresNativePolicyAndTerminalResult(t *testing.T) {
 	root := shortDaemonTestRoot(t)
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
@@ -2729,6 +2793,97 @@ func TestACPWorkerPublishesNativeIdentityBeforeTurnTerminal(t *testing.T) {
 	after, _ := runtime.State().Read()
 	if actor.nativeID != "native-session" || after.Catalog.Lanes[actor.id].NativeSessionID != "native-session" || after.Catalog.Lanes[actor.id].State != "running" {
 		t.Fatalf("native identity publication actor=%+v durable=%+v", actor, after.Catalog.Lanes[actor.id])
+	}
+}
+
+func TestRecordLaneNativeIDUpdatesActorOnlyAfterDurableAcceptance(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	coordinator := newHostCoordinator(context.Background(), root)
+	actor := &laneActor{id: "lane-native-cache", product: "qwen", state: "running"}
+	snapshot, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := snapshot.Catalog
+	catalog.Lanes[actor.id] = daemonpkg.Lane{ID: actor.id, Product: actor.product, NativeSessionID: "native-durable", State: "running"}
+	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.recordLaneNativeID(runtime, actor, "native-rejected"); err == nil {
+		t.Fatal("durable authority accepted a replacement native identity")
+	}
+	if actor.nativeID != "" {
+		t.Fatalf("actor cache advanced despite rejected durable write: %q", actor.nativeID)
+	}
+	after, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Catalog.Lanes[actor.id].NativeSessionID; got != "native-durable" {
+		t.Fatalf("durable native authority changed to %q", got)
+	}
+}
+
+func TestLaneCompletionOnlyCorroboratesNativeIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		completion string
+		wantFailed bool
+	}{
+		{name: "exact-match", completion: "native-durable"},
+		{name: "mismatch", completion: "native-other", wantFailed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := shortDaemonTestRoot(t)
+			runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = runtime.Close() })
+			coordinator := newHostCoordinator(context.Background(), root)
+			done := make(chan struct{})
+			actor := &laneActor{
+				id: "lane-completion-corrob", product: "qwen", nativeID: "native-durable",
+				state: "running", turnID: "turn-completion-corrob", done: done,
+			}
+			coordinator.lanes[actor.id] = actor
+			snapshot, err := runtime.State().Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			catalog := snapshot.Catalog
+			catalog.Lanes[actor.id] = daemonpkg.Lane{ID: actor.id, Product: actor.product, NativeSessionID: actor.nativeID, State: "running"}
+			catalog.Turns[actor.turnID] = daemonpkg.Turn{ID: actor.turnID, LaneID: actor.id, Sequence: 1, State: "dispatched"}
+			if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
+				t.Fatal(err)
+			}
+			coordinator.completeLaneTurn(runtime, actor, actor.turnID, done, laneTurnCompletion{
+				outcome: "completed", result: "result", nativeID: test.completion,
+			})
+			if actor.nativeID != "native-durable" {
+				t.Fatalf("completion rewrote actor cache to %q", actor.nativeID)
+			}
+			after, err := runtime.State().Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := after.Catalog.Lanes[actor.id].NativeSessionID; got != "native-durable" {
+				t.Fatalf("completion rewrote durable identity to %q", got)
+			}
+			turn := after.Catalog.Turns[actor.turnID]
+			if test.wantFailed {
+				if actor.outcome != "failed" || turn.Outcome != "failed" || !strings.Contains(turn.Diagnostic, "completion identity did not match") {
+					t.Fatalf("mismatch was not truthful terminal failure: actor=%+v turn=%+v", actor, turn)
+				}
+			} else if actor.outcome != "completed" || turn.Outcome != "completed" {
+				t.Fatalf("exact completion did not corroborate: actor=%+v turn=%+v", actor, turn)
+			}
+		})
 	}
 }
 

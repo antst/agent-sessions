@@ -30,6 +30,11 @@ cannot be `general` unless all applicable cells pass on both Linux and macOS.
 8. local message and terminal-notice delivery;
 9. federated lifecycle and destination capability enforcement;
 10. crash at each ledger/native-I/O boundary.
+11. when `DeferredSessionBinding` is declared: fresh Open remains unbound and
+    creates no native session/job; first StartTurn binds atomically with exact
+    native acceptance; unbound restart requeues by LaneID; possible write stays
+    ambiguous until authoritative reconciliation; resume and bound recovery
+    always use the exact immutable native ID.
 
 ### PARENT cells
 

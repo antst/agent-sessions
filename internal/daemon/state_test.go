@@ -572,6 +572,60 @@ func TestNativeSessionLeaseRequiresExactOwnerAndMonotonicRecoveryEvidence(t *tes
 	}
 }
 
+func TestUnboundLaneCannotLeaseAndExactOpenBindingCannotBeRewritten(t *testing.T) {
+	catalog, key := validNewDomainCatalog(t)
+	lane := catalog.Lanes["lane"]
+	lane.NativeSessionID = ""
+	catalog.Lanes[lane.ID] = lane
+	if err := validateCatalog(catalog); err == nil {
+		t.Fatal("unbound lane acquired a native-session lease before binding")
+	}
+	delete(catalog.NativeLeases, key)
+	if err := validateCatalog(catalog); err != nil {
+		t.Fatalf("unbound lane without native evidence should remain a valid LaneID authority: %v", err)
+	}
+
+	store, err := OpenState(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Commit(0, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewLaneEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SetNativeSessionID remains the exact-at-Open binding path. Deferred
+	// drivers must skip it and use MarkInjectedAndSetNativeDispatch instead.
+	if err := engine.SetNativeSessionID("lane", "native-bound-at-open"); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.SetNativeSessionID("lane", "different-native-session"); err == nil {
+		t.Fatal("exact-at-Open native-session authority was rewritten")
+	}
+	if err := engine.SetNativeSessionID("lane", ""); err == nil {
+		t.Fatal("exact-at-Open binding accepted an empty native identity")
+	}
+	bound, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.Revision != first.Revision+1 || bound.Catalog.Lanes["lane"].NativeSessionID != "native-bound-at-open" {
+		t.Fatalf("exact-at-Open binding was not one-time and immutable: %+v", bound)
+	}
+	for _, changedID := range []string{"", "different-native-session"} {
+		candidate := bound.Catalog
+		changed := candidate.Lanes["lane"]
+		changed.NativeSessionID = changedID
+		candidate.Lanes[changed.ID] = changed
+		if _, err := store.Commit(bound.Revision, candidate); err == nil {
+			t.Fatalf("direct state mutation changed bound native authority to %q", changedID)
+		}
+	}
+}
+
 func TestComponentRecordsRequireExactIdentityUniquenessAndMonotonicSequences(t *testing.T) {
 	tests := []struct {
 		name   string

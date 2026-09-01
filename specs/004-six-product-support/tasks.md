@@ -284,6 +284,18 @@ to reproducible Linux/macOS evidence.
 
 ---
 
+## Frozen Contract Amendment Round 2
+
+- [x] T121 Add product-neutral deferred native-session binding for create-on-first-turn lane drivers: explicit `LaneCapabilitySet.DeferredSessionBinding`, shared Open/StartTurn validation and exact-at-Open commit guard, atomic first-turn lane/receipt/turn binding, unbound restart/ambiguity/lease hostile tests, and the review-ready contract/evidence packet in `internal/{productruntime,daemon}/` and `specs/004-six-product-support/{contracts,evidence}/`
+
+## Adopted Persistence-Audit Follow-ups (separate base-system work)
+
+- [ ] T122 Record and schedule the product-neutral display-name projection cleanup: native title is the sole mutable writer, rename is write-through, and canonical peer addressing does not depend on a mutable display string
+- [ ] T123 Record and schedule live on-demand peer presence/attestation so a healthy process is not muted solely by a daemon-generation re-adoption window
+- [ ] T124 Record and schedule bounded garbage collection of detached attachment and terminal-delivery tombstones, with live ownership checks and no unrelated-state removal
+
+---
+
 ## Dependencies and Execution Order
 
 ### Phase dependencies
@@ -361,5 +373,5 @@ Root integrator: central-only tasks after stream gates
 
 ## Task Format Validation
 
-All 120 tasks use the required checkbox, sequential ID, optional `[P]`, required
+All 124 tasks use the required checkbox, sequential ID, optional `[P]`, required
 story labels within story phases, and explicit file or evidence paths.

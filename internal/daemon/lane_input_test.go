@@ -48,6 +48,28 @@ func newLaneInputTestEngine(t *testing.T, limits LaneInputLimits) (*LaneInputEng
 	return engine, store, spoolRoot
 }
 
+func newUnboundLaneInputTestEngine(t *testing.T) (*LaneInputEngine, *StateStore, Lane) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := OpenState(filepath.Join(root, "state"), 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane := Lane{ID: "lane", Product: "codex", ProfileIdentity: "profile", State: "terminal"}
+	catalog := emptyCatalog()
+	catalog.Host = HostRuntime{User: "1000", Host: "test", Generation: 7}
+	catalog.Lanes[lane.ID] = lane
+	if _, err := store.Commit(0, catalog); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewLaneInputEngine(store, filepath.Join(root, "spool"), DefaultLaneInputLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.now = func() time.Time { return time.Unix(100, 0) }
+	return engine, store, lane
+}
+
 func TestLaneInputAdmissionPersistsPrivateVerifiedBodyBeforeAcknowledgment(t *testing.T) {
 	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
 	body := []byte("secret prompt body")
@@ -332,6 +354,236 @@ func TestLaneInputAtomicTurnAcceptanceAndDispatchIntentShareOneRevision(t *testi
 		acceptedSnapshot.Catalog.Turns["atomic-turn"].NativeDispatchID != "native-turn" {
 		t.Fatalf("atomic native acceptance revision: before=%d after=%d turn=%+v receipt=%+v",
 			after.Revision, acceptedSnapshot.Revision, acceptedSnapshot.Catalog.Turns["atomic-turn"], accepted)
+	}
+}
+
+func TestDeferredNativeSessionBindingCommitsLaneReceiptAndTurnInOneCAS(t *testing.T) {
+	engine, store, lane := newUnboundLaneInputTestEngine(t)
+	receipt, err := engine.AdmitWithID("deferred-binding-receipt", lane.ID, []byte("first turn"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.State != ReceiptQueued {
+		t.Fatalf("first input was not queued by lane ID: %+v", receipt)
+	}
+	turn := Turn{ID: "deferred-binding-turn", LaneID: lane.ID}
+	if _, err := engine.AcceptTurnAndMarkDispatching(receipt.ReceiptID, lane, turn, "deferred-binding-attempt"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "product-generated-session", NativeMessageID: "product-native-turn", AcceptedAt: receipt.AcceptedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+1 || after.Catalog.Host.LaneRevision != before.Catalog.Host.LaneRevision+1 {
+		t.Fatalf("deferred binding used more than one CAS: before=%+v after=%+v", before, after)
+	}
+	boundLane := after.Catalog.Lanes[lane.ID]
+	boundTurn := after.Catalog.Turns[turn.ID]
+	if boundLane.NativeSessionID != "product-generated-session" || accepted.State != ReceiptInjected ||
+		accepted.NativeAcceptance == nil || accepted.NativeAcceptance.NativeSessionID != boundLane.NativeSessionID ||
+		boundTurn.State != "dispatched" || boundTurn.NativeDispatchID != "product-native-turn" {
+		t.Fatalf("atomic deferred binding facts diverged: lane=%+v receipt=%+v turn=%+v", boundLane, accepted, boundTurn)
+	}
+
+	replayBefore := after.Revision
+	replayedAcceptance := *accepted.NativeAcceptance
+	replayedAcceptance.AcceptedAt++
+	if _, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, replayedAcceptance); err != nil {
+		t.Fatalf("exact acceptance replay failed: %v", err)
+	}
+	replayed, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Revision != replayBefore {
+		t.Fatalf("exact replay mutated revision: before=%d after=%d", replayBefore, replayed.Revision)
+	}
+	if _, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "different-session", NativeMessageID: "product-native-turn", AcceptedAt: receipt.AcceptedAt,
+	}); err == nil {
+		t.Fatal("bound lane accepted a different native session")
+	}
+	conflict, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Revision != replayBefore || conflict.Catalog.Lanes[lane.ID].NativeSessionID != "product-generated-session" {
+		t.Fatalf("conflicting replay mutated bound authority: %+v", conflict)
+	}
+}
+
+func TestLaneInputExistingLaneMutationsCannotBindOrReplaceNativeSession(t *testing.T) {
+	t.Run("queued turn acceptance", func(t *testing.T) {
+		engine, store, lane := newUnboundLaneInputTestEngine(t)
+		laneEngine, err := NewLaneEngine(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := laneEngine.SetNativeSessionID(lane.ID, "native-a"); err != nil {
+			t.Fatal(err)
+		}
+		receipt, err := engine.AdmitWithID("existing-lane-receipt", lane.ID, []byte("queued"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		replacement := lane
+		replacement.NativeSessionID = "native-b"
+		if _, err := engine.AcceptTurnAndMarkDispatching(
+			receipt.ReceiptID, replacement, Turn{ID: "replacement-turn", LaneID: lane.ID}, "replacement-attempt",
+		); err == nil {
+			t.Fatal("queued turn acceptance replaced a bound native session")
+		}
+		omitted := lane
+		omitted.NativeSessionID = ""
+		if _, err := engine.AcceptTurnAndMarkDispatching(
+			receipt.ReceiptID, omitted, Turn{ID: "preserved-turn", LaneID: lane.ID}, "preserved-attempt",
+		); err != nil {
+			t.Fatalf("queued turn did not preserve omitted durable native session: %v", err)
+		}
+		snapshot, err := store.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Catalog.Lanes[lane.ID].NativeSessionID != "native-a" {
+			t.Fatalf("queued turn changed bound native authority: %+v", snapshot.Catalog.Lanes[lane.ID])
+		}
+	})
+
+	t.Run("command resume staging", func(t *testing.T) {
+		engine, store, lane := newUnboundLaneInputTestEngine(t)
+		laneEngine, err := NewLaneEngine(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := laneEngine.SetNativeSessionID(lane.ID, "native-a"); err != nil {
+			t.Fatal(err)
+		}
+		replacement := lane
+		replacement.NativeSessionID = "native-b"
+		if _, err := engine.UpdateLaneAdmitAndMarkDispatching(
+			"command-replacement-receipt", replacement,
+			Turn{ID: "command-replacement-turn", LaneID: lane.ID}, "command-replacement-attempt", []byte("resume"),
+		); err == nil {
+			t.Fatal("command resume staging replaced a bound native session")
+		}
+		if entries, err := os.ReadDir(engine.spool.root); err != nil || len(entries) != 0 {
+			t.Fatalf("rejected replacement wrote a spool object: entries=%v err=%v", entries, err)
+		}
+		omitted := lane
+		omitted.NativeSessionID = ""
+		if _, err := engine.UpdateLaneAdmitAndMarkDispatching(
+			"command-preserved-receipt", omitted,
+			Turn{ID: "command-preserved-turn", LaneID: lane.ID}, "command-preserved-attempt", []byte("resume"),
+		); err != nil {
+			t.Fatalf("command resume did not preserve omitted durable native session: %v", err)
+		}
+		snapshot, err := store.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Catalog.Lanes[lane.ID].NativeSessionID != "native-a" {
+			t.Fatalf("command resume changed bound native authority: %+v", snapshot.Catalog.Lanes[lane.ID])
+		}
+	})
+}
+
+func TestDeferredNativeSessionBindingFailsClosedWithoutExactAcceptance(t *testing.T) {
+	engine, store, lane := newUnboundLaneInputTestEngine(t)
+	receipt, err := engine.AdmitWithID("deferred-ambiguous-receipt", lane.ID, []byte("possibly written"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := Turn{ID: "deferred-ambiguous-turn", LaneID: lane.ID}
+	if _, err := engine.AcceptTurnAndMarkDispatching(receipt.ReceiptID, lane, turn, "deferred-ambiguous-attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "invented-placeholder", AcceptedAt: receipt.AcceptedAt,
+	}); err == nil {
+		t.Fatal("incomplete acceptance invented a deferred native binding")
+	}
+	if _, err := engine.MarkAmbiguous(receipt.ReceiptID, AmbiguityNativeAcceptanceUnproven); err != nil {
+		t.Fatal(err)
+	}
+	ambiguous, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguous.Catalog.Lanes[lane.ID].NativeSessionID != "" || ambiguous.Catalog.LaneInputs[receipt.ReceiptID].State != ReceiptAmbiguous {
+		t.Fatalf("possible write acquired fake authority: lane=%+v receipt=%+v", ambiguous.Catalog.Lanes[lane.ID], ambiguous.Catalog.LaneInputs[receipt.ReceiptID])
+	}
+	if _, err := engine.MarkInjected(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "uncorrelated-session", NativeMessageID: "uncorrelated-turn", AcceptedAt: receipt.AcceptedAt,
+	}); err == nil {
+		t.Fatal("uncoupled receipt proof adopted an unbound lane")
+	}
+	stillAmbiguous, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillAmbiguous.Catalog.Lanes[lane.ID].NativeSessionID != "" || stillAmbiguous.Catalog.LaneInputs[receipt.ReceiptID].State != ReceiptAmbiguous {
+		t.Fatal("failed adoption changed durable authority")
+	}
+
+	if _, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "authoritatively-reconciled-session", NativeMessageID: "authoritatively-reconciled-turn", AcceptedAt: receipt.AcceptedAt,
+	}); err != nil {
+		t.Fatalf("authoritative ambiguity reconciliation failed: %v", err)
+	}
+	bound, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.Catalog.Lanes[lane.ID].NativeSessionID != "authoritatively-reconciled-session" ||
+		bound.Catalog.LaneInputs[receipt.ReceiptID].State != ReceiptInjected ||
+		bound.Catalog.Turns[turn.ID].NativeDispatchID != "authoritatively-reconciled-turn" {
+		t.Fatalf("authoritative reconciliation was not atomic: %+v", bound.Catalog)
+	}
+}
+
+func TestUnboundLaneRestartIsNoNativeAndRedispatchesQueuedFirstInputByLaneID(t *testing.T) {
+	engine, store, lane := newUnboundLaneInputTestEngine(t)
+	receipt, err := engine.AdmitWithID("deferred-restart-receipt", lane.ID, []byte("retry after restart"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTurn := Turn{ID: "deferred-restart-first-turn", LaneID: lane.ID}
+	if _, err := engine.AcceptTurnAndMarkDispatching(receipt.ReceiptID, lane, firstTurn, "deferred-restart-first-attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.RecoverAcceptedTurnAndRequeue(receipt.ReceiptID, "restart before native I/O"); err != nil {
+		t.Fatal(err)
+	}
+	queued, found, err := engine.EarliestQueued(lane.ID)
+	if err != nil || !found || queued.ReceiptID != receipt.ReceiptID {
+		t.Fatalf("unbound first input was not addressable by lane ID: %+v found=%v err=%v", queued, found, err)
+	}
+	recovered, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Catalog.Lanes[lane.ID].NativeSessionID != "" ||
+		recovered.Catalog.Turns[firstTurn.ID].State != "terminal" || recovered.Catalog.LaneInputs[receipt.ReceiptID].State != ReceiptQueued {
+		t.Fatalf("unbound restart fabricated native state: %+v", recovered.Catalog)
+	}
+	secondTurn := Turn{ID: "deferred-restart-second-turn", LaneID: lane.ID}
+	if _, err := engine.AcceptTurnAndMarkDispatching(receipt.ReceiptID, recovered.Catalog.Lanes[lane.ID], secondTurn, "deferred-restart-second-attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.MarkInjectedAndSetNativeDispatch(receipt.ReceiptID, NativeAcceptanceRef{
+		NativeSessionID: "session-created-on-redispatch", NativeMessageID: "native-redispatch-turn", AcceptedAt: receipt.AcceptedAt,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

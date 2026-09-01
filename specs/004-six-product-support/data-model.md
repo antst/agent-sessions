@@ -58,12 +58,20 @@ Secret-free durable reference used by a lane driver.
 | Field | Validation |
 |---|---|
 | `LaneID` | Existing exact daemon lane |
-| `NativeSessionID` | Non-empty immutable native ID |
+| `NativeSessionID` | Immutable native ID; empty only during the explicitly flagged fresh-Open window for a create-on-first-turn driver |
 | `Generation` | Daemon generation that last opened/recovered the live client |
 
 The lane row remains authoritative for product, profile identity, cwd, and
 policy. The reference contains no URL, port, socket, password, connection token,
 or raw capability.
+
+For a driver declaring `DeferredSessionBinding`, fresh `Open` MUST return the
+empty native ID and perform no native session/job creation. Its first
+`StartTurn` returns the product-generated session and turn IDs; one catalog CAS
+then binds the lane, receipt acceptance, and turn dispatch. Resume is never
+unbound. No lease or native-session-addressed operation is legal during this
+window, and a possible native write without exact acceptance remains
+ambiguous rather than authorizing a guessed binding.
 
 ### NativeTurnRef
 
@@ -148,8 +156,10 @@ transaction: spool commit precedes catalog admission.
 
 ## 6. Native Session Lease
 
-Durable exclusive ownership record, initially required by DSH and reusable for
-other products that allow dual writers.
+Durable exclusive ownership record quarantined to DSH's verified absence of a
+cross-process native lock. It MUST NOT spread to another product without a new
+FR-037 single-writer/edge-cost review, and should be removed if DSH gains a
+native lock.
 
 Composite key:
 

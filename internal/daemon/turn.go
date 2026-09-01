@@ -18,6 +18,9 @@ func (e *LaneEngine) Dispatch(lane Lane, turn Turn) error {
 		if !ok || currentLane.Product != lane.Product {
 			return errors.New("dispatched lane state is missing or changed product")
 		}
+		if err := preserveExistingLaneNativeSession(currentLane, &lane); err != nil {
+			return err
+		}
 		currentTurn, ok := catalog.Turns[turn.ID]
 		if !ok || currentTurn.LaneID != lane.ID {
 			return errors.New("accepted lane turn is missing")
@@ -70,6 +73,14 @@ func (e *LaneEngine) Complete(lane Lane, turn Turn) (bool, error) {
 		if !ok || currentTurn.LaneID != lane.ID {
 			return errors.New("terminal lane turn is missing")
 		}
+		if lane.NativeSessionID != "" && lane.NativeSessionID != currentLane.NativeSessionID {
+			turn.Outcome, turn.ExitCode = "failed", 1
+			if turn.Diagnostic != "" {
+				turn.Diagnostic += "; "
+			}
+			turn.Diagnostic += "native lane session identity did not match durable authority"
+		}
+		lane.NativeSessionID = currentLane.NativeSessionID
 		if currentTurn.State == "terminal" {
 			if !sameTerminalTurn(currentTurn, turn) {
 				return errors.New("terminal lane turn evidence conflicts with committed evidence")

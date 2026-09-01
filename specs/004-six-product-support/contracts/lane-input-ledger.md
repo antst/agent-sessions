@@ -28,12 +28,26 @@ orphan spool object after proving it has no committed receipt.
 4. open the spool object no-follow and re-verify identity, length, and digest;
 5. call `Steer` or `StartTurn` with the receipt ID;
 6. on exact native acceptance, commit `Injected` plus
-   `NativeAcceptanceRef`/native turn reference;
+   `NativeAcceptanceRef`/native turn reference; for a flagged deferred-binding
+   fresh lane, the same CAS also changes the lane's empty `NativeSessionID` to
+   the exact product-generated ID returned by this first `StartTurn`;
 7. securely retire the exact spool object and later mark metadata `Retired`
    under the documented retention policy.
 
 `ErrUnsupportedSteer` moves the same receipt back to ordered queueing for the
 next turn. It does not create another receipt or alter sequence.
+
+An unbound deferred lane is addressed only by `LaneID` until step 6. It cannot
+be steered, recovered, archived through a native ID, or issued a native-session
+lease. `Open` may stage owned runtime prerequisites but performs no native
+session/job creation and sends no input. Exact-at-Open drivers continue to bind
+through the separately guarded `SetNativeSessionID` path; deferred-binding
+drivers MUST skip that path.
+
+Every mutation of an existing lane in this ledger treats the durable native
+session ID as canonical: omission is filled from durable state, a nonempty
+mismatch is rejected, and an empty durable ID cannot be populated outside the
+reviewed first-acceptance CAS.
 
 ## 3. Crash Matrix
 
@@ -46,6 +60,11 @@ next turn. It does not create another receipt or alter sequence.
 | After native I/O, before durable native ack | `Ambiguous`; no replay unless native idempotency is proven |
 | After `Injected`, before spool removal | exact object removed during recovery; no redelivery |
 | During removal with changed identity/type | cleanup debt; unrelated object preserved |
+
+For a deferred-binding first turn, the first pre-I/O crash row leaves the lane
+unbound and requeues by `LaneID`: no native session exists to recover. The
+possible-write row likewise leaves it unbound and ambiguous; no requested lane
+ID, cwd match, or placeholder may be adopted as native authority.
 
 ## 4. Ordering
 
@@ -85,6 +104,11 @@ When a product-specific authoritative query proves the exact native operation,
 the durable lifecycle permits `Ambiguous -> Injected` with the exact
 `NativeAcceptanceRef`; no other automatic transition out of `Ambiguous` is
 allowed.
+
+For an unbound deferred first turn, that authoritative transition uses
+`MarkInjectedAndSetNativeDispatch` so the lane session, receipt acceptance, and
+turn dispatch anchor appear atomically. An uncoupled `MarkInjected` cannot bind
+an unbound lane. Conflicting evidence for an already-bound lane fails closed.
 
 ## 7. Existing-Four Migration
 

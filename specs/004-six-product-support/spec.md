@@ -345,6 +345,21 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   missing or unknown record schema MUST fail closed and use exact-match
   migration dispatch. Record-format schemas MUST NOT reuse semantic user
   attributes such as `Lane.Schema`.
+- **FR-036**: Every durable fact MUST have exactly one writer. Agent Sessions
+  MAY persist only facts that it authors and that have no more-authoritative
+  live source. Product- or OS-owned mutable facts, including native title,
+  cwd, process presence, and liveness, MUST be derived or reconciled from that
+  live authority rather than stored as an independently mutable copy. Native
+  session IDs that must survive restart are immutable reattach anchors: live
+  product evidence remains authoritative and every recovery MUST fail closed
+  on disappearance or divergence.
+- **FR-037**: Every proposal for new durable state MUST document its single
+  writer, why the fact cannot be derived on demand, its size/retention bound,
+  crash matrix, reconciliation and cleanup path, and why its correctness value
+  justifies the added edge cost. The lane-input receipt/spool is the adopted
+  worked example and reference cost for durable busy-lane delivery; this rule
+  does not reopen its frozen contract. State without that justification MUST
+  remain bounded ephemeral state or MUST NOT be added.
 
 ### Key Entities
 
@@ -412,6 +427,13 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
 - Native credentials and ordinary profiles remain owned by their products.
   Agent Sessions may use existing authenticated contexts for acceptance but
   does not copy, print, or persist their secrets.
+- The persistence and state-minimization audit is formal architectural input.
+  Rename-incapable products such as DSH project the native title read-only and
+  are drift-immune by construction. Rename-capable products write through to
+  the product and project the confirmed native title; the daemon does not keep
+  a second mutable rename baseline. The recommended peer-plane direction is
+  live kernel/process attestation with ephemeral generation-scoped bindings,
+  not expansion of the durable attachment catalog.
 - Tested native baselines are OpenCode 1.18.25, Kilo 7.5.6, Pi 0.84.4, OMP
   18.0.11, CodeBuddy 2.143.0, and the exact DSH 0.1.2-alpha.3 tuple. Doctor
   combines version policy with capability probes and fails closed on drift.

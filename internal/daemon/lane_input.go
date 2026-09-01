@@ -254,6 +254,9 @@ func (e *LaneInputEngine) admitLaneMutationWithID(
 			if !exists || current.Product != lane.Product {
 				return LaneInputReceipt{}, errors.New("lane input resume lane is missing or changed product")
 			}
+			if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
+				return LaneInputReceipt{}, err
+			}
 			for _, candidate := range snapshot.Catalog.LaneInputs {
 				if candidate.LaneID == lane.ID && candidate.State == ReceiptQueued {
 					return LaneInputReceipt{}, ErrLaneInputEarlierQueued
@@ -315,10 +318,10 @@ func (e *LaneInputEngine) admitLaneMutationWithID(
 				default:
 					return fmt.Errorf("%w: state=%s", ErrLaneInputUnavailable, current.State)
 				}
-				lane.InputSequence, lane.ArchiveRevision = current.InputSequence, current.ArchiveRevision
-				if lane.NativeSessionID == "" {
-					lane.NativeSessionID = current.NativeSessionID
+				if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
+					return err
 				}
+				lane.InputSequence, lane.ArchiveRevision = current.InputSequence, current.ArchiveRevision
 			}
 			quotaCatalog := *catalog
 			if create {
@@ -377,6 +380,9 @@ func (e *LaneInputEngine) admitLaneMutationWithID(
 		current, ok := catalog.Lanes[lane.ID]
 		if !ok || current.Product != lane.Product {
 			return errors.New("lane input target lane is missing or changed product")
+		}
+		if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
+			return err
 		}
 		switch current.State {
 		case "preparing", "idle", "terminal", "archived":
@@ -546,6 +552,9 @@ func (e *LaneInputEngine) acceptTurnAndMarkDispatching(
 		if !ok || current.Product != lane.Product {
 			return errors.New("lane input target lane is missing or changed product")
 		}
+		if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
+			return err
+		}
 		if _, exists := catalog.Turns[turn.ID]; exists {
 			return errors.New("lane input target turn identity already exists")
 		}
@@ -647,10 +656,12 @@ func (e *LaneInputEngine) MarkInjected(receiptID string, acceptance NativeAccept
 	})
 }
 
-// MarkInjectedAndSetNativeDispatch atomically commits exact native acceptance
-// evidence and the daemon turn reattachment anchor returned by the same native
-// acknowledgement. A crash can therefore observe neither fact or both facts,
-// but never an injected receipt whose target turn cannot be reattached.
+// MarkInjectedAndSetNativeDispatch atomically commits exact native acceptance,
+// the daemon turn reattachment anchor, and the one-time native-session binding
+// returned by the same acknowledgement. A crash can therefore observe none of
+// those facts or all of them. An already-bound lane must corroborate the exact
+// same session. An ambiguous possible-write may enter this boundary only after
+// product-native authoritative reconciliation supplies the exact acceptance.
 func (e *LaneInputEngine) MarkInjectedAndSetNativeDispatch(
 	receiptID string,
 	acceptance NativeAcceptanceRef,
@@ -672,14 +683,22 @@ func (e *LaneInputEngine) MarkInjectedAndSetNativeDispatch(
 		if !ok || turn.LaneID != receipt.LaneID {
 			return errors.New("lane input target turn is missing or changed lane")
 		}
+		lane, ok := catalog.Lanes[receipt.LaneID]
+		if !ok {
+			return errors.New("lane input target lane is missing")
+		}
+		if lane.NativeSessionID != "" && lane.NativeSessionID != acceptance.NativeSessionID {
+			return errors.New("lane input native acceptance changed the bound lane session")
+		}
 		if receipt.State == ReceiptInjected && receipt.NativeAcceptance != nil &&
 			receipt.NativeAcceptance.NativeSessionID == acceptance.NativeSessionID &&
 			receipt.NativeAcceptance.NativeMessageID == acceptance.NativeMessageID &&
+			lane.NativeSessionID == acceptance.NativeSessionID &&
 			turn.NativeDispatchID == acceptance.NativeMessageID {
 			updated, alreadyExact = receipt, true
 			return errLaneInputAlreadyExact
 		}
-		if receipt.State != ReceiptDispatching {
+		if receipt.State != ReceiptDispatching && receipt.State != ReceiptAmbiguous {
 			return errors.New("lane input receipt has no dispatching target")
 		}
 		if turn.NativeDispatchID != "" && turn.NativeDispatchID != acceptance.NativeMessageID {
@@ -688,7 +707,9 @@ func (e *LaneInputEngine) MarkInjectedAndSetNativeDispatch(
 		now := maxInt64(positiveUnix(e.now()), maxInt64(receipt.UpdatedAt, acceptance.AcceptedAt))
 		receipt.State, receipt.NativeAcceptance, receipt.AmbiguityCause = ReceiptInjected, &acceptance, ""
 		receipt.Revision, receipt.UpdatedAt = receipt.Revision+1, now
+		lane.NativeSessionID = acceptance.NativeSessionID
 		turn.State, turn.NativeDispatchID = "dispatched", acceptance.NativeMessageID
+		catalog.Lanes[lane.ID] = lane
 		catalog.LaneInputs[receiptID] = receipt
 		catalog.Turns[turn.ID] = turn
 		catalog.Host.LaneRevision++

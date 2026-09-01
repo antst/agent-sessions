@@ -82,6 +82,9 @@ func (e *LaneEngine) acceptTurn(lane Lane, turn Turn, allowCollectionDebt bool) 
 		if current.Product != lane.Product {
 			return errors.New("lane product cannot change")
 		}
+		if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
+			return err
+		}
 		if _, exists := catalog.Turns[turn.ID]; exists {
 			return errors.New("lane turn identity already exists")
 		}
@@ -107,6 +110,28 @@ func (e *LaneEngine) acceptTurn(lane Lane, turn Turn, allowCollectionDebt bool) 
 		catalog.Host.LaneRevision++
 		return nil
 	})
+}
+
+// preserveExistingLaneNativeSession treats the durable lane as the only
+// authority after creation. Existing-lane lifecycle mutations may omit that
+// projection, but they cannot bind an unbound lane or replace a bound one.
+// Binding is reserved for SetNativeSessionID after a validated exact Open, or
+// LaneInputEngine.MarkInjectedAndSetNativeDispatch at exact first acceptance.
+func preserveExistingLaneNativeSession(current Lane, candidate *Lane) error {
+	if candidate == nil {
+		return errors.New("lane mutation candidate is missing")
+	}
+	if current.NativeSessionID == "" {
+		if candidate.NativeSessionID != "" {
+			return errors.New("native lane session identity requires an explicit binding boundary")
+		}
+		return nil
+	}
+	if candidate.NativeSessionID != "" && candidate.NativeSessionID != current.NativeSessionID {
+		return errors.New("native lane session identity cannot change")
+	}
+	candidate.NativeSessionID = current.NativeSessionID
+	return nil
 }
 
 // TransitionLane commits a product-neutral lane state transition. Capability

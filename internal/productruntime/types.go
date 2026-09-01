@@ -135,8 +135,9 @@ type NativeAcceptance struct {
 }
 
 type LaneCapabilitySet struct {
-	Steer         bool
-	DurableResume bool
+	Steer                  bool
+	DurableResume          bool
+	DeferredSessionBinding bool
 }
 
 type LaneOpenRequest struct {

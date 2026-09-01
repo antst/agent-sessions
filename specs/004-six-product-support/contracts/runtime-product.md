@@ -100,8 +100,9 @@ that fact returns a typed failure or ambiguity.
 
 ```go
 type LaneCapabilitySet struct {
-    Steer         bool
-    DurableResume bool
+    Steer                  bool
+    DurableResume          bool
+    DeferredSessionBinding bool
 }
 
 type LaneDriver interface {
@@ -165,6 +166,67 @@ the daemon transitions the same receipt back to durable next-turn queueing.
 Drivers may hold ephemeral clients keyed by native references. `Recover` must
 rebuild those clients for the exact native ID or return
 `ErrUnsupportedRecovery`; it may not substitute a new session.
+
+### Deferred native-session binding
+
+`DeferredSessionBinding` is an explicit per-driver semantic capability for a
+native product whose session does not exist until its first accepted turn. It
+does not add a durable field or change `NativeSessionRef`:
+
+1. `ValidateLaneOpenResult` requires an empty `NativeSessionID` when the
+   capability is true and `LaneOpenRequest.ResumeNativeID` is empty, and
+   forbids an empty ID for every nonflagged Open. `LaneID` and `Generation`
+   remain mandatory authority throughout this window.
+   After validation, the shared coordinator uses
+   `NativeSessionBindingFromOpen`: `bindAtOpen=true` is the only authorization
+   to call `LaneEngine.SetNativeSessionID`. A deferred empty result returns
+   `bindAtOpen=false`; a deferred driver MUST NOT use that exact-at-Open path.
+2. Resume is never deferred. Every resume `Open` returns the exact requested
+   native session ID, including for a deferred-binding driver; omission or
+   substitution fails closed.
+3. Fresh deferred `Open` stages only the lane and owned runtime prerequisites.
+   It MUST NOT create a native session/job, dispatch input, spend a model turn,
+   or invent an ID from `LaneID` or the caller's request.
+4. The first `StartTurn` is the sole operation that may receive an unbound
+   `NativeSessionRef`. `ValidateLaneStartTurnResult` requires it to return the
+   same `LaneID` and `Generation`, a non-empty product-generated native session
+   ID, and an exact native turn ID. Every other lane operation requires a bound
+   native session; leases and native-session addressing are forbidden before
+   binding.
+5. The lane engine commits the returned session ID, exact native acceptance,
+   receipt `Injected` state, and daemon turn native dispatch ID in one CAS.
+   If the lane is already bound the returned ID must equal it exactly. A bound
+   ID is immutable and an exact replay is idempotent. Existing-lane Accept,
+   Dispatch, and lane-input admission mutations may preserve an omitted durable
+   ID but MUST reject any nonempty mismatch and MUST NOT bind an empty ID.
+   Terminal completion preserves the durable ID; a conflicting product result
+   converges to failed terminal evidence with a diagnostic instead of changing
+   session authority or stranding the Turn.
+6. An unbound lane surviving restart has no native session to recover. Its
+   proven-pre-I/O first input remains queued and is redispatched by `LaneID`.
+   A possible native write without exact acceptance is `Ambiguous`, never a
+   clean failure or automatic replay, and does not authorize a placeholder ID.
+   Only authoritative product reconciliation may resolve it through the same
+   atomic binding/acceptance commit; otherwise cleanup debt remains explicit.
+7. From binding onward, `Recover`, resume, delivery, wait, interrupt, archive,
+   and later turns use the exact immutable native session ID. A product may not
+   adopt an arbitrary session merely because cwd or display metadata matches.
+   A process-local lane actor is never routing authority by itself: resolution
+   requires a non-staged durable Lane row, and the actor cache's native session
+   ID must exactly equal that row's `NativeSessionID`. Equality intentionally
+   includes empty-to-empty for a non-staged deferred lane, which remains
+   addressable by `LaneID`; the guard does not impose premature non-emptiness.
+   This blocks both the pre-create reservation window and the
+   post-bind/pre-cache-sync window.
+
+These rules are Amendment Round 2 to the LaneDriver semantics. They preserve
+the existing durable catalog schema and record versions.
+
+Production source MUST keep a mechanical tripwire over writes to lane
+`NativeSessionID`: the only binding writes are `SetNativeSessionID` after the
+validated exact-at-Open guard and `MarkInjectedAndSetNativeDispatch` at exact
+first native acceptance. Preservation-only copies may not introduce another
+binding boundary.
 
 ## 5. Parent Attester
 
