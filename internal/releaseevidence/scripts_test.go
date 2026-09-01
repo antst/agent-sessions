@@ -51,7 +51,11 @@ func TestReleaseGateManifestFindsManagedGrokOutsidePATH(t *testing.T) {
 		"--job-url", "https://github.com/antst/agent-sessions/actions/runs/1/job/2",
 		"--evidence-dir", evidence, "--output", manifest)
 	command.Dir = root
-	command.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":/usr/bin:/bin", "GROK_PEER_GROK_BIN=")
+	command.Env = append(os.Environ(),
+		"HOME="+home, "PATH="+bin+":/usr/bin:/bin",
+		"QWEN_PEER_QWEN_BIN=", "CODEX_PEER_CODEX_BIN=",
+		"CLAUDE_PEER_CLAUDE_BIN=", "GROK_PEER_GROK_BIN=",
+	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("release gate manifest: %v: %s", err, output)
 	}
@@ -65,8 +69,13 @@ func TestReleaseGateManifestFindsManagedGrokOutsidePATH(t *testing.T) {
 	if err := json.Unmarshal(body, &document); err != nil {
 		t.Fatal(err)
 	}
-	if got := document.NativeClients["grok"]; got != "grok fixture version" {
-		t.Fatalf("managed Grok version = %q", got)
+	for product, want := range map[string]string{
+		"qwen": "qwen fixture version", "codex": "codex fixture version",
+		"claude": "claude fixture version", "grok": "grok fixture version",
+	} {
+		if got := document.NativeClients[product]; got != want {
+			t.Fatalf("%s fixture version = %q, want %q", product, got, want)
+		}
 	}
 }
 
