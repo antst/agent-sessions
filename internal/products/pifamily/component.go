@@ -54,10 +54,7 @@ type ComponentRuntimeConfig struct {
 	Now      func() time.Time
 }
 
-// ComponentRuntime owns correlation and product-native frame semantics only.
-// Durable attachment/session/delivery admission is completed by the central
-// componentruntime.Authority before this post-admission observer is invoked.
-// This runtime never calls Authority and has no fallback/Next handler.
+// ComponentRuntime owns process-local correlation and product-native frame semantics.
 type ComponentRuntime struct {
 	config ComponentRuntimeConfig
 

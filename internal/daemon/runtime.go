@@ -23,13 +23,6 @@ var nextRuntimeGeneration atomic.Uint64
 // before daemon cancellation terminates the complete authority.
 type RuntimeComponent func(context.Context) error
 
-// LaneConnectorAuthorizer corroborates a capability-less native connector
-// against one active lane. Most native lane processes inherit the daemon's
-// one-turn capability directly. Codex is the exception: its MCP connector is
-// hosted by the shared App Server, so authorization must use the exact native
-// thread and App Server process evidence instead.
-type LaneConnectorAuthorizer func(context.Context, Lane, NativeEvidence) error
-
 // ParentConnectorAuthorizer corroborates a connector tool call against one
 // exact active peer attachment. It is deliberately distinct from an
 // AttachmentAdapter: parent authority belongs to the product's per-session
@@ -47,7 +40,6 @@ type RuntimeConfig struct {
 	MaxStateBytes              int64
 	Release                    string
 	Adapters                   map[string]AttachmentAdapter
-	LaneConnectorAuthorizer    LaneConnectorAuthorizer
 	ParentConnectorAuthorizer  ParentConnectorAuthorizer
 	ProductDiagnosticsProvider ProductDiagnosticsProvider
 	Handler                    ControlHandler
@@ -67,7 +59,6 @@ type Runtime struct {
 	hostID                     string
 	release                    string
 	handler                    ControlHandler
-	laneConnectorAuthorizer    LaneConnectorAuthorizer
 	parentConnectorAuthorizer  ParentConnectorAuthorizer
 	productDiagnosticsProvider ProductDiagnosticsProvider
 
@@ -105,10 +96,6 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	if err != nil {
 		return nil, fmt.Errorf("open runtime state: %w", err)
 	}
-	snapshot, err := state.Read()
-	if err != nil {
-		return nil, fmt.Errorf("read runtime state: %w", err)
-	}
 	generation := nextRuntimeGeneration.Add(1)
 	attachments, err := NewAttachmentEngine(state, generation, config.Adapters)
 	if err != nil {
@@ -118,7 +105,6 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	runtime := &Runtime{
 		state: state, attachments: attachments, generation: generation,
 		hostID: currentRuntimeHost(), release: strings.TrimSpace(config.Release), handler: config.Handler,
-		laneConnectorAuthorizer:    config.LaneConnectorAuthorizer,
 		parentConnectorAuthorizer:  config.ParentConnectorAuthorizer,
 		productDiagnosticsProvider: config.ProductDiagnosticsProvider,
 		ctx:                        ctx, cancel: cancel, done: make(chan struct{}),
@@ -130,13 +116,6 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	}
 	runtime.control = control
 
-	catalog := snapshot.Catalog
-	retireStaleComponentAuthority(&catalog)
-	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
-		cancel()
-		_ = control.Close()
-		return nil, fmt.Errorf("commit running runtime generation: %w", err)
-	}
 	if config.Initialize != nil {
 		if err := config.Initialize(runtime); err != nil {
 			runtime.finish("failed", err, true)
@@ -154,29 +133,6 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 		}
 	}()
 	return runtime, nil
-}
-
-// retireStaleComponentAuthority is part of the same catalog CAS that publishes
-// a successor Host.Generation. A component stream cannot survive process
-// restart, so no Binding or Ready row may cross that publication boundary as
-// live authority. Secret-free binding anchors remain as Retiring tombstones for
-// exact, freshly re-attested bootstrap/reconnect recovery; nonclosed session
-// rows close in the same revision and are re-announced by the successor.
-func retireStaleComponentAuthority(catalog *Catalog) {
-	for id, binding := range catalog.ComponentBindings {
-		if binding.State != BindingBinding && binding.State != BindingReady {
-			continue
-		}
-		binding.State = BindingRetiring
-		catalog.ComponentBindings[id] = binding
-	}
-	for id, session := range catalog.ComponentSessions {
-		if session.State == ComponentSessionClosed {
-			continue
-		}
-		session.State = ComponentSessionClosed
-		catalog.ComponentSessions[id] = session
-	}
 }
 
 // Endpoint returns the fixed bound local endpoint.

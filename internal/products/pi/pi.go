@@ -81,8 +81,7 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 
 // NewComponentObserver constructs the ephemeral post-admission observer used
 // by both the product drivers and central broker routing. Composition must pass
-// this exact pointer back in Config.Component and invoke it only after durable
-// componentruntime.Authority admission.
+// this exact pointer back in Config.Component for the live connection.
 func NewComponentObserver(config Config) (*pifamily.ComponentRuntime, error) {
 	quirks, err := pifamily.QuirksFor(ProductID)
 	if err != nil {

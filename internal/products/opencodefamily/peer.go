@@ -16,10 +16,7 @@ import (
 
 const ComponentProtocol = component.ContractRevision
 
-// ComponentGateway is the post-admission, generation-scoped observer/router
-// seam supplied by composition. The central broker Handler must admit each
-// component frame through componentruntime.Authority before updating this
-// ephemeral router. A gateway implementation must not call Authority again.
+// ComponentGateway is the process-local observer/router supplied by composition.
 // It awaits delivery.accept or native rename confirmation; queueing a frame
 // locally is not success.
 type ComponentGateway interface {

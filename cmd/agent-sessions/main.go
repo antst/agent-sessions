@@ -259,11 +259,10 @@ func runDaemon(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 	coordinator := newHostCoordinator(ctx, *stateRoot)
 	var runtime *daemonpkg.Runtime
 	runtime, err := daemonpkg.StartRuntime(ctx, daemonpkg.RuntimeConfig{
-		StateRoot:               *stateRoot,
-		Release:                 version,
-		Adapters:                coordinator.adapters(),
-		LaneConnectorAuthorizer: coordinator.authorizeLaneConnector,
-		Initialize:              coordinator.reconcileAttachmentOwners,
+		StateRoot:  *stateRoot,
+		Release:    version,
+		Adapters:   coordinator.adapters(),
+		Initialize: coordinator.reconcileAttachmentOwners,
 		Handler: func(callCtx context.Context, request daemonpkg.ControlRequest) (json.RawMessage, error) {
 			return coordinator.handle(callCtx, runtime, request)
 		},

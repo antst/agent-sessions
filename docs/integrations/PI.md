@@ -14,9 +14,8 @@ or native event hook and performs no component I/O. Once the component broker re
 `ctx.sessionManager.getSessionId()`, announces it, and exports that same value
 as `AGENT_SESSIONS_SESSION_ID` for native tool children. Bootstrap secrets are
 removed by the shared component client and are never session authority.
-Central composition must construct `NewComponentObserver`, invoke it only
-after durable `componentruntime.Authority` admission, and pass that exact
-pointer into `NewRuntime`; a nil or implicitly trapped observer is rejected.
+Central composition constructs `NewComponentObserver` for the live connection
+and passes that exact pointer into `NewRuntime`.
 
 The extension maps `idle-wake`, `busy-steer`, and `busy-follow-up` deliveries
 onto `pi.sendUserMessage`. It reports exact native acceptance using the

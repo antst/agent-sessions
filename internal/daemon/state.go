@@ -16,17 +16,7 @@ import (
 
 const (
 	catalogRecord = "catalog"
-
-	ComponentBindingRecordSchema RecordSchema = "agent-sessions.component-binding.v1"
-	ComponentSessionRecordSchema RecordSchema = "agent-sessions.component-session.v1"
-
-	maxDurableOpaqueIDBytes = 128
 )
-
-// RecordSchema identifies one independently versioned durable daemon domain.
-// A missing map is legacy-compatible; a present record always carries an exact
-// known schema and unknown versions fail closed.
-type RecordSchema string
 
 // NativeEvidence is the shared exact identity skeleton plus distinct optional
 // native evidence fields. Product adapters decide which fields are required.
@@ -77,33 +67,6 @@ type ManagedAttachment struct {
 	State              string         `json:"state"`
 }
 
-// Lane is the process-local view of one live product-owned worker.
-type Lane struct {
-	ID                 string   `json:"id"`
-	CapabilityHash     string   `json:"capability_hash,omitempty"`
-	ParentAttachmentID string   `json:"parent_attachment_id"`
-	Product            string   `json:"product"`
-	Name               string   `json:"name,omitempty"`
-	ProfileIdentity    string   `json:"profile_identity,omitempty"`
-	NativeSessionID    string   `json:"native_session_id,omitempty"`
-	Cwd                string   `json:"cwd,omitempty"`
-	Groups             []string `json:"groups,omitempty"`
-	ExplicitGroups     []string `json:"explicit_groups,omitempty"`
-	InheritGroups      bool     `json:"inherit_groups,omitempty"`
-	PermissionMode     string   `json:"permission_mode,omitempty"`
-	ApprovalPolicy     string   `json:"approval_policy,omitempty"`
-	Sandbox            string   `json:"sandbox,omitempty"`
-	Effort             string   `json:"effort,omitempty"`
-	Schema             string   `json:"schema,omitempty"`
-	Arguments          []string `json:"arguments,omitempty"`
-	Persistent         bool     `json:"persistent,omitempty"`
-	AutoArchive        bool     `json:"auto_archive,omitempty"`
-	AutoArchiveDelayMS int64    `json:"auto_archive_delay_ms,omitempty"`
-	AutoArchiveAt      int64    `json:"auto_archive_at,omitempty"`
-	State              string   `json:"state"`
-	ArchiveRevision    uint64   `json:"archive_revision,omitempty"`
-}
-
 // LaneCandidate remembers only which product UUID an owning parent may ask
 // the product about while the lane is offline.
 type LaneCandidate struct {
@@ -115,52 +78,10 @@ type LaneCandidate struct {
 	Host            string   `json:"host,omitempty"`
 }
 
-type BindingState string
-
-const (
-	BindingBinding  BindingState = "binding"
-	BindingReady    BindingState = "ready"
-	BindingRetiring BindingState = "retiring"
-	BindingClosed   BindingState = "closed"
-)
-
-type ComponentBinding struct {
-	Schema            RecordSchema      `json:"schema"`
-	BindingID         string            `json:"binding_id"`
-	AttachmentID      string            `json:"attachment_id"`
-	ProcessIdentity   procinfo.Identity `json:"process_identity"`
-	BootstrapRevision uint64            `json:"bootstrap_revision"`
-	Generation        uint64            `json:"generation"`
-	State             BindingState      `json:"state"`
-	LastInboundSeq    uint64            `json:"last_inbound_seq,omitempty"`
-	LastOutboundSeq   uint64            `json:"last_outbound_seq,omitempty"`
-}
-
-type ComponentSessionState string
-
-const (
-	ComponentSessionAnnounced ComponentSessionState = "announced"
-	ComponentSessionIdle      ComponentSessionState = "idle"
-	ComponentSessionBusy      ComponentSessionState = "busy"
-	ComponentSessionClosing   ComponentSessionState = "closing"
-	ComponentSessionClosed    ComponentSessionState = "closed"
-)
-
-type ComponentSession struct {
-	Schema          RecordSchema          `json:"schema"`
-	AttachmentID    string                `json:"attachment_id"`
-	BindingID       string                `json:"binding_id"`
-	NativeSessionID string                `json:"native_session_id"`
-	State           ComponentSessionState `json:"state"`
-	LastEventSeq    uint64                `json:"last_event_seq,omitempty"`
-}
-
 // Catalog is the complete durable host state committed as one revision.
 type Catalog struct {
-	Attachments       map[string]ManagedAttachment `json:"attachments"`
-	Lanes             map[string]LaneCandidate     `json:"lanes"`
-	ComponentBindings map[string]ComponentBinding  `json:"component_bindings"`
-	ComponentSessions map[string]ComponentSession  `json:"component_sessions"`
+	Attachments map[string]ManagedAttachment `json:"attachments"`
+	Lanes       map[string]LaneCandidate     `json:"lanes"`
 }
 
 // StateSnapshot is one isolated committed daemon catalog revision.
@@ -253,14 +174,6 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 			"detaching": {"detached"},
 			"detached":  {"preparing"},
 		},
-		"component-binding": {
-			"binding": {"ready", "retiring", "closed"}, "ready": {"retiring", "closed"},
-			"retiring": {"closed"},
-		},
-		"component-session": {
-			"announced": {"idle", "busy", "closing", "closed"}, "idle": {"busy", "closing", "closed"},
-			"busy": {"idle", "closing", "closed"}, "closing": {"closed"},
-		},
 	}
 	for _, candidate := range transitions[kind][from] {
 		if candidate == to {
@@ -272,9 +185,8 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 
 func emptyCatalog() Catalog {
 	return Catalog{
-		Attachments:       map[string]ManagedAttachment{},
-		Lanes:             map[string]LaneCandidate{},
-		ComponentBindings: map[string]ComponentBinding{}, ComponentSessions: map[string]ComponentSession{},
+		Attachments: map[string]ManagedAttachment{},
+		Lanes:       map[string]LaneCandidate{},
 	}
 }
 
@@ -285,34 +197,7 @@ func normalizedCatalog(catalog Catalog) Catalog {
 	if catalog.Lanes == nil {
 		catalog.Lanes = map[string]LaneCandidate{}
 	}
-	if catalog.ComponentBindings == nil {
-		catalog.ComponentBindings = map[string]ComponentBinding{}
-	}
-	if catalog.ComponentSessions == nil {
-		catalog.ComponentSessions = map[string]ComponentSession{}
-	}
 	return catalog
-}
-
-func validDurableOpaqueID(value string) bool {
-	if len(value) == 0 || len(value) > maxDurableOpaqueIDBytes {
-		return false
-	}
-	for _, character := range value {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') || character == '-' || character == '_' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func validOptionalProcessIdentity(identity procinfo.Identity) bool {
-	if identity == (procinfo.Identity{}) {
-		return true
-	}
-	return identity.PID > 1 && identity.Start != "" && identity.StrongStart != ""
 }
 
 //nolint:gocyclo // The closed catalog validates each independent record family explicitly.
@@ -331,57 +216,6 @@ func validateCatalog(catalog Catalog) error {
 		}
 		if _, ok := productcatalog.ByID(lane.Product); !ok {
 			return fmt.Errorf("lane %s has unknown product %q", id, lane.Product)
-		}
-	}
-	activeBindings := map[string]bool{}
-	readyBindings := map[string]bool{}
-	for id, binding := range catalog.ComponentBindings {
-		if binding.Schema != ComponentBindingRecordSchema || !validDurableOpaqueID(id) || binding.BindingID != id ||
-			!knownState("component-binding", string(binding.State)) || binding.Generation == 0 ||
-			!validOptionalProcessIdentity(binding.ProcessIdentity) || binding.ProcessIdentity == (procinfo.Identity{}) ||
-			binding.BootstrapRevision == 0 {
-			return fmt.Errorf("invalid component binding %q", id)
-		}
-		attachment, ok := catalog.Attachments[binding.AttachmentID]
-		if !ok {
-			return fmt.Errorf("component binding %s references unknown attachment", id)
-		}
-		if binding.State == BindingBinding || binding.State == BindingReady {
-			if attachment.State != "prepared" && attachment.State != "selecting" && attachment.State != "attached" {
-				return fmt.Errorf("active component binding %s references attachment in state %s", id, attachment.State)
-			}
-			activeKey := fmt.Sprintf("%s\x00%d", binding.AttachmentID, binding.Generation)
-			if activeBindings[activeKey] {
-				return fmt.Errorf("attachment %s has multiple active component bindings in generation %d", binding.AttachmentID, binding.Generation)
-			}
-			activeBindings[activeKey] = true
-		}
-		if binding.State == BindingReady {
-			if readyBindings[binding.AttachmentID] {
-				return fmt.Errorf("attachment %s has multiple ready component bindings", binding.AttachmentID)
-			}
-			readyBindings[binding.AttachmentID] = true
-		}
-	}
-	for id, session := range catalog.ComponentSessions {
-		if session.Schema != ComponentSessionRecordSchema || !validDurableOpaqueID(id) || session.AttachmentID != id ||
-			!validDurableOpaqueID(session.BindingID) || session.NativeSessionID == "" ||
-			!knownState("component-session", string(session.State)) || (session.State != ComponentSessionClosed && session.LastEventSeq == 0) {
-			return fmt.Errorf("invalid component session %q", id)
-		}
-		attachment, ok := catalog.Attachments[id]
-		if !ok || (attachment.NativeSessionID != "" && attachment.NativeSessionID != session.NativeSessionID) {
-			return fmt.Errorf("component session %s does not match attachment", id)
-		}
-		if session.State != ComponentSessionClosed {
-			binding, ok := catalog.ComponentBindings[session.BindingID]
-			if !ok || binding.AttachmentID != id || (binding.State != BindingBinding && binding.State != BindingReady) {
-				return fmt.Errorf("component session %s has invalid binding", id)
-			}
-			if (session.State == ComponentSessionIdle || session.State == ComponentSessionBusy) &&
-				(attachment.State != "attached" || attachment.NativeSessionID == "") {
-				return fmt.Errorf("active component session %s lacks an exact attached native session", id)
-			}
 		}
 	}
 	return nil
@@ -411,66 +245,12 @@ func validateCatalogTransitions(current, next Catalog) error {
 			return fmt.Errorf("lane candidate %s cannot be removed", id)
 		}
 	}
-	for id, binding := range current.ComponentBindings {
-		if candidate, ok := next.ComponentBindings[id]; ok {
-			if binding.Schema != candidate.Schema || binding.AttachmentID != candidate.AttachmentID ||
-				binding.ProcessIdentity != candidate.ProcessIdentity || binding.Generation != candidate.Generation ||
-				binding.BootstrapRevision != candidate.BootstrapRevision {
-				return fmt.Errorf("component binding %s changed immutable identity", id)
-			}
-			if candidate.LastInboundSeq < binding.LastInboundSeq || candidate.LastOutboundSeq < binding.LastOutboundSeq {
-				return fmt.Errorf("component binding %s sequence regressed", id)
-			}
-			if !ValidLifecycleTransition("component-binding", string(binding.State), string(candidate.State)) {
-				return fmt.Errorf("component binding %s cannot transition from %s to %s", id, binding.State, candidate.State)
-			}
-		} else if binding.State != BindingClosed {
-			return fmt.Errorf("component binding %s cannot be removed from state %s", id, binding.State)
-		}
-	}
-	for id, session := range current.ComponentSessions {
-		if candidate, ok := next.ComponentSessions[id]; ok {
-			if session.Schema != candidate.Schema || session.AttachmentID != candidate.AttachmentID || session.NativeSessionID != candidate.NativeSessionID {
-				return fmt.Errorf("component session %s changed immutable identity", id)
-			}
-			if candidate.LastEventSeq < session.LastEventSeq {
-				return fmt.Errorf("component session %s event sequence regressed", id)
-			}
-			if session.BindingID != candidate.BindingID {
-				prior, priorOK := current.ComponentBindings[session.BindingID]
-				rebound, reboundOK := next.ComponentBindings[candidate.BindingID]
-				retiredPrior, stillPresent := next.ComponentBindings[session.BindingID]
-				if !priorOK || !reboundOK || rebound.Generation <= prior.Generation ||
-					(stillPresent && retiredPrior.State != BindingRetiring && retiredPrior.State != BindingClosed) {
-					return fmt.Errorf("component session %s changed binding without exact generation retirement", id)
-				}
-			}
-			if !ValidLifecycleTransition("component-session", string(session.State), string(candidate.State)) {
-				return fmt.Errorf("component session %s cannot transition from %s to %s", id, session.State, candidate.State)
-			}
-		} else if session.State != ComponentSessionClosed {
-			return fmt.Errorf("component session %s cannot be removed from state %s", id, session.State)
-		}
-	}
-
-	for id, binding := range next.ComponentBindings {
-		if _, exists := current.ComponentBindings[id]; !exists && binding.State != BindingBinding {
-			return fmt.Errorf("component binding %s starts in non-initial state %s", id, binding.State)
-		}
-	}
-	for id, session := range next.ComponentSessions {
-		if _, exists := current.ComponentSessions[id]; !exists && session.State != ComponentSessionAnnounced {
-			return fmt.Errorf("component session %s starts in non-initial state %s", id, session.State)
-		}
-	}
 	return nil
 }
 
 func knownState(kind, state string) bool {
 	states := map[string]map[string]bool{
-		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true},
-		"component-binding": {"binding": true, "ready": true, "retiring": true, "closed": true},
-		"component-session": {"announced": true, "idle": true, "busy": true, "closing": true, "closed": true},
+		"attachment": {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true},
 	}
 	return states[kind][state]
 }

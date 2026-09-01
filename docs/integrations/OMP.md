@@ -32,9 +32,8 @@ children. A bare/global extension without the complete one-time bootstrap is
 inert: it registers no model tool, command, or native event hook and performs
 no component I/O. There is no fallback to an ambient `OMP_*` or `PI_*` bash
 variable.
-Central composition must construct `NewComponentObserver`, invoke it only
-after durable `componentruntime.Authority` admission, and pass that exact
-pointer into `NewRuntime`; a nil or implicitly trapped observer is rejected.
+Central composition constructs `NewComponentObserver` for the live connection
+and passes that exact pointer into `NewRuntime`.
 
 Delivery requires the exact current `session.bound` identity. Native title
 observations use `session_info_changed`; daemon-requested rename is a

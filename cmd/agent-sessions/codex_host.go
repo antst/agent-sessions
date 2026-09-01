@@ -514,38 +514,6 @@ func (c *hostCoordinator) refreshCodexAttachment(
 	return attachment.Evidence, nil
 }
 
-// authorizeLaneConnector preserves the legacy Codex lane boundary. Codex
-// hosts every MCP connector below its shared App Server rather than below the
-// individual `codex exec` worker, so per-worker environment capabilities are
-// unavailable at the connector. The native thread metadata and the exact live
-// App Server ancestry are the established product-owned proof instead.
-func (c *hostCoordinator) authorizeLaneConnector(
-	_ context.Context,
-	lane daemonpkg.Lane,
-	observed daemonpkg.NativeEvidence,
-) error {
-	if lane.Product != "codex" || lane.NativeSessionID == "" || observed.ThreadID != lane.NativeSessionID ||
-		procinfo.ObserveIdentity(observed.Process).Status != procinfo.IdentityMatches {
-		return errors.New("codex lane connector does not match its native thread")
-	}
-	native, err := c.codexNative()
-	if err != nil {
-		return err
-	}
-	appPID, appStart, _ := native.AppServerEvidence()
-	appServer, err := procinfo.CaptureIdentity(appPID)
-	if err != nil || appStart == "" || appServer.Start != appStart ||
-		procinfo.ObserveIdentity(appServer).Status != procinfo.IdentityMatches {
-		return errors.New("codex App Server identity is not live")
-	}
-	for _, ancestor := range observed.Ancestry {
-		if sameProcessIdentity(ancestor, appServer) {
-			return nil
-		}
-	}
-	return errors.New("codex lane connector is not hosted by the managed App Server")
-}
-
 func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
