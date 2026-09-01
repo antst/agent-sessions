@@ -412,11 +412,9 @@ func callNativePeerTool(name string, args map[string]any, callerSessionID string
 		}
 		state, err := readOwnNativeState(paths, sessionID)
 		if err != nil {
-			// A Grok host must prove that its plugin MCP is usable before it can
-			// publish and register the peer. The exact live launch capability and
-			// process ancestry already authorize this narrow bootstrap identity;
-			// grouped discovery and delivery remain unavailable until publication.
-			if activeGrokLaunchForSession(paths, sessionID) != nil {
+			// A live Grok MCP process may arrive before its peer connection has
+			// published the product-owned session row.
+			if sessionID == callerSessionID {
 				return map[string]any{
 					"text": "Grok peer startup is process-attested.",
 					"data": map[string]any{"sessionId": sessionID, "status": "starting"},
@@ -547,11 +545,8 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 		return "", errors.New("agent_sessions is inactive outside an attested peer session")
 	}
 	requested := strings.TrimSpace(stringValue(args["session_id"]))
-	if requested == "" && (liveGrokLaunchForSession(paths, callerSessionID) != nil || liveRegisteredClaudePeer(callerSessionID) || liveRegisteredQwenPeer(callerSessionID)) {
-		return callerSessionID, nil
-	}
 	if requested == "" {
-		return "", errors.New("session_id is required")
+		return callerSessionID, nil
 	}
 	if requested != callerSessionID {
 		return "", fmt.Errorf("session-scoped peer tool cannot act as session %s", requested)
@@ -560,7 +555,7 @@ func requireMCPCallerSession(paths nativePaths, args map[string]any, callerSessi
 }
 
 func authorizedPeerSessionNative(paths nativePaths, sessionID string) bool {
-	return authorizedPeerThreadNative(paths, sessionID) || activeGrokLaunchForSession(paths, sessionID) != nil ||
+	return validSessionID(sessionID) || authorizedPeerThreadNative(paths, sessionID) ||
 		liveRegisteredClaudePeer(sessionID) || liveRegisteredQwenPeer(sessionID)
 }
 

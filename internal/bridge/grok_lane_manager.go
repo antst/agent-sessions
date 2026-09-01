@@ -32,7 +32,6 @@ type grokLaneManager struct {
 	controlWG         sync.WaitGroup
 	controlClosed     bool
 	lifecycleLock     *os.File
-	launchLease       *os.File
 	diagnostics       *grokDiagnosticSink
 	toolShellPath     string
 	toolRealShell     string
@@ -244,27 +243,8 @@ func (m *grokLaneManager) start() error {
 	}
 	go m.acceptLoop(listener)
 	m.setStartupPhase("worker")
-	lease, err := acquireGrokLaunchLease(m.paths, m.state.SessionID)
-	if err != nil {
+	if err := m.startWorker(); err != nil {
 		return err
-	}
-	m.launchLease = lease
-	record := grokLaunchRecord{
-		SessionID: m.state.SessionID, Cwd: m.state.Cwd, Name: m.state.Name,
-		PermissionMode: m.state.PermissionMode, TokenHash: m.state.LaunchTokenHash,
-		OwnerPID: os.Getpid(), OwnerProcStart: m.state.ManagerProcStart,
-		HostPID: os.Getpid(), HostProcStart: m.state.ManagerProcStart,
-		RuntimeDir: m.state.RuntimeDir, LeaderSocket: m.hostPaths.LeaderSocket,
-		ControlSocket: m.hostPaths.ControlSocket, StartedAt: time.Now().UnixMilli(),
-	}
-	if err := claimGrokLaunchRecord(m.paths, record); err != nil {
-		return fmt.Errorf("persist Grok lane ownership: %w", err)
-	}
-	if err := m.startWorker(&record); err != nil {
-		return err
-	}
-	if err := writeJSONAtomic(grokLaunchRecordPath(m.paths, m.state.SessionID), record); err != nil {
-		return fmt.Errorf("persist Grok lane worker ownership: %w", err)
 	}
 	m.setStartupPhase("acp")
 	ctx, cancel := context.WithTimeout(context.Background(), grokACPStartupTimeout)
@@ -331,7 +311,7 @@ func (m *grokLaneManager) start() error {
 }
 
 //nolint:gocyclo // Worker startup keeps process, ledger, ACP, and publication state in one fail-closed transaction.
-func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
+func (m *grokLaneManager) startWorker() error {
 	grokBin := strings.TrimSpace(os.Getenv("GROK_PEER_GROK_BIN"))
 	if grokBin == "" {
 		return errors.New("validated Grok Build executable is unavailable")
@@ -383,7 +363,6 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 		return errors.New("headless Grok lane worker did not establish an isolated process session")
 	}
 	m.state.WorkerSessionID = workerSessionID
-	record.LeaderPID, record.LeaderProcStart = m.state.WorkerPID, m.state.WorkerProcStart
 	err = m.persistLocked()
 	m.mu.Unlock()
 	if err != nil {
@@ -1390,10 +1369,6 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		}
 		if cleanupErr == nil {
 			cleanupErr = cleanupGrokLaneOwnedFiles(m.paths, cleanupState, os.Getpid(), cleanupRoots...)
-		}
-		if m.launchLease != nil {
-			_ = syscall.Flock(int(m.launchLease.Fd()), syscall.LOCK_UN)
-			_ = m.launchLease.Close()
 		}
 		if cleanupErr == nil {
 			m.mu.Lock()

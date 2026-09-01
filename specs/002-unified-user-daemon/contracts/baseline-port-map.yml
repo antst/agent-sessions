@@ -538,7 +538,7 @@ entries:
     new_owner: daemon Grok coordinator with only required stateless vendor helper
     new_symbols: []
     replacement_tests:
-      - internal/bridge/grok_test.go:TestGrokNativeTitleResumeAdoptsSelectedUUIDAndTitle
+      - internal/bridge/grok_roster_test.go:TestGrokProductRosterResolvesOneResidentSession
     acceptance_cells: [G-06, G-07, G-08, G-09, G-10, G-11, G-12, G-13, G-14, G-15, G-16, G-17, G-18, G-19, G-20, G-21]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#grok]
     deletion_paths: [internal/bridge/grok.go, internal/bridge/grok_diagnostics.go, internal/bridge/grok_process_unix.go, internal/bridge/grok_session_unix.go]

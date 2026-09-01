@@ -91,7 +91,7 @@ func Main() {
 		os.Exit(runGrokToolWrapper(os.Args[1:]))
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "agent-sessions requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok, grok-host, grok-plugin-verify, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, or grok-mcp")
+		fmt.Fprintln(os.Stderr, "agent-sessions requires bootstrap, shim, supervisor, appserver, lane, claude-lane, claude-lane-manager, grok-lane, grok-lane-manager, qwen-lane, qwen-lane-manager, grok-plugin-verify, qwen-plugin-install, qwen-plugin-remove, release-package, release-evidence, hook, mcp, or grok-mcp")
 		os.Exit(2)
 	}
 	if code, handled := runNativeLaneRole(os.Args[1], os.Args[2:]); handled {
@@ -110,10 +110,6 @@ func Main() {
 		os.Exit(runGrokLaneManager(os.Args[2:]))
 	case "qwen-lane-manager":
 		os.Exit(runQwenLaneManager(os.Args[2:]))
-	case "grok":
-		os.Exit(runGrokSafetyCommand(os.Args[2:]))
-	case "grok-host":
-		os.Exit(runGrokHostCommand(os.Args[2:]))
 	case "grok-plugin-verify":
 		os.Exit(runGrokPluginVerify(os.Args[2:]))
 	case "qwen-plugin-install":

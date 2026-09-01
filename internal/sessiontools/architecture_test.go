@@ -25,7 +25,6 @@ var frozenLegacyImporters = map[string]bool{
 	"cmd/agent-sessions/messaging.go":      true,
 	"cmd/agent-sessions/qwen_host.go":      true,
 	"internal/bridge/claude_lane.go":       true,
-	"internal/bridge/grok.go":              true,
 	"internal/bridge/group_context.go":     true,
 	"internal/bridge/lane.go":              true,
 	"internal/bridge/mcp.go":               true,

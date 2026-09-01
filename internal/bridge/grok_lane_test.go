@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -539,7 +538,7 @@ func TestGrokLaneMaintenanceRetriesTerminalNotice(t *testing.T) {
 	}
 }
 
-func TestCleanupGrokLanePreservesReusedPIDBackendAndRejectsMalformedOwnership(t *testing.T) {
+func TestCleanupGrokLanePreservesReusedPIDBackend(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
@@ -562,18 +561,6 @@ func TestCleanupGrokLanePreservesReusedPIDBackendAndRejectsMalformedOwnership(t 
 	}
 	if body, err := os.ReadFile(backend); err != nil || string(body) != "unrelated reused-pid owner" {
 		t.Fatalf("reused PID backend was changed: %q, %v", body, err)
-	}
-
-	state.SessionID = randomID()
-	launchPath := grokLaunchRecordPath(paths, state.SessionID)
-	if err := os.MkdirAll(filepath.Dir(launchPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(launchPath, []byte("not-json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := cleanupGrokLaneOwnedFiles(paths, state, 0); err == nil || !strings.Contains(err.Error(), "launch ownership remains") {
-		t.Fatalf("malformed launch cleanup error = %v", err)
 	}
 }
 
@@ -718,17 +705,6 @@ func TestStopGrokTaggedProcessesRemovesDetachedLaunchChildren(t *testing.T) {
 			t.Fatalf("tagged Grok members = %+v; want parent %d and detached child %d", members, pid, childPID)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	state := grokLaneState{
-		Type: "grok-peer-lane", Name: "tagged-install-inventory", SessionID: randomID(), Status: "archived",
-		LaunchTokenHash: tokenHash, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli(),
-	}
-	paths := resolveNativePaths()
-	if err := writeGrokLaneState(paths, state); err != nil {
-		t.Fatal(err)
-	}
-	if live, err := activeGrokLaunchSessions(paths); err != nil || !reflect.DeepEqual(live, []string{state.SessionID}) {
-		t.Fatalf("tagged Grok install inventory = %v, %v", live, err)
 	}
 	if err := stopGrokTaggedProcesses(tokenHash, 0, workerRoot); err != nil {
 		t.Fatal(err)
@@ -972,10 +948,6 @@ func TestGrokLaneManagerLifecycleAndPeerWake(t *testing.T) {
 	if _, err := os.Lstat(hostPaths.ControlSocket); !os.IsNotExist(err) {
 		t.Fatalf("Grok lane control socket survived archive: %v", err)
 	}
-	if record := readGrokLaunchRecord(grokLaunchRecordPath(paths, sessionID)); record != nil {
-		t.Fatalf("Grok lane launch record survived archive: %+v", record)
-	}
-
 	resumedToken := randomID() + randomID()
 	resumedPaths := grokRuntimePaths(paths.runtimeDir, os.Getuid(), resumedToken)
 	resumed := archived

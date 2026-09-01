@@ -711,9 +711,6 @@ func grokLaneHasOwnedResidue(paths nativePaths, state grokLaneState) bool {
 		state.ControlSocket != "" || state.MessagingSocket != "" {
 		return true
 	}
-	if grokLanePathMayExist(grokLaunchRecordPath(paths, state.SessionID)) {
-		return true
-	}
 	runtimeDir := defaultString(state.RuntimeDir, paths.runtimeDir)
 	runtimeRoot := bridgeRuntimeRoot(runtimeDir, os.Getuid())
 	stable := filepath.Join(runtimeRoot, "session-"+sessionKey(state.SessionID)+".sock")
@@ -1205,9 +1202,6 @@ func cleanupGrokLaneOwnedFiles(paths nativePaths, state grokLaneState, currentMa
 			safeBackendRemoval = false
 		}
 	}
-	removeJSONIf(grokLaunchRecordPath(paths, state.SessionID), func(row map[string]any) bool {
-		return stringValue(row["tokenHash"]) == state.LaunchTokenHash && stringValue(row["sessionId"]) == state.SessionID
-	})
 	if err := dropGrokLaneInbox(paths, state.SessionID); err != nil {
 		return err
 	}
@@ -1253,9 +1247,6 @@ func cleanupGrokLaneOwnedFiles(paths nativePaths, state grokLaneState, currentMa
 }
 
 func verifyGrokLaneCleanup(paths nativePaths, state grokLaneState, requireBackendAbsent bool, backend string) error {
-	if _, err := os.Lstat(grokLaunchRecordPath(paths, state.SessionID)); err == nil || !os.IsNotExist(err) {
-		return errors.New("grok lane launch ownership remains")
-	}
 	if grokLaneRegistryResidue(paths, state.SessionID) {
 		return errors.New("grok lane registry publication remains")
 	}

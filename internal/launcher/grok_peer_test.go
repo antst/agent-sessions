@@ -201,27 +201,6 @@ func TestGrokPeerTitleResumePreservesNativeSelectorAndHostContext(t *testing.T) 
 	if !slices.Contains(managed, "test") || slices.Contains(managed, plan.sessionID) {
 		t.Fatalf("native title selector was rewritten: %q", managed)
 	}
-	request := grokHostRequest{
-		SessionID: plan.sessionID, Cwd: root, OwnerPID: 42, OwnerProcStart: "start",
-		PermissionMode: plan.permissionMode, GrokBin: "/bin/grok", AgentRuntimeDir: "/run/agent",
-		LateBoundResume: true, PeerContext: plan.peerContext, YoloSpecified: plan.permissionSpecified,
-	}
-	hostArgs := grokHostArguments(request)
-	wantPairs := [][]string{{"--late-bound-resume"}, {"--groups-json", `["umka"]`}, {"--groups-specified=true"}}
-	for _, want := range wantPairs {
-		if !containsArgumentSequence(hostArgs, want) {
-			t.Fatalf("host args %q do not contain %q", hostArgs, want)
-		}
-	}
-}
-
-func containsArgumentSequence(args, sequence []string) bool {
-	for index := 0; index+len(sequence) <= len(args); index++ {
-		if slices.Equal(args[index:index+len(sequence)], sequence) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestGrokPeerPermissionPublicationUsesLastPolicyOption(t *testing.T) {
@@ -275,56 +254,6 @@ func TestGrokPeerCwdIsCanonicalButNativeArgvIsUntouched(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.interactiveArgs, args) {
 		t.Fatalf("cwd inspection rewrote argv: %q", plan.interactiveArgs)
-	}
-}
-
-func TestGrokHostContractAndReadinessValidation(t *testing.T) {
-	root := t.TempDir()
-	request := grokHostRequest{
-		SessionID: testGrokSessionID, Cwd: root, Name: "reviewer", NameSpecified: true, OwnerPID: 42,
-		OwnerProcStart: "start-token", LaunchToken: "secret-token",
-		PermissionMode: "bypassPermissions", GrokBin: "/opt/grok/bin/grok",
-	}
-	got := grokHostArguments(request)
-	want := []string{
-		"grok-host", "--session-id", testGrokSessionID, "--cwd", root,
-		"--owner-pid", "42", "--owner-proc-start", "start-token",
-		"--permission-mode", "bypassPermissions", "--grok-bin", "/opt/grok/bin/grok",
-		"--name-specified=true", "--name", "reviewer",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("host args = %q, want %q", got, want)
-	}
-	if strings.Contains(strings.Join(got, " "), request.LaunchToken) {
-		t.Fatal("launch token leaked into process argv")
-	}
-	line := `{"ready":true,"session_id":"` + testGrokSessionID + `","cwd":"` + root + `","leader_socket":"` + filepath.Join(root, "leader.sock") + `","control_socket":"` + filepath.Join(root, "control.sock") + `"}`
-	ready, err := parseGrokHostReady(line, request)
-	if err != nil || ready.SessionID != testGrokSessionID {
-		t.Fatalf("readiness = %+v, %v", ready, err)
-	}
-	for _, bad := range []string{
-		`{"ready":false,"session_id":"` + testGrokSessionID + `","cwd":"` + root + `","leader_socket":"/tmp/a","control_socket":"/tmp/b"}`,
-		`{"ready":true,"session_id":"00000000-0000-4000-8000-000000000000","cwd":"` + root + `","leader_socket":"/tmp/a","control_socket":"/tmp/b"}`,
-		`{"ready":true,"session_id":"` + testGrokSessionID + `","cwd":"` + root + `","leader_socket":"relative","control_socket":"/tmp/b"}`,
-	} {
-		if _, err := parseGrokHostReady(bad, request); err == nil {
-			t.Fatalf("accepted readiness %s", bad)
-		}
-	}
-}
-
-func TestGrokLaunchEnvironmentReplacesInheritedAuthority(t *testing.T) {
-	got := replaceGrokLaunchEnvironment([]string{
-		"PATH=/bin", grokLaunchTokenEnv + "=stale", grokSessionIDEnv + "=stale",
-		"GROK_PEER_NATIVE_RUNTIME=/stale/runtime", "KEEP=yes",
-	}, "fresh-token", testGrokSessionID, "/exact/runtime")
-	want := []string{
-		"PATH=/bin", "KEEP=yes", grokLaunchTokenEnv + "=fresh-token", grokSessionIDEnv + "=" + testGrokSessionID,
-		"GROK_PEER_NATIVE_RUNTIME=/exact/runtime",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("environment = %q, want %q", got, want)
 	}
 }
 
@@ -475,21 +404,6 @@ func TestGrokExecutableRejectsMacOSAppBundleBeforeProbe(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestGrokRuntimeSelectionDoesNotRequireCodex(t *testing.T) {
-	root := t.TempDir()
-	runtimePath := filepath.Join(root, "agent-session-runtime")
-	if err := os.WriteFile(runtimePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GROK_PEER_NATIVE_RUNTIME", runtimePath)
-	t.Setenv("CODEX_PEER_NATIVE_RUNTIME", filepath.Join(root, "must-not-win"))
-	t.Setenv("CODEX_PEER_CODEX_BIN", filepath.Join(root, "absent-codex"))
-	got, err := grokRuntimeExecutable()
-	if err != nil || got != runtimePath {
-		t.Fatalf("Grok runtime = %q, %v; want %q without Codex", got, err, runtimePath)
 	}
 }
 

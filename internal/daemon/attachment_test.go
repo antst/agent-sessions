@@ -102,3 +102,33 @@ func TestAttachmentFailuresDoNotCreatePersistentRecoveryState(t *testing.T) {
 		t.Fatalf("failed prepare remained live: %+v", active)
 	}
 }
+
+func TestAttachmentSelectsProductResolvedNativeSession(t *testing.T) {
+	engine, err := NewAttachmentEngine(1, map[string]AttachmentAdapter{"grok": {
+		Prepare: func(context.Context, ManagedAttachment) (NativeEvidence, error) {
+			return NativeEvidence{ThreadID: "provisional"}, nil
+		},
+		Adopt: func(_ context.Context, attachment ManagedAttachment, evidence NativeEvidence) (NativeEvidence, error) {
+			if attachment.NativeSessionID != "11111111-1111-4111-8111-111111111111" {
+				t.Fatalf("selected native session = %q", attachment.NativeSessionID)
+			}
+			return evidence, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Prepare(context.Background(), ManagedAttachment{
+		ID: "provisional", CapabilityHash: "cap", Product: "grok", ProfileIdentity: "profile",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selected := "11111111-1111-4111-8111-111111111111"
+	if _, err := engine.SelectNative("provisional", selected, "/work", "default"); err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := engine.Adopt(context.Background(), "provisional", NativeEvidence{ThreadID: selected})
+	if err != nil || adopted.NativeSessionID != selected || adopted.State != "attached" {
+		t.Fatalf("adopted = %+v, %v", adopted, err)
+	}
+}

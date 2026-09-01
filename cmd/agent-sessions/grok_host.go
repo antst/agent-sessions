@@ -118,9 +118,13 @@ func (c *hostCoordinator) prepareGrok(
 		_ = stopGrokLeader(pending)
 		return launcher.GrokDaemonPrepareResult{}, err
 	}
+	nativeSessionID := request.SessionID
+	if request.LateBoundResume {
+		nativeSessionID = ""
+	}
 	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
 		ID: request.SessionID, CapabilityHash: daemonpkg.CapabilityDigest(capability), Product: "grok",
-		ProfileIdentity: grokProfileRoot(), NativeSessionID: request.SessionID,
+		ProfileIdentity: grokProfileRoot(), NativeSessionID: nativeSessionID,
 		Cwd: request.Cwd, Groups: append([]string(nil), request.Groups...), PermissionMode: request.PermissionMode,
 	})
 	if err != nil {
@@ -201,6 +205,11 @@ func (c *hostCoordinator) startGrokOwnerMonitor(runtime *daemonpkg.Runtime, id s
 					continue
 				}
 				if !pending.adopted {
+					if pending.request.LateBoundResume {
+						if err := c.selectGrokNativeSession(runtime, id, pending); err != nil {
+							continue
+						}
+					}
 					if _, err := runtime.Attachments().Adopt(context.Background(), id, grokEvidence(pending)); err != nil {
 						return
 					}
@@ -217,6 +226,39 @@ func (c *hostCoordinator) startGrokOwnerMonitor(runtime *daemonpkg.Runtime, id s
 			}
 		}
 	}()
+}
+
+func (c *hostCoordinator) selectGrokNativeSession(
+	runtime *daemonpkg.Runtime,
+	id string,
+	pending *grokPending,
+) error {
+	environment := envutil.Set(os.Environ(), "AGENT_SESSIONS_PRODUCT", "grok")
+	environment = envutil.Set(environment, "AGENT_SESSIONS_SESSION_ID", pending.request.SessionID)
+	observer, selectedID, err := bridge.OpenGrokNativeSelectionObserver(
+		c.ctx, pending.request.GrokBin, pending.request.Cwd, pending.leaderSocket,
+		pending.request.SessionID, environment, pending.diagnostics,
+	)
+	if err != nil {
+		return err
+	}
+	if _, err := runtime.Attachments().SelectNative(
+		id, selectedID, pending.request.Cwd, pending.request.PermissionMode,
+	); err != nil {
+		observer.Close()
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.grokPending[id]
+	if current != pending || current.observer != nil {
+		observer.Close()
+		return errors.New("grok native selection was superseded")
+	}
+	current.request.SessionID = selectedID
+	current.request.LateBoundResume = false
+	current.observer = observer
+	return nil
 }
 
 func (c *hostCoordinator) observeDurableGrokNativeName(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) {

@@ -26,8 +26,31 @@ func OpenGrokNativeObserver(
 	environment []string,
 	diagnostics io.Writer,
 ) (*GrokNativeObserver, error) {
+	observer, _, err := openGrokNativeObserver(ctx, bin, cwd, leaderSocket, sessionID, false, environment, diagnostics)
+	return observer, err
+}
+
+// OpenGrokNativeSelectionObserver asks the product which resident session a
+// native --resume selector opened. The provisional ID only scopes the launch;
+// the returned UUID comes from Grok's live session roster.
+func OpenGrokNativeSelectionObserver(
+	ctx context.Context,
+	bin, cwd, leaderSocket, provisionalID string,
+	environment []string,
+	diagnostics io.Writer,
+) (*GrokNativeObserver, string, error) {
+	return openGrokNativeObserver(ctx, bin, cwd, leaderSocket, provisionalID, true, environment, diagnostics)
+}
+
+func openGrokNativeObserver(
+	ctx context.Context,
+	bin, cwd, leaderSocket, sessionID string,
+	selectResident bool,
+	environment []string,
+	diagnostics io.Writer,
+) (*GrokNativeObserver, string, error) {
 	if ctx == nil || !validSessionID(sessionID) || !strings.HasPrefix(leaderSocket, "/") {
-		return nil, errors.New("invalid Grok ACP observer identity")
+		return nil, "", errors.New("invalid Grok ACP observer identity")
 	}
 	command := exec.CommandContext(ctx, bin, //nolint:gosec // Exact native binary is selected and validated by the daemon preparation.
 		"--no-auto-update", "--permission-mode", "default",
@@ -41,20 +64,20 @@ func OpenGrokNativeObserver(
 	command.Stderr = diagnostics
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	process, err := startGrokManagedProcess(command, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	client := newGrokACPClient(process, stdin, stdout, sessionID, 1, make(chan grokRosterState, 4))
-	fail := func(cause error) error {
+	fail := func(cause error) (*GrokNativeObserver, string, error) {
 		client.close()
-		return cause
+		return nil, "", cause
 	}
 	handshake, cancel := context.WithTimeout(ctx, grokACPStartupTimeout)
 	defer cancel()
@@ -65,24 +88,30 @@ func OpenGrokNativeObserver(
 		},
 	})
 	if err != nil {
-		return nil, fail(err)
+		return fail(err)
 	}
 	if !grokCachedTokenAdvertised(initialized) {
-		return nil, fail(errors.New("grok ACP cached_token authentication is unavailable"))
+		return fail(errors.New("grok ACP cached_token authentication is unavailable"))
 	}
 	if _, err := client.request(handshake, "authenticate", map[string]any{
 		"methodId": "cached_token", "_meta": map[string]any{"headless": true},
 	}); err != nil {
-		return nil, fail(err)
+		return fail(err)
 	}
 	roster, err := client.request(handshake, "_x.ai/sessions/list", map[string]any{})
 	if err != nil {
-		return nil, fail(err)
+		return fail(err)
 	}
-	if _, err := grokRosterStateFromResponse(roster, sessionID); err != nil {
-		return nil, fail(err)
+	selectedID := sessionID
+	if selectResident {
+		selectedID, _, err = grokSelectedResidentSession(roster)
+	} else {
+		_, err = grokRosterStateFromResponse(roster, sessionID)
 	}
-	return &GrokNativeObserver{client: client, sessionID: sessionID}, nil
+	if err != nil {
+		return fail(err)
+	}
+	return &GrokNativeObserver{client: client, sessionID: selectedID}, selectedID, nil
 }
 
 // Interject delivers exactly one immutable message to the resident actor.

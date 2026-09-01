@@ -1,14 +1,11 @@
 package launcher
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -26,7 +22,6 @@ const (
 	grokLaunchTokenEnv = "AGENT_SESSIONS_GROK_LAUNCH_TOKEN"
 	grokSessionIDEnv   = "AGENT_SESSIONS_GROK_SESSION_ID"
 	grokProbeTimeout   = 5 * time.Second
-	grokReadyTimeout   = 15 * time.Second
 )
 
 type grokMode string
@@ -70,22 +65,6 @@ type grokPlan struct {
 	informationalPass   bool
 }
 
-type grokHostRequest struct {
-	SessionID       string
-	Cwd             string
-	Name            string
-	OwnerPID        int
-	OwnerProcStart  string
-	LaunchToken     string
-	PermissionMode  string
-	GrokBin         string
-	AgentRuntimeDir string
-	LateBoundResume bool
-	NameSpecified   bool
-	PeerContext     peerLaunchContext
-	YoloSpecified   bool
-}
-
 type grokHostReady struct {
 	Ready         bool   `json:"ready"`
 	SessionID     string `json:"session_id"`
@@ -93,13 +72,6 @@ type grokHostReady struct {
 	LeaderSocket  string `json:"leader_socket"`
 	ControlSocket string `json:"control_socket"`
 }
-
-type grokHostProcess struct {
-	ready   grokHostReady
-	process *os.Process
-}
-
-type grokHostStarter func(runtimePath string, request grokHostRequest) (grokHostProcess, error)
 
 // GrokDaemonPrepareRequest is the exact parsed intent submitted before the
 // terminal client replaces itself with Grok. The unified daemon owns the
@@ -195,83 +167,6 @@ func RunGrokPeerWithDaemon(ctx context.Context, args []string, prepare GrokDaemo
 	})
 	environment := replaceGrokDaemonLaunchEnvironment(os.Environ(), launchToken, result.SessionID)
 	return Exec(grok, managed, environment)
-}
-
-// RunGrokPeer starts an owner-attested Grok TUI backed by its own leader and
-// ACP waker host. Native informational and administrative commands pass
-// through without starting the shared Agent Sessions runtime.
-func RunGrokPeer(args []string) error {
-	return runGrokPeer(args, startGrokHost)
-}
-
-//nolint:gocyclo // Parse, preference, ownership, host-readiness, exec, and rollback failures require distinct diagnostics.
-func runGrokPeer(args []string, startHost grokHostStarter) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("resolve working directory: %w", err)
-	}
-	plan, err := parseGrokPeerArgs(args, cwd)
-	if err != nil {
-		return err
-	}
-	grok, err := grokExecutable()
-	if err != nil {
-		return err
-	}
-	if plan.mode == grokModePassthrough || plan.informationalPass {
-		return Exec(grok, plan.originalArgs, nil)
-	}
-	runtimePath, err := grokRuntimeExecutable()
-	if err != nil {
-		return err
-	}
-	if !plan.lateBoundResume {
-		resolved, resolveErr := resolvePeerLaunchContext(
-			plan.sessionID, "grok", plan.peerContext,
-			plan.permissionMode == "bypassPermissions", plan.permissionSpecified,
-		)
-		if resolveErr != nil {
-			return fmt.Errorf("resolve Agent Sessions peer preferences: %w", resolveErr)
-		}
-		if resolved.Preference.AlwaysApprove && plan.permissionMode != "bypassPermissions" {
-			plan.permissionMode = "bypassPermissions"
-			plan.interactiveArgs = append(plan.interactiveArgs, "--always-approve")
-		}
-	}
-	ownerPID := os.Getpid()
-	ownerStart, err := capture(runtimePath, "launch", "proc-start", strconv.Itoa(ownerPID))
-	if err != nil {
-		return fmt.Errorf("capture launcher process identity: %w", err)
-	}
-	launchToken, err := randomHex(32)
-	if err != nil {
-		return fmt.Errorf("generate Grok launch token: %w", err)
-	}
-	request := grokHostRequest{
-		SessionID: plan.sessionID, Cwd: plan.requestedCwd, Name: plan.peerName,
-		OwnerPID: ownerPID, OwnerProcStart: strings.TrimSpace(ownerStart),
-		LaunchToken: launchToken, PermissionMode: plan.permissionMode, GrokBin: grok,
-		AgentRuntimeDir: agentRuntimeDir(), LateBoundResume: plan.lateBoundResume,
-		NameSpecified: plan.peerName != "",
-		PeerContext:   plan.peerContext, YoloSpecified: plan.permissionSpecified,
-	}
-	if request.Name == "" && plan.lateBoundResume {
-		request.Name = plan.resumeTarget
-	}
-	host, err := startHost(runtimePath, request)
-	if err != nil {
-		return err
-	}
-	managed := grokInteractiveArguments(plan, host.ready)
-	environment := replaceGrokLaunchEnvironment(os.Environ(), launchToken, plan.sessionID, runtimePath)
-	environment = peerEnvironment(environment, plan.sessionID, "grok")
-	if err := Exec(grok, managed, environment); err != nil {
-		if host.process != nil {
-			_ = host.process.Kill()
-		}
-		return err
-	}
-	return nil
 }
 
 //nolint:gocyclo // CLI parsing preserves Grok arguments while extracting the shared peer layer.
@@ -653,50 +548,6 @@ func grokExecutable() (string, error) {
 	return "", &ExitError{Code: 127, Err: fmt.Errorf("no valid Grok CLI was found; rejected: %s", strings.Join(rejected, ", "))}
 }
 
-// grokRuntimeExecutable locates this installation's native runtime without
-// bootstrapping Codex App Server or the Codex supervisor. Grok owns its own
-// private leader lifecycle and must remain usable on a host without Codex.
-func grokRuntimeExecutable() (string, error) {
-	if err := ensureCodexHome(); err != nil {
-		return "", err
-	}
-	runtimePath := strings.TrimSpace(os.Getenv("GROK_PEER_NATIVE_RUNTIME"))
-	if runtimePath == "" {
-		runtimePath = strings.TrimSpace(os.Getenv("CODEX_PEER_NATIVE_RUNTIME"))
-	}
-	if runtimePath == "" {
-		pluginRoot := strings.TrimSpace(os.Getenv("GROK_PEER_PLUGIN_ROOT"))
-		if pluginRoot == "" {
-			pluginRoot = strings.TrimSpace(os.Getenv("CODEX_PEER_PLUGIN_ROOT"))
-		}
-		if pluginRoot == "" {
-			executable, err := os.Executable()
-			if err != nil {
-				return "", fmt.Errorf("resolve Grok launcher executable: %w", err)
-			}
-			executable, err = filepath.EvalSymlinks(executable)
-			if err != nil {
-				return "", fmt.Errorf("resolve Grok launcher symlink: %w", err)
-			}
-			pluginRoot = filepath.Clean(filepath.Join(filepath.Dir(executable), "..", ".."))
-		}
-		platform, err := platformKey()
-		if err != nil {
-			return "", err
-		}
-		runtimePath = filepath.Join(pluginRoot, "bin", platform, "agent-sessions")
-	}
-	absolute, err := filepath.Abs(runtimePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve native runtime: %w", err)
-	}
-	info, err := os.Stat(absolute)
-	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("native runtime is unavailable: %s", absolute)
-	}
-	return absolute, nil
-}
-
 func grokExecutableCandidates() []string {
 	seen := make(map[string]struct{})
 	var candidates []string
@@ -859,92 +710,6 @@ func pathInsideMacOSAppContents(path string) bool {
 	return false
 }
 
-func startGrokHost(runtimePath string, request grokHostRequest) (grokHostProcess, error) {
-	command := exec.Command(runtimePath, grokHostArguments(request)...) //nolint:gosec // runtimePath is the validated native runtime from this Agent Sessions install.
-	// The launcher is about to exec into the interactive Grok TUI. Keep the
-	// cleanup watchdog outside that TUI's foreground process group so a normal
-	// /quit cannot terminate it before it removes the private leader and durable
-	// launch ownership. The host still observes the exact owner PID/start token
-	// and exits as soon as that exec-preserved owner disappears.
-	configureGrokHostProcess(command)
-	command.Env = replaceGrokLaunchEnvironment(os.Environ(), request.LaunchToken, request.SessionID, runtimePath)
-	command.Env = envutil.Set(command.Env, agentRuntimeDirEnv, request.AgentRuntimeDir)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return grokHostProcess{}, fmt.Errorf("capture Grok host readiness: %w", err)
-	}
-	command.Stderr = os.Stderr
-	if err := command.Start(); err != nil {
-		return grokHostProcess{}, fmt.Errorf("start Grok native host: %w", err)
-	}
-	reader := bufio.NewReader(stdout)
-	type readResult struct {
-		line string
-		err  error
-	}
-	readiness := make(chan readResult, 1)
-	go func() {
-		line, readErr := reader.ReadString('\n')
-		readiness <- readResult{line: line, err: readErr}
-	}()
-	timer := time.NewTimer(grokReadyTimeout)
-	defer timer.Stop()
-	var result readResult
-	select {
-	case result = <-readiness:
-	case <-timer.C:
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return grokHostProcess{}, errors.New("grok native host did not become ready")
-	}
-	if result.err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return grokHostProcess{}, fmt.Errorf("read Grok native host readiness: %w", result.err)
-	}
-	ready, err := parseGrokHostReady(result.line, request)
-	if err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return grokHostProcess{}, err
-	}
-	go func() {
-		_, _ = io.Copy(io.Discard, reader)
-		_ = command.Wait()
-	}()
-	return grokHostProcess{ready: ready, process: command.Process}, nil
-}
-
-func grokHostArguments(request grokHostRequest) []string {
-	args := []string{
-		"grok-host", "--session-id", request.SessionID, "--cwd", request.Cwd,
-		"--owner-pid", strconv.Itoa(request.OwnerPID), "--owner-proc-start", request.OwnerProcStart,
-		"--permission-mode", request.PermissionMode, "--grok-bin", request.GrokBin,
-	}
-	if request.AgentRuntimeDir != "" {
-		args = append(args, "--agent-runtime-dir", request.AgentRuntimeDir)
-	}
-	if request.LateBoundResume {
-		args = append(args, "--late-bound-resume")
-		groupsJSON, _ := json.Marshal(request.PeerContext.groups)
-		args = append(args,
-			"--groups-json", string(groupsJSON),
-			"--groups-specified="+boolString(request.PeerContext.groupsSpecified),
-			"--parent-session", request.PeerContext.parentSession,
-			"--parent-specified="+boolString(request.PeerContext.parentSpecified),
-			"--inherit-parent-groups="+boolString(request.PeerContext.inheritParentGroups),
-			"--inherit-groups-specified="+boolString(request.PeerContext.inheritGroupsSpecified),
-			"--always-approve="+boolString(request.PermissionMode == "bypassPermissions"),
-			"--always-approve-specified="+boolString(request.YoloSpecified),
-		)
-	}
-	args = append(args, "--name-specified="+boolString(request.NameSpecified))
-	if request.Name != "" {
-		args = append(args, "--name", request.Name)
-	}
-	return args
-}
-
 func grokInteractiveArguments(plan grokPlan, ready grokHostReady) []string {
 	managed := []string{"--leader", "--leader-socket", ready.LeaderSocket, "--sandbox", "off"}
 	if plan.mode == grokModeFresh {
@@ -960,20 +725,6 @@ func grokInteractiveArguments(plan grokPlan, ready grokHostReady) []string {
 		}
 	}
 	return append(managed, plan.interactiveArgs...)
-}
-
-func parseGrokHostReady(line string, request grokHostRequest) (grokHostReady, error) {
-	var ready grokHostReady
-	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &ready); err != nil {
-		return grokHostReady{}, fmt.Errorf("decode Grok native host readiness: %w", err)
-	}
-	if !ready.Ready || ready.SessionID != request.SessionID || ready.Cwd != request.Cwd {
-		return grokHostReady{}, errors.New("grok native host returned mismatched readiness identity")
-	}
-	if !filepath.IsAbs(ready.LeaderSocket) || !filepath.IsAbs(ready.ControlSocket) {
-		return grokHostReady{}, errors.New("grok native host returned invalid socket paths")
-	}
-	return ready, nil
 }
 
 func newGrokSessionID() (string, error) {
@@ -993,18 +744,6 @@ func randomHex(bytes int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value), nil
-}
-
-func replaceGrokLaunchEnvironment(environment []string, token, sessionID, runtimePath string) []string {
-	prefixes := []string{grokLaunchTokenEnv + "=", grokSessionIDEnv + "=", "GROK_PEER_NATIVE_RUNTIME="}
-	updated := make([]string, 0, len(environment)+3)
-	for _, entry := range environment {
-		if strings.HasPrefix(entry, prefixes[0]) || strings.HasPrefix(entry, prefixes[1]) || strings.HasPrefix(entry, prefixes[2]) {
-			continue
-		}
-		updated = append(updated, entry)
-	}
-	return append(updated, prefixes[0]+token, prefixes[1]+sessionID, prefixes[2]+runtimePath)
 }
 
 func replaceGrokDaemonLaunchEnvironment(environment []string, token, sessionID string) []string {
