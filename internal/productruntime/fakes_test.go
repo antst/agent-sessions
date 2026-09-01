@@ -18,6 +18,12 @@ func (fakePeerDriver) Rename(context.Context, daemon.ManagedAttachment, string) 
 	return NativeName{}, nil
 }
 
+type fakeUnsupportedRenamePeerDriver struct{ fakePeerDriver }
+
+func (fakeUnsupportedRenamePeerDriver) Rename(context.Context, daemon.ManagedAttachment, string) (NativeName, error) {
+	return NativeName{}, ErrUnsupportedRename
+}
+
 type fakeMessageDriver struct{}
 
 func (fakeMessageDriver) Deliver(context.Context, daemon.ManagedAttachment, DeliveryRequest) (NativeAcceptance, error) {

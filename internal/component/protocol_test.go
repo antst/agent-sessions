@@ -39,14 +39,19 @@ func TestDecodeFrameV1AcceptsAdditiveFieldsAndRejectsUnknownAuthority(t *testing
 
 func TestProtocolPayloadValidation(t *testing.T) {
 	valid := map[FrameType]any{
-		TypeBootstrap:      BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: "raw-secret", ProcessStart: "10", StrongStart: "10", ComponentVersion: "1.2.3"},
-		TypeReconnect:      ReconnectClaim{AttachmentID: "attachment", PriorBindingID: "binding-old", PriorGeneration: 4, ProcessStart: "10", StrongStart: "10", LastReceivedSeq: 9},
-		TypeHeartbeat:      Heartbeat{BindingID: "binding", LastReceivedSeq: 2},
-		TypeDeliveryAccept: DeliveryAccept{DeliveryID: "delivery", NativeSessionID: "native", NativeMessageID: "message", AcceptedAt: 1},
-		TypeToolCall:       ToolCall{CallID: "call", Operation: "sessions.send", Arguments: json.RawMessage(`{"target":"peer"}`)},
+		TypeBootstrap:            BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: "raw-secret", ProcessStart: "10", StrongStart: "10", ComponentVersion: ContractRevision},
+		TypeReconnect:            ReconnectClaim{AttachmentID: "attachment", PriorBindingID: "binding-old", PriorGeneration: 4, ProcessStart: "10", StrongStart: "10", LastReceivedSeq: 9},
+		TypeHeartbeat:            Heartbeat{BindingID: "binding", LastReceivedSeq: 2},
+		TypeDeliveryAccept:       DeliveryAccept{DeliveryID: "delivery", NativeSessionID: "native", NativeMessageID: "message", AcceptedAt: 1},
+		TypeToolCall:             ToolCall{CallID: "call", Operation: "sessions.send", Arguments: json.RawMessage(`{"target":"peer"}`)},
+		TypeSessionRenameRequest: SessionRenameRequest{NativeSessionID: "native", RequestedName: "new title"},
 	}
 	for frameType, payload := range valid {
-		frame, err := NewFrame(frameType, "operation", 1, payload)
+		operationID := "operation"
+		if frameType == TypeSessionRenameRequest {
+			operationID = DaemonRenameOperationPrefix + "operation"
+		}
+		frame, err := NewFrame(frameType, operationID, 1, payload)
 		if err != nil {
 			t.Fatalf("NewFrame(%s): %v", frameType, err)
 		}
@@ -54,13 +59,139 @@ func TestProtocolPayloadValidation(t *testing.T) {
 			t.Fatalf("ValidatePayload(%s): %v", frameType, err)
 		}
 	}
+	for _, test := range []struct {
+		name    string
+		payload any
+	}{
+		{name: "bootstrap", payload: BootstrapClaim{
+			ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability",
+			BootstrapValue: "raw-secret", ComponentVersion: ContractRevision,
+		}},
+		{name: "reconnect", payload: ReconnectClaim{
+			AttachmentID: "attachment", PriorBindingID: "binding-old", PriorGeneration: 4, LastReceivedSeq: 9,
+		}},
+	} {
+		t.Run(test.name+" omitted process corroboration", func(t *testing.T) {
+			frameType := TypeBootstrap
+			if test.name == "reconnect" {
+				frameType = TypeReconnect
+			}
+			frame, err := NewFrame(frameType, "operation", 1, test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(frame.Payload), "process_start") || strings.Contains(string(frame.Payload), "strong_start") {
+				t.Fatalf("omitted process corroboration was serialized: %s", frame.Payload)
+			}
+			if err := ValidatePayload(frame); err != nil {
+				t.Fatalf("omitted process corroboration: %v", err)
+			}
+		})
+	}
 
-	frame, err := NewFrame(TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: "secret", ProcessStart: "10"})
+	for _, test := range []struct {
+		name      string
+		frameType FrameType
+		payload   any
+	}{
+		{name: "bootstrap process-start only", frameType: TypeBootstrap, payload: BootstrapClaim{
+			ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability",
+			BootstrapValue: "secret", ProcessStart: "10", ComponentVersion: ContractRevision,
+		}},
+		{name: "bootstrap strong-start only", frameType: TypeBootstrap, payload: BootstrapClaim{
+			ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability",
+			BootstrapValue: "secret", StrongStart: "strong", ComponentVersion: ContractRevision,
+		}},
+		{name: "reconnect process-start only", frameType: TypeReconnect, payload: ReconnectClaim{
+			AttachmentID: "attachment", PriorBindingID: "binding-old", PriorGeneration: 4, ProcessStart: "10",
+		}},
+		{name: "reconnect strong-start only", frameType: TypeReconnect, payload: ReconnectClaim{
+			AttachmentID: "attachment", PriorBindingID: "binding-old", PriorGeneration: 4, StrongStart: "strong",
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame, err := NewFrame(test.frameType, "operation", 1, test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidatePayload(frame); err == nil {
+				t.Fatal("partial process corroboration was accepted")
+			}
+		})
+	}
+}
+
+func TestRenameFrameNamespacesAndContractRevision(t *testing.T) {
+	if ProtocolVersion != 1 || ContractRevision != "agent-sessions.component.v1-r1" {
+		t.Fatalf("component contract = wire %d / %q", ProtocolVersion, ContractRevision)
+	}
+	if err := ValidateContractRevision(ContractRevision); err != nil {
+		t.Fatalf("ValidateContractRevision(current): %v", err)
+	}
+	if err := ValidateContractRevision("agent-sessions.component.v1-r0"); err == nil {
+		t.Fatal("doctor seam accepted a mismatched pinned component contract")
+	}
+	if len(knownFrameTypes) != 21 {
+		t.Fatalf("frozen component frame vocabulary = %d, want 21", len(knownFrameTypes))
+	}
+	daemonID, err := DaemonRenameOperationID("stable-operation")
+	if err != nil || daemonID != DaemonRenameOperationPrefix+"stable-operation" {
+		t.Fatalf("DaemonRenameOperationID = %q / %v", daemonID, err)
+	}
+	observationID, err := ComponentRenameObservationID("native-event")
+	if err != nil || observationID != ComponentRenameObservationPrefix+"native-event" {
+		t.Fatalf("ComponentRenameObservationID = %q / %v", observationID, err)
+	}
+	if _, err := DaemonRenameOperationID(observationID); err == nil {
+		t.Fatal("daemon rename helper accepted a component namespace collision")
+	}
+	requests := []struct {
+		id    string
+		valid bool
+	}{
+		{DaemonRenameOperationPrefix + "stable-operation", true},
+		{ComponentRenameObservationPrefix + "native-event", false},
+		{"rename-without-namespace", false},
+	}
+	for _, candidate := range requests {
+		frame, err := NewFrame(TypeSessionRenameRequest, candidate.id, 1, SessionRenameRequest{NativeSessionID: "native", RequestedName: "new name"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ValidatePayload(frame) == nil; got != candidate.valid {
+			t.Fatalf("request id %q valid = %t, want %t", candidate.id, got, candidate.valid)
+		}
+	}
+	for _, id := range []string{DaemonRenameOperationPrefix + "response", ComponentRenameObservationPrefix + "observation"} {
+		frame, err := NewFrame(TypeSessionRename, id, 1, SessionRename{NativeSessionID: "native", NativeName: "new name", ProductEventSeq: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidatePayload(frame); err != nil {
+			t.Fatalf("rename id %q: %v", id, err)
+		}
+	}
+	bad, err := NewFrame(TypeSessionRename, "ambiguous-id", 1, SessionRename{NativeSessionID: "native", NativeName: "new name", ProductEventSeq: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidatePayload(frame); err == nil {
-		t.Fatal("bootstrap without strong process start was accepted")
+	if err := ValidatePayload(bad); err == nil {
+		t.Fatal("session.rename accepted an ambiguous frame-id namespace")
+	}
+	boundedName, err := NewFrame(TypeSessionRenameRequest, DaemonRenameOperationPrefix+"bounded", 1, SessionRenameRequest{
+		NativeSessionID: "native", RequestedName: strings.Repeat("n", 1024),
+	})
+	if err != nil || ValidatePayload(boundedName) != nil {
+		t.Fatalf("maximum bounded rename was rejected: %v", err)
+	}
+	for _, invalidName := range []string{strings.Repeat("n", 1025), "line\nbreak", " leading"} {
+		frame, err := NewFrame(TypeSessionRenameRequest, DaemonRenameOperationPrefix+"invalid-name", 1, SessionRenameRequest{NativeSessionID: "native", RequestedName: invalidName})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidatePayload(frame); err == nil {
+			t.Fatalf("rename request accepted invalid name %q", invalidName)
+		}
 	}
 }
 

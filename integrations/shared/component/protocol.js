@@ -3,6 +3,9 @@
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 const VERSION = 1;
+const CONTRACT_REVISION = "agent-sessions.component.v1-r1";
+const DAEMON_RENAME_PREFIX = "daemon.rename.";
+const COMPONENT_RENAME_PREFIX = "component.rename.";
 const DEFAULT_LIMITS = Object.freeze({
   maxFrameBytes: 1024 * 1024,
   maxNesting: 32,
@@ -11,7 +14,7 @@ const DEFAULT_LIMITS = Object.freeze({
 
 const FRAME_TYPES = new Set([
   "bootstrap", "ready", "reconnect",
-  "session.announce", "session.rebind", "session.rename", "session.state", "session.close", "session.bound",
+  "session.announce", "session.rebind", "session.rename", "session.rename.request", "session.state", "session.close", "session.bound",
   "delivery.present", "delivery.accept", "delivery.reject", "turn.event",
   "tool.call", "tool.cancel", "tool.result", "generation.retire",
   "heartbeat", "heartbeat.ack", "reject",
@@ -23,6 +26,11 @@ function makeFrame(type, id, seq, payload) {
   return frame;
 }
 
+function validateContractRevision(revision) {
+  if (revision !== CONTRACT_REVISION) throw new Error(`unsupported component contract revision ${String(revision)}`);
+  return true;
+}
+
 function validateFrame(frame, limits = DEFAULT_LIMITS) {
   limits = normalizeLimits(limits);
   if (!frame || Array.isArray(frame) || typeof frame !== "object") throw new Error("component frame must be an object");
@@ -32,7 +40,27 @@ function validateFrame(frame, limits = DEFAULT_LIMITS) {
   if (!Number.isSafeInteger(frame.seq) || frame.seq <= 0) throw new Error("component frame sequence is invalid");
   if (!frame.payload || Array.isArray(frame.payload) || typeof frame.payload !== "object") throw new Error("component frame payload must be an object");
   validateJSONBounds(frame, limits);
+  validateRenameFrame(frame);
   return frame;
+}
+
+function validateRenameFrame(frame) {
+  if (frame.type === "session.rename.request") {
+    if (!frame.id.startsWith(DAEMON_RENAME_PREFIX) || frame.id.length === DAEMON_RENAME_PREFIX.length) {
+      throw new Error("component rename request id uses the wrong namespace");
+    }
+    if (!validID(frame.payload.native_session_id) || !validNativeName(frame.payload.requested_name)) {
+      throw new Error("component rename request payload is invalid");
+    }
+    return;
+  }
+  if (frame.type !== "session.rename") return;
+  const daemonResponse = frame.id.startsWith(DAEMON_RENAME_PREFIX) && frame.id.length > DAEMON_RENAME_PREFIX.length;
+  const componentObservation = frame.id.startsWith(COMPONENT_RENAME_PREFIX) && frame.id.length > COMPONENT_RENAME_PREFIX.length;
+  if ((!daemonResponse && !componentObservation) || !validID(frame.payload.native_session_id) ||
+      !validNativeName(frame.payload.native_name) || !Number.isSafeInteger(frame.payload.product_event_seq) || frame.payload.product_event_seq <= 0) {
+    throw new Error("component rename payload or id namespace is invalid");
+  }
 }
 
 function encodeFrame(frame, limits = DEFAULT_LIMITS) {
@@ -148,6 +176,29 @@ function validID(value) {
   return typeof value === "string" && value.trim() === value && value.length > 0 && Buffer.byteLength(value, "utf8") <= 256 && !/[\0\r\n]/u.test(value);
 }
 
+function validNativeName(value) {
+  return typeof value === "string" && value.trim() === value && value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= 1024 && !/[\0\r\n]/u.test(value);
+}
+
+function daemonRenameOperationID(stableID) {
+  if (!validID(stableID) || stableID.startsWith(DAEMON_RENAME_PREFIX) || stableID.startsWith(COMPONENT_RENAME_PREFIX)) {
+    throw new Error("stable rename operation id is invalid or already namespaced");
+  }
+  const value = `${DAEMON_RENAME_PREFIX}${stableID}`;
+  if (!validID(value)) throw new Error("daemon rename operation id exceeds its bound");
+  return value;
+}
+
+function componentRenameObservationID(nativeEventID) {
+  if (!validID(nativeEventID) || nativeEventID.startsWith(DAEMON_RENAME_PREFIX) || nativeEventID.startsWith(COMPONENT_RENAME_PREFIX)) {
+    throw new Error("native rename event id is invalid or already namespaced");
+  }
+  const value = `${COMPONENT_RENAME_PREFIX}${nativeEventID}`;
+  if (!validID(value)) throw new Error("component rename observation id exceeds its bound");
+  return value;
+}
+
 function redact(detail, ...secrets) {
   let value = String(detail ?? "").replaceAll("\0", "");
   for (const secret of secrets) {
@@ -163,11 +214,17 @@ function redact(detail, ...secrets) {
 
 module.exports = {
   VERSION,
+  CONTRACT_REVISION,
+  DAEMON_RENAME_PREFIX,
+  COMPONENT_RENAME_PREFIX,
   DEFAULT_LIMITS,
   FRAME_TYPES,
   FrameDecoder,
   encodeFrame,
   makeFrame,
+  daemonRenameOperationID,
+  componentRenameObservationID,
   redact,
   validateFrame,
+  validateContractRevision,
 };

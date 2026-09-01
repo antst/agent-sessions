@@ -94,7 +94,7 @@ func TestBrokerBootstrapReplayHeartbeatAndDistinctNativeSession(t *testing.T) {
 	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{
 		ProductID: "pi", AttachmentID: "attachment-lifecycle", BootstrapCapabilityID: "capability-1",
 		BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart,
-		ComponentVersion: "1.0.0",
+		ComponentVersion: ContractRevision,
 	})
 	readyFrame := readTestFrame(t, connection)
 	if readyFrame.Type != TypeReady {
@@ -119,7 +119,7 @@ func TestBrokerBootstrapReplayHeartbeatAndDistinctNativeSession(t *testing.T) {
 	eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(handled) == 1
+		return len(handled) == 2
 	})
 	if err := broker.Send(ready.BindingID, TypeDeliveryPresent, "delivery", DeliveryPresent{DeliveryID: "delivery", Mode: "wake", Body: json.RawMessage(`{"text":"hello"}`)}); err != nil {
 		t.Fatalf("Send delivery.present: %v", err)
@@ -137,15 +137,15 @@ func TestBrokerBootstrapReplayHeartbeatAndDistinctNativeSession(t *testing.T) {
 	eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(handled) == 2
+		return len(handled) == 4
 	})
 	mu.Lock()
 	defer mu.Unlock()
 	if handled[0].Type != TypeSessionAnnounce {
 		t.Fatalf("handled frame = %s", handled[0].Type)
 	}
-	if handled[1].Type != TypeDeliveryAccept {
-		t.Fatalf("handled replayable operation = %s", handled[1].Type)
+	if handled[1].Type != TypeHeartbeat || handled[2].Type != TypeDeliveryAccept || handled[3].Type != TypeHeartbeat {
+		t.Fatalf("durably handled operation order = %s, %s, %s", handled[1].Type, handled[2].Type, handled[3].Type)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestBrokerRejectsWrongProcessAndPIDReuseEvidence(t *testing.T) {
 			writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{
 				ProductID: "omp", AttachmentID: "attachment", BootstrapCapabilityID: "capability",
 				BootstrapValue: authorizer.secret, ProcessStart: test.claimStart, StrongStart: test.claimStrong,
-				ComponentVersion: "1",
+				ComponentVersion: ContractRevision,
 			})
 			reject := readTestFrame(t, connection)
 			if reject.Type != TypeReject {
@@ -208,7 +208,7 @@ func TestBrokerConsumesBootstrapCapabilityOnceAndRedactsRefusal(t *testing.T) {
 	}
 	path, stop := serveTestBroker(t, broker)
 	defer stop()
-	claim := BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1"}
+	claim := BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision}
 	first := dialFrameConn(t, path)
 	writeTestFrame(t, first, TypeBootstrap, "first", 1, claim)
 	if response := readTestFrame(t, first); response.Type != TypeReady {
@@ -241,7 +241,7 @@ func TestBrokerReconnectReattestsSameProcessAcrossGeneration(t *testing.T) {
 	first, _ := NewBroker(Config{Generation: 1, Authorizer: authorizer, Handler: noopComponentHandler, HeartbeatInterval: time.Second})
 	path, stopFirst := serveTestBroker(t, first)
 	connection := dialFrameConn(t, path)
-	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "opencode", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1"})
+	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "opencode", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision})
 	readyOneFrame := readTestFrame(t, connection)
 	var readyOne Ready
 	_ = readyOneFrame.PayloadInto(&readyOne)
@@ -294,7 +294,7 @@ func TestBrokerIdempotentHandshakeReadyLossRestartAndAdoptionFence(t *testing.T)
 	claim := BootstrapClaim{
 		ProductID: authorizer.productID, AttachmentID: authorizer.attachmentID,
 		BootstrapCapabilityID: authorizer.capabilityID, BootstrapValue: authorizer.secret,
-		ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1",
+		ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision,
 	}
 
 	firstBroker := newBroker(1)
@@ -402,7 +402,7 @@ func TestBrokerReconnectsAfterSameGenerationSocketClose(t *testing.T) {
 	path, stop := serveTestBroker(t, broker)
 	defer stop()
 	first := dialFrameConn(t, path)
-	writeTestFrame(t, first, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1"})
+	writeTestFrame(t, first, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision})
 	firstReadyFrame := readTestFrame(t, first)
 	var firstReady Ready
 	if err := firstReadyFrame.PayloadInto(&firstReady); err != nil {
@@ -477,8 +477,11 @@ func TestBrokerReconnectsAfterSameGenerationSocketClose(t *testing.T) {
 	}
 	select {
 	case frame := <-handled:
-		t.Fatalf("already committed delivery replay reached handler: %#v", frame)
+		if frame.Type != TypeHeartbeat {
+			t.Fatalf("already committed delivery replay reached handler: %#v", frame)
+		}
 	default:
+		t.Fatal("heartbeat ack was sent before durable handler admission")
 	}
 }
 
@@ -496,7 +499,7 @@ func TestBrokerSameAttachmentReconnectFencesOldStreamAndRejectsStaleDualStream(t
 	defer stop()
 	oldStream := dialFrameConn(t, path)
 	defer oldStream.Close()
-	writeTestFrame(t, oldStream, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "omp", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1"})
+	writeTestFrame(t, oldStream, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "omp", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision})
 	oldReadyFrame := readTestFrame(t, oldStream)
 	var oldReady Ready
 	if err := oldReadyFrame.PayloadInto(&oldReady); err != nil {
@@ -572,7 +575,7 @@ func TestBrokerHeartbeatTimeoutClosesBinding(t *testing.T) {
 	defer stop()
 	connection := dialFrameConn(t, path)
 	defer connection.Close()
-	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1"})
+	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision})
 	_ = readTestFrame(t, connection)
 	time.Sleep(80 * time.Millisecond)
 	if _, err := connection.ReadFrame(); err == nil {
@@ -611,7 +614,7 @@ func TestBrokerRollsBackHandlerAdmissionForRetryAndOutstandingBounds(t *testing.
 	defer stop()
 	connection := dialFrameConn(t, path)
 	defer connection.Close()
-	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: "1"})
+	writeTestFrame(t, connection, TypeBootstrap, "bootstrap", 1, BootstrapClaim{ProductID: "pi", AttachmentID: "attachment", BootstrapCapabilityID: "capability", BootstrapValue: authorizer.secret, ProcessStart: identity.Start, StrongStart: identity.StrongStart, ComponentVersion: ContractRevision})
 	readyFrame := readTestFrame(t, connection)
 	var ready Ready
 	if err := readyFrame.PayloadInto(&ready); err != nil {

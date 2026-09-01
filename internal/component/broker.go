@@ -51,8 +51,9 @@ type Authorization struct {
 
 // Authorizer supplies daemon-owned bootstrap consumption and durable binding
 // lookup. Implementations must freshly validate capability hash/revision,
-// expected product, attachment, lineage evidence, and reconnect relationship
-// on every call. Exact unadopted handshake replay returns the same BindingID;
+// expected product, attachment, kernel-derived lineage evidence, and reconnect
+// relationship on every call. Claim process tokens are optional corroboration,
+// never authority. Exact unadopted handshake replay returns the same BindingID;
 // stale, conflicting, foreign-process, and adopted replay fails closed.
 type Authorizer interface {
 	Bootstrap(context.Context, BootstrapClaim, PeerEvidence) (Authorization, error)
@@ -217,6 +218,9 @@ func (b *Broker) Bindings() []BindingView {
 
 // Send writes one daemon-to-component frame to an exact live binding.
 func (b *Broker) Send(bindingID string, frameType FrameType, operationID string, payload any) error {
+	if frameType == TypeSessionRenameRequest {
+		return errors.New("session.rename.request requires Broker.RenameSession correlation")
+	}
 	if !daemonToComponent(frameType) {
 		return fmt.Errorf("frame type %s is not daemon-to-component", frameType)
 	}
@@ -312,6 +316,7 @@ func (b *Broker) handleConnection(ctx context.Context, connection *localtranspor
 		connection: connection, replayWindow: b.config.ReplayWindow, maxOutstanding: b.config.MaxOutstanding,
 		inboundDigests: make(map[uint64][sha256.Size]byte), pendingToolCalls: make(map[string][sha256.Size]byte),
 		deliveries:    newDeliveryTracker(b.config.MaxOutstanding, b.config.ReplayWindow),
+		renames:       newRenameTracker(b.config.MaxOutstanding, b.config.ReplayWindow),
 		lastHeartbeat: time.Now(), heartbeatInterval: b.config.HeartbeatInterval, heartbeatGrace: b.config.HeartbeatGrace,
 	}
 	replaced, err := b.installBinding(first, live)
@@ -370,8 +375,8 @@ func (b *Broker) authorize(ctx context.Context, first Frame, evidence PeerEviden
 			return Authorization{}, "", err
 		}
 		bootstrapSecret = claim.BootstrapValue
-		if claim.ProcessStart != evidence.Process.Start || claim.StrongStart != evidence.Process.StrongStart {
-			return Authorization{}, bootstrapSecret, &ProtocolError{Category: CategoryStaleProcess, Detail: "bootstrap process start does not match kernel peer"}
+		if err := corroborateClaimedProcess("bootstrap", claim.ProcessStart, claim.StrongStart, evidence.Process); err != nil {
+			return Authorization{}, bootstrapSecret, err
 		}
 		authorization, err = b.config.Authorizer.Bootstrap(ctx, claim, evidence)
 		if err != nil {
@@ -386,11 +391,24 @@ func (b *Broker) authorize(ctx context.Context, first Frame, evidence PeerEviden
 	if claim.PriorGeneration > b.config.Generation {
 		return Authorization{}, "", &ProtocolError{Category: CategoryProtocol, Detail: "reconnect generation is in the future"}
 	}
-	if claim.ProcessStart != evidence.Process.Start || claim.StrongStart != evidence.Process.StrongStart {
-		return Authorization{}, "", &ProtocolError{Category: CategoryStaleProcess, Detail: "reconnect process start does not match kernel peer"}
+	if err := corroborateClaimedProcess("reconnect", claim.ProcessStart, claim.StrongStart, evidence.Process); err != nil {
+		return Authorization{}, "", err
 	}
 	authorization, err = b.config.Authorizer.Reconnect(ctx, claim, evidence)
 	return authorization, "", err
+}
+
+func corroborateClaimedProcess(operation, processStart, strongStart string, live procinfo.Identity) error {
+	if processStart == "" && strongStart == "" {
+		return nil
+	}
+	if processStart == "" || strongStart == "" {
+		return &ProtocolError{Category: CategoryInvalidFrame, Detail: operation + " process corroboration must be omitted or supplied as a pair"}
+	}
+	if processStart != live.Start || strongStart != live.StrongStart {
+		return &ProtocolError{Category: CategoryStaleProcess, Detail: operation + " process start does not match kernel peer"}
+	}
+	return nil
 }
 
 func (b *Broker) installBinding(first Frame, live *binding) (*binding, error) {
@@ -539,8 +557,8 @@ func (b *Broker) readBinding(ctx context.Context, live *binding) {
 					b.rejectLive(live, frame.ID, err)
 					return
 				}
-				live.markHeartbeat()
-				if err := live.send(TypeHeartbeatAck, frame.ID, Heartbeat{BindingID: live.snapshot().BindingID, LastReceivedSeq: frame.Seq}); err != nil {
+				if err := b.admitHeartbeat(ctx, live, frame); err != nil {
+					b.rejectLive(live, frame.ID, err)
 					return
 				}
 			}
@@ -552,10 +570,42 @@ func (b *Broker) readBinding(ctx context.Context, live *binding) {
 		}
 		frame = redactInbound(frame)
 		if frame.Type == TypeHeartbeat {
-			live.markHeartbeat()
-			if err := live.send(TypeHeartbeatAck, frame.ID, Heartbeat{BindingID: live.snapshot().BindingID, LastReceivedSeq: frame.Seq}); err != nil {
+			if err := b.admitHeartbeat(ctx, live, frame); err != nil {
+				b.rejectLive(live, frame.ID, err)
 				return
 			}
+			continue
+		}
+		if frame.Type == TypeSessionRename && validDaemonRenameOperationID(frame.ID) {
+			operation, duplicate, err := live.renames.admitResponse(frame)
+			if err != nil {
+				if operation != nil {
+					live.renames.failHandler(frame.ID, operation, err)
+				}
+				b.rejectLive(live, frame.ID, err)
+				continue
+			}
+			if duplicate {
+				continue
+			}
+			if err := b.config.Handler.HandleComponentFrame(ctx, live.snapshot(), frame); err != nil {
+				live.renames.failHandler(frame.ID, operation, err)
+				b.rejectLive(live, frame.ID, err)
+				continue
+			}
+			if err := live.renames.commitResponse(frame.ID, operation); err != nil {
+				b.rejectLive(live, frame.ID, err)
+			}
+			continue
+		}
+		if frame.Type == TypeReject && validDaemonRenameOperationID(frame.ID) {
+			if _, err := live.renames.reject(frame); err != nil {
+				b.rejectLive(live, frame.ID, err)
+			}
+			continue
+		}
+		if frame.Type == TypeReject {
+			b.rejectLive(live, frame.ID, &ProtocolError{Category: CategoryProtocol, Detail: "component rejection does not name an outstanding daemon request"})
 			continue
 		}
 		operationReplay, err := live.trackOperation(frame)
@@ -573,6 +623,17 @@ func (b *Broker) readBinding(ctx context.Context, live *binding) {
 			}
 		}
 	}
+}
+
+// admitHeartbeat durably records the first authenticated proof that Ready was
+// received before extending liveness or acknowledging it. Exact duplicate
+// heartbeats re-enter the handler so a failure before its CAS can converge.
+func (b *Broker) admitHeartbeat(ctx context.Context, live *binding, frame Frame) error {
+	if err := b.config.Handler.HandleComponentFrame(ctx, live.snapshot(), frame); err != nil {
+		return err
+	}
+	live.markHeartbeat()
+	return live.send(TypeHeartbeatAck, frame.ID, Heartbeat{BindingID: live.snapshot().BindingID, LastReceivedSeq: frame.Seq})
 }
 
 func redactInbound(frame Frame) Frame {
@@ -620,6 +681,10 @@ func componentToDaemon(frameType FrameType) bool {
 	case TypeSessionAnnounce, TypeSessionRebind, TypeSessionRename, TypeSessionState, TypeSessionClose,
 		TypeDeliveryAccept, TypeDeliveryReject, TypeTurnEvent, TypeToolCall, TypeToolCancel, TypeHeartbeat:
 		return true
+	case TypeReject:
+		// Components may reject only daemon-correlated requests. The live read
+		// path validates the outstanding daemon operation before admission.
+		return true
 	default:
 		return false
 	}
@@ -627,7 +692,7 @@ func componentToDaemon(frameType FrameType) bool {
 
 func daemonToComponent(frameType FrameType) bool {
 	switch frameType {
-	case TypeSessionBound, TypeDeliveryPresent, TypeToolResult, TypeGenerationRetire, TypeHeartbeatAck, TypeReject:
+	case TypeSessionBound, TypeSessionRenameRequest, TypeDeliveryPresent, TypeToolResult, TypeGenerationRetire, TypeHeartbeatAck, TypeReject:
 		return true
 	default:
 		return false

@@ -263,6 +263,7 @@ ErrUnauthorized
 ErrStale
 ErrAmbiguousSession
 ErrUnsupportedPolicy
+ErrUnsupportedRename
 ErrUnsupportedSteer
 ErrUnsupportedRecovery
 ErrNativeRejected

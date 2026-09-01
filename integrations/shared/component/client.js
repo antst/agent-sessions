@@ -2,7 +2,16 @@
 
 const { EventEmitter } = require("node:events");
 const net = require("node:net");
-const { DEFAULT_LIMITS, FrameDecoder, encodeFrame, makeFrame, redact } = require("./protocol.js");
+const {
+  DAEMON_RENAME_PREFIX,
+  CONTRACT_REVISION,
+  DEFAULT_LIMITS,
+  FrameDecoder,
+  componentRenameObservationID,
+  encodeFrame,
+  makeFrame,
+  redact,
+} = require("./protocol.js");
 
 const ENV = Object.freeze({
   socket: "AGENT_SESSIONS_COMPONENT_SOCKET",
@@ -39,6 +48,8 @@ class ComponentClient extends EventEmitter {
     this.maxQueue = boundedOption(options.maxQueue, 128, 1, 4096, "maxQueue");
     this.maxJournal = boundedOption(options.maxJournal, this.maxQueue, 1, this.maxQueue, "maxJournal");
     this.maxOutstanding = boundedOption(options.maxOutstanding, 128, 1, 4096, "maxOutstanding");
+    this.maxRenameReplay = boundedOption(options.maxRenameReplay, 64, 1, 4096, "maxRenameReplay");
+    this.renameTimeoutMs = boundedOption(options.renameTimeoutMs, 10000, 1, 60000, "renameTimeoutMs");
     this.heartbeatGrace = boundedOption(options.heartbeatGrace, 3, 1, 10, "heartbeatGrace");
     this.reconnectMinMs = boundedOption(options.reconnectMinMs, 50, 1, 60000, "reconnectMinMs");
     this.reconnectMaxMs = boundedOption(options.reconnectMaxMs, 2000, this.reconnectMinMs, 60000, "reconnectMaxMs");
@@ -75,6 +86,10 @@ class ComponentClient extends EventEmitter {
     this.connectionEpoch = 0;
     this.lastOutboundAckSeq = 0;
     this.pendingTools = new Map();
+    this.renameSession = typeof options.renameSession === "function" ? options.renameSession : null;
+    this.renameOperations = new Map();
+    this.renameCompletedOrder = [];
+    this.pendingRenames = 0;
     this.heartbeatTimer = null;
     this.lastHeartbeatAckAt = 0;
     this.reconnectTimer = null;
@@ -98,6 +113,10 @@ class ComponentClient extends EventEmitter {
 
   send(type, id, payload) {
     if (!this.active || this.stopping) return false;
+    if (type === "session.rename.request") throw new Error("session.rename.request is daemon-to-component only");
+    if ((type === "session.rename" || type === "reject") && id.startsWith(DAEMON_RENAME_PREFIX)) {
+      throw new Error("daemon-correlated rename results require the native rename callback");
+    }
     const operation = snapshotOperation(type, id, payload);
     encodeFrame(makeFrame(operation.type, operation.id, 1, operation.payload), this.limits);
     if (NON_JOURNALED_TYPES.has(type)) {
@@ -151,6 +170,14 @@ class ComponentClient extends EventEmitter {
     return result;
   }
 
+  observeRename(nativeEventID, nativeSessionID, nativeName, productEventSeq) {
+    return this.send("session.rename", componentRenameObservationID(nativeEventID), {
+      native_session_id: nativeSessionID,
+      native_name: nativeName,
+      product_event_seq: productEventSeq,
+    });
+  }
+
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
@@ -165,6 +192,10 @@ class ComponentClient extends EventEmitter {
     const error = new Error("component client stopped");
     for (const pending of this.pendingTools.values()) pending.reject(error);
     this.pendingTools.clear();
+    this._failPendingRenames("unavailable", "component client stopped");
+    this.renameOperations.clear();
+    this.renameCompletedOrder.length = 0;
+    this.pendingRenames = 0;
     this.queue.length = 0;
     this.outboundJournal.clear();
   }
@@ -208,8 +239,7 @@ class ComponentClient extends EventEmitter {
         attachment_id: this.attachmentID,
         prior_binding_id: this.priorBindingID,
         prior_generation: this.priorGeneration,
-        process_start: this.processStart,
-        strong_start: this.strongStart,
+        ...this._processCorroboration(),
         last_received_seq: this.lastReceivedSeq,
       } });
       return;
@@ -219,13 +249,17 @@ class ComponentClient extends EventEmitter {
       attachment_id: this.attachmentID,
       bootstrap_capability_id: this.capabilityID,
       bootstrap_value: this.bootstrapValue,
-      process_start: this.processStart,
-      strong_start: this.strongStart,
+      ...this._processCorroboration(),
       component_version: this.componentVersion,
     } });
     // Remove the raw value from the launch environment immediately. It remains
     // only in this client until the daemon confirms ready, then is discarded.
     delete this.env[ENV.bootstrapValue];
+  }
+
+  _processCorroboration() {
+    if (!this.processStart && !this.strongStart) return {};
+    return { process_start: this.processStart, strong_start: this.strongStart };
   }
 
   _onData(socket, chunk) {
@@ -303,6 +337,16 @@ class ComponentClient extends EventEmitter {
       this.emit("ready", { bindingID: this.bindingID, daemonGeneration: this.daemonGeneration });
       return;
     }
+    if (frame.type === "session.rename.request") {
+      this._handleRenameRequest(frame);
+      this.emit("frame", frame);
+      return;
+    }
+    if (frame.type === "session.rename") {
+      this.emit("diagnostic", "component received session.rename in the wrong direction");
+      this.socket?.destroy();
+      return;
+    }
     if (frame.type === "tool.result") {
       this._dropJournal(frame.payload?.call_id);
       const pending = this.pendingTools.get(frame.payload?.call_id);
@@ -341,6 +385,134 @@ class ComponentClient extends EventEmitter {
     }
     this.emit("frame", frame);
     this.emit(frame.type, frame.payload);
+  }
+
+  _handleRenameRequest(frame) {
+    if (!frame.id.startsWith(DAEMON_RENAME_PREFIX)) {
+      this._sendRenameReject(frame.id, "protocol", "rename request id uses the wrong namespace");
+      return;
+    }
+    const fingerprint = JSON.stringify(frame.payload);
+    const existing = this.renameOperations.get(frame.id);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        this._sendRenameReject(frame.id, "replay", "rename request id conflicts with its prior body");
+      } else if (existing.response) {
+        this._writeRenameResponse(existing.response);
+      }
+      return;
+    }
+    if (this.pendingRenames >= this.maxOutstanding) {
+      this._rememberRenameResult(frame.id, fingerprint, {
+        type: "reject", id: frame.id,
+        payload: { operation_id: frame.id, category: "unavailable", detail: "too many native rename requests are outstanding" },
+      });
+      return;
+    }
+    const controller = new AbortController();
+    const entry = { fingerprint, response: null, pending: true, controller, timer: null };
+    this.renameOperations.set(frame.id, entry);
+    this.pendingRenames += 1;
+    entry.timer = setTimeout(() => {
+      controller.abort();
+      this._completeRename(frame.id, entry, {
+        type: "reject", id: frame.id,
+        payload: { operation_id: frame.id, category: "timed-out", detail: "native rename callback timed out" },
+      });
+    }, this.renameTimeoutMs);
+    entry.timer.unref?.();
+    if (!this.renameSession) {
+      this._completeRename(frame.id, entry, {
+        type: "reject", id: frame.id,
+        payload: { operation_id: frame.id, category: "unsupported", detail: "this pinned component has no native rename callback" },
+      });
+      return;
+    }
+    Promise.resolve().then(() => this.renameSession({
+      operationID: frame.id,
+      nativeSessionID: frame.payload.native_session_id,
+      requestedName: frame.payload.requested_name,
+      signal: controller.signal,
+    })).then((result) => {
+      const nativeName = result?.nativeName;
+      const productEventSeq = result?.productEventSeq;
+      if (nativeName !== frame.payload.requested_name || !Number.isSafeInteger(productEventSeq) || productEventSeq <= 0) {
+        const error = new Error("native rename callback did not confirm the exact requested name and event sequence");
+        error.category = "native-rejected";
+        throw error;
+      }
+      this._completeRename(frame.id, entry, {
+        type: "session.rename", id: frame.id,
+        payload: {
+          native_session_id: frame.payload.native_session_id,
+          native_name: nativeName,
+          product_event_seq: productEventSeq,
+        },
+      });
+    }).catch((error) => {
+      const allowed = new Set(["unsupported", "unavailable", "native-rejected", "timed-out"]);
+      const category = allowed.has(error?.category) ? error.category : "native-rejected";
+      this._completeRename(frame.id, entry, {
+        type: "reject", id: frame.id,
+        payload: { operation_id: frame.id, category, detail: redact(error?.message ?? category, this.bootstrapValue) },
+      });
+    });
+  }
+
+  _completeRename(operationID, entry, response) {
+    if (this.renameOperations.get(operationID) !== entry || !entry.pending) return;
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.pending = false;
+    entry.response = snapshotOperation(response.type, response.id, response.payload);
+    this.pendingRenames -= 1;
+    this.renameCompletedOrder.push(operationID);
+    this._boundRenameReplay();
+    this._writeRenameResponse(entry.response);
+  }
+
+  _rememberRenameResult(operationID, fingerprint, response) {
+    const entry = { fingerprint, response: snapshotOperation(response.type, response.id, response.payload), pending: false };
+    this.renameOperations.set(operationID, entry);
+    this.renameCompletedOrder.push(operationID);
+    this._boundRenameReplay();
+    this._writeRenameResponse(entry.response);
+  }
+
+  _sendRenameReject(operationID, category, detail) {
+    this._writeRenameResponse({
+      type: "reject", id: operationID,
+      payload: { operation_id: operationID, category, detail: redact(detail, this.bootstrapValue) },
+    });
+  }
+
+  _writeRenameResponse(operation) {
+    if (!this.ready || this.stopping || !this.socket || this.socket.destroyed) return;
+    try {
+      this._writeOperation(operation);
+    } catch (error) {
+      this.emit("diagnostic", redact(error.message, this.bootstrapValue));
+      this.socket?.destroy();
+    }
+  }
+
+  _boundRenameReplay() {
+    while (this.renameCompletedOrder.length > this.maxRenameReplay) {
+      const oldest = this.renameCompletedOrder.shift();
+      const entry = this.renameOperations.get(oldest);
+      if (entry && !entry.pending) this.renameOperations.delete(oldest);
+    }
+  }
+
+  _failPendingRenames(category, detail) {
+    for (const [operationID, entry] of this.renameOperations) {
+      if (!entry.pending) continue;
+      entry.controller?.abort();
+      this._completeRename(operationID, entry, {
+        type: "reject", id: operationID,
+        payload: { operation_id: operationID, category, detail: redact(detail, this.bootstrapValue) },
+      });
+    }
   }
 
   _startHeartbeat(intervalMs) {
@@ -391,6 +563,7 @@ class ComponentClient extends EventEmitter {
     this.ready = false;
     clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+    this._failPendingRenames("unavailable", "component connection closed before native rename confirmation");
     if (!this.stopping) this._prepareJournalForReconnect();
     if (!this.stopping) this._scheduleReconnect();
   }
@@ -502,11 +675,16 @@ function readBootstrap(env) {
   const checks = [
     ["socketPath", "missing-component-socket"], ["productID", "missing-product-id"],
     ["attachmentID", "missing-attachment-id"], ["capabilityID", "missing-bootstrap-capability-id"],
-    ["bootstrapValue", "missing-bootstrap-value"], ["processStart", "missing-process-start"],
-    ["strongStart", "missing-strong-start"], ["componentVersion", "missing-component-version"],
+    ["bootstrapValue", "missing-bootstrap-value"], ["componentVersion", "missing-component-version"],
   ];
   for (const [field, reason] of checks) {
     if (!values[field]) return { active: false, reason, ...values };
+  }
+  if (values.componentVersion !== CONTRACT_REVISION) {
+    return { active: false, reason: "component-contract-mismatch", ...values };
+  }
+  if (!values.processStart !== !values.strongStart) {
+    return { active: false, reason: "partial-process-corroboration", ...values };
   }
   return { active: true, reason: "managed-bootstrap", ...values };
 }

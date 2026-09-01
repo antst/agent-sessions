@@ -15,40 +15,48 @@ import (
 
 const (
 	ProtocolVersion = 1
-	RedactedValue   = "<redacted>"
-	maxIdentifier   = 256
-	maxDetailBytes  = 512
+	// ContractRevision identifies the pinned daemon/client frame vocabulary.
+	// It is deliberately separate from ProtocolVersion: v1 has not shipped as
+	// an independently versioned client protocol and therefore remains wire v1.
+	ContractRevision = "agent-sessions.component.v1-r1"
+	RedactedValue    = "<redacted>"
+	maxIdentifier    = 256
+	maxDetailBytes   = 512
+
+	DaemonRenameOperationPrefix      = "daemon.rename."
+	ComponentRenameObservationPrefix = "component.rename."
 )
 
 // FrameType is one protocol-v1 operation.
 type FrameType string
 
 const (
-	TypeBootstrap        FrameType = "bootstrap"
-	TypeReady            FrameType = "ready"
-	TypeReconnect        FrameType = "reconnect"
-	TypeSessionAnnounce  FrameType = "session.announce"
-	TypeSessionRebind    FrameType = "session.rebind"
-	TypeSessionRename    FrameType = "session.rename"
-	TypeSessionState     FrameType = "session.state"
-	TypeSessionClose     FrameType = "session.close"
-	TypeSessionBound     FrameType = "session.bound"
-	TypeDeliveryPresent  FrameType = "delivery.present"
-	TypeDeliveryAccept   FrameType = "delivery.accept"
-	TypeDeliveryReject   FrameType = "delivery.reject"
-	TypeTurnEvent        FrameType = "turn.event"
-	TypeToolCall         FrameType = "tool.call"
-	TypeToolCancel       FrameType = "tool.cancel"
-	TypeToolResult       FrameType = "tool.result"
-	TypeGenerationRetire FrameType = "generation.retire"
-	TypeHeartbeat        FrameType = "heartbeat"
-	TypeHeartbeatAck     FrameType = "heartbeat.ack"
-	TypeReject           FrameType = "reject"
+	TypeBootstrap            FrameType = "bootstrap"
+	TypeReady                FrameType = "ready"
+	TypeReconnect            FrameType = "reconnect"
+	TypeSessionAnnounce      FrameType = "session.announce"
+	TypeSessionRebind        FrameType = "session.rebind"
+	TypeSessionRename        FrameType = "session.rename"
+	TypeSessionRenameRequest FrameType = "session.rename.request"
+	TypeSessionState         FrameType = "session.state"
+	TypeSessionClose         FrameType = "session.close"
+	TypeSessionBound         FrameType = "session.bound"
+	TypeDeliveryPresent      FrameType = "delivery.present"
+	TypeDeliveryAccept       FrameType = "delivery.accept"
+	TypeDeliveryReject       FrameType = "delivery.reject"
+	TypeTurnEvent            FrameType = "turn.event"
+	TypeToolCall             FrameType = "tool.call"
+	TypeToolCancel           FrameType = "tool.cancel"
+	TypeToolResult           FrameType = "tool.result"
+	TypeGenerationRetire     FrameType = "generation.retire"
+	TypeHeartbeat            FrameType = "heartbeat"
+	TypeHeartbeatAck         FrameType = "heartbeat.ack"
+	TypeReject               FrameType = "reject"
 )
 
 var knownFrameTypes = map[FrameType]struct{}{
 	TypeBootstrap: {}, TypeReady: {}, TypeReconnect: {}, TypeSessionAnnounce: {},
-	TypeSessionRebind: {}, TypeSessionRename: {}, TypeSessionState: {}, TypeSessionClose: {},
+	TypeSessionRebind: {}, TypeSessionRename: {}, TypeSessionRenameRequest: {}, TypeSessionState: {}, TypeSessionClose: {},
 	TypeSessionBound: {}, TypeDeliveryPresent: {}, TypeDeliveryAccept: {}, TypeDeliveryReject: {},
 	TypeTurnEvent: {}, TypeToolCall: {}, TypeToolCancel: {}, TypeToolResult: {},
 	TypeGenerationRetire: {}, TypeHeartbeat: {}, TypeHeartbeatAck: {}, TypeReject: {},
@@ -142,6 +150,15 @@ func DecodeFrame(body []byte) (Frame, error) {
 	return frame, nil
 }
 
+// ValidateContractRevision is the doctor/installer seam for the pinned shared
+// client artifact. Revision negotiation is intentionally not added to wire v1.
+func ValidateContractRevision(revision string) error {
+	if revision != ContractRevision {
+		return protocolError(CategoryUnsupportedVersion, "component contract revision %q is unsupported", revision)
+	}
+	return nil
+}
+
 func validateEnvelope(frame Frame) error {
 	if frame.Version != ProtocolVersion {
 		return protocolError(CategoryUnsupportedVersion, "component protocol version %d is unsupported", frame.Version)
@@ -186,8 +203,8 @@ type BootstrapClaim struct {
 	AttachmentID          string `json:"attachment_id"`
 	BootstrapCapabilityID string `json:"bootstrap_capability_id"`
 	BootstrapValue        string `json:"bootstrap_value"`
-	ProcessStart          string `json:"process_start"`
-	StrongStart           string `json:"strong_start"`
+	ProcessStart          string `json:"process_start,omitempty"`
+	StrongStart           string `json:"strong_start,omitempty"`
 	ComponentVersion      string `json:"component_version"`
 }
 
@@ -195,8 +212,8 @@ type ReconnectClaim struct {
 	AttachmentID    string `json:"attachment_id"`
 	PriorBindingID  string `json:"prior_binding_id"`
 	PriorGeneration uint64 `json:"prior_generation"`
-	ProcessStart    string `json:"process_start"`
-	StrongStart     string `json:"strong_start"`
+	ProcessStart    string `json:"process_start,omitempty"`
+	StrongStart     string `json:"strong_start,omitempty"`
 	LastReceivedSeq uint64 `json:"last_received_seq"`
 }
 
@@ -229,6 +246,14 @@ type SessionRename struct {
 	NativeSessionID string `json:"native_session_id"`
 	NativeName      string `json:"native_name"`
 	ProductEventSeq uint64 `json:"product_event_seq"`
+}
+
+// SessionRenameRequest asks the product-native component to write through a
+// title change. Frame.ID, rather than payload, is the stable daemon operation
+// id and must use DaemonRenameOperationPrefix.
+type SessionRenameRequest struct {
+	NativeSessionID string `json:"native_session_id"`
+	RequestedName   string `json:"requested_name"`
 }
 
 type SessionState struct {
@@ -330,12 +355,17 @@ func ValidatePayload(frame Frame) error { //nolint:gocyclo // Explicit frame voc
 	switch frame.Type {
 	case TypeBootstrap:
 		var value BootstrapClaim
-		if frame.PayloadInto(&value) != nil || !validProductID(value.ProductID) || !required(value.AttachmentID, value.BootstrapCapabilityID, value.ProcessStart, value.StrongStart, value.ComponentVersion) || strings.TrimSpace(value.BootstrapValue) == "" {
+		if frame.PayloadInto(&value) != nil || !validProductID(value.ProductID) ||
+			!required(value.AttachmentID, value.BootstrapCapabilityID, value.ComponentVersion) ||
+			!validOptionalProcessCorroboration(value.ProcessStart, value.StrongStart) ||
+			strings.TrimSpace(value.BootstrapValue) == "" {
 			return invalid()
 		}
+		return ValidateContractRevision(value.ComponentVersion)
 	case TypeReconnect:
 		var value ReconnectClaim
-		if frame.PayloadInto(&value) != nil || !required(value.AttachmentID, value.PriorBindingID, value.ProcessStart, value.StrongStart) || value.PriorGeneration == 0 {
+		if frame.PayloadInto(&value) != nil || !required(value.AttachmentID, value.PriorBindingID) ||
+			!validOptionalProcessCorroboration(value.ProcessStart, value.StrongStart) || value.PriorGeneration == 0 {
 			return invalid()
 		}
 	case TypeReady:
@@ -355,7 +385,14 @@ func ValidatePayload(frame Frame) error { //nolint:gocyclo // Explicit frame voc
 		}
 	case TypeSessionRename:
 		var value SessionRename
-		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID, value.NativeName) || value.ProductEventSeq == 0 {
+		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID) || !validNativeName(value.NativeName) ||
+			value.ProductEventSeq == 0 || !validRenameFrameID(frame.ID) {
+			return invalid()
+		}
+	case TypeSessionRenameRequest:
+		var value SessionRenameRequest
+		if frame.PayloadInto(&value) != nil || !required(value.NativeSessionID) || !validNativeName(value.RequestedName) ||
+			!validDaemonRenameOperationID(frame.ID) {
 			return invalid()
 		}
 	case TypeSessionState:
@@ -427,6 +464,55 @@ func ValidatePayload(frame Frame) error { //nolint:gocyclo // Explicit frame voc
 		return protocolError(CategoryUnknownType, "component frame type %q is unsupported", frame.Type)
 	}
 	return nil
+}
+
+func validOptionalProcessCorroboration(processStart, strongStart string) bool {
+	if processStart == "" && strongStart == "" {
+		return true
+	}
+	return validIdentifier(processStart) && validIdentifier(strongStart)
+}
+
+func validNativeName(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value && validText(value, 1024) && !strings.ContainsAny(value, "\r\n")
+}
+
+func validRenameFrameID(value string) bool {
+	return validDaemonRenameOperationID(value) || validComponentRenameObservationID(value)
+}
+
+func validDaemonRenameOperationID(value string) bool {
+	return strings.HasPrefix(value, DaemonRenameOperationPrefix) && len(value) > len(DaemonRenameOperationPrefix) && validIdentifier(value)
+}
+
+func validComponentRenameObservationID(value string) bool {
+	return strings.HasPrefix(value, ComponentRenameObservationPrefix) && len(value) > len(ComponentRenameObservationPrefix) && validIdentifier(value)
+}
+
+// DaemonRenameOperationID places a caller's stable operation identity in the
+// daemon request namespace without accepting an already-namespaced value.
+func DaemonRenameOperationID(stableID string) (string, error) {
+	if !validIdentifier(stableID) || strings.HasPrefix(stableID, DaemonRenameOperationPrefix) || strings.HasPrefix(stableID, ComponentRenameObservationPrefix) {
+		return "", protocolError(CategoryInvalidFrame, "stable rename operation id is invalid or already namespaced")
+	}
+	value := DaemonRenameOperationPrefix + stableID
+	if !validIdentifier(value) {
+		return "", protocolError(CategoryInvalidFrame, "daemon rename operation id exceeds its bound")
+	}
+	return value, nil
+}
+
+// ComponentRenameObservationID places a product event identity in the
+// unsolicited observation namespace.
+func ComponentRenameObservationID(nativeEventID string) (string, error) {
+	if !validIdentifier(nativeEventID) || strings.HasPrefix(nativeEventID, DaemonRenameOperationPrefix) || strings.HasPrefix(nativeEventID, ComponentRenameObservationPrefix) {
+		return "", protocolError(CategoryInvalidFrame, "native rename event id is invalid or already namespaced")
+	}
+	value := ComponentRenameObservationPrefix + nativeEventID
+	if !validIdentifier(value) {
+		return "", protocolError(CategoryInvalidFrame, "component rename observation id exceeds its bound")
+	}
+	return value, nil
 }
 
 func validJSONObject(value json.RawMessage) bool {

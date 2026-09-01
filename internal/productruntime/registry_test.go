@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
@@ -29,6 +30,24 @@ func TestRegistrySupportsInjectedSyntheticProductWithoutInitRegistration(t *test
 	}
 	if _, present := productcatalog.ByID("synthetic"); present {
 		t.Fatal("synthetic runtime escaped into production catalog")
+	}
+}
+
+func TestRegistryAllowsTruthfulUnsupportedRenameDriver(t *testing.T) {
+	descriptor := syntheticDescriptor("synthetic")
+	product := completeRuntime(descriptor)
+	product.Peer = fakeUnsupportedRenamePeerDriver{}
+	registry, err := NewRegistry([]productcatalog.Descriptor{descriptor}, []RuntimeProduct{product})
+	if err != nil {
+		t.Fatalf("compose rename-unsupported product: %v", err)
+	}
+	runtimeProduct, ok := registry.ByID(descriptor.ID)
+	if !ok {
+		t.Fatal("rename-unsupported product missing from registry")
+	}
+	_, err = runtimeProduct.Peer.Rename(context.Background(), daemon.ManagedAttachment{}, "new name")
+	if !errors.Is(err, ErrUnsupportedRename) {
+		t.Fatalf("rename unsupported category = %v", err)
 	}
 }
 

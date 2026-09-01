@@ -33,6 +33,7 @@ type binding struct {
 	inboundDigests    map[uint64][sha256.Size]byte
 	pendingToolCalls  map[string][sha256.Size]byte
 	deliveries        *deliveryTracker
+	renames           *renameTracker
 	lastHeartbeat     time.Time
 	heartbeatInterval time.Duration
 	heartbeatGrace    int
@@ -312,5 +313,8 @@ func (b *binding) close() error {
 	}
 	b.closed = true
 	b.mu.Unlock()
+	if b.renames != nil {
+		b.renames.close()
+	}
 	return b.connection.Close()
 }

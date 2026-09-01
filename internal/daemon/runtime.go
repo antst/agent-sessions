@@ -118,6 +118,7 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	catalog.Host.Generation = generation
 	catalog.Host.Endpoint = control.Endpoint()
 	catalog.Host.ServiceState = "running"
+	retireStaleComponentAuthority(&catalog)
 	if strings.TrimSpace(config.Release) != "" {
 		catalog.Host.Release = strings.TrimSpace(config.Release)
 	}
@@ -143,6 +144,29 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 		}
 	}()
 	return runtime, nil
+}
+
+// retireStaleComponentAuthority is part of the same catalog CAS that publishes
+// a successor Host.Generation. A component stream cannot survive process
+// restart, so no Binding or Ready row may cross that publication boundary as
+// live authority. Secret-free binding anchors remain as Retiring tombstones for
+// exact, freshly re-attested bootstrap/reconnect recovery; nonclosed session
+// rows close in the same revision and are re-announced by the successor.
+func retireStaleComponentAuthority(catalog *Catalog) {
+	for id, binding := range catalog.ComponentBindings {
+		if binding.State != BindingBinding && binding.State != BindingReady {
+			continue
+		}
+		binding.State = BindingRetiring
+		catalog.ComponentBindings[id] = binding
+	}
+	for id, session := range catalog.ComponentSessions {
+		if session.State == ComponentSessionClosed {
+			continue
+		}
+		session.State = ComponentSessionClosed
+		catalog.ComponentSessions[id] = session
+	}
 }
 
 // Endpoint returns the fixed bound local endpoint.

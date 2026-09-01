@@ -11,6 +11,7 @@ var (
 	ErrStale               = errors.New("product runtime stale")
 	ErrAmbiguousSession    = errors.New("product runtime session ambiguous")
 	ErrUnsupportedPolicy   = errors.New("product runtime permission policy unsupported")
+	ErrUnsupportedRename   = errors.New("product runtime rename unsupported")
 	ErrUnsupportedSteer    = errors.New("product runtime steer unsupported")
 	ErrUnsupportedRecovery = errors.New("product runtime recovery unsupported")
 	ErrNativeRejected      = errors.New("product native operation rejected")
