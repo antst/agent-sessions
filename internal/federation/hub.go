@@ -134,12 +134,6 @@ func (h *hub) handleConnection(conn net.Conn) {
 			if err := client.wire.Send(Message{Type: "hello_ok", Version: ProtocolVersion, Build: RuntimeVersion}); err != nil {
 				return err
 			}
-			h.mu.Lock()
-			if h.clients[client.hostID] == client {
-				client.ready = true
-			}
-			h.mu.Unlock()
-			h.broadcastRoster()
 			return nil
 		}
 		return h.handleClientMessage(client, message)
@@ -198,6 +192,7 @@ func (h *hub) handleClientMessage(client *hubClient, message Message) error {
 		h.mu.Lock()
 		if h.clients[client.hostID] == client {
 			client.peers = peers
+			client.ready = true
 		}
 		h.mu.Unlock()
 		h.broadcastRoster()
