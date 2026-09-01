@@ -1,74 +1,45 @@
 package daemon
 
 import (
+	"reflect"
 	"testing"
-	"time"
 )
 
-func TestLaneEngineStoresOnlyLaneRoutingState(t *testing.T) {
+func TestLaneEngineRemembersOnlyImmutableOfflineLookupCandidate(t *testing.T) {
 	engine, store := testLaneEngine(t)
-	lane := testDurableLane("lane", "codex")
-	if err := engine.Create(lane); err != nil {
+	candidate := testLaneCandidate()
+	if err := engine.Remember(candidate); err != nil {
 		t.Fatal(err)
+	}
+	if err := engine.Remember(candidate); err != nil {
+		t.Fatalf("idempotent remember: %v", err)
 	}
 	snapshot, err := store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored := snapshot.Catalog.Lanes[lane.ID]
-	if stored.ID != lane.ID || stored.Product != lane.Product || stored.State != "idle" {
-		t.Fatalf("stored lane = %+v", stored)
+	if got := snapshot.Catalog.Lanes[candidate.NativeSessionID]; !reflect.DeepEqual(got, candidate) {
+		t.Fatalf("stored candidate = %+v, want %+v", got, candidate)
 	}
 }
 
-func TestLaneEngineUpdatePreservesNativeSession(t *testing.T) {
+func TestLaneEngineRejectsCandidateRewrite(t *testing.T) {
 	engine, store := testLaneEngine(t)
-	lane := testDurableLane("lane", "codex")
-	lane.NativeSessionID = "native-a"
-	if err := engine.Create(lane); err != nil {
+	candidate := testLaneCandidate()
+	if err := engine.Remember(candidate); err != nil {
 		t.Fatal(err)
 	}
-	omitted := lane
-	omitted.NativeSessionID = ""
-	if err := engine.Update(omitted); err != nil {
-		t.Fatal(err)
-	}
-	conflicting := lane
-	conflicting.NativeSessionID = "native-b"
-	if err := engine.Update(conflicting); err == nil {
-		t.Fatal("Update replaced the product-owned native session UUID")
+	conflicting := candidate
+	conflicting.SecondaryGroups = []string{"different"}
+	if err := engine.Remember(conflicting); err == nil {
+		t.Fatal("Remember rewrote an immutable lookup candidate")
 	}
 	snapshot, err := store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := snapshot.Catalog.Lanes[lane.ID].NativeSessionID; got != "native-a" {
-		t.Fatalf("native session = %q", got)
-	}
-}
-
-func TestLaneEngineTransitionsWithoutTurnState(t *testing.T) {
-	engine, store := testLaneEngine(t)
-	lane := testDurableLane("lane", "qwen")
-	if err := engine.Create(lane); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.TransitionLane(lane.ID, "running", "capability"); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.TransitionLane(lane.ID, "terminal", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.TransitionLane(lane.ID, "archived", ""); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stored := snapshot.Catalog.Lanes[lane.ID]
-	if stored.State != "archived" || stored.CapabilityHash != "" || stored.ArchiveRevision != 1 {
-		t.Fatalf("archived lane = %+v", stored)
+	if got := snapshot.Catalog.Lanes[candidate.NativeSessionID]; !reflect.DeepEqual(got, candidate) {
+		t.Fatalf("candidate changed after rejection: %+v", got)
 	}
 }
 
@@ -85,10 +56,9 @@ func testLaneEngine(t *testing.T) (*LaneEngine, *StateStore) {
 	return engine, store
 }
 
-func testDurableLane(id, product string) Lane {
-	return Lane{
-		ID: id, ParentAttachmentID: "parent", Product: product, Name: id,
-		Cwd: "/workspace", Groups: []string{"peer-dev"}, PermissionMode: "bypassPermissions",
-		Persistent: true, AutoArchive: true, AutoArchiveDelayMS: time.Minute.Milliseconds(),
+func testLaneCandidate() LaneCandidate {
+	return LaneCandidate{
+		NativeSessionID: "native", Product: "codex", Parent: "parent",
+		PrimaryGroup: "session:host/parent", SecondaryGroups: []string{"project"},
 	}
 }

@@ -348,16 +348,9 @@ esac
 		id: "00000000-0000-0000-0000-000000000002", parentID: "parent", product: "claude", name: "worker",
 		cwd: root, nativeID: "00000000-0000-0000-0000-000000000001", permission: "dontAsk", state: "idle", done: closedLaneDone(),
 	}
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := snapshot.Catalog
-	catalog.Lanes[actor.id] = durableLane(actor, "idle")
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
 	coordinator := newHostCoordinator(context.Background(), root)
+	coordinator.lanesLoaded = true
+	coordinator.lanes[actor.id] = actor
 	frame := `<cross-session-message from="session:source">work</cross-session-message>`
 	if err := coordinator.deliverLaneMessage(runtime, actor, frame); err != nil {
 		t.Fatalf("deliver Claude peer frame: %v", err)
@@ -371,61 +364,6 @@ esac
 	}
 }
 
-func TestLaneResumeTransfersDurableParentAndUnarchives(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := snapshot.Catalog
-	catalog.Lanes["lane"] = daemonpkg.Lane{
-		ID: "lane", ParentAttachmentID: "old-parent", Product: "qwen", Name: "worker",
-		NativeSessionID: "native", Cwd: "/workspace", Groups: []string{"old"}, State: "archived",
-	}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
-	coordinator := newHostCoordinator(context.Background(), root)
-	actor := &laneActor{id: "lane", product: "qwen", parentID: "new-parent", groups: []string{"new"}, turnID: "turn"}
-	if err := coordinator.commitResumeLane(runtime, actor, false); err != nil {
-		t.Fatal(err)
-	}
-	after, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	lane := after.Catalog.Lanes["lane"]
-	if lane.ParentAttachmentID != "new-parent" || lane.State != "idle" || !reflect.DeepEqual(lane.Groups, []string{"new"}) {
-		t.Fatalf("resumed lane = %+v", lane)
-	}
-}
-
-func TestNewLaneCandidateStartsIdleWhileLiveActorPrepares(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	coordinator := newHostCoordinator(context.Background(), root)
-	actor := &laneActor{id: "lane", parentID: "parent", product: "qwen", name: "worker", cwd: "/workspace", turnID: "turn", state: "preparing"}
-	if err := coordinator.commitNewLane(runtime, actor); err != nil {
-		t.Fatal(err)
-	}
-	after, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := after.Catalog.Lanes[actor.id].State; got != "idle" {
-		t.Fatalf("new lane candidate state = %q, want idle", got)
-	}
-}
-
 func TestParentDetachImmediatelyArchivesIdleNonPersistentLanes(t *testing.T) {
 	root := shortDaemonTestRoot(t)
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
@@ -436,16 +374,9 @@ func TestParentDetachImmediatelyArchivesIdleNonPersistentLanes(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), root)
 	coordinator.lanesLoaded = true
 	coordinator.lanes["idle"] = &laneActor{id: "idle", parentID: "parent", product: "grok", state: "idle", done: closedLaneDone()}
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Lanes["idle"] = daemonpkg.Lane{ID: "idle", ParentAttachmentID: "parent", Product: "grok", State: "idle"}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
 	coordinator.archiveIdleLanesForParent(runtime, "parent")
-	after, _ := runtime.State().Read()
-	if coordinator.lanes["idle"].state != "archived" || after.Catalog.Lanes["idle"].State != "archived" {
-		t.Fatalf("idle orphan survived: actor=%s durable=%s", coordinator.lanes["idle"].state, after.Catalog.Lanes["idle"].State)
+	if coordinator.lanes["idle"].state != "archived" {
+		t.Fatalf("idle orphan survived: actor=%s", coordinator.lanes["idle"].state)
 	}
 }
 
@@ -465,25 +396,17 @@ func TestParentDetachRetiresActiveLaneAndPreservesPersistentLane(t *testing.T) {
 	persistent := &laneActor{id: "persistent", parentID: "parent", product: "grok", state: "idle", persistent: true, done: closedLaneDone()}
 	coordinator.lanesLoaded = true
 	coordinator.lanes[active.id], coordinator.lanes[persistent.id] = active, persistent
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Lanes[active.id] = daemonpkg.Lane{ID: active.id, ParentAttachmentID: "parent", Product: "qwen", State: "running"}
-	catalog.Lanes[persistent.id] = daemonpkg.Lane{ID: persistent.id, ParentAttachmentID: "parent", Product: "grok", State: "idle", Persistent: true}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
 	coordinator.archiveIdleLanesForParent(runtime, "parent")
 	select {
 	case <-cancelled:
 	default:
 		t.Fatal("active orphan was not interrupted")
 	}
-	after, _ := runtime.State().Read()
-	if active.state != "retiring" || after.Catalog.Lanes[active.id].State != "retiring" {
-		t.Fatalf("active orphan state actor=%s durable=%s", active.state, after.Catalog.Lanes[active.id].State)
+	if active.state != "retiring" {
+		t.Fatalf("active orphan state actor=%s", active.state)
 	}
-	if persistent.state != "idle" || after.Catalog.Lanes[persistent.id].State != "idle" {
-		t.Fatalf("persistent lane was changed actor=%s durable=%s", persistent.state, after.Catalog.Lanes[persistent.id].State)
+	if persistent.state != "idle" {
+		t.Fatalf("persistent lane was changed actor=%s", persistent.state)
 	}
 }
 
@@ -595,13 +518,6 @@ func TestIdleLaneRemainsLiveOwnerOfItsChildUntilParentArchive(t *testing.T) {
 	}
 	coordinator.lanesLoaded = true
 	coordinator.lanes[parent.id], coordinator.lanes[child.id] = parent, child
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Lanes[parent.id] = durableLane(parent, "idle")
-	catalog.Lanes[child.id] = durableLane(child, "idle")
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
 	if err := coordinator.reconcileOrphanedLanes(runtime); err != nil {
 		t.Fatal(err)
 	}
@@ -612,9 +528,8 @@ func TestIdleLaneRemainsLiveOwnerOfItsChildUntilParentArchive(t *testing.T) {
 	if _, err := coordinator.archiveLane(runtime, controller, "qwen", parsedLaneCommand{target: parent.id}); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := runtime.State().Read()
-	if parent.state != "archived" || child.state != "archived" || after.Catalog.Lanes[child.id].State != "archived" {
-		t.Fatalf("archive cascade parent=%s child=%s durable_child=%s", parent.state, child.state, after.Catalog.Lanes[child.id].State)
+	if parent.state != "archived" || child.state != "archived" {
+		t.Fatalf("archive cascade parent=%s child=%s", parent.state, child.state)
 	}
 }
 
@@ -654,12 +569,6 @@ func TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch(t *testing.
 	coordinator.openCodex = func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error) {
 		openCalls++
 		return nil, errors.New("native archive must not be redispatched")
-	}
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Lanes[actor.id] = durableLane(actor, "archived")
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
 	}
 	controller := daemonpkg.ManagedAttachment{ID: "parent", Cwd: root, Groups: []string{"shared"}, State: "attached"}
 	result, err := coordinator.archiveLane(runtime, controller, "codex", parsedLaneCommand{target: actor.id})

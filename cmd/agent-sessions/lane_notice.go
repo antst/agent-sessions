@@ -75,11 +75,7 @@ func (c *hostCoordinator) presentLaneTerminalNotice(
 	actor laneActor,
 	noticeID string,
 ) error {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return err
-	}
-	hostID := strings.TrimSpace(snapshot.Catalog.Host.Host)
+	hostID := strings.TrimSpace(runtime.HostID())
 	remoteParent := strings.Contains(actor.parentID, "/")
 	body := laneTerminalNoticeBody(actor, map[bool]string{true: hostID}[remoteParent], false)
 	if !remoteParent {

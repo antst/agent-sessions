@@ -449,10 +449,6 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return nil, err
-	}
 	targets := make([]localPeerTarget, 0, len(attachments)+len(c.lanes))
 	for index := range attachments {
 		attachment := attachments[index]
@@ -462,8 +458,7 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	}
 	c.mu.Lock()
 	for _, lane := range c.lanes {
-		durableState := snapshot.Catalog.Lanes[lane.id].State
-		if durableState != "archived" && durableState != "retiring" && groupsIntersect(sourceGroups, lane.groups) {
+		if lane.state != "archived" && lane.state != "retiring" && groupsIntersect(sourceGroups, lane.groups) {
 			targets = append(targets, localPeerTarget{lane: lane})
 		}
 	}

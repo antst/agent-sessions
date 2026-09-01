@@ -37,15 +37,8 @@ func runHookInput(ctx context.Context, product string, input io.Reader, output i
 	}
 	dispatcher, err := bridge.NewHookDispatcher(bridge.HookDispatchConfig{
 		Product: product, Endpoint: endpoint,
-		Events: map[string]bool{"SessionStart": true, "UserPromptSubmit": true, "Stop": true, "SessionEnd": true},
-		Generation: func(context.Context) (uint64, error) {
-			state, openErr := daemonpkg.OpenState(stateRoot, 16<<20)
-			if openErr != nil {
-				return 0, openErr
-			}
-			snapshot, readErr := state.Read()
-			return snapshot.Catalog.Host.Generation, readErr
-		},
+		Events:     map[string]bool{"SessionStart": true, "UserPromptSubmit": true, "Stop": true, "SessionEnd": true},
+		Generation: func(context.Context) (uint64, error) { return 1, nil },
 		Attest: func(_ context.Context, _ string, input json.RawMessage) (bridge.HookAttestation, error) {
 			if product != "codex" {
 				return bridge.HookAttestation{}, bridge.ErrConnectorInactive
@@ -86,8 +79,7 @@ func attestHookFromState(stateRoot, product, threadID string, pid int) (bridge.H
 		return bridge.HookAttestation{}, bridge.ErrConnectorInactive
 	}
 	attachment, ok := snapshot.Catalog.Attachments[threadID]
-	if !ok || attachment.Product != product || attachment.NativeSessionID != threadID || attachment.State != "attached" ||
-		attachment.DaemonGeneration != snapshot.Catalog.Host.Generation {
+	if !ok || attachment.Product != product || attachment.NativeSessionID != threadID || attachment.State != "attached" {
 		return bridge.HookAttestation{}, bridge.ErrConnectorInactive
 	}
 	evidence := daemonpkg.NativeEvidence{

@@ -23,11 +23,6 @@ func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.Raw
 		Attachments: len(catalog.Attachments), ActiveAttachments: len(activeAttachments),
 		Lanes: len(catalog.Lanes),
 	}
-	for _, lane := range catalog.Lanes {
-		if lane.State != "archived" {
-			records.ActiveLanes++
-		}
-	}
 	var productStates map[string]string
 	if r.productDiagnosticsProvider != nil {
 		productStates, err = r.productDiagnosticsProvider(ctx, operation)
@@ -37,17 +32,10 @@ func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.Raw
 			return nil, errors.New("live product diagnostics unavailable")
 		}
 	}
-	host := catalog.Host
 	return diagnostics.Marshal(diagnostics.Input{
 		Operation: operation, RuntimeReady: r.ready.Load(), Generation: r.generation,
-		CatalogRevision: snapshot.Revision, ServiceState: host.ServiceState,
-		ReleasePresent:  strings.TrimSpace(host.Release) != "",
-		EndpointPresent: strings.TrimSpace(host.Endpoint) != "",
-		Revisions: diagnostics.Revisions{
-			Attachments: host.AttachmentRevision,
-			Lanes:       host.LaneRevision,
-			Federation:  host.FederationRevision,
-		},
+		CatalogRevision: snapshot.Revision, ServiceState: "running",
+		ReleasePresent: strings.TrimSpace(r.release) != "", EndpointPresent: r.control != nil,
 		Records: records, ProductStates: productStates,
 	})
 }

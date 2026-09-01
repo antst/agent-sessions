@@ -2,137 +2,45 @@ package daemon
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/antst/agent-sessions/internal/statestore"
 )
 
 const laneMutationAttempts = 32
 
-// LaneEngine owns the durable product-neutral lane lifecycle. Native launch,
-// resume, interrupt, and archive operations remain adapter callbacks in the
-// host coordinator; their observed results enter this engine as state facts.
+// LaneEngine owns the one durable lane-candidate table used only to discover
+// product UUIDs that an owning parent may ask the product about.
 type LaneEngine struct {
 	store *StateStore
-	now   func() time.Time
 	mu    sync.Mutex
 }
 
-// NewLaneEngine constructs a durable lane engine over the daemon catalog.
 func NewLaneEngine(store *StateStore) (*LaneEngine, error) {
 	if store == nil {
 		return nil, errors.New("lane engine requires state")
 	}
-	return &LaneEngine{store: store, now: time.Now}, nil
+	return &LaneEngine{store: store}, nil
 }
 
-// Create publishes one product-owned lane address. Turn execution and results
-// stay with the product and are never written to daemon state.
-func (e *LaneEngine) Create(lane Lane) error {
-	if lane.ID == "" {
-		return errors.New("new lane identity is incomplete")
+// Remember writes one immutable product UUID and its parent-group ownership.
+func (e *LaneEngine) Remember(candidate LaneCandidate) error {
+	if strings.TrimSpace(candidate.NativeSessionID) == "" || strings.TrimSpace(candidate.Product) == "" ||
+		strings.TrimSpace(candidate.Parent) == "" || strings.TrimSpace(candidate.PrimaryGroup) == "" {
+		return errors.New("lane candidate is incomplete")
 	}
+	candidate.SecondaryGroups = slices.Clone(candidate.SecondaryGroups)
 	return e.mutate(func(catalog *Catalog) error {
-		if _, exists := catalog.Lanes[lane.ID]; exists {
-			return errors.New("lane identity already exists")
+		if existing, ok := catalog.Lanes[candidate.NativeSessionID]; ok {
+			if existing.Product == candidate.Product && existing.Parent == candidate.Parent && existing.PrimaryGroup == candidate.PrimaryGroup &&
+				existing.Host == candidate.Host && slices.Equal(existing.SecondaryGroups, candidate.SecondaryGroups) {
+				return nil
+			}
+			return errors.New("lane candidate already exists with different ownership")
 		}
-		lane.State, lane.AutoArchiveAt = "idle", 0
-		catalog.Lanes[lane.ID] = cloneLane(lane)
-		catalog.Host.LaneRevision++
-		return nil
-	})
-}
-
-// Update refreshes the daemon-owned routing projection for an existing lane.
-// It does not accept, queue, or record a turn.
-func (e *LaneEngine) Update(lane Lane) error {
-	if lane.ID == "" {
-		return errors.New("lane identity is incomplete")
-	}
-	return e.mutate(func(catalog *Catalog) error {
-		current, ok := catalog.Lanes[lane.ID]
-		if !ok {
-			return errors.New("lane state is missing")
-		}
-		if current.Product != lane.Product {
-			return errors.New("lane product cannot change")
-		}
-		if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
-			return err
-		}
-		lane.State, lane.CapabilityHash, lane.AutoArchiveAt = "idle", "", 0
-		lane.ArchiveRevision = current.ArchiveRevision
-		catalog.Lanes[lane.ID] = cloneLane(lane)
-		catalog.Host.LaneRevision++
-		return nil
-	})
-}
-
-// preserveExistingLaneNativeSession treats the durable lane as the only
-// authority after creation. Existing-lane lifecycle mutations may omit that
-// projection, but they cannot bind an unbound lane or replace a bound one.
-// Binding is reserved for SetNativeSessionID after a validated exact Open, or
-// LaneInputEngine.MarkInjectedAndSetNativeDispatch at exact first acceptance.
-func preserveExistingLaneNativeSession(current Lane, candidate *Lane) error {
-	if candidate == nil {
-		return errors.New("lane mutation candidate is missing")
-	}
-	if current.NativeSessionID == "" {
-		if candidate.NativeSessionID != "" {
-			return errors.New("native lane session identity requires an explicit binding boundary")
-		}
-		return nil
-	}
-	if candidate.NativeSessionID != "" && candidate.NativeSessionID != current.NativeSessionID {
-		return errors.New("native lane session identity cannot change")
-	}
-	candidate.NativeSessionID = current.NativeSessionID
-	return nil
-}
-
-// TransitionLane commits a product-neutral lane state transition. Capability
-// authorization is retained only while a lane can accept native input.
-func (e *LaneEngine) TransitionLane(laneID, state, capabilityHash string) error {
-	return e.mutate(func(catalog *Catalog) error {
-		lane, ok := catalog.Lanes[laneID]
-		if !ok {
-			return errors.New("lane state is missing")
-		}
-		lane.State = state
-		if state == "preparing" || state == "running" {
-			lane.CapabilityHash = capabilityHash
-		} else {
-			lane.CapabilityHash = ""
-		}
-		if state == "archived" {
-			lane.AutoArchiveAt = 0
-			lane.ArchiveRevision++
-		}
-		catalog.Lanes[laneID] = lane
-		catalog.Host.LaneRevision++
-		return nil
-	})
-}
-
-// SetNativeSessionID records a product adapter's immutable native session
-// selection without changing lifecycle state.
-func (e *LaneEngine) SetNativeSessionID(laneID, nativeID string) error {
-	if strings.TrimSpace(nativeID) == "" {
-		return errors.New("native lane session identity is empty")
-	}
-	return e.mutate(func(catalog *Catalog) error {
-		lane, ok := catalog.Lanes[laneID]
-		if !ok {
-			return errors.New("lane state is missing")
-		}
-		if lane.NativeSessionID != "" && lane.NativeSessionID != nativeID {
-			return errors.New("native lane session identity cannot change")
-		}
-		lane.NativeSessionID = nativeID
-		catalog.Lanes[laneID] = lane
-		catalog.Host.LaneRevision++
+		catalog.Lanes[candidate.NativeSessionID] = candidate
 		return nil
 	})
 }
@@ -157,12 +65,5 @@ func (e *LaneEngine) mutate(apply func(*Catalog) error) error {
 		}
 		return nil
 	}
-	return errors.New("lane state remained contended")
-}
-
-func cloneLane(lane Lane) Lane {
-	lane.Groups = append([]string(nil), lane.Groups...)
-	lane.ExplicitGroups = append([]string(nil), lane.ExplicitGroups...)
-	lane.Arguments = append([]string(nil), lane.Arguments...)
-	return lane
+	return errors.New("lane candidate table remained contended")
 }

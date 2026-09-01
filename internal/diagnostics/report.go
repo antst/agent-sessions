@@ -28,16 +28,8 @@ type Input struct {
 	ServiceState    string
 	ReleasePresent  bool
 	EndpointPresent bool
-	Revisions       Revisions
 	Records         Records
 	ProductStates   map[string]string
-}
-
-// Revisions exposes monotonic catalog family revisions only.
-type Revisions struct {
-	Attachments uint64 `json:"attachments"`
-	Lanes       uint64 `json:"lanes"`
-	Federation  uint64 `json:"federation"`
 }
 
 // Records exposes aggregate durable record counts only.
@@ -56,7 +48,6 @@ type Report struct {
 	Operation string    `json:"operation"`
 	Ready     bool      `json:"ready"`
 	Daemon    Daemon    `json:"daemon"`
-	Revisions Revisions `json:"revisions"`
 	Records   Records   `json:"records"`
 	Products  []Product `json:"products"`
 	Checks    []Check   `json:"checks,omitempty"`
@@ -97,9 +88,8 @@ func Build(input Input) (Report, error) {
 			ServiceState: serviceState, ReleasePresent: input.ReleasePresent,
 			EndpointPresent: input.EndpointPresent,
 		},
-		Revisions: input.Revisions,
-		Records:   nonnegativeRecords(input.Records),
-		Products:  products(input.ProductStates),
+		Records:  nonnegativeRecords(input.Records),
+		Products: products(input.ProductStates),
 	}
 	if input.Operation == "doctor" {
 		report.Checks = doctorChecks(report)

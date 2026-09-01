@@ -22,13 +22,11 @@ func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := snapshot.Catalog
-	catalog.Host.User = canary
-	catalog.Host.Host = canary
-	catalog.Host.Release = canary
-	catalog.Host.Endpoint = canary
-	catalog.Host.ProductReadiness = map[string]string{"codex": "ready", "claude": canary}
 	catalog.Attachments["attachment"] = ManagedAttachment{ID: "attachment", Product: "codex", Cwd: canary, State: "attached", DaemonGeneration: runtime.Generation()}
-	catalog.Lanes["lane"] = Lane{ID: "lane", ParentAttachmentID: "attachment", Product: "codex", Name: canary, State: "terminal"}
+	catalog.Lanes["native"] = LaneCandidate{
+		NativeSessionID: "native", Parent: "attachment", Product: "codex",
+		PrimaryGroup: "session:host/attachment",
+	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)
 	}
@@ -79,9 +77,8 @@ func TestAdminReportsConfiguredReleasePresenceWithoutPublishingReleaseBytes(t *t
 	if strings.Contains(string(body), releaseCanary) || !strings.Contains(string(body), `"release_present":true`) {
 		t.Fatalf("release projection = %s", body)
 	}
-	snapshot, err := runtime.State().Read()
-	if err != nil || snapshot.Catalog.Host.Release != releaseCanary {
-		t.Fatalf("durable release = %q, %v", snapshot.Catalog.Host.Release, err)
+	if runtime.Release() != releaseCanary {
+		t.Fatalf("runtime release = %q", runtime.Release())
 	}
 }
 
@@ -103,16 +100,6 @@ func TestAdminConsumesOnlyLiveBoundedProductDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := snapshot.Catalog
-	catalog.Host.ProductReadiness = map[string]string{"codex": "missing", "claude": canary}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
-
 	for _, operation := range []string{"status", "doctor"} {
 		body, err := runtime.runtimeStatus(context.Background(), operation)
 		if err != nil {

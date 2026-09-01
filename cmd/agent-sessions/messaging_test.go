@@ -17,21 +17,17 @@ func TestMessagingToolsRejectBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = runtime.Close() })
+			parentGroup := "session:" + runtime.HostID() + "/parent"
+			laneGroup := "session:" + runtime.HostID() + "/lane-id"
 			snapshot, err := runtime.State().Read()
 			if err != nil {
 				t.Fatal(err)
 			}
 			catalog := snapshot.Catalog
-			catalog.Host.Host = "host-a"
 			catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
 				ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 				Cwd: "/work", PermissionMode: "bypassPermissions",
-				State: "attached", DaemonGeneration: catalog.Host.Generation,
-			}
-			catalog.Lanes["lane-id"] = daemonpkg.Lane{
-				ID: "lane-id", Product: "qwen", NativeSessionID: "native-id", Name: "worker",
-				ParentAttachmentID: "parent", Cwd: "/work",
-				Groups: []string{"session:host-a/parent", "session:host-a/lane-id"}, State: "running",
+				State: "attached", DaemonGeneration: runtime.Generation(),
 			}
 			if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 				t.Fatal(err)
@@ -41,7 +37,7 @@ func TestMessagingToolsRejectBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 			coordinator.lanes["lane-id"] = &laneActor{
 				id: "lane-id", product: "qwen", nativeID: "native-id", name: "worker",
 				parentID: "parent", cwd: "/work",
-				groups:     []string{"session:host-a/parent", "session:host-a/lane-id"},
+				groups:     []string{parentGroup, laneGroup},
 				permission: "default", state: "running",
 			}
 
@@ -76,7 +72,7 @@ func TestUnifiedRenameNeverCreatesADurableDaemonAlias(t *testing.T) {
 	catalog := snapshot.Catalog
 	catalog.Attachments["peer"] = daemonpkg.ManagedAttachment{
 		ID: "peer", Product: "claude", NativeSessionID: "native",
-		State: "attached", DaemonGeneration: catalog.Host.Generation,
+		State: "attached", DaemonGeneration: runtime.Generation(),
 	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)

@@ -20,7 +20,6 @@ func TestHookEventsAreSilentWhenDaemonIsUnavailable(t *testing.T) {
 	}
 	threadID := "00000000-0000-4000-8000-00000000babe"
 	if _, err := store.Commit(0, daemonpkg.Catalog{
-		Host: daemonpkg.HostRuntime{Generation: 7},
 		Attachments: map[string]daemonpkg.ManagedAttachment{
 			threadID: {
 				ID: threadID, Product: "codex", NativeSessionID: threadID,

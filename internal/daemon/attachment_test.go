@@ -290,7 +290,6 @@ func activeAttachmentEngineForTest(t *testing.T, id string) *AttachmentEngine {
 		t.Fatal(err)
 	}
 	catalog := snapshot.Catalog
-	catalog.Host.Generation = 1
 	catalog.Attachments[id] = ManagedAttachment{
 		ID: id, Product: "codex", NativeSessionID: "native-" + id, State: "attached", DaemonGeneration: 1,
 	}

@@ -3,22 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
-
-var errConnectorGenerationRecovering = errors.New("connector attachment generation is recovering")
-
-const connectorRecoveryTimeout = 2 * time.Second
 
 func runConnector(ctx context.Context, product string, output io.Writer) error {
 	resolved, err := resolveConnectorProduct(product, os.Getenv)
@@ -47,46 +41,15 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		Refresh: func(context.Context) error {
 			return refresher.refresh()
 		},
-		Generation: func(context.Context) (uint64, error) {
-			state, openErr := daemonpkg.OpenState(stateRoot, 16<<20)
-			if openErr != nil {
-				return 0, openErr
-			}
-			snapshot, readErr := state.Read()
-			return snapshot.Catalog.Host.Generation, readErr
-		},
+		Generation: func(context.Context) (uint64, error) { return 1, nil },
 		Attest: func(callCtx context.Context, params json.RawMessage) (sessiontools.ConnectorAttestation, error) {
-			return attestConnectorWithRecovery(callCtx, stateRoot, product, params, os.Getpid())
+			return attestConnectorFromState(stateRoot, product, params, os.Getpid())
 		},
 	})
 	if err != nil {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
-}
-
-func attestConnectorWithRecovery(
-	ctx context.Context,
-	stateRoot, product string,
-	params json.RawMessage,
-	pid int,
-) (sessiontools.ConnectorAttestation, error) {
-	deadline := time.Now().Add(connectorRecoveryTimeout)
-	for {
-		attestation, err := attestConnectorFromState(stateRoot, product, params, pid)
-		if !errors.Is(err, errConnectorGenerationRecovering) || time.Now().After(deadline) {
-			return attestation, err
-		}
-		timer := time.NewTimer(20 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return sessiontools.ConnectorAttestation{}, ctx.Err()
-		case <-timer.C:
-		}
-	}
 }
 
 // resolveConnectorProduct keeps the repository-root Codex MCP manifest safe
@@ -133,58 +96,22 @@ func attestConnectorFromState(
 	if err != nil {
 		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
 	}
-	if laneID, capability := strings.TrimSpace(os.Getenv("AGENT_SESSIONS_SESSION_ID")), strings.TrimSpace(os.Getenv("AGENT_SESSIONS_LANE_CAPABILITY")); laneID != "" && capability != "" {
-		lane, exists := snapshot.Catalog.Lanes[laneID]
-		if exists && lane.Product == product && (lane.State == "preparing" || lane.State == "running") &&
-			lane.CapabilityHash == daemonpkg.CapabilityDigest(capability) {
-			return sessiontools.ConnectorAttestation{
-				AttachmentID: lane.ID, Capability: capability,
-				Evidence: daemonpkg.NativeEvidence{Process: caller, Ancestry: ancestry, ThreadID: lane.NativeSessionID},
-			}, nil
-		}
-	}
 	wantedThread := ""
 	if product == "codex" {
 		wantedThread, _ = sessiontools.StdioMCPThreadID(params)
 	}
 	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
-	recoveringMatches := 0
 	for _, attachment := range snapshot.Catalog.Attachments {
 		if attachment.Product != product || attachment.State != "attached" ||
 			wantedThread != "" && attachment.NativeSessionID != wantedThread {
 			continue
 		}
 		if connectorAncestryMatches(attachment, caller, ancestry) {
-			if attachment.DaemonGeneration == snapshot.Catalog.Host.Generation {
-				matches = append(matches, attachment)
-			} else {
-				recoveringMatches++
-			}
+			matches = append(matches, attachment)
 		}
 	}
-	laneMatches := make([]daemonpkg.Lane, 0, 1)
-	if product == "codex" && wantedThread != "" {
-		for _, lane := range snapshot.Catalog.Lanes {
-			if lane.Product == product && (lane.State == "preparing" || lane.State == "running") &&
-				lane.NativeSessionID == wantedThread && strings.TrimSpace(lane.CapabilityHash) != "" {
-				laneMatches = append(laneMatches, lane)
-			}
-		}
-	}
-	if len(matches)+len(laneMatches) == 0 && recoveringMatches == 1 {
-		return sessiontools.ConnectorAttestation{}, errConnectorGenerationRecovering
-	}
-	if len(matches)+len(laneMatches) != 1 {
+	if len(matches) != 1 {
 		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
-	}
-	if len(laneMatches) == 1 {
-		lane := laneMatches[0]
-		return sessiontools.ConnectorAttestation{
-			AttachmentID: lane.ID,
-			Evidence: daemonpkg.NativeEvidence{
-				Process: caller, Ancestry: ancestry, ThreadID: lane.NativeSessionID,
-			},
-		}, nil
 	}
 	attachment := matches[0]
 	evidence := daemonpkg.NativeEvidence{

@@ -111,13 +111,29 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 		connected = federationHost.Connected()
 	}
 	hostName := daemonSetting("AGENT_SESSIONS_HOST_NAME")
+	hostID := runtime.HostID()
 	if hostName == "" {
-		hostName = snapshot.Catalog.Host.Host
+		hostName = hostID
 	}
 	report := buildOperatorRoster(
-		snapshot, runtime.Generation(), hostName, daemonSetting("AGENT_SESSIONS_HUB") != "", connected,
+		snapshot, runtime.Generation(), hostID, runtime.Release(), hostName, daemonSetting("AGENT_SESSIONS_HUB") != "", connected,
 		remoteHosts, remotePeers,
 	)
+	c.mu.Lock()
+	for _, lane := range c.lanes {
+		if lane == nil || lane.state == "archived" || lane.state == "retiring" {
+			continue
+		}
+		report.Local = append(report.Local, operatorRosterEntry{
+			Kind: "lane", Scope: "local", ID: lane.id, LocalID: lane.id,
+			NativeSessionID: lane.nativeID, Name: operatorDefaultString(lane.name, lane.id),
+			HostID: hostID, HostName: hostName, Product: lane.product, State: lane.state,
+			Live: true, Cwd: lane.cwd, Groups: operatorLocalGroups(hostID, lane.id, lane.groups),
+			PermissionMode: lane.permission, OwnerSessionID: lane.parentID, Persistent: lane.persistent,
+		})
+		report.Summary.LocalLanes++
+	}
+	c.mu.Unlock()
 	for index := range report.Local {
 		entry := &report.Local[index]
 		if entry.Kind != "peer" || !entry.Live {
@@ -133,19 +149,19 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 func buildOperatorRoster(
 	snapshot daemonpkg.StateSnapshot,
 	generation uint64,
+	hostID, release string,
 	hostName string,
 	hubConfigured, federationConnected bool,
 	remoteHosts []federationpkg.Host,
 	remotePeers []federationpkg.Peer,
 ) operatorRosterReport {
-	host := snapshot.Catalog.Host
 	if strings.TrimSpace(hostName) == "" {
-		hostName = host.Host
+		hostName = hostID
 	}
 	report := operatorRosterReport{
 		Schema: operatorRosterSchema,
 		Host: operatorRosterHost{
-			ID: host.Host, Name: hostName, Release: host.Release, State: host.ServiceState,
+			ID: hostID, Name: hostName, Release: release, State: "running",
 			Generation: generation, HubConfigured: hubConfigured, FederationConnected: federationConnected,
 		},
 		Local: make([]operatorRosterEntry, 0), Remote: make([]operatorRosterEntry, 0),
@@ -158,26 +174,12 @@ func buildOperatorRoster(
 		report.Local = append(report.Local, operatorRosterEntry{
 			Kind: "peer", Scope: "local", ID: attachment.ID, LocalID: attachment.ID,
 			NativeSessionID: attachment.NativeSessionID, Name: attachment.ID,
-			HostID: host.Host, HostName: hostName, Product: attachment.Product, State: attachment.State,
+			HostID: hostID, HostName: hostName, Product: attachment.Product, State: attachment.State,
 			Live: attachment.State == "attached" && attachment.DaemonGeneration == generation,
-			Cwd:  attachment.Cwd, Groups: operatorLocalGroups(host.Host, attachment.ID, attachment.Groups),
+			Cwd:  attachment.Cwd, Groups: operatorLocalGroups(hostID, attachment.ID, attachment.Groups),
 			PermissionMode: attachment.PermissionMode,
 		})
 		report.Summary.LocalPeers++
-	}
-	for _, lane := range snapshot.Catalog.Lanes {
-		if lane.State == "archived" {
-			continue
-		}
-		report.Local = append(report.Local, operatorRosterEntry{
-			Kind: "lane", Scope: "local", ID: lane.ID, LocalID: lane.ID,
-			NativeSessionID: lane.NativeSessionID, Name: operatorDefaultString(lane.Name, lane.ID),
-			HostID: host.Host, HostName: hostName, Product: lane.Product, State: lane.State,
-			Live: lane.State != "retiring", Cwd: lane.Cwd,
-			Groups: operatorLocalGroups(host.Host, lane.ID, lane.Groups), PermissionMode: lane.PermissionMode,
-			OwnerSessionID: lane.ParentAttachmentID, Persistent: lane.Persistent,
-		})
-		report.Summary.LocalLanes++
 	}
 	for _, peer := range remotePeers {
 		kind := "peer"

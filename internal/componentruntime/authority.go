@@ -163,13 +163,6 @@ func New(config Config) (*Authority, error) {
 		afterRebindClose:         config.afterRebindClose,
 		afterRebindAttachment:    config.afterRebindAttachment,
 	}
-	snapshot, err := authority.store.Read()
-	if err != nil {
-		return nil, err
-	}
-	if snapshot.Catalog.Host.Generation != config.Generation {
-		return nil, errors.New("component authority generation does not match durable host")
-	}
 	if err := authority.collectClosedBindings(context.Background()); err != nil {
 		return nil, fmt.Errorf("collect component binding tombstones: %w", err)
 	}
@@ -339,7 +332,7 @@ func (a *Authority) HandleComponentFrame(
 		if err != nil {
 			return err
 		}
-		if snapshot.Catalog.Host.Generation != a.generation || view.Generation != a.generation {
+		if view.Generation != a.generation {
 			return replayError("component binding belongs to another generation")
 		}
 		binding, ok := snapshot.Catalog.ComponentBindings[view.BindingID]
@@ -517,8 +510,7 @@ func (a *Authority) handleSessionRebind(
 				attachment.NativeSessionID = rebind.NewNativeSessionID
 				attachment.Evidence = fresh
 				attachment.ComponentRevision++
-				catalog.Host.AttachmentRevision++
-				attachment.CatalogRevision = catalog.Host.AttachmentRevision
+				attachment.CatalogRevision = snapshot.Revision + 1
 				attachment.DaemonGeneration = a.generation
 				catalog.Attachments[attachment.ID] = attachment
 			} else if attachment.NativeSessionID != rebind.NewNativeSessionID {
@@ -586,7 +578,7 @@ func (a *Authority) currentFrameAuthority(
 	snapshot daemon.StateSnapshot,
 	view component.BindingView,
 ) (daemon.ComponentBinding, daemon.ManagedAttachment, error) {
-	if snapshot.Catalog.Host.Generation != a.generation || view.Generation != a.generation {
+	if view.Generation != a.generation {
 		return daemon.ComponentBinding{}, daemon.ManagedAttachment{}, replayError("component binding belongs to another generation")
 	}
 	binding, ok := snapshot.Catalog.ComponentBindings[view.BindingID]
@@ -610,9 +602,6 @@ func (a *Authority) resolve(
 	snapshot, err := a.store.Read()
 	if err != nil {
 		return daemon.StateSnapshot{}, daemon.ManagedAttachment{}, Resolution{}, err
-	}
-	if snapshot.Catalog.Host.Generation != a.generation {
-		return daemon.StateSnapshot{}, daemon.ManagedAttachment{}, Resolution{}, replayError("component authority generation is stale")
 	}
 	attachment, ok := snapshot.Catalog.Attachments[attachmentID]
 	if !ok {

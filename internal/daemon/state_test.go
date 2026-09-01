@@ -17,10 +17,6 @@ func TestLifecycleTransitionsRemainProductNeutral(t *testing.T) {
 		{kind: "attachment", from: "preparing", to: "prepared", want: true},
 		{kind: "attachment", from: "attached", to: "detaching", want: true},
 		{kind: "attachment", from: "detached", to: "attached"},
-		{kind: "lane", from: "preparing", to: "idle", want: true},
-		{kind: "lane", from: "idle", to: "running", want: true},
-		{kind: "lane", from: "terminal", to: "archived", want: true},
-		{kind: "lane", from: "archived", to: "running"},
 	} {
 		t.Run(test.kind+"/"+test.from+"/"+test.to, func(t *testing.T) {
 			if got := ValidLifecycleTransition(test.kind, test.from, test.to); got != test.want {
@@ -36,9 +32,11 @@ func TestStateStoreRoundTripsLaneWithoutTurnOrInputState(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := Catalog{
-		Host: HostRuntime{User: "1000", Host: "pdev", Generation: 7},
-		Lanes: map[string]Lane{
-			"lane": {ID: "lane", ParentAttachmentID: "parent", Product: "codex", NativeSessionID: "native", State: "idle", Groups: []string{"project"}},
+		Lanes: map[string]LaneCandidate{
+			"native": {
+				NativeSessionID: "native", Parent: "parent", Product: "codex",
+				PrimaryGroup: "session:host/parent", SecondaryGroups: []string{"project"},
+			},
 		},
 	}
 	committed, err := store.Commit(0, catalog)
@@ -46,14 +44,14 @@ func TestStateStoreRoundTripsLaneWithoutTurnOrInputState(t *testing.T) {
 		t.Fatal(err)
 	}
 	caller := committed.Catalog
-	lane := caller.Lanes["lane"]
-	lane.Groups[0] = "mutated"
-	caller.Lanes["lane"] = lane
+	lane := caller.Lanes["native"]
+	lane.SecondaryGroups[0] = "mutated"
+	caller.Lanes["native"] = lane
 	loaded, err := store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded.Catalog.Lanes["lane"].Groups[0]; got != "project" {
+	if got := loaded.Catalog.Lanes["native"].SecondaryGroups[0]; got != "project" {
 		t.Fatalf("caller mutation leaked into store: %q", got)
 	}
 	body, err := json.Marshal(loaded.Catalog)
@@ -86,23 +84,26 @@ func TestStateStoreNormalizesRemainingMaps(t *testing.T) {
 	}
 }
 
-func TestStateStoreRejectsNativeSessionRewriteAndStaleRevision(t *testing.T) {
+func TestStateStoreRejectsCandidateRewriteAndStaleRevision(t *testing.T) {
 	store, err := OpenState(t.TempDir(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.Commit(0, Catalog{Lanes: map[string]Lane{
-		"lane": {ID: "lane", Product: "codex", NativeSessionID: "native-a", State: "idle"},
+	first, err := store.Commit(0, Catalog{Lanes: map[string]LaneCandidate{
+		"native-a": {
+			NativeSessionID: "native-a", Product: "codex", Parent: "parent",
+			PrimaryGroup: "session:host/parent",
+		},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mutated := first.Catalog
-	lane := mutated.Lanes["lane"]
-	lane.NativeSessionID = "native-b"
-	mutated.Lanes["lane"] = lane
+	lane := mutated.Lanes["native-a"]
+	lane.Parent = "other-parent"
+	mutated.Lanes["native-a"] = lane
 	if _, err := store.Commit(first.Revision, mutated); err == nil {
-		t.Fatal("native session rewrite was accepted")
+		t.Fatal("candidate rewrite was accepted")
 	}
 	if _, err := store.Commit(0, first.Catalog); !errors.Is(err, statestore.ErrConflict) {
 		t.Fatalf("stale commit error = %v", err)

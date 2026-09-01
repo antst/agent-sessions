@@ -15,7 +15,6 @@ import (
 func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveContent(t *testing.T) {
 	const secret = "SECRET-PROMPT-RESULT-CREDENTIAL"
 	snapshot := daemonpkg.StateSnapshot{Revision: 11, Catalog: daemonpkg.Catalog{
-		Host: daemonpkg.HostRuntime{Host: "host-a", Release: "0.3.0", ServiceState: "running", Generation: 7},
 		Attachments: map[string]daemonpkg.ManagedAttachment{
 			"local-peer": {
 				ID: "local-peer", Product: "codex", NativeSessionID: "native-peer",
@@ -24,14 +23,6 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 				CapabilityHash: secret, Evidence: daemonpkg.NativeEvidence{Executable: secret},
 			},
 			"detached": {ID: "detached", Product: "claude", State: "detached"},
-		},
-		Lanes: map[string]daemonpkg.Lane{
-			"local-lane": {
-				ID: "local-lane", ParentAttachmentID: "local-peer", Product: "qwen", Name: "worker",
-				NativeSessionID: "native-lane", Cwd: "/work", Groups: []string{"project"},
-				State: "terminal", Persistent: true, Arguments: []string{secret}, Schema: secret,
-			},
-			"archived": {ID: "archived", Product: "grok", Name: secret, State: "archived"},
 		},
 	}}
 	remoteHosts := []federationpkg.Host{{
@@ -50,18 +41,17 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 			Cwd: "/remote", Groups: []string{"project", "session:host-b/remote-lane"}, ParentSessionID: "remote-peer",
 		},
 	}
-	report := buildOperatorRoster(snapshot, 7, "workstation-a", true, true, remoteHosts, remotePeers)
+	report := buildOperatorRoster(snapshot, 7, "host-a", "0.3.0", "workstation-a", true, true, remoteHosts, remotePeers)
 	if report.Schema != operatorRosterSchema || report.Host.ID != "host-a" || !report.Host.FederationConnected {
 		t.Fatalf("host roster = %+v", report.Host)
 	}
-	if report.Summary != (operatorRosterSummary{LocalPeers: 1, LocalLanes: 1, RemotePeers: 1, RemoteLanes: 1, FederatedHosts: 1}) {
+	if report.Summary != (operatorRosterSummary{LocalPeers: 1, RemotePeers: 1, RemoteLanes: 1, FederatedHosts: 1}) {
 		t.Fatalf("roster summary = %+v", report.Summary)
 	}
-	if len(report.Local) != 2 || len(report.Remote) != 2 || len(report.FederatedHosts) != 1 {
+	if len(report.Local) != 1 || len(report.Remote) != 2 || len(report.FederatedHosts) != 1 {
 		t.Fatalf("roster sizes local=%d remote=%d hosts=%d", len(report.Local), len(report.Remote), len(report.FederatedHosts))
 	}
-	if !containsString(report.Local[0].Groups, "session:host-a/"+report.Local[0].LocalID) ||
-		!containsString(report.Local[1].Groups, "session:host-a/"+report.Local[1].LocalID) {
+	if !containsString(report.Local[0].Groups, "session:host-a/"+report.Local[0].LocalID) {
 		t.Fatalf("local private groups = %+v", report.Local)
 	}
 	if report.Remote[0].Kind != "lane" && report.Remote[1].Kind != "lane" {

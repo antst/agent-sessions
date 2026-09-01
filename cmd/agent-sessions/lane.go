@@ -1290,7 +1290,11 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 	if err != nil {
 		return err
 	}
-	return engine.SetNativeSessionID(actor.id, nativeID)
+	candidate, ok := durableLaneCandidate(runtime, actor)
+	if !ok {
+		return nil
+	}
+	return engine.Remember(candidate)
 }
 
 func parseCodexStartedThreadID(line []byte) string {
@@ -1713,11 +1717,7 @@ func (c *hostCoordinator) liveLaneNameLocked(runtime *daemonpkg.Runtime, parent 
 }
 
 func (c *hostCoordinator) anchorLaneGroups(runtime *daemonpkg.Runtime, groups []string, parentID, laneID string) ([]string, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return nil, err
-	}
-	host := strings.TrimSpace(snapshot.Catalog.Host.Host)
+	host := strings.TrimSpace(runtime.HostID())
 	if host == "" {
 		return nil, errors.New("daemon host identity is unavailable")
 	}
@@ -1732,11 +1732,7 @@ func (c *hostCoordinator) anchorLaneGroups(runtime *daemonpkg.Runtime, groups []
 }
 
 func (c *hostCoordinator) attachmentVisibilityGroups(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) ([]string, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return nil, err
-	}
-	host := strings.TrimSpace(snapshot.Catalog.Host.Host)
+	host := strings.TrimSpace(runtime.HostID())
 	if host == "" {
 		return nil, errors.New("daemon host identity is unavailable")
 	}
@@ -1856,63 +1852,40 @@ func (c *hostCoordinator) ensureLaneActors(_ *daemonpkg.Runtime) error {
 	return nil
 }
 func (c *hostCoordinator) commitNewLane(r *daemonpkg.Runtime, a *laneActor) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
-	if err != nil {
-		return err
+	if a.nativeID != "" {
+		candidate, ok := durableLaneCandidate(r, a)
+		if !ok {
+			return nil
+		}
+		engine, err := daemonpkg.NewLaneEngine(r.State())
+		if err != nil {
+			return err
+		}
+		return engine.Remember(candidate)
 	}
-	return engine.Create(durableLane(a, "idle"))
+	return nil
 }
-func (c *hostCoordinator) markLaneRunning(r *daemonpkg.Runtime, a *laneActor) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
-	if err != nil {
-		return err
-	}
-	lane := durableLane(a, "running")
-	lane.CapabilityHash = daemonpkg.CapabilityDigest(a.capability)
-	if err := engine.Update(lane); err != nil {
-		return err
-	}
-	return engine.TransitionLane(a.id, "running", lane.CapabilityHash)
-}
-func (c *hostCoordinator) markLaneTerminal(r *daemonpkg.Runtime, a *laneActor) error {
-	return c.commitLaneState(r, a.id, "terminal")
-}
-func (c *hostCoordinator) commitResumeLane(r *daemonpkg.Runtime, a *laneActor, _ bool) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
-	if err != nil {
-		return err
-	}
-	return engine.Update(durableLane(a, "idle"))
-}
-func (c *hostCoordinator) commitLaneState(r *daemonpkg.Runtime, id, state string) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
-	if err != nil {
-		return err
-	}
-	return engine.TransitionLane(id, state, "")
-}
+func (c *hostCoordinator) markLaneRunning(*daemonpkg.Runtime, *laneActor) error        { return nil }
+func (c *hostCoordinator) markLaneTerminal(*daemonpkg.Runtime, *laneActor) error       { return nil }
+func (c *hostCoordinator) commitResumeLane(*daemonpkg.Runtime, *laneActor, bool) error { return nil }
+func (c *hostCoordinator) commitLaneState(*daemonpkg.Runtime, string, string) error    { return nil }
 
-func durableLane(a *laneActor, state string) daemonpkg.Lane {
-	lane := daemonpkg.Lane{ID: a.id, ParentAttachmentID: a.parentID, Product: a.product, Name: a.name, Cwd: a.cwd, State: state}
-	copyLanePolicy(&lane, a)
-	return lane
-}
-
-func copyLanePolicy(lane *daemonpkg.Lane, a *laneActor) {
-	lane.NativeSessionID = a.nativeID
-	lane.Groups = append([]string(nil), a.groups...)
-	lane.ExplicitGroups = append([]string(nil), a.explicitGroups...)
-	lane.InheritGroups = a.inheritGroups
-	lane.PermissionMode = a.permission
-	lane.ApprovalPolicy = a.approvalPolicy
-	lane.Sandbox = a.sandbox
-	lane.Effort = a.effort
-	lane.Schema = a.schema
-	lane.Arguments = append([]string(nil), a.arguments...)
-	lane.Persistent = a.persistent
-	lane.AutoArchive = a.autoArchive
-	lane.AutoArchiveDelayMS = a.autoArchiveDelay.Milliseconds()
-	lane.AutoArchiveAt = a.autoArchiveAt
+func durableLaneCandidate(runtime *daemonpkg.Runtime, actor *laneActor) (daemonpkg.LaneCandidate, bool) {
+	if actor == nil || strings.TrimSpace(actor.nativeID) == "" || strings.Contains(actor.parentID, "/") {
+		return daemonpkg.LaneCandidate{}, false
+	}
+	primary := "session:" + runtime.HostID() + "/" + actor.parentID
+	laneGroup := "session:" + runtime.HostID() + "/" + actor.id
+	secondary := make([]string, 0, len(actor.groups))
+	for _, group := range actor.groups {
+		if group != primary && group != laneGroup {
+			secondary = append(secondary, group)
+		}
+	}
+	return daemonpkg.LaneCandidate{
+		NativeSessionID: actor.nativeID, Product: actor.product, Parent: actor.parentID,
+		PrimaryGroup: primary, SecondaryGroups: uniqueStrings(secondary),
+	}, true
 }
 
 func (c *hostCoordinator) armLaneAutoArchive(runtime *daemonpkg.Runtime, actor *laneActor) {
@@ -1957,10 +1930,6 @@ func (c *hostCoordinator) scheduleLaneAutoArchive(runtime *daemonpkg.Runtime, ac
 	}(due)
 }
 
-func (c *hostCoordinator) commitLaneAuthorization(r *daemonpkg.Runtime, a *laneActor, state string) error {
-	engine, err := daemonpkg.NewLaneEngine(r.State())
-	if err != nil {
-		return err
-	}
-	return engine.TransitionLane(a.id, state, daemonpkg.CapabilityDigest(a.capability))
+func (c *hostCoordinator) commitLaneAuthorization(*daemonpkg.Runtime, *laneActor, string) error {
+	return nil
 }

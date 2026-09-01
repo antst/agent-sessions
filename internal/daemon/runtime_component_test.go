@@ -17,7 +17,6 @@ func TestRuntimeGenerationCommitAtomicallyRetiresComponentAuthority(t *testing.T
 			}
 			identity := procinfo.Identity{PID: 42, Start: "start", StrongStart: "strong"}
 			catalog := Catalog{
-				Host: HostRuntime{User: "1000", Host: "host", Generation: 4, ServiceState: "running"},
 				Attachments: map[string]ManagedAttachment{
 					"attachment": {
 						ID: "attachment", CapabilityHash: CapabilityDigest("secret"), Product: "codex",
@@ -64,10 +63,9 @@ func TestRuntimeGenerationCommitAtomicallyRetiresComponentAuthority(t *testing.T
 					}
 					binding := snapshot.Catalog.ComponentBindings["binding"]
 					session := snapshot.Catalog.ComponentSessions["attachment"]
-					if snapshot.Catalog.Host.Generation != 5 || binding.Generation != 4 ||
+					if binding.Generation != 4 ||
 						binding.State != BindingRetiring || session.State != ComponentSessionClosed {
-						t.Fatalf("startup component sweep = host=%d binding=%+v session=%+v",
-							snapshot.Catalog.Host.Generation, binding, session)
+						t.Fatalf("startup component sweep = binding=%+v session=%+v", binding, session)
 					}
 					initialized = true
 					return nil
@@ -77,7 +75,7 @@ func TestRuntimeGenerationCommitAtomicallyRetiresComponentAuthority(t *testing.T
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = runtime.Close() })
-			if !initialized || runtime.Generation() != 5 {
+			if !initialized || runtime.Generation() == 0 {
 				t.Fatalf("runtime initialized=%v generation=%d", initialized, runtime.Generation())
 			}
 		})

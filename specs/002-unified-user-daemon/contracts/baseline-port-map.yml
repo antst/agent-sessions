@@ -670,15 +670,11 @@ entries:
     new_owner: daemon shared lane engine
     new_symbols:
       - internal/daemon/lane.go:NewLaneEngine
-      - internal/daemon/lane.go:LaneEngine.Create
-      - internal/daemon/lane.go:LaneEngine.Update
-      - internal/daemon/lane.go:LaneEngine.TransitionLane
-      - internal/daemon/lane.go:LaneEngine.RecordCleanupDebt
-      - internal/daemon/lane.go:LaneEngine.ResolveCleanupDebt
+      - internal/daemon/lane.go:LaneEngine.Remember
     replacement_tests:
-      - internal/daemon/lane_test.go:TestLaneEngineStoresOnlyLaneRoutingState
-      - internal/daemon/lane_test.go:TestLaneEngineTransitionsWithoutTurnState
-      - cmd/agent-sessions/lane_test.go:TestLaneResumeTransfersDurableParentAndUnarchives
+      - internal/daemon/lane_test.go:TestLaneEngineRemembersOnlyImmutableOfflineLookupCandidate
+      - internal/daemon/lane_test.go:TestLaneEngineRejectsCandidateRewrite
+      - cmd/agent-sessions/lane_test.go:TestLaneReadyKeepsAgentSessionsOwnerDistinctFromNativeSession
       - cmd/agent-sessions/messaging_test.go:TestMessagingToolsRejectBusyLaneByEveryAdvertisedIdentity
     acceptance_cells: [L-01, L-02, L-03, L-04, L-05, L-06, L-07, L-08, L-09, L-10, L-11, L-12, L-13, L-14, L-15, L-16, L-17, L-18, L-19, P-C-C, P-C-CL, P-C-G, P-C-Q, P-CL-C, P-CL-CL, P-CL-G, P-CL-Q, P-G-C, P-G-CL, P-G-G, P-G-Q, P-Q-C, P-Q-CL, P-Q-G, P-Q-Q]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#shared-lane-engine]

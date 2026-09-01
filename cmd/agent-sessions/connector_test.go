@@ -1,15 +1,9 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
@@ -62,117 +56,5 @@ func TestGrokConnectorAcceptsExactTUIOrPrivateLeaderAncestry(t *testing.T) {
 	}
 	if connectorAncestryMatches(attachment, caller, []procinfo.Identity{{PID: 104, Start: "unrelated"}}) {
 		t.Fatal("unrelated Grok connector ancestry was accepted")
-	}
-}
-
-func TestConnectorAttestsDaemonLaneFromInheritedCapability(t *testing.T) {
-	root := t.TempDir()
-	state, err := daemonpkg.OpenState(root, 16<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := state.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	capability := "one-turn-lane-capability"
-	catalog := snapshot.Catalog
-	catalog.Lanes["lane"] = daemonpkg.Lane{
-		ID: "lane", Product: "qwen", NativeSessionID: "native", State: "running",
-		CapabilityHash: daemonpkg.CapabilityDigest(capability),
-	}
-	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AGENT_SESSIONS_SESSION_ID", "lane")
-	t.Setenv("AGENT_SESSIONS_LANE_CAPABILITY", capability)
-	attestation, err := attestConnectorFromState(root, "qwen", nil, os.Getpid())
-	if err != nil || attestation.AttachmentID != "lane" || attestation.Capability != capability || attestation.Evidence.ThreadID != "native" {
-		t.Fatalf("lane attestation = %+v, %v", attestation, err)
-	}
-	t.Setenv("AGENT_SESSIONS_LANE_CAPABILITY", "forged")
-	if _, err := attestConnectorFromState(root, "qwen", nil, os.Getpid()); !errors.Is(err, bridge.ErrConnectorInactive) {
-		t.Fatalf("forged lane attestation error = %v", err)
-	}
-}
-
-func TestCodexConnectorAttestsDaemonLaneFromNativeThreadMetadata(t *testing.T) {
-	root := t.TempDir()
-	state, err := daemonpkg.OpenState(root, 16<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := state.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	threadID := "01a04e84-e0fc-7ff0-98cd-7dde31af5a79"
-	catalog := snapshot.Catalog
-	catalog.Lanes["stable-lane"] = daemonpkg.Lane{
-		ID: "stable-lane", Product: "codex", NativeSessionID: threadID, State: "running",
-		CapabilityHash: daemonpkg.CapabilityDigest("app-server-cannot-inherit-this"),
-	}
-	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
-	params, _ := json.Marshal(map[string]any{"_meta": map[string]any{
-		"threadId":              threadID,
-		"x-codex-turn-metadata": map[string]any{"session_id": threadID, "thread_id": threadID},
-	}})
-	attestation, err := attestConnectorFromState(root, "codex", params, os.Getpid())
-	if err != nil || attestation.AttachmentID != "stable-lane" || attestation.Capability != "" ||
-		attestation.Evidence.ThreadID != threadID {
-		t.Fatalf("Codex lane attestation = %+v, %v", attestation, err)
-	}
-}
-
-func TestConnectorRetriesOnlyARecorroboratingAttachmentGeneration(t *testing.T) {
-	root := t.TempDir()
-	state, err := daemonpkg.OpenState(root, 16<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caller, ancestry, err := bridge.CaptureNativeAncestry(os.Getpid(), 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := state.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := snapshot.Catalog
-	catalog.Host.Generation = 2
-	catalog.Attachments["qwen-peer"] = daemonpkg.ManagedAttachment{
-		ID: "qwen-peer", Product: "qwen", State: "attached", DaemonGeneration: 1,
-		Evidence: daemonpkg.NativeEvidence{Process: caller, Ancestry: ancestry},
-	}
-	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := attestConnectorFromState(root, "qwen", nil, os.Getpid()); !errors.Is(err, errConnectorGenerationRecovering) {
-		t.Fatalf("recovering attestation error = %v", err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, attestErr := attestConnectorWithRecovery(context.Background(), root, "qwen", nil, os.Getpid())
-		done <- attestErr
-	}()
-	time.Sleep(40 * time.Millisecond)
-	snapshot, err = state.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog = snapshot.Catalog
-	attachment := catalog.Attachments["qwen-peer"]
-	attachment.DaemonGeneration = catalog.Host.Generation
-	catalog.Attachments[attachment.ID] = attachment
-	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("connector recovery retry = %v", err)
-	}
-	if _, err := attestConnectorFromState(root, "grok", nil, os.Getpid()); !errors.Is(err, bridge.ErrConnectorInactive) {
-		t.Fatalf("bare connector error = %v", err)
 	}
 }

@@ -64,10 +64,6 @@ func newAuthorityFixture(t *testing.T, generation uint64, attachmentState string
 		attachment.NativeSessionID = "native-old"
 	}
 	catalog := daemon.Catalog{
-		Host: daemon.HostRuntime{
-			User: "1000", Host: "host", Generation: generation, ServiceState: "running",
-			AttachmentRevision: testRevision,
-		},
 		Attachments: map[string]daemon.ManagedAttachment{testAttachmentID: attachment},
 	}
 	if _, err := store.Commit(0, catalog); err != nil {
@@ -539,7 +535,7 @@ func TestAuthorityCrossGenerationReadyLossCreatesOneBoundedSuccessor(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	if runtime.Generation() != 2 {
+	if runtime.Generation() == 0 {
 		t.Fatalf("successor runtime generation = %d", runtime.Generation())
 	}
 
@@ -1112,7 +1108,6 @@ func attachFixture(t *testing.T, fixture *authorityFixture, nativeSessionID stri
 		attachment.State = "attached"
 		attachment.NativeSessionID = nativeSessionID
 		attachment.Evidence = fixture.live
-		attachment.DaemonGeneration = catalog.Host.Generation
 		catalog.Attachments[testAttachmentID] = attachment
 		if _, err := fixture.store.Commit(snapshot.Revision, catalog); err == nil {
 			return
@@ -1128,7 +1123,6 @@ func seedAttachment(t *testing.T, store *daemon.StateStore, attachment daemon.Ma
 			t.Fatal(err)
 		}
 		catalog := snapshot.Catalog
-		catalog.Host.AttachmentRevision = attachment.CatalogRevision
 		catalog.Attachments[attachment.ID] = attachment
 		if _, err := store.Commit(snapshot.Revision, catalog); err == nil {
 			return

@@ -8,9 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
-	"os/user"
 	"reflect"
 	"strings"
 	"sync"
@@ -18,6 +16,8 @@ import (
 )
 
 const defaultRuntimeStateBytes int64 = 16 << 20
+
+var nextRuntimeGeneration atomic.Uint64
 
 // RuntimeComponent is one long-lived in-process daemon component. Returning
 // before daemon cancellation terminates the complete authority.
@@ -64,6 +64,8 @@ type Runtime struct {
 	attachments                *AttachmentEngine
 	control                    *ControlServer
 	generation                 uint64
+	hostID                     string
+	release                    string
 	handler                    ControlHandler
 	laneConnectorAuthorizer    LaneConnectorAuthorizer
 	parentConnectorAuthorizer  ParentConnectorAuthorizer
@@ -107,17 +109,15 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	if err != nil {
 		return nil, fmt.Errorf("read runtime state: %w", err)
 	}
-	if snapshot.Catalog.Host.Generation == math.MaxUint64 {
-		return nil, errors.New("runtime generation is exhausted")
-	}
-	generation := snapshot.Catalog.Host.Generation + 1
+	generation := nextRuntimeGeneration.Add(1)
 	attachments, err := NewAttachmentEngine(state, generation, config.Adapters)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &Runtime{
-		state: state, attachments: attachments, generation: generation, handler: config.Handler,
+		state: state, attachments: attachments, generation: generation,
+		hostID: currentRuntimeHost(), release: strings.TrimSpace(config.Release), handler: config.Handler,
 		laneConnectorAuthorizer:    config.LaneConnectorAuthorizer,
 		parentConnectorAuthorizer:  config.ParentConnectorAuthorizer,
 		productDiagnosticsProvider: config.ProductDiagnosticsProvider,
@@ -131,15 +131,7 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	runtime.control = control
 
 	catalog := snapshot.Catalog
-	catalog.Host.User = currentRuntimeUser()
-	catalog.Host.Host = currentRuntimeHost()
-	catalog.Host.Generation = generation
-	catalog.Host.Endpoint = control.Endpoint()
-	catalog.Host.ServiceState = "running"
 	retireStaleComponentAuthority(&catalog)
-	if strings.TrimSpace(config.Release) != "" {
-		catalog.Host.Release = strings.TrimSpace(config.Release)
-	}
 	if _, err := state.Commit(snapshot.Revision, catalog); err != nil {
 		cancel()
 		_ = control.Close()
@@ -190,8 +182,14 @@ func retireStaleComponentAuthority(catalog *Catalog) {
 // Endpoint returns the fixed bound local endpoint.
 func (r *Runtime) Endpoint() string { return r.control.Endpoint() }
 
-// Generation returns this runtime's exact durable generation.
+// Generation returns this process-local runtime incarnation.
 func (r *Runtime) Generation() uint64 { return r.generation }
+
+// HostID returns the identity derived by the running daemon.
+func (r *Runtime) HostID() string { return r.hostID }
+
+// Release returns the configured running release label.
+func (r *Runtime) Release() string { return r.release }
 
 // State returns the runtime's durable state store.
 func (r *Runtime) State() *StateStore { return r.state }
@@ -241,7 +239,7 @@ func (r *Runtime) startComponents(components []RuntimeComponent) {
 	}()
 }
 
-func (r *Runtime) finish(serviceState string, cause error, commit bool) {
+func (r *Runtime) finish(_ string, cause error, _ bool) {
 	r.finishOnce.Do(func() {
 		r.ready.Store(false)
 		r.cancel()
@@ -255,36 +253,16 @@ func (r *Runtime) finish(serviceState string, cause error, commit bool) {
 			}
 		}
 		r.componentWG.Wait()
-		if commit {
-			if err := r.commitServiceState(serviceState); err != nil {
-				failures = append(failures, err)
-			}
-		}
 		r.waitErr = errors.Join(failures...)
 		close(r.done)
 	})
 }
 
-// crashForTest models process death: resources close, but no terminal durable
-// state is committed. The successor must recover from the still-running record.
+// crashForTest models process death without a durable runtime record.
 func (r *Runtime) crashForTest(_ error) error {
 	r.finish("", nil, false)
 	<-r.done
 	return r.waitErr
-}
-
-func (r *Runtime) commitServiceState(state string) error {
-	snapshot, err := r.state.Read()
-	if err != nil {
-		return err
-	}
-	catalog := snapshot.Catalog
-	if catalog.Host.Generation != r.generation {
-		return errors.New("runtime generation changed before service-state commit")
-	}
-	catalog.Host.ServiceState = state
-	_, err = r.state.Commit(snapshot.Revision, catalog)
-	return err
 }
 
 func (r *Runtime) handleControl(ctx context.Context, request ControlRequest) (json.RawMessage, error) {
@@ -384,24 +362,7 @@ func (r *Runtime) authorizeConnectorRequest(ctx context.Context, request Control
 		return nil
 	}
 
-	snapshot, err := r.state.Read()
-	if err != nil {
-		return InactiveControlError()
-	}
-	lane, ok := snapshot.Catalog.Lanes[request.AttachmentID]
-	if !ok || lane.Product != product || (lane.State != "preparing" && lane.State != "running") {
-		return InactiveControlError()
-	}
-	if strings.TrimSpace(request.Capability) != "" {
-		if !capabilityMatches(lane.CapabilityHash, request.Capability) {
-			return InactiveControlError()
-		}
-		return nil
-	}
-	if r.laneConnectorAuthorizer == nil || r.laneConnectorAuthorizer(ctx, lane, envelope.Evidence) != nil {
-		return InactiveControlError()
-	}
-	return nil
+	return InactiveControlError()
 }
 
 // CapabilityDigest returns the stored one-way identity of a daemon-minted capability.
@@ -417,13 +378,6 @@ func capabilityMatches(expectedHash, capability string) bool {
 	}
 	actual := sha256.Sum256([]byte(capability))
 	return subtle.ConstantTimeCompare(expected, actual[:]) == 1
-}
-
-func currentRuntimeUser() string {
-	if current, err := user.Current(); err == nil && current.Uid != "" {
-		return current.Uid
-	}
-	return fmt.Sprintf("%d", os.Getuid())
 }
 
 func currentRuntimeHost() string {

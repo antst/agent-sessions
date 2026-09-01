@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
@@ -26,20 +27,6 @@ const (
 // A missing map is legacy-compatible; a present record always carries an exact
 // known schema and unknown versions fail closed.
 type RecordSchema string
-
-// HostRuntime is the one user-host authority identity and its catalog revisions.
-type HostRuntime struct {
-	User               string            `json:"user"`
-	Host               string            `json:"host"`
-	Release            string            `json:"release,omitempty"`
-	Generation         uint64            `json:"generation"`
-	Endpoint           string            `json:"endpoint,omitempty"`
-	ServiceState       string            `json:"service_state,omitempty"`
-	ProductReadiness   map[string]string `json:"product_readiness,omitempty"`
-	AttachmentRevision uint64            `json:"attachment_revision,omitempty"`
-	LaneRevision       uint64            `json:"lane_revision,omitempty"`
-	FederationRevision uint64            `json:"federation_revision,omitempty"`
-}
 
 // NativeEvidence is the shared exact identity skeleton plus distinct optional
 // native evidence fields. Product adapters decide which fields are required.
@@ -90,7 +77,7 @@ type ManagedAttachment struct {
 	State              string         `json:"state"`
 }
 
-// Lane is one durable parent-owned native worker lane.
+// Lane is the process-local view of one live product-owned worker.
 type Lane struct {
 	ID                 string   `json:"id"`
 	CapabilityHash     string   `json:"capability_hash,omitempty"`
@@ -115,6 +102,17 @@ type Lane struct {
 	AutoArchiveAt      int64    `json:"auto_archive_at,omitempty"`
 	State              string   `json:"state"`
 	ArchiveRevision    uint64   `json:"archive_revision,omitempty"`
+}
+
+// LaneCandidate remembers only which product UUID an owning parent may ask
+// the product about while the lane is offline.
+type LaneCandidate struct {
+	NativeSessionID string   `json:"uuid"`
+	Product         string   `json:"product"`
+	Parent          string   `json:"parent"`
+	PrimaryGroup    string   `json:"primary_group"`
+	SecondaryGroups []string `json:"secondary_groups,omitempty"`
+	Host            string   `json:"host,omitempty"`
 }
 
 type BindingState string
@@ -159,9 +157,8 @@ type ComponentSession struct {
 
 // Catalog is the complete durable host state committed as one revision.
 type Catalog struct {
-	Host              HostRuntime                  `json:"host"`
 	Attachments       map[string]ManagedAttachment `json:"attachments"`
-	Lanes             map[string]Lane              `json:"lanes"`
+	Lanes             map[string]LaneCandidate     `json:"lanes"`
 	ComponentBindings map[string]ComponentBinding  `json:"component_bindings"`
 	ComponentSessions map[string]ComponentSession  `json:"component_sessions"`
 }
@@ -256,15 +253,6 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 			"detaching": {"detached"},
 			"detached":  {"preparing"},
 		},
-		"lane": {
-			"preparing":    {"idle", "running", "retiring", "terminal"},
-			"idle":         {"preparing", "running", "terminal", "archived"},
-			"running":      {"interrupting", "retiring", "terminal"},
-			"interrupting": {"retiring", "terminal"},
-			"retiring":     {"terminal", "archived"},
-			"terminal":     {"idle", "archived"},
-			"archived":     {"idle"},
-		},
 		"component-binding": {
 			"binding": {"ready", "retiring", "closed"}, "ready": {"retiring", "closed"},
 			"retiring": {"closed"},
@@ -285,7 +273,7 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 func emptyCatalog() Catalog {
 	return Catalog{
 		Attachments:       map[string]ManagedAttachment{},
-		Lanes:             map[string]Lane{},
+		Lanes:             map[string]LaneCandidate{},
 		ComponentBindings: map[string]ComponentBinding{}, ComponentSessions: map[string]ComponentSession{},
 	}
 }
@@ -295,7 +283,7 @@ func normalizedCatalog(catalog Catalog) Catalog {
 		catalog.Attachments = map[string]ManagedAttachment{}
 	}
 	if catalog.Lanes == nil {
-		catalog.Lanes = map[string]Lane{}
+		catalog.Lanes = map[string]LaneCandidate{}
 	}
 	if catalog.ComponentBindings == nil {
 		catalog.ComponentBindings = map[string]ComponentBinding{}
@@ -338,11 +326,8 @@ func validateCatalog(catalog Catalog) error {
 		}
 	}
 	for id, lane := range catalog.Lanes {
-		if id == "" || lane.ID != id || !knownState("lane", lane.State) {
-			return fmt.Errorf("invalid lane %q", id)
-		}
-		if lane.NativeSessionID != "" && strings.TrimSpace(lane.NativeSessionID) == "" {
-			return fmt.Errorf("lane %s has a blank native session identity", id)
+		if strings.TrimSpace(id) == "" || id != lane.NativeSessionID || strings.TrimSpace(lane.Parent) == "" || strings.TrimSpace(lane.PrimaryGroup) == "" {
+			return fmt.Errorf("invalid lane candidate %q", id)
 		}
 		if _, ok := productcatalog.ByID(lane.Product); !ok {
 			return fmt.Errorf("lane %s has unknown product %q", id, lane.Product)
@@ -353,7 +338,6 @@ func validateCatalog(catalog Catalog) error {
 	for id, binding := range catalog.ComponentBindings {
 		if binding.Schema != ComponentBindingRecordSchema || !validDurableOpaqueID(id) || binding.BindingID != id ||
 			!knownState("component-binding", string(binding.State)) || binding.Generation == 0 ||
-			(catalog.Host.Generation > 0 && binding.Generation > catalog.Host.Generation) ||
 			!validOptionalProcessIdentity(binding.ProcessIdentity) || binding.ProcessIdentity == (procinfo.Identity{}) ||
 			binding.BootstrapRevision == 0 {
 			return fmt.Errorf("invalid component binding %q", id)
@@ -363,9 +347,6 @@ func validateCatalog(catalog Catalog) error {
 			return fmt.Errorf("component binding %s references unknown attachment", id)
 		}
 		if binding.State == BindingBinding || binding.State == BindingReady {
-			if catalog.Host.Generation > 0 && binding.Generation != catalog.Host.Generation {
-				return fmt.Errorf("active component binding %s belongs to stale generation %d", id, binding.Generation)
-			}
 			if attachment.State != "prepared" && attachment.State != "selecting" && attachment.State != "attached" {
 				return fmt.Errorf("active component binding %s references attachment in state %s", id, attachment.State)
 			}
@@ -422,15 +403,12 @@ func validateCatalogTransitions(current, next Catalog) error {
 	}
 	for id, lane := range current.Lanes {
 		if candidate, ok := next.Lanes[id]; ok {
-			if lane.NativeSessionID != candidate.NativeSessionID &&
-				(lane.NativeSessionID != "" || candidate.NativeSessionID == "") {
-				return fmt.Errorf("lane %s native session identity changed after binding", id)
+			if lane.NativeSessionID != candidate.NativeSessionID || lane.Product != candidate.Product || lane.Parent != candidate.Parent ||
+				lane.PrimaryGroup != candidate.PrimaryGroup || !slices.Equal(lane.SecondaryGroups, candidate.SecondaryGroups) || lane.Host != candidate.Host {
+				return fmt.Errorf("lane candidate %s cannot change", id)
 			}
-			if !ValidLifecycleTransition("lane", lane.State, candidate.State) {
-				return fmt.Errorf("lane %s cannot transition from %s to %s", id, lane.State, candidate.State)
-			}
-		} else if lane.State != "archived" {
-			return fmt.Errorf("lane %s cannot be removed from state %s", id, lane.State)
+		} else {
+			return fmt.Errorf("lane candidate %s cannot be removed", id)
 		}
 	}
 	for id, binding := range current.ComponentBindings {
@@ -491,7 +469,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 func knownState(kind, state string) bool {
 	states := map[string]map[string]bool{
 		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true},
-		"lane":              {"preparing": true, "idle": true, "running": true, "interrupting": true, "retiring": true, "terminal": true, "archived": true},
 		"component-binding": {"binding": true, "ready": true, "retiring": true, "closed": true},
 		"component-session": {"announced": true, "idle": true, "busy": true, "closing": true, "closed": true},
 	}

@@ -19,11 +19,7 @@ import (
 )
 
 func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemonpkg.Federation, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return nil, err
-	}
-	hostID := strings.TrimSpace(snapshot.Catalog.Host.Host)
+	hostID := strings.TrimSpace(runtime.HostID())
 	hostName := daemonSetting("AGENT_SESSIONS_HOST_NAME")
 	if hostName == "" {
 		hostName = hostID
@@ -73,10 +69,7 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 	}
 	peers := make([]federationpkg.Peer, 0, len(attachments))
 	for _, attachment := range attachments {
-		groups, groupErr := c.attachmentVisibilityGroups(runtime, attachment)
-		if groupErr != nil {
-			return nil, groupErr
-		}
+		groups := uniqueStrings(append(append([]string(nil), attachment.Groups...), "session:"+hostID+"/"+attachment.ID))
 		instance := attachmentFederationInstance(attachment)
 		peer, buildErr := federationpkg.BuildPeer(
 			hostID, hostName, attachment.ID, c.attachmentDisplayName(runtime, attachment), "idle", attachment.Cwd,
@@ -114,11 +107,7 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 }
 
 func (c *hostCoordinator) localFederationPeer(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) (federationpkg.Peer, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return federationpkg.Peer{}, err
-	}
-	hostID := strings.TrimSpace(snapshot.Catalog.Host.Host)
+	hostID := strings.TrimSpace(runtime.HostID())
 	hostName := daemonSetting("AGENT_SESSIONS_HOST_NAME")
 	if hostName == "" {
 		hostName = hostID
@@ -179,14 +168,6 @@ func (c *hostCoordinator) localTargetByFederationID(runtime *daemonpkg.Runtime, 
 		return localPeerTarget{}, err
 	} else if ok {
 		return localPeerTarget{attachment: &attachment}, nil
-	}
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return localPeerTarget{}, err
-	}
-	durableState := snapshot.Catalog.Lanes[sessionID].State
-	if durableState == "archived" || durableState == "retiring" {
-		return localPeerTarget{}, errors.New("federated target is no longer local and live")
 	}
 	c.mu.Lock()
 	actor := c.lanes[sessionID]

@@ -450,10 +450,8 @@ func (e *AttachmentEngine) commitAttachment(
 		delete(e.titles, attachment.ID)
 	}
 	catalog := snapshot.Catalog
-	catalog.Host.Generation = e.generation
-	catalog.Host.AttachmentRevision++
 	attachment.DaemonGeneration = e.generation
-	attachment.CatalogRevision = catalog.Host.AttachmentRevision
+	attachment.CatalogRevision = snapshot.Revision + 1
 	catalog.Attachments[attachment.ID] = cloneAttachment(attachment)
 	committed, err := e.store.Commit(snapshot.Revision, catalog)
 	if err != nil {

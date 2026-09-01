@@ -56,13 +56,13 @@ func TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
+	localHost := runtime.HostID()
 	snapshot, _ := runtime.State().Read()
 	catalog := snapshot.Catalog
-	catalog.Host.Host = "host-a"
 	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
 		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "default",
-		State: "attached", DaemonGeneration: catalog.Host.Generation,
+		State: "attached", DaemonGeneration: runtime.Generation(),
 	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)
@@ -78,10 +78,10 @@ func TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation(t *testing.T)
 	}
 	delivered := make(chan federator.AgentFrame, 1)
 	hostA, err := daemonpkg.NewFederation(federator.EmbeddedHostOptions{
-		Hub: address, HostID: "host-a", HostName: "host-a",
+		Hub: address, HostID: localHost, HostName: localHost,
 		ScanInterval: 20 * time.Millisecond, HeartbeatInterval: 50 * time.Millisecond,
 		Snapshot: func(context.Context) ([]federator.Peer, error) {
-			return coordinator.federationSnapshot(runtime, "host-a", "host-a")
+			return coordinator.federationSnapshot(runtime, localHost, localHost)
 		},
 		Deliver: func(context.Context, federator.Peer, federator.Peer, federator.AgentFrame) error { return nil },
 	})
@@ -118,7 +118,7 @@ func TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation(t *testing.T)
 	if err := json.Unmarshal(rawRoster, &roster); err != nil {
 		t.Fatal(err)
 	}
-	if roster.Host.ID != "host-a" || roster.Host.Name != "workstation-a" ||
+	if roster.Host.ID != localHost || roster.Host.Name != "workstation-a" ||
 		!roster.Host.HubConfigured || !roster.Host.FederationConnected {
 		t.Fatalf("operator host roster = %+v", roster.Host)
 	}
@@ -162,11 +162,10 @@ func TestFederationSnapshotProjectsCurrentDaemonAttachmentsAndLanes(t *testing.T
 		t.Fatal(err)
 	}
 	catalog := snapshot.Catalog
-	catalog.Host.Host = "host-a"
 	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
 		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
-		State: "attached", DaemonGeneration: catalog.Host.Generation,
+		State: "attached", DaemonGeneration: runtime.Generation(),
 	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)
@@ -244,12 +243,6 @@ func TestFederatedLaneUsesAttestedRemoteParentAndForcesPersistence(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Host.Host = "host-b"
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 	coordinator.lanesLoaded = true
 	source, err := federator.BuildPeer(
@@ -361,20 +354,12 @@ func TestRemoteLaneTerminalNoticeIsAcknowledgedOnceAndPointsBackToDestination(t 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Host.Host = "host-b"
-	catalog.Lanes["lane"] = daemonpkg.Lane{
-		ID: "lane", ParentAttachmentID: "host-a/parent", Product: "qwen", State: "terminal",
-	}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
+	localHost := runtime.HostID()
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 	coordinator.lanesLoaded = true
 	actor := &laneActor{
 		id: "lane", product: "qwen", name: "worker", cwd: "/work", parentID: "host-a/parent",
-		groups:     []string{"project", "session:host-a/parent", "session:host-b/lane"},
+		groups:     []string{"project", "session:host-a/parent", "session:" + localHost + "/lane"},
 		permission: "default", persistent: true, state: "terminal", outcome: "completed",
 		turnID: "turn", completedAt: time.Now().UnixMilli(), done: closedTestLaneDone(),
 	}
@@ -400,9 +385,9 @@ func TestRemoteLaneTerminalNoticeIsAcknowledgedOnceAndPointsBackToDestination(t 
 		t.Fatal(err)
 	}
 	hostB, err := daemonpkg.NewFederation(federator.EmbeddedHostOptions{
-		Hub: address, HostID: "host-b", HostName: "host-b", ScanInterval: 20 * time.Millisecond,
+		Hub: address, HostID: localHost, HostName: localHost, ScanInterval: 20 * time.Millisecond,
 		Snapshot: func(context.Context) ([]federator.Peer, error) {
-			return coordinator.federationSnapshot(runtime, "host-b", "host-b")
+			return coordinator.federationSnapshot(runtime, localHost, localHost)
 		},
 		Deliver: func(context.Context, federator.Peer, federator.Peer, federator.AgentFrame) error { return nil },
 	})
