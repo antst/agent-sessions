@@ -1051,12 +1051,9 @@ func TestGrokLaneManagerInterruptsAndAutoArchives(t *testing.T) {
 	}, time.Second); err != nil {
 		t.Fatalf("status after interrupt: %v", err)
 	}
-	if err := waitGrokLaneArchived(paths, state.SessionID, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	archived, err := readGrokLaneState(paths, state.SessionID)
-	if err != nil || archived.WorkerPID != 0 || archived.ManagerPID != 0 {
-		t.Fatalf("auto-archived Grok lane = %+v, %v", archived, err)
+	archived := waitForGrokLaneManagerShutdown(t, manager, paths, state.SessionID)
+	if archived.WorkerPID != 0 || archived.ManagerPID != 0 {
+		t.Fatalf("auto-archived Grok lane = %+v", archived)
 	}
 }
 
@@ -1138,9 +1135,7 @@ func TestGrokLaneManagerArchivesWhenOwnerExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = owner.Wait()
-	if err := waitGrokLaneArchived(paths, state.SessionID, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
+	waitForGrokLaneManagerShutdown(t, manager, paths, state.SessionID)
 }
 
 func TestForceArchiveGrokLaneDoesNotBlockOnLiveManagerLock(t *testing.T) {
@@ -1264,6 +1259,20 @@ func waitForGrokLaneTurn(t *testing.T, paths nativePaths, sessionID, turnID, sta
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("Grok lane turn %s did not reach %s", turnID, status)
+}
+
+func waitForGrokLaneManagerShutdown(t *testing.T, manager *grokLaneManager, paths nativePaths, sessionID string) grokLaneState {
+	t.Helper()
+	select {
+	case <-manager.done:
+	case <-time.After(grokLaneArchiveWaitTimeout):
+		t.Fatal("timed out waiting for Grok lane manager shutdown")
+	}
+	state, err := readGrokLaneState(paths, sessionID)
+	if err != nil || state.Status != "archived" || !grokLaneCleanupComplete(paths, state) {
+		t.Fatalf("Grok lane manager shutdown state = %+v, %v", state, err)
+	}
+	return state
 }
 
 func waitForGrokLaneMessage(t *testing.T, paths nativePaths, sessionID, messageID, status string) {

@@ -1403,7 +1403,7 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 			m.state.ControlSocket, m.state.MessagingSocket, m.state.StartupID = "", "", ""
 			if err := m.persistLocked(); err != nil {
 				m.state = previous
-				fmt.Fprintln(os.Stderr, "grok-lane-manager: persist final archived ownership state failed")
+				fmt.Fprintf(os.Stderr, "grok-lane-manager: persist final archived ownership state failed: %v\n", err)
 			}
 			m.mu.Unlock()
 		}

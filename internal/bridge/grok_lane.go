@@ -17,6 +17,7 @@ const (
 	grokLaneContractVersion     = 1
 	grokLaneMCPReadyTimeout     = 35 * time.Second
 	grokLaneManagerReadyTimeout = grokACPStartupTimeout + grokLaneMCPReadyTimeout + 10*time.Second
+	grokLaneArchiveWaitTimeout  = 10 * time.Second
 )
 
 type grokLaneOptions struct {
@@ -1000,10 +1001,10 @@ func archiveGrokLane(o grokLaneOptions) (int, error) {
 		return 0, emitLane(map[string]any{"type": "lane.archived", "product": "grok", "name": state.Name, "thread_id": state.SessionID, "dropped_notices": latest.ArchiveDroppedNotices})
 	}
 	if grokLaneManagerLive(state) {
-		if _, err := requestControl(state.ControlSocket, map[string]any{"action": "archive", "sessionId": state.SessionID}, 10*time.Second); err != nil {
+		if _, err := requestControl(state.ControlSocket, map[string]any{"action": "archive", "sessionId": state.SessionID}, grokLaneArchiveWaitTimeout); err != nil {
 			return 1, err
 		}
-		if err := waitGrokLaneArchived(paths, state.SessionID, 10*time.Second); err != nil {
+		if err := waitGrokLaneArchived(paths, state.SessionID, grokLaneArchiveWaitTimeout); err != nil {
 			return 1, err
 		}
 	} else if err := forceArchiveGrokLane(paths, state.SessionID, "explicit archive: manager unavailable"); err != nil {
