@@ -17,9 +17,7 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-// ComponentSender is implemented by component.Broker. Keeping this narrow lets
-// product tests exercise typed operations without owning broker persistence or
-// authentication.
+// ComponentSender writes to one live component connection.
 type ComponentSender interface {
 	Send(bindingID string, frameType component.FrameType, operationID string, payload any) error
 }
