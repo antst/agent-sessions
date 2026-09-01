@@ -230,3 +230,4 @@
 - `internal/structuredprocess` → product process pipes and exit → delete frame-retention/evidence caches and use spawn, pipes, and wait.
 - `internal/productserver` → product HTTP/SSE endpoints → delete cleanup debt, auth/redirect bounds, and SSE checkpoint state; retain only a plain HTTP/SSE client.
 - `internal/federation` snapshot admission and generation machinery → one live daemon↔hub connection → delete amplification projection/rejection and pending-generation promotion; keep framing, hello/version, reconnect, and an in-memory resend set for unacknowledged frames.
+- `internal/federator` legacy host/agent registration and preparation machinery → live daemon/federation/product owners → move the few still-used launcher and lane helpers into their proper packages, then delete `internal/federator` before end-to-end acceptance.

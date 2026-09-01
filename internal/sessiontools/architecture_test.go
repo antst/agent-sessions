@@ -31,14 +31,12 @@ var frozenLegacyImporters = map[string]bool{
 	"internal/bridge/mcp.go":               true,
 	"internal/bridge/mcp_lane.go":          true,
 	"internal/bridge/product.go":           true,
-	"internal/bridge/qwen_host.go":         true,
 	"internal/bridge/qwen_lane_manager.go": true,
 	"internal/bridge/runtime.go":           true,
 	"internal/launcher/lane.go":            true,
 	"internal/launcher/peer.go":            true,
 	"internal/launcher/peer_context.go":    true,
 	"internal/launcher/product.go":         true,
-	"internal/launcher/qwen_peer.go":       true,
 }
 
 func TestNoNewLegacyBridgeOrFederatorImports(t *testing.T) {

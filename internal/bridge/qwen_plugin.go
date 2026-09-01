@@ -466,7 +466,7 @@ func refuseLiveQwenPluginMutation(selected qwenprofile.Identity) error {
 
 func looksLikeManagedQwenRuntime(arguments []string) bool {
 	for _, argument := range arguments {
-		if argument == "qwen-host" || argument == "qwen-lane-manager" {
+		if argument == "qwen-lane-manager" {
 			return true
 		}
 	}

@@ -191,7 +191,7 @@ func TestQwenPluginMutationRefusesExactLiveProfileAndAllowsDifferentProfile(t *t
 		if err != nil {
 			t.Fatal(err)
 		}
-		command := exec.Command(testBinary, "-test.run=^TestQwenPluginManagedProcessHelper$", "--", "qwen-host")
+		command := exec.Command(testBinary, "-test.run=^TestQwenPluginManagedProcessHelper$", "--", "qwen-lane-manager")
 		command.Env = qwenprofile.ApplyEnvironment(os.Environ(), profile)
 		command.Env = append(command.Env, "AGENT_SESSIONS_PRODUCT=qwen", qwenPluginProcessHelperEnv+"=1")
 		if err := command.Start(); err != nil {

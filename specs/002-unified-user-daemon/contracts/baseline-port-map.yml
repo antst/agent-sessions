@@ -401,7 +401,7 @@ entries:
     new_owner: shared attachment transaction plus Claude adapter
     new_symbols: []
     replacement_tests:
-      - internal/bridge/claude_daemon_parity_test.go:TestClaudeDaemonParity
+      - internal/launcher/claude_peer_test.go:TestClaudePeerPassesProductOwnedNameAndResumeSelectors
     acceptance_cells: [CL-01, CL-02, CL-03, CL-04, CL-05, CL-06, CL-07, CL-10, CL-11]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#claude]
     deletion_paths: [internal/launcher/claude_peer.go]
@@ -436,7 +436,7 @@ entries:
     new_owner: stateless relay plus daemon Claude adapter
     new_symbols: []
     replacement_tests:
-      - internal/bridge/claude_daemon_parity_test.go:TestClaudeDaemonParity
+      - internal/bridge/mcp_test.go:TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity
     acceptance_cells: [CL-01, CL-03, CL-08, CL-09]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#claude]
     deletion_paths: [internal/bridge/mcp.go]
@@ -477,7 +477,7 @@ entries:
     new_owner: shared attachment transaction plus Grok adapter
     new_symbols: []
     replacement_tests:
-      - internal/bridge/grok_daemon_parity_test.go:TestGrokDaemonParity
+      - internal/launcher/grok_peer_test.go:TestGrokPeerManagedArgumentParity
     acceptance_cells: [G-01, G-02, G-03, G-04, G-05]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#grok]
     deletion_paths: [internal/launcher/grok_peer.go, internal/launcher/grok_host_process_unix.go]
@@ -538,7 +538,7 @@ entries:
     new_owner: daemon Grok coordinator with only required stateless vendor helper
     new_symbols: []
     replacement_tests:
-      - internal/bridge/grok_daemon_parity_test.go:TestGrokDaemonParity
+      - internal/bridge/grok_test.go:TestGrokNativeTitleResumeAdoptsSelectedUUIDAndTitle
     acceptance_cells: [G-06, G-07, G-08, G-09, G-10, G-11, G-12, G-13, G-14, G-15, G-16, G-17, G-18, G-19, G-20, G-21]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#grok]
     deletion_paths: [internal/bridge/grok.go, internal/bridge/grok_diagnostics.go, internal/bridge/grok_process_unix.go, internal/bridge/grok_session_unix.go]
@@ -577,7 +577,7 @@ entries:
     new_owner: shared attachment transaction plus Qwen adapter
     new_symbols: []
     replacement_tests:
-      - internal/bridge/qwen_daemon_parity_test.go:TestQwenDaemonParity
+      - internal/launcher/qwen_peer_test.go:TestQwenProductSessionResolutionUsesNativeTranscriptsOnly
     acceptance_cells: [Q-01, Q-02, Q-03, Q-04, Q-05]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#qwen]
     deletion_paths: [internal/launcher/qwen_peer.go]
@@ -621,7 +621,7 @@ entries:
     new_owner: daemon Qwen coordinator
     new_symbols: []
     replacement_tests:
-      - internal/bridge/qwen_daemon_parity_test.go:TestQwenDaemonParity
+      - internal/bridge/qwen_test.go:TestQwenInputWriterAppendsOneCompleteSubmitAndAttestsBodyCursor
     acceptance_cells: [Q-06, Q-07, Q-08, Q-09, Q-10]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#qwen]
     deletion_paths: [internal/bridge/qwen.go, internal/bridge/qwen_host.go, internal/bridge/qwen_archive.go, internal/bridge/qwen_diagnostics.go]
