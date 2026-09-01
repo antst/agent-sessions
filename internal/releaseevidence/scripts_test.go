@@ -1,12 +1,74 @@
 package releaseevidence
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestReleaseGateManifestFindsManagedGrokOutsidePATH(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	evidence := filepath.Join(root, "gates")
+	tools := filepath.Join(root, "bin", "tools")
+	home := filepath.Join(root, "home")
+	for _, directory := range []string{bin, evidence, tools, filepath.Join(home, ".grok", "bin")} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, executable := range []string{"go", "qwen", "codex", "claude"} {
+		path := filepath.Join(bin, executable)
+		writeTestFile(t, path, "#!/bin/sh\nprintf '%s fixture version\\n' '"+executable+"'\n")
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, output := range map[string]string{
+		filepath.Join(tools, "golangci-lint"):       "golangci-lint fixture version",
+		filepath.Join(home, ".grok", "bin", "grok"): "grok fixture version",
+	} {
+		writeTestFile(t, path, "#!/bin/sh\nprintf '%s\\n' '"+output+"'\n")
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, gate := range []string{
+		"normal", "race", "vet", "lint", "focused_contracts", "quickstart",
+		"permissions", "federation", "prebuilt_install", "owner_nonmutation",
+	} {
+		writeTestFile(t, filepath.Join(evidence, "linux-"+gate+".txt"), "passed\n")
+	}
+	manifest := filepath.Join(root, "linux.json")
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "release-gate-manifest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(script, "--os", "linux",
+		"--job-url", "https://github.com/antst/agent-sessions/actions/runs/1/job/2",
+		"--evidence-dir", evidence, "--output", manifest)
+	command.Dir = root
+	command.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":/usr/bin:/bin", "GROK_PEER_GROK_BIN=")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("release gate manifest: %v: %s", err, output)
+	}
+	body, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		NativeClients map[string]string `json:"native_clients"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	if got := document.NativeClients["grok"]; got != "grok fixture version" {
+		t.Fatalf("managed Grok version = %q", got)
+	}
+}
 
 func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	source := filepath.Join("..", "..", "scripts", "release-tag-preflight")
@@ -152,6 +214,7 @@ printf '%s\ttrue\tvalid\tweb-flow\n' "${FAKE_COMMIT:?}"
 func runGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", args...)
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	if directory != "" {
 		command.Dir = directory
 	}
