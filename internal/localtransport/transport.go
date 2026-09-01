@@ -207,32 +207,9 @@ func Listen(path string, limits Limits) (*Listener, error) {
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
-	var err error
-	path, err = noFollowSocketPath(path)
+	listener, err := listenUnix(path)
 	if err != nil {
 		return nil, err
-	}
-	if err := validatePrivateParent(filepath.Dir(path)); err != nil {
-		return nil, err
-	}
-	if _, err := os.Lstat(path); err == nil {
-		return nil, fmt.Errorf("local socket path already exists: %s", path)
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("inspect local socket path: %w", err)
-	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if err != nil {
-		return nil, fmt.Errorf("listen on local socket: %w", err)
-	}
-	listener.SetUnlinkOnClose(true)
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("make local socket private: %w", err)
-	}
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 || fileUID(info) != os.Geteuid() {
-		_ = listener.Close()
-		return nil, errors.New("local socket identity could not be corroborated")
 	}
 	return &Listener{listener: listener, limits: limits}, nil
 }
@@ -260,6 +237,47 @@ func Dial(path string, limits Limits) (*Conn, error) {
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
+	connection, err := dialUnix(path)
+	if err != nil {
+		return nil, err
+	}
+	return newConn(connection, limits), nil
+}
+
+// listenUnix is the sole no-follow/private-path implementation shared by the
+// JSON component transport and bounded binary one-shot transports.
+func listenUnix(path string) (*net.UnixListener, error) {
+	var err error
+	path, err = noFollowSocketPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePrivateParent(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil, fmt.Errorf("local socket path already exists: %s", path)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect local socket path: %w", err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return nil, fmt.Errorf("listen on local socket: %w", err)
+	}
+	listener.SetUnlinkOnClose(true)
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("make local socket private: %w", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 || fileUID(info) != os.Geteuid() {
+		_ = listener.Close()
+		return nil, errors.New("local socket identity could not be corroborated")
+	}
+	return listener, nil
+}
+
+func dialUnix(path string) (*net.UnixConn, error) {
 	var err error
 	path, err = noFollowSocketPath(path)
 	if err != nil {
@@ -279,7 +297,7 @@ func Dial(path string, limits Limits) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newConn(connection, limits), nil
+	return connection, nil
 }
 
 func validatePrivateParent(parent string) error {
