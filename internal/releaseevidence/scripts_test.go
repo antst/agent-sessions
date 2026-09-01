@@ -79,6 +79,28 @@ func TestReleaseGateManifestFindsManagedGrokOutsidePATH(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowDownloadsExactCandidateArtifacts(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(body)
+	for _, required := range []string{
+		"- name: Download exact candidate platform archives",
+		`gh run download "${{ steps.tag.outputs.run_id }}" --repo "$GITHUB_REPOSITORY"`,
+		`--name "agent-sessions-$platform" --dir dist/release`,
+		`evidence="dist/candidate/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json"`,
+		`--document "$evidence" --archive-dir dist/release --gate-dir dist/candidate/gates`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("release workflow is missing exact-candidate boundary %q", required)
+		}
+	}
+	if strings.Contains(workflow, "- name: Download platform archives\n        uses: actions/download-artifact") {
+		t.Fatal("release workflow downloads platform archives from the tag run instead of the evidence-bound candidate run")
+	}
+}
+
 func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	source := filepath.Join("..", "..", "scripts", "release-tag-preflight")
 	body, err := os.ReadFile(source)
