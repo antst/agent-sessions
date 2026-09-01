@@ -40,7 +40,6 @@ type hostCoordinator struct {
 	qwenLanes        *daemonpkg.QwenLaneAdapter
 	lanes            map[string]*laneActor
 	lanesLoaded      bool
-	ownerReconciling bool
 	now              func() time.Time
 	runtime          *daemonpkg.Runtime
 	runtimeReady     chan *daemonpkg.Runtime
@@ -74,75 +73,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		return native.UnsubscribeThread(ctx, threadID)
 	}
 	return coordinator
-}
-
-// reconcileAttachmentOwners restores the owner monitors that are intentionally
-// process-local while keeping attachment authority durable across daemon
-// restarts. Dead owners are detached before the restarted daemon accepts their
-// attachments as live; surviving owners get a fresh product monitor.
-func (c *hostCoordinator) reconcileAttachmentOwners(runtime *daemonpkg.Runtime) error {
-	c.mu.Lock()
-	c.ownerReconciling = true
-	c.mu.Unlock()
-	defer func() {
-		c.mu.Lock()
-		c.ownerReconciling = false
-		c.mu.Unlock()
-	}()
-	if err := c.ensureLaneActors(runtime); err != nil {
-		c.mu.Lock()
-		c.ownerReconciling = false
-		c.mu.Unlock()
-		return err
-	}
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return err
-	}
-	for id, attachment := range snapshot.Catalog.Attachments {
-		if attachment.State != "attached" {
-			continue
-		}
-		owner := attachment.Evidence.Process
-		observation := procinfo.ObserveIdentity(owner)
-		if observation.Status == procinfo.IdentityStale {
-			if _, err := runtime.Attachments().Detach(context.Background(), id, "native-owner-exited"); err != nil {
-				return err
-			}
-			c.archiveIdleLanesForParent(runtime, id)
-			continue
-		}
-		if observation.Status != procinfo.IdentityMatches {
-			return fmt.Errorf("attachment %s owner identity is not corroborated", id)
-		}
-		// An attachment is addressable only in the generation that has
-		// recorroborated its native evidence. The previous implementation
-		// restored only the process-local owner monitor, which left every
-		// surviving peer inactive after a service restart.
-		if _, err := runtime.Attachments().Refresh(context.Background(), id); err != nil {
-			return fmt.Errorf("refresh attachment %s: %w", id, err)
-		}
-		switch attachment.Product {
-		case "codex":
-			c.startCodexOwnerMonitor(runtime, id, owner)
-		case "claude":
-			c.startClaudeOwnerMonitor(runtime, id, owner)
-		case "grok":
-			c.startGrokOwnerMonitor(runtime, id, owner)
-		case "qwen":
-			c.startQwenOwnerMonitor(runtime, id, owner)
-		}
-	}
-	if err := c.reconcileOrphanedLanes(runtime); err != nil {
-		c.mu.Lock()
-		c.ownerReconciling = false
-		c.mu.Unlock()
-		return err
-	}
-	c.mu.Lock()
-	c.ownerReconciling = false
-	c.mu.Unlock()
-	return nil
 }
 
 func (c *hostCoordinator) adapters() map[string]daemonpkg.AttachmentAdapter {
@@ -350,9 +280,6 @@ func (c *hostCoordinator) prepareCodex(
 	case "resume":
 		thread, err = native.ResolveThread(ctx, request.Target)
 		if err == nil {
-			request, err = resolveCodexResumeRequest(runtime, request, thread)
-		}
-		if err == nil {
 			// Match native `codex resume` and the established peer launcher:
 			// every resume uses the launcher's effective cwd. The thread's
 			// persisted cwd is historical metadata and may name a workspace
@@ -414,48 +341,6 @@ func (c *hostCoordinator) prepareCodex(
 	_ = runtime.Attachments().ObserveNativeTitle(thread.ID, thread.ID, bridge.NormalizePeerName(thread.Name))
 	c.startCodexOwnerMonitor(runtime, thread.ID, request.Owner)
 	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Cwd: cwd}, nil
-}
-
-func resolveCodexResumeRequest(
-	runtime *daemonpkg.Runtime,
-	request launcher.CodexDaemonPrepareRequest,
-	thread bridge.CodexNativeThread,
-) (launcher.CodexDaemonPrepareRequest, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return launcher.CodexDaemonPrepareRequest{}, err
-	}
-	selected, found := snapshot.Catalog.Attachments[thread.ID]
-	if !found {
-		return request, nil
-	}
-	if selected.Product != "codex" || selected.ProfileIdentity != codexHome() ||
-		selected.NativeSessionID != thread.ID {
-		return launcher.CodexDaemonPrepareRequest{}, errors.New("managed Codex resume identity does not match the selected native thread")
-	}
-	if selected.State != "detached" {
-		return launcher.CodexDaemonPrepareRequest{}, errors.New("managed Codex session is already live")
-	}
-	return inheritCodexResumeRequest(request, selected), nil
-}
-
-func inheritCodexResumeRequest(
-	request launcher.CodexDaemonPrepareRequest,
-	selected daemonpkg.ManagedAttachment,
-) launcher.CodexDaemonPrepareRequest {
-	if !request.GroupsSpecified {
-		request.Groups = append([]string(nil), selected.Groups...)
-	}
-	if !request.PermissionSpecified {
-		if selected.LaunchIntent == "yolo" || selected.PermissionMode == "bypassPermissions" {
-			request.ApprovalPolicy = "never"
-			request.Sandbox = "danger-full-access"
-		} else {
-			request.ApprovalPolicy = ""
-			request.Sandbox = ""
-		}
-	}
-	return request
 }
 
 func codexResumeCwd(request launcher.CodexDaemonPrepareRequest, _ bridge.CodexNativeThread) string {

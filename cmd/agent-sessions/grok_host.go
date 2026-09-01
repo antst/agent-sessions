@@ -57,23 +57,6 @@ func (c *hostCoordinator) prepareGrok(
 	if info, err := os.Stat(request.GrokBin); err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
 		return launcher.GrokDaemonPrepareResult{}, errors.New("grok native executable is unavailable")
 	}
-	if strings.TrimSpace(request.ResumeTarget) != "" {
-		selected, found, err := resolveGrokDaemonResume(runtime, request)
-		if err != nil {
-			return launcher.GrokDaemonPrepareResult{}, err
-		}
-		if found {
-			request.SessionID = selected.NativeSessionID
-			request.Cwd = selected.Cwd
-			request.LateBoundResume = false
-			if !request.GroupsSpecified {
-				request.Groups = append([]string(nil), selected.Groups...)
-			}
-			if !request.PermissionSpecified {
-				request.PermissionMode = selected.PermissionMode
-			}
-		}
-	}
 	digest := sha256.Sum256([]byte(request.LaunchToken))
 	root := filepath.Join(c.stateRoot, "run", "g-"+hex.EncodeToString(digest[:10]))
 	leaderSocket := filepath.Join(root, "leader.sock")
@@ -149,38 +132,6 @@ func (c *hostCoordinator) prepareGrok(
 	}
 	c.startGrokOwnerMonitor(runtime, prepared.ID, request.Owner)
 	return launcher.GrokDaemonPrepareResult{SessionID: prepared.ID, Cwd: request.Cwd, LeaderSocket: leaderSocket}, nil
-}
-
-// resolveGrokDaemonResume accepts only stable daemon/native identifiers. A
-// mutable product title is resolved by Grok itself and is never a daemon-owned
-// selector.
-func resolveGrokDaemonResume(
-	runtime *daemonpkg.Runtime,
-	request launcher.GrokDaemonPrepareRequest,
-) (daemonpkg.ManagedAttachment, bool, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return daemonpkg.ManagedAttachment{}, false, err
-	}
-	selector := strings.TrimSpace(request.ResumeTarget)
-	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
-	for _, attachment := range snapshot.Catalog.Attachments {
-		exactID := attachment.NativeSessionID == selector || attachment.ID == selector
-		if attachment.Product != "grok" || attachment.ProfileIdentity != grokProfileRoot() || !exactID {
-			continue
-		}
-		if attachment.State != "detached" {
-			return daemonpkg.ManagedAttachment{}, false, errors.New("managed Grok session is already live")
-		}
-		matches = append(matches, attachment)
-	}
-	if len(matches) == 0 {
-		return daemonpkg.ManagedAttachment{}, false, nil
-	}
-	if len(matches) != 1 {
-		return daemonpkg.ManagedAttachment{}, false, fmt.Errorf("managed Grok session %q is ambiguous; use an exact session UUID", selector)
-	}
-	return matches[0], true, nil
 }
 
 func grokEvidence(pending *grokPending) daemonpkg.NativeEvidence {

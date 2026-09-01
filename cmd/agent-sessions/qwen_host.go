@@ -51,11 +51,7 @@ func (c *hostCoordinator) prepareQwen(
 		return launcher.QwenDaemonPrepareResult{}, errors.New("qwen native executable is unavailable")
 	}
 	if request.Resume {
-		selected, err := resolveQwenDaemonResume(runtime, request)
-		if err != nil {
-			return launcher.QwenDaemonPrepareResult{}, err
-		}
-		request = inheritQwenResumeRequest(request, selected)
+		request.SessionID = strings.TrimSpace(request.ResumeTarget)
 	}
 	if strings.TrimSpace(request.SessionID) == "" {
 		return launcher.QwenDaemonPrepareResult{}, errors.New("qwen session identity is empty")
@@ -125,24 +121,6 @@ func (c *hostCoordinator) prepareQwen(
 	}, nil
 }
 
-func inheritQwenResumeRequest(
-	request launcher.QwenDaemonPrepareRequest,
-	selected daemonpkg.ManagedAttachment,
-) launcher.QwenDaemonPrepareRequest {
-	request.SessionID, request.Cwd = selected.NativeSessionID, selected.Cwd
-	if !request.GroupsSpecified {
-		request.Groups = append([]string(nil), selected.Groups...)
-	}
-	if !request.PermissionSpecified {
-		request.LaunchPreference = selected.LaunchIntent
-		if request.LaunchPreference == "" && selected.PermissionMode == "bypassPermissions" {
-			request.LaunchPreference = "yolo"
-		}
-		request.ExpectedInitialMode = qwenInitialModeForPreference(request.LaunchPreference)
-	}
-	return request
-}
-
 func qwenInitialModeForPreference(preference string) string {
 	switch {
 	case preference == "yolo":
@@ -154,32 +132,6 @@ func qwenInitialModeForPreference(preference string) string {
 	default:
 		return ""
 	}
-}
-
-func resolveQwenDaemonResume(runtime *daemonpkg.Runtime, request launcher.QwenDaemonPrepareRequest) (daemonpkg.ManagedAttachment, error) {
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		return daemonpkg.ManagedAttachment{}, err
-	}
-	selector := strings.TrimSpace(request.ResumeTarget)
-	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
-	for _, attachment := range snapshot.Catalog.Attachments {
-		if attachment.Product != "qwen" || attachment.ProfileIdentity != request.Profile.Fingerprint ||
-			(attachment.NativeSessionID != selector && attachment.ID != selector) {
-			continue
-		}
-		if attachment.State != "detached" {
-			return daemonpkg.ManagedAttachment{}, errors.New("managed Qwen session is already live")
-		}
-		matches = append(matches, attachment)
-	}
-	if len(matches) == 0 {
-		return daemonpkg.ManagedAttachment{}, fmt.Errorf("no managed Qwen session matches %q", selector)
-	}
-	if len(matches) != 1 {
-		return daemonpkg.ManagedAttachment{}, fmt.Errorf("managed Qwen session %q is ambiguous; use an exact session UUID", selector)
-	}
-	return matches[0], nil
 }
 
 func qwenEvidence(pending *qwenPending) (daemonpkg.NativeEvidence, error) {

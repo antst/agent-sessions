@@ -52,7 +52,7 @@ func TestRuntimeLifecycleExplicitStopRemainsStoppedAndWorkflowCallsDoNotBootstra
 	}
 }
 
-func TestRuntimeLifecycleRecoversOneSuccessorAfterCrash(t *testing.T) {
+func TestRuntimeLifecycleStartsSuccessorWithAnEmptyLiveRegistry(t *testing.T) {
 	root := shortDaemonTestRoot(t)
 	adapter := AttachmentAdapter{
 		Prepare: func(context.Context, ManagedAttachment) (NativeEvidence, error) {
@@ -93,12 +93,6 @@ func TestRuntimeLifecycleRecoversOneSuccessorAfterCrash(t *testing.T) {
 	if active, err := successor.Attachments().ListActive(); err != nil || len(active) != 0 {
 		t.Fatalf("unrefreshed predecessor attachment remained active: %+v, %v", active, err)
 	}
-	if _, err := successor.Attachments().Refresh(context.Background(), "survivor"); err != nil {
-		t.Fatal(err)
-	}
-	if active, err := successor.Attachments().ListActive(); err != nil || len(active) != 1 || active[0].ID != "survivor" {
-		t.Fatalf("refreshed successor attachment = %+v, %v", active, err)
-	}
 	response, err := CallControl(context.Background(), successor.Endpoint(), ControlRequest{
 		ID: "doctor", Role: RoleAdmin, Operation: "doctor", Generation: successor.Generation(),
 	})
@@ -135,56 +129,6 @@ func TestRuntimeComponentFailureCancelsWholeAuthority(t *testing.T) {
 	}
 	if _, err := os.Lstat(runtime.Endpoint()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed runtime endpoint survived: %v", err)
-	}
-}
-
-func TestRuntimeDoesNotAdvertiseReadyBeforeInitializationCompletes(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	result := make(chan struct {
-		runtime *Runtime
-		err     error
-	}, 1)
-	go func() {
-		runtime, err := StartRuntime(context.Background(), RuntimeConfig{
-			StateRoot: root,
-			Initialize: func(*Runtime) error {
-				close(entered)
-				<-release
-				return nil
-			},
-		})
-		result <- struct {
-			runtime *Runtime
-			err     error
-		}{runtime: runtime, err: err}
-	}()
-	<-entered
-	endpoint, err := ControlEndpoint(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := CallControl(context.Background(), endpoint, ControlRequest{
-		ID: "before-ready", Role: RoleAdmin, Operation: "doctor", Generation: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.OK || response.Error == nil {
-		t.Fatalf("control response before initialization = %+v", response)
-	}
-	close(release)
-	started := <-result
-	if started.err != nil {
-		t.Fatal(started.err)
-	}
-	t.Cleanup(func() { _ = started.runtime.Close() })
-	response, err = CallControl(context.Background(), endpoint, ControlRequest{
-		ID: "after-ready", Role: RoleAdmin, Operation: "doctor", Generation: started.runtime.Generation(),
-	})
-	if err != nil || !response.OK {
-		t.Fatalf("control response after initialization = %+v, %v", response, err)
 	}
 }
 
@@ -249,7 +193,8 @@ func TestRuntimeComposesAttachmentAndExactRelayAuthorization(t *testing.T) {
 	if response := call(ControlRequest{ID: "forged", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "forged", AttachmentID: "attachment", Capability: "wrong", Payload: json.RawMessage(`{}`)}); response.OK || response.Error == nil || response.Error.Code != ErrorInactive || response.Error.Message != CanonicalInactiveMessage {
 		t.Fatalf("forged connector response = %+v", response)
 	}
-	if response := call(ControlRequest{ID: "exact", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "exact", AttachmentID: "attachment", Capability: capability, Payload: json.RawMessage(`{"product":"codex","evidence":{"thread_id":"native-thread"}}`)}); !response.OK {
+	exactPayload, _ := json.Marshal(map[string]any{"product": "codex", "evidence": NativeEvidence{ThreadID: "native-thread"}})
+	if response := call(ControlRequest{ID: "exact", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "exact", AttachmentID: "attachment", Capability: capability, Payload: exactPayload}); !response.OK {
 		t.Fatalf("exact connector response = %+v", response)
 	}
 	if externalCalls.Load() != 1 {

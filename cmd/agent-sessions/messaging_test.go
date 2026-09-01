@@ -19,19 +19,10 @@ func TestMessagingToolsRejectBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 			t.Cleanup(func() { _ = runtime.Close() })
 			parentGroup := "session:" + runtime.HostID() + "/parent"
 			laneGroup := "session:" + runtime.HostID() + "/lane-id"
-			snapshot, err := runtime.State().Read()
-			if err != nil {
-				t.Fatal(err)
-			}
-			catalog := snapshot.Catalog
-			catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
+			activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
 				ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 				Cwd: "/work", PermissionMode: "bypassPermissions",
-				State: "attached", DaemonGeneration: runtime.Generation(),
-			}
-			if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-				t.Fatal(err)
-			}
+			})
 			coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 			coordinator.lanesLoaded = true
 			coordinator.lanes["lane-id"] = &laneActor{
@@ -65,18 +56,9 @@ func TestUnifiedRenameNeverCreatesADurableDaemonAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := snapshot.Catalog
-	catalog.Attachments["peer"] = daemonpkg.ManagedAttachment{
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
 		ID: "peer", Product: "claude", NativeSessionID: "native",
-		State: "attached", DaemonGeneration: runtime.Generation(),
-	}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
+	})
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 	_, err = coordinator.callLocalTool(context.Background(), runtime, "peer", "rename_session", map[string]any{
 		"name": "Builder Corrected",
@@ -88,11 +70,11 @@ func TestUnifiedRenameNeverCreatesADurableDaemonAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded, err := json.Marshal(current.Catalog.Attachments["peer"])
+	encoded, err := json.Marshal(current.Catalog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), `"name"`) || strings.Contains(string(encoded), `"native_name"`) {
-		t.Fatalf("attachment retained a durable title: %s", encoded)
+	if strings.Contains(string(encoded), `"attachments"`) || strings.Contains(string(encoded), `"name"`) {
+		t.Fatalf("live peer leaked into durable catalog: %s", encoded)
 	}
 }

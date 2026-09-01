@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/bridge"
@@ -73,27 +72,5 @@ func TestCodexResumeUsesInvocationCwdWhenRecordedWorkspaceMoved(t *testing.T) {
 
 	if got := codexResumeCwd(request, thread); got != current {
 		t.Fatalf("resume cwd = %q, want invocation cwd %q", got, current)
-	}
-}
-
-func TestCodexManagedResumeInheritsStableIntentWithoutOverridingExplicitFields(t *testing.T) {
-	selected := daemonpkg.ManagedAttachment{
-		ID: "native", Product: "codex", ProfileIdentity: codexHome(),
-		NativeSessionID: "native", Cwd: "/original",
-		Groups: []string{"group-a", "group-b"}, LaunchIntent: "yolo", PermissionMode: "bypassPermissions",
-		State: "detached",
-	}
-	inherited := inheritCodexResumeRequest(launcher.CodexDaemonPrepareRequest{}, selected)
-	if inherited.Name != "" || strings.Join(inherited.Groups, ",") != "group-a,group-b" || inherited.ApprovalPolicy != "never" ||
-		inherited.Sandbox != "danger-full-access" {
-		t.Fatalf("inherited Codex resume = %+v", inherited)
-	}
-	explicit := launcher.CodexDaemonPrepareRequest{
-		Groups: []string{"override-group"}, GroupsSpecified: true,
-		ApprovalPolicy: "", Sandbox: "", PermissionSpecified: true,
-	}
-	explicit = inheritCodexResumeRequest(explicit, selected)
-	if strings.Join(explicit.Groups, ",") != "override-group" || explicit.ApprovalPolicy != "" || explicit.Sandbox != "" {
-		t.Fatalf("explicit Codex resume was overwritten: %+v", explicit)
 	}
 }

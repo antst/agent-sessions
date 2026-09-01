@@ -1,11 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
-
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *testing.T) {
@@ -41,20 +39,23 @@ func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *test
 	}
 }
 
-func TestGrokConnectorAcceptsExactTUIOrPrivateLeaderAncestry(t *testing.T) {
-	owner := procinfo.Identity{PID: 101, Start: "owner"}
-	leader := procinfo.Identity{PID: 102, Start: "leader"}
-	caller := procinfo.Identity{PID: 103, Start: "connector"}
-	attachment := daemonpkg.ManagedAttachment{
-		Product:  "grok",
-		Evidence: daemonpkg.NativeEvidence{Process: owner, Ancestry: []procinfo.Identity{leader}},
-	}
-	for _, ancestry := range [][]procinfo.Identity{{owner}, {leader}, {caller, owner}, {caller, leader}} {
-		if !connectorAncestryMatches(attachment, caller, ancestry) {
-			t.Fatalf("Grok connector ancestry %+v was rejected", ancestry)
+func TestConnectorReportsItsProductSessionWithoutDurableLookup(t *testing.T) {
+	getenv := func(name string) string {
+		if name == "AGENT_SESSIONS_SESSION_ID" {
+			return "qwen-session"
 		}
+		return ""
 	}
-	if connectorAncestryMatches(attachment, caller, []procinfo.Identity{{PID: 104, Start: "unrelated"}}) {
-		t.Fatal("unrelated Grok connector ancestry was accepted")
+	got, err := attestConnector("qwen", nil, getenv)
+	if err != nil || got.AttachmentID != "qwen-session" || got.Evidence.ThreadID != "qwen-session" {
+		t.Fatalf("Qwen connector report = %+v, %v", got, err)
+	}
+	codexParams, _ := json.Marshal(map[string]any{"_meta": map[string]any{
+		"threadId":              "codex-thread",
+		"x-codex-turn-metadata": map[string]any{"session_id": "codex-session", "thread_id": "codex-thread"},
+	}})
+	got, err = attestConnector("codex", codexParams, func(string) string { return "" })
+	if err != nil || got.AttachmentID != "codex-thread" {
+		t.Fatalf("Codex connector report = %+v, %v", got, err)
 	}
 }

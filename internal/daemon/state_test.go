@@ -8,24 +8,6 @@ import (
 	"github.com/antst/agent-sessions/internal/statestore"
 )
 
-func TestLifecycleTransitionsRemainProductNeutral(t *testing.T) {
-	for _, test := range []struct {
-		kind     string
-		from, to string
-		want     bool
-	}{
-		{kind: "attachment", from: "preparing", to: "prepared", want: true},
-		{kind: "attachment", from: "attached", to: "detaching", want: true},
-		{kind: "attachment", from: "detached", to: "attached"},
-	} {
-		t.Run(test.kind+"/"+test.from+"/"+test.to, func(t *testing.T) {
-			if got := ValidLifecycleTransition(test.kind, test.from, test.to); got != test.want {
-				t.Fatalf("ValidLifecycleTransition(%q,%q,%q) = %v, want %v", test.kind, test.from, test.to, got, test.want)
-			}
-		})
-	}
-}
-
 func TestStateStoreRoundTripsLaneWithoutTurnOrInputState(t *testing.T) {
 	store, err := OpenState(t.TempDir(), 1<<20)
 	if err != nil {
@@ -78,7 +60,7 @@ func TestStateStoreNormalizesRemainingMaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Catalog.Attachments == nil || snapshot.Catalog.Lanes == nil {
+	if snapshot.Catalog.Lanes == nil {
 		t.Fatalf("remaining maps were not normalized: %#v", snapshot.Catalog)
 	}
 }

@@ -47,7 +47,7 @@ func runHookInput(ctx context.Context, product string, input io.Reader, output i
 			if identityErr != nil {
 				return bridge.HookAttestation{}, bridge.ErrConnectorInactive
 			}
-			return attestHookFromState(stateRoot, product, threadID, os.Getpid())
+			return attestHook(product, threadID)
 		},
 	})
 	if err != nil {
@@ -65,26 +65,12 @@ func runHookInput(ctx context.Context, product string, input io.Reader, output i
 	return nil
 }
 
-func attestHookFromState(stateRoot, product, threadID string, pid int) (bridge.HookAttestation, error) {
-	caller, ancestry, err := bridge.CaptureNativeAncestry(pid, 32)
-	if err != nil {
+func attestHook(product, threadID string) (bridge.HookAttestation, error) {
+	if strings.TrimSpace(product) == "" || strings.TrimSpace(threadID) == "" {
 		return bridge.HookAttestation{}, bridge.ErrConnectorInactive
 	}
-	state, err := daemonpkg.OpenState(stateRoot, 16<<20)
-	if err != nil {
-		return bridge.HookAttestation{}, bridge.ErrConnectorInactive
-	}
-	snapshot, err := state.Read()
-	if err != nil {
-		return bridge.HookAttestation{}, bridge.ErrConnectorInactive
-	}
-	attachment, ok := snapshot.Catalog.Attachments[threadID]
-	if !ok || attachment.Product != product || attachment.NativeSessionID != threadID || attachment.State != "attached" {
-		return bridge.HookAttestation{}, bridge.ErrConnectorInactive
-	}
-	evidence := daemonpkg.NativeEvidence{
-		Process: caller, Ancestry: ancestry, ThreadID: threadID,
-		SocketPath: attachment.Evidence.SocketPath, Executable: attachment.Evidence.Executable,
-	}
-	return bridge.HookAttestation{AttachmentID: attachment.ID, Evidence: evidence}, nil
+	return bridge.HookAttestation{
+		AttachmentID: threadID,
+		Evidence:     daemonpkg.NativeEvidence{ThreadID: threadID},
+	}, nil
 }

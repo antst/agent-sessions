@@ -14,16 +14,11 @@ import (
 
 func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveContent(t *testing.T) {
 	const secret = "SECRET-PROMPT-RESULT-CREDENTIAL"
-	snapshot := daemonpkg.StateSnapshot{Revision: 11, Catalog: daemonpkg.Catalog{
-		Attachments: map[string]daemonpkg.ManagedAttachment{
-			"local-peer": {
-				ID: "local-peer", Product: "codex", NativeSessionID: "native-peer",
-				Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
-				State: "attached", DaemonGeneration: 7,
-				CapabilityHash: secret, Evidence: daemonpkg.NativeEvidence{Executable: secret},
-			},
-			"detached": {ID: "detached", Product: "claude", State: "detached"},
-		},
+	attachments := []daemonpkg.ManagedAttachment{{
+		ID: "local-peer", Product: "codex", NativeSessionID: "native-peer",
+		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
+		State: "attached", DaemonGeneration: 7,
+		CapabilityHash: secret, Evidence: daemonpkg.NativeEvidence{Executable: secret},
 	}}
 	remoteHosts := []federationpkg.Host{{
 		ID: "host-b", Name: "workstation-b", Generation: 4, Build: "0.3.0",
@@ -41,7 +36,7 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 			Cwd: "/remote", Groups: []string{"project", "session:host-b/remote-lane"}, ParentSessionID: "remote-peer",
 		},
 	}
-	report := buildOperatorRoster(snapshot, 7, "host-a", "0.3.0", "workstation-a", true, true, remoteHosts, remotePeers)
+	report := buildOperatorRoster(attachments, 7, "host-a", "0.3.0", "workstation-a", true, true, remoteHosts, remotePeers)
 	if report.Schema != operatorRosterSchema || report.Host.ID != "host-a" || !report.Host.FederationConnected {
 		t.Fatalf("host roster = %+v", report.Host)
 	}

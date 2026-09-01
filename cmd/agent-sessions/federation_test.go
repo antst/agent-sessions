@@ -57,16 +57,10 @@ func TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation(t *testing.T)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 	localHost := runtime.HostID()
-	snapshot, _ := runtime.State().Read()
-	catalog := snapshot.Catalog
-	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
 		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "default",
-		State: "attached", DaemonGeneration: runtime.Generation(),
-	}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
+	})
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 	coordinator.lanesLoaded = true
 	target, err := federator.BuildPeer(
@@ -157,19 +151,10 @@ func TestFederationSnapshotProjectsCurrentDaemonAttachmentsAndLanes(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	snapshot, err := runtime.State().Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := snapshot.Catalog
-	catalog.Attachments["parent"] = daemonpkg.ManagedAttachment{
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
 		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
-		State: "attached", DaemonGeneration: runtime.Generation(),
-	}
-	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
-		t.Fatal(err)
-	}
+	})
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 	coordinator.lanesLoaded = true
 	coordinator.lanes["lane"] = &laneActor{

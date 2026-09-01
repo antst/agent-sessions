@@ -95,7 +95,7 @@ func runRoster(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 }
 
 func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMessage, error) {
-	snapshot, err := runtime.State().Read()
+	attachments, err := runtime.Attachments().ListActive()
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 		hostName = hostID
 	}
 	report := buildOperatorRoster(
-		snapshot, runtime.Generation(), hostID, runtime.Release(), hostName, daemonSetting("AGENT_SESSIONS_HUB") != "", connected,
+		attachments, runtime.Generation(), hostID, runtime.Release(), hostName, daemonSetting("AGENT_SESSIONS_HUB") != "", connected,
 		remoteHosts, remotePeers,
 	)
 	c.mu.Lock()
@@ -147,7 +147,7 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 }
 
 func buildOperatorRoster(
-	snapshot daemonpkg.StateSnapshot,
+	attachments []daemonpkg.ManagedAttachment,
 	generation uint64,
 	hostID, release string,
 	hostName string,
@@ -167,15 +167,12 @@ func buildOperatorRoster(
 		Local: make([]operatorRosterEntry, 0), Remote: make([]operatorRosterEntry, 0),
 		FederatedHosts: append([]federationpkg.Host(nil), remoteHosts...),
 	}
-	for _, attachment := range snapshot.Catalog.Attachments {
-		if attachment.State == "detached" {
-			continue
-		}
+	for _, attachment := range attachments {
 		report.Local = append(report.Local, operatorRosterEntry{
 			Kind: "peer", Scope: "local", ID: attachment.ID, LocalID: attachment.ID,
 			NativeSessionID: attachment.NativeSessionID, Name: attachment.ID,
 			HostID: hostID, HostName: hostName, Product: attachment.Product, State: attachment.State,
-			Live: attachment.State == "attached" && attachment.DaemonGeneration == generation,
+			Live: true,
 			Cwd:  attachment.Cwd, Groups: operatorLocalGroups(hostID, attachment.ID, attachment.Groups),
 			PermissionMode: attachment.PermissionMode,
 		})

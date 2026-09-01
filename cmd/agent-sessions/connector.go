@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
@@ -42,8 +41,8 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 			return refresher.refresh()
 		},
 		Generation: func(context.Context) (uint64, error) { return 1, nil },
-		Attest: func(callCtx context.Context, params json.RawMessage) (sessiontools.ConnectorAttestation, error) {
-			return attestConnectorFromState(stateRoot, product, params, os.Getpid())
+		Attest: func(_ context.Context, params json.RawMessage) (sessiontools.ConnectorAttestation, error) {
+			return attestConnector(product, params, os.Getenv)
 		},
 	})
 	if err != nil {
@@ -78,85 +77,22 @@ func resolveConnectorProduct(requested string, getenv func(string) string) (stri
 	return product, nil
 }
 
-//nolint:gocyclo // Connector attestation deliberately fails closed across every product evidence shape.
-func attestConnectorFromState(
-	stateRoot, product string,
+func attestConnector(
+	product string,
 	params json.RawMessage,
-	pid int,
+	getenv func(string) string,
 ) (sessiontools.ConnectorAttestation, error) {
-	caller, ancestry, err := sessiontools.CaptureNativeAncestry(pid, 32)
-	if err != nil {
-		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
-	}
-	state, err := daemonpkg.OpenState(stateRoot, 16<<20)
-	if err != nil {
-		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
-	}
-	snapshot, err := state.Read()
-	if err != nil {
-		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
-	}
-	wantedThread := ""
+	threadID := strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_ID"))
 	if product == "codex" {
-		wantedThread, _ = sessiontools.StdioMCPThreadID(params)
-	}
-	matches := make([]daemonpkg.ManagedAttachment, 0, 1)
-	for _, attachment := range snapshot.Catalog.Attachments {
-		if attachment.Product != product || attachment.State != "attached" ||
-			wantedThread != "" && attachment.NativeSessionID != wantedThread {
-			continue
-		}
-		if connectorAncestryMatches(attachment, caller, ancestry) {
-			matches = append(matches, attachment)
+		if nativeThread, err := sessiontools.StdioMCPThreadID(params); err == nil {
+			threadID = nativeThread
 		}
 	}
-	if len(matches) != 1 {
+	if threadID == "" {
 		return sessiontools.ConnectorAttestation{}, sessiontools.ErrConnectorInactive
 	}
-	attachment := matches[0]
-	evidence := daemonpkg.NativeEvidence{
-		Process: caller, Ancestry: ancestry, ThreadID: attachment.NativeSessionID,
-		SocketPath: attachment.Evidence.SocketPath, Executable: attachment.Evidence.Executable,
-		RegistryPath: attachment.Evidence.RegistryPath, ArtifactPath: attachment.Evidence.ArtifactPath,
-		ArtifactRevision: attachment.Evidence.ArtifactRevision,
-	}
-	return sessiontools.ConnectorAttestation{AttachmentID: attachment.ID, Evidence: evidence}, nil
-}
-
-func connectorAncestryMatches(
-	attachment daemonpkg.ManagedAttachment,
-	caller procinfo.Identity,
-	ancestry []procinfo.Identity,
-) bool {
-	contains := func(wanted procinfo.Identity) bool {
-		if sameProcessIdentity(caller, wanted) {
-			return true
-		}
-		for _, candidate := range ancestry {
-			if sameProcessIdentity(candidate, wanted) {
-				return true
-			}
-		}
-		return false
-	}
-	switch attachment.Product {
-	case "grok":
-		// Grok has shipped both process topologies: plugin MCPs hosted by the
-		// private leader and plugin MCPs hosted directly by the attached TUI.
-		// Both identities are daemon-corroborated and exact; accept either
-		// ancestry without weakening the per-launch attachment boundary.
-		return contains(attachment.Evidence.Process) ||
-			len(attachment.Evidence.Ancestry) == 1 && contains(attachment.Evidence.Ancestry[0])
-	case "codex":
-		return len(attachment.Evidence.Ancestry) == 1 && contains(attachment.Evidence.Ancestry[0])
-	case "claude", "qwen":
-		return contains(attachment.Evidence.Process)
-	default:
-		return false
-	}
-}
-
-func sameProcessIdentity(left, right procinfo.Identity) bool {
-	return left.PID > 1 && left.PID == right.PID && strings.TrimSpace(left.Start) != "" && left.Start == right.Start &&
-		(left.StrongStart == "" || right.StrongStart == "" || left.StrongStart == right.StrongStart)
+	return sessiontools.ConnectorAttestation{
+		AttachmentID: threadID,
+		Evidence:     daemonpkg.NativeEvidence{ThreadID: threadID},
+	}, nil
 }

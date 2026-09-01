@@ -16,23 +16,62 @@ import (
 )
 
 var (
-	// ErrAttachmentPreparation identifies a product preparation failure.
 	ErrAttachmentPreparation = errors.New("attachment preparation failed")
-	// ErrAttachmentAdoption identifies rejected native evidence.
-	ErrAttachmentAdoption = errors.New("attachment adoption failed")
-	// ErrAttachmentRefresh identifies failed live-evidence reconciliation.
-	ErrAttachmentRefresh = errors.New("attachment refresh failed")
-	// ErrAttachmentDetach identifies failed exact native cleanup.
-	ErrAttachmentDetach = errors.New("attachment detach failed")
-	// ErrAttachmentRollback identifies failed exact preparation rollback.
-	ErrAttachmentRollback = errors.New("attachment rollback failed")
-	// ErrAttachmentConflict identifies changed reuse or an invalid lifecycle call.
-	ErrAttachmentConflict = errors.New("attachment transaction conflict")
+	ErrAttachmentAdoption    = errors.New("attachment adoption failed")
+	ErrAttachmentRefresh     = errors.New("attachment refresh failed")
+	ErrAttachmentDetach      = errors.New("attachment detach failed")
+	ErrAttachmentRollback    = errors.New("attachment rollback failed")
+	ErrAttachmentConflict    = errors.New("attachment transaction conflict")
 )
 
-// AttachmentAdapter retains product-native behavior at the edge of the shared
-// durable transaction. Each product supplies its own evidence checks and exact
-// cleanup operations; the shared engine never infers one product from another.
+// NativeEvidence is one process-local product observation.
+type NativeEvidence struct {
+	Process          procinfo.Identity
+	Ancestry         []procinfo.Identity
+	Executable       string
+	RegistryPath     string
+	SocketPath       string
+	ThreadID         string
+	LaunchTokenHash  string
+	LeaderIdentity   string
+	RosterRevision   string
+	ArtifactPath     string
+	ArtifactType     string
+	ArtifactMode     uint32
+	ArtifactOwner    uint32
+	ArtifactRevision string
+	ArtifactDevice   uint64
+	ArtifactInode    uint64
+	ArtifactPrefix   string
+	ArtifactBytes    int64
+	RegistryDevice   uint64
+	RegistryInode    uint64
+	RegistryPrefix   string
+	RegistryBytes    int64
+}
+
+// ManagedAttachment is one live peer connection known only to this process.
+type ManagedAttachment struct {
+	ID                 string
+	CapabilityHash     string
+	Product            string
+	ProfileIdentity    string
+	LaunchIntent       string
+	NativeSessionID    string
+	NativeProfileRoot  string
+	Cwd                string
+	Groups             []string
+	PermissionMode     string
+	ExpectedEvidence   NativeEvidence
+	Evidence           NativeEvidence
+	DaemonGeneration   uint64
+	CatalogRevision    uint64
+	ComponentProtocol  string
+	ComponentRevision  uint64
+	IntegrationVersion string
+	State              string
+}
+
 type AttachmentAdapter struct {
 	Prepare   func(context.Context, ManagedAttachment) (NativeEvidence, error)
 	Adopt     func(context.Context, ManagedAttachment, NativeEvidence) (NativeEvidence, error)
@@ -42,13 +81,12 @@ type AttachmentAdapter struct {
 	Rollback  func(context.Context, ManagedAttachment) error
 }
 
-// AttachmentEngine serializes the shared durable attachment lifecycle for one
-// daemon generation.
+// AttachmentEngine is the process-local live peer registry.
 type AttachmentEngine struct {
 	mu         sync.Mutex
-	store      *StateStore
 	generation uint64
 	adapters   map[string]AttachmentAdapter
+	active     map[string]ManagedAttachment
 	titles     map[string]liveNativeTitle
 }
 
@@ -57,11 +95,7 @@ type liveNativeTitle struct {
 	value           string
 }
 
-// NewAttachmentEngine creates an attachment authority over one durable store.
-func NewAttachmentEngine(store *StateStore, generation uint64, adapters map[string]AttachmentAdapter) (*AttachmentEngine, error) {
-	if store == nil {
-		return nil, errors.New("attachment state store is nil")
-	}
+func NewAttachmentEngine(generation uint64, adapters map[string]AttachmentAdapter) (*AttachmentEngine, error) {
 	if generation == 0 {
 		return nil, errors.New("attachment daemon generation must be positive")
 	}
@@ -73,13 +107,11 @@ func NewAttachmentEngine(store *StateStore, generation uint64, adapters map[stri
 		copyAdapters[product] = adapter
 	}
 	return &AttachmentEngine{
-		store: store, generation: generation, adapters: copyAdapters,
-		titles: make(map[string]liveNativeTitle),
+		generation: generation, adapters: copyAdapters,
+		active: make(map[string]ManagedAttachment), titles: make(map[string]liveNativeTitle),
 	}, nil
 }
 
-// SetAdapter replaces one product callback set. Runtime composition uses this
-// when a product coordinator reconnects; durable ownership remains unchanged.
 func (e *AttachmentEngine) SetAdapter(product string, adapter AttachmentAdapter) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -88,64 +120,43 @@ func (e *AttachmentEngine) SetAdapter(product string, adapter AttachmentAdapter)
 	}
 }
 
-// Prepare durably records intent before invoking the product preparation.
-// Prepared attachments are not discoverable or addressable.
 func (e *AttachmentEngine) Prepare(ctx context.Context, requested ManagedAttachment) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := validateAttachmentRequest(requested); err != nil {
 		return ManagedAttachment{}, err
 	}
+	if existing, ok := e.active[requested.ID]; ok {
+		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s already exists in state %s", ErrAttachmentConflict, requested.ID, existing.State)
+	}
 	adapter, ok := e.adapters[requested.Product]
 	if !ok || adapter.Prepare == nil {
 		return ManagedAttachment{}, fmt.Errorf("%w: %s prepare callback is unavailable", ErrAttachmentPreparation, requested.Product)
 	}
-	snapshot, err := e.store.Read()
-	if err != nil {
-		return ManagedAttachment{}, err
-	}
-	if existing, exists := snapshot.Catalog.Attachments[requested.ID]; exists && existing.State != "detached" {
-		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s already exists in state %s", ErrAttachmentConflict, requested.ID, existing.State)
-	}
 	requested.State = "preparing"
-	requested.ExpectedEvidence = NativeEvidence{}
-	requested.Evidence = NativeEvidence{}
-	prepared, err := e.commitAttachment(snapshot, requested)
+	requested.DaemonGeneration = e.generation
+	e.active[requested.ID] = cloneAttachment(requested)
+	expected, err := adapter.Prepare(ctx, cloneAttachment(requested))
 	if err != nil {
-		return ManagedAttachment{}, err
+		rollbackErr := e.rollbackPreparation(ctx, requested, adapter)
+		return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentPreparation, errors.Join(err, rollbackErr))
 	}
-	expected, prepareErr := adapter.Prepare(ctx, cloneAttachment(prepared))
-	if prepareErr != nil {
-		_, rollbackErr := e.rollbackLocked(ctx, requested.ID, "prepare-failed", adapter)
-		if rollbackErr != nil {
-			return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentPreparation, errors.Join(prepareErr, rollbackErr))
-		}
-		return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentPreparation, prepareErr)
-	}
-	snapshot, prepared, err = e.currentAttachment(requested.ID)
-	if err != nil {
-		return ManagedAttachment{}, err
-	}
-	if prepared.State != "preparing" {
-		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s changed during preparation", ErrAttachmentConflict, requested.ID)
-	}
-	prepared.ExpectedEvidence = cloneEvidence(expected)
-	prepared.State = "prepared"
-	return e.commitAttachment(snapshot, prepared)
+	requested.ExpectedEvidence = cloneEvidence(expected)
+	requested.State = "prepared"
+	e.active[requested.ID] = cloneAttachment(requested)
+	return cloneAttachment(requested), nil
 }
 
-// Adopt corroborates product-native evidence and grants authority only after
-// the attached state is durably committed.
 func (e *AttachmentEngine) Adopt(ctx context.Context, id string, observed NativeEvidence) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	snapshot, attachment, err := e.currentAttachment(id)
+	attachment, err := e.currentAttachment(id)
 	if err != nil {
 		return ManagedAttachment{}, err
 	}
 	if attachment.State == "attached" {
 		if reflect.DeepEqual(attachment.Evidence, observed) {
-			return cloneAttachment(attachment), nil
+			return attachment, nil
 		}
 		return ManagedAttachment{}, fmt.Errorf("%w: attached evidence changed", ErrAttachmentConflict)
 	}
@@ -156,44 +167,26 @@ func (e *AttachmentEngine) Adopt(ctx context.Context, id string, observed Native
 	if !ok || adapter.Adopt == nil {
 		return ManagedAttachment{}, fmt.Errorf("%w: %s adopt callback is unavailable", ErrAttachmentAdoption, attachment.Product)
 	}
-	if attachment.State == "prepared" {
-		attachment.State = "selecting"
-		attachment, err = e.commitAttachment(snapshot, attachment)
-		if err != nil {
-			return ManagedAttachment{}, err
-		}
-	}
-	corroborated, adoptionErr := adapter.Adopt(ctx, cloneAttachment(attachment), cloneEvidence(observed))
-	if adoptionErr != nil {
-		_, rollbackErr := e.rollbackLocked(ctx, id, "adopt-failed", adapter)
-		if rollbackErr != nil {
-			return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentAdoption, errors.Join(adoptionErr, rollbackErr))
-		}
-		return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentAdoption, adoptionErr)
-	}
-	snapshot, attachment, err = e.currentAttachment(id)
+	attachment.State = "selecting"
+	e.active[id] = cloneAttachment(attachment)
+	corroborated, err := adapter.Adopt(ctx, cloneAttachment(attachment), cloneEvidence(observed))
 	if err != nil {
-		return ManagedAttachment{}, err
-	}
-	if attachment.State != "selecting" {
-		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s changed during adoption", ErrAttachmentConflict, id)
+		rollbackErr := e.rollbackPreparation(ctx, attachment, adapter)
+		return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentAdoption, errors.Join(err, rollbackErr))
 	}
 	attachment.Evidence = cloneEvidence(corroborated)
 	attachment.State = "attached"
-	return e.commitAttachment(snapshot, attachment)
+	e.active[id] = cloneAttachment(attachment)
+	return cloneAttachment(attachment), nil
 }
 
-// SelectNative binds a late native selection (for example Claude's interactive
-// resume-by-name picker) to an already prepared daemon attachment. It never
-// makes the attachment addressable; Adopt must still corroborate the complete
-// product-native evidence afterward.
 func (e *AttachmentEngine) SelectNative(id, nativeSessionID, cwd, permissionMode string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if strings.TrimSpace(nativeSessionID) == "" {
 		return ManagedAttachment{}, fmt.Errorf("%w: selected native session is empty", ErrAttachmentConflict)
 	}
-	snapshot, attachment, err := e.currentAttachment(id)
+	attachment, err := e.currentAttachment(id)
 	if err != nil {
 		return ManagedAttachment{}, err
 	}
@@ -211,18 +204,15 @@ func (e *AttachmentEngine) SelectNative(id, nativeSessionID, cwd, permissionMode
 		attachment.PermissionMode = permissionMode
 	}
 	attachment.State = "selecting"
-	return e.commitAttachment(snapshot, attachment)
+	e.active[id] = cloneAttachment(attachment)
+	return cloneAttachment(attachment), nil
 }
 
-// Refresh asks the product adapter to recorroborate one active attachment.
 func (e *AttachmentEngine) Refresh(ctx context.Context, id string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	snapshot, attachment, err := e.currentAttachment(id)
-	if err != nil {
-		return ManagedAttachment{}, err
-	}
-	if attachment.State != "attached" {
+	attachment, err := e.currentAttachment(id)
+	if err != nil || attachment.State != "attached" {
 		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s is not active", ErrAttachmentConflict, id)
 	}
 	adapter, ok := e.adapters[attachment.Product]
@@ -234,56 +224,44 @@ func (e *AttachmentEngine) Refresh(ctx context.Context, id string) (ManagedAttac
 		return ManagedAttachment{}, fmt.Errorf("%w: %w", ErrAttachmentRefresh, err)
 	}
 	attachment.Evidence = cloneEvidence(evidence)
-	return e.commitAttachment(snapshot, attachment)
+	e.active[id] = cloneAttachment(attachment)
+	return cloneAttachment(attachment), nil
 }
 
-// Detach asks the product to clean up and records only confirmed success.
-func (e *AttachmentEngine) Detach(ctx context.Context, id, cause string) (ManagedAttachment, error) {
+func (e *AttachmentEngine) Detach(ctx context.Context, id, _ string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, attachment, err := e.currentAttachment(id)
+	attachment, err := e.currentAttachment(id)
 	if err != nil {
 		return ManagedAttachment{}, err
-	}
-	if attachment.State == "detached" {
-		return cloneAttachment(attachment), nil
 	}
 	adapter, ok := e.adapters[attachment.Product]
 	if !ok || adapter.Detach == nil {
 		return ManagedAttachment{}, fmt.Errorf("%w: %s detach callback is unavailable", ErrAttachmentDetach, attachment.Product)
 	}
-	return e.detachLocked(ctx, id, adapter.Detach, ErrAttachmentDetach)
+	return e.remove(ctx, attachment, adapter.Detach, ErrAttachmentDetach)
 }
 
-// Rollback asks the product to discard an incomplete preparation.
-func (e *AttachmentEngine) Rollback(ctx context.Context, id, cause string) (ManagedAttachment, error) {
+func (e *AttachmentEngine) Rollback(ctx context.Context, id, _ string) (ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, attachment, err := e.currentAttachment(id)
+	attachment, err := e.currentAttachment(id)
 	if err != nil {
 		return ManagedAttachment{}, err
 	}
-	if attachment.State == "detached" {
-		return cloneAttachment(attachment), nil
-	}
 	adapter, ok := e.adapters[attachment.Product]
-	if !ok {
-		return ManagedAttachment{}, fmt.Errorf("%w: %s rollback adapter is unavailable", ErrAttachmentRollback, attachment.Product)
+	if !ok || adapter.Rollback == nil {
+		return ManagedAttachment{}, fmt.Errorf("%w: %s rollback callback is unavailable", ErrAttachmentRollback, attachment.Product)
 	}
-	return e.rollbackLocked(ctx, id, cause, adapter)
+	return e.remove(ctx, attachment, adapter.Rollback, ErrAttachmentRollback)
 }
 
-// ListActive returns stable isolated copies of only currently addressable peers.
 func (e *AttachmentEngine) ListActive() ([]ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	snapshot, err := e.store.Read()
-	if err != nil {
-		return nil, err
-	}
-	result := make([]ManagedAttachment, 0, len(snapshot.Catalog.Attachments))
-	for _, attachment := range snapshot.Catalog.Attachments {
-		if attachment.State == "attached" && attachment.DaemonGeneration == e.generation {
+	result := make([]ManagedAttachment, 0, len(e.active))
+	for _, attachment := range e.active {
+		if attachment.State == "attached" {
 			result = append(result, cloneAttachment(attachment))
 		}
 	}
@@ -291,77 +269,46 @@ func (e *AttachmentEngine) ListActive() ([]ManagedAttachment, error) {
 	return result, nil
 }
 
-// ActiveAttachment returns one current-generation addressable attachment.
 func (e *AttachmentEngine) ActiveAttachment(id string) (ManagedAttachment, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	snapshot, err := e.store.Read()
-	if err != nil {
-		return ManagedAttachment{}, false, err
-	}
-	attachment, ok := snapshot.Catalog.Attachments[id]
-	if !ok || attachment.State != "attached" || attachment.DaemonGeneration != e.generation {
+	attachment, ok := e.active[id]
+	if !ok || attachment.State != "attached" {
 		return ManagedAttachment{}, false, nil
 	}
 	return cloneAttachment(attachment), true, nil
 }
 
-// ObserveNativeTitle follows one exact live product session's title in memory.
-// The observation is generation-local, never enters the durable catalog, and
-// is discarded whenever the attachment stops being active.
 func (e *AttachmentEngine) ObserveNativeTitle(id, nativeSessionID, title string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !validNativeTitleObservation(title) {
 		return fmt.Errorf("%w: native title observation is unsafe", ErrAttachmentConflict)
 	}
-	snapshot, err := e.store.Read()
-	if err != nil {
-		return err
-	}
-	attachment, ok := snapshot.Catalog.Attachments[id]
-	if !ok || attachment.State != "attached" || attachment.DaemonGeneration != e.generation ||
-		attachment.NativeSessionID == "" || attachment.NativeSessionID != nativeSessionID {
+	attachment, ok := e.active[id]
+	if !ok || attachment.State != "attached" || attachment.NativeSessionID == "" || attachment.NativeSessionID != nativeSessionID {
 		return fmt.Errorf("%w: attachment %s is not the exact live native session", ErrAttachmentConflict, id)
 	}
 	e.titles[id] = liveNativeTitle{nativeSessionID: nativeSessionID, value: title}
 	return nil
 }
 
-// LiveNativeTitle returns a title only while its exact attachment/session is
-// active in this daemon generation. The boolean distinguishes an observed
-// empty native title from a connection that has not announced one.
 func (e *AttachmentEngine) LiveNativeTitle(id string) (string, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	snapshot, err := e.store.Read()
-	if err != nil {
-		return "", false, err
-	}
-	attachment, ok := snapshot.Catalog.Attachments[id]
+	attachment, ok := e.active[id]
 	observation, observed := e.titles[id]
-	if !ok || attachment.State != "attached" || attachment.DaemonGeneration != e.generation ||
-		!observed || observation.nativeSessionID != attachment.NativeSessionID {
+	if !ok || attachment.State != "attached" || !observed || observation.nativeSessionID != attachment.NativeSessionID {
 		return "", false, nil
 	}
 	return observation.value, true, nil
 }
 
-// Authorize corroborates one hook or connector against the active attachment.
-// Product-native evidence is authoritative; a launch capability is an optional
-// additional gate for products whose established protocol supplies one.
-func (e *AttachmentEngine) Authorize(
-	ctx context.Context,
-	id, capability, product string,
-	evidence NativeEvidence,
-) error {
+func (e *AttachmentEngine) Authorize(ctx context.Context, id, capability, product string, evidence NativeEvidence) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, attachment, err := e.currentAttachment(id)
-	if err != nil || attachment.State != "attached" || attachment.DaemonGeneration != e.generation {
-		return InactiveControlError()
-	}
-	if product != "" && product != attachment.Product {
+	attachment, ok := e.active[id]
+	if !ok || attachment.State != "attached" || product != "" && product != attachment.Product {
 		return InactiveControlError()
 	}
 	if capability != "" && !capabilityMatches(attachment.CapabilityHash, capability) {
@@ -369,9 +316,6 @@ func (e *AttachmentEngine) Authorize(
 	}
 	adapter, ok := e.adapters[attachment.Product]
 	if !ok || adapter.Authorize == nil {
-		// Compatibility for internal callers that already present the exact
-		// daemon-minted capability. Native relays must provide an Authorize
-		// callback when no capability exists at their product boundary.
 		if capability != "" && capabilityMatches(attachment.CapabilityHash, capability) {
 			return nil
 		}
@@ -383,81 +327,39 @@ func (e *AttachmentEngine) Authorize(
 	return nil
 }
 
-func (e *AttachmentEngine) rollbackLocked(ctx context.Context, id, cause string, adapter AttachmentAdapter) (ManagedAttachment, error) {
+func (e *AttachmentEngine) rollbackPreparation(ctx context.Context, attachment ManagedAttachment, adapter AttachmentAdapter) error {
+	delete(e.active, attachment.ID)
+	delete(e.titles, attachment.ID)
 	if adapter.Rollback == nil {
-		_, attachment, err := e.currentAttachment(id)
-		if err != nil {
-			return ManagedAttachment{}, err
-		}
-		return attachment, fmt.Errorf("%w: rollback callback is unavailable", ErrAttachmentRollback)
+		return fmt.Errorf("%w: rollback callback is unavailable", ErrAttachmentRollback)
 	}
-	return e.detachLocked(ctx, id, adapter.Rollback, ErrAttachmentRollback)
+	if err := adapter.Rollback(ctx, cloneAttachment(attachment)); err != nil {
+		return fmt.Errorf("%w: %w", ErrAttachmentRollback, err)
+	}
+	return nil
 }
 
-func (e *AttachmentEngine) detachLocked(
-	ctx context.Context,
-	id string,
-	cleanup func(context.Context, ManagedAttachment) error,
-	rootError error,
-) (ManagedAttachment, error) {
-	snapshot, attachment, err := e.currentAttachment(id)
-	if err != nil {
-		return ManagedAttachment{}, err
+func (e *AttachmentEngine) remove(ctx context.Context, attachment ManagedAttachment, cleanup func(context.Context, ManagedAttachment) error, root error) (ManagedAttachment, error) {
+	target := cloneAttachment(attachment)
+	target.State = "detaching"
+	if err := cleanup(ctx, target); err != nil {
+		return cloneAttachment(attachment), fmt.Errorf("%w: %w", root, err)
 	}
-	if attachment.State == "detached" {
-		return cloneAttachment(attachment), nil
-	}
-	if attachment.State != "preparing" && attachment.State != "detaching" {
-		if !ValidLifecycleTransition("attachment", attachment.State, "detaching") {
-			return ManagedAttachment{}, fmt.Errorf("%w: attachment %s cannot clean up from %s", ErrAttachmentConflict, id, attachment.State)
-		}
-	}
-	cleanupTarget := cloneAttachment(attachment)
-	if cleanupTarget.State != "preparing" {
-		cleanupTarget.State = "detaching"
-	}
-	if err := cleanup(ctx, cleanupTarget); err != nil {
-		return cloneAttachment(attachment), fmt.Errorf("%w: %w", rootError, err)
-	}
-	snapshot, attachment, err = e.currentAttachment(id)
-	if err != nil {
-		return ManagedAttachment{}, err
-	}
+	delete(e.active, attachment.ID)
+	delete(e.titles, attachment.ID)
 	attachment.State = "detached"
-	return e.commitAttachment(snapshot, attachment)
+	return cloneAttachment(attachment), nil
 }
 
-func (e *AttachmentEngine) currentAttachment(id string) (StateSnapshot, ManagedAttachment, error) {
+func (e *AttachmentEngine) currentAttachment(id string) (ManagedAttachment, error) {
 	if strings.TrimSpace(id) == "" {
-		return StateSnapshot{}, ManagedAttachment{}, fmt.Errorf("%w: attachment id is empty", ErrAttachmentConflict)
+		return ManagedAttachment{}, fmt.Errorf("%w: attachment id is empty", ErrAttachmentConflict)
 	}
-	snapshot, err := e.store.Read()
-	if err != nil {
-		return StateSnapshot{}, ManagedAttachment{}, err
-	}
-	attachment, ok := snapshot.Catalog.Attachments[id]
+	attachment, ok := e.active[id]
 	if !ok {
-		return StateSnapshot{}, ManagedAttachment{}, fmt.Errorf("%w: attachment %s does not exist", ErrAttachmentConflict, id)
+		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s does not exist", ErrAttachmentConflict, id)
 	}
-	return snapshot, cloneAttachment(attachment), nil
-}
-
-func (e *AttachmentEngine) commitAttachment(
-	snapshot StateSnapshot,
-	attachment ManagedAttachment,
-) (ManagedAttachment, error) {
-	if attachment.State != "attached" {
-		delete(e.titles, attachment.ID)
-	}
-	catalog := snapshot.Catalog
-	attachment.DaemonGeneration = e.generation
-	attachment.CatalogRevision = snapshot.Revision + 1
-	catalog.Attachments[attachment.ID] = cloneAttachment(attachment)
-	committed, err := e.store.Commit(snapshot.Revision, catalog)
-	if err != nil {
-		return ManagedAttachment{}, err
-	}
-	return cloneAttachment(committed.Catalog.Attachments[attachment.ID]), nil
+	return cloneAttachment(attachment), nil
 }
 
 func validNativeTitleObservation(value string) bool {

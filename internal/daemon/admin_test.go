@@ -11,18 +11,30 @@ import (
 )
 
 func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
-	const canary = "SECRET_CREDENTIAL_PROMPT_RESULT_TRANSCRIPT"
 	runtime, err := StartRuntime(context.Background(), RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
+	runtime.Attachments().SetAdapter("codex", AttachmentAdapter{
+		Prepare: func(context.Context, ManagedAttachment) (NativeEvidence, error) { return NativeEvidence{}, nil },
+		Adopt: func(_ context.Context, _ ManagedAttachment, evidence NativeEvidence) (NativeEvidence, error) {
+			return evidence, nil
+		},
+	})
+	if _, err := runtime.Attachments().Prepare(context.Background(), ManagedAttachment{
+		ID: "attachment", CapabilityHash: "cap", Product: "codex", ProfileIdentity: "profile",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Attachments().Adopt(context.Background(), "attachment", NativeEvidence{}); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := runtime.State().Read()
 	if err != nil {
 		t.Fatal(err)
 	}
 	catalog := snapshot.Catalog
-	catalog.Attachments["attachment"] = ManagedAttachment{ID: "attachment", Product: "codex", Cwd: canary, State: "attached", DaemonGeneration: runtime.Generation()}
 	catalog.Lanes["native"] = LaneCandidate{
 		NativeSessionID: "native", Parent: "attachment", Product: "codex",
 		PrimaryGroup: "session:host/attachment",
@@ -35,9 +47,6 @@ func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
 		body, err := runtime.runtimeStatus(context.Background(), operation)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if strings.Contains(string(body), canary) {
-			t.Fatalf("%s leaked catalog content: %s", operation, body)
 		}
 		if len(body) > diagnostics.MaxReportBytes {
 			t.Fatalf("%s output is unbounded: %d", operation, len(body))

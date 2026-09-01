@@ -43,10 +43,7 @@ type RuntimeConfig struct {
 	ParentConnectorAuthorizer  ParentConnectorAuthorizer
 	ProductDiagnosticsProvider ProductDiagnosticsProvider
 	Handler                    ControlHandler
-	// Initialize restores generation-scoped durable authority after the
-	// endpoint is bound but before any control request may observe readiness.
-	Initialize func(*Runtime) error
-	Components []RuntimeComponent
+	Components                 []RuntimeComponent
 }
 
 // Runtime owns the one local endpoint, durable store, attachments, and
@@ -97,7 +94,7 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 		return nil, fmt.Errorf("open runtime state: %w", err)
 	}
 	generation := nextRuntimeGeneration.Add(1)
-	attachments, err := NewAttachmentEngine(state, generation, config.Adapters)
+	attachments, err := NewAttachmentEngine(generation, config.Adapters)
 	if err != nil {
 		return nil, err
 	}
@@ -116,13 +113,6 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	}
 	runtime.control = control
 
-	if config.Initialize != nil {
-		if err := config.Initialize(runtime); err != nil {
-			runtime.finish("failed", err, true)
-			<-runtime.done
-			return nil, fmt.Errorf("initialize runtime before readiness: %w", runtime.waitErr)
-		}
-	}
 	runtime.ready.Store(true)
 	runtime.startComponents(config.Components)
 	go func() {

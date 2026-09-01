@@ -18,10 +18,10 @@ func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.Raw
 	if err != nil {
 		return nil, err
 	}
-	catalog := snapshot.Catalog
 	records := diagnostics.Records{
-		Attachments: len(catalog.Attachments), ActiveAttachments: len(activeAttachments),
-		Lanes: len(catalog.Lanes),
+		Attachments: len(activeAttachments), ActiveAttachments: len(activeAttachments),
+		// Candidate rows are private lookup inputs, never live lane records.
+		Lanes: 0,
 	}
 	var productStates map[string]string
 	if r.productDiagnosticsProvider != nil {

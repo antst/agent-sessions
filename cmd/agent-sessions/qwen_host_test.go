@@ -11,7 +11,6 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/federator"
-	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -21,27 +20,6 @@ func TestQwenDurableOwnerHelper(t *testing.T) {
 	}
 	for {
 		time.Sleep(time.Hour)
-	}
-}
-
-func TestQwenManagedResumeInheritsStableIntentWithoutOverridingExplicitFields(t *testing.T) {
-	selected := daemonpkg.ManagedAttachment{
-		ID: "native", NativeSessionID: "native", Cwd: "/original",
-		Groups: []string{"group-a", "group-b"}, LaunchIntent: "yolo", PermissionMode: "bypassPermissions",
-	}
-	inherited := inheritQwenResumeRequest(launcher.QwenDaemonPrepareRequest{}, selected)
-	if inherited.SessionID != "native" || inherited.Name != "" || inherited.Cwd != "/original" ||
-		strings.Join(inherited.Groups, ",") != "group-a,group-b" || inherited.LaunchPreference != "yolo" ||
-		inherited.ExpectedInitialMode != "yolo" {
-		t.Fatalf("inherited Qwen resume = %+v", inherited)
-	}
-	explicit := inheritQwenResumeRequest(launcher.QwenDaemonPrepareRequest{
-		Name: "override", NameSpecified: true, Groups: []string{"override-group"}, GroupsSpecified: true,
-		LaunchPreference: "non_yolo", ExpectedInitialMode: "default", PermissionSpecified: true,
-	}, selected)
-	if explicit.Name != "override" || strings.Join(explicit.Groups, ",") != "override-group" ||
-		explicit.LaunchPreference != "non_yolo" || explicit.ExpectedInitialMode != "default" {
-		t.Fatalf("explicit Qwen resume was overwritten: %+v", explicit)
 	}
 }
 

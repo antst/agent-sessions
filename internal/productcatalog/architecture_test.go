@@ -75,14 +75,12 @@ func TestFederatorHasNoAuthoredProductInventory(t *testing.T) {
 // root rather than another central conditional or parallel inventory.
 func TestNoNewProductDispatchSwitches(t *testing.T) {
 	want := map[string]int{
-		"cmd/agent-sessions/codex_host.go":                9,
-		"cmd/agent-sessions/connector.go":                 5,
-		"cmd/agent-sessions/grok_host.go":                 1,
+		"cmd/agent-sessions/codex_host.go":                4,
+		"cmd/agent-sessions/connector.go":                 1,
 		"cmd/agent-sessions/hook.go":                      1,
 		"cmd/agent-sessions/lane.go":                      29,
 		"cmd/agent-sessions/main.go":                      4,
 		"cmd/agent-sessions/messaging.go":                 4,
-		"cmd/agent-sessions/qwen_host.go":                 1,
 		"internal/bridge/claude_lane.go":                  1,
 		"internal/bridge/cleanup.go":                      3,
 		"internal/bridge/grok.go":                         1,
