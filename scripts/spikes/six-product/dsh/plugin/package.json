@@ -1,0 +1,11 @@
+{
+  "name": "@agent-sessions/dsh-s2-plugin",
+  "version": "0.1.2-alpha.3",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.3"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "additive_unknown_json_fields": "accepted_by_encoding_json_unmarshal",
+  "closed_coupling_to_remove": [
+    "internal/federation.normalizeCapabilities productcatalog lookup",
+    "internal/federation.capabilityForProduct closed product resolution"
+  ],
+  "decoder_uses_disallow_unknown_fields": false,
+  "existing_wire_fields_sufficient": [
+    "Message.Product",
+    "Message.Capabilities",
+    "Host.Capabilities"
+  ],
+  "mixed_build_outcome": "unknown new-product capability may be omitted by an old hop, causing explicit unavailability rather than misrouting",
+  "new_wire_fields_required": false,
+  "protocol_version": 3,
+  "reproducer": "scripts/spikes/six-product/base/run.sh",
+  "security_scope": "trusted-network assumption retained; TLS/authentication deferred to a separate design",
+  "status": "pass",
+  "tests": {
+    "cmd_agent_sessions_hub": "pass (package currently has no tests; Phase B adds live-hub coverage)",
+    "internal_federation": "pass"
+  },
+  "type": "six_product_phase0.federation.v1"
+}

@@ -1,0 +1,146 @@
+{
+  "schema": "agent-sessions.six-product-spike.v1",
+  "gate": "S3-codebuddy",
+  "observed_at": "2026-09-01T07:22:28.226Z",
+  "base_commit": "679fe9d3068b6362df867f8d78ce6708c4ce1342",
+  "product": {
+    "package": "@tencent-ai/codebuddy-code",
+    "version": "2.143.0",
+    "package_integrity": "sha512-RY6tItN1zSMSDChZQaPuRzp/SJ+s0g0B3cU8uto3DfH6NqKfQQcQUlnGap1oSJ5bNK9/SaqtZLQgZ8Q02I5+Ag==",
+    "protocol": {
+      "title": "CodeBuddy Code API (Beta)",
+      "version": "2.143.0",
+      "reply_summary": "向当前活会话投递回复（不占用 ACP writer）"
+    }
+  },
+  "isolation": {
+    "isolated_home": true,
+    "worker_count": 2,
+    "worker_sessions": [
+      {
+        "session_id": "s3-worker-a",
+        "pid_positive": true,
+        "kind": "interactive",
+        "literal_loopback": true,
+        "credential_field_count": 0,
+        "ownership_verified": true,
+        "socket_owned_by_registry_pid": true,
+        "exact_codebuddy_entrypoint": true,
+        "direct_wrapper_child": true,
+        "strong_start_fingerprint": "fdc3cb7a770f41bd9fb03a0880cca4c201be6636920dfc5f47ff463e1ac376bf"
+      },
+      {
+        "session_id": "s3-worker-b",
+        "pid_positive": true,
+        "kind": "interactive",
+        "literal_loopback": true,
+        "credential_field_count": 0,
+        "ownership_verified": true,
+        "socket_owned_by_registry_pid": true,
+        "exact_codebuddy_entrypoint": true,
+        "direct_wrapper_child": true,
+        "strong_start_fingerprint": "4410eba972f83f5b48f3dfa68a6d7d689e7441021442c41f44f12f78d2ff291c"
+      }
+    ],
+    "distinct_worker_pids": true,
+    "distinct_worker_endpoints": true,
+    "registry_url_is_authority": false,
+    "stale_row_rejected": true,
+    "reused_pid_rejected": true,
+    "recycled_port_rejected": true,
+    "macos_ownership_proof": {
+      "status": "pending-physical-macos",
+      "required_api": "proc_pidinfo(PROC_PIDLISTFDS)+proc_pidfdinfo(PROC_PIDFDSOCKETINFO), plus proc start/executable ancestry"
+    }
+  },
+  "auth_truth": {
+    "worker_password_present": false,
+    "worker_credential_fields": 0,
+    "no_header_http": 403,
+    "bogus_password_without_csrf_http": 403,
+    "csrf_header_http": 200,
+    "observed_mode": "constant-csrf-header-only",
+    "raw_credential_persisted_by_spike": false
+  },
+  "surface_split": {
+    "peer": {
+      "owner": "product-interactive-tui",
+      "auth": "no-password; X-CodeBuddy-Request required",
+      "attachment": "wrapper AttachmentAdapter Adopt/Refresh re-attests registry session, socket owner PID, executable/start, and ancestry",
+      "component_or_sidecar": false
+    },
+    "lane": {
+      "owner": "agent-sessions",
+      "mode": "codebuddy --serve --auth password",
+      "ephemeral_password_env": "CODEBUDDY_GATEWAY_PASSWORD",
+      "missing_bearer_http": 401,
+      "wrong_bearer_http": 401,
+      "correct_bearer_http": 200,
+      "password_persisted": false
+    }
+  },
+  "exact_routing": {
+    "idle_reply_http": 0,
+    "idle_reply_wait_category": "native-await-timeout",
+    "idle_message_in_exact_replay": true,
+    "wrong_target_http": 409,
+    "wrong_marker_in_worker_a": false,
+    "wrong_marker_in_worker_b": false,
+    "zero_wrong_session_delivery": true
+  },
+  "busy_safe_api": {
+    "native_endpoint_summary_verified": true,
+    "native_reply_results": [
+      {
+        "http": 200,
+        "delivered": true,
+        "category": ""
+      },
+      {
+        "http": 200,
+        "delivered": true,
+        "category": ""
+      }
+    ],
+    "model_processing": "pending-no-tencent-account"
+  },
+  "daemon_restart": {
+    "daemon_pid_changed": true,
+    "worker_pid_stable": true,
+    "exact_session_before": true,
+    "exact_session_after": true,
+    "daemon_registry_contains_both_workers": true,
+    "peer_credential_retained": false,
+    "reason": "peer endpoint is product-owned and exposes no password credential"
+  },
+  "controller_restart": {
+    "sidecar_present": false,
+    "native_worker_registry_survives": true,
+    "native_endpoint_rediscoverable": true,
+    "exact_session_rediscoverable": true,
+    "unmanaged_until_tui_relaunch": false,
+    "wrong_session_delivery_after_death": false
+  },
+  "account_gated": {
+    "tencent_login_used": false,
+    "model_turn_completion": "pending",
+    "credit": "pending-never-pass"
+  },
+  "assertions": {
+    "exact_worker_correlation": true,
+    "idle_ingress_to_exact_native_session": true,
+    "busy_safe_native_api": true,
+    "daemon_restart_preserves_exact_worker": true,
+    "peer_zero_password_persistence": true,
+    "lane_ephemeral_password_not_persisted": true,
+    "zero_wrong_session_delivery": true,
+    "sidecar_password_contract": false,
+    "socket_pid_process_ownership": true,
+    "stale_pid_port_rejection": true
+  },
+  "result": {
+    "status": "red-contract-change-required",
+    "blocking_reason": "CodeBuddy 2.143.0 interactive workers do not publish or require the assumed per-worker password; controller death does not make the still-live worker undiscoverable or require TUI relaunch.",
+    "recommended_change": "Remove the peer credential-sidecar/component contract. Peer AttachmentAdapter Adopt/Refresh must treat the registry URL as a claim, prove listening-socket ownership by PID, then verify executable/start/ancestry against the wrapper child. Keep AS-owned lane --serve separate and supply CODEBUDDY_GATEWAY_PASSWORD only in memory."
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "schema": "agent-sessions.six-product.phase0.v1",
+  "spike": "S1-kilo",
+  "status": "PASS",
+  "base_commit": "679fe9d3068b6362df867f8d78ce6708c4ce1342",
+  "generated_at": "2026-09-01T07:32:12Z",
+  "product": {
+    "package": "@kilocode/cli",
+    "version": "7.5.6",
+    "product_protocol_mocked": false,
+    "model_provider": "deterministic local OpenAI-compatible streaming fixture",
+    "credential_used": false
+  },
+  "topology": {
+    "decision": "one authenticated kilo serve plus one full kilo attach TUI per peer",
+    "server_count": 2,
+    "full_attach_tui_count": 2,
+    "isolated_home_and_xdg": true,
+    "literal_loopback": true,
+    "distinct_servers": true,
+    "distinct_native_sessions": true,
+    "shared_daemon_for_multiple_peers": false,
+    "reason": "The /tui/* API controls the full TUI attached to its server. Per-peer servers make delivery authority exact and avoid unresolved multi-TUI routing."
+  },
+  "observed_pair_run": {
+    "started_at": "2026-09-01T07:29:57Z",
+    "completed_through_required_s1_cells_at": "2026-09-01T07:30:17Z",
+    "pair_a": {
+      "native_session_id": "ses_fa420108cffe64yvmtzNOt04yy",
+      "marker": "ROUTE_A_MODEL",
+      "foreign_marker": "ROUTE_B_MODEL",
+      "foreign_marker_count": 0,
+      "busy_events": 8,
+      "idle_events": 2
+    },
+    "pair_b": {
+      "native_session_id": "ses_fa4201000ffe4M1Jo9yqPH6pLb",
+      "marker": "ROUTE_B_MODEL",
+      "foreign_marker": "ROUTE_A_MODEL",
+      "foreign_marker_count": 0,
+      "busy_events": 16,
+      "idle_events": 5
+    },
+    "busy_queue_input_order": [
+      "SLOW_TURN_FIRST",
+      "BUSY_QUEUE_SECOND"
+    ],
+    "background_process_session_id": "ses_fa4201000ffe4M1Jo9yqPH6pLb",
+    "mcp_status_both_pairs": "connected",
+    "raw_server_password_persisted": false
+  },
+  "assertions": {
+    "two_independent_serve_attach_pairs": true,
+    "exact_pair_routing": true,
+    "zero_cross_delivery": true,
+    "full_attach_idle_wake": true,
+    "full_attach_busy_queue": true,
+    "completion_busy_idle_events": true,
+    "background_process_exact_session_attribution": true,
+    "mcp_available_in_attach_mode": true,
+    "rename_visible_in_full_tui": true,
+    "resume_preserves_native_session_id_and_history": true,
+    "exact_parent_context": true,
+    "no_credentials_persisted": true
+  },
+  "parent_context": {
+    "source": "S4-component.json",
+    "product": "kilocode",
+    "version": "7.5.6",
+    "identity_source": "shell.env.sessionID",
+    "shell_environment_session_id_matched": true,
+    "note": "S4 independently owns the exact parent-context proof; S1 consumes rather than duplicates it."
+  },
+  "rename_resume_probe": {
+    "native_session_ids": [
+      "ses_fa439d8f9ffelhunfD2nvzsnhg",
+      "ses_fa4397d49ffeN8Csauo8AB7JwT"
+    ],
+    "external_patch_title_visible_in_tui": true,
+    "full_attach_session_resume_same_id": true,
+    "history_replayed": true
+  },
+  "negative": {
+    "mini_attach_peer_supported": false,
+    "operation": "/tui/append-prompt then /tui/submit-prompt",
+    "rendered_in_mini": false,
+    "native_message_created": false,
+    "required_action": "Do not use --mini for Agent Sessions peer mode; launch the full attached TUI."
+  },
+  "reproducibility": {
+    "entrypoint": "scripts/spikes/six-product/kilo/run.sh",
+    "native_package_installed_in_scratch": true,
+    "authenticated_servers": true,
+    "temporary_root_mode": "0700",
+    "cleanup_stops_owned_native_processes": true,
+    "helpers": [
+      "scripts/spikes/six-product/kilo/mock-openai.mjs",
+      "scripts/spikes/six-product/kilo/mock-mcp.mjs",
+      "scripts/spikes/six-product/kilo/free-port.mjs"
+    ]
+  },
+  "limitations": [
+    "Kilo attach --mini is read/resume-capable but is not /tui/*-messageable at 7.5.6.",
+    "A shared Kilo daemon with multiple attached TUIs is not the selected peer topology; each peer gets an isolated authenticated server.",
+    "The model provider is deterministic, but every Kilo transport and lifecycle assertion uses the real pinned product."
+  ]
+}

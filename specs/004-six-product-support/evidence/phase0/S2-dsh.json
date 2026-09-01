@@ -1,0 +1,119 @@
+{
+  "schema": "agent-sessions.six-product.phase0.v1",
+  "spike": "S2-dsh",
+  "status": "PASS",
+  "base_commit": "679fe9d3068b6362df867f8d78ce6708c4ce1342",
+  "generated_at": "2026-09-01T07:16:17.858Z",
+  "product": {
+    "id": "dsh",
+    "cli_version": "0.1.2-alpha.3",
+    "tuple_version": "0.1.2-alpha.3",
+    "acp_app_version": "0.1.2-alpha.3",
+    "cordis_plugin_version": "0.1.2-alpha.3",
+    "profile_version": "0.1.2-alpha.3",
+    "package_manager": "pnpm 10.28.1",
+    "model_provider": "deterministic mock adapter inside the real DSH process",
+    "product_protocol_mocked": false,
+    "credential_used": false
+  },
+  "assertions": {
+    "exact_tuple": true,
+    "mismatched_tuple_rejected": true,
+    "cordis_session_enumeration": true,
+    "idle_followup_wake": true,
+    "busy_steer": true,
+    "completion_event": true,
+    "native_parent_tool_exact_session": true,
+    "sandbox_home_socket": true,
+    "dsh_session_id_witness": true,
+    "acp_busy_prompt_rejected": true,
+    "cancel_is_notification": true,
+    "projcache_not_liveness": true
+  },
+  "observed": {
+    "session_id": "c327e3ff-3ea4-45ba-b935-97586052a828",
+    "projcache_sample_while_running": null,
+    "cancel_notification_result": "stopReason=cancelled",
+    "acp_busy_prompt_result": "JSON-RPC -32602 prompt already in flight",
+    "cancel_request_result": "JSON-RPC -32601 Method not found",
+    "component_socket_location": "$HOME/.local/state/agent-sessions-spikes/<mktemp>/component.sock",
+    "component_socket_tmpfs_safe": true
+  },
+  "design_decision": {
+    "parent_facade": "native_registered_tool",
+    "rationale": "Cordis tool execution supplies exec.agent with the exact native DSH session; it avoids an extra MCP child and keeps identity in-process.",
+    "mcp_status": "supported fallback, not selected for primary parent facade",
+    "busy_lane_policy": "ACP rejects a concurrent prompt; shared durable ledger queues. Cordis peer delivery uses agent.steer directly.",
+    "liveness_source": "ACP stop reason plus Cordis agent/status and agent/turn-stopping; never projection cache"
+  },
+  "tuple_validation": {
+    "expected": "0.1.2-alpha.3",
+    "actual": {
+      "profile": "0.1.2-alpha.3",
+      "acp_app": "0.1.2-alpha.3",
+      "plugin": "0.1.2-alpha.3"
+    },
+    "exact_tuple_ok": true,
+    "exact_errors": [],
+    "mismatch_candidate": {
+      "profile": "0.1.2-alpha.3",
+      "acp_app": "0.1.2-alpha.3",
+      "plugin": "0.1.2-alpha.3",
+      "cli": "0.1.1-rc.2"
+    },
+    "mismatch_rejected": true,
+    "mismatch_errors": [
+      {
+        "member": "cli",
+        "version": "0.1.1-rc.2",
+        "expected": "0.1.2-alpha.3"
+      }
+    ],
+    "policy": "all tuple members must equal the pinned version; no semver widening"
+  },
+  "raw_result": {
+    "initialized": true,
+    "session_listed": true,
+    "idle_followup": true,
+    "busy_steer": true,
+    "completion_observed": true,
+    "parent_facade": "native_registered_tool",
+    "parent_tool_exact_session": true,
+    "sandbox_home_socket": true,
+    "dsh_session_id_witness": true,
+    "cancel_notification": true,
+    "acp_busy_prompt_rejected": true,
+    "cancel_request_rejected": true,
+    "projcache_not_liveness": true,
+    "projcache_sample": null,
+    "session_id": "c327e3ff-3ea4-45ba-b935-97586052a828",
+    "child_terminal": {
+      "code": 0,
+      "signal": null
+    },
+    "stderr_lines": [],
+    "pass": true,
+    "required": [
+      "initialized",
+      "session_listed",
+      "idle_followup",
+      "busy_steer",
+      "completion_observed",
+      "parent_tool_exact_session",
+      "sandbox_home_socket",
+      "dsh_session_id_witness",
+      "cancel_notification",
+      "acp_busy_prompt_rejected",
+      "cancel_request_rejected",
+      "projcache_not_liveness"
+    ]
+  },
+  "artifacts": {
+    "plugin_log_sha256": "4808230bcef23babb1fa5c5a6f91d8e986a876c914100ec0d1923631d57e8441",
+    "acp_transcript_sha256": "7707c8e168e899d58feb56ee6d36ce928ddec26e02176e1a4717b79d51989f76"
+  },
+  "account_gate": {
+    "status": "not_applicable_to_spike",
+    "explanation": "The native DSH/Cordis/ACP/tool/sandbox protocols ran end-to-end with an allowed mock model adapter; no user credential was needed or read."
+  }
+}

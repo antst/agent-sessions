@@ -1,0 +1,11 @@
+{
+  "base_commit": "679fe9d3068b6362df867f8d78ce6708c4ce1342",
+  "base_tree": "90dbec40e4114aa164c16d8d3fd958467f3051aa",
+  "branch": "feature/six-product-support",
+  "origin_main_equal": true,
+  "planning_only_changes_before_spikes": true,
+  "reproducer": "scripts/spikes/six-product/base/run.sh",
+  "status": "pass",
+  "tag": "v0.3.0",
+  "type": "six_product_phase0.base.v1"
+}

@@ -1,0 +1,320 @@
+{
+  "type": "six_product_phase0_legacy_reachability",
+  "contract": "six-product-s5-legacy-v1",
+  "base_commit": "679fe9d3068b6362df867f8d78ce6708c4ce1342",
+  "status": "pass",
+  "decision": "extract-and-freeze",
+  "summary": "The legacy runners are unreachable from both live commands, but their declarations are co-located with live helpers and package-wide types. No production Go file is a certified standalone deletion unit on this base. Phase A must extract the live surfaces, collapse the duplicate catalog, forbid new imports into the legacy packages, and defer full deletion until the ported tests and full cross-platform gates prove a bounded removal.",
+  "reproduction": {
+    "inventory": "scripts/spikes/six-product/legacy/run.sh > /tmp/S5-raw.json",
+    "validate_inventory": "jq empty /tmp/S5-raw.json",
+    "removal_probes": [
+      "scripts/spikes/six-product/legacy/probe-file-removal.sh internal/bridge/runtime.go",
+      "scripts/spikes/six-product/legacy/probe-file-removal.sh internal/federator/agent.go",
+      "scripts/spikes/six-product/legacy/probe-file-removal.sh internal/federator/hub.go"
+    ],
+    "script_validation": [
+      "bash -n scripts/spikes/six-product/legacy/run.sh scripts/spikes/six-product/legacy/probe-file-removal.sh",
+      "go test ./scripts/spikes/six-product/legacy"
+    ],
+    "full_gates_required_after_extraction": [
+      "scripts/test",
+      "make test-race",
+      "go vet ./...",
+      "make lint"
+    ]
+  },
+  "inventory": {
+    "bridge": {
+      "production_files": 56,
+      "test_files": 53,
+      "production_lines": 28436,
+      "test_lines": 23020,
+      "direct_production_importers": [
+        "cmd/agent-sessions"
+      ],
+      "externally_referenced_production_symbols": [
+        "CaptureNativeAncestry",
+        "CodexHookThreadIDFromInput",
+        "CodexLaneTurnRequest",
+        "CodexLaneTurnResult",
+        "CodexNative",
+        "CodexNativeConfig",
+        "CodexNativeEvent",
+        "CodexNativeThread",
+        "CodexStartRequest",
+        "ConnectorAttestation",
+        "ErrConnectorInactive",
+        "GrokNativeObserver",
+        "HookAttestation",
+        "HookDispatchConfig",
+        "InspectClaudeLaneReadiness",
+        "LaneUsage",
+        "MCPRelayConfig",
+        "NativeLaneACPConfig",
+        "NativeLaneACPResult",
+        "NewHookDispatcher",
+        "NewMCPRelay",
+        "NormalizePeerName",
+        "OpenCodexNative",
+        "OpenGrokNativeObserver",
+        "OpenQwenNativeInput",
+        "ProductMCPInstructions",
+        "ProductMCPTools",
+        "QwenNativeInput",
+        "QwenNativeSessionTitle",
+        "RunNativeLaneACP",
+        "StdioMCPThreadID",
+        "WrapPeerMessage"
+      ],
+      "declaring_files_of_external_roots": [
+        "internal/bridge/claude_lane.go",
+        "internal/bridge/codex_attestation.go",
+        "internal/bridge/codex_native.go",
+        "internal/bridge/grok_native_observer.go",
+        "internal/bridge/hook_dispatch.go",
+        "internal/bridge/lane_usage.go",
+        "internal/bridge/mcp.go",
+        "internal/bridge/mcp_relay.go",
+        "internal/bridge/native_lane_acp.go",
+        "internal/bridge/qwen.go",
+        "internal/bridge/runtime.go"
+      ],
+      "legacy_entrypoint": {
+        "symbol": "Main",
+        "declaration": "internal/bridge/runtime.go:86",
+        "production_callers": [],
+        "test_callers": []
+      }
+    },
+    "federator": {
+      "production_files": 22,
+      "test_files": 16,
+      "production_lines": 7780,
+      "test_lines": 4741,
+      "direct_production_importers": [
+        "cmd/agent-sessions",
+        "internal/bridge",
+        "internal/launcher"
+      ],
+      "direct_live_declaring_files": [
+        "internal/federator/agent.go",
+        "internal/federator/diagnostics.go",
+        "internal/federator/groups.go",
+        "internal/federator/process_cleanup.go",
+        "internal/federator/product.go",
+        "internal/federator/protocol.go",
+        "internal/federator/registration.go",
+        "internal/federator/util.go"
+      ],
+      "direct_cmd_launcher_symbols": [
+        "AgentStatus",
+        "CancelPeerPreparation",
+        "ClaudeKeyBaselineEntry",
+        "ClaudeNativeSessionTitle",
+        "ClaudePeerKeySidecars",
+        "ClaudePeerLifecycleLockPath",
+        "ClaudePeerLifecycleRoot",
+        "ClaudePeerLifecycleRootInState",
+        "ClaudePeerMessagingSocketPath",
+        "ClaudeServiceKeyName",
+        "CleanupClaudePeerNewKeySidecars",
+        "DefaultRuntimeDir",
+        "GroupProtocolVersion",
+        "LookupManagedSession",
+        "LookupSessionPreferences",
+        "ObserveClaudePeerNewKeySidecars",
+        "PeerLifecycleRootInState",
+        "PeerRegistration",
+        "PrepareClaudePeerSelection",
+        "PreparePeerLaunch",
+        "PreviewSessionPreferences",
+        "ProcessStart",
+        "ProductByID",
+        "ProductDescriptor",
+        "ProductDescriptors",
+        "PromoteClaudePeerSelection",
+        "QwenArtifactAttestation",
+        "QwenArtifactAttestationForPath",
+        "QwenArtifactIdentityForPath",
+        "QwenArtifactIdentityMatches",
+        "QwenArtifactPrefixMatches",
+        "QwenPreparationPayload",
+        "QwenProfileIdentity",
+        "QwenSessionMetadata",
+        "ReadAgentStatus",
+        "RegisterPeer",
+        "ResolvePreferencesRequest",
+        "ResolveSessionName",
+        "ResolveSessionPreferences",
+        "ResolvedPreferences",
+        "SessionKindInteractive",
+        "SessionKindLane",
+        "SessionPreferences",
+        "UnregisterPeer",
+        "ValidateClaudePeerMessagingSocketPath",
+        "ValidateClaudePeerObservedSocketKey"
+      ],
+      "legacy_entrypoints": [
+        {
+          "symbol": "RunAgent",
+          "declaration": "internal/federator/agent.go:137",
+          "production_callers": [],
+          "test_callers": [
+            "internal/bridge/agent_test.go:28",
+            "internal/bridge/group_agent_test.go:58",
+            "internal/bridge/group_agent_test.go:598",
+            "internal/federator/runtime_regression_test.go:132",
+            "internal/federator/runtime_regression_test.go:206",
+            "internal/federator/runtime_regression_test.go:281",
+            "internal/launcher/claude_peer_test.go:533",
+            "internal/launcher/qwen_peer_test.go:410"
+          ]
+        },
+        {
+          "symbol": "RunHub",
+          "declaration": "internal/federator/hub.go:47",
+          "production_callers": [],
+          "test_callers": [
+            "internal/federator/embedded_test.go:15",
+            "internal/federator/embedded_test.go:104"
+          ]
+        }
+      ]
+    },
+    "cross_platform_deadcode": [
+      {
+        "platform": "linux/amd64",
+        "tool": "golang.org/x/tools/cmd/deadcode@v0.36.0",
+        "total_unreachable_functions": 1224,
+        "bridge_unreachable_functions": 826,
+        "federator_unreachable_functions": 256,
+        "legacy_entrypoints_reported_unreachable": [
+          "bridge.Main",
+          "federator.RunAgent",
+          "federator.RunHub"
+        ],
+        "raw_output_sha256": "b695831d3c12624be32b22a9f65c0e79f69936d7b0b846759700a0a8749bc035"
+      },
+      {
+        "platform": "darwin/arm64",
+        "tool": "golang.org/x/tools/cmd/deadcode@v0.36.0",
+        "total_unreachable_functions": 1225,
+        "bridge_unreachable_functions": 827,
+        "federator_unreachable_functions": 256,
+        "legacy_entrypoints_reported_unreachable": [
+          "bridge.Main",
+          "federator.RunAgent",
+          "federator.RunHub"
+        ],
+        "raw_output_sha256": "bcf2c74156c55a1c54a7c63a1b478fb4b43645b7b27146bc85ae6673f4fb0ccb"
+      }
+    ],
+    "duplicate_product_catalog": {
+      "product_catalog_file": "internal/productcatalog/catalog.go",
+      "federator_catalog_file": "internal/federator/product.go",
+      "independently_authored_ids": {
+        "productcatalog": ["codex", "claude", "grok", "qwen"],
+        "federator": ["codex", "claude", "grok", "qwen"]
+      },
+      "must_collapse_in_phase_a": true
+    },
+    "stale_forgejo_workflow": {
+      "file": ".forgejo/workflows/ci.yml",
+      "missing_command_directories": [
+        "cmd/agent-session-runtime",
+        "cmd/peer",
+        "cmd/codex-peer",
+        "cmd/claude-peer",
+        "cmd/codex-peer-lane",
+        "cmd/claude-peer-lane",
+        "cmd/grok-peer",
+        "cmd/grok-peer-lane",
+        "cmd/peer-federator"
+      ],
+      "disposition": "separate bounded cleanup after confirming Forgejo is no longer an active required CI surface"
+    }
+  },
+  "removal_probes": [
+    {
+      "file": "internal/bridge/runtime.go",
+      "result": "compile-fail",
+      "representative_missing_declarations": ["daemon", "maxFrameBytes", "stringValue", "intValue"],
+      "reason": "bridge.Main shares its file with live NormalizePeerName and QwenNativeSessionTitle plus package-wide legacy helpers"
+    },
+    {
+      "file": "internal/federator/agent.go",
+      "result": "compile-fail",
+      "representative_missing_declarations": ["agent", "AgentStatus", "DefaultRuntimeDir"],
+      "reason": "RunAgent shares its file and private agent type with embedded/registration/lane code while live launchers consume status/runtime helpers"
+    },
+    {
+      "file": "internal/federator/hub.go",
+      "result": "compile-fail",
+      "representative_missing_declarations": ["hub", "hubClient", "HubOptions"],
+      "reason": "RunHub owns types used by legacy lane routing and is still called by same-package and command integration tests"
+    }
+  ],
+  "bounded_deletion": {
+    "certified_production_go_files_now": [],
+    "can_land_standalone_before_foundations": false,
+    "reason": "Every legacy runner declaration is file-entangled; production commands still expose 32 bridge symbols, live command/launcher code consumes federator registration and diagnostics, and the old RunAgent/RunHub remain test roots. Making a broad deletion pass known gates would require simultaneous helper extraction, test porting, and package reshaping, which would put the six-product critical path at risk. Deadcode counts are prioritization evidence, not file-deletion proof."
+  },
+  "phase_a_required_extraction": {
+    "sessiontools": [
+      "MCP tool schemas and instructions from internal/bridge/mcp.go",
+      "AgentFrame wrapping from internal/bridge/mcp.go",
+      "fail-loud product labeling in place of the unknown-to-Claude default",
+      "peer-name normalization from internal/bridge/runtime.go",
+      "Codex hook/MCP ancestry helpers from internal/bridge/codex_attestation.go",
+      "hook dispatcher and connector relay from internal/bridge/hook_dispatch.go and internal/bridge/mcp_relay.go",
+      "lane help projection from internal/bridge/lane_usage.go"
+    ],
+    "native_product_helpers": [
+      "Codex App Server transport from internal/bridge/codex_native.go",
+      "Grok observer plus its exact ACP/process transitive closure from internal/bridge/grok_native_observer.go",
+      "Grok/Qwen lane ACP transport from internal/bridge/native_lane_acp.go without the legacy managers",
+      "Qwen attested input writer from internal/bridge/qwen.go",
+      "Claude readiness probe extracted from internal/bridge/claude_lane.go",
+      "Qwen title projection extracted from internal/bridge/runtime.go"
+    ],
+    "federator_helpers": [
+      "move local peer preparation/attestation/status/path helpers out of the legacy agent package",
+      "port AgentFrame/session messaging dependencies to focused sessiontools and the live internal/federation model",
+      "replace internal/federator/product.go with internal/productcatalog projections",
+      "port command federation tests from federator.RunHub to internal/federation.RunHub before deleting legacy hub code"
+    ],
+    "mandatory_documentation": "rewrite docs/ADAPTER-PROTOCOL.md for the unified daemon and component/runtime contracts"
+  },
+  "no_new_import_enforcement": {
+    "forbidden_new_importers": [
+      "internal/productruntime",
+      "internal/products/*",
+      "internal/component",
+      "internal/productserver",
+      "internal/structuredprocess",
+      "integrations/*"
+    ],
+    "mechanism": [
+      "capture this inventory as the baseline allowlist",
+      "add a go/parser conformance test that rejects any new direct import of internal/bridge or internal/federator outside the temporary explicit allowlist",
+      "shrink the allowlist on every extraction",
+      "ban package-init registration and duplicate product tables in scripts/test",
+      "require productcatalog projection equality after deleting internal/federator/product.go"
+    ]
+  },
+  "uncertainty": [
+    "Deadcode is a sound RTA result for each recorded GOOS/GOARCH command, but it does not by itself certify deletion of types, variables, initializers, interface-only methods, tests, or entire files.",
+    "The scanner records syntactic selector references; references inside unreachable bridge functions are intentionally retained as conservative extraction candidates until Phase A moves the live roots.",
+    "Only Linux/amd64 and Darwin/arm64 were compared in this spike; the released amd64/arm64 variants share source families, but any later deletion still requires the full four-platform build and physical release gates.",
+    "The Forgejo workflow is source-stale, but whether the Forgejo service remains organizationally required is outside static Go reachability."
+  ],
+  "follow_up_deletion_gate": [
+    "all live external roots have focused-package replacements",
+    "no production importer remains for internal/bridge or legacy internal/federator surfaces",
+    "legacy command tests are ported to internal/federation and unified daemon fixtures",
+    "cross-platform deadcode/call inventory identifies a closed file set",
+    "normal, race, vet, lint, federation, focused contracts, prebuilt install, quickstart, owner-nonmutation, and physical macOS gates pass",
+    "deletion lands as a standalone reviewable change rather than mixed with a product adapter"
+  ]
+}

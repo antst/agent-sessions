@@ -1,0 +1,178 @@
+{
+  "schema": "agent-sessions.six-product.phase0.component-context.v1",
+  "gate": "S4",
+  "status": "pass",
+  "started_at": "2026-09-01T07:32:03.551Z",
+  "completed_at": "2026-09-01T07:32:38.924Z",
+  "base_commit": "679fe9d3068b6362df867f8d78ce6708c4ce1342",
+  "product_protocol_mocked": false,
+  "model_provider": "local deterministic OpenAI-compatible tool-call fixture",
+  "products": [
+    {
+      "product": "opencode",
+      "version": "1.18.25",
+      "identity_source": "shell.env.sessionID",
+      "native_session_id": "ses_fa41df0a4ffe5PBdlb1sCNiGIk",
+      "authoritative_session_id": "ses_fa41df0a4ffe5PBdlb1sCNiGIk",
+      "shell_environment_session_id_matched": true,
+      "inert_without_bootstrap_secret": true,
+      "active_with_exact_bootstrap_secret": true,
+      "raw_bootstrap_secret_absent_from_artifacts": true,
+      "native_protocol": "/session/{nativeSessionID}/shell",
+      "component_frames_observed": [
+        "session.announce"
+      ]
+    },
+    {
+      "product": "kilocode",
+      "version": "7.5.6",
+      "identity_source": "shell.env.sessionID",
+      "native_session_id": "ses_fa41db29cffeLHyGCYAazCKdVJ",
+      "authoritative_session_id": "ses_fa41db29cffeLHyGCYAazCKdVJ",
+      "shell_environment_session_id_matched": true,
+      "inert_without_bootstrap_secret": true,
+      "active_with_exact_bootstrap_secret": true,
+      "raw_bootstrap_secret_absent_from_artifacts": true,
+      "native_protocol": "/session/{nativeSessionID}/shell",
+      "component_frames_observed": [
+        "session.announce"
+      ]
+    },
+    {
+      "product": "pi",
+      "version": "0.84.4",
+      "identity_source": "registered_tool.context + RPC get_state.sessionId",
+      "native_session_id": "01a05be2-5698-7010-a6fa-6def93b4785c",
+      "authoritative_session_id": "01a05be2-5698-7010-a6fa-6def93b4785c",
+      "extension_session_id_matched": true,
+      "registered_tool_session_id_matched": true,
+      "session_specific_environment_matched": true,
+      "inert_without_bootstrap_secret": true,
+      "active_with_exact_bootstrap_secret": true,
+      "raw_bootstrap_secret_absent_from_artifacts": true,
+      "native_protocol": "real JSONL RPC + registered extension provider/tool",
+      "mock_model_requests": 2,
+      "component_frames_observed": [
+        "session.announce",
+        "tool.call",
+        "turn.event"
+      ]
+    },
+    {
+      "product": "omp",
+      "version": "18.0.11",
+      "identity_source": "registered_tool.context + RPC get_state.sessionId",
+      "native_session_id": "01a05be2-6429-7654-96dc-5d824fbc7e4a",
+      "authoritative_session_id": "01a05be2-6429-7654-96dc-5d824fbc7e4a",
+      "extension_session_id_matched": true,
+      "registered_tool_session_id_matched": true,
+      "session_specific_environment_matched": true,
+      "inert_without_bootstrap_secret": true,
+      "active_with_exact_bootstrap_secret": true,
+      "raw_bootstrap_secret_absent_from_artifacts": true,
+      "native_protocol": "real JSONL RPC + registered extension provider/tool",
+      "mock_model_requests": 2,
+      "component_frames_observed": [
+        "session.announce",
+        "tool.call",
+        "turn.event"
+      ]
+    }
+  ],
+  "bootstrap": {
+    "one_time_secret_is_ephemeral_launch_input": true,
+    "capability_id_alone_is_insufficient": true,
+    "components_inert_without_secret": true,
+    "exact_secret_activates_component": true,
+    "raw_secret_absent_from_artifacts": true,
+    "durable_reconnect_authority": "kernel peer identity + process start/strong-start/ancestry against ManagedAttachment; no reusable secret and no Ed25519"
+  },
+  "component_vocabulary": {
+    "version": 1,
+    "evidence_kind": "contract-frame mapping over native product identity evidence; daemon transport is not implemented in S4",
+    "required_frame_types": [
+      "bootstrap",
+      "reconnect",
+      "session.announce",
+      "session.rename",
+      "session.state",
+      "delivery.accept",
+      "delivery.reject",
+      "turn.event",
+      "tool.call",
+      "tool.result"
+    ],
+    "products": {
+      "opencode": {
+        "pass": true,
+        "frame_types": [
+          "bootstrap",
+          "reconnect",
+          "session.announce",
+          "session.rename",
+          "session.state",
+          "delivery.accept",
+          "delivery.reject",
+          "turn.event",
+          "tool.call",
+          "tool.result"
+        ],
+        "native_session_id_consistent": true
+      },
+      "kilocode": {
+        "pass": true,
+        "frame_types": [
+          "bootstrap",
+          "reconnect",
+          "session.announce",
+          "session.rename",
+          "session.state",
+          "delivery.accept",
+          "delivery.reject",
+          "turn.event",
+          "tool.call",
+          "tool.result"
+        ],
+        "native_session_id_consistent": true
+      },
+      "pi": {
+        "pass": true,
+        "frame_types": [
+          "bootstrap",
+          "reconnect",
+          "session.announce",
+          "session.rename",
+          "session.state",
+          "delivery.accept",
+          "delivery.reject",
+          "turn.event",
+          "tool.call",
+          "tool.result"
+        ],
+        "native_session_id_consistent": true
+      },
+      "omp": {
+        "pass": true,
+        "frame_types": [
+          "bootstrap",
+          "reconnect",
+          "session.announce",
+          "session.rename",
+          "session.state",
+          "delivery.accept",
+          "delivery.reject",
+          "turn.event",
+          "tool.call",
+          "tool.result"
+        ],
+        "native_session_id_consistent": true
+      }
+    },
+    "product_specific_identity_sources_preserved": true,
+    "no_universal_native_endpoint_dsl": true
+  },
+  "limitations": [
+    "This S4 spike proves native identity contexts and common frame expressiveness; it does not implement the daemon broker.",
+    "The local model fixture controls only LLM responses; product loaders, hooks, session stores, RPC, shell, and tool execution are real pinned binaries."
+  ]
+}
