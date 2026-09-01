@@ -22,7 +22,7 @@ tree="$(git -C "$root" rev-parse "$commit^{tree}")"
   printf 'signed tag target does not match expected commit/tree\n' >&2
   exit 1
 }
-trailers="$(git -C "$root" for-each-ref --format='%(contents)' "refs/tags/$tag" | git interpret-trailers --parse)"
+trailers="$(git -C "$root" for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$tag" | git interpret-trailers --parse)"
 trailer_value() {
   local name=$1
   local values

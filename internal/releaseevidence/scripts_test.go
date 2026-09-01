@@ -123,6 +123,77 @@ func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	}
 }
 
+func TestReleaseTagVerifyParsesTrailersBeforeSignatureBlock(t *testing.T) {
+	source := filepath.Join("..", "..", "scripts", "release-tag-verify")
+	body, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, directory := range []string{
+		filepath.Join(root, "scripts"),
+		filepath.Join(root, "deploy", "agent-sessions"),
+		filepath.Join(root, "bin"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "scripts", "release-tag-verify"), body, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "deploy", "agent-sessions", "VERSION"), []byte("0.2.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "init", "-q")
+	runGit(t, root, "config", "user.name", "Release Test")
+	runGit(t, root, "config", "user.email", "release@example.invalid")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "fixture")
+	commit := gitOutput(t, root, "rev-parse", "HEAD")
+	tree := gitOutput(t, root, "rev-parse", "HEAD^{tree}")
+	message := strings.Join([]string{
+		"Agent Sessions v0.2.4",
+		"",
+		"Agent-Sessions-Evidence-Run: https://github.com/antst/agent-sessions/actions/runs/123",
+		"Agent-Sessions-Evidence-Artifact: agent-sessions-v0.2.4-release-evidence-" + commit,
+		"Agent-Sessions-Evidence-SHA256: " + strings.Repeat("a", 64),
+		"-----BEGIN SSH SIGNATURE-----",
+		"U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg5vdTVet3xAIfUGUQu7w1hA8FLe",
+		"xp42hPuuyRfuaCyBMAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5",
+		"AAAAQOblrYOslmldowJQaGpLTzRDxsDkhBtKgOAw0AdE9g8qMCD+4M1/qqQsefccIYhIFd",
+		"wLyUOj2z/+L9XfB4cuigU=",
+		"-----END SSH SIGNATURE-----",
+	}, "\n")
+	runGit(t, root, "tag", "-a", "v0.2.4", "-m", message)
+	tagBody := gitOutput(t, root, "for-each-ref", "--format=%(contents:body)", "refs/tags/v0.2.4")
+	if strings.Contains(tagBody, "BEGIN SSH SIGNATURE") || !strings.Contains(tagBody, "Agent-Sessions-Evidence-Run:") {
+		t.Fatalf("tag body did not isolate signed annotation trailers: %q", tagBody)
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitWrapper := filepath.Join(root, "bin", "git")
+	wrapper := "#!/bin/sh\n" +
+		"if [ \"$#\" -ge 3 ] && [ \"$1\" = -C ] && [ \"$3\" = verify-tag ]; then exit 0; fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(gitWrapper, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(filepath.Join(root, "scripts", "release-tag-verify"), "v0.2.4", commit, tree)
+	command.Dir = root
+	command.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("signed tag trailers were rejected: %v: %s", err, output)
+	}
+	if !strings.Contains(string(output), "run_id=123") || !strings.Contains(string(output), strings.Repeat("a", 64)) {
+		t.Fatalf("verified tag output omitted evidence binding: %s", output)
+	}
+}
+
 func TestReleasePublicationPreflightRejectsReleaseAndAssetCollisionsSeparately(t *testing.T) {
 	root := t.TempDir()
 	gh := filepath.Join(root, "gh")
@@ -230,4 +301,16 @@ func runGit(t *testing.T, directory string, args ...string) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
 	}
+}
+
+func gitOutput(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
