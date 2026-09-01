@@ -198,19 +198,18 @@ hooks, policy defaults, or global permission mutation. Managed Claude launchers 
 Agent Sessions MCP tools in their lifecycle-owned settings/argv. Its process-attested MCP declaration
 provides grouped messaging and the same daemon-backed lane control used by the other products.
 
-`wait` is a single-consumer cursor over the lane's persisted turn history. Its first successful
-call collects the initial turn; each later call blocks for and returns the oldest uncollected turn,
-including a turn started by an inbound peer message. It never replays the last completed turn.
-The durable pending queue survives additional wake turns before collection; a schema correction
-replaces its rejected draft in the same queue position instead of skipping neighboring results.
+`wait` is a single live collector for the current product turn. It returns the
+product's terminal result once; a busy lane rejects another turn rather than
+building a daemon queue. A schema correction remains inside the same native
+product turn.
 Consumers should identify the result by `item.completed` with `type: "agent_message"` and
 `phase: "final_answer"`; that phase label is part of the adapter contract. Do not run concurrent
 `wait` calls for one lane or combine `wait` with another lifecycle collector. Interactive
 `codex-peer` sessions do not use this cursor—the attached TUI owns their App Server event stream.
-On reconnect, `wait`, `status`, and `interrupt` resubscribe through a metadata-only App Server
-resume. Installation requires App Server to be stopped and never replaces a live process, because
-Codex 0.147's projection-backed history APIs do not repair a cursor gap left by an interrupted
-server.
+While the daemon remains live, `wait`, `status`, and `interrupt` use the current App Server
+connection. After a daemon restart, an explicit resume asks Codex for the exact product session by
+name or ID; the daemon does not reconstruct a turn cursor. Installation requires App Server to be
+stopped and never replaces a live process.
 
 `archive` synchronously writes a retirement tombstone and removes the live peer transport. It keeps
 the small local lane record so the archived thread remains addressable by lane name for an explicit

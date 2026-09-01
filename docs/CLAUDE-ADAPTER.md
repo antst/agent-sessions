@@ -98,17 +98,14 @@ lane. On `turn.schema_retry`, `turn_id` identifies that rejected draft and `atte
 1-based correction attempt. Anchoring on the terminal `turn_id` discards the draft without
 special-casing.
 
-`wait` is a **single-consumer cursor**. Its first successful call collects the initial turn; within
-that cursor, each later call blocks for the oldest uncollected turn, including one started by an
-inbound peer message. Its durable order is preserved when several wakes finish before collection
-and when a schema correction replaces a rejected draft. An explicit `resume` begins the new cursor
-described above. `wait` never replays the last completed turn. Concurrent `wait` calls on one lane, or mixing `wait` with
-another collector, are contract violations. Interactive `codex-peer` sessions do not use this cursor
-at all.
+`wait` is a single live collector for the lane's current turn. It returns the
+product's terminal result and then clears the process-local result. A busy lane
+does not accept another turn; callers retry after the product becomes idle.
+Interactive `codex-peer` sessions do not use this collector at all.
 
 Acknowledgement happens only after the terminal items and the terminal event have been emitted, so
-an interrupted collector or a broken output pipe never marks unseen content as collected — re-`wait`
-returns the same turn while the lane remains in its terminal grace period. `auto_archive_at` in
+an interrupted collector or a broken output pipe leaves the in-memory result available. A repeated
+`wait` returns the same turn while the lane remains in its terminal grace period. `auto_archive_at` in
 `status` and `list` is the exact Unix-millisecond deadline; it is `null` before the timer is armed.
 
 `lane.list` returns active lane records by default; `--all` also includes archived, resumable

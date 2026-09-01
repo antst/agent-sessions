@@ -666,30 +666,20 @@ entries:
       - internal/bridge/review_regression_test.go:TestSupervisorAutoArchivesIdleLaneAfterGracePeriod
       - internal/bridge/review_regression_test.go:TestSupervisorRestartReconstructsMissedTerminalNotice
       - internal/bridge/review_regression_test.go:TestDetachedCollectorSignalDoesNotInterruptTurn
-    invariant: Preserve durable turns, notices, collection, parent context, restart, and cleanup debt.
+    invariant: Route each live turn synchronously to the product and return the product result without daemon turn persistence.
     new_owner: daemon shared lane engine
     new_symbols:
       - internal/daemon/lane.go:NewLaneEngine
       - internal/daemon/lane.go:LaneEngine.Create
-      - internal/daemon/lane.go:LaneEngine.AcceptTurn
-      - internal/daemon/lane.go:LaneEngine.AcceptQueuedTurn
+      - internal/daemon/lane.go:LaneEngine.Update
       - internal/daemon/lane.go:LaneEngine.TransitionLane
       - internal/daemon/lane.go:LaneEngine.RecordCleanupDebt
       - internal/daemon/lane.go:LaneEngine.ResolveCleanupDebt
-      - internal/daemon/turn.go:LaneEngine.Dispatch
-      - internal/daemon/turn.go:LaneEngine.Complete
-      - internal/daemon/turn.go:LaneEngine.Collect
-      - internal/daemon/turn.go:LaneEngine.ReconcileRestart
     replacement_tests:
-      - internal/daemon/lane_test.go:TestLaneEngineSerializesTurnsAndCollectsEveryTerminalExactlyOnce
-      - internal/daemon/lane_test.go:TestLaneEngineRestartArchiveAndCleanupDebtAreDurable
+      - internal/daemon/lane_test.go:TestLaneEngineStoresOnlyLaneRoutingState
+      - internal/daemon/lane_test.go:TestLaneEngineTransitionsWithoutTurnState
       - cmd/agent-sessions/lane_test.go:TestLaneResumeTransfersDurableParentAndUnarchives
-      - cmd/agent-sessions/lane_test.go:TestQueuedLaneFollowupAdvancesDurableTerminalLaneBeforePreparing
-      - cmd/agent-sessions/lane_test.go:TestConcurrentBusyLaneMessagesCommitOrderedReceiptsWithoutAggregation
-      - cmd/agent-sessions/lane_test.go:TestLaneResumeRefusesUncollectedDurableTurnWithoutMutation
-      - cmd/agent-sessions/lane_test.go:TestLaneWaitCollectsOldestTerminalTurnExactlyOnce
-      - cmd/agent-sessions/lane_test.go:TestRestartCatalogPreservesOnlyRecoverableNativeCodexTurn
-      - cmd/agent-sessions/lane_test.go:TestCollectedLaneAutoArchivesAtDurableDeadline
+      - cmd/agent-sessions/messaging_test.go:TestMessagingToolsRejectBusyLaneByEveryAdvertisedIdentity
     acceptance_cells: [L-01, L-02, L-03, L-04, L-05, L-06, L-07, L-08, L-09, L-10, L-11, L-12, L-13, L-14, L-15, L-16, L-17, L-18, L-19, P-C-C, P-C-CL, P-C-G, P-C-Q, P-CL-C, P-CL-CL, P-CL-G, P-CL-Q, P-G-C, P-G-CL, P-G-G, P-G-Q, P-Q-C, P-Q-CL, P-Q-G, P-Q-Q]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#shared-lane-engine]
     deletion_paths: [internal/bridge/lane.go, internal/bridge/lane_contract.go]
@@ -772,7 +762,7 @@ entries:
       - cmd/agent-sessions/lane_test.go:TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup
       - cmd/agent-sessions/lane_test.go:TestClaudeInboundPeerFrameDispatchesAsOrdinaryNativeQuery
       - cmd/agent-sessions/lane_test.go:TestParentDetachRetiresActiveLaneAndPreservesPersistentLane
-      - cmd/agent-sessions/lane_test.go:TestCodexArchiveReaffirmsAlreadyArchivedAndRetriesNativeCleanup
+      - cmd/agent-sessions/lane_test.go:TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch
       - cmd/agent-sessions/lane_test.go:TestCodexJSONStreamPublishesNativeIdentityBeforeProcessExit
       - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterPreservesAppServerStartResumePolicyAndNativeCallbacks
       - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterRejectsChangedResumeAndTerminalIdentity
@@ -906,7 +896,6 @@ entries:
       - internal/servicecontrol/service_darwin_test.go
       - internal/diagnostics/report_test.go
       - internal/daemon/admin_test.go
-      - internal/daemon/runtime_recovery_test.go:TestRuntimeRecoveryPreservesFourIdleBusyPeersWithoutRedispatch
       - cmd/agent-sessions/main_test.go:TestDaemonLifecycleCommandsUseOnlyUserServiceManager
       - cmd/agent-sessions/main_test.go:TestWaitForDaemonReadyBridgesServiceManagerSocketPublicationRace
       - scripts/test-install-host-transaction

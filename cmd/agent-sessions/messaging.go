@@ -453,7 +453,6 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	if err != nil {
 		return nil, err
 	}
-	staged := stagedUnacknowledgedLaneInputs(snapshot.Catalog)
 	targets := make([]localPeerTarget, 0, len(attachments)+len(c.lanes))
 	for index := range attachments {
 		attachment := attachments[index]
@@ -464,7 +463,7 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	c.mu.Lock()
 	for _, lane := range c.lanes {
 		durableState := snapshot.Catalog.Lanes[lane.id].State
-		if !staged[lane.id] && durableState != "archived" && durableState != "retiring" && durableState != "cleanup-debt" && groupsIntersect(sourceGroups, lane.groups) {
+		if durableState != "archived" && durableState != "retiring" && durableState != "cleanup-debt" && groupsIntersect(sourceGroups, lane.groups) {
 			targets = append(targets, localPeerTarget{lane: lane})
 		}
 	}
@@ -498,8 +497,7 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 	if err != nil {
 		return err
 	}
-	_, err = c.deliverLaneMessageWithID(runtime, target.lane, messageID, message)
-	return err
+	return c.deliverLaneMessage(runtime, target.lane, message)
 }
 
 func publicLocalTarget(target localPeerTarget) map[string]any {

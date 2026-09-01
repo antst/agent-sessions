@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,13 +17,11 @@ import (
 const (
 	catalogRecord = "catalog"
 
-	LaneInputReceiptRecordSchema   RecordSchema = "agent-sessions.lane-input-receipt.v1"
 	NativeSessionLeaseRecordSchema RecordSchema = "agent-sessions.native-session-lease.v1"
 	ComponentBindingRecordSchema   RecordSchema = "agent-sessions.component-binding.v1"
 	ComponentSessionRecordSchema   RecordSchema = "agent-sessions.component-session.v1"
 
-	maxLaneInputReceiptBytes int64 = 1 << 20
-	maxDurableOpaqueIDBytes        = 128
+	maxDurableOpaqueIDBytes = 128
 )
 
 // RecordSchema identifies one independently versioned durable daemon domain.
@@ -105,7 +102,6 @@ type Lane struct {
 	Name               string   `json:"name,omitempty"`
 	ProfileIdentity    string   `json:"profile_identity,omitempty"`
 	NativeSessionID    string   `json:"native_session_id,omitempty"`
-	InputSequence      uint64   `json:"input_sequence,omitempty"`
 	Cwd                string   `json:"cwd,omitempty"`
 	Groups             []string `json:"groups,omitempty"`
 	ExplicitGroups     []string `json:"explicit_groups,omitempty"`
@@ -124,24 +120,6 @@ type Lane struct {
 	ArchiveRevision    uint64   `json:"archive_revision,omitempty"`
 }
 
-// Turn is one ordered accepted native dispatch within a lane.
-type Turn struct {
-	ID                 string `json:"id"`
-	LaneID             string `json:"lane_id"`
-	Sequence           uint64 `json:"sequence"`
-	State              string `json:"state"`
-	NativeDispatchID   string `json:"native_dispatch_id,omitempty"`
-	Outcome            string `json:"outcome,omitempty"`
-	Result             string `json:"result,omitempty"`
-	Diagnostic         string `json:"diagnostic,omitempty"`
-	ExitCode           int    `json:"exit_code,omitempty"`
-	StartedAt          int64  `json:"started_at,omitempty"`
-	DeadlineAt         int64  `json:"deadline_at,omitempty"`
-	CompletedAt        int64  `json:"completed_at,omitempty"`
-	TerminalRevision   uint64 `json:"terminal_revision,omitempty"`
-	CollectionRevision uint64 `json:"collection_revision,omitempty"`
-}
-
 // CleanupDebt retains one exact owned resource whose safe terminal state is not yet proven.
 type CleanupDebt struct {
 	ID                string `json:"id"`
@@ -153,58 +131,6 @@ type CleanupDebt struct {
 	RetryRevision     uint64 `json:"retry_revision"`
 	Operation         string `json:"operation"`
 }
-
-// ReceiptState is the durable lane-input admission and dispatch lifecycle.
-type ReceiptState string
-
-const (
-	ReceiptPrepared    ReceiptState = "prepared"
-	ReceiptQueued      ReceiptState = "queued"
-	ReceiptDispatching ReceiptState = "dispatching"
-	ReceiptInjected    ReceiptState = "injected"
-	ReceiptAmbiguous   ReceiptState = "ambiguous"
-	ReceiptRetired     ReceiptState = "retired"
-)
-
-// NativeAcceptanceRef is the secret-free durable projection of one exact
-// native API acceptance. It is nested under LaneInputReceipt's record schema
-// and deliberately has no independent schema. Message bodies remain in the
-// private spool.
-type NativeAcceptanceRef struct {
-	NativeSessionID string `json:"native_session_id"`
-	NativeMessageID string `json:"native_message_id,omitempty"`
-	AcceptedAt      int64  `json:"accepted_at"`
-}
-
-// LaneInputReceipt contains metadata and ordering only; SpoolObjectID is an
-// opaque generated identifier, never a caller path.
-type LaneInputReceipt struct {
-	Schema           RecordSchema         `json:"schema"`
-	ReceiptID        string               `json:"receipt_id"`
-	LaneID           string               `json:"lane_id"`
-	Sequence         uint64               `json:"sequence"`
-	Digest           [sha256.Size]byte    `json:"digest"`
-	Bytes            int64                `json:"bytes"`
-	SpoolObjectID    string               `json:"spool_object_id"`
-	State            ReceiptState         `json:"state"`
-	TargetTurnID     string               `json:"target_turn_id,omitempty"`
-	DispatchAttempt  string               `json:"dispatch_attempt,omitempty"`
-	NativeAcceptance *NativeAcceptanceRef `json:"native_acceptance,omitempty"`
-	Revision         uint64               `json:"revision"`
-	AcceptedAt       int64                `json:"accepted_at"`
-	UpdatedAt        int64                `json:"updated_at"`
-	AmbiguityCause   AmbiguityCategory    `json:"ambiguity_cause,omitempty"`
-}
-
-// AmbiguityCategory is a bounded machine category, never native diagnostic
-// detail. Product/operator detail belongs in redacted diagnostics outside the
-// durable catalog.
-type AmbiguityCategory string
-
-const (
-	AmbiguityNativeAcceptanceUnproven AmbiguityCategory = "native-acceptance-unproven"
-	AmbiguityNativeAcceptanceConflict AmbiguityCategory = "native-acceptance-conflict"
-)
 
 type LeaseState string
 
@@ -294,9 +220,7 @@ type Catalog struct {
 	Host              HostRuntime                                  `json:"host"`
 	Attachments       map[string]ManagedAttachment                 `json:"attachments"`
 	Lanes             map[string]Lane                              `json:"lanes"`
-	Turns             map[string]Turn                              `json:"turns"`
 	CleanupDebts      map[string]CleanupDebt                       `json:"cleanup_debts"`
-	LaneInputs        map[string]LaneInputReceipt                  `json:"lane_inputs"`
 	NativeLeases      map[NativeSessionLeaseKey]NativeSessionLease `json:"native_leases"`
 	ComponentBindings map[string]ComponentBinding                  `json:"component_bindings"`
 	ComponentSessions map[string]ComponentSession                  `json:"component_sessions"`
@@ -403,16 +327,6 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 			"archived":     {"idle", "cleanup-debt"},
 			"cleanup-debt": {"idle", "archived"},
 		},
-		"turn": {
-			"accepted":   {"dispatched", "terminal"},
-			"dispatched": {"terminal"},
-			"terminal":   {"collected"},
-		},
-		"receipt": {
-			"prepared": {"queued", "retired"}, "queued": {"dispatching", "retired"},
-			"dispatching": {"queued", "injected", "ambiguous"}, "injected": {"retired"},
-			"ambiguous": {"injected", "retired"},
-		},
 		"lease": {
 			"prepared": {"held", "releasing", "cleanup-debt"}, "held": {"releasing", "cleanup-debt"},
 			"releasing": {"released", "cleanup-debt"}, "cleanup-debt": {"released"},
@@ -437,8 +351,8 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 func emptyCatalog() Catalog {
 	return Catalog{
 		Attachments: map[string]ManagedAttachment{},
-		Lanes:       map[string]Lane{}, Turns: map[string]Turn{}, CleanupDebts: map[string]CleanupDebt{},
-		LaneInputs: map[string]LaneInputReceipt{}, NativeLeases: map[NativeSessionLeaseKey]NativeSessionLease{},
+		Lanes:       map[string]Lane{}, CleanupDebts: map[string]CleanupDebt{},
+		NativeLeases:      map[NativeSessionLeaseKey]NativeSessionLease{},
 		ComponentBindings: map[string]ComponentBinding{}, ComponentSessions: map[string]ComponentSession{},
 	}
 }
@@ -450,14 +364,8 @@ func normalizedCatalog(catalog Catalog) Catalog {
 	if catalog.Lanes == nil {
 		catalog.Lanes = map[string]Lane{}
 	}
-	if catalog.Turns == nil {
-		catalog.Turns = map[string]Turn{}
-	}
 	if catalog.CleanupDebts == nil {
 		catalog.CleanupDebts = map[string]CleanupDebt{}
-	}
-	if catalog.LaneInputs == nil {
-		catalog.LaneInputs = map[string]LaneInputReceipt{}
 	}
 	if catalog.NativeLeases == nil {
 		catalog.NativeLeases = map[NativeSessionLeaseKey]NativeSessionLease{}
@@ -485,94 +393,11 @@ func validDurableOpaqueID(value string) bool {
 	return true
 }
 
-func knownAmbiguityCategory(category AmbiguityCategory) bool {
-	switch category {
-	case AmbiguityNativeAcceptanceUnproven, AmbiguityNativeAcceptanceConflict:
-		return true
-	default:
-		return false
-	}
-}
-
 func validOptionalProcessIdentity(identity procinfo.Identity) bool {
 	if identity == (procinfo.Identity{}) {
 		return true
 	}
 	return identity.PID > 1 && identity.Start != "" && identity.StrongStart != ""
-}
-
-func validReceiptStateFields(receipt LaneInputReceipt, lane Lane, turns map[string]Turn) error {
-	hasTarget := receipt.TargetTurnID != ""
-	hasAttempt := receipt.DispatchAttempt != ""
-	hasAcceptance := receipt.NativeAcceptance != nil
-	hasAmbiguity := receipt.AmbiguityCause != ""
-
-	if hasTarget {
-		turn, ok := turns[receipt.TargetTurnID]
-		if !ok || turn.LaneID != receipt.LaneID {
-			return errors.New("target turn does not belong to the receipt lane")
-		}
-	}
-	if hasAttempt && !validDurableOpaqueID(receipt.DispatchAttempt) {
-		return errors.New("dispatch attempt is not a bounded opaque identifier")
-	}
-	if hasAcceptance {
-		if receipt.NativeAcceptance.NativeSessionID == "" || receipt.NativeAcceptance.AcceptedAt <= 0 ||
-			receipt.NativeAcceptance.AcceptedAt < receipt.AcceptedAt || receipt.NativeAcceptance.AcceptedAt > receipt.UpdatedAt ||
-			lane.NativeSessionID == "" || receipt.NativeAcceptance.NativeSessionID != lane.NativeSessionID {
-			return errors.New("native acceptance does not corroborate the exact lane session")
-		}
-	}
-	if hasAmbiguity {
-		if productcatalog.ValidateToken(string(receipt.AmbiguityCause)) != nil || !knownAmbiguityCategory(receipt.AmbiguityCause) {
-			return errors.New("ambiguity cause is not a bounded machine category")
-		}
-	}
-
-	switch receipt.State {
-	case ReceiptPrepared:
-		if receipt.AcceptedAt != 0 || hasTarget || hasAttempt || hasAcceptance || hasAmbiguity {
-			return errors.New("prepared receipt carries caller-visible or dispatch evidence")
-		}
-	case ReceiptQueued:
-		if receipt.AcceptedAt <= 0 || hasTarget || hasAttempt || hasAcceptance || hasAmbiguity {
-			return errors.New("queued receipt has invalid dispatch evidence")
-		}
-	case ReceiptDispatching:
-		if receipt.AcceptedAt <= 0 || !hasTarget || !hasAttempt || hasAcceptance || hasAmbiguity {
-			return errors.New("dispatching receipt lacks exact intent")
-		}
-	case ReceiptInjected:
-		if receipt.AcceptedAt <= 0 || !hasTarget || !hasAttempt || !hasAcceptance || hasAmbiguity {
-			return errors.New("injected receipt lacks exact native proof")
-		}
-	case ReceiptAmbiguous:
-		if receipt.AcceptedAt <= 0 || !hasTarget || !hasAttempt || hasAcceptance || !hasAmbiguity {
-			return errors.New("ambiguous receipt lacks stable unproven-I/O evidence")
-		}
-	case ReceiptRetired:
-		if receipt.AcceptedAt == 0 {
-			if hasTarget || hasAttempt || hasAcceptance || hasAmbiguity {
-				return errors.New("unaccepted retired receipt carries dispatch evidence")
-			}
-		} else {
-			switch {
-			case hasAcceptance:
-				if !hasTarget || !hasAttempt || hasAmbiguity {
-					return errors.New("retired injected receipt has conflicting evidence")
-				}
-			case hasAmbiguity:
-				if !hasTarget || !hasAttempt {
-					return errors.New("retired ambiguous receipt lacks dispatch evidence")
-				}
-			default:
-				if hasTarget || hasAttempt {
-					return errors.New("retired queued receipt has partial dispatch evidence")
-				}
-			}
-		}
-	}
-	return nil
 }
 
 //nolint:gocyclo // The closed catalog validates each independent record family explicitly.
@@ -596,40 +421,9 @@ func validateCatalog(catalog Catalog) error {
 			return fmt.Errorf("lane %s has unknown product %q", id, lane.Product)
 		}
 	}
-	for id, turn := range catalog.Turns {
-		if id == "" || turn.ID != id || !knownState("turn", turn.State) {
-			return fmt.Errorf("invalid turn %q", id)
-		}
-	}
 	for id, debt := range catalog.CleanupDebts {
 		if id == "" || debt.ID != id || strings.TrimSpace(debt.Resource) == "" || strings.TrimSpace(debt.Operation) == "" {
 			return fmt.Errorf("invalid cleanup debt %q", id)
-		}
-	}
-	sequences := map[string]map[uint64]bool{}
-	for id, receipt := range catalog.LaneInputs {
-		if receipt.Schema != LaneInputReceiptRecordSchema || !validDurableOpaqueID(id) || receipt.ReceiptID != id ||
-			!knownState("receipt", string(receipt.State)) || receipt.Sequence == 0 || receipt.Bytes < 0 ||
-			receipt.Bytes > maxLaneInputReceiptBytes || !validDurableOpaqueID(receipt.SpoolObjectID) ||
-			receipt.Revision == 0 || receipt.UpdatedAt <= 0 || (receipt.AcceptedAt > 0 && receipt.UpdatedAt < receipt.AcceptedAt) {
-			return fmt.Errorf("invalid lane input receipt %q", id)
-		}
-		lane, ok := catalog.Lanes[receipt.LaneID]
-		if !ok {
-			return fmt.Errorf("lane input receipt %s references unknown lane %q", id, receipt.LaneID)
-		}
-		if receipt.Sequence > lane.InputSequence {
-			return fmt.Errorf("lane input receipt %s exceeds lane sequence authority %d", id, lane.InputSequence)
-		}
-		if sequences[receipt.LaneID] == nil {
-			sequences[receipt.LaneID] = map[uint64]bool{}
-		}
-		if sequences[receipt.LaneID][receipt.Sequence] {
-			return fmt.Errorf("lane %s repeats input sequence %d", receipt.LaneID, receipt.Sequence)
-		}
-		sequences[receipt.LaneID][receipt.Sequence] = true
-		if err := validReceiptStateFields(receipt, lane, catalog.Turns); err != nil {
-			return fmt.Errorf("invalid lane input receipt %s: %w", id, err)
 		}
 	}
 	for key, lease := range catalog.NativeLeases {
@@ -726,9 +520,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 	}
 	for id, lane := range current.Lanes {
 		if candidate, ok := next.Lanes[id]; ok {
-			if candidate.InputSequence < lane.InputSequence {
-				return fmt.Errorf("lane %s input sequence authority regressed", id)
-			}
 			if lane.NativeSessionID != candidate.NativeSessionID &&
 				(lane.NativeSessionID != "" || candidate.NativeSessionID == "") {
 				return fmt.Errorf("lane %s native session identity changed after binding", id)
@@ -738,45 +529,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 			}
 		} else if lane.State != "archived" {
 			return fmt.Errorf("lane %s cannot be removed from state %s", id, lane.State)
-		}
-	}
-	for id, turn := range current.Turns {
-		if candidate, ok := next.Turns[id]; ok {
-			if !ValidLifecycleTransition("turn", turn.State, candidate.State) {
-				return fmt.Errorf("turn %s cannot transition from %s to %s", id, turn.State, candidate.State)
-			}
-		} else if turn.State != "collected" {
-			return fmt.Errorf("turn %s cannot be removed from state %s", id, turn.State)
-		}
-	}
-	for id, receipt := range current.LaneInputs {
-		if candidate, ok := next.LaneInputs[id]; ok {
-			if receipt.Schema != candidate.Schema || receipt.LaneID != candidate.LaneID || receipt.Sequence != candidate.Sequence ||
-				receipt.SpoolObjectID != candidate.SpoolObjectID || receipt.Digest != candidate.Digest || receipt.Bytes != candidate.Bytes ||
-				receipt.AcceptedAt != candidate.AcceptedAt {
-				return fmt.Errorf("lane input receipt %s changed immutable identity", id)
-			}
-			if candidate.Revision < receipt.Revision || candidate.UpdatedAt < receipt.UpdatedAt ||
-				(!reflect.DeepEqual(receipt, candidate) && candidate.Revision <= receipt.Revision) {
-				return fmt.Errorf("lane input receipt %s regressed mutation evidence", id)
-			}
-			if receipt.NativeAcceptance != nil && !reflect.DeepEqual(receipt.NativeAcceptance, candidate.NativeAcceptance) {
-				return fmt.Errorf("lane input receipt %s changed native acceptance", id)
-			}
-			if receipt.State == ReceiptDispatching || receipt.State == ReceiptInjected || receipt.State == ReceiptAmbiguous {
-				if candidate.State != ReceiptQueued &&
-					(receipt.TargetTurnID != candidate.TargetTurnID || receipt.DispatchAttempt != candidate.DispatchAttempt) {
-					return fmt.Errorf("lane input receipt %s changed stable dispatch intent", id)
-				}
-			}
-			if receipt.State == ReceiptAmbiguous && candidate.State == ReceiptRetired && receipt.AmbiguityCause != candidate.AmbiguityCause {
-				return fmt.Errorf("lane input receipt %s changed ambiguity category", id)
-			}
-			if !ValidLifecycleTransition("receipt", string(receipt.State), string(candidate.State)) {
-				return fmt.Errorf("lane input receipt %s cannot transition from %s to %s", id, receipt.State, candidate.State)
-			}
-		} else if receipt.State != ReceiptRetired {
-			return fmt.Errorf("lane input receipt %s cannot be removed from state %s", id, receipt.State)
 		}
 	}
 	for key, lease := range current.NativeLeases {
@@ -845,36 +597,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 		}
 	}
 
-	newSequences := map[string][]uint64{}
-	maxNewSequence := map[string]uint64{}
-	for id, receipt := range next.LaneInputs {
-		if _, exists := current.LaneInputs[id]; !exists {
-			if receipt.State != ReceiptPrepared && receipt.State != ReceiptQueued {
-				return fmt.Errorf("lane input receipt %s starts in non-initial state %s", id, receipt.State)
-			}
-			newSequences[receipt.LaneID] = append(newSequences[receipt.LaneID], receipt.Sequence)
-			if receipt.Sequence > maxNewSequence[receipt.LaneID] {
-				maxNewSequence[receipt.LaneID] = receipt.Sequence
-			}
-		}
-	}
-	for laneID, sequences := range newSequences {
-		priorHighWater := current.Lanes[laneID].InputSequence
-		for _, sequence := range sequences {
-			if sequence <= priorHighWater {
-				return fmt.Errorf("lane input receipt sequence %d for lane %s is not append-only", sequence, laneID)
-			}
-		}
-		if next.Lanes[laneID].InputSequence != maxNewSequence[laneID] {
-			return fmt.Errorf("lane %s input sequence authority does not match admitted receipts", laneID)
-		}
-	}
-	for laneID, lane := range next.Lanes {
-		priorHighWater := current.Lanes[laneID].InputSequence
-		if lane.InputSequence > priorHighWater && maxNewSequence[laneID] == 0 {
-			return fmt.Errorf("lane %s advanced input sequence authority without an admitted receipt", laneID)
-		}
-	}
 	for key, lease := range next.NativeLeases {
 		if _, exists := current.NativeLeases[key]; !exists {
 			if lease.State != LeasePrepared {
@@ -902,8 +624,6 @@ func knownState(kind, state string) bool {
 	states := map[string]map[string]bool{
 		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true, "debt": true},
 		"lane":              {"preparing": true, "idle": true, "running": true, "interrupting": true, "retiring": true, "terminal": true, "archived": true, "cleanup-debt": true},
-		"turn":              {"accepted": true, "dispatched": true, "terminal": true, "collected": true},
-		"receipt":           {"prepared": true, "queued": true, "dispatching": true, "injected": true, "ambiguous": true, "retired": true},
 		"lease":             {"prepared": true, "held": true, "releasing": true, "released": true, "cleanup-debt": true},
 		"component-binding": {"binding": true, "ready": true, "retiring": true, "closed": true},
 		"component-session": {"announced": true, "idle": true, "busy": true, "closing": true, "closed": true},

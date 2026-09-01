@@ -21,34 +21,30 @@ import (
 )
 
 type hostCoordinator struct {
-	ctx                     context.Context
-	stateRoot               string
-	openCodex               func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error)
-	reloadCodex             func(context.Context, *bridge.CodexNative) error
-	unsubscribeCodex        func(context.Context, string) error
-	mu                      sync.Mutex
-	laneInputCommitMu       sync.Mutex
-	noticeMu                sync.Mutex
-	codex                   *bridge.CodexNative
-	pending                 map[string]daemonpkg.NativeEvidence
-	monitored               map[string]bool
-	claudePending           map[string]*claudePending
-	grokPending             map[string]*grokPending
-	grokObservers           map[string]*bridge.GrokNativeObserver
-	qwenPending             map[string]*qwenPending
-	claudeLanes             *daemonpkg.ClaudeLaneAdapter
-	grokLanes               *daemonpkg.GrokLaneAdapter
-	qwenLanes               *daemonpkg.QwenLaneAdapter
-	laneInputs              *daemonpkg.LaneInputEngine
-	lanes                   map[string]*laneActor
-	lanesLoaded             bool
-	ownerReconciling        bool
-	laneRecoveryStarted     bool
-	now                     func() time.Time
-	laneInputStagingTimeout time.Duration
-	runtime                 *daemonpkg.Runtime
-	runtimeReady            chan *daemonpkg.Runtime
-	federation              *daemonpkg.Federation
+	ctx              context.Context
+	stateRoot        string
+	openCodex        func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error)
+	reloadCodex      func(context.Context, *bridge.CodexNative) error
+	unsubscribeCodex func(context.Context, string) error
+	mu               sync.Mutex
+	noticeMu         sync.Mutex
+	codex            *bridge.CodexNative
+	pending          map[string]daemonpkg.NativeEvidence
+	monitored        map[string]bool
+	claudePending    map[string]*claudePending
+	grokPending      map[string]*grokPending
+	grokObservers    map[string]*bridge.GrokNativeObserver
+	qwenPending      map[string]*qwenPending
+	claudeLanes      *daemonpkg.ClaudeLaneAdapter
+	grokLanes        *daemonpkg.GrokLaneAdapter
+	qwenLanes        *daemonpkg.QwenLaneAdapter
+	lanes            map[string]*laneActor
+	lanesLoaded      bool
+	ownerReconciling bool
+	now              func() time.Time
+	runtime          *daemonpkg.Runtime
+	runtimeReady     chan *daemonpkg.Runtime
+	federation       *daemonpkg.Federation
 }
 
 func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator {
@@ -59,17 +55,16 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		claudePending:           map[string]*claudePending{},
-		grokPending:             map[string]*grokPending{},
-		grokObservers:           map[string]*bridge.GrokNativeObserver{},
-		qwenPending:             map[string]*qwenPending{},
-		claudeLanes:             daemonpkg.NewClaudeLaneAdapter(),
-		grokLanes:               daemonpkg.NewGrokLaneAdapter(),
-		qwenLanes:               daemonpkg.NewQwenLaneAdapter(),
-		lanes:                   map[string]*laneActor{},
-		runtimeReady:            make(chan *daemonpkg.Runtime, 1),
-		now:                     time.Now,
-		laneInputStagingTimeout: 30 * time.Second,
+		claudePending: map[string]*claudePending{},
+		grokPending:   map[string]*grokPending{},
+		grokObservers: map[string]*bridge.GrokNativeObserver{},
+		qwenPending:   map[string]*qwenPending{},
+		claudeLanes:   daemonpkg.NewClaudeLaneAdapter(),
+		grokLanes:     daemonpkg.NewGrokLaneAdapter(),
+		qwenLanes:     daemonpkg.NewQwenLaneAdapter(),
+		lanes:         map[string]*laneActor{},
+		runtimeReady:  make(chan *daemonpkg.Runtime, 1),
+		now:           time.Now,
 	}
 	coordinator.unsubscribeCodex = func(ctx context.Context, threadID string) error {
 		native, err := coordinator.codexNative()
@@ -147,7 +142,7 @@ func (c *hostCoordinator) reconcileAttachmentOwners(runtime *daemonpkg.Runtime) 
 	c.mu.Lock()
 	c.ownerReconciling = false
 	c.mu.Unlock()
-	return c.startRecoveredLaneWork(runtime)
+	return nil
 }
 
 func (c *hostCoordinator) adapters() map[string]daemonpkg.AttachmentAdapter {

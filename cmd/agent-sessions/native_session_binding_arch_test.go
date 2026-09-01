@@ -23,15 +23,9 @@ func TestLaneActorNativeSessionWritesStayAtReviewedBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// initialLane is Claude's AS-authored identity in the durable create CAS;
-	// actor follows only after that create/replay succeeds. recordLaneNativeID
-	// follows the sanctioned durable setter. copyLanePolicy is a projection
-	// guarded by the daemon's canonical preservation checks. ensureLaneActors
-	// may hydrate the cache only from the exact durable Lane field. resumeLane
-	// may restore an exact priorActor snapshot on one of three
-	// pre-native failure paths; whole-struct writes from any other source are
-	// cache-authority writes and fail this inventory. Completion is deliberately
-	// absent: it is read-only.
+	// The actor receives the UUID from the product at start/open and thereafter
+	// only follows that live value. Completion is deliberately absent: it can
+	// corroborate the opened UUID but never rewrite it.
 	allowed := reviewedLaneActorNativeSessionWrites()
 	writes := laneActorNativeSessionWrites(parsed)
 	sort.Strings(writes)
@@ -86,12 +80,9 @@ func forged(actor *laneActor) { *actor = laneActor{nativeID: "forged"} }
 
 func reviewedLaneActorNativeSessionWrites() map[string]int {
 	return map[string]int{
-		"startLane:initialLane.NativeSessionID":                    1,
-		"startLane:actor.nativeID":                                 1,
-		"recordLaneNativeID:actor.nativeID":                        1,
-		"copyLanePolicy:lane.NativeSessionID":                      1,
-		"ensureLaneActors:laneActor.nativeID=lane.NativeSessionID": 1,
-		"resumeLane:*actor=priorActor":                             3,
+		"startLane:actor.nativeID":            1,
+		"recordLaneNativeID:actor.nativeID":   1,
+		"copyLanePolicy:lane.NativeSessionID": 1,
 	}
 }
 

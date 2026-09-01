@@ -69,7 +69,7 @@ Expected:
 ```bash
 go test ./internal/productruntime ./internal/localtransport \
   ./internal/component ./internal/productserver ./internal/structuredprocess
-go test ./internal/daemon -run 'LaneInput|NativeLease|Recovery'
+go test ./internal/daemon -run 'Lane|NativeLease'
 go test ./internal/federation
 ```
 

@@ -82,12 +82,11 @@ archive or unarchive operations.
 The target layer launches `qwen --acp` over stdio with
 `QWEN_CODE_NO_RELAUNCH=1`. It initializes ACP, supplies the existing
 `agent_sessions` MCP in `session/new`, and persists the returned native Qwen
-UUID separately from the Agent Sessions lane UUID. Resume uses the ACP wire
+UUID as the product-owned lane address. Resume uses the ACP wire
 method `session/resume` (currently exposed by the SDK as
 `unstable_resumeSession`), which restores without `session/load` history
-replay. ACP prompt, update, and cancel map onto the existing durable turn,
-queue, interrupt, wait, collection, archive, autoarchive, and owner-exit state
-machine.
+replay. ACP prompt, update, and cancel map directly onto one live product turn;
+the daemon does not persist or queue Qwen turns.
 
 The manager must not select or mutate Qwen authentication. `doctor` reports
 the exact executable and version, ACP availability, authentication readiness,

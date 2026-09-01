@@ -284,84 +284,6 @@ func TestFederatedLaneUsesAttestedRemoteParentAndForcesPersistence(t *testing.T)
 	}
 }
 
-func TestFederatedLaneRunReturnsDestinationReceiptAndStableRetryRequeriesWithoutDuplicate(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	remoteKey := "remote-lane-ledger-request"
-	receiptID := laneCommandInputID(daemonpkg.ControlRequest{IdempotencyKey: remoteKey})
-	laneID := laneIDForInitialReceipt(receiptID)
-	claudeBin := filepath.Join(root, "claude-remote-ledger")
-	promptLog := filepath.Join(root, "remote-ledger-prompts.log")
-	script := `#!/bin/sh
-case "$*" in
-  --version) printf '2.1.233\n'; exit 0 ;;
-  'auth status --json') printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; exit 0 ;;
-esac
-last=
-for argument do last="$argument"; done
-printf '%s\n' "$last" >> "$REMOTE_LEDGER_PROMPT_LOG"
-printf '%s\n' '{"session_id":"` + laneID + `","result":"remote ledger result"}'
-`
-	if err := os.WriteFile(claudeBin, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
-	t.Setenv("REMOTE_LEDGER_PROMPT_LOG", promptLog)
-	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: filepath.Join(root, "state")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	coordinator := newHostCoordinator(context.Background(), root)
-	coordinator.lanesLoaded = true
-	source, err := federator.BuildPeer(
-		"host-a", "host-a", "parent", "parent", "idle", root, "codex",
-		"bypassPermissions", "instance", "", []string{"project"},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := federator.RemoteLaneRequest{
-		Source: source,
-		Parent: federator.ParentContext{
-			HostID: source.HostID, SessionID: source.SessionID, Product: source.Entrypoint,
-			InstanceID: source.InstanceID, Groups: source.Groups, PermissionMode: source.PermissionMode,
-		},
-		TargetHostID: "host-b", Product: "claude", Capability: "claude-lane",
-		Arguments: []string{"run", "--name", "remote-ledger"}, Input: []byte("remote ledger prompt"),
-		IdempotencyKey: remoteKey,
-	}
-	first, err := coordinator.runFederatedLane(context.Background(), runtime, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := coordinator.runFederatedLane(context.Background(), runtime, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stableReceiptID string
-	for index, result := range []federator.RemoteLaneResult{first, second} {
-		var body map[string]any
-		if err := json.Unmarshal(result.Stdout, &body); err != nil {
-			t.Fatal(err)
-		}
-		gotReceiptID, _ := body["receipt_id"].(string)
-		if index == 0 {
-			stableReceiptID = gotReceiptID
-		}
-		if !strings.HasPrefix(gotReceiptID, receiptID+"-") || gotReceiptID != stableReceiptID ||
-			body["receipt_sequence"] != float64(1) || body["outcome"] != "completed" {
-			t.Fatalf("remote receipt result %d = %#v", index, body)
-		}
-	}
-	prompts, err := os.ReadFile(promptLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(strings.TrimSpace(string(prompts)), "remote ledger prompt") != 1 {
-		t.Fatalf("remote idempotent retry duplicated native prompt: %q", prompts)
-	}
-}
-
 func TestFederatedLaneDoctorDoesNotResolveSourceHostCwd(t *testing.T) {
 	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/echo")
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
@@ -445,9 +367,6 @@ func TestRemoteLaneTerminalNoticeIsAcknowledgedOnceAndPointsBackToDestination(t 
 	catalog.Lanes["lane"] = daemonpkg.Lane{
 		ID: "lane", ParentAttachmentID: "host-a/parent", Product: "qwen", State: "terminal",
 	}
-	catalog.Turns["turn"] = daemonpkg.Turn{
-		ID: "turn", LaneID: "lane", Sequence: 1, State: "terminal", Outcome: "completed",
-	}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)
 	}
@@ -504,8 +423,8 @@ func TestRemoteLaneTerminalNoticeIsAcknowledgedOnceAndPointsBackToDestination(t 
 	case frame := <-delivered:
 		if frame.MessageID != laneTerminalNoticeID("lane", "turn") ||
 			!strings.Contains(frame.Content, "QWEN_LANE_TERMINAL") ||
-			!strings.Contains(frame.Content, "collection=required") ||
-			!strings.Contains(frame.Content, "Collection hint: agent_sessions.lane host=host-b product=qwen command=wait arguments=[\"lane\"]") {
+			!strings.Contains(frame.Content, "collection=not_required") ||
+			strings.Contains(frame.Content, "Collection hint:") {
 			t.Fatalf("terminal frame = %#v", frame)
 		}
 	case <-time.After(3 * time.Second):

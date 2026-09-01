@@ -31,6 +31,21 @@ type NativeLeaseRequest struct {
 	Generation      uint64
 }
 
+func positiveUnix(now time.Time) int64 {
+	value := now.Unix()
+	if value <= 0 {
+		return 1
+	}
+	return value
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
 // NativeLeaseEngine serializes ownership of a product/profile/native-session
 // tuple and refuses reassignment until exact process death is proven.
 type NativeLeaseEngine struct {
@@ -330,7 +345,7 @@ func (e *NativeLeaseEngine) transition(request NativeLeaseRequest, apply func(*N
 }
 
 func (e *NativeLeaseEngine) mutate(apply func(*Catalog) error) error {
-	for attempt := 0; attempt < laneInputMutationAttempts; attempt++ {
+	for attempt := 0; attempt < laneMutationAttempts; attempt++ {
 		snapshot, err := e.store.Read()
 		if err != nil {
 			return err

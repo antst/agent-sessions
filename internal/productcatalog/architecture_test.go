@@ -79,7 +79,7 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 		"cmd/agent-sessions/connector.go":                 6,
 		"cmd/agent-sessions/grok_host.go":                 1,
 		"cmd/agent-sessions/hook.go":                      1,
-		"cmd/agent-sessions/lane.go":                      32,
+		"cmd/agent-sessions/lane.go":                      29,
 		"cmd/agent-sessions/main.go":                      4,
 		"cmd/agent-sessions/messaging.go":                 4,
 		"cmd/agent-sessions/qwen_host.go":                 1,

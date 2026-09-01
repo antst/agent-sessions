@@ -21,17 +21,12 @@ func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.Raw
 	catalog := snapshot.Catalog
 	records := diagnostics.Records{
 		Attachments: len(catalog.Attachments), ActiveAttachments: len(activeAttachments),
-		Lanes: len(catalog.Lanes),
-		Turns: len(catalog.Turns), CleanupDebts: len(catalog.CleanupDebts),
+		Lanes:        len(catalog.Lanes),
+		CleanupDebts: len(catalog.CleanupDebts),
 	}
 	for _, lane := range catalog.Lanes {
 		if lane.State != "archived" {
 			records.ActiveLanes++
-		}
-	}
-	for _, turn := range catalog.Turns {
-		if turn.State == "terminal" && turn.CollectionRevision == 0 {
-			records.UncollectedTurns++
 		}
 	}
 	var productStates map[string]string

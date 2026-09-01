@@ -29,7 +29,6 @@ func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
 	catalog.Host.ProductReadiness = map[string]string{"codex": "ready", "claude": canary}
 	catalog.Attachments["attachment"] = ManagedAttachment{ID: "attachment", Product: "codex", Cwd: canary, State: "attached", DaemonGeneration: runtime.Generation()}
 	catalog.Lanes["lane"] = Lane{ID: "lane", ParentAttachmentID: "attachment", Product: "codex", Name: canary, State: "terminal"}
-	catalog.Turns["turn"] = Turn{ID: "turn", LaneID: "lane", Sequence: 1, State: "terminal", Result: canary, Diagnostic: canary, TerminalRevision: 1}
 	catalog.CleanupDebts["debt"] = CleanupDebt{ID: "debt", Resource: "lane", BaselineIdentity: canary, IntendedState: "absent", LastVerifiedState: canary, Cause: canary, Operation: "archive"}
 	if _, err := runtime.State().Commit(snapshot.Revision, catalog); err != nil {
 		t.Fatal(err)
@@ -53,7 +52,7 @@ func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
 		if report.Schema != diagnostics.Schema || report.Operation != operation || !report.Ready {
 			t.Fatalf("%s report = %+v", operation, report)
 		}
-		if report.Records.Attachments != 1 || report.Records.ActiveAttachments != 1 || report.Records.UncollectedTurns != 1 || report.Records.CleanupDebts != 1 {
+		if report.Records.Attachments != 1 || report.Records.ActiveAttachments != 1 || report.Records.UncollectedTurns != 0 || report.Records.CleanupDebts != 1 {
 			t.Fatalf("%s counts = %+v", operation, report.Records)
 		}
 		for _, product := range report.Products {

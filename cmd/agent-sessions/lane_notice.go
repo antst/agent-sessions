@@ -79,22 +79,9 @@ func (c *hostCoordinator) presentLaneTerminalNotice(
 	if err != nil {
 		return err
 	}
-	// The durable Turn is the single terminal outcome authority. In particular,
-	// a receipt/native-acceptance CAS ambiguity committed after the product
-	// process exits must not be presented as a process-local completed/exit-0
-	// notice.
-	actor = durableLaneTerminalNoticeActor(snapshot, actor)
 	hostID := strings.TrimSpace(snapshot.Catalog.Host.Host)
 	remoteParent := strings.Contains(actor.parentID, "/")
-	engine, err := daemonpkg.NewLaneEngine(runtime.State())
-	if err != nil {
-		return err
-	}
-	collectionRequired, err := engine.HasCollectionDebt(actor.id)
-	if err != nil {
-		return err
-	}
-	body := laneTerminalNoticeBody(actor, map[bool]string{true: hostID}[remoteParent], collectionRequired)
+	body := laneTerminalNoticeBody(actor, map[bool]string{true: hostID}[remoteParent], false)
 	if !remoteParent {
 		target, ok, targetErr := runtime.Attachments().ActiveAttachment(actor.parentID)
 		if targetErr != nil {
@@ -138,13 +125,4 @@ func (c *hostCoordinator) presentLaneTerminalNotice(
 		return err
 	}
 	return host.Send(ctx, source, target, noticeID, body, "")
-}
-
-func durableLaneTerminalNoticeActor(snapshot daemonpkg.StateSnapshot, actor laneActor) laneActor {
-	if turn, ok := snapshot.Catalog.Turns[actor.turnID]; ok && turn.LaneID == actor.id &&
-		(turn.State == "terminal" || turn.State == "collected") {
-		actor.outcome, actor.result, actor.failure = turn.Outcome, turn.Result, turn.Diagnostic
-		actor.startedAt, actor.deadlineAt, actor.completedAt = turn.StartedAt, turn.DeadlineAt, turn.CompletedAt
-	}
-	return actor
 }

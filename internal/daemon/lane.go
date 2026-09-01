@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -21,13 +20,6 @@ type LaneEngine struct {
 	mu    sync.Mutex
 }
 
-// LaneCollection reports the state after exactly one terminal turn is
-// collected.
-type LaneCollection struct {
-	RemainingDebt bool
-	AutoArchiveAt int64
-}
-
 // NewLaneEngine constructs a durable lane engine over the daemon catalog.
 func NewLaneEngine(store *StateStore) (*LaneEngine, error) {
 	if store == nil {
@@ -36,43 +28,28 @@ func NewLaneEngine(store *StateStore) (*LaneEngine, error) {
 	return &LaneEngine{store: store, now: time.Now}, nil
 }
 
-// Create atomically publishes a new preparing lane and its first accepted
-// turn. No native dispatch may occur before this commit succeeds.
-func (e *LaneEngine) Create(lane Lane, turn Turn) error {
-	if lane.ID == "" || turn.ID == "" || turn.LaneID != lane.ID {
-		return errors.New("new lane and turn identities are incomplete")
+// Create publishes one product-owned lane address. Turn execution and results
+// stay with the product and are never written to daemon state.
+func (e *LaneEngine) Create(lane Lane) error {
+	if lane.ID == "" {
+		return errors.New("new lane identity is incomplete")
 	}
 	return e.mutate(func(catalog *Catalog) error {
 		if _, exists := catalog.Lanes[lane.ID]; exists {
 			return errors.New("lane identity already exists")
 		}
-		if _, exists := catalog.Turns[turn.ID]; exists {
-			return errors.New("lane turn identity already exists")
-		}
-		lane.State, lane.AutoArchiveAt = "preparing", 0
-		turn.State, turn.Sequence = "accepted", 1
+		lane.State, lane.AutoArchiveAt = "idle", 0
 		catalog.Lanes[lane.ID] = cloneLane(lane)
-		catalog.Turns[turn.ID] = turn
 		catalog.Host.LaneRevision++
 		return nil
 	})
 }
 
-// AcceptTurn atomically reserves the next turn on an existing idle, terminal,
-// or archived lane. Outstanding collection debt blocks every resume.
-func (e *LaneEngine) AcceptTurn(lane Lane, turn Turn) error {
-	return e.acceptTurn(lane, turn, false)
-}
-
-// AcceptQueuedTurn reserves work already accepted while the prior native turn
-// was running. Its older terminal turn remains collectable in sequence order.
-func (e *LaneEngine) AcceptQueuedTurn(lane Lane, turn Turn) error {
-	return e.acceptTurn(lane, turn, true)
-}
-
-func (e *LaneEngine) acceptTurn(lane Lane, turn Turn, allowCollectionDebt bool) error {
-	if lane.ID == "" || turn.ID == "" || turn.LaneID != lane.ID {
-		return errors.New("resumed lane and turn identities are incomplete")
+// Update refreshes the daemon-owned routing projection for an existing lane.
+// It does not accept, queue, or record a turn.
+func (e *LaneEngine) Update(lane Lane) error {
+	if lane.ID == "" {
+		return errors.New("lane identity is incomplete")
 	}
 	return e.mutate(func(catalog *Catalog) error {
 		current, ok := catalog.Lanes[lane.ID]
@@ -85,28 +62,9 @@ func (e *LaneEngine) acceptTurn(lane Lane, turn Turn, allowCollectionDebt bool) 
 		if err := preserveExistingLaneNativeSession(current, &lane); err != nil {
 			return err
 		}
-		if _, exists := catalog.Turns[turn.ID]; exists {
-			return errors.New("lane turn identity already exists")
-		}
-		if catalogHasCollectionDebt(*catalog, lane.ID) && !allowCollectionDebt {
-			return errors.New("collect outstanding lane turn before resume")
-		}
-		switch current.State {
-		case "idle", "terminal", "archived":
-		default:
-			return fmt.Errorf("lane cannot accept a turn from state %s", current.State)
-		}
-		sequence := uint64(1)
-		for _, candidate := range catalog.Turns {
-			if candidate.LaneID == lane.ID && candidate.Sequence >= sequence {
-				sequence = candidate.Sequence + 1
-			}
-		}
 		lane.State, lane.CapabilityHash, lane.AutoArchiveAt = "idle", "", 0
 		lane.ArchiveRevision = current.ArchiveRevision
-		turn.State, turn.Sequence = "accepted", sequence
 		catalog.Lanes[lane.ID] = cloneLane(lane)
-		catalog.Turns[turn.ID] = turn
 		catalog.Host.LaneRevision++
 		return nil
 	})

@@ -24,17 +24,13 @@ func TestLaneNativeSessionWritesStayAtReviewedBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The attachment write is a different durable type. The two lane binders
-	// are SetNativeSessionID (validated exact Open) and
-	// MarkInjectedAndSetNativeDispatch (exact first native acceptance). The
-	// remaining lane writes only copy the already-durable value so callers
-	// cannot erase it while advancing another lifecycle fact.
+	// The attachment write is a different durable type. Lane creation/open is
+	// the only remaining binding boundary; synchronous product calls do not
+	// persist turn acceptance or rewrite the product-owned UUID.
 	allowed := map[string]struct{}{
 		"attachment.go:SelectNative:attachment":               {},
 		"lane.go:SetNativeSessionID:lane":                     {},
 		"lane.go:preserveExistingLaneNativeSession:candidate": {},
-		"lane_input.go:MarkInjectedAndSetNativeDispatch:lane": {},
-		"turn.go:Complete:lane":                               {},
 	}
 	writes := make([]string, 0, len(allowed))
 	for _, path := range files {
