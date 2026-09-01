@@ -14,7 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
@@ -82,7 +84,8 @@ func StartControlServer(parent context.Context, stateRoot string, generation uin
 		endpoint: endpoint, listener: listener, lease: lease, uid: uint32(uid),
 		policy: &controlPolicy{
 			generation: generation, handler: handler,
-			cache: map[string]cachedControlResponse{}, inFlight: map[string]*inFlightControlResponse{},
+			cache:    map[controlMutationCacheKey]cachedControlResponse{},
+			inFlight: map[controlMutationCacheKey]*inFlightControlResponse{},
 		},
 		ctx: ctx, cancel: cancel,
 	}
@@ -221,10 +224,15 @@ func (s *ControlServer) accept() {
 func (s *ControlServer) serveConnection(connection *net.UnixConn) {
 	defer s.wg.Done()
 	defer func() { _ = connection.Close() }()
-	uid, err := controlPeerUID(connection)
-	if err != nil || authorizeControlPeer(s.uid, uid) != nil {
+	peer, err := localtransport.CapturePeerIdentity(connection)
+	if err != nil {
 		return
 	}
+	process, err := procinfo.CaptureIdentity(peer.PID)
+	if err != nil || authorizeControlPeer(s.uid, peer.UID) != nil {
+		return
+	}
+	connectionContext := withControlConnectionIdentity(s.ctx, peer, process)
 	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
 	var request ControlRequest
 	if err := readControlFrame(connection, &request); err != nil {
@@ -235,7 +243,7 @@ func (s *ControlServer) serveConnection(connection *net.UnixConn) {
 	// and real provider turns routinely exceed thirty seconds; the client
 	// context remains the authority for cancelling the call.
 	_ = connection.SetDeadline(time.Time{})
-	response := s.policy.handle(s.ctx, request)
+	response := s.policy.handle(connectionContext, request)
 	response.Generation = s.policy.generation
 	_ = writeControlFrame(connection, response)
 }
@@ -269,8 +277,8 @@ func CallControl(ctx context.Context, endpoint string, request ControlRequest) (
 	return response, nil
 }
 
-func authorizeControlPeer(expected, actual uint32) error {
-	if expected != actual {
+func authorizeControlPeer(expected uint32, actual int) error {
+	if actual < 0 || uint64(expected) != uint64(actual) {
 		return errors.New("control peer user does not match daemon user")
 	}
 	return nil

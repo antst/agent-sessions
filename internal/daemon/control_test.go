@@ -10,7 +10,51 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/localtransport"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
+
+func TestControlPeerIdentityIsContextOnlyAndAbsentOffConnection(t *testing.T) {
+	if peer, ok := ControlPeerIdentity(nil); ok || peer != (localtransport.PeerIdentity{}) {
+		t.Fatalf("nil context identity = %#v, %t", peer, ok)
+	}
+	if peer, ok := ControlPeerIdentity(context.Background()); ok || peer != (localtransport.PeerIdentity{}) {
+		t.Fatalf("background context identity = %#v, %t", peer, ok)
+	}
+
+	want := localtransport.PeerIdentity{PID: 4242, UID: 1000}
+	wantProcess := procinfo.Identity{PID: want.PID, Start: "display-start", StrongStart: "strong-start"}
+	ctx := withControlConnectionIdentity(context.Background(), want, wantProcess)
+	if got, ok := ControlPeerIdentity(ctx); !ok || got != want {
+		t.Fatalf("connection context identity = %#v, %t; want %#v, true", got, ok, want)
+	}
+	if got, ok := ControlProcessIdentity(ctx); !ok || got != wantProcess {
+		t.Fatalf("connection process identity = %#v, %t; want %#v, true", got, ok, wantProcess)
+	}
+	incomplete := withControlConnectionIdentity(context.Background(), want, procinfo.Identity{PID: want.PID, Start: "display-start"})
+	if process, ok := ControlProcessIdentity(incomplete); ok || process != (procinfo.Identity{}) {
+		t.Fatalf("incomplete strong identity accepted: %#v, %t", process, ok)
+	}
+	mismatched := withControlConnectionIdentity(context.Background(), want, procinfo.Identity{PID: want.PID + 1, Start: "display-start", StrongStart: "strong-start"})
+	if process, ok := ControlProcessIdentity(mismatched); ok || process != (procinfo.Identity{}) {
+		t.Fatalf("PID-mismatched strong identity accepted: %#v, %t", process, ok)
+	}
+
+	requestWire, err := json.Marshal(ControlRequest{ID: "wire", Role: RoleAdmin, Operation: "status", Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseWire, err := json.Marshal(ControlResponse{ID: "wire", Generation: 1, OK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wire := range [][]byte{requestWire, responseWire} {
+		if strings.Contains(string(wire), `"pid"`) || strings.Contains(string(wire), `"uid"`) {
+			t.Fatalf("control wire serialized peer identity: %s", wire)
+		}
+	}
+}
 
 func TestControlFramingIsBoundedCorrelatedAndStrict(t *testing.T) {
 	request := ControlRequest{
@@ -107,6 +151,138 @@ func TestControlMutationIdempotencyIsExactAndConflictSafe(t *testing.T) {
 	missing := callControlTest(t, server.Endpoint(), ControlRequest{ID: "missing-key", Role: RoleHook, Operation: "hook.event", Generation: 11})
 	if missing.OK || missing.Error == nil || missing.Error.Code != ErrorInvalidRequest {
 		t.Fatalf("mutation without idempotency key = %#v", missing)
+	}
+}
+
+func TestControlMutationCacheIsPartitionedByStrongProcessIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		role       ControlRole
+		operation  string
+		attachment string
+	}{
+		{name: "hook", role: RoleHook, operation: "hook.event"},
+		{name: "connector", role: RoleConnector, operation: "connector.call", attachment: "attachment-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var handled int
+			policy := &controlPolicy{
+				generation: 17,
+				handler: func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
+					handled++
+					return json.Marshal(map[string]int{"call": handled})
+				},
+				cache:    map[controlMutationCacheKey]cachedControlResponse{},
+				inFlight: map[controlMutationCacheKey]*inFlightControlResponse{},
+			}
+			request := ControlRequest{
+				ID: "first", Role: test.role, Operation: test.operation, Generation: 17,
+				IdempotencyKey: "shared", AttachmentID: test.attachment, Payload: json.RawMessage(`{}`),
+			}
+			peer := localtransport.PeerIdentity{PID: 101, UID: 1000}
+			firstProcess := procinfo.Identity{PID: peer.PID, Start: "same-display-start", StrongStart: "strong-start-a"}
+			firstConnection := withControlConnectionIdentity(context.Background(), peer, firstProcess)
+			retryConnection := withControlConnectionIdentity(context.Background(), peer, firstProcess)
+			reusedPIDConnection := withControlConnectionIdentity(context.Background(), peer, procinfo.Identity{
+				PID: peer.PID, Start: firstProcess.Start, StrongStart: "strong-start-b",
+			})
+			otherPeer := localtransport.PeerIdentity{PID: 202, UID: peer.UID}
+			otherPeerConnection := withControlConnectionIdentity(context.Background(), otherPeer, procinfo.Identity{
+				PID: otherPeer.PID, Start: "other-display-start", StrongStart: "other-strong-start",
+			})
+
+			first := policy.handle(firstConnection, request)
+			request.ID = "exact-retry"
+			exactRetry := policy.handle(retryConnection, request)
+			request.ID = "reused-pid"
+			reusedPID := policy.handle(reusedPIDConnection, request)
+			request.ID = "other-peer"
+			other := policy.handle(otherPeerConnection, request)
+			if !first.OK || !exactRetry.OK || !reusedPID.OK || !other.OK {
+				t.Fatalf("authority-partitioned responses = first %#v retry %#v reused %#v other %#v", first, exactRetry, reusedPID, other)
+			}
+			if string(first.Payload) != string(exactRetry.Payload) {
+				t.Fatalf("exact process identity did not share cache: first=%s retry=%s", first.Payload, exactRetry.Payload)
+			}
+			if string(first.Payload) == string(reusedPID.Payload) {
+				t.Fatalf("PID reuse shared cached response: first=%s reused=%s", first.Payload, reusedPID.Payload)
+			}
+			if string(reusedPID.Payload) == string(other.Payload) || handled != 3 {
+				t.Fatalf("other peer response=%s reused=%s calls=%d", other.Payload, reusedPID.Payload, handled)
+			}
+		})
+	}
+}
+
+func TestControlMutationFailsClosedWithoutStrongProcessIdentity(t *testing.T) {
+	var handled atomic.Int64
+	policy := &controlPolicy{
+		generation: 17,
+		handler: func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
+			handled.Add(1)
+			return json.RawMessage(`{}`), nil
+		},
+		cache:    map[controlMutationCacheKey]cachedControlResponse{},
+		inFlight: map[controlMutationCacheKey]*inFlightControlResponse{},
+	}
+	peer := localtransport.PeerIdentity{PID: 101, UID: 1000}
+	incomplete := withControlConnectionIdentity(context.Background(), peer, procinfo.Identity{
+		PID: peer.PID, Start: "display-start",
+	})
+	response := policy.handle(incomplete, ControlRequest{
+		ID: "missing-strong-start", Role: RoleHook, Operation: "hook.event", Generation: 17,
+		IdempotencyKey: "missing-strong-start", Payload: json.RawMessage(`{}`),
+	})
+	if response.OK || response.Error == nil || response.Error.Code != ErrorHandler || handled.Load() != 0 {
+		t.Fatalf("mutation without strong process identity = %#v, handler calls=%d", response, handled.Load())
+	}
+}
+
+func TestControlMutationInFlightCoalescesExactStrongProcessIdentity(t *testing.T) {
+	var handled atomic.Int64
+	policy := &controlPolicy{
+		generation: 18,
+		handler: func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
+			handled.Add(1)
+			return json.RawMessage(`{"unexpected":true}`), nil
+		},
+		cache:    map[controlMutationCacheKey]cachedControlResponse{},
+		inFlight: map[controlMutationCacheKey]*inFlightControlResponse{},
+	}
+	request := ControlRequest{
+		ID: "in-flight-retry", Role: RoleHook, Operation: "hook.event", Generation: 18,
+		IdempotencyKey: "in-flight", Payload: json.RawMessage(`{}`),
+	}
+	peer := localtransport.PeerIdentity{PID: 303, UID: 1000}
+	process := procinfo.Identity{PID: peer.PID, Start: "display-start", StrongStart: "strong-start"}
+	firstConnection := withControlConnectionIdentity(context.Background(), peer, process)
+	retryConnection := withControlConnectionIdentity(context.Background(), peer, process)
+	digest, err := controlRequestDigest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := controlMutationAuthorityKey(firstConnection, request)
+	if retryKey := controlMutationAuthorityKey(retryConnection, request); retryKey != key {
+		t.Fatalf("exact process identity keys differ: first=%#v retry=%#v", key, retryKey)
+	}
+	active := &inFlightControlResponse{
+		digest: digest,
+		done:   make(chan struct{}),
+		response: ControlResponse{
+			OK: true, Payload: json.RawMessage(`{"coalesced":true}`),
+		},
+	}
+	policy.inFlight[key] = active
+	result := make(chan ControlResponse, 1)
+	go func() { result <- policy.handle(retryConnection, request) }()
+	close(active.done)
+	select {
+	case response := <-result:
+		if !response.OK || string(response.Payload) != `{"coalesced":true}` || handled.Load() != 0 {
+			t.Fatalf("in-flight coalescing response=%#v handler calls=%d", response, handled.Load())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("exact process identity did not coalesce with in-flight mutation")
 	}
 }
 

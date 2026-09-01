@@ -11,6 +11,9 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/antst/agent-sessions/internal/localtransport"
+	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 const maxControlFrameBytes uint32 = 1 << 20
@@ -77,6 +80,51 @@ type ControlResponse struct {
 // ControlHandler executes one already-framed, authorized operation.
 type ControlHandler func(context.Context, ControlRequest) (json.RawMessage, error)
 
+type controlPeerIdentityContextKey struct{}
+type controlProcessIdentityContextKey struct{}
+
+// ControlPeerIdentity returns the kernel identity captured for the accepted
+// control connection. It is process-correlation evidence for local
+// attestation; the control endpoint remains a same-user trust domain.
+func ControlPeerIdentity(ctx context.Context) (localtransport.PeerIdentity, bool) {
+	if ctx == nil {
+		return localtransport.PeerIdentity{}, false
+	}
+	peer, ok := ctx.Value(controlPeerIdentityContextKey{}).(localtransport.PeerIdentity)
+	if !ok || !peer.Valid() {
+		return localtransport.PeerIdentity{}, false
+	}
+	return peer, true
+}
+
+func withControlConnectionIdentity(ctx context.Context, peer localtransport.PeerIdentity, process procinfo.Identity) context.Context {
+	ctx = context.WithValue(ctx, controlPeerIdentityContextKey{}, peer)
+	return context.WithValue(ctx, controlProcessIdentityContextKey{}, process)
+}
+
+// ControlProcessIdentity returns the strong process identity captured at the
+// same accept boundary as ControlPeerIdentity. Callers must use this evidence
+// rather than re-reading a PID later, which could observe a recycled process.
+func ControlProcessIdentity(ctx context.Context) (procinfo.Identity, bool) {
+	peer, peerPresent := ControlPeerIdentity(ctx)
+	if !peerPresent {
+		return procinfo.Identity{}, false
+	}
+	process, ok := ctx.Value(controlProcessIdentityContextKey{}).(procinfo.Identity)
+	if !ok || process.PID != peer.PID || process.Start == "" || process.StrongStart == "" {
+		return procinfo.Identity{}, false
+	}
+	return process, true
+}
+
+type controlMutationCacheKey struct {
+	role             ControlRole
+	idempotencyKey   string
+	peer             localtransport.PeerIdentity
+	process          procinfo.Identity
+	authorityPresent bool
+}
+
 type cachedControlResponse struct {
 	digest   [sha256.Size]byte
 	response ControlResponse
@@ -92,8 +140,8 @@ type controlPolicy struct {
 	generation uint64
 	handler    ControlHandler
 	mu         sync.Mutex
-	cache      map[string]cachedControlResponse
-	inFlight   map[string]*inFlightControlResponse
+	cache      map[controlMutationCacheKey]cachedControlResponse
+	inFlight   map[controlMutationCacheKey]*inFlightControlResponse
 }
 
 type classifiedControlError struct{ code string }
@@ -120,7 +168,10 @@ func (p *controlPolicy) handle(ctx context.Context, request ControlRequest) Cont
 	if err != nil {
 		return failedControlResponse(request.ID, ErrorInvalidRequest, err.Error())
 	}
-	cacheKey := string(request.Role) + "\x00" + request.IdempotencyKey
+	cacheKey := controlMutationAuthorityKey(ctx, request)
+	if !cacheKey.authorityPresent {
+		return failedControlResponse(request.ID, ErrorHandler, "control operation peer identity is unavailable")
+	}
 	p.mu.Lock()
 	if cached, ok := p.cache[cacheKey]; ok {
 		p.mu.Unlock()
@@ -143,7 +194,7 @@ func (p *controlPolicy) handle(ctx context.Context, request ControlRequest) Cont
 		}
 	}
 	if p.inFlight == nil {
-		p.inFlight = map[string]*inFlightControlResponse{}
+		p.inFlight = map[controlMutationCacheKey]*inFlightControlResponse{}
 	}
 	active := &inFlightControlResponse{digest: digest, done: make(chan struct{})}
 	p.inFlight[cacheKey] = active
@@ -158,6 +209,18 @@ func (p *controlPolicy) handle(ctx context.Context, request ControlRequest) Cont
 	close(active.done)
 	p.mu.Unlock()
 	return correlatedControlResponse(response, request.ID)
+}
+
+func controlMutationAuthorityKey(ctx context.Context, request ControlRequest) controlMutationCacheKey {
+	peer, peerPresent := ControlPeerIdentity(ctx)
+	process, processPresent := ControlProcessIdentity(ctx)
+	return controlMutationCacheKey{
+		role:             request.Role,
+		idempotencyKey:   request.IdempotencyKey,
+		peer:             peer,
+		process:          process,
+		authorityPresent: peerPresent && processPresent,
+	}
 }
 
 func correlatedControlResponse(response ControlResponse, requestID string) ControlResponse {
