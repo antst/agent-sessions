@@ -1,0 +1,225 @@
+# Durable State Deletion Plan — Owner Approved
+
+- End state → products lack only lane-to-parent/group correspondence → persist exactly one lane-candidate table whose local row is `{native_session_uuid, product, parent, primary_group, secondary_groups}` and nothing else.
+- Lane-candidate write path → product-issued native UUID plus the creating live parent, the parent's private group, and the resolved secondary-group list → insert the row only after the product creates or confirms the native lane.
+- Lane-candidate read path → product is authoritative for existence, title, state, history, resumability, and unarchive → use product plus parent/group access to select candidate UUIDs, ask the product about every candidate, return only product-confirmed product data, and restore secondary groups only when unarchiving a confirmed lane.
+- Remote lane candidate → the parent host is the sole writer → if recorded, add `host` to the row on the parent host only; remote hosts never persist the lane.
+- Live lane path → live product connection is authoritative → route directly over that connection without reading the lane-candidate table.
+- Stale lane-candidate row → product's live lookup is authoritative → return nothing for an unknown UUID; never expose, count, name, or infer existence from the row.
+- Development state compatibility → no released durable format exists → delete old catalog decoding, migration, compatibility, and preservation paths instead of translating old rows.
+- `HostRuntime.User` → operating-system user identity → delete the durable field and read the current process/user identity live.
+- `HostRuntime.Host` → live daemon configuration and federation handshake → delete the durable field and derive the current host identity from runtime configuration.
+- `HostRuntime.Release` → running binary metadata → delete the durable field and report the current binary version live.
+- `HostRuntime.Generation` → running daemon process → delete the durable field and keep any connection-generation fence in memory only.
+- `HostRuntime.Endpoint` → live listener/socket → delete the durable field and inspect the current listener configuration.
+- `HostRuntime.ServiceState` → service manager and live daemon process → delete the durable field and probe the service live.
+- `HostRuntime.ProductReadiness` → product executable/integration live probes → delete the durable map and call each `DoctorProbe` on demand.
+- `HostRuntime.AttachmentRevision` → removed durable peer catalog → delete the field and all attachment-revision comparisons.
+- `HostRuntime.DeliveryRevision` → removed durable delivery catalog → delete the field and all delivery-revision comparisons.
+- `HostRuntime.LaneRevision` → product-owned lane list plus the approved candidate table → delete the field and use the store's atomic row-set revision only as an implementation detail.
+- `HostRuntime.CleanupDebtRevision` → removed durable cleanup-debt catalog → delete the field and all cleanup-debt revision logic.
+- `HostRuntime.FederationRevision` → live federation roster → delete the field and rebuild federation presence from current connections.
+- `HostRuntime` → OS/config/service/product live sources → delete the durable type, its catalog member, validators, transitions, snapshots, admin projections, and tests.
+- `NativeEvidence.Process` → kernel process table → delete the durable field and recapture PID/start/strong-start live when a connection or operation is authorized.
+- `NativeEvidence.Ancestry` → kernel process ancestry → delete the durable field and recapture ancestry live.
+- `NativeEvidence.Executable` → kernel executable identity → delete the durable field and recapture the executable live.
+- `NativeEvidence.RegistryPath` → product-owned live registry discovery → delete the durable field and query the product registry live.
+- `NativeEvidence.SocketPath` → live product/listener discovery → delete the durable field and resolve the active socket live.
+- `NativeEvidence.ThreadID` → product-owned session/thread store → delete the durable field and ask the product by native UUID.
+- `NativeEvidence.LaunchTokenHash` → ephemeral launch handshake → delete the durable field and keep launch capability material memory-only for the live launch.
+- `NativeEvidence.LeaderIdentity` → kernel/product live process identity → delete the durable field and recapture it live.
+- `NativeEvidence.RosterRevision` → product-owned live roster → delete the durable field and query the product live.
+- `NativeEvidence.ArtifactPath` → product/runtime live artifact discovery → delete the durable field and resolve the artifact live.
+- `NativeEvidence.ArtifactType` → live filesystem/product metadata → delete the durable field and inspect the artifact live.
+- `NativeEvidence.ArtifactMode` → filesystem metadata → delete the durable field and `stat` the artifact live.
+- `NativeEvidence.ArtifactOwner` → filesystem metadata → delete the durable field and `stat` the artifact live.
+- `NativeEvidence.ArtifactRevision` → product/filesystem metadata → delete the durable field and recapture it live.
+- `NativeEvidence.ArtifactDevice` → filesystem metadata → delete the durable field and `stat` the artifact live.
+- `NativeEvidence.ArtifactInode` → filesystem metadata → delete the durable field and `stat` the artifact live.
+- `NativeEvidence.ArtifactPrefix` → product artifact content → delete the durable field and validate the live artifact when needed.
+- `NativeEvidence.ArtifactBytes` → filesystem metadata → delete the durable field and `stat` the artifact live.
+- `NativeEvidence.RegistryDevice` → filesystem metadata → delete the durable field and `stat` the live registry.
+- `NativeEvidence.RegistryInode` → filesystem metadata → delete the durable field and `stat` the live registry.
+- `NativeEvidence.RegistryPrefix` → product registry content → delete the durable field and validate the live registry when needed.
+- `NativeEvidence.RegistryBytes` → filesystem metadata → delete the durable field and `stat` the live registry.
+- `NativeEvidence` durable use → OS, filesystem, and product live sources → remove it from `state.go` and JSON; retain only a non-serializable ephemeral observation type where a single live call needs it.
+- `ManagedAttachment.ID` → live connection identity → delete the durable field; disconnected peers have no row and no presence.
+- `ManagedAttachment.CapabilityHash` → ephemeral live bootstrap → delete the durable field and mint/recheck capabilities only within the live launch/connection lifetime.
+- `ManagedAttachment.Product` → live connection/product handshake → delete the durable field and take the product from the attested live peer.
+- `ManagedAttachment.ProfileIdentity` → product-owned profile/session store → delete the durable field and resolve it through the product live when required.
+- `ManagedAttachment.LaunchIntent` → current launch request → delete the durable field after the live launch handoff completes.
+- `ManagedAttachment.NativeSessionID` → product-owned live peer session → delete the durable field and take it from the attested live announce/registry row.
+- `ManagedAttachment.NativeProfileRoot` → product configuration/filesystem → delete the durable field and derive it live for the current launch or probe.
+- `ManagedAttachment.Cwd` → product-owned session metadata → delete the durable field and ask the product/live peer.
+- `ManagedAttachment.Groups` → live launch/parent configuration → delete the durable field and compute live peer visibility from current attested connections.
+- `ManagedAttachment.PermissionMode` → current product session policy → delete the durable field and ask the product or current launch context.
+- `ManagedAttachment.ExpectedEvidence` → OS/product live evidence → delete the durable field and every deferred-enrichment/write-once path.
+- `ManagedAttachment.Evidence` → OS/product live evidence → delete the durable field and every reconcile-against-stored-evidence path.
+- `ManagedAttachment.DaemonGeneration` → running daemon connection → delete the durable field and fence live connections in memory.
+- `ManagedAttachment.CatalogRevision` → removed attachment catalog → delete the durable field and all catalog revision checks.
+- `ManagedAttachment.ComponentProtocol` → live component handshake → delete the durable field and check the pinned client during the current connection.
+- `ManagedAttachment.ComponentRevision` → live component connection → delete the durable field and all durable replay counters.
+- `ManagedAttachment.IntegrationVersion` → installed product integration/live doctor → delete the durable field and probe it live.
+- `ManagedAttachment.State` → live connection/process → delete the durable field and derive presence solely from the current attested connection.
+- `ManagedAttachment` and `Catalog.Attachments` → products and live connections own peer sessions → delete the durable type/map, attachment lifecycle transitions, restart adoption catalog, tombstones, and state-backed peer roster.
+- `Delivery.ID` → caller request and live recipient carrier → delete the durable field; any stable operation ID remains request-local and product-facing only.
+- `Delivery.CorrelationID` → sender request → delete the durable field and pass it through synchronously.
+- `Delivery.Sender` → live sender connection → delete the durable field and authorize the sender at delivery time.
+- `Delivery.Destinations` → live roster selection → delete the durable field and resolve recipients from the current identity-proven roster.
+- `Delivery.Groups` → live sender/recipient membership → delete the durable field and check groups during the live relay.
+- `Delivery.HostSuffix` → live federation route → delete the durable field and use the current connection route.
+- `Delivery.SentAt` → sender message envelope → delete the durable field and do not retain a daemon copy.
+- `Delivery.State` → recipient carrier acceptance → delete the durable field and return the carrier's synchronous result directly.
+- `Delivery.Acknowledgment` → recipient carrier acceptance → delete the durable field and return the live acceptance directly.
+- `Delivery.RetryCause` → sender-owned retry decision → delete the durable field and return truthful non-delivery on failure.
+- `Delivery`, `Catalog.Deliveries`, and `internal/daemon/delivery.go` → live sender and recipient carriers → delete the record/engine/transitions/tests and call group admission plus the destination presenter synchronously.
+- Deferred mailbox/spool/receipt support → sender retains undelivered data → delete all current preparation hooks and build no mailbox unless the owner separately approves a demonstrated need.
+- `Lane.ID` → live connection handle or product native UUID → delete the durable field and do not create a second stored lane identity.
+- `Lane.CapabilityHash` → ephemeral live lane bootstrap → delete the durable field and keep any capability memory-only for the live connection.
+- `Lane.ParentAttachmentID` → foreign-to-product lane ownership correspondence → retain only as the candidate row's `parent` field.
+- `Lane.Product` → product route needed to ask the authoritative store → retain only as the candidate row's `product` field.
+- `Lane.Name` → product-owned lane title/list → delete the durable field and resolve names from a live product list or disposable generation-local cache.
+- `Lane.ProfileIdentity` → product-owned profile/session configuration → delete the durable field and ask the product by native UUID.
+- `Lane.NativeSessionID` → product-owned immutable lane UUID → retain only as the candidate row's `native_session_uuid` field.
+- `Lane.InputSequence` → product queue/order → delete the durable field and all daemon FIFO authority.
+- `Lane.Cwd` → product-owned lane metadata → delete the durable field and ask the product by native UUID.
+- `Lane.Groups` → foreign-to-product lane visibility correspondence → replace with the candidate row's exact `primary_group` and `secondary_groups` fields.
+- `Lane.ExplicitGroups` → resolved secondary-group correspondence → delete the policy-shaped field after materializing the exact `secondary_groups` list into the candidate row at creation.
+- `Lane.InheritGroups` → creation-time group policy → delete the durable flag after resolving the final secondary-group list from the live parent.
+- `Lane.PermissionMode` → product-owned lane policy/current request → delete the durable field and ask the product or supply it on the live operation.
+- `Lane.ApprovalPolicy` → product-owned lane policy → delete the durable field and ask the product by native UUID.
+- `Lane.Sandbox` → product-owned lane policy → delete the durable field and ask the product by native UUID.
+- `Lane.Effort` → product-owned lane configuration → delete the durable field and ask the product by native UUID.
+- `Lane.Schema` → product-owned semantic lane attribute → delete the durable field and ask the product by native UUID.
+- `Lane.Arguments` → product-owned session configuration → delete the durable field and ask the product by native UUID.
+- `Lane.Persistent` → product owns session persistence → delete the durable field and remove daemon persistence policy.
+- `Lane.AutoArchive` → product owns archive lifecycle → delete the durable field and remove daemon auto-archive policy.
+- `Lane.AutoArchiveDelayMS` → product owns archive lifecycle → delete the durable field and remove daemon timers.
+- `Lane.AutoArchiveAt` → product owns archive lifecycle → delete the durable field and remove daemon timers.
+- `Lane.State` → product owns lane state/existence → delete the durable field and query the product live.
+- `Lane.ArchiveRevision` → product owns archive state → delete the durable field and all daemon archive revision logic.
+- `Lane` and `Catalog.Lanes` → product-owned lane store plus the one candidate question index → replace the record/map with the exact approved candidate row and no lifecycle state.
+- Parent group calculation → live parent membership plus persisted primary/secondary correspondence → compute the resolved groups once at row creation and delete durable inheritance policy/state.
+- Lane name selection in `cmd/agent-sessions/lane.go` → product-returned live/archived lane list → delete matching against stored `Lane.Name`; optionally cache the product response in memory for the current generation.
+- Restore Codex start-with-name and resume-by-name/ID from `a4bebd85e164dc4ade29fda4a1f8ecd65eb99e0f` (`internal/launcher/codex_peer.go`, `internal/bridge/launch.go`), adapted only to keep the App Server's live first-listed/exact-UUID resolution and delete the local launch-index fallback and owner records.
+- Restore Claude start-with-name and resume-by-name/ID from `264cf6e57ba01ccf697c20957c11feb440b27638` (`internal/launcher/claude_peer.go`), adapted only to pass native `--name`, `--resume`, or exact `--session-id` through the stateless launcher and delete daemon preparation/catalog state.
+- Restore Grok start-with-name and resume-by-name/ID from `264cf6e57ba01ccf697c20957c11feb440b27638` (`internal/launcher/grok_peer.go`, `internal/bridge/grok.go`), adapted only to retain the live `_x.ai/sessions/list` late-bound selection and delete launch records/catalog state.
+- Restore Qwen start-with-name and native resume argument handling from `564ad36629e8fd9f85d19dd4c44069a15175fde6` (`internal/launcher/qwen_peer.go`) and product-owned title lookup from `3d588acf2ca43ea7da036f2b6ef321a8a8b565d5` (`internal/bridge/runtime.go`), adapted only to resolve the candidate-table UUIDs against Qwen's product transcripts and delete `LookupManagedSession`/daemon catalog resolution.
+- Preserve OpenCode/Kilo product-side exact create/get/resume from `52a843ad2c71e2ce52493ca23df52a1c8218a26f` (`internal/products/opencodefamily/client.go`, `internal/products/opencodefamily/lane.go`, `internal/products/kilocode/kilocode.go`), adapted only to feed candidate UUIDs into `GetSession`/exact Kilo selection and delete daemon session records.
+- Preserve CodeBuddy product-side list/get/resume from `a8130476ffb2af2c08bbfac24a03a81b76132f96` (`internal/products/codebuddy/client.go`, `internal/products/codebuddy/lane.go`), adapted only to resolve candidate UUIDs through `ListJobs`/`GetJob`/`ResumeJob` and delete daemon session records.
+- Preserve DSH product-side list/exact resume from `a7506127e7bbc5728ecbba0df011add1d22fcab2` (`internal/products/dsh/lane.go`), adapted only to resolve candidate UUIDs through `listACPSessions` and `session/resume` and delete daemon leases/session records.
+- Preserve Pi/OMP product-side exact native resume from `1456c549a7f20dc680cf3d6cab49eabfe220297a` (`internal/products/pifamily/quirks.go`, `internal/products/pifamily/lane.go`, `internal/products/pifamily/component.go`), adapted only to use the product's live component/RPC session and delete daemon binding/session records.
+- Archived lane listing/unarchive → product-owned lane store → make this the only lane-candidate table consumer and require live product confirmation before returning or operating on a UUID.
+- `Turn.ID` → product turn/request identity → delete the durable field and use the product's live response only.
+- `Turn.LaneID` → product native session UUID → delete the durable field and address the product directly.
+- `Turn.Sequence` → product turn ordering → delete the durable field and do not impose daemon ordering.
+- `Turn.State` → product turn state → delete the durable field and query/wait on the product live.
+- `Turn.NativeDispatchID` → product-owned turn identity → delete the durable field and keep it only in the synchronous call result if returned.
+- `Turn.Outcome` → product result → delete the durable field and return the product's outcome directly.
+- `Turn.Result` → product transcript/result store → delete the durable field and fetch it from the product.
+- `Turn.Diagnostic` → product/live operation error → delete the durable field and return a bounded live error.
+- `Turn.ExitCode` → product/live process result → delete the durable field and return it synchronously.
+- `Turn.StartedAt` → product turn metadata → delete the durable field and ask the product if needed.
+- `Turn.DeadlineAt` → caller request/product operation → delete the durable field and keep the deadline in the live call only.
+- `Turn.CompletedAt` → product turn metadata → delete the durable field and ask the product if needed.
+- `Turn.TerminalRevision` → removed daemon turn lifecycle → delete the durable field and terminal CAS machinery.
+- `Turn.CollectionRevision` → product result collection → delete the durable field and collection CAS machinery.
+- `Turn`, `Catalog.Turns`, and `internal/daemon/turn.go` → product owns turns/history/results → delete the record/map/engine/transitions/tests and make start/wait/collect synchronous product calls.
+- `CleanupDebt.ID` → removed daemon lifecycle promise → delete the durable field.
+- `CleanupDebt.Resource` → product/OS owns resource existence → delete the durable field and inspect the live source only during the current operation.
+- `CleanupDebt.BaselineIdentity` → OS/product live identity → delete the durable field and recapture live if the current call needs it.
+- `CleanupDebt.IntendedState` → caller/product operation → delete the durable field and make no durable convergence promise.
+- `CleanupDebt.LastVerifiedState` → product/OS live state → delete the durable field and do not cache it on disk.
+- `CleanupDebt.Cause` → live operation error → delete the durable field and return the error synchronously.
+- `CleanupDebt.RetryRevision` → removed daemon retry loop → delete the durable field and retry machinery.
+- `CleanupDebt.Operation` → removed daemon lifecycle operation → delete the durable field.
+- `CleanupDebt` and `Catalog.CleanupDebts` → product/OS live lifecycle → delete the record/map/transitions/reconcilers/tests; do not schedule durable cleanup retries.
+- `LaneInputReceipt.Schema` → removed receipt domain → delete the field and schema constant.
+- `LaneInputReceipt.ReceiptID` → caller/product idempotency → delete the durable field and pass the request ID directly to the product when supported.
+- `LaneInputReceipt.LaneID` → product native UUID → delete the durable field and address the product directly.
+- `LaneInputReceipt.Sequence` → product queue/order → delete the durable field and daemon FIFO sequencing.
+- `LaneInputReceipt.Digest` → sender-owned input → delete the durable field and do not retain a daemon copy.
+- `LaneInputReceipt.Bytes` → sender-owned input → delete the durable field and spool bounds tied to persistence.
+- `LaneInputReceipt.SpoolObjectID` → removed daemon spool → delete the durable field and spool object.
+- `LaneInputReceipt.State` → product acceptance/state → delete the durable field and receipt lifecycle.
+- `LaneInputReceipt.TargetTurnID` → product turn identity → delete the durable field and use the live product response.
+- `LaneInputReceipt.DispatchAttempt` → removed daemon retry machinery → delete the durable field.
+- `LaneInputReceipt.NativeAcceptance` → product acceptance → delete the durable field and return the product's synchronous acknowledgment.
+- `LaneInputReceipt.Revision` → removed receipt lifecycle → delete the durable field.
+- `LaneInputReceipt.AcceptedAt` → product acceptance → delete the durable field and return it without storing it.
+- `LaneInputReceipt.UpdatedAt` → removed receipt lifecycle → delete the durable field.
+- `LaneInputReceipt.AmbiguityCause` → caller owns retry after no acknowledgment → delete the durable field and ambiguity state machine.
+- `NativeAcceptanceRef` → product acceptance response → delete the durable type and return acceptance directly.
+- `ReceiptState`, `AmbiguityCategory`, and receipt transition validators → removed daemon acceptance promise → delete the enums, validators, crash matrix, and tests.
+- `Catalog.LaneInputs`, `internal/daemon/lane_input.go`, and `internal/daemon/lane_input_spool.go` → sender and product own input until/after product acceptance → delete the map, ledger, spool, CAS1/CAS2, FIFO, ambiguity, recovery, and tests.
+- Initial-turn and busy-turn queueing → product owns native queue/steer behavior → delete daemon staging and call the product synchronously; return busy/unsupported when the product does.
+- `NativeSessionLease.Schema` → removed daemon lease domain → delete the field and schema constant.
+- `NativeSessionLease.ProductID` → product route → delete the durable lease copy and use the lane candidate's product only for archived lookup.
+- `NativeSessionLease.ProfileIdentity` → product-owned profile/session → delete the durable field and ask the product live.
+- `NativeSessionLease.NativeSessionID` → product-owned UUID → delete the duplicate lease field.
+- `NativeSessionLease.OwnerLaneID` → removed daemon lane identity → delete the durable field.
+- `NativeSessionLease.Generation` → live daemon/process → delete the durable field.
+- `NativeSessionLease.ProcessGroup` → kernel process table → delete the durable field and inspect live processes.
+- `NativeSessionLease.State` → product/OS live ownership → delete the durable field and lifecycle.
+- `NativeSessionLease.Revision` → removed lease lifecycle → delete the durable field.
+- `NativeSessionLease.CreatedAt` → removed lease lifecycle → delete the durable field.
+- `NativeSessionLease.UpdatedAt` → removed lease lifecycle → delete the durable field.
+- `NativeSessionLeaseKey`, `NativeSessionLease`, `Catalog.NativeLeases`, and `internal/daemon/native_lease.go` → product owns session exclusivity/existence → delete the key/record/map/lease engine/transitions/tests and query the product live.
+- `ComponentBinding.Schema` → removed durable component-binding domain → delete the field and schema constant.
+- `ComponentBinding.BindingID` → current component connection → delete the durable field and keep a live handle in broker memory only.
+- `ComponentBinding.AttachmentID` → removed durable peer attachment → delete the durable field and bind the live connection directly.
+- `ComponentBinding.ProcessIdentity` → kernel peer identity → delete the durable field and recapture it on the current connection.
+- `ComponentBinding.BootstrapRevision` → removed durable bootstrap replay anchor → delete the durable field and make bootstrap/reconnect a fresh live attestation.
+- `ComponentBinding.Generation` → running daemon connection → delete the durable field and keep any fence in broker memory.
+- `ComponentBinding.State` → live broker connection → delete the durable field and derive it from connection presence.
+- `ComponentBinding.LastInboundSeq` → live stream ordering → delete the durable field and keep bounded sequence state in memory for that connection only.
+- `ComponentBinding.LastOutboundSeq` → live stream ordering → delete the durable field and keep bounded sequence state in memory for that connection only.
+- `ComponentSession.Schema` → removed durable component-session domain → delete the field and schema constant.
+- `ComponentSession.AttachmentID` → removed durable peer attachment → delete the durable field.
+- `ComponentSession.BindingID` → current live broker binding → delete the durable field and use the live connection handle.
+- `ComponentSession.NativeSessionID` → product-owned session UUID → delete the durable field and take it from the authenticated live announce.
+- `ComponentSession.State` → product/live component connection → delete the durable field and use live observations only.
+- `ComponentSession.LastEventSeq` → live stream ordering → delete the durable field and keep sequence state in memory only.
+- `ComponentBinding`, `ComponentSession`, `Catalog.ComponentBindings`, `Catalog.ComponentSessions`, and `internal/componentruntime/authority.go` → kernel peer identity, product session, and current connection → delete durable binding/session authority, replay/tombstone/generation recovery, transitions, and tests; retain only live broker attestation and in-memory routing.
+- Component reconnect/generation-retire semantics → disconnected sessions are gone and a new connection re-attests live → delete cross-restart durable replay anchors and frames/contract clauses that exist only for persisted bindings.
+- `Catalog.Host` → live OS/config/daemon → delete the catalog member.
+- `Catalog.Attachments` → live peer connections → delete the catalog member.
+- `Catalog.Deliveries` → live relay → delete the catalog member.
+- `Catalog.Turns` → product turn store → delete the catalog member.
+- `Catalog.CleanupDebts` → product/OS live lifecycle → delete the catalog member.
+- `Catalog.LaneInputs` → sender/product acceptance → delete the catalog member.
+- `Catalog.NativeLeases` → product session store → delete the catalog member.
+- `Catalog.ComponentBindings` → live broker connection → delete the catalog member.
+- `Catalog.ComponentSessions` → live product connection → delete the catalog member.
+- `Catalog` → one approved lane-candidate table → replace the aggregate catalog with a bounded set of exact local rows and optional parent-host-owned remote rows.
+- `RecordSchema` and all four durable-domain schema constants → no released multi-domain durable format remains → delete the type/constants/version dispatch.
+- `StateSnapshot.Catalog` → lane-candidate row set → replace the full catalog snapshot with only the row set; keep a storage revision only for atomic insertion if the store requires it.
+- `StateStore.Read` full-catalog JSON → lane-candidate row set → decode only the exact approved row fields and reject any extra semantic state.
+- `StateStore.Commit` full-catalog JSON → lane-candidate row set → commit only exact approved rows with fixed field/count bounds.
+- `emptyCatalog` and `normalizedCatalog` → no nullable catalog maps remain → delete both helpers.
+- `validateCatalog` → product confirms all session facts live → replace with validation only for nonempty native UUID, known product, exact parent, valid primary/secondary groups, and optional parent-host locality.
+- `validateCatalogTransitions` → no daemon lifecycle records remain → delete transition validation; rows are insert-only candidate questions.
+- `ValidLifecycleTransition`, `knownState`, receipt/lease/binding/session validators, and write-once guards → removed daemon lifecycle domains → delete the functions and their architecture tests.
+- `internal/daemon/state_test.go` durable lifecycle matrix → approved lane-candidate store only → delete obsolete cases and retain only row shape, bounds, atomic insertion, parent/group filtering, parent-host locality, and unknown-extra-state rejection.
+- `internal/daemon/attachment.go` state-backed engine → live connection registry → delete persistence, prepare/adopt/refresh/detach/rollback catalog transitions, tombstones, and restart state recovery; any remaining peer registry is memory-only.
+- `internal/daemon/runtime.go` catalog generation/startup reconciliation → live connections plus lane-candidate store → delete attachment/binding/lease/debt/turn/receipt recovery and initialize only the candidate index.
+- `internal/daemon/runtime_recovery_test.go` → removed durable recovery domains → delete the tests rather than replace the state machines.
+- `cmd/agent-sessions/preparation.go` durable peer preparation → ephemeral launch handoff and live attestation → delete catalog writes and discard the preparation record after the live launch outcome.
+- `cmd/agent-sessions/connector_refresh.go` stored attachment refresh → live product/OS checks → delete state refresh and authorize against the current connection.
+- `cmd/agent-sessions/{claude,codex,grok,qwen}_host.go` durable peer adoption/resume metadata → product-native session discovery and live connections → delete catalog reads/writes and pass names/UUIDs to the product's own resolution path.
+- `cmd/agent-sessions/roster.go` state-backed peer/lane roster → live local/federated connections plus product-confirmed archived queries → delete durable attachment/lane rendering and never render a candidate row directly.
+- `cmd/agent-sessions/messaging.go` `DeliveryEngine`/receipt enrichment → live recipient carrier → delete delivery records, lane receipt projections, re-presentation, and all disk-backed retry behavior.
+- `cmd/agent-sessions/lane.go` durable actors/turns/receipts/leases/state machine → product-owned sessions and live pass-through → delete CAS admission, daemon FIFO, result persistence, resume metadata, cleanup debt, and state-derived routing.
+- `cmd/agent-sessions/lane_notice.go` stored turn/result notices → live product response → delete durable notice ordering and emit only the current synchronous result.
+- `cmd/agent-sessions/native_session_binding_arch_test.go` → removed daemon native-session writers → delete the tripwire with the fields it guards.
+- Admin/status durable readiness and counts → live product probes/connections → delete state-derived counts/readiness and never expose candidate-row contents or counts as existing lanes.
+- Federation durable delivery metadata and receipt `Message.Data` → live destination carrier → delete receipt metadata/requery paths while retaining live protocol framing, roster bounds, and synchronous delivery result.
+- `specs/004-six-product-support/contracts/lane-input-ledger.md` → product owns acceptance/queue/history → delete the contract.
+- Durable-record sections in `specs/004-six-product-support/contracts/runtime-product.md` → live product/OS authority → delete attachment/receipt/lease/binding/session persistence requirements.
+- Durable-replay sections in `specs/004-six-product-support/contracts/component-protocol.md` → current live component connection → delete cross-restart binding/session authority and retained operation state.
+- Delivery receipt/ack persistence in `specs/004-six-product-support/contracts/federation-v4.md` → live recipient carrier → delete durable receipt semantics while retaining versioning, live roster, and amplification bounds.
+- `specs/004-six-product-support/data-model.md` → exact approved lane-candidate index → replace the durable model with the local/optional-parent-host row and live-query read path only.
+- Persistence/CAS/crash-matrix requirements in `specs/004-six-product-support/spec.md`, `plan.md`, and `tasks.md` → product-owned session behavior → delete the tasks and replace them with subtraction work plus live product acceptance cells.
+- Ledger/component/state evidence files under `specs/004-six-product-support/evidence` → deleted machinery is not a product capability → delete the evidence ceremony instead of preserving historical acceptance claims.
+- `docs/designs/PERSISTENCE-AND-STATE.md` allowances beyond the approved lane-candidate row → owner-issued ceiling → rewrite it to zero peer/session/message/turn persistence and the candidate-only lane lookup rule.
+- Acceptance tests that credit mocked durable product state → real product is authoritative → delete those credits and require live product confirmation for list, name resolution, resume, unarchive, message acceptance, and turn acceptance.
