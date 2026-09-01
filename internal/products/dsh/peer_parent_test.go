@@ -10,7 +10,6 @@ import (
 
 	"github.com/antst/agent-sessions/internal/component"
 	"github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -56,8 +55,7 @@ func TestCordisGatewayBindsExactSessionAndRoutesFollowupOrSteer(t *testing.T) {
 	}
 	binding := component.BindingView{
 		BindingID: "binding", AttachmentID: "attachment", ProductID: ProductID,
-		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"},
-		PeerIdentity:    localtransport.PeerIdentity{PID: 101, UID: 1000}, Generation: 7,
+		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"}, Generation: 7,
 	}
 	announceFrame, _ := component.NewFrame(component.TypeSessionAnnounce, "announce", 1, component.SessionAnnounce{
 		BindingID: "binding", NativeSessionID: "native", Cwd: "/work", NativeName: "dsh", ProductEventSeq: 1,
@@ -104,8 +102,7 @@ func TestCordisGatewayLateDeliveryResultIsIdempotentAfterObserverRestart(t *test
 	}
 	binding := component.BindingView{
 		BindingID: "binding", AttachmentID: "attachment", ProductID: ProductID,
-		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"},
-		PeerIdentity:    localtransport.PeerIdentity{PID: 101, UID: 1000}, Generation: 7,
+		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"}, Generation: 7,
 	}
 	announce, _ := component.NewFrame(component.TypeSessionAnnounce, "announce", 1, component.SessionAnnounce{
 		BindingID: binding.BindingID, NativeSessionID: "native", Cwd: "/work", NativeName: "dsh", ProductEventSeq: 1,
@@ -132,8 +129,7 @@ func TestCordisGatewayReconcilesOnlyNewerCentrallyAdmittedBinding(t *testing.T) 
 	gateway, _ := NewCordisGateway(sender, time.Now)
 	oldBinding := component.BindingView{
 		BindingID: "binding-7", AttachmentID: "attachment", ProductID: ProductID,
-		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"},
-		PeerIdentity:    localtransport.PeerIdentity{PID: 101, UID: 1000}, Generation: 7,
+		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"}, Generation: 7,
 	}
 	announce := func(binding component.BindingView, sequence uint64) error {
 		frame, err := component.NewFrame(component.TypeSessionAnnounce, "announce", sequence, component.SessionAnnounce{
@@ -170,8 +166,7 @@ func TestCordisGatewayDoesNotReenterCentralForSharedFrames(t *testing.T) {
 	gateway, _ := NewCordisGateway(&recordingComponentSender{frames: make(chan component.Frame, 1)}, time.Now)
 	binding := component.BindingView{
 		BindingID: "binding", AttachmentID: "attachment", ProductID: ProductID,
-		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"},
-		PeerIdentity:    localtransport.PeerIdentity{PID: 101, UID: 1000}, Generation: 7,
+		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"}, Generation: 7,
 	}
 	frame, err := component.NewFrame(component.TypeToolCall, "call", 1, component.ToolCall{
 		CallID: "call", Operation: "sessions.list", Arguments: []byte(`{}`),
@@ -189,8 +184,7 @@ func TestParentAttesterRequiresBindingProcessPeerAndNativeWitness(t *testing.T) 
 	gateway, _ := NewCordisGateway(sender, time.Now)
 	binding := component.BindingView{
 		BindingID: "binding", AttachmentID: "attachment", ProductID: ProductID,
-		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"},
-		PeerIdentity:    localtransport.PeerIdentity{PID: 101, UID: 1000}, Generation: 7,
+		ProcessIdentity: procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"}, Generation: 7,
 	}
 	announce, _ := component.NewFrame(component.TypeSessionAnnounce, "announce", 1, component.SessionAnnounce{
 		BindingID: "binding", NativeSessionID: "native", Cwd: "/work", NativeName: "dsh", ProductEventSeq: 1,
@@ -204,7 +198,7 @@ func TestParentAttesterRequiresBindingProcessPeerAndNativeWitness(t *testing.T) 
 	}
 	attempt := productruntime.ConnectorAttempt{
 		ProductID: ProductID, ComponentBindingID: "binding", ClaimedNativeSessionID: "native",
-		PeerCredential: binding.PeerIdentity, ProcessIdentity: binding.ProcessIdentity,
+		ProcessIdentity: binding.ProcessIdentity,
 	}
 	got, err := attester.Attest(context.Background(), attempt)
 	if err != nil || !got.Verified || got.AttachmentID != "attachment" || got.NativeSessionID != "native" {
@@ -213,7 +207,6 @@ func TestParentAttesterRequiresBindingProcessPeerAndNativeWitness(t *testing.T) 
 	for name, mutate := range map[string]func(*productruntime.ConnectorAttempt){
 		"false native id": func(value *productruntime.ConnectorAttempt) { value.ClaimedNativeSessionID = "forged" },
 		"foreign binding": func(value *productruntime.ConnectorAttempt) { value.ComponentBindingID = "other" },
-		"wrong peer":      func(value *productruntime.ConnectorAttempt) { value.PeerCredential.PID++ },
 		"wrong process":   func(value *productruntime.ConnectorAttempt) { value.ProcessIdentity.Start = "reused" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -232,7 +225,7 @@ func TestParentAttesterAcceptsExactSandboxChildOnlyWithAncestryProof(t *testing.
 	ancestor := procinfo.Identity{PID: 101, Start: "start", StrongStart: "strong"}
 	binding := component.BindingView{
 		BindingID: "binding", AttachmentID: "attachment", ProductID: ProductID,
-		ProcessIdentity: ancestor, PeerIdentity: localtransport.PeerIdentity{PID: 101, UID: 1000}, Generation: 7,
+		ProcessIdentity: ancestor, Generation: 7,
 	}
 	announce, _ := component.NewFrame(component.TypeSessionAnnounce, "announce", 1, component.SessionAnnounce{
 		BindingID: "binding", NativeSessionID: "native", Cwd: "/work", NativeName: "dsh", ProductEventSeq: 1,
@@ -247,7 +240,7 @@ func TestParentAttesterAcceptsExactSandboxChildOnlyWithAncestryProof(t *testing.
 	}
 	got, err := attester.Attest(context.Background(), productruntime.ConnectorAttempt{
 		ProductID: ProductID, ComponentBindingID: "binding", ClaimedNativeSessionID: "native",
-		PeerCredential: localtransport.PeerIdentity{PID: child.PID, UID: 1000}, ProcessIdentity: child,
+		ProcessIdentity: child,
 	})
 	if err != nil || !got.Verified || got.NativeSessionID != "native" {
 		t.Fatalf("Attest(child) = %+v, %v", got, err)
@@ -360,8 +353,7 @@ func TestPeerLaunchSocketMustBeHomeOrXDGAndNeverTmp(t *testing.T) {
 	}
 	binding := component.BindingView{
 		BindingID: "cwd-binding", AttachmentID: "cwd-attachment", ProductID: ProductID,
-		ProcessIdentity: procinfo.Identity{PID: 303, Start: "cwd-start", StrongStart: "cwd-strong"},
-		PeerIdentity:    localtransport.PeerIdentity{PID: 303, UID: 1000}, Generation: 1,
+		ProcessIdentity: procinfo.Identity{PID: 303, Start: "cwd-start", StrongStart: "cwd-strong"}, Generation: 1,
 	}
 	announce, _ := component.NewFrame(component.TypeSessionAnnounce, "cwd-announce", 1, component.SessionAnnounce{
 		BindingID: binding.BindingID, NativeSessionID: "cwd-native", Cwd: physicalCwd, NativeName: "dsh", ProductEventSeq: 1,

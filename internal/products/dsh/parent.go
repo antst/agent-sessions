@@ -29,12 +29,11 @@ func NewParentAttester(gateway *CordisGateway, processes ...productruntime.Proce
 }
 
 func (attester *ParentAttester) Attest(ctx context.Context, attempt productruntime.ConnectorAttempt) (productruntime.ParentBinding, error) {
-	if attempt.ProductID != ProductID || !attempt.PeerCredential.Valid() || attempt.ComponentBindingID == "" || attempt.ClaimedNativeSessionID == "" {
+	if attempt.ProductID != ProductID || attempt.ComponentBindingID == "" || attempt.ClaimedNativeSessionID == "" {
 		return productruntime.ParentBinding{}, fmt.Errorf("%w: DSH parent attempt is incomplete", productruntime.ErrUnauthorized)
 	}
 	session, ok := attester.gateway.SessionByBinding(attempt.ComponentBindingID)
-	if !ok || session.Binding.ProductID != ProductID || session.Binding.PeerIdentity.UID != attempt.PeerCredential.UID ||
-		attempt.ProcessIdentity.PID != attempt.PeerCredential.PID || session.NativeID != attempt.ClaimedNativeSessionID {
+	if !ok || session.Binding.ProductID != ProductID || session.NativeID != attempt.ClaimedNativeSessionID {
 		return productruntime.ParentBinding{}, fmt.Errorf("%w: DSH_SESSION_ID or exact component process witness did not match", productruntime.ErrUnauthorized)
 	}
 	if attempt.ProcessIdentity != session.Binding.ProcessIdentity {

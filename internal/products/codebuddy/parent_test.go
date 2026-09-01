@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -29,21 +28,18 @@ func TestParentAttestationUsesKernelProcessAndPerSessionAncestry(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding, err := attester.Attest(context.Background(), productruntime.ConnectorAttempt{
-		ProductID: ProductID, PeerCredential: localtransport.PeerIdentity{PID: connector.PID, UID: 1000},
-		ProcessIdentity: connector, ClaimedNativeSessionID: "native",
+		ProductID: ProductID, ProcessIdentity: connector, ClaimedNativeSessionID: "native",
 	})
 	if err != nil || !binding.Verified || binding.AttachmentID != "attachment" || binding.NativeSessionID != "native" {
 		t.Fatalf("binding = %#v, %v", binding, err)
 	}
 	if _, err := attester.Attest(context.Background(), productruntime.ConnectorAttempt{
-		ProductID: ProductID, PeerCredential: localtransport.PeerIdentity{PID: connector.PID, UID: 1000},
-		ProcessIdentity: connector, ClaimedNativeSessionID: "forged",
+		ProductID: ProductID, ProcessIdentity: connector, ClaimedNativeSessionID: "forged",
 	}); !errors.Is(err, productruntime.ErrUnauthorized) {
 		t.Fatalf("forged claim error = %v", err)
 	}
 	if _, err := attester.Attest(context.Background(), productruntime.ConnectorAttempt{
-		ProductID: ProductID, PeerCredential: localtransport.PeerIdentity{PID: connector.PID, UID: 1000},
-		ProcessIdentity: connector, ComponentBindingID: "sidecar-binding",
+		ProductID: ProductID, ProcessIdentity: connector, ComponentBindingID: "sidecar-binding",
 	}); !errors.Is(err, productruntime.ErrUnauthorized) {
 		t.Fatalf("component-sidecar error = %v", err)
 	}
@@ -64,7 +60,7 @@ func TestParentAttestationRejectsAmbiguousCrossTargetAncestry(t *testing.T) {
 		}, nil
 	}), 16)
 	if _, err := attester.Attest(context.Background(), productruntime.ConnectorAttempt{
-		ProductID: ProductID, PeerCredential: localtransport.PeerIdentity{PID: 300, UID: 1000}, ProcessIdentity: connector,
+		ProductID: ProductID, ProcessIdentity: connector,
 	}); !errors.Is(err, productruntime.ErrUnauthorized) {
 		t.Fatalf("ambiguous ancestry error = %v", err)
 	}

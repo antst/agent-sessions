@@ -17,14 +17,12 @@ func TestRuntimeHasNoInitRegistrationMechanicsImportsOrReverseCycles(t *testing.
 	root := filepath.Clean(filepath.Join(filepath.Dir(current), "..", ".."))
 	allowedRuntimeImports := map[string]bool{
 		"github.com/antst/agent-sessions/internal/daemon":         true,
-		"github.com/antst/agent-sessions/internal/localtransport": true,
 		"github.com/antst/agent-sessions/internal/permissionmode": true,
 		"github.com/antst/agent-sessions/internal/procinfo":       true,
 		"github.com/antst/agent-sessions/internal/productcatalog": true,
 	}
 	reverseForbidden := map[string]bool{
 		"internal/daemon":         true,
-		"internal/localtransport": true,
 		"internal/productcatalog": true,
 	}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {

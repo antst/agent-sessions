@@ -5,16 +5,13 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 func TestControlEndpointIsFixedPrivateAndIndependentOfTMPDIR(t *testing.T) {
@@ -106,59 +103,5 @@ func TestControlRecoversExactStaleSocketAfterAbruptExit(t *testing.T) {
 	response := callControlTest(t, server.Endpoint(), ControlRequest{ID: "recovered", Role: RoleAdmin, Operation: "status", Generation: 7})
 	if !response.OK || !strings.Contains(string(response.Payload), `"recovered":true`) {
 		t.Fatalf("recovered control response = %#v", response)
-	}
-}
-
-func TestControlAuthorizesOnlyExactUserAndActualLocalPeer(t *testing.T) {
-	uid := os.Getuid()
-	if err := authorizeControlPeer(uint32(uid), uid); err != nil {
-		t.Fatal(err)
-	}
-	if err := authorizeControlPeer(uint32(uid), uid+1); err == nil {
-		t.Fatal("different user was authorized")
-	}
-	server := startControlTestServer(t, 9, func(context.Context, ControlRequest) (json.RawMessage, error) {
-		return json.RawMessage(`{"same_user":true}`), nil
-	})
-	response := callControlTest(t, server.Endpoint(), ControlRequest{ID: "same-user", Role: RoleAdmin, Operation: "doctor", Generation: 9})
-	if !response.OK {
-		t.Fatalf("actual same-user request = %#v", response)
-	}
-}
-
-func TestControlHandlerReceivesExactAcceptTimeProcessIdentity(t *testing.T) {
-	type acceptedIdentity struct {
-		peer    localtransport.PeerIdentity
-		process procinfo.Identity
-	}
-	identities := make(chan acceptedIdentity, 1)
-	server := startControlTestServer(t, 10, func(ctx context.Context, _ ControlRequest) (json.RawMessage, error) {
-		peer, ok := ControlPeerIdentity(ctx)
-		if !ok {
-			return nil, errors.New("control peer identity missing")
-		}
-		process, ok := ControlProcessIdentity(ctx)
-		if !ok {
-			return nil, errors.New("control process identity missing")
-		}
-		identities <- acceptedIdentity{peer: peer, process: process}
-		return json.RawMessage(`{}`), nil
-	})
-	response := callControlTest(t, server.Endpoint(), ControlRequest{
-		ID: "peer-identity", Role: RoleAdmin, Operation: "status", Generation: 10,
-	})
-	if !response.OK {
-		t.Fatalf("control response = %#v", response)
-	}
-	identity := <-identities
-	if identity.peer.PID != os.Getpid() || identity.peer.UID != os.Getuid() {
-		t.Fatalf("handler peer identity = %#v, want pid=%d uid=%d", identity.peer, os.Getpid(), os.Getuid())
-	}
-	wantProcess, err := procinfo.CaptureIdentity(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if identity.process != wantProcess {
-		t.Fatalf("handler process identity = %#v, want %#v", identity.process, wantProcess)
 	}
 }

@@ -194,8 +194,8 @@ func NewParentAttester(productID string, verify ExactParentVerifier) (*ParentAtt
 
 func (attester *ParentAttester) Attest(ctx context.Context, attempt productruntime.ConnectorAttempt) (productruntime.ParentBinding, error) {
 	if attempt.ProductID != attester.productID || attempt.ComponentBindingID == "" ||
-		!validNativeID(attempt.ClaimedNativeSessionID, "ses_") || attempt.PeerCredential.PID <= 1 ||
-		attempt.ProcessIdentity.PID != attempt.PeerCredential.PID || attempt.ProcessIdentity.Start == "" || attempt.ProcessIdentity.StrongStart == "" {
+		!validNativeID(attempt.ClaimedNativeSessionID, "ses_") ||
+		attempt.ProcessIdentity.PID <= 1 || attempt.ProcessIdentity.Start == "" || attempt.ProcessIdentity.StrongStart == "" {
 		return productruntime.ParentBinding{}, productruntime.ErrUnauthorized
 	}
 	view, err := attester.verify.VerifyComponentParent(ctx, attester.productID, attempt)

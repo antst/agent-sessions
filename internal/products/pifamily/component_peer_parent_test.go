@@ -14,7 +14,6 @@ import (
 
 	"github.com/antst/agent-sessions/internal/component"
 	"github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -392,10 +391,9 @@ func TestParentAttesterRequiresExactRegisteredComponentProcessAndSession(t *test
 			process := procinfo.Identity{PID: 42, Start: productID + "-start", StrongStart: productID + "-strong"}
 			connector := procinfo.Identity{PID: 43, Start: productID + "-connector", StrongStart: productID + "-connector-strong"}
 			subagentChild := procinfo.Identity{PID: 44, Start: productID + "-subagent", StrongStart: productID + "-subagent-strong"}
-			peer := localtransport.PeerIdentity{PID: process.PID, UID: 1000}
 			binding := component.BindingView{
 				BindingID: "binding-parent-" + productID, AttachmentID: "attachment-parent-" + productID,
-				ProductID: productID, ProcessIdentity: process, PeerIdentity: peer, Generation: 4,
+				ProductID: productID, ProcessIdentity: process, Generation: 4,
 			}
 			runtime, _, bindings := testComponentRuntime(t, productID, binding)
 			inspector := &processInspectorFixture{live: []procinfo.Identity{process, connector, subagentChild}, directChild: connector}
@@ -408,9 +406,7 @@ func TestParentAttesterRequiresExactRegisteredComponentProcessAndSession(t *test
 				t.Fatal(err)
 			}
 			attempt := productruntime.ConnectorAttempt{
-				ProductID:       productID,
-				PeerCredential:  localtransport.PeerIdentity{PID: connector.PID, UID: peer.UID},
-				ProcessIdentity: connector, ClaimedNativeSessionID: "native-1",
+				ProductID: productID, ProcessIdentity: connector, ClaimedNativeSessionID: "native-1",
 				ComponentBindingID: binding.BindingID,
 			}
 			parent, err := attester.Attest(context.Background(), attempt)
@@ -430,7 +426,6 @@ func TestParentAttesterRequiresExactRegisteredComponentProcessAndSession(t *test
 				},
 				"subagent process": func(value *productruntime.ConnectorAttempt) {
 					value.ProcessIdentity = subagentChild
-					value.PeerCredential.PID = subagentChild.PID
 				},
 			} {
 				t.Run(name, func(t *testing.T) {

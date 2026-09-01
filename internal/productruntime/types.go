@@ -10,7 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -190,7 +189,6 @@ type LaneRecoveryRequest struct {
 
 type ConnectorAttempt struct {
 	ProductID              string
-	PeerCredential         localtransport.PeerIdentity
 	ProcessIdentity        procinfo.Identity
 	ClaimedNativeSessionID string
 	ComponentBindingID     string

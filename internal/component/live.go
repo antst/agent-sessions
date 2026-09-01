@@ -3,7 +3,6 @@ package component
 import (
 	"context"
 
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
@@ -17,7 +16,6 @@ type BindingView struct {
 	AttachmentID    string
 	ProductID       string
 	ProcessIdentity procinfo.Identity
-	PeerIdentity    localtransport.PeerIdentity
 	Generation      uint64
 }
 

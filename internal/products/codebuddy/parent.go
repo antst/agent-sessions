@@ -26,8 +26,7 @@ func NewParentAttester(processes ProcessProbe, attachments ActiveAttachmentSourc
 
 func (attester *ParentAttester) Attest(ctx context.Context, attempt productruntime.ConnectorAttempt) (productruntime.ParentBinding, error) {
 	if attester == nil || attester.processes == nil || attester.attachments == nil || ctx == nil ||
-		attempt.ProductID != ProductID || !attempt.PeerCredential.Valid() || attempt.PeerCredential.PID != attempt.ProcessIdentity.PID ||
-		!validIdentity(attempt.ProcessIdentity) || strings.TrimSpace(attempt.ComponentBindingID) != "" {
+		attempt.ProductID != ProductID || !validIdentity(attempt.ProcessIdentity) || strings.TrimSpace(attempt.ComponentBindingID) != "" {
 		return productruntime.ParentBinding{}, productruntime.ErrUnauthorized
 	}
 	observation, err := attester.processes.ObserveIdentity(ctx, attempt.ProcessIdentity)

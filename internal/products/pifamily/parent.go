@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -33,8 +32,7 @@ func NewParentAttester(quirks Quirks, runtime *ComponentRuntime, bindings Bindin
 
 func (attester *ParentAttester) Attest(ctx context.Context, attempt productruntime.ConnectorAttempt) (productruntime.ParentBinding, error) {
 	if ctx == nil || attempt.ProductID != attester.quirks.ProductID ||
-		!attempt.PeerCredential.Valid() || !exactProcess(attempt.ProcessIdentity) ||
-		attempt.PeerCredential.PID != attempt.ProcessIdentity.PID ||
+		!exactProcess(attempt.ProcessIdentity) ||
 		strings.TrimSpace(attempt.ComponentBindingID) == "" ||
 		strings.TrimSpace(attempt.ClaimedNativeSessionID) == "" {
 		return productruntime.ParentBinding{}, fmt.Errorf("%w: Pi-family connector evidence is incomplete", productruntime.ErrUnauthorized)
@@ -49,12 +47,11 @@ func (attester *ParentAttester) Attest(ctx context.Context, attempt productrunti
 		}
 		copy := componentBindingWitness{
 			attachmentID: binding.AttachmentID, productID: binding.ProductID,
-			process: binding.ProcessIdentity, peer: binding.PeerIdentity,
+			process: binding.ProcessIdentity,
 		}
 		exactBinding = &copy
 	}
-	if exactBinding == nil || exactBinding.productID != attester.quirks.ProductID || !exactBinding.peer.Valid() ||
-		exactBinding.peer.PID != exactBinding.process.PID || exactBinding.peer.UID != attempt.PeerCredential.UID || !exactProcess(exactBinding.process) {
+	if exactBinding == nil || exactBinding.productID != attester.quirks.ProductID || !exactProcess(exactBinding.process) {
 		return productruntime.ParentBinding{}, fmt.Errorf("%w: connector does not match the authenticated component binding", productruntime.ErrUnauthorized)
 	}
 	observation, err := attester.processes.ObserveIdentity(ctx, attempt.ProcessIdentity)
@@ -80,7 +77,6 @@ type componentBindingWitness struct {
 	attachmentID string
 	productID    string
 	process      procinfo.Identity
-	peer         localtransport.PeerIdentity
 }
 
 var _ productruntime.ParentAttester = (*ParentAttester)(nil)

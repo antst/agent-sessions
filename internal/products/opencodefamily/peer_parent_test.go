@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/localtransport"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -313,7 +312,7 @@ func TestParentAttesterRejectsFalseModelClaimAndForeignProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	attempt := productruntime.ConnectorAttempt{
-		ProductID: "opencode", PeerCredential: localtransport.PeerIdentity{PID: 55, UID: 1000},
+		ProductID:              "opencode",
 		ProcessIdentity:        procinfo.Identity{PID: 55, Start: "start", StrongStart: "strong"},
 		ClaimedNativeSessionID: "ses_parent", ComponentBindingID: "binding-parent",
 	}
@@ -327,7 +326,7 @@ func TestParentAttesterRejectsFalseModelClaimAndForeignProcess(t *testing.T) {
 		t.Fatalf("false claim = %v", err)
 	}
 	foreignPID := attempt
-	foreignPID.PeerCredential.PID = 99
+	foreignPID.ProcessIdentity.PID = 99
 	if _, err := attester.Attest(context.Background(), foreignPID); !errors.Is(err, productruntime.ErrUnauthorized) {
 		t.Fatalf("kernel/process mismatch = %v", err)
 	}
@@ -388,7 +387,7 @@ func TestRegisteredParentToolAssetsMatchExactAttestationContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			attempt := productruntime.ConnectorAttempt{
-				ProductID: product.id, PeerCredential: localtransport.PeerIdentity{PID: 55, UID: 1000},
+				ProductID:              product.id,
 				ProcessIdentity:        procinfo.Identity{PID: 55, Start: "start", StrongStart: "strong"},
 				ClaimedNativeSessionID: product.native, ComponentBindingID: product.binding,
 			}
