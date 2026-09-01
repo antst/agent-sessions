@@ -154,40 +154,6 @@ Private file below a daemon-owned `0700` root; file mode `0600`.
 Catalog and spool are ordered rather than pretending to be one filesystem
 transaction: spool commit precedes catalog admission.
 
-## 6. Native Session Lease
-
-Durable exclusive ownership record quarantined to DSH's verified absence of a
-cross-process native lock. It MUST NOT spread to another product without a new
-FR-037 single-writer/edge-cost review, and should be removed if DSH gains a
-native lock.
-
-Composite key:
-
-```text
-(ProductID, ProfileIdentity, NativeSessionID)
-```
-
-| Field | Meaning |
-|---|---|
-| `RecordSchema` | Exact `agent-sessions.native-session-lease.v1`; a present record with a missing or unknown value fails closed |
-| `ProductID`, `ProfileIdentity`, `NativeSessionID` | Exact lease key |
-| `OwnerLaneID` | Exact daemon lane owner |
-| `Generation` | Current daemon generation |
-| `ProcessGroup` | Exact supervised process identity when present |
-| `State` | `Prepared`, `Held`, `Releasing`, `Released`, `CleanupDebt` |
-| `Revision`, `CreatedAt`, `UpdatedAt` | Mutation evidence |
-
-Transitions:
-
-```text
-Prepared -> Held -> Releasing -> Released
-             |          |
-             +----------+-> CleanupDebt -> Released
-```
-
-Only one non-terminal lease may exist for a composite key. Recovery never
-steals a lease from a live corroborated owner.
-
 ## 7. Component Binding and Session
 
 ### ComponentBinding
@@ -258,7 +224,6 @@ Existing `NativeSessionID`, `NativeName`, `Cwd`, `ExpectedEvidence`, `Evidence`,
 Catalog
 ├── existing Host / Attachments / Deliveries / Lanes / Turns / CleanupDebts
 ├── LaneInputs map[ReceiptID]LaneInputReceipt
-├── NativeLeases map[CompositeLeaseKey]NativeSessionLease
 ├── ComponentBindings map[BindingID]ComponentBinding
 └── ComponentSessions map[AttachmentID]ComponentSession
 ```

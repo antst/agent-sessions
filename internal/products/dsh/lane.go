@@ -48,7 +48,6 @@ type LaneConfig struct {
 	Generation      uint64
 	TupleVerifier   TupleVerifier
 	Processes       ACPProcessFactory
-	Leases          LeaseAuthority
 	Receipts        productruntime.ReceiptReader
 	Environment     []productruntime.EnvVar
 	ResolveRecovery RecoveryResolver
@@ -56,7 +55,6 @@ type LaneConfig struct {
 
 type laneSession struct {
 	reference      productruntime.NativeSessionRef
-	profile        string
 	cwd            string
 	policy         NativePolicy
 	process        ACPProcess
@@ -71,7 +69,6 @@ type laneSession struct {
 	closeAttempted bool
 	closed         bool
 	cleaned        bool
-	released       bool
 }
 
 type laneTurn struct {
@@ -120,8 +117,8 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 		config.ACPProfile = "acp"
 	}
 	if filepath.Base(config.Executable) != "dsh" || len(config.ACPProfile) == 0 || len(config.ACPProfile) > maxProfileBytes || config.ACPProfile != strings.TrimSpace(config.ACPProfile) || strings.ContainsAny(config.ACPProfile, "\x00/\\") || config.Generation == 0 || config.TupleVerifier == nil ||
-		config.Processes == nil || config.Leases == nil || config.Receipts == nil {
-		return nil, errors.New("DSH lane driver requires profile, generation, tuple, process, lease, and receipt dependencies")
+		config.Processes == nil || config.Receipts == nil {
+		return nil, errors.New("DSH lane driver requires profile, generation, tuple, process, and receipt dependencies")
 	}
 	if err := validateConfiguredProfileManifestShape(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
 		return nil, err
@@ -158,83 +155,67 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	fail := func(failure error, claim *LeaseClaim) (productruntime.NativeSessionRef, error) {
+	fail := func(failure error) (productruntime.NativeSessionRef, error) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cleanupErr := process.Cleanup(cleanupCtx)
 		cleanupCancel()
 		cancel()
-		if claim != nil {
-			cleanupErr = errors.Join(cleanupErr, driver.releaseLeaseBounded(*claim))
-		}
 		return productruntime.NativeSessionRef{}, errors.Join(failure, cleanupErr)
 	}
 	if err := client.Initialize(ctx); err != nil {
-		return fail(err, nil)
+		return fail(err)
 	}
 	listed, err := listACPSessions(ctx, client, request.Cwd)
 	if err != nil {
-		return fail(err, nil)
+		return fail(err)
 	}
 
 	var nativeID string
-	var claim *LeaseClaim
 	if request.ResumeNativeID != "" {
 		nativeID = request.ResumeNativeID
 		if !listedSessionAtCwd(listed, nativeID, request.Cwd) {
-			return fail(fmt.Errorf("%w: DSH resume identity is not listed at the exact cwd", productruntime.ErrStale), nil)
+			return fail(fmt.Errorf("%w: DSH resume identity is not listed at the exact cwd", productruntime.ErrStale))
 		}
-		candidate := driver.claim(request.LaneID, request.ProfileIdentity, nativeID, process.Ref())
-		if err := driver.config.Leases.Acquire(ctx, candidate); err != nil {
-			return fail(err, nil)
-		}
-		claim = &candidate
 		var resumed struct {
 			SessionID string `json:"sessionId"`
 		}
 		if err := client.Request(ctx, "session/resume", sessionParams(nativeID, request.Cwd, policy), &resumed); err != nil {
-			return fail(err, claim)
+			return fail(err)
 		}
 		if resumed.SessionID != "" && !validNativeID(resumed.SessionID) {
-			return fail(fmt.Errorf("%w: DSH resume returned a non-canonical native identity", productruntime.ErrProtocol), claim)
+			return fail(fmt.Errorf("%w: DSH resume returned a non-canonical native identity", productruntime.ErrProtocol))
 		}
 		if resumed.SessionID != "" && resumed.SessionID != nativeID {
-			return fail(fmt.Errorf("%w: DSH resumed a different native session", productruntime.ErrAmbiguousSession), claim)
+			return fail(fmt.Errorf("%w: DSH resumed a different native session", productruntime.ErrAmbiguousSession))
 		}
 	} else {
 		var created struct {
 			SessionID string `json:"sessionId"`
 		}
 		if err := client.Request(ctx, "session/new", sessionParams("", request.Cwd, policy), &created); err != nil {
-			return fail(err, nil)
+			return fail(err)
 		}
 		if !validNativeID(created.SessionID) {
-			return fail(fmt.Errorf("%w: DSH ACP returned no session identity", productruntime.ErrProtocol), nil)
+			return fail(fmt.Errorf("%w: DSH ACP returned no session identity", productruntime.ErrProtocol))
 		}
 		nativeID = created.SessionID
 		if listedSessionID(listed, nativeID) {
-			return fail(fmt.Errorf("%w: DSH session/new reused an existing native identity", productruntime.ErrAmbiguousSession), nil)
+			return fail(fmt.Errorf("%w: DSH session/new reused an existing native identity", productruntime.ErrAmbiguousSession))
 		}
-		candidate := driver.claim(request.LaneID, request.ProfileIdentity, nativeID, process.Ref())
-		if err := driver.config.Leases.Acquire(ctx, candidate); err != nil {
-			// The conflicting lease may own this exact native ID. Never issue a
-			// close until this process has established exclusive ownership.
-			return fail(err, nil)
-		}
-		claim = &candidate
 	}
 	if err := permissions.bind(nativeID); err != nil {
-		return fail(err, claim)
+		return fail(err)
 	}
 
 	reference := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: nativeID, Generation: driver.config.Generation}
 	session := &laneSession{
-		reference: reference, profile: request.ProfileIdentity, cwd: request.Cwd, policy: policy,
+		reference: reference, cwd: request.Cwd, policy: policy,
 		process: process, client: client, cancel: cancel, turns: make(map[string]*laneTurn),
 	}
 	driver.mu.Lock()
 	if _, exists := driver.sessions[request.LaneID]; exists {
 		driver.mu.Unlock()
-		return fail(fmt.Errorf("%w: DSH lane already has a live ACP owner", ErrLeaseConflict), claim)
+		return fail(fmt.Errorf("%w: DSH lane already has a live ACP owner", productruntime.ErrNativeRejected))
 	}
 	delete(driver.archived, reference)
 	driver.sessions[request.LaneID] = session
@@ -439,49 +420,42 @@ func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.La
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	cleanup := func(failure error, release bool) (productruntime.NativeSessionRef, error) {
+	cleanup := func(failure error) (productruntime.NativeSessionRef, error) {
 		cleanupErr := cleanupACPProcess(process)
 		cancel()
-		if release {
-			cleanupErr = errors.Join(cleanupErr, driver.releaseLeaseBounded(driver.claim(open.LaneID, open.ProfileIdentity, open.ResumeNativeID, process.Ref())))
-		}
 		return productruntime.NativeSessionRef{}, errors.Join(failure, cleanupErr)
 	}
 	if err := client.Initialize(ctx); err != nil {
-		return cleanup(err, false)
+		return cleanup(err)
 	}
 	listed, err := listACPSessions(ctx, client, open.Cwd)
 	if err != nil {
-		return cleanup(err, false)
+		return cleanup(err)
 	}
 	if !listedSessionAtCwd(listed, open.ResumeNativeID, open.Cwd) {
-		return cleanup(fmt.Errorf("%w: recovered DSH identity is not listed at the exact cwd", productruntime.ErrStale), false)
-	}
-	claim := driver.claim(open.LaneID, open.ProfileIdentity, open.ResumeNativeID, process.Ref())
-	if err := driver.config.Leases.Recover(ctx, claim); err != nil {
-		return cleanup(err, false)
+		return cleanup(fmt.Errorf("%w: recovered DSH identity is not listed at the exact cwd", productruntime.ErrStale))
 	}
 	var resumed struct {
 		SessionID string `json:"sessionId"`
 	}
 	if err := client.Request(ctx, "session/resume", sessionParams(open.ResumeNativeID, open.Cwd, policy), &resumed); err != nil {
-		return cleanup(err, true)
+		return cleanup(err)
 	}
 	if resumed.SessionID != "" && !validNativeID(resumed.SessionID) {
-		return cleanup(fmt.Errorf("%w: DSH recovery returned a non-canonical native identity", productruntime.ErrProtocol), true)
+		return cleanup(fmt.Errorf("%w: DSH recovery returned a non-canonical native identity", productruntime.ErrProtocol))
 	}
 	if resumed.SessionID != "" && resumed.SessionID != open.ResumeNativeID {
-		return cleanup(fmt.Errorf("%w: DSH recovery resumed a different native session", productruntime.ErrAmbiguousSession), true)
+		return cleanup(fmt.Errorf("%w: DSH recovery resumed a different native session", productruntime.ErrAmbiguousSession))
 	}
 	if err := permissions.bind(open.ResumeNativeID); err != nil {
-		return cleanup(err, true)
+		return cleanup(err)
 	}
 	reference := productruntime.NativeSessionRef{LaneID: open.LaneID, NativeSessionID: open.ResumeNativeID, Generation: driver.config.Generation}
-	session := &laneSession{reference: reference, profile: open.ProfileIdentity, cwd: open.Cwd, policy: policy, process: process, client: client, cancel: cancel, turns: make(map[string]*laneTurn)}
+	session := &laneSession{reference: reference, cwd: open.Cwd, policy: policy, process: process, client: client, cancel: cancel, turns: make(map[string]*laneTurn)}
 	driver.mu.Lock()
 	if _, exists := driver.sessions[open.LaneID]; exists {
 		driver.mu.Unlock()
-		return cleanup(ErrLeaseConflict, true)
+		return cleanup(productruntime.ErrNativeRejected)
 	}
 	delete(driver.archived, reference)
 	driver.sessions[open.LaneID] = session
@@ -596,10 +570,10 @@ func (driver *LaneDriver) reserveLane(laneID string) error {
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
 	if driver.sessions[laneID] != nil {
-		return fmt.Errorf("%w: DSH lane already has a live ACP owner", ErrLeaseConflict)
+		return fmt.Errorf("%w: DSH lane already has a live ACP owner", productruntime.ErrNativeRejected)
 	}
 	if _, exists := driver.opening[laneID]; exists {
-		return fmt.Errorf("%w: DSH lane open is already in progress", ErrLeaseConflict)
+		return fmt.Errorf("%w: DSH lane open is already in progress", productruntime.ErrNativeRejected)
 	}
 	driver.opening[laneID] = struct{}{}
 	return nil
@@ -736,7 +710,7 @@ func (driver *LaneDriver) poisonAfterPossibleWrite(session *laneSession, failure
 
 func (driver *LaneDriver) archiveSteps(ctx context.Context, session *laneSession) error {
 	driver.mu.Lock()
-	poisoned, closeAttempted, cleaned, released := session.poisoned != nil, session.closeAttempted, session.cleaned, session.released
+	poisoned, closeAttempted, cleaned := session.poisoned != nil, session.closeAttempted, session.cleaned
 	driver.mu.Unlock()
 	var closeErr error
 	if !poisoned && !closeAttempted {
@@ -764,21 +738,6 @@ func (driver *LaneDriver) archiveSteps(ctx context.Context, session *laneSession
 		session.cleaned = true
 		driver.mu.Unlock()
 	}
-	if !released {
-		claim := driver.claim(session.reference.LaneID, session.profile, session.reference.NativeSessionID, session.process.Ref())
-		var err error
-		if closeErr != nil {
-			err = driver.releaseLeaseBounded(claim)
-		} else {
-			err = driver.config.Leases.Release(ctx, claim)
-		}
-		if err != nil {
-			return errors.Join(closeErr, err)
-		}
-		driver.mu.Lock()
-		session.released = true
-		driver.mu.Unlock()
-	}
 	driver.mu.Lock()
 	if current := driver.sessions[session.reference.LaneID]; current == session {
 		delete(driver.sessions, session.reference.LaneID)
@@ -795,12 +754,6 @@ func cleanupACPProcess(process ACPProcess) error {
 	ctx, cancel := context.WithTimeout(context.Background(), processCleanupTimeout)
 	defer cancel()
 	return process.Cleanup(ctx)
-}
-
-func (driver *LaneDriver) releaseLeaseBounded(claim LeaseClaim) error {
-	ctx, cancel := context.WithTimeout(context.Background(), processCleanupTimeout)
-	defer cancel()
-	return driver.config.Leases.Release(ctx, claim)
 }
 
 func (driver *LaneDriver) markArchiveCompleteLocked(reference productruntime.NativeSessionRef) {
@@ -967,10 +920,6 @@ func sameCwd(left, right string) bool {
 		return resolvedLeft == resolvedRight
 	}
 	return left == right
-}
-
-func (driver *LaneDriver) claim(laneID, profile, nativeID string, process productruntime.OwnedProcessRef) LeaseClaim {
-	return LeaseClaim{ProfileIdentity: profile, NativeSessionID: nativeID, LaneID: laneID, Generation: driver.config.Generation, Process: process}
 }
 
 func sessionParams(nativeID, cwd string, _ NativePolicy) map[string]any {

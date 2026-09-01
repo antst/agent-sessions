@@ -43,7 +43,7 @@ func TestDriversBindDistinctPeerAndACPProfilesToOneManagedHome(t *testing.T) {
 		Lane: LaneConfig{
 			Executable: "dsh", ACPProfile: "acp", DSHHome: dshHome, ProfileManifest: laneManifest, Generation: 1,
 			TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: newScriptedACPProcess()},
-			Leases: &recordingLease{}, Receipts: memoryReceiptReader{body: []byte("hello")},
+			Receipts: memoryReceiptReader{body: []byte("hello")},
 		},
 		Doctor: DoctorConfig{
 			Executable: "dsh", ACPProfile: "acp", DSHHome: dshHome,
@@ -87,7 +87,7 @@ func TestAbsentDSHInstallConstructsEveryDriverAndDoctorReportsMissing(t *testing
 		Lane: LaneConfig{
 			Executable: "dsh", ACPProfile: "acp", DSHHome: dshHome, ProfileManifest: profileManifest, Generation: 1,
 			TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: newScriptedACPProcess()},
-			Leases: &recordingLease{}, Receipts: memoryReceiptReader{body: []byte("hello")},
+			Receipts: memoryReceiptReader{body: []byte("hello")},
 		},
 		Doctor: DoctorConfig{
 			Executable: "dsh", ACPProfile: "acp", DSHHome: dshHome, ProfileManifest: profileManifest,

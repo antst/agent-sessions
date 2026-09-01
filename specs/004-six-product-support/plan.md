@@ -121,9 +121,6 @@ internal/
 ├── sessiontools/             # extracted AgentFrame/MCP/tool/instruction helpers
 ├── structuredprocess/        # exact owned structured child/framed stdio
 ├── productserver/            # literal-loopback HTTP/auth/event/supervision
-├── daemon/
-│   ├── lane_input.go         # durable receipt ledger + spool coordinator
-│   └── native_lease.go       # exact exclusive native session leases
 ├── products/
 │   ├── opencodefamily/       # verified common OpenCode/Kilo client mechanics
 │   ├── pifamily/             # verified common Pi/OMP RPC/extension mechanics

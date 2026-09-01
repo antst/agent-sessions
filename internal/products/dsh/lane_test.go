@@ -118,61 +118,14 @@ func (reader memoryReceiptReader) OpenReceipt(string) (io.ReadCloser, int64, [32
 	return io.NopCloser(bytes.NewReader(reader.body)), int64(len(reader.body)), sha256.Sum256(reader.body), nil
 }
 
-type recordingLease struct {
-	mu              sync.Mutex
-	held            map[string]string
-	acquires        int
-	releases        int
-	releaseCalls    int
-	releaseFailures int
-	releaseDeadline bool
-}
-
-func (lease *recordingLease) Acquire(_ context.Context, claim LeaseClaim) error {
-	lease.mu.Lock()
-	defer lease.mu.Unlock()
-	if lease.held == nil {
-		lease.held = map[string]string{}
-	}
-	key := claim.ProfileIdentity + "\x00" + claim.NativeSessionID
-	if owner, ok := lease.held[key]; ok && owner != claim.LaneID {
-		return ErrLeaseConflict
-	}
-	lease.held[key] = claim.LaneID
-	lease.acquires++
-	return nil
-}
-func (lease *recordingLease) Recover(ctx context.Context, claim LeaseClaim) error {
-	return lease.Acquire(ctx, claim)
-}
-func (lease *recordingLease) Release(ctx context.Context, claim LeaseClaim) error {
-	lease.mu.Lock()
-	defer lease.mu.Unlock()
-	lease.releaseCalls++
-	if _, ok := ctx.Deadline(); ok {
-		lease.releaseDeadline = true
-	}
-	if lease.releaseFailures > 0 {
-		lease.releaseFailures--
-		return errors.New("scripted release failure")
-	}
-	key := claim.ProfileIdentity + "\x00" + claim.NativeSessionID
-	if lease.held[key] != claim.LaneID {
-		return ErrLeaseConflict
-	}
-	delete(lease.held, key)
-	lease.releases++
-	return nil
-}
-
-func newTestLane(t *testing.T, process *scriptedACPProcess, lease *recordingLease) *LaneDriver {
+func newTestLane(t *testing.T, process *scriptedACPProcess) *LaneDriver {
 	t.Helper()
 	dshHome := managedTestDSHHome(t)
 	driver, err := NewLaneDriver(LaneConfig{
 		Executable: "dsh", ACPProfile: "acp", Generation: 7,
 		DSHHome: dshHome, ProfileManifest: writeManagedProfileManifest(t, dshHome, "acp", PinnedVersion),
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
-		Leases: lease, Receipts: memoryReceiptReader{body: []byte("hello")},
+		Receipts:    memoryReceiptReader{body: []byte("hello")},
 		Environment: []productruntime.EnvVar{{Name: "DSH_HOME", Value: filepath.Join(t.TempDir(), "foreign-home")}},
 	})
 	if err != nil {
@@ -192,7 +145,6 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 
 func TestACPLaneNewPromptStopAndCancelNotification(t *testing.T) {
 	process := newScriptedACPProcess()
-	lease := &recordingLease{}
 	process.writeHook = func(frame map[string]any) {
 		method, _ := frame["method"].(string)
 		id, hasID := frame["id"]
@@ -217,7 +169,7 @@ func TestACPLaneNewPromptStopAndCancelNotification(t *testing.T) {
 			process.respond(id, map[string]any{}, nil)
 		}
 	}
-	driver := newTestLane(t, process, lease)
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp",
 	})
@@ -293,7 +245,7 @@ func TestACPBusyPromptMapsToUnsupportedSteerBeforeNativeAcceptance(t *testing.T)
 			process.respond(id, nil, map[string]any{"code": -32602, "message": "a prompt is already in flight for this session"})
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +270,7 @@ func TestRepeatedImmediatePromptErrorsLeaveNoTerminalCacheGhosts(t *testing.T) {
 			process.respond(frame["id"], nil, map[string]any{"code": -32602, "message": "busy"})
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	reference, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -360,7 +312,7 @@ func TestACPTurnProjectsLastOrderedAssistantMessage(t *testing.T) {
 			process.respond(frame["id"], map[string]any{"stopReason": "end_turn"}, nil)
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +357,7 @@ func TestLaneBypassPermissionSetsExactDangerPreset(t *testing.T) {
 			process.respond(frame["id"], map[string]any{"sessionId": "native"}, nil)
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	_, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp",
 		PermissionMode: permissionmode.BypassPermissions,
@@ -421,31 +373,7 @@ func TestLaneBypassPermissionSetsExactDangerPreset(t *testing.T) {
 	}
 }
 
-func TestLaneLeaseRejectsSecondOwnerBeforeResume(t *testing.T) {
-	lease := &recordingLease{held: map[string]string{"acp\x00native": "first"}}
-	process := newScriptedACPProcess()
-	process.writeHook = func(frame map[string]any) {
-		if frame["method"] == "initialize" {
-			process.respond(frame["id"], map[string]any{"protocolVersion": 1}, nil)
-		}
-		if frame["method"] == "session/list" {
-			process.respond(frame["id"], map[string]any{"sessions": []any{map[string]any{"sessionId": "native", "cwd": "/work"}}}, nil)
-		}
-		if frame["method"] == "session/resume" {
-			t.Error("resume reached native ACP before exclusive lease")
-		}
-	}
-	driver := newTestLane(t, process, lease)
-	_, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "second", ResumeNativeID: "native", Cwd: "/work", ProfileIdentity: "acp",
-	})
-	if !errors.Is(err, ErrLeaseConflict) {
-		t.Fatalf("Open() error = %v, want lease conflict", err)
-	}
-}
-
-func TestLaneRecoveryResumesOnlyPriorNativeIdentityAfterLeaseRecovery(t *testing.T) {
-	lease := &recordingLease{}
+func TestLaneRecoveryResumesOnlyPriorNativeIdentityFromProduct(t *testing.T) {
 	process := newScriptedACPProcess()
 	process.writeHook = func(frame map[string]any) {
 		id := frame["id"]
@@ -467,7 +395,7 @@ func TestLaneRecoveryResumesOnlyPriorNativeIdentityAfterLeaseRecovery(t *testing
 		Executable: "dsh", ACPProfile: "acp", Generation: 8,
 		DSHHome: dshHome, ProfileManifest: writeManagedProfileManifest(t, dshHome, "acp", PinnedVersion),
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
-		Leases: lease, Receipts: memoryReceiptReader{body: []byte("hello")},
+		Receipts: memoryReceiptReader{body: []byte("hello")},
 		ResolveRecovery: func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
 			return productruntime.LaneOpenRequest{Cwd: "/work", ProfileIdentity: "acp"}, nil
 		},
@@ -481,13 +409,9 @@ func TestLaneRecoveryResumesOnlyPriorNativeIdentityAfterLeaseRecovery(t *testing
 	if err != nil || reference.NativeSessionID != "native" || reference.Generation != 8 {
 		t.Fatalf("Recover() = %+v, %v", reference, err)
 	}
-	if lease.acquires != 1 {
-		t.Fatalf("lease recovery acquisitions = %d, want 1", lease.acquires)
-	}
 }
 
-func TestLaneArchiveClosesOwnedSessionCleansProcessAndReleasesLease(t *testing.T) {
-	lease := &recordingLease{}
+func TestLaneArchiveClosesOwnedSessionAndCleansProcess(t *testing.T) {
 	process := newScriptedACPProcess()
 	closeCalls := 0
 	process.writeHook = func(frame map[string]any) {
@@ -503,7 +427,7 @@ func TestLaneArchiveClosesOwnedSessionCleansProcessAndReleasesLease(t *testing.T
 			process.respond(frame["id"], map[string]any{}, nil)
 		}
 	}
-	driver := newTestLane(t, process, lease)
+	driver := newTestLane(t, process)
 	reference, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp",
 	})
@@ -520,8 +444,8 @@ func TestLaneArchiveClosesOwnedSessionCleansProcessAndReleasesLease(t *testing.T
 	cleaned := process.cleanup
 	cleanupCalls := process.cleanupCalls
 	process.mu.Unlock()
-	if !cleaned || closeCalls != 1 || cleanupCalls != 1 || lease.releaseCalls != 1 || lease.releases != 1 {
-		t.Fatalf("archive close/cleanup/release = %d/%d/%d (%d confirmed)", closeCalls, cleanupCalls, lease.releaseCalls, lease.releases)
+	if !cleaned || closeCalls != 1 || cleanupCalls != 1 {
+		t.Fatalf("archive close/cleanup = %d/%d", closeCalls, cleanupCalls)
 	}
 	if _, err := driver.StartTurn(context.Background(), reference, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("archived reference error = %v, want ErrStale", err)
@@ -541,12 +465,11 @@ func TestRecoveryFailureUsesDeadlineBoundProcessCleanup(t *testing.T) {
 		}
 	}
 	dshHome := managedTestDSHHome(t)
-	lease := &recordingLease{}
 	driver, err := NewLaneDriver(LaneConfig{
 		Executable: "dsh", ACPProfile: "acp", Generation: 8,
 		DSHHome: dshHome, ProfileManifest: writeManagedProfileManifest(t, dshHome, "acp", PinnedVersion),
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
-		Leases: lease, Receipts: memoryReceiptReader{body: []byte("hello")},
+		Receipts: memoryReceiptReader{body: []byte("hello")},
 		ResolveRecovery: func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
 			return productruntime.LaneOpenRequest{Cwd: "/work", ProfileIdentity: "acp"}, nil
 		},
@@ -564,12 +487,6 @@ func TestRecoveryFailureUsesDeadlineBoundProcessCleanup(t *testing.T) {
 	process.mu.Unlock()
 	if !deadline || calls != 1 {
 		t.Fatalf("recovery cleanup deadline/calls = %v/%d, want true/1", deadline, calls)
-	}
-	lease.mu.Lock()
-	releaseDeadline, releaseCalls := lease.releaseDeadline, lease.releaseCalls
-	lease.mu.Unlock()
-	if !releaseDeadline || releaseCalls != 1 {
-		t.Fatalf("recovery lease release deadline/calls = %v/%d, want true/1", releaseDeadline, releaseCalls)
 	}
 }
 
@@ -610,7 +527,7 @@ func TestACPPermissionRequestRejectsWithoutInteractiveApprovalAuthority(t *testi
 			process.respond(promptID, map[string]any{"stopReason": "end_turn"}, nil)
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -665,7 +582,6 @@ func TestACPPermissionPolicyNeverAutoAllowsPinnedOptions(t *testing.T) {
 
 func TestACPUnrelatedUpdateDoesNotAdmitAndPostWriteTimeoutPoisonsOwner(t *testing.T) {
 	process := newScriptedACPProcess()
-	lease := &recordingLease{}
 	process.writeHook = func(frame map[string]any) {
 		switch frame["method"] {
 		case "initialize":
@@ -681,7 +597,7 @@ func TestACPUnrelatedUpdateDoesNotAdmitAndPostWriteTimeoutPoisonsOwner(t *testin
 			}})
 		}
 	}
-	driver := newTestLane(t, process, lease)
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -694,8 +610,8 @@ func TestACPUnrelatedUpdateDoesNotAdmitAndPostWriteTimeoutPoisonsOwner(t *testin
 	process.mu.Lock()
 	cleaned := process.cleanup
 	process.mu.Unlock()
-	if !cleaned || lease.releases != 1 {
-		t.Fatalf("poison reconciliation cleanup/release = %v/%d", cleaned, lease.releases)
+	if !cleaned {
+		t.Fatal("poison reconciliation did not clean the process")
 	}
 	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("poisoned reference reuse error = %v, want ErrStale", err)
@@ -705,7 +621,6 @@ func TestACPUnrelatedUpdateDoesNotAdmitAndPostWriteTimeoutPoisonsOwner(t *testin
 
 func TestACPPromptWriteFailurePoisonsPossibleNativeWrite(t *testing.T) {
 	process := newScriptedACPProcess()
-	lease := &recordingLease{}
 	process.writeFailureMethod = "session/prompt"
 	process.writeHook = func(frame map[string]any) {
 		switch frame["method"] {
@@ -717,7 +632,7 @@ func TestACPPromptWriteFailurePoisonsPossibleNativeWrite(t *testing.T) {
 			process.respond(frame["id"], map[string]any{"sessionId": "native"}, nil)
 		}
 	}
-	driver := newTestLane(t, process, lease)
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -728,8 +643,8 @@ func TestACPPromptWriteFailurePoisonsPossibleNativeWrite(t *testing.T) {
 	process.mu.Lock()
 	cleanupCalls := process.cleanupCalls
 	process.mu.Unlock()
-	if cleanupCalls != 1 || lease.releases != 1 {
-		t.Fatalf("possible-write reconciliation cleanup/release = %d/%d", cleanupCalls, lease.releases)
+	if cleanupCalls != 1 {
+		t.Fatalf("possible-write reconciliation cleanup = %d, want 1", cleanupCalls)
 	}
 	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("possible-write owner reuse error = %v, want ErrStale", err)
@@ -758,7 +673,7 @@ func TestWaitTurnIsConcurrentRetrySafe(t *testing.T) {
 			}()
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -808,7 +723,7 @@ func TestSettledTurnEvidenceIsByteBoundedAndRetryableUntilEvicted(t *testing.T) 
 			process.respond(frame["id"], map[string]any{"stopReason": "end_turn"}, nil)
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	sessionRef, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -850,7 +765,6 @@ func TestSettledTurnEvidenceIsByteBoundedAndRetryableUntilEvicted(t *testing.T) 
 }
 
 func TestLaneArchiveRetriesOnlyUnconfirmedSteps(t *testing.T) {
-	lease := &recordingLease{releaseFailures: 1}
 	process := newScriptedACPProcess()
 	process.cleanupFailures = 1
 	closeCalls := 0
@@ -867,7 +781,7 @@ func TestLaneArchiveRetriesOnlyUnconfirmedSteps(t *testing.T) {
 			process.respond(frame["id"], map[string]any{}, nil)
 		}
 	}
-	driver := newTestLane(t, process, lease)
+	driver := newTestLane(t, process)
 	reference, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -875,22 +789,18 @@ func TestLaneArchiveRetriesOnlyUnconfirmedSteps(t *testing.T) {
 	if err := driver.Archive(context.Background(), reference); err == nil {
 		t.Fatal("archive unexpectedly hid cleanup failure")
 	}
-	if err := driver.Archive(context.Background(), reference); err == nil {
-		t.Fatal("archive unexpectedly hid lease release failure")
-	}
 	if err := driver.Archive(context.Background(), reference); err != nil {
 		t.Fatal(err)
 	}
 	process.mu.Lock()
 	cleanupCalls := process.cleanupCalls
 	process.mu.Unlock()
-	if closeCalls != 1 || cleanupCalls != 2 || lease.releaseCalls != 2 || lease.releases != 1 {
-		t.Fatalf("archive step calls close/cleanup/release/success = %d/%d/%d/%d", closeCalls, cleanupCalls, lease.releaseCalls, lease.releases)
+	if closeCalls != 1 || cleanupCalls != 2 {
+		t.Fatalf("archive step calls close/cleanup = %d/%d", closeCalls, cleanupCalls)
 	}
 }
 
 func TestLaneArchiveLostCloseResponseNeverResendsClose(t *testing.T) {
-	lease := &recordingLease{}
 	process := newScriptedACPProcess()
 	closeCalls := 0
 	process.writeHook = func(frame map[string]any) {
@@ -906,7 +816,7 @@ func TestLaneArchiveLostCloseResponseNeverResendsClose(t *testing.T) {
 			// The native close may have completed, but its response is lost.
 		}
 	}
-	driver := newTestLane(t, process, lease)
+	driver := newTestLane(t, process)
 	reference, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp"})
 	if err != nil {
 		t.Fatal(err)
@@ -922,8 +832,8 @@ func TestLaneArchiveLostCloseResponseNeverResendsClose(t *testing.T) {
 	process.mu.Lock()
 	cleanupCalls := process.cleanupCalls
 	process.mu.Unlock()
-	if closeCalls != 1 || cleanupCalls != 1 || lease.releaseCalls != 1 || lease.releases != 1 {
-		t.Fatalf("lost-response close/cleanup/release = %d/%d/%d (%d confirmed)", closeCalls, cleanupCalls, lease.releaseCalls, lease.releases)
+	if closeCalls != 1 || cleanupCalls != 1 {
+		t.Fatalf("lost-response close/cleanup = %d/%d", closeCalls, cleanupCalls)
 	}
 }
 
@@ -937,7 +847,7 @@ func TestLaneRequiresLiveSelectedProfileAndResumeCwd(t *testing.T) {
 			process.respond(frame["id"], map[string]any{"sessions": []any{map[string]any{"sessionId": "native", "cwd": "/other"}}}, nil)
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "missing-profile", Cwd: "/work", ProfileIdentity: "other"}); !errors.Is(err, productruntime.ErrUnavailable) {
 		t.Fatalf("missing selected profile error = %v, want ErrUnavailable", err)
 	}
@@ -956,7 +866,7 @@ func TestLaneSessionListRequiresExplicitSessionsArray(t *testing.T) {
 			process.respond(frame["id"], map[string]any{}, nil)
 		}
 	}
-	driver := newTestLane(t, process, &recordingLease{})
+	driver := newTestLane(t, process)
 	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp",
 	}); !errors.Is(err, productruntime.ErrProtocol) {
@@ -978,7 +888,7 @@ func TestLaneRejectsNonCanonicalNativeSessionIDs(t *testing.T) {
 					process.respond(frame["id"], map[string]any{"sessionId": nativeID}, nil)
 				}
 			}
-			driver := newTestLane(t, process, &recordingLease{})
+			driver := newTestLane(t, process)
 			if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 				ProductID: ProductID, LaneID: "lane", Cwd: "/work", ProfileIdentity: "acp",
 			}); !errors.Is(err, productruntime.ErrProtocol) {

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
@@ -17,9 +16,8 @@ import (
 const (
 	catalogRecord = "catalog"
 
-	NativeSessionLeaseRecordSchema RecordSchema = "agent-sessions.native-session-lease.v1"
-	ComponentBindingRecordSchema   RecordSchema = "agent-sessions.component-binding.v1"
-	ComponentSessionRecordSchema   RecordSchema = "agent-sessions.component-session.v1"
+	ComponentBindingRecordSchema RecordSchema = "agent-sessions.component-binding.v1"
+	ComponentSessionRecordSchema RecordSchema = "agent-sessions.component-session.v1"
 
 	maxDurableOpaqueIDBytes = 128
 )
@@ -132,49 +130,6 @@ type CleanupDebt struct {
 	Operation         string `json:"operation"`
 }
 
-type LeaseState string
-
-const (
-	LeasePrepared    LeaseState = "prepared"
-	LeaseHeld        LeaseState = "held"
-	LeaseReleasing   LeaseState = "releasing"
-	LeaseReleased    LeaseState = "released"
-	LeaseCleanupDebt LeaseState = "cleanup-debt"
-)
-
-// NativeSessionLeaseKey is a JSON-compatible canonical composite map key.
-type NativeSessionLeaseKey string
-
-// NewNativeSessionLeaseKey encodes the exact product/profile/native identity
-// without delimiter ambiguity.
-func NewNativeSessionLeaseKey(productID, profileIdentity, nativeSessionID string) (NativeSessionLeaseKey, error) {
-	parts := [3]string{productID, profileIdentity, nativeSessionID}
-	for _, part := range parts {
-		if strings.TrimSpace(part) == "" {
-			return "", errors.New("native session lease key fields are required")
-		}
-	}
-	body, err := json.Marshal(parts)
-	if err != nil {
-		return "", err
-	}
-	return NativeSessionLeaseKey(body), nil
-}
-
-type NativeSessionLease struct {
-	Schema          RecordSchema      `json:"schema"`
-	ProductID       string            `json:"product_id"`
-	ProfileIdentity string            `json:"profile_identity"`
-	NativeSessionID string            `json:"native_session_id"`
-	OwnerLaneID     string            `json:"owner_lane_id"`
-	Generation      uint64            `json:"generation"`
-	ProcessGroup    procinfo.Identity `json:"process_group,omitempty"`
-	State           LeaseState        `json:"state"`
-	Revision        uint64            `json:"revision"`
-	CreatedAt       int64             `json:"created_at"`
-	UpdatedAt       int64             `json:"updated_at"`
-}
-
 type BindingState string
 
 const (
@@ -217,13 +172,12 @@ type ComponentSession struct {
 
 // Catalog is the complete durable host state committed as one revision.
 type Catalog struct {
-	Host              HostRuntime                                  `json:"host"`
-	Attachments       map[string]ManagedAttachment                 `json:"attachments"`
-	Lanes             map[string]Lane                              `json:"lanes"`
-	CleanupDebts      map[string]CleanupDebt                       `json:"cleanup_debts"`
-	NativeLeases      map[NativeSessionLeaseKey]NativeSessionLease `json:"native_leases"`
-	ComponentBindings map[string]ComponentBinding                  `json:"component_bindings"`
-	ComponentSessions map[string]ComponentSession                  `json:"component_sessions"`
+	Host              HostRuntime                  `json:"host"`
+	Attachments       map[string]ManagedAttachment `json:"attachments"`
+	Lanes             map[string]Lane              `json:"lanes"`
+	CleanupDebts      map[string]CleanupDebt       `json:"cleanup_debts"`
+	ComponentBindings map[string]ComponentBinding  `json:"component_bindings"`
+	ComponentSessions map[string]ComponentSession  `json:"component_sessions"`
 }
 
 // StateSnapshot is one isolated committed daemon catalog revision.
@@ -327,10 +281,6 @@ func ValidLifecycleTransition(kind, from, to string) bool {
 			"archived":     {"idle", "cleanup-debt"},
 			"cleanup-debt": {"idle", "archived"},
 		},
-		"lease": {
-			"prepared": {"held", "releasing", "cleanup-debt"}, "held": {"releasing", "cleanup-debt"},
-			"releasing": {"released", "cleanup-debt"}, "cleanup-debt": {"released"},
-		},
 		"component-binding": {
 			"binding": {"ready", "retiring", "closed"}, "ready": {"retiring", "closed"},
 			"retiring": {"closed"},
@@ -352,7 +302,6 @@ func emptyCatalog() Catalog {
 	return Catalog{
 		Attachments: map[string]ManagedAttachment{},
 		Lanes:       map[string]Lane{}, CleanupDebts: map[string]CleanupDebt{},
-		NativeLeases:      map[NativeSessionLeaseKey]NativeSessionLease{},
 		ComponentBindings: map[string]ComponentBinding{}, ComponentSessions: map[string]ComponentSession{},
 	}
 }
@@ -366,9 +315,6 @@ func normalizedCatalog(catalog Catalog) Catalog {
 	}
 	if catalog.CleanupDebts == nil {
 		catalog.CleanupDebts = map[string]CleanupDebt{}
-	}
-	if catalog.NativeLeases == nil {
-		catalog.NativeLeases = map[NativeSessionLeaseKey]NativeSessionLease{}
 	}
 	if catalog.ComponentBindings == nil {
 		catalog.ComponentBindings = map[string]ComponentBinding{}
@@ -424,26 +370,6 @@ func validateCatalog(catalog Catalog) error {
 	for id, debt := range catalog.CleanupDebts {
 		if id == "" || debt.ID != id || strings.TrimSpace(debt.Resource) == "" || strings.TrimSpace(debt.Operation) == "" {
 			return fmt.Errorf("invalid cleanup debt %q", id)
-		}
-	}
-	for key, lease := range catalog.NativeLeases {
-		want, err := NewNativeSessionLeaseKey(lease.ProductID, lease.ProfileIdentity, lease.NativeSessionID)
-		if lease.Schema != NativeSessionLeaseRecordSchema || err != nil || key != want || !knownState("lease", string(lease.State)) ||
-			lease.Generation == 0 || (catalog.Host.Generation > 0 && lease.Generation > catalog.Host.Generation) ||
-			!validDurableOpaqueID(lease.OwnerLaneID) || lease.Revision == 0 || lease.CreatedAt <= 0 ||
-			lease.UpdatedAt < lease.CreatedAt || !validOptionalProcessIdentity(lease.ProcessGroup) {
-			return fmt.Errorf("invalid native session lease %q", key)
-		}
-		if _, ok := productcatalog.ByID(lease.ProductID); !ok {
-			return fmt.Errorf("native session lease %q has unknown product", key)
-		}
-		lane, ownerExists := catalog.Lanes[lease.OwnerLaneID]
-		if lease.State != LeaseReleased {
-			if !ownerExists || lane.Product != lease.ProductID || lane.ProfileIdentity != lease.ProfileIdentity || lane.NativeSessionID != lease.NativeSessionID {
-				return fmt.Errorf("native session lease %q has invalid owner lane", key)
-			}
-		} else if ownerExists && (lane.Product != lease.ProductID || lane.ProfileIdentity != lease.ProfileIdentity || lane.NativeSessionID != lease.NativeSessionID) {
-			return fmt.Errorf("released native session lease %q has conflicting historical owner", key)
 		}
 	}
 	activeBindings := map[string]bool{}
@@ -531,30 +457,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 			return fmt.Errorf("lane %s cannot be removed from state %s", id, lane.State)
 		}
 	}
-	for key, lease := range current.NativeLeases {
-		if candidate, ok := next.NativeLeases[key]; ok {
-			if lease.Schema != candidate.Schema || lease.ProductID != candidate.ProductID || lease.ProfileIdentity != candidate.ProfileIdentity ||
-				lease.NativeSessionID != candidate.NativeSessionID || lease.OwnerLaneID != candidate.OwnerLaneID || lease.CreatedAt != candidate.CreatedAt {
-				return fmt.Errorf("native session lease %s changed immutable identity", key)
-			}
-			if candidate.Generation < lease.Generation || candidate.Revision < lease.Revision || candidate.UpdatedAt < lease.UpdatedAt ||
-				(!reflect.DeepEqual(lease, candidate) && candidate.Revision <= lease.Revision) {
-				return fmt.Errorf("native session lease %s regressed mutation evidence", key)
-			}
-			if lease.ProcessGroup != candidate.ProcessGroup {
-				initialHold := lease.State == LeasePrepared && lease.ProcessGroup == (procinfo.Identity{}) && candidate.State == LeaseHeld
-				recoveredGeneration := candidate.Generation > lease.Generation
-				if !initialHold && !recoveredGeneration {
-					return fmt.Errorf("native session lease %s changed process identity without a new generation", key)
-				}
-			}
-			if !ValidLifecycleTransition("lease", string(lease.State), string(candidate.State)) {
-				return fmt.Errorf("native session lease %s cannot transition from %s to %s", key, lease.State, candidate.State)
-			}
-		} else if lease.State != LeaseReleased {
-			return fmt.Errorf("native session lease %s cannot be removed from state %s", key, lease.State)
-		}
-	}
 	for id, binding := range current.ComponentBindings {
 		if candidate, ok := next.ComponentBindings[id]; ok {
 			if binding.Schema != candidate.Schema || binding.AttachmentID != candidate.AttachmentID ||
@@ -597,16 +499,6 @@ func validateCatalogTransitions(current, next Catalog) error {
 		}
 	}
 
-	for key, lease := range next.NativeLeases {
-		if _, exists := current.NativeLeases[key]; !exists {
-			if lease.State != LeasePrepared {
-				return fmt.Errorf("native session lease %s starts in non-initial state %s", key, lease.State)
-			}
-			if next.Host.Generation > 0 && lease.Generation != next.Host.Generation {
-				return fmt.Errorf("native session lease %s starts in stale generation %d", key, lease.Generation)
-			}
-		}
-	}
 	for id, binding := range next.ComponentBindings {
 		if _, exists := current.ComponentBindings[id]; !exists && binding.State != BindingBinding {
 			return fmt.Errorf("component binding %s starts in non-initial state %s", id, binding.State)
@@ -624,7 +516,6 @@ func knownState(kind, state string) bool {
 	states := map[string]map[string]bool{
 		"attachment":        {"preparing": true, "prepared": true, "selecting": true, "attached": true, "detaching": true, "detached": true, "debt": true},
 		"lane":              {"preparing": true, "idle": true, "running": true, "interrupting": true, "retiring": true, "terminal": true, "archived": true, "cleanup-debt": true},
-		"lease":             {"prepared": true, "held": true, "releasing": true, "released": true, "cleanup-debt": true},
 		"component-binding": {"binding": true, "ready": true, "retiring": true, "closed": true},
 		"component-session": {"announced": true, "idle": true, "busy": true, "closing": true, "closed": true},
 	}

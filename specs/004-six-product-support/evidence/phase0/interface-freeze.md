@@ -61,7 +61,6 @@ The exact constants in `internal/daemon/state.go` are:
 
 ```text
 agent-sessions.lane-input-receipt.v1
-agent-sessions.native-session-lease.v1
 agent-sessions.component-binding.v1
 agent-sessions.component-session.v1
 ```

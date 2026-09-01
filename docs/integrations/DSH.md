@@ -193,8 +193,8 @@ Readiness checks, in order, are:
 5. central component Authority and installed Cordis profile readiness.
 
 Typical fail-closed diagnostics are tuple mismatch, pnpm missing, plugin absent
-from the selected profile, ACP protocol drift, `/tmp` component socket, active
-native lease owner, unsupported permission policy, and missing exact parent
+from the selected profile, ACP protocol drift, `/tmp` component socket,
+unsupported permission policy, and missing exact parent
 identity evidence. Credentials and raw bootstrap values are redacted and are
 not persisted in native references or doctor output.
 
