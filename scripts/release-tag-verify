@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 3 )); then
+  printf 'usage: %s TAG EXPECTED_COMMIT EXPECTED_TREE\n' "${0##*/}" >&2
+  exit 2
+fi
+tag=$1
+expected_commit=$2
+expected_tree=$3
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+version="$(<"$root/deploy/agent-sessions/VERSION")"
+[[ "$tag" == "v$version" ]] || { printf 'tag/version mismatch\n' >&2; exit 1; }
+[[ "$(git -C "$root" cat-file -t "refs/tags/$tag")" == tag ]] || {
+  printf '%s is not an annotated tag\n' "$tag" >&2
+  exit 1
+}
+git -C "$root" verify-tag "$tag"
+commit="$(git -C "$root" rev-list -n1 "$tag")"
+tree="$(git -C "$root" rev-parse "$commit^{tree}")"
+[[ "$commit" == "$expected_commit" && "$tree" == "$expected_tree" ]] || {
+  printf 'signed tag target does not match expected commit/tree\n' >&2
+  exit 1
+}
+trailers="$(git -C "$root" for-each-ref --format='%(contents)' "refs/tags/$tag" | git interpret-trailers --parse)"
+trailer_value() {
+  local name=$1
+  local values
+  values="$(sed -n "s/^$name:[[:space:]]*//p" <<<"$trailers")"
+  [[ "$(grep -c . <<<"$values" || true)" == 1 ]] || {
+    printf 'signed tag must contain exactly one %s trailer\n' "$name" >&2
+    exit 1
+  }
+  printf '%s' "$values"
+}
+run_url="$(trailer_value Agent-Sessions-Evidence-Run)"
+artifact="$(trailer_value Agent-Sessions-Evidence-Artifact)"
+digest="$(trailer_value Agent-Sessions-Evidence-SHA256)"
+[[ "$run_url" =~ ^https://github\.com/.+/actions/runs/([0-9]+)$ ]] || {
+  printf 'signed tag evidence run URL is invalid\n' >&2
+  exit 1
+}
+run_id=${BASH_REMATCH[1]}
+[[ "$artifact" == "agent-sessions-v${version}-release-evidence-${commit}" ]] || {
+  printf 'signed tag evidence artifact is not bound to its commit\n' >&2
+  exit 1
+}
+[[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+  printf 'signed tag evidence digest is invalid\n' >&2
+  exit 1
+}
+printf 'run_url=%s\nrun_id=%s\nartifact=%s\nsha256=%s\n' "$run_url" "$run_id" "$artifact" "$digest"

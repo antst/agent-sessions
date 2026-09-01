@@ -1067,8 +1067,8 @@ func TestPreparedResumeSynchronouslyReleasesExitedLoadedOwner(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", socket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", socket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	if err := writeJSONAtomic(interactiveOwnerPath(paths, threadID), interactiveOwnerRecord{
@@ -1088,7 +1088,7 @@ func TestPreparedResumeSynchronouslyReleasesExitedLoadedOwner(t *testing.T) {
 		}
 		return map[string]any{"released": true}
 	})
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 	paths = resolveNativePaths()
 	client, err := dialLaunchAppServer(paths)
 	if err != nil {
@@ -1121,8 +1121,8 @@ func TestPreparedResumeDoesNotReleaseUncorroboratedLoadedOwner(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", socket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", socket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	if err := writeJSONAtomic(interactiveOwnerPath(paths, threadID), interactiveOwnerRecord{
@@ -1270,8 +1270,8 @@ func TestPreparedResumeKeepsIndexedNameAfterPromptReplacesTitle(t *testing.T) {
 
 func setPreparedLaunchTestEnv(t *testing.T, root, socket string, handlers ...func(map[string]any) map[string]any) {
 	t.Helper()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", socket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", socket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	supervisorSocket := startAuthorizationControlServer(t, func(request map[string]any) map[string]any {
@@ -1289,7 +1289,7 @@ func setPreparedLaunchTestEnv(t *testing.T, root, socket string, handlers ...fun
 			return map[string]any{}
 		}
 	})
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 }
 
 func commitPreparedOwnerForTest(paths nativePaths, threadID string) {

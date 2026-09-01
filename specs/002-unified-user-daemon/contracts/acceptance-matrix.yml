@@ -1,0 +1,334 @@
+schema_version: 1
+baseline_commit: c056fbc5015d4ab0a673f66cac5404206f7bcee6
+assertion_source: docs/ACCEPTANCE-MATRIX.md
+expected_cell_count: 202
+cell_expansion_contract:
+  required_family_fields: [id, evidence_tiers, platforms, assertion_source, prerequisites, ids]
+  required_expanded_fields: [id, family, evidence_tiers, platforms, assertion_source, prerequisites]
+  evidence_tiers:
+    allowed: [S, I, T, L, X, F, U]
+    require_nonempty: true
+  assertion_locator:
+    document: docs/ACCEPTANCE-MATRIX.md
+    section_field: section
+    locator_template_field: locator_template
+    require_exactly_one_cell_id_in_section: true
+  platform_scope:
+    allowed: [linux, macos]
+    require_nonempty_after_overrides: true
+    applicability_field: applicability
+  prerequisite_graph:
+    references: acceptance-cell-ids-only
+    acyclic: true
+    no_implicit_dependencies: true
+    missing_prerequisite_result: invalid
+    failed_prerequisite_verdict: NOT_EXECUTED_PREREQUISITE_RED
+topology_delta_contract:
+  default: assertion-unchanged
+  allowed_scope: agent-sessions-process-service-or-package-observation-only
+  required_fields: [baseline_observation, target_observation, preserved_invariant]
+  require_known_cell_id: true
+  require_target_assertion_locator: true
+  functional_or_native_product_behavior_change: forbidden
+verdicts:
+  - PASS
+  - N/A
+  - BLOCKED
+  - RED
+  - NOT_EXECUTED_PREREQUISITE_RED
+result_contract:
+  required_fields:
+    - result_id
+    - cell_id
+    - verdict
+    - source_commit
+    - source_tree
+    - installed_release_identity
+    - os
+    - architecture
+    - native_product_versions
+    - evidence_paths
+  conditional_fields:
+    PASS: [literal_command, cwd, exit_status, exact_identity_evidence, preserved_state_evidence, cleanup_evidence]
+    N/A: [verdict_reason, applicability_evidence]
+    BLOCKED: [verdict_reason, diagnostic_classification, applicability_evidence]
+    RED: [verdict_reason, diagnostic_classification, literal_command, cwd, exit_status, exact_identity_evidence, preserved_state_evidence, cleanup_evidence]
+    NOT_EXECUTED_PREREQUISITE_RED: [verdict_reason, failed_prerequisite_ids]
+    superseding_rerun: [supersedes_result_id]
+  aggregate_credit: forbidden
+  duplicate_credit: forbidden
+  supersession:
+    allowed: true
+    prior_result_receives_credit: false
+    require_same_cell_candidate_and_platform: true
+topology_deltas:
+  S-06:
+    baseline_observation: repository and install plans contain no obsolete canonical-host or binary names
+    target_observation: active production, build, package, standard lifecycle, help, plugin, and executable dependency surfaces contain no obsolete canonical-host or binary names while historical evidence, tests, and the repository-only one-time cleanup script plus its authoritative allowlist contract may name them
+    preserved_invariant: no obsolete Agent Sessions authority or binary remains reachable from a supported build, package, installation, update, removal, service, or runtime path
+  U-03:
+    baseline_observation: upgrade waits for Codex App Server and managed Grok peers to stop
+    target_observation: first greenfield install assumes operator quiescence; unified upgrades restart only the Agent Sessions daemon and preserve vendor peers
+    preserved_invariant: upgrade never creates mixed Agent Sessions authority or signals unrelated processes
+  U-04:
+    baseline_observation: install preserves an unrelated standalone federator or peer
+    target_observation: install preserves another OS user's Agent Sessions service, the central hub, and unrelated vendor peers
+    preserved_invariant: install mutates only the exact selected user service and release
+  U-12:
+    baseline_observation: prebuilt archive installs eleven Agent Sessions binaries
+    target_observation: prebuilt archive contains exactly agent-sessions and agent-sessions-hub images and independent host-only and hub-only targets select their role
+    preserved_invariant: prebuilt no-Go installation, four host product payloads, and reproducible bytes
+  C-09:
+    baseline_observation: normal quit converges the per-session shim count to zero
+    target_observation: normal quit converges the managed attachment to detached with no per-session Agent Sessions process
+    preserved_invariant: normal quit does not archive and leaves no Agent Sessions-owned residue
+  C-16:
+    baseline_observation: supervisor restart participates in Codex recovery
+    target_observation: unified daemon restart participates in Codex recovery
+    preserved_invariant: every exit, interrupt, restart, and App Server recovery path converges exactly once
+  CL-02:
+    baseline_observation: Claude rows coexist with one standalone host-agent service row
+    target_observation: Claude rows coexist with one unified daemon service row
+    preserved_invariant: ordinary, peer, and lane Claude identities coexist without duplication
+  CL-05:
+    baseline_observation: native title and status refresh the host-agent registration
+    target_observation: native title and status refresh the daemon-owned attachment registration
+    preserved_invariant: native state wins over cwd fallback without duplicating the service row
+  CL-06:
+    baseline_observation: host-agent restart causes idle supershims to re-register
+    target_observation: daemon restart reattests idle Claude attachments without restarting Claude
+    preserved_invariant: one service row and every live native Claude identity are restored
+  CL-07:
+    baseline_observation: supershim crash and stale native artifacts retire exact Claude ownership
+    target_observation: connector or daemon-side attachment failure and stale native artifacts retire exact Claude ownership
+    preserved_invariant: cleanup preserves unrelated Claude rows, processes, and service state
+  CL-10:
+    baseline_observation: gated launch journal survives standalone agent restart
+    target_observation: gated launch journal survives unified daemon restart
+    preserved_invariant: failed selection never adopts or mutates the ordinary Claude session
+  G-06:
+    baseline_observation: TUI, product host, private leader, observer, and MCP share one launch record
+    target_observation: TUI, daemon attachment, private leader, observer, and MCP share one launch record
+    preserved_invariant: every Grok actor is bound by exact ancestry and launch identity
+  G-16:
+    baseline_observation: standalone product-host process group is isolated from the TUI
+    target_observation: private leader and observer process scopes are isolated from the TUI and daemon
+    preserved_invariant: normal exit terminates only exact owned Grok helpers and removes exact owned artifacts
+  G-18:
+    baseline_observation: owner, standalone host, or leader death reconciles Grok state
+    target_observation: owner, unified daemon, or leader death reconciles Grok state
+    preserved_invariant: fault cleanup never kills unrelated Grok clients
+  Q-08:
+    baseline_observation: standalone agent restart republishes Qwen
+    target_observation: unified daemon restart republishes Qwen
+    preserved_invariant: the same native Qwen peer returns without restart or duplication
+  L-16:
+    baseline_observation: worker, manager, or supervisor crash restores lane state
+    target_observation: worker or unified daemon crash restores lane state
+    preserved_invariant: terminal items, cursor, notices, and cleanup restore exactly once
+  L-25:
+    baseline_observation: macOS restricted-shell cleanup is exercised after manager SIGKILL
+    target_observation: macOS restricted-shell cleanup is exercised across daemon SIGKILL and restart
+    preserved_invariant: exact Grok lane workers and descendants are removed without heuristic collateral
+  L-29:
+    baseline_observation: Qwen manager, worker, helper, agent, or supervisor failure is reconciled
+    target_observation: Qwen worker, tool root, helper, or unified daemon failure is reconciled
+    preserved_invariant: retry preserves unrelated processes and converges durable cleanup debt
+  X-01:
+    baseline_observation: local startup publishes one standalone host service row
+    target_observation: local startup publishes one unified daemon host service row
+    preserved_invariant: grouped local collaboration works without a hub
+  X-05:
+    baseline_observation: hub and standalone host-agent restart restore registrations
+    target_observation: hub and host-daemon restart restore registrations
+    preserved_invariant: service and peer identities return without duplicate or peer restart
+  X-08:
+    baseline_observation: install and tests preserve unrelated standalone host agents and hubs
+    target_observation: install and tests preserve another OS user's Agent Sessions service and the central hub
+    preserved_invariant: test and install scope never mutates unrelated authorities
+families:
+  - id: source-package
+    evidence_tiers: [S]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Source and packaging (`S`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: []
+    cell_overrides:
+      S-02:
+        platforms: [macos]
+    ids: [S-01, S-02, S-03, S-04, S-05, S-06, S-07, S-08]
+  - id: install-upgrade
+    evidence_tiers: [I, U]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Installation and upgrade (`I/U`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01]
+    cell_overrides:
+      U-07:
+        platforms: [macos]
+      U-09:
+        applicability: four-platform-release-artifacts
+    ids: [U-01, U-02, U-03, U-04, U-05, U-06, U-07, U-08, U-09, U-10, U-11, U-12]
+  - id: codex-interactive
+    evidence_tiers: [T, F]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Codex interactive peer (`T/F`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    ids: [C-01, C-02, C-03, C-04, C-05, C-06, C-07, C-08, C-09, C-10, C-11, C-12, C-13, C-14, C-15, C-16, C-17, C-18]
+  - id: claude-interactive
+    evidence_tiers: [T, F]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Claude interactive peer (`T/F`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    cell_overrides:
+      CL-11:
+        applicability: claude-in-chrome-installed
+    ids: [CL-01, CL-02, CL-03, CL-04, CL-05, CL-06, CL-07, CL-08, CL-09, CL-10, CL-11]
+  - id: grok-interactive
+    evidence_tiers: [T, F]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Grok interactive peer (`T/F`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    cell_overrides:
+      G-02:
+        platforms: [macos]
+    ids: [G-01, G-02, G-03, G-04, G-05, G-06, G-07, G-08, G-09, G-10, G-11, G-12, G-13, G-14, G-15, G-16, G-17, G-18, G-19, G-20, G-21]
+  - id: qwen-interactive
+    evidence_tiers: [T, F]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Qwen interactive peer (`T/F`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    ids: [Q-01, Q-02, Q-03, Q-04, Q-05, Q-06, Q-07, Q-08, Q-09, Q-10]
+  - id: lane-lifecycle
+    evidence_tiers: [L, F, X]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Codex, Claude, Grok, and Qwen lanes (`L/F/X`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    ids: [L-01, L-02, L-03, L-04, L-05, L-06, L-07, L-08, L-09, L-10, L-11, L-12, L-13, L-14, L-15, L-16, L-17, L-18, L-19, L-20, L-21, L-22, L-23, L-24, L-25, L-26, L-27, L-28, L-29, L-30]
+  - id: parent-target-composition
+    evidence_tiers: [L, X]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Parent layer × target layer (`P/L/X`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    ids:
+      - P-C-C
+      - P-C-CL
+      - P-C-G
+      - P-C-Q
+      - P-CL-C
+      - P-CL-CL
+      - P-CL-G
+      - P-CL-Q
+      - P-G-C
+      - P-G-CL
+      - P-G-G
+      - P-G-Q
+      - P-Q-C
+      - P-Q-CL
+      - P-Q-G
+      - P-Q-Q
+  - id: peer-lane-messaging
+    evidence_tiers: [T, L, X]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Pairwise peer messaging (`T/X`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    ids:
+      - M-CP-CP
+      - M-CP-CLP
+      - M-CP-GP
+      - M-CP-QP
+      - M-CP-CL
+      - M-CP-CLL
+      - M-CP-GL
+      - M-CP-QL
+      - M-CLP-CP
+      - M-CLP-CLP
+      - M-CLP-GP
+      - M-CLP-QP
+      - M-CLP-CL
+      - M-CLP-CLL
+      - M-CLP-GL
+      - M-CLP-QL
+      - M-GP-CP
+      - M-GP-CLP
+      - M-GP-GP
+      - M-GP-QP
+      - M-GP-CL
+      - M-GP-CLL
+      - M-GP-GL
+      - M-GP-QL
+      - M-QP-CP
+      - M-QP-CLP
+      - M-QP-GP
+      - M-QP-QP
+      - M-QP-CL
+      - M-QP-CLL
+      - M-QP-GL
+      - M-QP-QL
+      - M-CL-CP
+      - M-CL-CLP
+      - M-CL-GP
+      - M-CL-QP
+      - M-CL-CL
+      - M-CL-CLL
+      - M-CL-GL
+      - M-CL-QL
+      - M-CLL-CP
+      - M-CLL-CLP
+      - M-CLL-GP
+      - M-CLL-QP
+      - M-CLL-CL
+      - M-CLL-CLL
+      - M-CLL-GL
+      - M-CLL-QL
+      - M-GL-CP
+      - M-GL-CLP
+      - M-GL-GP
+      - M-GL-QP
+      - M-GL-CL
+      - M-GL-CLL
+      - M-GL-GL
+      - M-GL-QL
+      - M-QL-CP
+      - M-QL-CLP
+      - M-QL-GP
+      - M-QL-QP
+      - M-QL-CL
+      - M-QL-CLL
+      - M-QL-GL
+      - M-QL-QL
+  - id: federation-groups
+    evidence_tiers: [X, F]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Federation (`X/F`)
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    ids: [X-01, X-02, X-03, X-04, X-05, X-06, X-07, X-08]
+  - id: archive-unarchive
+    evidence_tiers: [T, L, X]
+    platforms: [linux, macos]
+    assertion_source:
+      section: Archive and unarchive contract
+      locator_template: "table-cell:{cell_id}"
+    prerequisites: [S-01, U-01, U-08]
+    cell_overrides:
+      A-CL:
+        applicability: native-or-explicit-na
+    ids: [A-C, A-CL, A-G, A-Q]

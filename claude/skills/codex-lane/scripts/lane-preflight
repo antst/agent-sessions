@@ -8,7 +8,7 @@ set -eu
 # starts, installs, configures, or mutates anything.
 
 expected_contract_version=2
-state_root="${CLAUDE_PEER_DATA_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/claude-code-peer}"
+state_root="${AGENT_SESSIONS_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/agent-sessions}"
 
 json_string() {
   # Keep this expression portable to both GNU and BSD sed. In BSD sed, \r
@@ -20,26 +20,13 @@ json_bool() {
   if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi
 }
 
-runtime_path=""
-invocation=""
+runtime_path="$(command -v codex-peer-lane 2>/dev/null || true)"
+invocation="$runtime_path"
 launcher_found=0
-if command -v codex-peer-lane >/dev/null 2>&1; then
-  launcher_found=1
-fi
-if [ -f "$state_root/native-runtime-path" ]; then
-  runtime_path="$(sed -n 1p "$state_root/native-runtime-path" 2>/dev/null || true)"
-  if [ -n "$runtime_path" ] && [ -x "$runtime_path" ]; then
-    # Report the exact binary this preflight validated. A launcher found on
-    # PATH may belong to a different installation root and select another
-    # runtime when it bootstraps.
-    invocation="$runtime_path lane"
-  else
-    runtime_path=""
-  fi
-fi
+[ -z "$runtime_path" ] || launcher_found=1
 
 run_lane() {
-  "$runtime_path" lane "$@"
+  "$runtime_path" "$@"
 }
 
 runtime_found=0
@@ -89,11 +76,7 @@ if [ "$contract_ok" = "1" ] && [ "$doctor_exit" = "0" ]; then
 fi
 
 if [ "$runtime_found" = "0" ]; then
-  if [ "$launcher_found" = "1" ]; then
-    summary="lane launcher is installed but the native runtime is not initialized; ask the user to run codex-peer-lane doctor once in a host terminal, then rerun preflight"
-  else
-    summary="lane runtime is not installed; show the commands from references/install.md and stop"
-  fi
+  summary="lane runtime is not installed; show the commands from references/install.md and stop"
 elif [ "$contract_ok" = "1" ]; then
   summary="lane contract is compatible, but App Server or the peer supervisor is unreachable; stop and report runtime unavailable"
 else

@@ -24,11 +24,11 @@ func TestLinuxProcessIdentityObservationMatchesProcStat(t *testing.T) {
 	if len(fields) <= 19 {
 		t.Fatalf("current process stat has %d trailing fields", len(fields))
 	}
-	observation := observeProcessIdentity(pid, fields[19])
+	observation := classifyProcessIdentityProbe(probeProcessIdentity(pid), fields[19])
 	if observation.Status != processIdentityMatches || observation.ProcStart != fields[19] {
 		t.Fatalf("process observation = %+v, want start token %q", observation, fields[19])
 	}
-	if reused := observeProcessIdentity(pid, fields[19]+"-reused"); reused.Status != processIdentityStale {
+	if reused := classifyProcessIdentityProbe(probeProcessIdentity(pid), fields[19]+"-reused"); reused.Status != processIdentityStale {
 		t.Fatalf("mismatched process observation = %+v", reused)
 	}
 }

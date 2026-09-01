@@ -95,7 +95,7 @@ func TestSupervisorAuthorizationRequiresExplicitPeerCapability(t *testing.T) {
 
 func TestUserPromptLateAttachesPreparedCodex0148OwnerWithDistinctSessionFamily(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	codexHome := filepath.Join(root, "codex")
 	if err := os.MkdirAll(codexHome, 0700); err != nil {
@@ -130,7 +130,7 @@ func TestUserPromptLateAttachesPreparedCodex0148OwnerWithDistinctSessionFamily(t
 			"sessionId": threadID, "name": "codex-0148-parent", "socketPath": "",
 		}}
 	})
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 
 	output, err := handleNativeHook(hookInput{
 		Event: "UserPromptSubmit", SessionID: sessionID, TranscriptPath: transcriptPath, Cwd: root,
@@ -358,17 +358,6 @@ func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			connection, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			_ = connection.SetReadDeadline(time.Now().Add(time.Second))
-			_, _ = bufio.NewReader(connection).ReadBytes('\n')
-			_ = connection.Close()
-		}
-	}()
 	statePath := filepath.Join(paths.dataRoot, "sessions", sessionKey(threadID), "state.json")
 	if err := writeJSONAtomic(statePath, map[string]any{
 		"sessionId": threadID, "pid": os.Getpid(), "socketPath": shimSocket,
@@ -376,6 +365,7 @@ func TestRegisterPreparedLaunchPublishesExactTransaction(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	serveTestMutableShim(t, listener, statePath)
 	supervisor := &nativeSupervisor{
 		paths: paths, done: make(chan struct{}), shims: map[string]map[string]any{},
 		activeTurns: map[string]string{}, subscribed: map[string]bool{}, retired: map[string]bool{},
@@ -587,24 +577,15 @@ func TestAttachedReplacementKeepsReleaseGuardAgainstDelayedArchive(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			connection, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			_ = connection.SetReadDeadline(time.Now().Add(time.Second))
-			_, _ = bufio.NewReader(connection).ReadBytes('\n')
-			_ = connection.Close()
-		}
-	}()
+	statePath := filepath.Join(paths.dataRoot, "sessions", sessionKey(threadID), "state.json")
 	state := map[string]any{
 		"sessionId": threadID, "pid": os.Getpid(), "socketPath": shimSocket,
 		"name": "replacement", "permissionMode": "default", "status": "idle",
 	}
-	if err := writeJSONAtomic(filepath.Join(paths.dataRoot, "sessions", sessionKey(threadID), "state.json"), state); err != nil {
+	if err := writeJSONAtomic(statePath, state); err != nil {
 		t.Fatal(err)
 	}
+	serveTestMutableShim(t, listener, statePath)
 	supervisor := &nativeSupervisor{
 		paths: paths, done: make(chan struct{}), shims: map[string]map[string]any{threadID: state},
 		activeTurns: map[string]string{}, subscribed: map[string]bool{}, retired: map[string]bool{},
@@ -672,27 +653,13 @@ func TestPreparedRegisterAndAbortSerializeWithoutResidue(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			connection, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			_ = connection.SetReadDeadline(time.Now().Add(time.Second))
-			body, _ := bufio.NewReader(connection).ReadBytes('\n')
-			_ = connection.Close()
-			var message map[string]any
-			if json.Unmarshal(body, &message) == nil && stringValue(message["action"]) == "shutdown" {
-				_ = os.Remove(statePath)
-			}
-		}
-	}()
 	if err := writeJSONAtomic(statePath, map[string]any{
 		"sessionId": threadID, "pid": os.Getpid(), "socketPath": shimSocket,
 		"name": "prepared", "permissionMode": "default", "status": "idle",
 	}); err != nil {
 		t.Fatal(err)
 	}
+	serveTestMutableShim(t, listener, statePath)
 	supervisor := &nativeSupervisor{
 		paths: paths, done: make(chan struct{}), shims: map[string]map[string]any{},
 		activeTurns: map[string]string{}, subscribed: map[string]bool{}, retired: map[string]bool{},
@@ -1168,11 +1135,11 @@ func TestPreparedTurnCompletionClearsActiveStatus(t *testing.T) {
 
 func TestOrdinaryHooksAreSilentAndDoNotActivateSupervisor(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "run", "missing-supervisor.sock"))
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(root, "run", "missing-supervisor.sock"))
 	threadID := "00000000-0000-0000-0000-000000000a06"
 	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
 		output, err := handleNativeHook(hookInput{Event: event, SessionID: threadID, Cwd: root})
@@ -1194,11 +1161,11 @@ func TestOrdinaryHooksAreSilentAndDoNotActivateSupervisor(t *testing.T) {
 
 func TestOrdinaryHookCommandWritesNoOutput(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "run", "missing-supervisor.sock"))
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(root, "run", "missing-supervisor.sock"))
 
 	input, err := os.CreateTemp(root, "hook-input")
 	if err != nil {
@@ -1245,7 +1212,7 @@ func TestOrdinaryHookCommandWritesNoOutput(t *testing.T) {
 
 func TestPeerHooksNeverRenameThreadDuringTurnReconciliation(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1263,7 +1230,7 @@ func TestPeerHooksNeverRenameThreadDuringTurnReconciliation(t *testing.T) {
 		actions <- request
 		return map[string]any{"state": map[string]any{"sessionId": threadID}}
 	})
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 	paths = resolveNativePaths()
 	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop"} {
 		if _, err := ensureHookShim(paths, hookInput{Event: event, SessionID: threadID, Cwd: root}, liveInteractiveOwnerRecord(paths, threadID)); err != nil {
@@ -1287,7 +1254,7 @@ func TestPeerHooksNeverRenameThreadDuringTurnReconciliation(t *testing.T) {
 
 func TestPeerTurnHooksPreserveManualShimRename(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1331,7 +1298,7 @@ func TestPeerTurnHooksPreserveManualShimRename(t *testing.T) {
 
 func TestCodexLaneHookConsumesFallbackInbox(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1376,12 +1343,12 @@ func TestCodexLaneHookConsumesFallbackInbox(t *testing.T) {
 
 func TestHookRejectsMismatchedSupervisorWithoutRestart(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	socket := startAuthorizationControlServer(t, func(_ map[string]any) map[string]any {
 		return map[string]any{"runtimeIdentity": "sha256:stale", "pluginVersion": "stale"}
 	})
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", socket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", socket)
 	started := time.Now()
 	err := ensureHookSupervisorCurrent(resolveNativePaths())
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
@@ -1407,7 +1374,7 @@ func TestShimMaintenanceReapsMissingOwnerWithoutStartToken(t *testing.T) {
 
 func TestStdioMCPRequiresHostAttestationBeforeEveryTool(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	peerID := "00000000-0000-0000-0000-000000000a30"
@@ -1418,7 +1385,7 @@ func TestStdioMCPRequiresHostAttestationBeforeEveryTool(t *testing.T) {
 			"appServerProcStart": readProcStart(os.Getppid()),
 		}
 	})
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 	paths := resolveNativePaths()
 	writeTestAttachedInteractiveOwner(t, paths, peerID)
 	peerSocket := filepath.Join(root, "peer.sock")
@@ -1527,7 +1494,7 @@ func mcpResultIsError(result map[string]any) bool {
 func TestStandaloneMCPProcessCannotForgeManagedHostMetadata(t *testing.T) {
 	root := t.TempDir()
 	peerID := "00000000-0000-0000-0000-000000000a32"
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	writeTestAttachedInteractiveOwner(t, paths, peerID)
@@ -1535,9 +1502,9 @@ func TestStandaloneMCPProcessCannotForgeManagedHostMetadata(t *testing.T) {
 	command.Env = append(os.Environ(),
 		"CODEX_MCP_IMPERSONATION_HELPER=1",
 		"CODEX_MCP_IMPERSONATION_THREAD="+peerID,
-		"CLAUDE_PEER_DATA_DIR="+paths.dataRoot,
+		"AGENT_SESSIONS_STATE_ROOT="+paths.dataRoot,
 		"CODEX_HOME="+paths.codexHome,
-		"CLAUDE_PEER_SUPERVISOR_SOCKET="+filepath.Join(root, "missing-supervisor.sock"),
+		"AGENT_SESSIONS_SUPERVISOR_SOCKET="+filepath.Join(root, "missing-supervisor.sock"),
 	)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -1606,7 +1573,7 @@ func TestMCPImpersonationHelper(t *testing.T) {
 
 func TestReconcileDoesNotReadResumeOrSubscribeOrdinaryLoadedThread(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	threadID := "00000000-0000-0000-0000-000000000a07"
@@ -1631,7 +1598,7 @@ func TestReconcileDoesNotReadResumeOrSubscribeOrdinaryLoadedThread(t *testing.T)
 		}
 		return map[string]any{}, nil
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", socket)
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", socket)
 	supervisor, err := newNativeSupervisor("test")
 	if err != nil {
 		t.Fatal(err)

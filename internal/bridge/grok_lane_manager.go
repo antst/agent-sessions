@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 type grokLaneManager struct {
@@ -208,6 +209,9 @@ func (m *grokLaneManager) start() error {
 	if err := m.prepareToolRegistry(); err != nil {
 		return err
 	}
+	if err := socketpath.Validate(m.state.ControlSocket); err != nil {
+		return fmt.Errorf("validate Grok lane control socket: %w", err)
+	}
 	_ = os.Remove(m.state.ControlSocket)
 	listener, err := net.Listen("unix", m.state.ControlSocket)
 	if err != nil {
@@ -221,6 +225,10 @@ func (m *grokLaneManager) start() error {
 	if err != nil {
 		return fmt.Errorf("capture Grok lane manager identity: %w", err)
 	}
+	managerInfo := procinfo.Read(os.Getpid())
+	if managerInfo.Status != procinfo.Known || managerInfo.Start != managerProcStart || managerInfo.StrongStart == "" {
+		return errors.New("capture strong Grok lane manager identity")
+	}
 	m.mu.Lock()
 	if m.closing {
 		m.mu.Unlock()
@@ -228,7 +236,7 @@ func (m *grokLaneManager) start() error {
 		return m.closingError("grok lane manager is closing during startup")
 	}
 	m.listener = listener
-	m.state.ManagerPID, m.state.ManagerProcStart = os.Getpid(), managerProcStart
+	m.state.ManagerPID, m.state.ManagerProcStart, m.state.ManagerStrongStart = os.Getpid(), managerProcStart, managerInfo.StrongStart
 	err = m.persistLocked()
 	m.mu.Unlock()
 	if err != nil {
@@ -322,6 +330,7 @@ func (m *grokLaneManager) start() error {
 	return nil
 }
 
+//nolint:gocyclo // Worker startup keeps process, ledger, ACP, and publication state in one fail-closed transaction.
 func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 	grokBin := strings.TrimSpace(os.Getenv("GROK_PEER_GROK_BIN"))
 	if grokBin == "" {
@@ -381,6 +390,10 @@ func (m *grokLaneManager) startWorker(record *grokLaunchRecord) error {
 		stopGrokManagedProcess(worker, 2*time.Second)
 		return err
 	}
+	if err := m.prepareSharedToolRootLedger(); err != nil {
+		stopGrokManagedProcess(worker, 2*time.Second)
+		return err
+	}
 	client := newGrokACPClient(worker, stdin, stdout, m.state.SessionID, 0, nil)
 	m.mu.Lock()
 	if m.closing {
@@ -408,15 +421,21 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return worker.attributedError("initialize headless Grok lane ACP worker", err)
+		return grokLanePrivateACPError("initialize headless Grok lane ACP worker", err)
 	}
-	if !grokAuthMethodAdvertised(result, "cached_token") {
-		return worker.attributedError("authenticate headless Grok lane ACP worker", errors.New("cached_token authentication was not advertised"))
+	if !grokCachedTokenAdvertised(result) {
+		return errors.New("authenticate headless Grok lane ACP worker: cached_token authentication was not advertised")
 	}
 	if _, err := client.request(ctx, "authenticate", map[string]any{"methodId": "cached_token", "_meta": map[string]any{"headless": true}}); err != nil {
-		return worker.attributedError("authenticate headless Grok lane ACP worker", err)
+		return grokLanePrivateACPError("authenticate headless Grok lane ACP worker", err)
 	}
-	params := map[string]any{"cwd": m.state.Cwd, "mcpServers": []any{}, "_meta": map[string]any{"yoloMode": true}}
+	mcpServer, err := nativeRuntimeAgentSessionsMCPServer("grok-mcp", nil)
+	if err != nil {
+		return err
+	}
+	params := map[string]any{
+		"cwd": m.state.Cwd, "mcpServers": []any{mcpServer}, "_meta": map[string]any{"yoloMode": true},
+	}
 	method := "session/new"
 	if m.state.SessionCreated {
 		method = "session/load"
@@ -427,7 +446,7 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 	}
 	created, err := client.request(ctx, method, params)
 	if err != nil {
-		return worker.attributedError("open headless Grok lane session", err)
+		return grokLanePrivateACPError("open headless Grok lane session", err)
 	}
 	returned := stringValue(created["sessionId"])
 	if method == "session/new" && returned == "" {
@@ -449,10 +468,19 @@ func (m *grokLaneManager) initializeACP(ctx context.Context) error {
 	return err
 }
 
+// grokLanePrivateACPError preserves a bounded protocol cause for the lane
+// manager's private 0600 log. The public launcher reports only that the manager
+// failed startup, while shutdown separately stops and joins the still-live ACP
+// worker; treating a request rejection as a process-exit error would mask the
+// useful cause behind a spurious "managed process join incomplete" message.
+func grokLanePrivateACPError(role string, err error) error {
+	return fmt.Errorf("%s: %w", role, grokMCPReadinessDiagnostic(err))
+}
+
 func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	var lastFailure string
+	failures := grokMCPReadinessFailures{}
 	for {
 		m.mu.Lock()
 		client, worker := m.client, m.worker
@@ -464,14 +492,14 @@ func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 		roster, rosterErr := client.request(ctx, "_x.ai/sessions/list", map[string]any{})
 		switch {
 		case rosterErr != nil:
-			lastFailure = rosterErr.Error()
+			failures.record(rosterErr)
 		default:
 			state, stateErr := grokRosterStateFromResponse(roster, grokSessionID)
 			switch {
 			case stateErr != nil:
-				lastFailure = stateErr.Error()
+				failures.record(stateErr)
 			case state.permissionMode != "bypassPermissions":
-				lastFailure = "Grok session is not in bypassPermissions mode"
+				failures.record(errors.New("grok session is not in bypassPermissions mode"))
 			default:
 				result, callErr := client.request(ctx, "_x.ai/mcp/call", map[string]any{
 					"sessionId": grokSessionID, "server": "agent_sessions", "tool": "identity",
@@ -483,9 +511,9 @@ func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 				}
 				switch {
 				case callErr != nil:
-					lastFailure = callErr.Error()
+					failures.record(grokMCPReadinessDiagnostic(callErr))
 				case readyErr != nil:
-					lastFailure = readyErr.Error()
+					failures.record(readyErr)
 				default:
 					return nil
 				}
@@ -493,12 +521,63 @@ func (m *grokLaneManager) waitForAgentSessionsMCP(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for the Grok lane agent_sessions MCP: %s", lastFailure)
+			return fmt.Errorf("timed out waiting for the Grok lane agent_sessions MCP: %s", failures.summary(ctx.Err()))
 		case <-worker.done:
 			return worker.attributedError("headless Grok lane ACP worker exited during MCP startup", nil)
 		case <-ticker.C:
 		}
 	}
+}
+
+func grokMCPReadinessDiagnostic(err error) error {
+	var rpcErr *grokRPCError
+	if !errors.As(err, &rpcErr) {
+		return err
+	}
+	detail := rpcErr.diagnosticDetail()
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w; detail: %s", err, detail)
+}
+
+// grokMCPReadinessFailures retains the last substantive protocol failure even
+// when the final bounded probe ends with its parent context. Without this, a
+// deterministic, promptly returned ACP/MCP error is misreported as a hung
+// request merely because the retry window eventually closes.
+type grokMCPReadinessFailures struct {
+	lastFailure          string
+	lastSubstantive      string
+	lastSubstantiveCount int
+}
+
+func (f *grokMCPReadinessFailures) record(err error) {
+	if err == nil {
+		return
+	}
+	f.lastFailure = err.Error()
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return
+	}
+	if f.lastSubstantive == f.lastFailure {
+		f.lastSubstantiveCount++
+		return
+	}
+	f.lastSubstantive = f.lastFailure
+	f.lastSubstantiveCount = 1
+}
+
+func (f *grokMCPReadinessFailures) summary(ctxErr error) string {
+	if f.lastSubstantive != "" {
+		if f.lastSubstantiveCount > 1 {
+			return fmt.Sprintf("%s (repeated %d times before %v)", f.lastSubstantive, f.lastSubstantiveCount, ctxErr)
+		}
+		return fmt.Sprintf("%s (before %v)", f.lastSubstantive, ctxErr)
+	}
+	if f.lastFailure != "" {
+		return f.lastFailure
+	}
+	return ctxErr.Error()
 }
 
 func (m *grokLaneManager) handleACPNotification(message map[string]any) {
@@ -599,7 +678,7 @@ func (m *grokLaneManager) executeNextTurn() bool {
 	})
 	cancel()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		_ = m.client.notifyRequest("session/cancel", map[string]any{"sessionId": m.state.GrokSessionID})
+		_ = m.client.notifyCancel(map[string]any{"sessionId": m.state.GrokSessionID})
 	}
 
 	m.mu.Lock()
@@ -685,29 +764,15 @@ func (m *grokLaneManager) publishStatusLocked(status string) {
 }
 
 func (m *grokLaneManager) acceptLoop(listener net.Listener) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-m.done:
-				return
-			default:
-				continue
-			}
-		}
+	acceptLaneControlLoop(listener, m.done, func() bool {
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		if m.controlClosed {
-			m.mu.Unlock()
-			_ = conn.Close()
-			continue
+			return false
 		}
 		m.controlWG.Add(1)
-		m.mu.Unlock()
-		go func() {
-			defer m.controlWG.Done()
-			m.handleControlConn(conn)
-		}()
-	}
+		return true
+	}, m.controlWG.Done, m.handleControlConn)
 }
 
 func (m *grokLaneManager) handleControlConn(conn net.Conn) {
@@ -885,7 +950,7 @@ func (m *grokLaneManager) handleControl(request map[string]any) (map[string]any,
 		if client == nil {
 			return nil, errors.New("grok lane ACP worker is unavailable")
 		}
-		if err := client.notifyRequest("session/cancel", map[string]any{"sessionId": grokSessionID}); err != nil {
+		if err := client.notifyCancel(map[string]any{"sessionId": grokSessionID}); err != nil {
 			m.mu.Lock()
 			if m.interruptedID == turnID {
 				m.interruptedID = ""
@@ -922,7 +987,7 @@ func (m *grokLaneManager) queueWake(item map[string]any) (map[string]any, error)
 	}
 	if m.closing || m.state.Status == "archived" {
 		previous := cloneGrokLaneState(m.state)
-		turn := newGrokLaneTurn(trustedPeerTextForProduct(item, "grok"), 0)
+		turn := newGrokLaneTurn(peerMessageText(item), 0)
 		turn.MessageID, turn.Fingerprint = messageID, fingerprint
 		turn.Status, turn.Outcome, turn.Exit, turn.Error, turn.CompletedAt = "interrupted", "interrupted", 130, "Grok lane is closing", time.Now().UnixMilli()
 		m.state.Turns = append(m.state.Turns, turn)
@@ -940,7 +1005,7 @@ func (m *grokLaneManager) queueWake(item map[string]any) (map[string]any, error)
 		return grokLaneWakeResult(turn, "interrupted"), nil
 	}
 	previous := cloneGrokLaneState(m.state)
-	turn := newGrokLaneTurn(trustedPeerTextForProduct(item, "grok"), 0)
+	turn := newGrokLaneTurn(peerMessageText(item), 0)
 	turn.MessageID, turn.Fingerprint = messageID, fingerprint
 	m.state.Turns = append(m.state.Turns, turn)
 	if m.state.TurnID == "" {
@@ -1059,23 +1124,10 @@ func cancelAllGrokLaneNotices(state *grokLaneState) int {
 }
 
 func queueGrokLaneTerminalNotice(state *grokLaneState, turn grokLaneTurn) {
-	if state.NotifyTarget == "" {
-		return
-	}
-	for _, notice := range state.Notices {
-		if notice.TurnID == turn.ID {
-			return
-		}
-	}
-	noticeID := sessionKey("grok-lane-terminal\x00" + state.SessionID + "\x00" + turn.ID)
-	collect := laneCollectionPointer("grok", state.SessionID, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups)
-	message := fmt.Sprintf(
-		"GROK_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%d collection=required\nCollect: %s",
-		noticeID, state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit, collect,
+	state.Notices = appendLaneTerminalNotice(
+		state.Notices, "grok", state.Name, state.SessionID, turn.ID, turn.Status, turn.Outcome, turn.Exit,
+		state.NotifyTarget, state.ParentHostID, state.ParentAgentRuntimeDir, state.Groups,
 	)
-	state.Notices = append(state.Notices, claudeLaneNotice{
-		ID: noticeID, TurnID: turn.ID, Target: state.NotifyTarget, Message: message, CreatedAt: time.Now().UnixMilli(),
-	})
 }
 
 func grokLaneHasUnsentNotices(state grokLaneState) bool {
@@ -1154,19 +1206,7 @@ func (m *grokLaneManager) flushTerminalNoticesLocked() {
 }
 
 func lockGrokLaneNotices(paths nativePaths, sessionID string) (*os.File, error) {
-	directory := filepath.Join(profileDataRoot(paths), "grok-lane-notice-locks")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(filepath.Join(directory, sessionKey(sessionID)+".lock"), os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // session id is hashed.
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return lockLaneFile(paths, "grok-lane-notice-locks", sessionID, true)
 }
 
 func currentGrokLaneNotifyTarget(paths nativePaths, state grokLaneState, fallback string) string {
@@ -1320,14 +1360,14 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 			m.flushTerminalNotices()
 		}
 		if interrupt && client != nil {
-			_ = client.notifyRequest("session/cancel", map[string]any{"sessionId": grokSessionID})
+			_ = client.notifyCancel(map[string]any{"sessionId": grokSessionID})
 		}
 		// Snapshot and stop the exact worker plus every registered tool-shell
 		// root before ACP shutdown changes ancestry. Registered roots remain
 		// authoritative after manager death even when Darwin hides their env.
 		taggedCleanupErr := registryErr
-		if taggedCleanupErr == nil {
-			taggedCleanupErr = stopGrokTaggedProcesses(cleanupState.LaunchTokenHash, os.Getpid(), cleanupRoots...)
+		if taggedCleanupErr == nil && registryGuard != nil && registryGuard.ledger != nil {
+			taggedCleanupErr = registryGuard.ledger.reconcileCleanup()
 		}
 		if client != nil {
 			client.close()
@@ -1358,7 +1398,8 @@ func (m *grokLaneManager) shutdown(reason string, interrupt bool) {
 		if cleanupErr == nil {
 			m.mu.Lock()
 			previous := cloneGrokLaneState(m.state)
-			m.state.ManagerPID, m.state.ManagerProcStart, m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerStrongStart, m.state.WorkerSessionID = 0, "", 0, "", "", 0
+			m.state.ManagerPID, m.state.ManagerProcStart, m.state.ManagerStrongStart = 0, "", ""
+			m.state.WorkerPID, m.state.WorkerProcStart, m.state.WorkerStrongStart, m.state.WorkerSessionID = 0, "", "", 0
 			m.state.ControlSocket, m.state.MessagingSocket, m.state.StartupID = "", "", ""
 			if err := m.persistLocked(); err != nil {
 				m.state = previous

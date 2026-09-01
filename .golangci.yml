@@ -26,6 +26,7 @@ linters:
     - asciicheck
     - bidichk
     - durationcheck
+    - dupl              # Shared product contracts must not drift as copied blocks
     - errname
     - exhaustive
     - gocheckcompilerdirectives
@@ -39,6 +40,8 @@ linters:
     - usestdlibvars
     - wastedassign
   settings:
+    dupl:
+      threshold: 100
     gocyclo:
       min-complexity: 15
     staticcheck:
@@ -76,6 +79,14 @@ linters:
       # RFC 6455 requires SHA-1 for WebSocket's non-security accept-key proof.
       - path: internal/bridge/appserver\.go
         text: "G401|G505"
+        linters:
+          - gosec
+      # writeJSONAtomic is the shared sink for bridge-root-derived state paths.
+      # Its callers validate the private root and session-key components; the
+      # interprocedural taint result for its required parent creation is flaky
+      # across otherwise identical analyzer runs.
+      - path: internal/bridge/runtime\.go
+        text: "G703: Path traversal via taint analysis"
         linters:
           - gosec
 

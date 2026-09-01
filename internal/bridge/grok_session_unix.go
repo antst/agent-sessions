@@ -4,6 +4,7 @@ package bridge
 
 import (
 	"errors"
+	"os"
 	"sort"
 	"strings"
 	"syscall"
@@ -249,6 +250,13 @@ func stopStaleGrokLaneWorker(member grokSessionMember) {
 func grokProcessSessionHasMembers(sessionID, excludedPID int) bool {
 	if sessionID <= 1 {
 		return false
+	}
+	// The caller is authoritative evidence for its own kernel session and does
+	// not depend on a potentially incomplete platform process-table snapshot.
+	if os.Getpid() != excludedPID {
+		if currentSessionID, err := grokProcessSessionID(os.Getpid()); err == nil && currentSessionID == sessionID {
+			return true
+		}
 	}
 	members, err := grokProcessSessionMembers(sessionID)
 	if err != nil {

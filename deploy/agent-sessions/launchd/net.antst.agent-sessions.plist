@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>net.antst.agent-sessions</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PREFIX@/libexec/agent-sessions/host/current/bin/agent-sessions</string>
+    <string>daemon</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@HOME@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@SERVICE_PATH@</string>
+    <key>CODEX_PEER_CODEX_BIN</key>
+    <string>@CODEX_BIN@</string>
+    <key>CLAUDE_PEER_CLAUDE_BIN</key>
+    <string>@CLAUDE_BIN@</string>
+    <key>GROK_PEER_GROK_BIN</key>
+    <string>@GROK_BIN@</string>
+    <key>QWEN_PEER_QWEN_BIN</key>
+    <string>@QWEN_BIN@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@STATE_ROOT@/logs/agent-sessions.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>@STATE_ROOT@/logs/agent-sessions.stderr.log</string>
+</dict>
+</plist>

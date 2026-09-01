@@ -51,12 +51,12 @@ func TestCodexLaneResumePreservesPersistentLifecyclePolicy(t *testing.T) {
 		Persistent: true, OwnerPID: 91, OwnerProcStart: "old", OwnerSessionID: "old-session",
 		NotifyTarget: "session:old-session",
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{ownerPID: 92, ownerProcStart: "new"})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{ownerPID: 92, ownerProcStart: "new"}})
 	if !state.Persistent || state.OwnerPID != 0 || state.OwnerProcStart != "" ||
 		state.OwnerSessionID != "" || state.NotifyTarget != "session:old-session" {
 		t.Fatalf("implicit resume changed persistent lifecycle = %+v", state)
 	}
-	applyLaneLifecycleOptions(&state, laneOptions{persistent: true, persistentSet: true})
+	applyLaneLifecycleOptions(&state, laneOptions{laneCommonOptions: laneCommonOptions{persistent: true, persistentSet: true}})
 	if !state.Persistent || state.OwnerPID != 0 || state.OwnerProcStart != "" || state.OwnerSessionID != "" {
 		t.Fatalf("persistent resume lifecycle = %+v", state)
 	}
@@ -104,13 +104,56 @@ func TestPrivateRuntimeDirectoryRejectsSymlinkAndRepairsMode(t *testing.T) {
 	}
 }
 
+func TestStableSessionSocketRefusesSameNameSocketAndSymlinkSubstitution(t *testing.T) {
+	root := shortSocketTestRoot(t, "ss-")
+	path := filepath.Join(root, "session-collision.sock")
+	target := filepath.Join(root, "unrelated-target")
+	if err := os.WriteFile(target, []byte("preserve\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if listener, err := listenPrivateSessionSocket(path); err == nil {
+		_ = listener.Close()
+		t.Fatal("same-name symlink was replaced by a stable session socket")
+	}
+	if destination, err := os.Readlink(path); err != nil || destination != target {
+		t.Fatalf("same-name symlink changed: target=%q err=%v", destination, err)
+	}
+	if body, err := os.ReadFile(target); err != nil || string(body) != "preserve\n" {
+		t.Fatalf("symlink target changed: body=%q err=%v", body, err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = existing.Close() })
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listener, listenErr := listenPrivateSessionSocket(path); listenErr == nil {
+		_ = listener.Close()
+		t.Fatal("same-name live socket was replaced by a stable session socket")
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Mode()&os.ModeSocket == 0 || !os.SameFile(before, after) {
+		t.Fatalf("same-name live socket changed: before=%v after=%v err=%v", before, after, err)
+	}
+}
+
 func TestNativeProfilesUseDistinctSupervisorState(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", "")
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", "")
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", "")
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", "")
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex-a"))
 	first := resolveNativePaths()
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex-b"))
@@ -243,7 +286,7 @@ func TestBoundedLanePromptRejectsRatherThanTruncates(t *testing.T) {
 
 func TestSessionScopedPeerToolsRejectForeignCallerIdentity(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	callerID := "00000000-0000-0000-0000-000000000211"
@@ -261,7 +304,7 @@ func TestSessionScopedPeerToolsRejectForeignCallerIdentity(t *testing.T) {
 
 func TestInteractivePeerToolUsesAttestedInteractiveOwner(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", root)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", root)
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
 	sessionID := "00000000-0000-0000-0000-000000000213"
@@ -306,16 +349,16 @@ func TestLaneSetupArchivesThreadWhenNamingFails(t *testing.T) {
 		}
 	})
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	prompt := filepath.Join(root, "prompt")
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "name-fail", cwd: root, promptFile: prompt}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "name-fail", cwd: root, promptFile: prompt}}), false); err == nil {
 		t.Fatal("name failure unexpectedly succeeded")
 	}
 	select {
@@ -350,16 +393,16 @@ func TestLaneSetupRetainsManageableStateWhenRollbackArchiveFails(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	prompt := filepath.Join(root, "prompt")
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "recoverable-setup", cwd: root, promptFile: prompt}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "recoverable-setup", cwd: root, promptFile: prompt}}), false); err == nil {
 		t.Fatal("name failure unexpectedly succeeded")
 	}
 	state, err := resolveLaneState(resolveNativePaths(), "recoverable-setup")
@@ -391,16 +434,16 @@ func TestLaneSetupDeletesUnmaterializedThreadWhenRollbackFindsNoRollout(t *testi
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(root, "missing-supervisor.sock"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	prompt := filepath.Join(root, "prompt")
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "no-rollout", cwd: root, promptFile: prompt}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "no-rollout", cwd: root, promptFile: prompt}}), false); err == nil {
 		t.Fatal("name failure unexpectedly succeeded")
 	}
 	select {
@@ -439,14 +482,16 @@ func TestFailedLaneStartRemovesProvisionalWorktree(t *testing.T) {
 		}
 	}
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	prompt := filepath.Join(root, "prompt")
 	if err := os.WriteFile(prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "duplicate", cwd: repository, promptFile: prompt, worktree: true}), false); err == nil {
+	if _, err := startLaneNative(withCurrentTestLaneOwner(laneOptions{
+		laneCommonOptions: laneCommonOptions{name: "duplicate", cwd: repository, promptFile: prompt}, worktree: true,
+	}), false); err == nil {
 		t.Fatal("lane start unexpectedly succeeded without an App Server")
 	}
 	output, err := exec.Command("git", "-C", repository, "worktree", "list", "--porcelain").Output()
@@ -494,7 +539,7 @@ func TestWorktreeCreationCleansMissingSourceSubdirectory(t *testing.T) {
 
 func TestWaitReloadsDurableTimeoutBeforeTerminalClassification(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	state := laneState{Type: "codex-peer-lane", ThreadID: "thread-timeout-live", SessionID: "thread-timeout-live", TurnID: "turn-timeout-live", Status: "in_progress"}
@@ -573,9 +618,9 @@ func TestRunReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 			}()
 		}
 	}()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	prompt := filepath.Join(root, "prompt")
@@ -584,7 +629,7 @@ func TestRunReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 	}
 	finished := make(chan struct{})
 	go func() {
-		_, _ = startLaneNative(withCurrentTestLaneOwner(laneOptions{name: "parallel", cwd: root, promptFile: prompt, timeout: 800 * time.Millisecond}), true)
+		_, _ = startLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{name: "parallel", cwd: root, promptFile: prompt, timeout: 800 * time.Millisecond}}), true)
 		close(finished)
 	}()
 	select {
@@ -656,9 +701,9 @@ func TestResumeReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 			}()
 		}
 	}()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -674,7 +719,7 @@ func TestResumeReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 	}
 	finished := make(chan struct{})
 	go func() {
-		_, _ = resumeLaneNative(withCurrentTestLaneOwner(laneOptions{target: threadID, promptFile: prompt, timeout: 800 * time.Millisecond}))
+		_, _ = resumeLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID, promptFile: prompt, timeout: 800 * time.Millisecond}}))
 		close(finished)
 	}()
 	select {
@@ -703,7 +748,7 @@ func TestResumeReleasesLaneNameLockBeforeWaitingForTurn(t *testing.T) {
 
 func TestWakeLedgerMakesRetriesIdempotent(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	var starts atomic.Int32
@@ -720,7 +765,7 @@ func TestWakeLedgerMakesRetriesIdempotent(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
 	supervisor, err := newNativeSupervisor("test")
 	if err != nil {
 		t.Fatal(err)
@@ -769,7 +814,7 @@ func TestWakeLedgerMakesRetriesIdempotent(t *testing.T) {
 
 func TestSlowWakeIsJournaledBeforeAppServerDelivery(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	threadID := "00000000-0000-0000-0000-000000000119"
@@ -789,7 +834,7 @@ func TestSlowWakeIsJournaledBeforeAppServerDelivery(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
 	supervisor, err := newNativeSupervisor("test")
 	if err != nil {
 		t.Fatal(err)
@@ -844,7 +889,7 @@ func TestWakeFallbackIsDeduplicatedAcrossShimAndSupervisor(t *testing.T) {
 
 func TestFailedWakeQueuesExactlyOnceAndSurvivesShimRestart(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	_, appSocket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
@@ -861,7 +906,7 @@ func TestFailedWakeQueuesExactlyOnceAndSurvivesShimRestart(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
 	supervisor, err := newNativeSupervisor("test")
 	if err != nil {
 		t.Fatal(err)
@@ -894,7 +939,7 @@ func TestFailedWakeQueuesExactlyOnceAndSurvivesShimRestart(t *testing.T) {
 
 func TestWakeLedgerRecoversInFlightAfterSupervisorRestart(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	threadID := "00000000-0000-0000-0000-000000000777"
@@ -907,13 +952,13 @@ func TestWakeLedgerRecoversInFlightAfterSupervisorRestart(t *testing.T) {
 		case "thread/turns/list":
 			return map[string]any{"data": []map[string]any{{
 				"id": "turn-already-started", "status": "inProgress",
-				"items": []map[string]any{{"id": "user-item", "type": "userMessage", "text": trustedPeerText(item)}},
+				"items": []map[string]any{{"id": "user-item", "type": "userMessage", "text": peerMessageText(item)}},
 			}}}, nil
 		default:
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
 	supervisor, err := newNativeSupervisor("test")
 	if err != nil {
 		t.Fatal(err)
@@ -923,7 +968,7 @@ func TestWakeLedgerRecoversInFlightAfterSupervisorRestart(t *testing.T) {
 		Item: item, CreatedAt: time.Now().UnixMilli(),
 	}
 	record.Fingerprint = wakeItemFingerprint(item)
-	record.DeliveryFingerprint = sessionKey(trustedPeerText(item))
+	record.DeliveryFingerprint = sessionKey(peerMessageText(item))
 	if err := writeWakeRecord(supervisor.paths, record); err != nil {
 		t.Fatal(err)
 	}
@@ -957,12 +1002,12 @@ func TestWakeIdentityWithoutTransportIDIsStableAcrossShimRestart(t *testing.T) {
 
 func TestHookRegisterFailureReusesPublishedSupervisorShim(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
 	supervisorSocket := filepath.Join(root, "supervisor.sock")
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
 	paths := resolveNativePaths()
 	threadID := "00000000-0000-0000-0000-000000000444"
 	writeTestAttachedInteractiveOwner(t, paths, threadID)
@@ -972,15 +1017,8 @@ func TestHookRegisterFailureReusesPublishedSupervisorShim(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = shimListener.Close() })
-	go func() {
-		for {
-			connection, acceptErr := shimListener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			_ = connection.Close()
-		}
-	}()
+	shimStatePath := filepath.Join(paths.dataRoot, "sessions", sessionKey(threadID), "state.json")
+	serveTestMutableShim(t, shimListener, shimStatePath)
 	supervisorListener, err := net.Listen("unix", supervisorSocket)
 	if err != nil {
 		t.Fatal(err)
@@ -998,7 +1036,7 @@ func TestHookRegisterFailureReusesPublishedSupervisorShim(t *testing.T) {
 				var request map[string]any
 				_ = json.Unmarshal(line, &request)
 				if stringValue(request["action"]) == "register" {
-					_ = writeJSONAtomic(filepath.Join(paths.dataRoot, "sessions", sessionKey(threadID), "state.json"), map[string]any{
+					_ = writeJSONAtomic(shimStatePath, map[string]any{
 						"sessionId": threadID, "socketPath": shimSocket, "name": "published-shim",
 					})
 					_, _ = connection.Write([]byte(`{"ok":false,"error":"subscription failed"}` + "\n"))
@@ -1019,7 +1057,7 @@ func TestHookRegisterFailureReusesPublishedSupervisorShim(t *testing.T) {
 
 func TestRenamePeerReturnsSanitizedDiscoverableName(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1173,7 +1211,7 @@ func TestFastCompletedLaneReplaysFinalItem(t *testing.T) {
 
 func TestCompletedLaneRecoversFinalAnswerFromSupervisorSpool(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1343,9 +1381,9 @@ func TestLaneReadyFollowsInitialTurnAndRegistration(t *testing.T) {
 		methods <- stringValue(request["action"])
 		_, _ = connection.Write([]byte(`{"ok":true,"state":{"socketPath":"/tmp/lane-ready.sock"}}` + "\n"))
 	}()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	promptFile := filepath.Join(root, "prompt.txt")
@@ -1359,7 +1397,7 @@ func TestLaneReadyFollowsInitialTurnAndRegistration(t *testing.T) {
 	original := os.Stdout
 	os.Stdout = write
 	code, startErr := startLaneNative(withCurrentTestLaneOwner(laneOptions{
-		command: "start", name: "ready-lane", cwd: root, promptFile: promptFile,
+		laneCommonOptions: laneCommonOptions{command: "start", name: "ready-lane", cwd: root, promptFile: promptFile},
 	}), false)
 	_ = write.Close()
 	os.Stdout = original
@@ -1424,56 +1462,64 @@ func TestSupervisorStopTimeoutDoesNotPermitReplacement(t *testing.T) {
 	}
 }
 
-func TestNamespacedSupervisorRetiresResponsiveLegacyInstance(t *testing.T) {
-	runtimeRoot := t.TempDir()
-	legacySocket := filepath.Join(bridgeRuntimeRoot(runtimeRoot, os.Getuid()), "supervisor.sock")
-	if err := os.MkdirAll(filepath.Dir(legacySocket), 0700); err != nil {
+func TestSupervisorStopCommandWaitsForExactProcessExit(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "data"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
+	socket := filepath.Join(root, "supervisor.sock")
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", socket)
+
+	child := exec.Command("sleep", "0.35")
+	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("unix", legacySocket)
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+	procStart := ""
+	deadline := time.Now().Add(time.Second)
+	for procStart == "" && time.Now().Before(deadline) {
+		procStart = readProcStart(child.Process.Pid)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if procStart == "" {
+		t.Fatal("could not capture supervisor fixture process identity")
+	}
+
+	paths := resolveNativePaths()
+	if err := writeJSONAtomic(paths.supervisorState, map[string]any{
+		"pid": child.Process.Pid, "procStart": procStart,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	appServerSocket := filepath.Join(t.TempDir(), "app-server.sock")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for {
-			connection, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			line, _ := bufio.NewReader(connection).ReadBytes('\n')
-			var request map[string]any
-			_ = json.Unmarshal(line, &request)
-			if stringValue(request["action"]) == "stop" {
-				_, _ = connection.Write([]byte(`{"ok":true,"stopping":true}` + "\n"))
-				_ = connection.Close()
-				_ = listener.Close()
-				return
-			}
-			response, _ := json.Marshal(map[string]any{
-				"ok": true, "implementation": "go", "appServerSocket": appServerSocket,
-			})
-			_, _ = connection.Write(append(response, '\n'))
-			_ = connection.Close()
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
 		}
+		_, _ = bufio.NewReader(connection).ReadBytes('\n')
+		_, _ = connection.Write([]byte(`{"ok":true,"stopping":true}` + "\n"))
+		_ = connection.Close()
+		_ = listener.Close()
+		_ = os.Remove(socket)
 	}()
-	paths := nativePaths{
-		runtimeDir: runtimeRoot, appServerSock: appServerSocket,
-		supervisorSock: filepath.Join(bridgeRuntimeRoot(runtimeRoot, os.Getuid()), "supervisor-profile.sock"),
+
+	started := time.Now()
+	if exit := runSupervisorCommand([]string{"stop"}); exit != 0 {
+		t.Fatalf("supervisor stop exit = %d", exit)
 	}
-	if err := stopLegacyNativeSupervisor(paths); err != nil {
-		t.Fatal(err)
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+		t.Fatalf("supervisor stop returned before exact process exit: %s", elapsed)
 	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("legacy supervisor was not stopped")
-	}
-	if probeUnixSocket(legacySocket, 25*time.Millisecond) {
-		t.Fatal("legacy supervisor remained reachable")
-	}
+	<-done
 }
 
 func TestLaneSchemaValidatesFinalAnswer(t *testing.T) {
@@ -1779,9 +1825,9 @@ func TestResumeLaneStartsNewTurnOnSameTranscript(t *testing.T) {
 		methods <- stringValue(request["action"])
 		_, _ = connection.Write([]byte(`{"ok":true,"state":{"socketPath":"/tmp/lane-resume.sock"}}` + "\n"))
 	}()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1801,7 +1847,7 @@ func TestResumeLaneStartsNewTurnOnSameTranscript(t *testing.T) {
 	}
 	original := os.Stdout
 	os.Stdout = write
-	code, resumeErr := resumeLaneNative(withCurrentTestLaneOwner(laneOptions{command: "resume", target: "resume-lane", promptFile: promptFile}))
+	code, resumeErr := resumeLaneNative(withCurrentTestLaneOwner(laneOptions{laneCommonOptions: laneCommonOptions{command: "resume", target: "resume-lane", promptFile: promptFile}}))
 	_ = write.Close()
 	os.Stdout = original
 	output, _ := io.ReadAll(read)
@@ -1834,8 +1880,8 @@ func TestResumeStartFailureRestoresOriginalLaneState(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1853,7 +1899,7 @@ func TestResumeStartFailureRestoresOriginalLaneState(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, resumeErr := resumeLaneNative(laneOptions{
-		command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false,
+		laneCommonOptions: laneCommonOptions{command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false},
 	})
 	if resumeErr == nil || code == 0 {
 		t.Fatalf("rejected resume = code %d err %v", code, resumeErr)
@@ -1888,8 +1934,8 @@ func TestResumeUncertainStartPreservesObservedTurn(t *testing.T) {
 			return map[string]any{}, nil
 		}
 	})
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1908,7 +1954,7 @@ func TestResumeUncertainStartPreservesObservedTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, resumeErr := resumeLaneNative(laneOptions{
-		command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false,
+		laneCommonOptions: laneCommonOptions{command: "resume", target: original.Name, promptFile: promptFile, persistent: true, autoArchive: false},
 	})
 	if resumeErr == nil || code == 0 {
 		t.Fatalf("uncertain resume = code %d err %v", code, resumeErr)
@@ -2578,9 +2624,9 @@ func TestArchiveByRawThreadIDDoesNotFabricateLaneMetadata(t *testing.T) {
 			}()
 		}
 	}()
-	t.Setenv("CLAUDE_PEER_APP_SERVER_SOCKET", appSocket)
-	t.Setenv("CLAUDE_PEER_SUPERVISOR_SOCKET", supervisorSocket)
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", appSocket)
+	t.Setenv("AGENT_SESSIONS_SUPERVISOR_SOCKET", supervisorSocket)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -2590,8 +2636,8 @@ func TestArchiveByRawThreadIDDoesNotFabricateLaneMetadata(t *testing.T) {
 	}
 	original := os.Stdout
 	os.Stdout = write
-	code, archiveErr := archiveLaneNative(laneOptions{target: threadID})
-	secondCode, secondErr := archiveLaneNative(laneOptions{target: threadID})
+	code, archiveErr := archiveLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID}})
+	secondCode, secondErr := archiveLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: threadID}})
 	_ = write.Close()
 	os.Stdout = original
 	_, _ = io.ReadAll(read)
@@ -2849,7 +2895,7 @@ func TestQueuedWakeRecoveryRestoresAutoArchiveGrace(t *testing.T) {
 
 func TestWaitCollectsTerminalTurnStrandedByPeerWake(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -3005,7 +3051,7 @@ func TestAcknowledgementClearsOnlyCollectedTurnSpool(t *testing.T) {
 
 func TestArchivedLaneStatusIsLocalAndRetainedForResume(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -3026,7 +3072,7 @@ func TestArchivedLaneStatusIsLocalAndRetainedForResume(t *testing.T) {
 	}
 	original := os.Stdout
 	os.Stdout = write
-	code, statusErr := statusLaneNative(laneOptions{target: state.Name})
+	code, statusErr := statusLaneNative(laneOptions{laneCommonOptions: laneCommonOptions{target: state.Name}})
 	_ = write.Close()
 	os.Stdout = original
 	output, _ := io.ReadAll(read)
@@ -3148,6 +3194,7 @@ func TestReconcilePreservesAuthoritativePermissionMode(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	serveTestMutableShim(t, listener, stateFile)
 	s := nativeSupervisor{paths: paths, shims: map[string]map[string]any{}, procStart: readProcStart(os.Getpid())}
 	if _, err := s.ensureShim(map[string]any{"sessionId": threadID, "cwd": root, "name": "permission-peer", "status": "idle"}); err != nil {
 		t.Fatal(err)
@@ -3189,7 +3236,7 @@ func TestQueuedWakeRecoveryRecreatesInboxExactlyOnce(t *testing.T) {
 
 func TestSessionEndIsInertWithoutAttachmentIdentity(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))

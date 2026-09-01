@@ -6,10 +6,10 @@ import (
 )
 
 func TestPeerLaunchContextSeparatesGroupLayerFromCodexTargetArgs(t *testing.T) {
-	forwarded, context, err := extractPeerLaunchContext([]string{
+	forwarded, context, err := scanPeerWrapperOptions("codex", []string{
 		"-g", "project", "-g=review", "--group", "release", "--group=docs", "--inherit-groups",
 		"resume", "thread-id", "--model", "gpt-test",
-	}, codexOptionConsumesNext)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,15 +22,15 @@ func TestPeerLaunchContextSeparatesGroupLayerFromCodexTargetArgs(t *testing.T) {
 		!context.inheritParentGroups || !context.inheritGroupsSpecified {
 		t.Fatalf("parent context = %+v", context)
 	}
-	if _, _, err := extractPeerLaunchContext([]string{"--parent-session", "someone-else"}, codexOptionConsumesNext); err == nil {
+	if _, _, err := scanPeerWrapperOptions("codex", []string{"--parent-session", "someone-else"}); err == nil {
 		t.Fatal("public peer launch accepted a caller-selected parent")
 	}
 }
 
 func TestPeerLaunchContextDoesNotInterpretNativeOptionValue(t *testing.T) {
-	forwarded, context, err := extractPeerLaunchContext([]string{
+	forwarded, context, err := scanPeerWrapperOptions("codex", []string{
 		"--model", "-g", "-g", "actual", "--no-inherit-groups", "--no-yolo",
-	}, codexOptionConsumesNext)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,16 +42,12 @@ func TestPeerLaunchContextDoesNotInterpretNativeOptionValue(t *testing.T) {
 }
 
 func TestPeerLaunchContextShortGroupAliasAppliesToEveryProduct(t *testing.T) {
-	products := map[string]func(string) bool{
-		"codex":  codexOptionConsumesNext,
-		"claude": claudeOptionConsumesNext,
-		"grok":   grokOptionConsumesNext,
-	}
-	for product, consumesNext := range products {
+	products := []string{"codex", "claude", "grok", "qwen"}
+	for _, product := range products {
 		t.Run(product, func(t *testing.T) {
-			forwarded, context, err := extractPeerLaunchContext([]string{
+			forwarded, context, err := scanPeerWrapperOptions(product, []string{
 				"-g", "project", "-g=review", "--", "prompt", "-g", "not-a-group",
-			}, consumesNext)
+			})
 			if err != nil {
 				t.Fatal(err)
 			}

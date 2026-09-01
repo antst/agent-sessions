@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -138,6 +139,66 @@ func TestHubRoutesRemoteLaneOnlyThroughConnectedCapableHosts(t *testing.T) {
 	}
 	if got := source.waitType(t, "lane_error"); got.RequestID != "request-2" || got.Error == "" {
 		t.Fatalf("capability rejection = %#v", got)
+	}
+}
+
+func TestHubRoutesQwenLaneWithExactAttestedParentContext(t *testing.T) {
+	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}}
+	source := newTestHubClient(t, hub, "qwen-source")
+	defer func() { _ = source.conn.Close() }()
+	sourcePeer := groupedHubTestPeer("qwen-source", "parent", "project")
+	sourcePeer.Entrypoint = "qwen"
+	if err := source.wire.Send(Message{Type: "snapshot", Peers: []Peer{sourcePeer}}); err != nil {
+		t.Fatal(err)
+	}
+	source.waitType(t, "roster")
+	destination := newTestHubClient(t, hub, "qwen-destination", CapabilityQwenLane)
+	defer func() { _ = destination.conn.Close() }()
+	source.waitType(t, "roster")
+	parent := groupedHubTestParent(sourcePeer)
+	parent.AgentRuntimeDir = "/tmp/qwen source runtime"
+	parent.QwenCapabilityDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	request := Message{
+		Type: "lane_exec", RequestID: "qwen-request", SourceID: sourcePeer.ID,
+		TargetHostID: "qwen-destination", Product: "qwen", Args: []string{"start", "--name", "worker", "-"},
+		ParentContext: parent,
+	}
+	if err := source.wire.Send(request); err != nil {
+		t.Fatal(err)
+	}
+	forwarded := destination.waitType(t, "lane_exec")
+	if forwarded.ParentContext == nil || !reflect.DeepEqual(*forwarded.ParentContext, *parent) {
+		t.Fatalf("forwarded Qwen parent = %#v, want %#v", forwarded.ParentContext, parent)
+	}
+	if err := destination.wire.Send(Message{Type: "lane_exit", RequestID: request.RequestID}); err != nil {
+		t.Fatal(err)
+	}
+	source.waitType(t, "lane_exit")
+}
+
+func TestHubCancelsQwenLaneWhenSourceDisconnects(t *testing.T) {
+	hub := &hub{logger: discardLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}}
+	source := newTestHubClient(t, hub, "qwen-source")
+	sourcePeer := groupedHubTestPeer("qwen-source", "parent")
+	sourcePeer.Entrypoint = "qwen"
+	if err := source.wire.Send(Message{Type: "snapshot", Peers: []Peer{sourcePeer}}); err != nil {
+		t.Fatal(err)
+	}
+	source.waitType(t, "roster")
+	destination := newTestHubClient(t, hub, "qwen-destination", CapabilityQwenLane)
+	defer func() { _ = destination.conn.Close() }()
+	source.waitType(t, "roster")
+	if err := source.wire.Send(Message{
+		Type: "lane_exec", RequestID: "qwen-disconnect", SourceID: sourcePeer.ID,
+		TargetHostID: "qwen-destination", Product: "qwen", Args: []string{"wait", "lane"},
+		ParentContext: groupedHubTestParent(sourcePeer),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destination.waitType(t, "lane_exec")
+	_ = source.conn.Close()
+	if got := destination.waitType(t, "lane_cancel"); got.RequestID != "qwen-disconnect" {
+		t.Fatalf("Qwen disconnect cancel = %#v", got)
 	}
 }
 

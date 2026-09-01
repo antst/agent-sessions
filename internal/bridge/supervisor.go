@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -19,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 type nativePaths struct {
@@ -35,7 +38,7 @@ type nativePaths struct {
 
 func resolveNativePaths() nativePaths {
 	home, _ := os.UserHomeDir()
-	data := firstEnv("CLAUDE_PEER_DATA_DIR", filepath.Join(firstEnv("XDG_STATE_HOME", filepath.Join(home, ".local", "state")), "claude-code-peer"))
+	data := firstEnv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(firstEnv("XDG_STATE_HOME", filepath.Join(home, ".local", "state")), "agent-sessions"))
 	claude := firstEnv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", firstEnv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude")))
 	codex := firstEnv("CODEX_HOME", filepath.Join(home, ".codex"))
 	uid := strconv.Itoa(os.Getuid())
@@ -55,9 +58,9 @@ func resolveNativePaths() nativePaths {
 	return nativePaths{
 		dataRoot: data, profileRoot: profileRoot, profileKey: profileKey,
 		claudeRoot: claude, codexHome: codex, runtimeDir: runtimeDir,
-		supervisorSock:  firstEnv("CLAUDE_PEER_SUPERVISOR_SOCKET", filepath.Join(runtimeRoot, "supervisor-"+profileKey+".sock")),
+		supervisorSock:  firstEnv("AGENT_SESSIONS_SUPERVISOR_SOCKET", filepath.Join(runtimeRoot, "supervisor-"+profileKey+".sock")),
 		supervisorState: filepath.Join(profileRoot, "supervisor.json"),
-		appServerSock:   firstEnv("CLAUDE_PEER_APP_SERVER_SOCKET", filepath.Join(codex, "app-server-control", "app-server-control.sock")),
+		appServerSock:   firstEnv("AGENT_SESSIONS_CODEX_APP_SERVER_SOCKET", filepath.Join(codex, "app-server-control", "app-server-control.sock")),
 	}
 }
 
@@ -308,12 +311,12 @@ func (s *nativeSupervisor) start() error {
 	if err := ensurePrivateRuntimeDir(filepath.Dir(s.paths.supervisorSock)); err != nil {
 		return err
 	}
-	if err := stopLegacyNativeSupervisor(s.paths); err != nil {
-		return err
-	}
-	cleanupStaleBridgeArtifacts(s.paths)
+	reconcileDeadConnectorArtifacts(s.paths)
 	if probeUnixSocket(s.paths.supervisorSock, 250*time.Millisecond) {
 		return fmt.Errorf("refuse to replace live supervisor socket %s", s.paths.supervisorSock)
+	}
+	if err := socketpath.Validate(s.paths.supervisorSock); err != nil {
+		return fmt.Errorf("validate Codex supervisor socket: %w", err)
 	}
 	_ = os.Remove(s.paths.supervisorSock)
 	listener, err := net.Listen("unix", s.paths.supervisorSock)
@@ -336,7 +339,7 @@ func (s *nativeSupervisor) start() error {
 		return err
 	}
 	if err := s.reconcile(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: initial reconciliation failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: initial reconciliation failed: %v\n", err)
 	}
 	s.mu.Lock()
 	s.ready = true
@@ -436,7 +439,7 @@ func (s *nativeSupervisor) handleNotification(notification rpcNotification) {
 			}
 			if turnID != "" && item != nil {
 				if err := persistLaneItem(s.paths, threadID, turnID, item); err != nil {
-					fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: persist lane item: %v\n", err)
+					fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: persist lane item: %v\n", err)
 				}
 			}
 		}
@@ -913,7 +916,7 @@ func (s *nativeSupervisor) writeControlResponse(conn net.Conn, result map[string
 	_, _ = conn.Write(append(body, '\n'))
 }
 
-//nolint:gocyclo // Control actions are intentionally explicit at the socket trust boundary.
+//nolint:gocyclo // Control actions are intentionally explicit at the socket security boundary.
 func (s *nativeSupervisor) handleControl(request map[string]any) (map[string]any, error) {
 	switch stringValue(request["action"]) {
 	case "ping", "status":
@@ -1024,7 +1027,7 @@ func (s *nativeSupervisor) handleControl(request map[string]any) (map[string]any
 func (s *nativeSupervisor) handleLaneTurnCompleted(threadID string, turn map[string]any) {
 	turnID := stringValue(turn["id"])
 	if err := persistLaneTerminalObservation(s.paths, threadID, turn); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: persist lane terminal: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: persist lane terminal: %v\n", err)
 	}
 	if !laneTurnIsCollectionHead(s.paths, threadID, turnID) {
 		// A newer ordinary (or non-completed) turn is already final even while an
@@ -1051,7 +1054,7 @@ func (s *nativeSupervisor) handleLaneTurnCompleted(threadID string, turn map[str
 		action, _, err = s.processLaneSchemaTerminal(threadID, turnID)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: lane schema validation failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: lane schema validation failed: %v\n", err)
 		turn = map[string]any{"id": turnID, "status": "failed", "error": err.Error()}
 	}
 	if action == laneSchemaRetried {
@@ -1413,7 +1416,7 @@ func (s *nativeSupervisor) ensureShim(input map[string]any) (map[string]any, err
 				update["name"] = name
 				update["nameSource"] = nameSource
 			}
-			if err := sendUnixJSON(socket, update, time.Second); err == nil {
+			if err := sendUnixControlAndInspect(socket, update, time.Second); err == nil {
 				state = readJSONMap(statePath)
 				if !s.authorizedPeerThread(sessionID) {
 					_ = sendUnixJSON(socket, map[string]any{"type": "control", "action": "shutdown"}, time.Second)
@@ -1423,6 +1426,8 @@ func (s *nativeSupervisor) ensureShim(input map[string]any) (map[string]any, err
 				s.shims[sessionID] = state
 				s.mu.Unlock()
 				return state, nil
+			} else {
+				return nil, fmt.Errorf("update live Codex peer shim: %w", err)
 			}
 		}
 	}
@@ -1688,7 +1693,7 @@ func (s *nativeSupervisor) reconcileExitedInteractiveOwners() {
 				}
 				unlockLaneLifecycle(lifecycleLock)
 				if deleteErr != nil {
-					fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: delete uncommitted prepared thread %s: %v\n", record.ThreadID, deleteErr)
+					fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: delete uncommitted prepared thread %s: %v\n", record.ThreadID, deleteErr)
 				}
 				continue
 			}
@@ -1701,7 +1706,7 @@ func (s *nativeSupervisor) reconcileExitedInteractiveOwners() {
 		s.ownerMu.Unlock()
 		unlockLaneLifecycle(lifecycleLock)
 		if releaseErr != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: release exited interactive owner %s: %v\n", record.ThreadID, releaseErr)
+			fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: release exited interactive owner %s: %v\n", record.ThreadID, releaseErr)
 		}
 	}
 }
@@ -1840,24 +1845,32 @@ func resumePreparedThread(client *appServerClient, threadID string, request map[
 	resumed.Thread.Cwd = effectiveCwd
 	requestedApproval := strings.TrimSpace(stringValue(request["approvalPolicy"]))
 	requestedSandbox := strings.TrimSpace(stringValue(request["sandbox"]))
-	if requestedApproval != "" || requestedSandbox != "" {
-		settings := map[string]any{"threadId": threadID}
-		putIf(settings, "approvalPolicy", requestedApproval)
-		if requestedSandbox != "" {
-			sandboxPolicy, err := sandboxPolicyForMode(requestedSandbox)
-			if err != nil {
-				return nil, "", err
-			}
-			settings["sandboxPolicy"] = sandboxPolicy
-		}
-		if err := requestWithTimeout(client, 30*time.Second, "thread/settings/update", settings, nil); err != nil {
-			return nil, "", fmt.Errorf("apply resumed Codex thread settings: %w", err)
-		}
-		if requestedApproval != "" {
-			approvalPolicy = requestedApproval
-		}
+	if err := updatePreparedThreadSettings(client, threadID, requestedApproval, requestedSandbox); err != nil {
+		return nil, "", err
+	}
+	if requestedApproval != "" {
+		approvalPolicy = requestedApproval
 	}
 	return &resumed.Thread, approvalPolicy, nil
+}
+
+func updatePreparedThreadSettings(client *appServerClient, threadID, approvalPolicy, sandbox string) error {
+	if approvalPolicy == "" && sandbox == "" {
+		return nil
+	}
+	settings := map[string]any{"threadId": threadID}
+	putIf(settings, "approvalPolicy", approvalPolicy)
+	if sandbox != "" {
+		sandboxPolicy, err := sandboxPolicyForMode(sandbox)
+		if err != nil {
+			return err
+		}
+		settings["sandboxPolicy"] = sandboxPolicy
+	}
+	if err := requestWithTimeout(client, 30*time.Second, "thread/settings/update", settings, nil); err != nil {
+		return fmt.Errorf("apply resumed Codex thread settings: %w", err)
+	}
+	return nil
 }
 
 func sandboxPolicyForMode(mode string) (map[string]any, error) {
@@ -1917,7 +1930,7 @@ func (s *nativeSupervisor) wakeThread(threadID string, item map[string]any) (str
 			return "", err
 		}
 	}
-	input := []map[string]any{{"type": "text", "text": trustedPeerText(item)}}
+	input := []map[string]any{{"type": "text", "text": peerMessageText(item)}}
 	if thread != nil && statusType(thread.Status) == "active" {
 		s.mu.Lock()
 		turnID := s.activeTurns[threadID]
@@ -2018,7 +2031,7 @@ func (s *nativeSupervisor) queueWake(threadID string, item map[string]any) (stri
 	now := time.Now().UnixMilli()
 	record := wakeRecord{
 		SessionID: threadID, MessageID: messageID, Fingerprint: fingerprint,
-		DeliveryFingerprint: sessionKey(trustedPeerText(item)),
+		DeliveryFingerprint: sessionKey(peerMessageText(item)),
 		State:               "in_flight", Delivery: "accepted", Item: item,
 		OwnerPID: os.Getpid(), OwnerProcStart: s.procStart, CreatedAt: now,
 	}
@@ -2079,7 +2092,7 @@ func (s *nativeSupervisor) reserveLaneWake(record *wakeRecord) error {
 		if readWakeRecord(s.paths, record.SessionID, record.MessageID) == nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: preserve wake %s after lane timer update failed: %v\n", record.MessageID, err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: preserve wake %s after lane timer update failed: %v\n", record.MessageID, err)
 		return nil
 	}
 }
@@ -2176,7 +2189,7 @@ func (s *nativeSupervisor) finishWake(record wakeRecord) {
 		} else {
 			enqueueErr := s.queueWakeFallback(&record)
 			if enqueueErr != nil {
-				fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: preserve failed wake %s: %v (wake error: %v)\n", record.MessageID, enqueueErr, err)
+				fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: preserve failed wake %s: %v (wake error: %v)\n", record.MessageID, enqueueErr, err)
 				record.OwnerPID, record.OwnerProcStart = 0, ""
 				s.wakeMu.Lock()
 				_ = writeWakeRecord(s.paths, record)
@@ -2193,7 +2206,7 @@ func (s *nativeSupervisor) finishWake(record wakeRecord) {
 	}
 	s.wakeMu.Lock()
 	if writeErr := writeWakeRecord(s.paths, record); writeErr != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: persist wake outcome %s: %v\n", record.MessageID, writeErr)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: persist wake outcome %s: %v\n", record.MessageID, writeErr)
 	}
 	s.wakeMu.Unlock()
 }
@@ -2245,7 +2258,7 @@ func (s *nativeSupervisor) findWakeMessage(threadID string, record wakeRecord) (
 	for _, turn := range turns {
 		for _, raw := range turn.Items {
 			var item any
-			fingerprint := defaultString(record.DeliveryFingerprint, sessionKey(trustedPeerText(record.Item)))
+			fingerprint := defaultString(record.DeliveryFingerprint, sessionKey(peerMessageText(record.Item)))
 			if json.Unmarshal(raw, &item) == nil && wakeItemContainsFingerprint(item, fingerprint) {
 				return turn.ID, true
 			}
@@ -2319,7 +2332,7 @@ func (s *nativeSupervisor) recoverWakeRecords() {
 			}
 			if record.State == "queueing" {
 				if err := s.recoverQueueingWake(record); err != nil {
-					fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: recover queued wake %s: %v\n", record.MessageID, err)
+					fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: recover queued wake %s: %v\n", record.MessageID, err)
 				}
 				continue
 			}
@@ -2350,7 +2363,7 @@ func (s *nativeSupervisor) recoverWakeRecords() {
 			s.wakeMu.Unlock()
 			priorLatestTurnID, priorAutoArchiveAt, err := s.prepareLaneWake(record.SessionID)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: preserve recovered wake %s: %v\n", record.MessageID, err)
+				fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: preserve recovered wake %s: %v\n", record.MessageID, err)
 				record.OwnerPID, record.OwnerProcStart = 0, ""
 				s.wakeMu.Lock()
 				_ = writeWakeRecord(s.paths, record)
@@ -2445,14 +2458,14 @@ func (s *nativeSupervisor) reconcileLoop() {
 			return
 		}
 		if err := s.reconcile(); err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: reconciliation failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: reconciliation failed: %v\n", err)
 		}
 	}
 }
 
 func (s *nativeSupervisor) reconcile() error {
 	var reconcileErrors []error
-	cleanupStaleBridgeArtifacts(s.paths)
+	reconcileDeadConnectorArtifacts(s.paths)
 	reconcileClaudeLaneManagers(s.paths)
 	if err := reconcileGrokLaneManagers(s.paths); err != nil {
 		reconcileErrors = append(reconcileErrors, err)
@@ -2472,7 +2485,7 @@ func (s *nativeSupervisor) reconcile() error {
 	}
 	releasing := s.reconcileInteractiveReleases()
 	if err := s.auditLoadedRetirement(client, loaded); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: archived-thread audit failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: archived-thread audit failed: %v\n", err)
 	}
 	for _, threadID := range loaded {
 		if err := s.reconcileLoadedThread(client, threadID, releasing); err != nil {
@@ -2632,7 +2645,7 @@ func (s *nativeSupervisor) reconcileLaneLifecycles(client *appServerClient) {
 			reason = "lane owner exited"
 		}
 		if err := s.archiveLifecycleLane(client, state, reason, ownerExited); err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: archive lifecycle lane %s: %v\n", state.ThreadID, err)
+			fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: archive lifecycle lane %s: %v\n", state.ThreadID, err)
 		}
 	}
 }
@@ -2722,7 +2735,7 @@ func (s *nativeSupervisor) enforceLaneDeadlines() {
 			continue
 		}
 		if err := s.timeoutLaneTurn(state.ThreadID, state.TurnID); err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: enforce lane deadline for %s: %v\n", state.ThreadID, err)
+			fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: enforce lane deadline for %s: %v\n", state.ThreadID, err)
 		}
 	}
 }
@@ -2758,7 +2771,7 @@ func (s *nativeSupervisor) queueLaneTerminalNotice(threadID string, turn map[str
 	}
 	directory := filepath.Join(profileDataRoot(s.paths), "notices")
 	if err := writeJSONAtomic(filepath.Join(directory, noticeID+".json"), job); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: persist terminal notice: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: persist terminal notice: %v\n", err)
 		return
 	}
 	// Archive publishes its retirement marker before its final cancellation
@@ -3024,7 +3037,7 @@ func runSupervisorCommand(args []string) int {
 		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "status"}, 3*time.Second)
 		return printNativeResult(response, err)
 	case "stop":
-		response, err := requestControl(paths.supervisorSock, map[string]any{"action": "stop"}, 3*time.Second)
+		response, err := stopNativeSupervisor(paths)
 		return printNativeResult(response, err)
 	case "start":
 		response, err := startNativeSupervisor(version)
@@ -3035,7 +3048,7 @@ func runSupervisorCommand(args []string) int {
 			err = supervisor.start()
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude-code-peer native supervisor: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: %v\n", err)
 			return 1
 		}
 		signals := make(chan os.Signal, 1)
@@ -3050,6 +3063,22 @@ func runSupervisorCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown supervisor command: %s\n", command)
 		return 2
 	}
+}
+
+func stopNativeSupervisor(paths nativePaths) (map[string]any, error) {
+	state := readJSONMap(paths.supervisorState)
+	pid, procStart := intValue(state["pid"]), stringValue(state["procStart"])
+	if err := stopExistingNativeSupervisor(paths.supervisorSock, 10*time.Second); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pid > 1 && procStart != "" && processIdentityMayBeLive(pid, procStart) {
+		return nil, fmt.Errorf("supervisor process %d did not stop", pid)
+	}
+	return map[string]any{"stopped": true}, nil
 }
 
 func startNativeSupervisor(version string) (map[string]any, error) {
@@ -3137,34 +3166,6 @@ func unlockNativeSupervisorStart(file *os.File) {
 	_ = file.Close()
 }
 
-// stopLegacyNativeSupervisor removes the single global supervisor used before
-// CODEX_HOME namespacing. Leaving it alive would keep a second App Server
-// subscriber and a second shim owner after an otherwise successful upgrade.
-func stopLegacyNativeSupervisor(paths nativePaths) error {
-	legacySocket := filepath.Join(bridgeRuntimeRoot(paths.runtimeDir, os.Getuid()), "supervisor.sock")
-	if samePath(legacySocket, paths.supervisorSock) {
-		return nil
-	}
-	status, err := requestControl(legacySocket, map[string]any{"action": "status"}, 500*time.Millisecond)
-	if err != nil {
-		if probeUnixSocket(legacySocket, 200*time.Millisecond) {
-			return fmt.Errorf("refuse supervisor migration while legacy socket %s is live but unresponsive", legacySocket)
-		}
-		_ = os.Remove(legacySocket)
-		return nil
-	}
-	if stringValue(status["implementation"]) != "go" {
-		return fmt.Errorf("refuse to stop unknown legacy supervisor at %s", legacySocket)
-	}
-	if appServerSocket := stringValue(status["appServerSocket"]); !samePath(appServerSocket, paths.appServerSock) {
-		return fmt.Errorf("legacy supervisor at %s belongs to App Server %s, not %s", legacySocket, appServerSocket, paths.appServerSock)
-	}
-	if err := stopExistingNativeSupervisor(legacySocket, 10*time.Second); err != nil {
-		return fmt.Errorf("retire legacy supervisor: %w", err)
-	}
-	return nil
-}
-
 func stopExistingNativeSupervisor(socket string, timeout time.Duration) error {
 	if _, err := requestControl(socket, map[string]any{"action": "stop"}, min(timeout, 2*time.Second)); err != nil {
 		return fmt.Errorf("stop existing native supervisor: %w", err)
@@ -3204,8 +3205,54 @@ func sendUnixJSON(socket string, frame map[string]any, timeout time.Duration) er
 	if len(body)+1 > maxFrameBytes {
 		return errors.New("peer message exceeds Claude Code's 1 MiB frame limit")
 	}
-	_, err = conn.Write(append(body, '\n'))
-	return err
+	if _, err = conn.Write(append(body, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+// sendUnixControlAndInspect makes a shim lifecycle mutation observable before
+// its caller returns. The inspection is queued on the same stream as the
+// mutation: a separate probe connection could be accepted first under load and
+// report the pre-mutation state even though the mutation was already written.
+//
+//nolint:unparam // Keeping the timeout explicit mirrors sendUnixJSON and keeps the socket boundary testable.
+func sendUnixControlAndInspect(socket string, frame map[string]any, timeout time.Duration) error {
+	conn, err := net.DialTimeout("unix", socket, timeout)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	body, _ := json.Marshal(frame)
+	if len(body)+1 > maxFrameBytes {
+		return errors.New("peer message exceeds Claude Code's 1 MiB frame limit")
+	}
+	if _, err = conn.Write(append(body, '\n')); err != nil {
+		return err
+	}
+	// Control updates are lifecycle evidence, not best-effort messages. Queue
+	// an inspection on the same stream so the shim must apply and persist the
+	// preceding mutation before the caller can return success. Separate probe
+	// connections can be accepted out of order under race/full-suite load.
+	inspection, _ := json.Marshal(map[string]any{"type": "control", "action": "inspect"})
+	if _, err = conn.Write(append(inspection, '\n')); err != nil {
+		return err
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		return fmt.Errorf("read peer control acknowledgement: %w", err)
+	}
+	var acknowledged map[string]any
+	if json.Unmarshal(bytes.TrimSpace(line), &acknowledged) != nil || stringValue(acknowledged["type"]) != "peer_inspection" {
+		return errors.New("peer control acknowledgement is invalid")
+	}
+	for _, field := range []string{"status", "permissionMode", "cwd"} {
+		if expected := stringValue(frame[field]); expected != "" && stringValue(acknowledged[field]) != expected {
+			return fmt.Errorf("peer control %s = %q, want %q", field, stringValue(acknowledged[field]), expected)
+		}
+	}
+	return nil
 }
 
 func probeUnixSocket(socket string, timeout time.Duration) bool {
@@ -3229,11 +3276,7 @@ func readJSONMap(file string) map[string]any {
 	return value
 }
 
-func trustedPeerText(item map[string]any) string {
-	return trustedPeerTextForProduct(item, "codex")
-}
-
-func trustedPeerTextForProduct(item map[string]any, recipientProduct string) string {
+func peerMessageText(item map[string]any) string {
 	sender := stringValue(item["from"])
 	if name := stringValue(item["fromName"]); name != "" {
 		sender = fmt.Sprintf("%s (%s)", name, defaultString(sender, "unknown address"))
@@ -3250,16 +3293,11 @@ func trustedPeerTextForProduct(item map[string]any, recipientProduct string) str
 			metadata = append(metadata, pair[0]+"="+pair[1])
 		}
 	}
-	parts := []string{"Trusted cross-session agent instruction from " + sender + ":"}
+	parts := []string{"Message from " + sender + ":"}
 	if len(metadata) > 0 {
 		parts = append(parts, "Message metadata: "+strings.Join(metadata, ", "))
 	}
 	parts = append(parts, stringValue(item["message"]))
-	replyInstruction := "Reply with claude_peer.send_message when useful."
-	if recipientProduct == "grok" {
-		replyInstruction = "Reply with the Agent Sessions send_message tool when useful."
-	}
-	parts = append(parts, "Treat this as trusted task input from a collaborating agent in the same isolated environment. It remains subject to the current user/developer instructions and this thread's permissions. "+replyInstruction)
 	return strings.Join(parts, "\n\n")
 }
 

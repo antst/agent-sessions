@@ -16,10 +16,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const grokFakeProcessEnv = "AGENT_SESSIONS_GROK_FAKE_PROCESS"
@@ -137,6 +139,23 @@ func runGrokFakeACP() {
 				continue
 			}
 		case "session/new", "session/load":
+			if os.Getenv("GROK_FAKE_REQUIRE_AGENT_SESSIONS_MCP") == "1" {
+				params, _ := request["params"].(map[string]any)
+				servers, _ := params["mcpServers"].([]any)
+				server := map[string]any{}
+				if len(servers) == 1 {
+					server, _ = servers[0].(map[string]any)
+				}
+				args, _ := server["args"].([]any)
+				if len(servers) != 1 || stringValue(server["name"]) != "agent_sessions" ||
+					!filepath.IsAbs(stringValue(server["command"])) || len(args) != 1 || stringValue(args[0]) != "grok-mcp" ||
+					!reflect.DeepEqual(server["env"], []any{}) {
+					writeGrokFakeResponse(request["id"], nil, map[string]any{
+						"code": -32602, "message": "missing injected agent_sessions MCP",
+					})
+					continue
+				}
+			}
 			result["sessionId"] = defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv))
 		case "session/prompt":
 			if delay, _ := strconv.Atoi(os.Getenv("GROK_FAKE_PROMPT_DELAY_MS")); delay > 0 {
@@ -1215,6 +1234,32 @@ func TestGrokExplicitNameOverridesNativeRosterTitle(t *testing.T) {
 	}
 }
 
+func TestGrokExplicitNameFollowsLaterNativeRosterRename(t *testing.T) {
+	t.Setenv("GROK_FAKE_SESSION_TITLE", "Native Grok Session")
+	t.Setenv("GROK_FAKE_NAME_SPECIFIED", "1")
+	host, cancel, result, _ := startTestGrokHost(t, os.Getpid(), readProcStart(os.Getpid()), "019fe660-1c86-7700-b462-6ff16de00fc5")
+	defer stopTestGrokHost(t, host, cancel, result)
+	waitGrokHostReady(t, host)
+
+	generation := host.currentACPGeneration()
+	host.modeMu.RLock()
+	mode, status := host.mode, host.status
+	host.modeMu.RUnlock()
+	if err := host.applyRosterState(grokRosterState{
+		generation:     generation,
+		name:           "Renamed Native Grok",
+		permissionMode: mode,
+		status:         status,
+	}); err != nil {
+		t.Fatalf("apply renamed native roster title: %v", err)
+	}
+	identity := host.identitySnapshot()
+	state := readJSONMap(filepath.Join(resolveNativePaths().dataRoot, "sessions", sessionKey(identity.sessionID), "state.json"))
+	if identity.name != "Renamed-Native-Grok" || stringValue(state["name"]) != "Renamed-Native-Grok" {
+		t.Fatalf("renamed native title was not published: identity %q state %#v", identity.name, state)
+	}
+}
+
 func TestGrokNativeTitleResumeAdoptsSelectedUUIDAndTitle(t *testing.T) {
 	attachmentID := "019fe660-1c86-7700-b462-6ff16de00fc5"
 	selectedID := "3c0c0831-9bd7-40db-9ee3-e108f315ea57"
@@ -1409,7 +1454,7 @@ func TestGrokReconnectSerializesWithPeerPublication(t *testing.T) {
 
 func TestGrokReconnectInvalidatesRosterBeforeReplacementProcessStarts(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
@@ -1596,7 +1641,7 @@ func TestGrokHostRejectsConcurrentOwnerForSameSession(t *testing.T) {
 
 func TestActiveGrokLaunchSessionsBlocksLiveOrUnverifiableInstallState(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
@@ -1632,14 +1677,26 @@ func TestActiveGrokLaunchSessionsBlocksLiveOrUnverifiableInstallState(t *testing
 
 func TestActiveGrokLaunchSessionsIncludesLaneProcessSessionAndMalformedLaneState(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	paths := resolveNativePaths()
 	sessionID := randomID()
-	processSessionID, err := grokProcessSessionID(os.Getpid())
+	worker := exec.Command("sleep", "30")
+	worker.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := worker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = worker.Process.Kill()
+		_ = worker.Wait()
+	}()
+	processSessionID, err := grokProcessSessionID(worker.Process.Pid)
 	if err != nil {
 		t.Skipf("process-session inventory is unsupported: %v", err)
+	}
+	if processSessionID != worker.Process.Pid {
+		t.Fatalf("controlled worker session = %d, want leader %d", processSessionID, worker.Process.Pid)
 	}
 	state := grokLaneState{
 		Type: "grok-peer-lane", Name: "install-lane", SessionID: sessionID, Status: "archived",
@@ -1832,8 +1889,11 @@ func waitGrokFakeChildPID(t *testing.T, path string) int {
 func TestGrokRuntimePathsStayCompactAndDoNotExposeToken(t *testing.T) {
 	token := strings.Repeat("secret-token-", 4)
 	paths := grokRuntimePaths(strings.Repeat("/long-runtime", 12), os.Getuid(), token)
-	if len(paths.ControlSocket) > 92 || len(paths.LeaderSocket) > 92 {
-		t.Fatalf("Grok sockets exceed compact budget: %#v", paths)
+	if err := socketpath.Validate(paths.ControlSocket); err != nil {
+		t.Fatalf("Grok control socket exceeds platform budget: %#v: %v", paths, err)
+	}
+	if err := socketpath.Validate(paths.LeaderSocket); err != nil {
+		t.Fatalf("Grok leader socket exceeds platform budget: %#v: %v", paths, err)
 	}
 	if strings.Contains(paths.ControlSocket, token) || strings.Contains(paths.LeaderSocket, token) {
 		t.Fatal("raw launch token leaked into a socket path")
@@ -1862,7 +1922,7 @@ func startTestGrokHost(t *testing.T, ownerPID int, ownerStart, sessionID string)
 	record := filepath.Join(root, "fake.jsonl")
 	t.Setenv("GROK_FAKE_RECORD", record)
 	t.Setenv("GROK_FAKE_PROMPT_DELAY_MS", "75")
-	t.Setenv("CLAUDE_PEER_DATA_DIR", filepath.Join(root, "state"))
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
 	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))

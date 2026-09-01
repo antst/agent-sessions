@@ -2,6 +2,12 @@
 
 `claude-peer-lane` is the symmetric companion to `codex-peer-lane`: it lets Codex and other local orchestrators start a named Claude Code worker, keep it messageable between turns, collect structured results, resume it, and retire it without orphan processes or discovery rows.
 
+Managed Codex, Claude, Grok, and Qwen orchestrators call the process-attested
+`agent_sessions.lane` MCP tool with `product: "claude"`; the daemon owns the
+worker and lifecycle. This includes Claude-to-Claude lanes in addition to
+Claude-native subagents. The CLI below remains the host-operator and argument
+contract, not a requirement for the model to launch a shell process.
+
 ## Quick start
 
 ```bash
@@ -37,21 +43,19 @@ While idle, the lane appears in both Claude and Codex peer discovery and accepts
 
 ## Remote hosts
 
-With `peer-federator` protocol 3 connected on both hosts, the same native CLI can run on a named
+With the unified daemons connected to a protocol-3 hub, the same native CLI can run on a named
 destination without SSH:
 
 ```bash
-peer-federator hosts
-peer-federator lane --host workstation-b --product claude -- \
+claude-peer-lane --host workstation-b \
   start --name claude-review -C /srv/project --max-budget-usd 5 - < review-brief.md
-peer-federator lane --host workstation-b --product claude -- \
-  wait claude-review --timeout 300
+claude-peer-lane --host workstation-b wait claude-review --timeout 300
 ```
 
-Federation preserves JSONL, stderr, and exit status. It automatically adds `--persistent` and a
-notify target back to the live originating peer for `run`, `start`, and `resume`; callers must not
-pass `--persistent`, `--notify`, `--no-notify`, or `--no-auto-archive` themselves. The destination advertises
-this capability only after its operator explicitly enables remote execution. A disconnected hub
+Federation preserves JSONL, stderr, and exit status. It makes remote `run`, `start`, and `resume`
+persistent while preserving the hub-attested originating peer as the immediate parent; callers
+must not pass `--persistent` or `--no-auto-archive` themselves. The destination advertises
+this capability only while its native product adapter is ready. A disconnected hub
 rejects new commands, and there is no direct agent listener or SSH fallback. Remote lanes use plain destination `list` rather than
 `--mine`, because they are persistent and have no destination lifecycle owner.
 Pass `-C`/`--cd` on remote `run` or `start` whenever the cwd matters; otherwise the launcher
@@ -95,9 +99,11 @@ the lifecycle escape hatches.
 - Otherwise the direct launcher process is the owner.
 - Completed work auto-archives after 60 seconds. The exact deadline is exposed as `auto_archive_at`; cleanup occurs on the manager's sub-second maintenance loop.
 - `--auto-archive-after S` changes the grace period. `--no-auto-archive` disables it and requires explicit archive.
-- `--persistent` detaches lifecycle ownership. `--notify TARGET` is persistent-only; parent-owned lanes notify their inferred owner without a flag.
+- `--persistent` detaches parent-exit cleanup while retaining the immediate Agent Sessions parent
+  anchor. It does not disable terminal auto-archive; pair it with `--no-auto-archive` only for
+  indefinite idle retention. Terminal pointers route to that parent automatically.
 - Terminal notices are durably retried. A failed notice can delay automatic archive for up to 30 seconds so a short custom grace does not erase the only collection pointer.
-- A terminal notice is an infrastructure pointer, not a conversational message. Collect it with the printed `wait` command rather than replying to its sender address; after a worker crash that address may no longer be live.
+- A terminal notice is infrastructure status, not a conversational message. Follow its structured `agent_sessions.lane` `wait` hint only when it says `collection=required`; after a worker crash its sender address may no longer be live.
 
 `claude-peer-lane list` returns all active Claude lanes in the profile and `--all` adds archived
 lanes. `list --mine` selects only lanes owned by the current Codex or Claude orchestrator, matching
@@ -117,11 +123,12 @@ refuse resume after that agent profile changes.
 Claude has no Codex sandbox axis. The launcher passes through Claude's `--permission-mode`, tool allow/deny lists, `--model`, `--effort`, `--json-schema`, and `--max-budget-usd` without pretending they are equivalent to Codex sandbox policy.
 
 The default permission mode is `dontAsk`, because a headless worker cannot answer an interactive
-approval. Workers start with `--settings '{"crossSessionInbound":"accept"}'` so native peer input
-does not wait for an approval UI the lane does not have. This is a per-process
-override; installation and lane lifecycle never modify the host default. Workers also start with
-`--no-chrome`: a headless lane cannot answer Claude in Chrome's first-run dialog, and browser
-integration is outside the lane lifecycle contract. When the launcher
+approval. Workers start with a lifecycle settings overlay that accepts native peer input and
+disables only a project `.mcp.json` server named `agent_sessions`, so project configuration cannot
+shadow the installed connector or wait for an approval UI the lane does not have. This is a
+per-process override; installation and lane lifecycle never modify the host default. Workers also
+start with `--no-chrome`: a headless lane cannot answer Claude in Chrome's first-run dialog, and
+browser integration is outside the lane lifecycle contract. When the launcher
 corroborates a bypass-mode Codex or Claude owner and the caller did not explicitly choose a mode,
 the lane inherits `bypassPermissions`; an explicit `--permission-mode` always wins. The launcher
 never trusts an inherited thread ID alone: it requires a live Codex-host ancestor as a launch-context
@@ -129,9 +136,11 @@ precondition plus a live matching session bridge PID, process-start identity, se
 socket. Codex does not currently expose a per-thread host PID, so the bridge identity—not the
 shared host process—is the lifecycle owner.
 
-The worker enables Claude's Agent Teams tool set and always adds `SendMessage,ListAgents` to
-`--allowedTools`. An explicit `--allowed-tools` list is preserved and extended rather than
-replaced. This lets a lane discover and initiate messages to any reachable peer; ownership only
+The worker enables Claude's Agent Teams tool set and always adds `SendMessage`, `ListAgents`, and
+the four exact, plugin-qualified Agent Sessions operations (`list_peers`, `send_message`,
+`broadcast`, and `lane`) to `--allowedTools`. An explicit `--allowed-tools` list is preserved and
+extended rather than replaced. This lets a lane discover and initiate messages to any reachable
+peer and spawn any supported Agent Sessions lane, including another Claude lane; ownership only
 controls lifecycle and automatic terminal notices. Explicit `--tools` or `--disallowed-tools`
 policy can still remove those capabilities. The SDK worker publishes and authors messages under
 the lane name, owns the address reported by `lane.ready`, and accepts inbound peer turns directly.
