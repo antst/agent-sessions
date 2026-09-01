@@ -201,6 +201,10 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	if err := <-hubDone; err != nil {
 		t.Fatal(err)
 	}
+	waitTest(t, func() bool {
+		return !hostA.Connected() && !hostB.Connected() &&
+			len(hostA.RemoteHosts()) == 0 && len(hostB.RemoteHosts()) == 0
+	}, "hosts to observe the stopped hub")
 	hubCancel, hubDone = runTestHub(t, address)
 	waitTest(t, func() bool {
 		hosts := hostA.RemoteHosts()

@@ -59,6 +59,49 @@ func TestHubRejectsMalformedSnapshotWithoutReplacingLastGoodRoster(t *testing.T)
 	if got := client.peers[valid.ID]; got.InstanceID != valid.InstanceID || len(client.peers) != 1 {
 		t.Fatalf("last good roster changed: %#v", client.peers)
 	}
+	if client.ready {
+		t.Fatal("malformed initial snapshot made the host ready")
+	}
+}
+
+func TestHubPublishesHostOnlyAfterInitialSnapshot(t *testing.T) {
+	h := &hub{
+		logger: discardTestLogger(), clients: map[string]*hubClient{},
+		laneRoutes: map[string]*laneRoute{}, deliveryRoutes: map[string]*deliveryRoute{},
+	}
+	server, peerConn := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = peerConn.Close() }()
+	client := &hubClient{
+		hostID: "host-a", hostName: "host-a", generation: 7,
+		wire: newWireConn(server), peers: map[string]Peer{},
+	}
+	h.clients[client.hostID] = client
+	if client.ready {
+		t.Fatal("registered host was ready before its initial snapshot")
+	}
+
+	received := make(chan Message, 1)
+	go func() {
+		_ = scanMessages(peerConn, func(message Message) error {
+			received <- message
+			return nil
+		})
+	}()
+	if err := h.handleClientMessage(client, Message{Type: "snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+	if !client.ready {
+		t.Fatal("valid initial snapshot did not make the host ready")
+	}
+	select {
+	case roster := <-received:
+		if roster.Type != "roster" || len(roster.Hosts) != 1 || roster.Hosts[0].ID != client.hostID {
+			t.Fatalf("initial roster = %#v", roster)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial snapshot did not publish the host roster")
+	}
 }
 
 func TestHubRejectsDuplicateDeliveryWhileOriginalIsPending(t *testing.T) {
