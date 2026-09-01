@@ -1,0 +1,173 @@
+"use strict";
+
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+const VERSION = 1;
+const DEFAULT_LIMITS = Object.freeze({
+  maxFrameBytes: 1024 * 1024,
+  maxNesting: 32,
+  maxStringBytes: 256 * 1024,
+});
+
+const FRAME_TYPES = new Set([
+  "bootstrap", "ready", "reconnect",
+  "session.announce", "session.rebind", "session.rename", "session.state", "session.close", "session.bound",
+  "delivery.present", "delivery.accept", "delivery.reject", "turn.event",
+  "tool.call", "tool.cancel", "tool.result", "generation.retire",
+  "heartbeat", "heartbeat.ack", "reject",
+]);
+
+function makeFrame(type, id, seq, payload) {
+  const frame = { version: VERSION, type, id, seq, payload };
+  validateFrame(frame);
+  return frame;
+}
+
+function validateFrame(frame, limits = DEFAULT_LIMITS) {
+  limits = normalizeLimits(limits);
+  if (!frame || Array.isArray(frame) || typeof frame !== "object") throw new Error("component frame must be an object");
+  if (frame.version !== VERSION) throw new Error(`unsupported component version ${String(frame.version)}`);
+  if (!FRAME_TYPES.has(frame.type)) throw new Error(`unknown component frame type ${String(frame.type)}`);
+  if (!validID(frame.id)) throw new Error("component frame id is invalid");
+  if (!Number.isSafeInteger(frame.seq) || frame.seq <= 0) throw new Error("component frame sequence is invalid");
+  if (!frame.payload || Array.isArray(frame.payload) || typeof frame.payload !== "object") throw new Error("component frame payload must be an object");
+  validateJSONBounds(frame, limits);
+  return frame;
+}
+
+function encodeFrame(frame, limits = DEFAULT_LIMITS) {
+  limits = normalizeLimits(limits);
+  validateFrame(frame, limits);
+  const body = Buffer.from(JSON.stringify(frame), "utf8");
+  if (body.length === 0 || body.length > limits.maxFrameBytes) throw new Error("component frame exceeds configured frame size");
+  const header = Buffer.allocUnsafe(4);
+  header.writeUInt32BE(body.length, 0);
+  return Buffer.concat([header, body]);
+}
+
+class FrameDecoder {
+  constructor(limits = DEFAULT_LIMITS) {
+    this.limits = normalizeLimits(limits);
+    this.buffer = Buffer.alloc(0);
+    this.expected = null;
+  }
+
+  push(chunk) {
+    if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
+    const frames = [];
+    let offset = 0;
+    const decodeBody = (body) => {
+      let frame;
+      try {
+        frame = JSON.parse(utf8Decoder.decode(body));
+      } catch (error) {
+        throw new Error(`component frame is invalid JSON: ${redact(error.message)}`);
+      }
+      frames.push(validateFrame(frame, this.limits));
+    };
+    while (offset < chunk.length) {
+      if (this.expected === null) {
+        if (this.buffer.length > 0 || chunk.length - offset < 4) {
+          const count = Math.min(4 - this.buffer.length, chunk.length - offset);
+          this.buffer = Buffer.concat([this.buffer, chunk.subarray(offset, offset + count)]);
+          offset += count;
+          if (this.buffer.length < 4) break;
+          this.expected = this.buffer.readUInt32BE(0);
+          this.buffer = Buffer.alloc(0);
+        } else {
+          this.expected = chunk.readUInt32BE(offset);
+          offset += 4;
+        }
+        if (this.expected === 0 || this.expected > this.limits.maxFrameBytes) {
+          this.buffer = Buffer.alloc(0);
+          this.expected = null;
+          throw new Error("component frame size is invalid");
+        }
+      }
+      const available = chunk.length - offset;
+      if (this.buffer.length === 0 && available >= this.expected) {
+        const body = chunk.subarray(offset, offset + this.expected);
+        offset += this.expected;
+        this.expected = null;
+        decodeBody(body);
+        continue;
+      }
+      const needed = this.expected - this.buffer.length;
+      const count = Math.min(needed, available);
+      if (count > 0) {
+        this.buffer = Buffer.concat([this.buffer, chunk.subarray(offset, offset + count)]);
+        offset += count;
+      }
+      if (this.buffer.length < this.expected) break;
+      const body = this.buffer;
+      this.buffer = Buffer.alloc(0);
+      this.expected = null;
+      decodeBody(body);
+    }
+    return frames;
+  }
+}
+
+function validateJSONBounds(root, limits) {
+  const stack = [{ value: root, depth: 1 }];
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop();
+    if (depth > limits.maxNesting) throw new Error("component frame JSON nesting exceeds configured bound");
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value, "utf8") > limits.maxStringBytes) throw new Error("component frame JSON string exceeds configured bound");
+      continue;
+    }
+    if (!value || typeof value !== "object") continue;
+    for (const [key, child] of Object.entries(value)) {
+      if (Buffer.byteLength(key, "utf8") > limits.maxStringBytes) throw new Error("component frame JSON key exceeds configured bound");
+      if (typeof child === "string") {
+        if (Buffer.byteLength(child, "utf8") > limits.maxStringBytes) throw new Error("component frame JSON string exceeds configured bound");
+      } else if (child && typeof child === "object") {
+        stack.push({ value: child, depth: depth + 1 });
+      }
+    }
+  }
+}
+
+function normalizeLimits(limits) {
+  const normalized = {
+    maxFrameBytes: limits.maxFrameBytes ?? DEFAULT_LIMITS.maxFrameBytes,
+    maxNesting: limits.maxNesting ?? DEFAULT_LIMITS.maxNesting,
+    maxStringBytes: limits.maxStringBytes ?? Math.min(DEFAULT_LIMITS.maxStringBytes, limits.maxFrameBytes ?? DEFAULT_LIMITS.maxFrameBytes),
+  };
+  if (!Number.isSafeInteger(normalized.maxFrameBytes) || normalized.maxFrameBytes <= 0 ||
+      !Number.isSafeInteger(normalized.maxNesting) || normalized.maxNesting <= 0 ||
+      !Number.isSafeInteger(normalized.maxStringBytes) || normalized.maxStringBytes <= 0 ||
+      normalized.maxStringBytes > normalized.maxFrameBytes) {
+    throw new Error("component protocol limits are invalid");
+  }
+  return normalized;
+}
+
+function validID(value) {
+  return typeof value === "string" && value.trim() === value && value.length > 0 && Buffer.byteLength(value, "utf8") <= 256 && !/[\0\r\n]/u.test(value);
+}
+
+function redact(detail, ...secrets) {
+  let value = String(detail ?? "").replaceAll("\0", "");
+  for (const secret of secrets) {
+    if (secret) value = value.split(String(secret)).join("<redacted>");
+  }
+  value = value.replace(/(bootstrap_value|password|secret|token)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/giu, "$1$2<redacted>");
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= 512) return value;
+  let end = 512;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+module.exports = {
+  VERSION,
+  DEFAULT_LIMITS,
+  FRAME_TYPES,
+  FrameDecoder,
+  encodeFrame,
+  makeFrame,
+  redact,
+  validateFrame,
+};

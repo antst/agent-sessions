@@ -72,3 +72,20 @@ func TestLinuxServiceAssetPreservesExplicitStopAndExternalNativeProcesses(t *tes
 		}
 	}
 }
+
+func TestLinuxHubAssetUsesPerUserHubEnvironmentWithoutAddingNetworkTrust(t *testing.T) {
+	body := readRepositoryAsset(t, "deploy/agent-sessions-hub/systemd/user/agent-sessions-hub.service")
+	for _, literal := range []string{
+		"Type=simple", "EnvironmentFile=-%h/.config/agent-sessions/hub.env",
+		"agent-sessions-hub", "Restart=on-failure",
+	} {
+		if !strings.Contains(body, literal) {
+			t.Errorf("systemd hub asset omits %q", literal)
+		}
+	}
+	for _, forbidden := range []string{"TLS", "AUTH_TOKEN", "CODEX_PEER_CODEX_BIN", "QWEN_PEER_QWEN_BIN"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("systemd hub asset contains out-of-scope or host-only setting %q", forbidden)
+		}
+	}
+}

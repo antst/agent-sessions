@@ -3,7 +3,11 @@ package federation
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -123,5 +127,61 @@ func TestEqualProtocolUnrelatedBuildsHandshake(t *testing.T) {
 	}
 	if response.Type != "hello_ok" || response.Version != ProtocolVersion {
 		t.Fatalf("unrelated-build handshake = %#v", response)
+	}
+}
+
+func TestNormalizeCapabilitiesPreservesUnknownTokensAndRejectsInvalidRawInput(t *testing.T) {
+	got, err := normalizeCapabilities([]string{"future-lane", CapabilityCodexLane, "future-lane", "alpha-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"alpha-2", CapabilityCodexLane, "future-lane"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized capabilities = %q, want %q", got, want)
+	}
+	for _, values := range [][]string{
+		{""}, {"Future-lane"}, {"future--lane"}, {strings.Repeat("a", 65)},
+		append(make([]string, maxWireCapabilities), "duplicate-does-not-evade-raw-count"),
+	} {
+		if _, err := normalizeCapabilities(values); err == nil {
+			t.Fatalf("invalid capabilities accepted: %#v", values)
+		}
+	}
+	maximal := make([]string, maxWireCapabilities)
+	for index := range maximal {
+		maximal[index] = "a" + strings.Repeat("a", 61) + fmt.Sprintf("%02d", index)
+	}
+	if got, err := normalizeCapabilities(maximal); err != nil || len(got) != maxWireCapabilities {
+		t.Fatalf("exact aggregate bound rejected: count=%d, err=%v", len(got), err)
+	}
+	overAggregate := append([]string(nil), maximal...)
+	overAggregate[len(overAggregate)-1] += "x"
+	if _, err := normalizeCapabilities(overAggregate); err == nil || !strings.Contains(err.Error(), "aggregate") {
+		t.Fatalf("aggregate overflow result = %v", err)
+	}
+}
+
+func TestProtocolAcceptsAdditiveUnknownJSONFields(t *testing.T) {
+	var got Message
+	err := scanMessages(strings.NewReader(`{"type":"hello","version":3,"host_id":"host-a","host_name":"host-a","future":{"nested":true}}`+"\n"), func(message Message) error {
+		got = message
+		return nil
+	})
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("scan additive frame: %v", err)
+	}
+	if err := validateHello(got); err != nil {
+		t.Fatalf("additive hello rejected: %v", err)
+	}
+}
+
+func TestWirePeerSyntaxDoesNotRequireLocalCatalogAuthority(t *testing.T) {
+	peer := mustTestPeer(t, "host-a", "future", "codex", "project")
+	peer.Product, peer.Entrypoint = "future-product", "future-product"
+	if err := validateWirePeer(peer, "host-a"); err != nil {
+		t.Fatalf("valid opaque wire product rejected: %v", err)
+	}
+	if err := validateLocalPeer(peer, "host-a"); err == nil {
+		t.Fatal("unknown local product bypassed catalog authority")
 	}
 }

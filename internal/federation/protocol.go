@@ -30,10 +30,20 @@ const (
 	// CapabilityQwenLane advertises remotely executable Qwen lanes.
 	CapabilityQwenLane = "qwen-lane"
 
-	maxWireBytes      = 2 * 1024 * 1024
-	maxLaneInputBytes = 1024 * 1024
-	wireWriteTimeout  = 10 * time.Second
+	maxWireBytes        = 2 * 1024 * 1024
+	maxLaneInputBytes   = 1024 * 1024
+	maxWireCapabilities = 64
+	maxCapabilityBytes  = 4096
+	wireWriteTimeout    = 10 * time.Second
 )
+
+// legacyV3LaneCapabilities is deliberately frozen to the products that sent
+// protocol-3 lane_exec frames before per-frame capability selection existed.
+// New products must always send exactly one explicit opaque capability.
+var legacyV3LaneCapabilities = map[string]string{
+	"codex": CapabilityCodexLane, "claude": CapabilityClaudeLane,
+	"grok": CapabilityGrokLane, "qwen": CapabilityQwenLane,
+}
 
 // RuntimeVersion is diagnostic build metadata emitted during registration.
 // Equal protocol versions interoperate regardless of this value.
@@ -162,26 +172,50 @@ func validateHello(message Message) error {
 	return nil
 }
 
-func normalizeCapabilities(values []string) []string {
+func normalizeCapabilities(values []string) ([]string, error) {
+	if len(values) > maxWireCapabilities {
+		return nil, fmt.Errorf("federation capabilities exceed raw count limit %d", maxWireCapabilities)
+	}
+	total := 0
 	seen := map[string]bool{}
 	result := make([]string, 0, len(values))
 	for _, value := range values {
-		if _, ok := productcatalog.ByLaneCapability(value); !ok || seen[value] {
+		total += len(value)
+		if total > maxCapabilityBytes {
+			return nil, fmt.Errorf("federation capabilities exceed aggregate byte limit %d", maxCapabilityBytes)
+		}
+		if err := productcatalog.ValidateToken(value); err != nil {
+			return nil, fmt.Errorf("invalid federation capability %q: %w", value, err)
+		}
+		if seen[value] {
 			continue
 		}
 		seen[value] = true
 		result = append(result, value)
 	}
 	sortStrings(result)
-	return result
+	return result, nil
 }
 
-func capabilityForProduct(product string) string {
-	descriptor, ok := productcatalog.ByID(product)
-	if !ok {
-		return ""
+func laneCapabilityForMessage(message Message) (capability string, legacy bool, err error) {
+	if err := productcatalog.ValidateToken(message.Product); err != nil {
+		return "", false, fmt.Errorf("invalid remote lane product %q: %w", message.Product, err)
 	}
-	return descriptor.LaneCapability
+	switch len(message.Capabilities) {
+	case 0:
+		capability, legacy = legacyV3LaneCapabilities[message.Product]
+		if capability == "" {
+			return "", false, errors.New("remote lane request requires exactly one capability")
+		}
+		return capability, true, nil
+	case 1:
+		if err := productcatalog.ValidateToken(message.Capabilities[0]); err != nil {
+			return "", false, fmt.Errorf("invalid remote lane capability %q: %w", message.Capabilities[0], err)
+		}
+		return message.Capabilities[0], false, nil
+	default:
+		return "", false, errors.New("remote lane request requires exactly one capability")
+	}
 }
 
 func sortStrings(values []string) {

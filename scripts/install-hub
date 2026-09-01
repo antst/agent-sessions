@@ -46,7 +46,11 @@ write_hub_service_definition() {
   case "$(uname -s)" in
     Linux)
       local unit_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-      mkdir -p "$unit_root" "${XDG_CONFIG_HOME:-$HOME/.config}/agent-sessions"
+      local config_root="$HOME/.config/agent-sessions"
+      mkdir -p "$unit_root" "$config_root"
+      if [[ ! -e "$config_root/hub.env.example" ]]; then
+        install -m 0600 "$selected_release/deploy/agent-sessions-hub/hub.env.example" "$config_root/hub.env.example"
+      fi
       sed "s|@PREFIX@|$prefix|g" \
         "$selected_release/deploy/agent-sessions-hub/systemd/user/agent-sessions-hub.service" \
         >"$unit_root/agent-sessions-hub.service"
@@ -54,12 +58,15 @@ write_hub_service_definition() {
       ;;
     Darwin)
       local unit_root="$HOME/Library/LaunchAgents"
-      local prefix_value
-      mkdir -p "$unit_root"
-      prefix_value=$(launchd_xml_sed_replacement "$prefix")
-      sed "s|@PREFIX@|$prefix_value|g" \
+      local config_root="$HOME/.config/agent-sessions"
+      local service_path="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      mkdir -p "$unit_root" "$config_root"
+      if [[ ! -e "$config_root/hub.env.example" ]]; then
+        install -m 0600 "$selected_release/deploy/agent-sessions-hub/hub.env.example" "$config_root/hub.env.example"
+      fi
+      launchd_render_hub_plist \
         "$selected_release/deploy/agent-sessions-hub/launchd/net.antst.agent-sessions-hub.plist" \
-        >"$unit_root/net.antst.agent-sessions-hub.plist"
+        "$unit_root/net.antst.agent-sessions-hub.plist" "$prefix" "$HOME" "$service_path"
       plutil -lint "$unit_root/net.antst.agent-sessions-hub.plist" >/dev/null
       ;;
     *) return 1 ;;

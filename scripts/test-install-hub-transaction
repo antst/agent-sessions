@@ -27,7 +27,8 @@ fi
 home="$test_root/home"
 prefix="$test_root/prefix"
 fake_bin="$test_root/bin"
-mkdir -p "$home" "$prefix" "$fake_bin"
+mkdir -p "$home/.config/agent-sessions" "$prefix" "$fake_bin"
+printf '%s\n' 'AGENT_SESSIONS_HUB_LISTEN=127.0.0.1:8749' >"$home/.config/agent-sessions/hub.env"
 
 cat >"$fake_bin/uname" <<'EOF'
 #!/bin/sh
@@ -123,7 +124,9 @@ if [[ "$after_hash" != "$prior_hash" ]] ||
    [[ -e "$test_root/hub-enabled" ]] ||
    [[ -e "$test_root/hub-active" ]] ||
    [[ -e "$test_root/hub-running-identity" ]] ||
-   [[ ! -f "$home/.config/systemd/user/agent-sessions-hub.service" ]]; then
+   [[ ! -f "$home/.config/systemd/user/agent-sessions-hub.service" ]] ||
+   [[ ! -f "$home/.config/agent-sessions/hub.env.example" ]] ||
+   [[ "$(cat "$home/.config/agent-sessions/hub.env")" != 'AGENT_SESSIONS_HUB_LISTEN=127.0.0.1:8749' ]]; then
   printf 'failed hub update did not restore the exact stopped/disabled prior service state\n' >&2
   exit 1
 fi

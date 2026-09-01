@@ -63,22 +63,22 @@ fixtures before any new product is composed.
 reviewed and frozen. Shared-engine workers may now start against those types.
 
 ### Shared Engine Tests and Implementation
-- [ ] T021 Write failing admission/dispatch/ambiguity/recovery/retirement tests for the lane-input contract in `internal/daemon/lane_input_test.go`
-- [ ] T022 Implement the private bounded no-follow spool and durable receipt engine in `internal/daemon/lane_input.go` and `internal/daemon/lane_input_spool.go`
+- [x] T021 Write failing admission/dispatch/ambiguity/recovery/retirement tests for the lane-input contract in `internal/daemon/lane_input_test.go`
+- [x] T022 Implement the private bounded no-follow spool and durable receipt engine in `internal/daemon/lane_input.go` and `internal/daemon/lane_input_spool.go`
 - [ ] T023 Replace volatile `laneActor.pending` acceptance with ledger-backed execution and recovery in `cmd/agent-sessions/lane.go` and `cmd/agent-sessions/lane_test.go`
-- [ ] T024 Implement exclusive native-session lease transitions and DSH-ready composite-key tests in `internal/daemon/{native_lease.go,native_lease_test.go}`
-- [ ] T025 [P] Write Linux/macOS peer-identity and bounded-frame tests for `internal/localtransport/` in `internal/localtransport/{transport_test.go,peer_linux_test.go,peer_darwin_test.go}`
-- [ ] T026 [P] Implement bounded AF_UNIX framing and exact Linux/macOS peer identity in `internal/localtransport/{transport.go,peer_linux.go,peer_darwin.go}`
-- [ ] T027 [P] Write component bootstrap/reconnect/replay/wrong-process/PID-reuse/heartbeat tests in `internal/component/{broker_test.go,protocol_test.go}`
-- [ ] T028 [P] Implement the component broker, bindings, protocol v1, and redaction in `internal/component/{broker.go,protocol.go,binding.go}`
-- [ ] T029 [P] Implement and test the inert-without-bootstrap shared component client in `integrations/shared/component/{client.js,protocol.js,client.test.js}`
-- [ ] T030 [P] Write process-group/framing/order/bounds/cancel/exit regression tests in `internal/structuredprocess/{process_test.go,framing_test.go}`
-- [ ] T031 [P] Implement exact owned structured child supervision in `internal/structuredprocess/{process.go,framing.go,process_unix.go}`
-- [ ] T032 [P] Write redirect/proxy/non-loopback/auth/body/SSE/reconnect hostile tests in `internal/productserver/{client_test.go,events_test.go,server_test.go}`
-- [ ] T033 [P] Implement literal-loopback HTTP, memory auth, bounded event streams, and owned-server supervision in `internal/productserver/{client.go,events.go,server.go}`
-- [ ] T034 [P] Implement the shared deterministic streaming/tool-call/slow-turn/cancel model fixture in `internal/testutil/mockprovider/{server.go,script.go,server_test.go}`
-- [ ] T035 Write failing opaque-capability/live-hub/generation/malformed-client tests in `internal/federation/{hub_test.go,host_test.go,protocol_fuzz_test.go}` and `cmd/agent-sessions-hub/main_test.go`
-- [ ] T036 Implement bounded opaque protocol-3 capabilities, destination registry resolution hooks, live-hub integration, and macOS hub environment parity in `internal/federation/{protocol.go,hub.go,host.go}`, `cmd/agent-sessions/federation.go`, and `internal/servicecontrol/`
+- [x] T024 Implement exclusive native-session lease transitions and DSH-ready composite-key tests in `internal/daemon/{native_lease.go,native_lease_test.go}`
+- [x] T025 [P] Write Linux/macOS peer-identity and bounded-frame tests for `internal/localtransport/` in `internal/localtransport/{transport_test.go,peer_linux_test.go,peer_darwin_test.go}`
+- [x] T026 [P] Implement bounded AF_UNIX framing and exact Linux/macOS peer identity in `internal/localtransport/{transport.go,peer_linux.go,peer_darwin.go}`
+- [x] T027 [P] Write component bootstrap/reconnect/replay/wrong-process/PID-reuse/heartbeat tests in `internal/component/{broker_test.go,protocol_test.go}`
+- [x] T028 [P] Implement the component broker, bindings, protocol v1, and redaction in `internal/component/{broker.go,protocol.go,binding.go}`
+- [x] T029 [P] Implement and test the inert-without-bootstrap shared component client in `integrations/shared/component/{client.js,protocol.js,client.test.js}`
+- [x] T030 [P] Write process-group/framing/order/bounds/cancel/exit regression tests in `internal/structuredprocess/{process_test.go,framing_test.go}`
+- [x] T031 [P] Implement exact owned structured child supervision in `internal/structuredprocess/{process.go,framing.go,process_unix.go}`
+- [x] T032 [P] Write redirect/proxy/non-loopback/auth/body/SSE/reconnect hostile tests in `internal/productserver/{client_test.go,events_test.go,server_test.go}`
+- [x] T033 [P] Implement literal-loopback HTTP, memory auth, bounded event streams, and owned-server supervision in `internal/productserver/{client.go,events.go,server.go}`
+- [x] T034 [P] Implement the shared deterministic streaming/tool-call/slow-turn/cancel model fixture in `internal/testutil/mockprovider/{server.go,script.go,server_test.go}`
+- [x] T035 Write failing opaque-capability/live-hub/generation/malformed-client tests in `internal/federation/{hub_test.go,host_test.go,protocol_fuzz_test.go}` and `cmd/agent-sessions-hub/main_test.go`
+- [x] T036 Implement bounded opaque protocol-3 capabilities, destination registry resolution hooks, live-hub integration, and macOS hub environment parity in `internal/federation/{protocol.go,hub.go,host.go}`, `cmd/agent-sessions/federation.go`, and `internal/servicecontrol/`
 - [ ] T037 Run original-four focused/full normal/race/vet/lint gates, capture results in `specs/004-six-product-support/evidence/phase0/foundation-gate.md`, and obtain Fable review of the frozen foundation
 
 **Checkpoint**: Shared packages are green with no new product composed; original

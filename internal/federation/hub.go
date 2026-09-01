@@ -123,9 +123,13 @@ func (h *hub) handleConnection(conn net.Conn) {
 			if err := validateHello(message); err != nil {
 				return err
 			}
+			capabilities, err := normalizeCapabilities(message.Capabilities)
+			if err != nil {
+				return err
+			}
 			candidate := &hubClient{
 				hostID: message.HostID, hostName: message.HostName, generation: message.Generation, build: message.Build,
-				wire: newWireConn(conn), peers: map[string]Peer{}, capabilities: normalizeCapabilities(message.Capabilities),
+				wire: newWireConn(conn), peers: map[string]Peer{}, capabilities: capabilities,
 			}
 			if err := h.register(candidate); err != nil {
 				return err
@@ -176,12 +180,18 @@ func (h *hub) unregister(client *hubClient) {
 
 //nolint:gocyclo // Hub protocol variants remain a closed audited switch.
 func (h *hub) handleClientMessage(client *hubClient, message Message) error {
+	h.mu.Lock()
+	current := h.clients[client.hostID] == client
+	h.mu.Unlock()
+	if !current {
+		return errors.New("host registration was superseded by another generation")
+	}
 	switch message.Type {
 	case "snapshot":
 		peers := make(map[string]Peer, len(message.Peers))
 		sessions := make(map[string]bool, len(message.Peers))
 		for _, peer := range message.Peers {
-			if err := validateSnapshotPeer(peer, client.hostID); err != nil {
+			if err := validateWirePeer(peer, client.hostID); err != nil {
 				return err
 			}
 			if _, exists := peers[peer.ID]; exists || sessions[peer.SessionID] {
@@ -282,7 +292,7 @@ func validateTerminalNotice(source *hubClient, message Message) (AgentFrame, err
 		frame.Source == nil || frame.Source.ID != message.SourceID || frame.SourceSessionID != frame.Source.SessionID {
 		return AgentFrame{}, errors.New("terminal notice contains an invalid agent frame")
 	}
-	if frame.Source.HostID != source.hostID || validateSnapshotPeer(*frame.Source, source.hostID) != nil {
+	if frame.Source.HostID != source.hostID || validateWirePeer(*frame.Source, source.hostID) != nil {
 		return AgentFrame{}, errors.New("terminal notice source is not owned by the sending host")
 	}
 	return frame, nil
@@ -367,7 +377,10 @@ func newLaneRoute(source, destination *hubClient, sourceID, targetHost string) *
 func (r *laneRoute) stop() { r.stopOnce.Do(func() { close(r.done) }) }
 
 func (h *hub) routeLaneExec(source *hubClient, message Message) error {
-	capability := capabilityForProduct(message.Product)
+	capability, _, capabilityErr := laneCapabilityForMessage(message)
+	if capabilityErr != nil {
+		return sendLaneRouteError(source, message.RequestID, capabilityErr.Error())
+	}
 	if reason := validateLaneExecRequest(message, capability); reason != "" {
 		return sendLaneRouteError(source, message.RequestID, reason)
 	}

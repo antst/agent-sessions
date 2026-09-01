@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -147,7 +148,7 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	}
 	hostB, err := NewEmbeddedHost(EmbeddedHostOptions{
 		Hub: address, HostID: "host-b", HostName: "host-b", Generation: 22, Build: "host-build-b",
-		Capabilities: []string{CapabilityQwenLane}, ScanInterval: 20 * time.Millisecond,
+		Capabilities: []string{"future-lane"}, ScanInterval: 20 * time.Millisecond,
 		HeartbeatInterval: 30 * time.Millisecond, HeartbeatTimeout: time.Second,
 		Snapshot: func(context.Context) ([]Peer, error) { return []Peer{target}, nil },
 		Deliver: func(_ context.Context, gotSource, gotTarget Peer, frame AgentFrame) error {
@@ -158,7 +159,7 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 			return nil
 		},
 		RunLane: func(_ context.Context, request RemoteLaneRequest) (RemoteLaneResult, error) {
-			if request.Parent.SessionID != source.SessionID || request.Product != "qwen" {
+			if request.Parent.SessionID != source.SessionID || request.Product != "future" || request.Capability != "future-lane" {
 				return RemoteLaneResult{}, errors.New("remote parent attestation changed")
 			}
 			return RemoteLaneResult{Stdout: []byte("lane-ok\n"), ExitCode: 7}, nil
@@ -191,7 +192,8 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 		InstanceID: source.InstanceID, Groups: append([]string(nil), source.Groups...),
 	}
 	result, err := hostA.RunRemoteLane(context.Background(), RemoteLaneRequest{
-		Source: source, Parent: parent, TargetHostID: "host-b", Product: "qwen", Arguments: []string{"list", "--all"},
+		Source: source, Parent: parent, TargetHostID: "host-b", Product: "future", Capability: "future-lane",
+		Arguments: []string{"list", "--all"},
 	})
 	if err != nil || string(result.Stdout) != "lane-ok\n" || result.ExitCode != 7 {
 		t.Fatalf("remote lane result = %#v, %v", result, err)
@@ -215,6 +217,85 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	}
 	if got := <-deliveries; got != "after restart" {
 		t.Fatalf("delivery after reconnect = %q", got)
+	}
+}
+
+func TestHostPreservesUnknownCapabilitiesInOptionsAndRoster(t *testing.T) {
+	host, err := NewEmbeddedHost(EmbeddedHostOptions{
+		HostID: "host-a", HostName: "host-a", Capabilities: []string{"future-lane", CapabilityCodexLane, "future-lane"},
+		Snapshot: func(context.Context) ([]Peer, error) { return nil, nil },
+		Deliver:  func(context.Context, Peer, Peer, AgentFrame) error { return nil },
+		RunLane:  func(context.Context, RemoteLaneRequest) (RemoteLaneResult, error) { return RemoteLaneResult{}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(host.options.Capabilities, []string{CapabilityCodexLane, "future-lane"}) {
+		t.Fatalf("host capabilities = %q", host.options.Capabilities)
+	}
+	host.network = &wireConn{}
+	if err := host.handleHubMessage(Message{
+		Type: "roster", Version: ProtocolVersion,
+		Hosts: []Host{{ID: "host-b", Name: "host-b", Capabilities: []string{"future-lane", "future-lane"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remote := host.RemoteHosts()
+	if len(remote) != 1 || !reflect.DeepEqual(remote[0].Capabilities, []string{"future-lane"}) {
+		t.Fatalf("remote opaque roster = %#v", remote)
+	}
+}
+
+func TestHostPassesExactCapabilityToDestinationAndRejectsMismatchBeforeCallback(t *testing.T) {
+	source := mustTestPeer(t, "host-a", "source", "codex", "project")
+	server, client := net.Pipe()
+	defer func() {
+		_ = server.Close()
+		_ = client.Close()
+	}()
+	var calls atomic.Int32
+	requests := make(chan RemoteLaneRequest, 1)
+	host, err := NewEmbeddedHost(EmbeddedHostOptions{
+		HostID: "host-b", HostName: "host-b", Capabilities: []string{"future-lane"},
+		Snapshot: func(context.Context) ([]Peer, error) { return nil, nil },
+		Deliver:  func(context.Context, Peer, Peer, AgentFrame) error { return nil },
+		RunLane: func(_ context.Context, request RemoteLaneRequest) (RemoteLaneResult, error) {
+			calls.Add(1)
+			requests <- request
+			return RemoteLaneResult{ExitCode: 0}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.remote[source.ID] = source
+	host.network = newWireConn(server)
+	responses := make(chan Message, 4)
+	go func() {
+		_ = scanMessages(client, func(message Message) error {
+			responses <- message
+			return nil
+		})
+	}()
+	base := Message{
+		Type: "lane_exec", RequestID: "mismatch", SourceID: source.ID, TargetHostID: "host-b",
+		Product: "future", Capabilities: []string{"other-lane"}, Args: []string{"run"},
+		ParentContext: testParentContext(source),
+	}
+	host.runInboundLane(base, &laneRun{})
+	if calls.Load() != 0 {
+		t.Fatal("mismatched capability reached destination callback")
+	}
+	if response := <-responses; response.Type != "lane_error" {
+		t.Fatalf("mismatch response = %#v", response)
+	}
+
+	base.RequestID = "accepted"
+	base.Capabilities = []string{"future-lane"}
+	host.runInboundLane(base, &laneRun{})
+	request := <-requests
+	if request.Product != "future" || request.Capability != "future-lane" || calls.Load() != 1 {
+		t.Fatalf("destination callback request = %#v, calls=%d", request, calls.Load())
 	}
 }
 

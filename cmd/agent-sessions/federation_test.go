@@ -238,6 +238,7 @@ func waitFederationTest(t *testing.T, predicate func() bool, label string) {
 }
 
 func TestFederatedLaneUsesAttestedRemoteParentAndForcesPersistence(t *testing.T) {
+	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/echo")
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +265,7 @@ func TestFederatedLaneUsesAttestedRemoteParentAndForcesPersistence(t *testing.T)
 			HostID: source.HostID, SessionID: source.SessionID, Product: source.Entrypoint,
 			InstanceID: source.InstanceID, Groups: source.Groups, PermissionMode: source.PermissionMode,
 		},
-		TargetHostID: "host-b", Product: "qwen", Arguments: []string{"list", "--all"},
+		TargetHostID: "host-b", Product: "codex", Capability: "codex-lane", Arguments: []string{"list", "--all"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +306,7 @@ func TestFederatedLaneDoctorDoesNotResolveSourceHostCwd(t *testing.T) {
 			HostID: source.HostID, SessionID: source.SessionID, Product: source.Entrypoint,
 			InstanceID: source.InstanceID, Groups: source.Groups, PermissionMode: source.PermissionMode,
 		},
-		TargetHostID: "mac-destination", Product: "codex", Arguments: []string{"doctor", "--json"},
+		TargetHostID: "mac-destination", Product: "codex", Capability: "codex-lane", Arguments: []string{"doctor", "--json"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -317,6 +318,35 @@ func TestFederatedLaneDoctorDoesNotResolveSourceHostCwd(t *testing.T) {
 	ready, _ := body["ready"].(bool)
 	if body["type"] != "lane.doctor" || !ready {
 		t.Fatalf("remote doctor = %#v", body)
+	}
+}
+
+func TestFederatedLaneRejectsProductCapabilityMismatchBeforeDispatch(t *testing.T) {
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
+	source, err := federator.BuildPeer(
+		"host-a", "host-a", "parent", "parent", "idle", "/work", "codex",
+		"default", "instance", "", []string{"project"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = coordinator.runFederatedLane(context.Background(), runtime, federator.RemoteLaneRequest{
+		Source: source, Parent: federator.ParentContext{
+			HostID: source.HostID, SessionID: source.SessionID, Product: source.Product,
+			InstanceID: source.InstanceID, Groups: source.Groups,
+		},
+		TargetHostID: "host-b", Product: "qwen", Capability: "codex-lane", Arguments: []string{"list", "--all"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "capability") {
+		t.Fatalf("product/capability mismatch result = %v", err)
+	}
+	if len(coordinator.lanes) != 0 {
+		t.Fatalf("mismatched request dispatched a lane: %#v", coordinator.lanes)
 	}
 }
 

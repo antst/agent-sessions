@@ -77,3 +77,24 @@ func TestDarwinServiceAssetRunsAtLoadSurvivesWakeAndTargetsOnlyDaemon(t *testing
 		}
 	}
 }
+
+func TestDarwinHubAssetHasHomePathWorkingDirectoryAndNoHostProductEnvironment(t *testing.T) {
+	body := readRepositoryAsset(t, "deploy/agent-sessions-hub/launchd/net.antst.agent-sessions-hub.plist")
+	for _, literal := range []string{
+		"<key>Label</key>", "net.antst.agent-sessions-hub", "<key>RunAtLoad</key>", "<key>KeepAlive</key>",
+		"<key>WorkingDirectory</key>", "@HOME@", "<key>EnvironmentVariables</key>",
+		"<key>HOME</key>", "<key>PATH</key>", "@SERVICE_PATH@", "agent-sessions-hub",
+	} {
+		if !strings.Contains(body, literal) {
+			t.Errorf("launchd hub asset omits %q", literal)
+		}
+	}
+	for _, forbidden := range []string{
+		"CODEX_PEER_CODEX_BIN", "CLAUDE_PEER_CLAUDE_BIN", "GROK_PEER_GROK_BIN", "QWEN_PEER_QWEN_BIN",
+		"AGENT_SESSIONS_HUB_LISTEN", "TLS", "AUTH_TOKEN",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("launchd hub asset contains out-of-scope or host-only setting %q", forbidden)
+		}
+	}
+}

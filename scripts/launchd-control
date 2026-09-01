@@ -80,3 +80,17 @@ launchd_render_host_plist() {
     -e "s|@GROK_BIN@|$grok_value|g" -e "s|@QWEN_BIN@|$qwen_value|g" \
     "$template" >"$output"
 }
+
+launchd_render_hub_plist() {
+  if [[ $# -ne 5 ]]; then
+    printf 'launchd hub plist renderer requires template, output, prefix, home, and service path\n' >&2
+    return 2
+  fi
+  local template=$1 output=$2 prefix=$3 home=$4 service_path=$5
+  local prefix_value home_value service_path_value
+  prefix_value=$(launchd_xml_sed_replacement "$prefix")
+  home_value=$(launchd_xml_sed_replacement "$home")
+  service_path_value=$(launchd_xml_sed_replacement "$service_path")
+  sed -e "s|@PREFIX@|$prefix_value|g" -e "s|@HOME@|$home_value|g" \
+    -e "s|@SERVICE_PATH@|$service_path_value|g" "$template" >"$output"
+}

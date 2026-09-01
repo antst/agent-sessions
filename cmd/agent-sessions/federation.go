@@ -48,9 +48,9 @@ func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemon
 }
 
 func (c *hostCoordinator) federationCapabilities() []string {
-	capabilities := make([]string, 0, 4)
-	for _, product := range []string{"codex", "claude", "grok", "qwen"} {
-		report, err := doctorLane(c.ctx, product, "")
+	capabilities := make([]string, 0, len(productcatalog.All()))
+	for _, descriptor := range productcatalog.All() {
+		report, err := doctorLane(c.ctx, descriptor.ID, "")
 		if err != nil {
 			continue
 		}
@@ -58,10 +58,7 @@ func (c *hostCoordinator) federationCapabilities() []string {
 		if !ready {
 			continue
 		}
-		descriptor, ok := productcatalog.ByID(product)
-		if ok {
-			capabilities = append(capabilities, descriptor.LaneCapability)
-		}
+		capabilities = append(capabilities, descriptor.FederationCapabilities...)
 	}
 	return capabilities
 }
@@ -263,6 +260,10 @@ func (c *hostCoordinator) handleRemoteLaneCommand(
 	if err != nil {
 		return nil, err
 	}
+	capability, err := localFederationCapability(envelope.Product)
+	if err != nil {
+		return nil, err
+	}
 	result, err := host.RunRemoteLane(ctx, federationpkg.RemoteLaneRequest{
 		Source: source,
 		Parent: federationpkg.ParentContext{
@@ -271,7 +272,7 @@ func (c *hostCoordinator) handleRemoteLaneCommand(
 			AlwaysApprove:  source.PermissionMode == "bypassPermissions" || source.PermissionMode == "bypass",
 			PermissionMode: source.PermissionMode,
 		},
-		TargetHostID: strings.TrimSpace(envelope.Host), Product: envelope.Product,
+		TargetHostID: strings.TrimSpace(envelope.Host), Product: envelope.Product, Capability: capability,
 		Arguments: append([]string(nil), envelope.Arguments...), Input: []byte(envelope.Input),
 	})
 	if err != nil {
@@ -292,6 +293,9 @@ func (c *hostCoordinator) runFederatedLane(
 	runtime *daemonpkg.Runtime,
 	request federationpkg.RemoteLaneRequest,
 ) (federationpkg.RemoteLaneResult, error) {
+	if err := authorizeFederatedLane(ctx, request.Product, request.Capability); err != nil {
+		return federationpkg.RemoteLaneResult{}, err
+	}
 	parsed, err := parseUnifiedLaneCommand(request.Arguments)
 	if err != nil {
 		return federationpkg.RemoteLaneResult{}, err
@@ -317,4 +321,35 @@ func (c *hostCoordinator) runFederatedLane(
 		return federationpkg.RemoteLaneResult{}, err
 	}
 	return federationpkg.RemoteLaneResult{Stdout: append(append([]byte(nil), raw...), '\n')}, nil
+}
+
+func localFederationCapability(product string) (string, error) {
+	descriptor, ok := productcatalog.ByID(product)
+	if !ok || len(descriptor.FederationCapabilities) != 1 {
+		return "", fmt.Errorf("remote lane product %q is unsupported", product)
+	}
+	return descriptor.FederationCapabilities[0], nil
+}
+
+func authorizeFederatedLane(ctx context.Context, product, capability string) error {
+	descriptor, ok := productcatalog.ByID(product)
+	if !ok {
+		return fmt.Errorf("remote lane product %q is unsupported", product)
+	}
+	if !containsString(descriptor.FederationCapabilities, capability) {
+		return fmt.Errorf("remote lane capability %q does not match product %q", capability, product)
+	}
+	report, err := doctorLane(ctx, product, "")
+	if err != nil {
+		return fmt.Errorf("remote lane product %q is unavailable: %w", product, err)
+	}
+	ready, _ := report["ready"].(bool)
+	if !ready {
+		reason, _ := report["readiness_error"].(string)
+		if strings.TrimSpace(reason) == "" {
+			reason = "lane doctor did not report ready"
+		}
+		return fmt.Errorf("remote lane product %q is unavailable: %s", product, reason)
+	}
+	return nil
 }

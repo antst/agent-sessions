@@ -1,0 +1,484 @@
+package daemon
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func newLaneInputTestEngine(t *testing.T, limits LaneInputLimits) (*LaneInputEngine, *StateStore, string) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := OpenState(filepath.Join(root, "state"), 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := emptyCatalog()
+	catalog.Host = HostRuntime{User: "1000", Host: "test", Generation: 7}
+	catalog.Lanes["lane"] = Lane{ID: "lane", Product: "codex", ProfileIdentity: "profile", NativeSessionID: "native", State: "running"}
+	catalog.Turns["turn"] = Turn{ID: "turn", LaneID: "lane", Sequence: 1, State: "dispatched"}
+	if _, err := store.Commit(0, catalog); err != nil {
+		t.Fatal(err)
+	}
+	spoolRoot := filepath.Join(root, "spool")
+	engine, err := NewLaneInputEngine(store, spoolRoot, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.now = func() time.Time { return time.Unix(100, 0) }
+	return engine, store, spoolRoot
+}
+
+func TestLaneInputAdmissionPersistsPrivateVerifiedBodyBeforeAcknowledgment(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	body := []byte("secret prompt body")
+	receipt, err := engine.Admit("lane", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.State != ReceiptQueued || receipt.Sequence != 1 || receipt.Digest != sha256.Sum256(body) || receipt.Bytes != int64(len(body)) {
+		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+	rootInfo, err := os.Stat(spoolRoot)
+	if err != nil || rootInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("spool root mode: info=%v err=%v", rootInfo, err)
+	}
+	entries, err := os.ReadDir(spoolRoot)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("spool entries=%v err=%v", entries, err)
+	}
+	objectInfo, err := entries[0].Info()
+	if err != nil || objectInfo.Mode().Perm() != 0o600 || !objectInfo.Mode().IsRegular() {
+		t.Fatalf("spool object mode: info=%v err=%v", objectInfo, err)
+	}
+	reader, metadata, err := engine.OpenVerified(receipt.ReceiptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(got, body) || metadata.Digest != receipt.Digest || metadata.Bytes != receipt.Bytes {
+		t.Fatalf("verified read body=%q metadata=%+v read=%v close=%v", got, metadata, readErr, closeErr)
+	}
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Catalog.Lanes["lane"].InputSequence != 1 || snapshot.Catalog.LaneInputs[receipt.ReceiptID].ReceiptID != receipt.ReceiptID {
+		t.Fatalf("durable admission missing: %+v", snapshot.Catalog)
+	}
+	encoded := mustJSON(t, snapshot.Catalog)
+	if bytes.Contains(encoded, body) || bytes.Contains(encoded, []byte(spoolRoot)) {
+		t.Fatalf("catalog leaked body or spool path: %s", encoded)
+	}
+}
+
+func TestLaneInputAdmissionFailureLeavesRecoverableOrphanAndNeverAcknowledges(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	engine.afterSpoolSync = func() error { return errors.New("crash before receipt commit") }
+	if _, err := engine.Admit("lane", []byte("orphan")); err == nil {
+		t.Fatal("admission unexpectedly succeeded")
+	}
+	snapshot, _ := store.Read()
+	if len(snapshot.Catalog.LaneInputs) != 0 || snapshot.Catalog.Lanes["lane"].InputSequence != 0 {
+		t.Fatalf("failed admission became durable: %+v", snapshot.Catalog.LaneInputs)
+	}
+	entries, _ := os.ReadDir(spoolRoot)
+	if len(entries) != 1 {
+		t.Fatalf("want one crash orphan, got %d", len(entries))
+	}
+	engine.afterSpoolSync = nil
+	report, err := engine.Recover()
+	if err != nil || report.OrphansRemoved != 1 {
+		t.Fatalf("recover report=%+v err=%v", report, err)
+	}
+	entries, _ = os.ReadDir(spoolRoot)
+	if len(entries) != 0 {
+		t.Fatalf("orphan remains after recovery: %v", entries)
+	}
+}
+
+func TestLaneInputQuotasAreEnforcedBeforeDurableAcceptance(t *testing.T) {
+	limits := LaneInputLimits{MaxInputBytes: 4, MaxLaneBytes: 6, MaxLaneObjects: 2, MaxHostBytes: 8, MaxHostObjects: 3}
+	engine, store, _ := newLaneInputTestEngine(t, limits)
+	if _, err := engine.Admit("lane", []byte("12345")); !errors.Is(err, ErrLaneInputTooLarge) {
+		t.Fatalf("oversize error=%v", err)
+	}
+	if _, err := engine.Admit("lane", []byte("1234")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Admit("lane", []byte("123")); !errors.Is(err, ErrLaneInputQuota) {
+		t.Fatalf("lane quota error=%v", err)
+	}
+	snapshot, _ := store.Read()
+	if len(snapshot.Catalog.LaneInputs) != 1 || snapshot.Catalog.Lanes["lane"].InputSequence != 1 {
+		t.Fatalf("quota rejection mutated state: %+v", snapshot.Catalog.LaneInputs)
+	}
+}
+
+func TestLaneInputAdmissionKeyIsDurablyIdempotentAndConflictsFailClosed(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	first, err := engine.AdmitWithID("delivery-key", "lane", []byte("same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.AdmitWithID("delivery-key", "lane", []byte("same"))
+	if err != nil || second.ReceiptID != first.ReceiptID || second.Sequence != first.Sequence {
+		t.Fatalf("idempotent admission=%+v err=%v", second, err)
+	}
+	if _, err := engine.AdmitWithID("delivery-key", "lane", []byte("different")); !errors.Is(err, ErrLaneInputConflict) {
+		t.Fatalf("conflicting admission error=%v", err)
+	}
+	snapshot, _ := store.Read()
+	if len(snapshot.Catalog.LaneInputs) != 1 || snapshot.Catalog.Lanes["lane"].InputSequence != 1 {
+		t.Fatalf("idempotency mutated authority: %+v", snapshot.Catalog.LaneInputs)
+	}
+	if entries, _ := os.ReadDir(spoolRoot); len(entries) != 1 {
+		t.Fatalf("idempotency leaked spool objects: %v", entries)
+	}
+}
+
+func TestLaneInputAdmissionAndSelectionFailClosedForNonLiveOrDebtedLane(t *testing.T) {
+	for _, state := range []string{"retiring", "archived", "cleanup-debt"} {
+		t.Run(state, func(t *testing.T) {
+			engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+			snapshot, _ := store.Read()
+			catalog := snapshot.Catalog
+			lane := catalog.Lanes["lane"]
+			if state == "archived" {
+				lane.State = "terminal"
+				catalog.Lanes["lane"] = lane
+				committed, err := store.Commit(snapshot.Revision, catalog)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot, catalog, lane = committed, committed.Catalog, committed.Catalog.Lanes["lane"]
+			}
+			lane.State = state
+			catalog.Lanes["lane"] = lane
+			if _, err := store.Commit(snapshot.Revision, catalog); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := engine.AdmitWithID("blocked", "lane", []byte("body")); !errors.Is(err, ErrLaneInputUnavailable) {
+				t.Fatalf("state %s admission error=%v", state, err)
+			}
+			if _, _, err := engine.EarliestQueued("lane"); !errors.Is(err, ErrLaneInputUnavailable) {
+				t.Fatalf("state %s selection error=%v", state, err)
+			}
+		})
+	}
+
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	receipt, err := engine.Admit("lane", []byte("queued"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := store.Read()
+	catalog := snapshot.Catalog
+	catalog.CleanupDebts[laneInputDebtID(receipt.ReceiptID)] = CleanupDebt{
+		ID: laneInputDebtID(receipt.ReceiptID), Resource: "lane-input:" + receipt.ReceiptID,
+		BaselineIdentity: receipt.SpoolObjectID, IntendedState: "absent", LastVerifiedState: "unknown", RetryRevision: 1, Operation: "retire-lane-input",
+	}
+	if _, err := store.Commit(snapshot.Revision, catalog); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.EarliestQueued("lane"); !errors.Is(err, ErrLaneInputCleanupDebt) {
+		t.Fatalf("debt selection error=%v", err)
+	}
+}
+
+func TestLaneInputTerminalLaneAcceptsAndSelectsWhileOlderTurnRemainsCollectable(t *testing.T) {
+	engine, store, _ := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	snapshot, _ := store.Read()
+	catalog := snapshot.Catalog
+	lane := catalog.Lanes["lane"]
+	lane.State = "terminal"
+	catalog.Lanes["lane"] = lane
+	turn := catalog.Turns["turn"]
+	turn.State, turn.Outcome, turn.CompletedAt, turn.TerminalRevision = "terminal", "completed", 99, 1
+	catalog.Turns["turn"] = turn
+	if _, err := store.Commit(snapshot.Revision, catalog); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := engine.AdmitWithID("terminal-queued", "lane", []byte("next input"))
+	if err != nil || receipt.State != ReceiptQueued {
+		t.Fatalf("terminal admission=%+v err=%v", receipt, err)
+	}
+	selected, ok, err := engine.EarliestQueued("lane")
+	if err != nil || !ok || selected.ReceiptID != receipt.ReceiptID {
+		t.Fatalf("terminal selection=%+v ok=%v err=%v", selected, ok, err)
+	}
+	snapshot, _ = store.Read()
+	if snapshot.Catalog.Lanes["lane"].State != "terminal" || snapshot.Catalog.Turns["turn"].State != "terminal" ||
+		snapshot.Catalog.Turns["turn"].CollectionRevision != 0 {
+		t.Fatalf("queue admission consumed collection debt: lane=%+v turn=%+v", snapshot.Catalog.Lanes["lane"], snapshot.Catalog.Turns["turn"])
+	}
+}
+
+func TestLaneInputDispatchRequeueInjectionAmbiguityAndRetirement(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	receipt, err := engine.Admit("lane", []byte("first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, ok, err := engine.EarliestQueued("lane")
+	if err != nil || !ok || queued.ReceiptID != receipt.ReceiptID {
+		t.Fatalf("earliest=%+v ok=%v err=%v", queued, ok, err)
+	}
+	dispatching, err := engine.MarkDispatching(receipt.ReceiptID, "turn", "attempt-one")
+	if err != nil || dispatching.State != ReceiptDispatching {
+		t.Fatalf("dispatching=%+v err=%v", dispatching, err)
+	}
+	requeued, err := engine.RequeueUnsupportedSteer(receipt.ReceiptID)
+	if err != nil || requeued.State != ReceiptQueued || requeued.Sequence != receipt.Sequence || requeued.ReceiptID != receipt.ReceiptID {
+		t.Fatalf("requeued=%+v err=%v", requeued, err)
+	}
+	if _, err := engine.MarkDispatching(receipt.ReceiptID, "turn", "attempt-two"); err != nil {
+		t.Fatal(err)
+	}
+	ambiguous, err := engine.MarkAmbiguous(receipt.ReceiptID, AmbiguityNativeAcceptanceUnproven)
+	if err != nil || ambiguous.State != ReceiptAmbiguous {
+		t.Fatalf("ambiguous=%+v err=%v", ambiguous, err)
+	}
+	acceptance := NativeAcceptanceRef{NativeSessionID: "native", NativeMessageID: "message", AcceptedAt: 101}
+	injected, err := engine.MarkInjected(receipt.ReceiptID, acceptance)
+	if err != nil || injected.State != ReceiptInjected || injected.NativeAcceptance == nil {
+		t.Fatalf("injected=%+v err=%v", injected, err)
+	}
+	retired, err := engine.Retire(receipt.ReceiptID)
+	if err != nil || retired.State != ReceiptRetired {
+		t.Fatalf("retired=%+v err=%v", retired, err)
+	}
+	if entries, _ := os.ReadDir(spoolRoot); len(entries) != 0 {
+		t.Fatalf("retired object remains: %v", entries)
+	}
+	snapshot, _ := store.Read()
+	if snapshot.Catalog.LaneInputs[receipt.ReceiptID].State != ReceiptRetired {
+		t.Fatalf("retirement not durable: %+v", snapshot.Catalog.LaneInputs[receipt.ReceiptID])
+	}
+}
+
+func TestLaneInputChangedObjectIsPreservedAsCleanupDebt(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	receipt, err := engine.Admit("lane", []byte("owned"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(spoolRoot, receipt.SpoolObjectID)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("unrelated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Retire(receipt.ReceiptID); !errors.Is(err, ErrLaneInputCleanupDebt) {
+		t.Fatalf("retire changed object error=%v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "unrelated" {
+		t.Fatalf("unrelated object was changed: %q err=%v", got, err)
+	}
+	snapshot, _ := store.Read()
+	if len(snapshot.Catalog.CleanupDebts) != 1 || snapshot.Catalog.LaneInputs[receipt.ReceiptID].State == ReceiptRetired {
+		t.Fatalf("cleanup debt not preserved: receipts=%+v debts=%+v", snapshot.Catalog.LaneInputs, snapshot.Catalog.CleanupDebts)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := engine.Retire(receipt.ReceiptID)
+	if err != nil || retired.State != ReceiptRetired {
+		t.Fatalf("debt resolution retirement=%+v err=%v", retired, err)
+	}
+	snapshot, _ = store.Read()
+	if _, ok := snapshot.Catalog.CleanupDebts[laneInputDebtID(receipt.ReceiptID)]; ok {
+		t.Fatalf("resolved cleanup debt remains: %+v", snapshot.Catalog.CleanupDebts)
+	}
+}
+
+func TestLaneInputRecoveryPreservesQueuedAndReportsDispatchingWithoutReplay(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	queued, _ := engine.Admit("lane", []byte("queued"))
+	dispatching, _ := engine.Admit("lane", []byte("dispatching"))
+	if _, err := engine.MarkDispatching(dispatching.ReceiptID, "turn", "attempt"); err != nil {
+		t.Fatal(err)
+	}
+	report, err := engine.Recover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Dispatching) != 1 || report.Dispatching[0].ReceiptID != dispatching.ReceiptID || report.Queued != 1 {
+		t.Fatalf("recovery report=%+v", report)
+	}
+	if entries, _ := os.ReadDir(spoolRoot); len(entries) != 2 {
+		t.Fatalf("recovery removed active bodies: %v", entries)
+	}
+	snapshot, _ := store.Read()
+	if snapshot.Catalog.LaneInputs[queued.ReceiptID].State != ReceiptQueued || snapshot.Catalog.LaneInputs[dispatching.ReceiptID].State != ReceiptDispatching {
+		t.Fatalf("recovery replayed or rewrote receipts: %+v", snapshot.Catalog.LaneInputs)
+	}
+}
+
+func TestLaneInputOpenRejectsSymlinkAndIdentityReplacement(t *testing.T) {
+	engine, _, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	receipt, _ := engine.Admit("lane", []byte("owned"))
+	path := filepath.Join(spoolRoot, receipt.SpoolObjectID)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(spoolRoot, "target")
+	if err := os.WriteFile(target, []byte("owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.OpenVerified(receipt.ReceiptID); err == nil {
+		t.Fatal("symlinked spool object was accepted")
+	}
+}
+
+func TestLaneInputOpenRejectsDigestMutationOnSameInode(t *testing.T) {
+	engine, _, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	receipt, _ := engine.Admit("lane", []byte("owned"))
+	path := filepath.Join(spoolRoot, receipt.SpoolObjectID)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("other")); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.OpenVerified(receipt.ReceiptID); err == nil {
+		t.Fatal("same-inode digest mutation was accepted")
+	}
+}
+
+func TestLaneInputRecoveryRetiresInjectedAndDebtsMissingQueued(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	injected, _ := engine.Admit("lane", []byte("injected"))
+	if _, err := engine.MarkDispatching(injected.ReceiptID, "turn", "injected-attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.MarkInjected(injected.ReceiptID, NativeAcceptanceRef{NativeSessionID: "native", AcceptedAt: 100}); err != nil {
+		t.Fatal(err)
+	}
+	missing, _ := engine.Admit("lane", []byte("missing"))
+	snapshot, _ := store.Read()
+	if err := os.Remove(filepath.Join(spoolRoot, snapshot.Catalog.LaneInputs[missing.ReceiptID].SpoolObjectID)); err != nil {
+		t.Fatal(err)
+	}
+	report, err := engine.Recover()
+	if err != nil || report.ObjectsRetired != 1 || len(report.CleanupDebtIDs) != 1 {
+		t.Fatalf("recover report=%+v err=%v", report, err)
+	}
+	snapshot, _ = store.Read()
+	if snapshot.Catalog.LaneInputs[injected.ReceiptID].State != ReceiptRetired || snapshot.Catalog.LaneInputs[missing.ReceiptID].State != ReceiptQueued {
+		t.Fatalf("unexpected recovered receipt states: %+v", snapshot.Catalog.LaneInputs)
+	}
+	if _, ok := snapshot.Catalog.CleanupDebts[laneInputDebtID(missing.ReceiptID)]; !ok {
+		t.Fatalf("missing queued object did not become cleanup debt: %+v", snapshot.Catalog.CleanupDebts)
+	}
+}
+
+func TestLaneInputRecoveryPreservesSuspiciousOrphanAndRecordsDebt(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	target := filepath.Join(t.TempDir(), "unrelated")
+	if err := os.WriteFile(target, []byte("unrelated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trap := filepath.Join(spoolRoot, "spool-malformed")
+	if err := os.Symlink(target, trap); err != nil {
+		t.Fatal(err)
+	}
+	report, err := engine.Recover()
+	if err != nil || len(report.CleanupDebtIDs) != 1 || report.OrphansRemoved != 0 {
+		t.Fatalf("recover report=%+v err=%v", report, err)
+	}
+	if info, err := os.Lstat(trap); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("suspicious orphan was changed: info=%v err=%v", info, err)
+	}
+	snapshot, _ := store.Read()
+	if _, ok := snapshot.Catalog.CleanupDebts[report.CleanupDebtIDs[0]]; !ok {
+		t.Fatalf("orphan debt missing: %+v", snapshot.Catalog.CleanupDebts)
+	}
+}
+
+func TestLaneInputAdmissionUsesNoFollowExclusiveObjects(t *testing.T) {
+	engine, _, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	engine.randomID = func() (string, error) { return "fixed", nil }
+	trap := filepath.Join(spoolRoot, ".admit-fixed")
+	if err := os.Symlink(filepath.Join(spoolRoot, "victim"), trap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Admit("lane", []byte("body")); err == nil {
+		t.Fatal("exclusive no-follow trap was overwritten")
+	}
+	var stat unix.Stat_t
+	if err := unix.Lstat(trap, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFLNK {
+		t.Fatalf("trap changed: stat=%+v err=%v", stat, err)
+	}
+}
+
+func TestLaneInputConcurrentEnginesCommitUniqueMonotonicSequences(t *testing.T) {
+	engine, store, spoolRoot := newLaneInputTestEngine(t, DefaultLaneInputLimits())
+	second, err := NewLaneInputEngine(store, spoolRoot, DefaultLaneInputLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const admissions = 16
+	errorsSeen := make(chan error, admissions)
+	var group sync.WaitGroup
+	for index := 0; index < admissions; index++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			candidate := engine
+			if index%2 != 0 {
+				candidate = second
+			}
+			_, err := candidate.Admit("lane", []byte{byte(index)})
+			errorsSeen <- err
+		}(index)
+	}
+	group.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Catalog.LaneInputs) != admissions || snapshot.Catalog.Lanes["lane"].InputSequence != admissions {
+		t.Fatalf("concurrent admission state: count=%d highwater=%d", len(snapshot.Catalog.LaneInputs), snapshot.Catalog.Lanes["lane"].InputSequence)
+	}
+	sequences := make(map[uint64]bool, admissions)
+	for _, receipt := range snapshot.Catalog.LaneInputs {
+		if sequences[receipt.Sequence] {
+			t.Fatalf("duplicate sequence %d", receipt.Sequence)
+		}
+		sequences[receipt.Sequence] = true
+	}
+}

@@ -55,6 +55,7 @@ type RemoteLaneRequest struct {
 	Parent       ParentContext
 	TargetHostID string
 	Product      string
+	Capability   string
 	Arguments    []string
 	Input        []byte
 }
@@ -129,7 +130,11 @@ func NewEmbeddedHost(options EmbeddedHostOptions) (*EmbeddedHost, error) {
 	if options.HeartbeatTimeout <= 0 {
 		options.HeartbeatTimeout = 20 * time.Second
 	}
-	options.Capabilities = normalizeCapabilities(options.Capabilities)
+	capabilities, err := normalizeCapabilities(options.Capabilities)
+	if err != nil {
+		return nil, err
+	}
+	options.Capabilities = capabilities
 	if len(options.Capabilities) != 0 && options.RunLane == nil {
 		return nil, errors.New("embedded federation lane capabilities require a lane callback")
 	}
@@ -318,7 +323,7 @@ func (h *EmbeddedHost) refreshLocal(ctx context.Context) error {
 	}
 	next := make(map[string]Peer, len(peers))
 	for _, peer := range peers {
-		if err := validateSnapshotPeer(peer, h.options.HostID); err != nil {
+		if err := validateLocalPeer(peer, h.options.HostID); err != nil {
 			return fmt.Errorf("invalid embedded peer %s: %w", peer.ID, err)
 		}
 		if _, exists := next[peer.ID]; exists {
@@ -379,13 +384,17 @@ func (h *EmbeddedHost) handleHubMessage(message Message) error {
 				return errors.New("hub roster contains an invalid host")
 			}
 			if host.ID != h.options.HostID {
-				host.Capabilities = normalizeCapabilities(host.Capabilities)
+				capabilities, err := normalizeCapabilities(host.Capabilities)
+				if err != nil {
+					return fmt.Errorf("hub roster host %s capabilities: %w", host.ID, err)
+				}
+				host.Capabilities = capabilities
 				remoteHosts[host.ID] = host
 			}
 		}
 		remote := make(map[string]Peer, len(message.Peers))
 		for _, peer := range message.Peers {
-			if err := validateSnapshotPeer(peer, peer.HostID); err != nil {
+			if err := validateWirePeer(peer, peer.HostID); err != nil {
 				return fmt.Errorf("hub roster contains invalid peer: %w", err)
 			}
 			if peer.HostID != h.options.HostID {
@@ -555,7 +564,7 @@ func (h *EmbeddedHost) resolveInboundDelivery(message Message) (Peer, Peer, Agen
 	}
 	if message.Type == "terminal_notice_deliver" {
 		source = clonePeer(*frame.Source)
-		sourceOK = validateSnapshotPeer(source, source.HostID) == nil && source.HostID != h.options.HostID
+		sourceOK = validateWirePeer(source, source.HostID) == nil && source.HostID != h.options.HostID
 	}
 	if !targetOK || !sourceOK || frame.Source.ID != source.ID || frame.SourceSessionID != source.SessionID {
 		return Peer{}, Peer{}, AgentFrame{}, errors.New("federated source or local target is no longer live")
@@ -695,7 +704,13 @@ func (h *EmbeddedHost) startRemoteLane(ctx context.Context, request RemoteLaneRe
 	if !sourceOK || source.InstanceID != request.Source.InstanceID {
 		return Message{}, nil, errors.New("remote lane source is no longer locally advertised")
 	}
-	host, err := h.resolveRemoteHost(request.TargetHostID, capabilityForProduct(request.Product))
+	capability, _, err := laneCapabilityForMessage(Message{
+		Product: request.Product, Capabilities: []string{request.Capability},
+	})
+	if err != nil {
+		return Message{}, nil, err
+	}
+	host, err := h.resolveRemoteHost(request.TargetHostID, capability)
 	if err != nil {
 		return Message{}, nil, err
 	}
@@ -709,7 +724,7 @@ func (h *EmbeddedHost) startRemoteLane(ctx context.Context, request RemoteLaneRe
 	h.laneMu.Unlock()
 	message := Message{
 		Type: "lane_exec", RequestID: requestID, SourceID: source.ID, TargetHostID: host.ID,
-		Product: request.Product, Args: append([]string(nil), request.Arguments...),
+		Product: request.Product, Capabilities: []string{capability}, Args: append([]string(nil), request.Arguments...),
 		Input: append([]byte(nil), request.Input...), ParentContext: ptrParent(request.Parent),
 	}
 	h.mu.RLock()
@@ -879,8 +894,8 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	source, sourceOK := h.remote[request.SourceID]
 	connected := h.network != nil
 	h.mu.RUnlock()
-	capability := capabilityForProduct(request.Product)
-	if !connected || !sourceOK || capability == "" || !contains(h.options.Capabilities, capability) ||
+	capability, _, capabilityErr := laneCapabilityForMessage(request)
+	if !connected || !sourceOK || capabilityErr != nil || !contains(h.options.Capabilities, capability) ||
 		h.options.RunLane == nil || request.ParentContext == nil || len(request.Args) == 0 || len(request.Input) > maxLaneInputBytes {
 		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: "invalid or stale embedded remote lane request"})
 		return
@@ -905,7 +920,8 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	run.mu.Unlock()
 	result, err := h.options.RunLane(ctx, RemoteLaneRequest{
 		Source: source, Parent: *request.ParentContext, TargetHostID: h.options.HostID,
-		Product: request.Product, Arguments: append([]string(nil), request.Args...), Input: append([]byte(nil), request.Input...),
+		Product: request.Product, Capability: capability,
+		Arguments: append([]string(nil), request.Args...), Input: append([]byte(nil), request.Input...),
 	})
 	cancel()
 	if err != nil {
@@ -1003,7 +1019,7 @@ func validateRemoteLaneArgs(args []string) error {
 	return nil
 }
 
-func validateSnapshotPeer(peer Peer, hostID string) error {
+func validateWirePeer(peer Peer, hostID string) error {
 	product := peer.Product
 	if product == "" {
 		product = peer.Entrypoint
@@ -1015,7 +1031,7 @@ func validateSnapshotPeer(peer Peer, hostID string) error {
 	if peer.PeerProtocol != GroupProtocolVersion {
 		return errors.New("snapshot contains an incompatible grouped peer")
 	}
-	if _, ok := productcatalog.ByID(product); !ok || strings.TrimSpace(peer.Name) == "" || strings.TrimSpace(peer.InstanceID) == "" {
+	if productcatalog.ValidateToken(product) != nil || strings.TrimSpace(peer.Name) == "" || strings.TrimSpace(peer.InstanceID) == "" {
 		return errors.New("snapshot contains an invalid product peer")
 	}
 	if len(peer.Groups) == 0 || !contains(peer.Groups, PrivateGroup(hostID, peer.SessionID)) {
@@ -1027,6 +1043,20 @@ func validateSnapshotPeer(peer Peer, hostID string) error {
 			return errors.New("snapshot contains invalid peer groups")
 		}
 		seen[group] = true
+	}
+	return nil
+}
+
+func validateLocalPeer(peer Peer, hostID string) error {
+	if err := validateWirePeer(peer, hostID); err != nil {
+		return err
+	}
+	product := peer.Product
+	if product == "" {
+		product = peer.Entrypoint
+	}
+	if _, ok := productcatalog.ByID(product); !ok {
+		return errors.New("snapshot contains a product outside the local catalog")
 	}
 	return nil
 }
@@ -1073,7 +1103,7 @@ func BuildPeer(hostID, hostName, sessionID, name, status, cwd, product, permissi
 		Status: status, Cwd: cwd, PermissionMode: permission, PeerProtocol: GroupProtocolVersion,
 		InstanceID: instanceID, Groups: effective, ParentSessionID: parentID,
 	}
-	if err := validateSnapshotPeer(peer, hostID); err != nil {
+	if err := validateLocalPeer(peer, hostID); err != nil {
 		return Peer{}, err
 	}
 	return peer, nil

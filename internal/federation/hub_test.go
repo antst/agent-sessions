@@ -3,6 +3,7 @@ package federation
 import (
 	"encoding/json"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -198,5 +199,177 @@ func TestHubRejectsStaleBroadcastThroughDifferentSharedGroup(t *testing.T) {
 		TargetID: targetPeer.ID, Frame: frame,
 	}); err == nil {
 		t.Fatal("hub forwarded a stale broadcast through an unrelated shared group")
+	}
+}
+
+func TestHubRoutesUnknownOpaqueCapabilityOnlyToExactAdvertisement(t *testing.T) {
+	sourcePeer := mustTestPeer(t, "host-a", "source", "codex", "project")
+	sourceHub, sourceConn := net.Pipe()
+	destinationHub, destinationConn := net.Pipe()
+	defer func() {
+		_ = sourceHub.Close()
+		_ = sourceConn.Close()
+		_ = destinationHub.Close()
+		_ = destinationConn.Close()
+	}()
+	source := &hubClient{
+		hostID: "host-a", ready: true, wire: newWireConn(sourceHub),
+		peers: map[string]Peer{sourcePeer.ID: sourcePeer},
+	}
+	destination := &hubClient{
+		hostID: "host-b", ready: true, wire: newWireConn(destinationHub), peers: map[string]Peer{},
+		capabilities: []string{"future-lane"},
+	}
+	h := &hub{
+		logger: discardTestLogger(), clients: map[string]*hubClient{"host-a": source, "host-b": destination},
+		laneRoutes: map[string]*laneRoute{}, deliveryRoutes: map[string]*deliveryRoute{},
+	}
+	forwarded := make(chan Message, 1)
+	sourceResponses := make(chan Message, 1)
+	go func() {
+		_ = scanMessages(destinationConn, func(message Message) error {
+			forwarded <- message
+			return nil
+		})
+	}()
+	go func() {
+		_ = scanMessages(sourceConn, func(message Message) error {
+			sourceResponses <- message
+			return nil
+		})
+	}()
+	request := Message{
+		Type: "lane_exec", RequestID: "opaque-route", SourceID: sourcePeer.ID, TargetHostID: "host-b",
+		Product: "future", Capabilities: []string{"future-lane"}, Args: []string{"run"},
+		ParentContext: testParentContext(sourcePeer),
+	}
+	if err := h.routeLaneExec(source, request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-forwarded:
+		if got.Product != "future" || !reflect.DeepEqual(got.Capabilities, []string{"future-lane"}) {
+			t.Fatalf("forwarded opaque request = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("opaque lane request was not forwarded")
+	}
+
+	mismatch := request
+	mismatch.RequestID = "wrong-route"
+	mismatch.Capabilities = []string{"other-lane"}
+	if err := h.routeLaneExec(source, mismatch); err != nil {
+		t.Fatal(err)
+	}
+	response := <-sourceResponses
+	if response.Type != "lane_error" || !strings.Contains(response.Error, "lacks") {
+		t.Fatalf("wrong capability response = %#v", response)
+	}
+
+	destination.capabilities = []string{CapabilityCodexLane}
+	legacy := request
+	legacy.RequestID = "legacy-route"
+	legacy.Product = "codex"
+	legacy.Capabilities = nil
+	if err := h.routeLaneExec(source, legacy); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-forwarded:
+		if got.RequestID != "legacy-route" || len(got.Capabilities) != 0 {
+			t.Fatalf("forwarded legacy request = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy original-four lane request was not forwarded")
+	}
+}
+
+func TestHubMixedV3CapabilityAdmissionUsesFrozenLegacyMapOnly(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		product      string
+		capabilities []string
+		want         string
+		legacy       bool
+		wantError    bool
+	}{
+		{name: "legacy codex", product: "codex", want: CapabilityCodexLane, legacy: true},
+		{name: "legacy claude", product: "claude", want: CapabilityClaudeLane, legacy: true},
+		{name: "legacy grok", product: "grok", want: CapabilityGrokLane, legacy: true},
+		{name: "legacy qwen", product: "qwen", want: CapabilityQwenLane, legacy: true},
+		{name: "new empty", product: "future", wantError: true},
+		{name: "new exact", product: "future", capabilities: []string{"future-lane"}, want: "future-lane"},
+		{name: "multi", product: "future", capabilities: []string{"future-lane", "other-lane"}, wantError: true},
+		{name: "duplicate", product: "future", capabilities: []string{"future-lane", "future-lane"}, wantError: true},
+		{name: "invalid", product: "future", capabilities: []string{"Future-lane"}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, legacy, err := laneCapabilityForMessage(Message{Product: test.product, Capabilities: test.capabilities})
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("capability admission = %q, legacy=%t", got, legacy)
+				}
+				return
+			}
+			if err != nil || got != test.want || legacy != test.legacy {
+				t.Fatalf("capability admission = %q, legacy=%t, err=%v", got, legacy, err)
+			}
+		})
+	}
+}
+
+func TestHubRejectsInvalidHelloCapabilitiesWithoutSilentFiltering(t *testing.T) {
+	for _, capabilities := range [][]string{{"valid-lane", "Invalid"}, append(make([]string, maxWireCapabilities), "valid-lane")} {
+		server, client := net.Pipe()
+		h := &hub{
+			logger: discardTestLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{},
+			deliveryRoutes: map[string]*deliveryRoute{}, clientTimeout: time.Second,
+		}
+		go h.handleConnection(server)
+		if err := newWireConn(client).Send(Message{
+			Type: "hello", Version: ProtocolVersion, HostID: "host-a", HostName: "host-a", Capabilities: capabilities,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		var response Message
+		if err := json.NewDecoder(client).Decode(&response); err == nil {
+			t.Fatalf("invalid capability hello received response %#v", response)
+		}
+		if len(h.clients) != 0 {
+			t.Fatalf("invalid capability hello registered: %#v", h.clients)
+		}
+		_ = client.Close()
+	}
+}
+
+func TestHubFencesMessagesFromReplacedGeneration(t *testing.T) {
+	h := &hub{
+		logger: discardTestLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{},
+		deliveryRoutes: map[string]*deliveryRoute{},
+	}
+	oldServer, oldPeer := net.Pipe()
+	newServer, newPeer := net.Pipe()
+	defer func() {
+		_ = oldServer.Close()
+		_ = oldPeer.Close()
+		_ = newServer.Close()
+		_ = newPeer.Close()
+	}()
+	old := &hubClient{hostID: "host-a", generation: 7, wire: newWireConn(oldServer), peers: map[string]Peer{}}
+	current := &hubClient{hostID: "host-a", generation: 8, wire: newWireConn(newServer), peers: map[string]Peer{}}
+	h.clients[old.hostID] = current
+	if err := h.handleClientMessage(old, Message{Type: "snapshot"}); err == nil || !strings.Contains(err.Error(), "superseded") {
+		t.Fatalf("superseded client message result = %v", err)
+	}
+	if current.ready {
+		t.Fatal("superseded generation mutated the current registration")
+	}
+}
+
+func testParentContext(peer Peer) *ParentContext {
+	return &ParentContext{
+		HostID: peer.HostID, SessionID: peer.SessionID, Product: peer.Product,
+		InstanceID: peer.InstanceID, Groups: append([]string(nil), peer.Groups...),
 	}
 }

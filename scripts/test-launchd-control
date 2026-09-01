@@ -75,6 +75,23 @@ with open(sys.argv[1], "rb") as stream:
 assert document["WorkingDirectory"] == "/Users/a&b"
 assert document["EnvironmentVariables"]["CODEX_PEER_CODEX_BIN"] == "/Applications/Codex & Tools/codex"
 PY
+hub_rendered="$test_root/rendered-hub.plist"
+launchd_render_hub_plist \
+  "$root/deploy/agent-sessions-hub/launchd/net.antst.agent-sessions-hub.plist" "$hub_rendered" \
+  '/Users/a&b/.local' '/Users/a&b' '/Users/a&b/.local/bin:/usr/bin'
+if grep -Eq '@(PREFIX|HOME|SERVICE_PATH)@' "$hub_rendered"; then
+  printf 'rendered hub launchd plist retains a template placeholder\n' >&2
+  exit 1
+fi
+python3 - "$hub_rendered" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], "rb") as stream:
+    document = plistlib.load(stream)
+assert document["WorkingDirectory"] == "/Users/a&b"
+assert document["EnvironmentVariables"]["HOME"] == "/Users/a&b"
+assert document["EnvironmentVariables"]["PATH"] == "/Users/a&b/.local/bin:/usr/bin"
+assert "AGENT_SESSIONS_HUB_LISTEN" not in document["EnvironmentVariables"]
+PY
 grep -Fxq "bootout $target" "$TEST_LAUNCHCTL_LOG"
 grep -Fxq "bootstrap gui/501 $plist" "$TEST_LAUNCHCTL_LOG"
 printf 'launchd exact-label retry and plist escaping: PASS\n'
