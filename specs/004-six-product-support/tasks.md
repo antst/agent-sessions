@@ -65,7 +65,7 @@ reviewed and frozen. Shared-engine workers may now start against those types.
 ### Shared Engine Tests and Implementation
 - [x] T021 Write failing admission/dispatch/ambiguity/recovery/retirement tests for the lane-input contract in `internal/daemon/lane_input_test.go`
 - [x] T022 Implement the private bounded no-follow spool and durable receipt engine in `internal/daemon/lane_input.go` and `internal/daemon/lane_input_spool.go`
-- [ ] T023 Replace volatile `laneActor.pending` acceptance with ledger-backed execution and recovery in `cmd/agent-sessions/lane.go` and `cmd/agent-sessions/lane_test.go`
+- [x] T023 Replace volatile `laneActor.pending` acceptance with ledger-backed execution and recovery in `cmd/agent-sessions/lane.go` and `cmd/agent-sessions/lane_test.go`
 - [x] T024 Implement exclusive native-session lease transitions and DSH-ready composite-key tests in `internal/daemon/{native_lease.go,native_lease_test.go}`
 - [x] T025 [P] Write Linux/macOS peer-identity and bounded-frame tests for `internal/localtransport/` in `internal/localtransport/{transport_test.go,peer_linux_test.go,peer_darwin_test.go}`
 - [x] T026 [P] Implement bounded AF_UNIX framing and exact Linux/macOS peer identity in `internal/localtransport/{transport.go,peer_linux.go,peer_darwin.go}`
