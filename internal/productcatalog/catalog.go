@@ -44,9 +44,10 @@ type TupleMember struct {
 }
 
 type Compatibility struct {
-	Policy         VersionPolicy `json:"policy"`
-	PackageManager string        `json:"package_manager,omitempty"`
-	TupleMembers   []TupleMember `json:"tuple_members,omitempty"`
+	Policy                VersionPolicy `json:"policy"`
+	PackageManager        string        `json:"package_manager,omitempty"`
+	PackageManagerVersion string        `json:"package_manager_version,omitempty"`
+	TupleMembers          []TupleMember `json:"tuple_members,omitempty"`
 }
 
 // NativeRegistration is a secret-free strategy selector. Args are declarative
@@ -177,6 +178,23 @@ func ValidateToken(token string) error {
 	return nil
 }
 
+// ValidateVersion validates the one bounded version grammar shared by tested
+// product versions, exact tuple members, and exact package-manager versions.
+// It deliberately validates identity syntax, not semver ordering or ranges.
+func ValidateVersion(version string) error {
+	if len(version) < 1 || len(version) > 128 {
+		return fmt.Errorf("version length %d is outside 1..128", len(version))
+	}
+	for index, character := range version {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || (index > 0 && (character == '.' || character == '-' || character == '_' || character == '+')) {
+			continue
+		}
+		return fmt.Errorf("version contains invalid character %q", character)
+	}
+	return nil
+}
+
 // ValidateInventory validates one complete injected product inventory.
 func ValidateInventory(inventory []Descriptor) error {
 	ids, aliases := map[string]bool{}, map[string]bool{}
@@ -234,8 +252,8 @@ func validateDescriptor(descriptor Descriptor) error {
 	if descriptor.SupportState != SupportHidden && descriptor.SupportState != SupportExperimental && descriptor.SupportState != SupportGeneral {
 		return fmt.Errorf("invalid support state %q", descriptor.SupportState)
 	}
-	if strings.TrimSpace(descriptor.TestedVersion) == "" {
-		return errors.New("tested version is required")
+	if err := ValidateVersion(descriptor.TestedVersion); err != nil {
+		return fmt.Errorf("tested version %q: %w", descriptor.TestedVersion, err)
 	}
 	if descriptor.Compatibility.Policy != VersionExact && descriptor.Compatibility.Policy != VersionMinimum {
 		return fmt.Errorf("invalid compatibility policy %q", descriptor.Compatibility.Policy)
@@ -243,14 +261,33 @@ func validateDescriptor(descriptor Descriptor) error {
 	if descriptor.ResumeStyle != ResumeSubcommand && descriptor.ResumeStyle != ResumeFlag {
 		return fmt.Errorf("invalid resume style %q", descriptor.ResumeStyle)
 	}
+	manager := descriptor.Compatibility.PackageManager
+	managerVersion := descriptor.Compatibility.PackageManagerVersion
+	if (manager == "") != (managerVersion == "") {
+		return errors.New("package manager and exact package-manager version must be declared together")
+	}
+	if manager != "" {
+		if descriptor.Compatibility.Policy != VersionExact || len(descriptor.Compatibility.TupleMembers) == 0 {
+			return errors.New("package-manager identity is valid only for an exact non-empty tuple")
+		}
+		if err := ValidateToken(manager); err != nil {
+			return fmt.Errorf("package manager %q: %w", manager, err)
+		}
+		if err := ValidateVersion(managerVersion); err != nil {
+			return fmt.Errorf("package-manager version %q: %w", managerVersion, err)
+		}
+	}
 	if len(descriptor.Compatibility.TupleMembers) > 0 {
-		if descriptor.Compatibility.Policy != VersionExact || strings.TrimSpace(descriptor.Compatibility.PackageManager) == "" {
-			return errors.New("version tuple requires exact policy and package manager")
+		if descriptor.Compatibility.Policy != VersionExact || manager == "" {
+			return errors.New("version tuple requires exact policy and exact package-manager identity")
 		}
 		seen := map[string]bool{}
 		for _, member := range descriptor.Compatibility.TupleMembers {
-			if strings.TrimSpace(member.Name) == "" || strings.TrimSpace(member.Version) == "" || seen[member.Name] {
+			if strings.TrimSpace(member.Name) == "" || seen[member.Name] {
 				return errors.New("version tuple members require unique non-empty names and versions")
+			}
+			if err := ValidateVersion(member.Version); err != nil {
+				return fmt.Errorf("tuple member %q version %q: %w", member.Name, member.Version, err)
 			}
 			seen[member.Name] = true
 		}

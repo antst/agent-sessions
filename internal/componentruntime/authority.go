@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strings"
 
 	"github.com/antst/agent-sessions/internal/component"
 	"github.com/antst/agent-sessions/internal/daemon"
@@ -22,9 +21,10 @@ import (
 const bindingIDPrefix = "component-binding-"
 
 // Resolution is fresh, secret-free evidence for one prepared component
-// launch. The resolver retains capability-ID and product-specific capture
-// mechanics; the authority independently checks the returned revision,
-// capability hash, process identity, and exact durable NativeEvidence.
+// launch. BootstrapCapabilityID is optional correlation metadata and never
+// grants authority. The authority independently checks the presented value
+// against the durable capability hash, plus the returned revision, process
+// identity, and exact durable NativeEvidence.
 type Resolution struct {
 	BootstrapCapabilityID string
 	BootstrapRevision     uint64
@@ -659,8 +659,8 @@ func validateBootstrapClaim(
 	if claim.AttachmentID != attachment.ID || claim.ProductID != attachment.Product {
 		return unauthorizedError("bootstrap attachment or product conflicts")
 	}
-	if claim.BootstrapCapabilityID != resolution.BootstrapCapabilityID || resolution.BootstrapRevision != attachment.CatalogRevision {
-		return unauthorizedError("bootstrap capability id or revision conflicts")
+	if resolution.BootstrapRevision != attachment.CatalogRevision {
+		return unauthorizedError("bootstrap revision conflicts")
 	}
 	if !capabilityMatches(attachment.CapabilityHash, claim.BootstrapValue) {
 		return unauthorizedError("bootstrap capability was refused")
@@ -729,8 +729,8 @@ func validateResolution(peer component.PeerEvidence, attachment daemon.ManagedAt
 		peer.Process.Start == "" || peer.Process.StrongStart == "" {
 		return &component.ProtocolError{Category: component.CategoryStaleProcess, Detail: "kernel peer process evidence is invalid"}
 	}
-	if resolution.BootstrapRevision == 0 || strings.TrimSpace(resolution.BootstrapCapabilityID) == "" {
-		return unauthorizedError("resolved bootstrap identity is incomplete")
+	if resolution.BootstrapRevision == 0 {
+		return unauthorizedError("resolved bootstrap revision is incomplete")
 	}
 	if resolution.LiveEvidence.Process != peer.Process {
 		return &component.ProtocolError{Category: component.CategoryStaleProcess, Detail: "live component process differs from kernel peer"}

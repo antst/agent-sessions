@@ -66,6 +66,7 @@ func validateRuntimeProduct(product RuntimeProduct) error {
 	interactive := descriptor.Has(productcatalog.CapabilityInteractive)
 	lane := descriptor.Has(productcatalog.CapabilityLane)
 	parent := descriptor.Has(productcatalog.CapabilityParent)
+	componentTransport := interactive && descriptor.PeerTransport == ComponentPeerTransport
 	if interactive != (product.Peer != nil) {
 		return fmt.Errorf("interactive capability/peer driver mismatch")
 	}
@@ -80,6 +81,12 @@ func validateRuntimeProduct(product RuntimeProduct) error {
 	}
 	if descriptor.SupportState != productcatalog.SupportHidden && product.Doctor == nil {
 		return fmt.Errorf("visible product requires doctor probe")
+	}
+	if !componentTransport && (product.ComponentResolver != nil || product.ComponentRebinder != nil) {
+		return fmt.Errorf("component resolver/rebinder requires interactive component peer transport")
+	}
+	if product.ComponentRebinder != nil && product.ComponentResolver == nil {
+		return fmt.Errorf("component rebinder requires component resolver")
 	}
 	return nil
 }

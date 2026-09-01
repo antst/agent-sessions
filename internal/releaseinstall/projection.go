@@ -20,6 +20,7 @@ type ProjectedInstallProduct struct {
 	ProductID          string                            `json:"product_id"`
 	SupportState       productcatalog.SupportState       `json:"support_state"`
 	TestedVersion      string                            `json:"tested_version"`
+	Compatibility      productcatalog.Compatibility      `json:"compatibility"`
 	NativeRegistration productcatalog.NativeRegistration `json:"native_registration"`
 	Acceptance         productcatalog.AcceptanceContract `json:"acceptance"`
 	Authority          *productcatalog.AuthorityContract `json:"authority,omitempty"`
@@ -33,8 +34,15 @@ func BuildProjection(inventory []productcatalog.Descriptor) (InstallProjection, 
 	for _, descriptor := range sortedDescriptors(inventory) {
 		args := append([]string(nil), descriptor.NativeRegistration.Args...)
 		cells := append([]productcatalog.ExternalAcceptanceCell(nil), descriptor.Acceptance.ExternalCells...)
+		tuple := append([]productcatalog.TupleMember(nil), descriptor.Compatibility.TupleMembers...)
 		sort.Strings(args)
 		sort.Slice(cells, func(i, j int) bool { return cells[i].ID < cells[j].ID })
+		sort.Slice(tuple, func(i, j int) bool {
+			if tuple[i].Name == tuple[j].Name {
+				return tuple[i].Version < tuple[j].Version
+			}
+			return tuple[i].Name < tuple[j].Name
+		})
 		var authority *productcatalog.AuthorityContract
 		if descriptor.Authority != nil {
 			copyAuthority := *descriptor.Authority
@@ -42,6 +50,10 @@ func BuildProjection(inventory []productcatalog.Descriptor) (InstallProjection, 
 		}
 		products = append(products, ProjectedInstallProduct{
 			ProductID: descriptor.ID, SupportState: descriptor.SupportState, TestedVersion: descriptor.TestedVersion,
+			Compatibility: productcatalog.Compatibility{
+				Policy: descriptor.Compatibility.Policy, PackageManager: descriptor.Compatibility.PackageManager,
+				PackageManagerVersion: descriptor.Compatibility.PackageManagerVersion, TupleMembers: tuple,
+			},
 			NativeRegistration: productcatalog.NativeRegistration{Strategy: descriptor.NativeRegistration.Strategy, Args: args, AssetOnly: descriptor.NativeRegistration.AssetOnly},
 			Acceptance:         productcatalog.AcceptanceContract{RealProductRequired: descriptor.Acceptance.RealProductRequired, ExternalCells: cells},
 			Authority:          authority,

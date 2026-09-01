@@ -72,7 +72,7 @@ func BuildProjection(inventory []Descriptor) (Projection, error) {
 		products = append(products, ProjectedProduct{
 			ID: descriptor.ID, Label: descriptor.Label, SupportState: descriptor.SupportState,
 			NativeExecutable: descriptor.NativeExecutable, TestedVersion: descriptor.TestedVersion,
-			Compatibility: Compatibility{Policy: descriptor.Compatibility.Policy, PackageManager: descriptor.Compatibility.PackageManager, TupleMembers: tuple},
+			Compatibility: Compatibility{Policy: descriptor.Compatibility.Policy, PackageManager: descriptor.Compatibility.PackageManager, PackageManagerVersion: descriptor.Compatibility.PackageManagerVersion, TupleMembers: tuple},
 			PeerAlias:     descriptor.PeerAlias, LaneAlias: descriptor.LaneAlias,
 			Capabilities: descriptor.SortedCapabilities(), FederationCapabilities: federation,
 			PeerTransport: descriptor.PeerTransport, MessageTransport: descriptor.MessageTransport,

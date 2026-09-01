@@ -84,6 +84,76 @@ func TestRegistryRejectsMissingExtraAndMismatchedDrivers(t *testing.T) {
 	}
 }
 
+func TestRegistryScopesOptionalComponentResolverAndRebinderToComponentTransport(t *testing.T) {
+	resolver := ComponentResolverFunc(func(
+		context.Context,
+		HostDeps,
+		daemon.ManagedAttachment,
+		ComponentPeerEvidence,
+	) (ComponentResolution, error) {
+		return ComponentResolution{}, nil
+	})
+	rebinder := ComponentSessionRebinderFunc(func(
+		context.Context,
+		HostDeps,
+		daemon.ManagedAttachment,
+		string,
+		string,
+		[]byte,
+	) (daemon.NativeEvidence, error) {
+		return daemon.NativeEvidence{}, nil
+	})
+
+	componentDescriptor := syntheticDescriptor("component-product")
+	componentDescriptor.PeerTransport = ComponentPeerTransport
+	componentProduct := completeRuntime(componentDescriptor)
+	componentProduct.ComponentResolver = resolver
+	componentProduct.ComponentRebinder = rebinder
+	registry, err := NewRegistry([]productcatalog.Descriptor{componentDescriptor}, []RuntimeProduct{componentProduct})
+	if err != nil {
+		t.Fatalf("compose component authority seam: %v", err)
+	}
+	got, ok := registry.ByID(componentDescriptor.ID)
+	if !ok || got.ComponentResolver == nil || got.ComponentRebinder == nil {
+		t.Fatalf("component authority seam = %#v, %v", got, ok)
+	}
+
+	withoutSeam := completeRuntime(componentDescriptor)
+	if _, err := NewRegistry([]productcatalog.Descriptor{componentDescriptor}, []RuntimeProduct{withoutSeam}); err != nil {
+		t.Fatalf("optional component seam rejected transitional composition: %v", err)
+	}
+
+	nonComponentDescriptor := syntheticDescriptor("non-component-product")
+	nonComponent := completeRuntime(nonComponentDescriptor)
+	nonComponent.ComponentResolver = resolver
+	if _, err := NewRegistry([]productcatalog.Descriptor{nonComponentDescriptor}, []RuntimeProduct{nonComponent}); err == nil {
+		t.Fatal("component resolver accepted for non-component transport")
+	}
+
+	nonInteractiveDescriptor := componentDescriptor
+	nonInteractiveDescriptor.ID = "non-interactive-component"
+	nonInteractiveDescriptor.NativeExecutable = nonInteractiveDescriptor.ID
+	nonInteractiveDescriptor.PeerAlias = nonInteractiveDescriptor.ID + "-peer"
+	nonInteractiveDescriptor.LaneAlias = nonInteractiveDescriptor.ID + "-lane"
+	nonInteractiveDescriptor.LaneCapability = nonInteractiveDescriptor.ID + "-lane-capability"
+	nonInteractiveDescriptor.FederationCapabilities = []string{nonInteractiveDescriptor.LaneCapability}
+	nonInteractiveDescriptor.InstallRoot = "integrations/" + nonInteractiveDescriptor.ID
+	nonInteractiveDescriptor.Capabilities = []productcatalog.Capability{productcatalog.CapabilityLane, productcatalog.CapabilityParent}
+	nonInteractive := completeRuntime(nonInteractiveDescriptor)
+	nonInteractive.Peer = nil
+	nonInteractive.Message = nil
+	nonInteractive.ComponentResolver = resolver
+	if _, err := NewRegistry([]productcatalog.Descriptor{nonInteractiveDescriptor}, []RuntimeProduct{nonInteractive}); err == nil {
+		t.Fatal("component resolver accepted without interactive capability")
+	}
+
+	partial := completeRuntime(componentDescriptor)
+	partial.ComponentRebinder = rebinder
+	if _, err := NewRegistry([]productcatalog.Descriptor{componentDescriptor}, []RuntimeProduct{partial}); err == nil {
+		t.Fatal("component rebinder accepted without resolver")
+	}
+}
+
 func TestRuntimeSecretsCannotSerializeOrAppearInFormatting(t *testing.T) {
 	secret := NewSensitiveValue("raw-secret-value")
 	if secret.String() != "[REDACTED]" || secret.GoString() != "[REDACTED]" || secret.Reveal() != "raw-secret-value" {

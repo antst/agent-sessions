@@ -174,8 +174,9 @@ func TestAuthorityConcurrentBootstrapReplayAndAdoptionFence(t *testing.T) {
 	}
 	conflictingClaim := fixture.claim
 	conflictingClaim.BootstrapCapabilityID = "another-capability"
-	if _, err := authority.Bootstrap(ctx, conflictingClaim, fixture.peer); protocolCategory(err) != component.CategoryUnauthorized {
-		t.Fatalf("conflicting capability id error = %v", err)
+	replayed, err := authority.Bootstrap(ctx, conflictingClaim, fixture.peer)
+	if err != nil || replayed.BindingID != bindingID {
+		t.Fatalf("correlation-only capability id replay = %+v, %v", replayed, err)
 	}
 	conflictingClaim = fixture.claim
 	conflictingClaim.BootstrapValue = "another-secret"
@@ -215,6 +216,130 @@ func TestAuthorityConcurrentBootstrapReplayAndAdoptionFence(t *testing.T) {
 	if err != nil || len(snapshot.Catalog.ComponentBindings) != 1 ||
 		snapshot.Catalog.ComponentBindings[bindingID].State != daemon.BindingReady {
 		t.Fatalf("adopted binding state = %+v, %v", snapshot.Catalog.ComponentBindings, err)
+	}
+}
+
+func TestAuthorityBootstrapCapabilityIDIsCorrelationOnlyAndNeverAuthority(t *testing.T) {
+	fixture := newAuthorityFixture(t, 1, "prepared")
+	// A resolver may omit the correlation ID entirely. The daemon authenticates
+	// the presented value and the durable/live evidence, not this label.
+	fixture.resolver = ResolverFunc(func(
+		_ context.Context,
+		attachment daemon.ManagedAttachment,
+		_ component.PeerEvidence,
+	) (Resolution, error) {
+		fixture.resolution.Add(1)
+		return Resolution{BootstrapRevision: attachment.CatalogRevision, LiveEvidence: attachment.ExpectedEvidence}, nil
+	})
+	authority := fixture.authority(t, 1)
+	ctx := context.Background()
+
+	first := fixture.claim
+	first.BootstrapCapabilityID = "launch-correlation"
+	ready, err := authority.Bootstrap(ctx, first, fixture.peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := first
+	retry.BootstrapCapabilityID = "retry-correlation"
+	replayed, err := authority.Bootstrap(ctx, retry, fixture.peer)
+	if err != nil || replayed.BindingID != ready.BindingID {
+		t.Fatalf("lost Ready retry = %+v, %v; want binding %q", replayed, err, ready.BindingID)
+	}
+
+	guessed := retry
+	guessed.BootstrapCapabilityID = "copied-or-guessed"
+	guessed.BootstrapValue = "wrong-secret"
+	if _, err := authority.Bootstrap(ctx, guessed, fixture.peer); protocolCategory(err) != component.CategoryUnauthorized {
+		t.Fatalf("guessed id plus wrong value = %v", err)
+	}
+	foreign := fixture.peer
+	foreign.Process.StrongStart += "-foreign"
+	if _, err := authority.Bootstrap(ctx, guessedWithValue(guessed, testSecret), foreign); protocolCategory(err) != component.CategoryStaleProcess {
+		t.Fatalf("copied id plus foreign process = %v", err)
+	}
+
+	announce := testFrame(t, component.TypeSessionAnnounce, "announce", 2, component.SessionAnnounce{
+		BindingID: ready.BindingID, NativeSessionID: "native-one", Cwd: "/work", NativeName: "native", ProductEventSeq: 1,
+	})
+	if err := authority.HandleComponentFrame(ctx, bindingView(ready.BindingID, fixture, 1, 2), announce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.Bootstrap(ctx, retry, fixture.peer); protocolCategory(err) != component.CategoryReplay {
+		t.Fatalf("correlation-only id weakened adoption fence: %v", err)
+	}
+	if fixture.resolution.Load() < 5 {
+		t.Fatalf("resolver calls = %d, want fresh resolution for every attempt", fixture.resolution.Load())
+	}
+}
+
+func guessedWithValue(claim component.BootstrapClaim, value string) component.BootstrapClaim {
+	claim.BootstrapValue = value
+	return claim
+}
+
+func TestAuthorityBootstrapIDRelaxationPreservesEveryRealAuthority(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*authorityFixture, *component.BootstrapClaim)
+		want   component.Category
+	}{
+		{
+			name: "capability value versus durable hash",
+			mutate: func(_ *authorityFixture, claim *component.BootstrapClaim) {
+				claim.BootstrapValue = "wrong-secret"
+			},
+			want: component.CategoryUnauthorized,
+		},
+		{
+			name: "resolver revision versus catalog revision",
+			mutate: func(fixture *authorityFixture, _ *component.BootstrapClaim) {
+				base := fixture.resolver
+				fixture.resolver = ResolverFunc(func(ctx context.Context, attachment daemon.ManagedAttachment, peer component.PeerEvidence) (Resolution, error) {
+					resolved, err := base.ResolveComponent(ctx, attachment, peer)
+					resolved.BootstrapRevision++
+					return resolved, err
+				})
+			},
+			want: component.CategoryUnauthorized,
+		},
+		{
+			name: "fresh artifact versus durable evidence",
+			mutate: func(fixture *authorityFixture, _ *component.BootstrapClaim) {
+				base := fixture.resolver
+				fixture.resolver = ResolverFunc(func(ctx context.Context, attachment daemon.ManagedAttachment, peer component.PeerEvidence) (Resolution, error) {
+					resolved, err := base.ResolveComponent(ctx, attachment, peer)
+					resolved.LiveEvidence.Executable += "-foreign"
+					return resolved, err
+				})
+			},
+			want: component.CategoryUnauthorized,
+		},
+		{
+			name: "exact attachment product",
+			mutate: func(_ *authorityFixture, claim *component.BootstrapClaim) {
+				claim.ProductID = "other"
+			},
+			want: component.CategoryUnauthorized,
+		},
+		{
+			name: "exact attachment identity",
+			mutate: func(_ *authorityFixture, claim *component.BootstrapClaim) {
+				claim.AttachmentID = "other-attachment"
+			},
+			want: component.CategoryUnauthorized,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAuthorityFixture(t, 1, "prepared")
+			claim := fixture.claim
+			claim.BootstrapCapabilityID = "arbitrary-correlation"
+			test.mutate(fixture, &claim)
+			if _, err := fixture.authority(t, 1).Bootstrap(context.Background(), claim, fixture.peer); protocolCategory(err) != test.want {
+				t.Fatalf("bootstrap category = %q, want %q: %v", protocolCategory(err), test.want, err)
+			}
+		})
 	}
 }
 

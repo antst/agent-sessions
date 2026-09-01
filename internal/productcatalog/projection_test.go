@@ -70,6 +70,16 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 	if err := ValidateToken("valid-token-2"); err != nil {
 		t.Fatal(err)
 	}
+	for _, valid := range []string{"10.28.1", "0.1.2-alpha.3", "v1.2.3+build_4"} {
+		if err := ValidateVersion(valid); err != nil {
+			t.Fatalf("valid version %q: %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", ".1", "1/2", "1 2", string(bytes.Repeat([]byte{'1'}, 129))} {
+		if ValidateVersion(invalid) == nil {
+			t.Fatalf("invalid version %q accepted", invalid)
+		}
+	}
 
 	duplicate := All()
 	duplicate[1].ID = duplicate[0].ID
@@ -137,6 +147,15 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 		{name: "invalid authority token", mutate: func(products []Descriptor) {
 			products[0].Authority.PeerAuth = "Bearer secret"
 		}},
+		{name: "tuple missing package manager version", mutate: func(products []Descriptor) {
+			products[0].Compatibility = Compatibility{Policy: VersionExact, PackageManager: "pnpm", TupleMembers: []TupleMember{{Name: "cli", Version: "1.0.0"}}}
+		}},
+		{name: "package manager version without manager", mutate: func(products []Descriptor) {
+			products[0].Compatibility = Compatibility{Policy: VersionExact, PackageManagerVersion: "10.28.1", TupleMembers: []TupleMember{{Name: "cli", Version: "1.0.0"}}}
+		}},
+		{name: "package manager outside exact tuple", mutate: func(products []Descriptor) {
+			products[0].Compatibility = Compatibility{Policy: VersionMinimum, PackageManager: "pnpm", PackageManagerVersion: "10.28.1"}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -146,5 +165,35 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 				t.Fatal("invalid catalog mutation accepted")
 			}
 		})
+	}
+}
+
+func TestExactTupleProjectsPinnedPackageManagerVersion(t *testing.T) {
+	inventory := All()
+	inventory[0].Compatibility = Compatibility{
+		Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
+		TupleMembers: []TupleMember{
+			{Name: "@agent-sessions/dsh-plugin", Version: "0.1.2-alpha.3"},
+			{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.3"},
+			{Name: "@deepseek-ai/dsh-acp-app", Version: "0.1.2-alpha.3"},
+		},
+	}
+	body, err := ProjectionJSON(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(`"package_manager": "pnpm"`)) || !bytes.Contains(body, []byte(`"package_manager_version": "10.28.1"`)) {
+		t.Fatalf("exact package-manager identity missing from projection: %s", body)
+	}
+	legacy := All()[1]
+	if legacy.Compatibility.PackageManager != "" || legacy.Compatibility.PackageManagerVersion != "" {
+		t.Fatalf("non-package-managed descriptor changed backward behavior: %#v", legacy.Compatibility)
+	}
+	legacyBody, err := ProjectionJSON(All())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(legacyBody, []byte(`"package_manager_version"`)) {
+		t.Fatalf("legacy descriptors did not omit additive manager version: %s", legacyBody)
 	}
 }

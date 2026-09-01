@@ -38,6 +38,30 @@ result or credential:
 
 Unknown schema versions fail closed.
 
+Compatibility remains additive within `agent-sessions.product-catalog.v1`.
+Descriptors without a package manager omit both manager fields and retain their
+existing minimum/exact product-version behavior. A package-managed tuple is a
+single exact boundary and MUST declare all of:
+
+```json
+{
+  "policy": "exact",
+  "package_manager": "pnpm",
+  "package_manager_version": "10.28.1",
+  "tuple_members": [
+    {"name": "@deepseek-ai/dsh", "version": "0.1.2-alpha.3"},
+    {"name": "@deepseek-ai/dsh-acp-app", "version": "0.1.2-alpha.3"},
+    {"name": "@agent-sessions/dsh-plugin", "version": "0.1.2-alpha.3"}
+  ]
+}
+```
+
+The package-manager name uses the shared bounded product-token grammar. The
+tested product version, tuple-member versions, and package-manager version use
+one bounded exact-version grammar; they are identities, never ranges. A manager
+without its exact version, a version without its manager, or either outside an
+exact non-empty tuple fails catalog validation.
+
 Phase A adds `CapabilityParent` to the data catalog. A runtime `Parent` driver
 is valid exactly when that capability is declared; it is not inferred. Product
 capability values such as `parent` and opaque federation values such as
@@ -101,7 +125,7 @@ and reported as debt rather than overwritten or removed.
   supported user-global mechanism; project-local trust remains user-owned.
 - CodeBuddy: install MCP assets and wrapper integration; peer discovery uses no
   password, while Agent Sessions-owned lane-server passwords remain transient.
-- DSH: pnpm is required; materialize one exact Agent Sessions-owned profile
+- DSH: pnpm 10.28.1 is required; materialize one exact Agent Sessions-owned profile
   tuple and add the Cordis plugin only to explicitly named profiles with an
   ownership receipt. Never broadly rewrite all profiles.
 

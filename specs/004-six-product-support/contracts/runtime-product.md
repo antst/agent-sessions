@@ -8,12 +8,14 @@ error semantics may not.
 
 ```go
 type RuntimeProduct struct {
-    Descriptor productcatalog.Descriptor
-    Peer       PeerDriver
-    Message    MessageDriver
-    Lane       LaneDriver
-    Parent     ParentAttester
-    Doctor     DoctorProbe
+    Descriptor        productcatalog.Descriptor
+    Peer              PeerDriver
+    Message           MessageDriver
+    Lane              LaneDriver
+    Parent            ParentAttester
+    Doctor            DoctorProbe
+    ComponentResolver ComponentResolver
+    ComponentRebinder ComponentSessionRebinder
 }
 
 type Registry interface {
@@ -25,7 +27,10 @@ type Registry interface {
 The constructor accepts an explicit ordered slice from the sole composition
 root. It rejects duplicate IDs, unknown descriptors, missing required drivers,
 undeclared drivers, duplicate aliases/capabilities, or a visible product
-without a doctor probe. There is no package-init registration.
+without a doctor probe. The optional component resolver/rebinder fields are
+accepted only for an interactive descriptor whose peer transport is exactly
+`component`; a rebinder without its resolver is rejected. There is no
+package-init registration.
 
 ## 2. Peer Driver
 
@@ -63,6 +68,55 @@ type NativeName struct {
 `BuildLaunch` returns an exact exec-in-place command. It may not mutate global
 product settings to prepare a launch. `AttachmentAdapter` retains the existing
 daemon prepare/adopt/refresh/authorize/detach/rollback lifecycle.
+
+### Component Resolver/Rebinder
+
+The component mechanics package remains below the product-runtime package
+boundary, so the registry exposes a minimal product-neutral seam. The shared
+component authority adapts this seam without product switches:
+
+```go
+type ComponentPeerEvidence struct {
+    Peer    localtransport.PeerIdentity
+    Process procinfo.Identity
+}
+
+type ComponentResolution struct {
+    BootstrapCapabilityID string // optional correlation only; never authority
+    BootstrapRevision     uint64
+    LiveEvidence          daemon.NativeEvidence
+}
+
+type ComponentResolver interface {
+    ResolveComponent(
+        context.Context,
+        HostDeps,
+        daemon.ManagedAttachment,
+        ComponentPeerEvidence,
+    ) (ComponentResolution, error)
+}
+
+type ComponentSessionRebinder interface {
+    ReattestSessionRebind(
+        context.Context,
+        HostDeps,
+        daemon.ManagedAttachment,
+        oldNativeSessionID string,
+        newNativeSessionID string,
+        evidence []byte,
+    ) (daemon.NativeEvidence, error)
+}
+```
+
+Every resolver and rebinder call MUST use the supplied live host capabilities
+to re-capture process, executable, artifact, tuple, and ancestry evidence. A
+stored identity or prepared-launch handoff may be a correlation hint but is
+never authority. The shared adapter retains no evidence between calls.
+
+These fields are additive and optional so a transitional composition can still
+use its existing central fallback. When supplied, the typed seam is preferred
+and the composition root must not select it through package initialization or a
+per-product switch.
 
 ## 3. Message Driver
 

@@ -47,7 +47,7 @@ fact and is not a second handshake field.
 Managed wrapper launch provides:
 
 - attachment ID;
-- opaque one-time bootstrap capability ID;
+- opaque bootstrap correlation ID;
 - raw one-time bootstrap value in a redacted ephemeral environment entry;
 - expected product and executable/process lineage.
 
@@ -67,10 +67,14 @@ bootstrap {
 `process_start` and `strong_start` are an optional corroborating pair. Both MAY
 be omitted. Supplying exactly one is invalid; when both are supplied they MUST
 exactly match the daemon's independent live capture. The fields never grant
-authority. The daemon validates the capability hash/revision, consumes it once,
-validates kernel peer PID/UID, independently captures exact process identity,
-executable, and ancestry, and checks that live evidence against the prepared
-attachment. Success returns:
+authority. `bootstrap_capability_id` is likewise non-authoritative correlation
+metadata: it is never durable authority and a resolver-supplied ID is never an
+authorization gate. The daemon validates the presented bootstrap value against
+the durable capability hash, validates the bootstrap revision, consumes the
+durable `(attachment_id, bootstrap_revision)` anchor once, validates kernel peer
+PID/UID, independently captures exact process identity, executable, and
+ancestry, and checks that live evidence against the exact prepared attachment.
+Success returns:
 
 ```text
 ready { binding_id, attachment_id, daemon_generation, protocol_version,
@@ -89,17 +93,19 @@ inert and does not retry privileged operations.
    replacement after authorization. A successor daemon generation creates one
    fresh generation-scoped binding ID carrying the same anchor after fresh
    re-attestation.
-2. A lost `ready` MAY be retried only with the identical capability ID/value,
+2. A lost `ready` MAY be retried only with the identical bootstrap value,
    attachment, product, bootstrap revision, and freshly recaptured kernel
-   PID/UID, process start/strong-start, executable, and ancestry. Optional
-   claim-side process tokens, when supplied, must remain an exact pair matching
-   that live capture; their omission does not weaken live re-attestation. While the
-   binding remains unadopted, an exact retry in the same generation returns the
-   same committed `binding_id`. On daemon restart, the atomic generation sweep
-   retires the old binding and an exact, freshly re-attested retry creates or
-   returns one fresh current-generation binding with the same attachment and
-   bootstrap revision. Any foreign, stale, conflicting, or already-adopted
-   replay is rejected.
+   PID/UID, process start/strong-start, executable, and ancestry. The opaque
+   capability ID may be carried for correlation or changed without changing
+   authorization; by itself it can neither authorize nor reject the retry.
+   Optional claim-side process tokens, when supplied, must remain an exact pair
+   matching that live capture; their omission does not weaken live
+   re-attestation. While the binding remains unadopted, an exact authoritative
+   retry in the same generation returns the same committed `binding_id`. On
+   daemon restart, the atomic generation sweep retires the old binding and an
+   exact, freshly re-attested retry creates or returns one fresh
+   current-generation binding with the same attachment and bootstrap revision.
+   Any foreign, stale, conflicting, or already-adopted replay is rejected.
 3. A returned binding remains in `binding` state until the first authenticated
    non-handshake component frame that names its `binding_id` is durably
    admitted. That admission adopts the binding; no `ready` acknowledgment or
