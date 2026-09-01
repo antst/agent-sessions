@@ -79,7 +79,7 @@ reviewed and frozen. Shared-engine workers may now start against those types.
 - [x] T034 [P] Implement the shared deterministic streaming/tool-call/slow-turn/cancel model fixture in `internal/testutil/mockprovider/{server.go,script.go,server_test.go}`
 - [x] T035 Write failing opaque-capability/live-hub/generation/malformed-client tests in `internal/federation/{hub_test.go,host_test.go,protocol_fuzz_test.go}` and `cmd/agent-sessions-hub/main_test.go`
 - [x] T036 Implement bounded opaque protocol-3 capabilities, destination registry resolution hooks, live-hub integration, and macOS hub environment parity in `internal/federation/{protocol.go,hub.go,host.go}`, `cmd/agent-sessions/federation.go`, and `internal/servicecontrol/`
-- [ ] T037 Run original-four focused/full normal/race/vet/lint gates, capture results in `specs/004-six-product-support/evidence/phase0/foundation-gate.md`, and obtain Fable review of the frozen foundation
+- [x] T037 Run original-four focused/full normal/race/vet/lint gates, capture results in `specs/004-six-product-support/evidence/phase0/foundation-gate.md`, and obtain Fable review of the frozen foundation
 
 **Checkpoint**: Shared packages are green with no new product composed; original
 four remain green; product owners may now work in parallel.

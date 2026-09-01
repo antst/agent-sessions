@@ -10,8 +10,8 @@ the frozen Phase-A source at `f66229e` and the first shared-engine cut at
 
 Implementation and local Linux gates: **PASS**.
 
-Fable architecture review: **PENDING** at this commit. T037 remains open until
-the visible review packet below is accepted.
+Fable architecture review: **PASS** on 2026-09-01 for candidate `863032e` and
+this evidence at `055d748`. T037 is closed and Phase-C fan-out is authorized.
 
 No OpenCode, KiloCode, Pi, OMP, CodeBuddy, or DSH runtime product is registered
 at this checkpoint.
@@ -154,6 +154,14 @@ ran ten normal and three race repetitions.
 
 ## Honest pending cells
 
+- Mixed-version federation against a real pre-feature binary remains required
+  before production cross-version rollout. This gate proves the asymmetry and
+  additive `Message.Data` behavior through the production validators and a
+  faithful old-host model, not a separately installed old executable.
+- A statestore-backed production component `Authorizer` must be wired and
+  exercised end to end before the first component-broker product peer receives
+  acceptance credit. This gate proves the broker contract, durable record
+  schema/transitions, and faithful authorizer behavior in isolation.
 - Physical macOS execution for this exact candidate is pending and receives no
   acceptance credit here.
 - CodeBuddy's Tencent-backed model-turn GA cell remains pending by product
