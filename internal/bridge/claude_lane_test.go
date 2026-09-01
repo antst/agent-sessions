@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,42 @@ import (
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	"github.com/antst/agent-sessions/internal/federator"
 )
+
+func startAuthorizationControlServer(t *testing.T, handler func(map[string]any) map[string]any) string {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "supervisor.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = connection.Close() }()
+				line, readErr := bufio.NewReader(connection).ReadBytes('\n')
+				if readErr != nil {
+					return
+				}
+				var request map[string]any
+				if json.Unmarshal(line, &request) != nil {
+					return
+				}
+				response := map[string]any{"ok": true}
+				for key, value := range handler(request) {
+					response[key] = value
+				}
+				body, _ := json.Marshal(response)
+				_, _ = connection.Write(append(body, '\n'))
+			}()
+		}
+	}()
+	return socket
+}
 
 type bufferWriteCloser struct {
 	mu     sync.Mutex

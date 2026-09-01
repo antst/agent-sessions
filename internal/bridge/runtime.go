@@ -126,8 +126,6 @@ func Main() {
 		os.Exit(runReleasePackage(os.Args[2:]))
 	case "release-evidence":
 		os.Exit(runReleaseEvidence(os.Args[2:]))
-	case "hook":
-		runHookCommand()
 	case "mcp":
 		os.Exit(runMCPCommand())
 	case "grok-mcp":

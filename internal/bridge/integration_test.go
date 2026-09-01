@@ -242,9 +242,6 @@ func TestNativeShimPublishesPrivateStablePeerAndQueuesMessage(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, err := handleNativeHook(hookInput{Event: "SessionEnd", SessionID: sessionID, Cwd: root}); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestNativeShimNameSourcesPreserveExplicitAndFollowCodexTitles(t *testing.T) {

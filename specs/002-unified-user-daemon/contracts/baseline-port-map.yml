@@ -292,7 +292,7 @@ entries:
     new_owner: daemon Codex adapter calling transplanted native operations
     new_symbols: []
     replacement_tests:
-      - internal/bridge/codex_daemon_parity_test.go:TestCodexDaemonParity
+      - internal/bridge/codex_native_test.go:TestCodexNativeResolvesExactIDAndFirstLiveNameFromProduct
     acceptance_cells: [C-01, C-02, C-03, C-04, C-05, C-06, C-07, C-08]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#codex]
     deletion_paths: [internal/launcher/codex_peer.go, internal/bridge/launch.go]
@@ -352,8 +352,7 @@ entries:
     new_owner: daemon Codex coordinator
     new_symbols: []
     replacement_tests:
-      - internal/bridge/codex_daemon_parity_test.go:TestCodexDaemonParity
-      - internal/bridge/hook_daemon_parity_test.go:TestHookDaemonParity
+      - internal/bridge/appserver_test.go:TestNativeAppServerClientRoundTrip
     acceptance_cells: [C-09, C-10, C-11, C-12, C-13, C-14, C-15, C-16, C-17, C-18]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#codex]
     deletion_paths: [internal/bridge/appserver.go, internal/bridge/supervisor.go, internal/bridge/hook.go]
@@ -438,7 +437,6 @@ entries:
     new_symbols: []
     replacement_tests:
       - internal/bridge/claude_daemon_parity_test.go:TestClaudeDaemonParity
-      - internal/bridge/hook_daemon_parity_test.go:TestHookDaemonParity
     acceptance_cells: [CL-01, CL-03, CL-08, CL-09]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#claude]
     deletion_paths: [internal/bridge/mcp.go]
@@ -541,7 +539,6 @@ entries:
     new_symbols: []
     replacement_tests:
       - internal/bridge/grok_daemon_parity_test.go:TestGrokDaemonParity
-      - internal/bridge/hook_daemon_parity_test.go:TestHookDaemonParity
     acceptance_cells: [G-06, G-07, G-08, G-09, G-10, G-11, G-12, G-13, G-14, G-15, G-16, G-17, G-18, G-19, G-20, G-21]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#grok]
     deletion_paths: [internal/bridge/grok.go, internal/bridge/grok_diagnostics.go, internal/bridge/grok_process_unix.go, internal/bridge/grok_session_unix.go]
@@ -625,7 +622,6 @@ entries:
     new_symbols: []
     replacement_tests:
       - internal/bridge/qwen_daemon_parity_test.go:TestQwenDaemonParity
-      - internal/bridge/hook_daemon_parity_test.go:TestHookDaemonParity
     acceptance_cells: [Q-06, Q-07, Q-08, Q-09, Q-10]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#qwen]
     deletion_paths: [internal/bridge/qwen.go, internal/bridge/qwen_host.go, internal/bridge/qwen_archive.go, internal/bridge/qwen_diagnostics.go]

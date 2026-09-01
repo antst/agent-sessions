@@ -114,13 +114,11 @@ func TestPeerMessagePresentationIsNeutralProvenance(t *testing.T) {
 	}
 
 	texts := map[string]string{
-		"codex MCP":     mcpInstructions,
-		"claude MCP":    claudeMCPInstructions,
-		"grok MCP":      grokMCPInstructions,
-		"qwen MCP":      qwenMCPInstructions,
-		"startup hook":  hookStartupContext(map[string]any{"name": "peer", "sessionId": "session"}),
-		"overflow hook": nativeInboxOverflowNotice(),
-		"delivery":      peerMessageText(item),
+		"codex MCP":  mcpInstructions,
+		"claude MCP": claudeMCPInstructions,
+		"grok MCP":   grokMCPInstructions,
+		"qwen MCP":   qwenMCPInstructions,
+		"delivery":   peerMessageText(item),
 	}
 	for label, value := range texts {
 		lower := strings.ToLower(value)

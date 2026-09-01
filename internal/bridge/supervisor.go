@@ -204,23 +204,6 @@ type appThread struct {
 
 const supervisorControlTimeout = 60 * time.Second
 
-type interactiveOwnerRecord struct {
-	ThreadID       string `json:"threadId"`
-	RequestID      string `json:"requestId"`
-	OwnerPID       int    `json:"ownerPid"`
-	OwnerProcStart string `json:"ownerProcStart"`
-	Pending        bool   `json:"pending,omitempty"`
-	Prepared       bool   `json:"prepared,omitempty"`
-	DeleteOnAbort  bool   `json:"deleteOnAbort,omitempty"`
-	ParkOnAbort    bool   `json:"parkOnAbort,omitempty"`
-	ResumeLoaded   bool   `json:"resumeLoaded,omitempty"`
-	Aborting       bool   `json:"aborting,omitempty"`
-	Cwd            string `json:"cwd,omitempty"`
-	Name           string `json:"name,omitempty"`
-	NameSource     string `json:"nameSource,omitempty"`
-	UpdatedAt      int64  `json:"updatedAt"`
-}
-
 type nativeSupervisor struct {
 	paths           nativePaths
 	pluginVersion   string
@@ -242,13 +225,10 @@ type nativeSupervisor struct {
 	shims             map[string]map[string]any
 	activeTurns       map[string]string
 	subscribed        map[string]bool
-	releasing         map[string]int64
 	retired           map[string]bool
-	closedCandidates  map[string]uint64
 	retirementAudited bool
 	reconcileWake     chan struct{}
 	ensureMu          sync.Mutex
-	ownerMu           sync.Mutex
 	subscribeMu       sync.Mutex
 	noticeMu          sync.Mutex
 	wakeMu            sync.Mutex
@@ -297,8 +277,8 @@ func newNativeSupervisor(pluginVersion string) (*nativeSupervisor, error) {
 		executable: executable, runtimeIdentity: runtimeIdentity, shimExecutable: executable,
 		procStart: readProcStart(os.Getpid()), startedAt: time.Now().UnixMilli(),
 		done: make(chan struct{}), shims: map[string]map[string]any{},
-		activeTurns: map[string]string{}, subscribed: map[string]bool{}, releasing: map[string]int64{},
-		retired: readRetiredThreads(paths), closedCandidates: map[string]uint64{}, reconcileWake: make(chan struct{}, 1),
+		activeTurns: map[string]string{}, subscribed: map[string]bool{},
+		retired: readRetiredThreads(paths), reconcileWake: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -465,26 +445,7 @@ func (s *nativeSupervisor) handleNotification(notification rpcNotification) {
 		s.handleDestructiveThreadNotification(threadID, "deleted")
 	case "thread/unarchived":
 		s.handleDestructiveThreadNotification(threadID, "unarchived")
-	case "thread/closed":
-		// This notification identifies only a thread, not the client attachment
-		// that closed. Queue one bounded reconciliation pass and remove authority
-		// only after App Server confirms that no attachment still has the thread
-		// loaded. The periodic pass retains failed candidates for retry.
-		s.queueClosedInteractiveThread(threadID)
 	}
-}
-
-func (s *nativeSupervisor) queueClosedInteractiveThread(threadID string) {
-	if !validSessionID(threadID) {
-		return
-	}
-	s.mu.Lock()
-	if s.closedCandidates == nil {
-		s.closedCandidates = map[string]uint64{}
-	}
-	s.closedCandidates[threadID]++
-	s.mu.Unlock()
-	s.requestReconcile()
 }
 
 func (s *nativeSupervisor) requestReconcile() {
@@ -501,26 +462,6 @@ func (s *nativeSupervisor) handleDestructiveThreadNotification(threadID, event s
 	if !validSessionID(threadID) {
 		return
 	}
-	// Owner-exit parking holds the lifecycle lock while archive/unarchive RPCs
-	// run. Their notifications are dispatched on a different goroutine and must
-	// be ignored before trying that same lock; otherwise they can wait past the
-	// release guard and retire a successfully restored replacement.
-	if s.interactiveReleasePending(threadID) {
-		switch event {
-		case "archived":
-			return
-		case "unarchived":
-			// The release transaction owns ensureMu while App Server performs
-			// archive/unarchive. Clear any older retirement marker without
-			// waiting on that same mutex, then reconcile after the transaction.
-			clearRetiredThread(s.paths, threadID)
-			s.mu.Lock()
-			delete(s.retired, threadID)
-			s.mu.Unlock()
-			s.requestReconcile()
-			return
-		}
-	}
 	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
 	if err != nil {
 		return
@@ -531,61 +472,15 @@ func (s *nativeSupervisor) handleDestructiveThreadNotification(threadID, event s
 	}
 	switch event {
 	case "archived":
-		// Exact owner-exit cleanup briefly archives and immediately unarchives
-		// an interactive root because App Server has no public unload RPC.
-		// The old shim was removed synchronously before archive. Ignore its
-		// delayed notification completely while the release guard is live: an
-		// exact prepared replacement may already have published a new shim.
-		if s.interactiveReleasePending(threadID) {
-			return
-		}
 		_ = s.markRetired(threadID)
-		s.clearInteractiveOwner(threadID)
 		s.removeShim(threadID)
 	case "deleted":
-		owner := readInteractiveOwner(s.paths, threadID)
-		if owner == nil || !owner.Pending {
-			_ = s.markRetired(threadID)
-		} else {
-			s.clearRetired(threadID)
-		}
-		s.clearInteractiveOwner(threadID)
+		_ = s.markRetired(threadID)
 		s.removeShim(threadID)
 	case "unarchived":
 		s.clearRetired(threadID)
 		s.requestReconcile()
 	}
-}
-
-// reconcileClosedInteractiveThreadWithLoaded returns true once this close
-// candidate no longer needs retry. Unknown owner identity is retained until a
-// later pass can prove whether authority is still safe to remove.
-func (s *nativeSupervisor) reconcileClosedInteractiveThreadWithLoaded(threadID string, loaded bool) bool {
-	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
-	if err != nil {
-		return false
-	}
-	defer unlockLaneLifecycle(lifecycleLock)
-	if s.activeCodexLaneThread(threadID) {
-		return true
-	}
-	owner := readInteractiveOwner(s.paths, threadID)
-	if owner == nil || owner.Pending {
-		return true
-	}
-	switch exactProcessIdentityStatus(owner.OwnerPID, owner.OwnerProcStart).Status {
-	case processIdentityUnknown:
-		return false
-	case processIdentityStale:
-		return true
-	case processIdentityMatches:
-	}
-	if loaded {
-		return true
-	}
-	removeInteractiveOwnerIfMatching(s.paths, threadID, owner)
-	s.removeShim(threadID)
-	return true
 }
 
 func (s *nativeSupervisor) handleThreadStarted(thread appThread) {
@@ -594,10 +489,9 @@ func (s *nativeSupervisor) handleThreadStarted(thread appThread) {
 	}
 }
 
-// authorizedPeerThread is the supervisor-side capability boundary. App Server
-// discovery and daemon-wide hooks may observe ordinary threads, but only an
-// exact attached owner, an exact fresh prepared owner awaiting SessionStart,
-// or a durable unarchived lane may publish or receive peer work.
+// authorizedPeerThread recognizes only a currently managed lane. Interactive
+// sessions connect to the unified daemon directly and never use this legacy
+// supervisor.
 func (s *nativeSupervisor) authorizedPeerThread(threadID string) bool {
 	return publishablePeerThreadNative(s.paths, threadID)
 }
@@ -610,20 +504,12 @@ type peerThreadCapability uint8
 
 const (
 	peerCapabilityNone peerThreadCapability = iota
-	peerCapabilityPrepared
-	peerCapabilityInteractive
 	peerCapabilityLane
 )
 
 func peerCapabilityNative(paths nativePaths, threadID string) peerThreadCapability {
 	if !validSessionID(threadID) || isRetiredThreadNative(paths, threadID) {
 		return peerCapabilityNone
-	}
-	if owner := liveAuthorizedInteractiveOwnerRecord(paths, threadID); owner != nil {
-		if owner.Pending {
-			return peerCapabilityPrepared
-		}
-		return peerCapabilityInteractive
 	}
 	state, err := readLaneStateFile(paths, threadID)
 	if err == nil && state.Type == "codex-peer-lane" && state.Status != "archived" {
@@ -633,16 +519,11 @@ func peerCapabilityNative(paths nativePaths, threadID string) peerThreadCapabili
 }
 
 func authorizedPeerThreadNative(paths nativePaths, threadID string) bool {
-	capability := peerCapabilityNative(paths, threadID)
-	return capability == peerCapabilityInteractive || capability == peerCapabilityLane
+	return peerCapabilityNative(paths, threadID) == peerCapabilityLane
 }
 
-// publishablePeerThreadNative additionally recognizes a bridge-prepared fresh
-// thread while the exact launcher process is alive. That narrow pre-attachment
-// capability may publish and receive an idle wake, but it does not authorize
-// MCP/dynamic tool calls until SessionStart promotes the owner to attached.
 func publishablePeerThreadNative(paths nativePaths, threadID string) bool {
-	return peerCapabilityNative(paths, threadID) != peerCapabilityNone
+	return peerCapabilityNative(paths, threadID) == peerCapabilityLane
 }
 
 func activeCodexLaneThreadNative(paths nativePaths, threadID string) bool {
@@ -653,219 +534,9 @@ func activeCodexLaneThreadNative(paths nativePaths, threadID string) bool {
 	return err == nil && state.Type == "codex-peer-lane" && state.Status != "archived"
 }
 
-func liveInteractiveOwnerRecord(paths nativePaths, threadID string) *interactiveOwnerRecord {
-	owner := liveAuthorizedInteractiveOwnerRecord(paths, threadID)
-	if owner == nil || owner.Pending {
-		return nil
-	}
-	return owner
-}
-
-func liveAuthorizedInteractiveOwnerRecord(paths nativePaths, threadID string) *interactiveOwnerRecord {
-	if isRetiredThreadNative(paths, threadID) {
-		return nil
-	}
-	owner := readInteractiveOwner(paths, threadID)
-	if owner == nil || owner.Aborting || (owner.Pending && !owner.Prepared) ||
-		!exactProcessIdentityMatch(owner.OwnerPID, owner.OwnerProcStart) {
-		return nil
-	}
-	return owner
-}
-
-func interactiveOwnerMatchesRequest(record *interactiveOwnerRecord, request map[string]any) bool {
-	return record != nil &&
-		record.ThreadID == stringValue(request["sessionId"]) &&
-		record.RequestID == stringValue(request["requestId"]) &&
-		record.OwnerPID == intValue(request["ownerPid"]) &&
-		record.OwnerProcStart == stringValue(request["ownerProcStart"])
-}
-
-func preparedOwnerMatchesRequest(record *interactiveOwnerRecord, request map[string]any) bool {
-	return interactiveOwnerMatchesRequest(record, request) && record.Pending && record.Prepared && !record.Aborting
-}
-
-func (s *nativeSupervisor) registerPreparedLaunch(request map[string]any) (map[string]any, error) {
-	threadID := stringValue(request["sessionId"])
-	replacingReleasedOwner := s.interactiveReleasePending(threadID)
-	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
-	if err != nil {
-		return nil, err
-	}
-	defer unlockLaneLifecycle(lifecycleLock)
-	record := readInteractiveOwner(s.paths, threadID)
-	if !preparedOwnerMatchesRequest(record, request) {
-		return nil, errors.New("prepared Codex peer owner changed before publication")
-	}
-	client, err := s.ensureClient()
-	if err != nil {
-		return nil, err
-	}
-	if !record.DeleteOnAbort {
-		archived, listErr := listThreadMembership(client, true)
-		if listErr != nil {
-			return nil, listErr
-		}
-		if archived[threadID] || isRetiredThreadNative(s.paths, threadID) {
-			return nil, fmt.Errorf("codex thread %s became archived before peer publication", threadID)
-		}
-		loaded, listErr := loadedPreparedThreads(client)
-		if listErr != nil {
-			return nil, listErr
-		}
-		if loaded[threadID] && !record.ResumeLoaded {
-			return nil, fmt.Errorf("codex thread %s became loaded before peer publication", threadID)
-		}
-	}
-	// Starting publication is the irreversible durability boundary. A shim can
-	// become externally connectable before subscribe/response completes, so any
-	// failure from this point must park and preserve the thread, never delete it.
-	record.DeleteOnAbort = false
-	record.ParkOnAbort = true
-	record.UpdatedAt = time.Now().UnixMilli()
-	if err := writeInteractiveOwnerRecord(s.paths, *record); err != nil {
-		return nil, err
-	}
-	thread, approvalPolicy, err := resumePreparedThread(client, threadID, request)
-	if err != nil {
-		return nil, err
-	}
-	publication := make(map[string]any, len(request)+1)
-	for key, value := range request {
-		publication[key] = value
-	}
-	publication["allowInteractiveRelease"] = replacingReleasedOwner
-	publication["permissionMode"] = permissionModeForApprovalPolicy(approvalPolicy)
-	state, err := s.ensureShim(publication)
-	if err == nil {
-		s.mu.Lock()
-		s.subscribed[threadID] = true
-		s.mu.Unlock()
-		return map[string]any{
-			"state": state, "thread": thread, "approvalPolicy": approvalPolicy,
-		}, nil
-	}
-	s.removeShim(threadID)
-	return nil, err
-}
-
-func (s *nativeSupervisor) abortPreparedLaunch(request map[string]any) (map[string]any, error) {
-	threadID := stringValue(request["sessionId"])
-	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
-	if err != nil {
-		return nil, err
-	}
-	defer unlockLaneLifecycle(lifecycleLock)
-	record := readInteractiveOwner(s.paths, threadID)
-	if !preparedOwnerMatchesRequest(record, request) {
-		return map[string]any{"sessionId": threadID, "preserved": true}, nil
-	}
-	switch exactProcessIdentityStatus(record.OwnerPID, record.OwnerProcStart).Status {
-	case processIdentityUnknown:
-		return map[string]any{"sessionId": threadID, "preserved": true}, errors.New("cannot corroborate the prepared Codex peer owner during abort")
-	case processIdentityStale:
-		// Definite owner death belongs to the normal stale-owner reaper. Keeping
-		// this transaction untouched makes the destructive proof and retry path
-		// identical whether the launcher vanished before or during rollback.
-		return map[string]any{"sessionId": threadID, "preserved": true}, nil
-	case processIdentityMatches:
-	}
-	record.Aborting = true
-	record.UpdatedAt = time.Now().UnixMilli()
-	if err := writeInteractiveOwnerRecord(s.paths, *record); err != nil {
-		return nil, err
-	}
-	s.removeShim(threadID)
-	if record.ParkOnAbort {
-		// A committed zero-turn launch may remain loaded after its TUI exits.
-		// Preserve this exact stale owner as takeover proof instead of using
-		// archive/unarchive as an unload surrogate: archiving races immediate
-		// resume and moves the rollout out of the live sessions tree.
-		return map[string]any{"sessionId": threadID, "aborted": true, "preserved": true}, nil
-	}
-	if !record.DeleteOnAbort {
-		removeInteractiveOwnerIfMatching(s.paths, threadID, record)
-		return map[string]any{"sessionId": threadID, "aborted": true, "preserved": true}, nil
-	}
-	client, err := s.ensureClient()
-	if err != nil {
-		return nil, err
-	}
-	if err := deletePreparedThread(client, threadID); err != nil {
-		return nil, err
-	}
-	removeInteractiveOwnerIfMatching(s.paths, threadID, record)
-	return map[string]any{"sessionId": threadID, "aborted": true}, nil
-}
-
-func (s *nativeSupervisor) releaseStaleInteractiveOwner(threadID string) error {
-	if !validSessionID(threadID) {
-		return errors.New("release requires a valid Codex thread id")
-	}
-	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
-	if err != nil {
-		return err
-	}
-	defer unlockLaneLifecycle(lifecycleLock)
-	record := readInteractiveOwner(s.paths, threadID)
-	if record == nil || record.Pending {
-		return errors.New("loaded Codex thread has no releasable attached owner")
-	}
-	switch exactProcessIdentityStatus(record.OwnerPID, record.OwnerProcStart).Status {
-	case processIdentityMatches:
-		return errors.New("refuse to release a live Codex peer owner")
-	case processIdentityUnknown:
-		return errors.New("cannot corroborate the loaded Codex peer owner")
-	case processIdentityStale:
-	}
-	s.ownerMu.Lock()
-	defer s.ownerMu.Unlock()
-	return s.releaseInteractiveThreadLocked(threadID, record)
-}
-
-func (s *nativeSupervisor) detachStalePreparedOwner(request map[string]any) error {
-	threadID := stringValue(request["sessionId"])
-	if !validSessionID(threadID) {
-		return errors.New("detach requires a valid Codex thread id")
-	}
-	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
-	if err != nil {
-		return err
-	}
-	defer unlockLaneLifecycle(lifecycleLock)
-	record := readInteractiveOwner(s.paths, threadID)
-	if !interactiveOwnerMatchesRequest(record, request) || !record.Pending || !record.Prepared || !record.ParkOnAbort {
-		return errors.New("loaded Codex thread has no matching stale prepared owner")
-	}
-	switch exactProcessIdentityStatus(record.OwnerPID, record.OwnerProcStart).Status {
-	case processIdentityMatches:
-		return errors.New("refuse to detach a live prepared Codex peer owner")
-	case processIdentityUnknown:
-		return errors.New("cannot corroborate the stale prepared Codex peer owner")
-	case processIdentityStale:
-	}
-	s.subscribeMu.Lock()
-	defer s.subscribeMu.Unlock()
-	client, err := s.ensureClient()
-	if err != nil {
-		return err
-	}
-	if err := requestWithTimeout(client, 5*time.Second, "thread/unsubscribe", map[string]any{"threadId": threadID}, nil); err != nil {
-		return fmt.Errorf("unsubscribe stale prepared Codex peer %s: %w", threadID, err)
-	}
-	s.mu.Lock()
-	delete(s.subscribed, threadID)
-	delete(s.activeTurns, threadID)
-	s.mu.Unlock()
-	return nil
-}
-
 func (s *nativeSupervisor) knownPeerLineage(threadID string) bool {
 	if !validSessionID(threadID) {
 		return false
-	}
-	if readInteractiveOwner(s.paths, threadID) != nil {
-		return true
 	}
 	if state, err := readLaneStateFile(s.paths, threadID); err == nil && state.Type == "codex-peer-lane" {
 		return true
@@ -924,47 +595,15 @@ func (s *nativeSupervisor) handleControl(request map[string]any) (map[string]any
 	case "ping", "status":
 		return s.status(), nil
 	case "register":
-		delete(request, "allowInteractiveRelease")
-		owner := readInteractiveOwner(s.paths, stringValue(request["sessionId"]))
-		if owner != nil && owner.Pending {
-			return nil, errors.New("prepared Codex peer registration requires its exact launch transaction")
-		}
 		if !s.authorizedPeerThread(stringValue(request["sessionId"])) {
-			return nil, errors.New("refuse to publish an unauthorized Codex thread")
-		}
-		if owner != nil && owner.Prepared && owner.ParkOnAbort && exactProcessIdentityMatch(owner.OwnerPID, owner.OwnerProcStart) {
-			request["allowInteractiveRelease"] = true
+			return nil, errors.New("refuse to publish a non-lane Codex thread")
 		}
 		state, err := s.ensureShim(request)
-		allowInteractiveRelease, _ := request["allowInteractiveRelease"].(bool)
-		if errors.Is(err, errInteractiveSessionEnding) && !allowInteractiveRelease {
-			// A new client may attach while owner-exit reconciliation parks an older one.
-			// ensureShim waited on ensureMu, so the park is complete here; cancel
-			// its grace marker and publish the replacement attachment.
-			s.cancelInteractiveRelease(stringValue(request["sessionId"]))
-			state, err = s.ensureShim(request)
-		}
 		if err != nil {
 			return nil, err
 		}
 		thread, err := s.subscribeThread(stringValue(request["sessionId"]))
 		return map[string]any{"state": state, "thread": thread}, err
-	case "register_prepared":
-		return s.registerPreparedLaunch(request)
-	case "abort_prepared":
-		return s.abortPreparedLaunch(request)
-	case "release_stale_interactive":
-		sessionID := stringValue(request["sessionId"])
-		if err := s.releaseStaleInteractiveOwner(sessionID); err != nil {
-			return nil, err
-		}
-		return map[string]any{"sessionId": sessionID, "released": true}, nil
-	case "detach_stale_prepared":
-		sessionID := stringValue(request["sessionId"])
-		if err := s.detachStalePreparedOwner(request); err != nil {
-			return nil, err
-		}
-		return map[string]any{"sessionId": sessionID, "detached": true}, nil
 	case "wake":
 		item, _ := request["item"].(map[string]any)
 		delivery, err := s.queueWake(stringValue(request["sessionId"]), item)
@@ -1487,245 +1126,7 @@ func (s *nativeSupervisor) shimSessionID(input map[string]any) (string, error) {
 	if !validSessionID(sessionID) {
 		return "", errors.New("invalid Codex thread id")
 	}
-	allowInteractiveRelease, _ := input["allowInteractiveRelease"].(bool)
-	if s.interactiveReleasePending(sessionID) && !allowInteractiveRelease {
-		return "", errInteractiveSessionEnding
-	}
 	return sessionID, nil
-}
-
-const interactiveReleaseGrace = 30 * time.Second
-
-var errInteractiveSessionEnding = errors.New("interactive Codex session is ending")
-
-func (s *nativeSupervisor) cancelInteractiveRelease(threadID string) {
-	if threadID == "" {
-		return
-	}
-	s.mu.Lock()
-	delete(s.releasing, threadID)
-	s.mu.Unlock()
-}
-
-func (s *nativeSupervisor) interactiveReleasePending(threadID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.releasing[threadID] > time.Now().UnixMilli()
-}
-
-func (s *nativeSupervisor) releaseInteractiveThread(threadID string) error {
-	s.ownerMu.Lock()
-	defer s.ownerMu.Unlock()
-	return s.releaseInteractiveThreadLocked(threadID, nil)
-}
-
-func (s *nativeSupervisor) releaseInteractiveThreadLocked(threadID string, expected *interactiveOwnerRecord) error {
-	if !validSessionID(threadID) {
-		return errors.New("release requires a valid Codex thread id")
-	}
-	if expected != nil {
-		current := readInteractiveOwner(s.paths, threadID)
-		if !sameInteractiveOwner(current, expected) ||
-			cleanupProcessIdentityStatus(current.OwnerPID, current.OwnerProcStart).Status != processIdentityStale {
-			return nil
-		}
-	}
-	s.ensureMu.Lock()
-	defer s.ensureMu.Unlock()
-	if lane, err := readLaneStateFile(s.paths, threadID); err == nil && lane.Type == "codex-peer-lane" {
-		removeInteractiveOwnerIfMatching(s.paths, threadID, expected)
-		return nil
-	}
-	s.mu.Lock()
-	if s.releasing == nil {
-		s.releasing = map[string]int64{}
-	}
-	s.releasing[threadID] = time.Now().Add(interactiveReleaseGrace).UnixMilli()
-	s.mu.Unlock()
-	s.removeShim(threadID)
-	client, err := s.ensureClient()
-	if err == nil {
-		err = parkInteractiveThread(client, threadID)
-	}
-	if err != nil {
-		// Keep the release guard and exact stale owner for attached-session
-		// reconciliation. Zero-turn prepared owners never enter this path.
-		return err
-	}
-	removeInteractiveOwnerIfMatching(s.paths, threadID, expected)
-	// App Server has no public unload operation. Archiving unloads the runtime
-	// and its MCP children; immediately unarchiving leaves the durable thread
-	// resumable but not loaded. The release guard prevents the transient archive
-	// notifications from retiring or republishing the peer shim.
-	return nil
-}
-
-func interactiveOwnerPath(paths nativePaths, threadID string) string {
-	return filepath.Join(profileDataRoot(paths), "interactive-owners", sessionKey(threadID)+".json")
-}
-
-func writeInteractiveOwnerRecord(paths nativePaths, record interactiveOwnerRecord) error {
-	if !validSessionID(record.ThreadID) || record.RequestID == "" ||
-		!exactProcessIdentityMatch(record.OwnerPID, record.OwnerProcStart) {
-		return errors.New("interactive launch owner is not live")
-	}
-	return writeJSONAtomic(interactiveOwnerPath(paths, record.ThreadID), record)
-}
-
-func markPreparedLaunchAttached(paths nativePaths, threadID string) (*interactiveOwnerRecord, error) {
-	lifecycleLock, err := lockLaneLifecycle(paths, threadID)
-	if err != nil {
-		return nil, err
-	}
-	defer unlockLaneLifecycle(lifecycleLock)
-	record := readInteractiveOwner(paths, threadID)
-	if record == nil || !record.Pending {
-		return record, nil
-	}
-	if record.Aborting {
-		return record, errors.New("prepared launch is already aborting")
-	}
-	if !exactProcessIdentityMatch(record.OwnerPID, record.OwnerProcStart) {
-		return nil, errors.New("cannot corroborate the prepared launch owner")
-	}
-	record.Pending = false
-	record.UpdatedAt = time.Now().UnixMilli()
-	if err := writeInteractiveOwnerRecord(paths, *record); err != nil {
-		return nil, err
-	}
-	return record, nil
-}
-
-func readInteractiveOwner(paths nativePaths, threadID string) *interactiveOwnerRecord {
-	body, err := os.ReadFile(interactiveOwnerPath(paths, threadID))
-	if err != nil {
-		return nil
-	}
-	var record interactiveOwnerRecord
-	if json.Unmarshal(body, &record) != nil || record.ThreadID != threadID || record.OwnerPID <= 1 {
-		return nil
-	}
-	return &record
-}
-
-func readInteractiveOwners(paths nativePaths) []interactiveOwnerRecord {
-	directory := filepath.Join(profileDataRoot(paths), "interactive-owners")
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil
-	}
-	records := make([]interactiveOwnerRecord, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		body, readErr := os.ReadFile(filepath.Join(directory, entry.Name())) //nolint:gosec // entries are constrained to the bridge-owned directory.
-		if readErr != nil {
-			continue
-		}
-		var record interactiveOwnerRecord
-		if json.Unmarshal(body, &record) != nil || !validSessionID(record.ThreadID) || record.OwnerPID <= 1 ||
-			entry.Name() != sessionKey(record.ThreadID)+".json" {
-			continue
-		}
-		records = append(records, record)
-	}
-	return records
-}
-
-func sameInteractiveOwner(left, right *interactiveOwnerRecord) bool {
-	return left != nil && right != nil && left.ThreadID == right.ThreadID && left.RequestID == right.RequestID &&
-		left.OwnerPID == right.OwnerPID && left.OwnerProcStart == right.OwnerProcStart
-}
-
-func removeInteractiveOwnerIfMatching(paths nativePaths, threadID string, expected *interactiveOwnerRecord) {
-	removeJSONIf(interactiveOwnerPath(paths, threadID), func(current map[string]any) bool {
-		if stringValue(current["threadId"]) != threadID {
-			return false
-		}
-		return expected == nil || (stringValue(current["requestId"]) == expected.RequestID &&
-			intValue(current["ownerPid"]) == expected.OwnerPID &&
-			stringValue(current["ownerProcStart"]) == expected.OwnerProcStart)
-	})
-}
-
-func (s *nativeSupervisor) clearInteractiveOwner(threadID string) {
-	s.ownerMu.Lock()
-	defer s.ownerMu.Unlock()
-	removeInteractiveOwnerIfMatching(s.paths, threadID, nil)
-}
-
-func (s *nativeSupervisor) reconcileExitedInteractiveOwners() {
-	records := readInteractiveOwners(s.paths)
-	for index := range records {
-		candidate := &records[index]
-		lifecycleLock, err := lockLaneLifecycle(s.paths, candidate.ThreadID)
-		if err != nil {
-			continue
-		}
-		record := readInteractiveOwner(s.paths, candidate.ThreadID)
-		if record == nil || !sameInteractiveOwner(record, candidate) {
-			unlockLaneLifecycle(lifecycleLock)
-			continue
-		}
-		observation := cleanupProcessIdentityStatus(record.OwnerPID, record.OwnerProcStart)
-		if observation.Status == processIdentityMatches || observation.Status == processIdentityUnknown {
-			unlockLaneLifecycle(lifecycleLock)
-			continue
-		}
-		if record.Pending && record.ParkOnAbort {
-			// A zero-turn TUI has exited after publication. Remove its advertised
-			// transport, but retain the exact stale record as the authorization
-			// proof for an immediate resume of the still-loaded Codex thread.
-			s.removeShim(record.ThreadID)
-			unlockLaneLifecycle(lifecycleLock)
-			continue
-		}
-		if record.Pending {
-			if record.DeleteOnAbort {
-				s.removeShim(record.ThreadID)
-				var deleteErr error
-				client, clientErr := s.ensureClient()
-				deleteErr = clientErr
-				if deleteErr == nil {
-					deleteErr = deletePreparedThread(client, record.ThreadID)
-				}
-				if deleteErr == nil {
-					removeInteractiveOwnerIfMatching(s.paths, record.ThreadID, record)
-				}
-				unlockLaneLifecycle(lifecycleLock)
-				if deleteErr != nil {
-					fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: delete uncommitted prepared thread %s: %v\n", record.ThreadID, deleteErr)
-				}
-				continue
-			}
-			removeInteractiveOwnerIfMatching(s.paths, record.ThreadID, record)
-			unlockLaneLifecycle(lifecycleLock)
-			continue
-		}
-		s.ownerMu.Lock()
-		releaseErr := s.releaseInteractiveThreadLocked(record.ThreadID, record)
-		s.ownerMu.Unlock()
-		unlockLaneLifecycle(lifecycleLock)
-		if releaseErr != nil {
-			fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: release exited interactive owner %s: %v\n", record.ThreadID, releaseErr)
-		}
-	}
-}
-
-func parkInteractiveThread(client *appServerClient, threadID string) error {
-	if err := requestWithTimeout(client, 4*time.Second, "thread/archive", map[string]any{"threadId": threadID}, nil); err != nil {
-		return fmt.Errorf("unload interactive Codex thread: %w", err)
-	}
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		lastErr = requestWithTimeout(client, 4*time.Second, "thread/unarchive", map[string]any{"threadId": threadID}, nil)
-		if lastErr == nil {
-			return nil
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return fmt.Errorf("restore interactive Codex thread after unload: %w", lastErr)
 }
 
 func (s *nativeSupervisor) updateShimStatus(threadID, status string) {
@@ -2476,7 +1877,6 @@ func (s *nativeSupervisor) reconcile() error {
 	if err != nil {
 		return errors.Join(append(reconcileErrors, err)...)
 	}
-	s.reconcileExitedInteractiveOwners()
 	loadedSet, err := loadedPreparedThreads(client)
 	if err != nil {
 		return errors.Join(append(reconcileErrors, err)...)
@@ -2485,20 +1885,13 @@ func (s *nativeSupervisor) reconcile() error {
 	for threadID := range loadedSet {
 		loaded = append(loaded, threadID)
 	}
-	releasing := s.reconcileInteractiveReleases()
 	if err := s.auditLoadedRetirement(client, loaded); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-sessions native supervisor: archived-thread audit failed: %v\n", err)
 	}
 	for _, threadID := range loaded {
-		if err := s.reconcileLoadedThread(client, threadID, releasing); err != nil {
+		if err := s.reconcileLoadedThread(client, threadID); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile loaded thread %s: %w", threadID, err))
 		}
-	}
-	// Re-read membership after loaded-thread reconciliation. That work can take
-	// seconds; using its initial snapshot here could remove a peer that attached
-	// while the pass was in progress.
-	if err := s.reconcileClosedInteractiveCandidatesFromAppServer(client); err != nil {
-		reconcileErrors = append(reconcileErrors, fmt.Errorf("refresh closed-thread membership: %w", err))
 	}
 	s.enforceLaneDeadlines()
 	s.recoverWakeRecords()
@@ -2508,47 +1901,14 @@ func (s *nativeSupervisor) reconcile() error {
 	return errors.Join(reconcileErrors...)
 }
 
-func (s *nativeSupervisor) reconcileClosedInteractiveCandidatesFromAppServer(client *appServerClient) error {
-	s.mu.Lock()
-	hasCandidates := len(s.closedCandidates) != 0
-	s.mu.Unlock()
-	if !hasCandidates {
-		return nil
-	}
-	loaded, err := loadedPreparedThreads(client)
-	if err != nil {
-		return err
-	}
-	s.reconcileClosedInteractiveCandidates(loaded)
-	return nil
-}
-
-func (s *nativeSupervisor) reconcileClosedInteractiveCandidates(loaded map[string]bool) {
-	s.mu.Lock()
-	candidates := make(map[string]uint64, len(s.closedCandidates))
-	for threadID, generation := range s.closedCandidates {
-		candidates[threadID] = generation
-	}
-	s.mu.Unlock()
-	for threadID, generation := range candidates {
-		if !s.reconcileClosedInteractiveThreadWithLoaded(threadID, loaded[threadID]) {
-			continue
-		}
-		s.mu.Lock()
-		if s.closedCandidates[threadID] == generation {
-			delete(s.closedCandidates, threadID)
-		}
-		s.mu.Unlock()
-	}
-}
-
-func (s *nativeSupervisor) reconcileLoadedThread(client *appServerClient, threadID string, releasing map[string]bool) error {
+func (s *nativeSupervisor) reconcileLoadedThread(client *appServerClient, threadID string) error {
 	lifecycleLock, err := lockLaneLifecycle(s.paths, threadID)
 	if err != nil {
 		return err
 	}
 	defer unlockLaneLifecycle(lifecycleLock)
-	if s.skipLoadedThreadReconciliation(threadID, releasing) {
+	if s.isRetired(threadID) || !s.activeCodexLaneThread(threadID) {
+		s.removeShim(threadID)
 		return nil
 	}
 	thread, err := readExactPreparedThread(client, threadID)
@@ -2563,9 +1923,6 @@ func (s *nativeSupervisor) reconcileLoadedThread(client *appServerClient, thread
 		"nameSource": map[bool]string{true: "codex", false: "generated"}[thread.Name != ""],
 		"status":     map[bool]string{true: "busy", false: "idle"}[statusType(thread.Status) == "active"],
 	})
-	if errors.Is(err, errInteractiveSessionEnding) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}
@@ -2573,60 +1930,6 @@ func (s *nativeSupervisor) reconcileLoadedThread(client *appServerClient, thread
 		_, _ = s.subscribeThread(thread.ID)
 	}
 	return nil
-}
-
-func (s *nativeSupervisor) skipLoadedThreadReconciliation(threadID string, releasing map[string]bool) bool {
-	if releasing[threadID] || s.interactiveReleasePending(threadID) {
-		return true
-	}
-	if s.isRetired(threadID) {
-		s.removeShim(threadID)
-		return true
-	}
-	if s.activeCodexLaneThread(threadID) {
-		return false
-	}
-	if owner := readInteractiveOwner(s.paths, threadID); owner != nil {
-		if owner.Pending {
-			switch cleanupProcessIdentityStatus(owner.OwnerPID, owner.OwnerProcStart).Status {
-			case processIdentityMatches:
-				if owner.Prepared {
-					return false
-				}
-			case processIdentityUnknown:
-				return true
-			case processIdentityStale:
-			}
-			s.removeShim(threadID)
-			return true
-		}
-		switch cleanupProcessIdentityStatus(owner.OwnerPID, owner.OwnerProcStart).Status {
-		case processIdentityMatches:
-			return false
-		case processIdentityUnknown:
-			// Unknown is neither authorization nor proof that an existing
-			// transport should be destroyed. Preserve it for a later retry.
-			return true
-		case processIdentityStale:
-		}
-	}
-	s.removeShim(threadID)
-	return true
-}
-
-func (s *nativeSupervisor) reconcileInteractiveReleases() map[string]bool {
-	now := time.Now().UnixMilli()
-	pending := map[string]bool{}
-	s.mu.Lock()
-	for threadID, deadline := range s.releasing {
-		if deadline <= now {
-			delete(s.releasing, threadID)
-			continue
-		}
-		pending[threadID] = true
-	}
-	s.mu.Unlock()
-	return pending
 }
 
 func (s *nativeSupervisor) reconcileLaneLifecycles(client *appServerClient) {
