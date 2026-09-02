@@ -284,12 +284,24 @@ func (client *rpcClient) readLoop() {
 				return
 			}
 		case "extension_ui_request":
-			// The pinned OMP RPC protocol uses this frame for interactive
-			// approval. Agent Sessions has no host permission-authority callback
-			// in this driver contract, so treating it as additive output would
-			// leave an unattended turn blocked forever. Fail closed promptly.
-			client.fail(fmt.Errorf("%w: native RPC approval mediation is unavailable", productruntime.ErrUnsupportedPolicy))
-			return
+			var request struct {
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(body, &request) != nil || request.Method == "" {
+				client.fail(fmt.Errorf("%w: malformed native RPC UI request", productruntime.ErrProtocol))
+				return
+			}
+			switch request.Method {
+			case "cancel", "notify", "setStatus", "setWidget", "setTitle", "set_editor_text":
+				// These OMP UI frames are product-declared fire-and-forget output.
+				continue
+			case "select", "confirm", "input", "editor", "open_url":
+				client.fail(fmt.Errorf("%w: native RPC UI mediation is unavailable", productruntime.ErrUnsupportedPolicy))
+				return
+			default:
+				client.fail(fmt.Errorf("%w: unknown native RPC UI method %q", productruntime.ErrProtocol, request.Method))
+				return
+			}
 		default:
 			// Streaming events are product output, not control authority. Unknown
 			// additive events are ignored at this pinned protocol version.

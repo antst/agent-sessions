@@ -593,6 +593,43 @@ func TestOMPRPCApprovalRequestFailsClosedWithoutWaitingForTerminal(t *testing.T)
 	}
 }
 
+func TestOMPRPCIgnoresOnlyProductDeclaredFireAndForgetUI(t *testing.T) {
+	quirks, _ := QuirksFor(OMPProductID)
+	for _, method := range []string{"cancel", "notify", "setStatus", "setWidget", "setTitle", "set_editor_text"} {
+		t.Run(method, func(t *testing.T) {
+			process := newScriptedProcess("omp-native")
+			process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+			process.emit(map[string]any{"type": "extension_ui_request", "id": "ui-1", "method": method})
+			client, err := newRPCClient(process, quirks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			state, err := client.handshake(ctx)
+			if err != nil || state.SessionID != "omp-native" {
+				t.Fatalf("handshake after %s = %+v, %v", method, state, err)
+			}
+		})
+	}
+
+	process := newScriptedProcess("omp-native")
+	process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+	client, err := newRPCClient(process, quirks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := client.handshake(ctx); err != nil {
+		t.Fatal(err)
+	}
+	process.emit(map[string]any{"type": "extension_ui_request", "id": "ui-unknown", "method": "future_method"})
+	if _, err := client.waitTerminal(ctx); !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("unknown UI method returned %v", err)
+	}
+}
+
 func TestLaneOpenPassesProductNativeArgumentsAndName(t *testing.T) {
 	for _, productID := range []string{PiProductID, OMPProductID} {
 		t.Run(productID, func(t *testing.T) {
