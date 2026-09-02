@@ -11,8 +11,6 @@ import (
 func TestProjectionIsCanonicalSortedIsolatedAndSecretFree(t *testing.T) {
 	inventory := All()
 	inventory[0], inventory[3] = inventory[3], inventory[0]
-	inventory[0].Authority.PeerAuth = "password"
-	inventory[0].Authority.LaneAuth = "bearer"
 	first, err := ProjectionJSON(inventory)
 	if err != nil {
 		t.Fatal(err)
@@ -29,8 +27,8 @@ func TestProjectionIsCanonicalSortedIsolatedAndSecretFree(t *testing.T) {
 			t.Fatalf("projection contains secret-shaped field %q", forbidden)
 		}
 	}
-	if !bytes.Contains(first, []byte(`"peer_auth": "password"`)) || !bytes.Contains(first, []byte(`"lane_auth": "bearer"`)) {
-		t.Fatalf("projection rejected public authority mechanism enums: %s", first)
+	if bytes.Contains(first, []byte(`"authority"`)) || bytes.Contains(first, []byte(`"connector_attester"`)) {
+		t.Fatalf("projection contains removed trust metadata: %s", first)
 	}
 	var decoded Projection
 	if err := json.Unmarshal(first, &decoded); err != nil {
@@ -41,9 +39,9 @@ func TestProjectionIsCanonicalSortedIsolatedAndSecretFree(t *testing.T) {
 	}
 	for _, product := range decoded.Products {
 		if product.PeerTransport == "" || product.MessageTransport == "" || product.LaneTransport == "" ||
-			product.ConnectorAttesterKey == "" || product.DoctorProbeKey == "" || product.PermissionProfileKey == "" ||
+			product.DoctorProbeKey == "" || product.PermissionProfileKey == "" ||
 			product.InstallRoot == "" || len(product.PluginArchivePaths) == 0 || len(product.RequiredDoctorFeatures) == 0 ||
-			product.NativeRegistration.Strategy == "" || !product.Acceptance.RealProductRequired || product.Authority == nil {
+			product.NativeRegistration.Strategy == "" || !product.Acceptance.RealProductRequired {
 			t.Fatalf("projection omitted derived contract fields: %#v", product)
 		}
 	}
@@ -143,9 +141,6 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 		}},
 		{name: "missing real product acceptance", mutate: func(products []Descriptor) {
 			products[0].Acceptance.RealProductRequired = false
-		}},
-		{name: "invalid authority token", mutate: func(products []Descriptor) {
-			products[0].Authority.PeerAuth = "Bearer secret"
 		}},
 		{name: "tuple missing package manager version", mutate: func(products []Descriptor) {
 			products[0].Compatibility = Compatibility{Policy: VersionExact, PackageManager: "pnpm", TupleMembers: []TupleMember{{Name: "cli", Version: "1.0.0"}}}

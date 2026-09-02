@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 		joined <- report
 	}, func(report liveSessionReport) {
 		left <- report
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +51,7 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	rejoined := make(chan liveSessionReport, 1)
 	successor, err := startLivePresenceServer(ctx, root, func(report liveSessionReport) {
 		rejoined <- report
-	}, func(liveSessionReport) {})
+	}, func(liveSessionReport) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +65,52 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 		t.Fatal("live session did not reconnect to the successor daemon")
 	}
 	stopClient()
+}
+
+func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan liveSessionReport, 1)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
+		joined <- report
+	}, func(liveSessionReport) {}, func(_ context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
+		if report.UUID != "session-rpc" || method != "tools/call" {
+			t.Fatalf("server call = %+v %q", report, method)
+		}
+		return append(json.RawMessage(nil), params...), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	client := startLiveSessionClient(ctx, server.listener.Addr().String(), liveSessionReport{
+		UUID: "session-rpc", Name: "rpc", Product: "codex",
+	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+		if method != "message.deliver" {
+			t.Fatalf("client method = %q", method)
+		}
+		return append(json.RawMessage(nil), params...), nil
+	})
+	select {
+	case <-joined:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live RPC session did not join")
+	}
+	var fromSession json.RawMessage
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		fromSession, err = client.Call(ctx, "tool", "tools/call", map[string]string{"name": "list_peers"})
+		if err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil || !strings.Contains(string(fromSession), "list_peers") {
+		t.Fatalf("session-to-daemon call = %s, %v", fromSession, err)
+	}
+	fromDaemon, err := server.Call(ctx, "session-rpc", "delivery", "message.deliver", map[string]string{"body": "hello"})
+	if err != nil || !strings.Contains(string(fromDaemon), "hello") {
+		t.Fatalf("daemon-to-session call = %s, %v", fromDaemon, err)
+	}
 }
 
 func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {

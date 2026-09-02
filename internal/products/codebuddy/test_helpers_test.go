@@ -9,71 +9,18 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-type fakeRegistry struct {
-	claim     WorkerClaim
-	findErr   error
-	verifyErr error
-	finds     int
-}
-
-func (registry *fakeRegistry) FindInteractive(context.Context, string) (WorkerClaim, error) {
-	registry.finds++
-	return registry.claim, registry.findErr
-}
-
-func (registry *fakeRegistry) VerifyUnchanged(context.Context, WorkerClaim) error {
-	return registry.verifyErr
-}
-
-type fakeProcesses struct {
-	identities map[int]procinfo.Identity
-	executable string
-	argv       []string
-	descends   map[[2]int]bool
-}
-
-func (processes *fakeProcesses) CaptureIdentity(_ context.Context, pid int) (procinfo.Identity, error) {
-	identity, ok := processes.identities[pid]
-	if !ok {
-		return procinfo.Identity{}, errors.New("missing process")
-	}
-	return identity, nil
-}
-
-func (processes *fakeProcesses) ObserveIdentity(_ context.Context, identity procinfo.Identity) (procinfo.IdentityObservation, error) {
-	current, ok := processes.identities[identity.PID]
-	if !ok || current != identity {
-		return procinfo.IdentityObservation{Status: procinfo.IdentityStale}, nil
-	}
-	return procinfo.IdentityObservation{Status: procinfo.IdentityMatches, Current: current}, nil
-}
-
-func (processes *fakeProcesses) Executable(context.Context, procinfo.Identity) (string, error) {
-	return processes.executable, nil
-}
-
-func (processes *fakeProcesses) CommandLine(context.Context, procinfo.Identity) ([]string, error) {
-	return append([]string(nil), processes.argv...), nil
-}
-
-func (processes *fakeProcesses) DescendsFrom(_ context.Context, child, ancestor procinfo.Identity, _ int) (bool, error) {
-	if child == ancestor {
-		return true, nil
-	}
-	return processes.descends[[2]int{child.PID, ancestor.PID}], nil
-}
+type fakeRegistry struct{}
+type fakeProcesses struct{}
 
 type memoryReceiptReader struct{ values map[string][]byte }
 
@@ -289,14 +236,10 @@ func argumentValue(arguments []string, name string) string {
 	return ""
 }
 
-func codebuddyTestConfig(t *testing.T, registry WorkerRegistry, processes ProcessProbe) Config {
+func codebuddyTestConfig(t *testing.T, _ any, _ any) Config {
 	t.Helper()
 	return Config{
 		Executable: "/opt/codebuddy", MCPConfigPath: "/opt/agent-sessions/codebuddy-mcp.json",
-		Registry: registry, Processes: processes,
-		SocketOwner: SocketOwnerVerifierFunc(func(_ context.Context, endpoint string, pid int) (SocketObservation, error) {
-			return SocketObservation{PID: pid, Endpoint: endpoint, Identity: strconv.Itoa(pid)}, nil
-		}),
 		Endpoints: EndpointAllocatorFunc(func(context.Context) (string, error) { return freeEndpoint(t), nil }),
 		Secrets: SecretSourceFunc(func(context.Context) (productruntime.SensitiveValue, error) {
 			return productruntime.NewSensitiveValue("test-lane-secret-not-for-production"), nil
@@ -309,13 +252,4 @@ func codebuddyTestConfig(t *testing.T, registry WorkerRegistry, processes Proces
 		}),
 		PollInterval: time.Millisecond,
 	}
-}
-
-func attachmentFixture(endpoint string) (daemon.ManagedAttachment, procinfo.Identity, procinfo.Identity) {
-	wrapper := procinfo.Identity{PID: 100, Start: "wrapper", StrongStart: "wrapper-strong"}
-	worker := procinfo.Identity{PID: 101, Start: "worker", StrongStart: "worker-strong"}
-	return daemon.ManagedAttachment{
-		ID: "attachment-1", Product: ProductID, NativeSessionID: "native-1", Cwd: "/work", State: "attached",
-		Evidence: daemon.NativeEvidence{Process: worker},
-	}, wrapper, worker
 }

@@ -32,8 +32,8 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 		if !product.Acceptance.RealProductRequired || len(product.Acceptance.ExternalCells) != 0 {
 			t.Fatalf("%s acceptance = %#v", product.ID, product.Acceptance)
 		}
-		if product.Authority == nil || product.Authority.PeerAuth == "" || product.Authority.LaneAuth == "" || product.Authority.LaneAuthLifetime == "" {
-			t.Fatalf("%s authority = %#v", product.ID, product.Authority)
+		if product.PeerTransport != "presence" || product.MessageTransport != "presence" {
+			t.Fatalf("%s live transports = %q/%q", product.ID, product.PeerTransport, product.MessageTransport)
 		}
 		if !reflect.DeepEqual(product.FederationCapabilities, []string{product.LaneCapability}) {
 			t.Fatalf("%s federation capabilities = %v", product.ID, product.FederationCapabilities)
@@ -56,6 +56,25 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 	}
 	if _, ok := ByCommand("codex"); ok {
 		t.Fatal("native executable classified as managed alias")
+	}
+}
+
+func TestRuntimeInventoryRecognizesAllLiveReconnectProducts(t *testing.T) {
+	want := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "codebuddy", "dsh"}
+	inventory := RuntimeInventory()
+	if len(inventory) != len(want) {
+		t.Fatalf("runtime product count = %d, want %d", len(inventory), len(want))
+	}
+	if err := ValidateInventory(inventory); err != nil {
+		t.Fatal(err)
+	}
+	for index, id := range want {
+		if inventory[index].ID != id {
+			t.Fatalf("runtime product %d = %q, want %q", index, inventory[index].ID, id)
+		}
+		if resolved, ok := ByID(id); !ok || resolved.ID != id {
+			t.Fatalf("ByID(%q) = %#v, %v", id, resolved, ok)
+		}
 	}
 }
 
@@ -88,9 +107,8 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	products[0].NativeRegistration.Args[0] = "mutated"
 	products[0].NativeRegistration.AssetOnly = true
 	products[0].Acceptance.ExternalCells = []ExternalAcceptanceCell{{ID: "mutated"}}
-	products[0].Authority.PeerAuth = "mutated"
 	again, _ := ByID("codex")
-	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 || again.Authority.PeerAuth == "mutated" {
+	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
 	}
 	ordered := again.SortedCapabilities()

@@ -17,12 +17,12 @@ import (
 // must never add another dependency on the frozen bridge/federator trees.
 var frozenLegacyImporters = map[string]bool{
 	"cmd/agent-sessions/codex_host.go":  true,
+	"cmd/agent-sessions/connector.go":   true,
 	"cmd/agent-sessions/federation.go":  true,
 	"cmd/agent-sessions/grok_host.go":   true,
 	"cmd/agent-sessions/hook.go":        true,
 	"cmd/agent-sessions/lane.go":        true,
 	"cmd/agent-sessions/lane_notice.go": true,
-	"cmd/agent-sessions/messaging.go":   true,
 	"cmd/agent-sessions/qwen_host.go":   true,
 }
 

@@ -148,7 +148,6 @@ func (c *hostCoordinator) startQwenOwnerMonitor(runtime *daemonpkg.Runtime, id s
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		lastNamePoll := time.Time{}
 		for {
 			select {
 			case <-c.ctx.Done():
@@ -164,13 +163,6 @@ func (c *hostCoordinator) startQwenOwnerMonitor(runtime *daemonpkg.Runtime, id s
 				pending := c.qwenPending[id]
 				c.mu.Unlock()
 				if pending == nil || pending.adopted {
-					if time.Since(lastNamePoll) >= time.Second {
-						attachment, ok, _ := runtime.Attachments().ActiveAttachment(id)
-						if ok {
-							c.observeQwenNativeName(runtime, attachment)
-						}
-						lastNamePoll = time.Now()
-					}
 					continue
 				}
 				if !qwenOwnerExecReady(pending) {
@@ -188,36 +180,9 @@ func (c *hostCoordinator) startQwenOwnerMonitor(runtime *daemonpkg.Runtime, id s
 					current.adopted = true
 				}
 				c.mu.Unlock()
-				if attachment, ok, _ := runtime.Attachments().ActiveAttachment(id); ok {
-					c.observeQwenNativeName(runtime, attachment)
-					lastNamePoll = time.Now()
-				}
 			}
 		}
 	}()
-}
-
-func (c *hostCoordinator) observeQwenNativeName(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) {
-	home := attachment.NativeProfileRoot
-	if home == "" {
-		profile, err := qwenprofile.Current()
-		if err != nil || profile.Fingerprint != attachment.ProfileIdentity {
-			return
-		}
-		home, err = qwenprofile.EffectiveHome(profile, os.LookupEnv)
-		if err != nil {
-			return
-		}
-	}
-	title, ok := bridge.QwenNativeSessionTitle(
-		home, attachment.NativeSessionID, attachment.Cwd,
-	)
-	if !ok {
-		return
-	}
-	_ = runtime.Attachments().ObserveNativeTitle(
-		attachment.ID, attachment.NativeSessionID, bridge.NormalizePeerName(title),
-	)
 }
 
 func qwenOwnerExecReady(pending *qwenPending) bool {

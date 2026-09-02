@@ -12,7 +12,6 @@ import (
 
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/procinfo"
-	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 type EnvVar struct {
@@ -187,19 +186,6 @@ type LaneRecoveryRequest struct {
 	PriorGeneration      uint64
 }
 
-type ConnectorAttempt struct {
-	ProductID              string
-	ProcessIdentity        procinfo.Identity
-	ClaimedNativeSessionID string
-	ComponentBindingID     string
-}
-
-type ParentBinding struct {
-	AttachmentID    string
-	NativeSessionID string
-	Verified        bool
-}
-
 type ProbeDepth string
 
 const (
@@ -239,15 +225,6 @@ type ReceiptReader interface {
 	OpenReceipt(receiptID string) (io.ReadCloser, int64, [32]byte, error)
 }
 
-// ProcessInspector provides exact process identity and ancestry checks without
-// exposing product drivers to platform process-table mechanics.
-type ProcessInspector interface {
-	CaptureIdentity(context.Context, int) (procinfo.Identity, error)
-	ObserveIdentity(context.Context, procinfo.Identity) (procinfo.IdentityObservation, error)
-	Executable(context.Context, procinfo.Identity) (string, error)
-	DescendsFrom(context.Context, procinfo.Identity, procinfo.Identity, int) (bool, error)
-}
-
 type ProcessSignal string
 
 const (
@@ -277,63 +254,12 @@ type OwnedProcessSupervisor interface {
 	Wait(context.Context, OwnedProcessRef) (ProcessExit, error)
 }
 
-// ComponentSessionView and ProductServerView are secret-free observations of
-// ephemeral registries. Product-specific clients remain in their drivers; the
-// lookup never exposes a socket path, URL, password, or bearer token.
-type ComponentSessionView struct {
-	BindingID       string
-	AttachmentID    string
-	NativeSessionID string
-	Generation      uint64
-	State           string
-}
-
-type ComponentLookup interface {
-	LookupComponent(context.Context, string, string) (ComponentSessionView, error)
-}
-
-type ProductServerView struct {
-	ServerID        string
-	ProductID       string
-	NativeSessionID string
-	Generation      uint64
-}
-
-type ProductServerLookup interface {
-	LookupProductServer(context.Context, string, string) (ProductServerView, error)
-}
-
-type TestHookPoint struct{ value string }
-
-func NewTestHookPoint(value string) (TestHookPoint, error) {
-	if err := productcatalog.ValidateToken(value); err != nil {
-		return TestHookPoint{}, err
-	}
-	return TestHookPoint{value: value}, nil
-}
-
-func (p TestHookPoint) String() string { return p.value }
-
-// TestHooks is a bounded test-only checkpoint surface. Production hosts leave
-// it nil. Implementations must reject unknown points instead of executing
-// callbacks selected by arbitrary native input.
-type TestHooks interface {
-	Checkpoint(context.Context, TestHookPoint) error
-}
-
 // HostDeps contains only product-neutral ephemeral host capabilities.
 type HostDeps struct {
 	Generation     uint64
-	HostID         string
-	StateRoot      string
-	RuntimeRoot    string
 	Receipts       ReceiptReader
-	Processes      ProcessInspector
 	OwnedProcesses OwnedProcessSupervisor
-	Components     ComponentLookup
-	ProductServers ProductServerLookup
 	Now            func() time.Time
-	TestHooks      TestHooks
 }
 
 // Compile-time assertions guard accidental serialization of secret-bearing

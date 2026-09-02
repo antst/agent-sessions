@@ -1,7 +1,7 @@
 "use strict";
 
 const path = require("node:path");
-const { createComponentClient, readConfiguration } = require("../shared/component/client.js");
+const { createLiveSessionClient, readConfiguration } = require("../shared/live-session.js");
 const { validateSocket } = require("./mcp-env.cjs");
 
 const name = "agent-sessions";
@@ -36,6 +36,7 @@ function applyLanePolicy(ctx, policy, native) {
 }
 
 function textOf(body) {
+  if (typeof body === "string") return body;
   if (!body || typeof body !== "object") return "";
   if (typeof body.text === "string") return body.text;
   if (typeof body.message === "string") return body.message;
@@ -48,23 +49,16 @@ function textOf(body) {
 
 function createCordisPlugin(options) {
   if (!options || !options.client || typeof options.defineTool !== "function" || typeof options.createUserMessage !== "function") {
-    throw new Error("DSH Cordis plugin requires component client, defineTool, and createUserMessage");
+    throw new Error("DSH Cordis plugin requires live session client, defineTool, and createUserMessage");
   }
   const client = options.client;
   const defineTool = options.defineTool;
   const createUserMessage = options.createUserMessage;
-  const sessionSequences = new Map();
   let managedAgent;
   let selected = false;
-  let announced = false;
   let observedTitle = "";
   let operationSequence = 0;
   const nextOperation = (prefix) => prefix + "-" + (++operationSequence);
-  const nextSessionSequence = (sessionID) => {
-    const sequence = (sessionSequences.get(sessionID) || 0) + 1;
-    sessionSequences.set(sessionID, sequence);
-    return sequence;
-  };
 
   function exactAgent(agent) { return selected && managedAgent === agent; }
 
@@ -77,47 +71,16 @@ function createCordisPlugin(options) {
   }
 
   function announce(ctx, agent) {
-    if (!client.bindingID) return false;
     const facts = nativeFacts(ctx, agent);
     if (!facts) return false;
-    const sequence = nextSessionSequence(agent.id);
-    const sent = client.send("session.announce", nextOperation("announce"), {
-      binding_id: client.bindingID,
-      native_session_id: agent.id,
-      cwd: facts.cwd,
-      native_name: facts.title,
-      product_event_seq: sequence,
-    });
-    if (sent) {
-      announced = true;
-      observedTitle = facts.title;
-    }
+    const sent = client.report(agent.id, facts.title);
+    if (sent) observedTitle = facts.title;
     return sent;
   }
 
-  function state(agent, status) {
-    if (!client.bindingID || !announced || !exactAgent(agent)) return false;
-    const normalized = status === "running" || status === "busy" ? "busy" : "idle";
-    return client.send("session.state", nextOperation("state"), {
-      native_session_id: agent.id,
-      state: normalized,
-      product_event_seq: nextSessionSequence(agent.id),
-    });
-  }
-
-  function turnEvent(agent, kind, metadata = {}) {
-    if (!client.bindingID || !announced || !exactAgent(agent)) return false;
-    return client.send("turn.event", nextOperation("turn"), {
-      native_session_id: agent.id,
-      event_seq: nextSessionSequence(agent.id),
-      kind,
-      metadata,
-    });
-  }
-
   async function deliver(ctx, payload) {
-    const agent = ctx.agents.get(payload.native_session_id);
-    if (!exactAgent(agent) || !announced) throw new Error("unknown exact managed DSH session");
+    const agent = ctx.agents.get(payload.nativeSessionID);
+    if (!exactAgent(agent)) throw new Error("unknown live DSH session");
     const text = textOf(payload.body);
     if (!text) throw new Error("empty Agent Sessions delivery");
     const input = createUserMessage({
@@ -125,19 +88,12 @@ function createCordisPlugin(options) {
       source: { kind: "plugin", plugin: name },
     });
     if (!input || typeof input.id !== "string" || !input.id) throw new Error("DSH did not allocate a native message identity");
-    if (payload.mode === "busy-steer") {
+    if (agent.status === "running" || agent.status === "busy") {
       agent.steer(input);
-    } else if (payload.mode === "idle-wake" || payload.mode === "busy-follow-up") {
-      agent.followup(input);
     } else {
-      throw new Error("unsupported DSH delivery mode " + String(payload.mode));
+      agent.followup(input);
     }
-    client.send("delivery.accept", payload.delivery_id, {
-      delivery_id: payload.delivery_id,
-      native_session_id: agent.id,
-      native_message_id: input.id,
-      accepted_at: Date.now(),
-    });
+    client.acceptMessage(payload.messageID, { native_message_id: input.id });
   }
 
   function registerParentTool(ctx) {
@@ -155,23 +111,8 @@ function createCordisPlugin(options) {
       async execute(argumentsValue, execution) {
         if (!exactAgent(execution?.agent)) throw new Error("agent_sessions requires the exact managed native exec.agent identity");
         const callID = nextOperation("tool");
-        let cancelSent = false;
-        const onAbort = () => {
-          if (cancelSent) return;
-          cancelSent = true;
-          client.send("tool.cancel", nextOperation("cancel"), { call_id: callID });
-        };
-        const pending = client.callTool(callID, argumentsValue.action, {
-          ...(argumentsValue.arguments || {}),
-          claimed_native_session_id: execution.agent.id,
-        });
-        execution.signal?.addEventListener("abort", onAbort, { once: true });
-        if (execution.signal?.aborted) onAbort();
-        try {
-          return await pending;
-        } finally {
-          execution.signal?.removeEventListener("abort", onAbort);
-        }
+        if (execution.signal?.aborted) throw new Error("Agent Sessions operation was cancelled before dispatch");
+        return client.callTool(execution.agent.id, callID, argumentsValue.action, argumentsValue.arguments || {});
       },
     }));
   }
@@ -183,21 +124,10 @@ function createCordisPlugin(options) {
       throw new Error("DSH managed profile must start before any native session exists");
     }
     registerParentTool(ctx);
-    client.on("ready", () => {
-      if (managedAgent) announce(ctx, managedAgent);
-    });
-    client.on("delivery.present", (payload) => {
+    client.on("message", (payload) => {
       Promise.resolve(deliver(ctx, payload)).catch((error) => {
-        client.send("delivery.reject", payload.delivery_id, {
-          delivery_id: payload.delivery_id,
-          category: "protocol",
-          detail: String(error?.message || error).slice(0, 512),
-        });
+        client.rejectMessage(payload.messageID, String(error?.message || error).slice(0, 512));
       });
-    });
-    client.on("session.bound", (payload) => {
-      const agent = ctx.agents.get(payload.native_session_id);
-      if (exactAgent(agent)) state(agent, agent.status);
     });
     ctx.on("agent/created", ({ agent }) => {
       if (selected) throw new Error("DSH managed profile rejects sibling native sessions");
@@ -210,42 +140,28 @@ function createCordisPlugin(options) {
       selected = true;
       announce(ctx, agent);
     });
-    ctx.on("agent/status", ({ agent, status }) => {
-      if (exactAgent(agent)) state(agent, status);
-    });
     ctx.on("session/event", (session, event) => {
       if (!managedAgent || session !== managedAgent.session) return;
       if (event?.type === "session/title") {
         const title = ctx.sessionTitle.get(managedAgent.session)?.title;
         if (typeof event.seq !== "number" || !Number.isSafeInteger(event.seq) || event.seq < 0 || typeof title !== "string" || !title) return;
-        if (!announced) {
+        if (!client.sessions.has(managedAgent.id)) {
           announce(ctx, managedAgent);
         } else if (title !== observedTitle) {
-          const sequence = nextSessionSequence(managedAgent.id);
-          if (client.observeRename("title-" + String(event.seq), managedAgent.id, title, sequence)) observedTitle = title;
+          if (client.updateName(managedAgent.id, title)) observedTitle = title;
         }
         return;
       }
-      if (event?.type !== "turn/end" || !announced) return;
-      const reason = typeof event.data?.reason?.kind === "string" ? event.data.reason.kind : "unknown";
-      let kind = "failed";
-      if (reason === "completed" || reason === "max-tokens") kind = "settled";
-      else if (reason === "aborted" || reason === "interrupted") kind = "cancelled";
-      turnEvent(managedAgent, kind, { stop_reason: reason, turn: event.data?.turn });
     });
     ctx.on("agent/disposed", ({ agent }) => {
-      if (!client.bindingID || !announced || !exactAgent(agent)) return;
-      client.send("session.close", nextOperation("close"), {
-        native_session_id: agent.id,
-        reason: "disposed",
-      });
+      if (exactAgent(agent)) client.closeSession(agent.id);
     });
     const started = client.start();
-    ctx.effect?.(() => () => client.stop(), "Agent Sessions DSH component");
+    ctx.effect?.(() => () => client.stop(), "Agent Sessions live session");
     return started;
   }
 
-  return { apply, announce, deliver, state, turnEvent };
+  return { apply, announce, deliver };
 }
 
 function applyWithEnvironment(ctx, environment, loadNative = async () => {
@@ -265,14 +181,14 @@ function applyWithEnvironment(ctx, environment, loadNative = async () => {
 }) {
   const gate = readConfiguration(environment);
   const lanePolicy = readLanePolicy(environment);
-  if (gate.active && lanePolicy) throw new Error("DSH process cannot be both a component peer and an ACP lane");
+  if (gate.active && lanePolicy) throw new Error("DSH process cannot be both a live peer and an ACP lane");
   if (lanePolicy) {
     const native = loadLanePolicy();
     return native && typeof native.then === "function" ? native.then((loaded) => applyLanePolicy(ctx, lanePolicy, loaded)) : applyLanePolicy(ctx, lanePolicy, native);
   }
   if (!gate.active) return { active: false, reason: gate.reason };
   validateSocket(gate.socketPath, environment);
-  const client = createComponentClient({ env: environment });
+  const client = createLiveSessionClient({ env: environment });
   // Load DSH's ESM-only native helpers only for a managed live connection; an
   // ambient profile remains entirely inert.
   return Promise.resolve(loadNative()).then(({ defineTool, createUserMessage }) =>

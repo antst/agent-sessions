@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -39,12 +39,117 @@ type livePresenceServer struct {
 	listener net.Listener
 	join     func(liveSessionReport)
 	leave    func(liveSessionReport)
+	call     func(context.Context, liveSessionReport, string, json.RawMessage) (json.RawMessage, error)
 
 	mu       sync.Mutex
-	current  map[string]net.Conn
+	current  map[string]*liveRPCConnection
 	wg       sync.WaitGroup
 	close    sync.Once
 	closeErr error
+}
+
+// liveRPCFrame is the whole post-report vocabulary. A method names a request;
+// a method-less frame is the response bearing either result or error.
+type liveRPCFrame struct {
+	ID     string          `json:"id"`
+	Method string          `json:"method,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+type liveRPCConnection struct {
+	connection net.Conn
+	encoder    *json.Encoder
+	decoder    *json.Decoder
+
+	writeMu sync.Mutex
+	mu      sync.Mutex
+	pending map[string]chan liveRPCFrame
+	report  liveSessionReport
+}
+
+func newLiveRPCConnection(connection net.Conn) *liveRPCConnection {
+	return &liveRPCConnection{
+		connection: connection, encoder: json.NewEncoder(connection), decoder: json.NewDecoder(bufio.NewReader(connection)),
+		pending: map[string]chan liveRPCFrame{},
+	}
+}
+
+func (c *liveRPCConnection) write(frame liveRPCFrame) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.encoder.Encode(frame)
+}
+
+func (c *liveRPCConnection) call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(method) == "" {
+		return nil, errors.New("live RPC request identity is incomplete")
+	}
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	response := make(chan liveRPCFrame, 1)
+	c.mu.Lock()
+	if _, duplicate := c.pending[id]; duplicate {
+		c.mu.Unlock()
+		return nil, errors.New("live RPC request id is already outstanding")
+	}
+	c.pending[id] = response
+	c.mu.Unlock()
+	if err := c.write(liveRPCFrame{ID: id, Method: method, Params: body}); err != nil {
+		c.drop(id)
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		c.drop(id)
+		return nil, ctx.Err()
+	case frame, ok := <-response:
+		if !ok {
+			return nil, errors.New("live session disconnected")
+		}
+		if frame.Error != "" {
+			return nil, errors.New(frame.Error)
+		}
+		return append(json.RawMessage(nil), frame.Result...), nil
+	}
+}
+
+func (c *liveRPCConnection) drop(id string) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
+}
+
+func (c *liveRPCConnection) resolve(frame liveRPCFrame) bool {
+	c.mu.Lock()
+	response := c.pending[frame.ID]
+	delete(c.pending, frame.ID)
+	c.mu.Unlock()
+	if response == nil {
+		return false
+	}
+	response <- frame
+	close(response)
+	return true
+}
+
+func (c *liveRPCConnection) fail() {
+	c.mu.Lock()
+	pending := c.pending
+	c.pending = map[string]chan liveRPCFrame{}
+	c.mu.Unlock()
+	for _, response := range pending {
+		close(response)
+	}
+}
+
+func (c *liveRPCConnection) liveReport() liveSessionReport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.report
 }
 
 func livePresenceEndpoint(stateRoot string) string {
@@ -56,6 +161,7 @@ func startLivePresenceServer(
 	stateRoot string,
 	join func(liveSessionReport),
 	leave func(liveSessionReport),
+	call func(context.Context, liveSessionReport, string, json.RawMessage) (json.RawMessage, error),
 ) (*livePresenceServer, error) {
 	endpoint := livePresenceEndpoint(stateRoot)
 	if err := os.MkdirAll(filepath.Dir(endpoint), 0o700); err != nil {
@@ -71,8 +177,8 @@ func startLivePresenceServer(
 		return nil, err
 	}
 	server := &livePresenceServer{
-		listener: listener, join: join, leave: leave,
-		current: map[string]net.Conn{},
+		listener: listener, join: join, leave: leave, call: call,
+		current: map[string]*liveRPCConnection{},
 	}
 	server.wg.Add(1)
 	go server.accept()
@@ -98,33 +204,90 @@ func (s *livePresenceServer) accept() {
 func (s *livePresenceServer) serve(connection net.Conn) {
 	defer s.wg.Done()
 	defer func() { _ = connection.Close() }()
+	requestCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	rpc := newLiveRPCConnection(connection)
+	defer rpc.fail()
 	var report liveSessionReport
-	decoder := json.NewDecoder(io.LimitReader(connection, 64<<10))
+	decoder := rpc.decoder
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&report) != nil || !validLiveSessionReport(report) {
 		return
 	}
 	report.Groups = uniqueStrings(report.Groups)
+	rpc.report = report
 	s.mu.Lock()
 	previous := s.current[report.UUID]
-	s.current[report.UUID] = connection
+	s.current[report.UUID] = rpc
 	s.mu.Unlock()
 	if previous != nil {
-		_ = previous.Close()
+		_ = previous.connection.Close()
 	}
 	s.join(report)
-	if _, err := io.WriteString(connection, "{}\n"); err == nil {
-		_, _ = io.Copy(io.Discard, connection)
+	for {
+		var frame liveRPCFrame
+		if decoder.Decode(&frame) != nil {
+			break
+		}
+		if strings.TrimSpace(frame.ID) == "" {
+			break
+		}
+		if frame.Method == "" {
+			rpc.resolve(frame)
+			continue
+		}
+		go s.handleRequest(requestCtx, rpc, report, frame)
 	}
 	s.mu.Lock()
-	current := s.current[report.UUID] == connection
+	current := s.current[report.UUID] == rpc
 	if current {
 		delete(s.current, report.UUID)
 	}
 	s.mu.Unlock()
 	if current {
-		s.leave(report)
+		s.leave(rpc.liveReport())
 	}
+}
+
+func (s *livePresenceServer) handleRequest(ctx context.Context, connection *liveRPCConnection, report liveSessionReport, frame liveRPCFrame) {
+	if frame.Method == "session.update" {
+		var updated liveSessionReport
+		decoder := json.NewDecoder(strings.NewReader(string(frame.Params)))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&updated) != nil || !validLiveSessionReport(updated) ||
+			updated.UUID != report.UUID || updated.Product != report.Product {
+			_ = connection.write(liveRPCFrame{ID: frame.ID, Error: "live session update is invalid"})
+			return
+		}
+		updated.Groups = uniqueStrings(updated.Groups)
+		connection.mu.Lock()
+		connection.report = updated
+		connection.mu.Unlock()
+		s.join(updated)
+		_ = connection.write(liveRPCFrame{ID: frame.ID, Result: json.RawMessage(`{}`)})
+		return
+	}
+	if s.call == nil {
+		_ = connection.write(liveRPCFrame{ID: frame.ID, Error: "live session operation is unsupported"})
+		return
+	}
+	result, err := s.call(ctx, connection.liveReport(), frame.Method, frame.Params)
+	response := liveRPCFrame{ID: frame.ID, Result: result}
+	if err != nil {
+		response.Result = nil
+		response.Error = err.Error()
+	}
+	_ = connection.write(response)
+}
+
+func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, params any) (json.RawMessage, error) {
+	s.mu.Lock()
+	connection := s.current[uuid]
+	s.mu.Unlock()
+	if connection == nil {
+		return nil, errors.New("live session is unavailable")
+	}
+	return connection.call(ctx, "daemon."+id, method, params)
 }
 
 func (s *livePresenceServer) Close() error {
@@ -133,7 +296,7 @@ func (s *livePresenceServer) Close() error {
 		s.mu.Lock()
 		connections := make([]net.Conn, 0, len(s.current))
 		for _, connection := range s.current {
-			connections = append(connections, connection)
+			connections = append(connections, connection.connection)
 		}
 		s.mu.Unlock()
 		for _, connection := range connections {
@@ -152,38 +315,125 @@ func validLiveSessionReport(report liveSessionReport) bool {
 	return strings.TrimSpace(report.UUID) != "" && supported
 }
 
-func maintainLivePresence(ctx context.Context, endpoint string, report liveSessionReport) {
-	if !validLiveSessionReport(report) {
+type liveSessionClient struct {
+	ctx      context.Context
+	endpoint string
+	report   liveSessionReport
+
+	mu      sync.Mutex
+	current *liveRPCConnection
+	call    func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+}
+
+func startLiveSessionClient(
+	ctx context.Context,
+	endpoint string,
+	report liveSessionReport,
+	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
+) *liveSessionClient {
+	client := &liveSessionClient{ctx: ctx, endpoint: endpoint, report: report, call: call}
+	go client.run()
+	return client
+}
+
+func (c *liveSessionClient) Call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
+	c.mu.Lock()
+	connection := c.current
+	c.mu.Unlock()
+	if connection == nil {
+		return nil, errors.New("Agent Sessions daemon is unavailable")
+	}
+	return connection.call(ctx, "session."+id, method, params)
+}
+
+func (c *liveSessionClient) run() {
+	if !validLiveSessionReport(c.report) {
 		return
 	}
-	for ctx.Err() == nil {
-		connection, err := (&net.Dialer{}).DialContext(ctx, "unix", endpoint)
+	for c.ctx.Err() == nil {
+		connection, err := (&net.Dialer{}).DialContext(c.ctx, "unix", c.endpoint)
 		if err == nil {
-			err = json.NewEncoder(connection).Encode(report)
+			rpc := newLiveRPCConnection(connection)
+			closed := make(chan struct{})
+			go func() {
+				select {
+				case <-c.ctx.Done():
+					_ = connection.Close()
+				case <-closed:
+				}
+			}()
+			err = rpc.encoder.Encode(c.report)
 			if err == nil {
-				var ready map[string]any
-				err = json.NewDecoder(connection).Decode(&ready)
+				readCtx, stopReads := context.WithCancel(c.ctx)
+				c.mu.Lock()
+				c.current = rpc
+				c.mu.Unlock()
+				c.read(readCtx, rpc)
+				stopReads()
+				c.mu.Lock()
+				if c.current == rpc {
+					c.current = nil
+				}
+				c.mu.Unlock()
 			}
-			if err == nil {
-				done := make(chan struct{})
-				go func() {
-					select {
-					case <-ctx.Done():
-						_ = connection.Close()
-					case <-done:
-					}
-				}()
-				_, _ = io.Copy(io.Discard, connection)
-				close(done)
-			}
+			rpc.fail()
 			_ = connection.Close()
+			close(closed)
 		}
 		select {
-		case <-ctx.Done():
+		case <-c.ctx.Done():
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func (c *liveSessionClient) read(ctx context.Context, connection *liveRPCConnection) {
+	for {
+		var frame liveRPCFrame
+		if connection.decoder.Decode(&frame) != nil {
+			return
+		}
+		if frame.Method == "" {
+			connection.resolve(frame)
+			continue
+		}
+		go func(frame liveRPCFrame) {
+			response := liveRPCFrame{ID: frame.ID}
+			if c.call == nil {
+				response.Error = "live session operation is unsupported"
+			} else {
+				response.Result, response.Error = liveCall(ctx, c.call, frame.Method, frame.Params)
+			}
+			_ = connection.write(response)
+		}(frame)
+	}
+}
+
+func liveCall(
+	ctx context.Context,
+	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
+	method string,
+	params json.RawMessage,
+) (json.RawMessage, string) {
+	result, err := call(ctx, method, params)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return result, ""
+}
+
+func maintainLivePresence(ctx context.Context, endpoint string, report liveSessionReport) {
+	if !validLiveSessionReport(report) {
+		return
+	}
+	client := startLiveSessionClient(ctx, endpoint, report, nil)
+	<-ctx.Done()
+	client.mu.Lock()
+	if client.current != nil {
+		_ = client.current.connection.Close()
+	}
+	client.mu.Unlock()
 }
 
 func (c *hostCoordinator) joinLiveSession(runtime *daemonpkg.Runtime, report liveSessionReport) {

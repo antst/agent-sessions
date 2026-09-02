@@ -29,7 +29,6 @@ type ProjectedProduct struct {
 	PeerTransport          string             `json:"peer_transport"`
 	MessageTransport       string             `json:"message_transport"`
 	LaneTransport          string             `json:"lane_transport"`
-	ConnectorAttesterKey   string             `json:"connector_attester"`
 	DoctorProbeKey         string             `json:"doctor_probe"`
 	PermissionProfileKey   string             `json:"permission_profile"`
 	InstallRoot            string             `json:"install_root"`
@@ -37,7 +36,6 @@ type ProjectedProduct struct {
 	RequiredDoctorFeatures []string           `json:"required_doctor_features"`
 	NativeRegistration     NativeRegistration `json:"native_registration"`
 	Acceptance             AcceptanceContract `json:"acceptance"`
-	Authority              *AuthorityContract `json:"authority,omitempty"`
 }
 
 // BuildProjection validates and deterministically sorts an injected inventory.
@@ -64,11 +62,6 @@ func BuildProjection(inventory []Descriptor) (Projection, error) {
 		})
 		sort.Strings(registrationArgs)
 		sort.Slice(externalCells, func(i, j int) bool { return externalCells[i].ID < externalCells[j].ID })
-		var authority *AuthorityContract
-		if descriptor.Authority != nil {
-			copyAuthority := *descriptor.Authority
-			authority = &copyAuthority
-		}
 		products = append(products, ProjectedProduct{
 			ID: descriptor.ID, Label: descriptor.Label, SupportState: descriptor.SupportState,
 			NativeExecutable: descriptor.NativeExecutable, TestedVersion: descriptor.TestedVersion,
@@ -76,12 +69,11 @@ func BuildProjection(inventory []Descriptor) (Projection, error) {
 			PeerAlias:     descriptor.PeerAlias, LaneAlias: descriptor.LaneAlias,
 			Capabilities: descriptor.SortedCapabilities(), FederationCapabilities: federation,
 			PeerTransport: descriptor.PeerTransport, MessageTransport: descriptor.MessageTransport,
-			LaneTransport: descriptor.LaneTransport, ConnectorAttesterKey: descriptor.ConnectorAttesterKey,
+			LaneTransport:  descriptor.LaneTransport,
 			DoctorProbeKey: descriptor.DoctorProbeKey, PermissionProfileKey: descriptor.PermissionProfileKey,
 			InstallRoot: descriptor.InstallRoot, PluginArchivePaths: archivePaths, RequiredDoctorFeatures: doctorFeatures,
 			NativeRegistration: NativeRegistration{Strategy: descriptor.NativeRegistration.Strategy, Args: registrationArgs, AssetOnly: descriptor.NativeRegistration.AssetOnly},
 			Acceptance:         AcceptanceContract{RealProductRequired: descriptor.Acceptance.RealProductRequired, ExternalCells: externalCells},
-			Authority:          authority,
 		})
 	}
 	sort.Slice(products, func(i, j int) bool { return products[i].ID < products[j].ID })

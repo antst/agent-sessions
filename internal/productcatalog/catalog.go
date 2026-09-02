@@ -76,15 +76,6 @@ type AcceptanceContract struct {
 	ExternalCells       []ExternalAcceptanceCell `json:"external_cells,omitempty"`
 }
 
-// AuthorityContract is an optional, secret-free description of the native
-// authority boundary. It names mechanisms and lifetimes, not values.
-type AuthorityContract struct {
-	PeerAuth         string `json:"peer_auth,omitempty"`
-	PeerHeader       string `json:"peer_header,omitempty"`
-	LaneAuth         string `json:"lane_auth,omitempty"`
-	LaneAuthLifetime string `json:"lane_auth_lifetime,omitempty"`
-}
-
 type ResumeStyle string
 
 const (
@@ -114,7 +105,6 @@ type Descriptor struct {
 	PeerTransport          string
 	MessageTransport       string
 	LaneTransport          string
-	ConnectorAttesterKey   string
 	DoctorProbeKey         string
 	PermissionProfileKey   string
 	InstallRoot            string
@@ -122,14 +112,87 @@ type Descriptor struct {
 	FederationCapabilities []string
 	NativeRegistration     NativeRegistration
 	Acceptance             AcceptanceContract
-	Authority              *AuthorityContract
 }
 
+const projectedProductCount = 4
+
+// descriptors is the one product inventory. Release aliases remain on the
+// original-four projection until the real-product launch slice activates the
+// new aliases, while live reconnect already recognizes every authored ID.
 var descriptors = [...]Descriptor{
 	baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
 	baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
 	baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
 	baselineDescriptor("qwen", "Qwen Code", "qwen", "qwen-peer", "qwen-peer-lane", "qwen-lane", "qwen-lane-manager", "qwen-lane", []string{"qwen"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "0.22.0"),
+	newProductDescriptor(
+		"opencode", "OpenCode", "opencode", "1.18.25", "opencode-global-plugin",
+		"presence", "presence", "opencode-http", "opencode",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
+		[]string{"event-stream", "parent", "plugin-sdk", "prompt-async"},
+	),
+	newProductDescriptor(
+		"kilo", "Kilo Code", "kilo", "7.5.6", "kilo-global-plugin",
+		"presence", "presence", "kilo-http", "kilo",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
+		[]string{"event-stream", "parent", "plugin-sdk", "tui-routing"},
+	),
+	newProductDescriptor(
+		"pi", "Pi Coding Agent", "pi", "0.84.4", "pi-package",
+		"presence", "presence", "pi-rpc", "pi",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
+		[]string{"extension", "parent", "rpc-ready", "steer"},
+	),
+	newProductDescriptor(
+		"omp", "Oh My Pi", "omp", "18.0.11", "omp-extension",
+		"presence", "presence", "omp-rpc", "omp",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
+		[]string{"extension", "parent", "rpc-ready", "steer"},
+	),
+	newProductDescriptor(
+		"codebuddy", "CodeBuddy", "codebuddy", "2.143.0", "codebuddy-wrapper-plugin-mcp",
+		"presence", "presence", "codebuddy-owned-http", "codebuddy",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
+		[]string{"job-events", "native-registry", "parent", "session-reply"},
+	),
+	dshDescriptor(),
+}
+
+func newProductDescriptor(
+	id, label, executable, testedVersion, strategy, peerTransport, messageTransport, laneTransport, permission string,
+	capabilities []Capability, doctorFeatures []string,
+) Descriptor {
+	return Descriptor{
+		ID: id, Label: label, NativeExecutable: executable,
+		PeerAlias: id + "-peer", LaneAlias: id + "-peer-lane", LaneRuntimeRole: id + "-lane",
+		LaneManagerRole: id + "-lane-manager", LaneCapability: id + "-lane",
+		PluginArchivePaths: []string{"integrations/" + id}, Capabilities: capabilities, ResumeStyle: ResumeFlag,
+		SupportState: SupportGeneral, TestedVersion: testedVersion, Compatibility: Compatibility{Policy: VersionExact},
+		PeerTransport: peerTransport, MessageTransport: messageTransport, LaneTransport: laneTransport,
+		DoctorProbeKey: id + "-doctor", PermissionProfileKey: permission,
+		InstallRoot: "integrations/" + id, RequiredDoctorFeatures: doctorFeatures,
+		FederationCapabilities: []string{id + "-lane"},
+		NativeRegistration:     NativeRegistration{Strategy: strategy},
+		Acceptance:             AcceptanceContract{RealProductRequired: true},
+	}
+}
+
+func dshDescriptor() Descriptor {
+	descriptor := newProductDescriptor(
+		"dsh", "DeepSeek Harness", "dsh", "0.1.2-alpha.3", "dsh-owned-profile",
+		"presence", "presence", "dsh-acp", "dsh",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
+		[]string{"acp", "cordis", "parent", "tuple"},
+	)
+	descriptor.Compatibility = Compatibility{
+		Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
+		TupleMembers: []TupleMember{
+			{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.3"},
+			{Name: "@deepseek-ai/dsh-acp-app", Version: "0.1.2-alpha.3"},
+			{Name: "@agent-sessions/dsh-plugin", Version: "0.1.2-alpha.3"},
+			{Name: "@agent-sessions/dsh-profile", Version: "0.1.2-alpha.3"},
+		},
+	}
+	return descriptor
 }
 
 func baselineDescriptor(id, label, executable, peerAlias, laneAlias, runtimeRole, managerRole, laneCapability string, archives []string, capabilities []Capability, resume ResumeStyle, transcriptIndex bool, testedVersion string) Descriptor {
@@ -139,16 +202,13 @@ func baselineDescriptor(id, label, executable, peerAlias, laneAlias, runtimeRole
 		PluginArchivePaths: archives, Capabilities: capabilities, ResumeStyle: resume,
 		TranscriptNameIndex: transcriptIndex, SupportState: SupportGeneral, TestedVersion: testedVersion,
 		Compatibility: Compatibility{Policy: VersionMinimum},
-		PeerTransport: id + "-peer", MessageTransport: id + "-message", LaneTransport: id + "-lane",
-		ConnectorAttesterKey: id + "-parent", DoctorProbeKey: id + "-doctor", PermissionProfileKey: id + "-permission",
+		PeerTransport: "presence", MessageTransport: "presence", LaneTransport: id + "-lane",
+		DoctorProbeKey: id + "-doctor", PermissionProfileKey: id + "-permission",
 		InstallRoot:            "integrations/" + id,
 		RequiredDoctorFeatures: []string{"native-cli", "peer", "lane"},
 		FederationCapabilities: []string{laneCapability},
 		NativeRegistration:     NativeRegistration{Strategy: "legacy-native-plugin", Args: []string{id}},
 		Acceptance:             AcceptanceContract{RealProductRequired: true},
-		Authority: &AuthorityContract{
-			PeerAuth: "wrapper-attestation", LaneAuth: "native-session", LaneAuthLifetime: "process",
-		},
 	}
 }
 
@@ -238,7 +298,6 @@ func validateDescriptor(descriptor Descriptor) error {
 		{label: "peer transport", token: descriptor.PeerTransport},
 		{label: "message transport", token: descriptor.MessageTransport},
 		{label: "lane transport", token: descriptor.LaneTransport},
-		{label: "connector attester", token: descriptor.ConnectorAttesterKey},
 		{label: "doctor probe", token: descriptor.DoctorProbeKey},
 		{label: "permission profile", token: descriptor.PermissionProfileKey},
 	} {
@@ -346,9 +405,6 @@ func validateDescriptor(descriptor Descriptor) error {
 	if descriptor.Has(CapabilityLane) && descriptor.LaneTransport == "" {
 		return errors.New("lane product requires lane transport")
 	}
-	if descriptor.Has(CapabilityParent) && descriptor.ConnectorAttesterKey == "" {
-		return errors.New("parent product requires connector attester")
-	}
 	if err := ValidateToken(descriptor.NativeRegistration.Strategy); err != nil {
 		return fmt.Errorf("native registration strategy %q: %w", descriptor.NativeRegistration.Strategy, err)
 	}
@@ -382,23 +438,6 @@ func validateDescriptor(descriptor Descriptor) error {
 		}
 		seenExternal[cell.ID] = true
 	}
-	if descriptor.Authority != nil {
-		for _, field := range []struct{ name, value string }{
-			{"peer auth", descriptor.Authority.PeerAuth},
-			{"peer header", descriptor.Authority.PeerHeader},
-			{"lane auth", descriptor.Authority.LaneAuth},
-			{"lane auth lifetime", descriptor.Authority.LaneAuthLifetime},
-		} {
-			if field.value != "" {
-				if err := ValidateToken(field.value); err != nil {
-					return fmt.Errorf("authority %s %q: %w", field.name, field.value, err)
-				}
-			}
-		}
-		if descriptor.Authority.PeerAuth == "" && descriptor.Authority.PeerHeader == "" && descriptor.Authority.LaneAuth == "" {
-			return errors.New("authority contract must name at least one mechanism")
-		}
-	}
 	return nil
 }
 
@@ -412,7 +451,11 @@ func knownCapability(capability Capability) bool {
 	}
 }
 
-func All() []Descriptor { return cloneInventory(descriptors[:]) }
+func All() []Descriptor { return cloneInventory(descriptors[:projectedProductCount]) }
+
+// RuntimeInventory includes products whose real launch aliases are still
+// being activated. Live reconnect validates against this authored inventory.
+func RuntimeInventory() []Descriptor { return cloneInventory(descriptors[:]) }
 
 func ByID(id string) (Descriptor, bool) {
 	for _, descriptor := range descriptors {
@@ -478,10 +521,6 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.FederationCapabilities = append([]string(nil), descriptor.FederationCapabilities...)
 	descriptor.NativeRegistration.Args = append([]string(nil), descriptor.NativeRegistration.Args...)
 	descriptor.Acceptance.ExternalCells = append([]ExternalAcceptanceCell(nil), descriptor.Acceptance.ExternalCells...)
-	if descriptor.Authority != nil {
-		authority := *descriptor.Authority
-		descriptor.Authority = &authority
-	}
 	return descriptor
 }
 

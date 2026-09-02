@@ -51,12 +51,6 @@ func TestAttachmentRegistryIsLiveAndProcessLocal(t *testing.T) {
 	if again[0].Groups[0] != "project" {
 		t.Fatalf("caller mutated live registry: %+v", again[0])
 	}
-	if err := engine.ObserveNativeTitle("peer", "native", "Product title"); err != nil {
-		t.Fatal(err)
-	}
-	if title, ok, err := engine.LiveNativeTitle("peer"); err != nil || !ok || title != "Product title" {
-		t.Fatalf("title = %q, %v, %v", title, ok, err)
-	}
 	restarted, err := NewAttachmentEngine(8, map[string]AttachmentAdapter{"codex": adapter})
 	if err != nil {
 		t.Fatal(err)

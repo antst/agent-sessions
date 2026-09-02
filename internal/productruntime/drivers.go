@@ -3,27 +3,13 @@ package productruntime
 import (
 	"context"
 
-	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 type RuntimeProduct struct {
 	Descriptor productcatalog.Descriptor
-	Peer       PeerDriver
-	Message    MessageDriver
 	Lane       LaneDriver
-	Parent     ParentAttester
 	Doctor     DoctorProbe
-}
-
-type PeerDriver interface {
-	AttachmentAdapter(HostDeps) (daemon.AttachmentAdapter, error)
-	BuildLaunch(context.Context, PeerLaunchRequest) (NativeCommand, error)
-	Rename(context.Context, daemon.ManagedAttachment, string) (NativeName, error)
-}
-
-type MessageDriver interface {
-	Deliver(context.Context, daemon.ManagedAttachment, DeliveryRequest) (NativeAcceptance, error)
 }
 
 type LaneDriver interface {
@@ -35,10 +21,6 @@ type LaneDriver interface {
 	Interrupt(context.Context, NativeTurnRef) error
 	Archive(context.Context, NativeSessionRef) error
 	Recover(context.Context, LaneRecoveryRequest) (NativeSessionRef, error)
-}
-
-type ParentAttester interface {
-	Attest(context.Context, ConnectorAttempt) (ParentBinding, error)
 }
 
 type DoctorProbe interface {

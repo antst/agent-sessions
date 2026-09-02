@@ -63,20 +63,9 @@ func NewRegistry(inventory []productcatalog.Descriptor, products []RuntimeProduc
 
 func validateRuntimeProduct(product RuntimeProduct) error {
 	descriptor := product.Descriptor
-	interactive := descriptor.Has(productcatalog.CapabilityInteractive)
 	lane := descriptor.Has(productcatalog.CapabilityLane)
-	parent := descriptor.Has(productcatalog.CapabilityParent)
-	if interactive != (product.Peer != nil) {
-		return fmt.Errorf("interactive capability/peer driver mismatch")
-	}
-	if interactive != (product.Message != nil) {
-		return fmt.Errorf("interactive capability/message driver mismatch")
-	}
 	if lane != (product.Lane != nil) {
 		return fmt.Errorf("lane capability/driver mismatch")
-	}
-	if parent != (product.Parent != nil) {
-		return fmt.Errorf("parent capability/attester mismatch")
 	}
 	if descriptor.SupportState != productcatalog.SupportHidden && product.Doctor == nil {
 		return fmt.Errorf("visible product requires doctor probe")

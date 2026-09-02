@@ -2,12 +2,9 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -129,46 +126,5 @@ func TestRuntimeComponentFailureCancelsWholeAuthority(t *testing.T) {
 	}
 	if _, err := os.Lstat(runtime.Endpoint()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed runtime endpoint survived: %v", err)
-	}
-}
-
-func TestRuntimeComposesLiveConnectorRelay(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	var externalCalls atomic.Int32
-	runtime, err := StartRuntime(context.Background(), RuntimeConfig{
-		StateRoot: root,
-		Handler: func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
-			externalCalls.Add(1)
-			return json.RawMessage(`{"accepted":true}`), nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	call := func(request ControlRequest) ControlResponse {
-		t.Helper()
-		request.Generation = runtime.Generation()
-		response, err := CallControl(context.Background(), runtime.Endpoint(), request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return response
-	}
-	runtime.Attachments().ReportLive("attachment", "worker", "codex", []string{"team"}, false)
-	if response := call(ControlRequest{ID: "wrong-product", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "wrong-product", AttachmentID: "attachment", Payload: json.RawMessage(`{"product":"claude"}`)}); response.OK || response.Error == nil || response.Error.Code != ErrorInactive {
-		t.Fatalf("wrong product connector response = %+v", response)
-	}
-	if response := call(ControlRequest{ID: "exact", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "exact", AttachmentID: "attachment", Payload: json.RawMessage(`{"product":"codex"}`)}); !response.OK {
-		t.Fatalf("exact connector response = %+v", response)
-	}
-	if externalCalls.Load() != 1 {
-		t.Fatalf("external handler calls = %d", externalCalls.Load())
-	}
-	if err := runtime.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "run", "daemon.sock")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("runtime socket survived close: %v", err)
 	}
 }

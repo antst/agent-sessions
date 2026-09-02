@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/productserver"
@@ -53,16 +52,6 @@ func (function CommandRunnerFunc) Run(ctx context.Context, path string, args ...
 	return function(ctx, path, args...)
 }
 
-type ActiveAttachmentSource interface {
-	ActiveCodeBuddyAttachments(context.Context) ([]daemon.ManagedAttachment, error)
-}
-
-type ActiveAttachmentSourceFunc func(context.Context) ([]daemon.ManagedAttachment, error)
-
-func (function ActiveAttachmentSourceFunc) ActiveCodeBuddyAttachments(ctx context.Context) ([]daemon.ManagedAttachment, error) {
-	return function(ctx)
-}
-
 type RecoveryRequestSource interface {
 	LaneOpenRequest(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error)
 }
@@ -73,33 +62,22 @@ func (function RecoveryRequestSourceFunc) LaneOpenRequest(ctx context.Context, r
 	return function(ctx, request)
 }
 
-type EntrypointMatcher func(executable string, argv []string) bool
-
 type Config struct {
 	Deps               productruntime.HostDeps
 	Executable         string
 	MCPConfigPath      string
-	Registry           WorkerRegistry
-	SocketOwner        SocketOwnerVerifier
-	Processes          ProcessProbe
-	Attachments        ActiveAttachmentSource
 	Recovery           RecoveryRequestSource
 	Secrets            SecretSource
 	Endpoints          EndpointAllocator
 	Commands           CommandRunner
-	Entrypoint         EntrypointMatcher
 	Limits             productserver.Limits
 	Now                func() time.Time
 	PollInterval       time.Duration
-	MaxAncestryDepth   int
 	AllowSandboxBypass bool
 }
 
 type Drivers struct {
-	Peer    *PeerDriver
-	Message *MessageDriver
 	Lane    *LaneDriver
-	Parent  *ParentAttester
 	Doctor  *DoctorProbe
 }
 
@@ -110,18 +88,12 @@ func NewDrivers(config Config, deps productruntime.HostDeps) (Drivers, error) {
 	if err != nil {
 		return Drivers{}, err
 	}
-	if deps.Generation == 0 || deps.OwnedProcesses == nil || deps.Receipts == nil || normalized.Attachments == nil || normalized.Recovery == nil {
-		return Drivers{}, fmtConfig("complete runtime host dependencies, attachment source, and exact lane recovery source are required")
+	if deps.Generation == 0 || deps.OwnedProcesses == nil || deps.Receipts == nil || normalized.Recovery == nil {
+		return Drivers{}, fmtConfig("complete lane dependencies and exact recovery source are required")
 	}
-	mechanics := &peerMechanics{config: normalized}
-	peer := &PeerDriver{mechanics: mechanics}
 	lane := newLaneDriver(normalized, deps)
 	return Drivers{
-		Peer:    peer,
-		Message: &MessageDriver{mechanics: mechanics, now: normalized.Now},
-		Lane:    lane,
-		Parent:  &ParentAttester{processes: normalized.Processes, attachments: normalized.Attachments, maxDepth: normalized.MaxAncestryDepth},
-		Doctor:  &DoctorProbe{config: normalized, deps: deps},
+		Lane: lane, Doctor: &DoctorProbe{config: normalized, deps: deps},
 	}, nil
 }
 
@@ -136,10 +108,7 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 	if err != nil {
 		return productruntime.RuntimeProduct{}, err
 	}
-	return productruntime.RuntimeProduct{
-		Descriptor: descriptor, Peer: drivers.Peer, Message: drivers.Message,
-		Lane: drivers.Lane, Parent: drivers.Parent, Doctor: drivers.Doctor,
-	}, nil
+	return productruntime.RuntimeProduct{Descriptor: descriptor, Lane: drivers.Lane, Doctor: drivers.Doctor}, nil
 }
 
 func normalizeConfig(config Config, deps productruntime.HostDeps) (Config, error) {
@@ -155,18 +124,6 @@ func normalizeConfig(config Config, deps productruntime.HostDeps) (Config, error
 	if config.PollInterval < time.Millisecond {
 		return Config{}, fmtConfig("poll interval is too small")
 	}
-	if config.MaxAncestryDepth == 0 {
-		config.MaxAncestryDepth = 32
-	}
-	if config.MaxAncestryDepth < 1 || config.MaxAncestryDepth > 256 {
-		return Config{}, fmtConfig("ancestry bound is outside 1..256")
-	}
-	if config.Processes == nil && deps.Processes != nil {
-		config.Processes = NewHostProcessProbe(deps.Processes)
-	}
-	if config.SocketOwner == nil {
-		config.SocketOwner = NewPlatformSocketOwnerVerifier()
-	}
 	if config.Secrets == nil {
 		config.Secrets = SecretSourceFunc(randomSecret)
 	}
@@ -175,12 +132,6 @@ func normalizeConfig(config Config, deps productruntime.HostDeps) (Config, error
 	}
 	if config.Commands == nil {
 		config.Commands = CommandRunnerFunc(runBoundedCommand)
-	}
-	if config.Entrypoint == nil {
-		config.Entrypoint = DefaultEntrypointMatcher
-	}
-	if config.Registry == nil || config.Processes == nil {
-		return Config{}, fmtConfig("worker registry and process probe are required")
 	}
 	if strings.TrimSpace(config.MCPConfigPath) == "" {
 		return Config{}, fmtConfig("MCP config path is required")

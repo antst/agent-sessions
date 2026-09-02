@@ -25,8 +25,6 @@ const (
 	RoleLauncher ControlRole = "launcher"
 	// RoleHook permits exact managed lifecycle events.
 	RoleHook ControlRole = "hook"
-	// RoleConnector permits MCP initialization, discovery, and attested calls.
-	RoleConnector ControlRole = "connector"
 )
 
 const (
@@ -112,10 +110,6 @@ func InactiveControlError() error { return classifiedControlError{code: ErrorIna
 func (p *controlPolicy) handle(ctx context.Context, request ControlRequest) ControlResponse {
 	if failure := p.validate(request); failure != nil {
 		return failedControlResponse(request.ID, failure.Code, failure.Message)
-	}
-	if request.Role == RoleConnector && request.Operation == "connector.call" &&
-		strings.TrimSpace(request.AttachmentID) == "" {
-		return failedControlResponse(request.ID, ErrorInactive, CanonicalInactiveMessage)
 	}
 	if !controlMutation(request) {
 		return p.invoke(ctx, request)
@@ -225,16 +219,13 @@ func roleAllowsOperation(role ControlRole, operation string) bool {
 		return strings.HasPrefix(operation, "attachment.") || strings.HasPrefix(operation, "lane.")
 	case RoleHook:
 		return operation == "hook.event"
-	case RoleConnector:
-		return operation == "connector.initialize" || operation == "connector.tools" || operation == "connector.call"
 	default:
 		return false
 	}
 }
 
 func controlMutation(request ControlRequest) bool {
-	return request.Role != RoleAdmin && (request.Role != RoleConnector ||
-		request.Operation != "connector.initialize" && request.Operation != "connector.tools")
+	return request.Role != RoleAdmin
 }
 
 func lifecycleOperation(operation string) bool {

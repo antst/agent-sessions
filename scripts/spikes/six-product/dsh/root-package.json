@@ -1,8 +1,0 @@
-{
-  "name": "agent-sessions-dsh-s2-runtime",
-  "version": "0.0.0",
-  "private": true,
-  "dependencies": {
-    "@deepseek-ai/dsh": "0.1.2-alpha.3"
-  }
-}

@@ -39,6 +39,26 @@ func temporaryPathLexical(path string) bool {
 	return within(filepath.Clean(path), "/tmp") || within(filepath.Clean(path), "/private/tmp")
 }
 
+func within(path, root string) bool {
+	root = filepath.Clean(root)
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func validateManagedDSHHome(path string) error {
+	if err := validateManagedDSHHomeShape(path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %w", productruntime.ErrUnavailable, errManagedProfileUnavailable)
+	}
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("%w: DSH home is not an existing directory", productruntime.ErrUnsupportedPolicy)
+	}
+	return nil
+}
+
 func managedProfileManifestPath(dshHome, profile string) (string, error) {
 	if err := validateManagedDSHHomeShape(dshHome); err != nil {
 		return "", err

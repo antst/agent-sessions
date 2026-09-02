@@ -109,6 +109,21 @@ type archiveEvidence struct {
 	sequence  uint64
 }
 
+func envValue(environment []productruntime.EnvVar, name string) string {
+	for index := len(environment) - 1; index >= 0; index-- {
+		if environment[index].Name == name {
+			return environment[index].Value
+		}
+	}
+	return ""
+}
+
+func overridesDSHProfile(argument string) bool {
+	return argument == "--profile" || strings.HasPrefix(argument, "--profile=") ||
+		argument == "--patch" || strings.HasPrefix(argument, "--patch=") ||
+		argument == "--dump-config" || argument == "--dump-default-config"
+}
+
 func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 	if config.Executable == "" {
 		config.Executable = "dsh"

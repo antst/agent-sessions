@@ -57,20 +57,6 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	}
 }
 
-func TestStableMCPRelayOperationIDPreservesExactRetryIdentity(t *testing.T) {
-	request := relayRequest{ID: json.RawMessage(`17`), Method: "tools/call", Params: json.RawMessage(`{"name":"lane","arguments":{"command":"run"}}`)}
-	first := stableMCPRelayOperationID("claude", request)
-	second := stableMCPRelayOperationID("claude", request)
-	if first == "" || first != second || !strings.HasPrefix(first, "mcp-") {
-		t.Fatalf("stable operation IDs first=%q second=%q", first, second)
-	}
-	changed := request
-	changed.Params = json.RawMessage(`{"name":"lane","arguments":{"command":"resume"}}`)
-	if stableMCPRelayOperationID("claude", changed) == first || stableMCPRelayOperationID("qwen", request) == first {
-		t.Fatal("changed MCP authority/request tuple reused an operation ID")
-	}
-}
-
 func TestWrapPeerMessageValidatesProductAndEscapesEnvelope(t *testing.T) {
 	if _, err := WrapPeerMessage("", "", "", "", "", "", "", "body"); err == nil {
 		t.Fatal("empty product succeeded")
@@ -160,10 +146,9 @@ func TestNormalizePeerName(t *testing.T) {
 
 func TestMCPRelayRejectsUnknownProductAndReturnsCanonicalInactive(t *testing.T) {
 	config := MCPRelayConfig{
-		Product: "unknown", Endpoint: "/unreachable",
-		Generation: func(context.Context) (uint64, error) { return 1, nil },
-		Attest: func(context.Context, json.RawMessage) (ConnectorAttestation, error) {
-			return ConnectorAttestation{}, ErrConnectorInactive
+		Product: "unknown",
+		Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+			return nil, ErrConnectorInactive
 		},
 	}
 	if _, err := NewMCPRelay(config); err == nil {

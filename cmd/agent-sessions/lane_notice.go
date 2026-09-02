@@ -94,7 +94,7 @@ func (c *hostCoordinator) presentLaneTerminalNotice(
 			actor.product, "session:"+actor.id, actor.nativeID, actor.name, mode,
 			noticeID, time.Now().UTC().Format(time.RFC3339Nano), body,
 		)
-		return c.deliverPreparedMessage(ctx, target, noticeID, "session:"+actor.id, message)
+		return c.deliverPreparedMessage(ctx, target, noticeID, message)
 	}
 	c.mu.Lock()
 	host := c.federation

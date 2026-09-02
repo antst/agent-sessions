@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
@@ -33,24 +32,6 @@ func TestRegistrySupportsInjectedSyntheticProductWithoutInitRegistration(t *test
 	}
 }
 
-func TestRegistryAllowsTruthfulUnsupportedRenameDriver(t *testing.T) {
-	descriptor := syntheticDescriptor("synthetic")
-	product := completeRuntime(descriptor)
-	product.Peer = fakeUnsupportedRenamePeerDriver{}
-	registry, err := NewRegistry([]productcatalog.Descriptor{descriptor}, []RuntimeProduct{product})
-	if err != nil {
-		t.Fatalf("compose rename-unsupported product: %v", err)
-	}
-	runtimeProduct, ok := registry.ByID(descriptor.ID)
-	if !ok {
-		t.Fatal("rename-unsupported product missing from registry")
-	}
-	_, err = runtimeProduct.Peer.Rename(context.Background(), daemon.ManagedAttachment{}, "new name")
-	if !errors.Is(err, ErrUnsupportedRename) {
-		t.Fatalf("rename unsupported category = %v", err)
-	}
-}
-
 func TestRegistryRejectsMissingExtraAndMismatchedDrivers(t *testing.T) {
 	descriptor := syntheticDescriptor("synthetic")
 	complete := completeRuntime(descriptor)
@@ -62,11 +43,8 @@ func TestRegistryRejectsMissingExtraAndMismatchedDrivers(t *testing.T) {
 		{name: "missing runtime", inventory: []productcatalog.Descriptor{descriptor}},
 		{name: "duplicate runtime", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{complete, complete}},
 		{name: "unknown runtime", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{completeRuntime(syntheticDescriptor("other"))}},
-		{name: "missing peer", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Message: fakeMessageDriver{}, Lane: fakeLaneDriver{}, Parent: fakeParentAttester{}, Doctor: fakeDoctor{}}}},
-		{name: "missing message", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Peer: fakePeerDriver{}, Lane: fakeLaneDriver{}, Parent: fakeParentAttester{}, Doctor: fakeDoctor{}}}},
-		{name: "missing lane", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Peer: fakePeerDriver{}, Message: fakeMessageDriver{}, Parent: fakeParentAttester{}, Doctor: fakeDoctor{}}}},
-		{name: "missing parent", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Peer: fakePeerDriver{}, Message: fakeMessageDriver{}, Lane: fakeLaneDriver{}, Doctor: fakeDoctor{}}}},
-		{name: "missing doctor", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Peer: fakePeerDriver{}, Message: fakeMessageDriver{}, Lane: fakeLaneDriver{}, Parent: fakeParentAttester{}}}},
+		{name: "missing lane", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Doctor: fakeDoctor{}}}},
+		{name: "missing doctor", inventory: []productcatalog.Descriptor{descriptor}, products: []RuntimeProduct{{Descriptor: descriptor, Lane: fakeLaneDriver{}}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -74,13 +52,6 @@ func TestRegistryRejectsMissingExtraAndMismatchedDrivers(t *testing.T) {
 				t.Fatal("invalid registry accepted")
 			}
 		})
-	}
-
-	noInteractive := descriptor
-	noInteractive.Capabilities = []productcatalog.Capability{productcatalog.CapabilityLane, productcatalog.CapabilityParent}
-	extra := completeRuntime(noInteractive)
-	if _, err := NewRegistry([]productcatalog.Descriptor{noInteractive}, []RuntimeProduct{extra}); err == nil {
-		t.Fatal("undeclared peer/message drivers accepted")
 	}
 }
 
@@ -113,29 +84,6 @@ func TestRuntimeSecretsCannotSerializeOrAppearInFormatting(t *testing.T) {
 	}
 }
 
-func TestRegistryRejectsUnknownCapabilityInsteadOfDroppingRequiredDrivers(t *testing.T) {
-	descriptor := syntheticDescriptor("synthetic")
-	descriptor.Capabilities[0] = productcatalog.Capability("interactiv")
-	product := completeRuntime(descriptor)
-	product.Peer = nil
-	product.Message = nil
-	if _, err := NewRegistry([]productcatalog.Descriptor{descriptor}, []RuntimeProduct{product}); err == nil {
-		t.Fatal("unknown capability bypassed runtime driver validation")
-	}
-}
-
-func TestHookPointsUseTheBoundedSharedTokenGrammar(t *testing.T) {
-	point, err := NewTestHookPoint("before-native-io")
-	if err != nil || point.String() != "before-native-io" {
-		t.Fatalf("valid hook point = %q, %v", point, err)
-	}
-	for _, invalid := range []string{"", "BeforeNativeIO", "before--native", strings.Repeat("x", 65)} {
-		if _, err := NewTestHookPoint(invalid); err == nil {
-			t.Fatalf("invalid hook point %q accepted", invalid)
-		}
-	}
-}
-
 func syntheticDescriptor(id string) productcatalog.Descriptor {
 	descriptor := productcatalog.All()[0]
 	descriptor.ID = id
@@ -148,7 +96,6 @@ func syntheticDescriptor(id string) productcatalog.Descriptor {
 	descriptor.PeerTransport = id + "-peer"
 	descriptor.MessageTransport = id + "-message"
 	descriptor.LaneTransport = id + "-lane"
-	descriptor.ConnectorAttesterKey = id + "-parent"
 	descriptor.DoctorProbeKey = id + "-doctor"
 	descriptor.PermissionProfileKey = id + "-permission"
 	descriptor.InstallRoot = "integrations/" + id
@@ -156,5 +103,5 @@ func syntheticDescriptor(id string) productcatalog.Descriptor {
 }
 
 func completeRuntime(descriptor productcatalog.Descriptor) RuntimeProduct {
-	return RuntimeProduct{Descriptor: descriptor, Peer: fakePeerDriver{}, Message: fakeMessageDriver{}, Lane: fakeLaneDriver{}, Parent: fakeParentAttester{}, Doctor: fakeDoctor{}}
+	return RuntimeProduct{Descriptor: descriptor, Lane: fakeLaneDriver{}, Doctor: fakeDoctor{}}
 }

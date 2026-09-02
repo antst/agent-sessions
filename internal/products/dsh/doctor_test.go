@@ -326,7 +326,7 @@ func TestDoctorRejectsPinnedPluginPolicyDependencyDrift(t *testing.T) {
 	}
 }
 
-func TestDoctorIntegrationDoesNotCreditPeerWhenCentralAuthorityIsUnready(t *testing.T) {
+func TestDoctorIntegrationDoesNotCreditPeerWhenLiveSessionIntegrationIsUnready(t *testing.T) {
 	root := t.TempDir()
 	dshHome := managedTestDSHHome(t)
 	process := newScriptedACPProcess()

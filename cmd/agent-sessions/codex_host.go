@@ -41,7 +41,6 @@ type hostCoordinator struct {
 	pending            map[string]daemonpkg.NativeEvidence
 	monitored          map[string]bool
 	grokPending        map[string]*grokPending
-	grokObservers      map[string]*bridge.GrokNativeObserver
 	qwenPending        map[string]*qwenPending
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
@@ -52,6 +51,7 @@ type hostCoordinator struct {
 	reportedPeers      map[string]bool
 	laneNames          map[string]map[string]laneNameEntry
 	laneNamesLoaded    map[string]bool
+	presence           *livePresenceServer
 	resolveCandidate   func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
 	candidateResolvers map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
 	lanesLoaded        bool
@@ -70,7 +70,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
 		grokPending:     map[string]*grokPending{},
-		grokObservers:   map[string]*bridge.GrokNativeObserver{},
 		qwenPending:     map[string]*qwenPending{},
 		claudeLanes:     daemonpkg.NewClaudeLaneAdapter(),
 		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
@@ -142,11 +141,24 @@ func (c *hostCoordinator) run(ctx context.Context) error {
 	presence, err := startLivePresenceServer(ctx, c.stateRoot,
 		func(report liveSessionReport) { c.joinLiveSession(runtime, report) },
 		func(report liveSessionReport) { c.leaveLiveSession(runtime, report) },
+		func(callCtx context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
+			return c.handleLiveSessionCall(callCtx, runtime, report, method, params)
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("start live session presence: %w", err)
 	}
 	defer func() { _ = presence.Close() }()
+	c.mu.Lock()
+	c.presence = presence
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.presence == presence {
+			c.presence = nil
+		}
+		c.mu.Unlock()
+	}()
 	federationHost, err := c.newFederationHost(runtime)
 	if err != nil {
 		return err
@@ -172,8 +184,6 @@ shutdown:
 	c.mu.Lock()
 	native := c.codex
 	c.codex = nil
-	grokObservers := c.grokObservers
-	c.grokObservers = map[string]*bridge.GrokNativeObserver{}
 	cancels := make([]context.CancelFunc, 0, len(c.lanes))
 	for _, actor := range c.lanes {
 		if actor.cancel != nil {
@@ -186,9 +196,6 @@ shutdown:
 	}
 	if native != nil {
 		native.Close()
-	}
-	for _, observer := range grokObservers {
-		observer.Close()
 	}
 	return nil
 }
@@ -240,11 +247,9 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 		},
 		laneCandidateGrok: func(ctx context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
 			c.mu.Lock()
-			observer := c.grokObservers[parent.ID]
-			if observer == nil {
-				if pending := c.grokPending[parent.ID]; pending != nil {
-					observer = pending.observer
-				}
+			var observer *bridge.GrokNativeObserver
+			if pending := c.grokPending[parent.ID]; pending != nil {
+				observer = pending.observer
 			}
 			c.mu.Unlock()
 			if observer == nil {
@@ -315,11 +320,6 @@ func (c *hostCoordinator) handle(
 			return nil, err
 		}
 		return json.Marshal(result)
-	case "connector.initialize", "connector.tools", "connector.call":
-		if runtime == nil {
-			return nil, errors.New("runtime connector authority is unavailable")
-		}
-		return c.handleConnector(ctx, runtime, request)
 	case "lane.command":
 		if runtime == nil {
 			return nil, errors.New("runtime lane authority is unavailable")
@@ -419,7 +419,6 @@ func (c *hostCoordinator) prepareCodex(
 		}
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
-	_ = runtime.Attachments().ObserveNativeTitle(thread.ID, thread.ID, bridge.NormalizePeerName(thread.Name))
 	c.startCodexOwnerMonitor(runtime, thread.ID, request.Owner)
 	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Cwd: cwd}, nil
 }
@@ -488,7 +487,6 @@ func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 	}
 	native, err := c.openCodex(c.ctx, bridge.CodexNativeConfig{
 		CodexBinary: codexBinary(), CodexHome: codexHome(), Environment: os.Environ(),
-		OnEvent: c.observeCodexNativeEvent,
 	})
 	if err != nil {
 		return nil, err
@@ -505,20 +503,6 @@ func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 	}
 	c.codex = native
 	return native, nil
-}
-
-func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent) {
-	if event.Kind != "thread/name/updated" || strings.TrimSpace(event.ThreadID) == "" {
-		return
-	}
-	c.mu.Lock()
-	runtime := c.runtime
-	c.mu.Unlock()
-	if runtime != nil {
-		_ = runtime.Attachments().ObserveNativeTitle(
-			event.ThreadID, event.ThreadID, bridge.NormalizePeerName(event.Name),
-		)
-	}
 }
 
 func requestCodexPreparation(

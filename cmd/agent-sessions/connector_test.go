@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *testing.T) {
@@ -39,23 +45,55 @@ func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *test
 	}
 }
 
-func TestConnectorReportsItsProductSessionWithoutDurableLookup(t *testing.T) {
-	getenv := func(name string) string {
-		if name == "AGENT_SESSIONS_SESSION_ID" {
-			return "qwen-session"
+func TestClaudeConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "claude.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", socket)
+	received := make(chan map[string]any, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
 		}
-		return ""
+		defer func() { _ = connection.Close() }()
+		var message map[string]any
+		if json.NewDecoder(bufio.NewReader(connection)).Decode(&message) == nil {
+			received <- message
+		}
+	}()
+	params, _ := json.Marshal(map[string]any{"message_id": "message-1", "body": "hello"})
+	if _, err := connectorNativeCall(context.Background(), liveSessionReport{UUID: "session-1", Product: "claude"}, "message.deliver", params); err != nil {
+		t.Fatal(err)
 	}
-	got, err := attestConnector("qwen", nil, getenv)
-	if err != nil || got.AttachmentID != "qwen-session" || got.Evidence.ThreadID != "qwen-session" {
-		t.Fatalf("Qwen connector report = %+v, %v", got, err)
+	select {
+	case message := <-received:
+		if message["msg_id"] != "message-1" || message["type"] != "user" {
+			t.Fatalf("native Claude message = %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("native Claude delivery did not arrive")
 	}
-	codexParams, _ := json.Marshal(map[string]any{"_meta": map[string]any{
-		"threadId":              "codex-thread",
-		"x-codex-turn-metadata": map[string]any{"session_id": "codex-session", "thread_id": "codex-thread"},
-	}})
-	got, err = attestConnector("codex", codexParams, func(string) string { return "" })
-	if err != nil || got.AttachmentID != "codex-thread" {
-		t.Fatalf("Codex connector report = %+v, %v", got, err)
+}
+
+func TestQwenConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
+	input := filepath.Join(t.TempDir(), "input.jsonl")
+	if err := os.WriteFile(input, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_SESSIONS_QWEN_INPUT_FILE", input)
+	params, _ := json.Marshal(map[string]any{"message_id": "message-1", "body": "hello"})
+	if _, err := connectorNativeCall(context.Background(), liveSessionReport{UUID: "session-1", Product: "qwen"}, "message.deliver", params); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "hello") {
+		t.Fatalf("native Qwen input = %q", body)
 	}
 }

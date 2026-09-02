@@ -20,6 +20,7 @@ import (
 
 const (
 	qwenCapabilityEnv    = "AGENT_SESSIONS_QWEN_CAPABILITY"
+	qwenInputEnv         = "AGENT_SESSIONS_QWEN_INPUT_FILE"
 	qwenReadinessTimeout = 45 * time.Second
 )
 
@@ -209,6 +210,7 @@ func runQwenPeerWithDaemon(
 	environment = daemonPeerEnvironment(environment, result.SessionID, "qwen")
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	environment = envutil.Set(environment, qwenCapabilityEnv, result.Capability)
+	environment = envutil.Set(environment, qwenInputEnv, result.InputPath)
 	return dependencies.exec(qwen, nativeArgs, environment)
 }
 

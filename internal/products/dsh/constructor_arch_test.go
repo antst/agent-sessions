@@ -19,12 +19,11 @@ type constructorFunction struct {
 }
 
 var reviewedConstructorFunctions = map[string]bool{
-	"NewDrivers": true, "NewCordisGateway": true, "NewDoctorProbe": true,
-	"NewPeerDriver": true, "NewMessageDriver": true, "NewParentAttester": true,
+	"NewDrivers": true, "NewDoctorProbe": true,
 	"NewLaneDriver": true, "validateConfiguredProfileManifestShape": true,
 	"managedProfileManifestPath": true, "validateManagedDSHHomeShape": true,
 	"validateProfileIdentity": true, "temporaryPathLexical": true, "within": true,
-	"validCwd": true, "validateComponentSocketShape": true,
+	"validCwd": true,
 }
 
 func analyzeProductionConstructorPurity() ([]string, error) {
@@ -43,7 +42,7 @@ func analyzeProductionConstructorPurity() ([]string, error) {
 		}
 		sources[entry.Name()] = body
 	}
-	return analyzeConstructorPurity(sources, []string{"NewDrivers", "NewPeerDriver", "NewLaneDriver", "NewDoctorProbe"}, reviewedConstructorFunctions)
+	return analyzeConstructorPurity(sources, []string{"NewDrivers", "NewLaneDriver", "NewDoctorProbe"}, reviewedConstructorFunctions)
 }
 
 func analyzeConstructorPurity(sources map[string][]byte, roots []string, reviewed map[string]bool) ([]string, error) {
@@ -153,10 +152,10 @@ func constructorLiveCall(importPath, method string) bool {
 func TestConstructorPurityGuardFollowsForgedLocalHelper(t *testing.T) {
 	sources := map[string][]byte{"forged.go": []byte(`package dsh
 import "os"
-func NewPeerDriver() { constructorHelper() }
+func NewLaneDriver() { constructorHelper() }
 func constructorHelper() { _, _ = os.Stat("/tmp/forged") }
 `)}
-	violations, err := analyzeConstructorPurity(sources, []string{"NewPeerDriver"}, map[string]bool{"NewPeerDriver": true, "constructorHelper": true})
+	violations, err := analyzeConstructorPurity(sources, []string{"NewLaneDriver"}, map[string]bool{"NewLaneDriver": true, "constructorHelper": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,14 +168,14 @@ func TestConstructorPurityGuardRejectsForgedReceiverHelper(t *testing.T) {
 	sources := map[string][]byte{"forged.go": []byte(`package dsh
 import "os"
 type constructorProbe struct{}
-func NewPeerDriver() { constructorProbe{}.snapshot() }
+func NewLaneDriver() { constructorProbe{}.snapshot() }
 func (constructorProbe) snapshot() { _, _ = os.Stat("/tmp/forged") }
 `)}
-	violations, err := analyzeConstructorPurity(sources, []string{"NewPeerDriver"}, map[string]bool{"NewPeerDriver": true})
+	violations, err := analyzeConstructorPurity(sources, []string{"NewLaneDriver"}, map[string]bool{"NewLaneDriver": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(violations) != 1 || !strings.Contains(violations[0], "NewPeerDriver reaches unreviewed receiver method snapshot") {
+	if len(violations) != 1 || !strings.Contains(violations[0], "NewLaneDriver reaches unreviewed receiver method snapshot") {
 		t.Fatalf("receiver-helper violations = %v, want conservative receiver rejection", violations)
 	}
 }

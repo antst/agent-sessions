@@ -23,6 +23,15 @@ type doctorRunnerFixture struct {
 	readErr    error
 }
 
+type fileInfoFixture struct{}
+
+func (fileInfoFixture) Name() string       { return "extension.mjs" }
+func (fileInfoFixture) Size() int64        { return 1 }
+func (fileInfoFixture) Mode() os.FileMode  { return 0444 }
+func (fileInfoFixture) ModTime() time.Time { return time.Time{} }
+func (fileInfoFixture) IsDir() bool        { return false }
+func (fileInfoFixture) Sys() any           { return nil }
+
 func (runner doctorRunnerFixture) LookPath(string) (string, error) {
 	return runner.path, runner.lookErr
 }
@@ -73,37 +82,22 @@ func TestDoctorPinsVersionFeaturesAndManagedExtension(t *testing.T) {
 	}
 }
 
-func TestDoctorRejectsReadableStaleComponentContractAsset(t *testing.T) {
+func TestDoctorAcceptsReadableLiveSessionExtension(t *testing.T) {
 	quirks, _ := QuirksFor(PiProductID)
-	base := doctorRunnerFixture{
+	runner := doctorRunnerFixture{
 		path: "/usr/bin/pi", version: "pi " + PiTestedVersion,
 		help: "--mode --extension --session --tools", info: fileInfoFixture{},
 	}
-	for name, fixture := range map[string]struct {
-		asset string
-		state productruntime.ProbeState
-	}{
-		"exact": {asset: `const CONTRACT_REVISION = "agent-sessions.component.v1-r1";`, state: productruntime.ProbeReady},
-		"stale": {asset: `const CONTRACT_REVISION = "agent-sessions.component.v1";`, state: productruntime.ProbeIncompatible},
-	} {
-		t.Run(name, func(t *testing.T) {
-			runner := base
-			runner.asset = fixture.asset
-			probe, err := NewDoctorProbe(DoctorConfig{
-				Quirks: quirks, ExtensionPath: "/managed/pi/agent-sessions.mjs", Runner: runner,
-				CheckIntegration: func(context.Context) (bool, string, error) { return true, "", nil },
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			report, err := probe.Probe(context.Background(), productruntime.ProbeRequest{ProductID: PiProductID, Depth: productruntime.ProbeIntegration})
-			if err != nil || report.State != fixture.state {
-				t.Fatalf("component tuple report = %+v, %v", report, err)
-			}
-			if fixture.state != productruntime.ProbeReady && (report.TupleOK == nil || *report.TupleOK) {
-				t.Fatalf("stale component tuple = %+v", report)
-			}
-		})
+	probe, err := NewDoctorProbe(DoctorConfig{
+		Quirks: quirks, ExtensionPath: "/managed/pi/agent-sessions.mjs", Runner: runner,
+		CheckIntegration: func(context.Context) (bool, string, error) { return true, "", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := probe.Probe(context.Background(), productruntime.ProbeRequest{ProductID: PiProductID, Depth: productruntime.ProbeIntegration})
+	if err != nil || report.State != productruntime.ProbeReady {
+		t.Fatalf("live-session report = %+v, %v", report, err)
 	}
 }
 

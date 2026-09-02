@@ -23,7 +23,6 @@ type ProjectedInstallProduct struct {
 	Compatibility      productcatalog.Compatibility      `json:"compatibility"`
 	NativeRegistration productcatalog.NativeRegistration `json:"native_registration"`
 	Acceptance         productcatalog.AcceptanceContract `json:"acceptance"`
-	Authority          *productcatalog.AuthorityContract `json:"authority,omitempty"`
 }
 
 func BuildProjection(inventory []productcatalog.Descriptor) (InstallProjection, error) {
@@ -43,11 +42,6 @@ func BuildProjection(inventory []productcatalog.Descriptor) (InstallProjection, 
 			}
 			return tuple[i].Name < tuple[j].Name
 		})
-		var authority *productcatalog.AuthorityContract
-		if descriptor.Authority != nil {
-			copyAuthority := *descriptor.Authority
-			authority = &copyAuthority
-		}
 		products = append(products, ProjectedInstallProduct{
 			ProductID: descriptor.ID, SupportState: descriptor.SupportState, TestedVersion: descriptor.TestedVersion,
 			Compatibility: productcatalog.Compatibility{
@@ -56,7 +50,6 @@ func BuildProjection(inventory []productcatalog.Descriptor) (InstallProjection, 
 			},
 			NativeRegistration: productcatalog.NativeRegistration{Strategy: descriptor.NativeRegistration.Strategy, Args: args, AssetOnly: descriptor.NativeRegistration.AssetOnly},
 			Acceptance:         productcatalog.AcceptanceContract{RealProductRequired: descriptor.Acceptance.RealProductRequired, ExternalCells: cells},
-			Authority:          authority,
 		})
 	}
 	return InstallProjection{Schema: InstallProjectionSchemaV1, Products: products}, nil

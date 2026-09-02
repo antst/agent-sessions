@@ -10,8 +10,6 @@ import (
 func TestInstallProjectionIsDeterministicCatalogDerivedAndSecretFree(t *testing.T) {
 	inventory := productcatalog.All()[:2]
 	inventory[0], inventory[1] = inventory[1], inventory[0]
-	inventory[0].Authority.PeerAuth = "password"
-	inventory[0].Authority.LaneAuth = "bearer"
 	inventory[0].Compatibility = productcatalog.Compatibility{
 		Policy: productcatalog.VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
 		TupleMembers: []productcatalog.TupleMember{
@@ -38,7 +36,7 @@ func TestInstallProjectionIsDeterministicCatalogDerivedAndSecretFree(t *testing.
 			t.Fatalf("projection contains forbidden secret-shaped field %q", forbidden)
 		}
 	}
-	if !bytes.Contains(first, []byte(`"peer_auth": "password"`)) || !bytes.Contains(first, []byte(`"lane_auth": "bearer"`)) {
-		t.Fatalf("projection rejected public authority mechanism enums: %s", first)
+	if bytes.Contains(first, []byte(`"authority"`)) {
+		t.Fatalf("projection contains removed trust metadata: %s", first)
 	}
 }

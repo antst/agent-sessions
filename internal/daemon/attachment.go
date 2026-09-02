@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -305,20 +303,6 @@ func (e *AttachmentEngine) ForgetLive(id string) {
 	delete(e.titles, id)
 }
 
-func (e *AttachmentEngine) ObserveNativeTitle(id, nativeSessionID, title string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !validNativeTitleObservation(title) {
-		return fmt.Errorf("%w: native title observation is unsafe", ErrAttachmentConflict)
-	}
-	attachment, ok := e.active[id]
-	if !ok || attachment.State != "attached" || attachment.NativeSessionID == "" || attachment.NativeSessionID != nativeSessionID {
-		return fmt.Errorf("%w: attachment %s is not the exact live native session", ErrAttachmentConflict, id)
-	}
-	e.titles[id] = liveNativeTitle{nativeSessionID: nativeSessionID, value: title}
-	return nil
-}
-
 func (e *AttachmentEngine) LiveNativeTitle(id string) (string, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -386,18 +370,6 @@ func (e *AttachmentEngine) currentAttachment(id string) (ManagedAttachment, erro
 		return ManagedAttachment{}, fmt.Errorf("%w: attachment %s does not exist", ErrAttachmentConflict, id)
 	}
 	return cloneAttachment(attachment), nil
-}
-
-func validNativeTitleObservation(value string) bool {
-	if len([]byte(value)) > 1024 || !utf8.ValidString(value) {
-		return false
-	}
-	for _, character := range value {
-		if unicode.IsControl(character) {
-			return false
-		}
-	}
-	return true
 }
 
 func validateAttachmentRequest(attachment ManagedAttachment) error {

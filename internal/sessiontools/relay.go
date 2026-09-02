@@ -4,18 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
@@ -23,34 +19,16 @@ const defaultMCPRelayFrameBytes = 2 << 20
 
 var ErrMCPRelayFrameTooLarge = errors.New("MCP relay frame exceeds configured bound")
 
-type ConnectorAttestation struct {
-	AttachmentID string
-	Capability   string
-	Evidence     daemon.NativeEvidence
-}
-
 type MCPRelayConfig struct {
 	Product       string
-	Endpoint      string
 	MaxFrameBytes int
-	Generation    func(context.Context) (uint64, error)
-	Attest        func(context.Context, json.RawMessage) (ConnectorAttestation, error)
+	Call          func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
 	Refresh       func(context.Context) error
 	RefreshEvery  time.Duration
 }
 
 type MCPRelay struct {
 	config MCPRelayConfig
-	client *daemonControlClient
-}
-
-// ConnectorRelayPayload is the private daemon control payload. It is exported
-// only so compatibility tests/wrappers can decode the frozen schema.
-type ConnectorRelayPayload struct {
-	Product  string                `json:"product"`
-	Method   string                `json:"method"`
-	Params   json.RawMessage       `json:"params,omitempty"`
-	Evidence daemon.NativeEvidence `json:"evidence,omitempty"`
 }
 
 type relayRequest struct {
@@ -76,17 +54,13 @@ func NewMCPRelay(config MCPRelayConfig) (*MCPRelay, error) {
 	if _, ok := productcatalog.ByID(config.Product); !ok {
 		return nil, fmt.Errorf("MCP relay product %q is unsupported", config.Product)
 	}
-	if config.Attest == nil {
-		return nil, errors.New("MCP relay attestation callback is unavailable")
+	if config.Call == nil {
+		return nil, errors.New("MCP relay live-session call is unavailable")
 	}
 	if config.MaxFrameBytes <= 0 {
 		config.MaxFrameBytes = defaultMCPRelayFrameBytes
 	}
-	client, err := newDaemonControlClient(config.Endpoint, config.Generation)
-	if err != nil {
-		return nil, fmt.Errorf("configure MCP relay: %w", err)
-	}
-	return &MCPRelay{config: config, client: client}, nil
+	return &MCPRelay{config: config}, nil
 }
 
 // Serve preserves newline-delimited MCP JSON-RPC while forwarding only
@@ -212,36 +186,22 @@ func (r *MCPRelay) handle(ctx context.Context, request relayRequest) (json.RawMe
 		}
 		return marshalRelayResult(map[string]any{"tools": tools}), nil
 	case "tools/call":
-		attestation, err := r.config.Attest(ctx, append(json.RawMessage(nil), request.Params...))
-		if err != nil || strings.TrimSpace(attestation.AttachmentID) == "" {
-			return marshalRelayResult(inactiveResult()), nil
-		}
-		return r.forward(ctx, request, attestation)
+		return r.forward(ctx, request)
 	default:
 		return nil, &rpcError{Code: -32601, Message: "Method not found: " + request.Method}
 	}
 }
 
-func (r *MCPRelay) forward(ctx context.Context, request relayRequest, attestation ConnectorAttestation) (json.RawMessage, *rpcError) {
-	payload, err := json.Marshal(ConnectorRelayPayload{Product: r.config.Product, Method: request.Method, Params: request.Params, Evidence: cloneEvidence(attestation.Evidence)})
+func (r *MCPRelay) forward(ctx context.Context, request relayRequest) (json.RawMessage, *rpcError) {
+	id := string(request.ID)
+	response, err := r.config.Call(ctx, id, request.Method, append(json.RawMessage(nil), request.Params...))
 	if err != nil {
-		return nil, &rpcError{Code: -32603, Message: "MCP relay request encoding failed"}
+		return marshalRelayResult(inactiveResult()), nil
 	}
-	id := stableMCPRelayOperationID(r.config.Product, request)
-	response, err := r.client.call(ctx, daemon.ControlRequest{ID: id, Role: daemon.RoleConnector, Operation: "connector.call", IdempotencyKey: id, AttachmentID: attestation.AttachmentID, Capability: attestation.Capability, Payload: payload})
-	if err != nil {
-		return nil, &rpcError{Code: -32603, Message: "Agent Sessions daemon is unavailable"}
-	}
-	if response.Error != nil {
-		if response.Error.Code == daemon.ErrorInactive {
-			return marshalRelayResult(inactiveResult()), nil
-		}
-		return marshalRelayResult(map[string]any{"content": []map[string]any{{"type": "text", "text": response.Error.Message}}, "isError": true}), nil
-	}
-	if !response.OK || len(response.Payload) == 0 || !json.Valid(response.Payload) {
+	if len(response) == 0 || !json.Valid(response) {
 		return nil, &rpcError{Code: -32603, Message: "Agent Sessions daemon returned an invalid response"}
 	}
-	return append(json.RawMessage(nil), response.Payload...), nil
+	return append(json.RawMessage(nil), response...), nil
 }
 
 func inactiveResult() map[string]any {
@@ -270,65 +230,3 @@ func writeRelayResponse(writer io.Writer, id, result json.RawMessage, failure *r
 }
 
 func marshalRelayResult(value any) json.RawMessage { body, _ := json.Marshal(value); return body }
-func cloneEvidence(evidence daemon.NativeEvidence) daemon.NativeEvidence {
-	evidence.Ancestry = append([]procinfo.Identity(nil), evidence.Ancestry...)
-	return evidence
-}
-func stableMCPRelayOperationID(product string, request relayRequest) string {
-	digest := sha256.New()
-	_, _ = digest.Write([]byte("agent-sessions-mcp-operation\x00"))
-	_, _ = digest.Write([]byte(product))
-	_, _ = digest.Write([]byte{'\x00'})
-	_, _ = digest.Write([]byte(request.Method))
-	_, _ = digest.Write([]byte{'\x00'})
-	_, _ = digest.Write(request.ID)
-	_, _ = digest.Write([]byte{'\x00'})
-	_, _ = digest.Write(request.Params)
-	return "mcp-" + hex.EncodeToString(digest.Sum(nil)[:16])
-}
-
-type daemonControlClient struct {
-	endpoint   string
-	generation func(context.Context) (uint64, error)
-	mu         sync.Mutex
-	current    uint64
-}
-
-func newDaemonControlClient(endpoint string, generation func(context.Context) (uint64, error)) (*daemonControlClient, error) {
-	if strings.TrimSpace(endpoint) == "" || generation == nil {
-		return nil, errors.New("daemon control endpoint or generation source is unavailable")
-	}
-	return &daemonControlClient{endpoint: endpoint, generation: generation}, nil
-}
-
-func (c *daemonControlClient) call(ctx context.Context, request daemon.ControlRequest) (daemon.ControlResponse, error) {
-	generation, err := c.readGeneration(ctx, false)
-	if err != nil {
-		return daemon.ControlResponse{}, err
-	}
-	request.Generation = generation
-	response, err := daemon.CallControl(ctx, c.endpoint, request)
-	if err != nil || response.Error == nil || response.Error.Code != daemon.ErrorStaleGeneration {
-		return response, err
-	}
-	generation, err = c.readGeneration(ctx, true)
-	if err != nil {
-		return daemon.ControlResponse{}, err
-	}
-	request.Generation = generation
-	return daemon.CallControl(ctx, c.endpoint, request)
-}
-
-func (c *daemonControlClient) readGeneration(ctx context.Context, refresh bool) (uint64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.current != 0 && !refresh {
-		return c.current, nil
-	}
-	generation, err := c.generation(ctx)
-	if err != nil || generation == 0 {
-		return 0, errors.New("daemon generation is unavailable")
-	}
-	c.current = generation
-	return generation, nil
-}

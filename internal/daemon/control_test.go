@@ -71,13 +71,6 @@ func TestControlRolesGenerationBareInactivityAndNoLifecycleOverSocket(t *testing
 			t.Fatalf("rejected request succeeded: %#v => %#v", request, response)
 		}
 	}
-	bare := callControlTest(t, server.Endpoint(), ControlRequest{
-		ID: "bare", Role: RoleConnector, Operation: "connector.call", Generation: 7,
-		IdempotencyKey: "bare-call", Payload: json.RawMessage(`{"tool":"list_peers"}`),
-	})
-	if bare.OK || bare.Error == nil || bare.Error.Code != ErrorInactive || bare.Error.Message != CanonicalInactiveMessage {
-		t.Fatalf("bare connector response = %#v", bare)
-	}
 	if handled.Load() != 2 {
 		t.Fatalf("handler calls = %d, want admin status and roster", handled.Load())
 	}
@@ -175,8 +168,8 @@ func TestControlMutationsWithDifferentKeysDoNotSerializeNestedWork(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	inner, err := CallControl(ctx, server.Endpoint(), ControlRequest{
-		ID: "inner", Role: RoleConnector, Operation: "connector.call", Generation: 13,
-		IdempotencyKey: "inner", AttachmentID: "lane", Payload: json.RawMessage(`{}`),
+		ID: "inner", Role: RoleHook, Operation: "hook.event", Generation: 13,
+		IdempotencyKey: "inner", Payload: json.RawMessage(`{}`),
 	})
 	if err != nil || !inner.OK {
 		t.Fatalf("nested mutation was serialized behind outer turn: response=%#v err=%v", inner, err)

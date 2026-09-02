@@ -12,23 +12,17 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/component"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-const (
-	maxDoctorOutput        = 64 << 10
-	maxComponentAssetBytes = 256 << 10
-)
+const maxDoctorOutput = 64 << 10
 
 var semanticVersion = regexp.MustCompile(`(?:^|[^0-9])v?([0-9]+\.[0-9]+\.[0-9]+)(?:$|[^0-9])`)
-var componentRevisionDeclaration = regexp.MustCompile(`(?m)^\s*const\s+CONTRACT_REVISION\s*=\s*"([^"]+)"\s*;\s*$`)
 
 type DoctorRunner interface {
 	LookPath(string) (string, error)
 	Run(context.Context, string, ...string) (string, error)
 	Stat(string) (os.FileInfo, error)
-	ReadFile(string, int) ([]byte, error)
 }
 
 type IntegrationCheck func(context.Context) (bool, string, error)
@@ -120,32 +114,14 @@ func (probe *DoctorProbe) Probe(ctx context.Context, request productruntime.Prob
 	info, err := probe.config.Runner.Stat(probe.config.ExtensionPath)
 	if err != nil || info == nil || !info.Mode().IsRegular() || info.Mode().Perm()&0444 == 0 {
 		report.State = productruntime.ProbeUnconfigured
-		report.Detail = productruntime.NewRedactedString("managed component extension is absent or unreadable")
-		value := false
-		report.TupleOK = &value
-		return report, nil
-	}
-	protocolPath := filepath.Clean(filepath.Join(filepath.Dir(probe.config.ExtensionPath), "..", "shared", "component", "protocol.js"))
-	protocolInfo, protocolErr := probe.config.Runner.Stat(protocolPath)
-	protocolSource, readErr := probe.config.Runner.ReadFile(protocolPath, maxComponentAssetBytes)
-	if protocolErr != nil || protocolInfo == nil || !protocolInfo.Mode().IsRegular() || protocolInfo.Mode().Perm()&0444 == 0 || readErr != nil {
-		report.State = productruntime.ProbeUnconfigured
-		report.Detail = productruntime.NewRedactedString("managed component protocol asset is absent or unreadable")
-		value := false
-		report.TupleOK = &value
-		return report, nil
-	}
-	matches := componentRevisionDeclaration.FindSubmatch(protocolSource)
-	if len(matches) != 2 || string(matches[1]) != component.ContractRevision {
-		report.State = productruntime.ProbeIncompatible
-		report.Detail = productruntime.NewRedactedString("managed component client contract revision does not match the runtime")
+		report.Detail = productruntime.NewRedactedString("managed live-session extension is absent or unreadable")
 		value := false
 		report.TupleOK = &value
 		return report, nil
 	}
 	if probe.config.CheckIntegration == nil {
 		report.State = productruntime.ProbeUnconfigured
-		report.Detail = productruntime.NewRedactedString("managed component authority check is not configured")
+		report.Detail = productruntime.NewRedactedString("live-session integration check is not configured")
 		value := false
 		report.TupleOK = &value
 		return report, nil
@@ -153,7 +129,7 @@ func (probe *DoctorProbe) Probe(ctx context.Context, request productruntime.Prob
 	ready, detail, err := probe.config.CheckIntegration(ctx)
 	if err != nil || !ready {
 		if strings.TrimSpace(detail) == "" {
-			detail = "managed component authority is not ready"
+			detail = "live-session integration is not ready"
 		}
 		report.State = productruntime.ProbeUnconfigured
 		report.Detail = productruntime.NewRedactedString(detail)
@@ -201,21 +177,6 @@ type osDoctorRunner struct{}
 
 func (osDoctorRunner) LookPath(name string) (string, error)  { return exec.LookPath(name) }
 func (osDoctorRunner) Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
-func (osDoctorRunner) ReadFile(path string, maximum int) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	value, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(value) > maximum {
-		return nil, errors.New("component protocol asset exceeds its bound")
-	}
-	return value, nil
-}
 func (osDoctorRunner) Run(ctx context.Context, executable string, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, executable, arguments...)
 	output := &boundedBuffer{remaining: maxDoctorOutput}

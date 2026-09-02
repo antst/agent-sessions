@@ -204,6 +204,9 @@ func TestRunQwenPeerResolvesNameThroughProductBeforeDaemonPreparation(t *testing
 				if value, ok := qwenTestEnvironment(environment, peerSessionIDEnv); !ok || value != testQwenSessionID {
 					t.Fatalf("native session environment = %q/%v", value, ok)
 				}
+				if value, ok := qwenTestEnvironment(environment, qwenInputEnv); !ok || value != input {
+					t.Fatalf("native input environment = %q/%v", value, ok)
+				}
 				return nil
 			},
 			capture: func(int) (procinfo.Identity, error) { return procinfo.Identity{PID: 42}, nil },

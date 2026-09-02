@@ -37,7 +37,7 @@ func TestCredentialAndProfileObservationIsMetadataOnly(t *testing.T) {
 	}
 }
 
-func TestHookConnectorAndDiagnosticFailuresNeverEchoContentIntoEvidence(t *testing.T) {
+func TestHookAndDiagnosticFailuresNeverEchoContentIntoEvidence(t *testing.T) {
 	canaries := securityboundary.FixtureCanaries()
 	root := testutil.ShortSocketRoot(t, "sb-", filepath.Join("run", "daemon.sock"))
 	seen := map[securityboundary.ContentClass]bool{}
@@ -58,14 +58,11 @@ func TestHookConnectorAndDiagnosticFailuresNeverEchoContentIntoEvidence(t *testi
 		"credential": string(canaries[securityboundary.CredentialContent]),
 		"prompt":     string(canaries[securityboundary.PromptContent]),
 		"transcript": string(canaries[securityboundary.TranscriptContent]),
-	})
-	connectorPayload, _ := json.Marshal(map[string]string{
-		"result": string(canaries[securityboundary.ResultContent]),
-		"log":    string(canaries[securityboundary.LogContent]),
+		"result":     string(canaries[securityboundary.ResultContent]),
+		"log":        string(canaries[securityboundary.LogContent]),
 	})
 	requests := []daemon.ControlRequest{
 		{ID: "hook", Role: daemon.RoleHook, Operation: "hook.event", Generation: 3, IdempotencyKey: "hook-key", Payload: hookPayload},
-		{ID: "connector", Role: daemon.RoleConnector, Operation: "connector.call", Generation: 3, IdempotencyKey: "connector-key", AttachmentID: "attachment", Capability: "capability", Payload: connectorPayload},
 	}
 	for _, request := range requests {
 		response, err := daemon.CallControl(context.Background(), server.Endpoint(), request)

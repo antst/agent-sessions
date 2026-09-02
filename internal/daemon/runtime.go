@@ -216,11 +216,6 @@ func (r *Runtime) handleControl(ctx context.Context, request ControlRequest) (js
 			return nil, err
 		}
 	}
-	if request.Role == RoleConnector && request.Operation == "connector.call" {
-		if err := r.authorizeConnectorRequest(ctx, request); err != nil {
-			return nil, err
-		}
-	}
 	if r.handler == nil {
 		return nil, errors.New("runtime operation handler is unavailable")
 	}
@@ -265,22 +260,6 @@ func (r *Runtime) authorizeAttachmentRequest(request ControlRequest) error {
 	return r.attachments.Authorize(
 		r.ctx, request.AttachmentID, request.Capability, strings.TrimSpace(envelope.Product), envelope.Evidence,
 	)
-}
-
-func (r *Runtime) authorizeConnectorRequest(_ context.Context, request ControlRequest) error {
-	var envelope struct {
-		Product string `json:"product"`
-	}
-	if len(request.Payload) == 0 || json.Unmarshal(request.Payload, &envelope) != nil {
-		return InactiveControlError()
-	}
-	product := strings.TrimSpace(envelope.Product)
-	attachment, active, err := r.attachments.ActiveAttachment(request.AttachmentID)
-	if err == nil && active && product != "" && product == attachment.Product {
-		return nil
-	}
-
-	return InactiveControlError()
 }
 
 // CapabilityDigest returns the stored one-way identity of a daemon-minted capability.

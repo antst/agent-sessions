@@ -42,8 +42,8 @@ function isCanonicallyWithin(candidate, root) {
 }
 
 function validateSocket(socketPath, environment = process.env) {
-  if (!path.isAbsolute(socketPath) || path.basename(socketPath) !== "component.sock") {
-    throw new Error("DSH component socket must be an absolute component.sock path");
+  if (!path.isAbsolute(socketPath) || path.basename(socketPath) !== "presence.sock") {
+    throw new Error("DSH presence socket must be an absolute presence.sock path");
   }
   if (path.resolve(socketPath) !== socketPath || isTemporary(socketPath)) throw new Error("DSH sandbox masks temporary sockets");
   const roots = [
@@ -53,7 +53,7 @@ function validateSocket(socketPath, environment = process.env) {
     environment.XDG_CONFIG_HOME,
   ].filter(Boolean);
   if (!roots.some((root) => isCanonicallyWithin(socketPath, root))) {
-    throw new Error("DSH component socket must be below HOME or an XDG root");
+    throw new Error("DSH presence socket must be below HOME or an XDG root");
   }
   return socketPath;
 }
@@ -76,10 +76,10 @@ function explicitMCPEnvironment(values, environment = process.env) {
   if (!values || typeof values.sessionID !== "string" || values.sessionID === "") {
     throw new Error("explicit DSH MCP env requires a session witness");
   }
-  const componentSocket = validateSocket(values.componentSocket, environment);
+  const presenceSocket = validateSocket(values.presenceSocket, environment);
   const result = {
     AGENT_SESSIONS_SESSION_ID: values.sessionID,
-    AGENT_SESSIONS_COMPONENT_SOCKET: componentSocket,
+    AGENT_SESSIONS_PRESENCE_SOCKET: presenceSocket,
   };
   if (values.stateRoot) result.AGENT_SESSIONS_STATE_ROOT = validateStateRoot(values.stateRoot, environment);
   for (const name of Object.keys(result)) {

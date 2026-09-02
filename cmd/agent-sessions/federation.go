@@ -216,7 +216,7 @@ func (c *hostCoordinator) deliverFederated(
 			deliveryID, delivered.SentAt, delivered.Content,
 		)
 		if local.attachment != nil {
-			return c.deliverPreparedMessage(callCtx, *local.attachment, deliveryID, "session:"+source.GlobalID, message)
+			return c.deliverPreparedMessage(callCtx, *local.attachment, deliveryID, message)
 		}
 		if local.lane == nil {
 			return errors.New("federated target disappeared")

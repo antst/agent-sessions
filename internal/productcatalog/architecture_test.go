@@ -30,11 +30,9 @@ func TestFederatorHasNoAuthoredProductInventory(t *testing.T) {
 func TestNoNewProductDispatchSwitches(t *testing.T) {
 	want := map[string]int{
 		"cmd/agent-sessions/codex_host.go":                3,
-		"cmd/agent-sessions/connector.go":                 1,
 		"cmd/agent-sessions/hook.go":                      1,
 		"cmd/agent-sessions/lane.go":                      29,
 		"cmd/agent-sessions/main.go":                      4,
-		"cmd/agent-sessions/messaging.go":                 4,
 		"internal/bridge/native_lane_acp.go":              2,
 		"internal/daemon/adapter_claude.go":               1,
 		"internal/daemon/adapter_codex.go":                1,
@@ -51,7 +49,7 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 	}
 	root := productCatalogRepositoryRoot(t)
 	productIDs := map[string]bool{}
-	for _, descriptor := range All() {
+	for _, descriptor := range RuntimeInventory() {
 		productIDs[descriptor.ID] = true
 	}
 	legacyProductIDs := map[string]bool{"codex": true, "claude": true, "grok": true, "qwen": true}

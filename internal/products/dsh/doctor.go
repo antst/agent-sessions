@@ -206,13 +206,13 @@ func (doctor *DoctorProbe) Probe(ctx context.Context, request productruntime.Pro
 		return report, nil
 	}
 	if doctor.config.CheckIntegration == nil {
-		report.State, report.Detail = productruntime.ProbeUnconfigured, productruntime.NewRedactedString("DSH component Authority readiness check is not configured")
+		report.State, report.Detail = productruntime.ProbeUnconfigured, productruntime.NewRedactedString("DSH live-session integration check is not configured")
 		return report, nil
 	}
 	ready, detail, integrationErr := doctor.config.CheckIntegration(ctx)
 	if integrationErr != nil || !ready {
 		if strings.TrimSpace(detail) == "" {
-			detail = "DSH component Authority is not ready"
+			detail = "DSH live-session integration is not ready"
 		}
 		report.State, report.Detail = productruntime.ProbeUnconfigured, productruntime.NewRedactedString(detail)
 		return report, nil

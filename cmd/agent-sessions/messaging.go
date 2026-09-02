@@ -5,73 +5,39 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/envutil"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
-
-type connectorCallEnvelope struct {
-	Product string          `json:"product"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-}
 
 type connectorToolCall struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
 }
 
-func (c *hostCoordinator) handleConnector(
+type liveToolCall struct {
+	Operation string         `json:"operation"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+func (c *hostCoordinator) handleLiveSessionCall(
 	ctx context.Context,
 	runtime *daemonpkg.Runtime,
-	request daemonpkg.ControlRequest,
+	report liveSessionReport,
+	method string,
+	params json.RawMessage,
 ) (json.RawMessage, error) {
-	var envelope connectorCallEnvelope
-	if json.Unmarshal(request.Payload, &envelope) != nil || strings.TrimSpace(envelope.Product) == "" {
-		return nil, errors.New("connector request is invalid")
-	}
-	switch request.Operation {
-	case "connector.initialize":
-		var input map[string]any
-		_ = json.Unmarshal(envelope.Params, &input)
-		protocol, _ := input["protocolVersion"].(string)
-		if protocol == "" {
-			protocol = "2025-06-18"
-		}
-		instructions, err := sessiontools.ProductMCPInstructions(envelope.Product)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(map[string]any{
-			"protocolVersion": protocol,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "agent-sessions", "version": version},
-			"instructions":    instructions,
-		})
-	case "connector.tools":
-		tools, err := sessiontools.ProductMCPTools(envelope.Product)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(map[string]any{"tools": tools})
-	case "connector.call":
+	switch method {
+	case "tools/call":
 		var call connectorToolCall
-		if json.Unmarshal(envelope.Params, &call) != nil || strings.TrimSpace(call.Name) == "" {
+		if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
 			return nil, errors.New("connector tool call is invalid")
 		}
-		operationID := strings.TrimSpace(request.IdempotencyKey)
-		if operationID == "" {
-			operationID = strings.TrimSpace(request.ID)
-		}
-		result, err := c.callLocalToolWithID(ctx, runtime, request.AttachmentID, call.Name, call.Arguments, operationID)
+		result, err := c.callLocalTool(ctx, runtime, report.UUID, call.Name, call.Arguments)
 		if err != nil {
 			return json.Marshal(map[string]any{
 				"content": []map[string]any{{"type": "text", "text": err.Error()}}, "isError": true,
@@ -81,8 +47,44 @@ func (c *hostCoordinator) handleConnector(
 			"content":           []map[string]any{{"type": "text", "text": result.Text}},
 			"structuredContent": result.Data,
 		})
+	case "tool.call":
+		var call liveToolCall
+		if json.Unmarshal(params, &call) != nil {
+			return nil, errors.New("live tool call is invalid")
+		}
+		name, arguments, err := normalizeLiveToolCall(call)
+		if err != nil {
+			return nil, err
+		}
+		result, err := c.callLocalTool(ctx, runtime, report.UUID, name, arguments)
+		if err != nil {
+			return nil, err
+		}
+		if result.Data != nil {
+			return json.Marshal(result.Data)
+		}
+		return json.Marshal(map[string]any{"text": result.Text})
 	default:
-		return nil, errors.New("connector operation is unsupported")
+		return nil, fmt.Errorf("live session method %s is unsupported", method)
+	}
+}
+
+func normalizeLiveToolCall(call liveToolCall) (string, map[string]any, error) {
+	arguments := call.Arguments
+	if arguments == nil {
+		arguments = map[string]any{}
+	}
+	switch call.Operation {
+	case "peers.list":
+		return "list_peers", arguments, nil
+	case "message.send":
+		return "send_message", arguments, nil
+	case "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status", "lane.steer", "lane.interrupt", "lane.collect", "lane.archive":
+		parts := strings.SplitN(call.Operation, ".", 2)
+		arguments["command"] = parts[1]
+		return "lane", arguments, nil
+	default:
+		return "", nil, fmt.Errorf("live tool operation %s is unsupported", call.Operation)
 	}
 }
 
@@ -586,129 +588,23 @@ func (c *hostCoordinator) deliverLocal(
 	if err != nil {
 		return err
 	}
-	return c.deliverPreparedMessage(ctx, target, messageID, "session:"+source.ID, message)
+	return c.deliverPreparedMessage(ctx, target, messageID, message)
 }
 
 func (c *hostCoordinator) deliverPreparedMessage(
 	ctx context.Context,
 	target daemonpkg.ManagedAttachment,
-	messageID, from, message string,
-) error {
-	switch target.Product {
-	case "codex":
-		native, err := c.codexNative()
-		if err != nil {
-			return err
-		}
-		_, err = native.SendMessage(ctx, target.NativeSessionID, message)
-		return err
-	case "claude":
-		return sendClaudeNativeMessage(target.Evidence.SocketPath, messageID, from, message)
-	case "qwen":
-		return c.submitQwenMessage(target, message)
-	case "grok":
-		return c.interjectGrokMessage(ctx, target, messageID, message)
-	default:
-		return errors.New("target product is unsupported")
-	}
-}
-
-func (c *hostCoordinator) submitQwenMessage(target daemonpkg.ManagedAttachment, message string) error {
-	c.mu.Lock()
-	pending := c.qwenPending[target.ID]
-	if pending == nil {
-		c.mu.Unlock()
-		return errors.New("qwen session is not connected to this daemon")
-	}
-	if pending.writer == nil {
-		writer, err := bridge.OpenQwenNativeInput(pending.input)
-		if err != nil {
-			c.mu.Unlock()
-			return err
-		}
-		pending.writer = writer
-	}
-	writer := pending.writer
-	c.mu.Unlock()
-	return writer.Submit(message)
-}
-
-func (c *hostCoordinator) interjectGrokMessage(
-	ctx context.Context,
-	target daemonpkg.ManagedAttachment,
 	messageID, message string,
 ) error {
 	c.mu.Lock()
-	pending := c.grokPending[target.ID]
-	if pending == nil {
-		c.mu.Unlock()
-		// The ACP observer is only a daemon-generation handle. The TUI, private
-		// leader, socket, and exact process identities survive service restart and
-		// are durably attested, so reconnect to them before interjecting.
-		evidence, err := refreshDurableGrokAttachment(target)
-		if err != nil {
-			return fmt.Errorf("grok native observer is unavailable: %w", err)
-		}
-		environment := envutil.Set(os.Environ(), "AGENT_SESSIONS_PRODUCT", "grok")
-		environment = envutil.Set(environment, "AGENT_SESSIONS_SESSION_ID", target.NativeSessionID)
-		observer, err := bridge.OpenGrokNativeObserver(
-			ctx, evidence.Executable, target.Cwd, evidence.SocketPath,
-			target.NativeSessionID, environment, nil,
-		)
-		if err != nil {
-			return err
-		}
-		defer observer.Close()
-		return observer.Interject(ctx, messageID, message)
-	}
-	observer := pending.observer
+	presence := c.presence
 	c.mu.Unlock()
-	if observer == nil {
-		environment := envutil.Set(os.Environ(), "AGENT_SESSIONS_PRODUCT", "grok")
-		environment = envutil.Set(environment, "AGENT_SESSIONS_SESSION_ID", pending.request.SessionID)
-		created, err := bridge.OpenGrokNativeObserver(
-			c.ctx, pending.request.GrokBin, pending.request.Cwd, pending.leaderSocket,
-			pending.request.SessionID, environment, pending.diagnostics,
-		)
-		if err != nil {
-			return err
-		}
-		c.mu.Lock()
-		if current := c.grokPending[target.ID]; current != nil && current.observer == nil {
-			current.observer = created
-			observer = created
-		} else {
-			created.Close()
-			if current != nil {
-				observer = current.observer
-			}
-		}
-		c.mu.Unlock()
+	if presence == nil {
+		return errors.New("live session channel is unavailable")
 	}
-	if observer == nil {
-		return errors.New("grok native observer disappeared")
-	}
-	return observer.Interject(ctx, messageID, message)
-}
-
-func sendClaudeNativeMessage(socket, messageID, from, message string) error {
-	if strings.TrimSpace(socket) == "" {
-		return errors.New("claude messaging socket is unavailable")
-	}
-	body, err := json.Marshal(map[string]any{
-		"msgV": 1, "msg_id": messageID, "type": "user", "priority": "next",
-		"from": from, "message": map[string]any{"role": "user", "content": message},
+	_, err := presence.Call(ctx, target.ID, messageID, "message.deliver", map[string]any{
+		"message_id": messageID, "body": message,
 	})
-	if err != nil {
-		return err
-	}
-	conn, err := net.DialTimeout("unix", socket, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err = conn.Write(append(body, '\n'))
 	return err
 }
 

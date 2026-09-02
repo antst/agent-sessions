@@ -15,13 +15,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/procinfo"
 )
 
 const (
-	grokLaunchTokenEnv = "AGENT_SESSIONS_GROK_LAUNCH_TOKEN"
-	grokSessionIDEnv   = "AGENT_SESSIONS_GROK_SESSION_ID"
-	grokProbeTimeout   = 5 * time.Second
+	grokLaunchTokenEnv  = "AGENT_SESSIONS_GROK_LAUNCH_TOKEN"
+	grokSessionIDEnv    = "AGENT_SESSIONS_GROK_SESSION_ID"
+	grokLeaderSocketEnv = "AGENT_SESSIONS_GROK_LEADER_SOCKET"
+	grokProbeTimeout    = 5 * time.Second
 )
 
 type grokMode string
@@ -167,6 +169,7 @@ func RunGrokPeerWithDaemon(ctx context.Context, args []string, prepare GrokDaemo
 	})
 	environment := replaceGrokDaemonLaunchEnvironment(os.Environ(), launchToken, result.SessionID)
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
+	environment = envutil.Set(environment, grokLeaderSocketEnv, result.LeaderSocket)
 	return Exec(grok, managed, environment)
 }
 

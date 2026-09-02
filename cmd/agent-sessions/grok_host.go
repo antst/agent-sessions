@@ -177,7 +177,6 @@ func (c *hostCoordinator) startGrokOwnerMonitor(runtime *daemonpkg.Runtime, id s
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		lastNamePoll := time.Time{}
 		for {
 			select {
 			case <-c.ctx.Done():
@@ -193,12 +192,6 @@ func (c *hostCoordinator) startGrokOwnerMonitor(runtime *daemonpkg.Runtime, id s
 				pending := c.grokPending[id]
 				c.mu.Unlock()
 				if pending == nil {
-					if time.Since(lastNamePoll) >= time.Second {
-						if attachment, ok, _ := runtime.Attachments().ActiveAttachment(id); ok {
-							c.observeDurableGrokNativeName(runtime, attachment)
-						}
-						lastNamePoll = time.Now()
-					}
 					continue
 				}
 				if !grokOwnerExecReady(pending) {
@@ -218,10 +211,6 @@ func (c *hostCoordinator) startGrokOwnerMonitor(runtime *daemonpkg.Runtime, id s
 						current.adopted = true
 					}
 					c.mu.Unlock()
-				}
-				if time.Since(lastNamePoll) >= time.Second {
-					c.observeGrokNativeName(runtime, id, pending)
-					lastNamePoll = time.Now()
 				}
 			}
 		}
@@ -259,73 +248,6 @@ func (c *hostCoordinator) selectGrokNativeSession(
 	current.request.LateBoundResume = false
 	current.observer = observer
 	return nil
-}
-
-func (c *hostCoordinator) observeDurableGrokNativeName(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) {
-	c.mu.Lock()
-	observer := c.grokObservers[attachment.ID]
-	c.mu.Unlock()
-	if observer == nil {
-		evidence, err := refreshDurableGrokAttachment(attachment)
-		if err != nil {
-			return
-		}
-		environment := envutil.Set(os.Environ(), "AGENT_SESSIONS_PRODUCT", "grok")
-		environment = envutil.Set(environment, "AGENT_SESSIONS_SESSION_ID", attachment.NativeSessionID)
-		created, err := bridge.OpenGrokNativeObserver(
-			c.ctx, evidence.Executable, attachment.Cwd, evidence.SocketPath,
-			attachment.NativeSessionID, environment, nil,
-		)
-		if err != nil {
-			return
-		}
-		c.mu.Lock()
-		if existing := c.grokObservers[attachment.ID]; existing == nil {
-			c.grokObservers[attachment.ID] = created
-			observer = created
-		} else {
-			created.Close()
-			observer = existing
-		}
-		c.mu.Unlock()
-	}
-	name, err := observer.SessionName(c.ctx)
-	if err == nil {
-		_ = runtime.Attachments().ObserveNativeTitle(
-			attachment.ID, attachment.NativeSessionID, bridge.NormalizePeerName(name),
-		)
-	}
-}
-
-func (c *hostCoordinator) observeGrokNativeName(runtime *daemonpkg.Runtime, id string, pending *grokPending) {
-	if pending.observer == nil {
-		environment := envutil.Set(os.Environ(), "AGENT_SESSIONS_PRODUCT", "grok")
-		environment = envutil.Set(environment, "AGENT_SESSIONS_SESSION_ID", pending.request.SessionID)
-		observer, err := bridge.OpenGrokNativeObserver(
-			c.ctx, pending.request.GrokBin, pending.request.Cwd, pending.leaderSocket,
-			pending.request.SessionID, environment, pending.diagnostics,
-		)
-		if err != nil {
-			return
-		}
-		c.mu.Lock()
-		if current := c.grokPending[id]; current != nil && current.observer == nil {
-			current.observer = observer
-			pending = current
-		} else {
-			observer.Close()
-		}
-		c.mu.Unlock()
-	}
-	if pending.observer == nil {
-		return
-	}
-	name, err := pending.observer.SessionName(c.ctx)
-	if err == nil {
-		_ = runtime.Attachments().ObserveNativeTitle(
-			id, pending.request.SessionID, bridge.NormalizePeerName(name),
-		)
-	}
 }
 
 func grokOwnerExecReady(pending *grokPending) bool {
@@ -377,12 +299,7 @@ func refreshDurableGrokAttachment(attachment daemonpkg.ManagedAttachment) (daemo
 func (c *hostCoordinator) cleanupGrokAttachment(_ context.Context, attachment daemonpkg.ManagedAttachment) error {
 	c.mu.Lock()
 	pending := c.grokPending[attachment.ID]
-	durableObserver := c.grokObservers[attachment.ID]
-	delete(c.grokObservers, attachment.ID)
 	c.mu.Unlock()
-	if durableObserver != nil {
-		durableObserver.Close()
-	}
 	if pending == nil {
 		return cleanupDurableGrokAttachment(c.stateRoot, attachment)
 	}
