@@ -82,6 +82,53 @@ func TestParseUnifiedLaneCommandRejectsMissingValuesAndPreservesNativeArguments(
 	}
 }
 
+func TestValidateLaneGroupNamesAcceptsOnlyParentGroupsAndTheirSubgroups(t *testing.T) {
+	parents := []string{"project", "session:host/parent"}
+	if err := validateLaneGroupNames([]string{
+		"project",
+		"project/bugfixing",
+		"session:host/parent/review",
+	}, parents); err != nil {
+		t.Fatalf("valid lane groups: %v", err)
+	}
+
+	for _, group := range []string{"bugfixing", "project:bugfixing", "project-bugfixing"} {
+		err := validateLaneGroupNames([]string{group}, parents)
+		if err == nil {
+			t.Fatalf("group %q was accepted", group)
+		}
+		if !strings.Contains(err.Error(), "project/") || !strings.Contains(err.Error(), "session:host/parent/") {
+			t.Fatalf("group %q error = %q", group, err)
+		}
+	}
+}
+
+func TestAnchorLaneGroupsCompoundsTheParentPrivateNamespace(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := &hostCoordinator{}
+	host := runtime.HostID()
+
+	root := daemonpkg.ManagedAttachment{ID: "parent", Groups: []string{"project"}}
+	rootGroups, err := coordinator.anchorLaneGroups(runtime, []string{"project/bugfixing"}, root, "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rootGroups, []string{"project/bugfixing", "session:" + host + "/parent", "session:" + host + "/parent/lane"}) {
+		t.Fatalf("root lane groups = %v", rootGroups)
+	}
+
+	nested := daemonpkg.ManagedAttachment{
+		ID: "lane", Groups: []string{"session:" + host + "/parent", "session:" + host + "/parent/lane"},
+	}
+	nestedGroups, err := coordinator.anchorLaneGroups(runtime, nil, nested, "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(nestedGroups, []string{"session:" + host + "/parent/lane", "session:" + host + "/parent/lane/child"}) {
+		t.Fatalf("nested lane groups = %v", nestedGroups)
+	}
+}
+
 func TestGrokLaneStartRequiresExplicitBypassBeforeRuntimeAccess(t *testing.T) {
 	coordinator := &hostCoordinator{}
 	parent := daemonpkg.ManagedAttachment{

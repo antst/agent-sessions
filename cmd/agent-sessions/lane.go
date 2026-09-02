@@ -387,6 +387,13 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if err != nil {
 		return nil, errors.New("lane cwd is unavailable")
 	}
+	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateLaneGroupNames(options.groups, parentGroups); err != nil {
+		return nil, err
+	}
 	nativePath, err := laneExecutable(product)
 	if err != nil {
 		return nil, err
@@ -408,7 +415,7 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if err != nil {
 		return nil, err
 	}
-	groups, err = c.anchorLaneGroups(runtime, groups, parent.ID, id)
+	groups, err = c.anchorLaneGroups(runtime, groups, parent, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1765,39 +1772,74 @@ func (c *hostCoordinator) liveLaneNameLocked(runtime *daemonpkg.Runtime, parent 
 	return false
 }
 
-func (c *hostCoordinator) anchorLaneGroups(runtime *daemonpkg.Runtime, groups []string, parentID, laneID string) ([]string, error) {
+func (c *hostCoordinator) anchorLaneGroups(runtime *daemonpkg.Runtime, groups []string, parent daemonpkg.ManagedAttachment, laneID string) ([]string, error) {
+	parentAnchor, err := parentPrivateGroup(runtime, parent)
+	if err != nil {
+		return nil, err
+	}
+	return uniqueStrings(append(groups, parentAnchor, parentAnchor+"/"+laneID)), nil
+}
+
+func parentPrivateGroup(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment) (string, error) {
 	host := strings.TrimSpace(runtime.HostID())
 	if host == "" {
-		return nil, errors.New("daemon host identity is unavailable")
+		return "", errors.New("daemon host identity is unavailable")
 	}
-	parentAnchor := "session:" + host + "/" + parentID
-	if strings.Contains(parentID, "/") {
-		parentAnchor = "session:" + parentID
+	fallback := "session:" + host + "/" + parent.ID
+	if strings.Contains(parent.ID, "/") {
+		fallback = "session:" + parent.ID
 	}
-	return uniqueStrings(append(groups,
-		parentAnchor,
-		"session:"+host+"/"+laneID,
-	)), nil
+	for _, group := range parent.Groups {
+		if group == fallback || strings.HasPrefix(group, "session:") && strings.HasSuffix(group, "/"+parent.ID) {
+			return group, nil
+		}
+	}
+	return fallback, nil
 }
 
 func (c *hostCoordinator) attachmentVisibilityGroups(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) ([]string, error) {
-	host := strings.TrimSpace(runtime.HostID())
-	if host == "" {
-		return nil, errors.New("daemon host identity is unavailable")
-	}
-	anchor := "session:" + host + "/" + attachment.ID
-	if strings.Contains(attachment.ID, "/") {
-		anchor = "session:" + attachment.ID
+	anchor, err := parentPrivateGroup(runtime, attachment)
+	if err != nil {
+		return nil, err
 	}
 	return uniqueStrings(append(append([]string(nil), attachment.Groups...), anchor)), nil
 }
 
 func (c *hostCoordinator) effectiveLaneGroups(runtime *daemonpkg.Runtime, actor *laneActor, parent daemonpkg.ManagedAttachment) ([]string, error) {
+	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateLaneGroupNames(actor.explicitGroups, parentGroups); err != nil {
+		return nil, err
+	}
 	groups := append([]string(nil), actor.explicitGroups...)
 	if actor.inheritGroups {
 		groups = append(groups, parent.Groups...)
 	}
-	return c.anchorLaneGroups(runtime, uniqueStrings(groups), parent.ID, actor.id)
+	return c.anchorLaneGroups(runtime, uniqueStrings(groups), parent, actor.id)
+}
+
+func validateLaneGroupNames(requested, parentGroups []string) error {
+	parents := uniqueStrings(parentGroups)
+	for _, group := range requested {
+		allowed := false
+		for _, parent := range parents {
+			if group == parent || strings.HasPrefix(group, parent+"/") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			prefixes := make([]string, 0, len(parents))
+			for _, parent := range parents {
+				prefixes = append(prefixes, parent+"/")
+			}
+			sort.Strings(prefixes)
+			return fmt.Errorf("lane group %q must equal a parent group or start with one of: %s", group, strings.Join(prefixes, ", "))
+		}
+	}
+	return nil
 }
 
 func laneActorStatus(a *laneActor) map[string]any {
