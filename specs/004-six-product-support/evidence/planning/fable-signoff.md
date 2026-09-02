@@ -11,7 +11,7 @@
 The reviewer read all fresh `specs/004-six-product-support` artifacts in the
 isolated worktree and confirmed the runtime interfaces, durable ledger,
 component authority, sole composition root, truth gates, legacy/federation
-scope, DSH/CodeBuddy constraints, shared test infrastructure, and Linux/macOS
+scope, DSH constraints, shared test infrastructure, and Linux/macOS
 acceptance projection. No blocking edits were requested.
 
 Two non-blocking Phase-A consistency notes were incorporated immediately:

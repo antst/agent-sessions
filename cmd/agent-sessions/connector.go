@@ -14,7 +14,6 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/products/codebuddy"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
@@ -197,7 +196,6 @@ var connectorNativeAdapters = map[string]connectorNativeAdapter{
 	connectorProductCodex:  deliverCodexConnectorMessage,
 	connectorProductClaude: deliverClaudeConnectorMessage,
 	connectorProductQwen:   deliverQwenConnectorMessage,
-	codebuddy.ProductID:    deliverCodeBuddyConnectorMessage,
 }
 
 // Products with a native presence adapter already own the session's one live
@@ -242,10 +240,6 @@ func deliverQwenConnectorMessage(_ context.Context, _ liveSessionReport, _ strin
 	}
 	defer writer.Close()
 	return writer.Submit(body)
-}
-
-func deliverCodeBuddyConnectorMessage(ctx context.Context, report liveSessionReport, _ string, body string) error {
-	return codebuddy.ReplyLivePeer(ctx, report.UUID, body)
 }
 
 func sendClaudeConnectorMessage(socket, messageID, message string) error {

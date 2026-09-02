@@ -34,7 +34,7 @@ func TestProjectionIsCanonicalSortedIsolatedAndSecretFree(t *testing.T) {
 	if err := json.Unmarshal(first, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProjectionSchemaV1 || len(decoded.Products) != 10 || decoded.Products[0].ID != "claude" || decoded.Products[9].ID != "qwen" {
+	if decoded.Schema != ProjectionSchemaV1 || len(decoded.Products) != 9 || decoded.Products[0].ID != "claude" || decoded.Products[8].ID != "qwen" {
 		t.Fatalf("projection = %#v", decoded)
 	}
 	for _, product := range decoded.Products {
@@ -112,10 +112,10 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 			products[0].InstallRoot = "integrations/other"
 		}},
 		{name: "assetless product with registration", mutate: func(products []Descriptor) {
-			products[9].NativeRegistration.Strategy = "unexpected-registration"
+			products[8].NativeRegistration.Strategy = "unexpected-registration"
 		}},
 		{name: "lane-only product with peer alias", mutate: func(products []Descriptor) {
-			products[9].PeerAlias = "dsh-peer"
+			products[8].PeerAlias = "dsh-peer"
 		}},
 		{name: "traversing archive path", mutate: func(products []Descriptor) {
 			products[0].PluginArchivePaths[0] = "../outside"

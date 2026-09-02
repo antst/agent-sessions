@@ -11,7 +11,7 @@ import (
 )
 
 func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
-	wantIDs := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "codebuddy", "dsh"}
+	wantIDs := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "dsh"}
 	products := All()
 	if len(products) != len(wantIDs) {
 		t.Fatalf("product count = %d", len(products))
@@ -64,7 +64,7 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 }
 
 func TestRuntimeInventoryRecognizesAllLiveReconnectProducts(t *testing.T) {
-	want := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "codebuddy", "dsh"}
+	want := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "dsh"}
 	inventory := RuntimeInventory()
 	if len(inventory) != len(want) {
 		t.Fatalf("runtime product count = %d, want %d", len(inventory), len(want))

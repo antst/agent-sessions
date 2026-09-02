@@ -122,8 +122,6 @@ and reported as debt rather than overwritten or removed.
   double loading; do not edit unrelated project config.
 - Pi/OMP: install the Agent Sessions package/extension and skill through the
   supported user-global mechanism; project-local trust remains user-owned.
-- CodeBuddy: install MCP assets and wrapper integration; peer discovery uses no
-  password, while Agent Sessions-owned lane-server passwords remain transient.
 - DSH: pnpm 10.28.1 is required for the exact native CLI/ACP tuple. DSH is
   lane-only and owns its shipped ACP profile; install no Agent Sessions DSH
   profile or plugin.

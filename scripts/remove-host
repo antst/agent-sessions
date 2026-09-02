@@ -79,8 +79,8 @@ resolve_file_link() {
   directory=$(cd -P -- "$(dirname -- "$target")" && pwd) || return 1
   printf '%s/%s\n' "$directory" "$(basename -- "$target")"
 }
-for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer \
-  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane; do
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer \
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane dsh-peer-lane; do
   alias_path="$prefix/bin/$alias"
   if [[ -L "$alias_path" ]]; then
     [[ "$(resolve_file_link "$alias_path")" == "$current/bin/agent-sessions" ]] || {
@@ -273,8 +273,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer \
-  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane; do
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer \
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane dsh-peer-lane; do
   if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
 done
 rm -f -- "$host_root/current"

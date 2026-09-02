@@ -55,7 +55,7 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	if len(required) != 1 || required[0] != "message" {
 		t.Fatalf("non-session requirements were lost: %v", required)
 	}
-	for _, product := range []string{"opencode", "kilo", "pi", "omp", "codebuddy", "dsh"} {
+	for _, product := range []string{"opencode", "kilo", "pi", "omp", "dsh"} {
 		instruction, instructionErr := ProductMCPInstructions(product)
 		productTools, toolsErr := ProductMCPTools(product)
 		if instructionErr != nil || instruction == "" || toolsErr != nil || len(productTools) != 7 {

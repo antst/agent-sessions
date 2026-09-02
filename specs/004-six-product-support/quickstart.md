@@ -32,10 +32,9 @@ Before runtime interfaces freeze, execute the spike harness for:
 S0  historical base decoder proof; protocol-4 uniform rewrite is T125
 S1  Kilo two-instance routing and attach parity
 S2  DSH exact native tuple and headless ACP lane
-S3  CodeBuddy wrapper/registry/socket ownership and restart isolation
 S4  OpenCode/Kilo/Pi/OMP exact parent-session context
 S5  legacy reachability and extract-and-freeze decision
-S6  deterministic ten-product catalog projection
+S6  deterministic product catalog projection
 ```
 
 Expected: one structured evidence file per gate, exact native versions, no
@@ -57,10 +56,9 @@ Use the repository's platform directory spelling on arm64.
 
 Expected:
 
-- ten unique products;
+- nine unique products;
 - peer aliases for interactive products and lane aliases for lane products;
 - integration asset roots only for products that install native integrations;
-- CodeBuddy marked experimental until its Tencent cell passes;
 - exact DSH tuple metadata;
 - no shell-authored product list or projection drift.
 
@@ -107,7 +105,7 @@ After the test, remove only the exact validated temporary home.
 agent-sessions catalog --json
 agent-sessions doctor
 agent-sessions roster
-for product in opencode kilo pi omp codebuddy dsh; do
+for product in opencode kilo pi omp dsh; do
   "${product}-peer-lane" doctor --json </dev/null
 done
 ```
@@ -117,7 +115,6 @@ Expected:
 - no command waits for terminal stdin;
 - native version and required feature keys are explicit;
 - unsupported/absent products are fail-closed;
-- CodeBuddy federation readiness reflects its experimental/account gate;
 - DSH reports the exact native CLI/ACP/pnpm tuple and lane readiness;
 - no peer secret or owned lane-server secret appears.
 
@@ -145,9 +142,6 @@ updated external name, and no keystroke injection.
 Additional mandatory cases:
 
 - Kilo: two attached TUIs, zero cross-delivery.
-- CodeBuddy: daemon restart re-discovers the exact TUI, stale rows and recycled
-  ports fail socket-to-PID/executable/ancestry checks, and peer versus owned
-  authenticated lane endpoints remain distinct.
 - DSH has no peer cell; exercise it in the lane matrix only.
 
 ## 8. Lane Matrix
@@ -219,5 +213,4 @@ done
 Then run the real-product acceptance runner on Linux and a physical macOS
 runner. Generate the release gate manifest and verify its commit/tree, native
 versions, catalog projection, all capability cells, and absence of skipped
-credit. The one allowed pending result is the explicitly labeled CodeBuddy
-Tencent-authenticated model-turn cell.
+credit.

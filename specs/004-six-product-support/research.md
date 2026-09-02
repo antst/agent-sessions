@@ -40,7 +40,6 @@ Build from `origin/main` commit
 | KiloCode | 7.5.6 | Peer, lane, parent and exact isolated full-attach route hands-on | General after acceptance |
 | Pi Coding Agent | 0.84.4 | Peer, lane, parent hands-on | General after acceptance |
 | Oh My Pi | 18.0.11 | Peer, lane, parent hands-on | General after acceptance |
-| CodeBuddy | 2.143.0 | Protocol, peer wake, parent hands-on; real model reply account-gated | Experimental until Tencent cell |
 | DeepSeek Harness | exact 0.1.2-alpha.3 tuple | ACP and credentialed success path hands-on | General only for exact tuple |
 
 [D] Doctor uses both a version policy and a feature probe. A matching version
@@ -61,7 +60,7 @@ compatible. DSH is an exact tuple rather than a semver range.
   control protocol and is unsuitable for long-lived product components.
 - [F] the federation hub filters capabilities through the closed product
   catalog, though the existing wire already carries product IDs and capability
-  strings needed by all six products.
+  strings needed by every product.
 - [F] live unified-daemon code consumes a small subset of exports colocated in
   a much larger unreachable legacy bridge/federator implementation.
 
@@ -127,7 +126,7 @@ proves idempotent replay for the exact operation.
 
 ### Rationale
 
-- [F] Pi/OMP, OpenCode/Kilo, and CodeBuddy expose genuine mid-turn input.
+- [F] Pi/OMP and OpenCode/Kilo expose genuine mid-turn input.
 - [F] DSH ACP rejects a second prompt while busy; the durable queue is the
   correct fallback.
 - [F] the current volatile queue is already a restart-loss bug for the original
@@ -189,8 +188,6 @@ Share only transport mechanics; keep product semantics typed:
 4. Typed `pifamily` RPC above `structuredprocess`; typed DSH ACP separately.
 5. Typed `opencodefamily` shared operations above `productserver`; explicit
    OpenCode/Kilo differences remain in product packages.
-6. Typed CodeBuddy jobs/workers/reply client above `productserver`; no universal
-   route DSL.
 
 ### Rationale
 
@@ -230,21 +227,6 @@ make safety review harder.
 - [F] Pi lacks a native approval prompt and therefore defaults to a restricted
   tool allowlist; OMP maps its explicit approval modes.
 
-### CodeBuddy
-
-- [F] each interactive worker exposes a documented per-session HTTP endpoint;
-  reply wakes an idle TUI. Its registry exposes exact session/PID/URL but no
-  password; the endpoint uses constant `X-CodeBuddy-Request: 1` CSRF gating.
-- [D] the managed wrapper adopts the exact TUI through registry plus fresh
-  socket-to-PID, executable, start, and ancestry evidence. The typed peer
-  client re-discovers and re-attests after daemon restart; no sidecar exists.
-- [D] an Agent Sessions-owned CodeBuddy lane server is a distinct surface: the
-  daemon enables password authentication and holds that generated secret only
-  in the supervised runtime client.
-- [D] build the complete adapter and offline acceptance; keep support state and
-  federation advertisement experimental until the Tencent-authenticated
-  model-turn cell passes.
-
 ### DeepSeek Harness
 
 - [F] the supported combination is the exact 0.1.2-alpha.3 CLI/ACP tuple with
@@ -270,7 +252,7 @@ encryption are separate security work.
 
 ### Rationale
 
-- [F] all six products fit existing `Product` and `Capabilities` wire fields;
+- [F] all products fit existing `Product` and `Capabilities` wire fields;
   no additive struct field is required.
 - [F] the federation path does not use `DisallowUnknownFields`.
 - [D] this is an unreleased greenfield boundary, so exact version rejection is
@@ -322,7 +304,7 @@ acceptance contract.
 ### Rationale
 
 This makes legacy disposition explicit without placing an unbounded 30–40k
-line deletion on the critical path. No dead code blocks the six products; its
+line deletion on the critical path. No dead code blocks the products; its
 co-location with live helpers is the relevant problem.
 
 ## 12. Truth Spikes Before Interface Freeze
@@ -335,10 +317,9 @@ mock model providers are allowed, mocked product protocols are not.
 | S0 Base/federation | historical base equals 679fe9d and decoder accepts additive fields; the protocol-3 compatibility decision is superseded by owner-authorized T125 uniform protocol 4 |
 | S1 Kilo | PASS: two isolated authenticated serve+full-attach pairs receive zero cross-delivery and pass `/tui/*`, busy queue, events, background-process attribution, MCP, rename/resume; `--mini` is not peer-messageable |
 | S2 DSH | PASS for the exact native tuple and ACP lane; peer mode removed after genuine terminal front ends proved incompatible with the pinned product exports |
-| S3 CodeBuddy | RED reconciled: peer endpoint has no password/component/sidecar; wrapper Adopt/Refresh re-attests registry claim through socket owner and process ancestry; lane endpoint is separately AS-owned and password-authenticated; Linux negative isolation cells pass, physical macOS socket-owner cell remains |
 | S4 Component identity | PASS: OpenCode/Kilo `shell.env` and Pi/OMP extension/RPC/tool contexts match authoritative native IDs; one component-v1 vocabulary works without weakening evidence; inert bootstrap and secret redaction verified |
 | S5 Legacy | PASS: three legacy entrypoints are unreachable, 32 bridge exports remain live, no production file is independently deletable; extract-and-freeze with a shrinking no-new-import baseline |
-| S6 Catalog projection | PASS: deterministic ten-product projection digest `9a0b001b5b92d1c0123d7ea1c62dee3ead70f545c07117cc95f1096a7fea1702`; one token grammar; exact DSH tuple; separate CodeBuddy peer/lane surfaces; drift rejected |
+| S6 Catalog projection | PASS: deterministic product projection; one token grammar; exact DSH tuple; drift rejected |
 
 ## 13. Verification and Ownership
 
@@ -363,5 +344,3 @@ mock model providers are allowed, mocked product protocols are not.
 - Full deletion of the entangled legacy bridge/federator tree; S5 requires
   focused live-helper extraction and freezes new imports in this milestone.
 - Copilot and other surveyed lane-only or conditional products.
-- CodeBuddy's Tencent-authenticated GA model-turn credit until an account is
-  available; this does not excuse any implementation or offline protocol cell.

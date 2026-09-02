@@ -347,8 +347,7 @@ type ProbeReport struct {
 ```
 
 Federation advertisement requires `ready` at the product's declared feature
-depth. CodeBuddy additionally requires its catalog support state to permit
-advertisement.
+depth.
 
 ## 7. Host Dependencies
 

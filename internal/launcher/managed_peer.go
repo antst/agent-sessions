@@ -1,8 +1,6 @@
 package launcher
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,13 +59,13 @@ func RunManagedPeer(product string, args []string) error {
 	}
 	root := ""
 	switch descriptor.NativeRegistration.Strategy {
-	case "pi-package", "omp-extension", "codebuddy-wrapper-plugin-mcp":
+	case "pi-package", "omp-extension":
 		root, err = managedIntegrationRoot()
 		if err != nil {
 			return err
 		}
 	}
-	plan, err := buildManagedPeerPlan(product, args, os.Environ(), root, path, newManagedSessionID)
+	plan, err := buildManagedPeerPlan(product, args, os.Environ(), root, path)
 	if err != nil {
 		return err
 	}
@@ -216,7 +214,6 @@ func buildManagedPeerPlan(
 	product string,
 	args, environment []string,
 	pluginRoot, executable string,
-	idSource func() (string, error),
 ) (managedPeerPlan, error) {
 	descriptor, ok := productcatalog.ByID(product)
 	if !ok || !descriptor.Has(productcatalog.CapabilityInteractive) {
@@ -250,26 +247,6 @@ func buildManagedPeerPlan(
 		forwarded = append([]string{"--extension", integrationAsset(pluginRoot, descriptor.ID, "agent-sessions.mjs")}, forwarded...)
 	case "omp-extension":
 		forwarded = append([]string{"--extension=" + integrationAsset(pluginRoot, descriptor.ID, "agent-sessions.mjs")}, forwarded...)
-	case "codebuddy-wrapper-plugin-mcp":
-		if hasOption(forwarded, "--mcp-config") || hasOption(forwarded, "--strict-mcp-config") {
-			return managedPeerPlan{}, usageError("CodeBuddy MCP routing is owned by the managed wrapper")
-		}
-		sessionID, ok, err := optionValue(forwarded, "--session-id")
-		if err != nil {
-			return managedPeerPlan{}, err
-		}
-		if !ok {
-			if idSource == nil {
-				return managedPeerPlan{}, errors.New("CodeBuddy session id source is unavailable")
-			}
-			sessionID, err = idSource()
-			if err != nil {
-				return managedPeerPlan{}, err
-			}
-			forwarded = append(forwarded, "--session-id", sessionID)
-		}
-		environment = envutil.Set(environment, peerSessionIDEnv, sessionID)
-		forwarded = append(forwarded, "--strict-mcp-config", "--mcp-config", integrationAsset(pluginRoot, descriptor.ID, "mcp.json"))
 	default:
 		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
 	}
@@ -396,20 +373,4 @@ func hasOption(arguments []string, name string) bool {
 		}
 	}
 	return false
-}
-
-func newManagedSessionID() (string, error) {
-	var body [16]byte
-	if _, err := rand.Read(body[:]); err != nil {
-		return "", err
-	}
-	body[6] = (body[6] & 0x0f) | 0x40
-	body[8] = (body[8] & 0x3f) | 0x80
-	return strings.Join([]string{
-		hex.EncodeToString(body[0:4]),
-		hex.EncodeToString(body[4:6]),
-		hex.EncodeToString(body[6:8]),
-		hex.EncodeToString(body[8:10]),
-		hex.EncodeToString(body[10:16]),
-	}, "-"), nil
 }

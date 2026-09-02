@@ -25,9 +25,8 @@ freeze. These are evidence tasks, not production implementation.
 
 - [x] T001 Verify isolated branch base/tree and record S0 evidence in `specs/004-six-product-support/evidence/phase0/S0-base.json`
 - [x] T002 [P] Run the Kilo two-server/two-attach exact-routing and attach-parity spike in `scripts/spikes/six-product/kilo/` and record `specs/004-six-product-support/evidence/phase0/S1-kilo.json`
-- [x] T004 [P] Run the CodeBuddy managed-wrapper/registry/socket-to-PID daemon-restart, stale-row/port-reuse, cross-target, and no-peer-secret spike in `scripts/spikes/six-product/codebuddy/` and record `specs/004-six-product-support/evidence/phase0/S3-codebuddy.json`
 - [x] T006 [P] Run static reachability/call inventory for live bridge/federator exports in `scripts/spikes/six-product/legacy/` and record the extract-and-freeze decision in `specs/004-six-product-support/evidence/phase0/S5-legacy.json`
-- [x] T007 [P] Prototype deterministic staged-binary ten-product catalog/install projection in `scripts/spikes/six-product/catalog/` and record `specs/004-six-product-support/evidence/phase0/S6-catalog.json`
+- [x] T007 [P] Prototype deterministic staged-binary product catalog/install projection in `scripts/spikes/six-product/catalog/`
 - [x] T008 Prove the historical protocol-3 decoder behavior and record the original opaque-capability/trusted-network decision in `specs/004-six-product-support/evidence/phase0/S0-federation.json` (superseded for the greenfield live protocol by T125)
 - [x] T009 Reconcile all spike outcomes into `specs/004-six-product-support/{spec.md,research.md,data-model.md,plan.md,contracts/}` before source interfaces freeze
 - [x] T010 Obtain visible `fable-architect` sign-off on S0-S6 evidence and reconciled planning artifacts in `specs/004-six-product-support/evidence/phase0/review.md`
@@ -96,13 +95,11 @@ restart the daemon while preserving exact native identity.
 
 - [x] T038 [P] [US1] Write OpenCode/Kilo peer component, isolated full-attach exact-routing, `--mini` rejection, rename, resume, and reconnect tests in `internal/products/{opencode,kilocode,opencodefamily}/*_test.go`
 - [x] T039 [P] [US1] Write Pi/OMP extension identity, idle-wake, busy-steer, rename, resume, and reconnect tests in `internal/products/{pi,omp,pifamily}/*_test.go`
-- [x] T040 [P] [US1] Write CodeBuddy wrapper/registry/socket-to-PID correlation, reply-wake, CSRF, stale-row/port-reuse, cross-target, and daemon-restart tests in `internal/products/codebuddy/*_test.go`
 
 ### Implementation for User Story 1
 
 - [x] T042 [P] [US1] Implement verified common OpenCode/Kilo component/server peer mechanics in `internal/products/opencodefamily/` and product-specific peer drivers in `internal/products/{opencode,kilocode}/`
 - [x] T043 [P] [US1] Implement the shared Pi/OMP component extension core and peer drivers with a typed quirk table in `internal/products/pifamily/`, `internal/products/{pi,omp}/`, and `integrations/{pi,omp}/`
-- [x] T044 [P] [US1] Implement the CodeBuddy typed product-owned peer endpoint client and wrapper-adopt registry/process/socket evidence in `internal/products/codebuddy/` and `integrations/codebuddy/`
 **Checkpoint**: Interactive peer drivers and integration components pass their
 product-owned contract suites and are ready for serialized host composition.
 
@@ -121,18 +118,16 @@ exact identity or explicit ambiguity.
 
 - [x] T046 [P] [US2] Write OpenCode/Kilo lane HTTP/SSE/session/permission/recovery tests in `internal/products/{opencode,kilocode,opencodefamily}/*_lane_test.go`
 - [x] T047 [P] [US2] Write Pi/OMP RPC ready/turn/steer/settled/abort/resume tests in `internal/products/{pi,omp,pifamily}/*_lane_test.go`
-- [x] T048 [P] [US2] Write CodeBuddy jobs/reply/stream/stop/respawn/archive lane tests in `internal/products/codebuddy/*_lane_test.go`
 - [x] T049 [P] [US2] Write DSH ACP new/resume/busy-queue/cancel-notification/stop/lease tests in `internal/products/dsh/*_lane_test.go`
 
 ### Implementation for User Story 2
 
 - [x] T050 [P] [US2] Implement OpenCode and Kilo lane drivers above `internal/productserver` in `internal/products/{opencodefamily,opencode,kilocode}/`
 - [x] T051 [P] [US2] Implement shared Pi/OMP JSONL RPC lane client and product drivers above `internal/structuredprocess` in `internal/products/{pifamily,pi,omp}/`
-- [x] T052 [P] [US2] Implement CodeBuddy lane lifecycle above its typed HTTP/event client in `internal/products/codebuddy/`
 - [x] T053 [P] [US2] Implement DSH ACP lane lifecycle, exact tuple handling, and lease use above `internal/structuredprocess` in `internal/products/dsh/`
-- [x] T054 [US2] Add fail-closed product-specific permission mappers and unsupported-policy tests for all six in `internal/products/*/permission.go` and `internal/products/*/permission_test.go`
+- [x] T054 [US2] Add fail-closed product-specific permission mappers and unsupported-policy tests in `internal/products/*/permission.go` and `internal/products/*/permission_test.go`
 
-**Checkpoint**: All six lane drivers pass typed native lifecycle suites and are
+**Checkpoint**: All five new lane drivers pass typed native lifecycle suites and are
 ready for shared ledger/coordinator/federation composition.
 
 ---
@@ -149,13 +144,11 @@ lane and reject a forged native-session claim.
 
 - [x] T055 [P] [US3] Write OpenCode/Kilo registered-tool and exact parent-session attestation tests in `internal/products/{opencode,kilocode,opencodefamily}/*_parent_test.go`
 - [x] T056 [P] [US3] Write Pi/OMP registered-tool, extension env, ancestry, and false-ID tests in `internal/products/{pi,omp,pifamily}/*_parent_test.go`
-- [x] T057 [P] [US3] Write CodeBuddy per-session MCP/tool ancestry and terminal-notice tests in `internal/products/codebuddy/*_parent_test.go`
 
 ### Implementation for User Story 3
 
 - [x] T059 [P] [US3] Implement OpenCode/Kilo parent tools and exact component/session attesters in `internal/products/{opencodefamily,opencode,kilocode}/` and `integrations/{opencode,kilocode}/`
 - [x] T060 [P] [US3] Implement Pi/OMP registered parent tools, commands, and exact session attesters in `internal/products/{pifamily,pi,omp}/` and `integrations/{pi,omp}/`
-- [x] T061 [P] [US3] Implement CodeBuddy parent connector/tool injection and attester in `internal/products/codebuddy/` and `integrations/codebuddy/`
 **Checkpoint**: Interactive parent drivers/tools pass their product suites and are
 ready for serialized host/tool composition.
 
@@ -167,8 +160,8 @@ ready for serialized host/tool composition.
 replace central switches, add aliases and federation projection, and prove the
 three P1 user stories end to end.
 
-- [ ] T063 [US1] Add all six final descriptors and complete runtime products to the sole composition root and connect the pre-agreed component broker/coordinator hook in `internal/productcatalog/catalog.go` and `cmd/agent-sessions/{product_registry.go,codex_host.go}`
-- [ ] T064 [US1] Replace product-name message delivery/rename dispatch with runtime registry drivers in `cmd/agent-sessions/{messaging.go,codex_host.go}` and add ten-product dispatch tests
+- [ ] T063 [US1] Add all final descriptors and complete runtime products to the sole composition root and connect the pre-agreed component broker/coordinator hook in `internal/productcatalog/catalog.go` and `cmd/agent-sessions/{product_registry.go,codex_host.go}`
+- [ ] T064 [US1] Replace product-name message delivery/rename dispatch with runtime registry drivers in `cmd/agent-sessions/{messaging.go,codex_host.go}` and add product dispatch tests
 - [ ] T065 [US2] Replace central product lane switches with `LaneDriver` dispatch, `Steer` fallback, and ledger execution in `cmd/agent-sessions/lane.go` and `cmd/agent-sessions/lane_test.go`
 - [ ] T066 [US2] Implement six doctor probes' central support-state/federation readiness projection in `internal/diagnostics/` and `cmd/agent-sessions/admin.go`
 - [ ] T067 [US1] Implement six managed peer aliases through catalog-driven launcher dispatch in `internal/launcher/{product.go,peer.go}` and add alias/help tests
@@ -182,21 +175,20 @@ three P1 user stories end to end.
 - [ ] T075 [US1] Verify no pluginless/bare launch gains ambient management and close the US1 checkpoint in `specs/004-six-product-support/evidence/acceptance/peer-gate.md`
 - [ ] T076 [US2] Run the six-product local lane lifecycle/crash/receipt matrix and record `specs/004-six-product-support/evidence/acceptance/local-lanes.json`
 - [ ] T077 [US2] Run the six-product federated lane matrix across two hosts and record `specs/004-six-product-support/evidence/acceptance/remote-lanes.json`
-- [ ] T078 [US2] Verify collection/archive/cleanup debt and zero owned residue for all ten products in `specs/004-six-product-support/evidence/acceptance/lane-gate.md`
+- [ ] T078 [US2] Verify collection/archive/cleanup debt and zero owned residue for all nine products in `specs/004-six-product-support/evidence/acceptance/lane-gate.md`
 - [ ] T079 [US3] Run each new product's local parent list/send/lane/notice matrix and record `specs/004-six-product-support/evidence/acceptance/local-parents.json`
 - [ ] T080 [US3] Run same-product and cross-product local/federated child lanes from every new parent and record `specs/004-six-product-support/evidence/acceptance/parent-composition.json`
 - [ ] T081 [US3] Close the parent authority/notice/skill checkpoint in `specs/004-six-product-support/evidence/acceptance/parent-gate.md`
 
 **Checkpoint**: US1, US2, and US3 are independently demonstrable through the
-real host, MCP, CLI, and federation surfaces. CodeBuddy's external account cell
-is the only permitted pending model result.
+real host, MCP, CLI, and federation surfaces.
 
 ---
 
 ## Phase 7: User Story 4 - Install, Diagnose, and Upgrade (Priority: P2)
 
 **Goal**: One transactional catalog-derived install/release path manages all
-ten optional integrations consistently on Linux and macOS.
+nine optional integrations consistently on Linux and macOS.
 
 **Independent Test**: Install, update, rollback, and remove against isolated
 homes containing different product subsets; compare catalog, aliases, native
@@ -207,7 +199,6 @@ registrations, doctor, roster, and release evidence.
 - [ ] T082 [US4] Write install-strategy registry, ownership-receipt, drift, rollback, and user-modification tests in `internal/releaseinstall/{registry_test.go,projection_test.go,transaction_test.go}`
 - [ ] T083 [P] [US4] Write OpenCode/Kilo native integration install/remove fixture tests in `internal/releaseinstall/opencodefamily_test.go`
 - [ ] T084 [P] [US4] Write Pi/OMP global package/extension/skill install/remove fixture tests in `internal/releaseinstall/pifamily_test.go`
-- [ ] T085 [P] [US4] Write CodeBuddy integration install/remove, no-peer-secret, and lane-server-secret non-persistence tests in `internal/releaseinstall/codebuddy_test.go`
 
 ### Implementation for User Story 4
 
@@ -216,8 +207,7 @@ registrations, doctor, roster, and release evidence.
 - [ ] T089 [US4] Refactor `scripts/install-host` and `scripts/remove-host` to execute typed projection plans transactionally and preserve exact prior integrations
 - [ ] T090 [P] [US4] Implement OpenCode/Kilo install strategies and packaged assets in `internal/releaseinstall/opencodefamily.go` and `integrations/{opencode,kilocode}/`
 - [ ] T091 [P] [US4] Implement Pi/OMP install strategies and packaged assets in `internal/releaseinstall/pifamily.go` and `integrations/{pi,omp}/`
-- [ ] T092 [P] [US4] Implement CodeBuddy install strategy and experimental readiness projection in `internal/releaseinstall/codebuddy.go` and `integrations/codebuddy/`
-- [ ] T094 [US4] Add ten-product doctor/roster/catalog JSON and secret-redaction operator tests in `internal/daemon/admin_test.go`, `internal/diagnostics/`, and `cmd/agent-sessions/admin_test.go`
+- [ ] T094 [US4] Add nine-product doctor/roster/catalog JSON and secret-redaction operator tests in `internal/daemon/admin_test.go`, `internal/diagnostics/`, and `cmd/agent-sessions/admin_test.go`
 - [ ] T095 [US4] Run isolated install/update/failure-rollback/remove transactions on Linux and macOS and record `specs/004-six-product-support/evidence/acceptance/install-transactions.json`
 - [ ] T096 [US4] Close catalog/projection/archive/prebuilt-install drift gate in `specs/004-six-product-support/evidence/acceptance/install-gate.md`
 
@@ -241,10 +231,9 @@ durable/native state after restart.
 - [ ] T098 [US5] Run 100-iteration receipt/spool crash matrix and close every lost/duplicate/ambiguity path in `internal/daemon/lane_input_recovery_test.go`
 - [ ] T099 [P] [US5] Run component daemon-restart, component-exit, PID-reuse, sequence-gap, and delivery-replay matrix in `internal/component/recovery_test.go`
 - [ ] T100 [P] [US5] Run structured-child and product-server crash/reconnect/exit/redirect matrix in `internal/{structuredprocess,productserver}/*_recovery_test.go`
-- [ ] T101 [P] [US5] Run CodeBuddy daemon/TUI/owned-lane-server crash, stale-registry, PID-reuse, and port-recycle permutations in `internal/products/codebuddy/recovery_test.go`
 - [ ] T102 [P] [US5] Run DSH dual-owner/lease/crash/cancel/sandbox permutations and assert exact lease debt in `internal/products/dsh/recovery_test.go`
 - [ ] T103 [US5] Add exact spool/component/server/process cleanup and unrelated-resource preservation tests in `internal/acceptance/six_product_cleanup_test.go`
-- [ ] T104 [US5] Run interrupted install/update/remove recovery for all six strategies in `internal/releaseinstall/six_product_recovery_test.go`
+- [ ] T104 [US5] Run interrupted install/update/remove recovery for all product strategies in `internal/releaseinstall/six_product_recovery_test.go`
 - [ ] T105 [US5] Run hub/destination disconnect and retry/dedup recovery for every new lane capability in `internal/federation/six_product_recovery_test.go`
 - [ ] T106 [US5] Expose receipt ambiguity, component unmanaged state, lease debt, and recovery diagnostics in `cmd/agent-sessions/{admin.go,lane.go}` with stable JSON tests
 - [ ] T107 [US5] Record full Linux crash/recovery/nonmutation evidence in `specs/004-six-product-support/evidence/acceptance/linux-recovery.json`
@@ -261,10 +250,10 @@ resource converges or remains explicit debt.
 to reproducible Linux/macOS evidence.
 
 - [ ] T109 [P] Rewrite user-facing overview, install, systemd/launchd, hub, and first-run guidance for ten products in `README.md` and `docs/INSTALL.md`
-- [ ] T110 [P] Add concise product setup/version/permission/failure guides in `docs/products/{opencode,kilocode,pi,omp,codebuddy,dsh}.md`
+- [ ] T110 [P] Add concise product setup/version/permission/failure guides in `docs/products/{opencode,kilocode,pi,omp,dsh}.md`
 - [ ] T111 [P] Update cross-host, trusted-network security, operator roster/doctor, component, and lane CLI/MCP guidance in `docs/federation/`, `docs/SECURITY.md`, and `docs/OPERATIONS.md`
 - [ ] T112 Expand the generated real-product acceptance runner/matrix for every declared capability in `scripts/realproducts/`, `scripts/test-real-products`, and `internal/releaseevidence/acceptance_products.go`
-- [ ] T113 Extend release gate manifest/evidence schema with catalog digest, six native versions/tuples, component/ledger/federation cells, and explicit CodeBuddy pending credit in `scripts/release-gate-manifest` and `internal/releaseevidence/`
+- [ ] T113 Extend release gate manifest/evidence schema with catalog digest, native versions/tuples, component/ledger/federation cells in `scripts/release-gate-manifest` and `internal/releaseevidence/`
 - [ ] T114 Run DRY/static audit proving no duplicate product arrays, unauthorized switches, init registration, new legacy imports, endpoint DSL, or secret-bearing durable refs; record `specs/004-six-product-support/evidence/acceptance/dry-audit.md`
 - [ ] T115 Run repository-managed lint and complete normal suite, fixing root causes without weakening tests; record exact logs under `specs/004-six-product-support/evidence/acceptance/gates/`
 - [ ] T116 Run race, vet, and all four supported builds; record exact logs and tool versions under `specs/004-six-product-support/evidence/acceptance/gates/`
@@ -339,7 +328,6 @@ serialized by the integrator.
 ```text
 Agent A: T002 Kilo spike
 Agent B: T003 DSH spike
-Agent C: T004 CodeBuddy spike
 Agent E: T006 legacy audit
 Agent F: T007 catalog projection spike
 ```
@@ -349,7 +337,6 @@ Agent F: T007 catalog projection spike
 ```text
 Agent A: OpenCode + Kilo stream (T038/T042/T046/T050/T055/T059)
 Agent B: Pi + OMP stream (T039/T043/T047/T051/T056/T060)
-Agent C: CodeBuddy stream (T040/T044/T048/T052/T057/T061)
 Agent D: DSH stream (T041/T045/T049/T053/T058/T062)
 Root integrator: central-only tasks after stream gates
 ```

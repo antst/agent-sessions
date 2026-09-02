@@ -8,8 +8,8 @@ binaries=(
   agent-sessions-hub
 )
 host_aliases=(
-  codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer
-  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane
+  codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane dsh-peer-lane
 )
 plugins=(
   'codex|.agents,.codex-plugin,hooks,scripts,skills'
@@ -20,7 +20,6 @@ plugins=(
   'kilo|integrations/kilo'
   'pi|integrations/pi'
   'omp|integrations/omp'
-  'codebuddy|integrations/codebuddy'
 )
 package_paths=(
   .agents .claude-plugin .codex-plugin

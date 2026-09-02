@@ -12,7 +12,6 @@ import (
 
 func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 	root := t.TempDir()
-	idSource := func() (string, error) { return "00000000-0000-4000-8000-000000000123", nil }
 	tests := []struct {
 		product string
 		wantArg []string
@@ -21,16 +20,12 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 		{product: "kilo", wantArg: []string{"--model", "native-model"}},
 		{product: "pi", wantArg: []string{"--extension", filepath.Join(root, "integrations", "pi", "agent-sessions.mjs"), "--model", "native-model", "--approve"}},
 		{product: "omp", wantArg: []string{"--extension=" + filepath.Join(root, "integrations", "omp", "agent-sessions.mjs"), "--model", "native-model"}},
-		{product: "codebuddy", wantArg: []string{
-			"--model", "native-model", "--session-id", "00000000-0000-4000-8000-000000000123",
-			"--strict-mcp-config", "--mcp-config", filepath.Join(root, "integrations", "codebuddy", "mcp.json"),
-		}},
 	}
 	for _, test := range tests {
 		t.Run(test.product, func(t *testing.T) {
 			plan, err := buildManagedPeerPlan(test.product, []string{
 				"--group", "project", "--peer-name", "reviewer", "--model", "native-model",
-			}, []string{"PATH=/bin"}, root, "/native/"+test.product, idSource)
+			}, []string{"PATH=/bin"}, root, "/native/"+test.product)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -49,9 +44,6 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 			var groups []string
 			if err := json.Unmarshal([]byte(environmentValue(plan.environment, peerGroupsEnv)), &groups); err != nil || !reflect.DeepEqual(groups, []string{"project"}) {
 				t.Fatalf("AGENT_SESSIONS_GROUPS = %#v, %v", groups, err)
-			}
-			if test.product == "codebuddy" && environmentValue(plan.environment, peerSessionIDEnv) != "00000000-0000-4000-8000-000000000123" {
-				t.Fatalf("CodeBuddy session id was not shared with its MCP connector")
 			}
 		})
 	}
@@ -95,7 +87,7 @@ func TestManagedLaunchPolicyComesOnlyFromTheProductDescriptor(t *testing.T) {
 func TestGlobalPluginPeersHaveNoLaunchTimePayloadDependency(t *testing.T) {
 	for _, product := range []string{"opencode", "kilo"} {
 		t.Run(product, func(t *testing.T) {
-			plan, err := buildManagedPeerPlan(product, []string{"--yolo", "--model", "native-model"}, nil, "", "/native/"+product, nil)
+			plan, err := buildManagedPeerPlan(product, []string{"--yolo", "--model", "native-model"}, nil, "", "/native/"+product)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -108,7 +100,6 @@ func TestGlobalPluginPeersHaveNoLaunchTimePayloadDependency(t *testing.T) {
 
 func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 	root := t.TempDir()
-	idSource := func() (string, error) { return "new-id", nil }
 	for _, test := range []struct {
 		product string
 		args    []string
@@ -117,10 +108,9 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 		{product: "kilo", args: []string{"--session", "ses_exact"}},
 		{product: "pi", args: []string{"--session", "native-exact"}},
 		{product: "omp", args: []string{"--resume", "native-exact"}},
-		{product: "codebuddy", args: []string{"--session-id", "native-exact"}},
 	} {
 		t.Run(test.product, func(t *testing.T) {
-			plan, err := buildManagedPeerPlan(test.product, test.args, nil, root, "/native/"+test.product, idSource)
+			plan, err := buildManagedPeerPlan(test.product, test.args, nil, root, "/native/"+test.product)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,9 +120,6 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 					t.Fatalf("native selector %q was not preserved in %#v", value, plan.args)
 				}
 			}
-			if test.product == "codebuddy" && strings.Count(joined, "--session-id") != 1 {
-				t.Fatalf("CodeBuddy exact selector was duplicated: %#v", plan.args)
-			}
 			if (test.product == "opencode" || test.product == "kilo") && environmentValue(plan.environment, peerSessionIDEnv) != "ses_exact" {
 				t.Fatalf("%s exact resume id was not shared with its native plugin", test.product)
 			}
@@ -141,7 +128,7 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 }
 
 func TestManagedPeerRejectsLaneOnlyProduct(t *testing.T) {
-	if _, err := buildManagedPeerPlan("dsh", nil, nil, "", "/native/dsh", nil); err == nil || !strings.Contains(err.Error(), "unsupported managed peer") {
+	if _, err := buildManagedPeerPlan("dsh", nil, nil, "", "/native/dsh"); err == nil || !strings.Contains(err.Error(), "unsupported managed peer") {
 		t.Fatalf("DSH peer plan error = %v", err)
 	}
 }

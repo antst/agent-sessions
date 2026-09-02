@@ -68,11 +68,6 @@ cannot be `general` unless all applicable cells pass on both Linux and macOS.
   `PI_SESSION_ID` cross-check, restricted default tool allowlist.
 - OMP: native interjection envelope retains Agent Sessions framing, extension
   env identity, foreground/async spawn behavior, explicit approval mapping.
-- CodeBuddy: product-owned peer registry plus socket-to-PID/executable/ancestry
-  correlation, constant-CSRF-header semantics, stale-row/port-reuse rejection,
-  cross-target isolation, daemon restart re-discovery; separately, authenticated
-  Agent Sessions-owned lane-server handling and offline OpenAPI drift. Tencent
-  model path is the only permitted pending cell and keeps support experimental.
 - DSH lane: exact native tuple/pnpm, ACP new and exact resume, real turn,
   interrupt, cancel-as-notification, archive, and truthful busy rejection.
 
@@ -97,5 +92,4 @@ Every candidate commit runs:
 - Fixed sleeps without state predicates, skipped assertions, loose process
   matching, TTY scraping, or transcript-only identity do not earn credit.
 - A red first genuine cell stops wider scope until root cause is classified.
-- CodeBuddy's account-gated cell is reported as pending, never as pass.
 - DSH is credited only for the exact installed tuple recorded by evidence.

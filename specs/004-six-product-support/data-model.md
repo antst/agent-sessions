@@ -10,7 +10,7 @@ Data-only record in `internal/productcatalog`.
 
 | Field | Meaning / validation |
 |---|---|
-| `ID` | Unique lower-case simple identifier (`opencode`, `kilo`, `pi`, `omp`, `codebuddy`, `dsh`) |
+| `ID` | Unique lower-case simple identifier (`opencode`, `kilo`, `pi`, `omp`, `dsh`) |
 | `Label` | User-facing product label |
 | `NativeExecutable` | Default native executable name |
 | `PeerAlias`, `LaneAlias` | Unique managed command aliases |

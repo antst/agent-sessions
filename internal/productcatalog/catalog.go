@@ -143,14 +143,6 @@ var descriptors = [...]Descriptor{
 	), "--auto"),
 	piDescriptor(),
 	ompDescriptor(),
-	newProductDescriptor(
-		"codebuddy", "CodeBuddy", "codebuddy", "2.143.0", "codebuddy-wrapper-plugin-mcp",
-		"presence", "presence", "codebuddy-owned-http", "codebuddy",
-		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
-		[]string{"job-events", "native-registry", "parent", "session-reply"},
-		[]string{"--model", "-m", "--session-id", "--mcp-config", "--permission-mode"},
-		[]string{"-m"},
-	),
 	dshDescriptor(),
 }
 

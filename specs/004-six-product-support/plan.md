@@ -2,12 +2,12 @@
 
 **Branch**: `feature/six-product-support` | **Date**: 2026-09-01 | **Spec**: [spec.md](spec.md)
 
-**Input**: Fully symmetric, maximally DRY support for OpenCode, KiloCode, Pi,
-OMP, CodeBuddy, and DSH on the released v0.3.0 unified-daemon base.
+**Input**: Maximally DRY support for OpenCode, KiloCode, Pi, OMP, and DSH on
+the released v0.3.0 unified-daemon base.
 
 ## Summary
 
-Add six products without creating six more lifecycle frameworks. The feature
+Add the new products without creating more lifecycle frameworks. The feature
 first removes closed-four-product assumptions and strengthens durable busy-input
 handling. It then builds three shared transport mechanisms—a managed component
 stream, a supervised structured child, and a safe authenticated loopback
@@ -29,7 +29,7 @@ the native product loaders
 
 **Primary Dependencies**: Go standard library, `golang.org/x/sys`, existing
 JSON schema/canonicalization packages; native documented OpenCode/Kilo HTTP+SSE,
-Pi/OMP JSONL RPC, CodeBuddy OpenAPI/HTTP, and DSH ACP APIs
+Pi/OMP JSONL RPC, and DSH ACP APIs
 
 **Storage**: Existing bounded atomic daemon JSON catalog plus a new private
 bounded `0700`/`0600` lane-input content spool; native products retain their own
@@ -52,11 +52,11 @@ roster and existing-product latency remain within current gates
 
 **Constraints**: Exact identity, no TTY scraping, no credential persistence,
 no permission widening, durable accepted input, fail-closed recovery,
-transactional install/remove, trusted-network uniform protocol-4 federation, same-UID
-local trust, CodeBuddy model GA cell account-gated, DSH exact alpha tuple
+transactional install/remove, trusted-network uniform protocol-4 federation,
+same-UID local trust, and the DSH exact alpha tuple
 
-**Scale/Scope**: Ten supported products, six new peer aliases, six lane aliases,
-six local/federated lane capabilities, five in-process component shapes,
+**Scale/Scope**: Nine supported products, four new peer aliases, five new lane
+aliases, five local/federated lane capabilities, four in-process component shapes,
 three shared transport engines, one catalog and one runtime composition root
 
 ## Constitution Check
@@ -128,7 +128,6 @@ internal/
 │   ├── kilocode/
 │   ├── pi/
 │   ├── omp/
-│   ├── codebuddy/
 │   └── dsh/
 ├── federation/               # live uniform protocol-4 opaque-capability hub/host
 └── releaseinstall/           # catalog-derived transactional install registry
@@ -139,7 +138,6 @@ integrations/
 ├── kilocode/
 ├── pi/
 ├── omp/
-├── codebuddy/
 └── dsh/
 
 internal/testutil/
@@ -213,25 +211,6 @@ updated and re-reviewed.
   pinned product exports, so DSH is lane-only. No Agent Sessions DSH profile,
   plugin, peer launcher, or parent facade is installed.
 
-### S3 — CodeBuddy peer registry and endpoint ownership
-
-- Correlate one exact interactive registry session/PID/URL with the managed
-  wrapper child and prove the endpoint uses constant CSRF-header gating, not a
-  peer credential.
-- Verify the literal-loopback listening socket belongs to the attested TUI PID,
-  then corroborate executable, start identity, and ancestry before delivery.
-- Prove idle wake/busy reply, daemon-restart re-discovery, cross-target
-  isolation, stale-row/PID-reuse/port-recycle rejection, and zero peer-secret
-  persistence.
-- Keep the Agent Sessions-owned authenticated lane server explicitly separate;
-  its generated secret is an ephemeral product-server runtime value.
-- Recorded result: **RED reconciled**. The interactive worker exposes no
-  password and needs no component or sidecar; wrapper Adopt/Refresh re-attests
-  registry claim -> socket owner PID -> executable/start/ancestry. The distinct
-  Agent Sessions-owned lane server retains memory-only password auth. Linux
-  stale-row/PID-reuse/port-recycle/cross-target cells passed; physical macOS
-  socket-owner proof remains a Phase-E acceptance cell.
-
 ### S4 — Shared component native identity
 
 - For OpenCode, Kilo, Pi, and OMP, prove the product-native registered
@@ -259,12 +238,12 @@ updated and re-reviewed.
 
 ### S6 — Catalog/install projection
 
-- Prototype deterministic staged-binary ten-product JSON projection.
+- Prototype deterministic staged-binary product JSON projection.
 - Prove aliases, payloads, install strategies, federation capabilities, and
   acceptance cells derive without shell product arrays.
 - Recorded result: **PASS**, including explicit parent capability, one bounded
-  token grammar, exact DSH tuple/pnpm policy, separate CodeBuddy peer/lane
-  surfaces, 110 Linux/macOS capability cells, and drift rejection. Prototype
+  token grammar, exact DSH tuple/pnpm policy, Linux/macOS capability cells,
+  and drift rejection. Prototype
   digest: `9a0b001b5b92d1c0123d7ea1c62dee3ead70f545c07117cc95f1096a7fea1702`.
 
 ### Phase-0 gate
@@ -393,16 +372,6 @@ install scripts, or shared component core.
 - OMP quirk table, interjection framing, approval modes, spawn behavior;
 - peer/parent extension assets, skills/commands, doctor and mock-provider cells.
 
-### C3 — CodeBuddy
-
-- typed workers/jobs/reply/event client;
-- wrapper-adopt registry/process/socket peer evidence plus restart/stale-row
-  semantics; no component sidecar;
-- separately supervised authenticated lane server with memory-only credential;
-- peer/lane/parent/permission/doctor/assets;
-- offline OpenAPI and mock-provider evidence; support remains experimental until
-  the external Tencent account cell passes.
-
 ### C4 — DSH
 
 - typed ACP client above structured process;
@@ -431,16 +400,14 @@ One integrator owns all shared central edits:
 7. generate aliases, payloads, help, skills, acceptance matrices, and docs;
 8. migrate current four products behind runtime contracts/wrappers and prove no
    behavior loss;
-9. make CodeBuddy support-state gating and DSH tuple gating visible in doctor,
-   roster, and federation.
+9. make DSH tuple gating visible in doctor, roster, and federation.
 
 ### Phase-D gate
 
-- Ten-product catalog/registry conformance.
+- Nine-product catalog/registry conformance.
 - No product dispatch switch outside permitted product/composition locations.
 - No shell-authored product array.
-- Existing four and six new focused matrices green, except the declared
-  CodeBuddy account-gated cell.
+- Existing four and five new focused matrices green.
 
 ## Phase E: Acceptance, Review, and Release
 
@@ -448,15 +415,14 @@ One integrator owns all shared central edits:
    and real-product gates.
 2. Run every declared capability cell on real Linux and physical macOS at exact
    product versions.
-3. Run cross-host representative matrix for all six new lane capabilities.
+3. Run cross-host representative matrix for all five new lane capabilities.
 4. Inspect exact cleanup, component/server/process residue, catalog/spool/lease
    debt, and unrelated profile nonmutation.
 5. Generate evidence manifest bound to commit/tree/native versions.
 6. Fable reviews shared-contract adherence, identity, recovery, permissions,
    installer projection, and matrix completeness while available; final review
    also uses independent implementation agents.
-7. Merge only after every non-account-gated cell is green. CodeBuddy remains
-   explicitly experimental until Tencent model-turn evidence is available.
+7. Merge only after every required cell is green.
 
 ## Dependency Graph
 
@@ -474,7 +440,6 @@ joint plan
                  └─ Phase-B gate
                       ├─ C1 OpenCode + Kilo
                       ├─ C2 Pi + OMP
-                      ├─ C3 CodeBuddy
                       └─ C4 DSH
                            └─ Phase-D central integration
                                 └─ Phase-E Linux/macOS/federation/release
@@ -495,7 +460,6 @@ joint plan
 | B7 | shared mock-provider testutil | product implementations |
 | C1 | opencode family/products/assets/docs/fixtures | shared core, catalog, composition, install |
 | C2 | pi family/products/assets/docs/fixtures | shared core, catalog, composition, install |
-| C3 | codebuddy product/assets/docs/fixtures | shared core, catalog, composition, install |
 | C4 | dsh product/assets/docs/fixtures | shared core, catalog, composition, install |
 
 No parallel worker edits `cmd/agent-sessions`, the product catalog, composition
@@ -508,7 +472,6 @@ Those merges are serialized through the central integrator.
 |---|---|
 | Kilo route targets wrong TUI | S1 blocks interface/topology choice; isolated server fallback |
 | DSH alpha/API churn | exact native tuple, pnpm, ACP doctor, pinned lane acceptance |
-| CodeBuddy stale registry or recycled port | wrapper child plus registry/socket-to-PID/executable/ancestry re-attestation; peer and authenticated lane endpoints remain distinct |
 | Duplicate native prompt after crash | dispatch-intent state + ambiguity/no-replay |
 | Shared abstraction hides product semantics | three mechanical engines; typed family/product clients; no endpoint DSL |
 | Permission widening | typed mapper, unsupported policy error, Grok migration audit |

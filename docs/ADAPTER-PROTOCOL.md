@@ -87,7 +87,6 @@ opens, and discarded when the parent disconnects.
 
 - Pi and OMP use their native JSONL RPC modes for lanes.
 - OpenCode and Kilo use their supported HTTP/event surfaces for lanes.
-- CodeBuddy uses its native HTTP job surface.
 - DSH uses its pinned ACP surface for headless lanes only.
 - Claude, Codex, Grok, and Qwen use their native start and exact resume forms.
 

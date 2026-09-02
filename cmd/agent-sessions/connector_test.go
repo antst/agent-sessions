@@ -87,7 +87,7 @@ func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
 			t.Fatalf("%s project connector would replace its native presence stream", product)
 		}
 	}
-	for _, product := range []string{"claude", "qwen", "codebuddy"} {
+	for _, product := range []string{"claude", "qwen"} {
 		if !connectorOwnsLivePresence(product) {
 			t.Fatalf("%s connector lost its only live presence stream", product)
 		}
