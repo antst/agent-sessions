@@ -315,7 +315,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 			return productruntime.NativeTerminal{}, waitErr
 		}
 		driver.clearTurn(turn.LaneID, operationID)
-		return productruntime.NativeTerminal{Outcome: productruntime.TurnFailed, ExitLike: 1, NativeStopReason: "native-event-failure"}, nil
+		return productruntime.NativeTerminal{Outcome: productruntime.TurnFailed, ExitLike: 1, NativeStopReason: "native-event-failure"}, waitErr
 	}
 	driver.mu.Lock()
 	current := driver.lanes[turn.LaneID]

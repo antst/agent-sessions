@@ -281,6 +281,57 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 	}
 }
 
+func TestLaneReturnsNativeSessionErrorWithFailedTerminal(t *testing.T) {
+	var nativeMessageID atomic.Value
+	nativeMessageID.Store("")
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requireBasicAuth(t, request)
+		switch request.Method + " " + request.URL.Path {
+		case "POST /session":
+			_, _ = response.Write([]byte(`{"id":"ses_error"}`))
+		case "POST /session/ses_error/prompt_async":
+			var body struct {
+				ID string `json:"messageID"`
+			}
+			if decodeJSON(request.Body, &body) != nil || body.ID == "" {
+				t.Fatalf("prompt body = %#v", body)
+			}
+			nativeMessageID.Store(body.ID)
+			response.WriteHeader(http.StatusNoContent)
+		case "GET /session/ses_error/message":
+			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_error","role":"user"},"parts":[]}]`, nativeMessageID.Load().(string))
+		case "GET /event":
+			response.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(response, `data: {"type":"session.error","properties":{"sessionID":"ses_error","error":{"data":{"message":"Model not found: native/product-model"}}}}`+"\n\n")
+		default:
+			http.NotFound(response, request)
+		}
+	})
+	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
+	defer closeClient()
+	driver, err := NewLaneDriver(LaneConfig{
+		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 1,
+		Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: "opencode", LaneID: "error", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "fail", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := driver.WaitTurn(context.Background(), turn)
+	if err == nil || err.Error() != "Model not found: native/product-model" || terminal.Outcome != productruntime.TurnFailed || terminal.ExitLike != 1 {
+		t.Fatalf("failed terminal = %#v, %v", terminal, err)
+	}
+}
+
 func TestLaneRejectsChangedPermissionAndConcurrentTurn(t *testing.T) {
 	var promptCalls atomic.Int64
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
