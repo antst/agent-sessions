@@ -90,6 +90,11 @@ cat >"$fake_bin/opencode" <<'EOF'
 exit 0
 EOF
 
+cat >"$fake_bin/kilo" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+
 cat >"$fake_bin/grok" <<'EOF'
 #!/bin/sh
 set -eu
@@ -157,7 +162,7 @@ case "$arguments" in
 esac
 exit 0
 EOF
-chmod 0700 "$fake_bin/uname" "$fake_bin/qwen" "$fake_bin/grok" "$fake_bin/opencode" "$fake_bin/systemctl"
+chmod 0700 "$fake_bin/uname" "$fake_bin/qwen" "$fake_bin/grok" "$fake_bin/opencode" "$fake_bin/kilo" "$fake_bin/systemctl"
 
 common_env=(
   "HOME=$home"
@@ -169,6 +174,7 @@ common_env=(
   "GROK=grok"
   "QWEN=qwen"
   "OPENCODE=opencode"
+  "KILO=kilo"
   "TEST_PREFIX=$prefix"
   "TEST_QWEN_STATE=$test_root/qwen-source"
   "TEST_QWEN_REMOVE_MARKER=$test_root/qwen-remove-failed"
@@ -188,6 +194,8 @@ install_host
 release="$prefix/libexec/agent-sessions/host/releases/0.3.0"
 cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs"
 cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js"
+cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs"
+cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js"
 find -P "$release" -type d -exec chmod 0555 {} +
 printf 'unified-state-canary\n' >"$state_root/canary"
 printf 'unified-config-canary\n' >"$home/.config/agent-sessions/preserved"
@@ -207,7 +215,9 @@ if [[ $failed_status -eq 0 ]] ||
    [[ ! -f "$test_root/grok-installed" ]] ||
    [[ ! -f "$home/.grok/plugins/agent-sessions/.grok-plugin/plugin.json" ]] ||
    ! cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs" >/dev/null ||
-   ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null; then
+   ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
+   ! cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs" >/dev/null ||
+   ! cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null; then
   printf 'failed removal did not restore the installed host transaction\n' >&2
   exit 1
 fi
@@ -221,6 +231,8 @@ if [[ -e "$prefix/libexec/agent-sessions/host" ]] ||
    [[ -e "$home/.grok/plugins/agent-sessions" ]] ||
    [[ -e "$home/.config/opencode/plugins/agent-sessions.js" || -L "$home/.config/opencode/plugins/agent-sessions.js" ]] ||
    [[ -e "$home/.config/opencode/shared/live-session.js" || -L "$home/.config/opencode/shared/live-session.js" ]] ||
+   [[ -e "$home/.config/kilo/plugins/agent-sessions.js" || -L "$home/.config/kilo/plugins/agent-sessions.js" ]] ||
+   [[ -e "$home/.config/kilo/shared/live-session.js" || -L "$home/.config/kilo/shared/live-session.js" ]] ||
    [[ ! -f "$state_root/canary" ]] ||
    [[ ! -f "$home/.config/agent-sessions/preserved" ]] ||
    [[ ! -f "$home/.qwen/vendor-canary" ]] ||

@@ -19,6 +19,7 @@ claude=${CLAUDE:-claude}
 grok=${GROK:-grok}
 qwen=${QWEN:-qwen}
 opencode=${OPENCODE:-opencode}
+kilo=${KILO:-kilo}
 host_root="$prefix/libexec/agent-sessions/host"
 
 resolve_product() {
@@ -39,6 +40,7 @@ codex_path=$(resolve_product "$codex" "$HOME/.local/bin/codex" || true)
 claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
 qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
 opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
+kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
 grok_override=$(resolve_product "$grok" "$HOME/.grok/bin/grok" || true)
 run_grok() {
   if [[ -n "$grok_override" ]]; then
@@ -151,14 +153,16 @@ install_integrations() {
     fi
     "$qwen_path" extensions install "$current/qwen" --consent --scope user
   fi
-  if [[ -n "$opencode_path" ]]; then
-    local config_root
-    config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+  local product product_path config_root
+  for product in opencode kilo; do
+    if [[ "$product" == opencode ]]; then product_path=$opencode_path; else product_path=$kilo_path; fi
+    [[ -n "$product_path" ]] || continue
+    config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
     mkdir -p "$config_root/plugins" "$config_root/shared"
     rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
-    install -m 0644 "$current/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
+    install -m 0644 "$current/integrations/$product/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
     install -m 0644 "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
-  fi
+  done
 }
 
 install_service() {
@@ -253,8 +257,10 @@ if [[ -n "$qwen_path" ]]; then
     "$qwen_path" extensions uninstall agent-sessions
   fi
 fi
-opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-rm -f -- "$opencode_config_root/plugins/agent-sessions.js" "$opencode_config_root/shared/live-session.js"
+for product in opencode kilo; do
+  config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
+  rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
+done
 
 case "$(uname -s)" in
   Linux)

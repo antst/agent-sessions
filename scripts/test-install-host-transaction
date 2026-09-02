@@ -80,6 +80,12 @@ exit 0
 EOF
 chmod 0700 "$fake_bin/opencode"
 
+cat >"$fake_bin/kilo" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0700 "$fake_bin/kilo"
+
 cat >"$fake_bin/claude" <<'EOF'
 #!/bin/sh
 set -eu
@@ -179,6 +185,7 @@ common_env=(
   "GROK=missing-grok"
   "QWEN=qwen"
   "OPENCODE=opencode"
+  "KILO=kilo"
   "TEST_PREFIX=$prefix"
   "TEST_QWEN_STATE=$test_root/qwen-source"
   "TEST_QWEN_FAILURE_MARKER=$test_root/qwen-failed-once"
@@ -198,6 +205,8 @@ prior_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
 diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null
 cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs"
 cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js"
+cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs"
+cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js"
 find -P "$release" -type d -exec chmod 0555 {} +
 
 # Reproduce an equal-version active cache that differs from the selected
@@ -225,7 +234,9 @@ if [[ "$after_hash" != "$prior_hash" ]] ||
    [[ "$(cat "$test_root/qwen-source")" != "$release/qwen" ]] ||
    ! diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null ||
    ! cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs" >/dev/null ||
-   ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null; then
+   ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
+   ! cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs" >/dev/null ||
+   ! cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null; then
   printf 'failed host update did not restore the exact release selection and Qwen source\n' >&2
   exit 1
 fi

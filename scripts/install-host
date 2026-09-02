@@ -20,6 +20,7 @@ claude=${CLAUDE:-claude}
 grok=${GROK:-grok}
 qwen=${QWEN:-qwen}
 opencode=${OPENCODE:-opencode}
+kilo=${KILO:-kilo}
 
 binary_release_identity() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -62,6 +63,7 @@ codex_path=$(resolve_product "$codex" "$HOME/.local/bin/codex" || true)
 claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
 qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
 opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
+kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
 
 # Grok Build may be installed only in its native self-managed downloads
 # directory, without a PATH or ~/.grok/bin shim. Route every discovery and
@@ -226,13 +228,13 @@ install_exact_claude_plugin() {
   fi
 }
 
-install_opencode_plugin() {
-  local integration_root=$1 config_root
-  [[ -n "$opencode_path" ]] || return 0
-  config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+install_opencode_family_plugin() {
+  local product=$1 product_path=$2 integration_root=$3 config_root
+  [[ -n "$product_path" ]] || return 0
+  config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
   mkdir -p "$config_root/plugins" "$config_root/shared"
   rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
-  install -m 0644 "$integration_root/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
+  install -m 0644 "$integration_root/integrations/$product/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
   install -m 0644 "$integration_root/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
 }
 
@@ -286,7 +288,8 @@ install_integrations() {
     printf 'Skipping Qwen integration: %s is not installed.\n' "$qwen"
   fi
 
-  install_opencode_plugin "$integration_root"
+  install_opencode_family_plugin opencode "$opencode_path" "$integration_root"
+  install_opencode_family_plugin kilo "$kilo_path" "$integration_root"
 }
 
 remove_integrations() {
@@ -304,9 +307,11 @@ remove_integrations() {
   if [[ -n "$qwen_path" ]]; then
     "$qwen_path" extensions uninstall agent-sessions >/dev/null 2>&1 || true
   fi
-  local opencode_config_root
-  opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-  rm -f -- "$opencode_config_root/plugins/agent-sessions.js" "$opencode_config_root/shared/live-session.js"
+  local product config_root
+  for product in opencode kilo; do
+    config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
+    rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
+  done
 }
 
 write_service_definition() {
