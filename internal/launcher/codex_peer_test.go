@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -42,6 +43,59 @@ func TestCodexPeerNativeArgumentParity(t *testing.T) {
 				t.Fatalf("resume yolo was not mirrored into the prepared binding: %+v", plan)
 			}
 		})
+	}
+}
+
+func TestCodexDescriptorHandlerChoosesAmongEveryProductMatch(t *testing.T) {
+	root := t.TempDir()
+	first := "00000000-0000-0000-0000-00000000c011"
+	second := "00000000-0000-0000-0000-00000000c012"
+	listCalls := 0
+	list := func(context.Context) ([]CodexResumeCandidate, error) {
+		listCalls++
+		return []CodexResumeCandidate{
+			{ID: first, Name: "shared", Cwd: "/first", UpdatedAt: 1},
+			{ID: second, Name: "shared", Cwd: "/second", UpdatedAt: 2},
+		}, nil
+	}
+	choose := func(product, selector string, matches []productSession) (string, error) {
+		if product != "codex" || selector != "shared" || len(matches) != 2 {
+			t.Fatalf("chooser input = product %q selector %q matches %+v", product, selector, matches)
+		}
+		return matches[1].ID, nil
+	}
+	plan, err := projectCodexLaunchPlan(context.Background(), []string{"--resume", "shared", "-g", "current"}, root, "", "/native/codex", list, choose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.mode != modeResume || plan.selectionTarget != second || listCalls != 1 || !reflect.DeepEqual(plan.peerContext.groups, []string{"current"}) {
+		t.Fatalf("projected plan = %+v, list calls %d", plan, listCalls)
+	}
+
+	plan, err = projectCodexLaunchPlan(context.Background(), []string{"resume", first}, root, "", "/native/codex", list, choose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.selectionTarget != first || listCalls != 1 {
+		t.Fatalf("exact UUID projection = %+v, list calls %d", plan, listCalls)
+	}
+}
+
+func TestCodexResumeGroupsComeOnlyFromCurrentInvocation(t *testing.T) {
+	root := t.TempDir()
+	plan, err := parseCodexPeerArgs([]string{"resume", "00000000-0000-0000-0000-00000000c011"}, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.peerContext.groups) != 0 {
+		t.Fatalf("resume inherited groups not present in argv: %v", plan.peerContext.groups)
+	}
+	plan, err = parseCodexPeerArgs([]string{"resume", "00000000-0000-0000-0000-00000000c011", "-g", "new"}, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plan.peerContext.groups, []string{"new"}) {
+		t.Fatalf("resume groups = %v", plan.peerContext.groups)
 	}
 }
 

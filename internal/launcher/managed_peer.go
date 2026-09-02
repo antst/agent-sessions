@@ -158,6 +158,43 @@ var productArgumentHandlers = map[string]productArgumentHandler{
 	"omp-session-list":      {isNativeSelector: isPiNativeSessionSelector, list: listOMPSessions},
 }
 
+func projectNativeArgumentTranslations(descriptor productcatalog.Descriptor, arguments []string) ([]string, error) {
+	projected := append([]string(nil), arguments...)
+	for _, rule := range descriptor.NativeArgumentRules {
+		if rule.Kind != productcatalog.NativeArgumentTranslation {
+			continue
+		}
+		var err error
+		projected, err = translateNativeOption(projected, rule.Option, rule.Replacement)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return projected, nil
+}
+
+func resolveNativeArgumentHandlerValue(
+	descriptor productcatalog.Descriptor,
+	executable, cwd, option, selector string,
+	handlers map[string]productArgumentHandler,
+	choose productSessionChooser,
+) (string, error) {
+	for _, rule := range descriptor.NativeArgumentRules {
+		if rule.Kind != productcatalog.NativeArgumentHandler || rule.Option != option {
+			continue
+		}
+		handler, ok := handlers[rule.Handler]
+		if !ok {
+			return "", fmt.Errorf("native argument handler %q is unavailable", rule.Handler)
+		}
+		return resolveProductSession(
+			descriptor.ID, executable, cwd, selector,
+			handler.isNativeSelector, handler.list, choose,
+		)
+	}
+	return selector, nil
+}
+
 func projectNativeArgumentRules(
 	descriptor productcatalog.Descriptor,
 	executable, cwd string,
@@ -225,9 +262,25 @@ func resolveProductResume(
 	if err != nil || !present || isNativeSelector(selector) {
 		return arguments, err
 	}
-	sessions, err := list(executable, cwd)
+	selected, err := resolveProductSession(product, executable, cwd, selector, isNativeSelector, list, choose)
 	if err != nil {
 		return nil, err
+	}
+	return replaceNativeOptionValue(arguments, option, selected), nil
+}
+
+func resolveProductSession(
+	product, executable, cwd, selector string,
+	isNativeSelector func(string) bool,
+	list func(string, string) ([]productSession, error),
+	choose productSessionChooser,
+) (string, error) {
+	if isNativeSelector(selector) {
+		return selector, nil
+	}
+	sessions, err := list(executable, cwd)
+	if err != nil {
+		return "", err
 	}
 	matches := make([]productSession, 0, 1)
 	for _, session := range sessions {
@@ -237,9 +290,9 @@ func resolveProductResume(
 	}
 	selected, err := choose(product, selector, matches)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return replaceNativeOptionValue(arguments, option, selected), nil
+	return selected, nil
 }
 
 func terminalProductSessionChooser(product, selector string, matches []productSession) (string, error) {

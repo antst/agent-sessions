@@ -262,6 +262,22 @@ func (c *hostCoordinator) handle(
 	request daemonpkg.ControlRequest,
 ) (json.RawMessage, error) {
 	switch request.Operation {
+	case "codex.sessions.list":
+		native, err := c.codexNative()
+		if err != nil {
+			return nil, err
+		}
+		threads, err := native.ListPeerThreads(ctx)
+		if err != nil {
+			return nil, err
+		}
+		candidates := make([]launcher.CodexResumeCandidate, 0, len(threads))
+		for _, thread := range threads {
+			candidates = append(candidates, launcher.CodexResumeCandidate{
+				ID: thread.ID, Name: thread.Name, Cwd: thread.Cwd, UpdatedAt: thread.UpdatedAt,
+			})
+		}
+		return json.Marshal(candidates)
 	case "attachment.codex.prepare":
 		if runtime == nil {
 			return nil, errors.New("runtime attachment authority is unavailable")
@@ -491,6 +507,10 @@ func requestCodexPreparation(
 	return requestPreparation[launcher.CodexDaemonPrepareRequest, launcher.CodexDaemonPrepareResult](
 		ctx, "attachment.codex.prepare", request,
 	)
+}
+
+func requestCodexSessionList(ctx context.Context) ([]launcher.CodexResumeCandidate, error) {
+	return requestPreparation[struct{}, []launcher.CodexResumeCandidate](ctx, "codex.sessions.list", struct{}{})
 }
 
 func codexBinary() string {

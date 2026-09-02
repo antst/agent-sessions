@@ -143,7 +143,10 @@ var descriptors = [...]Descriptor{
 	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
 		"--yolo",
-	), nativeArgumentTranslation("--resume", "resume")),
+	),
+		nativeArgumentTranslation("--resume", "resume"),
+		nativeArgumentHandler("resume", "codex-thread-list"),
+	),
 	withNativeArgumentRules(withNativeLaunchPolicy(
 		baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
 		[]string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
@@ -549,7 +552,11 @@ func validateDescriptor(descriptor Descriptor) error {
 	}
 	seenRules := map[string]bool{}
 	for _, rule := range descriptor.NativeArgumentRules {
-		if strings.TrimSpace(rule.Option) != rule.Option || !strings.HasPrefix(rule.Option, "-") || strings.ContainsRune(rule.Option, 0) {
+		validOption := strings.HasPrefix(rule.Option, "-") && !strings.ContainsRune(rule.Option, 0)
+		if !strings.HasPrefix(rule.Option, "-") {
+			validOption = ValidateToken(rule.Option) == nil
+		}
+		if strings.TrimSpace(rule.Option) != rule.Option || !validOption {
 			return errors.New("native argument rule contains an invalid option")
 		}
 		key := string(rule.Kind) + "\x00" + rule.Option

@@ -17,16 +17,28 @@ codex-peer --peer-name reviewer --group project-a --group release
 selects a native thread UUID before publication, starts the managed App Server, and publishes only
 after the exact TUI owner, thread, cwd, shim, process starts, and delivery socket agree.
 
-Resume by exact UUID or by an unambiguous managed name:
+Resume by exact UUID or product-owned name through either the uniform wrapper
+flag or Codex's native spelling:
 
 ```bash
+codex-peer --resume reviewer
 codex-peer resume 019fe660-1c86-7700-b462-6ff16de00fc5
 codex-peer resume reviewer
 ```
 
-Name resolution is performed by the local host agent. Multiple usable matches are rejected and
-require an exact UUID. Resume retains the canonical thread cwd and durable Agent Sessions
-preferences unless the caller supplies a supported explicit override.
+Codex can resolve a name natively, but its external parent cannot learn which
+thread the TUI selected ([upstream issue #35676](https://github.com/openai/codex/issues/35676)).
+Until Codex exposes that selection, the terminal-owning wrapper reads Codex's
+own thread list before launch so presence can report the exact UUID. One match
+is selected; multiple matches use an interactive picker, while a headless call
+prints the same product-provided UUID, cwd, and update details and exits. Exact
+UUID resume goes directly to Codex without listing. This exception is deleted
+when Codex exposes the selected thread to its parent.
+
+Groups are supplied anew on every start or resume invocation. They are never
+copied from an earlier run: omitting `-g` on resume intentionally leaves only
+the peer's derived private group, while adding or omitting group arguments is
+the complete add/remove operation.
 
 ## Permissions
 

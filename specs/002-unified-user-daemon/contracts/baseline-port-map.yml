@@ -292,7 +292,7 @@ entries:
     new_owner: daemon Codex adapter calling transplanted native operations
     new_symbols: []
     replacement_tests:
-      - internal/bridge/codex_native_test.go:TestCodexNativeResolvesExactIDAndFirstLiveNameFromProduct
+      - internal/bridge/codex_native_test.go:TestCodexNativeListsEveryProductMatchAndResolvesOnlyExactID
     acceptance_cells: [C-01, C-02, C-03, C-04, C-05, C-06, C-07, C-08]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#codex]
     deletion_paths: [internal/launcher/codex_peer.go, internal/bridge/launch.go]

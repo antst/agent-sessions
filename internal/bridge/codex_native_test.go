@@ -129,7 +129,7 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	}
 }
 
-func TestCodexNativeResolvesExactIDAndFirstLiveNameFromProduct(t *testing.T) {
+func TestCodexNativeListsEveryProductMatchAndResolvesOnlyExactID(t *testing.T) {
 	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
 	executable, err := os.Executable()
 	if err != nil {
@@ -177,12 +177,15 @@ func TestCodexNativeResolvesExactIDAndFirstLiveNameFromProduct(t *testing.T) {
 	if err != nil || exact.ID != exactID || exact.Name != "exact-id" {
 		t.Fatalf("exact resolution = %+v, %v", exact, err)
 	}
-	byName, err := native.ResolveThread(context.Background(), "shared-name")
-	if err != nil || byName.ID != firstID {
-		t.Fatalf("live name resolution = %+v, %v", byName, err)
+	if _, err := native.ResolveThread(context.Background(), "shared-name"); err == nil || !strings.Contains(err.Error(), "exact thread UUID") {
+		t.Fatalf("daemon accepted name selection: %v", err)
 	}
-	if _, err := native.ResolveThread(context.Background(), "not-live"); err == nil || !strings.Contains(err.Error(), "was not found") {
-		t.Fatalf("missing live name error = %v", err)
+	listed, err := native.ListPeerThreads(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0].ID != firstID || listed[1].ID != secondID {
+		t.Fatalf("product thread list = %+v", listed)
 	}
 }
 

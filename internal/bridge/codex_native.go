@@ -41,6 +41,7 @@ type CodexNativeThread struct {
 	ID             string
 	Name           string
 	Cwd            string
+	UpdatedAt      int64
 	Status         string
 	ApprovalPolicy string
 	Path           string
@@ -261,32 +262,16 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 	return exportedCodexThread(*resumed, effectiveApproval), nil
 }
 
-// ResolveThread asks Codex for the exact UUID or the first live title match.
-// Agent Sessions owns neither a name index nor a fallback copy of product data.
+// ResolveThread asks Codex for one exact UUID. Name selection happens in the
+// terminal-owning launcher because only that process can present ambiguity.
 func (native *CodexNative) ResolveThread(ctx context.Context, target string) (CodexNativeThread, error) {
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
 	}
-	var (
-		thread appThread
-		err    error
-	)
-	if exactLaunchThreadIDRE.MatchString(target) {
-		thread, err = readExactPreparedThread(native.client, target)
-	} else {
-		archived, membershipErr := listThreadMembership(native.client, true)
-		if membershipErr != nil {
-			return CodexNativeThread{}, membershipErr
-		}
-		listed, found, listErr := firstListedPreparedLaunchTarget(native.client, target, archived)
-		if listErr != nil {
-			return CodexNativeThread{}, listErr
-		}
-		if !found {
-			return CodexNativeThread{}, fmt.Errorf("codex thread %q was not found", target)
-		}
-		thread = listed
+	if !exactLaunchThreadIDRE.MatchString(target) {
+		return CodexNativeThread{}, fmt.Errorf("codex resume requires an exact thread UUID, got %q", target)
 	}
+	thread, err := readExactPreparedThread(native.client, target)
 	if err != nil {
 		return CodexNativeThread{}, err
 	}
@@ -294,6 +279,28 @@ func (native *CodexNative) ResolveThread(ctx context.Context, target string) (Co
 		return CodexNativeThread{}, err
 	}
 	return exportedCodexThread(thread, ""), nil
+}
+
+// ListPeerThreads projects Codex's own resumable root-thread list for the
+// launcher's name chooser. It keeps no index and makes no selection.
+func (native *CodexNative) ListPeerThreads(ctx context.Context) ([]CodexNativeThread, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := listThreadMembership(native.client, true)
+	if err != nil {
+		return nil, err
+	}
+	threads := make([]CodexNativeThread, 0)
+	seen := map[string]bool{}
+	err = visitPreparedThreads(native.client, false, func(thread appThread) {
+		if archived[thread.ID] || seen[thread.ID] || validatePreparedRootThread(thread) != nil {
+			return
+		}
+		seen[thread.ID] = true
+		threads = append(threads, exportedCodexThread(thread, ""))
+	})
+	return threads, err
 }
 
 // ResumeThread performs the same exclude-turns native subscription used by
@@ -770,7 +777,7 @@ func (native *CodexNative) observeNotification(notification rpcNotification) {
 
 func exportedCodexThread(thread appThread, approvalPolicy string) CodexNativeThread {
 	return CodexNativeThread{
-		ID: thread.ID, Name: thread.Name, Cwd: thread.Cwd, Status: statusType(thread.Status),
+		ID: thread.ID, Name: thread.Name, Cwd: thread.Cwd, UpdatedAt: thread.UpdatedAt, Status: statusType(thread.Status),
 		ApprovalPolicy: approvalPolicy, Path: thread.Path,
 	}
 }

@@ -27,20 +27,6 @@ func readExactPreparedThread(client *appServerClient, threadID string) (appThrea
 	return read.Thread, nil
 }
 
-func firstListedPreparedLaunchTarget(client *appServerClient, target string, archived map[string]bool) (appThread, bool, error) {
-	var match appThread
-	found := false
-	seen := map[string]bool{}
-	err := visitPreparedThreads(client, false, func(thread appThread) {
-		if found || thread.Name != target || archived[thread.ID] || seen[thread.ID] || validatePreparedRootThread(thread) != nil {
-			return
-		}
-		seen[thread.ID] = true
-		match, found = thread, true
-	})
-	return match, found, err
-}
-
 func visitPreparedThreads(client *appServerClient, archived bool, visit func(appThread)) error {
 	cursor := ""
 	seen := map[string]bool{}

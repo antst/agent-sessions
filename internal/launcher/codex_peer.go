@@ -71,6 +71,19 @@ type CodexDaemonPrepareResult struct {
 	Cwd      string
 }
 
+// CodexResumeCandidate is one product-owned root-thread row offered to the
+// terminal-owning wrapper when a name needs disambiguation.
+type CodexResumeCandidate struct {
+	ID        string
+	Name      string
+	Cwd       string
+	UpdatedAt int64
+}
+
+// CodexSessionLister obtains the current product-owned root-thread list from
+// the daemon's existing App Server connection. It makes no selection.
+type CodexSessionLister func(context.Context) ([]CodexResumeCandidate, error)
+
 // CodexDaemonPrepare submits one parsed Codex launch intent.
 type CodexDaemonPrepare func(context.Context, CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error)
 
@@ -90,21 +103,24 @@ type CodexNativeLaunch struct {
 type CodexNativeRunner func(context.Context, CodexNativeLaunch) error
 
 // RunCodexPeerWithDaemon preserves the baseline parser and native exec path
-// while replacing the legacy runtime/supervisor transaction with one daemon
-// call. It never starts or stops Agent Sessions authority.
-func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDaemonPrepare, run CodexNativeRunner) error {
-	if ctx == nil || prepare == nil || run == nil {
+// while replacing the legacy runtime/supervisor transaction with stateless
+// product-list selection followed by one exact daemon preparation. It never
+// starts or stops Agent Sessions authority.
+func RunCodexPeerWithDaemon(ctx context.Context, args []string, list CodexSessionLister, prepare CodexDaemonPrepare, run CodexNativeRunner) error {
+	if ctx == nil || list == nil || prepare == nil || run == nil {
 		return errors.New("codex daemon launch coordinator is unavailable")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
-	plan, err := parseCodexPeerArgs(args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"))
+	codex, err := codexExecutable()
 	if err != nil {
 		return err
 	}
-	codex, err := codexExecutable()
+	plan, err := projectCodexLaunchPlan(
+		ctx, args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"), codex, list, terminalProductSessionChooser,
+	)
 	if err != nil {
 		return err
 	}
@@ -152,6 +168,49 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDae
 		Executable: codex, Arguments: launchArgs, Environment: environment,
 		ThreadID: result.ThreadID, Name: result.Name, Groups: append([]string(nil), plan.peerContext.groups...),
 	})
+}
+
+func projectCodexLaunchPlan(
+	ctx context.Context,
+	args []string,
+	cwd, environmentName, executable string,
+	list CodexSessionLister,
+	choose productSessionChooser,
+) (codexPlan, error) {
+	descriptor, ok := productcatalog.ByID("codex")
+	if !ok {
+		return codexPlan{}, usageError("Codex product descriptor is unavailable")
+	}
+	projected, err := projectNativeArgumentTranslations(descriptor, args)
+	if err != nil {
+		return codexPlan{}, err
+	}
+	plan, err := parseCodexPeerArgs(projected, cwd, environmentName)
+	if err != nil || plan.mode != modeResume {
+		return plan, err
+	}
+	listProductRows := func(_, _ string) ([]productSession, error) {
+		candidates, listErr := list(ctx)
+		if listErr != nil {
+			return nil, listErr
+		}
+		rows := make([]productSession, 0, len(candidates))
+		for _, candidate := range candidates {
+			rows = append(rows, productSession{
+				ID: candidate.ID, Title: candidate.Name, Directory: candidate.Cwd, Updated: candidate.UpdatedAt,
+			})
+		}
+		return rows, nil
+	}
+	plan.selectionTarget, err = resolveNativeArgumentHandlerValue(
+		descriptor, executable, plan.requestedCwd, "resume", plan.selectionTarget,
+		map[string]productArgumentHandler{"codex-thread-list": {
+			isNativeSelector: func(selector string) bool { return threadIDPattern.MatchString(selector) },
+			list:             listProductRows,
+		}},
+		choose,
+	)
+	return plan, err
 }
 
 func codexExecutable() (string, error) {

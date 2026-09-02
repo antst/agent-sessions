@@ -4,6 +4,12 @@ Agent Sessions has no global peer namespace. A participating peer belongs to
 one or more groups and can discover or address only peers with which it shares
 at least one group.
 
+Peer membership is defined completely by the current launch command's group
+arguments plus the derived private anchor. Start and resume follow the same
+rule: omitting a former group removes it, adding a new argument adds it, and a
+resume with no group arguments is private-anchor-only. Agent Sessions never
+carries membership forward from an earlier invocation.
+
 This document intentionally defines only the operations required now. It does
 not introduce a general policy engine or an extension framework.
 
