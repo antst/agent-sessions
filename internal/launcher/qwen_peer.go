@@ -1,13 +1,11 @@
 package launcher
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,7 +18,8 @@ import (
 )
 
 const (
-	qwenInputEnv         = "AGENT_SESSIONS_QWEN_INPUT_FILE"
+	QwenInputFileEnv     = "AGENT_SESSIONS_QWEN_INPUT_FILE"
+	QwenEventsFileEnv    = "AGENT_SESSIONS_QWEN_EVENTS_FILE"
 	qwenReadinessTimeout = 45 * time.Second
 	qwenRegistryInterval = 100 * time.Millisecond
 )
@@ -60,20 +59,36 @@ type qwenPeerPlan struct {
 type qwenPeerDependencies struct {
 	readiness func(context.Context, qwenreadiness.Request) (qwenreadiness.Report, error)
 	exec      func(string, []string, []string) error
-	run       func(context.Context, string, []string, []string) error
+	run       QwenNativeRunner
 }
+
+// QwenNativeLaunch is one launcher-owned interactive child and its two native
+// live protocol files. Qwen emits the selected session identity into EventsPath.
+type QwenNativeLaunch struct {
+	Executable  string
+	Arguments   []string
+	Environment []string
+	Cwd         string
+	QwenHome    string
+	InputPath   string
+	EventsPath  string
+	Groups      []string
+}
+
+// QwenNativeRunner starts Qwen, confirms its product-emitted identity, and
+// holds the one live presence stream for exactly the native child's lifetime.
+type QwenNativeRunner func(context.Context, QwenNativeLaunch) error
 
 // RunQwenPeer preserves native profile selection, readiness, exact session
 // identity, and approval-mode argv. The launcher owns the two Qwen protocol
-// files for exactly the native child's lifetime; live presence belongs to the
-// installed Qwen extension.
+// files and its one live presence stream for exactly the native child's lifetime.
 //
 //nolint:gocyclo // Native argv, profile, resume, launch files, and child lifetime form one operation.
-func RunQwenPeer(ctx context.Context, args []string) error {
+func RunQwenPeer(ctx context.Context, args []string, run QwenNativeRunner) error {
 	return runQwenPeer(ctx, args, qwenPeerDependencies{
 		readiness: qwenreadiness.Check,
 		exec:      Exec,
-		run:       runQwenNative,
+		run:       run,
 	})
 }
 
@@ -117,26 +132,9 @@ func runQwenPeer(
 	if !report.Ready {
 		return qwenReadinessError(report)
 	}
-	if plan.mode == qwenPeerModeResume {
-		resolvedID, resolvedName, resolveErr := resolveQwenProductSession(
-			plan.profile, plan.requestedCwd, plan.resumeTarget,
-		)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		plan.sessionID = resolvedID
-		plan.resumeTarget = resolvedID
-		plan.nativeArgs = replaceQwenResumeTarget(plan.nativeArgs, resolvedID)
-		if plan.peerName == "" {
-			plan.peerName = resolvedName
-		}
-	}
-	qwenHome := ""
-	if plan.mode == qwenPeerModeFresh && strings.TrimSpace(plan.peerName) != "" {
-		qwenHome, err = qwenprofile.EffectiveHome(plan.profile, os.LookupEnv)
-		if err != nil {
-			return fmt.Errorf("resolve Qwen product profile: %w", err)
-		}
+	qwenHome, err := qwenprofile.EffectiveHome(plan.profile, os.LookupEnv)
+	if err != nil {
+		return fmt.Errorf("resolve Qwen product profile: %w", err)
 	}
 	root, inputPath, eventsPath, err := createQwenLaunchFiles()
 	if err != nil {
@@ -162,14 +160,17 @@ func runQwenPeer(
 	)
 	if plan.mode == qwenPeerModeFresh {
 		nativeArgs = insertQwenManagedArgs(nativeArgs, "--session-id", plan.sessionID)
-	} else {
-		nativeArgs = replaceQwenResumeTarget(nativeArgs, plan.sessionID)
 	}
 	environment := qwenprofile.ApplyEnvironment(os.Environ(), plan.profile)
-	environment = daemonPeerEnvironment(environment, plan.sessionID, "qwen")
+	environment = daemonPeerEnvironment(environment, "", "qwen")
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
-	environment = envutil.Set(environment, qwenInputEnv, inputPath)
-	return dependencies.run(ctx, qwen, nativeArgs, environment)
+	environment = envutil.Set(environment, QwenInputFileEnv, inputPath)
+	environment = envutil.Set(environment, QwenEventsFileEnv, eventsPath)
+	return dependencies.run(ctx, QwenNativeLaunch{
+		Executable: qwen, Arguments: nativeArgs, Environment: environment,
+		Cwd: plan.requestedCwd, QwenHome: qwenHome, InputPath: inputPath, EventsPath: eventsPath,
+		Groups: append([]string(nil), plan.peerContext.groups...),
+	})
 }
 
 func createQwenLaunchFiles() (string, string, string, error) {
@@ -190,13 +191,6 @@ func createQwenLaunchFiles() (string, string, string, error) {
 		}
 	}
 	return root, inputPath, eventsPath, nil
-}
-
-func runQwenNative(ctx context.Context, path string, args, environment []string) error {
-	command := exec.CommandContext(ctx, path, args...) //nolint:gosec // resolved installed Qwen executable and parsed native argv.
-	command.Env = append([]string(nil), environment...)
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return command.Run()
 }
 
 func waitAndSubmitQwenNativeName(ctx context.Context, home, sessionID, inputPath, name string) {
@@ -266,98 +260,6 @@ func canonicalQwenCwd() (string, error) {
 		return "", fmt.Errorf("canonicalize Qwen working directory: %w", err)
 	}
 	return canonical, nil
-}
-
-// resolveQwenProductSession leaves exact native UUIDs to Qwen and resolves a
-// human selector only against Qwen's own transcript titles. Agent Sessions
-// keeps no name index or session record of its own.
-func resolveQwenProductSession(
-	profile qwenprofile.Identity,
-	cwd, selector string,
-) (string, string, error) {
-	selector = strings.TrimSpace(selector)
-	if threadIDPattern.MatchString(selector) {
-		return selector, "", nil
-	}
-	if selector == "" {
-		return "", "", errors.New("Qwen resume selector is empty")
-	}
-	home, err := qwenprofile.EffectiveHome(profile, os.LookupEnv)
-	if err != nil {
-		return "", "", fmt.Errorf("resolve Qwen product profile: %w", err)
-	}
-	projects, err := os.ReadDir(filepath.Join(home, "projects"))
-	if err != nil {
-		return "", "", fmt.Errorf("list Qwen product sessions: %w", err)
-	}
-	type match struct{ id, title string }
-	matches := make([]match, 0, 1)
-	for _, project := range projects {
-		if !project.IsDir() {
-			continue
-		}
-		chats, readErr := os.ReadDir(filepath.Join(home, "projects", project.Name(), "chats"))
-		if readErr != nil {
-			continue
-		}
-		for _, chat := range chats {
-			if chat.IsDir() || filepath.Ext(chat.Name()) != ".jsonl" {
-				continue
-			}
-			id := strings.TrimSuffix(chat.Name(), ".jsonl")
-			if !threadIDPattern.MatchString(id) {
-				continue
-			}
-			path := filepath.Join(home, "projects", project.Name(), "chats", chat.Name())
-			title, transcriptCwd, ok := qwenProductTranscriptTitle(path, id)
-			if !ok || !strings.EqualFold(title, selector) ||
-				filepath.Clean(transcriptCwd) != filepath.Clean(cwd) {
-				continue
-			}
-			matches = append(matches, match{id: id, title: title})
-		}
-	}
-	if len(matches) == 0 {
-		return "", "", fmt.Errorf("Qwen has no session named %q in %s", selector, cwd)
-	}
-	if len(matches) > 1 {
-		return "", "", fmt.Errorf("Qwen session name %q is ambiguous; use an exact session UUID", selector)
-	}
-	return matches[0].id, matches[0].title, nil
-}
-
-func qwenProductTranscriptTitle(path, sessionID string) (string, string, bool) {
-	file, err := os.Open(path) //nolint:gosec // Path is read from Qwen's own selected-profile session inventory.
-	if err != nil {
-		return "", "", false
-	}
-	defer func() { _ = file.Close() }()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
-	first, cwd, latest := true, "", ""
-	for scanner.Scan() {
-		var event struct {
-			SessionID     string `json:"sessionId"`
-			Cwd           string `json:"cwd"`
-			Type          string `json:"type"`
-			Subtype       string `json:"subtype"`
-			SystemPayload struct {
-				CustomTitle string `json:"customTitle"`
-				TitleSource string `json:"titleSource"`
-			} `json:"systemPayload"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.SessionID != sessionID {
-			return "", "", false
-		}
-		if first {
-			first, cwd = false, event.Cwd
-		}
-		if event.Type == "system" && event.Subtype == "custom_title" &&
-			strings.TrimSpace(event.SystemPayload.TitleSource) != "auto" {
-			latest = strings.TrimSpace(event.SystemPayload.CustomTitle)
-		}
-	}
-	return latest, cwd, scanner.Err() == nil && !first && latest != ""
 }
 
 func qwenReadinessError(report qwenreadiness.Report) error {
@@ -735,26 +637,4 @@ Native boundary:
   Native --approval-mode MODE passes through only when --yolo/--no-yolo is absent.
   Arguments after -- are caller content and are never interpreted by qwen-peer.
 `
-}
-
-func replaceQwenResumeTarget(args []string, sessionID string) []string {
-	result := make([]string, 0, len(args))
-	for index := 0; index < len(args); index++ {
-		argument := args[index]
-		if argument == "--" {
-			return append(result, args[index:]...)
-		}
-		switch {
-		case argument == "--resume" || argument == "-r":
-			result = append(result, "--resume", sessionID)
-			if index+1 < len(args) {
-				index++
-			}
-		case strings.HasPrefix(argument, "--resume=") || strings.HasPrefix(argument, "-r="):
-			result = append(result, "--resume", sessionID)
-		default:
-			result = append(result, argument)
-		}
-	}
-	return result
 }

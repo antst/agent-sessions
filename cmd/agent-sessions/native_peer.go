@@ -21,6 +21,7 @@ type launcherHeldChild struct {
 type launcherHeldIdentity struct {
 	report liveSessionReport
 	call   func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	watch  func(context.Context, *liveSessionClient, liveSessionReport)
 }
 
 type launcherHeldExit struct {
@@ -119,6 +120,9 @@ func runLauncherHeldPeer(
 	}
 
 	client := startLiveSessionClient(runCtx, livePresenceEndpoint(defaultStateRoot()), identity.report, identity.call)
+	if identity.watch != nil {
+		identity.watch(runCtx, client, identity.report)
+	}
 	defer func() {
 		cancel()
 		client.mu.Lock()

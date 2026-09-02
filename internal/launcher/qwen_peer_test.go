@@ -137,39 +137,7 @@ func TestQwenPeerHelpAdvertisesManagedOptions(t *testing.T) {
 	}
 }
 
-func TestQwenProductSessionResolutionUsesNativeTranscriptsOnly(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "qwen")
-	cwd := filepath.Join(root, "workspace")
-	for _, path := range []string{home, cwd} {
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	profile := qwenTestProfile(t, home)
-	qwenWriteTranscript(t, home, "one", testQwenSessionID, cwd, "Reviewer", "manual")
-
-	if id, name, err := resolveQwenProductSession(profile, cwd, testQwenSessionID); err != nil || id != testQwenSessionID || name != "" {
-		t.Fatalf("exact native id = %q/%q, %v", id, name, err)
-	}
-	if id, name, err := resolveQwenProductSession(profile, cwd, "reviewer"); err != nil || id != testQwenSessionID || name != "Reviewer" {
-		t.Fatalf("product title = %q/%q, %v", id, name, err)
-	}
-	if _, _, err := resolveQwenProductSession(profile, cwd, "missing"); err == nil || !strings.Contains(err.Error(), "no session") {
-		t.Fatalf("missing product title = %v", err)
-	}
-
-	qwenWriteTranscript(t, home, "two", "22345678-1234-4234-8234-123456789abc", cwd, "Reviewer", "manual")
-	if _, _, err := resolveQwenProductSession(profile, cwd, "Reviewer"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("ambiguous product title = %v", err)
-	}
-	qwenWriteTranscript(t, home, "three", "32345678-1234-4234-8234-123456789abc", cwd, "Generated", "auto")
-	if _, _, err := resolveQwenProductSession(profile, cwd, "Generated"); err == nil || !strings.Contains(err.Error(), "no session") {
-		t.Fatalf("automatic title became resume authority: %v", err)
-	}
-}
-
-func TestRunQwenPeerResolvesNameThroughProductAndOwnsLaunchFiles(t *testing.T) {
+func TestRunQwenPeerPassesNativeNameAndOwnsLaunchFiles(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")
 	home := filepath.Join(root, "qwen")
@@ -179,7 +147,6 @@ func TestRunQwenPeerResolvesNameThroughProductAndOwnsLaunchFiles(t *testing.T) {
 		}
 	}
 	qwenTestChdir(t, cwd)
-	qwenWriteTranscript(t, home, "project", testQwenSessionID, cwd, "Reviewer", "manual")
 	executable := filepath.Join(root, "qwen-bin")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -194,15 +161,15 @@ func TestRunQwenPeerResolvesNameThroughProductAndOwnsLaunchFiles(t *testing.T) {
 				return qwenreadiness.Report{Ready: true, IntegrationReady: true}, nil
 			},
 			exec: func(string, []string, []string) error { return errors.New("unexpected exec") },
-			run: func(_ context.Context, path string, args, environment []string) error {
+			run: func(_ context.Context, launch QwenNativeLaunch) error {
 				executed = true
-				if path != executable || !slices.Contains(args, testQwenSessionID) || slices.Contains(args, "Reviewer") {
-					t.Fatalf("native exec = %q %q", path, args)
+				if launch.Executable != executable || !slices.Contains(launch.Arguments, "Reviewer") || slices.Contains(launch.Arguments, testQwenSessionID) {
+					t.Fatalf("native exec = %q %q", launch.Executable, launch.Arguments)
 				}
-				if value, ok := qwenTestEnvironment(environment, peerSessionIDEnv); !ok || value != testQwenSessionID {
+				if value, ok := qwenTestEnvironment(launch.Environment, peerSessionIDEnv); !ok || value != "" {
 					t.Fatalf("native session environment = %q/%v", value, ok)
 				}
-				input, ok := qwenTestEnvironment(environment, qwenInputEnv)
+				input, ok := qwenTestEnvironment(launch.Environment, QwenInputFileEnv)
 				if !ok || !filepath.IsAbs(input) {
 					t.Fatalf("native input environment = %q/%v", input, ok)
 				}
@@ -210,9 +177,15 @@ func TestRunQwenPeerResolvesNameThroughProductAndOwnsLaunchFiles(t *testing.T) {
 				if _, err := os.Stat(input); err != nil {
 					t.Fatalf("launcher-owned input is unavailable: %v", err)
 				}
-				events := qwenTestArg(args, "--json-file")
+				events := qwenTestArg(launch.Arguments, "--json-file")
 				if filepath.Dir(events) != launchRoot {
 					t.Fatalf("launch files have different owners: %q / %q", input, events)
+				}
+				if eventEnv, ok := qwenTestEnvironment(launch.Environment, QwenEventsFileEnv); !ok || eventEnv != events {
+					t.Fatalf("native events environment = %q/%v, want %q", eventEnv, ok, events)
+				}
+				if launch.InputPath != input || launch.EventsPath != events || launch.QwenHome != home || launch.Cwd != cwd {
+					t.Fatalf("native launch = %+v", launch)
 				}
 				return nil
 			},
@@ -243,7 +216,7 @@ func TestRunQwenPeerDoesNotCreateLaunchFilesBeforeReadiness(t *testing.T) {
 				return qwenreadiness.Report{Ready: false, IntegrationReady: true, Issues: []qwenreadiness.Issue{{Code: "auth", Message: "not ready"}}}, nil
 			},
 			exec: func(string, []string, []string) error { executed = true; return nil },
-			run:  func(context.Context, string, []string, []string) error { executed = true; return nil },
+			run:  func(context.Context, QwenNativeLaunch) error { executed = true; return nil },
 		})
 	if err == nil || !strings.Contains(err.Error(), "not ready") || executed {
 		t.Fatalf("readiness result = %v, executed=%v", err, executed)
@@ -268,9 +241,9 @@ func TestQwenLaunchDoesNotCollideWithStaleSessionScopedArtifacts(t *testing.T) {
 			return qwenreadiness.Report{Ready: true, IntegrationReady: true}, nil
 		},
 		exec: func(string, []string, []string) error { return errors.New("unexpected exec") },
-		run: func(_ context.Context, _ string, args, _ []string) error {
+		run: func(_ context.Context, launch QwenNativeLaunch) error {
 			runs++
-			if launchRoot := filepath.Dir(qwenTestArg(args, "--input-file")); launchRoot == stale {
+			if launchRoot := filepath.Dir(qwenTestArg(launch.Arguments, "--input-file")); launchRoot == stale {
 				t.Fatal("launch reused the stale session-scoped directory")
 			}
 			return nil
@@ -331,30 +304,6 @@ func TestSubmitQwenNativeNameWaitsForExactProductRegistryRow(t *testing.T) {
 	}
 }
 
-func qwenWriteTranscript(t *testing.T, home, project, id, cwd, title, source string) {
-	t.Helper()
-	directory := filepath.Join(home, "projects", project, "chats")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	rows := []map[string]any{
-		{"sessionId": id, "cwd": cwd, "type": "system", "subtype": "session_start"},
-		{"sessionId": id, "cwd": cwd, "type": "system", "subtype": "custom_title", "systemPayload": map[string]any{"customTitle": title, "titleSource": source}},
-	}
-	var body strings.Builder
-	for _, row := range rows {
-		encoded, err := json.Marshal(row)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body.Write(encoded)
-		body.WriteByte('\n')
-	}
-	if err := os.WriteFile(filepath.Join(directory, id+".jsonl"), []byte(body.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func qwenTestArg(args []string, name string) string {
 	for index := 0; index+1 < len(args); index++ {
 		if args[index] == name {
@@ -397,18 +346,6 @@ func qwenTestEnvironment(environment []string, name string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func qwenTestProfile(t *testing.T, home string) qwenprofile.Identity {
-	t.Helper()
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	profile, err := qwenprofile.ResolveEnvironment(qwenTestLookup(map[string]string{"HOME": t.TempDir(), "QWEN_HOME": home}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return profile
 }
 
 func qwenTestLookup(values map[string]string) qwenprofile.LookupEnv {

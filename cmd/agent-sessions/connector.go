@@ -13,8 +13,8 @@ import (
 
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
@@ -41,21 +41,12 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
-	if reported && product == connectorProductQwen {
-		report.Name = report.UUID
-		if nativeName, ok := qwenConnectorNativeName(report); ok {
-			report.Name = nativeName
-		}
-	}
 	var live *liveSessionClient
 	if reported && connectorClaimsLivePresence(product, os.Getenv) {
 		live = startLiveSessionClient(ctx, livePresenceEndpoint(stateRoot), report,
 			func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, report, method, params)
 			})
-		if product == connectorProductQwen {
-			startQwenNativeNameProjection(ctx, live, report)
-		}
 	}
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
 		Product: product,
@@ -64,7 +55,11 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live == nil {
-				return callConnectorDaemonTool(callCtx, report.UUID, id, method, params)
+				sourceID := report.UUID
+				if product == connectorProductQwen {
+					sourceID, _ = qwenLaunchSessionID(os.Getenv(launcher.QwenEventsFileEnv))
+				}
+				return callConnectorDaemonTool(callCtx, sourceID, id, method, params)
 			}
 			return live.Call(callCtx, id, method, params)
 		},
@@ -125,42 +120,6 @@ func connectorToolSource(ambient string, arguments map[string]any) string {
 	return sourceID
 }
 
-func qwenConnectorNativeName(report liveSessionReport) (string, bool) {
-	profile, err := qwenprofile.Current()
-	if err != nil {
-		return "", false
-	}
-	home, err := qwenprofile.EffectiveHome(profile, os.LookupEnv)
-	if err != nil {
-		return "", false
-	}
-	title, _, ok := bridge.QwenNativeSessionInfo(home, report.UUID)
-	return title, ok
-}
-
-func startQwenNativeNameProjection(ctx context.Context, live *liveSessionClient, report liveSessionReport) {
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		current := report.Name
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				name, ok := qwenConnectorNativeName(report)
-				if !ok || name == current {
-					continue
-				}
-				current, report.Name = name, name
-				updateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				_ = live.UpdateReport(updateCtx, report)
-				cancel()
-			}
-		}
-	}()
-}
-
 func connectorNativeCall(ctx context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
@@ -202,18 +161,13 @@ const (
 var connectorNativeAdapters = map[string]connectorNativeAdapter{
 	connectorProductCodex:  deliverCodexConnectorMessage,
 	connectorProductClaude: deliverClaudeConnectorMessage,
-	connectorProductQwen:   deliverQwenConnectorMessage,
 }
 
 // Products with a native presence adapter already own the session's one live
 // stream. A project-discovered MCP connector may expose the same tool name,
 // but it must never open a second connection and replace the product report.
 func connectorOwnsLivePresence(product string) bool {
-	if product == connectorProductCodex || product == connectorProductGrok {
-		return false
-	}
-	_, ok := connectorNativeAdapters[product]
-	return ok
+	return product == connectorProductClaude
 }
 
 func connectorClaimsLivePresence(product string, getenv func(string) string) bool {
@@ -240,8 +194,12 @@ func deliverClaudeConnectorMessage(_ context.Context, _ liveSessionReport, messa
 	return sendClaudeConnectorMessage(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"), messageID, body)
 }
 
-func deliverQwenConnectorMessage(_ context.Context, _ liveSessionReport, _ string, body string) error {
-	writer, err := bridge.OpenQwenNativeInput(os.Getenv("AGENT_SESSIONS_QWEN_INPUT_FILE"))
+func qwenNativeSessionInfo(home, sessionID string) (string, string, bool) {
+	return bridge.QwenNativeSessionInfo(home, sessionID)
+}
+
+func submitQwenNativeInput(path, body string) error {
+	writer, err := bridge.OpenQwenNativeInput(path)
 	if err != nil {
 		return err
 	}

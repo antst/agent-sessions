@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,12 +81,12 @@ func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) 
 }
 
 func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
-	for _, product := range []string{"codex", "grok", "opencode", "kilo", "pi", "omp", "dsh"} {
+	for _, product := range []string{"codex", "grok", "qwen", "opencode", "kilo", "pi", "omp", "dsh"} {
 		if connectorOwnsLivePresence(product) {
 			t.Fatalf("%s project connector would replace its native presence stream", product)
 		}
 	}
-	for _, product := range []string{"claude", "qwen"} {
+	for _, product := range []string{"claude"} {
 		if !connectorOwnsLivePresence(product) {
 			t.Fatalf("%s connector lost its only live presence stream", product)
 		}
@@ -111,38 +110,6 @@ func TestToolsOnlyConnectorUsesAmbientOrProductHostSession(t *testing.T) {
 	}
 	if sourceID := connectorToolSource("", map[string]any{}); sourceID != "" {
 		t.Fatalf("bare connector source = %q", sourceID)
-	}
-}
-
-func TestQwenConnectorProjectsOnlyProductOwnedNativeTitle(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, ".qwen")
-	cwd := filepath.Join(root, "workspace")
-	if err := os.MkdirAll(cwd, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if connectorCwd, err := os.Getwd(); err != nil || filepath.Clean(connectorCwd) == filepath.Clean(cwd) {
-		t.Fatal("test requires the connector cwd to differ from the Qwen session cwd")
-	}
-	t.Setenv("QWEN_HOME", home)
-	report := liveSessionReport{UUID: "11111111-2222-4333-8444-555555555555", Name: "unaccepted", Product: "qwen"}
-	if name, ok := qwenConnectorNativeName(report); ok || name != "" {
-		t.Fatalf("missing product title projected as %q/%v", name, ok)
-	}
-	path := filepath.Join(home, "projects", "workspace", "chats", report.UUID+".jsonl")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	encodedCwd, err := json.Marshal(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := `{"sessionId":"11111111-2222-4333-8444-555555555555","cwd":` + string(encodedCwd) + `,"type":"system","subtype":"custom_title","systemPayload":{"customTitle":"native title","titleSource":"manual"}}` + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if name, ok := qwenConnectorNativeName(report); !ok || name != "native title" {
-		t.Fatalf("product title projection = %q/%v", name, ok)
 	}
 }
 
@@ -177,24 +144,5 @@ func TestClaudeConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("native Claude delivery did not arrive")
-	}
-}
-
-func TestQwenConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
-	input := filepath.Join(t.TempDir(), "input.jsonl")
-	if err := os.WriteFile(input, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AGENT_SESSIONS_QWEN_INPUT_FILE", input)
-	params, _ := json.Marshal(map[string]any{"message_id": "message-1", "body": "hello"})
-	if _, err := connectorNativeCall(context.Background(), liveSessionReport{UUID: "session-1", Product: "qwen"}, "message.deliver", params); err != nil {
-		t.Fatal(err)
-	}
-	body, err := os.ReadFile(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body), "hello") {
-		t.Fatalf("native Qwen input = %q", body)
 	}
 }

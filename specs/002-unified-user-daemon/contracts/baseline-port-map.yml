@@ -577,7 +577,7 @@ entries:
     new_owner: shared attachment transaction plus Qwen adapter
     new_symbols: []
     replacement_tests:
-      - internal/launcher/qwen_peer_test.go:TestQwenProductSessionResolutionUsesNativeTranscriptsOnly
+      - internal/launcher/qwen_peer_test.go:TestRunQwenPeerPassesNativeNameAndOwnsLaunchFiles
     acceptance_cells: [Q-01, Q-02, Q-03, Q-04, Q-05]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#qwen]
     deletion_paths: [internal/launcher/qwen_peer.go]
