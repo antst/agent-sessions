@@ -295,6 +295,34 @@ func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) 
 	}
 }
 
+func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "opencode", Cwd: "/workspace", Groups: []string{"team"}}
+	coordinator.liveReports[parent.ID] = liveSessionReport{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
+	coordinator.laneNamesLoaded[parent.ID] = true
+	actor := &laneActor{
+		id: "agent-sessions-lane", nativeID: "ses_product", product: "opencode", name: "worker",
+		cwd: "/workspace", parentID: parent.ID, groups: []string{"team"}, explicitGroups: []string{"team/worker"},
+		state: "archived", done: closedLaneDone(),
+	}
+	coordinator.lanes[actor.id] = actor
+	coordinator.laneNames[parent.ID] = map[string]laneNameEntry{
+		actor.nativeID: {UUID: actor.nativeID, Name: actor.name, Product: actor.product, Parent: parent.ID},
+	}
+
+	resolved, err := coordinator.resolveLaneActor(runtime, parent, actor.product, actor.nativeID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != actor || resolved.id != "agent-sessions-lane" || resolved.cwd != "/workspace" || !reflect.DeepEqual(resolved.explicitGroups, []string{"team/worker"}) {
+		t.Fatalf("resolved actor = %+v, want original %+v", resolved, actor)
+	}
+	if len(coordinator.lanes) != 1 {
+		t.Fatalf("lane count = %d, want one existing actor", len(coordinator.lanes))
+	}
+}
+
 func TestConnectorLiveReportUsesOnlyReportedFields(t *testing.T) {
 	values := map[string]string{
 		"AGENT_SESSIONS_SESSION_ID":   "session-1",

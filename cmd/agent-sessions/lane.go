@@ -1589,7 +1589,7 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 	defer c.mu.Unlock()
 	var matches []*laneActor
 	for _, actor := range c.lanes {
-		if actor.product != product || actor.id != target && actor.name != target || !all && actor.state == "archived" || actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
+		if actor.product != product || actor.id != target && actor.nativeID != target && actor.name != target || !all && actor.state == "archived" || actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
 			continue
 		}
 		matches = append(matches, actor)
