@@ -14,22 +14,22 @@ func TestClaudePeerPassesProductOwnedNameAndResumeSelectors(t *testing.T) {
 		{
 			name: "fresh named",
 			args: []string{"--peer-name", "reviewer", "--model", "sonnet"},
-			want: []string{"--model", "sonnet", "--name", "reviewer"},
+			want: []string{"--model", "sonnet", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--name", "reviewer"},
 		},
 		{
 			name: "resume by name",
 			args: []string{"--resume", "reviewer"},
-			want: []string{"--resume", "reviewer"},
+			want: []string{"--resume", "reviewer", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
 		},
 		{
 			name: "resume by id",
 			args: []string{"--resume", "00000000-0000-4000-8000-000000000123"},
-			want: []string{"--resume", "00000000-0000-4000-8000-000000000123"},
+			want: []string{"--resume", "00000000-0000-4000-8000-000000000123", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
 		},
 		{
 			name: "exact session id",
 			args: []string{"--session-id", "00000000-0000-4000-8000-000000000124"},
-			want: []string{"--session-id", "00000000-0000-4000-8000-000000000124"},
+			want: []string{"--session-id", "00000000-0000-4000-8000-000000000124", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
 		},
 	}
 	for _, test := range tests {
@@ -52,7 +52,11 @@ func TestClaudePeerRemovesOnlyWrapperContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--dangerously-skip-permissions", "--", "prompt", "--group", "literal"}
+	want := []string{
+		"--dangerously-skip-permissions",
+		"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*",
+		"--", "prompt", "--group", "literal",
+	}
 	if !reflect.DeepEqual(plan.args, want) {
 		t.Fatalf("native argv = %#v, want %#v", plan.args, want)
 	}
@@ -67,7 +71,9 @@ func TestClaudePeerNoYoloIsNativeLastDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"--dangerously-skip-permissions", "--permission-mode", "default", "--", "prompt",
+		"--dangerously-skip-permissions",
+		"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*",
+		"--permission-mode", "default", "--", "prompt",
 	}
 	if !reflect.DeepEqual(plan.args, want) {
 		t.Fatalf("native argv = %#v, want %#v", plan.args, want)
@@ -79,7 +85,7 @@ func TestClaudePeerNativeOptionValueIsNotParsedAsWrapperFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--model", "--group", "--name", "worker"}
+	want := []string{"--model", "--group", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--name", "worker"}
 	if !reflect.DeepEqual(plan.args, want) {
 		t.Fatalf("native argv = %#v, want %#v", plan.args, want)
 	}

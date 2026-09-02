@@ -122,7 +122,11 @@ type Descriptor struct {
 // reconnect, and operator projections.
 var descriptors = [...]Descriptor{
 	baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
-	baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
+	withNativeLaunchPolicy(
+		baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
+		[]string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
+		[]string{"--dangerously-skip-permissions"},
+	),
 	baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
 	baselineDescriptor("qwen", "Qwen Code", "qwen", "qwen-peer", "qwen-peer-lane", "qwen-lane", "qwen-lane-manager", "qwen-lane", []string{"qwen"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "0.22.0"),
 	withNativeYolo(newProductDescriptor(
@@ -169,6 +173,12 @@ func newProductDescriptor(
 
 func withNativeYolo(descriptor Descriptor, arguments ...string) Descriptor {
 	descriptor.NativeYoloArgs = append([]string(nil), arguments...)
+	return descriptor
+}
+
+func withNativeLaunchPolicy(descriptor Descriptor, toolGrant, yolo []string) Descriptor {
+	descriptor.NativeToolGrantArgs = append([]string(nil), toolGrant...)
+	descriptor.NativeYoloArgs = append([]string(nil), yolo...)
 	return descriptor
 }
 

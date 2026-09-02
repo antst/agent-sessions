@@ -1,6 +1,10 @@
 package launcher
 
-import "os"
+import (
+	"os"
+
+	"github.com/antst/agent-sessions/internal/productcatalog"
+)
 
 type claudePeerPlan struct {
 	peerName string
@@ -47,13 +51,13 @@ func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
 	if err != nil {
 		return claudePeerPlan{}, err
 	}
-	for index, argument := range forwarded {
-		if argument == "--" {
-			break
-		}
-		if argument == "--yolo" {
-			forwarded[index] = "--dangerously-skip-permissions"
-		}
+	descriptor, ok := productcatalog.ByID("claude")
+	if !ok {
+		return claudePeerPlan{}, usageError("Claude product descriptor is unavailable")
+	}
+	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, context.forceNoYolo)
+	if err != nil {
+		return claudePeerPlan{}, err
 	}
 	forwarded, peerName, err := extractPeerNameArgs(forwarded)
 	if err != nil {

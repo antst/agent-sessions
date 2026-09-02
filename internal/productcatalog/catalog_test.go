@@ -119,6 +119,10 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
 	}
+	claude, _ := ByID("claude")
+	if !reflect.DeepEqual(claude.NativeToolGrantArgs, []string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"}) || !reflect.DeepEqual(claude.NativeYoloArgs, []string{"--dangerously-skip-permissions"}) {
+		t.Fatalf("Claude launch policy = %#v", claude)
+	}
 	pi, _ := ByID("pi")
 	if !reflect.DeepEqual(pi.NativeToolGrantArgs, []string{"--approve"}) || !reflect.DeepEqual(pi.NativeYoloArgs, []string{"--approve"}) {
 		t.Fatalf("Pi launch policy leaked caller mutation: %#v", pi)
