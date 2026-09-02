@@ -339,36 +339,47 @@ func TestDocumentProbeRequiresExactSupportedRoutesAndBoundsResponses(t *testing.
 	}
 }
 
-func TestTurnReconciliationRejectsUnrelatedOrIncompleteAssistant(t *testing.T) {
-	complete := false
-	parentID := "msg_other"
+func TestTurnReconciliationRequiresInputBeforeCompletedAssistant(t *testing.T) {
+	includeInput := false
+	complete := true
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuth(t, request)
 		if request.URL.Path != "/session/ses_exact/message" {
 			http.NotFound(response, request)
 			return
 		}
+		input := ""
+		if includeInput {
+			input = `,{"info":{"id":"msg_input","sessionID":"ses_exact","role":"user"},"parts":[]},{"info":{"id":"msg_synthetic","sessionID":"ses_exact","role":"user"},"parts":[]}`
+		}
 		completed := ""
 		if complete {
 			completed = `,"time":{"completed":123}`
 		}
-		_, _ = fmt.Fprintf(response, `[{"info":{"id":"msg_input","sessionID":"ses_exact","role":"user"},"parts":[]},{"info":{"id":"msg_answer","sessionID":"ses_exact","role":"assistant","parentID":%q%s},"parts":[{"type":"text","text":"wrong turn"}]}]`, parentID, completed)
+		_, _ = fmt.Fprintf(response, `[{"info":{"id":"msg_old_answer","sessionID":"ses_exact","role":"assistant","time":{"completed":100}},"parts":[{"type":"text","text":"old"}]}%s,{"info":{"id":"msg_answer","sessionID":"ses_exact","role":"assistant"%s},"parts":[{"type":"text","text":"current"}]}]`, input, completed)
 	})
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
 
 	completed, err := client.TurnCompleted(context.Background(), "ses_exact", "msg_input")
 	if err != nil || completed {
-		t.Fatalf("unrelated assistant completed=%v err=%v", completed, err)
+		t.Fatalf("assistant before input completed=%v err=%v", completed, err)
 	}
-	parentID = "msg_input"
+	if _, err := client.ResultAfter(context.Background(), "ses_exact", "msg_input"); !errors.Is(err, productruntime.ErrAmbiguousSession) {
+		t.Fatalf("result before input = %v", err)
+	}
+	includeInput = true
+	complete = false
 	completed, err = client.TurnCompleted(context.Background(), "ses_exact", "msg_input")
 	if err != nil || completed {
-		t.Fatalf("incomplete assistant completed=%v err=%v", completed, err)
+		t.Fatalf("incomplete assistant after synthetic input completed=%v err=%v", completed, err)
 	}
 	complete = true
 	completed, err = client.TurnCompleted(context.Background(), "ses_exact", "msg_input")
 	if err != nil || !completed {
-		t.Fatalf("exact completed assistant completed=%v err=%v", completed, err)
+		t.Fatalf("completed assistant after synthetic input completed=%v err=%v", completed, err)
+	}
+	if result, err := client.ResultAfter(context.Background(), "ses_exact", "msg_input"); err != nil || result != "current" {
+		t.Fatalf("result after synthetic input = %q, %v", result, err)
 	}
 }

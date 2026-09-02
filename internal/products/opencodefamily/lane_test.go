@@ -246,7 +246,7 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 			response.WriteHeader(http.StatusNoContent)
 		case "GET /session/ses_fast/message":
 			id := nativeMessageID.Load().(string)
-			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_fast_answer","sessionID":"ses_fast","role":"assistant","parentID":%q,"time":{"completed":999}},"parts":[{"type":"text","text":"fast result"}]}]`, id, id)
+			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_synthetic","sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_fast_answer","sessionID":"ses_fast","role":"assistant","parentID":"msg_synthetic","time":{"completed":999}},"parts":[{"type":"text","text":"fast result"}]}]`, id)
 		default:
 			http.NotFound(response, request)
 		}

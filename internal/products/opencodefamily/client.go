@@ -382,7 +382,6 @@ type message struct {
 		ID        string `json:"id"`
 		SessionID string `json:"sessionID"`
 		Role      string `json:"role"`
-		ParentID  string `json:"parentID"`
 		Time      struct {
 			Completed *int64 `json:"completed"`
 		} `json:"time"`
@@ -411,9 +410,9 @@ func (client *Client) messages(ctx context.Context, nativeSessionID string) ([]m
 	return messages, nil
 }
 
-// TurnCompleted reconciles the exact admitted user message with its completed
-// assistant child. This remains causally safe if a fast terminal SSE event was
-// emitted before the event subscription became live.
+// TurnCompleted uses the exact admitted user message as a lower bound, then
+// follows the product's own ordered transcript to its first completed assistant.
+// Product-owned synthetic or intermediate messages may sit between the two.
 func (client *Client) TurnCompleted(ctx context.Context, nativeSessionID, nativeMessageID string) (bool, error) {
 	if !validNativeID(nativeSessionID, "ses_") || !validNativeID(nativeMessageID, "msg_") {
 		return false, productruntime.ErrProtocol
@@ -429,8 +428,9 @@ func (client *Client) TurnCompleted(ctx context.Context, nativeSessionID, native
 				return false, productruntime.ErrAmbiguousSession
 			}
 			foundInput = true
+			continue
 		}
-		if candidate.Info.Role != "assistant" || candidate.Info.ParentID != nativeMessageID || candidate.Info.Time.Completed == nil {
+		if !foundInput || candidate.Info.Role != "assistant" || candidate.Info.Time.Completed == nil {
 			continue
 		}
 		if *candidate.Info.Time.Completed <= 0 {
@@ -438,9 +438,6 @@ func (client *Client) TurnCompleted(ctx context.Context, nativeSessionID, native
 		}
 		if len(bytes.TrimSpace(candidate.Info.Error)) != 0 && !bytes.Equal(bytes.TrimSpace(candidate.Info.Error), []byte("null")) {
 			return false, productruntime.ErrNativeRejected
-		}
-		if !foundInput {
-			return false, productruntime.ErrAmbiguousSession
 		}
 		return true, nil
 	}
@@ -456,7 +453,6 @@ func (client *Client) ResultAfter(ctx context.Context, nativeSessionID, nativeMe
 		return "", err
 	}
 	found := false
-	completed := false
 	var result bytes.Buffer
 	for _, candidate := range messages {
 		if candidate.Info.ID == nativeMessageID {
@@ -466,7 +462,7 @@ func (client *Client) ResultAfter(ctx context.Context, nativeSessionID, nativeMe
 			found = true
 			continue
 		}
-		if !found || candidate.Info.Role != "assistant" || candidate.Info.ParentID != nativeMessageID || candidate.Info.Time.Completed == nil {
+		if !found || candidate.Info.Role != "assistant" || candidate.Info.Time.Completed == nil {
 			continue
 		}
 		if *candidate.Info.Time.Completed <= 0 {
@@ -475,7 +471,6 @@ func (client *Client) ResultAfter(ctx context.Context, nativeSessionID, nativeMe
 		if len(bytes.TrimSpace(candidate.Info.Error)) != 0 && !bytes.Equal(bytes.TrimSpace(candidate.Info.Error), []byte("null")) {
 			return "", productruntime.ErrNativeRejected
 		}
-		completed = true
 		for _, part := range candidate.Parts {
 			if part.Type != "text" || part.Text == "" {
 				continue
@@ -488,11 +483,9 @@ func (client *Client) ResultAfter(ctx context.Context, nativeSessionID, nativeMe
 			}
 			result.WriteString(part.Text)
 		}
+		return result.String(), nil
 	}
-	if !found || !completed {
-		return "", productruntime.ErrAmbiguousSession
-	}
-	return result.String(), nil
+	return "", productruntime.ErrAmbiguousSession
 }
 
 type NativeEvent struct {
