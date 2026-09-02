@@ -20,7 +20,6 @@ type LaneDriver interface {
 	Steer(context.Context, NativeTurnRef, TurnStartRequest) (NativeAcceptance, error)
 	Interrupt(context.Context, NativeTurnRef) error
 	Archive(context.Context, NativeSessionRef) error
-	Recover(context.Context, LaneRecoveryRequest) (NativeSessionRef, error)
 }
 
 type DoctorProbe interface {

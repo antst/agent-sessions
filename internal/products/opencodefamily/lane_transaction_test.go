@@ -16,11 +16,9 @@ type laneTransactionManager struct {
 
 	mu             sync.Mutex
 	openCalls      int
-	recoverCalls   int
 	closeCalls     int
 	closeFailures  int
 	openErr        error
-	recoverErr     error
 	openEntered    chan struct{}
 	openRelease    chan struct{}
 	openSignalOnce sync.Once
@@ -51,25 +49,11 @@ func (manager *laneTransactionManager) Open(context.Context, ServerOpenRequest) 
 	return manager.live(), err
 }
 
-func (manager *laneTransactionManager) Recover(context.Context, ServerRecoveryRequest) (*LiveServer, error) {
-	manager.mu.Lock()
-	manager.recoverCalls++
-	err := manager.recoverErr
-	manager.mu.Unlock()
-	return manager.live(), err
-}
-
-func newTransactionLaneDriver(t *testing.T, manager ServerManager, recovery bool) *LaneDriver {
+func newTransactionLaneDriver(t *testing.T, manager ServerManager) *LaneDriver {
 	t.Helper()
 	config := LaneConfig{
 		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 7,
-		Receipts: &testReceipts{bodies: map[string][]byte{"receipt": []byte("body")}},
-		Servers:  manager, MapPermission: MapPermissionRules,
-	}
-	if recovery {
-		config.RecoveryMode = func(context.Context, productruntime.LaneRecoveryRequest) (permissionmode.Mode, error) {
-			return permissionmode.Default, nil
-		}
+		Servers: manager, MapPermission: MapPermissionRules,
 	}
 	driver, err := NewLaneDriver(config)
 	if err != nil {
@@ -80,7 +64,7 @@ func newTransactionLaneDriver(t *testing.T, manager ServerManager, recovery bool
 
 func TestLaneOpenRetainsServerReturnedWithErrorUntilCleanupRetry(t *testing.T) {
 	manager := &laneTransactionManager{openErr: productruntime.ErrCleanupDebt, closeFailures: 1}
-	driver := newTransactionLaneDriver(t, manager, false)
+	driver := newTransactionLaneDriver(t, manager)
 	request := productruntime.LaneOpenRequest{
 		ProductID: "opencode", LaneID: "open-error", Cwd: "/work/project", PermissionMode: permissionmode.Default,
 	}
@@ -119,7 +103,7 @@ func TestFreshProvisionalLaneDeletesExactlyAndRetainsCloseDebt(t *testing.T) {
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
 	manager := &laneTransactionManager{client: client, closeFailures: 1}
-	driver := newTransactionLaneDriver(t, manager, false)
+	driver := newTransactionLaneDriver(t, manager)
 	live := &laneSession{
 		server: manager.live(), client: client, nativeID: "ses_fresh_cleanup", permissionMode: permissionmode.Default,
 		provisional: true, opening: true, openDone: make(chan struct{}), fresh: true,
@@ -142,41 +126,6 @@ func TestFreshProvisionalLaneDeletesExactlyAndRetainsCloseDebt(t *testing.T) {
 	}
 }
 
-func TestLaneRecoveryGetFailurePreservesNativeSessionAndRetainsCloseDebt(t *testing.T) {
-	deleteCalls := 0
-	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requireBasicAuth(t, request)
-		switch request.Method + " " + request.URL.Path {
-		case "GET /session/ses_prior":
-			http.Error(response, "gone", http.StatusNotFound)
-		case "DELETE /session/ses_prior":
-			deleteCalls++
-			http.Error(response, "must preserve resumed session", http.StatusConflict)
-		default:
-			http.NotFound(response, request)
-		}
-	})
-	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
-	defer closeClient()
-	manager := &laneTransactionManager{client: client, closeFailures: 1}
-	driver := newTransactionLaneDriver(t, manager, true)
-	request := productruntime.LaneRecoveryRequest{
-		ProductID: "opencode", LaneID: "recover-debt", PriorNativeSessionID: "ses_prior", PriorGeneration: 6,
-	}
-	if _, err := driver.Recover(context.Background(), request); !errors.Is(err, productruntime.ErrUnsupportedRecovery) || !errors.Is(err, productruntime.ErrCleanupDebt) {
-		t.Fatalf("recovery cleanup debt = %v", err)
-	}
-	if _, err := driver.Recover(context.Background(), request); !errors.Is(err, productruntime.ErrCleanupDebt) {
-		t.Fatalf("recovery cleanup convergence = %v", err)
-	}
-	manager.mu.Lock()
-	recoverCalls, closeCalls := manager.recoverCalls, manager.closeCalls
-	manager.mu.Unlock()
-	if deleteCalls != 0 || recoverCalls != 1 || closeCalls != 2 || driver.lanes[request.LaneID] != nil {
-		t.Fatalf("recovery deletes=%d calls=%d closes=%d retained=%v", deleteCalls, recoverCalls, closeCalls, driver.lanes[request.LaneID] != nil)
-	}
-}
-
 func TestConcurrentLaneOpenIsReservedBeforeNativeServerStart(t *testing.T) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuth(t, request)
@@ -189,7 +138,7 @@ func TestConcurrentLaneOpenIsReservedBeforeNativeServerStart(t *testing.T) {
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
 	manager := &laneTransactionManager{client: client, openEntered: make(chan struct{}), openRelease: make(chan struct{})}
-	driver := newTransactionLaneDriver(t, manager, false)
+	driver := newTransactionLaneDriver(t, manager)
 	request := productruntime.LaneOpenRequest{
 		ProductID: "opencode", LaneID: "reserved", Cwd: "/work/project", PermissionMode: permissionmode.Default,
 	}

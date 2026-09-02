@@ -26,20 +26,11 @@ type ServerOpenRequest struct {
 	PermissionRules []PermissionRule
 }
 
-type ServerRecoveryRequest struct {
-	Key             string
-	NativeSessionID string
-	PriorGeneration uint64
-	Arguments       []string
-}
-
 type ServerManager interface {
 	Open(context.Context, ServerOpenRequest) (*LiveServer, error)
-	Recover(context.Context, ServerRecoveryRequest) (*LiveServer, error)
 }
 
 type EndpointAllocator func(context.Context, string) (string, error)
-type RecoveryDirectory func(context.Context, string, string) (string, error)
 type CredentialSource func() (string, productruntime.SensitiveValue, error)
 
 type OwnedServerManagerConfig struct {
@@ -48,7 +39,6 @@ type OwnedServerManagerConfig struct {
 	Executable       string
 	Supervisor       productruntime.OwnedProcessSupervisor
 	AllocateEndpoint EndpointAllocator
-	RecoveryCwd      RecoveryDirectory
 	Credentials      CredentialSource
 	Limits           productserver.Limits
 }
@@ -93,17 +83,6 @@ func secureCredential() (string, productruntime.SensitiveValue, error) {
 
 func (manager *OwnedServerManager) Open(ctx context.Context, request ServerOpenRequest) (*LiveServer, error) {
 	return manager.open(ctx, request.Key, request.Cwd, request.Arguments, request.Env, request.SensitiveEnv)
-}
-
-func (manager *OwnedServerManager) Recover(ctx context.Context, request ServerRecoveryRequest) (*LiveServer, error) {
-	if manager.config.RecoveryCwd == nil || !validNativeID(request.NativeSessionID, "ses_") {
-		return nil, productruntime.ErrUnsupportedRecovery
-	}
-	cwd, err := manager.config.RecoveryCwd(ctx, request.Key, request.NativeSessionID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: recovery directory unavailable", productruntime.ErrUnsupportedRecovery)
-	}
-	return manager.open(ctx, request.Key, cwd, request.Arguments, nil, nil)
 }
 
 func (manager *OwnedServerManager) open(

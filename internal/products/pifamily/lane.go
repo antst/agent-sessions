@@ -1,13 +1,11 @@
 package pifamily
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"time"
@@ -19,21 +17,12 @@ import (
 
 type PermissionMapper func(permissionmode.Mode) (PermissionPolicy, error)
 
-// RecoveryPlanner supplies current durable lane launch facts to Recover. The
-// product driver deliberately does not persist or copy mutable cwd, name, or
-// argv. A host without this authority receives ErrUnsupportedRecovery.
-type RecoveryPlanner interface {
-	PlanRecovery(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error)
-}
-
 type LaneConfig struct {
 	Quirks        Quirks
 	Executable    string
 	Generation    uint64
 	Processes     ProcessFactory
-	Receipts      productruntime.ReceiptReader
 	MapPermission PermissionMapper
-	RecoveryPlans RecoveryPlanner
 	Now           func() time.Time
 }
 
@@ -68,8 +57,8 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 	if strings.TrimSpace(config.Executable) == "" {
 		config.Executable = config.Quirks.Executable
 	}
-	if config.Generation == 0 || config.Processes == nil || config.Receipts == nil || config.MapPermission == nil {
-		return nil, errors.New("Pi-family lane requires generation, process factory, receipts, and permission mapper")
+	if config.Generation == 0 || config.Processes == nil || config.MapPermission == nil {
+		return nil, errors.New("Pi-family lane requires generation, process factory, and permission mapper")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -165,7 +154,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, ref productruntime.Nati
 	if request.PermissionMode != session.permission {
 		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: per-turn policy differs from the exact native launch policy", productruntime.ErrUnsupportedPolicy)
 	}
-	prompt, err := readReceipt(driver.config.Receipts, request.ReceiptID)
+	prompt, err := lanePrompt(request.Prompt)
 	if err != nil {
 		return productruntime.NativeTurnRef{}, err
 	}
@@ -284,7 +273,7 @@ func (driver *LaneDriver) Steer(ctx context.Context, ref productruntime.NativeTu
 	if request.PermissionMode != session.permission {
 		return productruntime.NativeAcceptance{}, fmt.Errorf("%w: steer policy differs from the exact native launch policy", productruntime.ErrUnsupportedPolicy)
 	}
-	prompt, err := readReceipt(driver.config.Receipts, request.ReceiptID)
+	prompt, err := lanePrompt(request.Prompt)
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
@@ -361,23 +350,6 @@ func (driver *LaneDriver) Archive(ctx context.Context, ref productruntime.Native
 	return nil
 }
 
-func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.LaneRecoveryRequest) (productruntime.NativeSessionRef, error) {
-	if request.ProductID != driver.config.Quirks.ProductID || request.LaneID == "" || request.PriorNativeSessionID == "" || request.PriorGeneration == 0 {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: incomplete Pi-family recovery anchor", productruntime.ErrUnsupportedRecovery)
-	}
-	if driver.config.RecoveryPlans == nil {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: host did not supply current durable lane launch facts", productruntime.ErrUnsupportedRecovery)
-	}
-	plan, err := driver.config.RecoveryPlans.PlanRecovery(ctx, request)
-	if err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	if plan.ProductID != request.ProductID || plan.LaneID != request.LaneID || plan.ResumeNativeID != request.PriorNativeSessionID {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: recovery plan changed the native session anchor", productruntime.ErrUnsupportedRecovery)
-	}
-	return driver.Open(ctx, plan)
-}
-
 func (driver *LaneDriver) session(ref productruntime.NativeSessionRef) (*laneSession, error) {
 	driver.mu.Lock()
 	session := driver.lanes[ref.LaneID]
@@ -432,32 +404,11 @@ func (driver *LaneDriver) nativeSessionInUseLocked(nativeSessionID string) bool 
 	return false
 }
 
-func readReceipt(reader productruntime.ReceiptReader, receiptID string) (string, error) {
-	if strings.TrimSpace(receiptID) == "" {
-		return "", fmt.Errorf("%w: receipt id is empty", productruntime.ErrNativeRejected)
+func lanePrompt(prompt string) (string, error) {
+	if strings.TrimSpace(prompt) == "" || len(prompt) > MaxPromptBytes || !utf8.ValidString(prompt) || strings.IndexByte(prompt, 0) >= 0 {
+		return "", fmt.Errorf("%w: prompt is not valid bounded native text", productruntime.ErrProtocol)
 	}
-	stream, length, digest, err := reader.OpenReceipt(receiptID)
-	if err != nil {
-		return "", err
-	}
-	if stream == nil {
-		return "", fmt.Errorf("%w: receipt reader returned no stream", productruntime.ErrProtocol)
-	}
-	defer stream.Close()
-	if length < 1 || length > MaxPromptBytes {
-		return "", fmt.Errorf("%w: receipt length is outside the native prompt bound", productruntime.ErrProtocol)
-	}
-	body, err := io.ReadAll(io.LimitReader(stream, length+1))
-	if err != nil {
-		return "", fmt.Errorf("%w: read receipt: %v", productruntime.ErrProtocol, err)
-	}
-	if int64(len(body)) != length || sha256.Sum256(body) != digest {
-		return "", fmt.Errorf("%w: receipt length or digest changed", productruntime.ErrStale)
-	}
-	if !utf8.Valid(body) || bytes.IndexByte(body, 0) >= 0 {
-		return "", fmt.Errorf("%w: receipt is not valid native prompt text", productruntime.ErrProtocol)
-	}
-	return string(body), nil
+	return prompt, nil
 }
 
 func terminalOutcome(event rpcTerminal, interrupted bool) (productruntime.TurnOutcome, string) {

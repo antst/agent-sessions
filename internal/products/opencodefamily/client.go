@@ -138,7 +138,7 @@ func mapTransportError(err error) error {
 	case errors.Is(err, productruntime.ErrUnavailable), errors.Is(err, productruntime.ErrIncompatible),
 		errors.Is(err, productruntime.ErrUnauthorized), errors.Is(err, productruntime.ErrStale),
 		errors.Is(err, productruntime.ErrAmbiguousSession), errors.Is(err, productruntime.ErrUnsupportedPolicy),
-		errors.Is(err, productruntime.ErrUnsupportedSteer), errors.Is(err, productruntime.ErrUnsupportedRecovery),
+		errors.Is(err, productruntime.ErrUnsupportedSteer),
 		errors.Is(err, productruntime.ErrNativeRejected), errors.Is(err, productruntime.ErrProtocol),
 		errors.Is(err, productruntime.ErrTimedOut), errors.Is(err, productruntime.ErrCleanupDebt):
 		return err

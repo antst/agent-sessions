@@ -2,11 +2,12 @@ package opencodefamily
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"time"
@@ -16,16 +17,13 @@ import (
 )
 
 type PermissionMapper func(permissionmode.Mode) ([]PermissionRule, error)
-type RecoveryPermissionMode func(context.Context, productruntime.LaneRecoveryRequest) (permissionmode.Mode, error)
 
 type LaneConfig struct {
 	ProductID        string
 	Dialect          Dialect
 	Generation       uint64
-	Receipts         productruntime.ReceiptReader
 	Servers          ServerManager
 	MapPermission    PermissionMapper
-	RecoveryMode     RecoveryPermissionMode
 	DecidePermission PermissionDecision
 	Now              func() time.Time
 }
@@ -49,10 +47,10 @@ type laneSession struct {
 }
 
 type laneTurn struct {
-	id         string
-	receiptID  string
-	waiting    bool
-	waitCancel context.CancelFunc
+	id          string
+	operationID string
+	waiting     bool
+	waitCancel  context.CancelFunc
 }
 
 // LaneDriver retains only live server/client handles and native IDs. Names,
@@ -64,7 +62,7 @@ type LaneDriver struct {
 }
 
 func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
-	if config.ProductID == "" || config.Generation == 0 || config.Receipts == nil || config.Servers == nil ||
+	if config.ProductID == "" || config.Generation == 0 || config.Servers == nil ||
 		config.MapPermission == nil || config.Dialect != DialectOpenCode && config.Dialect != DialectKilo {
 		return nil, productruntime.ErrProtocol
 	}
@@ -136,102 +134,6 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 			err = productruntime.ErrAmbiguousSession
 		}
 		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, err)
-	}
-	live.cleanup.Lock()
-	live.nativeID = session.ID
-	live.cleanup.Unlock()
-	driver.mu.Lock()
-	if driver.lanes[request.LaneID] != live || !live.opening {
-		driver.mu.Unlock()
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, productruntime.ErrAmbiguousSession)
-	}
-	live.provisional = false
-	live.opening = false
-	close(live.openDone)
-	driver.mu.Unlock()
-	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: session.ID, Generation: driver.config.Generation}, nil
-}
-
-func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.LaneRecoveryRequest) (productruntime.NativeSessionRef, error) {
-	if request.ProductID != driver.config.ProductID || strings.TrimSpace(request.LaneID) == "" ||
-		!validNativeID(request.PriorNativeSessionID, "ses_") || request.PriorGeneration == 0 {
-		return productruntime.NativeSessionRef{}, productruntime.ErrProtocol
-	}
-	if driver.config.RecoveryMode == nil {
-		return productruntime.NativeSessionRef{}, productruntime.ErrUnsupportedRecovery
-	}
-	permissionMode, err := driver.config.RecoveryMode(ctx, request)
-	if err != nil || !permissionMode.Valid() {
-		return productruntime.NativeSessionRef{}, errors.Join(productruntime.ErrUnsupportedRecovery, err)
-	}
-	if _, err := driver.config.MapPermission(permissionMode); err != nil {
-		return productruntime.NativeSessionRef{}, errors.Join(productruntime.ErrUnsupportedRecovery, err)
-	}
-	digest := laneIntentDigest("recover", request, permissionMode)
-	driver.mu.Lock()
-	if live := driver.lanes[request.LaneID]; live != nil {
-		if live.provisional {
-			if live.intentDigest != digest || live.opening {
-				driver.mu.Unlock()
-				return productruntime.NativeSessionRef{}, productruntime.ErrAmbiguousSession
-			}
-			driver.mu.Unlock()
-			if cleanupErr := driver.retryProvisionalCleanup(ctx, request.LaneID, live); cleanupErr != nil {
-				return productruntime.NativeSessionRef{}, cleanupErr
-			}
-			return productruntime.NativeSessionRef{}, fmt.Errorf("%w: prior lane-recovery cleanup converged; retry recovery explicitly", productruntime.ErrCleanupDebt)
-		}
-		if live.archiving {
-			driver.mu.Unlock()
-			return productruntime.NativeSessionRef{}, productruntime.ErrCleanupDebt
-		}
-		if live.archived {
-			driver.mu.Unlock()
-			return productruntime.NativeSessionRef{}, productruntime.ErrStale
-		}
-		if live.nativeID != request.PriorNativeSessionID {
-			driver.mu.Unlock()
-			return productruntime.NativeSessionRef{}, productruntime.ErrAmbiguousSession
-		}
-		if live.permissionMode != permissionMode {
-			driver.mu.Unlock()
-			return productruntime.NativeSessionRef{}, productruntime.ErrUnsupportedPolicy
-		}
-		ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: live.nativeID, Generation: driver.config.Generation}
-		driver.mu.Unlock()
-		return ref, nil
-	}
-	live := &laneSession{
-		nativeID: request.PriorNativeSessionID, permissionMode: permissionMode,
-		intentDigest: digest, provisional: true, opening: true, openDone: make(chan struct{}), fresh: false,
-	}
-	driver.lanes[request.LaneID] = live
-	driver.mu.Unlock()
-	server, err := driver.config.Servers.Recover(ctx, ServerRecoveryRequest{
-		Key: request.LaneID, NativeSessionID: request.PriorNativeSessionID, PriorGeneration: request.PriorGeneration,
-	})
-	if server == nil {
-		if err == nil {
-			err = productruntime.ErrUnavailable
-		}
-		driver.discardEmptyProvisional(request.LaneID, live)
-		return productruntime.NativeSessionRef{}, err
-	}
-	live.server = server
-	if err != nil {
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, err)
-	}
-	client := server.Client()
-	if client == nil {
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, productruntime.ErrUnavailable)
-	}
-	live.client = client
-	session, err := client.GetSession(ctx, request.PriorNativeSessionID)
-	if err != nil || session.ID != request.PriorNativeSessionID {
-		if err == nil {
-			err = productruntime.ErrAmbiguousSession
-		}
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, errors.Join(productruntime.ErrUnsupportedRecovery, err))
 	}
 	live.cleanup.Lock()
 	live.nativeID = session.ID
@@ -320,8 +222,12 @@ func (driver *LaneDriver) retryProvisionalCleanup(ctx context.Context, laneID st
 }
 
 func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
-	if !request.PermissionMode.Valid() || strings.TrimSpace(request.ReceiptID) == "" {
+	if !request.PermissionMode.Valid() || strings.TrimSpace(request.Prompt) == "" || len(request.Prompt) > maxResultBytes {
 		return productruntime.NativeTurnRef{}, productruntime.ErrProtocol
+	}
+	operationID, err := newOperationID()
+	if err != nil {
+		return productruntime.NativeTurnRef{}, err
 	}
 	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
 		return productruntime.NativeTurnRef{}, err
@@ -338,26 +244,22 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 		driver.mu.Unlock()
 		return productruntime.NativeTurnRef{}, productruntime.ErrNativeRejected
 	}
-	live.turn = &laneTurn{receiptID: request.ReceiptID}
+	live.turn = &laneTurn{operationID: operationID}
 	driver.mu.Unlock()
-	body, err := driver.readReceipt(request.ReceiptID)
-	if err != nil {
-		driver.clearTurn(session.LaneID, request.ReceiptID)
-		return productruntime.NativeTurnRef{}, err
-	}
+	body := []byte(request.Prompt)
 	var accepted productruntime.NativeAcceptance
 	if driver.config.Dialect == DialectKilo {
-		accepted, err = live.client.KiloPrompt(ctx, session.NativeSessionID, request.ReceiptID, body, "queue")
+		accepted, err = live.client.KiloPrompt(ctx, session.NativeSessionID, operationID, body, "queue")
 	} else {
-		accepted, err = live.client.PromptAsync(ctx, session.NativeSessionID, request.ReceiptID, body, false)
+		accepted, err = live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false)
 	}
 	if err != nil {
-		driver.clearTurn(session.LaneID, request.ReceiptID)
+		driver.clearTurn(session.LaneID, operationID)
 		return productruntime.NativeTurnRef{}, err
 	}
 	driver.mu.Lock()
 	current := driver.lanes[session.LaneID]
-	if current == nil || current != live || current.turn == nil || current.turn.receiptID != request.ReceiptID {
+	if current == nil || current != live || current.turn == nil || current.turn.operationID != operationID {
 		driver.mu.Unlock()
 		return productruntime.NativeTurnRef{}, productruntime.ErrAmbiguousSession
 	}
@@ -370,14 +272,14 @@ func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeT
 	if driver.config.Dialect != DialectKilo {
 		return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
 	}
-	if !request.PermissionMode.Valid() || strings.TrimSpace(request.ReceiptID) == "" || turn.NativeTurnID == "" {
+	if !request.PermissionMode.Valid() || strings.TrimSpace(request.Prompt) == "" || len(request.Prompt) > maxResultBytes || turn.NativeTurnID == "" {
 		return productruntime.NativeAcceptance{}, productruntime.ErrProtocol
 	}
-	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
+	operationID, err := newOperationID()
+	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
-	body, err := driver.readReceipt(request.ReceiptID)
-	if err != nil {
+	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
 	live, err := driver.lockLive(turn.NativeSessionRef, true)
@@ -392,7 +294,7 @@ func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeT
 		driver.mu.Unlock()
 		return productruntime.NativeAcceptance{}, productruntime.ErrStale
 	}
-	accepted, err := live.client.KiloPrompt(ctx, turn.NativeSessionID, request.ReceiptID, body, "steer")
+	accepted, err := live.client.KiloPrompt(ctx, turn.NativeSessionID, operationID, []byte(request.Prompt), "steer")
 	driver.mu.Unlock()
 	return accepted, err
 }
@@ -421,7 +323,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 		driver.mu.Unlock()
 		return productruntime.NativeTerminal{}, productruntime.ErrNativeRejected
 	}
-	receiptID := live.turn.receiptID
+	operationID := live.turn.operationID
 	waitCtx, cancelWait := context.WithCancel(ctx)
 	live.turn.waiting = true
 	live.turn.waitCancel = cancelWait
@@ -444,7 +346,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 		if errors.Is(waitErr, context.Canceled) {
 			return productruntime.NativeTerminal{}, waitErr
 		}
-		driver.clearTurn(turn.LaneID, receiptID)
+		driver.clearTurn(turn.LaneID, operationID)
 		return productruntime.NativeTerminal{Outcome: productruntime.TurnFailed, ExitLike: 1, NativeStopReason: "native-event-failure"}, nil
 	}
 	driver.mu.Lock()
@@ -460,7 +362,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 	}
 	result, err := live.client.ResultAfter(ctx, turn.NativeSessionID, turn.NativeTurnID)
 	if err != nil {
-		if current.turn != nil && current.turn.receiptID == receiptID {
+		if current.turn != nil && current.turn.operationID == operationID {
 			current.turn = nil
 		}
 		driver.mu.Unlock()
@@ -568,9 +470,9 @@ func (driver *LaneDriver) lockLive(ref productruntime.NativeSessionRef, requireO
 	return live, nil
 }
 
-func (driver *LaneDriver) clearTurn(laneID, receiptID string) {
+func (driver *LaneDriver) clearTurn(laneID, operationID string) {
 	driver.mu.Lock()
-	if live := driver.lanes[laneID]; live != nil && live.turn != nil && live.turn.receiptID == receiptID {
+	if live := driver.lanes[laneID]; live != nil && live.turn != nil && live.turn.operationID == operationID {
 		live.turn = nil
 	}
 	driver.mu.Unlock()
@@ -587,23 +489,12 @@ func (driver *LaneDriver) consumeInterrupted(turn productruntime.NativeTurnRef) 
 	return true
 }
 
-func (driver *LaneDriver) readReceipt(receiptID string) ([]byte, error) {
-	reader, length, digest, err := driver.config.Receipts.OpenReceipt(receiptID)
-	if err != nil {
-		return nil, err
+func newOperationID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("%w: generate native operation id", productruntime.ErrUnavailable)
 	}
-	if reader == nil || length < 1 || length > maxResultBytes {
-		if reader != nil {
-			_ = reader.Close()
-		}
-		return nil, productruntime.ErrProtocol
-	}
-	body, readErr := io.ReadAll(io.LimitReader(reader, maxResultBytes+1))
-	closeErr := reader.Close()
-	if readErr != nil || closeErr != nil || int64(len(body)) != length || len(body) > maxResultBytes || sha256.Sum256(body) != digest {
-		return nil, fmt.Errorf("%w: receipt verification failed", productruntime.ErrProtocol)
-	}
-	return body, nil
+	return hex.EncodeToString(raw[:]), nil
 }
 
 var _ productruntime.LaneDriver = (*LaneDriver)(nil)

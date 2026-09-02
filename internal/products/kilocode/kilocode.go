@@ -23,7 +23,6 @@ type Config struct {
 	DoctorWorkDir      string
 	IntegrationCheck   opencodefamily.IntegrationCheck
 	VersionRunner      opencodefamily.VersionRunner
-	RecoveryMode       opencodefamily.RecoveryPermissionMode
 }
 
 func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productruntime.RuntimeProduct, error) {
@@ -44,8 +43,8 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 func NewLaneDriver(config Config) (*opencodefamily.LaneDriver, error) {
 	return opencodefamily.NewLaneDriver(opencodefamily.LaneConfig{
 		ProductID: ProductID, Dialect: opencodefamily.DialectKilo, Generation: config.Deps.Generation,
-		Receipts: config.Deps.Receipts, Servers: config.Servers, MapPermission: MapPermission,
-		RecoveryMode: config.RecoveryMode, DecidePermission: config.PermissionDecision, Now: config.Deps.Now,
+		Servers: config.Servers, MapPermission: MapPermission,
+		DecidePermission: config.PermissionDecision, Now: config.Deps.Now,
 	})
 }
 

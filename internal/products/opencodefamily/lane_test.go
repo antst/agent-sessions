@@ -1,7 +1,6 @@
 package opencodefamily
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -19,32 +18,10 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-type testReceipts struct {
-	mu      sync.Mutex
-	bodies  map[string][]byte
-	corrupt bool
-}
-
-func (receipts *testReceipts) OpenReceipt(id string) (io.ReadCloser, int64, [32]byte, error) {
-	receipts.mu.Lock()
-	defer receipts.mu.Unlock()
-	body, ok := receipts.bodies[id]
-	if !ok {
-		return nil, 0, [32]byte{}, errors.New("missing receipt")
-	}
-	digest := sha256.Sum256(body)
-	if receipts.corrupt {
-		digest[0] ^= 0xff
-	}
-	copyBody := append([]byte(nil), body...)
-	return io.NopCloser(bytes.NewReader(copyBody)), int64(len(copyBody)), digest, nil
-}
-
 type testServerManager struct {
-	client       *Client
-	openCount    atomic.Int64
-	recoverCount atomic.Int64
-	closed       atomic.Int64
+	client    *Client
+	openCount atomic.Int64
+	closed    atomic.Int64
 }
 
 func (manager *testServerManager) live() *LiveServer {
@@ -56,12 +33,7 @@ func (manager *testServerManager) Open(context.Context, ServerOpenRequest) (*Liv
 	return manager.live(), nil
 }
 
-func (manager *testServerManager) Recover(context.Context, ServerRecoveryRequest) (*LiveServer, error) {
-	manager.recoverCount.Add(1)
-	return manager.live(), nil
-}
-
-func TestOpenCodeLaneLifecycleUsesReceiptAndExactRecovery(t *testing.T) {
+func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	var messageID atomic.Value
 	messageID.Store("")
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -95,11 +67,10 @@ func TestOpenCodeLaneLifecycleUsesReceiptAndExactRecovery(t *testing.T) {
 	})
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
-	receipts := &testReceipts{bodies: map[string][]byte{"receipt-one": []byte("perform task")}}
 	servers := &testServerManager{client: client}
 	driver, err := NewLaneDriver(LaneConfig{
 		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 7,
-		Receipts: receipts, Servers: servers, MapPermission: MapPermissionRules,
+		Servers: servers, MapPermission: MapPermissionRules,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -110,11 +81,11 @@ func TestOpenCodeLaneLifecycleUsesReceiptAndExactRecovery(t *testing.T) {
 	if err != nil || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
 		t.Fatalf("open = %#v, %v", session, err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt-one", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "perform task", PermissionMode: permissionmode.Default})
 	if err != nil || turn.NativeTurnID == "" {
 		t.Fatalf("start = %#v, %v", turn, err)
 	}
-	if _, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{ReceiptID: "receipt-one", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
+	if _, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{Prompt: "perform task", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
 		t.Fatalf("OpenCode steer = %v", err)
 	}
 	terminal, err := driver.WaitTurn(context.Background(), turn)
@@ -129,93 +100,6 @@ func TestOpenCodeLaneLifecycleUsesReceiptAndExactRecovery(t *testing.T) {
 	}
 	if servers.closed.Load() != 1 {
 		t.Fatalf("server closes = %d", servers.closed.Load())
-	}
-
-	unsupportedRecovery, err := NewLaneDriver(LaneConfig{
-		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 8,
-		Receipts: receipts, Servers: servers, MapPermission: MapPermissionRules,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := unsupportedRecovery.Recover(context.Background(), productruntime.LaneRecoveryRequest{
-		ProductID: "opencode", LaneID: "lane-one", PriorNativeSessionID: "ses_lane", PriorGeneration: 7,
-	}); !errors.Is(err, productruntime.ErrUnsupportedRecovery) || servers.recoverCount.Load() != 0 {
-		t.Fatalf("recovery without durable permission mode = %v, calls=%d", err, servers.recoverCount.Load())
-	}
-
-	recoveredDriver, err := NewLaneDriver(LaneConfig{
-		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 8,
-		Receipts: receipts, Servers: servers, MapPermission: MapPermissionRules,
-		RecoveryMode: func(context.Context, productruntime.LaneRecoveryRequest) (permissionmode.Mode, error) {
-			return permissionmode.Default, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := recoveredDriver.Recover(context.Background(), productruntime.LaneRecoveryRequest{
-		ProductID: "opencode", LaneID: "lane-one", PriorNativeSessionID: "ses_lane", PriorGeneration: 7,
-	})
-	if err != nil || recovered.NativeSessionID != "ses_lane" || recovered.Generation != 8 || servers.recoverCount.Load() != 1 {
-		t.Fatalf("recover = %#v, %v, calls=%d", recovered, err, servers.recoverCount.Load())
-	}
-}
-
-func TestKiloLaneRecoveryRequiresExactNativeSession(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		responseID string
-		wantErr    error
-	}{
-		{name: "success", responseID: "ses_kilo_recover"},
-		{name: "native session substitution", responseID: "ses_kilo_other", wantErr: productruntime.ErrAmbiguousSession},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-				requireBasicAuth(t, request)
-				if request.Method != http.MethodGet || request.URL.Path != "/session/ses_kilo_recover" {
-					http.NotFound(response, request)
-					return
-				}
-				_, _ = fmt.Fprintf(response, `{"id":%q,"title":""}`, test.responseID)
-			})
-			client, closeClient := newFamilyTestClient(t, DialectKilo, handler)
-			defer closeClient()
-			servers := &testServerManager{client: client}
-			driver, err := NewLaneDriver(LaneConfig{
-				ProductID: "kilo", Dialect: DialectKilo, Generation: 12,
-				Receipts: &testReceipts{bodies: map[string][]byte{"unused": []byte("unused")}},
-				Servers:  servers, MapPermission: MapPermissionRules,
-				RecoveryMode: func(context.Context, productruntime.LaneRecoveryRequest) (permissionmode.Mode, error) {
-					return permissionmode.BypassPermissions, nil
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			recovered, recoverErr := driver.Recover(context.Background(), productruntime.LaneRecoveryRequest{
-				ProductID: "kilo", LaneID: "lane-kilo-recover",
-				PriorNativeSessionID: "ses_kilo_recover", PriorGeneration: 11,
-			})
-			if test.wantErr == nil {
-				if recoverErr != nil || recovered != (productruntime.NativeSessionRef{
-					LaneID: "lane-kilo-recover", NativeSessionID: "ses_kilo_recover", Generation: 12,
-				}) {
-					t.Fatalf("Kilo recovery = %#v, %v", recovered, recoverErr)
-				}
-				if servers.recoverCount.Load() != 1 || servers.openCount.Load() != 0 {
-					t.Fatalf("Kilo recovery calls recover=%d open=%d", servers.recoverCount.Load(), servers.openCount.Load())
-				}
-				return
-			}
-			if !errors.Is(recoverErr, productruntime.ErrUnsupportedRecovery) || !errors.Is(recoverErr, test.wantErr) {
-				t.Fatalf("Kilo substituted-session recovery = %#v, %v", recovered, recoverErr)
-			}
-			if recovered != (productruntime.NativeSessionRef{}) || servers.closed.Load() != 1 {
-				t.Fatalf("failed Kilo recovery retained state: ref=%#v closes=%d", recovered, servers.closed.Load())
-			}
-		})
 	}
 }
 
@@ -252,10 +136,9 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 	})
 	client, closeClient := newFamilyTestClient(t, DialectKilo, handler)
 	defer closeClient()
-	receipts := &testReceipts{bodies: map[string][]byte{"initial": []byte("first"), "busy": []byte("second")}}
 	driver, err := NewLaneDriver(LaneConfig{
 		ProductID: "kilo", Dialect: DialectKilo, Generation: 3,
-		Receipts: receipts, Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules,
+		Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -266,14 +149,14 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "initial", PermissionMode: permissionmode.BypassPermissions})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "first", PermissionMode: permissionmode.BypassPermissions})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{ReceiptID: "busy", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
+	if _, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{Prompt: "second", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
 		t.Fatalf("changed Kilo permission mode = %v", err)
 	}
-	accepted, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{ReceiptID: "busy", PermissionMode: permissionmode.BypassPermissions})
+	accepted, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{Prompt: "second", PermissionMode: permissionmode.BypassPermissions})
 	if err != nil || accepted.NativeSessionID != "ses_kilo_lane" || accepted.NativeMessageID == turn.NativeTurnID {
 		t.Fatalf("steer = %#v, %v", accepted, err)
 	}
@@ -319,8 +202,7 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 	defer closeClient()
 	driver, err := NewLaneDriver(LaneConfig{
 		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 1,
-		Receipts: &testReceipts{bodies: map[string][]byte{"fast": []byte("finish immediately")}},
-		Servers:  &testServerManager{client: client}, MapPermission: MapPermissionRules,
+		Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +213,7 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "fast", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "finish immediately", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +228,7 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 	}
 }
 
-func TestLaneRejectsChangedReceiptAndConcurrentTurn(t *testing.T) {
+func TestLaneRejectsChangedPermissionAndConcurrentTurn(t *testing.T) {
 	var promptCalls atomic.Int64
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuth(t, request)
@@ -362,36 +244,25 @@ func TestLaneRejectsChangedReceiptAndConcurrentTurn(t *testing.T) {
 	})
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
-	receipts := &testReceipts{bodies: map[string][]byte{"one": []byte("one"), "two": []byte("two")}, corrupt: true}
-	driver, _ := NewLaneDriver(LaneConfig{ProductID: "opencode", Dialect: DialectOpenCode, Generation: 1, Receipts: receipts, Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules})
+	driver, _ := NewLaneDriver(LaneConfig{ProductID: "opencode", Dialect: DialectOpenCode, Generation: 1, Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules})
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: "opencode", LaneID: "race", Cwd: "/work/project", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "one", PermissionMode: permissionmode.BypassPermissions}); !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
+	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "one", PermissionMode: permissionmode.BypassPermissions}); !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
 		t.Fatalf("changed lane permission mode = %v", err)
 	}
 	if promptCalls.Load() != 0 {
 		t.Fatal("changed permission mode reached native I/O")
 	}
-	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "one", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrProtocol) {
-		t.Fatalf("changed receipt = %v", err)
-	}
-	if promptCalls.Load() != 0 {
-		t.Fatal("changed receipt reached native I/O")
-	}
-	receipts.mu.Lock()
-	receipts.corrupt = false
-	receipts.mu.Unlock()
-
 	start := make(chan struct{})
 	results := make(chan error, 2)
-	for _, receiptID := range []string{"one", "two"} {
-		go func(id string) {
+	for _, prompt := range []string{"one", "two"} {
+		go func(prompt string) {
 			<-start
-			_, startErr := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: id, PermissionMode: permissionmode.Default})
+			_, startErr := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: prompt, PermissionMode: permissionmode.Default})
 			results <- startErr
-		}(receiptID)
+		}(prompt)
 	}
 	close(start)
 	errA, errB := <-results, <-results
@@ -441,8 +312,7 @@ func TestLaneInterruptRacingIdleReportsInterruptedExactlyOnce(t *testing.T) {
 	defer closeClient()
 	driver, err := NewLaneDriver(LaneConfig{
 		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 1,
-		Receipts: &testReceipts{bodies: map[string][]byte{"interrupt": []byte("slow work")}},
-		Servers:  &testServerManager{client: client}, MapPermission: MapPermissionRules,
+		Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -451,7 +321,7 @@ func TestLaneInterruptRacingIdleReportsInterruptedExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "interrupt", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "slow work", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}

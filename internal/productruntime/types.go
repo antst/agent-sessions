@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -109,21 +108,6 @@ type NativeName struct {
 	NativeConfirmed bool
 }
 
-type DeliveryMode string
-
-const (
-	DeliveryIdleWake   DeliveryMode = "idle-wake"
-	DeliveryBusySteer  DeliveryMode = "busy-steer"
-	DeliveryBusyFollow DeliveryMode = "busy-follow-up"
-)
-
-type DeliveryRequest struct {
-	DeliveryID string
-	ReceiptID  string
-	Mode       DeliveryMode
-	Body       []byte
-}
-
 type NativeAcceptance struct {
 	NativeSessionID string
 	NativeMessageID string
@@ -153,7 +137,7 @@ type NativeSessionRef struct {
 }
 
 type TurnStartRequest struct {
-	ReceiptID      string
+	Prompt         string
 	PermissionMode permissionmode.Mode
 }
 
@@ -177,13 +161,6 @@ type NativeTerminal struct {
 	Result           string
 	ResultDigest     [32]byte
 	NativeStopReason string
-}
-
-type LaneRecoveryRequest struct {
-	ProductID            string
-	LaneID               string
-	PriorNativeSessionID string
-	PriorGeneration      uint64
 }
 
 type ProbeDepth string
@@ -219,12 +196,6 @@ type ProbeReport struct {
 	Detail        RedactedString
 }
 
-// ReceiptReader is a narrow, bounded host capability. Drivers receive content
-// only by a durable receipt ID and must verify the returned digest and length.
-type ReceiptReader interface {
-	OpenReceipt(receiptID string) (io.ReadCloser, int64, [32]byte, error)
-}
-
 type ProcessSignal string
 
 const (
@@ -257,7 +228,6 @@ type OwnedProcessSupervisor interface {
 // HostDeps contains only product-neutral ephemeral host capabilities.
 type HostDeps struct {
 	Generation     uint64
-	Receipts       ReceiptReader
 	OwnedProcesses OwnedProcessSupervisor
 	Now            func() time.Time
 }

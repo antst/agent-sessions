@@ -21,9 +21,6 @@ func (fakeLaneDriver) Steer(context.Context, NativeTurnRef, TurnStartRequest) (N
 }
 func (fakeLaneDriver) Interrupt(context.Context, NativeTurnRef) error  { return nil }
 func (fakeLaneDriver) Archive(context.Context, NativeSessionRef) error { return nil }
-func (fakeLaneDriver) Recover(context.Context, LaneRecoveryRequest) (NativeSessionRef, error) {
-	return NativeSessionRef{}, ErrUnsupportedRecovery
-}
 
 type fakeDoctor struct{}
 

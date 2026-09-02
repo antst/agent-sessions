@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,18 +36,14 @@ const (
 	turnReservedID        = "\x00reserved"
 )
 
-type RecoveryResolver func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error)
-
 type LaneConfig struct {
-	Executable      string
-	ACPProfile      string
-	DSHHome         string
-	Generation      uint64
-	TupleVerifier   TupleVerifier
-	Processes       ACPProcessFactory
-	Receipts        productruntime.ReceiptReader
-	Environment     []productruntime.EnvVar
-	ResolveRecovery RecoveryResolver
+	Executable    string
+	ACPProfile    string
+	DSHHome       string
+	Generation    uint64
+	TupleVerifier TupleVerifier
+	Processes     ACPProcessFactory
+	Environment   []productruntime.EnvVar
 }
 
 type laneSession struct {
@@ -130,8 +125,8 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 		config.ACPProfile = "acp"
 	}
 	if filepath.Base(config.Executable) != "dsh" || len(config.ACPProfile) == 0 || len(config.ACPProfile) > maxProfileBytes || config.ACPProfile != strings.TrimSpace(config.ACPProfile) || strings.ContainsAny(config.ACPProfile, "\x00/\\") || config.Generation == 0 || config.TupleVerifier == nil ||
-		config.Processes == nil || config.Receipts == nil {
-		return nil, errors.New("DSH lane driver requires profile, generation, tuple, process, and receipt dependencies")
+		config.Processes == nil {
+		return nil, errors.New("DSH lane driver requires profile, generation, tuple, and process dependencies")
 	}
 	if err := validateManagedDSHHomeShape(config.DSHHome); err != nil {
 		return nil, err
@@ -246,9 +241,8 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, reference productruntim
 	if policy != session.policy {
 		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: DSH turn policy differs from its exact session policy", productruntime.ErrUnsupportedPolicy)
 	}
-	body, err := readReceipt(driver.config.Receipts, request.ReceiptID)
-	if err != nil {
-		return productruntime.NativeTurnRef{}, err
+	if strings.TrimSpace(request.Prompt) == "" || len(request.Prompt) > maxPromptBytes {
+		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: DSH prompt is outside fixed bounds", productruntime.ErrProtocol)
 	}
 	driver.mu.Lock()
 	if session.poisoned != nil {
@@ -269,7 +263,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, reference productruntim
 	var created *laneTurn
 	future, err := session.client.startRequest(ctx, "session/prompt", map[string]any{
 		"sessionId": reference.NativeSessionID,
-		"prompt":    []map[string]string{{"type": "text", "text": string(body)}},
+		"prompt":    []map[string]string{{"type": "text", "text": request.Prompt}},
 	}, func(future rpcFuture) {
 		turnReference := productruntime.NativeTurnRef{NativeSessionRef: reference, NativeTurnID: future.id}
 		created = &laneTurn{reference: turnReference, future: future, admitted: make(chan struct{}), settled: make(chan struct{})}
@@ -394,80 +388,6 @@ func (driver *LaneDriver) Archive(ctx context.Context, reference productruntime.
 		driver.mu.Unlock()
 	}()
 	return driver.archiveSteps(ctx, session)
-}
-
-func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.LaneRecoveryRequest) (productruntime.NativeSessionRef, error) {
-	if request.ProductID != ProductID || request.LaneID == "" || len(request.LaneID) > maxLaneIDBytes || !validNativeID(request.PriorNativeSessionID) || request.PriorGeneration == 0 || request.PriorGeneration >= driver.config.Generation {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH recovery request is invalid", productruntime.ErrUnsupportedRecovery)
-	}
-	if driver.config.ResolveRecovery == nil {
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH recovery metadata resolver is unavailable", productruntime.ErrUnsupportedRecovery)
-	}
-	if err := driver.reserveLane(request.LaneID); err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	defer driver.unreserveLane(request.LaneID)
-	open, err := driver.config.ResolveRecovery(ctx, request)
-	if err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	open.PermissionMode = normalizePermission(open.PermissionMode)
-	open.ProductID, open.LaneID, open.ResumeNativeID = ProductID, request.LaneID, request.PriorNativeSessionID
-	if err := validateOpenRequest(open); err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, open.ProfileIdentity); err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	policy, err := MapPermission(open.PermissionMode)
-	if err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	process, client, cancel, permissions, err := driver.startClient(open.ProfileIdentity, open.Cwd, open.Arguments, policy)
-	if err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	cleanup := func(failure error) (productruntime.NativeSessionRef, error) {
-		cleanupErr := cleanupACPProcess(process)
-		cancel()
-		return productruntime.NativeSessionRef{}, errors.Join(failure, cleanupErr)
-	}
-	if err := client.Initialize(ctx); err != nil {
-		return cleanup(err)
-	}
-	listed, err := listACPSessions(ctx, client, open.Cwd)
-	if err != nil {
-		return cleanup(err)
-	}
-	if !listedSessionAtCwd(listed, open.ResumeNativeID, open.Cwd) {
-		return cleanup(fmt.Errorf("%w: recovered DSH identity is not listed at the exact cwd", productruntime.ErrStale))
-	}
-	var resumed struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := client.Request(ctx, "session/resume", sessionParams(open.ResumeNativeID, open.Cwd, policy), &resumed); err != nil {
-		return cleanup(err)
-	}
-	if resumed.SessionID != "" && !validNativeID(resumed.SessionID) {
-		return cleanup(fmt.Errorf("%w: DSH recovery returned a non-canonical native identity", productruntime.ErrProtocol))
-	}
-	if resumed.SessionID != "" && resumed.SessionID != open.ResumeNativeID {
-		return cleanup(fmt.Errorf("%w: DSH recovery resumed a different native session", productruntime.ErrAmbiguousSession))
-	}
-	if err := permissions.bind(open.ResumeNativeID); err != nil {
-		return cleanup(err)
-	}
-	reference := productruntime.NativeSessionRef{LaneID: open.LaneID, NativeSessionID: open.ResumeNativeID, Generation: driver.config.Generation}
-	session := &laneSession{reference: reference, cwd: open.Cwd, policy: policy, process: process, client: client, cancel: cancel, turns: make(map[string]*laneTurn)}
-	driver.mu.Lock()
-	if _, exists := driver.sessions[open.LaneID]; exists {
-		driver.mu.Unlock()
-		return cleanup(productruntime.ErrNativeRejected)
-	}
-	delete(driver.archived, reference)
-	driver.sessions[open.LaneID] = session
-	driver.mu.Unlock()
-	return reference, nil
 }
 
 func (driver *LaneDriver) startClient(profile, cwd string, arguments []string, policy NativePolicy) (ACPProcess, *ACPClient, context.CancelFunc, *lanePermissionPolicy, error) {
@@ -983,25 +903,6 @@ func normalizePermission(mode permissionmode.Mode) permissionmode.Mode {
 		return permissionmode.Default
 	}
 	return mode
-}
-
-func readReceipt(reader productruntime.ReceiptReader, receiptID string) ([]byte, error) {
-	if reader == nil || receiptID == "" {
-		return nil, fmt.Errorf("%w: DSH turn requires durable receipt", productruntime.ErrNativeRejected)
-	}
-	stream, size, digest, err := reader.OpenReceipt(receiptID)
-	if err != nil {
-		return nil, err
-	}
-	defer stream.Close()
-	if size < 1 || size > maxPromptBytes {
-		return nil, fmt.Errorf("%w: DSH receipt size is outside fixed bounds", productruntime.ErrProtocol)
-	}
-	body, err := io.ReadAll(io.LimitReader(stream, maxPromptBytes+1))
-	if err != nil || int64(len(body)) != size || len(body) > maxPromptBytes || sha256.Sum256(body) != digest {
-		return nil, fmt.Errorf("%w: DSH receipt identity, size, or digest changed", productruntime.ErrProtocol)
-	}
-	return body, nil
 }
 
 func nativeTerminal(stopReason, result string) productruntime.NativeTerminal {

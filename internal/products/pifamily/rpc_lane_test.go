@@ -1,13 +1,13 @@
 package pifamily
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,12 +141,6 @@ type sequenceProcessFactory struct {
 	next      int
 }
 
-type recoveryPlannerFunc func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error)
-
-func (planner recoveryPlannerFunc) PlanRecovery(ctx context.Context, request productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
-	return planner(ctx, request)
-}
-
 func (factory *sequenceProcessFactory) StartRPC(context.Context, productruntime.NativeCommand) (RPCProcess, error) {
 	if factory.next >= len(factory.processes) {
 		return nil, errors.New("no scripted process")
@@ -162,17 +156,6 @@ func (factory *oneProcessFactory) StartRPC(_ context.Context, command productrun
 	return factory.process, nil
 }
 
-type receiptReader map[string]string
-
-func (reader receiptReader) OpenReceipt(id string) (io.ReadCloser, int64, [32]byte, error) {
-	value, ok := reader[id]
-	if !ok {
-		return nil, 0, [32]byte{}, errors.New("missing receipt")
-	}
-	body := []byte(value)
-	return io.NopCloser(bytes.NewReader(body)), int64(len(body)), sha256.Sum256(body), nil
-}
-
 func familyPermission(mode permissionmode.Mode) (PermissionPolicy, error) {
 	if mode != permissionmode.Default {
 		return PermissionPolicy{}, productruntime.ErrUnsupportedPolicy
@@ -186,8 +169,8 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
 		Quirks: quirks, Generation: 7, Processes: factory,
-		Receipts: receiptReader{"prompt": "do work", "steer": "change course"}, MapPermission: familyPermission,
-		Now: func() time.Time { return time.Unix(100, 0) },
+		MapPermission: familyPermission,
+		Now:           func() time.Time { return time.Unix(100, 0) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +187,7 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	if want := []string{"--mode", "rpc", "--session", "pi-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Pi resume args = %q, want %q", factory.command.Args, want)
 	}
-	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{ReceiptID: "prompt", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "do work", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +218,7 @@ func TestWaitTurnRetriesCollectionFromCachedTerminalAfterCancellation(t *testing
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
 		Quirks: quirks, Generation: 8, Processes: factory,
-		Receipts: receiptReader{"first": "do work", "second": "next work"}, MapPermission: familyPermission,
+		MapPermission: familyPermission,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +231,7 @@ func TestWaitTurnRetriesCollectionFromCachedTerminalAfterCancellation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{ReceiptID: "first", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "do work", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +259,7 @@ func TestWaitTurnRetriesCollectionFromCachedTerminalAfterCancellation(t *testing
 	process.mu.Lock()
 	process.streaming = false
 	process.mu.Unlock()
-	if _, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{ReceiptID: "second", PermissionMode: permissionmode.Default}); err != nil {
+	if _, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "next work", PermissionMode: permissionmode.Default}); err != nil {
 		t.Fatalf("completed retry did not clear active turn: %v", err)
 	}
 }
@@ -287,7 +270,7 @@ func TestWaitTurnDoesNotInventEmptyResultWhenCollectionIsUnavailable(t *testing.
 	process.closeOnLastResponse = true
 	driver, err := NewLaneDriver(LaneConfig{
 		Quirks: quirks, Generation: 9, Processes: &oneProcessFactory{process: process},
-		Receipts: receiptReader{"prompt": "do work"}, MapPermission: familyPermission,
+		MapPermission: familyPermission,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +283,7 @@ func TestWaitTurnDoesNotInventEmptyResultWhenCollectionIsUnavailable(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{ReceiptID: "prompt", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "do work", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,8 +307,8 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
 		Quirks: quirks, Generation: 11, Processes: factory,
-		Receipts: receiptReader{"prompt": "first", "steer": "raw priority"}, MapPermission: familyPermission,
-		Now: func() time.Time { return time.Unix(200, 0) },
+		MapPermission: familyPermission,
+		Now:           func() time.Time { return time.Unix(200, 0) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -339,11 +322,11 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	if want := []string{"--mode=rpc", "--name", "lane-omp", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP args = %q, want %q", factory.command.Args, want)
 	}
-	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{ReceiptID: "prompt", PermissionMode: permissionmode.Default})
+	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "first", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := driver.Steer(ctx, turn, productruntime.TurnStartRequest{ReceiptID: "steer", PermissionMode: permissionmode.Default})
+	accepted, err := driver.Steer(ctx, turn, productruntime.TurnStartRequest{Prompt: "raw priority", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +372,7 @@ func TestLaneInterruptUsesCorrelatedAbortAndProductTerminalStrategy(t *testing.T
 			}
 			driver, err := NewLaneDriver(LaneConfig{
 				Quirks: quirks, Generation: 12, Processes: &oneProcessFactory{process: process},
-				Receipts: receiptReader{"interrupt-prompt": "run until interrupted"}, MapPermission: familyPermission,
+				MapPermission: familyPermission,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -404,7 +387,7 @@ func TestLaneInterruptUsesCorrelatedAbortAndProductTerminalStrategy(t *testing.T
 				t.Fatal(err)
 			}
 			turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{
-				ReceiptID: "interrupt-prompt", PermissionMode: permissionmode.Default,
+				Prompt: "run until interrupted", PermissionMode: permissionmode.Default,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -456,7 +439,7 @@ func TestLaneInterruptWriteFailureRollsBackInterruptedOutcome(t *testing.T) {
 			}
 			driver, err := NewLaneDriver(LaneConfig{
 				Quirks: quirks, Generation: 13, Processes: &oneProcessFactory{process: process},
-				Receipts: receiptReader{"prompt": "complete after rejected abort"}, MapPermission: familyPermission,
+				MapPermission: familyPermission,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -471,7 +454,7 @@ func TestLaneInterruptWriteFailureRollsBackInterruptedOutcome(t *testing.T) {
 				t.Fatal(err)
 			}
 			turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{
-				ReceiptID: "prompt", PermissionMode: permissionmode.Default,
+				Prompt: "complete after rejected abort", PermissionMode: permissionmode.Default,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -492,91 +475,6 @@ func TestLaneInterruptWriteFailureRollsBackInterruptedOutcome(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestLaneRecoveryAfterProcessDeathPreservesExactNativeSessionForBothProducts(t *testing.T) {
-	for _, productID := range []string{PiProductID, OMPProductID} {
-		t.Run(productID, func(t *testing.T) {
-			quirks, err := QuirksFor(productID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			nativeID := productID + "-native-resume"
-			oldProcess := newScriptedProcess(nativeID)
-			if productID == OMPProductID {
-				oldProcess.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
-			}
-			oldDriver, err := NewLaneDriver(LaneConfig{
-				Quirks: quirks, Generation: 20, Processes: &oneProcessFactory{process: oldProcess},
-				Receipts: receiptReader{"unused": "unused"}, MapPermission: familyPermission,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			oldRef, err := oldDriver.Open(ctx, productruntime.LaneOpenRequest{
-				ProductID: productID, LaneID: "recover-" + productID, Cwd: "/work",
-				PermissionMode: permissionmode.Default,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := oldDriver.Archive(ctx, oldRef); err != nil {
-				t.Fatal(err)
-			}
-			if !oldProcess.cleaned {
-				t.Fatal("old native RPC process was not killed before recovery")
-			}
-
-			resumedProcess := newScriptedProcess(nativeID)
-			if productID == OMPProductID {
-				resumedProcess.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
-			}
-			factory := &oneProcessFactory{process: resumedProcess}
-			planner := recoveryPlannerFunc(func(_ context.Context, request productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
-				return productruntime.LaneOpenRequest{
-					ProductID: request.ProductID, LaneID: request.LaneID,
-					ResumeNativeID: request.PriorNativeSessionID, Cwd: "/work",
-					PermissionMode: permissionmode.Default,
-				}, nil
-			})
-			resumedDriver, err := NewLaneDriver(LaneConfig{
-				Quirks: quirks, Generation: 21, Processes: factory,
-				Receipts: receiptReader{"unused": "unused"}, MapPermission: familyPermission,
-				RecoveryPlans: planner,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			resumedRef, err := resumedDriver.Recover(ctx, productruntime.LaneRecoveryRequest{
-				ProductID: productID, LaneID: oldRef.LaneID,
-				PriorNativeSessionID: oldRef.NativeSessionID, PriorGeneration: oldRef.Generation,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if resumedRef.NativeSessionID != oldRef.NativeSessionID || resumedRef.Generation != 21 {
-				t.Fatalf("resumed ref = %+v, prior = %+v", resumedRef, oldRef)
-			}
-			wantResume := quirks.resumeArguments(nativeID)
-			if !containsContiguous(factory.command.Args, wantResume) {
-				t.Fatalf("resume args = %q, want exact selector %q", factory.command.Args, wantResume)
-			}
-		})
-	}
-}
-
-func containsContiguous(values, want []string) bool {
-	if len(want) == 0 || len(want) > len(values) {
-		return false
-	}
-	for start := 0; start+len(want) <= len(values); start++ {
-		if reflect.DeepEqual(values[start:start+len(want)], want) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestOMPHandshakeRejectsHostileFirstOrIncompatibleReadyFrame(t *testing.T) {
@@ -608,7 +506,7 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 		process.emit(map[string]any{"type": "response", "id": "foreign", "command": "get_state", "success": true})
 		driver, err := NewLaneDriver(LaneConfig{
 			Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
-			Receipts: receiptReader{"prompt": "unused"}, MapPermission: familyPermission,
+			MapPermission: familyPermission,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -627,7 +525,7 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 		process.cleanupErr = errors.New("cleanup failed")
 		driver, err := NewLaneDriver(LaneConfig{
 			Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
-			Receipts: receiptReader{"prompt": "unused"}, MapPermission: familyPermission,
+			MapPermission: familyPermission,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -649,7 +547,7 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 		factory := &sequenceProcessFactory{processes: []*scriptedRPCProcess{first, second}}
 		driver, err := NewLaneDriver(LaneConfig{
 			Quirks: quirks, Generation: 1, Processes: factory,
-			Receipts: receiptReader{"prompt": "unused"}, MapPermission: familyPermission,
+			MapPermission: familyPermission,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -702,7 +600,7 @@ func TestLaneOpenRejectsNativeInputArgumentsBeforeStartingProcess(t *testing.T) 
 				factory := &oneProcessFactory{process: newScriptedProcess("must-not-start")}
 				driver, err := NewLaneDriver(LaneConfig{
 					Quirks: quirks, Generation: 1, Processes: factory,
-					Receipts: receiptReader{"prompt": "ledger input"}, MapPermission: familyPermission,
+					MapPermission: familyPermission,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -719,22 +617,10 @@ func TestLaneOpenRejectsNativeInputArgumentsBeforeStartingProcess(t *testing.T) 
 	}
 }
 
-func TestReceiptReaderRejectsDigestDriftAndNUL(t *testing.T) {
-	badDigest := digestReader{body: []byte("safe"), digest: sha256.Sum256([]byte("other"))}
-	if _, err := readReceipt(badDigest, "receipt"); !errors.Is(err, productruntime.ErrStale) {
-		t.Fatalf("digest drift returned %v", err)
+func TestLanePromptRejectsEmptyOversizedAndNUL(t *testing.T) {
+	for _, prompt := range []string{"", strings.Repeat("x", MaxPromptBytes+1), "bad\x00prompt"} {
+		if _, err := lanePrompt(prompt); !errors.Is(err, productruntime.ErrProtocol) {
+			t.Fatalf("invalid prompt returned %v", err)
+		}
 	}
-	body := "bad\x00prompt"
-	if _, err := readReceipt(receiptReader{"receipt": body}, "receipt"); !errors.Is(err, productruntime.ErrProtocol) {
-		t.Fatalf("NUL prompt returned %v", err)
-	}
-}
-
-type digestReader struct {
-	body   []byte
-	digest [32]byte
-}
-
-func (reader digestReader) OpenReceipt(string) (io.ReadCloser, int64, [32]byte, error) {
-	return io.NopCloser(bytes.NewReader(reader.body)), int64(len(reader.body)), reader.digest, nil
 }

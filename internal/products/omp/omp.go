@@ -19,7 +19,6 @@ type Config struct {
 	Executable       string
 	ExtensionPath    string
 	Processes        pifamily.ProcessFactory
-	RecoveryPlans    pifamily.RecoveryPlanner
 	DoctorRunner     pifamily.DoctorRunner
 	IntegrationCheck pifamily.IntegrationCheck
 	Now              func() time.Time
@@ -35,8 +34,7 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 	}
 	lane, err := pifamily.NewLaneDriver(pifamily.LaneConfig{
 		Quirks: quirks, Executable: config.Executable, Generation: config.Deps.Generation,
-		Processes: config.Processes, Receipts: config.Deps.Receipts, MapPermission: MapPermission,
-		RecoveryPlans: config.RecoveryPlans, Now: config.Now,
+		Processes: config.Processes, MapPermission: MapPermission, Now: config.Now,
 	})
 	if err != nil {
 		return productruntime.RuntimeProduct{}, err

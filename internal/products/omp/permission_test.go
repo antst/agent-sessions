@@ -3,7 +3,6 @@ package omp
 import (
 	"context"
 	"errors"
-	"io"
 	"reflect"
 	"testing"
 
@@ -32,17 +31,11 @@ func (factory *rejectingProcessFactory) StartRPC(context.Context, productruntime
 	return nil, errors.New("unexpected RPC start")
 }
 
-type unusedReceipts struct{}
-
-func (unusedReceipts) OpenReceipt(string) (io.ReadCloser, int64, [32]byte, error) {
-	return nil, 0, [32]byte{}, errors.New("unexpected receipt read")
-}
-
 func TestDefaultApprovalPolicyRejectsBeforeStartingUnattendedRPC(t *testing.T) {
 	quirks, _ := pifamily.QuirksFor(ProductID)
 	factory := &rejectingProcessFactory{}
 	driver, err := pifamily.NewLaneDriver(pifamily.LaneConfig{
-		Quirks: quirks, Generation: 1, Processes: factory, Receipts: unusedReceipts{}, MapPermission: MapPermission,
+		Quirks: quirks, Generation: 1, Processes: factory, MapPermission: MapPermission,
 	})
 	if err != nil {
 		t.Fatal(err)

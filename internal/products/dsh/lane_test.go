@@ -3,7 +3,6 @@ package dsh
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,12 +111,6 @@ func (factory oneProcessFactory) StartACPProcess(_ context.Context, command prod
 	return factory.process, nil
 }
 
-type memoryReceiptReader struct{ body []byte }
-
-func (reader memoryReceiptReader) OpenReceipt(string) (io.ReadCloser, int64, [32]byte, error) {
-	return io.NopCloser(bytes.NewReader(reader.body)), int64(len(reader.body)), sha256.Sum256(reader.body), nil
-}
-
 func newTestLane(t *testing.T, process *scriptedACPProcess) *LaneDriver {
 	t.Helper()
 	dshHome := "/var/lib/agent-sessions/test-dsh"
@@ -125,7 +118,6 @@ func newTestLane(t *testing.T, process *scriptedACPProcess) *LaneDriver {
 		Executable: "dsh", ACPProfile: "acp", Generation: 7,
 		DSHHome:       dshHome,
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
-		Receipts:    memoryReceiptReader{body: []byte("hello")},
 		Environment: []productruntime.EnvVar{{Name: "DSH_HOME", Value: filepath.Join(t.TempDir(), "foreign-home")}},
 	})
 	if err != nil {
@@ -185,7 +177,7 @@ func TestACPLaneNewPromptStopAndCancelNotification(t *testing.T) {
 	if got := envValue(process.command.Env, "DSH_HOME"); got != driver.config.DSHHome {
 		t.Fatalf("lane DSH_HOME = %q, want managed %q", got, driver.config.DSHHome)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
@@ -210,7 +202,7 @@ func TestACPLaneNewPromptStopAndCancelNotification(t *testing.T) {
 			process.respond(pendingPromptID, map[string]any{"stopReason": "cancelled"}, nil)
 		}
 	}
-	turn, err = driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"})
+	turn, err = driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +242,7 @@ func TestACPBusyPromptMapsToUnsupportedSteerBeforeNativeAcceptance(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
+	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
 		t.Fatalf("busy StartTurn error = %v, want ErrUnsupportedSteer", err)
 	}
 }
@@ -276,7 +268,7 @@ func TestRepeatedImmediatePromptErrorsLeaveNoTerminalCacheGhosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 512 {
-		if _, err := driver.StartTurn(context.Background(), reference, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
+		if _, err := driver.StartTurn(context.Background(), reference, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
 			t.Fatalf("immediate prompt error = %v, want ErrUnsupportedSteer", err)
 		}
 	}
@@ -317,7 +309,7 @@ func TestACPTurnProjectsLastOrderedAssistantMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,44 +365,6 @@ func TestLaneBypassPermissionSetsExactDangerPreset(t *testing.T) {
 	}
 }
 
-func TestLaneRecoveryResumesOnlyPriorNativeIdentityFromProduct(t *testing.T) {
-	process := newScriptedACPProcess()
-	process.writeHook = func(frame map[string]any) {
-		id := frame["id"]
-		switch frame["method"] {
-		case "initialize":
-			process.respond(id, map[string]any{"protocolVersion": 1}, nil)
-		case "session/list":
-			process.respond(id, map[string]any{"sessions": []any{map[string]any{"sessionId": "native", "cwd": "/work"}}}, nil)
-		case "session/resume":
-			params := frame["params"].(map[string]any)
-			if params["sessionId"] != "native" {
-				t.Errorf("resume sessionId = %v", params["sessionId"])
-			}
-			process.respond(id, map[string]any{"sessionId": "native"}, nil)
-		}
-	}
-	dshHome := "/var/lib/agent-sessions/test-dsh"
-	driver, err := NewLaneDriver(LaneConfig{
-		Executable: "dsh", ACPProfile: "acp", Generation: 8,
-		DSHHome:       dshHome,
-		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
-		Receipts: memoryReceiptReader{body: []byte("hello")},
-		ResolveRecovery: func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
-			return productruntime.LaneOpenRequest{Cwd: "/work", ProfileIdentity: "acp"}, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reference, err := driver.Recover(context.Background(), productruntime.LaneRecoveryRequest{
-		ProductID: ProductID, LaneID: "lane", PriorNativeSessionID: "native", PriorGeneration: 7,
-	})
-	if err != nil || reference.NativeSessionID != "native" || reference.Generation != 8 {
-		t.Fatalf("Recover() = %+v, %v", reference, err)
-	}
-}
-
 func TestLaneArchiveClosesOwnedSessionAndCleansProcess(t *testing.T) {
 	process := newScriptedACPProcess()
 	closeCalls := 0
@@ -447,46 +401,8 @@ func TestLaneArchiveClosesOwnedSessionAndCleansProcess(t *testing.T) {
 	if !cleaned || closeCalls != 1 || cleanupCalls != 1 {
 		t.Fatalf("archive close/cleanup = %d/%d", closeCalls, cleanupCalls)
 	}
-	if _, err := driver.StartTurn(context.Background(), reference, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrStale) {
+	if _, err := driver.StartTurn(context.Background(), reference, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("archived reference error = %v, want ErrStale", err)
-	}
-}
-
-func TestRecoveryFailureUsesDeadlineBoundProcessCleanup(t *testing.T) {
-	process := newScriptedACPProcess()
-	process.writeHook = func(frame map[string]any) {
-		switch frame["method"] {
-		case "initialize":
-			process.respond(frame["id"], map[string]any{"protocolVersion": 1}, nil)
-		case "session/list":
-			process.respond(frame["id"], map[string]any{"sessions": []any{map[string]any{"sessionId": "native", "cwd": "/work"}}}, nil)
-		case "session/resume":
-			process.respond(frame["id"], nil, map[string]any{"code": -32000, "message": "initialize failed"})
-		}
-	}
-	dshHome := "/var/lib/agent-sessions/test-dsh"
-	driver, err := NewLaneDriver(LaneConfig{
-		Executable: "dsh", ACPProfile: "acp", Generation: 8,
-		DSHHome:       dshHome,
-		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
-		Receipts: memoryReceiptReader{body: []byte("hello")},
-		ResolveRecovery: func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
-			return productruntime.LaneOpenRequest{Cwd: "/work", ProfileIdentity: "acp"}, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := driver.Recover(context.Background(), productruntime.LaneRecoveryRequest{
-		ProductID: ProductID, LaneID: "lane", PriorNativeSessionID: "native", PriorGeneration: 7,
-	}); err == nil {
-		t.Fatal("Recover unexpectedly succeeded")
-	}
-	process.mu.Lock()
-	deadline, calls := process.cleanupDeadline, process.cleanupCalls
-	process.mu.Unlock()
-	if !deadline || calls != 1 {
-		t.Fatalf("recovery cleanup deadline/calls = %v/%d, want true/1", deadline, calls)
 	}
 }
 
@@ -532,7 +448,7 @@ func TestACPPermissionRequestRejectsWithoutInteractiveApprovalAuthority(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +520,7 @@ func TestACPUnrelatedUpdateDoesNotAdmitAndPostWriteTimeoutPoisonsOwner(t *testin
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := driver.StartTurn(ctx, session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrAmbiguousSession) {
+	if _, err := driver.StartTurn(ctx, session, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrAmbiguousSession) {
 		t.Fatalf("post-write timeout error = %v, want ErrAmbiguousSession", err)
 	}
 	process.mu.Lock()
@@ -613,7 +529,7 @@ func TestACPUnrelatedUpdateDoesNotAdmitAndPostWriteTimeoutPoisonsOwner(t *testin
 	if !cleaned {
 		t.Fatal("poison reconciliation did not clean the process")
 	}
-	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrStale) {
+	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("poisoned reference reuse error = %v, want ErrStale", err)
 	}
 	close(process.reads)
@@ -637,7 +553,7 @@ func TestACPPromptWriteFailurePoisonsPossibleNativeWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrAmbiguousSession) {
+	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrAmbiguousSession) {
 		t.Fatalf("possible-write prompt error = %v, want ErrAmbiguousSession", err)
 	}
 	process.mu.Lock()
@@ -646,7 +562,7 @@ func TestACPPromptWriteFailurePoisonsPossibleNativeWrite(t *testing.T) {
 	if cleanupCalls != 1 {
 		t.Fatalf("possible-write reconciliation cleanup = %d, want 1", cleanupCalls)
 	}
-	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"}); !errors.Is(err, productruntime.ErrStale) {
+	if _, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"}); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("possible-write owner reuse error = %v, want ErrStale", err)
 	}
 }
@@ -678,7 +594,7 @@ func TestWaitTurnIsConcurrentRetrySafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{ReceiptID: "receipt"})
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +646,7 @@ func TestSettledTurnEvidenceIsByteBoundedAndRetryableUntilEvicted(t *testing.T) 
 	}
 	var first, last productruntime.NativeTurnRef
 	for index := 0; index < 6; index++ {
-		turn, startErr := driver.StartTurn(context.Background(), sessionRef, productruntime.TurnStartRequest{ReceiptID: "receipt"})
+		turn, startErr := driver.StartTurn(context.Background(), sessionRef, productruntime.TurnStartRequest{Prompt: "hello"})
 		if startErr != nil {
 			t.Fatal(startErr)
 		}
