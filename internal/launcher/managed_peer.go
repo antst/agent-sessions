@@ -143,7 +143,7 @@ func listOMPSessions(executable, cwd string) ([]productSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve Bun for OMP session list: %w", err)
 	}
-	command := exec.Command(bun, "--eval", packageSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
+	command := exec.Command(bun, "--eval", packageSessionListScript, productAPI, "cwd", cwd) //nolint:gosec // pinned product API and caller cwd.
 	command.Dir = cwd
 	payload, err := command.Output()
 	if err != nil {
