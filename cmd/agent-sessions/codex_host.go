@@ -22,6 +22,7 @@ import (
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
+	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
 	"github.com/antst/agent-sessions/internal/products/opencodefamily"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
@@ -117,9 +118,27 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if err != nil {
 		panic(err)
 	}
+	kiloDescriptor, ok := productcatalog.ByID(kiloproduct.ProductID)
+	if !ok {
+		panic("Kilo product descriptor is unavailable")
+	}
+	kiloServers, err := opencodefamily.NewOwnedServerManager(opencodefamily.OwnedServerManagerConfig{
+		ProductID: kiloproduct.ProductID, Dialect: opencodefamily.DialectKilo,
+		Executable: kiloDescriptor.NativeExecutable, Supervisor: laneProcesses,
+	})
+	if err != nil {
+		panic(err)
+	}
+	kiloLanes, err := kiloproduct.NewLaneDriver(kiloproduct.Config{
+		Deps: productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses}, Servers: kiloServers,
+	})
+	if err != nil {
+		panic(err)
+	}
 	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
 		codexproduct.ProductID:    codexLanes,
 		opencodeproduct.ProductID: opencodeLanes,
+		kiloproduct.ProductID:     kiloLanes,
 	})
 	if err != nil {
 		panic(err)
@@ -283,22 +302,29 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 			name, cwd, ok := bridge.QwenNativeSessionInfo(home, candidate.NativeSessionID)
 			return laneNameEntry{Name: name, Cwd: cwd}, ok
 		},
-		opencodeproduct.ProductID: func(ctx context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
-			executable, err := launcher.ResolveProductExecutable(opencodeproduct.ProductID)
-			if err != nil {
-				return laneNameEntry{}, false
-			}
-			sessions, err := launcher.ListProductSessions(ctx, executable)
-			if err != nil {
-				return laneNameEntry{}, false
-			}
-			for _, session := range sessions {
-				if session.ID == candidate.NativeSessionID {
-					return laneNameEntry{Name: session.Title, Cwd: session.Directory}, true
-				}
-			}
+		opencodeproduct.ProductID: productListLaneCandidateResolver(opencodeproduct.ProductID),
+		kiloproduct.ProductID:     productListLaneCandidateResolver(kiloproduct.ProductID),
+	}
+}
+
+func productListLaneCandidateResolver(product string) func(
+	context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate,
+) (laneNameEntry, bool) {
+	return func(ctx context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+		executable, err := launcher.ResolveProductExecutable(product)
+		if err != nil {
 			return laneNameEntry{}, false
-		},
+		}
+		sessions, err := launcher.ListProductSessions(ctx, executable)
+		if err != nil {
+			return laneNameEntry{}, false
+		}
+		for _, session := range sessions {
+			if session.ID == candidate.NativeSessionID {
+				return laneNameEntry{Name: session.Title, Cwd: session.Directory}, true
+			}
+		}
+		return laneNameEntry{}, false
 	}
 }
 

@@ -11,32 +11,43 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
 )
 
-func TestHostCoordinatorComposesOpenCodeLaneDriverAndProductCandidateLookup(t *testing.T) {
+func TestHostCoordinatorComposesOpenCodeFamilyLaneDriversAndProductCandidateLookups(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
-	if _, ok := coordinator.laneDrivers.ByProduct(opencodeproduct.ProductID); !ok {
-		t.Fatal("OpenCode lane driver is absent from the production registry")
-	}
-
-	executable := filepath.Join(t.TempDir(), "opencode")
-	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"ses_candidate\",\"title\":\"reviewer\",\"directory\":\"/work/project\",\"updated\":17}]'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OPENCODE_PEER_OPENCODE_BIN", executable)
-	resolver := coordinator.candidateResolvers[opencodeproduct.ProductID]
-	entry, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{}, daemonpkg.LaneCandidate{
-		Product: opencodeproduct.ProductID, NativeSessionID: "ses_candidate",
-	})
-	if !ok || entry.Name != "reviewer" || entry.Cwd != "/work/project" {
-		t.Fatalf("product-confirmed candidate = %+v, ok=%v", entry, ok)
-	}
-	if _, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{}, daemonpkg.LaneCandidate{
-		Product: opencodeproduct.ProductID, NativeSessionID: "ses_stale",
-	}); ok {
-		t.Fatal("stale OpenCode candidate was accepted without a product row")
+	for _, product := range []struct {
+		id          string
+		environment string
+	}{
+		{id: opencodeproduct.ProductID, environment: "OPENCODE_PEER_OPENCODE_BIN"},
+		{id: kiloproduct.ProductID, environment: "KILO_PEER_KILO_BIN"},
+	} {
+		t.Run(product.id, func(t *testing.T) {
+			if _, ok := coordinator.laneDrivers.ByProduct(product.id); !ok {
+				t.Fatalf("%s lane driver is absent from the production registry", product.id)
+			}
+			executable := filepath.Join(t.TempDir(), product.id)
+			body := "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"ses_" + product.id + "\",\"title\":\"reviewer-" + product.id + "\",\"directory\":\"/work/" + product.id + "\",\"updated\":17}]'\n"
+			if err := os.WriteFile(executable, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(product.environment, executable)
+			resolver := coordinator.candidateResolvers[product.id]
+			entry, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{}, daemonpkg.LaneCandidate{
+				Product: product.id, NativeSessionID: "ses_" + product.id,
+			})
+			if !ok || entry.Name != "reviewer-"+product.id || entry.Cwd != "/work/"+product.id {
+				t.Fatalf("product-confirmed candidate = %+v, ok=%v", entry, ok)
+			}
+			if _, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{}, daemonpkg.LaneCandidate{
+				Product: product.id, NativeSessionID: "ses_stale",
+			}); ok {
+				t.Fatalf("stale %s candidate was accepted without a product row", product.id)
+			}
+		})
 	}
 }
 
