@@ -139,7 +139,7 @@ var descriptors = [...]Descriptor{
 		[]string{"event-stream", "parent", "plugin-sdk", "prompt-async"},
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
-	), "--auto"),
+	), "--yolo"),
 	withNativeYolo(newProductDescriptor(
 		"kilo", "Kilo Code", "kilo", "7.5.6", "kilo-global-plugin",
 		"presence", "presence", "kilo-http", "kilo",
@@ -147,7 +147,7 @@ var descriptors = [...]Descriptor{
 		[]string{"event-stream", "parent", "plugin-sdk", "tui-routing"},
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
-	), "--auto"),
+	), "--yolo"),
 	piDescriptor(),
 	ompDescriptor(),
 	dshDescriptor(),
@@ -229,7 +229,7 @@ func ompDescriptor() Descriptor {
 		[]string{"--model", "-m", "--extension", "-e", "--resume", "--tools", "--exclude-tools", "--approval-mode"},
 		[]string{"-m", "-e"},
 	)
-	descriptor.NativeYoloArgs = []string{"--approval-mode", "yolo"}
+	descriptor.NativeYoloArgs = []string{"--yolo"}
 	return descriptor
 }
 

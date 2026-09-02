@@ -128,12 +128,12 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 		t.Fatalf("Pi launch policy leaked caller mutation: %#v", pi)
 	}
 	omp, _ := ByID("omp")
-	if len(omp.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(omp.NativeYoloArgs, []string{"--approval-mode", "yolo"}) {
+	if len(omp.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(omp.NativeYoloArgs, []string{"--yolo"}) {
 		t.Fatalf("OMP launch policy = %#v", omp)
 	}
 	for _, id := range []string{"opencode", "kilo"} {
 		product, _ := ByID(id)
-		if len(product.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(product.NativeYoloArgs, []string{"--auto"}) {
+		if len(product.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(product.NativeYoloArgs, []string{"--yolo"}) {
 			t.Fatalf("%s launch policy = %#v", id, product)
 		}
 	}

@@ -91,7 +91,7 @@ func TestGlobalPluginPeersHaveNoLaunchTimePayloadDependency(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if plan.path != "/native/"+product || !reflect.DeepEqual(plan.args, []string{"--auto", "--model", "native-model"}) {
+			if plan.path != "/native/"+product || !reflect.DeepEqual(plan.args, []string{"--yolo", "--model", "native-model"}) {
 				t.Fatalf("plan = path %q args %#v", plan.path, plan.args)
 			}
 		})
@@ -142,7 +142,7 @@ func TestOMPProjectsOnlyItsRealProbedYoloMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--model", "deepseek", "--approval-mode", "yolo"}
+	want := []string{"--model", "deepseek", "--yolo"}
 	if !reflect.DeepEqual(projected, want) {
 		t.Fatalf("projected = %#v, want %#v", projected, want)
 	}
