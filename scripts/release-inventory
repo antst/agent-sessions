@@ -12,7 +12,7 @@ host_aliases=(
   codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane
 )
 plugins=(
-  'codex|.agents,.codex-plugin,.mcp.json,hooks,scripts,skills'
+  'codex|.agents,.codex-plugin,hooks,scripts,skills'
   'claude|.claude-plugin,claude'
   'grok|grok'
   'qwen|qwen'
@@ -24,7 +24,7 @@ plugins=(
   'dsh|integrations/dsh'
 )
 package_paths=(
-  .agents .claude-plugin .codex-plugin .mcp.json
+  .agents .claude-plugin .codex-plugin
   claude deploy docs grok hooks integrations qwen skills Makefile README.md
   scripts/cachebuster
   scripts/federation

@@ -102,10 +102,10 @@ fi
 }
 
 payload=(
-  .agents .claude-plugin .codex-plugin .mcp.json
+  .agents .claude-plugin .codex-plugin
   claude grok hooks qwen skills README.md
 )
-for path in "${payload[@]}" scripts/native-entry deploy/agent-sessions; do
+for path in "${payload[@]}" .codex-plugin/mcp.json scripts/native-entry deploy/agent-sessions; do
   [[ -e "$source_root/$path" && ! -L "$source_root/$path" ]] || {
     printf 'host payload is missing or indirect: %s\n' "$path" >&2
     exit 1
@@ -140,6 +140,8 @@ for path in "${payload[@]}"; do
   mkdir -p "$stage/$(dirname -- "$path")"
   cp -R -- "$source_root/$path" "$stage/$(dirname -- "$path")/"
 done
+cp -- "$stage/.codex-plugin/mcp.json" "$stage/.mcp.json"
+rm -- "$stage/.codex-plugin/mcp.json"
 mkdir -p "$stage/scripts" "$stage/deploy"
 cp -- "$source_root/scripts/native-entry" "$stage/scripts/native-entry"
 cp -R -- "$source_root/deploy/agent-sessions" "$stage/deploy/"

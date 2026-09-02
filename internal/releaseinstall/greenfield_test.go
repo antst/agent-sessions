@@ -52,7 +52,6 @@ func TestActiveReleaseSurfacesContainNoLegacyProcessOrStateNames(t *testing.T) {
 		"cmd/agent-sessions-hub",
 		".claude-plugin",
 		".codex-plugin",
-		".mcp.json",
 		"claude",
 		"deploy/agent-sessions",
 		"deploy/agent-sessions-hub",
@@ -157,7 +156,7 @@ func TestOperationalSurfacesCannotInvokePreUnificationCleanup(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
 	for _, relative := range []string{
-		"Makefile", "cmd", "internal", ".claude-plugin", ".codex-plugin", ".mcp.json", "claude", "deploy", "grok", "hooks", "qwen", "skills",
+		"Makefile", "cmd", "internal", ".claude-plugin", ".codex-plugin", "claude", "deploy", "grok", "hooks", "qwen", "skills",
 		"scripts/install-host", "scripts/install-hub", "scripts/managed-tree", "scripts/native-entry", "scripts/package-release", "scripts/release-inventory", "scripts/remove-host", "scripts/remove-hub",
 	} {
 		path := filepath.Join(root, relative)

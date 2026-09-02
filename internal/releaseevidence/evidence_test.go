@@ -176,7 +176,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 	t.Helper()
 	executables := []string{"agent-sessions", "agent-sessions-hub"}
 	plugins := []map[string]any{
-		{"product": "codex", "plugin_id": "agent-sessions", "archive_paths": []string{".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills"}},
+		{"product": "codex", "plugin_id": "agent-sessions", "archive_paths": []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}},
 		{"product": "claude", "plugin_id": "agent-sessions", "archive_paths": []string{".claude-plugin", "claude"}},
 		{"product": "grok", "plugin_id": "agent-sessions", "archive_paths": []string{"grok"}},
 		{"product": "qwen", "plugin_id": "agent-sessions", "archive_paths": []string{"qwen"}},

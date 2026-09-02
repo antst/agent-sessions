@@ -236,7 +236,6 @@
               "archive_paths": [
                 ".agents",
                 ".codex-plugin",
-                ".mcp.json",
                 "hooks",
                 "scripts",
                 "skills"
