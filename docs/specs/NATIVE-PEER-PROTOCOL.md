@@ -1,0 +1,841 @@
+# Native Agent Sessions Presence Protocol
+
+Status: target protocol, version 1.
+
+This specification defines the small native connection a coding-agent product
+implements to participate in Agent Sessions without a product-specific plugin.
+Agent Sessions will align its implementation to this protocol.
+
+## 1. Purpose and trust model
+
+Agent Sessions is not a workflow or graph orchestrator; every session or lane
+runs whatever it likes internally. It is where independent agents and their
+humans discover one another, exchange messages, and converge through discussion.
+Disagreement is information to resolve with conversation and evidence, not
+noise to average across copies. Persistent participants with different skills,
+products, and models can keep talking across hours and restarts, and a human can
+step in at any seam. A native presence client lets a product join as a
+first-class participant without an adapter.
+
+Agent Sessions assumes a trusted environment: one held connection per live
+session is the complete liveness proof, and there is no authentication layer
+inside a host. Socket permissions and network isolation are deployment
+boundaries, not parts of this protocol.
+
+## 2. Finding the daemon
+
+The daemon listens on a Unix-domain socket named `run/presence.sock` beneath
+its state root. A client resolves the socket in this order:
+
+1. `AGENT_SESSIONS_PRESENCE_SOCKET`, when non-empty;
+2. `$AGENT_SESSIONS_STATE_ROOT/run/presence.sock`;
+3. `$XDG_STATE_HOME/agent-sessions/run/presence.sock`;
+4. `$HOME/.local/state/agent-sessions/run/presence.sock`.
+
+The daemon creates the containing directory with mode `0700` and the socket
+with mode `0600`. A custom daemon state root must be published through
+`AGENT_SESSIONS_PRESENCE_SOCKET` or `AGENT_SESSIONS_STATE_ROOT` so clients can
+find it.
+
+### Launch environment
+
+When Agent Sessions launches an interactive product, these existing variables
+carry launch context. A native client treats them as hints; the product remains
+the authority for the session UUID and stored title.
+
+| Variable | Meaning |
+| --- | --- |
+| `AGENT_SESSIONS_SESSION_NAME` | Requested start-time title, or an empty string. |
+| `AGENT_SESSIONS_GROUPS` | JSON array of group strings collected from the launch arguments. |
+| `AGENT_SESSIONS_PRODUCT_ID` | Product string identifier on launch paths that set it. `AGENT_SESSIONS_PRODUCT` is the current fallback. |
+| `AGENT_SESSIONS_SESSION_ID` | Exact resume ID when already known; empty or absent for a fresh session. It is never a request to invent a product session ID. |
+
+Current launchers do not uniformly set every variable, and they preserve an
+explicit socket or state root already present in their environment. A product
+started outside Agent Sessions may set the socket directly or use the
+conventional path, choose its own groups, and report its built-in product
+identifier. No registration command, plugin manifest, secret, or prior catalog
+entry is required.
+
+## 3. The first frame: `session.hello`
+
+The first line on every connection is a JSON-RPC 2.0 request:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode","info":{"model":"gpt-5.6-sol","cwd":"/work/project"}}}
+```
+
+The daemon validates the report, installs the connection as live, and replies:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+The client must wait for this result before sending another method. The fields
+mean:
+
+- `protocol` is the integer `1`. No other value is accepted.
+- `uuid` is the stable session ID issued by the product. The presence client
+  obtains it from the product and never generates or substitutes one.
+- `name` is the title owned and stored by the product. `""` is valid when
+  the product has no title yet.
+- `groups` is the array of group strings passed from the launch arguments,
+  unchanged and in order. It is fixed for the life of this connection.
+- `product` is the product's non-empty string identifier.
+- `info` is a string-to-string object owned by the product. The daemon passes
+  every key and value through verbatim to rosters and `peers.list` results and
+  never interprets them.
+
+Products may add any `info` keys. Unknown keys are valid by design. Two keys
+have well-known display meanings and SHOULD be set whenever the product knows
+them:
+
+- `model` is the model currently used by the session, such as `gpt-5.6-sol` or
+  `opus-4.8`. The product updates it whenever the user switches models.
+- `cwd` is the session's working directory. A product that connects on its own
+  is responsible for knowing this value because the daemon cannot infer it.
+
+The map is informational only and never affects routing or permissions. It is
+live, in-memory, and product-owned. The daemon stores none of it durably: it
+retains the map only on the live connection and discards it when that
+connection ends.
+
+An unsupported protocol version receives error `-32004`, after which the
+daemon closes the connection:
+
+```json
+{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"Unsupported protocol version","data":{"supported":1,"received":2}}}
+```
+
+An unknown product identifier is not an error. It is accepted for presence,
+rosters, peer discovery, and messaging, and is displayed as reported. Catalog
+knowledge is required only when Agent Sessions is asked to launch or drive
+that product as a lane. This is the adoption rule: **you can join with four
+identity fields and an info map; nothing else is required.** The map may be
+empty.
+
+## 4. The JSON-RPC stream
+
+After `session.hello`, each line is one UTF-8 JSON-RPC 2.0 object followed by
+`\n`. Requests contain `jsonrpc`, `id`, `method`, and `params`.
+Notifications omit `id`. Responses contain the same string or numeric `id`
+and exactly one of `result` or `error`. Batch arrays are not used.
+
+Products may reuse their existing JSON-RPC libraries with newline framing and
+batching disabled. Calls can be concurrent; an ID must be unique while its
+call is outstanding. Every version 1 method is a request with an ID. Although
+JSON-RPC supports notifications, version 1 assigns none because every operation
+needs a success or error result.
+
+### Error codes
+
+Errors use the standard JSON-RPC error object
+`{"code": INTEGER, "message": STRING, "data": OPTIONAL_JSON}`. Version 1 has
+this closed error table:
+
+| Code | Canonical message | Meaning |
+| ---: | --- | --- |
+| `-32602` | `Invalid params` | The method is known, but its parameters do not match the method schema. |
+| `-32001` | `Unknown session or target` | A session or message destination does not exist or is not visible to the caller. |
+| `-32002` | `Session busy` | The addressed product session or lane cannot accept input in its current state. |
+| `-32003` | `Operation not permitted` | The caller is not allowed to perform the requested operation, or the method is not part of version 1. |
+| `-32004` | `Unsupported protocol version` | `session.hello.params.protocol` is not exactly `1`. |
+| `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
+
+Messages may add detail after the canonical text, and `data` may identify the
+field, UUID, target, method, or product. No other error code is emitted by a
+version 1 endpoint. A line that is not a JSON object with
+`"jsonrpc":"2.0"` is not a protocol frame; the receiver closes the connection.
+
+### Product to daemon
+
+#### `session.update`
+
+`session.update` replaces the product-owned name and complete info map:
+
+```json
+{"jsonrpc":"2.0","id":"update-1","method":"session.update","params":{"name":"reviewer: tests complete","info":{"model":"opus-4.8","cwd":"/work/project"}}}
+{"jsonrpc":"2.0","id":"update-1","result":{}}
+```
+
+Both fields are required and replace their previous values; omitted `info`
+keys are removed. The UUID, product, and groups remain those from
+`session.hello`. Any attempt to include or change them is rejected, so the
+product always learns whether its update was applied:
+
+```json
+{"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","info":{},"groups":["other-team"]}}
+{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"field":"groups"}}}
+```
+
+Changing groups requires a new connection and a new `session.hello`.
+
+#### `peers.list`
+
+```json
+{"jsonrpc":"2.0","id":"peers-1","method":"peers.list","params":{}}
+{"jsonrpc":"2.0","id":"peers-1","result":{"peers":[{"id":"target-native","session_id":"target-native","name":"builder","product":"new-agent","status":"live","cwd":"","groups":["team"],"permission_mode":"default","info":{"model":"opus-4.8","cwd":"/work/project"}}]}}
+```
+
+The daemon returns live destinations that share a group with the caller. An
+uncatalogued product appears with its reported product identifier. Every peer's
+`info` is the exact current map supplied by that product.
+
+#### `message.send`
+
+```json
+{"jsonrpc":"2.0","id":"send-1","method":"message.send","params":{"target":"target-native","message":"Please review this."}}
+{"jsonrpc":"2.0","id":"send-1","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
+```
+
+`target` selects one `Peer.id` returned by `peers.list`. `targets` may instead
+select a non-empty array of distinct peer IDs. The forms are mutually
+exclusive. Success means every selected product accepted its delivery. A
+missing or invisible target returns:
+
+```json
+{"jsonrpc":"2.0","id":"send-2","method":"message.send","params":{"target":"missing","message":"Hello"}}
+{"jsonrpc":"2.0","id":"send-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
+```
+
+#### Lane methods
+
+The version 1 lane methods are `lane.start`, `lane.run`, `lane.resume`,
+`lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive`.
+`lane.collect` and `lane.steer` are not version 1 methods.
+
+Start, run, and resume use:
+
+```json
+{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change.","host":"optional-remote-host"}
+```
+
+Wait, status, interrupt, and archive omit `input`:
+
+```json
+{"product":"qwen","arguments":["reviewer","--timeout","300"],"host":"optional-remote-host"}
+```
+
+`product` selects the lane product. `arguments` is the bounded lane command
+argument array without the method name. `input` is required and non-empty
+where shown. `host` is optional. The daemon returns `-32005` when it has no
+launcher for the requested product.
+
+### Daemon to product: `message.deliver`
+
+The daemon sends plain message text and a structured sender:
+
+```json
+{"jsonrpc":"2.0","id":"delivery-1","method":"message.deliver","params":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"Please review this."}}
+{"jsonrpc":"2.0","id":"delivery-1","result":{}}
+```
+
+The product renders sender metadata natively. It must route `body` to the exact
+session represented by this connection and wake a model turn without terminal
+keystrokes or screen scraping. `result:{}` means the input was accepted and a
+model turn will run. A product that cannot accept the input returns a standard
+error:
+
+```json
+{"jsonrpc":"2.0","id":"delivery-2","method":"message.deliver","params":{"message_id":"message-2","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"One more check."}}
+{"jsonrpc":"2.0","id":"delivery-2","error":{"code":-32002,"message":"Session busy","data":{"uuid":"target-native"}}}
+```
+
+The daemon does not wrap `body`, queue it for a disconnected product, or
+synthesize acceptance.
+
+### Model exposure
+
+The presence methods are the wire contract, not a required model-facing tool
+layout. A product may expose one tool with a closed operation enum or several
+separate tools. Whichever layout it chooses, calls to `peers.list`,
+`message.send`, and the supported lane methods must be structured and
+promptless for the model.
+
+## 5. Lifecycle semantics
+
+- EOF or any connection loss removes the session immediately. There is no
+  heartbeat and no grace period.
+- After a daemon restart, the product reconnects and sends `session.hello`
+  again with the same UUID, current product-owned name, original groups, and
+  current info map. The daemon rebuilds its live roster from hello requests.
+- A newer connection whose successful hello reports the same UUID replaces and
+  closes the older connection. The displaced connection cannot later remove
+  the replacement.
+- A process hosting several live sessions holds one independent connection per
+  session. A multi-root product emits created, changed, and disposed events per
+  root and owns one presence loop per root.
+- On disconnect, outstanding calls in both directions fail. Neither side
+  replays calls after reconnect; the caller decides whether an operation is
+  safe to retry.
+
+## 6. Product responsibilities
+
+A conforming product provides:
+
+- A stable, product-issued session UUID at or near session start.
+- A requested start-time name written into the product's own session store,
+  not merely displayed in the terminal or remembered by Agent Sessions.
+- A current product-owned info map, including `model` and `cwd` whenever known,
+  with changes reported for the exact session that changed.
+- Native resume by exact UUID and, where the product supports named sessions,
+  lookup by name that returns exactly one product session or fails truthfully
+  on zero or multiple matches.
+- An addressable API that accepts an inbound message for one exact session and
+  wakes a model turn without keystroke injection. A busy session returns
+  `-32002`.
+- A finite, structured, promptless model surface for the version 1 Agent
+  Sessions methods.
+- Truthful exit: the presence connection closes as soon as the product session
+  is no longer live.
+- Per-session lifecycle, title, and info events when one process hosts several
+  sessions.
+
+## 7. Minimal implementation
+
+The following pseudocode is the complete shape of a native client. A production
+client adds normal cancellation, reconnect backoff, logging, and bounded I/O.
+
+```text
+presence(session):
+  while session.is_live:
+    socket, rpc = null, null
+    try:
+      socket = connect(discover_presence_socket())
+      rpc = JsonRpc2(socket, delimiter="\\n", batching=false)
+      rpc.on_request("message.deliver", params => {
+        if not session.can_accept_input:
+          throw RpcError(-32002, "Session busy")
+        session.accept_user_input(params.body, sender=params.from)
+        return {}
+      })
+      await rpc.call("session.hello", {
+        protocol: 1,
+        uuid: session.uuid,
+        name: session.stored_name_or_empty,
+        groups: session.launch_groups,
+        product: PRODUCT_ID,
+        info: session.current_info
+      })
+      session.on_presence_change((name, info) =>
+        rpc.call("session.update", {name: name, info: info}))
+      session.expose_promptless_methods(method =>
+        rpc.call(method.name, method.params))
+      await first_of(rpc.eof, session.disposed)
+    catch ConnectionFailedOrDisconnected:
+      if rpc: rpc.fail_all_pending_without_replay()
+      if session.is_live: continue
+    finally:
+      close_if_open(socket)
+  return
+```
+
+## 8. Conformance
+
+Conformance is checked end to end against the real product:
+
+| Cell | Required observation |
+| --- | --- |
+| Named start | Starting with a name and groups creates a real product session that is immediately visible with the same stored name, exact groups, UUID, product string, and current info. |
+| Live update | Changing the session name, model, or other info produces a successful `session.update`; the next roster read contains the complete replacement values. |
+| Model turn | The named session completes a real model turn through the product's normal runtime. |
+| Inbound round trip | `message.deliver` wakes that exact session; its model can call `message.send`, and the reply is accepted without an interactive approval prompt. |
+| Daemon restart | While the product remains live, restarting the daemon makes the session reappear after a new hello with the same UUID, current stored name, original groups, and current info. |
+| Exit | Exiting or disposing the product session makes it disappear immediately. |
+| Resume | Resume by exact UUID and resume by unique name both restore and report the same product UUID. |
+
+## Appendix A. Schemas and examples
+
+All examples below are complete newline-delimited frames. Line breaks between
+frames are shown literally by placing each JSON object on its own line.
+
+### A.1 JSON-RPC envelopes
+
+Request:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jsonrpc", "id", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": ["string", "number"]},
+    "method": {
+      "enum": [
+        "session.hello", "session.update", "peers.list", "message.send",
+        "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
+        "lane.interrupt", "lane.archive", "message.deliver"
+      ]
+    },
+    "params": {"type": "object"}
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jsonrpc", "id", "result"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": ["string", "number"]},
+    "result": {}
+  }
+}
+```
+
+Error response:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jsonrpc", "id", "error"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": ["string", "number"]},
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": [-32602, -32001, -32002, -32003, -32004, -32005]},
+        "message": {"type": "string"},
+        "data": {}
+      }
+    }
+  }
+}
+```
+
+### A.2 `session.hello`
+
+Parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "uuid", "name", "groups", "product", "info"],
+  "properties": {
+    "protocol": {"const": 1},
+    "uuid": {"type": "string", "minLength": 1},
+    "name": {"type": "string"},
+    "groups": {"type": "array", "items": {"type": "string"}},
+    "product": {"type": "string", "minLength": 1},
+    "info": {"type": "object", "additionalProperties": {"type": "string"}}
+  }
+}
+```
+
+Result: an empty object.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode","info":{"model":"gpt-5.6-sol","cwd":"/work/project"}}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+{"jsonrpc":"2.0","id":2,"method":"session.hello","params":{"protocol":2,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode","info":{}}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32004,"message":"Unsupported protocol version","data":{"supported":1,"received":2}}}
+```
+
+### A.3 `session.update`
+
+Parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "info"],
+  "properties": {
+    "name": {"type": "string"},
+    "info": {"type": "object", "additionalProperties": {"type": "string"}}
+  }
+}
+```
+
+Result: an empty object.
+
+```json
+{"jsonrpc":"2.0","id":"update-1","method":"session.update","params":{"name":"reviewer: tests complete","info":{"model":"opus-4.8","cwd":"/work/project"}}}
+{"jsonrpc":"2.0","id":"update-1","result":{}}
+{"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","info":{},"groups":["other-team"]}}
+{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"field":"groups"}}}
+```
+
+### A.4 Peer and message schemas
+
+`peers.list` parameters are exactly `{}`.
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 0
+}
+```
+
+`Peer`:
+
+```json
+{
+  "$id": "urn:agent-sessions:v1:peer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "session_id", "name", "product", "status", "cwd", "groups", "permission_mode", "info"],
+  "properties": {
+    "id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "name": {"type": "string"},
+    "product": {"type": "string"},
+    "status": {"enum": ["live", "idle", "busy"]},
+    "cwd": {"type": "string"},
+    "groups": {"type": "array", "items": {"type": "string"}},
+    "permission_mode": {"type": "string"},
+    "info": {"type": "object", "additionalProperties": {"type": "string"}},
+    "kind": {"enum": ["lane", "remote-peer"]},
+    "host_id": {"type": "string"}
+  }
+}
+```
+
+`peers.list` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["peers"],
+  "properties": {
+    "peers": {"type": "array", "items": {"$ref": "urn:agent-sessions:v1:peer"}}
+  }
+}
+```
+
+Frames:
+
+```json
+{"jsonrpc":"2.0","id":"peers-1","method":"peers.list","params":{}}
+{"jsonrpc":"2.0","id":"peers-1","result":{"peers":[{"id":"target-native","session_id":"target-native","name":"builder","product":"new-agent","status":"live","cwd":"","groups":["team"],"permission_mode":"default","info":{"model":"opus-4.8","cwd":"/work/project"}}]}}
+```
+
+`message.send` parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message"],
+  "properties": {
+    "target": {"type": "string", "minLength": 1},
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "message": {"type": "string", "minLength": 1}
+  },
+  "oneOf": [
+    {"required": ["target"], "not": {"required": ["targets"]}},
+    {"required": ["targets"], "not": {"required": ["target"]}}
+  ]
+}
+```
+
+`message.send` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message_id", "deliveries"],
+  "properties": {
+    "message_id": {"type": "string", "minLength": 1},
+    "deliveries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "session_id", "delivery_id", "status"],
+        "properties": {
+          "target": {"type": "string"},
+          "session_id": {"type": "string"},
+          "delivery_id": {"type": "string"},
+          "status": {"const": "accepted"}
+        }
+      }
+    }
+  }
+}
+```
+
+Frames:
+
+```json
+{"jsonrpc":"2.0","id":"send-1","method":"message.send","params":{"target":"target-native","message":"Please review this."}}
+{"jsonrpc":"2.0","id":"send-1","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
+{"jsonrpc":"2.0","id":"send-2","method":"message.send","params":{"target":"missing","message":"Hello"}}
+{"jsonrpc":"2.0","id":"send-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
+```
+
+`message.deliver` parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message_id", "from", "body"],
+  "properties": {
+    "message_id": {"type": "string", "minLength": 1},
+    "from": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uuid", "name", "product", "groups"],
+      "properties": {
+        "uuid": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "product": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "body": {"type": "string"}
+  }
+}
+```
+
+Result: an empty object.
+
+```json
+{"jsonrpc":"2.0","id":"delivery-1","method":"message.deliver","params":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"Please review this."}}
+{"jsonrpc":"2.0","id":"delivery-1","result":{}}
+{"jsonrpc":"2.0","id":"delivery-2","method":"message.deliver","params":{"message_id":"message-2","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"One more check."}}
+{"jsonrpc":"2.0","id":"delivery-2","error":{"code":-32002,"message":"Session busy","data":{"uuid":"target-native"}}}
+```
+
+### A.5 Lane schemas
+
+`lane.start`, `lane.run`, and `lane.resume` parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["product", "arguments", "input"],
+  "properties": {
+    "product": {"type": "string", "minLength": 1},
+    "arguments": {"type": "array", "items": {"type": "string"}},
+    "input": {"type": "string", "minLength": 1},
+    "host": {"type": "string", "minLength": 1}
+  }
+}
+```
+
+`lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive` parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["product", "arguments"],
+  "properties": {
+    "product": {"type": "string", "minLength": 1},
+    "arguments": {"type": "array", "items": {"type": "string"}},
+    "host": {"type": "string", "minLength": 1}
+  }
+}
+```
+
+`lane.ready` and `lane.status` result fields:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type", "product", "thread_id", "session_id", "name", "cwd", "groups",
+    "permission_mode", "state", "turn_id", "outcome", "exit",
+    "owner_session_id", "persistent", "auto_archive",
+    "auto_archive_after_seconds", "auto_archive_at"
+  ],
+  "properties": {
+    "type": {"enum": ["lane.ready", "lane.status"]},
+    "contract_version": {"const": 2},
+    "product": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "name": {"type": "string"},
+    "cwd": {"type": "string"},
+    "groups": {"type": "array", "items": {"type": "string"}},
+    "permission_mode": {"type": "string"},
+    "state": {"type": "string"},
+    "turn_id": {"type": "string"},
+    "outcome": {"type": "string"},
+    "exit": {"type": ["integer", "null"]},
+    "owner_session_id": {"type": "string"},
+    "persistent": {"type": "boolean"},
+    "auto_archive": {"type": "boolean"},
+    "auto_archive_after_seconds": {"type": "number"},
+    "auto_archive_at": {"type": "integer"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "lane.ready"}}},
+      "then": {"required": ["contract_version"]}
+    }
+  ]
+}
+```
+
+`turn.completed` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "product", "thread_id", "session_id", "turn_id", "status", "outcome", "exit", "result", "diagnostic"],
+  "properties": {
+    "type": {"const": "turn.completed"},
+    "product": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "turn_id": {"type": "string"},
+    "status": {"type": "string"},
+    "outcome": {"type": "string"},
+    "exit": {"type": ["integer", "null"]},
+    "result": {"type": "string"},
+    "diagnostic": {"type": "string"}
+  }
+}
+```
+
+`turn.interrupting` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "thread_id", "turn_id"],
+  "properties": {
+    "type": {"const": "turn.interrupting"},
+    "thread_id": {"type": "string"},
+    "turn_id": {"type": "string"}
+  }
+}
+```
+
+`lane.archived` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "product", "thread_id", "session_id", "name"],
+  "properties": {
+    "type": {"const": "lane.archived"},
+    "product": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "name": {"type": "string"},
+    "already_archived": {"type": "boolean"}
+  }
+}
+```
+
+#### `lane.start`
+
+```json
+{"jsonrpc":"2.0","id":"lane-start-1","method":"lane.start","params":{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change."}}
+{"jsonrpc":"2.0","id":"lane-start-1","result":{"type":"lane.ready","contract_version":2,"product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"running","turn_id":"turn-1","outcome":"","exit":null,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+{"jsonrpc":"2.0","id":"lane-start-2","method":"lane.start","params":{"product":"new-agent","arguments":["--name","reviewer"],"input":"Review the change."}}
+{"jsonrpc":"2.0","id":"lane-start-2","error":{"code":-32005,"message":"Product not launchable","data":{"product":"new-agent"}}}
+```
+
+#### `lane.run`
+
+```json
+{"jsonrpc":"2.0","id":"lane-run-1","method":"lane.run","params":{"product":"qwen","arguments":["--name","reviewer"],"input":"Review the change."}}
+{"jsonrpc":"2.0","id":"lane-run-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-1","status":"completed","outcome":"completed","exit":0,"result":"Looks good.","diagnostic":""}}
+```
+
+#### `lane.resume`
+
+```json
+{"jsonrpc":"2.0","id":"lane-resume-1","method":"lane.resume","params":{"product":"qwen","arguments":["reviewer"],"input":"Check one more thing."}}
+{"jsonrpc":"2.0","id":"lane-resume-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-resume-2","method":"lane.resume","params":{"product":"qwen","arguments":["missing"],"input":"Continue."}}
+{"jsonrpc":"2.0","id":"lane-resume-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
+```
+
+#### `lane.wait`
+
+```json
+{"jsonrpc":"2.0","id":"lane-wait-1","method":"lane.wait","params":{"product":"qwen","arguments":["reviewer","--timeout","300"]}}
+{"jsonrpc":"2.0","id":"lane-wait-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+```
+
+#### `lane.status`
+
+```json
+{"jsonrpc":"2.0","id":"lane-status-1","method":"lane.status","params":{"product":"qwen","arguments":["reviewer"]}}
+{"jsonrpc":"2.0","id":"lane-status-1","result":{"type":"lane.status","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"idle","turn_id":"turn-2","outcome":"completed","exit":0,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+```
+
+#### `lane.interrupt`
+
+```json
+{"jsonrpc":"2.0","id":"lane-interrupt-1","method":"lane.interrupt","params":{"product":"qwen","arguments":["reviewer"]}}
+{"jsonrpc":"2.0","id":"lane-interrupt-1","result":{"type":"turn.interrupting","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","turn_id":"turn-2"}}
+```
+
+#### `lane.archive`
+
+```json
+{"jsonrpc":"2.0","id":"lane-archive-1","method":"lane.archive","params":{"product":"qwen","arguments":["reviewer"]}}
+{"jsonrpc":"2.0","id":"lane-archive-1","result":{"type":"lane.archived","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer"}}
+{"jsonrpc":"2.0","id":"lane-archive-2","method":"lane.archive","params":{"product":"qwen","arguments":["owned-by-another-session"]}}
+{"jsonrpc":"2.0","id":"lane-archive-2","error":{"code":-32003,"message":"Operation not permitted","data":{"method":"lane.archive"}}}
+```
+
+## Appendix B. Differences from the current Agent Sessions implementation
+
+Agent Sessions must make these changes to conform to version 1:
+
+1. Add `"jsonrpc":"2.0"` to every presence frame; accept string and numeric
+   request IDs; replace string errors with the error objects and fixed codes in
+   this specification; and make `session.update` an acknowledged request.
+2. Replace the raw first report with the `session.hello` request, acknowledge
+   it before accepting other methods, reject any protocol value other than
+   `1` with `-32004`, and then close that connection.
+3. Accept every non-empty product string for presence, rosters, discovery, and
+   messaging. Apply catalog checks only when a lane method asks the daemon to
+   launch or drive a product. This also allows a standalone DSH root to appear
+   as a peer.
+4. Preserve hello groups exactly instead of removing duplicate strings. Keep
+   them immutable for the connection. Add the product-owned `info` map to hello,
+   live roster entries, and peer results without interpreting or persisting it;
+   change `session.update` from a full report to the name-and-info replacement
+   defined here.
+5. Replace `tool.call` with the first-class `peers.list`, `message.send`, and
+   lane methods. Remove the presence-stream `tools/call` compatibility method.
+   Do not expose `lane.collect` or `lane.steer` as version 1 methods.
+6. Change `message.deliver` to carry the structured `from` object and plain
+   `body`. Stop wrapping message text; products render sender metadata through
+   their native interfaces.
+7. Map validation, routing, busy-state, permission, version, and lane-product
+   failures to the closed error table instead of returning implementation
+   error strings.
+8. Align the daemon's default state-root discovery with the client's
+   `XDG_STATE_HOME` rule, or publish the authoritative socket path explicitly,
+   so both sides select the same Unix socket.
+9. Update the shared reference client and end-to-end product checks for hello
+   acknowledgement, exact JSON-RPC framing, unknown-product presence,
+   immutable groups, live info, structured delivery, first-class methods, and
+   standard errors.
