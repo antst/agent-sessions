@@ -125,45 +125,6 @@ func TestOpenCodeTypedLifecycleAndPermissionRelay(t *testing.T) {
 	}
 }
 
-func TestKiloSteerUsesV2PromptAndRejectsConflictingAcceptance(t *testing.T) {
-	wrong := false
-	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requireBasicAuthOnly(t, request)
-		if request.URL.RawQuery != "" {
-			t.Errorf("Kilo v2 prompt query = %q", request.URL.RawQuery)
-		}
-		if request.URL.Path != "/api/session/ses_kilo/prompt" {
-			http.NotFound(response, request)
-			return
-		}
-		var body struct {
-			ID       string `json:"id"`
-			Delivery string `json:"delivery"`
-			Prompt   struct {
-				Text string `json:"text"`
-			} `json:"prompt"`
-		}
-		if json.NewDecoder(request.Body).Decode(&body) != nil || body.Prompt.Text != "steer me" || body.Delivery != "steer" {
-			t.Errorf("Kilo v2 prompt = %#v", body)
-		}
-		sessionID := "ses_kilo"
-		if wrong {
-			sessionID = "ses_foreign"
-		}
-		_, _ = fmt.Fprintf(response, `{"data":{"id":%q,"sessionID":%q,"delivery":"steer"}}`, body.ID, sessionID)
-	})
-	client, closeClient := newFamilyTestClient(t, DialectKilo, handler)
-	defer closeClient()
-	accepted, err := client.KiloSteer(context.Background(), "ses_kilo", "receipt-steer", []byte("steer me"))
-	if err != nil || accepted.NativeSessionID != "ses_kilo" {
-		t.Fatalf("accepted = %#v, %v", accepted, err)
-	}
-	wrong = true
-	if _, err := client.KiloSteer(context.Background(), "ses_kilo", "receipt-foreign", []byte("steer me")); !errors.Is(err, productruntime.ErrAmbiguousSession) {
-		t.Fatalf("conflicting native session acceptance = %v", err)
-	}
-}
-
 func TestKiloSelectSessionRequiresExactIDAndTrueAcceptance(t *testing.T) {
 	requests := 0
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

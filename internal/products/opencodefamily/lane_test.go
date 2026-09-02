@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -160,16 +159,12 @@ func TestFamilyLaneRejectsMalformedModelBeforeStartingServer(t *testing.T) {
 	}
 }
 
-func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
+func TestKiloLaneInitialPromptUsesLegacyRouteAndRejectsSteer(t *testing.T) {
 	var deliveriesMu sync.Mutex
 	deliveries := []string{}
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuthOnly(t, request)
-		if strings.HasPrefix(request.URL.Path, "/api/session/") {
-			if request.URL.RawQuery != "" {
-				t.Errorf("Kilo v2 request query = %q", request.URL.RawQuery)
-			}
-		} else if request.URL.Query().Get("directory") != "/work/project" {
+		if request.URL.Query().Get("directory") != "/work/project" {
 			t.Errorf("directory = %q", request.URL.Query().Get("directory"))
 		}
 		switch request.Method + " " + request.URL.Path {
@@ -188,18 +183,6 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 			deliveries = append(deliveries, "prompt_async")
 			deliveriesMu.Unlock()
 			response.WriteHeader(http.StatusNoContent)
-		case "POST /api/session/ses_kilo_lane/prompt":
-			var body struct {
-				ID       string `json:"id"`
-				Delivery string `json:"delivery"`
-			}
-			if decodeJSON(request.Body, &body) != nil {
-				t.Error("invalid prompt")
-			}
-			deliveriesMu.Lock()
-			deliveries = append(deliveries, body.Delivery)
-			deliveriesMu.Unlock()
-			_, _ = fmt.Fprintf(response, `{"data":{"id":%q,"sessionID":"ses_kilo_lane","delivery":%q}}`, body.ID, body.Delivery)
 		default:
 			http.NotFound(response, request)
 		}
@@ -230,17 +213,16 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{Prompt: "second", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
-		t.Fatalf("changed Kilo permission mode = %v", err)
+	if driver.Capabilities().Steer {
+		t.Fatal("Kilo advertised a steer operation the product accepts but ignores")
 	}
-	accepted, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{Prompt: "second", PermissionMode: permissionmode.BypassPermissions})
-	if err != nil || accepted.NativeSessionID != "ses_kilo_lane" || accepted.NativeMessageID == turn.NativeTurnID {
-		t.Fatalf("steer = %#v, %v", accepted, err)
+	if _, err := driver.Steer(context.Background(), turn, productruntime.TurnStartRequest{Prompt: "second", PermissionMode: permissionmode.BypassPermissions}); !errors.Is(err, productruntime.ErrUnsupportedSteer) {
+		t.Fatalf("Kilo steer error = %v", err)
 	}
 	deliveriesMu.Lock()
 	got := append([]string(nil), deliveries...)
 	deliveriesMu.Unlock()
-	if fmt.Sprint(got) != "[prompt_async steer]" {
+	if fmt.Sprint(got) != "[prompt_async]" {
 		t.Fatalf("Kilo delivery routes = %v", got)
 	}
 }

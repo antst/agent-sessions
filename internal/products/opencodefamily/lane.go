@@ -63,7 +63,7 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 }
 
 func (driver *LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
-	return productruntime.LaneCapabilitySet{Steer: driver.config.Dialect == DialectKilo, DurableResume: true}
+	return productruntime.LaneCapabilitySet{DurableResume: true}
 }
 
 func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
@@ -227,35 +227,8 @@ func splitLaneArguments(arguments []string) ([]string, *NativeModel, error) {
 	return serverArguments, model, nil
 }
 
-func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeTurnRef, request productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
-	if driver.config.Dialect != DialectKilo {
-		return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
-	}
-	if !request.PermissionMode.Valid() || strings.TrimSpace(request.Prompt) == "" || len(request.Prompt) > maxResultBytes || turn.NativeTurnID == "" {
-		return productruntime.NativeAcceptance{}, productruntime.ErrProtocol
-	}
-	operationID, err := newOperationID()
-	if err != nil {
-		return productruntime.NativeAcceptance{}, err
-	}
-	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
-		return productruntime.NativeAcceptance{}, err
-	}
-	live, err := driver.lockLive(turn.NativeSessionRef)
-	if err != nil {
-		return productruntime.NativeAcceptance{}, err
-	}
-	if live.permissionMode != request.PermissionMode {
-		driver.mu.Unlock()
-		return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedPolicy
-	}
-	if live.turn == nil || live.turn.id != turn.NativeTurnID {
-		driver.mu.Unlock()
-		return productruntime.NativeAcceptance{}, productruntime.ErrStale
-	}
-	accepted, err := live.client.KiloSteer(ctx, turn.NativeSessionID, operationID, []byte(request.Prompt))
-	driver.mu.Unlock()
-	return accepted, err
+func (*LaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
+	return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
 }
 
 func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
