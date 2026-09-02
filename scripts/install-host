@@ -254,14 +254,15 @@ install_dsh_profile() {
   local integration_root=$1 profile_root
   [[ -n "$dsh_path" ]] || return 0
   profile_root=$(dsh_profile_root)
-  mkdir -p "$profile_root/agent-sessions-plugin" "$profile_root/shared"
+  rm -rf -- "$profile_root/agent-sessions-plugin" "$profile_root/shared"
+  mkdir -p "$profile_root/agent-sessions-plugin/dsh" "$profile_root/agent-sessions-plugin/shared"
   install -m 0644 "$integration_root/integrations/dsh/profile/package.json" "$profile_root/package.json"
   install -m 0644 "$integration_root/integrations/dsh/profile/cordis.yml" "$profile_root/cordis.yml"
   install -m 0644 "$integration_root/integrations/dsh/profile/cordis.patch.yml" "$profile_root/cordis.patch.yml"
   install -m 0644 "$integration_root/integrations/dsh/package.json" "$profile_root/agent-sessions-plugin/package.json"
-  install -m 0644 "$integration_root/integrations/dsh/plugin.cjs" "$profile_root/agent-sessions-plugin/plugin.cjs"
-  install -m 0644 "$integration_root/integrations/shared/live-session.js" "$profile_root/shared/live-session.js"
-  "$pnpm_path" --dir "$profile_root" install --prod --ignore-scripts --no-frozen-lockfile
+  install -m 0644 "$integration_root/integrations/dsh/plugin.cjs" "$profile_root/agent-sessions-plugin/dsh/plugin.cjs"
+  install -m 0644 "$integration_root/integrations/shared/live-session.js" "$profile_root/agent-sessions-plugin/shared/live-session.js"
+  "$pnpm_path" --dir "$profile_root" install --prod --ignore-scripts --no-frozen-lockfile --force
 }
 
 remove_dsh_profile() {

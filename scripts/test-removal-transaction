@@ -117,8 +117,12 @@ while [ "$#" -gt 0 ]; do
   fi
 done
 [ -n "$profile" ] || exit 91
-mkdir -p "$profile/node_modules/@agent-sessions"
-ln -sfn ../../agent-sessions-plugin "$profile/node_modules/@agent-sessions/dsh-plugin"
+installed="$profile/node_modules/.pnpm/@agent-sessions+dsh-plugin@file+agent-sessions-plugin/node_modules/@agent-sessions/dsh-plugin"
+rm -rf "$installed"
+mkdir -p "$installed" "$profile/node_modules/@agent-sessions"
+cp -R "$profile/agent-sessions-plugin/." "$installed/"
+ln -sfn ../.pnpm/@agent-sessions+dsh-plugin@file+agent-sessions-plugin/node_modules/@agent-sessions/dsh-plugin \
+  "$profile/node_modules/@agent-sessions/dsh-plugin"
 EOF
 
 cat >"$fake_bin/grok" <<'EOF'
@@ -226,9 +230,10 @@ cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kil
 cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js"
 dsh_profile="$home/.dsh/profiles/agent-sessions"
 cmp -- "$dsh_profile/package.json" "$release/integrations/dsh/profile/package.json"
-cmp -- "$dsh_profile/agent-sessions-plugin/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
-cmp -- "$dsh_profile/shared/live-session.js" "$release/integrations/shared/live-session.js"
-[[ "$(cd -P -- "$dsh_profile/node_modules/@agent-sessions/dsh-plugin" && pwd)" == "$dsh_profile/agent-sessions-plugin" ]]
+cmp -- "$dsh_profile/agent-sessions-plugin/dsh/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
+cmp -- "$dsh_profile/agent-sessions-plugin/shared/live-session.js" "$release/integrations/shared/live-session.js"
+cmp -- "$dsh_profile/node_modules/@agent-sessions/dsh-plugin/dsh/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
+[[ "$(cd -P -- "$dsh_profile/node_modules/@agent-sessions/dsh-plugin" && pwd)" == "$dsh_profile/node_modules/.pnpm/"* ]]
 find -P "$release" -type d -exec chmod 0555 {} +
 printf 'unified-state-canary\n' >"$state_root/canary"
 printf 'unified-config-canary\n' >"$home/.config/agent-sessions/preserved"
@@ -252,8 +257,9 @@ if [[ $failed_status -eq 0 ]] ||
    ! cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs" >/dev/null ||
    ! cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
    ! cmp -- "$dsh_profile/package.json" "$release/integrations/dsh/profile/package.json" >/dev/null ||
-   ! cmp -- "$dsh_profile/agent-sessions-plugin/plugin.cjs" "$release/integrations/dsh/plugin.cjs" >/dev/null ||
-   ! cmp -- "$dsh_profile/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null; then
+   ! cmp -- "$dsh_profile/agent-sessions-plugin/dsh/plugin.cjs" "$release/integrations/dsh/plugin.cjs" >/dev/null ||
+   ! cmp -- "$dsh_profile/agent-sessions-plugin/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
+   ! cmp -- "$dsh_profile/node_modules/@agent-sessions/dsh-plugin/dsh/plugin.cjs" "$release/integrations/dsh/plugin.cjs" >/dev/null; then
   printf 'failed removal did not restore the installed host transaction\n' >&2
   exit 1
 fi

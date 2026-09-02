@@ -3,8 +3,8 @@
   "version": "0.1.2-alpha.3",
   "private": true,
   "type": "commonjs",
-  "main": "plugin.cjs",
-  "exports": "./plugin.cjs",
+  "main": "dsh/plugin.cjs",
+  "exports": "./dsh/plugin.cjs",
   "packageManager": "pnpm@10.28.1",
   "scripts": {
     "test:real-scope": "node real-scope-spike.cjs"
