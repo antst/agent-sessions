@@ -57,7 +57,7 @@ type ControlRequest struct {
 	Payload        json.RawMessage `json:"payload,omitempty"`
 }
 
-// ControlFailure is one metadata-only operation failure.
+// ControlFailure is one operation failure returned to the same-user caller.
 type ControlFailure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -203,10 +203,7 @@ func (p *controlPolicy) invoke(ctx context.Context, request ControlRequest) Cont
 		if errors.As(err, &classified) && classified.code == ErrorInactive {
 			return failedControlResponse(request.ID, ErrorInactive, CanonicalInactiveMessage)
 		}
-		// Product callbacks may receive prompts, results, transcript fragments,
-		// or vendor diagnostics. Never echo an arbitrary callback error across
-		// the metadata-only control failure surface.
-		return failedControlResponse(request.ID, ErrorHandler, "control operation failed")
+		return failedControlResponse(request.ID, ErrorHandler, err.Error())
 	}
 	return ControlResponse{ID: request.ID, OK: true, Payload: append(json.RawMessage(nil), payload...)}
 }

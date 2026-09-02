@@ -146,7 +146,7 @@ func TestCallDaemonWithStableRetryDoesNotRetryDaemonFailure(t *testing.T) {
 	want := daemonpkg.ControlResponse{
 		ID:         "semantic-failure",
 		Generation: 9,
-		Error:      &daemonpkg.ControlFailure{Code: daemonpkg.ErrorHandler, Message: "control operation failed"},
+		Error:      &daemonpkg.ControlFailure{Code: daemonpkg.ErrorHandler, Message: "product rejected request"},
 	}
 	got, err := callDaemonWithStableRetry(
 		context.Background(),

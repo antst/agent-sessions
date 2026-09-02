@@ -22,7 +22,7 @@ Model-facing roles expose no daemon administration.
 - no generic session ID supplied by a model can adopt an attachment;
 - a bare connector may initialize and discover tools but receives only the inactive result for calls;
 - reconnect after daemon restart never implies attachment adoption;
-- errors are cause-specific, metadata-only, and non-successful before durable acceptance.
+- errors are cause-specific, carry the handler or product failure to the same-user caller, and are non-successful.
 
 ## Product evidence
 

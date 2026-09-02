@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net"
 	"reflect"
 	"strings"
@@ -114,6 +115,19 @@ func TestConnectorToolCallsAreSynchronousAndUncached(t *testing.T) {
 	second := callControlTest(t, server.Endpoint(), request)
 	if !first.OK || !second.OK || handled.Load() != 2 || string(first.Payload) == string(second.Payload) {
 		t.Fatalf("connector calls = first %#v second %#v calls=%d", first, second, handled.Load())
+	}
+}
+
+func TestControlReturnsHandlerErrorToSameUserCaller(t *testing.T) {
+	server := startControlTestServer(t, 14, func(context.Context, ControlRequest) (json.RawMessage, error) {
+		return nil, errors.New("product rejected model unavailable-model")
+	})
+	response := callControlTest(t, server.Endpoint(), ControlRequest{
+		ID: "product-error", Role: RoleLauncher, Operation: "connector.tool", Generation: 14,
+	})
+	if response.OK || response.Error == nil || response.Error.Code != ErrorHandler ||
+		response.Error.Message != "product rejected model unavailable-model" {
+		t.Fatalf("handler failure = %#v", response)
 	}
 }
 
