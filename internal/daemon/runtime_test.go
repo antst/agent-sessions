@@ -132,35 +132,11 @@ func TestRuntimeComponentFailureCancelsWholeAuthority(t *testing.T) {
 	}
 }
 
-func TestRuntimeComposesAttachmentAndExactRelayAuthorization(t *testing.T) {
+func TestRuntimeComposesLiveConnectorRelay(t *testing.T) {
 	root := shortDaemonTestRoot(t)
 	var externalCalls atomic.Int32
-	adapter := AttachmentAdapter{
-		Prepare: func(context.Context, ManagedAttachment) (NativeEvidence, error) {
-			return NativeEvidence{ThreadID: "native-thread", SocketPath: "/profile/native.sock"}, nil
-		},
-		Adopt: func(_ context.Context, _ ManagedAttachment, evidence NativeEvidence) (NativeEvidence, error) {
-			if evidence.ThreadID != "native-thread" {
-				return NativeEvidence{}, errors.New("wrong native thread")
-			}
-			return evidence, nil
-		},
-		Refresh: func(_ context.Context, attachment ManagedAttachment) (NativeEvidence, error) {
-			return attachment.Evidence, nil
-		},
-		Detach: func(context.Context, ManagedAttachment) error { return nil },
-		Rollback: func(context.Context, ManagedAttachment) error {
-			return nil
-		},
-	}
 	runtime, err := StartRuntime(context.Background(), RuntimeConfig{
-		StateRoot: root, Adapters: map[string]AttachmentAdapter{"codex": adapter},
-		ParentConnectorAuthorizer: func(_ context.Context, attachment ManagedAttachment, evidence NativeEvidence) error {
-			if attachment.ID != "attachment" || attachment.Product != "codex" || evidence.ThreadID != "native-thread" {
-				return errors.New("wrong parent connector evidence")
-			}
-			return nil
-		},
+		StateRoot: root,
 		Handler: func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
 			externalCalls.Add(1)
 			return json.RawMessage(`{"accepted":true}`), nil
@@ -179,22 +155,11 @@ func TestRuntimeComposesAttachmentAndExactRelayAuthorization(t *testing.T) {
 		}
 		return response
 	}
-	capability := "runtime-capability"
-	preparePayload, _ := json.Marshal(map[string]any{"attachment": ManagedAttachment{
-		ID: "attachment", CapabilityHash: CapabilityDigest(capability), Product: "codex", ProfileIdentity: "profile",
-	}})
-	if response := call(ControlRequest{ID: "prepare", Role: RoleLauncher, Operation: "attachment.prepare", IdempotencyKey: "prepare", Payload: preparePayload}); !response.OK {
-		t.Fatalf("prepare response = %+v", response)
+	runtime.Attachments().ReportLive("attachment", "worker", "codex", []string{"team"}, false)
+	if response := call(ControlRequest{ID: "wrong-product", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "wrong-product", AttachmentID: "attachment", Payload: json.RawMessage(`{"product":"claude"}`)}); response.OK || response.Error == nil || response.Error.Code != ErrorInactive {
+		t.Fatalf("wrong product connector response = %+v", response)
 	}
-	adoptPayload, _ := json.Marshal(map[string]any{"id": "attachment", "evidence": NativeEvidence{ThreadID: "native-thread", SocketPath: "/profile/native.sock"}})
-	if response := call(ControlRequest{ID: "adopt", Role: RoleLauncher, Operation: "attachment.adopt", IdempotencyKey: "adopt", Payload: adoptPayload}); !response.OK {
-		t.Fatalf("adopt response = %+v", response)
-	}
-	if response := call(ControlRequest{ID: "forged", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "forged", AttachmentID: "attachment", Capability: "wrong", Payload: json.RawMessage(`{}`)}); response.OK || response.Error == nil || response.Error.Code != ErrorInactive || response.Error.Message != CanonicalInactiveMessage {
-		t.Fatalf("forged connector response = %+v", response)
-	}
-	exactPayload, _ := json.Marshal(map[string]any{"product": "codex", "evidence": NativeEvidence{ThreadID: "native-thread"}})
-	if response := call(ControlRequest{ID: "exact", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "exact", AttachmentID: "attachment", Capability: capability, Payload: exactPayload}); !response.OK {
+	if response := call(ControlRequest{ID: "exact", Role: RoleConnector, Operation: "connector.call", IdempotencyKey: "exact", AttachmentID: "attachment", Payload: json.RawMessage(`{"product":"codex"}`)}); !response.OK {
 		t.Fatalf("exact connector response = %+v", response)
 	}
 	if externalCalls.Load() != 1 {
@@ -205,125 +170,5 @@ func TestRuntimeComposesAttachmentAndExactRelayAuthorization(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "run", "daemon.sock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("runtime socket survived close: %v", err)
-	}
-}
-
-func TestRuntimeParentConnectorFailsClosedWithoutDedicatedAuthorization(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		authorizer ParentConnectorAuthorizer
-	}{
-		{name: "nil"},
-		{name: "denied", authorizer: func(context.Context, ManagedAttachment, NativeEvidence) error {
-			return errors.New("native parent denied")
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var genericCalls, handlerCalls atomic.Int32
-			adapter := AttachmentAdapter{
-				Prepare: func(context.Context, ManagedAttachment) (NativeEvidence, error) {
-					return NativeEvidence{ThreadID: "native-thread"}, nil
-				},
-				Adopt: func(_ context.Context, _ ManagedAttachment, evidence NativeEvidence) (NativeEvidence, error) {
-					return evidence, nil
-				},
-				Authorize: func(context.Context, ManagedAttachment, NativeEvidence) error {
-					genericCalls.Add(1)
-					return nil
-				},
-				Detach:   func(context.Context, ManagedAttachment) error { return nil },
-				Rollback: func(context.Context, ManagedAttachment) error { return nil },
-			}
-			runtime, err := StartRuntime(context.Background(), RuntimeConfig{
-				StateRoot: shortDaemonTestRoot(t), Adapters: map[string]AttachmentAdapter{"codex": adapter},
-				ParentConnectorAuthorizer: test.authorizer,
-				Handler: func(context.Context, ControlRequest) (json.RawMessage, error) {
-					handlerCalls.Add(1)
-					return json.RawMessage(`{"accepted":true}`), nil
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = runtime.Close() })
-			prepareRuntimeAttachment(t, runtime, "parent", "codex", "parent-cap", NativeEvidence{ThreadID: "native-thread"})
-
-			response, err := CallControl(context.Background(), runtime.Endpoint(), ControlRequest{
-				ID: "parent", Role: RoleConnector, Operation: "connector.call", Generation: runtime.Generation(),
-				IdempotencyKey: "parent", AttachmentID: "parent", Capability: "parent-cap",
-				Payload: json.RawMessage(`{"product":"codex","evidence":{"thread_id":"native-thread"}}`),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if response.OK || response.Error == nil || response.Error.Code != ErrorInactive {
-				t.Fatalf("parent connector response = %+v", response)
-			}
-			if genericCalls.Load() != 0 || handlerCalls.Load() != 0 {
-				t.Fatalf("generic/handler calls = %d/%d", genericCalls.Load(), handlerCalls.Load())
-			}
-		})
-	}
-}
-
-func TestRuntimeParentConnectorRechecksAttachmentAfterCallback(t *testing.T) {
-	var runtime *Runtime
-	var handlerCalls atomic.Int32
-	adapter := AttachmentAdapter{
-		Prepare: func(context.Context, ManagedAttachment) (NativeEvidence, error) {
-			return NativeEvidence{ThreadID: "native-thread"}, nil
-		},
-		Adopt: func(_ context.Context, _ ManagedAttachment, evidence NativeEvidence) (NativeEvidence, error) {
-			return evidence, nil
-		},
-		Detach:   func(context.Context, ManagedAttachment) error { return nil },
-		Rollback: func(context.Context, ManagedAttachment) error { return nil },
-	}
-	var err error
-	runtime, err = StartRuntime(context.Background(), RuntimeConfig{
-		StateRoot: shortDaemonTestRoot(t), Adapters: map[string]AttachmentAdapter{"codex": adapter},
-		ParentConnectorAuthorizer: func(context.Context, ManagedAttachment, NativeEvidence) error {
-			_, detachErr := runtime.Attachments().Detach(context.Background(), "parent", "attestation-race")
-			return detachErr
-		},
-		Handler: func(context.Context, ControlRequest) (json.RawMessage, error) {
-			handlerCalls.Add(1)
-			return json.RawMessage(`{"accepted":true}`), nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	prepareRuntimeAttachment(t, runtime, "parent", "codex", "parent-cap", NativeEvidence{ThreadID: "native-thread"})
-
-	response, err := CallControl(context.Background(), runtime.Endpoint(), ControlRequest{
-		ID: "parent-race", Role: RoleConnector, Operation: "connector.call", Generation: runtime.Generation(),
-		IdempotencyKey: "parent-race", AttachmentID: "parent",
-		Payload: json.RawMessage(`{"product":"codex","evidence":{"thread_id":"native-thread"}}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.OK || response.Error == nil || response.Error.Code != ErrorInactive || handlerCalls.Load() != 0 {
-		t.Fatalf("post-callback attachment recheck = %+v, handler calls = %d", response, handlerCalls.Load())
-	}
-}
-
-func prepareRuntimeAttachment(
-	t *testing.T,
-	runtime *Runtime,
-	id, product, capability string,
-	evidence NativeEvidence,
-) {
-	t.Helper()
-	if _, err := runtime.Attachments().Prepare(context.Background(), ManagedAttachment{
-		ID: id, Product: product, ProfileIdentity: "profile-" + product,
-		CapabilityHash: CapabilityDigest(capability),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runtime.Attachments().Adopt(context.Background(), id, evidence); err != nil {
-		t.Fatal(err)
 	}
 }

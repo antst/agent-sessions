@@ -15,6 +15,8 @@ const (
 	nativeRuntimeEnv   = "AGENT_SESSIONS_NATIVE_RUNTIME"
 	peerSessionIDEnv   = "AGENT_SESSIONS_SESSION_ID"
 	peerProductEnv     = "AGENT_SESSIONS_PRODUCT"
+	peerSessionNameEnv = "AGENT_SESSIONS_SESSION_NAME"
+	peerGroupsEnv      = "AGENT_SESSIONS_GROUPS"
 	remoteParentEnv    = "AGENT_SESSIONS_REMOTE_PARENT_CONTEXT"
 )
 
@@ -42,7 +44,7 @@ func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]
 
 func persistentRuntimeEnvironment(environment []string) []string {
 	blocked := map[string]bool{
-		peerSessionIDEnv: true, peerProductEnv: true, remoteParentEnv: true,
+		peerSessionIDEnv: true, peerProductEnv: true, peerSessionNameEnv: true, peerGroupsEnv: true, remoteParentEnv: true,
 		"CODEX_THREAD_ID": true, grokLaunchTokenEnv: true, grokSessionIDEnv: true,
 	}
 	result := make([]string, 0, len(environment))
@@ -68,12 +70,18 @@ func daemonPeerEnvironment(environment []string, sessionID, product string) []st
 	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if name != agentRuntimeDirEnv && name != peerSessionIDEnv && name != peerProductEnv {
+		if name != agentRuntimeDirEnv && name != peerSessionIDEnv && name != peerProductEnv && name != peerSessionNameEnv && name != peerGroupsEnv {
 			filtered = append(filtered, entry)
 		}
 	}
 	filtered = envutil.Set(filtered, peerSessionIDEnv, sessionID)
 	return envutil.Set(filtered, peerProductEnv, product)
+}
+
+func liveReportEnvironment(environment []string, name string, groups []string) []string {
+	encoded, _ := json.Marshal(groups)
+	environment = envutil.Set(environment, peerSessionNameEnv, name)
+	return envutil.Set(environment, peerGroupsEnv, string(encoded))
 }
 
 func (c peerLaunchContext) launchArguments(alwaysApprove bool, alwaysApproveSpecified bool) []string {

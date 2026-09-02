@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,12 +22,6 @@ var nextRuntimeGeneration atomic.Uint64
 // before daemon cancellation terminates the complete authority.
 type RuntimeComponent func(context.Context) error
 
-// ParentConnectorAuthorizer corroborates a connector tool call against one
-// exact active peer attachment. It is deliberately distinct from an
-// AttachmentAdapter: parent authority belongs to the product's per-session
-// attester and may never fall back to generic attachment authorization.
-type ParentConnectorAuthorizer func(context.Context, ManagedAttachment, NativeEvidence) error
-
 // ProductDiagnosticsProvider returns live, metadata-only readiness states for
 // one status or doctor request. Durable Host.ProductReadiness is legacy state
 // and is never an authority for runtime diagnostics.
@@ -40,7 +33,6 @@ type RuntimeConfig struct {
 	MaxStateBytes              int64
 	Release                    string
 	Adapters                   map[string]AttachmentAdapter
-	ParentConnectorAuthorizer  ParentConnectorAuthorizer
 	ProductDiagnosticsProvider ProductDiagnosticsProvider
 	Handler                    ControlHandler
 	Components                 []RuntimeComponent
@@ -56,7 +48,6 @@ type Runtime struct {
 	hostID                     string
 	release                    string
 	handler                    ControlHandler
-	parentConnectorAuthorizer  ParentConnectorAuthorizer
 	productDiagnosticsProvider ProductDiagnosticsProvider
 
 	ctx    context.Context
@@ -102,7 +93,6 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	runtime := &Runtime{
 		state: state, attachments: attachments, generation: generation,
 		hostID: currentRuntimeHost(), release: strings.TrimSpace(config.Release), handler: config.Handler,
-		parentConnectorAuthorizer:  config.ParentConnectorAuthorizer,
 		productDiagnosticsProvider: config.ProductDiagnosticsProvider,
 		ctx:                        ctx, cancel: cancel, done: make(chan struct{}),
 	}
@@ -277,34 +267,16 @@ func (r *Runtime) authorizeAttachmentRequest(request ControlRequest) error {
 	)
 }
 
-func (r *Runtime) authorizeConnectorRequest(ctx context.Context, request ControlRequest) error {
+func (r *Runtime) authorizeConnectorRequest(_ context.Context, request ControlRequest) error {
 	var envelope struct {
-		Product  string         `json:"product"`
-		Evidence NativeEvidence `json:"evidence"`
+		Product string `json:"product"`
 	}
 	if len(request.Payload) == 0 || json.Unmarshal(request.Payload, &envelope) != nil {
 		return InactiveControlError()
 	}
 	product := strings.TrimSpace(envelope.Product)
 	attachment, active, err := r.attachments.ActiveAttachment(request.AttachmentID)
-	if err != nil {
-		return InactiveControlError()
-	}
-	if active {
-		if product == "" || product != attachment.Product || r.parentConnectorAuthorizer == nil {
-			return InactiveControlError()
-		}
-		before := cloneAttachment(attachment)
-		if err := r.parentConnectorAuthorizer(ctx, before, cloneEvidence(envelope.Evidence)); err != nil {
-			return InactiveControlError()
-		}
-		// Parent attestation may perform live product I/O. Re-read after the
-		// callback so detach, rebind, generation, or native-identity changes
-		// during that window cannot inherit the earlier authorization.
-		after, stillActive, err := r.attachments.ActiveAttachment(request.AttachmentID)
-		if err != nil || !stillActive || !reflect.DeepEqual(before, after) {
-			return InactiveControlError()
-		}
+	if err == nil && active && product != "" && product == attachment.Product {
 		return nil
 	}
 

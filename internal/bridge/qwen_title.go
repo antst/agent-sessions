@@ -81,3 +81,49 @@ func QwenNativeSessionTitle(home, sessionID, cwd string) (string, bool) {
 	}
 	return latest, scanner.Err() == nil
 }
+
+// QwenNativeSessionInfo confirms one exact transcript without requiring the
+// daemon to remember its cwd.
+func QwenNativeSessionInfo(home, sessionID string) (string, string, bool) {
+	path, ok := qwenTranscriptPath(home, sessionID)
+	if !ok {
+		return "", "", false
+	}
+	file, err := os.Open(path) //nolint:gosec // exact UUID below Qwen's selected profile.
+	if err != nil {
+		return "", "", false
+	}
+	defer func() { _ = file.Close() }()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	first, cwd, title := true, "", ""
+	for scanner.Scan() {
+		var event struct {
+			SessionID     string `json:"sessionId"`
+			Cwd           string `json:"cwd"`
+			Type          string `json:"type"`
+			Subtype       string `json:"subtype"`
+			SystemPayload struct {
+				CustomTitle string `json:"customTitle"`
+				TitleSource string `json:"titleSource"`
+			} `json:"systemPayload"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.SessionID != sessionID {
+			return "", "", false
+		}
+		if first {
+			first, cwd = false, event.Cwd
+		}
+		if event.Type == "system" && event.Subtype == "custom_title" &&
+			strings.TrimSpace(event.SystemPayload.TitleSource) != "auto" {
+			title = strings.TrimSpace(event.SystemPayload.CustomTitle)
+		}
+	}
+	if scanner.Err() != nil || first {
+		return "", "", false
+	}
+	if title == "" {
+		title = sessionID
+	}
+	return title, cwd, true
+}

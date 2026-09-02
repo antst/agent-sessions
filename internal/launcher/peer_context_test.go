@@ -65,6 +65,8 @@ func TestPersistentRuntimeEnvironmentDropsTransientParentIdentity(t *testing.T) 
 		"KEEP=value",
 		peerSessionIDEnv + "=parent",
 		peerProductEnv + "=grok",
+		peerSessionNameEnv + "=worker",
+		peerGroupsEnv + `=["team"]`,
 		remoteParentEnv + "={}",
 		"CODEX_THREAD_ID=thread",
 		grokLaunchTokenEnv + "=secret",
@@ -74,5 +76,13 @@ func TestPersistentRuntimeEnvironmentDropsTransientParentIdentity(t *testing.T) 
 	want := []string{"KEEP=value", agentRuntimeDirEnv + "=/runtime"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("persistent environment = %q, want %q", got, want)
+	}
+}
+
+func TestLiveReportEnvironmentCarriesNameAndGroupsOnlyInChildEnvironment(t *testing.T) {
+	got := liveReportEnvironment([]string{"KEEP=value"}, "worker", []string{"team", "review"})
+	want := []string{"KEEP=value", peerSessionNameEnv + "=worker", peerGroupsEnv + `=["team","review"]`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("live report environment = %q, want %q", got, want)
 	}
 }

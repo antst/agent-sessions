@@ -15,34 +15,50 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/bridge"
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/qwenprofile"
+)
+
+const (
+	laneCandidateCodex  = "codex"
+	laneCandidateClaude = "claude"
+	laneCandidateGrok   = "grok"
+	laneCandidateQwen   = "qwen"
 )
 
 type hostCoordinator struct {
-	ctx              context.Context
-	stateRoot        string
-	openCodex        func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error)
-	reloadCodex      func(context.Context, *bridge.CodexNative) error
-	unsubscribeCodex func(context.Context, string) error
-	mu               sync.Mutex
-	noticeMu         sync.Mutex
-	codex            *bridge.CodexNative
-	pending          map[string]daemonpkg.NativeEvidence
-	monitored        map[string]bool
-	grokPending      map[string]*grokPending
-	grokObservers    map[string]*bridge.GrokNativeObserver
-	qwenPending      map[string]*qwenPending
-	claudeLanes      *daemonpkg.ClaudeLaneAdapter
-	grokLanes        *daemonpkg.GrokLaneAdapter
-	qwenLanes        *daemonpkg.QwenLaneAdapter
-	lanes            map[string]*laneActor
-	lanesLoaded      bool
-	now              func() time.Time
-	runtime          *daemonpkg.Runtime
-	runtimeReady     chan *daemonpkg.Runtime
-	federation       *daemonpkg.Federation
+	ctx                context.Context
+	stateRoot          string
+	openCodex          func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error)
+	reloadCodex        func(context.Context, *bridge.CodexNative) error
+	unsubscribeCodex   func(context.Context, string) error
+	mu                 sync.Mutex
+	noticeMu           sync.Mutex
+	codex              *bridge.CodexNative
+	pending            map[string]daemonpkg.NativeEvidence
+	monitored          map[string]bool
+	grokPending        map[string]*grokPending
+	grokObservers      map[string]*bridge.GrokNativeObserver
+	qwenPending        map[string]*qwenPending
+	claudeLanes        *daemonpkg.ClaudeLaneAdapter
+	grokLanes          *daemonpkg.GrokLaneAdapter
+	qwenLanes          *daemonpkg.QwenLaneAdapter
+	lanes              map[string]*laneActor
+	liveReports        map[string]liveSessionReport
+	reportedLanes      map[string]string
+	reportedPeers      map[string]bool
+	laneNames          map[string]map[string]laneNameEntry
+	laneNamesLoaded    map[string]bool
+	resolveCandidate   func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
+	candidateResolvers map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
+	lanesLoaded        bool
+	now                func() time.Time
+	runtime            *daemonpkg.Runtime
+	runtimeReady       chan *daemonpkg.Runtime
+	federation         *daemonpkg.Federation
 }
 
 func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator {
@@ -53,16 +69,23 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		grokPending:   map[string]*grokPending{},
-		grokObservers: map[string]*bridge.GrokNativeObserver{},
-		qwenPending:   map[string]*qwenPending{},
-		claudeLanes:   daemonpkg.NewClaudeLaneAdapter(),
-		grokLanes:     daemonpkg.NewGrokLaneAdapter(),
-		qwenLanes:     daemonpkg.NewQwenLaneAdapter(),
-		lanes:         map[string]*laneActor{},
-		runtimeReady:  make(chan *daemonpkg.Runtime, 1),
-		now:           time.Now,
+		grokPending:     map[string]*grokPending{},
+		grokObservers:   map[string]*bridge.GrokNativeObserver{},
+		qwenPending:     map[string]*qwenPending{},
+		claudeLanes:     daemonpkg.NewClaudeLaneAdapter(),
+		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
+		qwenLanes:       daemonpkg.NewQwenLaneAdapter(),
+		lanes:           map[string]*laneActor{},
+		liveReports:     map[string]liveSessionReport{},
+		reportedLanes:   map[string]string{},
+		reportedPeers:   map[string]bool{},
+		laneNames:       map[string]map[string]laneNameEntry{},
+		laneNamesLoaded: map[string]bool{},
+		runtimeReady:    make(chan *daemonpkg.Runtime, 1),
+		now:             time.Now,
 	}
+	coordinator.resolveCandidate = coordinator.resolveProductLaneCandidate
+	coordinator.candidateResolvers = coordinator.productLaneCandidateResolvers()
 	coordinator.unsubscribeCodex = func(ctx context.Context, threadID string) error {
 		native, err := coordinator.codexNative()
 		if err != nil {
@@ -116,6 +139,14 @@ func (c *hostCoordinator) run(ctx context.Context) error {
 		return nil
 	case runtime = <-c.runtimeReady:
 	}
+	presence, err := startLivePresenceServer(ctx, c.stateRoot,
+		func(report liveSessionReport) { c.joinLiveSession(runtime, report) },
+		func(report liveSessionReport) { c.leaveLiveSession(runtime, report) },
+	)
+	if err != nil {
+		return fmt.Errorf("start live session presence: %w", err)
+	}
+	defer func() { _ = presence.Close() }()
 	federationHost, err := c.newFederationHost(runtime)
 	if err != nil {
 		return err
@@ -170,6 +201,72 @@ func (c *hostCoordinator) publishRuntime(runtime *daemonpkg.Runtime) {
 	case c.runtimeReady <- runtime:
 	default:
 	}
+}
+
+func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
+	context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate,
+) (laneNameEntry, bool) {
+	return map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool){
+		laneCandidateCodex: func(ctx context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			native, err := c.codexNative()
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			thread, err := native.ResolveThread(ctx, candidate.NativeSessionID)
+			if err != nil || thread.ID != candidate.NativeSessionID {
+				return laneNameEntry{}, false
+			}
+			return laneNameEntry{Name: thread.Name, Cwd: thread.Cwd}, true
+		},
+		laneCandidateClaude: func(_ context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			source, err := claudeprofile.CurrentSource()
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			name, ok := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, candidate.NativeSessionID)
+			return laneNameEntry{Name: name, Cwd: parent.Cwd}, ok
+		},
+		laneCandidateQwen: func(_ context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			profile, err := qwenprofile.Current()
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			home, err := qwenprofile.EffectiveHome(profile, os.LookupEnv)
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			name, cwd, ok := bridge.QwenNativeSessionInfo(home, candidate.NativeSessionID)
+			return laneNameEntry{Name: name, Cwd: cwd}, ok
+		},
+		laneCandidateGrok: func(ctx context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			c.mu.Lock()
+			observer := c.grokObservers[parent.ID]
+			if observer == nil {
+				if pending := c.grokPending[parent.ID]; pending != nil {
+					observer = pending.observer
+				}
+			}
+			c.mu.Unlock()
+			if observer == nil {
+				return laneNameEntry{}, false
+			}
+			name, ok := observer.SessionTitle(ctx, candidate.NativeSessionID)
+			return laneNameEntry{Name: strings.TrimSpace(name), Cwd: parent.Cwd}, ok
+		},
+	}
+}
+
+func (c *hostCoordinator) resolveProductLaneCandidate(
+	ctx context.Context,
+	_ *daemonpkg.Runtime,
+	parent daemonpkg.ManagedAttachment,
+	candidate daemonpkg.LaneCandidate,
+) (laneNameEntry, bool) {
+	resolver := c.candidateResolvers[candidate.Product]
+	if resolver == nil {
+		return laneNameEntry{}, false
+	}
+	return resolver(ctx, parent, candidate)
 }
 
 //nolint:gocyclo // Control operation dispatch is centralized to keep role and payload checks auditable.

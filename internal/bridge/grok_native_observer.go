@@ -143,6 +143,32 @@ func (observer *GrokNativeObserver) SessionName(ctx context.Context) (string, er
 	return state.name, nil
 }
 
+// SessionTitle asks Grok's own roster about one exact UUID. Dormant sessions
+// remain valid discovery candidates; the product row, not daemon state,
+// confirms their existence.
+func (observer *GrokNativeObserver) SessionTitle(ctx context.Context, sessionID string) (string, bool) {
+	if observer == nil || observer.client == nil {
+		return "", false
+	}
+	deadline, cancel := context.WithTimeout(ctx, grokACPInterjectTimeout)
+	defer cancel()
+	roster, err := observer.client.request(deadline, "_x.ai/sessions/list", map[string]any{})
+	if err != nil {
+		return "", false
+	}
+	result, _ := roster["result"].(map[string]any)
+	rows, _ := result["sessions"].([]any)
+	state, matches, err := grokRosterStateFromRows(rows, sessionID)
+	if err != nil || matches != 1 {
+		return "", false
+	}
+	name := strings.TrimSpace(state.name)
+	if name == "" {
+		name = sessionID
+	}
+	return name, true
+}
+
 // Close releases only the observer process; the TUI and private leader remain
 // owned by their attachment lifecycle.
 func (observer *GrokNativeObserver) Close() {

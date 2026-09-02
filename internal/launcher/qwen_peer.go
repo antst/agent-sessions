@@ -207,6 +207,7 @@ func runQwenPeerWithDaemon(
 	}
 	environment := qwenprofile.ApplyEnvironment(os.Environ(), plan.profile)
 	environment = daemonPeerEnvironment(environment, result.SessionID, "qwen")
+	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	environment = envutil.Set(environment, qwenCapabilityEnv, result.Capability)
 	return dependencies.exec(qwen, nativeArgs, environment)
 }

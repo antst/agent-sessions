@@ -130,6 +130,7 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDae
 	launchArgs = append(launchArgs, plan.interactiveArgs...)
 	environment := envutil.Set(os.Environ(), peerSessionIDEnv, result.ThreadID)
 	environment = envutil.Set(environment, peerProductEnv, "codex")
+	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	return Exec(codex, launchArgs, environment)
 }
 

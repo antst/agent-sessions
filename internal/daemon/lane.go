@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -16,6 +17,28 @@ const laneMutationAttempts = 32
 type LaneEngine struct {
 	store *StateStore
 	mu    sync.Mutex
+}
+
+// Candidates returns only the UUID questions owned by one parent for one
+// product. Callers must still ask the product whether each UUID exists.
+func (e *LaneEngine) Candidates(parent, product string) ([]LaneCandidate, error) {
+	if strings.TrimSpace(parent) == "" || strings.TrimSpace(product) == "" {
+		return nil, errors.New("lane candidate selector is incomplete")
+	}
+	snapshot, err := e.store.Read()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]LaneCandidate, 0)
+	for _, candidate := range snapshot.Catalog.Lanes {
+		if candidate.Parent != parent || candidate.Product != product {
+			continue
+		}
+		candidate.SecondaryGroups = slices.Clone(candidate.SecondaryGroups)
+		result = append(result, candidate)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].NativeSessionID < result[j].NativeSessionID })
+	return result, nil
 }
 
 func NewLaneEngine(store *StateStore) (*LaneEngine, error) {

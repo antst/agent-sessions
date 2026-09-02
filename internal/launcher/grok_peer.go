@@ -166,6 +166,7 @@ func RunGrokPeerWithDaemon(ctx context.Context, args []string, prepare GrokDaemo
 		Ready: true, SessionID: result.SessionID, Cwd: result.Cwd, LeaderSocket: result.LeaderSocket,
 	})
 	environment := replaceGrokDaemonLaunchEnvironment(os.Environ(), launchToken, result.SessionID)
+	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	return Exec(grok, managed, environment)
 }
 

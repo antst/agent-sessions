@@ -601,17 +601,36 @@ func (c *hostCoordinator) statusLane(runtime *daemonpkg.Runtime, parent daemonpk
 }
 
 func (c *hostCoordinator) listLanes(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand) (map[string]any, error) {
+	if options.all {
+		if err := c.ensureActiveLaneNames(c.ctx, runtime, parent, product); err != nil {
+			return nil, err
+		}
+	}
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
 	if err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
 	lanes := make([]map[string]any, 0)
+	liveNativeIDs := map[string]bool{}
 	for _, actor := range c.lanes {
 		if actor.product != product || options.mine && actor.parentID != parent.ID || !options.all && actor.state == "archived" || !groupsIntersect(parentGroups, actor.groups) && actor.parentID != parent.ID {
 			continue
 		}
 		lanes = append(lanes, laneActorStatus(actor))
+		liveNativeIDs[actor.nativeID] = true
+	}
+	if options.all {
+		for _, entry := range c.laneNames[parent.ID] {
+			if entry.Product != product || liveNativeIDs[entry.UUID] {
+				continue
+			}
+			lanes = append(lanes, laneActorStatus(&laneActor{
+				id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
+				name: entry.Name, cwd: entry.Cwd, parentID: entry.Parent,
+				groups: append([]string(nil), entry.Groups...), state: "archived",
+			}))
+		}
 	}
 	c.mu.Unlock()
 	sort.Slice(lanes, func(i, j int) bool { return fmt.Sprint(lanes[i]["name"]) < fmt.Sprint(lanes[j]["name"]) })
@@ -1294,7 +1313,11 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 	if !ok {
 		return nil
 	}
-	return engine.Remember(candidate)
+	if err := engine.Remember(candidate); err != nil {
+		return err
+	}
+	c.rememberActiveLaneName(actor)
+	return nil
 }
 
 func parseCodexStartedThreadID(line []byte) string {
@@ -1594,7 +1617,7 @@ func laneExecutable(product string) (string, error) {
 func cleanLaneEnvironment(input []string) []string {
 	result := make([]string, 0, len(input))
 	for _, entry := range input {
-		if strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_ID=") || strings.HasPrefix(entry, "AGENT_SESSIONS_PRODUCT=") || strings.HasPrefix(entry, "AGENT_SESSIONS_QWEN_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_LANE_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_HOST_BINARY=") {
+		if strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_ID=") || strings.HasPrefix(entry, "AGENT_SESSIONS_PRODUCT=") || strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_NAME=") || strings.HasPrefix(entry, "AGENT_SESSIONS_GROUPS=") || strings.HasPrefix(entry, "AGENT_SESSIONS_QWEN_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_LANE_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_HOST_BINARY=") {
 			continue
 		}
 		result = append(result, entry)
@@ -1604,12 +1627,15 @@ func cleanLaneEnvironment(input []string) []string {
 
 func laneWorkerEnvironment(input []string, actor *laneActor) []string {
 	result := cleanLaneEnvironment(input)
+	groups, _ := json.Marshal(actor.groups)
 	if executable, err := os.Executable(); err == nil {
 		result = append(result, "AGENT_SESSIONS_HOST_BINARY="+executable)
 	}
 	return append(result,
 		"AGENT_SESSIONS_SESSION_ID="+actor.id,
 		"AGENT_SESSIONS_PRODUCT="+actor.product,
+		"AGENT_SESSIONS_SESSION_NAME="+actor.name,
+		"AGENT_SESSIONS_GROUPS="+string(groups),
 		"AGENT_SESSIONS_LANE_CAPABILITY="+actor.capability,
 	)
 }
@@ -1681,6 +1707,11 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 	if target == "" {
 		return nil, errors.New("lane selector is required")
 	}
+	if all {
+		if err := c.ensureActiveLaneNames(c.ctx, runtime, parent, product); err != nil {
+			return nil, err
+		}
+	}
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
 	if err != nil {
 		return nil, err
@@ -1693,6 +1724,24 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 			continue
 		}
 		matches = append(matches, actor)
+	}
+	if len(matches) == 0 && all {
+		for _, entry := range c.laneNames[parent.ID] {
+			if entry.Product != product || entry.UUID != target && entry.Name != target {
+				continue
+			}
+			actor := &laneActor{
+				id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
+				name: entry.Name, cwd: entry.Cwd, parentID: entry.Parent,
+				groups:         append([]string(nil), entry.Groups...),
+				explicitGroups: append([]string(nil), entry.SecondaryGroups...),
+				state:          "archived", done: make(chan struct{}),
+			}
+			matches = append(matches, actor)
+		}
+		if len(matches) == 1 {
+			c.lanes[matches[0].id] = matches[0]
+		}
 	}
 	if len(matches) == 0 {
 		return nil, errors.New("lane was not found")
@@ -1861,9 +1910,30 @@ func (c *hostCoordinator) commitNewLane(r *daemonpkg.Runtime, a *laneActor) erro
 		if err != nil {
 			return err
 		}
-		return engine.Remember(candidate)
+		if err := engine.Remember(candidate); err != nil {
+			return err
+		}
+		c.rememberActiveLaneName(a)
 	}
 	return nil
+}
+
+func (c *hostCoordinator) rememberActiveLaneName(actor *laneActor) {
+	if actor == nil || actor.parentID == "" || actor.nativeID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, active := c.liveReports[actor.parentID]; !active {
+		return
+	}
+	if c.laneNames[actor.parentID] == nil {
+		c.laneNames[actor.parentID] = map[string]laneNameEntry{}
+	}
+	c.laneNames[actor.parentID][actor.nativeID] = laneNameEntry{
+		UUID: actor.nativeID, Name: actor.name, Product: actor.product, Parent: actor.parentID,
+		Groups: append([]string(nil), actor.groups...),
+	}
 }
 func (c *hostCoordinator) markLaneRunning(*daemonpkg.Runtime, *laneActor) error        { return nil }
 func (c *hostCoordinator) markLaneTerminal(*daemonpkg.Runtime, *laneActor) error       { return nil }

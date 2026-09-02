@@ -43,6 +43,26 @@ func TestLaneEngineRejectsCandidateRewrite(t *testing.T) {
 	}
 }
 
+func TestLaneEngineReturnsOnlyParentProductCandidateQuestions(t *testing.T) {
+	engine, _ := testLaneEngine(t)
+	wanted := testLaneCandidate()
+	if err := engine.Remember(wanted); err != nil {
+		t.Fatal(err)
+	}
+	other := wanted
+	other.NativeSessionID, other.Parent = "other-native", "other-parent"
+	if err := engine.Remember(other); err != nil {
+		t.Fatal(err)
+	}
+	got, err := engine.Candidates(wanted.Parent, wanted.Product)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []LaneCandidate{wanted}) {
+		t.Fatalf("candidate questions = %+v", got)
+	}
+}
+
 func testLaneEngine(t *testing.T) (*LaneEngine, *StateStore) {
 	t.Helper()
 	store, err := OpenState(t.TempDir(), 1<<20)

@@ -273,10 +273,36 @@ func (e *AttachmentEngine) ActiveAttachment(id string) (ManagedAttachment, bool,
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	attachment, ok := e.active[id]
-	if !ok || attachment.State != "attached" {
+	if !ok || attachment.State != "attached" && attachment.State != "lane" {
 		return ManagedAttachment{}, false, nil
 	}
 	return cloneAttachment(attachment), true, nil
+}
+
+// ReportLive accepts the product session currently speaking over the local
+// presence socket. The report is process-local reality, not durable state.
+func (e *AttachmentEngine) ReportLive(id, name, product string, groups []string, lane bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	attachment := e.active[id]
+	attachment.ID = id
+	attachment.NativeSessionID = id
+	attachment.Product = product
+	attachment.Groups = append([]string(nil), groups...)
+	attachment.State = "attached"
+	if lane {
+		attachment.State = "lane"
+	}
+	e.active[id] = cloneAttachment(attachment)
+	e.titles[id] = liveNativeTitle{nativeSessionID: id, value: name}
+}
+
+// ForgetLive removes a disconnected session from the process-local registry.
+func (e *AttachmentEngine) ForgetLive(id string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.active, id)
+	delete(e.titles, id)
 }
 
 func (e *AttachmentEngine) ObserveNativeTitle(id, nativeSessionID, title string) error {

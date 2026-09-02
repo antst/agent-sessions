@@ -35,6 +35,9 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if err := refresher.refresh(); err != nil {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
+	if report, ok := connectorLiveReport(product, os.Getenv); ok {
+		go maintainLivePresence(ctx, livePresenceEndpoint(stateRoot), report)
+	}
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
 		Product: product, Endpoint: endpoint,
 		Refresh: func(context.Context) error {
@@ -49,6 +52,40 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func connectorLiveReport(product string, getenv func(string) string) (liveSessionReport, bool) {
+	uuid := ""
+	productSessionEnv := map[string]string{
+		laneCandidateCodex: "CODEX_THREAD_ID", laneCandidateClaude: "CLAUDE_CODE_SESSION_ID", laneCandidateGrok: "AGENT_SESSIONS_GROK_SESSION_ID",
+	}
+	if name := productSessionEnv[product]; name != "" {
+		uuid = strings.TrimSpace(getenv(name))
+	}
+	if uuid == "" {
+		uuid = strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_ID"))
+	}
+	if uuid == "" {
+		for _, name := range []string{"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AGENT_SESSIONS_GROK_SESSION_ID"} {
+			if uuid = strings.TrimSpace(getenv(name)); uuid != "" {
+				break
+			}
+		}
+	}
+	if uuid == "" {
+		return liveSessionReport{}, false
+	}
+	name := strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_NAME"))
+	if name == "" {
+		name = uuid
+	}
+	var groups []string
+	if encoded := strings.TrimSpace(getenv("AGENT_SESSIONS_GROUPS")); encoded != "" {
+		if json.Unmarshal([]byte(encoded), &groups) != nil {
+			return liveSessionReport{}, false
+		}
+	}
+	return liveSessionReport{UUID: uuid, Name: name, Groups: uniqueStrings(groups), Product: product}, true
 }
 
 // resolveConnectorProduct keeps the repository-root Codex MCP manifest safe
