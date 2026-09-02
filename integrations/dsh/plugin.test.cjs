@@ -21,7 +21,7 @@ function fixture(initialName = "") {
   const client = new FakeLiveSession();
   const handlers = new Map(), agents = new Map(), tools = [];
   const ctx = {
-    agents: { get: (id) => agents.get(id), list: () => [...agents.values()] },
+    agents: { get: (id) => agents.get(id), list: () => [...agents.values()], roots: () => [...agents.values()] },
     tools: { register: (tool) => tools.push(tool) },
     sessionTitle: {
       get: (session) => typeof session.title === "string" ? { title: session.title } : undefined,
@@ -39,10 +39,10 @@ function fixture(initialName = "") {
   return { client, handlers, agents, tools, ctx, plugin };
 }
 
-function add(value, status = "idle") {
+function add(value, status = "idle", id = "native") {
   const calls = [];
-  const session = { header: { id: "native", cwd: "/work" }, title: "native title" };
-  const agent = { id: "native", status, session, followup: (input) => calls.push(["followup", input]), steer: (input) => calls.push(["steer", input]) };
+  const session = { header: { id, cwd: "/work" }, title: "native title" };
+  const agent = { id, status, session, followup: (input) => calls.push(["followup", input]), steer: (input) => calls.push(["steer", input]) };
   value.agents.set(agent.id, agent);
   value.handlers.get("agent/created")({ agent });
   return { agent, calls };
@@ -59,6 +59,10 @@ test("DSH reports one live session, updates its title, and closes it", () => {
   assert.deepEqual(value.client.updated, [{ id: "native", name: "renamed" }, { id: "native", name: "" }]);
   value.handlers.get("agent/disposed")({ agent });
   assert.equal(value.client.sessions.has("native"), false);
+  value.agents.delete(agent.id);
+  const { agent: resumed } = add(value, "idle", "resumed");
+  assert.equal(value.client.sessions.has("resumed"), true);
+  assert.equal(resumed.id, "resumed");
 });
 
 test("DSH reports an untitled session and writes the requested launch name through the product", () => {
@@ -98,10 +102,10 @@ test("DSH parent tool uses the exact live native session", async () => {
   await assert.rejects(value.tools[0].execute({ action: "peers.list" }, {}), /exec\.agent/u);
 });
 
-test("DSH profile rejects sibling sessions and stays inert without live settings", async () => {
+test("DSH profile rejects concurrent root sessions and stays inert without live settings", async () => {
   const value = fixture();
   add(value);
-  assert.throws(() => value.handlers.get("agent/created")({ agent: { id: "sibling" } }), /sibling/u);
+  assert.throws(() => add(value, "idle", "sibling"), /concurrent root/u);
   let loaded = false;
   const result = await applyWithEnvironment({}, {}, async () => { loaded = true; });
   assert.equal(result.active, false);

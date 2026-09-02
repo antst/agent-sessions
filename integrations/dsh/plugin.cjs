@@ -68,12 +68,11 @@ function createCordisPlugin(options) {
   const createUserMessage = options.createUserMessage;
   const initialName = typeof options.initialName === "string" ? options.initialName : "";
   let managedAgent;
-  let selected = false;
   let observedTitle = "";
   let operationSequence = 0;
   const nextOperation = (prefix) => prefix + "-" + (++operationSequence);
 
-  function exactAgent(agent) { return selected && managedAgent === agent; }
+  function exactAgent(agent) { return managedAgent === agent; }
 
   function nativeFacts(ctx, agent) {
     if (!exactAgent(agent) || typeof agent.id !== "string" || !agent.id || !agent.session || agent.session.header?.id !== agent.id) return null;
@@ -131,7 +130,9 @@ function createCordisPlugin(options) {
   }
 
   function apply(ctx) {
-    if (!ctx?.agents || !ctx?.tools || typeof ctx.sessionTitle?.get !== "function") throw new Error("DSH Cordis plugin requires ctx.agents, ctx.tools, and ctx.sessionTitle");
+    if (!ctx?.agents || typeof ctx.agents.roots !== "function" || !ctx?.tools || typeof ctx.sessionTitle?.get !== "function") {
+      throw new Error("DSH Cordis plugin requires ctx.agents, ctx.tools, and ctx.sessionTitle");
+    }
     const existing = ctx.agents.list();
     if (!Array.isArray(existing) || existing.length !== 0) {
       throw new Error("DSH managed profile must start before any native session exists");
@@ -143,14 +144,14 @@ function createCordisPlugin(options) {
       });
     });
     ctx.on("agent/created", ({ agent }) => {
-      if (selected) throw new Error("DSH managed profile rejects sibling native sessions");
+      if (!ctx.agents.roots().includes(agent)) return;
+      if (managedAgent && managedAgent !== agent) throw new Error("DSH managed profile rejects concurrent root native sessions");
       const cwd = agent?.session?.header?.cwd;
       if (!agent || typeof agent.id !== "string" || !agent.id || !agent.session || agent.session.header?.id !== agent.id ||
           typeof cwd !== "string" || !path.isAbsolute(cwd) || path.normalize(cwd) !== cwd) {
         throw new Error("DSH managed profile received incomplete native session identity");
       }
       managedAgent = agent;
-      selected = true;
       if (initialName) ctx.sessionTitle.rename(agent.session, initialName);
       announce(ctx, agent);
     });
@@ -168,7 +169,10 @@ function createCordisPlugin(options) {
       }
     });
     ctx.on("agent/disposed", ({ agent }) => {
-      if (exactAgent(agent)) client.closeSession(agent.id);
+      if (!exactAgent(agent)) return;
+      client.closeSession(agent.id);
+      managedAgent = undefined;
+      observedTitle = "";
     });
     const started = client.start();
     ctx.effect?.(() => () => client.stop(), "Agent Sessions live session");
