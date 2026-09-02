@@ -59,10 +59,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live == nil {
-				sourceID := report.UUID
-				if product == connectorProductQwen {
-					sourceID, _ = qwenLaunchSessionID(os.Getenv(launcher.QwenEventsFileEnv))
-				}
+				sourceID := connectorRelaySource(product, report.UUID, os.Getenv(launcher.QwenEventsFileEnv))
 				return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
 			}
 			return live.Call(callCtx, id, method, params)
@@ -72,6 +69,14 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func connectorRelaySource(product, ambient, qwenEventsPath string) string {
+	if ambient != "" || product != connectorProductQwen {
+		return ambient
+	}
+	sourceID, _ := qwenLaunchSessionID(qwenEventsPath)
+	return sourceID
 }
 
 func connectorDeclinesForeignManagedProduct(requestedProduct, resolvedProduct string, getenv func(string) string) bool {

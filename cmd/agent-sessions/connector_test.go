@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,6 +116,20 @@ func TestToolsOnlyConnectorUsesAmbientOrProductHostSession(t *testing.T) {
 	}
 	if sourceID := connectorToolSource("codex", "", json.RawMessage(`{"name":"list_peers","arguments":{}}`), map[string]any{}); sourceID != "" {
 		t.Fatalf("bare connector source = %q", sourceID)
+	}
+}
+
+func TestQwenToolsOnlyConnectorPrefersAmbientIdentityAndFallsBackForFreshPeer(t *testing.T) {
+	events := filepath.Join(t.TempDir(), "events.jsonl")
+	line := `{"session_id":"` + testQwenNativeSessionID + `","type":"system","subtype":"session_start"}` + "\n"
+	if err := os.WriteFile(events, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := connectorRelaySource(connectorProductQwen, "ambient-lane-session", events); got != "ambient-lane-session" {
+		t.Fatalf("Qwen lane source = %q; want ambient identity", got)
+	}
+	if got := connectorRelaySource(connectorProductQwen, "", events); got != testQwenNativeSessionID {
+		t.Fatalf("fresh Qwen peer source = %q; want product event identity", got)
 	}
 }
 
