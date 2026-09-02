@@ -152,6 +152,20 @@ func TestDefaultWorkflowUnavailableDoesNotCreateStateOrStartDaemon(t *testing.T)
 	}
 }
 
+func TestLaneWorkflowReturnsUsageErrorBeforeContactingDaemon(t *testing.T) {
+	stateRoot := filepath.Join(shortDaemonTestRoot(t), "absent")
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot)
+	err := runLaneWorkflow(context.Background(), clihelp.Invocation{
+		Product: "codex", Arguments: []string{"run", "--name", "worker", "first prompt", "second prompt"},
+	}, io.Discard)
+	if err == nil || err.Error() != "lane command accepts only one selector" {
+		t.Fatalf("lane usage error = %v", err)
+	}
+	if _, statErr := os.Lstat(stateRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("usage failure contacted or created daemon state: %v", statErr)
+	}
+}
+
 func TestDefaultAdminNegotiatesRunningGenerationWithoutStartingAuthority(t *testing.T) {
 	stateRoot := shortDaemonTestRoot(t)
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: stateRoot})

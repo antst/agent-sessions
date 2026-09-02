@@ -121,6 +121,9 @@ func runLaneWorkflow(ctx context.Context, invocation clihelp.Invocation, output 
 	if err != nil {
 		return err
 	}
+	if _, err := parseUnifiedLaneCommand(arguments); err != nil {
+		return err
+	}
 	input, err := readLaneInput(ctx, arguments, os.Stdin)
 	if err != nil {
 		return err
