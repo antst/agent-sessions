@@ -16,7 +16,6 @@ import (
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
-	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 func TestLaneTerminalNoticeBodyGatesStructuredCollectionHint(t *testing.T) {
@@ -644,10 +643,10 @@ func TestParentDetachRetiresActiveLaneAndPreservesPersistentLane(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), root)
 	cancelled := make(chan struct{})
 	active := &laneActor{
-		id: "active", parentID: "parent", product: "qwen", state: "running", done: make(chan struct{}),
+		id: "active", parentID: "parent", product: "grok", state: "running", done: make(chan struct{}),
 		cancel: func() { close(cancelled) },
 	}
-	persistent := &laneActor{id: "persistent", parentID: "parent", product: "grok", state: "idle", persistent: true, done: closedLaneDone()}
+	persistent := &laneActor{id: "persistent", parentID: "parent", product: "claude", state: "idle", persistent: true, done: closedLaneDone()}
 	coordinator.lanesLoaded = true
 	coordinator.lanes[active.id], coordinator.lanes[persistent.id] = active, persistent
 	coordinator.archiveIdleLanesForParent(runtime, "parent")
@@ -713,44 +712,23 @@ func TestLaneDoctorDoesNotRequirePeerAttachment(t *testing.T) {
 	}
 }
 
-func TestLaneDoctorProjectsEstablishedGrokReadinessFields(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	grok := filepath.Join(root, "grok")
-	if err := os.WriteFile(grok, []byte("#!/bin/sh\nprintf '%s\\n' 'grok 1.0.13'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	report := inspectLaneProductReadiness(context.Background(), "grok", grok, root)
-	ready, _ := report["ready"].(bool)
-	available, _ := report["grok_available"].(bool)
-	supervisor, _ := report["supervisor_reachable"].(bool)
-	if !ready || !available || report["grok_path"] != grok ||
-		report["grok_version"] != "grok 1.0.13" || !supervisor {
-		t.Fatalf("Grok readiness projection = %#v", report)
-	}
-}
-
-func TestQwenLaneDoctorProjectionPreservesCompleteLegacyEvidence(t *testing.T) {
-	ready := map[qwenreadiness.ParserContract]qwenreadiness.State{
-		qwenreadiness.ParserDualOutput: qwenreadiness.StateReady, qwenreadiness.ParserNativeDefault: qwenreadiness.StateReady,
-		qwenreadiness.ParserDefault: qwenreadiness.StateReady, qwenreadiness.ParserYolo: qwenreadiness.StateReady,
-		qwenreadiness.ParserPlan: qwenreadiness.StateReady,
-	}
-	report := qwenLaneDoctorProjection(qwenreadiness.Report{
-		Ready: true, ResolvedExecutable: "/opt/qwen", Version: "0.22.3", MinimumVersion: "0.21.15",
-		MinimumVersionOK: true, PackageIdentityOK: true, ParserContracts: ready,
-		ACPContract: qwenreadiness.StateReady, ArchiveContract: qwenreadiness.StateReady,
-		WorkspaceTrust: qwenreadiness.StateReady, IntegrationReady: true,
-		CredentialConfigurationState: qwenreadiness.StateReady,
-	})
-	for key, want := range map[string]any{
-		"ready": true, "qwen_available": true, "qwen_path": "/opt/qwen", "qwen_version": "0.22.3",
-		"minimum_version_ok": true, "package_identity_ok": true, "interactive_contract": qwenreadiness.StateReady,
-		"acp_contract": qwenreadiness.StateReady, "archive_contract": qwenreadiness.StateReady,
-		"workspace_trust": qwenreadiness.StateReady, "integration_ready": true,
-	} {
-		if report[key] != want {
-			t.Fatalf("Qwen readiness %s = %#v, want %#v; report=%#v", key, report[key], want, report)
-		}
+func TestLaneDoctorUsesNativeVersionReadinessForACPProducts(t *testing.T) {
+	for _, product := range []struct{ id, version string }{{"grok", "grok 1.0.13"}, {"qwen", "qwen 0.22.3"}} {
+		t.Run(product.id, func(t *testing.T) {
+			root := shortDaemonTestRoot(t)
+			executable := filepath.Join(root, product.id)
+			if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s\\n' '"+product.version+"'\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			report := inspectLaneProductReadiness(context.Background(), product.id, executable, root)
+			ready, _ := report["ready"].(bool)
+			available, _ := report[product.id+"_available"].(bool)
+			supervisor, _ := report["supervisor_reachable"].(bool)
+			if !ready || !available || report[product.id+"_path"] != executable ||
+				report[product.id+"_version"] != product.version || !supervisor {
+				t.Fatalf("%s readiness projection = %#v", product.id, report)
+			}
+		})
 	}
 }
 

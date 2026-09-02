@@ -53,7 +53,6 @@ type hostCoordinator struct {
 	monitored          map[string]bool
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
-	qwenLanes          *qwenproduct.LaneDriver
 	laneProcesses      *structuredprocess.Supervisor
 	laneDrivers        *productruntime.LaneRegistry
 	lanes              map[string]*laneActor
@@ -110,7 +109,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if err != nil {
 		panic(err)
 	}
-	coordinator.qwenLanes, err = qwenproduct.NewLaneDriver(qwenproduct.LaneConfig{
+	qwenLanes, err := qwenproduct.NewLaneDriver(qwenproduct.LaneConfig{
 		Executable: qwenDescriptor.NativeExecutable, HostExecutable: hostExecutable,
 		Generation: 1, Processes: qwenProcesses,
 	})
@@ -189,6 +188,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		kiloproduct.ProductID:     kiloLanes,
 		piproduct.ProductID:       piLanes,
 		ompproduct.ProductID:      ompLanes,
+		qwenproduct.ProductID:     qwenLanes,
 	})
 	if err != nil {
 		panic(err)

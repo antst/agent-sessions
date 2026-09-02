@@ -15,11 +15,15 @@ import (
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
 	piproduct "github.com/antst/agent-sessions/internal/products/pi"
+	qwenproduct "github.com/antst/agent-sessions/internal/products/qwen"
 )
 
 func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	if _, ok := coordinator.laneDrivers.ByProduct(qwenproduct.ProductID); !ok {
+		t.Fatal("Qwen lane driver is absent from the production registry")
+	}
 	for _, product := range []struct {
 		id          string
 		environment string

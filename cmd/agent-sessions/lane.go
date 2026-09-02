@@ -23,8 +23,6 @@ import (
 	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/qwenprofile"
-	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const laneOutputLimit = 16 << 20
@@ -696,11 +694,6 @@ func (c *hostCoordinator) interruptLaneNative(actor *laneActor) error {
 		defer interruptCancel()
 		return driver.Interrupt(interruptCtx, turn)
 	}
-	if product == "qwen" {
-		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer interruptCancel()
-		return c.qwenLanes.Interrupt(interruptCtx, turn)
-	}
 	switch product {
 	case "claude":
 		return c.claudeLanes.Interrupt(laneID)
@@ -880,9 +873,6 @@ func inspectLaneProductReadiness(ctx context.Context, product, path, cwd string)
 		"product": product, "ready": true, "native_path": path, "runtime_path": path,
 		"daemon_reachable": true, "supervisor_reachable": true,
 	}
-	if product == "qwen" {
-		return inspectQwenLaneProductReadiness(ctx, report, path, cwd)
-	}
 	version, versionErr := inspectLaneNativeVersion(ctx, product, path)
 	report[product+"_available"] = versionErr == nil
 	report[product+"_path"] = path
@@ -931,64 +921,6 @@ func inspectLaneNativeVersion(ctx context.Context, product, path string) (string
 	return version, nil
 }
 
-func inspectQwenLaneProductReadiness(ctx context.Context, base map[string]any, path, cwd string) map[string]any {
-	profile, err := qwenprofile.Current()
-	if err != nil {
-		base["ready"], base["qwen_available"], base["readiness_error"] = false, false, err.Error()
-		return base
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	result, err := qwenreadiness.Check(probeCtx, qwenreadiness.Request{
-		Executable: path, Workspace: cwd, Profile: profile,
-		ExpectedIntegrationVersion: qwenreadiness.IntegrationVersion,
-		Source:                     qwenreadiness.NewNativeSource(os.Environ()),
-	})
-	if err != nil {
-		base["ready"], base["qwen_available"], base["readiness_error"] = false, false, err.Error()
-		return base
-	}
-	for key, value := range qwenLaneDoctorProjection(result) {
-		base[key] = value
-	}
-	return base
-}
-
-func qwenLaneDoctorProjection(report qwenreadiness.Report) map[string]any {
-	interactive := qwenreadiness.StateReady
-	for _, contract := range []qwenreadiness.ParserContract{
-		qwenreadiness.ParserDualOutput, qwenreadiness.ParserNativeDefault, qwenreadiness.ParserDefault,
-		qwenreadiness.ParserYolo, qwenreadiness.ParserPlan,
-	} {
-		if report.ParserContracts[contract] != qwenreadiness.StateReady {
-			interactive = report.ParserContracts[contract]
-			if interactive == "" {
-				interactive = qwenreadiness.StateUnready
-			}
-			break
-		}
-	}
-	projection := map[string]any{
-		"ready": report.Ready, "ok": report.Ready, "qwen_available": report.ResolvedExecutable != "",
-		"qwen_path": report.ResolvedExecutable, "qwen_version": report.Version,
-		"minimum_version": report.MinimumVersion, "minimum_version_ok": report.MinimumVersionOK,
-		"package_identity_ok": report.PackageIdentityOK, "profile": report.Profile,
-		"integration": report.Integration, "integration_ready": report.IntegrationReady,
-		"parser_contracts": report.ParserContracts, "auth_state": report.CredentialConfigurationState,
-		"workspace_trust": report.WorkspaceTrust, "interactive_contract": interactive,
-		"acp_contract": report.ACPContract, "archive_contract": report.ArchiveContract,
-		"issues": report.Issues,
-	}
-	if !report.Ready {
-		messages := make([]string, 0, len(report.Issues))
-		for _, issue := range report.Issues {
-			messages = append(messages, issue.Code+": "+issue.Message)
-		}
-		projection["readiness_error"] = strings.Join(messages, "; ")
-	}
-	return projection
-}
-
 //nolint:gocyclo // Dispatch keeps capability, journal, native execution, and failure transitions together.
 func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string, resume bool) error {
 	capability, err := randomCapability()
@@ -1006,9 +938,6 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	c.mu.Unlock()
 	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
 		return c.dispatchProductLaneTurn(runtime, actor, prompt, driver)
-	}
-	if actor.product == "qwen" {
-		return c.dispatchProductLaneTurn(runtime, actor, prompt, c.qwenLanes)
 	}
 	if actor.product == "grok" {
 		return c.dispatchACPLaneTurn(runtime, actor, prompt)
@@ -1434,14 +1363,6 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 			return nil
 		}
 		return driver.Archive(context.Background(), productruntime.NativeSessionRef{
-			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
-		})
-	}
-	if actor.product == "qwen" {
-		if actor.nativeID == "" {
-			return nil
-		}
-		return c.qwenLanes.Archive(context.Background(), productruntime.NativeSessionRef{
 			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
 		})
 	}
