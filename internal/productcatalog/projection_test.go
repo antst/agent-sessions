@@ -162,6 +162,18 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 		{name: "package manager outside exact tuple", mutate: func(products []Descriptor) {
 			products[0].Compatibility = Compatibility{Policy: VersionMinimum, PackageManager: "pnpm", PackageManagerVersion: "10.28.1"}
 		}},
+		{name: "native argument rule without kind", mutate: func(products []Descriptor) {
+			products[0].NativeArgumentRules = []NativeArgumentRule{{Option: "--resume", Replacement: []string{"resume"}}}
+		}},
+		{name: "native argument translation with handler", mutate: func(products []Descriptor) {
+			products[0].NativeArgumentRules = []NativeArgumentRule{{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"resume"}, Handler: "codex-resume"}}
+		}},
+		{name: "native argument handler with replacement", mutate: func(products []Descriptor) {
+			products[0].NativeArgumentRules = []NativeArgumentRule{{Kind: NativeArgumentHandler, Option: "--resume", Replacement: []string{"resume"}, Handler: "codex-resume"}}
+		}},
+		{name: "duplicate native argument rule", mutate: func(products []Descriptor) {
+			products[0].NativeArgumentRules = append(products[0].NativeArgumentRules, products[0].NativeArgumentRules[0])
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

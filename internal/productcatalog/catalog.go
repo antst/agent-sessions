@@ -60,6 +60,7 @@ type NativeRegistration struct {
 
 const (
 	maxNativeRegistrationArgs  = 32
+	maxNativeArgumentRules     = 16
 	maxExternalAcceptanceCells = 32
 )
 
@@ -82,6 +83,23 @@ const (
 	ResumeSubcommand ResumeStyle = "subcommand"
 	ResumeFlag       ResumeStyle = "flag"
 )
+
+type NativeArgumentRuleKind string
+
+const (
+	NativeArgumentTranslation NativeArgumentRuleKind = "translation"
+	NativeArgumentHandler     NativeArgumentRuleKind = "handler"
+)
+
+// NativeArgumentRule is one descriptor-owned wrapper argument operation. A
+// translation rewrites one option into native argv; a handler names the
+// product-list adapter used only where semantic probes proved a native gap.
+type NativeArgumentRule struct {
+	Kind        NativeArgumentRuleKind
+	Option      string
+	Replacement []string
+	Handler     string
+}
 
 // Descriptor is the authoritative stable inventory for one product.
 // Transitional legacy fields remain until all original-four consumers move to
@@ -115,30 +133,31 @@ type Descriptor struct {
 	NativeAttachedShort    []string
 	NativeToolGrantArgs    []string
 	NativeYoloArgs         []string
+	NativeArgumentRules    []NativeArgumentRule
 	Acceptance             AcceptanceContract
 }
 
 // descriptors is the one product inventory used by launch, packaging, live
 // reconnect, and operator projections.
 var descriptors = [...]Descriptor{
-	withNativeYolo(
+	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
 		"--yolo",
-	),
-	withNativeLaunchPolicy(
+	), nativeArgumentTranslation("--resume", "resume")),
+	withNativeArgumentRules(withNativeLaunchPolicy(
 		baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
 		[]string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
 		[]string{"--dangerously-skip-permissions"},
-	),
-	withNativeYolo(
+	), nativeArgumentTranslation("--resume", "--resume")),
+	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
 		"--yolo",
-	),
-	withNativeYolo(
+	), nativeArgumentTranslation("--resume", "--resume")),
+	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("qwen", "Qwen Code", "qwen", "qwen-peer", "qwen-peer-lane", "qwen-lane", "qwen-lane-manager", "qwen-lane", []string{"qwen"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "0.22.0"),
 		"--yolo",
-	),
-	withNativeYolo(newProductDescriptor(
+	), nativeArgumentTranslation("--resume", "--resume")),
+	withNativeArgumentRules(withNativeYolo(newProductDescriptor(
 		"opencode", "OpenCode", "opencode", "1.18.25", "opencode-global-plugin",
 		"presence", "presence", "opencode-http", "opencode",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
@@ -146,7 +165,11 @@ var descriptors = [...]Descriptor{
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
 	), "--yolo"),
-	withNativeYolo(newProductDescriptor(
+		nativeArgumentTranslation("--resume", "--session"),
+		nativeArgumentHandler("--session", "opencode-session-list"),
+		nativeArgumentHandler("-s", "opencode-session-list"),
+	),
+	withNativeArgumentRules(withNativeYolo(newProductDescriptor(
 		"kilo", "Kilo Code", "kilo", "7.5.6", "kilo-global-plugin",
 		"presence", "presence", "kilo-http", "kilo",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
@@ -154,6 +177,10 @@ var descriptors = [...]Descriptor{
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
 	), "--yolo"),
+		nativeArgumentTranslation("--resume", "--session"),
+		nativeArgumentHandler("--session", "opencode-session-list"),
+		nativeArgumentHandler("-s", "opencode-session-list"),
+	),
 	piDescriptor(),
 	ompDescriptor(),
 	dshDescriptor(),
@@ -191,6 +218,19 @@ func withNativeLaunchPolicy(descriptor Descriptor, toolGrant, yolo []string) Des
 	return descriptor
 }
 
+func withNativeArgumentRules(descriptor Descriptor, rules ...NativeArgumentRule) Descriptor {
+	descriptor.NativeArgumentRules = append([]NativeArgumentRule(nil), rules...)
+	return descriptor
+}
+
+func nativeArgumentTranslation(option string, replacement ...string) NativeArgumentRule {
+	return NativeArgumentRule{Kind: NativeArgumentTranslation, Option: option, Replacement: append([]string(nil), replacement...)}
+}
+
+func nativeArgumentHandler(option, handler string) NativeArgumentRule {
+	return NativeArgumentRule{Kind: NativeArgumentHandler, Option: option, Handler: handler}
+}
+
 func dshDescriptor() Descriptor {
 	return Descriptor{
 		ID: "dsh", Label: "DeepSeek Harness", NativeExecutable: "dsh",
@@ -223,6 +263,10 @@ func piDescriptor() Descriptor {
 	)
 	descriptor.NativeToolGrantArgs = []string{"--approve"}
 	descriptor.NativeYoloArgs = []string{"--approve"}
+	descriptor.NativeArgumentRules = []NativeArgumentRule{
+		nativeArgumentTranslation("--resume", "--session"),
+		nativeArgumentHandler("--session", "pi-session-list"),
+	}
 	return descriptor
 }
 
@@ -236,6 +280,9 @@ func ompDescriptor() Descriptor {
 		[]string{"-m", "-e"},
 	)
 	descriptor.NativeYoloArgs = []string{"--yolo"}
+	descriptor.NativeArgumentRules = []NativeArgumentRule{
+		nativeArgumentHandler("--resume", "omp-session-list"),
+	}
 	return descriptor
 }
 
@@ -497,6 +544,37 @@ func validateDescriptor(descriptor Descriptor) error {
 			}
 		}
 	}
+	if len(descriptor.NativeArgumentRules) > maxNativeArgumentRules {
+		return fmt.Errorf("native argument rules has more than %d entries", maxNativeArgumentRules)
+	}
+	seenRules := map[string]bool{}
+	for _, rule := range descriptor.NativeArgumentRules {
+		if strings.TrimSpace(rule.Option) != rule.Option || !strings.HasPrefix(rule.Option, "-") || strings.ContainsRune(rule.Option, 0) {
+			return errors.New("native argument rule contains an invalid option")
+		}
+		key := string(rule.Kind) + "\x00" + rule.Option
+		if seenRules[key] {
+			return fmt.Errorf("duplicate native argument rule %s for %s", rule.Kind, rule.Option)
+		}
+		seenRules[key] = true
+		switch rule.Kind {
+		case NativeArgumentTranslation:
+			if rule.Handler != "" || len(rule.Replacement) == 0 {
+				return errors.New("native argument translation must have only a replacement")
+			}
+			for _, argument := range rule.Replacement {
+				if strings.TrimSpace(argument) == "" || strings.ContainsRune(argument, 0) {
+					return errors.New("native argument translation contains an invalid replacement")
+				}
+			}
+		case NativeArgumentHandler:
+			if len(rule.Replacement) != 0 || ValidateToken(rule.Handler) != nil {
+				return errors.New("native argument handler must have only a valid handler name")
+			}
+		default:
+			return fmt.Errorf("unknown native argument rule kind %q", rule.Kind)
+		}
+	}
 	seenExternal := map[string]bool{}
 	if descriptor.SupportState != SupportHidden && !descriptor.Acceptance.RealProductRequired {
 		return errors.New("visible product acceptance requires real-product evidence")
@@ -601,6 +679,10 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.NativeRegistration.Args = append([]string(nil), descriptor.NativeRegistration.Args...)
 	descriptor.NativeToolGrantArgs = append([]string(nil), descriptor.NativeToolGrantArgs...)
 	descriptor.NativeYoloArgs = append([]string(nil), descriptor.NativeYoloArgs...)
+	descriptor.NativeArgumentRules = append([]NativeArgumentRule(nil), descriptor.NativeArgumentRules...)
+	for index := range descriptor.NativeArgumentRules {
+		descriptor.NativeArgumentRules[index].Replacement = append([]string(nil), descriptor.NativeArgumentRules[index].Replacement...)
+	}
 	descriptor.Acceptance.ExternalCells = append([]ExternalAcceptanceCell(nil), descriptor.Acceptance.ExternalCells...)
 	return descriptor
 }

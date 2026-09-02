@@ -113,10 +113,12 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	products[0].NativeRegistration.Args[0] = "mutated"
 	products[6].NativeToolGrantArgs[0] = "mutated"
 	products[6].NativeYoloArgs[0] = "mutated"
+	products[0].NativeArgumentRules[0].Option = "--mutated"
+	products[0].NativeArgumentRules[0].Replacement[0] = "mutated"
 	products[0].NativeRegistration.AssetOnly = true
 	products[0].Acceptance.ExternalCells = []ExternalAcceptanceCell{{ID: "mutated"}}
 	again, _ := ByID("codex")
-	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 || len(again.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(again.NativeYoloArgs, []string{"--yolo"}) {
+	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 || len(again.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(again.NativeYoloArgs, []string{"--yolo"}) || !reflect.DeepEqual(again.NativeArgumentRules, []NativeArgumentRule{{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"resume"}}}) {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
 	}
 	claude, _ := ByID("claude")
@@ -148,6 +150,53 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	ordered := again.SortedCapabilities()
 	if !sort.StringsAreSorted(ordered) {
 		t.Fatalf("capabilities not sorted: %v", ordered)
+	}
+}
+
+func TestCatalogOwnsUniformResumeTranslationsAndOnlyProvenGapHandlers(t *testing.T) {
+	want := map[string][]NativeArgumentRule{
+		"codex": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"resume"}},
+		},
+		"claude": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--resume"}},
+		},
+		"grok": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--resume"}},
+		},
+		"qwen": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--resume"}},
+		},
+		"opencode": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--session"}},
+			{Kind: NativeArgumentHandler, Option: "--session", Handler: "opencode-session-list"},
+			{Kind: NativeArgumentHandler, Option: "-s", Handler: "opencode-session-list"},
+		},
+		"kilo": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--session"}},
+			{Kind: NativeArgumentHandler, Option: "--session", Handler: "opencode-session-list"},
+			{Kind: NativeArgumentHandler, Option: "-s", Handler: "opencode-session-list"},
+		},
+		"pi": {
+			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--session"}},
+			{Kind: NativeArgumentHandler, Option: "--session", Handler: "pi-session-list"},
+		},
+		"omp": {
+			{Kind: NativeArgumentHandler, Option: "--resume", Handler: "omp-session-list"},
+		},
+	}
+	for product, rules := range want {
+		descriptor, ok := ByID(product)
+		if !ok {
+			t.Fatalf("descriptor %q missing", product)
+		}
+		if !reflect.DeepEqual(descriptor.NativeArgumentRules, rules) {
+			t.Fatalf("%s native argument rules = %#v, want %#v", product, descriptor.NativeArgumentRules, rules)
+		}
+	}
+	dsh, _ := ByID("dsh")
+	if len(dsh.NativeArgumentRules) != 0 {
+		t.Fatalf("lane-only DSH carries peer argument rules: %#v", dsh.NativeArgumentRules)
 	}
 }
 
