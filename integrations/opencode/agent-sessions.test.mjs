@@ -21,7 +21,7 @@ class FakeLiveSession extends EventEmitter {
 }
 
 function fakeTool(definition) { return definition; }
-fakeTool.schema = { enum: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
+fakeTool.schema = { enum: () => ({}), string: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
 
 async function loadPlugin(live, deadline = 10_000) {
   globalThis.__testTool = fakeTool;
@@ -46,6 +46,44 @@ test("OpenCode reports live sessions, title changes, and closes on deletion", as
   assert.deepEqual(live.updated, [{ id: "ses_one", name: "native" }]);
   await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "ses_one" } } } });
   assert.equal(live.sessions.has("ses_one"), false);
+});
+
+test("OpenCode writes a requested fresh name through the native session API before reporting", async () => {
+  const live = new FakeLiveSession();
+  const updates = [];
+  const client = { session: { async update(request) {
+    updates.push(request);
+    return { data: { id: request.path.id, title: request.body.title }, response: { status: 200 } };
+  } } };
+  const hooks = await (await loadPlugin(live))({
+    client,
+    directory: "/work",
+    environment: { AGENT_SESSIONS_SESSION_NAME: "named-opencode" },
+  });
+  await hooks.event({ event: { type: "session.created", properties: {
+    info: { id: "ses_one", title: "New session", directory: "/work" },
+  } } });
+  assert.deepEqual(updates, [{
+    path: { id: "ses_one" }, query: { directory: "/work" }, body: { title: "named-opencode" },
+  }]);
+  assert.deepEqual(live.reported, [{ id: "ses_one", name: "named-opencode" }]);
+});
+
+test("OpenCode reports an exact resumed session directly from the product", async () => {
+  const live = new FakeLiveSession();
+  const gets = [];
+  const client = { session: { async get(request) {
+    gets.push(request);
+    return { data: { id: request.path.id, title: "existing-title", directory: "/work" }, response: { status: 200 } };
+  } } };
+  await (await loadPlugin(live))({
+    client,
+    directory: "/work",
+    environment: { AGENT_SESSIONS_SESSION_ID: "ses_exact" },
+  });
+  await tick();
+  assert.deepEqual(gets, [{ path: { id: "ses_exact" }, query: { directory: "/work" } }]);
+  assert.deepEqual(live.reported, [{ id: "ses_exact", name: "existing-title" }]);
 });
 
 test("OpenCode delivers and calls tools on the exact reported session", async () => {

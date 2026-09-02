@@ -16,7 +16,7 @@ class FakeLiveSession extends EventEmitter {
 }
 
 function fakeTool(definition) { return definition; }
-fakeTool.schema = { enum: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
+fakeTool.schema = { enum: () => ({}), string: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
 
 async function loadPlugin(live) {
   globalThis.__testTool = fakeTool; globalThis.__testLiveFactory = () => live;

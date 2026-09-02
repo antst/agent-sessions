@@ -200,7 +200,7 @@ export default async function agentSessionsKiloPlugin({ client, directory }) {
         description: "Use an exact managed Agent Sessions operation.",
         args: {
           operation: tool.schema.enum(OPERATIONS),
-          arguments: tool.schema.record(tool.schema.any()).default({}),
+          arguments: tool.schema.record(tool.schema.string(), tool.schema.any()).default({}),
         },
         execute: async ({ operation, arguments: argumentsValue }, context) => {
           if (!known.has(context.sessionID)) throw new Error("tool context is not a reported live native session");

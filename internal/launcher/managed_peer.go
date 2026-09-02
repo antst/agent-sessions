@@ -61,6 +61,13 @@ func buildManagedPeerPlan(
 	switch descriptor.NativeRegistration.Strategy {
 	case "opencode-global-plugin", "kilo-global-plugin":
 		// These products load the release-managed global plugin themselves.
+		resumeID, present, resumeErr := optionValue(forwarded, "--session")
+		if resumeErr != nil {
+			return managedPeerPlan{}, resumeErr
+		}
+		if present {
+			environment = envutil.Set(environment, peerSessionIDEnv, resumeID)
+		}
 	case "pi-package":
 		forwarded = append([]string{"--extension", integrationAsset(pluginRoot, descriptor.ID, "agent-sessions.mjs")}, forwarded...)
 	case "omp-extension":

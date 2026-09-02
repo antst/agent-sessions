@@ -84,6 +84,9 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 			if test.product == "codebuddy" && strings.Count(joined, "--session-id") != 1 {
 				t.Fatalf("CodeBuddy exact selector was duplicated: %#v", plan.args)
 			}
+			if (test.product == "opencode" || test.product == "kilo") && environmentValue(plan.environment, peerSessionIDEnv) != "ses_exact" {
+				t.Fatalf("%s exact resume id was not shared with its native plugin", test.product)
+			}
 			if test.product == "dsh" && strings.Count(joined, "--profile") != 1 {
 				t.Fatalf("DSH exact profile selector was duplicated: %#v", plan.args)
 			}

@@ -99,12 +99,31 @@ function validNativeTitleObservation(value) {
     Buffer.byteLength(value, "utf8") <= 1024 && !/\p{Cc}/u.test(value);
 }
 
-export default async function agentSessionsOpenCodePlugin({ client, directory }) {
+export default async function agentSessionsOpenCodePlugin({ client, directory, environment = process.env }) {
   let toolCounter = 0;
   const known = new Map();
+  const requestedName = String(environment.AGENT_SESSIONS_SESSION_NAME ?? "").trim();
   const live = createLiveSessionClient();
   const activation = await live.start();
   if (!activation.active) return {};
+
+  const resumedSessionID = String(environment.AGENT_SESSIONS_SESSION_ID ?? "").trim();
+  if (resumedSessionID) {
+    if (!validNativeID(resumedSessionID, "ses_")) throw new Error("OpenCode resume omitted an exact native session identity");
+    // Plugin construction runs before the product server is ready to answer
+    // its own SDK. Return the hooks first, then confirm the exact resumed
+    // session from the product and publish it.
+    void Promise.resolve().then(async () => {
+      const resumed = requireSDKSuccess(await client.session.get({
+        path: { id: resumedSessionID },
+        query: { directory },
+      }), 200);
+      const resumedTitle = eventNativeTitle(resumed?.title);
+      if (resumedTitle === undefined) throw new Error("OpenCode resume omitted the native session title");
+      known.set(resumedSessionID, { title: resumedTitle, cwd: resumed?.directory ?? directory });
+      live.report(resumedSessionID, resumedTitle);
+    }).catch((error) => live.emit("diagnostic", String(error?.message ?? error)));
+  }
 
   live.on("message", async (payload) => {
     let nativeSubmitAttempted = false;
@@ -142,8 +161,17 @@ export default async function agentSessionsOpenCodePlugin({ client, directory })
         case "session.updated": {
           if (!sessionID) break;
           if (!Object.hasOwn(info, "title")) break;
-          const nativeTitle = eventNativeTitle(info?.title);
+          let nativeTitle = eventNativeTitle(info?.title);
           if (nativeTitle === undefined) break;
+          if (event.type === "session.created" && requestedName && nativeTitle !== requestedName) {
+            const updated = requireSDKSuccess(await client.session.update({
+              path: { id: sessionID },
+              query: { directory },
+              body: { title: requestedName },
+            }), 200);
+            nativeTitle = eventNativeTitle(updated?.title);
+            if (nativeTitle !== requestedName) throw new Error("OpenCode did not confirm the requested native session title");
+          }
           const prior = known.get(sessionID);
           known.set(sessionID, { title: nativeTitle, cwd: info?.directory ?? directory });
           if (!prior) {
@@ -177,7 +205,7 @@ export default async function agentSessionsOpenCodePlugin({ client, directory })
         description: "Use an exact managed Agent Sessions operation.",
         args: {
           operation: tool.schema.enum(OPERATIONS),
-          arguments: tool.schema.record(tool.schema.any()).default({}),
+          arguments: tool.schema.record(tool.schema.string(), tool.schema.any()).default({}),
         },
         execute: async ({ operation, arguments: argumentsValue }, context) => {
           if (!known.has(context.sessionID)) throw new Error("tool context is not a reported live native session");
