@@ -135,6 +135,18 @@ func (process *scriptedRPCProcess) messageFor(command string) string {
 	return ""
 }
 
+func (process *scriptedRPCProcess) nameFor(command string) string {
+	process.mu.Lock()
+	defer process.mu.Unlock()
+	for _, write := range process.writes {
+		if write["type"] == command {
+			value, _ := write["name"].(string)
+			return value
+		}
+	}
+	return ""
+}
+
 type oneProcessFactory struct {
 	process *scriptedRPCProcess
 	command productruntime.NativeCommand
@@ -324,8 +336,11 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"--mode=rpc", "--name", "native lane name", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
+	if want := []string{"--mode=rpc", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP args = %q, want %q", factory.command.Args, want)
+	}
+	if got := process.nameFor("set_session_name"); got != "native lane name" {
+		t.Fatalf("OMP native session name = %q", got)
 	}
 	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "first", PermissionMode: permissionmode.Default})
 	if err != nil {
@@ -347,8 +362,33 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	if terminal.Outcome != productruntime.TurnCompleted {
 		t.Fatalf("terminal = %+v", terminal)
 	}
-	if got := process.commands(); !reflect.DeepEqual(got, []string{"get_state", "get_state", "prompt", "get_state", "steer", "get_last_assistant_text"}) {
+	if got := process.commands(); !reflect.DeepEqual(got, []string{"get_state", "set_session_name", "get_state", "prompt", "get_state", "steer", "get_last_assistant_text"}) {
 		t.Fatalf("commands = %q", got)
+	}
+}
+
+func TestOMPResumeNeverRenamesNativeSession(t *testing.T) {
+	quirks, _ := QuirksFor(OMPProductID)
+	process := newScriptedProcess("omp-native")
+	process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+	factory := &oneProcessFactory{process: process}
+	driver, err := NewLaneDriver(LaneConfig{
+		Quirks: quirks, Generation: 1, Processes: factory, MapPermission: familyPermission,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: OMPProductID, LaneID: "resume-omp", ResumeNativeID: "omp-native", Cwd: "/work", PermissionMode: permissionmode.Default,
+	})
+	if err != nil || ref.NativeSessionID != "omp-native" {
+		t.Fatalf("OMP resume = %+v, %v", ref, err)
+	}
+	if want := []string{"--mode=rpc", "--session", "omp-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
+		t.Fatalf("OMP resume args = %q, want %q", factory.command.Args, want)
+	}
+	if got := process.commands(); !reflect.DeepEqual(got, []string{"get_state"}) {
+		t.Fatalf("OMP resume commands = %q", got)
 	}
 }
 
@@ -653,9 +693,16 @@ func TestLaneOpenPassesProductNativeArgumentsAndName(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := append(quirks.modeArguments(), "--model", "deepseek/deepseek-v4-flash", "--name", "product native name", "--tools", "read")
+			want := append(quirks.modeArguments(), "--model", "deepseek/deepseek-v4-flash")
+			if !quirks.SetNameByRPC {
+				want = append(want, "--name", "product native name")
+			}
+			want = append(want, "--tools", "read")
 			if !reflect.DeepEqual(factory.command.Args, want) {
 				t.Fatalf("native args = %q, want %q", factory.command.Args, want)
+			}
+			if quirks.SetNameByRPC && process.nameFor("set_session_name") != "product native name" {
+				t.Fatalf("native session name was not set through RPC")
 			}
 		})
 	}

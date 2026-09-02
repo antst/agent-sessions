@@ -53,6 +53,7 @@ type Quirks struct {
 	TerminalEvent      string
 	NativeSteerFraming bool
 	NativeSessionEnv   bool
+	SetNameByRPC       bool
 	ResumeFlag         string
 	DefaultPolicy      string
 	BypassPolicy       string
@@ -70,7 +71,7 @@ var quirkTable = map[string]Quirks{
 		ProductID: OMPProductID, Executable: "omp", Runtime: "bun", TestedVersion: OMPTestedVersion,
 		AgentDirectory: ".omp/agent", ExtensionArgStyle: ArgEquals, ModeArgStyle: ArgEquals,
 		ReadyStrategy: ReadyByEvent, TerminalEvent: "agent_end", NativeSteerFraming: true,
-		NativeSessionEnv: false, ResumeFlag: "--session", DefaultPolicy: "unsupported-rpc-approval",
+		NativeSessionEnv: false, SetNameByRPC: true, ResumeFlag: "--session", DefaultPolicy: "unsupported-rpc-approval",
 		BypassPolicy: "yolo",
 	},
 }

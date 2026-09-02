@@ -14,10 +14,10 @@ func TestClosedQuirkTablePinsRealProtocolDifferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pi.TestedVersion != PiTestedVersion || pi.ReadyStrategy != ReadyByStateProbe || pi.TerminalEvent != "agent_settled" || pi.NativeSteerFraming {
+	if pi.TestedVersion != PiTestedVersion || pi.ReadyStrategy != ReadyByStateProbe || pi.TerminalEvent != "agent_settled" || pi.NativeSteerFraming || pi.SetNameByRPC {
 		t.Fatalf("unexpected Pi row: %+v", pi)
 	}
-	if omp.TestedVersion != OMPTestedVersion || omp.ReadyStrategy != ReadyByEvent || omp.TerminalEvent != "agent_end" || !omp.NativeSteerFraming {
+	if omp.TestedVersion != OMPTestedVersion || omp.ReadyStrategy != ReadyByEvent || omp.TerminalEvent != "agent_end" || !omp.NativeSteerFraming || !omp.SetNameByRPC {
 		t.Fatalf("unexpected OMP row: %+v", omp)
 	}
 	if got := pi.extensionArguments("/managed/extension.mjs"); !reflect.DeepEqual(got, []string{"--extension", "/managed/extension.mjs"}) {

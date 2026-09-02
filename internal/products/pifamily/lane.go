@@ -102,7 +102,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	arguments := append(driver.config.Quirks.modeArguments(), request.Arguments...)
 	if request.ResumeNativeID != "" {
 		arguments = append(arguments, driver.config.Quirks.resumeArguments(request.ResumeNativeID)...)
-	} else {
+	} else if !driver.config.Quirks.SetNameByRPC {
 		arguments = append(arguments, "--name", request.Name)
 	}
 	arguments = append(arguments, policy.Args...)
@@ -120,6 +120,11 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	state, err := client.handshake(ctx)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, err)
+	}
+	if request.ResumeNativeID == "" && driver.config.Quirks.SetNameByRPC {
+		if _, err := client.call(ctx, "set_session_name", map[string]any{"name": request.Name}); err != nil {
+			return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, err)
+		}
 	}
 	if request.ResumeNativeID != "" && state.SessionID != request.ResumeNativeID {
 		primary := fmt.Errorf("%w: resume returned native session %q, want %q", productruntime.ErrAmbiguousSession, state.SessionID, request.ResumeNativeID)
