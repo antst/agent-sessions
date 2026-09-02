@@ -42,7 +42,7 @@ const (
 	ErrorHandler = "operation_failed"
 
 	// CanonicalInactiveMessage is returned to bare product MCP calls.
-	CanonicalInactiveMessage = "agent_sessions is inactive outside an attested peer session"
+	CanonicalInactiveMessage = "agent_sessions is inactive outside a live peer session"
 )
 
 // ControlRequest is one bounded correlated local operation.

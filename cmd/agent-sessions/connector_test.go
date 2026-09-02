@@ -94,6 +94,19 @@ func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
 	}
 }
 
+func TestReportedToolsOnlyConnectorsRelayThroughTheirLiveSession(t *testing.T) {
+	for _, product := range []string{connectorProductCodex, connectorProductGrok} {
+		report := liveSessionReport{UUID: product + "-session", Product: product}
+		sourceID, ok := connectorDaemonToolSource(report, true)
+		if !ok || sourceID != report.UUID {
+			t.Fatalf("%s daemon tool source = %q/%v", product, sourceID, ok)
+		}
+	}
+	if sourceID, ok := connectorDaemonToolSource(liveSessionReport{}, false); ok || sourceID != "" {
+		t.Fatalf("unreported connector source = %q/%v", sourceID, ok)
+	}
+}
+
 func TestQwenConnectorProjectsOnlyProductOwnedNativeTitle(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, ".qwen")

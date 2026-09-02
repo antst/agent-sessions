@@ -64,8 +64,8 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live == nil {
-				if reported && product == connectorProductGrok {
-					return callConnectorDaemonTool(callCtx, report.UUID, id, method, params)
+				if sourceID, ok := connectorDaemonToolSource(report, reported); ok {
+					return callConnectorDaemonTool(callCtx, sourceID, id, method, params)
 				}
 				return nil, sessiontools.ErrConnectorInactive
 			}
@@ -76,6 +76,13 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func connectorDaemonToolSource(report liveSessionReport, reported bool) (string, bool) {
+	if !reported || strings.TrimSpace(report.UUID) == "" {
+		return "", false
+	}
+	return report.UUID, true
 }
 
 func connectorDeclinesForeignManagedProduct(requestedProduct, resolvedProduct string, getenv func(string) string) bool {
