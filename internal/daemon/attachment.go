@@ -258,8 +258,8 @@ func (e *AttachmentEngine) ListActive() ([]ManagedAttachment, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	result := make([]ManagedAttachment, 0, len(e.active))
-	for _, attachment := range e.active {
-		if attachment.State == "attached" {
+	for id, attachment := range e.active {
+		if _, reported := e.titles[id]; reported && attachment.State == "attached" {
 			result = append(result, cloneAttachment(attachment))
 		}
 	}
@@ -271,7 +271,8 @@ func (e *AttachmentEngine) ActiveAttachment(id string) (ManagedAttachment, bool,
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	attachment, ok := e.active[id]
-	if !ok || attachment.State != "attached" && attachment.State != "lane" {
+	_, reported := e.titles[id]
+	if !ok || !reported || attachment.State != "attached" && attachment.State != "lane" {
 		return ManagedAttachment{}, false, nil
 	}
 	return cloneAttachment(attachment), true, nil

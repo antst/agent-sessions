@@ -42,9 +42,17 @@ func TestAttachmentRegistryIsLiveAndProcessLocal(t *testing.T) {
 	if err != nil || adopted.State != "attached" {
 		t.Fatalf("adopt = %+v, %v", adopted, err)
 	}
+	if _, live, activeErr := engine.ActiveAttachment("peer"); activeErr != nil || live {
+		t.Fatalf("adopted preparation became live without a report: live=%v err=%v", live, activeErr)
+	}
 	active, err := engine.ListActive()
+	if err != nil || len(active) != 0 {
+		t.Fatalf("adopted preparation was listed without a report: %+v, %v", active, err)
+	}
+	engine.ReportLive("peer", "reviewer", "codex", []string{"project"}, false)
+	active, err = engine.ListActive()
 	if err != nil || len(active) != 1 || active[0].ID != "peer" {
-		t.Fatalf("active = %+v, %v", active, err)
+		t.Fatalf("reported active = %+v, %v", active, err)
 	}
 	active[0].Groups[0] = "mutated"
 	again, _ := engine.ListActive()

@@ -30,6 +30,7 @@ func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {
 	if _, err := runtime.Attachments().Adopt(context.Background(), "attachment", NativeEvidence{}); err != nil {
 		t.Fatal(err)
 	}
+	runtime.Attachments().ReportLive("attachment", "attachment", "codex", nil, false)
 	snapshot, err := runtime.State().Read()
 	if err != nil {
 		t.Fatal(err)
