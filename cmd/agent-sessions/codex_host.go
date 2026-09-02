@@ -19,6 +19,8 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/productruntime"
+	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
 
@@ -43,6 +45,7 @@ type hostCoordinator struct {
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
 	qwenLanes          *daemonpkg.QwenLaneAdapter
+	laneDrivers        *productruntime.LaneRegistry
 	lanes              map[string]*laneActor
 	liveReports        map[string]liveSessionReport
 	reportedLanes      map[string]string
@@ -81,6 +84,18 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	}
 	coordinator.resolveCandidate = coordinator.resolveProductLaneCandidate
 	coordinator.candidateResolvers = coordinator.productLaneCandidateResolvers()
+	codexLanes, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) {
+		return coordinator.codexNative()
+	})
+	if err != nil {
+		panic(err)
+	}
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
+		codexproduct.ProductID: codexLanes,
+	})
+	if err != nil {
+		panic(err)
+	}
 	coordinator.unsubscribeCodex = func(ctx context.Context, threadID string) error {
 		native, err := coordinator.codexNative()
 		if err != nil {

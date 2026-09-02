@@ -21,6 +21,8 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/permissionmode"
+	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
@@ -28,54 +30,10 @@ import (
 const laneOutputLimit = 16 << 20
 const defaultUnifiedLaneAutoArchiveDelay = time.Minute
 
-type codexLaneNative interface {
-	StartThread(context.Context, bridge.CodexStartRequest) (bridge.CodexNativeThread, error)
-	PrepareLaneThread(context.Context, string, string, string, string, bool) (bridge.CodexNativeThread, error)
-	StartLaneTurn(context.Context, bridge.CodexLaneTurnRequest) (string, error)
-	WaitLaneTurn(context.Context, string, string) (bridge.CodexLaneTurnResult, error)
-	InterruptLaneTurn(context.Context, string, string) error
-	ArchiveThread(context.Context, string) error
-}
-
-func newCodexLaneAdapter(native codexLaneNative) (*daemonpkg.CodexLaneAdapter, error) {
-	if native == nil {
-		return nil, errors.New("codex App Server lane backend is unavailable")
-	}
-	return daemonpkg.NewCodexLaneAdapter(daemonpkg.CodexLaneAdapterConfig{
-		Start: func(ctx context.Context, request daemonpkg.CodexLaneRequest) (daemonpkg.CodexLaneSession, error) {
-			thread, err := native.StartThread(ctx, bridge.CodexStartRequest{
-				Cwd: request.Cwd, Name: request.Name, NameSource: "lane",
-				ApprovalPolicy: request.ApprovalPolicy, Sandbox: request.Sandbox,
-			})
-			return daemonpkg.CodexLaneSession{ID: thread.ID, Cwd: thread.Cwd}, err
-		},
-		Resume: func(ctx context.Context, request daemonpkg.CodexLaneRequest) (daemonpkg.CodexLaneSession, error) {
-			thread, err := native.PrepareLaneThread(
-				ctx, request.NativeSession, request.Cwd, request.ApprovalPolicy, request.Sandbox, request.Unarchive,
-			)
-			return daemonpkg.CodexLaneSession{ID: thread.ID, Cwd: thread.Cwd}, err
-		},
-		StartTurn: func(ctx context.Context, prompt daemonpkg.CodexLanePrompt) (string, error) {
-			return native.StartLaneTurn(ctx, bridge.CodexLaneTurnRequest{
-				ThreadID: prompt.ThreadID, Prompt: prompt.Prompt, Effort: prompt.Effort,
-				ApprovalPolicy: prompt.ApprovalPolicy, Sandbox: prompt.Sandbox,
-				SchemaPath: prompt.SchemaPath, Arguments: append([]string(nil), prompt.Arguments...),
-			})
-		},
-		Wait: func(ctx context.Context, threadID, turnID string) (daemonpkg.CodexLaneTerminal, error) {
-			result, err := native.WaitLaneTurn(ctx, threadID, turnID)
-			return daemonpkg.CodexLaneTerminal{
-				ThreadID: result.ThreadID, TurnID: result.TurnID, Outcome: result.Outcome, Result: result.Result,
-			}, err
-		},
-		Interrupt: native.InterruptLaneTurn,
-		Archive:   native.ArchiveThread,
-	})
-}
-
 type laneActor struct {
 	id, product, name, cwd, parentID, nativeID string
 	nativeTurnID                               string
+	nativeGeneration                           uint64
 	capability                                 string
 	approvalPolicy, sandbox, effort, schema    string
 	groups, arguments                          []string
@@ -332,9 +290,8 @@ func parseUnifiedLaneCommand(arguments []string) (parsedLaneCommand, error) { //
 	if result.noAutoArchive && result.autoArchiveAfterSet {
 		return parsedLaneCommand{}, errors.New("--auto-archive-after and --no-auto-archive are mutually exclusive")
 	}
-	// Codex approval policy is the explicit native authorization contract. It
-	// must take precedence over both an inherited parent mode and any generic
-	// permission flag, independent of option order.
+	// An explicit native approval policy takes precedence over an inherited
+	// parent mode and any generic permission flag, independent of option order.
 	if result.approvalPolicy != "" {
 		result.permission = lanePermissionForApprovalPolicy(result.approvalPolicy)
 	}
@@ -652,7 +609,6 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 	c.mu.Lock()
 	cancel := actor.cancel
 	running := actor.state == "running"
-	actorProduct, nativeThreadID, nativeTurnID := actor.product, actor.nativeID, actor.nativeTurnID
 	if running && cancel != nil {
 		actor.interruptRequested = true
 		actor.state = "interrupting"
@@ -664,28 +620,27 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 	if err := c.commitLaneState(runtime, actor.id, "interrupting"); err != nil {
 		return nil, err
 	}
-	if err := c.interruptLaneNative(actorProduct, actor.id, nativeThreadID, nativeTurnID); err != nil {
+	if err := c.interruptLaneNative(actor); err != nil {
 		return nil, err
 	}
 	cancel()
 	return map[string]any{"type": "turn.interrupting", "thread_id": actor.id, "turn_id": actor.turnID}, nil
 }
 
-func (c *hostCoordinator) interruptLaneNative(product, laneID, nativeThreadID, nativeTurnID string) error {
-	switch product {
-	case "codex":
-		native, nativeErr := c.codexNative()
-		if nativeErr != nil {
-			return nativeErr
-		}
-		adapter, adapterErr := newCodexLaneAdapter(native)
-		if adapterErr != nil {
-			return adapterErr
-		}
+func (c *hostCoordinator) interruptLaneNative(actor *laneActor) error {
+	c.mu.Lock()
+	product, laneID := actor.product, actor.id
+	session := productruntime.NativeSessionRef{
+		LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
+	}
+	turn := productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: actor.nativeTurnID}
+	c.mu.Unlock()
+	if driver, ok := c.laneDrivers.ByProduct(product); ok {
 		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer interruptCancel()
-		nativeErr = adapter.Interrupt(interruptCtx, nativeThreadID, nativeTurnID)
-		return nativeErr
+		return driver.Interrupt(interruptCtx, turn)
+	}
+	switch product {
 	case "claude":
 		return c.claudeLanes.Interrupt(laneID)
 	case "grok":
@@ -801,9 +756,9 @@ func (c *hostCoordinator) archiveIdleLanesForParent(runtime *daemonpkg.Runtime, 
 //nolint:gocyclo // Parent retirement handles each durable lane lifecycle state explicitly.
 func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID string) error {
 	type transition struct {
-		actor                        *laneActor
-		state, product, thread, turn string
-		cancel                       context.CancelFunc
+		actor  *laneActor
+		state  string
+		cancel context.CancelFunc
 	}
 	c.mu.Lock()
 	candidates := make([]transition, 0)
@@ -818,10 +773,7 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 			actor.interruptRequested = true
 		}
 		actor.state = state
-		candidates = append(candidates, transition{
-			actor: actor, state: state, product: actor.product,
-			thread: actor.nativeID, turn: actor.nativeTurnID, cancel: cancel,
-		})
+		candidates = append(candidates, transition{actor: actor, state: state, cancel: cancel})
 	}
 	c.mu.Unlock()
 	for _, candidate := range candidates {
@@ -834,15 +786,8 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 			}
 		}
 		if candidate.cancel != nil {
-			if candidate.product == "codex" {
-				native, err := c.codexNative()
-				if err != nil {
-					return err
-				}
-				interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err = native.InterruptLaneTurn(interruptCtx, candidate.thread, candidate.turn)
-				interruptCancel()
-				if err != nil {
+			if _, managed := c.laneDrivers.ByProduct(candidate.actor.product); managed {
+				if err := c.interruptLaneNative(candidate.actor); err != nil {
 					return err
 				}
 			}
@@ -1000,8 +945,8 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	c.mu.Lock()
 	actor.state = "preparing"
 	c.mu.Unlock()
-	if actor.product == "codex" {
-		return c.dispatchCodexLaneTurn(runtime, actor, prompt, resume, unarchive)
+	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
+		return c.dispatchProductLaneTurn(runtime, actor, prompt, resume, unarchive, driver)
 	}
 	if actor.product == "grok" || actor.product == "qwen" {
 		return c.dispatchACPLaneTurn(runtime, actor, prompt)
@@ -1015,15 +960,6 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	command.Dir, command.Env = actor.cwd, laneWorkerEnvironment(os.Environ(), actor)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr cappedLaneBuffer
-	if actor.product == "codex" {
-		stdout.onLine = func(line []byte) error {
-			nativeID := parseCodexStartedThreadID(line)
-			if nativeID == "" {
-				return nil
-			}
-			return c.recordLaneNativeID(runtime, actor, nativeID)
-		}
-	}
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Start(); err != nil {
 		cancel()
@@ -1069,7 +1005,7 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 		if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
 			outcome = "timed_out"
 		}
-		result, nativeID := parseLaneNativeResult(actor.product, stdout.Bytes())
+		result, nativeID := parseLaneNativeResult(stdout.Bytes())
 		if result == "" {
 			result = strings.TrimSpace(stdout.String())
 		}
@@ -1085,96 +1021,82 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	return nil
 }
 
-func (c *hostCoordinator) dispatchCodexLaneTurn(
+func (c *hostCoordinator) dispatchProductLaneTurn(
 	runtime *daemonpkg.Runtime,
 	actor *laneActor,
 	prompt string,
 	resume, unarchive bool,
+	driver productruntime.LaneDriver,
 ) error {
-	native, err := c.codexNative()
+	mode, err := permissionmode.Parse(actor.permission)
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	return c.dispatchCodexLaneTurnWithNative(runtime, actor, prompt, resume, unarchive, native)
-}
-
-func (c *hostCoordinator) dispatchCodexLaneTurnWithNative(
-	runtime *daemonpkg.Runtime,
-	actor *laneActor,
-	prompt string,
-	resume, unarchive bool,
-	native codexLaneNative,
-) error {
-	adapter, err := newCodexLaneAdapter(native)
-	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	thread, err := adapter.Prepare(c.ctx, daemonpkg.CodexLaneRequest{
-		LaneID: actor.id, NativeSession: actor.nativeID, Cwd: actor.cwd, Name: actor.name,
-		PermissionMode: actor.permission, ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox,
-		Resume: resume, Unarchive: unarchive,
+	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
+		ProductID: actor.product, LaneID: actor.id, Name: actor.name, ResumeNativeID: actor.nativeID,
+		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
+		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox, Unarchive: unarchive,
 	})
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	if err := c.recordLaneNativeID(runtime, actor, thread.ID); err != nil {
+	if err := c.recordLaneNativeID(runtime, actor, session.NativeSessionID); err != nil {
 		if !resume {
-			_ = adapter.Archive(context.Background(), thread.ID)
-		}
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	nativeTurnID, err := adapter.StartTurn(c.ctx, daemonpkg.CodexLanePrompt{
-		ThreadID: thread.ID, Prompt: prompt, Effort: actor.effort,
-		ApprovalPolicy: thread.ApprovalPolicy, Sandbox: thread.Sandbox,
-		SchemaPath: actor.schema, Arguments: append([]string(nil), actor.arguments...),
-	})
-	if err != nil {
-		if !resume {
-			_ = adapter.Archive(context.Background(), thread.ID)
+			_ = driver.Archive(context.Background(), session)
 		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	c.mu.Lock()
-	actor.nativeTurnID = nativeTurnID
+	actor.nativeGeneration = session.Generation
+	c.mu.Unlock()
+	turn, err := driver.StartTurn(c.ctx, session, productruntime.TurnStartRequest{
+		Prompt: prompt, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
+		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox, Effort: actor.effort, SchemaPath: actor.schema,
+	})
+	if err != nil {
+		if !resume {
+			_ = driver.Archive(context.Background(), session)
+		}
+		return c.failLaneDispatch(runtime, actor, err)
+	}
+	c.mu.Lock()
+	actor.nativeTurnID = turn.NativeTurnID
 	c.mu.Unlock()
 	turnCtx, cancel := laneTurnContext(c.ctx, actor.turnTimeout)
 	if err := c.beginLaneExecution(runtime, actor, cancel); err != nil {
 		cancel()
 		if !resume {
-			_ = adapter.Archive(context.Background(), thread.ID)
+			_ = driver.Archive(context.Background(), session)
 		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	go c.watchCodexLaneTurn(runtime, actor, adapter, thread.ID, nativeTurnID, turnCtx, cancel)
+	go c.watchProductLaneTurn(runtime, actor, driver, turn, turnCtx, cancel)
 	return nil
 }
 
-func (c *hostCoordinator) watchCodexLaneTurn(
+func (c *hostCoordinator) watchProductLaneTurn(
 	runtime *daemonpkg.Runtime,
 	actor *laneActor,
-	adapter *daemonpkg.CodexLaneAdapter,
-	threadID, nativeTurnID string,
+	driver productruntime.LaneDriver,
+	turn productruntime.NativeTurnRef,
 	turnCtx context.Context,
 	cancel context.CancelFunc,
 ) {
 	c.mu.Lock()
 	dispatchedTurnID, dispatchedDone := actor.turnID, actor.done
 	c.mu.Unlock()
-	result, waitErr := adapter.Wait(turnCtx, threadID, nativeTurnID)
-	if waitErr != nil && c.ctx.Err() != nil {
-		// Service shutdown transfers ownership to the successor daemon. Do not
-		// terminalize or interrupt the product-owned App Server turn here.
-		cancel()
-		return
+	result, waitErr := driver.WaitTurn(turnCtx, turn)
+	outcome := string(result.Outcome)
+	if result.Outcome == productruntime.TurnTimedOut {
+		outcome = "timed_out"
 	}
-	outcome := result.Outcome
 	if outcome == "" {
 		outcome = "failed"
 	}
 	if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
 		outcome = "timed_out"
 		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = adapter.Interrupt(interruptCtx, threadID, nativeTurnID)
+		_ = driver.Interrupt(interruptCtx, turn)
 		interruptCancel()
 	}
 	cancel()
@@ -1338,17 +1260,6 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 	return nil
 }
 
-func parseCodexStartedThreadID(line []byte) string {
-	var event struct {
-		Type     string `json:"type"`
-		ThreadID string `json:"thread_id"`
-	}
-	if json.Unmarshal(line, &event) != nil || event.Type != "thread.started" || !looksLikeUUID(event.ThreadID) {
-		return ""
-	}
-	return event.ThreadID
-}
-
 func laneTurnContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout > 0 {
 		return context.WithTimeout(parent, timeout)
@@ -1474,20 +1385,15 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 	if actor == nil {
 		return nil
 	}
-	switch actor.product {
-	case "codex":
-		if !looksLikeUUID(actor.nativeID) {
+	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
+		if actor.nativeID == "" {
 			return nil
 		}
-		native, err := c.codexNative()
-		if err != nil {
-			return err
-		}
-		adapter, err := newCodexLaneAdapter(native)
-		if err != nil {
-			return err
-		}
-		return adapter.Archive(context.Background(), actor.nativeID)
+		return driver.Archive(context.Background(), productruntime.NativeSessionRef{
+			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
+		})
+	}
+	switch actor.product {
 	case "claude":
 		return c.claudeLanes.Archive(actor.id)
 	case "grok":
@@ -1502,8 +1408,6 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 type cappedLaneBuffer struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
-	parsed int
-	onLine func([]byte) error
 }
 
 func (b *cappedLaneBuffer) Write(p []byte) (int, error) {
@@ -1513,25 +1417,7 @@ func (b *cappedLaneBuffer) Write(p []byte) (int, error) {
 		return 0, errors.New("native lane output exceeded 16 MiB")
 	}
 	n, err := b.buffer.Write(p)
-	lines := make([][]byte, 0)
-	if err == nil && b.onLine != nil {
-		body := b.buffer.Bytes()
-		for {
-			relative := bytes.IndexByte(body[b.parsed:], '\n')
-			if relative < 0 {
-				break
-			}
-			end := b.parsed + relative
-			lines = append(lines, append([]byte(nil), body[b.parsed:end]...))
-			b.parsed = end + 1
-		}
-	}
 	b.mu.Unlock()
-	for _, line := range lines {
-		if callbackErr := b.onLine(line); callbackErr != nil {
-			return n, callbackErr
-		}
-	}
 	return n, err
 }
 
@@ -1553,33 +1439,6 @@ func laneNativeCommand(actor *laneActor, prompt string, resume bool) (*exec.Cmd,
 	}
 	args := make([]string, 0, 16+len(actor.arguments))
 	switch actor.product {
-	case "codex":
-		if resume {
-			args = append(args, "exec", "resume", actor.nativeID, "--json", "--skip-git-repo-check")
-		} else {
-			args = append(args, "exec", "--json", "--skip-git-repo-check", "-C", actor.cwd)
-		}
-		if actor.permission == "bypassPermissions" {
-			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-		}
-		if actor.approvalPolicy != "" && actor.permission != "bypassPermissions" {
-			args = append(args, "-c", fmt.Sprintf("approval_policy=%q", actor.approvalPolicy))
-		}
-		if actor.sandbox != "" && actor.permission != "bypassPermissions" {
-			if resume {
-				args = append(args, "-c", fmt.Sprintf("sandbox_mode=%q", actor.sandbox))
-			} else {
-				args = append(args, "--sandbox", actor.sandbox)
-			}
-		}
-		if actor.effort != "" {
-			args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", actor.effort))
-		}
-		if actor.schema != "" {
-			args = append(args, "--output-schema", actor.schema)
-		}
-		args = append(args, actor.arguments...)
-		args = append(args, prompt)
 	case "claude":
 		command, commandErr := daemonpkg.NewClaudeLaneAdapter().Command(daemonpkg.ClaudeLaneRequest{
 			LaneID: actor.id, NativeSession: actor.nativeID, Name: actor.name, Prompt: prompt,
@@ -1659,7 +1518,7 @@ func laneWorkerEnvironment(input []string, actor *laneActor) []string {
 }
 
 //nolint:gocyclo // Native result decoding accepts the documented result forms for all four products.
-func parseLaneNativeResult(product string, body []byte) (string, string) {
+func parseLaneNativeResult(body []byte) (string, string) {
 	var documents []any
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) > 0 && trimmed[0] == '[' {
@@ -1698,7 +1557,7 @@ func parseLaneNativeResult(product string, body []byte) (string, string) {
 						result = text
 					}
 				case "text":
-					if text != "" && (product == "codex" || result == "") {
+					if text != "" && result == "" {
 						result = text
 					}
 				}

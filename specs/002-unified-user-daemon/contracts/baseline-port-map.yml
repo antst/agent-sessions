@@ -750,14 +750,13 @@ entries:
       - internal/daemon/adapter_grok_test.go:TestGrokAdapterAuthorizesExactTUIOrPrivateLeaderConnector
       - internal/daemon/adapter_qwen_test.go:TestQwenAdapterAdoptsExactDualOutputEvidence
       - internal/daemon/adapter_qwen_test.go:TestQwenAdapterAuthorizesOnlyNativeTUIOrDescendant
-      - cmd/agent-sessions/lane_test.go:TestCodexNativeBypassOptionIsCanonicalizedExactlyOnce
+      - cmd/agent-sessions/lane_test.go:TestCodexNativeBypassOptionIsCanonicalizedBeforeDriverDispatch
       - cmd/agent-sessions/lane_test.go:TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup
       - cmd/agent-sessions/lane_test.go:TestClaudeInboundPeerFrameDispatchesAsOrdinaryNativeQuery
       - cmd/agent-sessions/lane_test.go:TestParentDetachRetiresActiveLaneAndPreservesPersistentLane
       - cmd/agent-sessions/lane_test.go:TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch
-      - cmd/agent-sessions/lane_test.go:TestCodexJSONStreamPublishesNativeIdentityBeforeProcessExit
-      - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterPreservesAppServerStartResumePolicyAndNativeCallbacks
-      - internal/daemon/adapter_codex_lane_test.go:TestCodexLaneAdapterRejectsChangedResumeAndTerminalIdentity
+      - internal/products/codex/lane_test.go:TestLaneDriverTranslatesStartResumeTurnAndLifecycle
+      - internal/products/codex/lane_test.go:TestLaneDriverRejectsNativeIdentitySubstitution
       - internal/daemon/adapter_claude_lane_test.go:TestClaudeLaneAdapterBuildsExactWorkerTranscriptAndPermissionArguments
       - internal/daemon/adapter_claude_lane_test.go:TestClaudeLaneAdapterAllowsOneStreamWorkerAndInterruptsBeforeArchive
       - internal/daemon/adapter_grok_lane_test.go:TestGrokLaneAdapterIsSoleACPDriverAndPreservesExplicitPolicy

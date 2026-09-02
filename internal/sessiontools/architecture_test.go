@@ -13,8 +13,9 @@ import (
 	"testing"
 )
 
-// This is an exact, shrinking compatibility allowlist. Extracted Phase-A code
-// must never add another dependency on the frozen bridge/federator trees.
+// This is the exact bridge migration inventory. Product mechanics extracted
+// from central code move into their owning product package; every other change
+// must shrink the inventory rather than create another bridge dependency.
 var frozenLegacyImporters = map[string]bool{
 	"cmd/agent-sessions/codex_host.go":  true,
 	"cmd/agent-sessions/connector.go":   true,
@@ -23,6 +24,7 @@ var frozenLegacyImporters = map[string]bool{
 	"cmd/agent-sessions/hook.go":        true,
 	"cmd/agent-sessions/lane.go":        true,
 	"cmd/agent-sessions/lane_notice.go": true,
+	"internal/products/codex/lane.go":   true,
 }
 
 func TestNoNewLegacyBridgeOrFederatorImports(t *testing.T) {

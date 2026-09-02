@@ -13,6 +13,9 @@ import (
 
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/permissionmode"
+	"github.com/antst/agent-sessions/internal/productruntime"
+	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
@@ -232,7 +235,7 @@ func TestParseUnifiedLaneCommandRejectsLegacyNotifyBeforeRegistration(t *testing
 	}
 }
 
-func TestCodexNativeBypassOptionIsCanonicalizedExactlyOnce(t *testing.T) {
+func TestCodexNativeBypassOptionIsCanonicalizedBeforeDriverDispatch(t *testing.T) {
 	got, err := parseUnifiedLaneCommand([]string{
 		"start", "--name", "worker", "--dangerously-bypass-approvals-and-sandbox", "-",
 	})
@@ -242,21 +245,16 @@ func TestCodexNativeBypassOptionIsCanonicalizedExactlyOnce(t *testing.T) {
 	if got.permission != "bypassPermissions" || len(got.native) != 0 {
 		t.Fatalf("parsed native bypass = %+v", got)
 	}
-	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/echo")
-	command, err := laneNativeCommand(&laneActor{
-		product: "codex", cwd: t.TempDir(), permission: got.permission, arguments: got.native,
-	}, "prompt", false)
+	native := &delayedCodexLaneNative{}
+	driver, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) { return native, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	count := 0
-	for _, argument := range command.Args {
-		if argument == "--dangerously-bypass-approvals-and-sandbox" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("Codex native argv = %q, bypass flag count = %d", command.Args, count)
+	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: codexproduct.ProductID, LaneID: "lane", Name: "worker", Cwd: t.TempDir(),
+		PermissionMode: permissionmode.BypassPermissions,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -340,12 +338,22 @@ func TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup(t *testing.T)
 		turnTimeout: 20 * time.Millisecond, done: make(chan struct{}),
 	}
 	coordinator := newHostCoordinator(context.Background(), root)
+	native := &delayedCodexLaneNative{setupDelay: 2 * actor.turnTimeout}
+	driver, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) { return native, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
+		codexproduct.ProductID: driver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := coordinator.commitNewLane(runtime, actor); err != nil {
 		t.Fatal(err)
 	}
-	native := &delayedCodexLaneNative{setupDelay: 2 * actor.turnTimeout}
 	started := time.Now()
-	if err := coordinator.dispatchCodexLaneTurnWithNative(runtime, actor, "work", false, false, native); err != nil {
+	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", false, false, driver); err != nil {
 		t.Fatalf("dispatch after slow native setup: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed < native.setupDelay {
@@ -662,40 +670,6 @@ func TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch(t *testing.
 	alreadyArchived, _ := result["already_archived"].(bool)
 	if !alreadyArchived || openCalls != 0 {
 		t.Fatalf("idempotent archive result=%#v native opens=%d", result, openCalls)
-	}
-}
-
-func TestCodexJSONStreamPublishesNativeIdentityBeforeProcessExit(t *testing.T) {
-	var observed string
-	buffer := cappedLaneBuffer{onLine: func(line []byte) error {
-		observed = parseCodexStartedThreadID(line)
-		return nil
-	}}
-	first := []byte(`{"type":"thread.started","thread_id":"01a04e44-c2f3-7761-b572-3bdd457f141c"}` + "\n" + `{"type":"item.started"`)
-	if _, err := buffer.Write(first); err != nil {
-		t.Fatal(err)
-	}
-	if observed != "01a04e44-c2f3-7761-b572-3bdd457f141c" {
-		t.Fatalf("early Codex identity = %q", observed)
-	}
-	if _, err := buffer.Write([]byte("}\n")); err != nil {
-		t.Fatal(err)
-	}
-	if string(buffer.Bytes()) != string(first)+"}\n" {
-		t.Fatalf("captured stream = %q", buffer.Bytes())
-	}
-}
-
-func TestCodexStreamIgnoresLaneMetadataUUIDs(t *testing.T) {
-	laneID := "24f498a0-5367-498e-8ba5-2b7937ce3599"
-	for _, line := range []string{
-		`{"type":"item.completed","thread_id":"` + laneID + `"}`,
-		`{"type":"tool.call","session_id":"` + laneID + `"}`,
-		`{"type":"thread.started","thread_id":"not-a-uuid"}`,
-	} {
-		if got := parseCodexStartedThreadID([]byte(line)); got != "" {
-			t.Fatalf("non-start event selected native identity %q from %s", got, line)
-		}
 	}
 }
 

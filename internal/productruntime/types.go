@@ -123,11 +123,15 @@ type LaneCapabilitySet struct {
 type LaneOpenRequest struct {
 	ProductID       string
 	LaneID          string
+	Name            string
 	ResumeNativeID  string
 	Cwd             string
 	PermissionMode  permissionmode.Mode
 	ProfileIdentity string
 	Arguments       []string
+	ApprovalPolicy  string
+	Sandbox         string
+	Unarchive       bool
 }
 
 type NativeSessionRef struct {
@@ -139,6 +143,11 @@ type NativeSessionRef struct {
 type TurnStartRequest struct {
 	Prompt         string
 	PermissionMode permissionmode.Mode
+	Arguments      []string
+	ApprovalPolicy string
+	Sandbox        string
+	Effort         string
+	SchemaPath     string
 }
 
 type NativeTurnRef struct {
