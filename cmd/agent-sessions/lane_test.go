@@ -155,8 +155,14 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 	if len(candidates) != 1 || !reflect.DeepEqual(candidates[0].SecondaryGroups, []string{"project/child"}) {
 		t.Fatalf("stored candidates = %+v", candidates)
 	}
-	if err := engine.Remember(candidates[0]); err != nil {
-		t.Fatalf("stable candidate was not idempotent: %v", err)
+	parent := daemonpkg.ManagedAttachment{ID: "parent", Groups: []string{"project"}}
+	actor.explicitGroups = []string{"project/child"}
+	actor.groups, err = coordinator.effectiveLaneGroups(runtime, actor, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.commitNewLane(runtime, actor); err != nil {
+		t.Fatalf("resume rebuilt different candidate ownership: %v", err)
 	}
 }
 

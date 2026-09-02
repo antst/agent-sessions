@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -58,6 +59,27 @@ func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveC
 	}
 	if strings.Contains(string(body), secret) {
 		t.Fatalf("operator roster leaked sensitive catalog content: %s", body)
+	}
+}
+
+func TestLaneRosterUsesItsParentPrefixedPrivateGroupWithoutPeerAnchor(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	primary := "session:" + runtime.HostID() + "/parent"
+	coordinator.lanes["temporary"] = &laneActor{
+		id: "temporary", nativeID: "native", name: "worker", product: "codex", state: "idle",
+		groups: []string{primary, primary + "/native"},
+	}
+	body, err := coordinator.operatorRoster(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report operatorRosterReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Local) != 1 || !reflect.DeepEqual(report.Local[0].Groups, []string{primary, primary + "/native"}) {
+		t.Fatalf("lane roster = %+v", report.Local)
 	}
 }
 

@@ -1828,7 +1828,14 @@ func (c *hostCoordinator) effectiveLaneGroups(runtime *daemonpkg.Runtime, actor 
 	if actor.inheritGroups {
 		groups = append(groups, parent.Groups...)
 	}
-	return c.anchorLaneGroups(runtime, uniqueStrings(groups), parent, actor.id)
+	return c.anchorLaneGroups(runtime, uniqueStrings(groups), parent, laneGroupIdentity(actor))
+}
+
+func laneGroupIdentity(actor *laneActor) string {
+	if actor.nativeID != "" {
+		return actor.nativeID
+	}
+	return actor.id
 }
 
 func validateLaneGroupNames(requested, parentGroups []string) error {

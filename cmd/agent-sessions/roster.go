@@ -128,7 +128,7 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 			Kind: "lane", Scope: "local", ID: lane.id, LocalID: lane.id,
 			NativeSessionID: lane.nativeID, Name: operatorDefaultString(lane.name, lane.id),
 			HostID: hostID, HostName: hostName, Product: lane.product, State: lane.state,
-			Live: true, Cwd: lane.cwd, Groups: operatorLocalGroups(hostID, lane.id, lane.groups),
+			Live: true, Cwd: lane.cwd, Groups: append([]string(nil), lane.groups...),
 			PermissionMode: lane.permission, OwnerSessionID: lane.parentID, Persistent: lane.persistent,
 		})
 		report.Summary.LocalLanes++
