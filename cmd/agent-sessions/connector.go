@@ -63,7 +63,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 				if product == connectorProductQwen {
 					sourceID, _ = qwenLaunchSessionID(os.Getenv(launcher.QwenEventsFileEnv))
 				}
-				return callConnectorDaemonTool(callCtx, sourceID, id, method, params)
+				return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
 			}
 			return live.Call(callCtx, id, method, params)
 		},
@@ -83,7 +83,7 @@ func connectorDeclinesForeignManagedProduct(requestedProduct, resolvedProduct st
 }
 
 func callConnectorDaemonTool(
-	ctx context.Context,
+	ctx context.Context, product string,
 	sourceID, requestID, method string,
 	params json.RawMessage,
 ) (json.RawMessage, error) {
@@ -94,7 +94,7 @@ func callConnectorDaemonTool(
 	if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
 		return nil, fmt.Errorf("connector tool call is invalid")
 	}
-	sourceID = connectorToolSource(sourceID, call.Arguments)
+	sourceID = connectorToolSource(product, sourceID, params, call.Arguments)
 	payload, err := json.Marshal(connectorToolEnvelope{
 		SourceID: sourceID, RequestID: requestID, Name: call.Name, Arguments: call.Arguments,
 	})
@@ -115,7 +115,12 @@ func callConnectorDaemonTool(
 	return append(json.RawMessage(nil), response.Payload...), nil
 }
 
-func connectorToolSource(ambient string, arguments map[string]any) string {
+func connectorToolSource(product, ambient string, params json.RawMessage, arguments map[string]any) string {
+	if product == connectorProductCodex {
+		sourceID, _ := sessiontools.StdioMCPThreadID(params)
+		delete(arguments, "session_id")
+		return sourceID
+	}
 	sourceID := strings.TrimSpace(ambient)
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(mapString(arguments, "session_id"))

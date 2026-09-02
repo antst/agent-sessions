@@ -55,6 +55,11 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	if len(required) != 1 || required[0] != "message" {
 		t.Fatalf("non-session requirements were lost: %v", required)
 	}
+	codexSendSchema := tools[1]["inputSchema"].(map[string]any)
+	codexProperties := codexSendSchema["properties"].(map[string]any)
+	if _, present := codexProperties["session_id"]; present {
+		t.Fatal("Codex still asks the model to restate its host-supplied thread identity")
+	}
 	for _, product := range []string{"opencode", "kilo", "pi", "omp", "dsh"} {
 		instruction, instructionErr := ProductMCPInstructions(product)
 		productTools, toolsErr := ProductMCPTools(product)
@@ -118,25 +123,25 @@ func TestWrapPeerMessageBoundsAndStripsSafeAttributes(t *testing.T) {
 	}
 }
 
-func TestStdioMCPThreadIDRequiresCorroboratingNativeMetadata(t *testing.T) {
-	params := json.RawMessage(`{"_meta":{"threadId":"thread-123","x-codex-turn-metadata":{"session_id":"session-123","thread_id":"thread-123"}}}`)
+func TestStdioMCPThreadIDUsesProductHostThreadMetadata(t *testing.T) {
+	params := json.RawMessage(`{"_meta":{"threadId":"thread-123"}}`)
 	if got, err := StdioMCPThreadID(params); err != nil || got != "thread-123" {
 		t.Fatalf("thread id = %q, %v", got, err)
 	}
-	for _, input := range []json.RawMessage{nil, json.RawMessage(`{}`), json.RawMessage(`{"_meta":{"threadId":"thread-123","x-codex-turn-metadata":{"session_id":"session-123","thread_id":"other-123"}}}`)} {
+	for _, input := range []json.RawMessage{nil, json.RawMessage(`{}`), json.RawMessage(`{"_meta":{"threadId":"bad/thread"}}`)} {
 		if got, err := StdioMCPThreadID(input); !errors.Is(err, ErrConnectorInactive) || got != "" {
-			t.Fatalf("forged metadata = %q, %v", got, err)
+			t.Fatalf("invalid host metadata = %q, %v", got, err)
 		}
 	}
 }
 
 func TestStdioMCPThreadIDNormalizesBoundedOpaqueColonIdentity(t *testing.T) {
-	params := json.RawMessage(`{"_meta":{"threadId":" thread:123 ","x-codex-turn-metadata":{"session_id":"session:123","thread_id":"thread:123"}}}`)
+	params := json.RawMessage(`{"_meta":{"threadId":" thread:123 "}}`)
 	if got, err := StdioMCPThreadID(params); err != nil || got != "thread:123" {
 		t.Fatalf("thread id = %q, %v", got, err)
 	}
 	tooLong := strings.Repeat("a", 129)
-	params = json.RawMessage(`{"_meta":{"threadId":"` + tooLong + `","x-codex-turn-metadata":{"session_id":"session:123","thread_id":"` + tooLong + `"}}}`)
+	params = json.RawMessage(`{"_meta":{"threadId":"` + tooLong + `"}}`)
 	if got, err := StdioMCPThreadID(params); !errors.Is(err, ErrConnectorInactive) || got != "" {
 		t.Fatalf("overlong thread id = %q, %v", got, err)
 	}

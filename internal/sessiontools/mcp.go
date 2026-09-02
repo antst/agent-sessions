@@ -23,11 +23,11 @@ type mcpToolPolicy struct {
 	contextName        string
 	sessionDescription string
 	allowedTools       map[string]bool
-	requiresSession    bool
+	omitSession        bool
 }
 
 var mcpToolPolicies = map[string]mcpToolPolicy{
-	"codex": {requiresSession: true},
+	"codex": {contextName: "Codex", omitSession: true},
 	"claude": {
 		contextName:        "managed Claude",
 		sessionDescription: "Optional context for this live Claude session UUID.",
@@ -61,14 +61,6 @@ func ProductMCPTools(product string) ([]map[string]any, error) {
 	}
 	policy := mcpToolPolicies[product]
 	definitions := baseToolDefinitions()
-	// The original Codex surface was authored as []string requirements. Each
-	// call already receives a fresh definition tree, so return it directly and
-	// preserve that public Go shape. The non-Codex projections historically
-	// passed through JSON before removing model-supplied session authority; keep
-	// that []any shape for exact original-four compatibility.
-	if policy.requiresSession {
-		return definitions, nil
-	}
 	body, err := json.Marshal(definitions)
 	if err != nil {
 		return nil, err
@@ -88,7 +80,9 @@ func ProductMCPTools(product string) ([]map[string]any, error) {
 		schema, _ := definition["inputSchema"].(map[string]any)
 		removeRequired(schema, "session_id")
 		properties, _ := schema["properties"].(map[string]any)
-		if session, ok := properties["session_id"].(map[string]any); ok {
+		if policy.omitSession {
+			delete(properties, "session_id")
+		} else if session, ok := properties["session_id"].(map[string]any); ok {
 			session["description"] = policy.sessionDescription
 		}
 		filtered = append(filtered, definition)

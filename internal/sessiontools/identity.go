@@ -15,19 +15,16 @@ import (
 
 var ErrConnectorInactive = errors.New("connector is inactive")
 
-// StdioMCPThreadID extracts only Codex-owned native metadata. Model arguments
-// and session-family identity cannot borrow another thread's authority.
+// StdioMCPThreadID extracts the current thread claim supplied by the Codex MCP
+// host on every tool invocation. Model arguments are deliberately ignored.
 func StdioMCPThreadID(params json.RawMessage) (string, error) {
 	var envelope map[string]any
 	if json.Unmarshal(params, &envelope) != nil {
 		return "", ErrConnectorInactive
 	}
 	meta, _ := envelope["_meta"].(map[string]any)
-	turnMeta, _ := meta["x-codex-turn-metadata"].(map[string]any)
-	threadID, threadOK := normalizeNativeID(stringValue(meta["threadId"]))
-	_, sessionOK := normalizeNativeID(stringValue(turnMeta["session_id"]))
-	turnThreadID, turnOK := normalizeNativeID(stringValue(turnMeta["thread_id"]))
-	if !threadOK || !sessionOK || !turnOK || turnThreadID != threadID {
+	threadID, ok := normalizeNativeID(stringValue(meta["threadId"]))
+	if !ok {
 		return "", ErrConnectorInactive
 	}
 	return threadID, nil
