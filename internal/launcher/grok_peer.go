@@ -122,7 +122,7 @@ func RunGrokPeer(ctx context.Context, args []string, run GrokNativeRunner) error
 		Executable: grok, Cwd: plan.requestedCwd, LeaderSocket: leaderSocket,
 		LeaderArguments: []string{
 			"--permission-mode", "default", "agent", "leader", "--leader-socket", leaderSocket,
-			"--no-exit-on-disconnect", "--relay-on-demand", "--no-auto-update",
+			"--relay-on-demand", "--no-auto-update",
 		},
 		LeaderEnvironment: leaderEnvironment, TUIArguments: managed, TUIEnvironment: environment,
 		SessionID: plan.sessionID, RequestedName: plan.peerName, LateBoundResume: plan.lateBoundResume,

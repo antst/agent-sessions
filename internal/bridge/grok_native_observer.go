@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // GrokNativeObserver is the legacy ACP observer/interjection transport,
@@ -16,6 +17,36 @@ import (
 type GrokNativeObserver struct {
 	client    *grokACPClient
 	sessionID string
+}
+
+// GrokNativeStartupHold is one authenticated native leader client kept open
+// while the interactive client passes through its transient startup connects.
+type GrokNativeStartupHold struct {
+	once   sync.Once
+	client *grokACPClient
+}
+
+func OpenGrokNativeStartupHold(
+	ctx context.Context,
+	bin, cwd, leaderSocket string,
+	environment []string,
+	diagnostics io.Writer,
+) (*GrokNativeStartupHold, error) {
+	if ctx == nil || !strings.HasPrefix(leaderSocket, "/") {
+		return nil, errors.New("invalid Grok ACP startup hold")
+	}
+	client, err := openGrokAuthenticatedClient(ctx, bin, cwd, leaderSocket, "", environment, diagnostics)
+	if err != nil {
+		return nil, err
+	}
+	return &GrokNativeStartupHold{client: client}, nil
+}
+
+func (hold *GrokNativeStartupHold) Close() {
+	if hold == nil {
+		return
+	}
+	hold.once.Do(func() { hold.client.close() })
 }
 
 // OpenGrokNativeObserver connects to one private leader, performs the exact
@@ -52,6 +83,38 @@ func openGrokNativeObserver(
 	if ctx == nil || !validSessionID(sessionID) || !strings.HasPrefix(leaderSocket, "/") {
 		return nil, "", errors.New("invalid Grok ACP observer identity")
 	}
+	client, err := openGrokAuthenticatedClient(ctx, bin, cwd, leaderSocket, sessionID, environment, diagnostics)
+	if err != nil {
+		return nil, "", err
+	}
+	fail := func(cause error) (*GrokNativeObserver, string, error) {
+		client.close()
+		return nil, "", cause
+	}
+	rosterCtx, cancel := context.WithTimeout(ctx, grokACPStartupTimeout)
+	defer cancel()
+	roster, err := client.request(rosterCtx, "_x.ai/sessions/list", map[string]any{})
+	if err != nil {
+		return fail(err)
+	}
+	selectedID := sessionID
+	if selectResident {
+		selectedID, _, err = grokSelectedResidentSession(roster)
+	} else {
+		_, err = grokRosterStateFromResponse(roster, sessionID)
+	}
+	if err != nil {
+		return fail(err)
+	}
+	return &GrokNativeObserver{client: client, sessionID: selectedID}, selectedID, nil
+}
+
+func openGrokAuthenticatedClient(
+	ctx context.Context,
+	bin, cwd, leaderSocket, sessionID string,
+	environment []string,
+	diagnostics io.Writer,
+) (*grokACPClient, error) {
 	command := exec.CommandContext(ctx, bin, //nolint:gosec // Exact native binary is selected and validated by the daemon preparation.
 		"--no-auto-update", "--permission-mode", "default",
 		"--leader-socket", leaderSocket, "agent", "--leader", "stdio",
@@ -64,20 +127,20 @@ func openGrokNativeObserver(
 	command.Stderr = diagnostics
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	process, err := startGrokManagedProcess(command, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	client := newGrokACPClient(process, stdin, stdout, sessionID, 1, make(chan grokRosterState, 4))
-	fail := func(cause error) (*GrokNativeObserver, string, error) {
+	fail := func(cause error) (*grokACPClient, error) {
 		client.close()
-		return nil, "", cause
+		return nil, cause
 	}
 	handshake, cancel := context.WithTimeout(ctx, grokACPStartupTimeout)
 	defer cancel()
@@ -98,20 +161,7 @@ func openGrokNativeObserver(
 	}); err != nil {
 		return fail(err)
 	}
-	roster, err := client.request(handshake, "_x.ai/sessions/list", map[string]any{})
-	if err != nil {
-		return fail(err)
-	}
-	selectedID := sessionID
-	if selectResident {
-		selectedID, _, err = grokSelectedResidentSession(roster)
-	} else {
-		_, err = grokRosterStateFromResponse(roster, sessionID)
-	}
-	if err != nil {
-		return fail(err)
-	}
-	return &GrokNativeObserver{client: client, sessionID: selectedID}, selectedID, nil
+	return client, nil
 }
 
 // Interject delivers exactly one immutable message to the resident actor.

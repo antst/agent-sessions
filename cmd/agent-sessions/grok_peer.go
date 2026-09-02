@@ -18,6 +18,9 @@ import (
 const grokPeerReadyTimeout = 15 * time.Second
 
 func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) error {
+	var startupHold *bridge.GrokNativeStartupHold
+	defer func() { startupHold.Close() }()
+
 	leader := exec.Command(launch.Executable, launch.LeaderArguments...) //nolint:gosec // resolved product executable and structured argv.
 	leader.Dir = launch.Cwd
 	leader.Env = append([]string(nil), launch.LeaderEnvironment...)
@@ -33,7 +36,15 @@ func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) er
 		{
 			role: "Grok private leader", command: leader,
 			ready: func(readyCtx context.Context) error {
-				return waitForGrokSocket(readyCtx, launch.LeaderSocket, grokPeerReadyTimeout)
+				if err := waitForGrokSocket(readyCtx, launch.LeaderSocket, grokPeerReadyTimeout); err != nil {
+					return err
+				}
+				var err error
+				startupHold, err = bridge.OpenGrokNativeStartupHold(
+					readyCtx, launch.Executable, launch.Cwd, launch.LeaderSocket,
+					launch.LeaderEnvironment, os.Stderr,
+				)
+				return err
 			},
 		},
 		{role: "Grok TUI", command: tui, primary: true},
@@ -43,6 +54,7 @@ func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) er
 			return launcherHeldIdentity{}, err
 		}
 		defer observer.Close()
+		startupHold.Close()
 		name := ""
 		if launch.RequestedName != "" {
 			if err := observer.Rename(confirmCtx, launch.RequestedName); err != nil {
