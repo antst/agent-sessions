@@ -55,6 +55,13 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	if len(required) != 1 || required[0] != "message" {
 		t.Fatalf("non-session requirements were lost: %v", required)
 	}
+	for _, product := range []string{"opencode", "kilo", "pi", "omp", "codebuddy", "dsh"} {
+		instruction, instructionErr := ProductMCPInstructions(product)
+		productTools, toolsErr := ProductMCPTools(product)
+		if instructionErr != nil || instruction == "" || toolsErr != nil || len(productTools) != 7 {
+			t.Fatalf("%s MCP surface = instruction %q err %v, tools %d err %v", product, instruction, instructionErr, len(productTools), toolsErr)
+		}
+	}
 }
 
 func TestWrapPeerMessageValidatesProductAndEscapesEnvelope(t *testing.T) {

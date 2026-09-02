@@ -10,6 +10,8 @@ import (
 
 const maxMCPInputBytes = 1 << 20
 
+const genericInstructions = "Use these structured tools for Agent Sessions peer discovery, live messaging, and lane lifecycle operations from this managed product session. The current live product session supplies the caller identity; session_id is optional context."
+
 var instructions = map[string]string{
 	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls activate only when Codex supplies host-owned metadata matching an attested grouped peer thread; session_id is optional corroboration.",
 	"claude": "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, reply, and Codex, Claude, Grok, or Qwen lane lifecycle operation from this managed Claude session. Use lane instead of invoking a product lane executable through Bash; the Agent Sessions daemon owns the background worker and lifecycle. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text. This MCP process activates only for exact ancestry from the live native Claude adapter plus its matching grouped host-agent registration; no model-supplied session_id is required.",
@@ -45,9 +47,9 @@ func ProductMCPInstructions(product string) (string, error) {
 	if _, ok := productcatalog.ByID(product); !ok {
 		return "", fmt.Errorf("MCP instruction product %q is unsupported", product)
 	}
-	instruction, ok := instructions[product]
-	if !ok {
-		return "", fmt.Errorf("MCP instructions for product %q are unavailable", product)
+	instruction := instructions[product]
+	if instruction == "" {
+		instruction = genericInstructions
 	}
 	return instruction, nil
 }
@@ -57,10 +59,7 @@ func ProductMCPTools(product string) ([]map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("MCP tool product %q is unsupported", product)
 	}
-	policy, ok := mcpToolPolicies[product]
-	if !ok {
-		return nil, fmt.Errorf("MCP tool policy for product %q is unavailable", product)
-	}
+	policy := mcpToolPolicies[product]
 	definitions := baseToolDefinitions()
 	// The original Codex surface was authored as []string requirements. Each
 	// call already receives a fresh definition tree, so return it directly and
