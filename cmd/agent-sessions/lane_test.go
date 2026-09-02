@@ -37,6 +37,8 @@ type delayedCodexLaneNative struct {
 	setupDelay           time.Duration
 	setupHadDeadline     bool
 	turnStartHadDeadline bool
+	turnStartErr         error
+	archived             []string
 }
 
 func (n *delayedCodexLaneNative) StartThread(ctx context.Context, _ bridge.CodexStartRequest) (bridge.CodexNativeThread, error) {
@@ -58,6 +60,9 @@ func (n *delayedCodexLaneNative) PrepareLaneThread(ctx context.Context, id, _, _
 
 func (n *delayedCodexLaneNative) StartLaneTurn(ctx context.Context, _ bridge.CodexLaneTurnRequest) (string, error) {
 	_, n.turnStartHadDeadline = ctx.Deadline()
+	if n.turnStartErr != nil {
+		return "", n.turnStartErr
+	}
 	return "native-turn", nil
 }
 
@@ -67,7 +72,48 @@ func (*delayedCodexLaneNative) WaitLaneTurn(ctx context.Context, threadID, turnI
 }
 
 func (*delayedCodexLaneNative) InterruptLaneTurn(context.Context, string, string) error { return nil }
-func (*delayedCodexLaneNative) ArchiveThread(context.Context, string) error             { return nil }
+func (n *delayedCodexLaneNative) ArchiveThread(_ context.Context, id string) error {
+	n.archived = append(n.archived, id)
+	return nil
+}
+
+func TestProductLaneTurnFailureLeavesNativeSessionForExplicitLifecycle(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	coordinator := newHostCoordinator(context.Background(), root)
+	native := &delayedCodexLaneNative{turnStartErr: errors.New("native turn refused")}
+	driver, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) { return native, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := &laneActor{
+		id: "lane", parentID: "parent", product: "codex", name: "worker", cwd: root,
+		permission: "default", turnID: "turn", state: "preparing", done: make(chan struct{}),
+	}
+	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", driver); !errors.Is(err, native.turnStartErr) {
+		t.Fatalf("dispatch error = %v", err)
+	}
+	if actor.state != "terminal" || actor.nativeID != "00000000-0000-0000-0000-000000000001" {
+		t.Fatalf("terminal actor = %+v", actor)
+	}
+	if len(native.archived) != 0 {
+		t.Fatalf("turn failure archived native sessions %v", native.archived)
+	}
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"codex": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.archiveNativeLane(actor); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(native.archived, []string{actor.nativeID}) {
+		t.Fatalf("explicit archive calls = %v", native.archived)
+	}
+}
 
 func TestParseUnifiedLaneCommandRejectsMissingValuesAndPreservesNativeArguments(t *testing.T) {
 	for _, args := range [][]string{{"run", "--name"}, {"run", "--cwd"}, {"wait", "lane", "--timeout"}, {"run", "--permission-mode"}, {"run", "--model"}} {
@@ -353,7 +399,7 @@ func TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup(t *testing.T)
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", false, driver); err != nil {
+	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", driver); err != nil {
 		t.Fatalf("dispatch after slow native setup: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed < native.setupDelay {

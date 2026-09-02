@@ -948,7 +948,7 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	actor.state = "preparing"
 	c.mu.Unlock()
 	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
-		return c.dispatchProductLaneTurn(runtime, actor, prompt, resume, driver)
+		return c.dispatchProductLaneTurn(runtime, actor, prompt, driver)
 	}
 	if actor.product == "grok" || actor.product == "qwen" {
 		return c.dispatchACPLaneTurn(runtime, actor, prompt)
@@ -1027,7 +1027,6 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	runtime *daemonpkg.Runtime,
 	actor *laneActor,
 	prompt string,
-	resume bool,
 	driver productruntime.LaneDriver,
 ) error {
 	mode, err := permissionmode.Parse(actor.permission)
@@ -1043,9 +1042,6 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	if err := c.recordLaneNativeID(runtime, actor, session.NativeSessionID); err != nil {
-		if !resume {
-			_ = driver.Archive(context.Background(), session)
-		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	c.mu.Lock()
@@ -1056,9 +1052,6 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox, Effort: actor.effort, SchemaPath: actor.schema,
 	})
 	if err != nil {
-		if !resume {
-			_ = driver.Archive(context.Background(), session)
-		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	c.mu.Lock()
@@ -1067,9 +1060,6 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	turnCtx, cancel := laneTurnContext(c.ctx, actor.turnTimeout)
 	if err := c.beginLaneExecution(runtime, actor, cancel); err != nil {
 		cancel()
-		if !resume {
-			_ = driver.Archive(context.Background(), session)
-		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	go c.watchProductLaneTurn(runtime, actor, driver, turn, turnCtx, cancel)
