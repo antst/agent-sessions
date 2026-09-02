@@ -12,9 +12,6 @@ RuntimeDirectory=agent-sessions
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 ExecStart=@PREFIX@/libexec/agent-sessions/host/current/bin/agent-sessions daemon
-# Vendor-native sessions do not belong to the daemon's process lifetime. The
-# successor re-attests them after a service restart.
-KillMode=process
 Restart=on-failure
 RestartSec=2
 

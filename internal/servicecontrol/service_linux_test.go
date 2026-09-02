@@ -59,14 +59,14 @@ func TestLinuxUpgradeValidatesBeforeReloadAndPreservesRunningServiceOnFailure(t 
 	}
 }
 
-func TestLinuxServiceAssetPreservesExplicitStopAndExternalNativeProcesses(t *testing.T) {
+func TestLinuxServiceAssetStopsTheWholeDaemonOwnedProcessTree(t *testing.T) {
 	body := readRepositoryAsset(t, "deploy/agent-sessions/systemd/user/agent-sessions.service")
-	for _, literal := range []string{"Type=simple", "Restart=on-failure", "KillMode=process", "agent-sessions daemon"} {
+	for _, literal := range []string{"Type=simple", "Restart=on-failure", "agent-sessions daemon"} {
 		if !strings.Contains(body, literal) {
 			t.Errorf("systemd asset omits %q", literal)
 		}
 	}
-	for _, forbidden := range []string{"KillMode=control-group", "pkill", "killall", "agent-sessions-hub"} {
+	for _, forbidden := range []string{"KillMode=process", "pkill", "killall", "agent-sessions-hub"} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("systemd asset contains unrelated/destructive directive %q", forbidden)
 		}
