@@ -156,9 +156,9 @@ func TestLaneWorkflowReturnsUsageErrorBeforeContactingDaemon(t *testing.T) {
 	stateRoot := filepath.Join(shortDaemonTestRoot(t), "absent")
 	t.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot)
 	err := runLaneWorkflow(context.Background(), clihelp.Invocation{
-		Product: "codex", Arguments: []string{"run", "--name", "worker", "first prompt", "second prompt"},
+		Product: "codex", Arguments: []string{"run", "--name", "worker", "positional prompt"},
 	}, io.Discard)
-	if err == nil || err.Error() != "lane command accepts only one selector" {
+	if err == nil || err.Error() != "lane run reads its prompt from stdin; positional prompts are not accepted" {
 		t.Fatalf("lane usage error = %v", err)
 	}
 	if _, statErr := os.Lstat(stateRoot); !errors.Is(statErr, os.ErrNotExist) {

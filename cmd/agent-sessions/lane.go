@@ -290,6 +290,9 @@ func parseUnifiedLaneCommand(arguments []string) (parsedLaneCommand, error) { //
 	if result.noAutoArchive && result.autoArchiveAfterSet {
 		return parsedLaneCommand{}, errors.New("--auto-archive-after and --no-auto-archive are mutually exclusive")
 	}
+	if (result.command == "run" || result.command == "start") && result.target != "" {
+		return parsedLaneCommand{}, fmt.Errorf("lane %s reads its prompt from stdin; positional prompts are not accepted", result.command)
+	}
 	// An explicit native approval policy takes precedence over an inherited
 	// parent mode and any generic permission flag, independent of option order.
 	if result.approvalPolicy != "" {
