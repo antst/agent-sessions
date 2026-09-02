@@ -382,13 +382,13 @@ func (c *liveSessionClient) run() {
 			}()
 			c.mu.Lock()
 			report = c.report
-			c.mu.Unlock()
 			err = rpc.encoder.Encode(report)
 			if err == nil {
-				readCtx, stopReads := context.WithCancel(c.ctx)
-				c.mu.Lock()
 				c.current = rpc
-				c.mu.Unlock()
+			}
+			c.mu.Unlock()
+			if err == nil {
+				readCtx, stopReads := context.WithCancel(c.ctx)
 				c.read(readCtx, rpc)
 				stopReads()
 				c.mu.Lock()
