@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,7 +59,7 @@ func RunManagedPeer(product string, args []string) error {
 	return Exec(plan.path, plan.args, plan.environment)
 }
 
-type productSession struct {
+type ProductSession struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
@@ -66,17 +67,23 @@ type productSession struct {
 	Modified  string `json:"modified"`
 }
 
-func listProductSessions(executable, _ string) ([]productSession, error) {
-	command := exec.Command(executable, "--pure", "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
+type productSession = ProductSession
+
+func ListProductSessions(ctx context.Context, executable string) ([]ProductSession, error) {
+	command := exec.CommandContext(ctx, executable, "--pure", "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
 	payload, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list product sessions: %w", err)
 	}
-	var sessions []productSession
+	var sessions []ProductSession
 	if err := json.Unmarshal(payload, &sessions); err != nil {
 		return nil, fmt.Errorf("decode product session list: %w", err)
 	}
 	return sessions, nil
+}
+
+func listProductSessions(executable, _ string) ([]productSession, error) {
+	return ListProductSessions(context.Background(), executable)
 }
 
 const packageSessionListScript = `

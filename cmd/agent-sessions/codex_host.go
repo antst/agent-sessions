@@ -19,9 +19,13 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
+	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
+	"github.com/antst/agent-sessions/internal/products/opencodefamily"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
+	"github.com/antst/agent-sessions/internal/structuredprocess"
 )
 
 const (
@@ -45,6 +49,7 @@ type hostCoordinator struct {
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
 	qwenLanes          *daemonpkg.QwenLaneAdapter
+	laneProcesses      *structuredprocess.Supervisor
 	laneDrivers        *productruntime.LaneRegistry
 	lanes              map[string]*laneActor
 	liveReports        map[string]liveSessionReport
@@ -84,14 +89,37 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	}
 	coordinator.resolveCandidate = coordinator.resolveProductLaneCandidate
 	coordinator.candidateResolvers = coordinator.productLaneCandidateResolvers()
+	laneProcesses, err := structuredprocess.NewSupervisor()
+	if err != nil {
+		panic(err)
+	}
+	coordinator.laneProcesses = laneProcesses
 	codexLanes, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) {
 		return coordinator.codexNative()
 	})
 	if err != nil {
 		panic(err)
 	}
+	opencodeDescriptor, ok := productcatalog.ByID(opencodeproduct.ProductID)
+	if !ok {
+		panic("OpenCode product descriptor is unavailable")
+	}
+	opencodeServers, err := opencodefamily.NewOwnedServerManager(opencodefamily.OwnedServerManagerConfig{
+		ProductID: opencodeproduct.ProductID, Dialect: opencodefamily.DialectOpenCode,
+		Executable: opencodeDescriptor.NativeExecutable, Supervisor: laneProcesses,
+	})
+	if err != nil {
+		panic(err)
+	}
+	opencodeLanes, err := opencodeproduct.NewLaneDriver(opencodeproduct.Config{
+		Deps: productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses}, Servers: opencodeServers,
+	})
+	if err != nil {
+		panic(err)
+	}
 	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
-		codexproduct.ProductID: codexLanes,
+		codexproduct.ProductID:    codexLanes,
+		opencodeproduct.ProductID: opencodeLanes,
 	})
 	if err != nil {
 		panic(err)
@@ -141,6 +169,7 @@ func (c *hostCoordinator) adapters() map[string]daemonpkg.AttachmentAdapter {
 }
 
 func (c *hostCoordinator) run(ctx context.Context) error {
+	defer func() { _ = c.laneProcesses.Close() }()
 	var runtime *daemonpkg.Runtime
 	select {
 	case <-ctx.Done():
@@ -253,6 +282,22 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 			}
 			name, cwd, ok := bridge.QwenNativeSessionInfo(home, candidate.NativeSessionID)
 			return laneNameEntry{Name: name, Cwd: cwd}, ok
+		},
+		opencodeproduct.ProductID: func(ctx context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			executable, err := launcher.ResolveProductExecutable(opencodeproduct.ProductID)
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			sessions, err := launcher.ListProductSessions(ctx, executable)
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			for _, session := range sessions {
+				if session.ID == candidate.NativeSessionID {
+					return laneNameEntry{Name: session.Title, Cwd: session.Directory}, true
+				}
+			}
+			return laneNameEntry{}, false
 		},
 	}
 }
