@@ -36,13 +36,22 @@ func (manager *testServerManager) Open(context.Context, ServerOpenRequest) (*Liv
 func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	var messageID atomic.Value
 	messageID.Store("")
+	var getCalls atomic.Int64
+	var deleteCalls atomic.Int64
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuth(t, request)
 		switch request.Method + " " + request.URL.Path {
 		case "POST /session":
-			_, _ = response.Write([]byte(`{"id":"ses_lane","title":""}`))
+			var body struct {
+				Title string `json:"title"`
+			}
+			if decodeJSON(request.Body, &body) != nil || body.Title != "worker" {
+				t.Errorf("create title = %q", body.Title)
+			}
+			_, _ = response.Write([]byte(`{"id":"ses_lane","title":"worker"}`))
 		case "GET /session/ses_lane":
-			_, _ = response.Write([]byte(`{"id":"ses_lane","title":""}`))
+			getCalls.Add(1)
+			_, _ = response.Write([]byte(`{"id":"ses_lane","title":"worker"}`))
 		case "POST /session/ses_lane/prompt_async":
 			var body struct {
 				ID string `json:"messageID"`
@@ -60,6 +69,7 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 		case "POST /session/ses_lane/abort":
 			_, _ = response.Write([]byte("true"))
 		case "DELETE /session/ses_lane":
+			deleteCalls.Add(1)
 			_, _ = response.Write([]byte("true"))
 		default:
 			http.NotFound(response, request)
@@ -76,7 +86,7 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: "opencode", LaneID: "lane-one", Cwd: "/work/project", PermissionMode: permissionmode.Default,
+		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
 	})
 	if err != nil || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
 		t.Fatalf("open = %#v, %v", session, err)
@@ -92,14 +102,28 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	if err != nil || terminal.Outcome != productruntime.TurnCompleted || terminal.Result != "lane result" || terminal.ResultDigest != sha256.Sum256([]byte("lane result")) {
 		t.Fatalf("terminal = %#v, %v", terminal, err)
 	}
+	reused, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: "opencode", LaneID: "lane-one", ResumeNativeID: session.NativeSessionID,
+		Cwd: "/work/project", PermissionMode: permissionmode.Default,
+	})
+	if err != nil || reused != session || servers.openCount.Load() != 1 {
+		t.Fatalf("reuse = %#v, %v; server opens = %d", reused, err, servers.openCount.Load())
+	}
 	if err := driver.Archive(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if err := driver.Archive(context.Background(), session); err != nil {
-		t.Fatalf("idempotent archive = %v", err)
+	if deleteCalls.Load() != 0 {
+		t.Fatalf("archive deleted product session %d times", deleteCalls.Load())
 	}
 	if servers.closed.Load() != 1 {
 		t.Fatalf("server closes = %d", servers.closed.Load())
+	}
+	resumed, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: "opencode", LaneID: "lane-one", ResumeNativeID: session.NativeSessionID,
+		Cwd: "/work/project", PermissionMode: permissionmode.Default,
+	})
+	if err != nil || resumed != session || getCalls.Load() != 1 || servers.openCount.Load() != 2 {
+		t.Fatalf("resume = %#v, %v; gets=%d opens=%d", resumed, err, getCalls.Load(), servers.openCount.Load())
 	}
 }
 
@@ -144,7 +168,7 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 		t.Fatal(err)
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: "kilo", LaneID: "lane-kilo", Cwd: "/work/project", PermissionMode: permissionmode.BypassPermissions,
+		ProductID: "kilo", LaneID: "lane-kilo", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.BypassPermissions,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +232,7 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 		t.Fatal(err)
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: "opencode", LaneID: "fast", Cwd: "/work/project", PermissionMode: permissionmode.Default,
+		ProductID: "opencode", LaneID: "fast", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +269,7 @@ func TestLaneRejectsChangedPermissionAndConcurrentTurn(t *testing.T) {
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
 	driver, _ := NewLaneDriver(LaneConfig{ProductID: "opencode", Dialect: DialectOpenCode, Generation: 1, Servers: &testServerManager{client: client}, MapPermission: MapPermissionRules})
-	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: "opencode", LaneID: "race", Cwd: "/work/project", PermissionMode: permissionmode.Default})
+	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: "opencode", LaneID: "race", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +341,7 @@ func TestLaneInterruptRacingIdleReportsInterruptedExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: "opencode", LaneID: "interrupt-lane", Cwd: "/work/project", PermissionMode: permissionmode.Default})
+	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: "opencode", LaneID: "interrupt-lane", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}

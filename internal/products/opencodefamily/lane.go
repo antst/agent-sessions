@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,21 +28,12 @@ type LaneConfig struct {
 }
 
 type laneSession struct {
-	cleanup           sync.Mutex
 	server            *LiveServer
 	client            *Client
 	nativeID          string
 	permissionMode    permissionmode.Mode
-	intentDigest      [32]byte
-	provisional       bool
-	opening           bool
-	openDone          chan struct{}
-	fresh             bool
-	deleted           bool
 	turn              *laneTurn
 	interruptedTurnID string
-	archiving         bool
-	archived          bool
 }
 
 type laneTurn struct {
@@ -78,32 +68,29 @@ func (driver *LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
 
 func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
 	if request.ProductID != driver.config.ProductID || strings.TrimSpace(request.LaneID) == "" || !validDirectory(request.Cwd) ||
-		!request.PermissionMode.Valid() || unsafeServerArguments(request.Arguments) {
+		!request.PermissionMode.Valid() || unsafeServerArguments(request.Arguments) ||
+		request.ResumeNativeID == "" && strings.TrimSpace(request.Name) == "" {
 		return productruntime.NativeSessionRef{}, productruntime.ErrProtocol
 	}
 	permissions, err := driver.config.MapPermission(request.PermissionMode)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	digest := laneIntentDigest("open", request, request.PermissionMode)
 	driver.mu.Lock()
 	if existing := driver.lanes[request.LaneID]; existing != nil {
-		if !existing.provisional || existing.intentDigest != digest || existing.opening {
+		if request.ResumeNativeID != "" && existing.nativeID == request.ResumeNativeID &&
+			existing.permissionMode == request.PermissionMode && existing.server != nil && existing.client != nil {
+			ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: existing.nativeID, Generation: driver.config.Generation}
 			driver.mu.Unlock()
-			return productruntime.NativeSessionRef{}, productruntime.ErrAmbiguousSession
+			return ref, nil
 		}
 		driver.mu.Unlock()
-		if cleanupErr := driver.retryProvisionalCleanup(ctx, request.LaneID, existing); cleanupErr != nil {
-			return productruntime.NativeSessionRef{}, cleanupErr
-		}
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: prior lane-open cleanup converged; retry launch explicitly", productruntime.ErrCleanupDebt)
+		return productruntime.NativeSessionRef{}, productruntime.ErrAmbiguousSession
 	}
-	live := &laneSession{
-		nativeID: request.ResumeNativeID, permissionMode: request.PermissionMode,
-		intentDigest: digest, provisional: true, opening: true, openDone: make(chan struct{}), fresh: request.ResumeNativeID == "",
-	}
+	live := &laneSession{nativeID: request.ResumeNativeID, permissionMode: request.PermissionMode}
 	driver.lanes[request.LaneID] = live
 	driver.mu.Unlock()
+
 	server, err := driver.config.Servers.Open(ctx, ServerOpenRequest{
 		Key: request.LaneID, Cwd: request.Cwd, Arguments: request.Arguments, PermissionRules: permissions,
 	})
@@ -111,21 +98,18 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		if err == nil {
 			err = productruntime.ErrUnavailable
 		}
-		driver.discardEmptyProvisional(request.LaneID, live)
-		return productruntime.NativeSessionRef{}, err
+		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, nil, err)
 	}
-	live.server = server
 	if err != nil {
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, err)
+		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, server, err)
 	}
 	client := server.Client()
 	if client == nil {
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, productruntime.ErrUnavailable)
+		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, server, productruntime.ErrUnavailable)
 	}
-	live.client = client
 	var session Session
 	if request.ResumeNativeID == "" {
-		session, err = client.CreateSession(ctx, "", permissions)
+		session, err = client.CreateSession(ctx, request.Name, permissions)
 	} else {
 		session, err = client.GetSession(ctx, request.ResumeNativeID)
 	}
@@ -133,92 +117,30 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		if err == nil {
 			err = productruntime.ErrAmbiguousSession
 		}
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, err)
+		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, server, err)
 	}
-	live.cleanup.Lock()
-	live.nativeID = session.ID
-	live.cleanup.Unlock()
 	driver.mu.Lock()
-	if driver.lanes[request.LaneID] != live || !live.opening {
+	if driver.lanes[request.LaneID] != live {
 		driver.mu.Unlock()
-		return productruntime.NativeSessionRef{}, driver.failProvisionalOpen(context.Background(), request.LaneID, live, productruntime.ErrAmbiguousSession)
+		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, server, productruntime.ErrAmbiguousSession)
 	}
-	live.provisional = false
-	live.opening = false
-	close(live.openDone)
+	live.server = server
+	live.client = client
+	live.nativeID = session.ID
 	driver.mu.Unlock()
 	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: session.ID, Generation: driver.config.Generation}, nil
 }
 
-func laneIntentDigest(kind string, request any, mode permissionmode.Mode) [32]byte {
-	encoded, _ := json.Marshal(struct {
-		Kind    string              `json:"kind"`
-		Mode    permissionmode.Mode `json:"mode"`
-		Request any                 `json:"request"`
-	}{Kind: kind, Mode: mode, Request: request})
-	return sha256.Sum256(encoded)
-}
-
-func (driver *LaneDriver) discardEmptyProvisional(laneID string, live *laneSession) {
-	driver.mu.Lock()
-	if driver.lanes[laneID] == live {
-		delete(driver.lanes, laneID)
-	}
-	if live.opening {
-		live.opening = false
-		close(live.openDone)
-	}
-	driver.mu.Unlock()
-}
-
-func (driver *LaneDriver) cleanupProvisionalResources(ctx context.Context, live *laneSession) error {
-	if live == nil {
-		return nil
-	}
-	live.cleanup.Lock()
-	defer live.cleanup.Unlock()
-	if live.fresh && live.nativeID != "" && !live.deleted {
-		if live.client == nil {
-			return fmt.Errorf("%w: fresh lane cleanup client is unavailable", productruntime.ErrCleanupDebt)
-		}
-		if err := live.client.DeleteSession(ctx, live.nativeID); err != nil && !errors.Is(err, productruntime.ErrStale) {
-			return fmt.Errorf("%w: exact fresh lane session delete: %v", productruntime.ErrCleanupDebt, err)
-		}
-		live.deleted = true
-	}
-	if live.server != nil {
-		if err := live.server.Close(ctx); err != nil {
-			return fmt.Errorf("%w: exact lane server close: %v", productruntime.ErrCleanupDebt, err)
-		}
-	}
-	live.client, live.server = nil, nil
-	return nil
-}
-
-func (driver *LaneDriver) failProvisionalOpen(ctx context.Context, laneID string, live *laneSession, cause error) error {
-	cleanupErr := driver.cleanupProvisionalResources(ctx, live)
-	driver.mu.Lock()
-	if live.opening {
-		live.opening = false
-		close(live.openDone)
-	}
-	if cleanupErr == nil && driver.lanes[laneID] == live {
-		delete(driver.lanes, laneID)
-	}
-	driver.mu.Unlock()
-	return errors.Join(cause, cleanupErr)
-}
-
-func (driver *LaneDriver) retryProvisionalCleanup(ctx context.Context, laneID string, live *laneSession) error {
-	if err := driver.cleanupProvisionalResources(ctx, live); err != nil {
-		return err
-	}
+func (driver *LaneDriver) failOpen(ctx context.Context, laneID string, live *laneSession, server *LiveServer, cause error) error {
 	driver.mu.Lock()
 	if driver.lanes[laneID] == live {
 		delete(driver.lanes, laneID)
 	}
 	driver.mu.Unlock()
-	return nil
+	if server == nil {
+		return cause
+	}
+	return errors.Join(cause, server.Close(ctx))
 }
 
 func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
@@ -232,7 +154,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
 		return productruntime.NativeTurnRef{}, err
 	}
-	live, err := driver.lockLive(session, true)
+	live, err := driver.lockLive(session)
 	if err != nil {
 		return productruntime.NativeTurnRef{}, err
 	}
@@ -282,7 +204,7 @@ func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeT
 	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
-	live, err := driver.lockLive(turn.NativeSessionRef, true)
+	live, err := driver.lockLive(turn.NativeSessionRef)
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
@@ -306,7 +228,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 	if driver.consumeInterrupted(turn) {
 		return productruntime.NativeTerminal{Outcome: productruntime.TurnInterrupted, ExitLike: 130, NativeStopReason: "native-interrupt"}, nil
 	}
-	live, err := driver.lockLive(turn.NativeSessionRef, true)
+	live, err := driver.lockLive(turn.NativeSessionRef)
 	if err != nil {
 		return productruntime.NativeTerminal{}, err
 	}
@@ -375,7 +297,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 }
 
 func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.NativeTurnRef) error {
-	live, err := driver.lockLive(turn.NativeSessionRef, true)
+	live, err := driver.lockLive(turn.NativeSessionRef)
 	if err != nil {
 		return err
 	}
@@ -398,72 +320,30 @@ func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.Nat
 }
 
 func (driver *LaneDriver) Archive(ctx context.Context, session productruntime.NativeSessionRef) error {
-	live, err := driver.lockLive(session, false)
+	live, err := driver.lockLive(session)
 	if err != nil {
 		return err
 	}
-	if live.archived {
-		if live.server == nil {
-			driver.mu.Unlock()
-			return nil
-		}
-		if live.archiving {
-			driver.mu.Unlock()
-			return productruntime.ErrNativeRejected
-		}
-		live.archiving = true
-		server := live.server
-		driver.mu.Unlock()
-		if err := server.Close(ctx); err != nil {
-			driver.mu.Lock()
-			live.archiving = false
-			driver.mu.Unlock()
-			return err
-		}
-		driver.mu.Lock()
-		live.archiving = false
-		live.client, live.server = nil, nil
-		driver.mu.Unlock()
-		return nil
-	}
-	if live.turn != nil || live.archiving {
+	if live.turn != nil {
 		driver.mu.Unlock()
 		return productruntime.ErrNativeRejected
 	}
-	live.archiving = true
-	driver.mu.Unlock()
-	if err := live.client.DeleteSession(ctx, session.NativeSessionID); err != nil {
-		driver.mu.Lock()
-		live.archiving = false
-		driver.mu.Unlock()
-		return err
-	}
-	driver.mu.Lock()
-	live.archived = true
-	driver.mu.Unlock()
-	if err := live.server.Close(ctx); err != nil {
-		driver.mu.Lock()
-		live.archiving = false
-		driver.mu.Unlock()
-		return err
-	}
-	driver.mu.Lock()
-	if current := driver.lanes[session.LaneID]; current == live {
-		current.archiving = false
-		current.client, current.server = nil, nil
+	server := live.server
+	if driver.lanes[session.LaneID] == live {
+		delete(driver.lanes, session.LaneID)
 	}
 	driver.mu.Unlock()
-	return nil
+	return server.Close(ctx)
 }
 
-func (driver *LaneDriver) lockLive(ref productruntime.NativeSessionRef, requireOpen bool) (*laneSession, error) {
+func (driver *LaneDriver) lockLive(ref productruntime.NativeSessionRef) (*laneSession, error) {
 	driver.mu.Lock()
 	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || !validNativeID(ref.NativeSessionID, "ses_") {
 		driver.mu.Unlock()
 		return nil, productruntime.ErrStale
 	}
 	live := driver.lanes[ref.LaneID]
-	if live == nil || live.provisional || live.nativeID != ref.NativeSessionID || requireOpen && (live.archived || live.archiving) || requireOpen && (live.client == nil || live.server == nil) {
+	if live == nil || live.nativeID != ref.NativeSessionID || live.client == nil || live.server == nil {
 		driver.mu.Unlock()
 		return nil, productruntime.ErrStale
 	}
