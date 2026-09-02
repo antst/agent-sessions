@@ -305,7 +305,7 @@ func validModelPart(value string) bool {
 		!strings.ContainsAny(value, "\x00\r\n")
 }
 
-type kiloPromptResponse struct {
+type kiloSteerResponse struct {
 	Data struct {
 		ID        string `json:"id"`
 		SessionID string `json:"sessionID"`
@@ -313,25 +313,25 @@ type kiloPromptResponse struct {
 	} `json:"data"`
 }
 
-// KiloPrompt uses the supported v2 server-owned-session API. It is never used
-// for attached TUI peers, whose explicit /tui/* controller remains separate.
-func (client *Client) KiloPrompt(ctx context.Context, nativeSessionID, operationID string, content []byte, delivery string) (productruntime.NativeAcceptance, error) {
+// KiloSteer uses the v2 server-owned-session API to steer one already-running
+// turn. Initial prompts use the product's executable prompt_async surface.
+func (client *Client) KiloSteer(ctx context.Context, nativeSessionID, operationID string, content []byte) (productruntime.NativeAcceptance, error) {
 	if client.dialect != DialectKilo || !validNativeID(nativeSessionID, "ses_") ||
-		(delivery != "queue" && delivery != "steer") || !utf8.Valid(content) || len(content) == 0 || len(content) > maxResultBytes {
+		!utf8.Valid(content) || len(content) == 0 || len(content) > maxResultBytes {
 		return productruntime.NativeAcceptance{}, productruntime.ErrProtocol
 	}
 	messageID, err := nativeMessageID(operationID)
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
-	body := map[string]any{"id": messageID, "prompt": map[string]string{"text": string(content)}, "delivery": delivery, "resume": true}
+	body := map[string]any{"id": messageID, "prompt": map[string]string{"text": string(content)}, "delivery": "steer", "resume": true}
 	response, err := client.requestUnscoped(ctx, http.MethodPost, "/api/session/"+url.PathEscape(nativeSessionID)+"/prompt", body, http.StatusOK)
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
-	var accepted kiloPromptResponse
+	var accepted kiloSteerResponse
 	if json.Unmarshal(response.Body, &accepted) != nil || accepted.Data.ID != messageID ||
-		accepted.Data.SessionID != nativeSessionID || accepted.Data.Delivery != delivery {
+		accepted.Data.SessionID != nativeSessionID || accepted.Data.Delivery != "steer" {
 		return productruntime.NativeAcceptance{}, productruntime.ErrAmbiguousSession
 	}
 	return productruntime.NativeAcceptance{NativeSessionID: nativeSessionID, NativeMessageID: messageID, AcceptedAt: client.now().UTC()}, nil

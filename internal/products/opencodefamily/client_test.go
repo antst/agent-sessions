@@ -125,7 +125,7 @@ func TestOpenCodeTypedLifecycleAndPermissionRelay(t *testing.T) {
 	}
 }
 
-func TestKiloLaneUsesV2PromptAndRejectsConflictingAcceptance(t *testing.T) {
+func TestKiloSteerUsesV2PromptAndRejectsConflictingAcceptance(t *testing.T) {
 	wrong := false
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuthOnly(t, request)
@@ -154,12 +154,12 @@ func TestKiloLaneUsesV2PromptAndRejectsConflictingAcceptance(t *testing.T) {
 	})
 	client, closeClient := newFamilyTestClient(t, DialectKilo, handler)
 	defer closeClient()
-	accepted, err := client.KiloPrompt(context.Background(), "ses_kilo", "receipt-steer", []byte("steer me"), "steer")
+	accepted, err := client.KiloSteer(context.Background(), "ses_kilo", "receipt-steer", []byte("steer me"))
 	if err != nil || accepted.NativeSessionID != "ses_kilo" {
 		t.Fatalf("accepted = %#v, %v", accepted, err)
 	}
 	wrong = true
-	if _, err := client.KiloPrompt(context.Background(), "ses_kilo", "receipt-foreign", []byte("steer me"), "steer"); !errors.Is(err, productruntime.ErrAmbiguousSession) {
+	if _, err := client.KiloSteer(context.Background(), "ses_kilo", "receipt-foreign", []byte("steer me")); !errors.Is(err, productruntime.ErrAmbiguousSession) {
 		t.Fatalf("conflicting native session acceptance = %v", err)
 	}
 }

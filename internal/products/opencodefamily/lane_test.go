@@ -138,21 +138,25 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	}
 }
 
-func TestOpenCodeLaneRejectsMalformedModelBeforeStartingServer(t *testing.T) {
-	servers := &testServerManager{}
-	driver, err := NewLaneDriver(LaneConfig{
-		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 7,
-		Servers: servers, MapPermission: MapPermissionRules,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
-		Arguments: []string{"--model", "missing-provider-separator"},
-	})
-	if err == nil || servers.openCount.Load() != 0 {
-		t.Fatalf("malformed model error = %v; server opens = %d", err, servers.openCount.Load())
+func TestFamilyLaneRejectsMalformedModelBeforeStartingServer(t *testing.T) {
+	for _, dialect := range []Dialect{DialectOpenCode, DialectKilo} {
+		t.Run(string(dialect), func(t *testing.T) {
+			servers := &testServerManager{}
+			driver, err := NewLaneDriver(LaneConfig{
+				ProductID: string(dialect), Dialect: dialect, Generation: 7,
+				Servers: servers, MapPermission: MapPermissionRules,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+				ProductID: string(dialect), LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
+				Arguments: []string{"--model", "missing-provider-separator"},
+			})
+			if err == nil || servers.openCount.Load() != 0 {
+				t.Fatalf("malformed model error = %v; server opens = %d", err, servers.openCount.Load())
+			}
+		})
 	}
 }
 
@@ -171,6 +175,19 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 		switch request.Method + " " + request.URL.Path {
 		case "POST /session":
 			_, _ = response.Write([]byte(`{"id":"ses_kilo_lane","title":""}`))
+		case "POST /session/ses_kilo_lane/prompt_async":
+			var body struct {
+				ID    string       `json:"messageID"`
+				Model *NativeModel `json:"model"`
+			}
+			if decodeJSON(request.Body, &body) != nil || body.ID == "" || body.Model == nil ||
+				body.Model.ProviderID != "deepseek" || body.Model.ModelID != "deepseek-v4-flash" {
+				t.Errorf("Kilo initial prompt = %#v", body)
+			}
+			deliveriesMu.Lock()
+			deliveries = append(deliveries, "prompt_async")
+			deliveriesMu.Unlock()
+			response.WriteHeader(http.StatusNoContent)
 		case "POST /api/session/ses_kilo_lane/prompt":
 			var body struct {
 				ID       string `json:"id"`
@@ -198,11 +215,18 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: "kilo", LaneID: "lane-kilo", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.BypassPermissions,
+		Arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "first", PermissionMode: permissionmode.BypassPermissions})
+	if got := driver.config.Servers.(*testServerManager).request.Load().(ServerOpenRequest).Arguments; len(got) != 0 {
+		t.Fatalf("Kilo serve arguments = %v, want model consumed by prompt", got)
+	}
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{
+		Prompt: "first", PermissionMode: permissionmode.BypassPermissions,
+		Arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +240,7 @@ func TestKiloLaneSteerUsesExplicitV2Route(t *testing.T) {
 	deliveriesMu.Lock()
 	got := append([]string(nil), deliveries...)
 	deliveriesMu.Unlock()
-	if fmt.Sprint(got) != "[queue steer]" {
+	if fmt.Sprint(got) != "[prompt_async steer]" {
 		t.Fatalf("Kilo delivery routes = %v", got)
 	}
 }

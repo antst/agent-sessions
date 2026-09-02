@@ -73,12 +73,10 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		return productruntime.NativeSessionRef{}, productruntime.ErrProtocol
 	}
 	serverArguments := request.Arguments
-	if driver.config.Dialect == DialectOpenCode {
-		var err error
-		serverArguments, _, err = splitOpenCodeLaneArguments(request.Arguments)
-		if err != nil {
-			return productruntime.NativeSessionRef{}, err
-		}
+	var err error
+	serverArguments, _, err = splitLaneArguments(request.Arguments)
+	if err != nil {
+		return productruntime.NativeSessionRef{}, err
 	}
 	if unsafeServerArguments(serverArguments) {
 		return productruntime.NativeSessionRef{}, productruntime.ErrProtocol
@@ -166,11 +164,9 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 		return productruntime.NativeTurnRef{}, err
 	}
 	var model *NativeModel
-	if driver.config.Dialect == DialectOpenCode {
-		_, model, err = splitOpenCodeLaneArguments(request.Arguments)
-		if err != nil {
-			return productruntime.NativeTurnRef{}, err
-		}
+	_, model, err = splitLaneArguments(request.Arguments)
+	if err != nil {
+		return productruntime.NativeTurnRef{}, err
 	}
 	live, err := driver.lockLive(session)
 	if err != nil {
@@ -187,12 +183,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	live.turn = &laneTurn{operationID: operationID}
 	driver.mu.Unlock()
 	body := []byte(request.Prompt)
-	var accepted productruntime.NativeAcceptance
-	if driver.config.Dialect == DialectKilo {
-		accepted, err = live.client.KiloPrompt(ctx, session.NativeSessionID, operationID, body, "queue")
-	} else {
-		accepted, err = live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false, model)
-	}
+	accepted, err := live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false, model)
 	if err != nil {
 		driver.clearTurn(session.LaneID, operationID)
 		return productruntime.NativeTurnRef{}, err
@@ -208,7 +199,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: accepted.NativeMessageID}, nil
 }
 
-func splitOpenCodeLaneArguments(arguments []string) ([]string, *NativeModel, error) {
+func splitLaneArguments(arguments []string) ([]string, *NativeModel, error) {
 	serverArguments := make([]string, 0, len(arguments))
 	var model *NativeModel
 	for index := 0; index < len(arguments); index++ {
@@ -262,7 +253,7 @@ func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeT
 		driver.mu.Unlock()
 		return productruntime.NativeAcceptance{}, productruntime.ErrStale
 	}
-	accepted, err := live.client.KiloPrompt(ctx, turn.NativeSessionID, operationID, []byte(request.Prompt), "steer")
+	accepted, err := live.client.KiloSteer(ctx, turn.NativeSessionID, operationID, []byte(request.Prompt))
 	driver.mu.Unlock()
 	return accepted, err
 }
