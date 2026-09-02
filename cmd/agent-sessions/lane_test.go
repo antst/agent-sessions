@@ -373,6 +373,18 @@ func TestGrokLaneResumeRejectsExplicitSaferReplacementButKeepsRecordedMode(t *te
 	}
 }
 
+func TestLaneResumePermissionUsesInvocationThenLiveValueThenFreshDefault(t *testing.T) {
+	if got := laneResumePermission("bypassPermissions", "default", "kilo", "bypassPermissions"); got != "default" {
+		t.Fatalf("explicit resume permission = %q", got)
+	}
+	if got := laneResumePermission("bypassPermissions", "", "kilo", "default"); got != "bypassPermissions" {
+		t.Fatalf("live resume permission = %q", got)
+	}
+	if got := laneResumePermission("", "", "kilo", "default"); got != "default" {
+		t.Fatalf("candidate resume permission = %q", got)
+	}
+}
+
 func TestParseUnifiedLaneCommandRejectsLegacyNotifyBeforeRegistration(t *testing.T) {
 	for _, args := range [][]string{
 		{"start", "--name", "worker", "--persistent", "--notify", "parent", "-"},

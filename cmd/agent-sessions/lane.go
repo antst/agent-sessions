@@ -469,9 +469,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if len(options.native) > 0 {
 		actor.arguments = append([]string(nil), options.native...)
 	}
-	if options.permission != "" {
-		actor.permission = options.permission
-	}
+	actor.permission = laneResumePermission(actor.permission, options.permission, product, parent.PermissionMode)
 	if options.persistentSet {
 		actor.persistent = options.persistent
 	}
@@ -1818,6 +1816,16 @@ func laneDefaultPermission(product, parent string) string {
 		return "dontAsk"
 	}
 	return "default"
+}
+
+func laneResumePermission(existing, requested, product, parent string) string {
+	if requested != "" {
+		return requested
+	}
+	if existing != "" {
+		return existing
+	}
+	return laneDefaultPermission(product, parent)
 }
 
 // validateGrokLanePermission prevents the generic option layer from silently
