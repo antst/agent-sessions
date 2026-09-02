@@ -26,6 +26,7 @@ type scriptedRPCProcess struct {
 	cleaned               bool
 	cleanupErr            error
 	commandErrors         map[string]error
+	responseErrors        map[string]string
 	suppressLastResponses int
 	closeOnLastResponse   bool
 }
@@ -77,6 +78,10 @@ func (process *scriptedRPCProcess) WriteFrame(_ context.Context, frame []byte) e
 	}
 	process.mu.Unlock()
 	if suppressResponse {
+		return nil
+	}
+	if responseError := process.responseErrors[command]; responseError != "" {
+		process.emit(map[string]any{"type": "response", "id": id, "command": command, "success": false, "error": responseError})
 		return nil
 	}
 	if closeResponseStream {
@@ -226,7 +231,7 @@ func TestWaitTurnRetriesCollectionFromCachedTerminalAfterCancellation(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: PiProductID, LaneID: "terminal-retry", Cwd: "/work", PermissionMode: permissionmode.Default,
+		ProductID: PiProductID, LaneID: "terminal-retry", Name: "terminal retry", Cwd: "/work", PermissionMode: permissionmode.Default,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +283,7 @@ func TestWaitTurnDoesNotInventEmptyResultWhenCollectionIsUnavailable(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: PiProductID, LaneID: "result-unavailable", Cwd: "/work", PermissionMode: permissionmode.Default,
+		ProductID: PiProductID, LaneID: "result-unavailable", Name: "result unavailable", Cwd: "/work", PermissionMode: permissionmode.Default,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,11 +320,11 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{ProductID: OMPProductID, LaneID: "lane-omp", Cwd: "/work", PermissionMode: permissionmode.Default})
+	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{ProductID: OMPProductID, LaneID: "lane-omp", Name: "native lane name", Cwd: "/work", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"--mode=rpc", "--name", "lane-omp", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
+	if want := []string{"--mode=rpc", "--name", "native lane name", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP args = %q, want %q", factory.command.Args, want)
 	}
 	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "first", PermissionMode: permissionmode.Default})
@@ -380,7 +385,7 @@ func TestLaneInterruptUsesCorrelatedAbortAndProductTerminalStrategy(t *testing.T
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-				ProductID: test.productID, LaneID: "interrupt-" + test.productID,
+				ProductID: test.productID, LaneID: "interrupt-" + test.productID, Name: "interrupt native",
 				Cwd: "/work", PermissionMode: permissionmode.Default,
 			})
 			if err != nil {
@@ -447,7 +452,7 @@ func TestLaneInterruptWriteFailureRollsBackInterruptedOutcome(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-				ProductID: productID, LaneID: "abort-failure-" + productID,
+				ProductID: productID, LaneID: "abort-failure-" + productID, Name: "abort failure",
 				Cwd: "/work", PermissionMode: permissionmode.Default,
 			})
 			if err != nil {
@@ -498,11 +503,12 @@ func TestOMPHandshakeRejectsHostileFirstOrIncompatibleReadyFrame(t *testing.T) {
 	}
 }
 
-func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
+func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 	t.Run("handshake", func(t *testing.T) {
 		quirks, _ := QuirksFor(OMPProductID)
 		process := newScriptedProcess("omp-handshake")
-		process.cleanupErr = errors.New("cleanup failed")
+		cleanupErr := errors.New("cleanup failed")
+		process.cleanupErr = cleanupErr
 		process.emit(map[string]any{"type": "response", "id": "foreign", "command": "get_state", "success": true})
 		driver, err := NewLaneDriver(LaneConfig{
 			Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
@@ -512,9 +518,9 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
-			ProductID: OMPProductID, LaneID: "handshake-debt", Cwd: "/work", PermissionMode: permissionmode.Default,
+			ProductID: OMPProductID, LaneID: "handshake-debt", Name: "handshake failure", Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
-		if !errors.Is(err, productruntime.ErrProtocol) || !errors.Is(err, productruntime.ErrCleanupDebt) || !process.cleaned {
+		if !errors.Is(err, productruntime.ErrProtocol) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !process.cleaned {
 			t.Fatalf("handshake cleanup = %v, cleaned = %t", err, process.cleaned)
 		}
 	})
@@ -522,7 +528,8 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 	t.Run("resume mismatch", func(t *testing.T) {
 		quirks, _ := QuirksFor(PiProductID)
 		process := newScriptedProcess("different-native")
-		process.cleanupErr = errors.New("cleanup failed")
+		cleanupErr := errors.New("cleanup failed")
+		process.cleanupErr = cleanupErr
 		driver, err := NewLaneDriver(LaneConfig{
 			Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
 			MapPermission: familyPermission,
@@ -534,7 +541,7 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 			ProductID: PiProductID, LaneID: "resume-debt", ResumeNativeID: "expected-native",
 			Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
-		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, productruntime.ErrCleanupDebt) || !process.cleaned {
+		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !process.cleaned {
 			t.Fatalf("resume cleanup = %v, cleaned = %t", err, process.cleaned)
 		}
 	})
@@ -543,7 +550,8 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 		quirks, _ := QuirksFor(PiProductID)
 		first := newScriptedProcess("shared-native")
 		second := newScriptedProcess("shared-native")
-		second.cleanupErr = errors.New("cleanup failed")
+		cleanupErr := errors.New("cleanup failed")
+		second.cleanupErr = cleanupErr
 		factory := &sequenceProcessFactory{processes: []*scriptedRPCProcess{first, second}}
 		driver, err := NewLaneDriver(LaneConfig{
 			Quirks: quirks, Generation: 1, Processes: factory,
@@ -553,14 +561,14 @@ func TestLaneOpenFailureSurfacesExactCleanupDebt(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-			ProductID: PiProductID, LaneID: "first-owner", Cwd: "/work", PermissionMode: permissionmode.Default,
+			ProductID: PiProductID, LaneID: "first-owner", Name: "first owner", Cwd: "/work", PermissionMode: permissionmode.Default,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
-			ProductID: PiProductID, LaneID: "second-owner", Cwd: "/work", PermissionMode: permissionmode.Default,
+			ProductID: PiProductID, LaneID: "second-owner", Name: "second owner", Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
-		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, productruntime.ErrCleanupDebt) || !second.cleaned {
+		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !second.cleaned {
 			t.Fatalf("collision cleanup = %v, cleaned = %t", err, second.cleaned)
 		}
 	})
@@ -585,35 +593,73 @@ func TestOMPRPCApprovalRequestFailsClosedWithoutWaitingForTerminal(t *testing.T)
 	}
 }
 
-func TestLaneOpenRejectsNativeInputArgumentsBeforeStartingProcess(t *testing.T) {
+func TestLaneOpenPassesProductNativeArgumentsAndName(t *testing.T) {
 	for _, productID := range []string{PiProductID, OMPProductID} {
-		for name, arguments := range map[string][]string{
-			"positional initial message": {"do work before the receipt"},
-			"file initial message":       {"@prompt.md"},
-			"short print mode":           {"-p", "do work"},
-			"long print mode":            {"--print", "do work"},
-			"delimiter message":          {"--", "do work"},
-			"unclassified option pair":   {"--model", "fixture"},
-		} {
-			t.Run(productID+"/"+name, func(t *testing.T) {
-				quirks, _ := QuirksFor(productID)
-				factory := &oneProcessFactory{process: newScriptedProcess("must-not-start")}
-				driver, err := NewLaneDriver(LaneConfig{
-					Quirks: quirks, Generation: 1, Processes: factory,
-					MapPermission: familyPermission,
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
-					ProductID: productID, LaneID: "argument-rejected", Cwd: "/work",
-					PermissionMode: permissionmode.Default, Arguments: arguments,
-				})
-				if !errors.Is(err, productruntime.ErrUnsupportedPolicy) || factory.starts != 0 {
-					t.Fatalf("lane open = %v, process starts = %d", err, factory.starts)
-				}
+		t.Run(productID, func(t *testing.T) {
+			quirks, _ := QuirksFor(productID)
+			process := newScriptedProcess(productID + "-native")
+			if productID == OMPProductID {
+				process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+			}
+			factory := &oneProcessFactory{process: process}
+			driver, err := NewLaneDriver(LaneConfig{
+				Quirks: quirks, Generation: 1, Processes: factory,
+				MapPermission: familyPermission,
 			})
-		}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+				ProductID: productID, LaneID: "argument-passed", Name: "product native name", Cwd: "/work",
+				PermissionMode: permissionmode.Default, Arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append(quirks.modeArguments(), "--model", "deepseek/deepseek-v4-flash", "--name", "product native name", "--tools", "read")
+			if !reflect.DeepEqual(factory.command.Args, want) {
+				t.Fatalf("native args = %q, want %q", factory.command.Args, want)
+			}
+		})
+	}
+}
+
+func TestLaneOpenRejectsLifecycleOwnedNativeArgumentsBeforeStartingProcess(t *testing.T) {
+	quirks, _ := QuirksFor(PiProductID)
+	for _, argument := range []string{"--mode=rpc", "--session", "--name=other", "--extension=/tmp/x", "--approval-mode=yolo", "--tools", "--"} {
+		t.Run(argument, func(t *testing.T) {
+			factory := &oneProcessFactory{process: newScriptedProcess("must-not-start")}
+			driver, err := NewLaneDriver(LaneConfig{Quirks: quirks, Generation: 1, Processes: factory, MapPermission: familyPermission})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+				ProductID: PiProductID, LaneID: "argument-rejected", Name: "native name", Cwd: "/work",
+				PermissionMode: permissionmode.Default, Arguments: []string{argument},
+			})
+			if !errors.Is(err, productruntime.ErrUnsupportedPolicy) || factory.starts != 0 {
+				t.Fatalf("lane open = %v, process starts = %d", err, factory.starts)
+			}
+		})
+	}
+}
+
+func TestRPCProductErrorIsReturnedVerbatim(t *testing.T) {
+	quirks, _ := QuirksFor(PiProductID)
+	process := newScriptedProcess("pi-error")
+	process.responseErrors = map[string]string{"get_state": "native provider rejected sk-product-detail"}
+	driver, err := NewLaneDriver(LaneConfig{
+		Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
+		MapPermission: familyPermission,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: PiProductID, LaneID: "native-error", Name: "native name", Cwd: "/work", PermissionMode: permissionmode.Default,
+	})
+	if !errors.Is(err, productruntime.ErrNativeRejected) || !strings.Contains(err.Error(), "native provider rejected sk-product-detail") || strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("native product error = %v", err)
 	}
 }
 

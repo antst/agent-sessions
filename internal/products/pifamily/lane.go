@@ -80,12 +80,13 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if request.ProductID != driver.config.Quirks.ProductID || strings.TrimSpace(request.LaneID) == "" || strings.TrimSpace(request.Cwd) == "" {
 		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: lane product, id, and cwd must be exact", productruntime.ErrNativeRejected)
 	}
-	if len(request.Arguments) != 0 {
-		// Pi-family positional, @file, print-mode, and extension-defined CLI
-		// arguments can all introduce model input before the first
-		// receipt-backed StartTurn. No caller-supplied lane argv is admitted
-		// until a pinned, product-specific safe allowlist exists.
-		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: caller-supplied Pi-family lane arguments are not supported", productruntime.ErrUnsupportedPolicy)
+	if request.ResumeNativeID == "" && strings.TrimSpace(request.Name) == "" {
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: fresh Pi-family lane requires a product-native name", productruntime.ErrNativeRejected)
+	}
+	for _, argument := range request.Arguments {
+		if reservedArgument(argument) {
+			return productruntime.NativeSessionRef{}, fmt.Errorf("%w: native argument %q is owned by the Pi-family lane lifecycle", productruntime.ErrUnsupportedPolicy, argument)
+		}
 	}
 	policy, err := driver.config.MapPermission(request.PermissionMode)
 	if err != nil {
@@ -98,11 +99,11 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	}
 	driver.mu.Unlock()
 
-	arguments := driver.config.Quirks.modeArguments()
+	arguments := append(driver.config.Quirks.modeArguments(), request.Arguments...)
 	if request.ResumeNativeID != "" {
 		arguments = append(arguments, driver.config.Quirks.resumeArguments(request.ResumeNativeID)...)
 	} else {
-		arguments = append(arguments, "--name", request.LaneID)
+		arguments = append(arguments, "--name", request.Name)
 	}
 	arguments = append(arguments, policy.Args...)
 	command := productruntime.NativeCommand{Path: driver.config.Executable, Args: arguments, Cwd: request.Cwd}
@@ -140,8 +141,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 func cleanupOpenFailure(cancel context.CancelFunc, process RPCProcess, primary error) error {
 	cancel()
 	if cleanupErr := process.Cleanup(context.Background()); cleanupErr != nil {
-		debt := fmt.Errorf("%w: clean failed Pi-family RPC launch: %v", productruntime.ErrCleanupDebt, cleanupErr)
-		return errors.Join(primary, debt)
+		return errors.Join(primary, fmt.Errorf("clean failed Pi-family RPC launch: %w", cleanupErr))
 	}
 	return primary
 }
@@ -336,7 +336,7 @@ func (driver *LaneDriver) Archive(ctx context.Context, ref productruntime.Native
 	// Archive retains the product JSONL transcript and stops only the exactly
 	// owned RPC process group.
 	if err := session.process.Cleanup(ctx); err != nil {
-		return fmt.Errorf("%w: archive exact RPC process: %v", productruntime.ErrCleanupDebt, err)
+		return fmt.Errorf("archive exact RPC process: %w", err)
 	}
 	session.cancel()
 	session.mu.Lock()

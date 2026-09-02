@@ -332,8 +332,7 @@ func (client *rpcClient) handleResponse(body []byte) error {
 		return fmt.Errorf("%w: RPC response command mismatch", productruntime.ErrProtocol)
 	}
 	if !response.Success {
-		detail := productruntime.NewRedactedString(response.Error)
-		pending.result <- rpcResult{err: fmt.Errorf("%w: %s", productruntime.ErrNativeRejected, detail.String())}
+		pending.result <- rpcResult{err: fmt.Errorf("%w: %s", productruntime.ErrNativeRejected, response.Error)}
 		return nil
 	}
 	pending.result <- rpcResult{response: response}

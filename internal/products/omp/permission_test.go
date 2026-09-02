@@ -41,7 +41,7 @@ func TestDefaultApprovalPolicyRejectsBeforeStartingUnattendedRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "default-rejected", Cwd: "/work", PermissionMode: permissionmode.Default,
+		ProductID: ProductID, LaneID: "default-rejected", Name: "default rejected", Cwd: "/work", PermissionMode: permissionmode.Default,
 	})
 	if !errors.Is(err, productruntime.ErrUnsupportedPolicy) || factory.started {
 		t.Fatalf("default open = %v, process started = %t", err, factory.started)
