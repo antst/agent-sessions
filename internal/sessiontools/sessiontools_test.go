@@ -69,6 +69,15 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	}
 }
 
+func TestEveryLaneHelpAdvertisesUniformYoloAliases(t *testing.T) {
+	for product := range laneUsageByProduct {
+		usage, err := LaneUsage(product)
+		if err != nil || !strings.Contains(usage, "--yolo") || !strings.Contains(usage, "--no-yolo") {
+			t.Fatalf("%s lane yolo help = %q err=%v", product, usage, err)
+		}
+	}
+}
+
 func TestWrapPeerMessageValidatesProductAndEscapesEnvelope(t *testing.T) {
 	if _, err := WrapPeerMessage("", "", "", "", "", "", "", "body"); err == nil {
 		t.Fatal("empty product succeeded")
