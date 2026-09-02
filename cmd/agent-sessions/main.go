@@ -83,7 +83,7 @@ func defaultCommandRunners() commandRunners {
 		catalog: runCatalog,
 		peer: func(ctx context.Context, invocation clihelp.Invocation, output io.Writer) error {
 			if invocation.Product == "codex" {
-				return launcher.RunCodexPeerWithDaemon(ctx, invocation.Arguments, requestCodexSessionList, requestCodexPreparation, runCodexNativePeer)
+				return launcher.RunCodexPeerWithDaemon(ctx, invocation.Arguments, requestCodexPreparation, runCodexNativePeer)
 			}
 			if invocation.Product == "claude" {
 				return launcher.RunClaudePeer(invocation.Arguments)

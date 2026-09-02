@@ -63,12 +63,13 @@ type CodexDaemonPrepareRequest struct {
 	InheritGroupsSpecified bool
 }
 
-// CodexDaemonPrepareResult is the exact native handoff returned after durable
-// daemon preparation and App Server selection.
+// CodexDaemonPrepareResult is either the exact native handoff or the ephemeral
+// product rows needed before an interactive name choice.
 type CodexDaemonPrepareResult struct {
-	ThreadID string
-	Name     string
-	Cwd      string
+	ThreadID   string
+	Name       string
+	Cwd        string
+	Candidates []CodexResumeCandidate
 }
 
 // CodexResumeCandidate is one product-owned root-thread row offered to the
@@ -79,10 +80,6 @@ type CodexResumeCandidate struct {
 	Cwd       string
 	UpdatedAt int64
 }
-
-// CodexSessionLister obtains the current product-owned root-thread list from
-// the daemon's existing App Server connection. It makes no selection.
-type CodexSessionLister func(context.Context) ([]CodexResumeCandidate, error)
 
 // CodexDaemonPrepare submits one parsed Codex launch intent.
 type CodexDaemonPrepare func(context.Context, CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error)
@@ -106,8 +103,8 @@ type CodexNativeRunner func(context.Context, CodexNativeLaunch) error
 // while replacing the legacy runtime/supervisor transaction with stateless
 // product-list selection followed by one exact daemon preparation. It never
 // starts or stops Agent Sessions authority.
-func RunCodexPeerWithDaemon(ctx context.Context, args []string, list CodexSessionLister, prepare CodexDaemonPrepare, run CodexNativeRunner) error {
-	if ctx == nil || list == nil || prepare == nil || run == nil {
+func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDaemonPrepare, run CodexNativeRunner) error {
+	if ctx == nil || prepare == nil || run == nil {
 		return errors.New("codex daemon launch coordinator is unavailable")
 	}
 	cwd, err := os.Getwd()
@@ -119,7 +116,7 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, list CodexSessio
 		return err
 	}
 	plan, err := projectCodexLaunchPlan(
-		ctx, args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"), codex, list, terminalProductSessionChooser,
+		ctx, args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"), codex, prepare, terminalProductSessionChooser,
 	)
 	if err != nil {
 		return err
@@ -174,7 +171,7 @@ func projectCodexLaunchPlan(
 	ctx context.Context,
 	args []string,
 	cwd, environmentName, executable string,
-	list CodexSessionLister,
+	prepare CodexDaemonPrepare,
 	choose productSessionChooser,
 ) (codexPlan, error) {
 	descriptor, ok := productcatalog.ByID("codex")
@@ -190,12 +187,12 @@ func projectCodexLaunchPlan(
 		return plan, err
 	}
 	listProductRows := func(_, _ string) ([]productSession, error) {
-		candidates, listErr := list(ctx)
+		result, listErr := prepare(ctx, CodexDaemonPrepareRequest{Mode: "list"})
 		if listErr != nil {
 			return nil, listErr
 		}
-		rows := make([]productSession, 0, len(candidates))
-		for _, candidate := range candidates {
+		rows := make([]productSession, 0, len(result.Candidates))
+		for _, candidate := range result.Candidates {
 			rows = append(rows, productSession{
 				ID: candidate.ID, Title: candidate.Name, Directory: candidate.Cwd, Updated: candidate.UpdatedAt,
 			})

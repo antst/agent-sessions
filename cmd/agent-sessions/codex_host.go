@@ -262,22 +262,6 @@ func (c *hostCoordinator) handle(
 	request daemonpkg.ControlRequest,
 ) (json.RawMessage, error) {
 	switch request.Operation {
-	case "codex.sessions.list":
-		native, err := c.codexNative()
-		if err != nil {
-			return nil, err
-		}
-		threads, err := native.ListPeerThreads(ctx)
-		if err != nil {
-			return nil, err
-		}
-		candidates := make([]launcher.CodexResumeCandidate, 0, len(threads))
-		for _, thread := range threads {
-			candidates = append(candidates, launcher.CodexResumeCandidate{
-				ID: thread.ID, Name: thread.Name, Cwd: thread.Cwd, UpdatedAt: thread.UpdatedAt,
-			})
-		}
-		return json.Marshal(candidates)
 	case "attachment.codex.prepare":
 		if runtime == nil {
 			return nil, errors.New("runtime attachment authority is unavailable")
@@ -319,6 +303,23 @@ func (c *hostCoordinator) prepareCodex(
 	runtime *daemonpkg.Runtime,
 	request launcher.CodexDaemonPrepareRequest,
 ) (launcher.CodexDaemonPrepareResult, error) {
+	if request.Mode == "list" {
+		native, err := c.codexNative()
+		if err != nil {
+			return launcher.CodexDaemonPrepareResult{}, err
+		}
+		threads, err := native.ListPeerThreads(ctx)
+		if err != nil {
+			return launcher.CodexDaemonPrepareResult{}, err
+		}
+		candidates := make([]launcher.CodexResumeCandidate, 0, len(threads))
+		for _, thread := range threads {
+			candidates = append(candidates, launcher.CodexResumeCandidate{
+				ID: thread.ID, Name: thread.Name, Cwd: thread.Cwd, UpdatedAt: thread.UpdatedAt,
+			})
+		}
+		return launcher.CodexDaemonPrepareResult{Candidates: candidates}, nil
+	}
 	if procinfo.ObserveIdentity(request.Owner).Status != procinfo.IdentityMatches {
 		return launcher.CodexDaemonPrepareResult{}, errors.New("codex launcher identity is not live")
 	}
@@ -507,10 +508,6 @@ func requestCodexPreparation(
 	return requestPreparation[launcher.CodexDaemonPrepareRequest, launcher.CodexDaemonPrepareResult](
 		ctx, "attachment.codex.prepare", request,
 	)
-}
-
-func requestCodexSessionList(ctx context.Context) ([]launcher.CodexResumeCandidate, error) {
-	return requestPreparation[struct{}, []launcher.CodexResumeCandidate](ctx, "codex.sessions.list", struct{}{})
 }
 
 func codexBinary() string {

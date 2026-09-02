@@ -51,12 +51,15 @@ func TestCodexDescriptorHandlerChoosesAmongEveryProductMatch(t *testing.T) {
 	first := "00000000-0000-0000-0000-00000000c011"
 	second := "00000000-0000-0000-0000-00000000c012"
 	listCalls := 0
-	list := func(context.Context) ([]CodexResumeCandidate, error) {
+	prepare := func(_ context.Context, request CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error) {
 		listCalls++
-		return []CodexResumeCandidate{
+		if request.Mode != "list" {
+			t.Fatalf("selection request mode = %q", request.Mode)
+		}
+		return CodexDaemonPrepareResult{Candidates: []CodexResumeCandidate{
 			{ID: first, Name: "shared", Cwd: "/first", UpdatedAt: 1},
 			{ID: second, Name: "shared", Cwd: "/second", UpdatedAt: 2},
-		}, nil
+		}}, nil
 	}
 	choose := func(product, selector string, matches []productSession) (string, error) {
 		if product != "codex" || selector != "shared" || len(matches) != 2 {
@@ -64,7 +67,7 @@ func TestCodexDescriptorHandlerChoosesAmongEveryProductMatch(t *testing.T) {
 		}
 		return matches[1].ID, nil
 	}
-	plan, err := projectCodexLaunchPlan(context.Background(), []string{"--resume", "shared", "-g", "current"}, root, "", "/native/codex", list, choose)
+	plan, err := projectCodexLaunchPlan(context.Background(), []string{"--resume", "shared", "-g", "current"}, root, "", "/native/codex", prepare, choose)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +75,7 @@ func TestCodexDescriptorHandlerChoosesAmongEveryProductMatch(t *testing.T) {
 		t.Fatalf("projected plan = %+v, list calls %d", plan, listCalls)
 	}
 
-	plan, err = projectCodexLaunchPlan(context.Background(), []string{"resume", first}, root, "", "/native/codex", list, choose)
+	plan, err = projectCodexLaunchPlan(context.Background(), []string{"resume", first}, root, "", "/native/codex", prepare, choose)
 	if err != nil {
 		t.Fatal(err)
 	}
