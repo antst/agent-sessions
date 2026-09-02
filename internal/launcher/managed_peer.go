@@ -133,7 +133,7 @@ func listPiSessions(executable, cwd string) ([]productSession, error) {
 	return listPiSessionsWithScope(context.Background(), executable, "cwd", cwd)
 }
 
-func listOMPSessions(executable, cwd string) ([]productSession, error) {
+func listOMPSessionsWithScope(ctx context.Context, executable, scope, cwd string) ([]ProductSession, error) {
 	resolved, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return nil, fmt.Errorf("resolve OMP executable: %w", err)
@@ -143,7 +143,7 @@ func listOMPSessions(executable, cwd string) ([]productSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve Bun for OMP session list: %w", err)
 	}
-	command := exec.Command(bun, "--eval", packageSessionListScript, productAPI, "cwd", cwd) //nolint:gosec // pinned product API and caller cwd.
+	command := exec.CommandContext(ctx, bun, "--eval", packageSessionListScript, productAPI, scope, cwd) //nolint:gosec // pinned product API and explicit scope.
 	command.Dir = cwd
 	payload, err := command.Output()
 	if err != nil {
@@ -154,6 +154,14 @@ func listOMPSessions(executable, cwd string) ([]productSession, error) {
 		return nil, fmt.Errorf("decode OMP product session list: %w", err)
 	}
 	return sessions, nil
+}
+
+func ListAllOMPSessions(ctx context.Context, executable string) ([]ProductSession, error) {
+	return listOMPSessionsWithScope(ctx, executable, "all", "")
+}
+
+func listOMPSessions(executable, cwd string) ([]productSession, error) {
+	return listOMPSessionsWithScope(context.Background(), executable, "cwd", cwd)
 }
 
 func isOpenCodeSessionID(selector string) bool {

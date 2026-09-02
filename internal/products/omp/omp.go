@@ -28,14 +28,7 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 	if descriptor.ID != ProductID {
 		return productruntime.RuntimeProduct{}, productruntime.ErrProtocol
 	}
-	quirks, err := pifamily.QuirksFor(ProductID)
-	if err != nil {
-		return productruntime.RuntimeProduct{}, err
-	}
-	lane, err := pifamily.NewLaneDriver(pifamily.LaneConfig{
-		Quirks: quirks, Executable: config.Executable, Generation: config.Deps.Generation,
-		Processes: config.Processes, MapPermission: MapPermission, Now: config.Now,
-	})
+	lane, err := NewLaneDriver(config)
 	if err != nil {
 		return productruntime.RuntimeProduct{}, err
 	}
@@ -44,6 +37,17 @@ func NewRuntime(descriptor productcatalog.Descriptor, config Config) (productrun
 		return productruntime.RuntimeProduct{}, err
 	}
 	return productruntime.RuntimeProduct{Descriptor: descriptor, Lane: lane, Doctor: doctor}, nil
+}
+
+func NewLaneDriver(config Config) (*pifamily.LaneDriver, error) {
+	quirks, err := pifamily.QuirksFor(ProductID)
+	if err != nil {
+		return nil, err
+	}
+	return pifamily.NewLaneDriver(pifamily.LaneConfig{
+		Quirks: quirks, Executable: config.Executable, Generation: config.Deps.Generation,
+		Processes: config.Processes, MapPermission: MapPermission, Now: config.Now,
+	})
 }
 
 func NewDoctorProbe(config Config) (*pifamily.DoctorProbe, error) {

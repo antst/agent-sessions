@@ -23,6 +23,7 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
+	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
 	"github.com/antst/agent-sessions/internal/products/opencodefamily"
 	piproduct "github.com/antst/agent-sessions/internal/products/pi"
@@ -141,13 +142,24 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if !ok {
 		panic("Pi product descriptor is unavailable")
 	}
-	piProcesses, err := pifamily.NewStructuredProcessFactory(laneProcesses)
+	piFamilyProcesses, err := pifamily.NewStructuredProcessFactory(laneProcesses)
 	if err != nil {
 		panic(err)
 	}
 	piLanes, err := piproduct.NewLaneDriver(piproduct.Config{
 		Deps:       productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses},
-		Executable: piDescriptor.NativeExecutable, Processes: piProcesses,
+		Executable: piDescriptor.NativeExecutable, Processes: piFamilyProcesses,
+	})
+	if err != nil {
+		panic(err)
+	}
+	ompDescriptor, ok := productcatalog.ByID(ompproduct.ProductID)
+	if !ok {
+		panic("OMP product descriptor is unavailable")
+	}
+	ompLanes, err := ompproduct.NewLaneDriver(ompproduct.Config{
+		Deps:       productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses},
+		Executable: ompDescriptor.NativeExecutable, Processes: piFamilyProcesses,
 	})
 	if err != nil {
 		panic(err)
@@ -157,6 +169,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		opencodeproduct.ProductID: opencodeLanes,
 		kiloproduct.ProductID:     kiloLanes,
 		piproduct.ProductID:       piLanes,
+		ompproduct.ProductID:      ompLanes,
 	})
 	if err != nil {
 		panic(err)
@@ -323,6 +336,7 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 		opencodeproduct.ProductID: productListLaneCandidateResolver(opencodeproduct.ProductID),
 		kiloproduct.ProductID:     productListLaneCandidateResolver(kiloproduct.ProductID),
 		piproduct.ProductID:       packageListLaneCandidateResolver(piproduct.ProductID, launcher.ListAllPiSessions),
+		ompproduct.ProductID:      packageListLaneCandidateResolver(ompproduct.ProductID, launcher.ListAllOMPSessions),
 	}
 }
 
