@@ -89,7 +89,9 @@ func listProductSessions(executable, _ string) ([]productSession, error) {
 const packageSessionListScript = `
 import { pathToFileURL } from "node:url";
 const { SessionManager } = await import(pathToFileURL(process.argv[1]).href);
-const rows = await SessionManager.list(process.argv[2]);
+const rows = process.argv[2] === "all"
+  ? await SessionManager.listAll()
+  : await SessionManager.list(process.argv[3]);
 process.stdout.write(JSON.stringify(rows.map((row) => ({
   id: row.id,
   title: row.title ?? row.name ?? "",
@@ -98,7 +100,7 @@ process.stdout.write(JSON.stringify(rows.map((row) => ({
 }))));
 `
 
-func ListPiSessions(ctx context.Context, executable, cwd string) ([]ProductSession, error) {
+func listPiSessionsWithScope(ctx context.Context, executable, scope, cwd string) ([]ProductSession, error) {
 	resolved, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Pi executable: %w", err)
@@ -108,8 +110,10 @@ func ListPiSessions(ctx context.Context, executable, cwd string) ([]ProductSessi
 	if err != nil {
 		return nil, fmt.Errorf("resolve Node.js for Pi session list: %w", err)
 	}
-	command := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packageSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
-	command.Dir = cwd
+	command := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packageSessionListScript, productAPI, scope, cwd) //nolint:gosec // pinned product API and explicit scope.
+	if cwd != "" {
+		command.Dir = cwd
+	}
 	payload, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list Pi sessions through product API: %w", err)
@@ -121,8 +125,12 @@ func ListPiSessions(ctx context.Context, executable, cwd string) ([]ProductSessi
 	return sessions, nil
 }
 
+func ListAllPiSessions(ctx context.Context, executable string) ([]ProductSession, error) {
+	return listPiSessionsWithScope(ctx, executable, "all", "")
+}
+
 func listPiSessions(executable, cwd string) ([]productSession, error) {
-	return ListPiSessions(context.Background(), executable, cwd)
+	return listPiSessionsWithScope(context.Background(), executable, "cwd", cwd)
 }
 
 func listOMPSessions(executable, cwd string) ([]productSession, error) {

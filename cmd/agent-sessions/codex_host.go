@@ -322,20 +322,20 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 		},
 		opencodeproduct.ProductID: productListLaneCandidateResolver(opencodeproduct.ProductID),
 		kiloproduct.ProductID:     productListLaneCandidateResolver(kiloproduct.ProductID),
-		piproduct.ProductID:       packageListLaneCandidateResolver(piproduct.ProductID, launcher.ListPiSessions),
+		piproduct.ProductID:       packageListLaneCandidateResolver(piproduct.ProductID, launcher.ListAllPiSessions),
 	}
 }
 
 func packageListLaneCandidateResolver(
 	product string,
-	list func(context.Context, string, string) ([]launcher.ProductSession, error),
+	list func(context.Context, string) ([]launcher.ProductSession, error),
 ) func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool) {
-	return func(ctx context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+	return func(ctx context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
 		executable, err := launcher.ResolveProductExecutable(product)
 		if err != nil {
 			return laneNameEntry{}, false
 		}
-		sessions, err := list(ctx, executable, parent.Cwd)
+		sessions, err := list(ctx, executable)
 		if err != nil {
 			return laneNameEntry{}, false
 		}

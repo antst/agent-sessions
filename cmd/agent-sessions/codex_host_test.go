@@ -64,7 +64,7 @@ func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *
 	}
 	toolsDir := t.TempDir()
 	node := filepath.Join(toolsDir, "node")
-	if err := os.WriteFile(node, []byte("#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"pi-native\",\"title\":\"reviewer-pi\",\"directory\":\"/work/pi\",\"modified\":\"now\"}]'\n"), 0o700); err != nil {
+	if err := os.WriteFile(node, []byte("#!/bin/sh\n[ \"$5\" = all ] || exit 23\nprintf '%s\\n' '[{\"id\":\"pi-native\",\"title\":\"reviewer-pi\",\"directory\":\"/work/pi\",\"modified\":\"now\"}]'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", toolsDir+string(os.PathListSeparator)+os.Getenv("PATH"))
