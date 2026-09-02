@@ -16,7 +16,7 @@ import (
 // Agent Sessions daemon owns lifecycle and durability; only the vendor worker
 // is a child process. This deliberately reuses the protocol clients exercised
 // by the legacy Grok and Qwen lane managers instead of approximating their
-// behavior through each product's interactive/headless convenience CLI.
+// behavior through Grok's interactive/headless convenience CLI.
 type NativeLaneACPConfig struct {
 	Product          string
 	Executable       string
@@ -43,14 +43,12 @@ type NativeLaneACPResult struct {
 	Mode            string
 }
 
-// RunNativeLaneACP executes one Grok or Qwen turn over the product's supported
-// ACP protocol and injects only the unified daemon's attested MCP connector.
+// RunNativeLaneACP executes one Grok turn over the product's supported ACP
+// protocol and injects only the unified daemon's MCP connector.
 func RunNativeLaneACP(ctx context.Context, config NativeLaneACPConfig) (NativeLaneACPResult, error) {
 	switch config.Product {
 	case "grok":
 		return runGrokNativeLaneACP(ctx, config)
-	case "qwen":
-		return runQwenNativeLaneACP(ctx, config)
 	default:
 		return NativeLaneACPResult{}, fmt.Errorf("native ACP lane product %q is unsupported", config.Product)
 	}
@@ -176,128 +174,6 @@ func runGrokNativeLaneACP(ctx context.Context, config NativeLaneACPConfig) (Nati
 	text := output.String()
 	outputMu.Unlock()
 	return NativeLaneACPResult{NativeSessionID: nativeID, Output: text, Mode: "bypassPermissions"}, nil
-}
-
-//nolint:gocyclo // Qwen ACP bootstrap, exact identity, mode, prompt, and teardown form one native transaction.
-func runQwenNativeLaneACP(ctx context.Context, config NativeLaneACPConfig) (NativeLaneACPResult, error) {
-	if err := validateNativeLaneACPConfig(config); err != nil {
-		return NativeLaneACPResult{}, err
-	}
-	args := []string{"--acp"}
-	requestedMode := ""
-	if config.PermissionMode == "bypassPermissions" || config.PermissionMode == "yolo" {
-		requestedMode = "yolo"
-	} else if config.PermissionMode != "" {
-		requestedMode = config.PermissionMode
-	}
-	if requestedMode != "" {
-		args = append(args, "--approval-mode", requestedMode)
-	}
-	command := exec.Command(config.Executable, args...) //nolint:gosec // validated installed product and structured arguments.
-	command.Dir, command.Env = config.Cwd, append([]string(nil), config.Environment...)
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		return NativeLaneACPResult{}, err
-	}
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return NativeLaneACPResult{}, err
-	}
-	var diagnostics bytes.Buffer
-	command.Stderr = &diagnostics
-	worker, err := startGrokManagedProcess(command, nil)
-	if err != nil {
-		return NativeLaneACPResult{}, fmt.Errorf("start Qwen ACP worker: %w", err)
-	}
-	client := newQwenACPClient(stdin, stdout)
-	defer func() {
-		_ = client.close()
-		stopGrokManagedProcess(worker, 2*time.Second)
-	}()
-	setupCtx, setupCancel := nativeLaneACPSetupContext(ctx)
-	defer setupCancel()
-	initialized, err := client.request(setupCtx, "initialize", map[string]any{
-		"protocolVersion": 1,
-		"clientCapabilities": map[string]any{
-			"fs": map[string]any{"readTextFile": false, "writeTextFile": false}, "terminal": false,
-		},
-	})
-	if err != nil {
-		return NativeLaneACPResult{}, nativeLaneACPError("initialize Qwen ACP worker", err, diagnostics.String())
-	}
-	agent := mapValue(initialized["agentInfo"])
-	capabilities := mapValue(initialized["agentCapabilities"])
-	if intValue(initialized["protocolVersion"]) != 1 || stringValue(agent["name"]) != "qwen-code" {
-		return NativeLaneACPResult{}, errors.New("qwen ACP initialize response has the wrong protocol or product identity")
-	}
-	params := map[string]any{"cwd": config.Cwd, "mcpServers": []any{unifiedLaneMCPServer(config)}}
-	method := "session/new"
-	if config.NativeSessionID != "" {
-		method, params["sessionId"] = "session/resume", config.NativeSessionID
-	}
-	if load, _ := capabilities["loadSession"].(bool); !load {
-		return NativeLaneACPResult{}, errors.New("qwen ACP worker does not support session resume")
-	}
-	opened, err := client.request(setupCtx, method, params)
-	if err != nil {
-		return NativeLaneACPResult{}, nativeLaneACPError("open Qwen ACP lane session", err, diagnostics.String())
-	}
-	nativeID := defaultString(stringValue(opened["sessionId"]), config.NativeSessionID)
-	if nativeID == "" {
-		return NativeLaneACPResult{}, errors.New("qwen ACP returned no native session identity")
-	}
-	if config.NativeSessionID != "" && nativeID != config.NativeSessionID {
-		return NativeLaneACPResult{}, errors.New("qwen ACP resumed a different native session identity")
-	}
-	mode := qwenACPMode(opened)
-	if config.SessionOpened != nil {
-		if err := config.SessionOpened(nativeID); err != nil {
-			return NativeLaneACPResult{NativeSessionID: nativeID, Mode: mode}, fmt.Errorf("persist Qwen ACP session identity: %w", err)
-		}
-	}
-	if requestedMode != "" && mode != requestedMode {
-		return NativeLaneACPResult{}, fmt.Errorf("qwen ACP initial mode %q does not match requested %q", mode, requestedMode)
-	}
-	setupCancel()
-	if config.ExecutionStarted != nil {
-		if err := config.ExecutionStarted(); err != nil {
-			return NativeLaneACPResult{NativeSessionID: nativeID, Mode: mode}, fmt.Errorf("start Qwen ACP lane execution: %w", err)
-		}
-	}
-	var output strings.Builder
-	var outputMu sync.Mutex
-	client.setNotificationHandler(func(message map[string]any) {
-		params := mapValue(message["params"])
-		if sessionID := stringValue(params["sessionId"]); sessionID != "" && sessionID != nativeID {
-			return
-		}
-		update := mapValue(params["update"])
-		if stringValue(update["sessionUpdate"]) != "agent_message_chunk" {
-			return
-		}
-		text := defaultString(stringValue(mapValue(update["content"])["text"]), stringValue(update["text"]))
-		if text != "" {
-			outputMu.Lock()
-			output.WriteString(text)
-			outputMu.Unlock()
-		}
-	})
-	err = runNativeLaneACPExecution(ctx, config.ExecutionTimeout, func(turnCtx context.Context) error {
-		_, requestErr := client.request(turnCtx, "session/prompt", map[string]any{
-			"sessionId": nativeID, "prompt": []any{map[string]any{"type": "text", "text": config.Prompt}},
-		})
-		if requestErr != nil && turnCtx.Err() != nil {
-			_ = client.notifyCancel(map[string]any{"sessionId": nativeID})
-		}
-		return requestErr
-	})
-	if err != nil {
-		return NativeLaneACPResult{NativeSessionID: nativeID, Mode: mode}, nativeLaneACPError("run Qwen ACP lane turn", err, diagnostics.String())
-	}
-	outputMu.Lock()
-	text := output.String()
-	outputMu.Unlock()
-	return NativeLaneACPResult{NativeSessionID: nativeID, Output: text, Mode: mode}, nil
 }
 
 const nativeLaneACPSetupTimeout = 45 * time.Second

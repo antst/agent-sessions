@@ -28,6 +28,7 @@ import (
 	"github.com/antst/agent-sessions/internal/products/opencodefamily"
 	piproduct "github.com/antst/agent-sessions/internal/products/pi"
 	"github.com/antst/agent-sessions/internal/products/pifamily"
+	qwenproduct "github.com/antst/agent-sessions/internal/products/qwen"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/structuredprocess"
 )
@@ -52,7 +53,7 @@ type hostCoordinator struct {
 	monitored          map[string]bool
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
-	qwenLanes          *daemonpkg.QwenLaneAdapter
+	qwenLanes          *qwenproduct.LaneDriver
 	laneProcesses      *structuredprocess.Supervisor
 	laneDrivers        *productruntime.LaneRegistry
 	lanes              map[string]*laneActor
@@ -81,7 +82,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
 		claudeLanes:     daemonpkg.NewClaudeLaneAdapter(),
 		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
-		qwenLanes:       daemonpkg.NewQwenLaneAdapter(),
 		lanes:           map[string]*laneActor{},
 		liveReports:     map[string]liveSessionReport{},
 		reportedLanes:   map[string]string{},
@@ -98,6 +98,25 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		panic(err)
 	}
 	coordinator.laneProcesses = laneProcesses
+	qwenDescriptor, ok := productcatalog.ByID(qwenproduct.ProductID)
+	if !ok {
+		panic("Qwen product descriptor is unavailable")
+	}
+	qwenProcesses, err := qwenproduct.NewStructuredProcessFactory(laneProcesses)
+	if err != nil {
+		panic(err)
+	}
+	hostExecutable, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	coordinator.qwenLanes, err = qwenproduct.NewLaneDriver(qwenproduct.LaneConfig{
+		Executable: qwenDescriptor.NativeExecutable, HostExecutable: hostExecutable,
+		Generation: 1, Processes: qwenProcesses,
+	})
+	if err != nil {
+		panic(err)
+	}
 	codexLanes, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) {
 		return coordinator.codexNative()
 	})

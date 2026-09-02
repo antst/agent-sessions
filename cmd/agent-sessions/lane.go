@@ -696,13 +696,16 @@ func (c *hostCoordinator) interruptLaneNative(actor *laneActor) error {
 		defer interruptCancel()
 		return driver.Interrupt(interruptCtx, turn)
 	}
+	if product == "qwen" {
+		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer interruptCancel()
+		return c.qwenLanes.Interrupt(interruptCtx, turn)
+	}
 	switch product {
 	case "claude":
 		return c.claudeLanes.Interrupt(laneID)
 	case "grok":
 		return c.grokLanes.Interrupt(laneID)
-	case "qwen":
-		return c.qwenLanes.Interrupt(laneID)
 	default:
 		return fmt.Errorf("unsupported lane product %q", product)
 	}
@@ -1004,7 +1007,10 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
 		return c.dispatchProductLaneTurn(runtime, actor, prompt, driver)
 	}
-	if actor.product == "grok" || actor.product == "qwen" {
+	if actor.product == "qwen" {
+		return c.dispatchProductLaneTurn(runtime, actor, prompt, c.qwenLanes)
+	}
+	if actor.product == "grok" {
 		return c.dispatchACPLaneTurn(runtime, actor, prompt)
 	}
 	command, err := laneNativeCommand(actor, prompt, resume)
@@ -1205,19 +1211,11 @@ func (c *hostCoordinator) dispatchACPLaneTurn(runtime *daemonpkg.Runtime, actor 
 			result daemonpkg.NativeACPLaneResult
 			runErr error
 		)
-		if product == "grok" {
-			result, runErr = c.grokLanes.Run(lifecycleCtx, daemonpkg.GrokACPLaneRequest{
-				LaneID: laneID, NativeSession: nativeID, PermissionMode: permission, Prompt: prompt,
-			}, func(runCtx context.Context, request daemonpkg.GrokACPLaneRequest) (daemonpkg.NativeACPLaneResult, error) {
-				return runNative(runCtx, request.PermissionMode, request.NativeSession)
-			})
-		} else {
-			result, runErr = c.qwenLanes.Run(lifecycleCtx, daemonpkg.QwenACPLaneRequest{
-				LaneID: laneID, NativeSession: nativeID, PermissionMode: permission, Prompt: prompt,
-			}, func(runCtx context.Context, request daemonpkg.QwenACPLaneRequest) (daemonpkg.NativeACPLaneResult, error) {
-				return runNative(runCtx, request.PermissionMode, request.NativeSession)
-			})
-		}
+		result, runErr = c.grokLanes.Run(lifecycleCtx, daemonpkg.GrokACPLaneRequest{
+			LaneID: laneID, NativeSession: nativeID, PermissionMode: permission, Prompt: prompt,
+		}, func(runCtx context.Context, request daemonpkg.GrokACPLaneRequest) (daemonpkg.NativeACPLaneResult, error) {
+			return runNative(runCtx, request.PermissionMode, request.NativeSession)
+		})
 		events <- acpLaneEvent{result: bridge.NativeLaneACPResult{
 			NativeSessionID: result.NativeSessionID, Output: result.Output, Mode: result.Mode,
 		}, err: runErr}
@@ -1439,13 +1437,19 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
 		})
 	}
+	if actor.product == "qwen" {
+		if actor.nativeID == "" {
+			return nil
+		}
+		return c.qwenLanes.Archive(context.Background(), productruntime.NativeSessionRef{
+			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
+		})
+	}
 	switch actor.product {
 	case "claude":
 		return c.claudeLanes.Archive(actor.id)
 	case "grok":
 		return c.grokLanes.Archive(actor.id)
-	case "qwen":
-		return c.qwenLanes.Archive(actor.id)
 	default:
 		return errors.New("unsupported lane product")
 	}
@@ -1508,17 +1512,6 @@ func laneNativeCommand(actor *laneActor, prompt string, resume bool) (*exec.Cmd,
 		}
 		args = append(args, actor.arguments...)
 		args = append(args, "--single", prompt)
-	case "qwen":
-		if resume {
-			args = append(args, "--resume", actor.nativeID)
-		} else {
-			args = append(args, "--session-id", actor.id)
-		}
-		if actor.permission == "bypassPermissions" || actor.permission == "yolo" {
-			args = append(args, "--approval-mode", "yolo")
-		}
-		args = append(args, actor.arguments...)
-		args = append(args, "--output-format", "json", "--prompt", prompt)
 	default:
 		return nil, errors.New("unsupported lane product")
 	}
