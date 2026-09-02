@@ -251,7 +251,7 @@ install_opencode_plugin() {
   [[ -n "$opencode_path" ]] || return 0
   config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
   install_managed_plugin_link \
-    "$config_root/plugins/agent-sessions.mjs" \
+    "$config_root/plugins/agent-sessions.js" \
     "$integration_root/integrations/opencode/agent-sessions.mjs" \
     "integrations/opencode/agent-sessions.mjs"
   install_managed_plugin_link \
@@ -331,7 +331,7 @@ remove_integrations() {
   if [[ -n "$opencode_path" ]]; then
     local config_root link target
     config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-    for link in "$config_root/plugins/agent-sessions.mjs" "$config_root/shared/live-session.js"; do
+    for link in "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"; do
       if [[ -L "$link" ]]; then
         target=$(readlink -- "$link")
         case "$target" in

@@ -186,7 +186,7 @@ install_host() {
 
 install_host
 release="$prefix/libexec/agent-sessions/host/releases/0.3.0"
-[[ "$(readlink -- "$home/.config/opencode/plugins/agent-sessions.mjs")" == "$release/integrations/opencode/agent-sessions.mjs" ]]
+[[ "$(readlink -- "$home/.config/opencode/plugins/agent-sessions.js")" == "$release/integrations/opencode/agent-sessions.mjs" ]]
 [[ "$(readlink -- "$home/.config/opencode/shared/live-session.js")" == "$release/integrations/shared/live-session.js" ]]
 find -P "$release" -type d -exec chmod 0555 {} +
 printf 'unified-state-canary\n' >"$state_root/canary"
@@ -206,7 +206,7 @@ if [[ $failed_status -eq 0 ]] ||
    [[ "$(cat "$test_root/qwen-source")" != "$release/qwen" ]] ||
    [[ ! -f "$test_root/grok-installed" ]] ||
    [[ ! -f "$home/.grok/plugins/agent-sessions/.grok-plugin/plugin.json" ]] ||
-   [[ "$(readlink -- "$home/.config/opencode/plugins/agent-sessions.mjs")" != "$release/integrations/opencode/agent-sessions.mjs" ]] ||
+   [[ "$(readlink -- "$home/.config/opencode/plugins/agent-sessions.js")" != "$release/integrations/opencode/agent-sessions.mjs" ]] ||
    [[ "$(readlink -- "$home/.config/opencode/shared/live-session.js")" != "$release/integrations/shared/live-session.js" ]]; then
   printf 'failed removal did not restore the installed host transaction\n' >&2
   exit 1
@@ -219,7 +219,7 @@ if [[ -e "$prefix/libexec/agent-sessions/host" ]] ||
    [[ -e "$test_root/qwen-source" ]] ||
    [[ -e "$test_root/grok-installed" ]] ||
    [[ -e "$home/.grok/plugins/agent-sessions" ]] ||
-   [[ -e "$home/.config/opencode/plugins/agent-sessions.mjs" || -L "$home/.config/opencode/plugins/agent-sessions.mjs" ]] ||
+   [[ -e "$home/.config/opencode/plugins/agent-sessions.js" || -L "$home/.config/opencode/plugins/agent-sessions.js" ]] ||
    [[ -e "$home/.config/opencode/shared/live-session.js" || -L "$home/.config/opencode/shared/live-session.js" ]] ||
    [[ ! -f "$state_root/canary" ]] ||
    [[ ! -f "$home/.config/agent-sessions/preserved" ]] ||

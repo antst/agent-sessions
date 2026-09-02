@@ -155,7 +155,7 @@ install_integrations() {
     local config_root
     config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
     mkdir -p "$config_root/plugins" "$config_root/shared"
-    ln -sfn "$current/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.mjs"
+    ln -sfn "$current/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
     ln -sfn "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   fi
 }
@@ -254,7 +254,7 @@ if [[ -n "$qwen_path" ]]; then
 fi
 if [[ -n "$opencode_path" ]]; then
   opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-  for link in "$opencode_config_root/plugins/agent-sessions.mjs" "$opencode_config_root/shared/live-session.js"; do
+  for link in "$opencode_config_root/plugins/agent-sessions.js" "$opencode_config_root/shared/live-session.js"; do
     if [[ -L "$link" ]]; then
       target=$(readlink -- "$link")
       case "$target" in
