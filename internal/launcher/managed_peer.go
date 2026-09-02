@@ -3,9 +3,11 @@ package launcher
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -27,6 +29,12 @@ func RunManagedPeer(product string, args []string) error {
 	if err != nil {
 		return err
 	}
+	if product == "opencode" {
+		args, err = resolveOpenCodeResume(path, args, listOpenCodeSessions)
+		if err != nil {
+			return err
+		}
+	}
 	root := ""
 	descriptor, ok := productcatalog.ByID(product)
 	if !ok {
@@ -44,6 +52,69 @@ func RunManagedPeer(product string, args []string) error {
 		return err
 	}
 	return Exec(plan.path, plan.args, plan.environment)
+}
+
+type openCodeSession struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Directory string `json:"directory"`
+	Updated   int64  `json:"updated"`
+}
+
+func listOpenCodeSessions(executable string) ([]openCodeSession, error) {
+	command := exec.Command(executable, "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
+	payload, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list OpenCode sessions: %w", err)
+	}
+	var sessions []openCodeSession
+	if err := json.Unmarshal(payload, &sessions); err != nil {
+		return nil, fmt.Errorf("decode OpenCode session list: %w", err)
+	}
+	return sessions, nil
+}
+
+func resolveOpenCodeResume(
+	executable string,
+	arguments []string,
+	list func(string) ([]openCodeSession, error),
+) ([]string, error) {
+	selector, present, err := optionValue(arguments, "--session")
+	if err != nil || !present || strings.HasPrefix(selector, "ses_") {
+		return arguments, err
+	}
+	sessions, err := list(executable)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]openCodeSession, 0, 1)
+	for _, session := range sessions {
+		if session.Title == selector {
+			matches = append(matches, session)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, usageError(fmt.Sprintf("OpenCode session name %q was not found in the product session list", selector))
+	}
+	if len(matches) > 1 {
+		details := make([]string, 0, len(matches))
+		for _, match := range matches {
+			details = append(details, fmt.Sprintf("%s (directory=%s updated=%d)", match.ID, match.Directory, match.Updated))
+		}
+		return nil, usageError(fmt.Sprintf("OpenCode session name %q is ambiguous: %s", selector, strings.Join(details, ", ")))
+	}
+	resolved := append([]string(nil), arguments...)
+	for index, argument := range beforeDoubleDash(resolved) {
+		if argument == "--session" {
+			resolved[index+1] = matches[0].ID
+			break
+		}
+		if strings.HasPrefix(argument, "--session=") {
+			resolved[index] = "--session=" + matches[0].ID
+			break
+		}
+	}
+	return resolved, nil
 }
 
 func buildManagedPeerPlan(
