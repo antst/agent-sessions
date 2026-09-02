@@ -187,6 +187,11 @@ type PermissionRule struct {
 	Action     string `json:"action"`
 }
 
+type NativeModel struct {
+	ProviderID string `json:"providerID"`
+	ModelID    string `json:"modelID"`
+}
+
 func (client *Client) CreateSession(ctx context.Context, title string, permissions []PermissionRule) (Session, error) {
 	if len([]byte(title)) > maxTitleBytes || !utf8.ValidString(title) || strings.ContainsRune(title, '\x00') {
 		return Session{}, productruntime.ErrProtocol
@@ -269,8 +274,11 @@ func (client *Client) RenameSession(ctx context.Context, nativeSessionID, title 
 
 // PromptAsync uses the stable documented OpenCode session API. The caller
 // supplies a deterministic native message ID, making a 204 exact acceptance.
-func (client *Client) PromptAsync(ctx context.Context, nativeSessionID, operationID string, content []byte, noReply bool) (productruntime.NativeAcceptance, error) {
+func (client *Client) PromptAsync(ctx context.Context, nativeSessionID, operationID string, content []byte, noReply bool, model *NativeModel) (productruntime.NativeAcceptance, error) {
 	if !validNativeID(nativeSessionID, "ses_") || !utf8.Valid(content) || len(content) == 0 || len(content) > maxResultBytes {
+		return productruntime.NativeAcceptance{}, productruntime.ErrProtocol
+	}
+	if model != nil && (!validModelPart(model.ProviderID) || !validModelPart(model.ModelID)) {
 		return productruntime.NativeAcceptance{}, productruntime.ErrProtocol
 	}
 	messageID, err := nativeMessageID(operationID)
@@ -282,11 +290,19 @@ func (client *Client) PromptAsync(ctx context.Context, nativeSessionID, operatio
 		"noReply":   noReply,
 		"parts":     []map[string]string{{"type": "text", "text": string(content)}},
 	}
+	if model != nil {
+		body["model"] = model
+	}
 	_, err = client.request(ctx, http.MethodPost, "/session/"+url.PathEscape(nativeSessionID)+"/prompt_async", body, http.StatusNoContent)
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
 	return productruntime.NativeAcceptance{NativeSessionID: nativeSessionID, NativeMessageID: messageID, AcceptedAt: client.now().UTC()}, nil
+}
+
+func validModelPart(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value && len(value) <= maxNativeIDBytes &&
+		!strings.ContainsAny(value, "\x00\r\n")
 }
 
 type kiloPromptResponse struct {

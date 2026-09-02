@@ -22,14 +22,16 @@ type testServerManager struct {
 	client    *Client
 	openCount atomic.Int64
 	closed    atomic.Int64
+	request   atomic.Value
 }
 
 func (manager *testServerManager) live() *LiveServer {
 	return &LiveServer{client: manager.client, closeFn: func(context.Context) error { manager.closed.Add(1); return nil }}
 }
 
-func (manager *testServerManager) Open(context.Context, ServerOpenRequest) (*LiveServer, error) {
+func (manager *testServerManager) Open(_ context.Context, request ServerOpenRequest) (*LiveServer, error) {
 	manager.openCount.Add(1)
+	manager.request.Store(request)
 	return manager.live(), nil
 }
 
@@ -54,9 +56,11 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 			_, _ = response.Write([]byte(`{"id":"ses_lane","title":"worker"}`))
 		case "POST /session/ses_lane/prompt_async":
 			var body struct {
-				ID string `json:"messageID"`
+				ID    string       `json:"messageID"`
+				Model *NativeModel `json:"model"`
 			}
-			if decodeJSON(request.Body, &body) != nil || body.ID == "" {
+			if decodeJSON(request.Body, &body) != nil || body.ID == "" || body.Model == nil ||
+				body.Model.ProviderID != "google" || body.Model.ModelID != "gemini-3.1-pro-preview" {
 				t.Errorf("prompt body = %#v", body)
 			}
 			messageID.Store(body.ID)
@@ -87,11 +91,18 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
+		Arguments: []string{"--model", "google/gemini-3.1-pro-preview"},
 	})
 	if err != nil || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
 		t.Fatalf("open = %#v, %v", session, err)
 	}
-	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{Prompt: "perform task", PermissionMode: permissionmode.Default})
+	if got := servers.request.Load().(ServerOpenRequest).Arguments; len(got) != 0 {
+		t.Fatalf("serve arguments = %v, want model consumed by prompt", got)
+	}
+	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{
+		Prompt: "perform task", PermissionMode: permissionmode.Default,
+		Arguments: []string{"--model", "google/gemini-3.1-pro-preview"},
+	})
 	if err != nil || turn.NativeTurnID == "" {
 		t.Fatalf("start = %#v, %v", turn, err)
 	}
@@ -124,6 +135,24 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	})
 	if err != nil || resumed != session || getCalls.Load() != 1 || servers.openCount.Load() != 2 {
 		t.Fatalf("resume = %#v, %v; gets=%d opens=%d", resumed, err, getCalls.Load(), servers.openCount.Load())
+	}
+}
+
+func TestOpenCodeLaneRejectsMalformedModelBeforeStartingServer(t *testing.T) {
+	servers := &testServerManager{}
+	driver, err := NewLaneDriver(LaneConfig{
+		ProductID: "opencode", Dialect: DialectOpenCode, Generation: 7,
+		Servers: servers, MapPermission: MapPermissionRules,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
+		Arguments: []string{"--model", "missing-provider-separator"},
+	})
+	if err == nil || servers.openCount.Load() != 0 {
+		t.Fatalf("malformed model error = %v; server opens = %d", err, servers.openCount.Load())
 	}
 }
 

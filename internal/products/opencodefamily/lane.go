@@ -68,8 +68,19 @@ func (driver *LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
 
 func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
 	if request.ProductID != driver.config.ProductID || strings.TrimSpace(request.LaneID) == "" || !validDirectory(request.Cwd) ||
-		!request.PermissionMode.Valid() || unsafeServerArguments(request.Arguments) ||
+		!request.PermissionMode.Valid() ||
 		request.ResumeNativeID == "" && strings.TrimSpace(request.Name) == "" {
+		return productruntime.NativeSessionRef{}, productruntime.ErrProtocol
+	}
+	serverArguments := request.Arguments
+	if driver.config.Dialect == DialectOpenCode {
+		var err error
+		serverArguments, _, err = splitOpenCodeLaneArguments(request.Arguments)
+		if err != nil {
+			return productruntime.NativeSessionRef{}, err
+		}
+	}
+	if unsafeServerArguments(serverArguments) {
 		return productruntime.NativeSessionRef{}, productruntime.ErrProtocol
 	}
 	permissions, err := driver.config.MapPermission(request.PermissionMode)
@@ -92,7 +103,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	driver.mu.Unlock()
 
 	server, err := driver.config.Servers.Open(ctx, ServerOpenRequest{
-		Key: request.LaneID, Cwd: request.Cwd, Arguments: request.Arguments, PermissionRules: permissions,
+		Key: request.LaneID, Cwd: request.Cwd, Arguments: serverArguments, PermissionRules: permissions,
 	})
 	if server == nil {
 		if err == nil {
@@ -154,6 +165,13 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
 		return productruntime.NativeTurnRef{}, err
 	}
+	var model *NativeModel
+	if driver.config.Dialect == DialectOpenCode {
+		_, model, err = splitOpenCodeLaneArguments(request.Arguments)
+		if err != nil {
+			return productruntime.NativeTurnRef{}, err
+		}
+	}
 	live, err := driver.lockLive(session)
 	if err != nil {
 		return productruntime.NativeTurnRef{}, err
@@ -173,7 +191,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	if driver.config.Dialect == DialectKilo {
 		accepted, err = live.client.KiloPrompt(ctx, session.NativeSessionID, operationID, body, "queue")
 	} else {
-		accepted, err = live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false)
+		accepted, err = live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false, model)
 	}
 	if err != nil {
 		driver.clearTurn(session.LaneID, operationID)
@@ -188,6 +206,34 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	current.turn.id = accepted.NativeMessageID
 	driver.mu.Unlock()
 	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: accepted.NativeMessageID}, nil
+}
+
+func splitOpenCodeLaneArguments(arguments []string) ([]string, *NativeModel, error) {
+	serverArguments := make([]string, 0, len(arguments))
+	var model *NativeModel
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		var value string
+		switch {
+		case argument == "--model" || argument == "-m":
+			index++
+			if index >= len(arguments) {
+				return nil, nil, fmt.Errorf("%s requires a provider/model value", argument)
+			}
+			value = arguments[index]
+		case strings.HasPrefix(argument, "--model="):
+			value = strings.TrimPrefix(argument, "--model=")
+		default:
+			serverArguments = append(serverArguments, argument)
+			continue
+		}
+		providerID, modelID, ok := strings.Cut(value, "/")
+		if model != nil || !ok || !validModelPart(providerID) || !validModelPart(modelID) {
+			return nil, nil, fmt.Errorf("--model requires one provider/model value")
+		}
+		model = &NativeModel{ProviderID: providerID, ModelID: modelID}
+	}
+	return serverArguments, model, nil
 }
 
 func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeTurnRef, request productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
