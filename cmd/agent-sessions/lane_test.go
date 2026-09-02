@@ -41,6 +41,110 @@ type delayedCodexLaneNative struct {
 	archived             []string
 }
 
+type steerRecordingLaneDriver struct {
+	capabilities productruntime.LaneCapabilitySet
+	acceptance   productruntime.NativeAcceptance
+	calls        int
+	turn         productruntime.NativeTurnRef
+	request      productruntime.TurnStartRequest
+}
+
+func (d *steerRecordingLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
+	return d.capabilities
+}
+func (*steerRecordingLaneDriver) Open(context.Context, productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
+	return productruntime.NativeSessionRef{}, nil
+}
+func (*steerRecordingLaneDriver) StartTurn(context.Context, productruntime.NativeSessionRef, productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
+	return productruntime.NativeTurnRef{}, nil
+}
+func (*steerRecordingLaneDriver) WaitTurn(context.Context, productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
+	return productruntime.NativeTerminal{}, nil
+}
+func (d *steerRecordingLaneDriver) Steer(_ context.Context, turn productruntime.NativeTurnRef, request productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
+	d.calls++
+	d.turn, d.request = turn, request
+	return d.acceptance, nil
+}
+func (*steerRecordingLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
+	return nil
+}
+func (*steerRecordingLaneDriver) Archive(context.Context, productruntime.NativeSessionRef) error {
+	return nil
+}
+
+func TestSteerLaneDispatchesOneExactActiveNativeTurn(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	actor := &laneActor{
+		id: "lane", nativeID: "ses_native", nativeTurnID: "msg_turn", nativeGeneration: 7,
+		parentID: "parent", product: "kilo", name: "worker", groups: []string{"shared"},
+		permission: "bypassPermissions", arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
+		approvalPolicy: "never", sandbox: "workspace-write", effort: "high", schema: "/schema.json",
+		turnID: "turn", state: "running", done: make(chan struct{}),
+	}
+	coordinator.lanesLoaded = true
+	coordinator.lanes[actor.id] = actor
+	driver := &steerRecordingLaneDriver{
+		capabilities: productruntime.LaneCapabilitySet{Steer: true},
+		acceptance:   productruntime.NativeAcceptance{NativeSessionID: actor.nativeID, NativeMessageID: "msg_steer"},
+	}
+	var err error
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"kilo": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := daemonpkg.ManagedAttachment{ID: actor.parentID, Groups: []string{"shared"}}
+	result, err := coordinator.steerLane(context.Background(), runtime, parent, actor.product, parsedLaneCommand{target: actor.name}, "change course")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTurn := productruntime.NativeTurnRef{
+		NativeSessionRef: productruntime.NativeSessionRef{LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration},
+		NativeTurnID:     actor.nativeTurnID,
+	}
+	if driver.calls != 1 || driver.turn != wantTurn || driver.request.Prompt != "change course" ||
+		driver.request.PermissionMode != permissionmode.BypassPermissions ||
+		!reflect.DeepEqual(driver.request.Arguments, actor.arguments) ||
+		driver.request.ApprovalPolicy != actor.approvalPolicy || driver.request.Sandbox != actor.sandbox ||
+		driver.request.Effort != actor.effort || driver.request.SchemaPath != actor.schema {
+		t.Fatalf("steer call count=%d turn=%+v request=%+v", driver.calls, driver.turn, driver.request)
+	}
+	if result["type"] != "turn.steered" || result["thread_id"] != actor.id || result["session_id"] != actor.nativeID ||
+		result["turn_id"] != actor.turnID || result["native_message_id"] != driver.acceptance.NativeMessageID {
+		t.Fatalf("steer result = %#v", result)
+	}
+}
+
+func TestSteerLaneRejectsUnsupportedAndIdleWithoutCallingDriver(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	actor := &laneActor{
+		id: "lane", nativeID: "ses_native", nativeTurnID: "msg_turn", nativeGeneration: 7,
+		parentID: "parent", product: "codex", name: "worker", groups: []string{"shared"},
+		permission: "default", turnID: "turn", state: "running", done: make(chan struct{}),
+	}
+	coordinator.lanesLoaded = true
+	coordinator.lanes[actor.id] = actor
+	driver := &steerRecordingLaneDriver{}
+	var err error
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"codex": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := daemonpkg.ManagedAttachment{ID: actor.parentID, Groups: []string{"shared"}}
+	if _, err := coordinator.steerLane(context.Background(), runtime, parent, actor.product, parsedLaneCommand{target: actor.id}, "change course"); err == nil || !strings.Contains(err.Error(), "do not support steer") {
+		t.Fatalf("unsupported steer error = %v", err)
+	}
+	actor.state = "idle"
+	if _, err := coordinator.steerLane(context.Background(), runtime, parent, actor.product, parsedLaneCommand{target: actor.id}, "change course"); err == nil || !strings.Contains(err.Error(), "no active native turn") {
+		t.Fatalf("idle steer error = %v", err)
+	}
+	if driver.calls != 0 {
+		t.Fatalf("rejected steer called driver %d times", driver.calls)
+	}
+}
+
 func (n *delayedCodexLaneNative) StartThread(ctx context.Context, _ bridge.CodexStartRequest) (bridge.CodexNativeThread, error) {
 	_, n.setupHadDeadline = ctx.Deadline()
 	timer := time.NewTimer(n.setupDelay)

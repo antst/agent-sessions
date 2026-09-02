@@ -143,6 +143,8 @@ func (c *hostCoordinator) dispatchLaneCommand(
 		result, err = c.statusLane(runtime, parent, product, parsed)
 	case "list":
 		result, err = c.listLanes(runtime, parent, product, parsed)
+	case "steer":
+		result, err = c.steerLane(ctx, runtime, parent, product, parsed, input)
 	case "interrupt":
 		result, err = c.interruptLane(runtime, parent, product, parsed)
 	case "archive":
@@ -627,6 +629,60 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 	}
 	cancel()
 	return map[string]any{"type": "turn.interrupting", "thread_id": actor.id, "turn_id": actor.turnID}, nil
+}
+
+func (c *hostCoordinator) steerLane(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	parent daemonpkg.ManagedAttachment,
+	product string,
+	options parsedLaneCommand,
+	input string,
+) (map[string]any, error) {
+	if strings.TrimSpace(input) == "" {
+		return nil, errors.New("lane steer requires non-empty input")
+	}
+	actor, err := c.resolveLaneActor(runtime, parent, product, options.target, false)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	if actor.state != "running" || actor.nativeTurnID == "" {
+		c.mu.Unlock()
+		return nil, errors.New("lane has no active native turn")
+	}
+	turn := productruntime.NativeTurnRef{
+		NativeSessionRef: productruntime.NativeSessionRef{
+			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
+		},
+		NativeTurnID: actor.nativeTurnID,
+	}
+	threadID, turnID := actor.id, actor.turnID
+	permission, arguments := actor.permission, append([]string(nil), actor.arguments...)
+	approvalPolicy, sandbox, effort, schema := actor.approvalPolicy, actor.sandbox, actor.effort, actor.schema
+	c.mu.Unlock()
+	driver, ok := c.laneDrivers.ByProduct(product)
+	if !ok || !driver.Capabilities().Steer {
+		return nil, fmt.Errorf("%s lanes do not support steer", product)
+	}
+	mode, err := permissionmode.Parse(permission)
+	if err != nil {
+		return nil, err
+	}
+	accepted, err := driver.Steer(ctx, turn, productruntime.TurnStartRequest{
+		Prompt: input, PermissionMode: mode, Arguments: arguments,
+		ApprovalPolicy: approvalPolicy, Sandbox: sandbox, Effort: effort, SchemaPath: schema,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if accepted.NativeSessionID != turn.NativeSessionID {
+		return nil, fmt.Errorf("%w: lane steer changed native session from %q to %q", productruntime.ErrAmbiguousSession, turn.NativeSessionID, accepted.NativeSessionID)
+	}
+	return map[string]any{
+		"type": "turn.steered", "product": product, "thread_id": threadID,
+		"session_id": turn.NativeSessionID, "turn_id": turnID, "native_message_id": accepted.NativeMessageID,
+	}, nil
 }
 
 func (c *hostCoordinator) interruptLaneNative(actor *laneActor) error {
