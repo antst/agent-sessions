@@ -98,7 +98,7 @@ process.stdout.write(JSON.stringify(rows.map((row) => ({
 }))));
 `
 
-func listPiSessions(executable, cwd string) ([]productSession, error) {
+func ListPiSessions(ctx context.Context, executable, cwd string) ([]ProductSession, error) {
 	resolved, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Pi executable: %w", err)
@@ -108,17 +108,21 @@ func listPiSessions(executable, cwd string) ([]productSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve Node.js for Pi session list: %w", err)
 	}
-	command := exec.Command(node, "--input-type=module", "--eval", packageSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
+	command := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packageSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
 	command.Dir = cwd
 	payload, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list Pi sessions through product API: %w", err)
 	}
-	var sessions []productSession
+	var sessions []ProductSession
 	if err := json.Unmarshal(payload, &sessions); err != nil {
 		return nil, fmt.Errorf("decode Pi product session list: %w", err)
 	}
 	return sessions, nil
+}
+
+func listPiSessions(executable, cwd string) ([]productSession, error) {
+	return ListPiSessions(context.Background(), executable, cwd)
 }
 
 func listOMPSessions(executable, cwd string) ([]productSession, error) {

@@ -25,6 +25,8 @@ import (
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
 	"github.com/antst/agent-sessions/internal/products/opencodefamily"
+	piproduct "github.com/antst/agent-sessions/internal/products/pi"
+	"github.com/antst/agent-sessions/internal/products/pifamily"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/structuredprocess"
 )
@@ -135,10 +137,26 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if err != nil {
 		panic(err)
 	}
+	piDescriptor, ok := productcatalog.ByID(piproduct.ProductID)
+	if !ok {
+		panic("Pi product descriptor is unavailable")
+	}
+	piProcesses, err := pifamily.NewStructuredProcessFactory(laneProcesses)
+	if err != nil {
+		panic(err)
+	}
+	piLanes, err := piproduct.NewLaneDriver(piproduct.Config{
+		Deps:       productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses},
+		Executable: piDescriptor.NativeExecutable, Processes: piProcesses,
+	})
+	if err != nil {
+		panic(err)
+	}
 	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
 		codexproduct.ProductID:    codexLanes,
 		opencodeproduct.ProductID: opencodeLanes,
 		kiloproduct.ProductID:     kiloLanes,
+		piproduct.ProductID:       piLanes,
 	})
 	if err != nil {
 		panic(err)
@@ -304,6 +322,29 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 		},
 		opencodeproduct.ProductID: productListLaneCandidateResolver(opencodeproduct.ProductID),
 		kiloproduct.ProductID:     productListLaneCandidateResolver(kiloproduct.ProductID),
+		piproduct.ProductID:       packageListLaneCandidateResolver(piproduct.ProductID, launcher.ListPiSessions),
+	}
+}
+
+func packageListLaneCandidateResolver(
+	product string,
+	list func(context.Context, string, string) ([]launcher.ProductSession, error),
+) func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+	return func(ctx context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+		executable, err := launcher.ResolveProductExecutable(product)
+		if err != nil {
+			return laneNameEntry{}, false
+		}
+		sessions, err := list(ctx, executable, parent.Cwd)
+		if err != nil {
+			return laneNameEntry{}, false
+		}
+		for _, session := range sessions {
+			if session.ID == candidate.NativeSessionID {
+				return laneNameEntry{Name: session.Title, Cwd: session.Directory}, true
+			}
+		}
+		return laneNameEntry{}, false
 	}
 }
 

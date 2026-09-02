@@ -13,9 +13,10 @@ import (
 	"github.com/antst/agent-sessions/internal/launcher"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
+	piproduct "github.com/antst/agent-sessions/internal/products/pi"
 )
 
-func TestHostCoordinatorComposesOpenCodeFamilyLaneDriversAndProductCandidateLookups(t *testing.T) {
+func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
 	for _, product := range []struct {
@@ -48,6 +49,37 @@ func TestHostCoordinatorComposesOpenCodeFamilyLaneDriversAndProductCandidateLook
 				t.Fatalf("stale %s candidate was accepted without a product row", product.id)
 			}
 		})
+	}
+	if _, ok := coordinator.laneDrivers.ByProduct(piproduct.ProductID); !ok {
+		t.Fatal("Pi lane driver is absent from the production registry")
+	}
+	packageRoot := t.TempDir()
+	binDir := filepath.Join(packageRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	piExecutable := filepath.Join(binDir, "pi")
+	if err := os.WriteFile(piExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	toolsDir := t.TempDir()
+	node := filepath.Join(toolsDir, "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"pi-native\",\"title\":\"reviewer-pi\",\"directory\":\"/work/pi\",\"modified\":\"now\"}]'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", toolsDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PI_PEER_PI_BIN", piExecutable)
+	resolver := coordinator.candidateResolvers[piproduct.ProductID]
+	entry, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{Cwd: t.TempDir()}, daemonpkg.LaneCandidate{
+		Product: piproduct.ProductID, NativeSessionID: "pi-native",
+	})
+	if !ok || entry.Name != "reviewer-pi" || entry.Cwd != "/work/pi" {
+		t.Fatalf("Pi product-confirmed candidate = %+v, ok=%v", entry, ok)
+	}
+	if _, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{Cwd: t.TempDir()}, daemonpkg.LaneCandidate{
+		Product: piproduct.ProductID, NativeSessionID: "pi-stale",
+	}); ok {
+		t.Fatal("stale Pi candidate was accepted without a product row")
 	}
 }
 
