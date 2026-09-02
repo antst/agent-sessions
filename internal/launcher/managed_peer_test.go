@@ -56,6 +56,20 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 	}
 }
 
+func TestGlobalPluginPeersHaveNoLaunchTimePayloadDependency(t *testing.T) {
+	for _, product := range []string{"opencode", "kilo"} {
+		t.Run(product, func(t *testing.T) {
+			plan, err := buildManagedPeerPlan(product, []string{"--model", "native-model"}, nil, "", "/native/"+product, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.path != "/native/"+product || !reflect.DeepEqual(plan.args, []string{"--model", "native-model"}) {
+				t.Fatalf("plan = path %q args %#v", plan.path, plan.args)
+			}
+		})
+	}
+}
+
 func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 	root := t.TempDir()
 	idSource := func() (string, error) { return "new-id", nil }

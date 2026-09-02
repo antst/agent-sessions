@@ -3,6 +3,7 @@ SHELL := /bin/bash
 CODEX ?= codex
 CLAUDE ?= claude
 QWEN ?= qwen
+OPENCODE ?= opencode
 # Ignore an inherited GROK environment variable: a long-lived peer may have
 # pinned its own launcher, but that must not disable discovery for a later
 # install. An explicit make command-line GROK=/absolute/path pins one candidate.
@@ -121,7 +122,7 @@ reinstall:
 	$(MAKE) install
 
 install install-all dev-install dev-install-all: build
-	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" \
+	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" \
 		./scripts/install-host "$(CURDIR)" "$(abspath $(BIN_DIR))/agent-sessions" \
 		"$(abspath $(PREFIX))" "$(HOST_RELEASE_VERSION)" "$(PLATFORM)"
 
@@ -130,11 +131,11 @@ install-hub: build
 		"$(abspath $(PREFIX))" "$(HOST_RELEASE_VERSION)" "$(PLATFORM)"
 
 remove-all:
-	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" \
+	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" \
 		./scripts/remove-host "$(abspath $(PREFIX))"
 
 purge-all:
-	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" \
+	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" \
 		./scripts/remove-host "$(abspath $(PREFIX))" --purge
 
 remove-hub:

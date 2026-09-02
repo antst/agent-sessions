@@ -27,9 +27,17 @@ func RunManagedPeer(product string, args []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := managedIntegrationRoot()
-	if err != nil {
-		return err
+	root := ""
+	descriptor, ok := productcatalog.ByID(product)
+	if !ok {
+		return fmt.Errorf("unsupported managed peer product %q", product)
+	}
+	switch descriptor.NativeRegistration.Strategy {
+	case "pi-package", "omp-extension", "codebuddy-wrapper-plugin-mcp":
+		root, err = managedIntegrationRoot()
+		if err != nil {
+			return err
+		}
 	}
 	plan, err := buildManagedPeerPlan(product, args, os.Environ(), root, path, newManagedSessionID)
 	if err != nil {

@@ -18,6 +18,7 @@ codex=${CODEX:-codex}
 claude=${CLAUDE:-claude}
 grok=${GROK:-grok}
 qwen=${QWEN:-qwen}
+opencode=${OPENCODE:-opencode}
 host_root="$prefix/libexec/agent-sessions/host"
 
 resolve_product() {
@@ -37,6 +38,7 @@ resolve_product() {
 codex_path=$(resolve_product "$codex" "$HOME/.local/bin/codex" || true)
 claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
 qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
+opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 grok_override=$(resolve_product "$grok" "$HOME/.grok/bin/grok" || true)
 run_grok() {
   if [[ -n "$grok_override" ]]; then
@@ -75,8 +77,8 @@ resolve_file_link() {
   directory=$(cd -P -- "$(dirname -- "$target")" && pwd) || return 1
   printf '%s/%s\n' "$directory" "$(basename -- "$target")"
 }
-for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer \
-  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane; do
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer dsh-peer \
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane; do
   alias_path="$prefix/bin/$alias"
   if [[ -L "$alias_path" ]]; then
     [[ "$(resolve_file_link "$alias_path")" == "$current/bin/agent-sessions" ]] || {
@@ -148,6 +150,13 @@ install_integrations() {
       "$qwen_path" extensions uninstall agent-sessions
     fi
     "$qwen_path" extensions install "$current/qwen" --consent --scope user
+  fi
+  if [[ -n "$opencode_path" ]]; then
+    local config_root
+    config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    mkdir -p "$config_root/plugins" "$config_root/shared"
+    ln -sfn "$current/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.mjs"
+    ln -sfn "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   fi
 }
 
@@ -243,6 +252,17 @@ if [[ -n "$qwen_path" ]]; then
     "$qwen_path" extensions uninstall agent-sessions
   fi
 fi
+if [[ -n "$opencode_path" ]]; then
+  opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+  for link in "$opencode_config_root/plugins/agent-sessions.mjs" "$opencode_config_root/shared/live-session.js"; do
+    if [[ -L "$link" ]]; then
+      target=$(readlink -- "$link")
+      case "$target" in
+        "$host_root"/releases/*/integrations/*) rm -f -- "$link" ;;
+      esac
+    fi
+  done
+fi
 
 case "$(uname -s)" in
   Linux)
@@ -256,8 +276,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer \
-  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane; do
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer dsh-peer \
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane; do
   if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
 done
 rm -f -- "$host_root/current"
