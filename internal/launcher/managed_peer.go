@@ -62,7 +62,7 @@ type openCodeSession struct {
 }
 
 func listOpenCodeSessions(executable string) ([]openCodeSession, error) {
-	command := exec.Command(executable, "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
+	command := exec.Command(executable, "--pure", "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
 	payload, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list OpenCode sessions: %w", err)
