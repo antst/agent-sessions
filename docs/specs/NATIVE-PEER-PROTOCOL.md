@@ -1,24 +1,23 @@
 # Native Agent Sessions Presence Protocol
 
-This document specifies the native product connection implemented by Agent
-Sessions today. It is intended for coding-agent products that want to expose
-their own sessions directly, without an Agent Sessions product plugin.
+Status: target protocol, version 1.
+
+This specification defines the small native connection a coding-agent product
+implements to participate in Agent Sessions without a product-specific plugin.
+Agent Sessions will align its implementation to this protocol.
 
 ## 1. Purpose and trust model
 
 Agent Sessions lets coding agents on a user's own machine or LAN discover and
 message one another. It assumes a trusted environment: one held connection per
 live session is the complete liveness proof, and there is no authentication
-layer inside a host. Network or host isolation, when wanted, belongs to the
-user's deployment.
+layer inside a host. Socket permissions and network isolation are deployment
+boundaries, not parts of this protocol.
 
 ## 2. Finding the daemon
 
 The daemon listens on a Unix-domain socket named `run/presence.sock` beneath
-its state root. The daemon chooses that root from `--state-root`, then
-`AGENT_SESSIONS_STATE_ROOT`, then `$HOME/.local/state/agent-sessions`.
-
-The shared reference client resolves the socket in this order:
+its state root. A client resolves the socket in this order:
 
 1. `AGENT_SESSIONS_PRESENCE_SOCKET`, when non-empty;
 2. `$AGENT_SESSIONS_STATE_ROOT/run/presence.sock`;
@@ -26,321 +25,387 @@ The shared reference client resolves the socket in this order:
 4. `$HOME/.local/state/agent-sessions/run/presence.sock`.
 
 The daemon creates the containing directory with mode `0700` and the socket
-with mode `0600`. Those operating-system permissions are not an application
-authentication protocol.
+with mode `0600`. A custom daemon state root must be published through
+`AGENT_SESSIONS_PRESENCE_SOCKET` or `AGENT_SESSIONS_STATE_ROOT` so clients can
+find it.
 
 ### Launch environment
 
-Current interactive launchers are not uniform. The following table lists only
-generic `AGENT_SESSIONS_*` variables that launcher code actually writes for an
-interactive product process; inherited variables are not counted.
+When Agent Sessions launches an interactive product, these existing variables
+carry launch context. A native client treats them as hints; the product remains
+the authority for the session UUID and stored title.
 
-| Variable | Value written today |
+| Variable | Meaning |
 | --- | --- |
-| `AGENT_SESSIONS_SESSION_NAME` | The requested start name or the title resolved for a Codex resume, otherwise `""`. Written for Codex, Claude Code, Grok, Qwen, OpenCode, Kilo, Pi, and OMP. |
-| `AGENT_SESSIONS_GROUPS` | A JSON array containing the repeated launch `--group` values. Written for all of the products above. |
-| `AGENT_SESSIONS_PRODUCT` | The catalog ID. Written for Codex, Grok, Qwen, OpenCode, Kilo, Pi, and OMP; the current Claude Code launcher does not write it. |
-| `AGENT_SESSIONS_PRODUCT_ID` | The catalog ID. Written only by the shared OpenCode/Kilo/Pi/OMP launch path. |
-| `AGENT_SESSIONS_SESSION_ID` | The known exact ID for Codex and Grok; an exact OpenCode/Kilo resume ID; otherwise currently `""` on the Qwen and shared launch paths. The current Claude Code launcher does not write it. |
+| `AGENT_SESSIONS_SESSION_NAME` | Requested start-time title, or an empty string. |
+| `AGENT_SESSIONS_GROUPS` | JSON array of group strings collected from the launch arguments. |
+| `AGENT_SESSIONS_PRODUCT_ID` | Product string identifier on launch paths that set it. `AGENT_SESSIONS_PRODUCT` is the current fallback. |
+| `AGENT_SESSIONS_SESSION_ID` | Exact resume ID when already known; empty or absent for a fresh session. It is never a request to invent a product session ID. |
 
-Grok's current wrapper also writes `AGENT_SESSIONS_GROK_SESSION_ID` and
-`AGENT_SESSIONS_GROK_LEADER_SOCKET`. Qwen's writes
-`AGENT_SESSIONS_QWEN_INPUT_FILE` and `AGENT_SESSIONS_QWEN_EVENTS_FILE`. These
-are private mechanics of those wrappers, not requirements of this protocol.
-Likewise, lane worker launchers write `AGENT_SESSIONS_HOST_BINARY`,
-`AGENT_SESSIONS_LANE_CAPABILITY`, and the applicable session, product, name,
-and group variables; a native presence client must still report the product's
-actual session identity.
+Current launchers do not uniformly set every variable, and they preserve an
+explicit socket or state root already present in their environment. A product
+started outside Agent Sessions may set the socket directly or use the
+conventional path, choose its own groups, and report its built-in product
+identifier. No registration command, plugin manifest, secret, or prior catalog
+entry is required.
 
-The peer launchers do **not** currently write
-`AGENT_SESSIONS_PRESENCE_SOCKET` or `AGENT_SESSIONS_STATE_ROOT`; they only
-preserve values already present in their environment. A product started
-outside Agent Sessions can therefore use the conventional path or set an
-explicit presence socket. The shared client becomes active only when it can
-resolve a socket and has `AGENT_SESSIONS_PRODUCT_ID` (or the supported fallback
-`AGENT_SESSIONS_PRODUCT`); missing groups mean `[]`, while malformed group JSON
-disables the client. There is no separate registration request. The daemon
-must already be running, and the reported product must already be in its
-catalog.
+## 3. The first frame: `session.hello`
 
-## 3. The first frame
-
-Immediately after connecting, the product sends one complete report followed
-by `\n`:
+The first line on every connection is a JSON-RPC 2.0 request:
 
 ```json
-{"uuid":"native","name":"before","groups":["team"],"product":"pi"}
+{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode"}}
 ```
 
-The fields mean:
+The daemon validates the report, installs the connection as live, and replies:
 
-- `uuid` is the stable session ID issued by the product. A presence client
-  receives it from the product and never generates or substitutes one.
-- `name` is the title owned by the product and stored with that product's
-  session. `""` is valid when the product has not assigned a title yet.
-- `groups` contains the group strings passed from the Agent Sessions launch
-  arguments, verbatim and in order; the presence client must not infer extra
-  membership. The current reference client and daemon remove exact duplicate
-  strings.
-- `product` is the exact Agent Sessions catalog ID. The catalog at this writing
-  accepts `codex`, `claude`, `grok`, `qwen`, `opencode`, `kilo`, `pi`, `omp`,
-  and `dsh`.
+```json
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
 
-The first object is not an RPC request. Unknown first-report fields, an empty
-UUID, invalid field types, or an unknown product cause the daemon to close the
-connection. Later title or group changes are sent as a full `session.update`
-report; they are not deltas.
+The client must wait for this result before sending another method. The fields
+mean:
 
-## 4. The stream
+- `protocol` is the integer `1`. No other value is accepted.
+- `uuid` is the stable session ID issued by the product. The presence client
+  obtains it from the product and never generates or substitutes one.
+- `name` is the title owned and stored by the product. `""` is valid when
+  the product has no title yet.
+- `groups` is the array of group strings passed from the launch arguments,
+  unchanged and in order. It is fixed for the life of this connection.
+- `product` is the product's non-empty string identifier.
 
-After the first report, both sides exchange newline-delimited JSON-RPC-shaped
-objects on the same connection. The wire does not include a `jsonrpc` member.
-Every implemented call is a request with a non-empty string `id`, and every
-request receives a method-less response with the same `id` and either `result`
-or a plain-string `error`. Notifications are not implemented; a client-to-
-daemon frame without an ID closes the connection.
+An unsupported protocol version receives error `-32004`, after which the
+daemon closes the connection:
 
-Implementations should use `session.`-prefixed IDs for product-to-daemon calls.
-The daemon uses `daemon.`-prefixed IDs for calls to a product. IDs must be
-unique among calls still awaiting a response. The shared JavaScript client
-disconnects if its unprocessed receive buffer grows beyond 1 MiB.
+```json
+{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"Unsupported protocol version","data":{"supported":1,"received":2}}}
+```
+
+An unknown product identifier is not an error. It is accepted for presence,
+rosters, peer discovery, and messaging, and is displayed as reported. Catalog
+knowledge is required only when Agent Sessions is asked to launch or drive
+that product as a lane. This is the adoption rule: **you can join with four
+fields; nothing else is required.**
+
+## 4. The JSON-RPC stream
+
+After `session.hello`, each line is one UTF-8 JSON-RPC 2.0 object followed by
+`\n`. Requests contain `jsonrpc`, `id`, `method`, and `params`.
+Notifications omit `id`. Responses contain the same string or numeric `id`
+and exactly one of `result` or `error`. Batch arrays are not used.
+
+Products may reuse their existing JSON-RPC libraries with newline framing and
+batching disabled. Calls can be concurrent; an ID must be unique while its
+call is outstanding. `session.update` normally uses a notification because
+no acknowledgement is needed. Every other method in version 1 is a request.
+
+### Error codes
+
+Errors use the standard JSON-RPC error object
+`{"code": INTEGER, "message": STRING, "data": OPTIONAL_JSON}`. Version 1 has
+this closed error table:
+
+| Code | Canonical message | Meaning |
+| ---: | --- | --- |
+| `-32602` | `Invalid params` | The method is known, but its parameters do not match the method schema. |
+| `-32001` | `Unknown session or target` | A session or message destination does not exist or is not visible to the caller. |
+| `-32002` | `Session busy` | The addressed product session or lane cannot accept input in its current state. |
+| `-32003` | `Operation not permitted` | The caller is not allowed to perform the requested operation, or the method is not part of version 1. |
+| `-32004` | `Unsupported protocol version` | `session.hello.params.protocol` is not exactly `1`. |
+| `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
+
+Messages may add detail after the canonical text, and `data` may identify the
+field, UUID, target, method, or product. No other error code is emitted by a
+version 1 endpoint. A line that is not a JSON object with
+`"jsonrpc":"2.0"` is not a protocol frame; the receiver closes the connection.
+
+### Product to daemon
+
+#### `session.update`
+
+`session.update` changes only the product-owned name:
+
+```json
+{"jsonrpc":"2.0","method":"session.update","params":{"name":"reviewer: tests complete"}}
+```
+
+The UUID, product, and groups remain those from `session.hello`. A request
+form is allowed when the product wants validation:
+
+```json
+{"jsonrpc":"2.0","id":"update-1","method":"session.update","params":{"name":"reviewer: tests complete"}}
+{"jsonrpc":"2.0","id":"update-1","result":{}}
+```
+
+Any attempt to include or change `uuid`, `product`, or `groups` is rejected.
+An invalid notification is ignored because JSON-RPC notifications have no
+response; an invalid request receives:
+
+```json
+{"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","groups":["other-team"]}}
+{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"field":"groups"}}}
+```
+
+Changing groups requires a new connection and a new `session.hello`.
+
+#### `peers.list`
+
+```json
+{"jsonrpc":"2.0","id":"peers-1","method":"peers.list","params":{}}
+{"jsonrpc":"2.0","id":"peers-1","result":{"peers":[{"id":"target-native","session_id":"target-native","name":"builder","product":"new-agent","status":"live","cwd":"/work/project","groups":["team"],"permission_mode":"default"}]}}
+```
+
+The daemon returns live destinations that share a group with the caller. An
+uncatalogued product appears with its reported product identifier.
+
+#### `message.send`
+
+```json
+{"jsonrpc":"2.0","id":"send-1","method":"message.send","params":{"target":"target-native","message":"Please review this."}}
+{"jsonrpc":"2.0","id":"send-1","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
+```
+
+`target` selects one `Peer.id` returned by `peers.list`. `targets` may instead
+select a non-empty array of distinct peer IDs. The forms are mutually
+exclusive. Success means every selected product accepted its delivery. A
+missing or invisible target returns:
+
+```json
+{"jsonrpc":"2.0","id":"send-2","method":"message.send","params":{"target":"missing","message":"Hello"}}
+{"jsonrpc":"2.0","id":"send-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
+```
+
+#### Lane methods
+
+The version 1 lane methods are `lane.start`, `lane.run`, `lane.resume`,
+`lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive`.
+`lane.collect` and `lane.steer` are not version 1 methods.
+
+Start, run, and resume use:
+
+```json
+{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change.","host":"optional-remote-host"}
+```
+
+Wait, status, interrupt, and archive omit `input`:
+
+```json
+{"product":"qwen","arguments":["reviewer","--timeout","300"],"host":"optional-remote-host"}
+```
+
+`product` selects the lane product. `arguments` is the bounded lane command
+argument array without the method name. `input` is required and non-empty
+where shown. `host` is optional. The daemon returns `-32005` when it has no
+launcher for the requested product.
 
 ### Daemon to product: `message.deliver`
 
-```json
-{"id":"daemon.message","method":"message.deliver","params":{"message_id":"message","body":"hello"}}
-{"id":"daemon.message","result":{}}
-```
-
-`message_id` is the delivery identity. `body` is the exact user input to place
-into the addressed session; normal daemon routing wraps peer text with sender
-metadata before this call. The product must deliver the body to this exact
-session and wake a model turn without terminal keystrokes or screen scraping.
-It returns `{}` only after accepting the input, or returns an error:
+The daemon sends plain message text and a structured sender:
 
 ```json
-{"id":"daemon.message","error":"session is busy"}
+{"jsonrpc":"2.0","id":"delivery-1","method":"message.deliver","params":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"Please review this."}}
+{"jsonrpc":"2.0","id":"delivery-1","result":{}}
 ```
 
-Agent Sessions does not queue the message for a disconnected product. The
-sender's `message.send` call succeeds only if every selected destination
-acknowledges delivery.
-
-### Product to daemon: `session.update`
+The product renders sender metadata natively. It must route `body` to the exact
+session represented by this connection and wake a model turn without terminal
+keystrokes or screen scraping. `result:{}` means the input was accepted and a
+model turn will run. A product that cannot accept the input returns a standard
+error:
 
 ```json
-{"id":"session.update","method":"session.update","params":{"uuid":"session","name":"product title","groups":["group"],"product":"qwen"}}
-{"id":"session.update","result":{}}
+{"jsonrpc":"2.0","id":"delivery-2","method":"message.deliver","params":{"message_id":"message-2","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"One more check."}}
+{"jsonrpc":"2.0","id":"delivery-2","error":{"code":-32002,"message":"Session busy","data":{"uuid":"target-native"}}}
 ```
 
-The parameters have the same shape as the first report. `uuid` and `product`
-must equal their values in the first report; `name` and `groups` may change.
-An invalid update receives `{"error":"live session update is invalid"}` and
-does not replace the current report.
+The daemon does not wrap `body`, queue it for a disconnected product, or
+synthesize acceptance.
 
-### Product to daemon: `tool.call`
+### Model exposure
 
-A product exposes one finite, promptless tool to its model and forwards it as:
-
-```json
-{"id":"session.tool-one","method":"tool.call","params":{"operation":"peers.list","arguments":{}}}
-```
-
-The exact operation enum is:
-
-```text
-peers.list
-message.send
-lane.start
-lane.run
-lane.resume
-lane.wait
-lane.status
-lane.steer
-lane.interrupt
-lane.collect
-lane.archive
-```
-
-The implemented argument and result shapes are:
-
-| Operation | `arguments` | Successful `result` |
-| --- | --- | --- |
-| `peers.list` | `{}` | `{"peers":[Peer, ...]}`. Only live, group-visible destinations are returned. |
-| `message.send` | `{"target":"ID","message":"TEXT"}` or `{"targets":["ID", ...],"message":"TEXT"}` | `{"message_id":"ID","deliveries":[Delivery, ...]}`. `target` and `targets` are mutually exclusive; duplicates are rejected. |
-| `lane.start` | Lane arguments described below | A `lane.ready` object after native start is accepted. |
-| `lane.run` | Lane arguments described below | A `turn.completed` object after the turn ends. |
-| `lane.resume` | Lane arguments described below | A `turn.completed` object after the resumed turn ends. |
-| `lane.wait` | Lane arguments described below | A `turn.completed` object for the live turn. |
-| `lane.status` | Lane arguments described below | A `lane.status` object. |
-| `lane.steer` | Lane arguments described below | No success shape today: downstream dispatch returns `unsupported lane command "steer"`. |
-| `lane.interrupt` | Lane arguments described below | A `turn.interrupting` object after native interruption is accepted. |
-| `lane.collect` | Lane arguments described below | No success shape today: downstream dispatch returns `unsupported lane command "collect"`. |
-| `lane.archive` | Lane arguments described below | A `lane.archived` object after native archive is accepted. |
-
-Lane calls use one structured object:
-
-```json
-{
-  "product": "qwen",
-  "arguments": ["--name", "reviewer"],
-  "input": "Review the change.",
-  "host": "optional-remote-host"
-}
-```
-
-`arguments` is the daemon's finite lane command argument array without the
-operation name. `input` is required and non-empty for `start`, `run`, and
-`resume`. `product` selects the lane product. `host` is optional. The daemon
-uses the calling session's working directory unless `arguments` includes an
-accepted working-directory option. Appendix A records every result object.
-
-For compatibility with current MCP connectors, the daemon also accepts
-`tools/call` with `{"name":"list_peers","arguments":{}}`. Its implemented
-names are `list_peers`, `identity`, `rename_session`, `send_message`,
-`broadcast`, and `lane`; `rename_session` currently always reports that no
-native rename driver is composed. This compatibility method returns MCP-style
-`content`, `structuredContent`, and `isError` values inside the RPC `result`.
-New native clients should use `tool.call`, whose errors use the top-level
-string `error` frame.
+The presence methods are the wire contract, not a required model-facing tool
+layout. A product may expose one tool with a closed operation enum or several
+separate tools. Whichever layout it chooses, calls to `peers.list`,
+`message.send`, and the supported lane methods must be structured and
+promptless for the model.
 
 ## 5. Lifecycle semantics
 
 - EOF or any connection loss removes the session immediately. There is no
   heartbeat and no grace period.
-- After a daemon restart, the product reconnects and sends the full first
-  report again. The daemon begins with an empty live roster and rebuilds it
-  entirely from those reports. The reference clients retry after 100 ms.
-- A newer connection reporting the same `uuid` replaces and closes the older
-  connection. The replacement is continuous from the roster's point of view;
-  the displaced connection cannot later remove it.
-- A process hosting several simultaneously live sessions holds one independent
-  connection per session. Creation, title changes, disposal, and reconnection
-  are handled independently for each one.
-- On disconnect, all outstanding calls in both directions fail. The shared
-  client rejects product-to-daemon promises as unavailable, forgets unanswered
-  inbound deliveries, and does not replay either kind of call after reconnect.
-  The caller owns any safe retry.
+- After a daemon restart, the product reconnects and sends `session.hello`
+  again with the same UUID, current product-owned name, and original groups.
+  The daemon rebuilds its live roster from hello requests.
+- A newer connection whose successful hello reports the same UUID replaces and
+  closes the older connection. The displaced connection cannot later remove
+  the replacement.
+- A process hosting several live sessions holds one independent connection per
+  session. A multi-root product emits created, changed, and disposed events per
+  root and owns one presence loop per root.
+- On disconnect, outstanding calls in both directions fail. Neither side
+  replays calls after reconnect; the caller decides whether an operation is
+  safe to retry.
 
 ## 6. Product responsibilities
 
-A conforming product integration provides all of the following:
+A conforming product provides:
 
-- A stable, product-issued session UUID available at or near session start.
+- A stable, product-issued session UUID at or near session start.
 - A requested start-time name written into the product's own session store,
-  not merely painted in the terminal or held by Agent Sessions.
-- Native resume by exact UUID and, where the product exposes named sessions,
-  an exact name lookup that selects one product session or fails truthfully on
-  zero or multiple matches.
-- An addressable API that delivers an inbound message to one exact session and
-  wakes a model turn without injecting keystrokes. A busy session either
-  accepts a supported native steer or returns an error.
-- A finite, structured, promptless model tool surface for exactly the
-  operations enumerated above. Unsupported operations return errors rather
-  than opening an approval prompt.
-- A truthful exit boundary: close the presence connection as soon as the
-  product session is no longer live.
-- Per-session created, changed, and disposed events when one product process
-  can host several live sessions.
+  not merely displayed in the terminal or remembered by Agent Sessions.
+- Native resume by exact UUID and, where the product supports named sessions,
+  lookup by name that returns exactly one product session or fails truthfully
+  on zero or multiple matches.
+- An addressable API that accepts an inbound message for one exact session and
+  wakes a model turn without keystroke injection. A busy session returns
+  `-32002`.
+- A finite, structured, promptless model surface for the version 1 Agent
+  Sessions methods.
+- Truthful exit: the presence connection closes as soon as the product session
+  is no longer live.
+- Per-session lifecycle and title events when one process hosts several
+  sessions.
 
-## 7. Conformance
+## 7. Minimal implementation
 
-Conformance is checked end to end against the real product, not just a socket
-mock:
+The following pseudocode is the complete shape of a native client. A production
+client adds normal cancellation, reconnect backoff, logging, and bounded I/O.
+
+```text
+presence(session):
+  while session.is_live:
+    socket, rpc = null, null
+    try:
+      socket = connect(discover_presence_socket())
+      rpc = JsonRpc2(socket, delimiter="\\n", batching=false)
+      rpc.on_request("message.deliver", params => {
+        if not session.can_accept_input:
+          throw RpcError(-32002, "Session busy")
+        session.accept_user_input(params.body, sender=params.from)
+        return {}
+      })
+      await rpc.call("session.hello", {
+        protocol: 1,
+        uuid: session.uuid,
+        name: session.stored_name_or_empty,
+        groups: session.launch_groups,
+        product: PRODUCT_ID
+      })
+      session.on_title(name =>
+        rpc.notify("session.update", {name: name}))
+      session.expose_promptless_methods(method =>
+        rpc.call(method.name, method.params))
+      await first_of(rpc.eof, session.disposed)
+    catch ConnectionFailedOrDisconnected:
+      if rpc: rpc.fail_all_pending_without_replay()
+      if session.is_live: continue
+    finally:
+      close_if_open(socket)
+  return
+```
+
+## 8. Conformance
+
+Conformance is checked end to end against the real product:
 
 | Cell | Required observation |
 | --- | --- |
-| Named start | Starting with a name and groups creates a real product session that is immediately visible with the same name and groups. |
+| Named start | Starting with a name and groups creates a real product session that is immediately visible with the same stored name, exact groups, UUID, and product string. |
 | Model turn | The named session completes a real model turn through the product's normal runtime. |
-| Inbound round trip | `message.deliver` wakes that exact session; its model can call `message.send`, and the reply is delivered without an interactive approval prompt. |
-| Daemon restart | While the product remains live, restarting the daemon makes the session reappear with the same UUID, product-owned name, and groups. |
+| Inbound round trip | `message.deliver` wakes that exact session; its model can call `message.send`, and the reply is accepted without an interactive approval prompt. |
+| Daemon restart | While the product remains live, restarting the daemon makes the session reappear after a new hello with the same UUID, current stored name, and original groups. |
 | Exit | Exiting or disposing the product session makes it disappear immediately. |
-| Resume | Resume by exact UUID and resume by unique name both restore the same product UUID and report it unchanged. |
+| Resume | Resume by exact UUID and resume by unique name both restore and report the same product UUID. |
 
-## Appendix A. Exact schemas and frame examples
+## Appendix A. Schemas and examples
 
-### A.1 Initial report schema
+All examples below are complete newline-delimited frames. Line breaks between
+frames are shown literally by placing each JSON object on its own line.
 
-This is the producer contract. The current daemon is slightly more permissive
-about omitted `name` and `groups`; see Appendix B.
+### A.1 JSON-RPC envelopes
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Agent Sessions initial report",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["uuid", "name", "groups", "product"],
-  "properties": {
-    "uuid": {"type": "string", "minLength": 1},
-    "name": {"type": "string"},
-    "groups": {
-      "type": "array",
-      "items": {"type": "string"},
-      "uniqueItems": true
-    },
-    "product": {
-      "enum": ["codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "dsh"]
-    }
-  }
-}
-```
-
-Example from the shared client test:
-
-```json
-{"uuid":"native","name":"before","groups":["team"],"product":"pi"}
-```
-
-### A.2 Post-report frame schemas
+Request:
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Agent Sessions RPC request",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "method", "params"],
+  "required": ["jsonrpc", "id", "method", "params"],
   "properties": {
-    "id": {"type": "string", "minLength": 1},
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": ["string", "number"]},
     "method": {
-      "enum": ["message.deliver", "session.update", "tool.call", "tools/call"]
+      "enum": [
+        "session.hello", "session.update", "peers.list", "message.send",
+        "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
+        "lane.interrupt", "lane.archive", "message.deliver"
+      ]
     },
     "params": {"type": "object"}
   }
 }
 ```
 
+Notification:
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Agent Sessions RPC response",
-  "oneOf": [
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "result"],
-      "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "result": {}
-      }
-    },
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "error"],
-      "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "error": {"type": "string", "minLength": 1}
-      }
-    }
-  ]
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jsonrpc", "method", "params"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "method": {"const": "session.update"},
+    "params": {"type": "object"}
+  }
 }
 ```
 
-Each JSON object below is one complete line on the wire.
+Success response:
 
-### A.3 `message.deliver`
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jsonrpc", "id", "result"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": ["string", "number"]},
+    "result": {}
+  }
+}
+```
+
+Error response:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jsonrpc", "id", "error"],
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"type": ["string", "number"]},
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": [-32602, -32001, -32002, -32003, -32004, -32005]},
+        "message": {"type": "string"},
+        "data": {}
+      }
+    }
+  }
+}
+```
+
+### A.2 `session.hello`
 
 Parameters:
 
@@ -348,180 +413,413 @@ Parameters:
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["message_id", "body"],
+  "required": ["protocol", "uuid", "name", "groups", "product"],
+  "properties": {
+    "protocol": {"const": 1},
+    "uuid": {"type": "string", "minLength": 1},
+    "name": {"type": "string"},
+    "groups": {"type": "array", "items": {"type": "string"}},
+    "product": {"type": "string", "minLength": 1}
+  }
+}
+```
+
+Result: an empty object.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode"}}
+{"jsonrpc":"2.0","id":1,"result":{}}
+{"jsonrpc":"2.0","id":2,"method":"session.hello","params":{"protocol":2,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode"}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32004,"message":"Unsupported protocol version","data":{"supported":1,"received":2}}}
+```
+
+### A.3 `session.update`
+
+Parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {"name": {"type": "string"}}
+}
+```
+
+Result for request form: an empty object. Notification form has no response.
+
+```json
+{"jsonrpc":"2.0","method":"session.update","params":{"name":"reviewer: tests complete"}}
+{"jsonrpc":"2.0","id":"update-1","method":"session.update","params":{"name":"reviewer: tests complete"}}
+{"jsonrpc":"2.0","id":"update-1","result":{}}
+{"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","groups":["other-team"]}}
+{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"field":"groups"}}}
+```
+
+### A.4 Peer and message schemas
+
+`peers.list` parameters are exactly `{}`.
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 0
+}
+```
+
+`Peer`:
+
+```json
+{
+  "$id": "urn:agent-sessions:v1:peer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "session_id", "name", "product", "status", "cwd", "groups", "permission_mode"],
+  "properties": {
+    "id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "name": {"type": "string"},
+    "product": {"type": "string"},
+    "status": {"enum": ["live", "idle", "busy"]},
+    "cwd": {"type": "string"},
+    "groups": {"type": "array", "items": {"type": "string"}},
+    "permission_mode": {"type": "string"},
+    "kind": {"enum": ["lane", "remote-peer"]},
+    "host_id": {"type": "string"}
+  }
+}
+```
+
+`peers.list` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["peers"],
+  "properties": {
+    "peers": {"type": "array", "items": {"$ref": "urn:agent-sessions:v1:peer"}}
+  }
+}
+```
+
+Frames:
+
+```json
+{"jsonrpc":"2.0","id":"peers-1","method":"peers.list","params":{}}
+{"jsonrpc":"2.0","id":"peers-1","result":{"peers":[{"id":"target-native","session_id":"target-native","name":"builder","product":"new-agent","status":"live","cwd":"/work/project","groups":["team"],"permission_mode":"default"}]}}
+```
+
+`message.send` parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message"],
+  "properties": {
+    "target": {"type": "string", "minLength": 1},
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "message": {"type": "string", "minLength": 1}
+  },
+  "oneOf": [
+    {"required": ["target"], "not": {"required": ["targets"]}},
+    {"required": ["targets"], "not": {"required": ["target"]}}
+  ]
+}
+```
+
+`message.send` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message_id", "deliveries"],
   "properties": {
     "message_id": {"type": "string", "minLength": 1},
+    "deliveries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "session_id", "delivery_id", "status"],
+        "properties": {
+          "target": {"type": "string"},
+          "session_id": {"type": "string"},
+          "delivery_id": {"type": "string"},
+          "status": {"const": "accepted"}
+        }
+      }
+    }
+  }
+}
+```
+
+Frames:
+
+```json
+{"jsonrpc":"2.0","id":"send-1","method":"message.send","params":{"target":"target-native","message":"Please review this."}}
+{"jsonrpc":"2.0","id":"send-1","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
+{"jsonrpc":"2.0","id":"send-2","method":"message.send","params":{"target":"missing","message":"Hello"}}
+{"jsonrpc":"2.0","id":"send-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
+```
+
+`message.deliver` parameters:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message_id", "from", "body"],
+  "properties": {
+    "message_id": {"type": "string", "minLength": 1},
+    "from": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uuid", "name", "product", "groups"],
+      "properties": {
+        "uuid": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "product": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "body": {"type": "string"}
   }
 }
 ```
 
-Frames exercised by the shared client:
+Result: an empty object.
 
 ```json
-{"id":"daemon.message","method":"message.deliver","params":{"message_id":"message","body":"hello"}}
-{"id":"daemon.message","result":{}}
-{"id":"daemon.message","error":"native delivery failed"}
+{"jsonrpc":"2.0","id":"delivery-1","method":"message.deliver","params":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"Please review this."}}
+{"jsonrpc":"2.0","id":"delivery-1","result":{}}
+{"jsonrpc":"2.0","id":"delivery-2","method":"message.deliver","params":{"message_id":"message-2","from":{"uuid":"source-native","name":"reviewer","product":"opencode","groups":["team"]},"body":"One more check."}}
+{"jsonrpc":"2.0","id":"delivery-2","error":{"code":-32002,"message":"Session busy","data":{"uuid":"target-native"}}}
 ```
 
-### A.4 `session.update`
+### A.5 Lane schemas
 
-`params` uses the initial-report schema. The request ID is caller-selected.
-
-```json
-{"id":"session.update","method":"session.update","params":{"uuid":"session","name":"product title","groups":["group"],"product":"qwen"}}
-{"id":"session.update","result":{}}
-{"id":"session.update","error":"live session update is invalid"}
-```
-
-### A.5 `tool.call`
-
-Parameters:
+`lane.start`, `lane.run`, and `lane.resume` parameters:
 
 ```json
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["operation", "arguments"],
+  "required": ["product", "arguments", "input"],
   "properties": {
-    "operation": {
-      "enum": [
-        "peers.list", "message.send", "lane.start", "lane.run",
-        "lane.resume", "lane.wait", "lane.status", "lane.steer",
-        "lane.interrupt", "lane.collect", "lane.archive"
-      ]
-    },
-    "arguments": {"type": "object"}
+    "product": {"type": "string", "minLength": 1},
+    "arguments": {"type": "array", "items": {"type": "string"}},
+    "input": {"type": "string", "minLength": 1},
+    "host": {"type": "string", "minLength": 1}
   }
 }
 ```
 
-`peers.list` request and response:
+`lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive` parameters:
 
 ```json
-{"id":"session.tool-one","method":"tool.call","params":{"operation":"peers.list","arguments":{}}}
-{"id":"session.tool-one","result":{"peers":[{"id":"target-native","session_id":"target-native","name":"reviewer","product":"codex","status":"live","cwd":"/work/project","groups":["team"],"permission_mode":"default"}]}}
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["product", "arguments"],
+  "properties": {
+    "product": {"type": "string", "minLength": 1},
+    "arguments": {"type": "array", "items": {"type": "string"}},
+    "host": {"type": "string", "minLength": 1}
+  }
+}
 ```
 
-A `Peer` has required `id`, `session_id`, `name`, `product`, `status`, `cwd`,
-`groups`, and `permission_mode` fields. A lane also has `"kind":"lane"` and
-uses `idle` or `busy` status. A peer reached through another host has
-`"kind":"remote-peer"` and `host_id`.
-
-`message.send` request and response:
+`lane.ready` and `lane.status` result fields:
 
 ```json
-{"id":"session.send-one","method":"tool.call","params":{"operation":"message.send","arguments":{"target":"target-native","message":"Please review this."}}}
-{"id":"session.send-one","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type", "product", "thread_id", "session_id", "name", "cwd", "groups",
+    "permission_mode", "state", "turn_id", "outcome", "exit",
+    "owner_session_id", "persistent", "auto_archive",
+    "auto_archive_after_seconds", "auto_archive_at"
+  ],
+  "properties": {
+    "type": {"enum": ["lane.ready", "lane.status"]},
+    "contract_version": {"const": 2},
+    "product": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "name": {"type": "string"},
+    "cwd": {"type": "string"},
+    "groups": {"type": "array", "items": {"type": "string"}},
+    "permission_mode": {"type": "string"},
+    "state": {"type": "string"},
+    "turn_id": {"type": "string"},
+    "outcome": {"type": "string"},
+    "exit": {"type": ["integer", "null"]},
+    "owner_session_id": {"type": "string"},
+    "persistent": {"type": "boolean"},
+    "auto_archive": {"type": "boolean"},
+    "auto_archive_after_seconds": {"type": "number"},
+    "auto_archive_at": {"type": "integer"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "lane.ready"}}},
+      "then": {"required": ["contract_version"]}
+    }
+  ]
+}
 ```
 
-A failed tool call uses the response error frame:
+`turn.completed` result:
 
 ```json
-{"id":"session.send-one","error":"destination target-native did not accept the delivery"}
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "product", "thread_id", "session_id", "turn_id", "status", "outcome", "exit", "result", "diagnostic"],
+  "properties": {
+    "type": {"const": "turn.completed"},
+    "product": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "turn_id": {"type": "string"},
+    "status": {"type": "string"},
+    "outcome": {"type": "string"},
+    "exit": {"type": ["integer", "null"]},
+    "result": {"type": "string"},
+    "diagnostic": {"type": "string"}
+  }
+}
 ```
 
-### A.6 Lane operation frames
-
-All lane requests have the same outer shape. These examples use the exact
-objects serialized by the current dispatcher; IDs and product-issued UUIDs are
-illustrative.
-
-`lane.start`:
+`turn.interrupting` result:
 
 ```json
-{"id":"session.lane-start","method":"tool.call","params":{"operation":"lane.start","arguments":{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change."}}}
-{"id":"session.lane-start","result":{"type":"lane.ready","contract_version":2,"product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team","session:host-id/parent-native","session:host-id/parent-native/27c1a11b-5716-4dc4-a158-a8177c1e7365"],"permission_mode":"default","state":"running","turn_id":"turn-1","outcome":"","exit":null,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "thread_id", "turn_id"],
+  "properties": {
+    "type": {"const": "turn.interrupting"},
+    "thread_id": {"type": "string"},
+    "turn_id": {"type": "string"}
+  }
+}
 ```
 
-`lane.run`:
+`lane.archived` result:
 
 ```json
-{"id":"session.lane-run","method":"tool.call","params":{"operation":"lane.run","arguments":{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change."}}}
-{"id":"session.lane-run","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-1","status":"completed","outcome":"completed","exit":0,"result":"Looks good.","diagnostic":""}}
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "product", "thread_id", "session_id", "name"],
+  "properties": {
+    "type": {"const": "lane.archived"},
+    "product": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "name": {"type": "string"},
+    "already_archived": {"type": "boolean"}
+  }
+}
 ```
 
-`lane.resume`:
+#### `lane.start`
 
 ```json
-{"id":"session.lane-resume","method":"tool.call","params":{"operation":"lane.resume","arguments":{"product":"qwen","arguments":["reviewer"],"input":"Check one more thing."}}}
-{"id":"session.lane-resume","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-start-1","method":"lane.start","params":{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change."}}
+{"jsonrpc":"2.0","id":"lane-start-1","result":{"type":"lane.ready","contract_version":2,"product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"running","turn_id":"turn-1","outcome":"","exit":null,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+{"jsonrpc":"2.0","id":"lane-start-2","method":"lane.start","params":{"product":"new-agent","arguments":["--name","reviewer"],"input":"Review the change."}}
+{"jsonrpc":"2.0","id":"lane-start-2","error":{"code":-32005,"message":"Product not launchable","data":{"product":"new-agent"}}}
 ```
 
-`lane.wait`:
+#### `lane.run`
 
 ```json
-{"id":"session.lane-wait","method":"tool.call","params":{"operation":"lane.wait","arguments":{"product":"qwen","arguments":["reviewer","--timeout","300"]}}}
-{"id":"session.lane-wait","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-run-1","method":"lane.run","params":{"product":"qwen","arguments":["--name","reviewer"],"input":"Review the change."}}
+{"jsonrpc":"2.0","id":"lane-run-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-1","status":"completed","outcome":"completed","exit":0,"result":"Looks good.","diagnostic":""}}
 ```
 
-`lane.status`:
+#### `lane.resume`
 
 ```json
-{"id":"session.lane-status","method":"tool.call","params":{"operation":"lane.status","arguments":{"product":"qwen","arguments":["reviewer"]}}}
-{"id":"session.lane-status","result":{"type":"lane.status","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team","session:host-id/parent-native","session:host-id/parent-native/27c1a11b-5716-4dc4-a158-a8177c1e7365"],"permission_mode":"default","state":"idle","turn_id":"turn-2","outcome":"completed","exit":0,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+{"jsonrpc":"2.0","id":"lane-resume-1","method":"lane.resume","params":{"product":"qwen","arguments":["reviewer"],"input":"Check one more thing."}}
+{"jsonrpc":"2.0","id":"lane-resume-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-resume-2","method":"lane.resume","params":{"product":"qwen","arguments":["missing"],"input":"Continue."}}
+{"jsonrpc":"2.0","id":"lane-resume-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
 ```
 
-`lane.steer` and `lane.collect` are in the accepted enum but currently return
-errors:
+#### `lane.wait`
 
 ```json
-{"id":"session.lane-steer","method":"tool.call","params":{"operation":"lane.steer","arguments":{"product":"qwen","arguments":["reviewer"],"input":"Focus on tests."}}}
-{"id":"session.lane-steer","error":"unsupported lane command \"steer\""}
-{"id":"session.lane-collect","method":"tool.call","params":{"operation":"lane.collect","arguments":{"product":"qwen","arguments":["reviewer"]}}}
-{"id":"session.lane-collect","error":"unsupported lane command \"collect\""}
+{"jsonrpc":"2.0","id":"lane-wait-1","method":"lane.wait","params":{"product":"qwen","arguments":["reviewer","--timeout","300"]}}
+{"jsonrpc":"2.0","id":"lane-wait-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
 ```
 
-`lane.interrupt`:
+#### `lane.status`
 
 ```json
-{"id":"session.lane-interrupt","method":"tool.call","params":{"operation":"lane.interrupt","arguments":{"product":"qwen","arguments":["reviewer"]}}}
-{"id":"session.lane-interrupt","result":{"type":"turn.interrupting","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","turn_id":"turn-2"}}
+{"jsonrpc":"2.0","id":"lane-status-1","method":"lane.status","params":{"product":"qwen","arguments":["reviewer"]}}
+{"jsonrpc":"2.0","id":"lane-status-1","result":{"type":"lane.status","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"idle","turn_id":"turn-2","outcome":"completed","exit":0,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
 ```
 
-`lane.archive`:
+#### `lane.interrupt`
 
 ```json
-{"id":"session.lane-archive","method":"tool.call","params":{"operation":"lane.archive","arguments":{"product":"qwen","arguments":["reviewer"]}}}
-{"id":"session.lane-archive","result":{"type":"lane.archived","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer"}}
+{"jsonrpc":"2.0","id":"lane-interrupt-1","method":"lane.interrupt","params":{"product":"qwen","arguments":["reviewer"]}}
+{"jsonrpc":"2.0","id":"lane-interrupt-1","result":{"type":"turn.interrupting","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","turn_id":"turn-2"}}
 ```
 
-### A.7 Connector-compatible `tools/call`
+#### `lane.archive`
 
 ```json
-{"id":"session.17","method":"tools/call","params":{"name":"list_peers","arguments":{}}}
-{"id":"session.17","result":{"content":[{"type":"text","text":"No live peers share a group with this session."}],"structuredContent":{"peers":[]}}}
+{"jsonrpc":"2.0","id":"lane-archive-1","method":"lane.archive","params":{"product":"qwen","arguments":["reviewer"]}}
+{"jsonrpc":"2.0","id":"lane-archive-1","result":{"type":"lane.archived","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer"}}
+{"jsonrpc":"2.0","id":"lane-archive-2","method":"lane.archive","params":{"product":"qwen","arguments":["owned-by-another-session"]}}
+{"jsonrpc":"2.0","id":"lane-archive-2","error":{"code":-32003,"message":"Operation not permitted","data":{"method":"lane.archive"}}}
 ```
 
-Connector tool failures remain RPC successes with an MCP error result:
+## Appendix B. Differences from the current Agent Sessions implementation
 
-```json
-{"id":"session.18","method":"tools/call","params":{"name":"rename_session","arguments":{"name":"new name"}}}
-{"id":"session.18","result":{"content":[{"type":"text","text":"native rename driver is not composed"}],"isError":true}}
-```
+Agent Sessions must make these changes to conform to version 1:
 
-## Appendix B. Open questions and code/document discrepancies
-
-1. The shared client honors `XDG_STATE_HOME`, but the daemon's default state
-   root currently does not. With `XDG_STATE_HOME` set and no explicit state
-   root or socket, they can choose different paths.
-2. The DSH design requires a live interactive root, but the current product
-   catalog marks `dsh` as lane-only. The daemon accepts a DSH report, then does
-   not expose a standalone DSH root as an interactive peer.
-3. `lane.steer` and `lane.collect` are accepted by the public operation enum,
-   but the current lane dispatcher has no cases for them and returns the exact
-   errors shown above. Existing adapter documentation describes steer more
-   broadly than the code provides.
-4. The daemon accepts an initial report with omitted `name` or `groups` by
-   decoding them as empty values, although the reference clients always send
-   all four report fields and this specification requires them.
-5. The server accepts group changes through full `session.update` reports, but
-   the shared JavaScript client currently exposes only `updateName`; a native
-   product must send the full update itself when groups change.
-6. The persistence design mentions up to two seconds to drain accepted work on
-   graceful daemon shutdown. The presence layer itself closes connections and
-   cancels in-flight requests; no drain negotiation or replay signal exists on
-   this wire.
-7. There is no protocol version or capability negotiation. It cannot be
-   determined from the wire alone how a future incompatible change would be
-   distinguished from an unsupported method.
+1. Add `"jsonrpc":"2.0"` to every presence frame; accept string and numeric
+   request IDs; replace string errors with the error objects and fixed codes in
+   this specification; and support the `session.update` notification.
+2. Replace the raw first report with the `session.hello` request, acknowledge
+   it before accepting other methods, reject any protocol value other than
+   `1` with `-32004`, and then close that connection.
+3. Accept every non-empty product string for presence, rosters, discovery, and
+   messaging. Apply catalog checks only when a lane method asks the daemon to
+   launch or drive a product. This also allows a standalone DSH root to appear
+   as a peer.
+4. Preserve hello groups exactly instead of removing duplicate strings. Keep
+   them immutable for the connection, and change `session.update` from a full
+   report to the name-only parameters defined here.
+5. Replace `tool.call` with the first-class `peers.list`, `message.send`, and
+   lane methods. Remove the presence-stream `tools/call` compatibility method.
+   Do not expose `lane.collect` or `lane.steer` as version 1 methods.
+6. Change `message.deliver` to carry the structured `from` object and plain
+   `body`. Stop wrapping message text; products render sender metadata through
+   their native interfaces.
+7. Map validation, routing, busy-state, permission, version, and lane-product
+   failures to the closed error table instead of returning implementation
+   error strings.
+8. Align the daemon's default state-root discovery with the client's
+   `XDG_STATE_HOME` rule, or publish the authoritative socket path explicitly,
+   so both sides select the same Unix socket.
+9. Update the shared reference client and end-to-end product checks for hello
+   acknowledgement, exact JSON-RPC framing, unknown-product presence,
+   immutable groups, structured delivery, first-class methods, and standard
+   errors.
