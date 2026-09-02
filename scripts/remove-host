@@ -20,8 +20,6 @@ grok=${GROK:-grok}
 qwen=${QWEN:-qwen}
 opencode=${OPENCODE:-opencode}
 kilo=${KILO:-kilo}
-dsh=${DSH:-dsh}
-pnpm=${PNPM:-pnpm}
 host_root="$prefix/libexec/agent-sessions/host"
 
 resolve_product() {
@@ -43,12 +41,6 @@ claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
 qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
 opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
-dsh_path=$(resolve_product "$dsh" "$HOME/.local/bin/dsh" || true)
-pnpm_path=$(resolve_product "$pnpm" "$HOME/.local/bin/pnpm" || true)
-if [[ -n "$dsh_path" ]] && { [[ -z "$pnpm_path" ]] || [[ "$($pnpm_path --version)" != 10.28.1 ]]; }; then
-  printf 'DSH integration requires pnpm 10.28.1.\n' >&2
-  exit 1
-fi
 grok_override=$(resolve_product "$grok" "$HOME/.grok/bin/grok" || true)
 run_grok() {
   if [[ -n "$grok_override" ]]; then
@@ -61,37 +53,6 @@ grok_available=0
 if [[ -x "$prefix/bin/agent-sessions" ]] && run_grok --version >/dev/null 2>&1; then
   grok_available=1
 fi
-
-dsh_profile_root() {
-  printf '%s/profiles/agent-sessions\n' "${DSH_HOME:-$HOME/.dsh}"
-}
-
-install_dsh_profile() {
-  local integration_root=$1 profile_root
-  [[ -n "$dsh_path" ]] || return 0
-  profile_root=$(dsh_profile_root)
-  rm -rf -- "$profile_root/agent-sessions-plugin" "$profile_root/shared"
-  mkdir -p "$profile_root/agent-sessions-plugin/dsh" "$profile_root/agent-sessions-plugin/shared"
-  install -m 0644 "$integration_root/integrations/dsh/profile/package.json" "$profile_root/package.json"
-  install -m 0644 "$integration_root/integrations/dsh/profile/cordis.yml" "$profile_root/cordis.yml"
-  install -m 0644 "$integration_root/integrations/dsh/profile/cordis.patch.yml" "$profile_root/cordis.patch.yml"
-  install -m 0644 "$integration_root/integrations/dsh/package.json" "$profile_root/agent-sessions-plugin/package.json"
-  install -m 0644 "$integration_root/integrations/dsh/plugin.cjs" "$profile_root/agent-sessions-plugin/dsh/plugin.cjs"
-  install -m 0644 "$integration_root/integrations/shared/live-session.js" "$profile_root/agent-sessions-plugin/shared/live-session.js"
-  "$pnpm_path" --dir "$profile_root" install --prod --ignore-scripts --no-frozen-lockfile --force
-}
-
-remove_dsh_profile() {
-  local profile_root
-  profile_root=$(dsh_profile_root)
-  if [[ -e "$profile_root" || -L "$profile_root" ]]; then
-    [[ -d "$profile_root" && ! -L "$profile_root" ]] || {
-      printf 'refuse to remove an indirect DSH Agent Sessions profile: %s\n' "$profile_root" >&2
-      return 1
-    }
-    rm -rf -- "$profile_root"
-  fi
-}
 
 if [[ ! -e "$host_root" && ! -L "$host_root" ]]; then
   printf 'Agent Sessions host is not installed under %s.\n' "$prefix"
@@ -118,7 +79,7 @@ resolve_file_link() {
   directory=$(cd -P -- "$(dirname -- "$target")" && pwd) || return 1
   printf '%s/%s\n' "$directory" "$(basename -- "$target")"
 }
-for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer dsh-peer \
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer \
   codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane; do
   alias_path="$prefix/bin/$alias"
   if [[ -L "$alias_path" ]]; then
@@ -202,7 +163,6 @@ install_integrations() {
     install -m 0644 "$current/integrations/$product/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
     install -m 0644 "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   done
-  install_dsh_profile "$current"
 }
 
 install_service() {
@@ -301,8 +261,6 @@ for product in opencode kilo; do
   config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
   rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
 done
-remove_dsh_profile
-
 case "$(uname -s)" in
   Linux)
     systemctl --user disable agent-sessions.service
@@ -315,7 +273,7 @@ case "$(uname -s)" in
     ;;
 esac
 
-for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer dsh-peer \
+for alias in agent-sessions codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer \
   codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane; do
   if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
 done

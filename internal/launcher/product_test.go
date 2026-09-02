@@ -14,8 +14,13 @@ func TestLauncherProductProjectionCoversEveryDescriptor(t *testing.T) {
 		}
 		for _, kind := range []string{"interactive", "lane"} {
 			executable, arguments, resumeOK := product.resume(kind, "session-a")
-			if !resumeOK || len(arguments) != 2 {
+			supported := kind == "interactive" && descriptor.Has(productcatalog.CapabilityInteractive) ||
+				kind == "lane" && descriptor.Has(productcatalog.CapabilityLane)
+			if resumeOK != supported || supported && len(arguments) != 2 {
 				t.Fatalf("%s %s resume projection = %q %v, %v", descriptor.ID, kind, executable, arguments, resumeOK)
+			}
+			if !supported {
+				continue
 			}
 			wantExecutable := descriptor.PeerAlias
 			if kind == "lane" {

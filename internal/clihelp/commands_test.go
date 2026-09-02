@@ -11,16 +11,29 @@ import (
 func TestParseDispatchesEveryMultiCallAndAliasWithoutChangingPassthrough(t *testing.T) {
 	passthrough := []string{"--name", "worker", "--", "prompt", "-g", "native"}
 	for _, product := range productcatalog.All() {
-		for _, test := range []struct {
+		tests := []struct {
 			argv0   string
 			args    []string
 			command string
 		}{
-			{argv0: "/installed/bin/" + product.PeerAlias, args: passthrough, command: "peer"},
 			{argv0: "/installed/bin/" + product.LaneAlias, args: passthrough, command: "lane"},
-			{argv0: "agent-sessions", args: append([]string{"peer", product.ID}, passthrough...), command: "peer"},
 			{argv0: "agent-sessions", args: append([]string{"lane", product.ID}, passthrough...), command: "lane"},
-		} {
+		}
+		if product.Has(productcatalog.CapabilityInteractive) {
+			tests = append(tests,
+				struct {
+					argv0   string
+					args    []string
+					command string
+				}{argv0: "/installed/bin/" + product.PeerAlias, args: passthrough, command: "peer"},
+				struct {
+					argv0   string
+					args    []string
+					command string
+				}{argv0: "agent-sessions", args: append([]string{"peer", product.ID}, passthrough...), command: "peer"},
+			)
+		}
+		for _, test := range tests {
 			invocation, err := Parse(test.argv0, test.args)
 			if err != nil {
 				t.Fatalf("Parse(%q,%v): %v", test.argv0, test.args, err)
@@ -58,6 +71,9 @@ func TestHelpUsesAuthoritativeProductAndAliasInventory(t *testing.T) {
 	}
 	for _, product := range productcatalog.All() {
 		for _, literal := range []string{product.ID, product.PeerAlias, product.LaneAlias} {
+			if literal == "" {
+				continue
+			}
 			if strings.Count(help, literal) == 0 {
 				t.Errorf("help omits %q", literal)
 			}
@@ -75,6 +91,9 @@ func TestParseRejectsUnknownOrIncompleteCommands(t *testing.T) {
 		{argv0: "agent-sessions", args: []string{"unknown"}},
 		{argv0: "agent-sessions", args: []string{"peer"}},
 		{argv0: "agent-sessions", args: []string{"lane", "imaginary"}},
+		{argv0: "agent-sessions", args: []string{"peer", "dsh"}},
+		{argv0: "agent-sessions", args: []string{"hook", "dsh"}},
+		{argv0: "agent-sessions", args: []string{"connector", "dsh"}},
 		{argv0: "agent-sessions", args: []string{"hook"}},
 	} {
 		if invocation, err := Parse(test.argv0, test.args); err == nil {

@@ -20,8 +20,6 @@ type CommandProbe interface {
 	Output(context.Context, string, []string, []string) ([]byte, error)
 }
 
-type IntegrationCheck func(context.Context) (bool, string, error)
-
 type OSCommandProbe struct{}
 
 func (OSCommandProbe) LookPath(name string) (string, error) { return exec.LookPath(name) }
@@ -32,20 +30,17 @@ func (OSCommandProbe) Output(ctx context.Context, path string, arguments, enviro
 }
 
 type DoctorConfig struct {
-	Executable       string
-	PNPMExecutable   string
-	ACPProfile       string
-	DSHHome          string
-	ProfileIdentity  string
-	ACPAppManifest   string
-	PluginManifest   string
-	ProfileManifest  string
-	ProbeCwd         string
-	Environment      []string
-	Commands         CommandProbe
-	Processes        ACPProcessFactory
-	CheckIntegration IntegrationCheck
-	Timeout          time.Duration
+	Executable      string
+	PNPMExecutable  string
+	ACPProfile      string
+	DSHHome         string
+	ProfileIdentity string
+	ACPAppManifest  string
+	ProbeCwd        string
+	Environment     []string
+	Commands        CommandProbe
+	Processes       ACPProcessFactory
+	Timeout         time.Duration
 }
 
 type DoctorProbe struct{ config DoctorConfig }
@@ -66,20 +61,18 @@ func NewDoctorProbe(config DoctorConfig) (*DoctorProbe, error) {
 	if config.Timeout == 0 {
 		config.Timeout = 10 * time.Second
 	}
-	if config.Timeout < time.Millisecond || config.Timeout > time.Minute || config.ACPAppManifest == "" || config.PluginManifest == "" || config.ProfileManifest == "" ||
+	if config.Timeout < time.Millisecond || config.Timeout > time.Minute || config.ACPAppManifest == "" ||
 		config.ACPProfile != strings.TrimSpace(config.ACPProfile) || strings.ContainsAny(config.ACPProfile, "\x00/\\") {
-		return nil, errors.New("DSH doctor requires bounded timeout and exact tuple manifest paths")
+		return nil, errors.New("DSH doctor requires bounded timeout and the native ACP tuple manifest")
 	}
 	if filepath.Base(config.Executable) != "dsh" || filepath.Base(config.PNPMExecutable) != RequiredPNPM {
 		return nil, errors.New("DSH doctor executable identities are invalid")
 	}
-	if err := validateConfiguredProfileManifestShape(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
+	if err := validateManagedDSHHomeShape(config.DSHHome); err != nil {
 		return nil, err
 	}
-	for _, path := range []string{config.ACPAppManifest, config.PluginManifest} {
-		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-			return nil, errors.New("DSH doctor tuple manifest paths must be absolute and clean")
-		}
+	if !filepath.IsAbs(config.ACPAppManifest) || filepath.Clean(config.ACPAppManifest) != config.ACPAppManifest {
+		return nil, errors.New("DSH doctor ACP tuple manifest path must be absolute and clean")
 	}
 	if config.ProbeCwd != "" && !validCwd(config.ProbeCwd) {
 		return nil, errors.New("DSH doctor probe cwd must be absolute and clean")
@@ -90,8 +83,7 @@ func NewDoctorProbe(config DoctorConfig) (*DoctorProbe, error) {
 	return &DoctorProbe{config: config}, nil
 }
 
-func (doctor *DoctorProbe) VerifyTuple(ctx context.Context, profileIdentity string) (Tuple, error) {
-	profileIdentity = doctor.selectedProfile(profileIdentity)
+func (doctor *DoctorProbe) VerifyTuple(ctx context.Context, _ string) (Tuple, error) {
 	cliPath, err := doctor.resolveExecutable(doctor.config.Executable)
 	if err != nil {
 		return Tuple{}, fmt.Errorf("%w: DSH CLI is missing", productruntime.ErrUnavailable)
@@ -99,15 +91,10 @@ func (doctor *DoctorProbe) VerifyTuple(ctx context.Context, profileIdentity stri
 	if filepath.Base(cliPath) != "dsh" {
 		return Tuple{}, fmt.Errorf("%w: DSH CLI executable identity changed", productruntime.ErrIncompatible)
 	}
-	return doctor.verifyResolvedTuple(ctx, profileIdentity, cliPath)
+	return doctor.verifyResolvedTuple(ctx, cliPath)
 }
 
-func (doctor *DoctorProbe) verifyResolvedTuple(ctx context.Context, profileIdentity, cliPath string) (Tuple, error) {
-	profileIdentity = doctor.selectedProfile(profileIdentity)
-	profileManifest, err := validateManagedProfile(doctor.config.DSHHome, profileIdentity)
-	if err != nil {
-		return Tuple{}, err
-	}
+func (doctor *DoctorProbe) verifyResolvedTuple(ctx context.Context, cliPath string) (Tuple, error) {
 	pnpmPath, err := doctor.resolveExecutable(doctor.config.PNPMExecutable)
 	if err != nil {
 		return Tuple{}, fmt.Errorf("%w: pnpm is required for DSH", productruntime.ErrUnavailable)
@@ -128,9 +115,7 @@ func (doctor *DoctorProbe) verifyResolvedTuple(ctx context.Context, profileIdent
 	}
 	tuple := Tuple{
 		CLI: extractPinnedVersion(string(cliOutput)), PackageManager: RequiredPNPM, PNPMVersion: strings.TrimSpace(string(pnpmOutput)),
-		ACPApp:  manifestVersion(doctor.config.ACPAppManifest, ACPAppPackage),
-		Plugin:  manifestVersion(doctor.config.PluginManifest, PluginPackage),
-		Profile: manifestVersion(profileManifest, ProfilePackage),
+		ACPApp: manifestVersion(doctor.config.ACPAppManifest, ACPAppPackage),
 	}
 	if err := tuple.Validate(); err != nil {
 		return tuple, err
@@ -143,8 +128,8 @@ func (doctor *DoctorProbe) Probe(ctx context.Context, request productruntime.Pro
 		return productruntime.ProbeReport{}, fmt.Errorf("%w: DSH doctor received product %q", productruntime.ErrProtocol, request.ProductID)
 	}
 	report := productruntime.ProbeReport{Features: map[string]bool{
-		"native-cli": false, "pnpm": false, "exact-tuple": false, "peer": false,
-		"lane": false, "parent": false, "acp-initialize": false, "acp-session-new": false,
+		"native-cli": false, "pnpm": false, "exact-tuple": false,
+		"lane": false, "acp-initialize": false, "acp-session-new": false,
 	}}
 	executable := doctor.config.Executable
 	if request.ExecutablePath != "" {
@@ -170,14 +155,12 @@ func (doctor *DoctorProbe) Probe(ctx context.Context, request productruntime.Pro
 		return report, nil
 	}
 
-	tuple, err := doctor.verifyResolvedTuple(ctx, doctor.selectedProfile(doctor.config.ProfileIdentity), resolvedExecutable)
+	tuple, err := doctor.verifyResolvedTuple(ctx, resolvedExecutable)
 	report.NativeVersion = tuple.CLI
 	tupleOK := err == nil
 	report.TupleOK = &tupleOK
 	if err != nil {
-		if errors.Is(err, errManagedProfileUnavailable) {
-			report.State = productruntime.ProbeUnconfigured
-		} else if errors.Is(err, productruntime.ErrIncompatible) {
+		if errors.Is(err, productruntime.ErrIncompatible) {
 			report.State = productruntime.ProbeIncompatible
 		} else {
 			report.State = productruntime.ProbeError
@@ -201,23 +184,6 @@ func (doctor *DoctorProbe) Probe(ctx context.Context, request productruntime.Pro
 	report.Features["acp-initialize"] = true
 	report.Features["acp-session-new"] = true
 	report.Features["lane"] = true
-	if request.Depth == productruntime.ProbeFeature {
-		report.State = productruntime.ProbeReady
-		return report, nil
-	}
-	if doctor.config.CheckIntegration == nil {
-		report.State, report.Detail = productruntime.ProbeUnconfigured, productruntime.NewRedactedString("DSH live-session integration check is not configured")
-		return report, nil
-	}
-	ready, detail, integrationErr := doctor.config.CheckIntegration(ctx)
-	if integrationErr != nil || !ready {
-		if strings.TrimSpace(detail) == "" {
-			detail = "DSH live-session integration is not ready"
-		}
-		report.State, report.Detail = productruntime.ProbeUnconfigured, productruntime.NewRedactedString(detail)
-		return report, nil
-	}
-	report.Features["peer"], report.Features["parent"] = true, true
 	report.State = productruntime.ProbeReady
 	return report, nil
 }
@@ -229,18 +195,12 @@ func validProbeDepth(depth productruntime.ProbeDepth) bool {
 
 func (doctor *DoctorProbe) keylessACPProbe(ctx context.Context, executable string) (failure error) {
 	profile := doctor.selectedProfile(doctor.config.ProfileIdentity)
-	profileManifest, err := validateManagedProfile(doctor.config.DSHHome, profile)
-	if err != nil {
-		return err
-	}
 	cwd := doctor.config.ProbeCwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	// session/new materializes durable product state even after session/close.
-	// Point DSH at a disposable home whose sole profile is a symlink to the
-	// already tuple-verified configured profile. Removal never traverses that
-	// symlink, so the installed profile and the user's native store stay inert.
+	// session/new materializes product state even after session/close, so probe
+	// against a disposable DSH home. DSH itself creates its shipped ACP profile.
 	probeBase := doctorEnvironmentValue(doctor.environment(), "HOME")
 	if probeBase == "" {
 		probeBase, _ = os.UserHomeDir()
@@ -253,17 +213,6 @@ func (doctor *DoctorProbe) keylessACPProbe(ctx context.Context, executable strin
 		return fmt.Errorf("create isolated DSH doctor home: %w", err)
 	}
 	defer func() { failure = errors.Join(failure, os.RemoveAll(probeHome)) }()
-	profiles := filepath.Join(probeHome, "profiles")
-	if err := os.Mkdir(profiles, 0o700); err != nil {
-		return fmt.Errorf("create isolated DSH doctor profiles: %w", err)
-	}
-	profileRoot, err := filepath.Abs(filepath.Dir(profileManifest))
-	if err != nil {
-		return fmt.Errorf("resolve configured DSH profile: %w", err)
-	}
-	if err := os.Symlink(profileRoot, filepath.Join(profiles, profile)); err != nil {
-		return fmt.Errorf("link exact DSH doctor profile: %w", err)
-	}
 	environment := setEnvVar(doctorRuntimeEnv(doctor.environment()), "DSH_PERMISSION_MODE", string(SandboxWorkspaceWrite))
 	environment = setEnvVar(environment, "DSH_HOME", probeHome)
 	command := productruntime.NativeCommand{
@@ -366,26 +315,10 @@ func manifestVersion(path, expectedName string) string {
 		return ""
 	}
 	var manifest struct {
-		Name             string            `json:"name"`
-		Version          string            `json:"version"`
-		PackageManager   string            `json:"packageManager"`
-		Dependencies     map[string]string `json:"dependencies"`
-		PeerDependencies map[string]string `json:"peerDependencies"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
 	}
 	if json.Unmarshal(body, &manifest) != nil || manifest.Name != expectedName {
-		return ""
-	}
-	packageManager := RequiredPNPM + "@" + PinnedPNPM
-	if expectedName == PluginPackage && (manifest.PackageManager != packageManager ||
-		manifest.Dependencies["@deepseek-ai/dsh-llm"] != PinnedVersion ||
-		manifest.Dependencies["@deepseek-ai/dsh-tools"] != PinnedVersion ||
-		manifest.Dependencies["@deepseek-ai/dsh-sandbox-policy"] != PinnedVersion ||
-		manifest.Dependencies["@deepseek-ai/dsh-user-approval"] != PinnedVersion ||
-		manifest.PeerDependencies[CLIPackage] != PinnedVersion || manifest.PeerDependencies[ACPAppPackage] != PinnedVersion) {
-		return ""
-	}
-	if expectedName == ProfilePackage && (manifest.PackageManager != packageManager ||
-		manifest.Dependencies[ACPAppPackage] != PinnedVersion || manifest.Dependencies[PluginPackage] != PinnedVersion) {
 		return ""
 	}
 	return manifest.Version

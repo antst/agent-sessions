@@ -45,7 +45,11 @@ func (role Role) aliases() []string {
 	}
 	aliases := []string{"agent-sessions"}
 	for _, product := range productcatalog.All() {
-		aliases = append(aliases, product.PeerAlias, product.LaneAlias)
+		for _, alias := range []string{product.PeerAlias, product.LaneAlias} {
+			if alias != "" {
+				aliases = append(aliases, alias)
+			}
+		}
 	}
 	return aliases
 }

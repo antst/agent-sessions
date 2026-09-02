@@ -180,10 +180,9 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
 
 - A Kilo TUI attaches to the wrong local server, or two Kilo TUIs share a
   server whose `/tui/*` routes cannot target one exact session.
-- A DSH profile contains a mismatched CLI, ACP bundle, or Agent Sessions
-  Cordis plugin version; another process concurrently resumes the same DSH
-  session; ACP rejects a busy prompt; cancel is sent as a request instead of a
-  notification; the sandbox masks `/tmp`.
+- A DSH installation contains a mismatched CLI or ACP bundle version; another
+  process concurrently resumes the same DSH session; ACP rejects a busy
+  prompt; or cancel is sent as a request instead of a notification.
 - A CodeBuddy worker registry row is stale, its literal-loopback port is owned
   by another process, or two live workers claim the same native session.
 - A Pi or OMP RPC frame exceeds bounds, arrives out of order, omits the ready
@@ -209,12 +208,11 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
 
 ### Functional Requirements
 
-- **FR-001**: The system MUST add product descriptors, managed peer aliases,
-  lane aliases, readiness probes, install assets, and federation lane
-  capabilities for `opencode`, `kilo`, `pi`, `omp`, `codebuddy`, and `dsh`.
-- **FR-002**: Full support for each product MUST satisfy the PEER, LANE, and
-  PARENT acceptance contracts; spawn-and-own headless control alone MUST NOT be
-  described as full support.
+- **FR-001**: The system MUST add product descriptors and the product-supported
+  aliases, probes, assets, and federation lane capabilities for `opencode`,
+  `kilo`, `pi`, `omp`, `codebuddy`, and `dsh`.
+- **FR-002**: A product MUST be described only at the modes it actually
+  supports. DSH is a lane engine, not a peer product.
 - **FR-003**: Managed peers MUST support externally delivered idle wake, busy
   steer or durable queue, outbound messaging, visible terminal notices,
   native-session persistence across resume, and externally reflected rename
@@ -286,12 +284,10 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   memory-only. Model-turn GA acceptance MAY remain pending only because a
   Tencent account is unavailable; all other implementation and offline
   protocol evidence MUST ship.
-- **FR-021**: DSH support MUST bind the CLI, ACP bundle, Agent Sessions Cordis
-  plugin, and profile to the exact tested `0.1.2-alpha.3` tuple; require pnpm;
-  enforce one Agent Sessions owner per native session; treat busy ACP prompt
-  rejection as queueing; send cancel as a notification; and never use the lazy
-  projection cache as a liveness signal. Its component socket MUST live below
-  an Agent Sessions-owned HOME/XDG path and MUST NOT use sandbox-masked `/tmp`.
+- **FR-021**: DSH lane support MUST bind the CLI and ACP bundle to the exact
+  tested `0.1.2-alpha.3` tuple and require exact pnpm; send ACP cancel as a
+  notification; and report busy prompt rejection truthfully. DSH peer mode and
+  an Agent Sessions-managed DSH profile/plugin are absent.
 - **FR-022**: Federation protocol 4 MUST be one uniform wire contract. The
   explicit handshake version MUST match exactly and every mismatch, including
   N+1 against N, MUST fail before registration. The hub MUST bound, validate,
@@ -311,8 +307,8 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
   acceptance matrices, and user documentation MUST be generated or validated
   against that same catalog; shell scripts MUST NOT retain a second product
   list.
-- **FR-027**: Truth spikes for Kilo exact routing/attach parity, DSH Cordis and
-  tuple behavior, CodeBuddy registry restart/stale-row/cross-target isolation,
+- **FR-027**: Truth spikes for Kilo exact routing/attach parity, DSH tuple and
+  ACP lane behavior, CodeBuddy registry restart/stale-row/cross-target isolation,
   shared Pi/OMP and OpenCode
   component identity, catalog projection, federation decoding, and legacy
   reachability MUST complete before runtime interfaces freeze.
@@ -403,9 +399,10 @@ idempotency, ambiguity reporting, bounded spool cleanup, and zero collateral.
 
 ### Measurable Outcomes
 
-- **SC-001**: OpenCode, Kilo, Pi, OMP, and DSH pass the complete PEER × LANE ×
-  PARENT matrix on Linux and macOS at their pinned versions; CodeBuddy passes
-  every cell except the explicitly account-gated Tencent model-turn cell.
+- **SC-001**: OpenCode, Kilo, Pi, and OMP pass the complete PEER × LANE ×
+  PARENT matrix on Linux and macOS at their pinned versions; DSH passes the
+  lane matrix only; CodeBuddy passes every cell except the explicitly
+  account-gated Tencent model-turn cell.
 - **SC-002**: The existing Claude, Codex, Grok, and Qwen matrices remain green,
   including normal, race, vet, lint, install, federation, recovery, and real
   product gates.

@@ -20,8 +20,7 @@ type constructorFunction struct {
 
 var reviewedConstructorFunctions = map[string]bool{
 	"NewDrivers": true, "NewDoctorProbe": true,
-	"NewLaneDriver": true, "validateConfiguredProfileManifestShape": true,
-	"managedProfileManifestPath": true, "validateManagedDSHHomeShape": true,
+	"NewLaneDriver": true, "validateManagedDSHHomeShape": true,
 	"validateProfileIdentity": true, "temporaryPathLexical": true, "within": true,
 	"validCwd": true,
 }

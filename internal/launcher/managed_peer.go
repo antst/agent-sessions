@@ -31,7 +31,7 @@ func RunManagedPeer(product string, args []string) error {
 		return err
 	}
 	descriptor, ok := productcatalog.ByID(product)
-	if !ok {
+	if !ok || !descriptor.Has(productcatalog.CapabilityInteractive) {
 		return fmt.Errorf("unsupported managed peer product %q", product)
 	}
 	switch descriptor.NativeRegistration.Strategy {
@@ -218,6 +218,10 @@ func buildManagedPeerPlan(
 	pluginRoot, executable string,
 	idSource func() (string, error),
 ) (managedPeerPlan, error) {
+	descriptor, ok := productcatalog.ByID(product)
+	if !ok || !descriptor.Has(productcatalog.CapabilityInteractive) {
+		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
+	}
 	forwarded, context, err := scanPeerWrapperOptions(product, args)
 	if err != nil {
 		return managedPeerPlan{}, err
@@ -227,10 +231,6 @@ func buildManagedPeerPlan(
 		return managedPeerPlan{}, err
 	}
 	environment = managedLiveEnvironment(environment, product, peerName, context.groups)
-	descriptor, ok := productcatalog.ByID(product)
-	if !ok {
-		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
-	}
 	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, context.forceNoYolo)
 	if err != nil {
 		return managedPeerPlan{}, err
@@ -270,10 +270,6 @@ func buildManagedPeerPlan(
 		}
 		environment = envutil.Set(environment, peerSessionIDEnv, sessionID)
 		forwarded = append(forwarded, "--strict-mcp-config", "--mcp-config", integrationAsset(pluginRoot, descriptor.ID, "mcp.json"))
-	case "dsh-owned-profile":
-		if !hasOption(forwarded, "--profile") {
-			forwarded = append([]string{"--profile", "agent-sessions"}, forwarded...)
-		}
 	default:
 		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
 	}

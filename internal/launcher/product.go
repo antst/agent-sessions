@@ -23,6 +23,10 @@ func (product launcherProduct) resume(kind, sessionID string) (string, []string,
 	if sessionID == "" || (kind != "interactive" && kind != "lane") {
 		return "", nil, false
 	}
+	if kind == "interactive" && !product.descriptor.Has(productcatalog.CapabilityInteractive) ||
+		kind == "lane" && !product.descriptor.Has(productcatalog.CapabilityLane) {
+		return "", nil, false
+	}
 	arguments := []string{"resume", sessionID}
 	executable := product.descriptor.PeerAlias
 	if kind == "lane" {

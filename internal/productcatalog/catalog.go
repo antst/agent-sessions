@@ -176,24 +176,24 @@ func newProductDescriptor(
 }
 
 func dshDescriptor() Descriptor {
-	descriptor := newProductDescriptor(
-		"dsh", "DeepSeek Harness", "dsh", "0.1.2-alpha.3", "dsh-owned-profile",
-		"presence", "presence", "dsh-acp", "dsh",
-		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
-		[]string{"acp", "cordis", "parent", "tuple"},
-		[]string{"--profile", "--patch", "--model", "-m"},
-		[]string{"-m"},
-	)
-	descriptor.Compatibility = Compatibility{
-		Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
-		TupleMembers: []TupleMember{
-			{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.3"},
-			{Name: "@deepseek-ai/dsh-acp-app", Version: "0.1.2-alpha.3"},
-			{Name: "@agent-sessions/dsh-plugin", Version: "0.1.2-alpha.3"},
-			{Name: "@agent-sessions/dsh-profile", Version: "0.1.2-alpha.3"},
+	return Descriptor{
+		ID: "dsh", Label: "DeepSeek Harness", NativeExecutable: "dsh",
+		LaneAlias: "dsh-peer-lane", LaneRuntimeRole: "dsh-lane",
+		LaneManagerRole: "dsh-lane-manager", LaneCapability: "dsh-lane",
+		Capabilities: []Capability{CapabilityLane, CapabilityArchive, CapabilityDynamicPermission},
+		ResumeStyle:  ResumeFlag, SupportState: SupportGeneral, TestedVersion: "0.1.2-alpha.3",
+		Compatibility: Compatibility{
+			Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
+			TupleMembers: []TupleMember{
+				{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.3"},
+				{Name: "@deepseek-ai/dsh-acp-app", Version: "0.1.2-alpha.3"},
+			},
 		},
+		LaneTransport: "dsh-acp", DoctorProbeKey: "dsh-doctor", PermissionProfileKey: "dsh",
+		RequiredDoctorFeatures: []string{"acp", "lane", "native-cli", "tuple"},
+		FederationCapabilities: []string{"dsh-lane"},
+		Acceptance:             AcceptanceContract{RealProductRequired: true},
 	}
-	return descriptor
 }
 
 func piDescriptor() Descriptor {
@@ -295,11 +295,16 @@ func ValidateInventory(inventory []Descriptor) error {
 			return fmt.Errorf("duplicate product id %q", descriptor.ID)
 		}
 		ids[descriptor.ID] = true
-		if installRoots[descriptor.InstallRoot] {
-			return fmt.Errorf("duplicate install root %q", descriptor.InstallRoot)
+		if descriptor.InstallRoot != "" {
+			if installRoots[descriptor.InstallRoot] {
+				return fmt.Errorf("duplicate install root %q", descriptor.InstallRoot)
+			}
+			installRoots[descriptor.InstallRoot] = true
 		}
-		installRoots[descriptor.InstallRoot] = true
 		for _, alias := range []string{descriptor.PeerAlias, descriptor.LaneAlias} {
+			if alias == "" {
+				continue
+			}
 			if aliases[alias] {
 				return fmt.Errorf("duplicate managed alias %q", alias)
 			}
@@ -321,10 +326,7 @@ func validateDescriptor(descriptor Descriptor) error {
 		token string
 	}{
 		{label: "id", token: descriptor.ID},
-		{label: "peer alias", token: descriptor.PeerAlias},
 		{label: "lane alias", token: descriptor.LaneAlias},
-		{label: "peer transport", token: descriptor.PeerTransport},
-		{label: "message transport", token: descriptor.MessageTransport},
 		{label: "lane transport", token: descriptor.LaneTransport},
 		{label: "doctor probe", token: descriptor.DoctorProbeKey},
 		{label: "permission profile", token: descriptor.PermissionProfileKey},
@@ -379,11 +381,14 @@ func validateDescriptor(descriptor Descriptor) error {
 			seen[member.Name] = true
 		}
 	}
-	if descriptor.InstallRoot != path.Join("integrations", descriptor.ID) {
+	if descriptor.InstallRoot == "" {
+		if len(descriptor.PluginArchivePaths) != 0 || descriptor.NativeRegistration.Strategy != "" || len(descriptor.NativeRegistration.Args) != 0 || descriptor.NativeRegistration.AssetOnly {
+			return errors.New("assetless product cannot declare archives or native registration")
+		}
+	} else if descriptor.InstallRoot != path.Join("integrations", descriptor.ID) {
 		return fmt.Errorf("install root %q must be integrations/%s", descriptor.InstallRoot, descriptor.ID)
-	}
-	if len(descriptor.PluginArchivePaths) == 0 {
-		return errors.New("at least one plugin archive path is required")
+	} else if len(descriptor.PluginArchivePaths) == 0 {
+		return errors.New("product install root requires at least one plugin archive path")
 	}
 	archivePaths := map[string]bool{}
 	for _, archivePath := range descriptor.PluginArchivePaths {
@@ -427,14 +432,27 @@ func validateDescriptor(descriptor Descriptor) error {
 		}
 		seenFeatures[feature] = true
 	}
-	if descriptor.Has(CapabilityInteractive) && (descriptor.PeerTransport == "" || descriptor.MessageTransport == "") {
-		return errors.New("interactive product requires peer and message transports")
+	if descriptor.Has(CapabilityInteractive) {
+		for _, field := range []struct {
+			label string
+			value string
+		}{{"peer alias", descriptor.PeerAlias}, {"peer transport", descriptor.PeerTransport}, {"message transport", descriptor.MessageTransport}} {
+			if err := ValidateToken(field.value); err != nil {
+				return fmt.Errorf("%s %q: %w", field.label, field.value, err)
+			}
+		}
+	} else if descriptor.PeerAlias != "" || descriptor.PeerTransport != "" || descriptor.MessageTransport != "" || descriptor.Has(CapabilityParent) || descriptor.Has(CapabilityMCPRelay) || descriptor.Has(CapabilityHook) {
+		return errors.New("lane-only product cannot declare a peer surface")
 	}
 	if descriptor.Has(CapabilityLane) && descriptor.LaneTransport == "" {
 		return errors.New("lane product requires lane transport")
 	}
-	if err := ValidateToken(descriptor.NativeRegistration.Strategy); err != nil {
-		return fmt.Errorf("native registration strategy %q: %w", descriptor.NativeRegistration.Strategy, err)
+	if descriptor.NativeRegistration.Strategy != "" {
+		if err := ValidateToken(descriptor.NativeRegistration.Strategy); err != nil {
+			return fmt.Errorf("native registration strategy %q: %w", descriptor.NativeRegistration.Strategy, err)
+		}
+	} else if descriptor.InstallRoot != "" {
+		return errors.New("product install root requires a native registration strategy")
 	}
 	if len(descriptor.NativeRegistration.Args) > maxNativeRegistrationArgs {
 		return fmt.Errorf("native registration has more than %d arguments", maxNativeRegistrationArgs)
@@ -509,6 +527,9 @@ func ByID(id string) (Descriptor, bool) {
 }
 
 func ByCommand(command string) (Descriptor, bool) {
+	if command == "" {
+		return Descriptor{}, false
+	}
 	for _, descriptor := range descriptors {
 		if descriptor.PeerAlias == command || descriptor.LaneAlias == command {
 			return cloneDescriptor(descriptor), true

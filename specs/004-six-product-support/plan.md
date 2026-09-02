@@ -29,7 +29,7 @@ the native product loaders
 
 **Primary Dependencies**: Go standard library, `golang.org/x/sys`, existing
 JSON schema/canonicalization packages; native documented OpenCode/Kilo HTTP+SSE,
-Pi/OMP JSONL RPC, CodeBuddy OpenAPI/HTTP, and DSH ACP/Cordis APIs
+Pi/OMP JSONL RPC, CodeBuddy OpenAPI/HTTP, and DSH ACP APIs
 
 **Storage**: Existing bounded atomic daemon JSON catalog plus a new private
 bounded `0700`/`0600` lane-input content spool; native products retain their own
@@ -204,17 +204,14 @@ updated and re-reviewed.
   rename, and resume. `attach --mini` does not consume `/tui/*` and is therefore
   explicitly unsupported for managed peer messaging.
 
-### S2 — DSH exact tuple and Cordis facade
+### S2 — DSH exact headless ACP lane
 
-- Materialize exact CLI/ACP/plugin/profile tuple with pnpm.
-- In a real supported profile, enumerate native sessions, wake idle through
-  followup, steer busy, and observe completion.
-- Choose and prove native registered tool versus MCP parent facade.
-- Prove HOME/XDG component socket visibility under sandbox.
-- Recorded result: **PASS**, selecting the native Cordis registered tool as the
-  primary parent facade. The exact tuple proved idle wake, busy native steer,
-  turn completion, sandbox-visible HOME socket, matching `DSH_SESSION_ID`,
-  ACP busy rejection, cancel-as-notification, and projcache non-liveness.
+- Verify the exact CLI/ACP/pnpm tuple.
+- Drive native session creation, exact resume, prompt, wait, interrupt, and
+  archive through the shipped ACP profile.
+- Recorded result: available DSH terminal front ends are incompatible with the
+  pinned product exports, so DSH is lane-only. No Agent Sessions DSH profile,
+  plugin, peer launcher, or parent facade is installed.
 
 ### S3 — CodeBuddy peer registry and endpoint ownership
 
@@ -409,10 +406,9 @@ install scripts, or shared component core.
 ### C4 — DSH
 
 - typed ACP client above structured process;
-- exact tuple installer metadata and durable native lease behavior;
-- Cordis peer/parent component, busy queue, cancel notification, Stop/ACP
-  completion, sandbox socket/env handling, doctor/assets;
-- exact tuple and real credentialed evidence.
+- exact native tuple, cancel notification, Stop/ACP completion, and doctor;
+- headless lane behavior and real credentialed evidence; no peer surface or
+  Agent Sessions-owned integration assets.
 
 ### Phase-C gate
 
@@ -511,7 +507,7 @@ Those merges are serialized through the central integrator.
 | Risk | Control |
 |---|---|
 | Kilo route targets wrong TUI | S1 blocks interface/topology choice; isolated server fallback |
-| DSH alpha/API churn | exact tuple, pnpm, capability doctor, per-profile ownership, pinned acceptance |
+| DSH alpha/API churn | exact native tuple, pnpm, ACP doctor, pinned lane acceptance |
 | CodeBuddy stale registry or recycled port | wrapper child plus registry/socket-to-PID/executable/ancestry re-attestation; peer and authenticated lane endpoints remain distinct |
 | Duplicate native prompt after crash | dispatch-intent state + ambiguity/no-replay |
 | Shared abstraction hides product semantics | three mechanical engines; typed family/product clients; no endpoint DSL |

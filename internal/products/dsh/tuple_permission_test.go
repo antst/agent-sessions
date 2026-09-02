@@ -19,8 +19,6 @@ func TestExactTupleRejectsEveryMismatchedMemberAndRequiresPNPM(t *testing.T) {
 	}{
 		{"cli", func(tuple *Tuple) { tuple.CLI = "0.1.2-alpha.4" }},
 		{"acp-app", func(tuple *Tuple) { tuple.ACPApp = "0.1.1-rc.2" }},
-		{"plugin", func(tuple *Tuple) { tuple.Plugin = "latest" }},
-		{"profile", func(tuple *Tuple) { tuple.Profile = "0.1.2-alpha.2" }},
 		{"package-manager", func(tuple *Tuple) { tuple.PackageManager = "npm" }},
 		{"pnpm-version", func(tuple *Tuple) { tuple.PNPMVersion = "10.27.0" }},
 	}

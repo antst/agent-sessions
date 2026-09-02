@@ -1,3 +1,0 @@
-- insert:
-    - id: agent-sessions
-      name: '@agent-sessions/dsh-plugin'

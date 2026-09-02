@@ -53,6 +53,13 @@ func Parse(argv0 string, args []string) (Invocation, error) {
 		if !ok {
 			return Invocation{}, fmt.Errorf("%s product %q is unsupported", command, args[1])
 		}
+		required := map[string]productcatalog.Capability{
+			"peer": productcatalog.CapabilityInteractive, "lane": productcatalog.CapabilityLane,
+			"hook": productcatalog.CapabilityInteractive, "connector": productcatalog.CapabilityInteractive,
+		}[command]
+		if !product.Has(required) {
+			return Invocation{}, fmt.Errorf("%s product %q is unsupported", command, args[1])
+		}
 		return Invocation{Command: command, Product: product.ID, Arguments: append([]string(nil), args[2:]...)}, nil
 	default:
 		return Invocation{}, fmt.Errorf("unknown Agent Sessions command %q", command)
@@ -62,11 +69,18 @@ func Parse(argv0 string, args []string) (Invocation, error) {
 // Usage renders the closed command, product, and alias inventory.
 func Usage() string {
 	products := productcatalog.All()
-	ids := make([]string, 0, len(products))
+	peerIDs := make([]string, 0, len(products))
+	laneIDs := make([]string, 0, len(products))
 	aliases := make([]string, 0, 2*len(products))
 	for _, product := range products {
-		ids = append(ids, product.ID)
-		aliases = append(aliases, product.PeerAlias+" → peer "+product.ID, product.LaneAlias+" → lane "+product.ID)
+		if product.Has(productcatalog.CapabilityInteractive) {
+			peerIDs = append(peerIDs, product.ID)
+			aliases = append(aliases, product.PeerAlias+" → peer "+product.ID)
+		}
+		if product.Has(productcatalog.CapabilityLane) {
+			laneIDs = append(laneIDs, product.ID)
+			aliases = append(aliases, product.LaneAlias+" → lane "+product.ID)
+		}
 	}
 	return fmt.Sprintf(`agent-sessions — one user-host Agent Sessions daemon and short-lived clients
 
@@ -82,11 +96,12 @@ Usage:
   agent-sessions connector PRODUCT|auto [ARGS...]
   agent-sessions version
 
-Products: %s
+Peer products: %s
+Lane products: %s
 Aliases:
   %s
 
 Peer, lane, hook, and connector commands require an already running daemon and
 never start, stop, restart, or supervise it.
-`, strings.Join(ids, "|"), strings.Join(aliases, "\n  "))
+`, strings.Join(peerIDs, "|"), strings.Join(laneIDs, "|"), strings.Join(aliases, "\n  "))
 }

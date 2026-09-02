@@ -38,11 +38,16 @@ func TestProjectionIsCanonicalSortedIsolatedAndSecretFree(t *testing.T) {
 		t.Fatalf("projection = %#v", decoded)
 	}
 	for _, product := range decoded.Products {
-		if product.PeerTransport == "" || product.MessageTransport == "" || product.LaneTransport == "" ||
-			product.DoctorProbeKey == "" || product.PermissionProfileKey == "" ||
-			product.InstallRoot == "" || len(product.PluginArchivePaths) == 0 || len(product.RequiredDoctorFeatures) == 0 ||
-			product.NativeRegistration.Strategy == "" || !product.Acceptance.RealProductRequired {
+		if product.LaneTransport == "" || product.DoctorProbeKey == "" || product.PermissionProfileKey == "" ||
+			len(product.RequiredDoctorFeatures) == 0 || !product.Acceptance.RealProductRequired {
 			t.Fatalf("projection omitted derived contract fields: %#v", product)
+		}
+		if product.ID == "dsh" {
+			if product.PeerAlias != "" || product.PeerTransport != "" || product.MessageTransport != "" || product.InstallRoot != "" || len(product.PluginArchivePaths) != 0 || product.NativeRegistration.Strategy != "" {
+				t.Fatalf("lane-only DSH projection carries a peer integration: %#v", product)
+			}
+		} else if product.PeerAlias == "" || product.PeerTransport == "" || product.MessageTransport == "" || product.InstallRoot == "" || len(product.PluginArchivePaths) == 0 || product.NativeRegistration.Strategy == "" {
+			t.Fatalf("peer projection omitted integration fields: %#v", product)
 		}
 	}
 	copyProjection, err := BuildProjection(inventory)
@@ -106,6 +111,12 @@ func TestValidateInventoryRejectsTokenTupleAndDuplicateDrift(t *testing.T) {
 		{name: "wrong install root", mutate: func(products []Descriptor) {
 			products[0].InstallRoot = "integrations/other"
 		}},
+		{name: "assetless product with registration", mutate: func(products []Descriptor) {
+			products[9].NativeRegistration.Strategy = "unexpected-registration"
+		}},
+		{name: "lane-only product with peer alias", mutate: func(products []Descriptor) {
+			products[9].PeerAlias = "dsh-peer"
+		}},
 		{name: "traversing archive path", mutate: func(products []Descriptor) {
 			products[0].PluginArchivePaths[0] = "../outside"
 		}},
@@ -168,7 +179,7 @@ func TestExactTupleProjectsPinnedPackageManagerVersion(t *testing.T) {
 	inventory[0].Compatibility = Compatibility{
 		Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
 		TupleMembers: []TupleMember{
-			{Name: "@agent-sessions/dsh-plugin", Version: "0.1.2-alpha.3"},
+			{Name: "@example/tool", Version: "0.1.2-alpha.3"},
 			{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.3"},
 			{Name: "@deepseek-ai/dsh-acp-app", Version: "0.1.2-alpha.3"},
 		},

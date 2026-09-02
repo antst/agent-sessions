@@ -73,9 +73,8 @@ cannot be `general` unless all applicable cells pass on both Linux and macOS.
   cross-target isolation, daemon restart re-discovery; separately, authenticated
   Agent Sessions-owned lane-server handling and offline OpenAPI drift. Tencent
   model path is the only permitted pending cell and keeps support experimental.
-- DSH: exact tuple/pnpm, Cordis idle followup/busy steer, exclusive lease,
-  ACP busy queue, cancel-as-notification, Stop/ACP liveness (not projcache),
-  HOME/XDG component socket under sandbox, native `DSH_SESSION_ID` witness.
+- DSH lane: exact native tuple/pnpm, ACP new and exact resume, real turn,
+  interrupt, cancel-as-notification, archive, and truthful busy rejection.
 
 ## 3. Shared Gates
 

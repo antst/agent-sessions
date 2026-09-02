@@ -35,7 +35,6 @@ const (
 	maxArchiveEvidence    = 1024
 	processCleanupTimeout = 5 * time.Second
 	turnReservedID        = "\x00reserved"
-	lanePolicyEnv         = "AGENT_SESSIONS_DSH_LANE_POLICY"
 )
 
 type RecoveryResolver func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error)
@@ -44,7 +43,6 @@ type LaneConfig struct {
 	Executable      string
 	ACPProfile      string
 	DSHHome         string
-	ProfileManifest string
 	Generation      uint64
 	TupleVerifier   TupleVerifier
 	Processes       ACPProcessFactory
@@ -135,15 +133,15 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 		config.Processes == nil || config.Receipts == nil {
 		return nil, errors.New("DSH lane driver requires profile, generation, tuple, process, and receipt dependencies")
 	}
-	if err := validateConfiguredProfileManifestShape(config.DSHHome, config.ACPProfile, config.ProfileManifest); err != nil {
+	if err := validateManagedDSHHomeShape(config.DSHHome); err != nil {
 		return nil, err
 	}
 	return &LaneDriver{config: config, sessions: make(map[string]*laneSession), opening: make(map[string]struct{}), archived: make(map[productruntime.NativeSessionRef]uint64)}, nil
 }
 
 func (*LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
-	// Cordis peers can steer. ACP lanes cannot: -32602 is shared-ledger queue
-	// fallback, so advertising native lane steering would be untruthful.
+	// ACP rejects a second prompt while busy, so advertising native lane
+	// steering would be untruthful.
 	return productruntime.LaneCapabilitySet{Steer: false, DurableResume: true}
 }
 
@@ -156,9 +154,6 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		return productruntime.NativeSessionRef{}, err
 	}
 	defer driver.unreserveLane(request.LaneID)
-	if _, err := validateManagedProfile(driver.config.DSHHome, request.ProfileIdentity); err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
 	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, request.ProfileIdentity); err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
@@ -421,9 +416,6 @@ func (driver *LaneDriver) Recover(ctx context.Context, request productruntime.La
 	if err := validateOpenRequest(open); err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	if _, err := validateManagedProfile(driver.config.DSHHome, open.ProfileIdentity); err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
 	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, open.ProfileIdentity); err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
@@ -487,7 +479,6 @@ func (driver *LaneDriver) startClient(profile, cwd string, arguments []string, p
 	processCtx, cancel := context.WithCancel(context.Background())
 	environment := setEnvVar(driver.config.Environment, "DSH_PERMISSION_MODE", string(policy.Sandbox))
 	environment = setEnvVar(environment, "DSH_HOME", driver.config.DSHHome)
-	environment = setEnvVar(environment, lanePolicyEnv, string(policy.Sandbox)+":"+string(policy.Approval))
 	command := productruntime.NativeCommand{
 		Path: driver.config.Executable, Args: append([]string{"--profile", profile}, arguments...),
 		Env: environment, Cwd: cwd,
@@ -962,6 +953,9 @@ func validateOpenRequest(request productruntime.LaneOpenRequest) error {
 		!validCwd(request.Cwd) ||
 		request.ProfileIdentity == "" || len(request.ProfileIdentity) > maxProfileBytes || !request.PermissionMode.Valid() || len(request.Arguments) > maxLaneArguments {
 		return fmt.Errorf("%w: DSH lane open request is incomplete", productruntime.ErrNativeRejected)
+	}
+	if err := validateProfileIdentity(request.ProfileIdentity); err != nil {
+		return err
 	}
 	totalArguments := 0
 	for _, argument := range request.Arguments {

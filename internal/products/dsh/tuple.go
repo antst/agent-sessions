@@ -14,10 +14,8 @@ const (
 	RequiredPNPM  = "pnpm"
 	PinnedPNPM    = "10.28.1"
 
-	CLIPackage     = "@deepseek-ai/dsh"
-	ACPAppPackage  = "@deepseek-ai/dsh-acp-app"
-	PluginPackage  = "@agent-sessions/dsh-plugin"
-	ProfilePackage = "@agent-sessions/dsh-profile"
+	CLIPackage    = "@deepseek-ai/dsh"
+	ACPAppPackage = "@deepseek-ai/dsh-acp-app"
 )
 
 // Tuple is the indivisible DSH compatibility boundary. DSH is a developer
@@ -25,16 +23,14 @@ const (
 type Tuple struct {
 	CLI            string
 	ACPApp         string
-	Plugin         string
-	Profile        string
 	PackageManager string
 	PNPMVersion    string
 }
 
 func PinnedTuple() Tuple {
 	return Tuple{
-		CLI: PinnedVersion, ACPApp: PinnedVersion, Plugin: PinnedVersion,
-		Profile: PinnedVersion, PackageManager: RequiredPNPM, PNPMVersion: PinnedPNPM,
+		CLI: PinnedVersion, ACPApp: PinnedVersion,
+		PackageManager: RequiredPNPM, PNPMVersion: PinnedPNPM,
 	}
 }
 
@@ -46,8 +42,6 @@ func (tuple Tuple) Validate() error {
 	}{
 		{"cli", tuple.CLI, PinnedVersion},
 		{"acp-app", tuple.ACPApp, PinnedVersion},
-		{"plugin", tuple.Plugin, PinnedVersion},
-		{"profile", tuple.Profile, PinnedVersion},
 		{"package-manager", tuple.PackageManager, RequiredPNPM},
 		{"pnpm-version", tuple.PNPMVersion, PinnedPNPM},
 	}

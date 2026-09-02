@@ -502,7 +502,10 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 			actorKey = c.unboundReportedLaneContextLocked(parentID, report)
 		}
 		if parentID == "" {
-			peerIDs[id] = true
+			product, _ := productcatalog.ByID(report.Product)
+			if product.Has(productcatalog.CapabilityInteractive) {
+				peerIDs[id] = true
+			}
 			continue
 		}
 		actor := c.lanes[actorKey]
@@ -562,6 +565,10 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 		}
 	}
 	for id, report := range reports {
+		if !peerIDs[id] && laneKeys[id] == "" {
+			runtime.Attachments().ForgetLive(id)
+			continue
+		}
 		runtime.Attachments().ReportLive(id, report.Name, report.Product, report.Groups, laneParents[id] != "")
 	}
 }

@@ -194,6 +194,29 @@ func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 	}
 }
 
+func TestLaneOnlyProductReportCannotBecomePeerButItsLaneRemainsLive(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "dsh-root", Name: "root", Product: "dsh"})
+	if attachment, active, err := runtime.Attachments().ActiveAttachment("dsh-root"); err != nil || active {
+		t.Fatalf("lane-only root projected as peer: %+v, active=%v, err=%v", attachment, active, err)
+	}
+
+	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex"})
+	coordinator.joinLiveSession(runtime, liveSessionReport{
+		UUID: "dsh-lane", Name: "worker", Product: "dsh",
+		Groups: []string{"session:" + runtime.HostID() + "/parent"},
+	})
+	lane, active, err := runtime.Attachments().ActiveAttachment("dsh-lane")
+	if err != nil || !active || lane.State != "lane" || lane.Product != "dsh" {
+		t.Fatalf("DSH lane report = %+v, active=%v, err=%v", lane, active, err)
+	}
+	peers, err := runtime.Attachments().ListActive()
+	if err != nil || len(peers) != 1 || peers[0].ID != "parent" {
+		t.Fatalf("peer roster with lane-only reports = %+v, err=%v", peers, err)
+	}
+}
+
 func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())

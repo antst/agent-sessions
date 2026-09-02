@@ -20,20 +20,21 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index, product := range products {
-		if product.ID != wantIDs[index] || !product.Has(CapabilityInteractive) || !product.Has(CapabilityLane) || !product.Has(CapabilityParent) {
+		if product.ID != wantIDs[index] || !product.Has(CapabilityLane) {
 			t.Fatalf("descriptor %d = %#v", index, product)
 		}
-		if product.SupportState != SupportGeneral || product.TestedVersion == "" || product.InstallRoot != "integrations/"+product.ID {
+		if product.SupportState != SupportGeneral || product.TestedVersion == "" {
 			t.Fatalf("shared metadata missing from %#v", product)
-		}
-		if product.NativeRegistration.Strategy == "" {
-			t.Fatalf("%s native registration is empty", product.ID)
 		}
 		if !product.Acceptance.RealProductRequired || len(product.Acceptance.ExternalCells) != 0 {
 			t.Fatalf("%s acceptance = %#v", product.ID, product.Acceptance)
 		}
-		if product.PeerTransport != "presence" || product.MessageTransport != "presence" {
-			t.Fatalf("%s live transports = %q/%q", product.ID, product.PeerTransport, product.MessageTransport)
+		if product.ID == "dsh" {
+			if product.Has(CapabilityInteractive) || product.Has(CapabilityParent) || product.PeerAlias != "" || product.PeerTransport != "" || product.MessageTransport != "" || product.InstallRoot != "" || len(product.PluginArchivePaths) != 0 || product.NativeRegistration.Strategy != "" {
+				t.Fatalf("DSH descriptor carries a peer surface: %#v", product)
+			}
+		} else if !product.Has(CapabilityInteractive) || !product.Has(CapabilityParent) || product.PeerTransport != "presence" || product.MessageTransport != "presence" || product.InstallRoot != "integrations/"+product.ID || product.NativeRegistration.Strategy == "" {
+			t.Fatalf("%s peer metadata = %#v", product.ID, product)
 		}
 		if !reflect.DeepEqual(product.FederationCapabilities, []string{product.LaneCapability}) {
 			t.Fatalf("%s federation capabilities = %v", product.ID, product.FederationCapabilities)
@@ -43,6 +44,9 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 			t.Fatalf("ByID(%q) = %#v, %v", product.ID, resolved, ok)
 		}
 		for _, alias := range []string{product.PeerAlias, product.LaneAlias} {
+			if alias == "" {
+				continue
+			}
 			if got, ok := ByCommand(alias); !ok || got.ID != product.ID {
 				t.Fatalf("ByCommand(%q) = %#v, %v", alias, got, ok)
 			}
@@ -90,7 +94,9 @@ func TestCatalogMatchesReleaseInventoryWithoutASecondGoCatalog(t *testing.T) {
 	gotRows := strings.Fields(strings.TrimSpace(string(body)))
 	wantRows := make([]string, 0, len(catalog))
 	for _, product := range catalog {
-		wantRows = append(wantRows, product.ID+"|"+strings.Join(product.PluginArchivePaths, ","))
+		if len(product.PluginArchivePaths) != 0 {
+			wantRows = append(wantRows, product.ID+"|"+strings.Join(product.PluginArchivePaths, ","))
+		}
 	}
 	if !reflect.DeepEqual(gotRows, wantRows) {
 		t.Fatalf("release plugin inventory = %v, want %v", gotRows, wantRows)

@@ -120,10 +120,10 @@ func (reader memoryReceiptReader) OpenReceipt(string) (io.ReadCloser, int64, [32
 
 func newTestLane(t *testing.T, process *scriptedACPProcess) *LaneDriver {
 	t.Helper()
-	dshHome := managedTestDSHHome(t)
+	dshHome := "/var/lib/agent-sessions/test-dsh"
 	driver, err := NewLaneDriver(LaneConfig{
 		Executable: "dsh", ACPProfile: "acp", Generation: 7,
-		DSHHome: dshHome, ProfileManifest: writeManagedProfileManifest(t, dshHome, "acp", PinnedVersion),
+		DSHHome:       dshHome,
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
 		Receipts:    memoryReceiptReader{body: []byte("hello")},
 		Environment: []productruntime.EnvVar{{Name: "DSH_HOME", Value: filepath.Join(t.TempDir(), "foreign-home")}},
@@ -179,8 +179,8 @@ func TestACPLaneNewPromptStopAndCancelNotification(t *testing.T) {
 	if got := envValue(process.command.Env, "DSH_PERMISSION_MODE"); got != string(SandboxWorkspaceWrite) {
 		t.Fatalf("DSH_PERMISSION_MODE = %q, want workspace-write", got)
 	}
-	if got := envValue(process.command.Env, lanePolicyEnv); got != "workspace-write:ask" {
-		t.Fatalf("%s = %q, want workspace-write:ask", lanePolicyEnv, got)
+	if got := envValue(process.command.Env, "AGENT_SESSIONS_DSH_LANE_POLICY"); got != "" {
+		t.Fatalf("AGENT_SESSIONS_DSH_LANE_POLICY = %q, want absent", got)
 	}
 	if got := envValue(process.command.Env, "DSH_HOME"); got != driver.config.DSHHome {
 		t.Fatalf("lane DSH_HOME = %q, want managed %q", got, driver.config.DSHHome)
@@ -368,8 +368,8 @@ func TestLaneBypassPermissionSetsExactDangerPreset(t *testing.T) {
 	if got := envValue(process.command.Env, "DSH_PERMISSION_MODE"); got != string(SandboxDangerFullAccess) {
 		t.Fatalf("DSH_PERMISSION_MODE = %q, want danger-full-access", got)
 	}
-	if got := envValue(process.command.Env, lanePolicyEnv); got != "danger-full-access:never" {
-		t.Fatalf("%s = %q, want danger-full-access:never", lanePolicyEnv, got)
+	if got := envValue(process.command.Env, "AGENT_SESSIONS_DSH_LANE_POLICY"); got != "" {
+		t.Fatalf("AGENT_SESSIONS_DSH_LANE_POLICY = %q, want absent", got)
 	}
 }
 
@@ -390,10 +390,10 @@ func TestLaneRecoveryResumesOnlyPriorNativeIdentityFromProduct(t *testing.T) {
 			process.respond(id, map[string]any{"sessionId": "native"}, nil)
 		}
 	}
-	dshHome := managedTestDSHHome(t)
+	dshHome := "/var/lib/agent-sessions/test-dsh"
 	driver, err := NewLaneDriver(LaneConfig{
 		Executable: "dsh", ACPProfile: "acp", Generation: 8,
-		DSHHome: dshHome, ProfileManifest: writeManagedProfileManifest(t, dshHome, "acp", PinnedVersion),
+		DSHHome:       dshHome,
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
 		Receipts: memoryReceiptReader{body: []byte("hello")},
 		ResolveRecovery: func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
@@ -464,10 +464,10 @@ func TestRecoveryFailureUsesDeadlineBoundProcessCleanup(t *testing.T) {
 			process.respond(frame["id"], nil, map[string]any{"code": -32000, "message": "initialize failed"})
 		}
 	}
-	dshHome := managedTestDSHHome(t)
+	dshHome := "/var/lib/agent-sessions/test-dsh"
 	driver, err := NewLaneDriver(LaneConfig{
 		Executable: "dsh", ACPProfile: "acp", Generation: 8,
-		DSHHome: dshHome, ProfileManifest: writeManagedProfileManifest(t, dshHome, "acp", PinnedVersion),
+		DSHHome:       dshHome,
 		TupleVerifier: StaticTupleVerifier(PinnedTuple()), Processes: oneProcessFactory{process: process},
 		Receipts: memoryReceiptReader{body: []byte("hello")},
 		ResolveRecovery: func(context.Context, productruntime.LaneRecoveryRequest) (productruntime.LaneOpenRequest, error) {
@@ -837,7 +837,7 @@ func TestLaneArchiveLostCloseResponseNeverResendsClose(t *testing.T) {
 	}
 }
 
-func TestLaneRequiresLiveSelectedProfileAndResumeCwd(t *testing.T) {
+func TestLaneRequiresExactResumeCwd(t *testing.T) {
 	process := newScriptedACPProcess()
 	process.writeHook = func(frame map[string]any) {
 		switch frame["method"] {
@@ -848,9 +848,6 @@ func TestLaneRequiresLiveSelectedProfileAndResumeCwd(t *testing.T) {
 		}
 	}
 	driver := newTestLane(t, process)
-	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "missing-profile", Cwd: "/work", ProfileIdentity: "other"}); !errors.Is(err, productruntime.ErrUnavailable) {
-		t.Fatalf("missing selected profile error = %v, want ErrUnavailable", err)
-	}
 	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{ProductID: ProductID, LaneID: "wrong-cwd", ResumeNativeID: "native", Cwd: "/work", ProfileIdentity: "acp"}); !errors.Is(err, productruntime.ErrProtocol) {
 		t.Fatalf("live cwd mismatch error = %v, want ErrProtocol", err)
 	}

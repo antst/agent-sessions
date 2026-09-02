@@ -247,15 +247,12 @@ make safety review harder.
 
 ### DeepSeek Harness
 
-- [F] the working combination is an exact 0.1.2-alpha.3 CLI/ACP/profile/plugin
-  tuple; npm installation exhausted an 8 GiB environment while pnpm succeeded.
-- [F] ACP busy prompt rejects, cancel is a notification, the projection cache
-  is not a real-time liveness signal, the sandbox masks `/tmp`, and native
-  `DSH_SESSION_ID` is available to tools.
-- [D] use a Cordis protocol-driver plugin for peers and a typed ACP child for
-  lanes. Enforce a durable exclusive native-session lease because DSH does not
-  prevent cross-process dual ownership.
-- [G] S2 proves the chosen Cordis parent facade in a real pinned profile.
+- [F] the supported combination is the exact 0.1.2-alpha.3 CLI/ACP tuple with
+  pnpm 10.28.1.
+- [F] DSH's available terminal front ends are incompatible with the pinned
+  exports; the web surface is not the selected daily peer interface.
+- [D] support DSH only as a headless ACP lane. DSH owns its shipped `acp`
+  profile; install no Agent Sessions DSH profile or plugin.
 
 ## 9. Federation
 
@@ -294,8 +291,8 @@ contain no product arrays.
 
 Install transactions stage, validate, register exact applicable native
 integrations, atomically switch, and roll back to captured prior identities.
-DSH profile/plugin operations carry explicit ownership receipts and never
-rewrite arbitrary profiles.
+DSH has no Agent Sessions-owned integration tree; the product creates and owns
+its shipped ACP profile.
 
 ### Rationale
 
@@ -337,7 +334,7 @@ mock model providers are allowed, mocked product protocols are not.
 |---|---|
 | S0 Base/federation | historical base equals 679fe9d and decoder accepts additive fields; the protocol-3 compatibility decision is superseded by owner-authorized T125 uniform protocol 4 |
 | S1 Kilo | PASS: two isolated authenticated serve+full-attach pairs receive zero cross-delivery and pass `/tui/*`, busy queue, events, background-process attribution, MCP, rename/resume; `--mini` is not peer-messageable |
-| S2 DSH | PASS: exact tuple boots; Cordis enumerates sessions; real idle followup and busy steer; native registered-tool parent facade selected; HOME/XDG socket and `DSH_SESSION_ID` verified; ACP cancel is notification and projcache is not liveness |
+| S2 DSH | PASS for the exact native tuple and ACP lane; peer mode removed after genuine terminal front ends proved incompatible with the pinned product exports |
 | S3 CodeBuddy | RED reconciled: peer endpoint has no password/component/sidecar; wrapper Adopt/Refresh re-attests registry claim through socket owner and process ancestry; lane endpoint is separately AS-owned and password-authenticated; Linux negative isolation cells pass, physical macOS socket-owner cell remains |
 | S4 Component identity | PASS: OpenCode/Kilo `shell.env` and Pi/OMP extension/RPC/tool contexts match authoritative native IDs; one component-v1 vocabulary works without weakening evidence; inert bootstrap and secret redaction verified |
 | S5 Legacy | PASS: three legacy entrypoints are unreachable, 32 bridge exports remain live, no production file is independently deletable; extract-and-freeze with a shrinking no-new-import baseline |

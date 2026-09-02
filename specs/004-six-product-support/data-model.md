@@ -250,8 +250,8 @@ Deterministic binary-emitted description derived from product descriptors:
 
 Records the exact Agent Sessions-owned native registration/artifact baseline,
 revision, prior identity, replacement identity, and rollback/removal rule.
-It never contains credentials. DSH profile/plugin installation uses this record
-instead of broad profile mutation.
+It never contains credentials. DSH owns its ACP profile and has no Agent
+Sessions integration receipt.
 
 ## 11. Transient Runtime Records
 

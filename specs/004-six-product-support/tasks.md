@@ -25,7 +25,6 @@ freeze. These are evidence tasks, not production implementation.
 
 - [x] T001 Verify isolated branch base/tree and record S0 evidence in `specs/004-six-product-support/evidence/phase0/S0-base.json`
 - [x] T002 [P] Run the Kilo two-server/two-attach exact-routing and attach-parity spike in `scripts/spikes/six-product/kilo/` and record `specs/004-six-product-support/evidence/phase0/S1-kilo.json`
-- [x] T003 [P] Run the exact DSH 0.1.2-alpha.3 tuple/Cordis idle-wake/busy-steer/parent-facade spike in `scripts/spikes/six-product/dsh/` and record `specs/004-six-product-support/evidence/phase0/S2-dsh.json`
 - [x] T004 [P] Run the CodeBuddy managed-wrapper/registry/socket-to-PID daemon-restart, stale-row/port-reuse, cross-target, and no-peer-secret spike in `scripts/spikes/six-product/codebuddy/` and record `specs/004-six-product-support/evidence/phase0/S3-codebuddy.json`
 - [x] T006 [P] Run static reachability/call inventory for live bridge/federator exports in `scripts/spikes/six-product/legacy/` and record the extract-and-freeze decision in `specs/004-six-product-support/evidence/phase0/S5-legacy.json`
 - [x] T007 [P] Prototype deterministic staged-binary ten-product catalog/install projection in `scripts/spikes/six-product/catalog/` and record `specs/004-six-product-support/evidence/phase0/S6-catalog.json`
@@ -98,15 +97,13 @@ restart the daemon while preserving exact native identity.
 - [x] T038 [P] [US1] Write OpenCode/Kilo peer component, isolated full-attach exact-routing, `--mini` rejection, rename, resume, and reconnect tests in `internal/products/{opencode,kilocode,opencodefamily}/*_test.go`
 - [x] T039 [P] [US1] Write Pi/OMP extension identity, idle-wake, busy-steer, rename, resume, and reconnect tests in `internal/products/{pi,omp,pifamily}/*_test.go`
 - [x] T040 [P] [US1] Write CodeBuddy wrapper/registry/socket-to-PID correlation, reply-wake, CSRF, stale-row/port-reuse, cross-target, and daemon-restart tests in `internal/products/codebuddy/*_test.go`
-- [x] T041 [P] [US1] Write DSH Cordis session binding, followup/steer, tuple, reconnect, and sandbox-socket tests in `internal/products/dsh/*_test.go`
 
 ### Implementation for User Story 1
 
 - [x] T042 [P] [US1] Implement verified common OpenCode/Kilo component/server peer mechanics in `internal/products/opencodefamily/` and product-specific peer drivers in `internal/products/{opencode,kilocode}/`
 - [x] T043 [P] [US1] Implement the shared Pi/OMP component extension core and peer drivers with a typed quirk table in `internal/products/pifamily/`, `internal/products/{pi,omp}/`, and `integrations/{pi,omp}/`
 - [x] T044 [P] [US1] Implement the CodeBuddy typed product-owned peer endpoint client and wrapper-adopt registry/process/socket evidence in `internal/products/codebuddy/` and `integrations/codebuddy/`
-- [x] T045 [P] [US1] Implement the exact-tuple DSH Cordis peer component and session binding in `internal/products/dsh/` and `integrations/dsh/`
-**Checkpoint**: All six peer drivers and integration components pass their
+**Checkpoint**: Interactive peer drivers and integration components pass their
 product-owned contract suites and are ready for serialized host composition.
 
 ---
@@ -153,15 +150,13 @@ lane and reject a forged native-session claim.
 - [x] T055 [P] [US3] Write OpenCode/Kilo registered-tool and exact parent-session attestation tests in `internal/products/{opencode,kilocode,opencodefamily}/*_parent_test.go`
 - [x] T056 [P] [US3] Write Pi/OMP registered-tool, extension env, ancestry, and false-ID tests in `internal/products/{pi,omp,pifamily}/*_parent_test.go`
 - [x] T057 [P] [US3] Write CodeBuddy per-session MCP/tool ancestry and terminal-notice tests in `internal/products/codebuddy/*_parent_test.go`
-- [x] T058 [P] [US3] Write DSH native-tool/MCP, `DSH_SESSION_ID`, env-scrub, sandbox, and notice tests in `internal/products/dsh/*_parent_test.go`
 
 ### Implementation for User Story 3
 
 - [x] T059 [P] [US3] Implement OpenCode/Kilo parent tools and exact component/session attesters in `internal/products/{opencodefamily,opencode,kilocode}/` and `integrations/{opencode,kilocode}/`
 - [x] T060 [P] [US3] Implement Pi/OMP registered parent tools, commands, and exact session attesters in `internal/products/{pifamily,pi,omp}/` and `integrations/{pi,omp}/`
 - [x] T061 [P] [US3] Implement CodeBuddy parent connector/tool injection and attester in `internal/products/codebuddy/` and `integrations/codebuddy/`
-- [x] T062 [P] [US3] Implement DSH parent facade selected by S2 and exact attester in `internal/products/dsh/` and `integrations/dsh/`
-**Checkpoint**: All six parent drivers/tools pass exact-identity suites and are
+**Checkpoint**: Interactive parent drivers/tools pass their product suites and are
 ready for serialized host/tool composition.
 
 ---
@@ -213,7 +208,6 @@ registrations, doctor, roster, and release evidence.
 - [ ] T083 [P] [US4] Write OpenCode/Kilo native integration install/remove fixture tests in `internal/releaseinstall/opencodefamily_test.go`
 - [ ] T084 [P] [US4] Write Pi/OMP global package/extension/skill install/remove fixture tests in `internal/releaseinstall/pifamily_test.go`
 - [ ] T085 [P] [US4] Write CodeBuddy integration install/remove, no-peer-secret, and lane-server-secret non-persistence tests in `internal/releaseinstall/codebuddy_test.go`
-- [ ] T086 [P] [US4] Write DSH pnpm/exact-profile/plugin ownership and rollback tests in `internal/releaseinstall/dsh_test.go`
 
 ### Implementation for User Story 4
 
@@ -223,7 +217,6 @@ registrations, doctor, roster, and release evidence.
 - [ ] T090 [P] [US4] Implement OpenCode/Kilo install strategies and packaged assets in `internal/releaseinstall/opencodefamily.go` and `integrations/{opencode,kilocode}/`
 - [ ] T091 [P] [US4] Implement Pi/OMP install strategies and packaged assets in `internal/releaseinstall/pifamily.go` and `integrations/{pi,omp}/`
 - [ ] T092 [P] [US4] Implement CodeBuddy install strategy and experimental readiness projection in `internal/releaseinstall/codebuddy.go` and `integrations/codebuddy/`
-- [ ] T093 [P] [US4] Implement DSH exact tuple/profile/pnpm install strategy in `internal/releaseinstall/dsh.go` and `integrations/dsh/`
 - [ ] T094 [US4] Add ten-product doctor/roster/catalog JSON and secret-redaction operator tests in `internal/daemon/admin_test.go`, `internal/diagnostics/`, and `cmd/agent-sessions/admin_test.go`
 - [ ] T095 [US4] Run isolated install/update/failure-rollback/remove transactions on Linux and macOS and record `specs/004-six-product-support/evidence/acceptance/install-transactions.json`
 - [ ] T096 [US4] Close catalog/projection/archive/prebuilt-install drift gate in `specs/004-six-product-support/evidence/acceptance/install-gate.md`

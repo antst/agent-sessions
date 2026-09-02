@@ -85,6 +85,9 @@ func (installer Installer) applyLocked(ctx context.Context, inventory []productc
 	}
 	prepared := make([]preparedInstall, 0, len(inventory))
 	for _, descriptor := range sortedDescriptors(inventory) {
+		if descriptor.NativeRegistration.Strategy == "" {
+			continue
+		}
 		strategy, _ := installer.Registry.Resolve(descriptor.NativeRegistration.Strategy)
 		discovery, err := strategy.Discover(ctx, descriptor)
 		if err != nil {
@@ -775,6 +778,9 @@ func (installer Installer) validate(inventory []productcatalog.Descriptor) error
 		return err
 	}
 	for _, descriptor := range inventory {
+		if descriptor.NativeRegistration.Strategy == "" {
+			continue
+		}
 		if _, ok := installer.Registry.Resolve(descriptor.NativeRegistration.Strategy); !ok {
 			return fmt.Errorf("missing install strategy %q", descriptor.NativeRegistration.Strategy)
 		}

@@ -50,8 +50,7 @@ single exact boundary and MUST declare all of:
   "package_manager_version": "10.28.1",
   "tuple_members": [
     {"name": "@deepseek-ai/dsh", "version": "0.1.2-alpha.3"},
-    {"name": "@deepseek-ai/dsh-acp-app", "version": "0.1.2-alpha.3"},
-    {"name": "@agent-sessions/dsh-plugin", "version": "0.1.2-alpha.3"}
+    {"name": "@deepseek-ai/dsh-acp-app", "version": "0.1.2-alpha.3"}
   ]
 }
 ```
@@ -125,9 +124,9 @@ and reported as debt rather than overwritten or removed.
   supported user-global mechanism; project-local trust remains user-owned.
 - CodeBuddy: install MCP assets and wrapper integration; peer discovery uses no
   password, while Agent Sessions-owned lane-server passwords remain transient.
-- DSH: pnpm 10.28.1 is required; materialize one exact Agent Sessions-owned profile
-  tuple and add the Cordis plugin only to explicitly named profiles with an
-  ownership receipt. Never broadly rewrite all profiles.
+- DSH: pnpm 10.28.1 is required for the exact native CLI/ACP tuple. DSH is
+  lane-only and owns its shipped ACP profile; install no Agent Sessions DSH
+  profile or plugin.
 
 ## 6. Removal
 

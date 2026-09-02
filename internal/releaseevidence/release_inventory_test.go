@@ -33,10 +33,14 @@ func TestReleaseInventoryAliasesAndArchiveImagesAreExact(t *testing.T) {
 	hostAliases := inventoryLines(t, inventory, "host-aliases")
 	var wantHostAliases []string
 	for _, product := range productcatalog.All() {
-		wantHostAliases = append(wantHostAliases, product.PeerAlias)
+		if product.PeerAlias != "" {
+			wantHostAliases = append(wantHostAliases, product.PeerAlias)
+		}
 	}
 	for _, product := range productcatalog.All() {
-		wantHostAliases = append(wantHostAliases, product.LaneAlias)
+		if product.LaneAlias != "" {
+			wantHostAliases = append(wantHostAliases, product.LaneAlias)
+		}
 	}
 	if !reflect.DeepEqual(hostAliases, wantHostAliases) {
 		t.Fatalf("host aliases = %q, want %q", hostAliases, wantHostAliases)

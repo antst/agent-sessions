@@ -25,7 +25,6 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 			"--model", "native-model", "--session-id", "00000000-0000-4000-8000-000000000123",
 			"--strict-mcp-config", "--mcp-config", filepath.Join(root, "integrations", "codebuddy", "mcp.json"),
 		}},
-		{product: "dsh", wantArg: []string{"--profile", "agent-sessions", "--model", "native-model"}},
 	}
 	for _, test := range tests {
 		t.Run(test.product, func(t *testing.T) {
@@ -117,7 +116,6 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 		{product: "pi", args: []string{"--session", "native-exact"}},
 		{product: "omp", args: []string{"--resume", "native-exact"}},
 		{product: "codebuddy", args: []string{"--session-id", "native-exact"}},
-		{product: "dsh", args: []string{"--profile", "custom"}},
 	} {
 		t.Run(test.product, func(t *testing.T) {
 			plan, err := buildManagedPeerPlan(test.product, test.args, nil, root, "/native/"+test.product, idSource)
@@ -136,10 +134,13 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 			if (test.product == "opencode" || test.product == "kilo") && environmentValue(plan.environment, peerSessionIDEnv) != "ses_exact" {
 				t.Fatalf("%s exact resume id was not shared with its native plugin", test.product)
 			}
-			if test.product == "dsh" && strings.Count(joined, "--profile") != 1 {
-				t.Fatalf("DSH exact profile selector was duplicated: %#v", plan.args)
-			}
 		})
+	}
+}
+
+func TestManagedPeerRejectsLaneOnlyProduct(t *testing.T) {
+	if _, err := buildManagedPeerPlan("dsh", nil, nil, "", "/native/dsh", nil); err == nil || !strings.Contains(err.Error(), "unsupported managed peer") {
+		t.Fatalf("DSH peer plan error = %v", err)
 	}
 }
 

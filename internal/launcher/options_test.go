@@ -9,6 +9,9 @@ import (
 
 func TestWrapperOptionScannerPreservesBytesOrderDelimiterAndRepeatedSemanticsAcrossProducts(t *testing.T) {
 	for _, product := range productcatalog.All() {
+		if !product.Has(productcatalog.CapabilityInteractive) {
+			continue
+		}
 		product := product
 		t.Run(product.ID, func(t *testing.T) {
 			nativeValue := string([]byte{'-', 'g', 0xff, 'x'})
@@ -44,6 +47,9 @@ func TestWrapperOptionScannerPreservesBytesOrderDelimiterAndRepeatedSemanticsAcr
 
 func TestWrapperOptionScannerRejectsInternalOrMalformedOptionsWithoutPartialForwarding(t *testing.T) {
 	for _, product := range productcatalog.All() {
+		if !product.Has(productcatalog.CapabilityInteractive) {
+			continue
+		}
 		for _, args := range [][]string{
 			{"-g"},
 			{"--group="},

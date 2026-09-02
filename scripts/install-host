@@ -21,8 +21,6 @@ grok=${GROK:-grok}
 qwen=${QWEN:-qwen}
 opencode=${OPENCODE:-opencode}
 kilo=${KILO:-kilo}
-dsh=${DSH:-dsh}
-pnpm=${PNPM:-pnpm}
 
 binary_release_identity() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -66,12 +64,6 @@ claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
 qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
 opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
-dsh_path=$(resolve_product "$dsh" "$HOME/.local/bin/dsh" || true)
-pnpm_path=$(resolve_product "$pnpm" "$HOME/.local/bin/pnpm" || true)
-if [[ -n "$dsh_path" ]] && { [[ -z "$pnpm_path" ]] || [[ "$($pnpm_path --version)" != 10.28.1 ]]; }; then
-  printf 'DSH integration requires pnpm 10.28.1.\n' >&2
-  exit 1
-fi
 
 # Grok Build may be installed only in its native self-managed downloads
 # directory, without a PATH or ~/.grok/bin shim. Route every discovery and
@@ -246,37 +238,6 @@ install_opencode_family_plugin() {
   install -m 0644 "$integration_root/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
 }
 
-dsh_profile_root() {
-  printf '%s/profiles/agent-sessions\n' "${DSH_HOME:-$HOME/.dsh}"
-}
-
-install_dsh_profile() {
-  local integration_root=$1 profile_root
-  [[ -n "$dsh_path" ]] || return 0
-  profile_root=$(dsh_profile_root)
-  rm -rf -- "$profile_root/agent-sessions-plugin" "$profile_root/shared"
-  mkdir -p "$profile_root/agent-sessions-plugin/dsh" "$profile_root/agent-sessions-plugin/shared"
-  install -m 0644 "$integration_root/integrations/dsh/profile/package.json" "$profile_root/package.json"
-  install -m 0644 "$integration_root/integrations/dsh/profile/cordis.yml" "$profile_root/cordis.yml"
-  install -m 0644 "$integration_root/integrations/dsh/profile/cordis.patch.yml" "$profile_root/cordis.patch.yml"
-  install -m 0644 "$integration_root/integrations/dsh/package.json" "$profile_root/agent-sessions-plugin/package.json"
-  install -m 0644 "$integration_root/integrations/dsh/plugin.cjs" "$profile_root/agent-sessions-plugin/dsh/plugin.cjs"
-  install -m 0644 "$integration_root/integrations/shared/live-session.js" "$profile_root/agent-sessions-plugin/shared/live-session.js"
-  "$pnpm_path" --dir "$profile_root" install --prod --ignore-scripts --no-frozen-lockfile --force
-}
-
-remove_dsh_profile() {
-  local profile_root
-  profile_root=$(dsh_profile_root)
-  if [[ -e "$profile_root" || -L "$profile_root" ]]; then
-    [[ -d "$profile_root" && ! -L "$profile_root" ]] || {
-      printf 'refuse to remove an indirect DSH Agent Sessions profile: %s\n' "$profile_root" >&2
-      return 1
-    }
-    rm -rf -- "$profile_root"
-  fi
-}
-
 install_integrations() {
   local integration_root=$1
   if [[ -n "$codex_path" ]]; then
@@ -329,7 +290,6 @@ install_integrations() {
 
   install_opencode_family_plugin opencode "$opencode_path" "$integration_root"
   install_opencode_family_plugin kilo "$kilo_path" "$integration_root"
-  install_dsh_profile "$integration_root"
 }
 
 remove_integrations() {
@@ -352,7 +312,6 @@ remove_integrations() {
     config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
     rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
   done
-  remove_dsh_profile
 }
 
 write_service_definition() {

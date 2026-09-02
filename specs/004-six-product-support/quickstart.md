@@ -31,7 +31,7 @@ Before runtime interfaces freeze, execute the spike harness for:
 ```text
 S0  historical base decoder proof; protocol-4 uniform rewrite is T125
 S1  Kilo two-instance routing and attach parity
-S2  DSH exact tuple, Cordis wake/steer, parent facade
+S2  DSH exact native tuple and headless ACP lane
 S3  CodeBuddy wrapper/registry/socket ownership and restart isolation
 S4  OpenCode/Kilo/Pi/OMP exact parent-session context
 S5  legacy reachability and extract-and-freeze decision
@@ -58,8 +58,8 @@ Use the repository's platform directory spelling on arm64.
 Expected:
 
 - ten unique products;
-- peer/lane aliases for all ten;
-- exactly one integration asset root per product;
+- peer aliases for interactive products and lane aliases for lane products;
+- integration asset roots only for products that install native integrations;
 - CodeBuddy marked experimental until its Tencent cell passes;
 - exact DSH tuple metadata;
 - no shell-authored product list or projection drift.
@@ -118,7 +118,7 @@ Expected:
 - native version and required feature keys are explicit;
 - unsupported/absent products are fail-closed;
 - CodeBuddy federation readiness reflects its experimental/account gate;
-- DSH reports exact tuple and profile/plugin ownership;
+- DSH reports the exact native CLI/ACP/pnpm tuple and lane readiness;
 - no peer secret or owned lane-server secret appears.
 
 ## 7. Peer Matrix
@@ -148,7 +148,7 @@ Additional mandatory cases:
 - CodeBuddy: daemon restart re-discovers the exact TUI, stale rows and recycled
   ports fail socket-to-PID/executable/ancestry checks, and peer versus owned
   authenticated lane endpoints remain distinct.
-- DSH: Cordis plugin in the exact profile and socket under HOME/XDG.
+- DSH has no peer cell; exercise it in the lane matrix only.
 
 ## 8. Lane Matrix
 

@@ -109,6 +109,9 @@ func NewRegistry(inventory []productcatalog.Descriptor, strategies ...Strategy) 
 	}
 	required := make(map[string][]productcatalog.Descriptor)
 	for _, descriptor := range inventory {
+		if descriptor.NativeRegistration.Strategy == "" {
+			continue
+		}
 		required[descriptor.NativeRegistration.Strategy] = append(required[descriptor.NativeRegistration.Strategy], descriptor)
 	}
 	resolved := make(map[string]Strategy, len(strategies))
@@ -158,6 +161,10 @@ func (registry *Registry) validateInventory(inventory []productcatalog.Descripto
 		expected, ok := registry.registrations[descriptor.ID]
 		if !ok || expected.Strategy != descriptor.NativeRegistration.Strategy || expected.AssetOnly != descriptor.NativeRegistration.AssetOnly || !equalStrings(expected.Args, descriptor.NativeRegistration.Args) {
 			return fmt.Errorf("install registration drift for product %q", descriptor.ID)
+		}
+		if expected.Strategy == "" {
+			seen[descriptor.ID] = true
+			continue
 		}
 		strategy, ok := registry.Resolve(expected.Strategy)
 		if !ok {
