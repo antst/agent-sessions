@@ -33,8 +33,9 @@ func RunManagedPeer(product string, args []string) error {
 	if !ok {
 		return fmt.Errorf("unsupported managed peer product %q", product)
 	}
-	if descriptor.NativeRegistration.Strategy == "opencode-global-plugin" {
-		args, err = resolveOpenCodeResume(path, args, listOpenCodeSessions)
+	switch descriptor.NativeRegistration.Strategy {
+	case "opencode-global-plugin", "kilo-global-plugin":
+		args, err = resolveProductResume(product, path, args, listProductSessions)
 		if err != nil {
 			return err
 		}
@@ -54,30 +55,31 @@ func RunManagedPeer(product string, args []string) error {
 	return Exec(plan.path, plan.args, plan.environment)
 }
 
-type openCodeSession struct {
+type productSession struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
 	Updated   int64  `json:"updated"`
 }
 
-func listOpenCodeSessions(executable string) ([]openCodeSession, error) {
+func listProductSessions(executable string) ([]productSession, error) {
 	command := exec.Command(executable, "--pure", "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
 	payload, err := command.Output()
 	if err != nil {
-		return nil, fmt.Errorf("list OpenCode sessions: %w", err)
+		return nil, fmt.Errorf("list product sessions: %w", err)
 	}
-	var sessions []openCodeSession
+	var sessions []productSession
 	if err := json.Unmarshal(payload, &sessions); err != nil {
-		return nil, fmt.Errorf("decode OpenCode session list: %w", err)
+		return nil, fmt.Errorf("decode product session list: %w", err)
 	}
 	return sessions, nil
 }
 
-func resolveOpenCodeResume(
+func resolveProductResume(
+	product string,
 	executable string,
 	arguments []string,
-	list func(string) ([]openCodeSession, error),
+	list func(string) ([]productSession, error),
 ) ([]string, error) {
 	selector, present, err := optionValue(arguments, "--session")
 	if err != nil || !present || strings.HasPrefix(selector, "ses_") {
@@ -87,21 +89,21 @@ func resolveOpenCodeResume(
 	if err != nil {
 		return nil, err
 	}
-	matches := make([]openCodeSession, 0, 1)
+	matches := make([]productSession, 0, 1)
 	for _, session := range sessions {
 		if session.Title == selector {
 			matches = append(matches, session)
 		}
 	}
 	if len(matches) == 0 {
-		return nil, usageError(fmt.Sprintf("OpenCode session name %q was not found in the product session list", selector))
+		return nil, usageError(fmt.Sprintf("%s session name %q was not found in the product session list", product, selector))
 	}
 	if len(matches) > 1 {
 		details := make([]string, 0, len(matches))
 		for _, match := range matches {
 			details = append(details, fmt.Sprintf("%s (directory=%s updated=%d)", match.ID, match.Directory, match.Updated))
 		}
-		return nil, usageError(fmt.Sprintf("OpenCode session name %q is ambiguous: %s", selector, strings.Join(details, ", ")))
+		return nil, usageError(fmt.Sprintf("%s session name %q is ambiguous: %s", product, selector, strings.Join(details, ", ")))
 	}
 	resolved := append([]string(nil), arguments...)
 	for index, argument := range beforeDoubleDash(resolved) {

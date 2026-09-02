@@ -108,47 +108,51 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 	}
 }
 
-func TestResolveOpenCodeResumeUsesProductOwnedSessionList(t *testing.T) {
-	sessions := []openCodeSession{
+func TestManagedGlobalPluginPeersResolveNamesFromTheirProductSessionList(t *testing.T) {
+	sessions := []productSession{
 		{ID: "ses_one", Title: "review", Directory: "/one", Updated: 10},
 		{ID: "ses_two", Title: "other", Directory: "/two", Updated: 20},
 	}
-	listCalls := 0
-	list := func(executable string) ([]openCodeSession, error) {
-		listCalls++
-		if executable != "/native/opencode" {
-			t.Fatalf("executable = %q", executable)
-		}
-		return sessions, nil
-	}
-	resolved, err := resolveOpenCodeResume("/native/opencode", []string{"--session", "review", "--model", "native"}, list)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(resolved, []string{"--session", "ses_one", "--model", "native"}) || listCalls != 1 {
-		t.Fatalf("resolved = %#v, list calls = %d", resolved, listCalls)
-	}
-	resolved, err = resolveOpenCodeResume("/native/opencode", []string{"--session=review"}, list)
-	if err != nil || !reflect.DeepEqual(resolved, []string{"--session=ses_one"}) {
-		t.Fatalf("equals-form resolved = %#v, err = %v", resolved, err)
-	}
-	resolved, err = resolveOpenCodeResume("/native/opencode", []string{"--session", "ses_exact"}, list)
-	if err != nil || !reflect.DeepEqual(resolved, []string{"--session", "ses_exact"}) || listCalls != 2 {
-		t.Fatalf("exact-id resolved = %#v, list calls = %d, err = %v", resolved, listCalls, err)
+	for _, product := range []string{"opencode", "kilo"} {
+		t.Run(product, func(t *testing.T) {
+			listCalls := 0
+			list := func(executable string) ([]productSession, error) {
+				listCalls++
+				if executable != "/native/"+product {
+					t.Fatalf("executable = %q", executable)
+				}
+				return sessions, nil
+			}
+			resolved, err := resolveProductResume(product, "/native/"+product, []string{"--session", "review", "--model", "native"}, list)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(resolved, []string{"--session", "ses_one", "--model", "native"}) || listCalls != 1 {
+				t.Fatalf("resolved = %#v, list calls = %d", resolved, listCalls)
+			}
+			resolved, err = resolveProductResume(product, "/native/"+product, []string{"--session=review"}, list)
+			if err != nil || !reflect.DeepEqual(resolved, []string{"--session=ses_one"}) {
+				t.Fatalf("equals-form resolved = %#v, err = %v", resolved, err)
+			}
+			resolved, err = resolveProductResume(product, "/native/"+product, []string{"--session", "ses_exact"}, list)
+			if err != nil || !reflect.DeepEqual(resolved, []string{"--session", "ses_exact"}) || listCalls != 2 {
+				t.Fatalf("exact-id resolved = %#v, list calls = %d, err = %v", resolved, listCalls, err)
+			}
+		})
 	}
 }
 
-func TestResolveOpenCodeResumeRejectsMissingAndAmbiguousProductNames(t *testing.T) {
-	list := func(string) ([]openCodeSession, error) {
-		return []openCodeSession{
+func TestResolveProductResumeRejectsMissingAndAmbiguousProductNames(t *testing.T) {
+	list := func(string) ([]productSession, error) {
+		return []productSession{
 			{ID: "ses_one", Title: "duplicate", Directory: "/one", Updated: 10},
 			{ID: "ses_two", Title: "duplicate", Directory: "/two", Updated: 20},
 		}, nil
 	}
-	if _, err := resolveOpenCodeResume("opencode", []string{"--session", "missing"}, list); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := resolveProductResume("opencode", "opencode", []string{"--session", "missing"}, list); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing-name error = %v", err)
 	}
-	if _, err := resolveOpenCodeResume("opencode", []string{"--session", "duplicate"}, list); err == nil ||
+	if _, err := resolveProductResume("opencode", "opencode", []string{"--session", "duplicate"}, list); err == nil ||
 		!strings.Contains(err.Error(), "ses_one (directory=/one updated=10)") ||
 		!strings.Contains(err.Error(), "ses_two (directory=/two updated=20)") {
 		t.Fatalf("ambiguous-name error = %v", err)
