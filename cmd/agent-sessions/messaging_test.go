@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 )
@@ -47,6 +48,66 @@ func TestMessagingToolsRejectBusyLaneByEveryAdvertisedIdentity(t *testing.T) {
 				t.Fatalf("busy lane delivery error = %v", err)
 			}
 		})
+	}
+}
+
+func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	coordinator := newHostCoordinator(context.Background(), root)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	presence, err := startLivePresenceServer(ctx, root,
+		func(report liveSessionReport) { coordinator.joinLiveSession(runtime, report) },
+		func(report liveSessionReport) { coordinator.leaveLiveSession(runtime, report) }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = presence.Close() })
+	coordinator.presence = presence
+	delivered := make(chan struct{}, 2)
+	_ = startLiveSessionClient(ctx, presence.listener.Addr().String(), liveSessionReport{
+		UUID: "parent-id", Name: "parent-name", Product: "claude",
+	}, func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		if method != "message.deliver" {
+			t.Fatalf("delivery method = %q", method)
+		}
+		delivered <- struct{}{}
+		return json.RawMessage(`{}`), nil
+	})
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		if _, active, _ := runtime.Attachments().ActiveAttachment("parent-id"); active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("parent presence did not join")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	parentAnchor := "session:" + runtime.HostID() + "/parent-id"
+	coordinator.lanes["lane-id"] = &laneActor{
+		id: "lane-id", nativeID: "lane-native", name: "lane-name", product: "qwen",
+		parentID: "parent-id", groups: []string{parentAnchor, parentAnchor + "/lane-native"}, state: "running",
+	}
+	listed, err := coordinator.callLocalTool(context.Background(), runtime, "lane-id", "list_peers", map[string]any{})
+	if err != nil || !strings.Contains(listed.Text, "parent-name") || !strings.Contains(listed.Text, parentAnchor) {
+		t.Fatalf("lane-visible parent = %q, %v", listed.Text, err)
+	}
+	for _, target := range []string{"parent-name", "parent-id"} {
+		if _, err := coordinator.callLocalTool(context.Background(), runtime, "lane-id", "send_message", map[string]any{
+			"target": target, "message": "from lane",
+		}); err != nil {
+			t.Fatalf("send to %q: %v", target, err)
+		}
+		select {
+		case <-delivered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("send to %q was not delivered", target)
+		}
 	}
 }
 

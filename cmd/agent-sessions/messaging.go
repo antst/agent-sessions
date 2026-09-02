@@ -587,6 +587,7 @@ func (c *hostCoordinator) visiblePeers(
 			return nil, groupErr
 		}
 		if candidate.ID != source.ID && groupsIntersect(sourceGroups, candidateGroups) {
+			candidate.Groups = candidateGroups
 			visible = append(visible, candidate)
 		}
 	}
