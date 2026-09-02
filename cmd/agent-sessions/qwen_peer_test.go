@@ -18,7 +18,7 @@ func TestQwenLaunchIdentityComesOnlyFromFirstNativeSessionStart(t *testing.T) {
 	if _, ok := qwenLaunchSessionID(path); ok {
 		t.Fatal("missing native event stream produced an identity")
 	}
-	partial := `{"sessionId":"` + testQwenNativeSessionID + `","type":"system","subtype":"session_start"}`
+	partial := `{"session_id":"` + testQwenNativeSessionID + `","type":"system","subtype":"session_start"}`
 	if err := os.WriteFile(path, []byte(partial), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestQwenLauncherConfirmsProductIdentityBeforeChildExit(t *testing.T) {
 		}
 	}
 	script := filepath.Join(root, "qwen")
-	body := "#!/bin/sh\nprintf '%s\\n' '{\"sessionId\":\"" + testQwenNativeSessionID + "\",\"type\":\"system\",\"subtype\":\"session_start\"}' >> \"$" + launcher.QwenEventsFileEnv + "\"\nsleep 0.1\n"
+	body := "#!/bin/sh\nprintf '%s\\n' '{\"session_id\":\"" + testQwenNativeSessionID + "\",\"type\":\"system\",\"subtype\":\"session_start\"}' >> \"$" + launcher.QwenEventsFileEnv + "\"\nsleep 0.1\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}

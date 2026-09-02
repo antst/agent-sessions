@@ -83,7 +83,7 @@ func qwenLaunchSessionID(eventsPath string) (string, bool) {
 		return "", false
 	}
 	var event struct {
-		SessionID string `json:"sessionId"`
+		SessionID string `json:"session_id"`
 		Type      string `json:"type"`
 		Subtype   string `json:"subtype"`
 	}
