@@ -317,8 +317,11 @@ func TestKiloPermissionRelayAndInterruptUseV2Routes(t *testing.T) {
 
 func TestDocumentProbeRequiresExactSupportedRoutesAndBoundsResponses(t *testing.T) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requireBasicAuth(t, request)
+		requireBasicAuthOnly(t, request)
 		if request.URL.Path == "/doc" {
+			if request.URL.RawQuery != "" {
+				t.Errorf("static document probe query = %q", request.URL.RawQuery)
+			}
 			_, _ = response.Write([]byte(`{"paths":{"/session":{},"/event":{}}}`))
 			return
 		}

@@ -10,7 +10,14 @@ import (
 
 func TestDoctorFailsClosedOnVersionAndFeatureDrift(t *testing.T) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requireBasicAuth(t, request)
+		if request.URL.Path == "/doc" {
+			requireBasicAuthOnly(t, request)
+			if request.URL.RawQuery != "" {
+				t.Errorf("static document probe query = %q", request.URL.RawQuery)
+			}
+		} else {
+			requireBasicAuth(t, request)
+		}
 		switch request.Method + " " + request.URL.Path {
 		case "GET /doc":
 			_, _ = response.Write([]byte(`{"paths":{"/session":{},"/event":{},"/config/providers":{}}}`))

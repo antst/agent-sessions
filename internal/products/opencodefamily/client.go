@@ -667,7 +667,7 @@ func (client *Client) ReplyPermission(ctx context.Context, sessionID, permission
 }
 
 func (client *Client) ProbeDocument(ctx context.Context, required []string) (map[string]bool, error) {
-	response, err := client.request(ctx, http.MethodGet, "/doc", nil, http.StatusOK)
+	response, err := client.requestUnscoped(ctx, http.MethodGet, "/doc", nil, http.StatusOK)
 	if err != nil {
 		return nil, err
 	}
