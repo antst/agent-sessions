@@ -94,16 +94,23 @@ func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
 	}
 }
 
-func TestReportedToolsOnlyConnectorsRelayThroughTheirLiveSession(t *testing.T) {
-	for _, product := range []string{connectorProductCodex, connectorProductGrok} {
-		report := liveSessionReport{UUID: product + "-session", Product: product}
-		sourceID, ok := connectorDaemonToolSource(report, true)
-		if !ok || sourceID != report.UUID {
-			t.Fatalf("%s daemon tool source = %q/%v", product, sourceID, ok)
-		}
+func TestToolsOnlyConnectorUsesAmbientOrProductHostSession(t *testing.T) {
+	grokArguments := map[string]any{"session_id": "host-session", "name": "identity"}
+	if sourceID := connectorToolSource("grok-session", grokArguments); sourceID != "grok-session" {
+		t.Fatalf("Grok source = %q", sourceID)
 	}
-	if sourceID, ok := connectorDaemonToolSource(liveSessionReport{}, false); ok || sourceID != "" {
-		t.Fatalf("unreported connector source = %q/%v", sourceID, ok)
+	if _, present := grokArguments["session_id"]; present {
+		t.Fatal("Grok transport identity leaked into tool arguments")
+	}
+	codexArguments := map[string]any{"session_id": "codex-session", "name": "identity"}
+	if sourceID := connectorToolSource("", codexArguments); sourceID != "codex-session" {
+		t.Fatalf("Codex source = %q", sourceID)
+	}
+	if _, present := codexArguments["session_id"]; present {
+		t.Fatal("Codex transport identity leaked into tool arguments")
+	}
+	if sourceID := connectorToolSource("", map[string]any{}); sourceID != "" {
+		t.Fatalf("bare connector source = %q", sourceID)
 	}
 }
 

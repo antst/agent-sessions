@@ -74,8 +74,7 @@ func (c *hostCoordinator) handleConnectorTool(
 	request daemonpkg.ControlRequest,
 ) (json.RawMessage, error) {
 	var call connectorToolEnvelope
-	if json.Unmarshal(request.Payload, &call) != nil || strings.TrimSpace(call.SourceID) == "" ||
-		strings.TrimSpace(call.RequestID) == "" || strings.TrimSpace(call.Name) == "" {
+	if json.Unmarshal(request.Payload, &call) != nil || strings.TrimSpace(call.RequestID) == "" || strings.TrimSpace(call.Name) == "" {
 		return nil, errors.New("connector tool call is invalid")
 	}
 	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID)

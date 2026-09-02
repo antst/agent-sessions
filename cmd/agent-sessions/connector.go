@@ -64,10 +64,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live == nil {
-				if sourceID, ok := connectorDaemonToolSource(report, reported); ok {
-					return callConnectorDaemonTool(callCtx, sourceID, id, method, params)
-				}
-				return nil, sessiontools.ErrConnectorInactive
+				return callConnectorDaemonTool(callCtx, report.UUID, id, method, params)
 			}
 			return live.Call(callCtx, id, method, params)
 		},
@@ -76,13 +73,6 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
-}
-
-func connectorDaemonToolSource(report liveSessionReport, reported bool) (string, bool) {
-	if !reported || strings.TrimSpace(report.UUID) == "" {
-		return "", false
-	}
-	return report.UUID, true
 }
 
 func connectorDeclinesForeignManagedProduct(requestedProduct, resolvedProduct string, getenv func(string) string) bool {
@@ -105,6 +95,7 @@ func callConnectorDaemonTool(
 	if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
 		return nil, fmt.Errorf("connector tool call is invalid")
 	}
+	sourceID = connectorToolSource(sourceID, call.Arguments)
 	payload, err := json.Marshal(connectorToolEnvelope{
 		SourceID: sourceID, RequestID: requestID, Name: call.Name, Arguments: call.Arguments,
 	})
@@ -123,6 +114,15 @@ func callConnectorDaemonTool(
 		return nil, errors.New(response.Error.Message)
 	}
 	return append(json.RawMessage(nil), response.Payload...), nil
+}
+
+func connectorToolSource(ambient string, arguments map[string]any) string {
+	sourceID := strings.TrimSpace(ambient)
+	if sourceID == "" {
+		sourceID = strings.TrimSpace(mapString(arguments, "session_id"))
+	}
+	delete(arguments, "session_id")
+	return sourceID
 }
 
 func qwenConnectorNativeName(report liveSessionReport) (string, bool) {
