@@ -26,6 +26,7 @@ class FakePi {
   registerCommand(name, command) { this.commands.set(name, command); }
   sendUserMessage(content, options) { this.messages.push({ content, options }); }
   getSessionName() { return this.name; }
+  async setSessionName(name) { this.name = name; }
   async fire(name, event, ctx) { return this.handlers.get(name)?.(event, ctx); }
 }
 
@@ -48,6 +49,49 @@ test("Pi and OMP report the current product session and its native title", async
     await pi.fire("session_info_changed", { name: "renamed" }, ctx);
     assert.deepEqual(live.updated, [{ id: `${product}-session`, name: "renamed" }]);
   });
+});
+
+test("Pi and OMP seed a requested fresh name through the product title writer", async (t) => {
+  for (const product of ["pi", "omp"]) await t.test(product, async () => {
+    const live = new FakeLiveSession();
+    const pi = new FakePi("");
+    createPiFamilyExtension(product, {
+      liveSessionClient: live,
+      environment: { AGENT_SESSIONS_SESSION_NAME: `named-${product}` },
+    })(pi);
+    await pi.fire("session_start", {}, context(`${product}-session`));
+    assert.equal(pi.getSessionName(), `named-${product}`);
+    assert.deepEqual(live.reported, [{ id: `${product}-session`, name: `named-${product}` }]);
+  });
+});
+
+test("a synchronous native title event during startup is carried by the initial report", async () => {
+  const live = new FakeLiveSession();
+  const pi = new FakePi("");
+  const ctx = context("pi-session");
+  createPiFamilyExtension("pi", {
+    liveSessionClient: live,
+    environment: { AGENT_SESSIONS_SESSION_NAME: "named-pi" },
+  })(pi);
+  pi.setSessionName = async function setSessionName(name) {
+    this.name = name;
+    await this.fire("session_info_changed", { name }, ctx);
+  };
+  await pi.fire("session_start", {}, ctx);
+  assert.deepEqual(live.reported, [{ id: "pi-session", name: "named-pi" }]);
+  assert.deepEqual(live.updated, []);
+});
+
+test("Pi-family reconnect preserves an existing product title", async () => {
+  const live = new FakeLiveSession();
+  const pi = new FakePi("product-owned");
+  createPiFamilyExtension("pi", {
+    liveSessionClient: live,
+    environment: { AGENT_SESSIONS_SESSION_NAME: "stale-launch-name" },
+  })(pi);
+  await pi.fire("session_start", {}, context("pi-session"));
+  assert.equal(pi.getSessionName(), "product-owned");
+  assert.deepEqual(live.reported, [{ id: "pi-session", name: "product-owned" }]);
 });
 
 test("Pi family live delivery uses ordinary send when idle and native steer when busy", async () => {

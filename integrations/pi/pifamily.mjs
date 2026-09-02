@@ -78,6 +78,7 @@ export function createPiFamilyExtension(productID, options = {}) {
   return function agentSessionsPiFamilyExtension(pi) {
     const runtime = createRuntime(options);
     const live = runtime.client;
+    const environment = options.environment ?? process.env;
     // Connection activity is fixed synchronously by the shared client from the
     // complete managed environment. Ambient/global loads must not alter the
     // model prompt, command UI, or native hook set while waiting for a later
@@ -146,6 +147,10 @@ export function createPiFamilyExtension(productID, options = {}) {
     pi.on("session_start", async (_event, ctx) => {
       let initialNativeTitle;
       try {
+        const requestedName = String(environment.AGENT_SESSIONS_SESSION_NAME ?? "").trim();
+        if (requestedName && !pi.getSessionName?.()) {
+          await Promise.resolve(pi.setSessionName?.(requestedName));
+        }
         initialNativeTitle = observedNativeTitle(pi.getSessionName?.());
       } catch {
         return;
@@ -186,7 +191,11 @@ export function createPiFamilyExtension(productID, options = {}) {
     });
 
     pi.on("session_info_changed", (event, ctx) => {
-      const nativeSessionID = assertExactContext(ctx);
+      const nativeSessionID = sessionID(ctx);
+      // setSessionName may synchronously emit this event while session_start
+      // is still establishing the live report. The report below carries the
+      // final product title, so there is nothing to update until it exists.
+      if (!current || current.nativeSessionID !== nativeSessionID || !live.sessions.has(nativeSessionID)) return;
       let nativeName;
       try {
         // Pi emits name:undefined when its native title is cleared. Empty is
