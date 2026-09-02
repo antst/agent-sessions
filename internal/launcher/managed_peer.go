@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/envutil"
@@ -197,6 +198,10 @@ func buildManagedPeerPlan(
 	if !ok {
 		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
 	}
+	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, context.forceNoYolo)
+	if err != nil {
+		return managedPeerPlan{}, err
+	}
 
 	switch descriptor.NativeRegistration.Strategy {
 	case "opencode-global-plugin", "kilo-global-plugin":
@@ -240,6 +245,59 @@ func buildManagedPeerPlan(
 		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
 	}
 	return managedPeerPlan{path: executable, args: forwarded, environment: environment}, nil
+}
+
+func projectNativeLaunchPolicy(descriptor productcatalog.Descriptor, arguments []string, forceNoYolo bool) ([]string, error) {
+	projected := make([]string, 0, len(arguments)+len(descriptor.NativeToolGrantArgs)+len(descriptor.NativeYoloArgs))
+	yoloSeen := false
+	for index, argument := range arguments {
+		if argument == "--" {
+			projected = append(projected, arguments[index:]...)
+			break
+		}
+		if argument != "--yolo" {
+			projected = append(projected, argument)
+			continue
+		}
+		if yoloSeen {
+			return nil, usageError("--yolo was specified more than once")
+		}
+		if forceNoYolo {
+			return nil, usageError("--yolo conflicts with --no-yolo")
+		}
+		if descriptor.NativeYoloArgs == nil {
+			return nil, usageError("--yolo is not mapped for " + descriptor.ID)
+		}
+		yoloSeen = true
+		projected = append(projected, descriptor.NativeYoloArgs...)
+	}
+	if len(descriptor.NativeToolGrantArgs) > 0 && !containsArgumentSequence(beforeDoubleDash(projected), descriptor.NativeToolGrantArgs) {
+		insert := len(projected)
+		for index, argument := range projected {
+			if argument == "--" {
+				insert = index
+				break
+			}
+		}
+		withGrant := make([]string, 0, len(projected)+len(descriptor.NativeToolGrantArgs))
+		withGrant = append(withGrant, projected[:insert]...)
+		withGrant = append(withGrant, descriptor.NativeToolGrantArgs...)
+		withGrant = append(withGrant, projected[insert:]...)
+		projected = withGrant
+	}
+	return projected, nil
+}
+
+func containsArgumentSequence(arguments, sequence []string) bool {
+	if len(sequence) == 0 || len(sequence) > len(arguments) {
+		return false
+	}
+	for start := 0; start+len(sequence) <= len(arguments); start++ {
+		if slices.Equal(arguments[start:start+len(sequence)], sequence) {
+			return true
+		}
+	}
+	return false
 }
 
 func managedLiveEnvironment(environment []string, product, name string, groups []string) []string {

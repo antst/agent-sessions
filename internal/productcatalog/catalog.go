@@ -113,6 +113,8 @@ type Descriptor struct {
 	NativeRegistration     NativeRegistration
 	NativeValueOptions     []string
 	NativeAttachedShort    []string
+	NativeToolGrantArgs    []string
+	NativeYoloArgs         []string
 	Acceptance             AcceptanceContract
 }
 
@@ -139,14 +141,7 @@ var descriptors = [...]Descriptor{
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
 	),
-	newProductDescriptor(
-		"pi", "Pi Coding Agent", "pi", "0.84.4", "pi-package",
-		"presence", "presence", "pi-rpc", "pi",
-		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
-		[]string{"extension", "parent", "rpc-ready", "steer"},
-		[]string{"--model", "-m", "--extension", "-e", "--session", "--tools", "--exclude-tools"},
-		[]string{"-m", "-e"},
-	),
+	piDescriptor(),
 	newProductDescriptor(
 		"omp", "Oh My Pi", "omp", "18.0.11", "omp-extension",
 		"presence", "presence", "omp-rpc", "omp",
@@ -205,6 +200,20 @@ func dshDescriptor() Descriptor {
 			{Name: "@agent-sessions/dsh-profile", Version: "0.1.2-alpha.3"},
 		},
 	}
+	return descriptor
+}
+
+func piDescriptor() Descriptor {
+	descriptor := newProductDescriptor(
+		"pi", "Pi Coding Agent", "pi", "0.84.4", "pi-package",
+		"presence", "presence", "pi-rpc", "pi",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
+		[]string{"extension", "parent", "rpc-ready", "steer"},
+		[]string{"--model", "-m", "--extension", "-e", "--session", "--tools", "--exclude-tools"},
+		[]string{"-m", "-e"},
+	)
+	descriptor.NativeToolGrantArgs = []string{"--approve"}
+	descriptor.NativeYoloArgs = []string{"--approve"}
 	return descriptor
 }
 
@@ -432,6 +441,22 @@ func validateDescriptor(descriptor Descriptor) error {
 			return errors.New("native registration arguments must be unique and sorted")
 		}
 	}
+	for _, launchArguments := range []struct {
+		label string
+		args  []string
+	}{
+		{label: "native tool grant", args: descriptor.NativeToolGrantArgs},
+		{label: "native yolo", args: descriptor.NativeYoloArgs},
+	} {
+		if len(launchArguments.args) > maxNativeRegistrationArgs {
+			return fmt.Errorf("%s has more than %d arguments", launchArguments.label, maxNativeRegistrationArgs)
+		}
+		for _, argument := range launchArguments.args {
+			if strings.TrimSpace(argument) == "" || strings.ContainsRune(argument, 0) {
+				return fmt.Errorf("%s contains an invalid argument", launchArguments.label)
+			}
+		}
+	}
 	seenExternal := map[string]bool{}
 	if descriptor.SupportState != SupportHidden && !descriptor.Acceptance.RealProductRequired {
 		return errors.New("visible product acceptance requires real-product evidence")
@@ -531,6 +556,8 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.RequiredDoctorFeatures = append([]string(nil), descriptor.RequiredDoctorFeatures...)
 	descriptor.FederationCapabilities = append([]string(nil), descriptor.FederationCapabilities...)
 	descriptor.NativeRegistration.Args = append([]string(nil), descriptor.NativeRegistration.Args...)
+	descriptor.NativeToolGrantArgs = append([]string(nil), descriptor.NativeToolGrantArgs...)
+	descriptor.NativeYoloArgs = append([]string(nil), descriptor.NativeYoloArgs...)
 	descriptor.Acceptance.ExternalCells = append([]ExternalAcceptanceCell(nil), descriptor.Acceptance.ExternalCells...)
 	return descriptor
 }

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
@@ -17,7 +19,7 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 	}{
 		{product: "opencode", wantArg: []string{"--model", "native-model"}},
 		{product: "kilo", wantArg: []string{"--model", "native-model"}},
-		{product: "pi", wantArg: []string{"--extension", filepath.Join(root, "integrations", "pi", "agent-sessions.mjs"), "--model", "native-model"}},
+		{product: "pi", wantArg: []string{"--extension", filepath.Join(root, "integrations", "pi", "agent-sessions.mjs"), "--model", "native-model", "--approve"}},
 		{product: "omp", wantArg: []string{"--extension=" + filepath.Join(root, "integrations", "omp", "agent-sessions.mjs"), "--model", "native-model"}},
 		{product: "codebuddy", wantArg: []string{
 			"--model", "native-model", "--session-id", "00000000-0000-4000-8000-000000000123",
@@ -53,6 +55,39 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 				t.Fatalf("CodeBuddy session id was not shared with its MCP connector")
 			}
 		})
+	}
+}
+
+func TestManagedLaunchPolicyComesOnlyFromTheProductDescriptor(t *testing.T) {
+	descriptor, _ := productcatalog.ByID("pi")
+	for _, test := range []struct {
+		name string
+		args []string
+		no   bool
+		want []string
+	}{
+		{name: "grant", args: []string{"--model", "native"}, want: []string{"--model", "native", "--approve"}},
+		{name: "yolo", args: []string{"--yolo", "--model", "native"}, want: []string{"--approve", "--model", "native"}},
+		{name: "native grant deduplicated", args: []string{"--approve"}, want: []string{"--approve"}},
+		{name: "prompt boundary", args: []string{"--", "--yolo"}, want: []string{"--approve", "--", "--yolo"}},
+		{name: "no yolo keeps tool grant", args: []string{"--model", "native"}, no: true, want: []string{"--model", "native", "--approve"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := projectNativeLaunchPolicy(descriptor, test.args, test.no)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("projected args = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+	if _, err := projectNativeLaunchPolicy(descriptor, []string{"--yolo"}, true); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("conflicting wrapper policy error = %v", err)
+	}
+	opencode, _ := productcatalog.ByID("opencode")
+	if _, err := projectNativeLaunchPolicy(opencode, []string{"--yolo"}, false); err == nil || !strings.Contains(err.Error(), "not mapped") {
+		t.Fatalf("unprobed product yolo error = %v", err)
 	}
 }
 

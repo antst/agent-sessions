@@ -105,11 +105,17 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	products[0].FederationCapabilities[0] = "mutated"
 	products[0].Compatibility.TupleMembers = []TupleMember{{Name: "mutated", Version: "1"}}
 	products[0].NativeRegistration.Args[0] = "mutated"
+	products[6].NativeToolGrantArgs[0] = "mutated"
+	products[6].NativeYoloArgs[0] = "mutated"
 	products[0].NativeRegistration.AssetOnly = true
 	products[0].Acceptance.ExternalCells = []ExternalAcceptanceCell{{ID: "mutated"}}
 	again, _ := ByID("codex")
 	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
+	}
+	pi, _ := ByID("pi")
+	if !reflect.DeepEqual(pi.NativeToolGrantArgs, []string{"--approve"}) || !reflect.DeepEqual(pi.NativeYoloArgs, []string{"--approve"}) {
+		t.Fatalf("Pi launch policy leaked caller mutation: %#v", pi)
 	}
 	ordered := again.SortedCapabilities()
 	if !sort.StringsAreSorted(ordered) {
