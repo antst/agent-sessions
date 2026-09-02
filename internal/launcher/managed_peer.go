@@ -36,7 +36,7 @@ func RunManagedPeer(product string, args []string) error {
 	}
 	switch descriptor.NativeRegistration.Strategy {
 	case "opencode-global-plugin", "kilo-global-plugin":
-		args, err = resolveProductResume(product, path, "", args, isOpenCodeSessionID, listProductSessions)
+		args, err = resolveProductResume(product, path, "", args, "--session", isOpenCodeSessionID, listProductSessions)
 		if err != nil {
 			return err
 		}
@@ -45,7 +45,16 @@ func RunManagedPeer(product string, args []string) error {
 		if cwdErr != nil {
 			return fmt.Errorf("resolve working directory: %w", cwdErr)
 		}
-		args, err = resolveProductResume(product, path, cwd, args, isPiNativeSessionSelector, listPiSessions)
+		args, err = resolveProductResume(product, path, cwd, args, "--session", isPiNativeSessionSelector, listPiSessions)
+		if err != nil {
+			return err
+		}
+	case "omp-extension":
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return fmt.Errorf("resolve working directory: %w", cwdErr)
+		}
+		args, err = resolveProductResume(product, path, cwd, args, "--resume", isPiNativeSessionSelector, listOMPSessions)
 		if err != nil {
 			return err
 		}
@@ -86,13 +95,13 @@ func listProductSessions(executable, _ string) ([]productSession, error) {
 	return sessions, nil
 }
 
-const piSessionListScript = `
+const packageSessionListScript = `
 import { pathToFileURL } from "node:url";
 const { SessionManager } = await import(pathToFileURL(process.argv[1]).href);
 const rows = await SessionManager.list(process.argv[2]);
 process.stdout.write(JSON.stringify(rows.map((row) => ({
   id: row.id,
-  title: row.name ?? "",
+  title: row.title ?? row.name ?? "",
   directory: row.cwd,
   modified: row.modified instanceof Date ? row.modified.toISOString() : String(row.modified),
 }))));
@@ -108,7 +117,7 @@ func listPiSessions(executable, cwd string) ([]productSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve Node.js for Pi session list: %w", err)
 	}
-	command := exec.Command(node, "--input-type=module", "--eval", piSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
+	command := exec.Command(node, "--input-type=module", "--eval", packageSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
 	command.Dir = cwd
 	payload, err := command.Output()
 	if err != nil {
@@ -117,6 +126,29 @@ func listPiSessions(executable, cwd string) ([]productSession, error) {
 	var sessions []productSession
 	if err := json.Unmarshal(payload, &sessions); err != nil {
 		return nil, fmt.Errorf("decode Pi product session list: %w", err)
+	}
+	return sessions, nil
+}
+
+func listOMPSessions(executable, cwd string) ([]productSession, error) {
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return nil, fmt.Errorf("resolve OMP executable: %w", err)
+	}
+	productAPI := filepath.Clean(filepath.Join(filepath.Dir(resolved), "..", "src", "index.ts"))
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		return nil, fmt.Errorf("resolve Bun for OMP session list: %w", err)
+	}
+	command := exec.Command(bun, "--eval", packageSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
+	command.Dir = cwd
+	payload, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list OMP sessions through product API: %w", err)
+	}
+	var sessions []productSession
+	if err := json.Unmarshal(payload, &sessions); err != nil {
+		return nil, fmt.Errorf("decode OMP product session list: %w", err)
 	}
 	return sessions, nil
 }
@@ -134,10 +166,11 @@ func resolveProductResume(
 	executable string,
 	cwd string,
 	arguments []string,
+	option string,
 	isNativeSelector func(string) bool,
 	list func(string, string) ([]productSession, error),
 ) ([]string, error) {
-	selector, present, err := optionValue(arguments, "--session")
+	selector, present, err := optionValue(arguments, option)
 	if err != nil || !present || isNativeSelector(selector) {
 		return arguments, err
 	}
@@ -167,12 +200,12 @@ func resolveProductResume(
 	}
 	resolved := append([]string(nil), arguments...)
 	for index, argument := range beforeDoubleDash(resolved) {
-		if argument == "--session" {
+		if argument == option {
 			resolved[index+1] = matches[0].ID
 			break
 		}
-		if strings.HasPrefix(argument, "--session=") {
-			resolved[index] = "--session=" + matches[0].ID
+		if strings.HasPrefix(argument, option+"=") {
+			resolved[index] = option + "=" + matches[0].ID
 			break
 		}
 	}
