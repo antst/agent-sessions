@@ -17,8 +17,9 @@ var (
 )
 
 const (
-	defaultStartupTimeout = 30 * time.Second
-	defaultProbeInterval  = 25 * time.Millisecond
+	defaultStartupTimeout      = 30 * time.Second
+	defaultProbeInterval       = 25 * time.Millisecond
+	defaultReadyAttemptTimeout = 500 * time.Millisecond
 )
 
 type ReadyFunc func(context.Context, *Client) error
@@ -93,7 +94,10 @@ func StartOwnedServer(ctx context.Context, config OwnedServerConfig) (*OwnedServ
 	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
 	for {
-		if err := config.Ready(startupCtx, client); err == nil {
+		attemptCtx, cancelAttempt := context.WithTimeout(startupCtx, defaultReadyAttemptTimeout)
+		readyErr := config.Ready(attemptCtx, client)
+		cancelAttempt()
+		if readyErr == nil {
 			return server, nil
 		}
 		select {

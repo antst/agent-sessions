@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,11 +14,13 @@ import (
 )
 
 type serverProcessFixture struct {
-	done chan struct{}
-	once sync.Once
+	done   chan struct{}
+	once   sync.Once
+	starts atomic.Int64
 }
 
 func (fixture *serverProcessFixture) Start(context.Context, productruntime.NativeCommand) (productruntime.OwnedProcessRef, error) {
+	fixture.starts.Add(1)
 	return productruntime.OwnedProcessRef{Process: procinfo.Identity{PID: 42}, ProcessGroup: 42}, nil
 }
 
@@ -70,5 +73,40 @@ func TestOwnedServerStartsProbesAndStopsOneProcess(t *testing.T) {
 	}
 	if exit, err := owned.Wait(ctx); err != nil || exit.ExitLike != 0 {
 		t.Fatalf("wait = %#v, %v", exit, err)
+	}
+}
+
+func TestOwnedServerBoundsEachReadinessAttempt(t *testing.T) {
+	auth, _ := NewMemoryAuth("X-Test", productruntime.NewSensitiveValue("ready"))
+	processes := &serverProcessFixture{done: make(chan struct{})}
+	var attempts atomic.Int64
+	owned, err := StartOwnedServer(context.Background(), OwnedServerConfig{
+		Command:        productruntime.NativeCommand{Path: "/bin/native"},
+		Endpoint:       "http://127.0.0.1:1",
+		Auth:           auth,
+		Supervisor:     processes,
+		StartupTimeout: 2 * time.Second,
+		ProbeInterval:  time.Millisecond,
+		Ready: func(ctx context.Context, _ *Client) error {
+			if attempts.Add(1) == 1 {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("readiness attempts = %d, want 2", attempts.Load())
+	}
+	if processes.starts.Load() != 1 {
+		t.Fatalf("started processes = %d, want 1", processes.starts.Load())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := owned.Close(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
