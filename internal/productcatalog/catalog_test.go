@@ -117,6 +117,10 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	if !reflect.DeepEqual(pi.NativeToolGrantArgs, []string{"--approve"}) || !reflect.DeepEqual(pi.NativeYoloArgs, []string{"--approve"}) {
 		t.Fatalf("Pi launch policy leaked caller mutation: %#v", pi)
 	}
+	omp, _ := ByID("omp")
+	if len(omp.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(omp.NativeYoloArgs, []string{"--approval-mode", "yolo"}) {
+		t.Fatalf("OMP launch policy = %#v", omp)
+	}
 	ordered := again.SortedCapabilities()
 	if !sort.StringsAreSorted(ordered) {
 		t.Fatalf("capabilities not sorted: %v", ordered)

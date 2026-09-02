@@ -142,14 +142,7 @@ var descriptors = [...]Descriptor{
 		[]string{"-m", "-s"},
 	),
 	piDescriptor(),
-	newProductDescriptor(
-		"omp", "Oh My Pi", "omp", "18.0.11", "omp-extension",
-		"presence", "presence", "omp-rpc", "omp",
-		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
-		[]string{"extension", "parent", "rpc-ready", "steer"},
-		[]string{"--model", "-m", "--extension", "-e", "--session", "--tools", "--exclude-tools", "--approval-mode"},
-		[]string{"-m", "-e"},
-	),
+	ompDescriptor(),
 	newProductDescriptor(
 		"codebuddy", "CodeBuddy", "codebuddy", "2.143.0", "codebuddy-wrapper-plugin-mcp",
 		"presence", "presence", "codebuddy-owned-http", "codebuddy",
@@ -214,6 +207,19 @@ func piDescriptor() Descriptor {
 	)
 	descriptor.NativeToolGrantArgs = []string{"--approve"}
 	descriptor.NativeYoloArgs = []string{"--approve"}
+	return descriptor
+}
+
+func ompDescriptor() Descriptor {
+	descriptor := newProductDescriptor(
+		"omp", "Oh My Pi", "omp", "18.0.11", "omp-extension",
+		"presence", "presence", "omp-rpc", "omp",
+		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
+		[]string{"extension", "parent", "rpc-ready", "steer"},
+		[]string{"--model", "-m", "--extension", "-e", "--resume", "--tools", "--exclude-tools", "--approval-mode"},
+		[]string{"-m", "-e"},
+	)
+	descriptor.NativeYoloArgs = []string{"--approval-mode", "yolo"}
 	return descriptor
 }
 

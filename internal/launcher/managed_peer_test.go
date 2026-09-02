@@ -115,7 +115,7 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 		{product: "opencode", args: []string{"--session", "ses_exact"}},
 		{product: "kilo", args: []string{"--session", "ses_exact"}},
 		{product: "pi", args: []string{"--session", "native-exact"}},
-		{product: "omp", args: []string{"--session", "native-exact"}},
+		{product: "omp", args: []string{"--resume", "native-exact"}},
 		{product: "codebuddy", args: []string{"--session-id", "native-exact"}},
 		{product: "dsh", args: []string{"--profile", "custom"}},
 	} {
@@ -140,6 +140,21 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 				t.Fatalf("DSH exact profile selector was duplicated: %#v", plan.args)
 			}
 		})
+	}
+}
+
+func TestOMPProjectsOnlyItsRealProbedYoloMapping(t *testing.T) {
+	descriptor, ok := productcatalog.ByID("omp")
+	if !ok {
+		t.Fatal("OMP descriptor missing")
+	}
+	projected, err := projectNativeLaunchPolicy(descriptor, []string{"--model", "deepseek", "--yolo"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--model", "deepseek", "--approval-mode", "yolo"}
+	if !reflect.DeepEqual(projected, want) {
+		t.Fatalf("projected = %#v, want %#v", projected, want)
 	}
 }
 
