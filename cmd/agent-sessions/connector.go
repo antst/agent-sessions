@@ -242,9 +242,7 @@ func resolveConnectorProduct(requested string, getenv func(string) string) (stri
 		if _, ok := productcatalog.ByID(product); !ok {
 			return "", fmt.Errorf("automatic connector product %q is unsupported", product)
 		}
-		if !connectorOwnsLivePresence(product) {
-			return connectorProductCodex, nil
-		}
+		return connectorProductCodex, nil
 	}
 	if strings.TrimSpace(getenv("AGENT_SESSIONS_GROK_SESSION_ID")) != "" {
 		product = "grok"

@@ -18,9 +18,9 @@ func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *test
 	}{
 		{name: "codex fallback", want: "codex"},
 		{name: "codex explicit environment", product: "codex", want: "codex"},
-		{name: "claude", product: "claude", want: "claude"},
-		{name: "qwen", product: "qwen", want: "qwen"},
-		{name: "grok product", product: "grok", want: "grok"},
+		{name: "claude", product: "claude", want: "codex"},
+		{name: "qwen", product: "qwen", want: "codex"},
+		{name: "grok product", product: "grok", want: "codex"},
 		{name: "OMP native extension", product: "omp", want: "codex"},
 		{name: "grok private launch", grokSession: "session", want: "grok"},
 	} {
