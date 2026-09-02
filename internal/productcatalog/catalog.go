@@ -125,22 +125,22 @@ var descriptors = [...]Descriptor{
 	baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
 	baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
 	baselineDescriptor("qwen", "Qwen Code", "qwen", "qwen-peer", "qwen-peer-lane", "qwen-lane", "qwen-lane-manager", "qwen-lane", []string{"qwen"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "0.22.0"),
-	newProductDescriptor(
+	withNativeYolo(newProductDescriptor(
 		"opencode", "OpenCode", "opencode", "1.18.25", "opencode-global-plugin",
 		"presence", "presence", "opencode-http", "opencode",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
 		[]string{"event-stream", "parent", "plugin-sdk", "prompt-async"},
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
-	),
-	newProductDescriptor(
+	), "--auto"),
+	withNativeYolo(newProductDescriptor(
 		"kilo", "Kilo Code", "kilo", "7.5.6", "kilo-global-plugin",
 		"presence", "presence", "kilo-http", "kilo",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
 		[]string{"event-stream", "parent", "plugin-sdk", "tui-routing"},
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
-	),
+	), "--auto"),
 	piDescriptor(),
 	ompDescriptor(),
 	newProductDescriptor(
@@ -173,6 +173,11 @@ func newProductDescriptor(
 		NativeAttachedShort:    nativeAttachedShort,
 		Acceptance:             AcceptanceContract{RealProductRequired: true},
 	}
+}
+
+func withNativeYolo(descriptor Descriptor, arguments ...string) Descriptor {
+	descriptor.NativeYoloArgs = append([]string(nil), arguments...)
+	return descriptor
 }
 
 func dshDescriptor() Descriptor {

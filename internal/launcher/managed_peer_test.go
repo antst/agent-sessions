@@ -84,8 +84,10 @@ func TestManagedLaunchPolicyComesOnlyFromTheProductDescriptor(t *testing.T) {
 	if _, err := projectNativeLaunchPolicy(descriptor, []string{"--yolo"}, true); err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("conflicting wrapper policy error = %v", err)
 	}
-	opencode, _ := productcatalog.ByID("opencode")
-	if _, err := projectNativeLaunchPolicy(opencode, []string{"--yolo"}, false); err == nil || !strings.Contains(err.Error(), "not mapped") {
+	unmapped := descriptor
+	unmapped.ID = "unprobed"
+	unmapped.NativeYoloArgs = nil
+	if _, err := projectNativeLaunchPolicy(unmapped, []string{"--yolo"}, false); err == nil || !strings.Contains(err.Error(), "not mapped") {
 		t.Fatalf("unprobed product yolo error = %v", err)
 	}
 }
@@ -93,11 +95,11 @@ func TestManagedLaunchPolicyComesOnlyFromTheProductDescriptor(t *testing.T) {
 func TestGlobalPluginPeersHaveNoLaunchTimePayloadDependency(t *testing.T) {
 	for _, product := range []string{"opencode", "kilo"} {
 		t.Run(product, func(t *testing.T) {
-			plan, err := buildManagedPeerPlan(product, []string{"--model", "native-model"}, nil, "", "/native/"+product, nil)
+			plan, err := buildManagedPeerPlan(product, []string{"--yolo", "--model", "native-model"}, nil, "", "/native/"+product, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if plan.path != "/native/"+product || !reflect.DeepEqual(plan.args, []string{"--model", "native-model"}) {
+			if plan.path != "/native/"+product || !reflect.DeepEqual(plan.args, []string{"--auto", "--model", "native-model"}) {
 				t.Fatalf("plan = path %q args %#v", plan.path, plan.args)
 			}
 		})
