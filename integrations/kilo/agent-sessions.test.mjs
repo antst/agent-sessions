@@ -39,6 +39,44 @@ test("Kilo reports live sessions and title changes", async () => {
   assert.deepEqual(live.updated, [{ id: "ses_one", name: "native" }]);
 });
 
+test("Kilo writes a requested fresh name through the native session API before reporting", async () => {
+  const live = new FakeLiveSession();
+  const updates = [];
+  const client = { session: { async update(request) {
+    updates.push(request);
+    return { data: { id: request.path.id, title: request.body.title }, response: { status: 200 } };
+  } } };
+  const hooks = await (await loadPlugin(live))({
+    client,
+    directory: "/work",
+    environment: { AGENT_SESSIONS_SESSION_NAME: "named-kilo" },
+  });
+  await hooks.event({ event: { type: "session.created", properties: {
+    info: { id: "ses_one", title: "New session", directory: "/work" },
+  } } });
+  assert.deepEqual(updates, [{
+    path: { id: "ses_one" }, query: { directory: "/work" }, body: { title: "named-kilo" },
+  }]);
+  assert.deepEqual(live.reported, [{ id: "ses_one", name: "named-kilo" }]);
+});
+
+test("Kilo reports an exact resumed session directly from the product", async () => {
+  const live = new FakeLiveSession();
+  const gets = [];
+  const client = { session: { async get(request) {
+    gets.push(request);
+    return { data: { id: request.path.id, title: "existing-title", directory: "/work" }, response: { status: 200 } };
+  } } };
+  await (await loadPlugin(live))({
+    client,
+    directory: "/work",
+    environment: { AGENT_SESSIONS_SESSION_ID: "ses_exact" },
+  });
+  await tick();
+  assert.deepEqual(gets, [{ path: { id: "ses_exact" }, query: { directory: "/work" } }]);
+  assert.deepEqual(live.reported, [{ id: "ses_exact", name: "existing-title" }]);
+});
+
 test("Kilo submits to the exact live session and acknowledges native evidence", async () => {
   const live = new FakeLiveSession();
   const messages = [];
