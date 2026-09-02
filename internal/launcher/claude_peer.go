@@ -24,23 +24,8 @@ func RunClaudePeer(args []string) error {
 	if err != nil {
 		return err
 	}
-	environment := liveReportEnvironment(os.Environ(), claudeReportName(plan), plan.context.groups)
+	environment := liveReportEnvironment(os.Environ(), plan.peerName, plan.context.groups)
 	return Exec(claude, plan.args, environment)
-}
-
-func claudeReportName(plan claudePeerPlan) string {
-	if plan.peerName != "" {
-		return plan.peerName
-	}
-	for index, argument := range plan.args {
-		if argument == "--resume" && index+1 < len(plan.args) {
-			return plan.args[index+1]
-		}
-		if len(argument) > len("--resume=") && argument[:len("--resume=")] == "--resume=" {
-			return argument[len("--resume="):]
-		}
-	}
-	return ""
 }
 
 // parseClaudePeerArgs preserves native Claude argv byte-for-byte except for

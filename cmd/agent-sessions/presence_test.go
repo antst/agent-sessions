@@ -314,6 +314,37 @@ func TestConnectorLiveReportPrefersProductNativeUUID(t *testing.T) {
 	}
 }
 
+func TestConnectorLiveReportNeverFabricatesAProductName(t *testing.T) {
+	values := map[string]string{
+		"CLAUDE_CODE_SESSION_ID": "native-session",
+		"AGENT_SESSIONS_GROUPS":  `["team"]`,
+	}
+	report, ok := connectorLiveReport("claude", func(name string) string { return values[name] })
+	if !ok || report.UUID != "native-session" || report.Name != "" || !reflect.DeepEqual(report.Groups, []string{"team"}) {
+		t.Fatalf("connector report = %+v, ok=%v", report, ok)
+	}
+}
+
+func TestClaudeActiveSessionNameComesFromExactNativeInteractiveRow(t *testing.T) {
+	payload := []byte(`[
+		{"sessionId":"target","name":"background","kind":"background"},
+		{"sessionId":"other","name":"other title","kind":"interactive"},
+		{"sessionId":"target","name":"product title","kind":"interactive"}
+	]`)
+	if got := claudeActiveSessionNameFromJSON(payload, "target"); got != "product title" {
+		t.Fatalf("Claude active session name = %q", got)
+	}
+	for _, invalid := range [][]byte{
+		[]byte(`not-json`),
+		[]byte(`[{"sessionId":"other","name":"product title","kind":"interactive"}]`),
+		[]byte(`[{"sessionId":"target","name":"one","kind":"interactive"},{"sessionId":"target","name":"two","kind":"interactive"}]`),
+	} {
+		if got := claudeActiveSessionNameFromJSON(invalid, "target"); got != "" {
+			t.Fatalf("invalid native rows produced name %q from %s", got, invalid)
+		}
+	}
+}
+
 func newPresenceTestRuntime(t *testing.T) *daemonpkg.Runtime {
 	t.Helper()
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: t.TempDir()})

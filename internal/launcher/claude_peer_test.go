@@ -7,14 +7,16 @@ import (
 
 func TestClaudePeerPassesProductOwnedNameAndResumeSelectors(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want []string
+		name       string
+		args       []string
+		want       []string
+		wantReport string
 	}{
 		{
-			name: "fresh named",
-			args: []string{"--peer-name", "reviewer", "--model", "sonnet"},
-			want: []string{"--model", "sonnet", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--name", "reviewer"},
+			name:       "fresh named",
+			args:       []string{"--peer-name", "reviewer", "--model", "sonnet"},
+			want:       []string{"--model", "sonnet", "--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--name", "reviewer"},
+			wantReport: "reviewer",
 		},
 		{
 			name: "resume by name",
@@ -40,6 +42,9 @@ func TestClaudePeerPassesProductOwnedNameAndResumeSelectors(t *testing.T) {
 			}
 			if !reflect.DeepEqual(plan.args, test.want) {
 				t.Fatalf("native argv = %#v, want %#v", plan.args, test.want)
+			}
+			if plan.peerName != test.wantReport {
+				t.Fatalf("reported launch name = %q, want %q", plan.peerName, test.wantReport)
 			}
 		})
 	}

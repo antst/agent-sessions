@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -41,6 +42,9 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
+	if reported && product == connectorProductClaude && report.Name == "" {
+		report.Name = claudeActiveSessionName(ctx, report.UUID)
+	}
 	var live *liveSessionClient
 	if reported && connectorClaimsLivePresence(product, os.Getenv) {
 		live = startLiveSessionClient(ctx, livePresenceEndpoint(stateRoot), report,
@@ -253,9 +257,6 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 		return liveSessionReport{}, false
 	}
 	name := strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_NAME"))
-	if name == "" {
-		name = uuid
-	}
 	var groups []string
 	if encoded := strings.TrimSpace(getenv("AGENT_SESSIONS_GROUPS")); encoded != "" {
 		if json.Unmarshal([]byte(encoded), &groups) != nil {
@@ -263,6 +264,41 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 		}
 	}
 	return liveSessionReport{UUID: uuid, Name: name, Groups: uniqueStrings(groups), Product: product}, true
+}
+
+func claudeActiveSessionName(ctx context.Context, sessionID string) string {
+	executable, err := launcher.ResolveProductExecutable(connectorProductClaude)
+	if err != nil {
+		return ""
+	}
+	payload, err := exec.CommandContext(ctx, executable, "agents", "--json").Output() //nolint:gosec // selected native Claude executable.
+	if err != nil {
+		return ""
+	}
+	return claudeActiveSessionNameFromJSON(payload, sessionID)
+}
+
+func claudeActiveSessionNameFromJSON(payload []byte, sessionID string) string {
+	var sessions []struct {
+		SessionID string `json:"sessionId"`
+		Name      string `json:"name"`
+		Kind      string `json:"kind"`
+	}
+	if json.Unmarshal(payload, &sessions) != nil {
+		return ""
+	}
+	name := ""
+	for _, session := range sessions {
+		candidate := strings.TrimSpace(session.Name)
+		if session.SessionID != sessionID || session.Kind != "interactive" || candidate == "" {
+			continue
+		}
+		if name != "" && name != candidate {
+			return ""
+		}
+		name = candidate
+	}
+	return name
 }
 
 // resolveConnectorProduct keeps the repository-root MCP manifest useful for
