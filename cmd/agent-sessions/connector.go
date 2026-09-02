@@ -103,6 +103,9 @@ var connectorNativeAdapters = map[string]connectorNativeAdapter{
 // stream. A project-discovered MCP connector may expose the same tool name,
 // but it must never open a second connection and replace the product report.
 func connectorOwnsLivePresence(product string) bool {
+	if product == connectorProductCodex {
+		return false
+	}
 	_, ok := connectorNativeAdapters[product]
 	return ok
 }

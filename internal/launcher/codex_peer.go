@@ -66,17 +66,33 @@ type CodexDaemonPrepareRequest struct {
 // daemon preparation and App Server selection.
 type CodexDaemonPrepareResult struct {
 	ThreadID string
+	Name     string
 	Cwd      string
 }
 
 // CodexDaemonPrepare submits one parsed Codex launch intent.
 type CodexDaemonPrepare func(context.Context, CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error)
 
+// CodexNativeLaunch is the product-issued thread and native process handoff.
+// The caller stays alive as the process parent so its one presence connection
+// proves exactly the child lifetime.
+type CodexNativeLaunch struct {
+	Executable  string
+	Arguments   []string
+	Environment []string
+	ThreadID    string
+	Name        string
+	Groups      []string
+}
+
+// CodexNativeRunner starts the native TUI and holds its live presence stream.
+type CodexNativeRunner func(context.Context, CodexNativeLaunch) error
+
 // RunCodexPeerWithDaemon preserves the baseline parser and native exec path
 // while replacing the legacy runtime/supervisor transaction with one daemon
 // call. It never starts or stops Agent Sessions authority.
-func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDaemonPrepare) error {
-	if ctx == nil || prepare == nil {
+func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDaemonPrepare, run CodexNativeRunner) error {
+	if ctx == nil || prepare == nil || run == nil {
 		return errors.New("codex daemon launch coordinator is unavailable")
 	}
 	cwd, err := os.Getwd()
@@ -130,8 +146,11 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDae
 	launchArgs = append(launchArgs, plan.interactiveArgs...)
 	environment := envutil.Set(os.Environ(), peerSessionIDEnv, result.ThreadID)
 	environment = envutil.Set(environment, peerProductEnv, "codex")
-	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
-	return Exec(codex, launchArgs, environment)
+	environment = liveReportEnvironment(environment, result.Name, plan.peerContext.groups)
+	return run(ctx, CodexNativeLaunch{
+		Executable: codex, Arguments: launchArgs, Environment: environment,
+		ThreadID: result.ThreadID, Name: result.Name, Groups: append([]string(nil), plan.peerContext.groups...),
+	})
 }
 
 func codexExecutable() (string, error) {

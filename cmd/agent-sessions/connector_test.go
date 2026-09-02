@@ -67,12 +67,12 @@ func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) 
 }
 
 func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
-	for _, product := range []string{"opencode", "kilo", "pi", "omp", "dsh"} {
+	for _, product := range []string{"codex", "opencode", "kilo", "pi", "omp", "dsh"} {
 		if connectorOwnsLivePresence(product) {
 			t.Fatalf("%s project connector would replace its native presence stream", product)
 		}
 	}
-	for _, product := range []string{"codex", "claude", "grok", "qwen", "codebuddy"} {
+	for _, product := range []string{"claude", "grok", "qwen", "codebuddy"} {
 		if !connectorOwnsLivePresence(product) {
 			t.Fatalf("%s connector lost its only live presence stream", product)
 		}

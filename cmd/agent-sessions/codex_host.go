@@ -420,7 +420,34 @@ func (c *hostCoordinator) prepareCodex(
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
 	c.startCodexOwnerMonitor(runtime, thread.ID, request.Owner)
-	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Cwd: cwd}, nil
+	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Name: thread.Name, Cwd: cwd}, nil
+}
+
+func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) error {
+	command := exec.CommandContext(ctx, launch.Executable, launch.Arguments...) //nolint:gosec // product executable and argv were resolved by the launcher.
+	command.Env = append([]string(nil), launch.Environment...)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := command.Start(); err != nil {
+		return err
+	}
+
+	presenceCtx, stopPresence := context.WithCancel(ctx)
+	report := liveSessionReport{
+		UUID: launch.ThreadID, Name: launch.Name, Product: connectorProductCodex,
+		Groups: append([]string(nil), launch.Groups...),
+	}
+	client := startLiveSessionClient(presenceCtx, livePresenceEndpoint(defaultStateRoot()), report,
+		func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+			return connectorNativeCall(callCtx, report, method, params)
+		})
+	err := command.Wait()
+	stopPresence()
+	client.mu.Lock()
+	if client.current != nil {
+		_ = client.current.connection.Close()
+	}
+	client.mu.Unlock()
+	return err
 }
 
 func codexResumeCwd(request launcher.CodexDaemonPrepareRequest, _ bridge.CodexNativeThread) string {

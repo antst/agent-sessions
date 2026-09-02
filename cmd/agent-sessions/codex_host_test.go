@@ -2,13 +2,81 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 )
+
+func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
+	stateRoot := t.TempDir()
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot)
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	joined := make(chan liveSessionReport, 1)
+	left := make(chan liveSessionReport, 1)
+	server, err := startLivePresenceServer(serverCtx, stateRoot,
+		func(report liveSessionReport) { joined <- report },
+		func(report liveSessionReport) { left <- report }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+
+	original := connectorNativeAdapters[connectorProductCodex]
+	defer func() { connectorNativeAdapters[connectorProductCodex] = original }()
+	delivered := make(chan liveSessionReport, 1)
+	connectorNativeAdapters[connectorProductCodex] = func(_ context.Context, report liveSessionReport, _ string, body string) error {
+		if body != "hello" {
+			t.Errorf("delivered body = %q", body)
+		}
+		delivered <- report
+		return nil
+	}
+
+	launch := launcher.CodexNativeLaunch{
+		Executable: "/bin/sh", Arguments: []string{"-c", "sleep 1"},
+		ThreadID: "00000000-0000-0000-0000-00000000c001", Name: "reviewer", Groups: []string{"project"},
+	}
+	done := make(chan error, 1)
+	go func() { done <- runCodexNativePeer(context.Background(), launch) }()
+
+	select {
+	case report := <-joined:
+		if report.UUID != launch.ThreadID || report.Name != launch.Name || report.Product != "codex" || len(report.Groups) != 1 || report.Groups[0] != "project" {
+			t.Fatalf("live report = %+v", report)
+		}
+		params, _ := json.Marshal(map[string]any{"message_id": "message-1", "body": "hello"})
+		if _, err := server.Call(context.Background(), report.UUID, "test", "message.deliver", json.RawMessage(params)); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Codex child did not become live")
+	}
+	select {
+	case report := <-delivered:
+		if report.UUID != launch.ThreadID {
+			t.Fatalf("delivery targeted %q", report.UUID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live delivery did not target the Codex thread")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case report := <-left:
+		if report.UUID != launch.ThreadID {
+			t.Fatalf("departed report = %+v", report)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex presence outlived its child")
+	}
+}
 
 func TestCodexNativeReloadsDaemonWideMCPInventoryOncePerGeneration(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
