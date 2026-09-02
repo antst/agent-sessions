@@ -436,7 +436,7 @@ entries:
     new_owner: stateless relay plus daemon Claude adapter
     new_symbols: []
     replacement_tests:
-      - internal/bridge/mcp_test.go:TestClaudeMCPToolsAreStructuredMessagingWithoutModelIdentity
+      - internal/sessiontools/sessiontools_test.go:TestProductSurfacesFailLoudAndReturnIsolatedSchemas
     acceptance_cells: [CL-01, CL-03, CL-08, CL-09]
     evidence: [specs/002-unified-user-daemon/evidence/transplanted-regressions.md#claude]
     deletion_paths: [internal/bridge/mcp.go]

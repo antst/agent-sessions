@@ -3,10 +3,11 @@ package launcher
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/federator"
 )
 
 const (
@@ -99,7 +100,10 @@ func agentRuntimeDir() string {
 	if value := strings.TrimSpace(os.Getenv(agentRuntimeDirEnv)); value != "" {
 		return value
 	}
-	return federator.DefaultRuntimeDir()
+	if value := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); value != "" {
+		return filepath.Join(value, "agent-sessions")
+	}
+	return filepath.Join(os.TempDir(), "agent-sessions-"+strconv.Itoa(os.Getuid()))
 }
 
 func boolString(value bool) string {
@@ -107,44 +111,4 @@ func boolString(value bool) string {
 		return "true"
 	}
 	return "false"
-}
-
-func resolvedPeerPreferences(sessionID, product string) (federator.ResolvedPreferences, error) {
-	return federator.ResolveSessionPreferences(agentRuntimeDir(), federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
-	})
-}
-
-func resolvePeerLaunchContext(
-	sessionID, product string,
-	context peerLaunchContext,
-	alwaysApprove, alwaysApproveSpecified bool,
-) (federator.ResolvedPreferences, error) {
-	return federator.ResolveSessionPreferences(agentRuntimeDir(), peerPreferenceRequest(
-		sessionID, product, context, alwaysApprove, alwaysApproveSpecified,
-	))
-}
-
-func previewPeerLaunchContext(
-	sessionID, product string,
-	context peerLaunchContext,
-	alwaysApprove, alwaysApproveSpecified bool,
-) (federator.ResolvedPreferences, federator.ResolvePreferencesRequest, error) {
-	request := peerPreferenceRequest(sessionID, product, context, alwaysApprove, alwaysApproveSpecified)
-	resolved, err := federator.PreviewSessionPreferences(agentRuntimeDir(), request)
-	return resolved, request, err
-}
-
-func peerPreferenceRequest(
-	sessionID, product string,
-	context peerLaunchContext,
-	alwaysApprove, alwaysApproveSpecified bool,
-) federator.ResolvePreferencesRequest {
-	return federator.ResolvePreferencesRequest{
-		SessionID: sessionID, Product: product, Kind: federator.SessionKindInteractive,
-		Groups: context.groups, GroupsSpecified: context.groupsSpecified,
-		ParentSessionID: context.parentSession, ParentSpecified: context.parentSpecified,
-		InheritParentGroups: context.inheritParentGroups, InheritGroupsSpecified: context.inheritGroupsSpecified,
-		AlwaysApprove: alwaysApprove, AlwaysApproveSpecified: alwaysApproveSpecified,
-	}
 }

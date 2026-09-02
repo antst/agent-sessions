@@ -83,26 +83,6 @@ func grokTokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func attestGrokMCPCaller(_ nativePaths) (string, error) {
-	sessionID := strings.TrimSpace(os.Getenv(grokSessionIDEnv))
-	if !validSessionID(sessionID) {
-		return "", errors.New("grok MCP session is unavailable")
-	}
-	return sessionID, nil
-}
-
-func inferGrokParent(_ nativePaths, startPID int) (laneOwner, bool) {
-	sessionID := strings.TrimSpace(os.Getenv(grokSessionIDEnv))
-	if !validSessionID(sessionID) || startPID <= 1 {
-		return laneOwner{}, false
-	}
-	procStart, err := captureProcessStart(startPID)
-	if err != nil {
-		return laneOwner{}, false
-	}
-	return laneOwner{PID: startPID, ProcStart: procStart, SessionID: sessionID, PermissionMode: "default"}, true
-}
-
 type grokManagedProcess struct {
 	cmd         *exec.Cmd
 	procStart   string

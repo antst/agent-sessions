@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/federator"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 var (
@@ -63,7 +63,7 @@ func laneHelpRequested(args []string) bool {
 }
 
 func launcherProductByLaneRole(role string) (launcherProduct, bool) {
-	for _, descriptor := range federator.ProductDescriptors() {
+	for _, descriptor := range productcatalog.All() {
 		if descriptor.LaneRuntimeRole == role {
 			return launcherProduct{descriptor: descriptor}, true
 		}

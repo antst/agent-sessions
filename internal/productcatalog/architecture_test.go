@@ -14,58 +14,12 @@ import (
 
 func TestFederatorHasNoAuthoredProductInventory(t *testing.T) {
 	root := productCatalogRepositoryRoot(t)
-	path := filepath.Join(root, "internal", "federator", "product.go")
-	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	matches, err := filepath.Glob(filepath.Join(root, "internal", "federator", "*.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	compatibilityCalls := map[string]int{}
-	for _, declaration := range file.Decls {
-		decl, ok := declaration.(*ast.GenDecl)
-		if !ok || decl.Tok != token.VAR {
-			continue
-		}
-		for _, specification := range decl.Specs {
-			value, ok := specification.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			for _, expression := range value.Values {
-				literal, ok := expression.(*ast.CompositeLit)
-				if ok && len(literal.Elts) > 1 {
-					t.Fatalf("federator authored a parallel composite inventory at %s", path)
-				}
-			}
-		}
-	}
-	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 {
-			return true
-		}
-		function, ok := call.Fun.(*ast.Ident)
-		if !ok || function.Name != "mustProductCapability" {
-			return true
-		}
-		literal, ok := call.Args[0].(*ast.BasicLit)
-		if !ok || literal.Kind != token.STRING {
-			t.Fatalf("federator compatibility capability is not one fixed baseline literal")
-		}
-		value, err := strconv.Unquote(literal.Value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		compatibilityCalls[value]++
-		return true
-	})
-	wantCompatibility := map[string]int{"codex": 1, "claude": 1, "grok": 1, "qwen": 1}
-	if len(compatibilityCalls) != len(wantCompatibility) {
-		t.Fatalf("federator compatibility product literals = %v, want frozen baseline %v", compatibilityCalls, wantCompatibility)
-	}
-	for product, count := range wantCompatibility {
-		if compatibilityCalls[product] != count {
-			t.Fatalf("federator compatibility product literals = %v, want frozen baseline %v", compatibilityCalls, wantCompatibility)
-		}
+	if len(matches) != 0 {
+		t.Fatalf("retired federator package still contains Go files: %v", matches)
 	}
 }
 
@@ -81,24 +35,11 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 		"cmd/agent-sessions/lane.go":                      29,
 		"cmd/agent-sessions/main.go":                      4,
 		"cmd/agent-sessions/messaging.go":                 4,
-		"internal/bridge/claude_lane.go":                  1,
-		"internal/bridge/cleanup.go":                      3,
-		"internal/bridge/grok_lane.go":                    1,
-		"internal/bridge/group_context.go":                2,
-		"internal/bridge/mcp.go":                          15,
 		"internal/bridge/native_lane_acp.go":              2,
-		"internal/bridge/qwen_lane.go":                    1,
-		"internal/bridge/qwen_plugin.go":                  2,
-		"internal/bridge/runtime.go":                      6,
 		"internal/daemon/adapter_claude.go":               1,
 		"internal/daemon/adapter_codex.go":                1,
 		"internal/daemon/adapter_grok.go":                 1,
 		"internal/daemon/adapter_qwen.go":                 1,
-		"internal/federator/agent.go":                     1,
-		"internal/federator/groups.go":                    2,
-		"internal/federator/lane.go":                      6,
-		"internal/federator/peer_inspect.go":              2,
-		"internal/federator/registration.go":              22,
 		"internal/launcher/options.go":                    4,
 		"internal/launcher/product.go":                    4,
 		"internal/procinfo/procinfo.go":                   1,

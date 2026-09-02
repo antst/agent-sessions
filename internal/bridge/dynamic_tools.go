@@ -52,20 +52,6 @@ func handleNativeServerRequest(client *appServerClient, request rpcServerRequest
 		respondDynamicToolFailure(client, request.ID, fmt.Errorf("unsupported headless dynamic tool %q", call.Tool))
 		return
 	}
-	if server == "agent_sessions" {
-		if !authorizedPeerThreadNative(resolveNativePaths(), call.ThreadID) {
-			respondDynamicToolFailure(client, request.ID, fmt.Errorf("agent_sessions is inactive outside an attested peer session"))
-			return
-		}
-		result, err := callNativePeerTool(tool, call.Arguments, call.ThreadID)
-		if err != nil {
-			respondDynamicToolFailure(client, request.ID, err)
-			return
-		}
-		items := []map[string]any{{"type": "inputText", "text": stringValue(result["text"])}}
-		_ = client.respond(request.ID, map[string]any{"contentItems": items, "success": true}, nil)
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var result mcpToolCallResponse

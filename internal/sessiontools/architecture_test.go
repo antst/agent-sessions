@@ -16,26 +16,14 @@ import (
 // This is an exact, shrinking compatibility allowlist. Extracted Phase-A code
 // must never add another dependency on the frozen bridge/federator trees.
 var frozenLegacyImporters = map[string]bool{
-	"cmd/agent-sessions/codex_host.go":     true,
-	"cmd/agent-sessions/federation.go":     true,
-	"cmd/agent-sessions/grok_host.go":      true,
-	"cmd/agent-sessions/hook.go":           true,
-	"cmd/agent-sessions/lane.go":           true,
-	"cmd/agent-sessions/lane_notice.go":    true,
-	"cmd/agent-sessions/messaging.go":      true,
-	"cmd/agent-sessions/qwen_host.go":      true,
-	"internal/bridge/claude_lane.go":       true,
-	"internal/bridge/group_context.go":     true,
-	"internal/bridge/lane.go":              true,
-	"internal/bridge/mcp.go":               true,
-	"internal/bridge/mcp_lane.go":          true,
-	"internal/bridge/product.go":           true,
-	"internal/bridge/qwen_lane_manager.go": true,
-	"internal/bridge/runtime.go":           true,
-	"internal/launcher/lane.go":            true,
-	"internal/launcher/peer.go":            true,
-	"internal/launcher/peer_context.go":    true,
-	"internal/launcher/product.go":         true,
+	"cmd/agent-sessions/codex_host.go":  true,
+	"cmd/agent-sessions/federation.go":  true,
+	"cmd/agent-sessions/grok_host.go":   true,
+	"cmd/agent-sessions/hook.go":        true,
+	"cmd/agent-sessions/lane.go":        true,
+	"cmd/agent-sessions/lane_notice.go": true,
+	"cmd/agent-sessions/messaging.go":   true,
+	"cmd/agent-sessions/qwen_host.go":   true,
 }
 
 func TestNoNewLegacyBridgeOrFederatorImports(t *testing.T) {

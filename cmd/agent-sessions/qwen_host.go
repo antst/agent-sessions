@@ -11,7 +11,6 @@ import (
 
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/federator"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
@@ -20,8 +19,8 @@ import (
 type qwenPending struct {
 	request launcher.QwenDaemonPrepareRequest
 	root    string
-	input   federator.QwenArtifactAttestation
-	events  federator.QwenArtifactAttestation
+	input   string
+	events  string
 	writer  *bridge.QwenNativeInput
 	adopted bool
 }
@@ -76,21 +75,11 @@ func (c *hostCoordinator) prepareQwen(
 		}
 		_ = file.Close()
 	}
-	input, err := federator.QwenArtifactAttestationForPath(inputPath)
-	if err != nil {
-		_ = removeQwenRoot(root, nil)
-		return launcher.QwenDaemonPrepareResult{}, err
-	}
-	events, err := federator.QwenArtifactAttestationForPath(eventsPath)
-	if err != nil {
-		_ = removeQwenRoot(root, []federator.QwenArtifactAttestation{input})
-		return launcher.QwenDaemonPrepareResult{}, err
-	}
-	pending := &qwenPending{request: request, root: root, input: input, events: events}
+	pending := &qwenPending{request: request, root: root, input: inputPath, events: eventsPath}
 	c.mu.Lock()
 	if c.qwenPending[request.SessionID] != nil {
 		c.mu.Unlock()
-		_ = removeQwenRoot(root, []federator.QwenArtifactAttestation{input, events})
+		_ = removeQwenRoot(root, []string{inputPath, eventsPath})
 		return launcher.QwenDaemonPrepareResult{}, errors.New("qwen session is already being prepared")
 	}
 	c.qwenPending[request.SessionID] = pending
@@ -111,7 +100,7 @@ func (c *hostCoordinator) prepareQwen(
 		c.mu.Lock()
 		delete(c.qwenPending, request.SessionID)
 		c.mu.Unlock()
-		_ = removeQwenRoot(root, []federator.QwenArtifactAttestation{input, events})
+		_ = removeQwenRoot(root, []string{inputPath, eventsPath})
 		return launcher.QwenDaemonPrepareResult{}, err
 	}
 	c.startQwenOwnerMonitor(runtime, prepared.ID, request.Owner)
@@ -135,27 +124,15 @@ func qwenInitialModeForPreference(preference string) string {
 }
 
 func qwenEvidence(pending *qwenPending) (daemonpkg.NativeEvidence, error) {
-	input, err := federator.QwenArtifactAttestationForPath(pending.input.Path)
-	if err != nil || input.Device != pending.input.Device || input.Inode != pending.input.Inode {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen input artifact changed while capturing evidence")
-	}
-	events, err := federator.QwenArtifactAttestationForPath(pending.events.Path)
-	if err != nil || events.Device != pending.events.Device || events.Inode != pending.events.Inode {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen event artifact changed while capturing evidence")
+	for _, path := range []string{pending.input, pending.events} {
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			return daemonpkg.NativeEvidence{}, errors.New("qwen protocol stream is unavailable")
+		}
 	}
 	return daemonpkg.NativeEvidence{
 		Process: pending.request.Owner, Executable: pending.request.QwenBin,
-		ThreadID: pending.request.SessionID, ArtifactPath: pending.input.Path,
-		RegistryPath:     pending.events.Path,
-		ArtifactRevision: input.Fingerprint + ":" + events.Fingerprint,
-		ArtifactDevice:   pending.input.Device,
-		ArtifactInode:    pending.input.Inode,
-		ArtifactPrefix:   input.Fingerprint,
-		ArtifactBytes:    input.Size,
-		RegistryDevice:   pending.events.Device,
-		RegistryInode:    pending.events.Inode,
-		RegistryPrefix:   events.Fingerprint,
-		RegistryBytes:    events.Size,
+		ThreadID: pending.request.SessionID, ArtifactPath: pending.input,
+		RegistryPath: pending.events, ArtifactRevision: "live",
 	}, nil
 }
 
@@ -196,8 +173,7 @@ func (c *hostCoordinator) startQwenOwnerMonitor(runtime *daemonpkg.Runtime, id s
 					}
 					continue
 				}
-				if !qwenOwnerExecReady(pending) ||
-					!federator.QwenArtifactIdentityMatches(pending.input) || !federator.QwenArtifactIdentityMatches(pending.events) {
+				if !qwenOwnerExecReady(pending) {
 					continue
 				}
 				evidence, evidenceErr := qwenEvidence(pending)
@@ -250,8 +226,8 @@ func qwenOwnerExecReady(pending *qwenPending) bool {
 		return false
 	}
 	joined := "\x00" + strings.Join(args, "\x00") + "\x00"
-	return strings.Contains(joined, "\x00"+pending.input.Path+"\x00") &&
-		strings.Contains(joined, "\x00"+pending.events.Path+"\x00") &&
+	return strings.Contains(joined, "\x00"+pending.input+"\x00") &&
+		strings.Contains(joined, "\x00"+pending.events+"\x00") &&
 		strings.Contains(joined, "\x00"+pending.request.SessionID+"\x00")
 }
 
@@ -260,68 +236,13 @@ func (c *hostCoordinator) refreshQwenAttachment(_ context.Context, attachment da
 	pending := c.qwenPending[attachment.ID]
 	c.mu.Unlock()
 	if pending == nil {
-		return refreshDurableQwenAttachment(c.stateRoot, attachment)
+		return daemonpkg.NativeEvidence{}, errors.New("qwen session is not connected to this daemon")
 	}
 	if procinfo.ObserveIdentity(pending.request.Owner).Status != procinfo.IdentityMatches ||
-		!qwenOwnerExecReady(pending) || !federator.QwenArtifactIdentityMatches(pending.input) ||
-		!federator.QwenArtifactIdentityMatches(pending.events) {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen native owner or dual-output artifacts are not live")
+		!qwenOwnerExecReady(pending) {
+		return daemonpkg.NativeEvidence{}, errors.New("qwen native owner is not live")
 	}
 	return qwenEvidence(pending)
-}
-
-//nolint:gocyclo // Refresh revalidates each native process and exact dual-output artifact independently.
-func refreshDurableQwenAttachment(stateRoot string, attachment daemonpkg.ManagedAttachment) (daemonpkg.NativeEvidence, error) {
-	evidence := attachment.Evidence
-	root := filepath.Join(stateRoot, "native", "qwen", attachment.NativeSessionID)
-	expectedInput := filepath.Join(root, "input.jsonl")
-	expectedEvents := filepath.Join(root, "events.jsonl")
-	if procinfo.ObserveIdentity(evidence.Process).Status != procinfo.IdentityMatches ||
-		evidence.ThreadID != attachment.NativeSessionID || !filepath.IsAbs(evidence.ArtifactPath) ||
-		!filepath.IsAbs(evidence.RegistryPath) || evidence.ArtifactPath != expectedInput ||
-		evidence.RegistryPath != expectedEvents {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen native owner or dual-output artifacts are not live")
-	}
-	input, inputErr := federator.QwenArtifactIdentityForPath(evidence.ArtifactPath)
-	events, eventsErr := federator.QwenArtifactIdentityForPath(evidence.RegistryPath)
-	if inputErr != nil || eventsErr != nil ||
-		(evidence.ArtifactDevice != 0 && (input.Device != evidence.ArtifactDevice || input.Inode != evidence.ArtifactInode)) ||
-		(evidence.RegistryDevice != 0 && (events.Device != evidence.RegistryDevice || events.Inode != evidence.RegistryInode)) ||
-		(evidence.ArtifactPrefix != "" && !federator.QwenArtifactPrefixMatches(
-			evidence.ArtifactPath, evidence.ArtifactPrefix, evidence.ArtifactBytes,
-		)) ||
-		(evidence.RegistryPrefix != "" && !federator.QwenArtifactPrefixMatches(
-			evidence.RegistryPath, evidence.RegistryPrefix, evidence.RegistryBytes,
-		)) {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen dual-output artifact identity changed")
-	}
-	args, err := procinfo.Args(evidence.Process.PID)
-	if err != nil {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen native owner arguments are unavailable")
-	}
-	joined := "\x00" + strings.Join(args, "\x00") + "\x00"
-	for _, value := range []string{evidence.ArtifactPath, evidence.RegistryPath, attachment.NativeSessionID} {
-		if !strings.Contains(joined, "\x00"+value+"\x00") {
-			return daemonpkg.NativeEvidence{}, errors.New("qwen native owner is not attached to its daemon artifacts")
-		}
-	}
-	inputCheckpoint, err := federator.QwenArtifactAttestationForPath(evidence.ArtifactPath)
-	if err != nil {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen input artifact changed while checkpointing")
-	}
-	eventsCheckpoint, err := federator.QwenArtifactAttestationForPath(evidence.RegistryPath)
-	if err != nil {
-		return daemonpkg.NativeEvidence{}, errors.New("qwen event artifact changed while checkpointing")
-	}
-	// Older v2 development records retained only the launch-time content
-	// fingerprint. Upgrade them after exact owner, argv, path, and append-only
-	// prefix corroboration so inode recycling cannot disguise replacement.
-	evidence.ArtifactDevice, evidence.ArtifactInode = input.Device, input.Inode
-	evidence.RegistryDevice, evidence.RegistryInode = events.Device, events.Inode
-	evidence.ArtifactPrefix, evidence.ArtifactBytes = inputCheckpoint.Fingerprint, inputCheckpoint.Size
-	evidence.RegistryPrefix, evidence.RegistryBytes = eventsCheckpoint.Fingerprint, eventsCheckpoint.Size
-	evidence.ArtifactRevision = inputCheckpoint.Fingerprint + ":" + eventsCheckpoint.Fingerprint
-	return evidence, nil
 }
 
 func (c *hostCoordinator) cleanupQwenAttachment(_ context.Context, attachment daemonpkg.ManagedAttachment) error {
@@ -329,7 +250,7 @@ func (c *hostCoordinator) cleanupQwenAttachment(_ context.Context, attachment da
 	pending := c.qwenPending[attachment.ID]
 	c.mu.Unlock()
 	if pending == nil {
-		return cleanupDurableQwenAttachment(c.stateRoot, attachment)
+		return nil
 	}
 	if pending.writer != nil {
 		_ = pending.writer.Close()
@@ -338,7 +259,7 @@ func (c *hostCoordinator) cleanupQwenAttachment(_ context.Context, attachment da
 	if procinfo.Read(pending.request.Owner.PID).Status != procinfo.Absent {
 		return errors.New("native Qwen PID is not absent during cleanup")
 	}
-	if err := removeQwenRoot(pending.root, []federator.QwenArtifactAttestation{pending.input, pending.events}); err != nil {
+	if err := removeQwenRoot(pending.root, []string{pending.input, pending.events}); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -347,32 +268,12 @@ func (c *hostCoordinator) cleanupQwenAttachment(_ context.Context, attachment da
 	return nil
 }
 
-func cleanupDurableQwenAttachment(stateRoot string, attachment daemonpkg.ManagedAttachment) error {
-	if procinfo.Read(attachment.Evidence.Process.PID).Status != procinfo.Absent {
-		return errors.New("native Qwen PID is not absent during cleanup")
-	}
-	root := filepath.Join(stateRoot, "native", "qwen", attachment.NativeSessionID)
-	input := federator.QwenArtifactAttestation{
-		Path: attachment.Evidence.ArtifactPath, Device: attachment.Evidence.ArtifactDevice, Inode: attachment.Evidence.ArtifactInode,
-		Fingerprint: attachment.Evidence.ArtifactPrefix, Size: attachment.Evidence.ArtifactBytes,
-	}
-	events := federator.QwenArtifactAttestation{
-		Path: attachment.Evidence.RegistryPath, Device: attachment.Evidence.RegistryDevice, Inode: attachment.Evidence.RegistryInode,
-		Fingerprint: attachment.Evidence.RegistryPrefix, Size: attachment.Evidence.RegistryBytes,
-	}
-	if input.Device == 0 || input.Inode == 0 || events.Device == 0 || events.Inode == 0 ||
-		input.Path != filepath.Join(root, "input.jsonl") || events.Path != filepath.Join(root, "events.jsonl") {
-		return errors.New("qwen durable cleanup identity is incomplete")
-	}
-	return removeQwenRoot(root, []federator.QwenArtifactAttestation{input, events})
-}
-
-func removeQwenRoot(root string, artifacts []federator.QwenArtifactAttestation) error {
+func removeQwenRoot(root string, artifacts []string) error {
 	for _, artifact := range artifacts {
-		if filepath.Dir(artifact.Path) != root || !federator.QwenArtifactIdentityMatches(artifact) {
-			return errors.New("qwen protocol artifact identity changed before cleanup")
+		if filepath.Dir(artifact) != root {
+			return errors.New("qwen protocol artifact is outside its session root")
 		}
-		if err := os.Remove(artifact.Path); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(artifact); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}

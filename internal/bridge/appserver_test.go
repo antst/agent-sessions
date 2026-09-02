@@ -7,15 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,44 +27,24 @@ type fakeAppServer struct {
 	once          sync.Once
 }
 
-func startFakeNativeAppServer(t *testing.T, handler func(map[string]any) (any, error)) (*fakeAppServer, string) {
-	t.Helper()
-	socket := filepath.Join(t.TempDir(), "app-server.sock")
-	return startFakeNativeAppServerAt(t, socket, handler), socket
-}
-
 func startFakeNativeAppServerAt(t *testing.T, socket string, handler func(map[string]any) (any, error)) *fakeAppServer {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeAppServer{
-		listener: listener, requests: make(chan map[string]any, 64), handler: handler, done: make(chan struct{}),
+		listener: listener,
+		requests: make(chan map[string]any, 64),
+		handler:  handler,
+		done:     make(chan struct{}),
 	}
 	go fake.accept()
 	t.Cleanup(fake.close)
 	return fake
-}
-
-func TestAppServerClientCapturesUnixPeerProcessIdentity(t *testing.T) {
-	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		if stringValue(request["method"]) == "initialize" {
-			return map[string]any{}, nil
-		}
-		return map[string]any{}, nil
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := dialAppServer(ctx, socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.close()
-	if client.peerPID != os.Getpid() || client.peerProcStart == "" ||
-		!exactProcessIdentityMatch(client.peerPID, client.peerProcStart) {
-		t.Fatalf("App Server peer identity = %d/%q", client.peerPID, client.peerProcStart)
-	}
 }
 
 func (f *fakeAppServer) close() {
@@ -123,8 +100,8 @@ func (f *fakeAppServer) serve(conn net.Conn) {
 		if callErr != nil {
 			response = map[string]any{"id": id, "error": map[string]any{"code": -32603, "message": callErr.Error()}}
 		}
-		body, _ := json.Marshal(response)
-		if writeTestFrame(conn, body) != nil {
+		encoded, _ := json.Marshal(response)
+		if writeTestFrame(conn, encoded) != nil {
 			return
 		}
 		if f.afterResponse != nil {
@@ -195,8 +172,18 @@ func writeTestFrame(writer io.Writer, payload []byte) error {
 	return err
 }
 
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestNativeAppServerClientRoundTrip(t *testing.T) {
-	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
+	socket := filepath.Join(t.TempDir(), "app-server.sock")
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
 		switch stringValue(request["method"]) {
 		case "initialize":
 			return map[string]any{"userAgent": "fake"}, nil
@@ -221,328 +208,5 @@ func TestNativeAppServerClientRoundTrip(t *testing.T) {
 	}
 	if result.Thread.ID != "thread-a" || statusType(result.Thread.Status) != "idle" {
 		t.Fatalf("unexpected thread result: %+v", result.Thread)
-	}
-}
-
-func TestActiveAppServerThreads(t *testing.T) {
-	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		switch stringValue(request["method"]) {
-		case "initialize":
-			return map[string]any{}, nil
-		case "thread/loaded/list":
-			return map[string]any{"data": []string{"idle-thread", "active-b", "active-a"}}, nil
-		case "thread/read":
-			params := request["params"].(map[string]any)
-			threadID := stringValue(params["threadId"])
-			status := "idle"
-			if strings.HasPrefix(threadID, "active-") {
-				status = "active"
-			}
-			return map[string]any{"thread": map[string]any{
-				"id": threadID, "status": map[string]any{"type": status},
-			}}, nil
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := dialAppServer(ctx, socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.close()
-	active, err := activeAppServerThreads(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(active, []string{"active-a", "active-b"}) {
-		t.Fatalf("active threads = %v", active)
-	}
-}
-
-func TestAppServerSocketRunning(t *testing.T) {
-	_, socket := startFakeNativeAppServer(t, func(map[string]any) (any, error) {
-		return map[string]any{}, nil
-	})
-	running, err := appServerSocketRunning(socket)
-	if err != nil || !running {
-		t.Fatalf("live socket: running=%v err=%v", running, err)
-	}
-
-	missing := filepath.Join(t.TempDir(), "missing.sock")
-	running, err = appServerSocketRunning(missing)
-	if err != nil || running {
-		t.Fatalf("missing socket: running=%v err=%v", running, err)
-	}
-}
-
-func TestNativeAppServerClientDispatchesDynamicMCPTool(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
-	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	threadID := "00000000-0000-0000-0000-000000000031"
-	writeTestActiveCodexLane(t, resolveNativePaths(), threadID)
-	fake, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		switch stringValue(request["method"]) {
-		case "initialize", "trigger/dynamic":
-			return map[string]any{}, nil
-		case "mcpServer/tool/call":
-			t.Fatal("agent_sessions dynamic tools must be handled with the App Server-attested thread id")
-			return nil, errors.New("unexpected agent_sessions MCP relay")
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	fake.afterResponse = func(conn net.Conn, request map[string]any) {
-		if stringValue(request["method"]) != "trigger/dynamic" {
-			return
-		}
-		body, _ := json.Marshal(map[string]any{
-			"id": "dynamic-request-1", "method": "item/tool/call",
-			"params": map[string]any{
-				"threadId": threadID, "turnId": "turn-dynamic", "callId": "call-dynamic",
-				"namespace": nil, "tool": "mcp__agent_sessions__list_peers", "arguments": map[string]any{},
-			},
-		})
-		_ = writeTestFrame(conn, body)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := dialAppServer(ctx, socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.close()
-	if err := client.request(ctx, "trigger/dynamic", map[string]any{}, nil); err != nil {
-		t.Fatal(err)
-	}
-	waitForDynamicToolError(t, fake.requests, "dynamic-request-1", "communication is inactive for this ungrouped session")
-}
-
-func TestDynamicPeerToolCannotClaimAnotherThread(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("AGENT_SESSIONS_STATE_ROOT", filepath.Join(root, "state"))
-	t.Setenv("CLAUDE_PEER_CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
-	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
-	callerID := "00000000-0000-0000-0000-000000000041"
-	writeTestActiveCodexLane(t, resolveNativePaths(), callerID)
-	fake, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		switch stringValue(request["method"]) {
-		case "initialize", "trigger/dynamic":
-			return map[string]any{}, nil
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	fake.afterResponse = func(conn net.Conn, request map[string]any) {
-		if stringValue(request["method"]) != "trigger/dynamic" {
-			return
-		}
-		body, _ := json.Marshal(map[string]any{
-			"id": "dynamic-foreign-session", "method": "item/tool/call",
-			"params": map[string]any{
-				"threadId": "00000000-0000-0000-0000-000000000041", "turnId": "turn-dynamic", "callId": "call-dynamic",
-				"namespace": nil, "tool": "mcp__agent_sessions__identity",
-				"arguments": map[string]any{"session_id": "00000000-0000-0000-0000-000000000042"},
-			},
-		})
-		_ = writeTestFrame(conn, body)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client, err := dialAppServer(ctx, socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.close()
-	if err := client.request(ctx, "trigger/dynamic", map[string]any{}, nil); err != nil {
-		t.Fatal(err)
-	}
-	waitForDynamicToolError(t, fake.requests, "dynamic-foreign-session", "cannot act as")
-}
-
-func waitForDynamicToolError(t *testing.T, requests <-chan map[string]any, requestID, message string) {
-	t.Helper()
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case request := <-requests:
-			if request["id"] != requestID || request["method"] != nil {
-				continue
-			}
-			result := request["result"].(map[string]any)
-			if success, _ := result["success"].(bool); success {
-				t.Fatalf("dynamic tool error unexpectedly succeeded: %v", result)
-			}
-			items := result["contentItems"].([]any)
-			if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["text"].(string), message) {
-				t.Fatalf("dynamic tool error content = %v, want substring %q", items, message)
-			}
-			return
-		case <-deadline:
-			t.Fatalf("timed out waiting for dynamic tool error %q", requestID)
-		}
-	}
-}
-
-func TestNativeSupervisorWakesIdleThreadInYoloMode(t *testing.T) {
-	requests := make(chan map[string]any, 64)
-	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		requests <- request
-		switch stringValue(request["method"]) {
-		case "initialize":
-			return map[string]any{"userAgent": "fake"}, nil
-		case "thread/loaded/list":
-			return map[string]any{"data": []string{}}, nil
-		case "thread/read":
-			return map[string]any{"thread": map[string]any{
-				"id": "thread-idle", "cwd": t.TempDir(), "source": "appServer", "status": map[string]any{"type": "idle"},
-			}}, nil
-		case "turn/start":
-			return map[string]any{"turn": map[string]any{"id": "turn-wake", "status": "inProgress"}}, nil
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	root := t.TempDir()
-	executable, _ := os.Executable()
-	supervisor := &nativeSupervisor{
-		paths: nativePaths{
-			dataRoot: filepath.Join(root, "state"), claudeRoot: filepath.Join(root, "claude"),
-			codexHome: filepath.Join(root, "codex"), runtimeDir: filepath.Join(root, "run"),
-			supervisorSock: filepath.Join(root, "supervisor.sock"), supervisorState: filepath.Join(root, "supervisor.json"),
-			appServerSock: socket,
-		},
-		pluginVersion: "test", executable: executable, procStart: readProcStart(os.Getpid()),
-		startedAt: time.Now().UnixMilli(), done: make(chan struct{}), shims: map[string]map[string]any{},
-		activeTurns: map[string]string{}, subscribed: map[string]bool{},
-	}
-	if err := supervisor.start(); err != nil {
-		t.Fatal(err)
-	}
-	defer supervisor.shutdown()
-	writeTestActiveCodexLane(t, supervisor.paths, "thread-idle")
-	delivery, err := supervisor.wakeThread("thread-idle", map[string]any{
-		"message": "WAKE", "from": "uds:/tmp/claude.sock", "fromName": "peer-a",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if delivery != "started" {
-		t.Fatalf("unexpected delivery: %s", delivery)
-	}
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case request := <-requests:
-			if stringValue(request["method"]) != "turn/start" {
-				continue
-			}
-			params := request["params"].(map[string]any)
-			if _, present := params["approvalPolicy"]; present {
-				t.Fatalf("peer wake persisted approval override: %v", params["approvalPolicy"])
-			}
-			if _, present := params["sandboxPolicy"]; present {
-				t.Fatalf("peer wake persisted sandbox override: %v", params["sandboxPolicy"])
-			}
-			return
-		case <-deadline:
-			t.Fatal("timed out waiting for turn/start")
-		}
-	}
-}
-
-func TestNativeSupervisorDoesNotRepublishRetiredLoadedThread(t *testing.T) {
-	threadReads := make(chan struct{}, 1)
-	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		switch stringValue(request["method"]) {
-		case "initialize":
-			return map[string]any{}, nil
-		case "thread/loaded/list":
-			return map[string]any{"data": []string{"archived-lane"}}, nil
-		case "thread/list":
-			params, _ := request["params"].(map[string]any)
-			if archived, _ := params["archived"].(bool); archived {
-				return map[string]any{"data": []map[string]any{{"id": "archived-lane"}}}, nil
-			}
-			return map[string]any{"data": []any{}}, nil
-		case "thread/read":
-			select {
-			case threadReads <- struct{}{}:
-			default:
-			}
-			return nil, errors.New("retired thread must not be read or republished")
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	root := t.TempDir()
-	supervisor := &nativeSupervisor{
-		paths: nativePaths{
-			dataRoot: filepath.Join(root, "state"), claudeRoot: filepath.Join(root, "claude"),
-			codexHome: filepath.Join(root, "codex"), runtimeDir: filepath.Join(root, "run"),
-			supervisorSock:  filepath.Join(root, "runtime", "supervisor.sock"),
-			supervisorState: filepath.Join(root, "state", "supervisor.json"), appServerSock: socket,
-		},
-		pluginVersion: "test", executable: os.Args[0], shimExecutable: os.Args[0],
-		procStart: readProcStart(os.Getpid()), startedAt: time.Now().UnixMilli(), done: make(chan struct{}),
-		shims: map[string]map[string]any{}, activeTurns: map[string]string{}, subscribed: map[string]bool{},
-		retired: map[string]bool{},
-	}
-	writeTestActiveCodexLane(t, supervisor.paths, "archived-lane")
-	if err := supervisor.start(); err != nil {
-		t.Fatal(err)
-	}
-	defer supervisor.shutdown()
-	select {
-	case <-threadReads:
-		t.Fatal("reconciliation read a retired loaded thread")
-	default:
-	}
-	if len(supervisor.shims) != 0 {
-		t.Fatalf("retired thread was republished: %#v", supervisor.shims)
-	}
-	if !supervisor.isRetired("archived-lane") {
-		t.Fatal("startup audit did not retire the archived loaded thread")
-	}
-	if _, err := os.Stat(retiredThreadPath(supervisor.paths, "archived-lane")); err != nil {
-		t.Fatalf("startup audit did not persist retirement: %v", err)
-	}
-}
-
-func TestNativeSupervisorStartupAuditKeepsActiveLoadedThread(t *testing.T) {
-	_, socket := startFakeNativeAppServer(t, func(request map[string]any) (any, error) {
-		switch stringValue(request["method"]) {
-		case "initialize":
-			return map[string]any{}, nil
-		case "thread/list":
-			return map[string]any{"data": []map[string]any{{"id": "active-lane"}}}, nil
-		default:
-			return map[string]any{}, nil
-		}
-	})
-	root := t.TempDir()
-	paths := nativePaths{dataRoot: filepath.Join(root, "state")}
-	if err := markRetiredThread(paths, "active-lane"); err != nil {
-		t.Fatal(err)
-	}
-	supervisor := &nativeSupervisor{paths: paths, retired: readRetiredThreads(paths)}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	client, err := dialAppServer(ctx, socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.close()
-	if err := supervisor.auditLoadedRetirement(client, []string{"active-lane"}); err != nil {
-		t.Fatal(err)
-	}
-	if supervisor.isRetired("active-lane") {
-		t.Fatal("startup audit retained a tombstone for an active thread")
-	}
-	if _, err := os.Stat(retiredThreadPath(paths, "active-lane")); !os.IsNotExist(err) {
-		t.Fatalf("active thread retirement marker survived audit: %v", err)
 	}
 }

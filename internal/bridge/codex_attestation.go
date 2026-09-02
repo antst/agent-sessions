@@ -45,7 +45,7 @@ func (native *CodexNative) AttestMCPCall(startPID int, params json.RawMessage) (
 		!processHasAncestor(startPID, appServer.PID) {
 		return ConnectorAttestation{}, ErrConnectorInactive
 	}
-	threadID, err := attestStdioMCPCaller(params)
+	threadID, err := StdioMCPThreadID(params)
 	if err != nil {
 		return ConnectorAttestation{}, ErrConnectorInactive
 	}

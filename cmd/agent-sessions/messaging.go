@@ -618,22 +618,10 @@ func (c *hostCoordinator) submitQwenMessage(target daemonpkg.ManagedAttachment, 
 	pending := c.qwenPending[target.ID]
 	if pending == nil {
 		c.mu.Unlock()
-		// Native input ownership is durable, while an open append descriptor is
-		// intentionally process-local. A successor daemon must re-open the exact
-		// re-attested artifact instead of making a surviving Qwen peer inert.
-		refreshed, err := refreshDurableQwenAttachment(c.stateRoot, target)
-		if err != nil {
-			return fmt.Errorf("qwen native input is unavailable: %w", err)
-		}
-		writer, err := bridge.OpenQwenNativeInput(refreshed.ArtifactPath)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = writer.Close() }()
-		return writer.Submit(message)
+		return errors.New("qwen session is not connected to this daemon")
 	}
 	if pending.writer == nil {
-		writer, err := bridge.OpenQwenNativeInput(pending.input.Path)
+		writer, err := bridge.OpenQwenNativeInput(pending.input)
 		if err != nil {
 			c.mu.Unlock()
 			return err
