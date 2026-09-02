@@ -2,7 +2,6 @@
 
 const path = require("node:path");
 const { createLiveSessionClient, readConfiguration } = require("../shared/live-session.js");
-const { validateSocket } = require("./mcp-env.cjs");
 
 const name = "agent-sessions";
 const version = "0.1.2-alpha.3";
@@ -54,6 +53,7 @@ function createCordisPlugin(options) {
   const client = options.client;
   const defineTool = options.defineTool;
   const createUserMessage = options.createUserMessage;
+  const initialName = typeof options.initialName === "string" ? options.initialName : "";
   let managedAgent;
   let selected = false;
   let observedTitle = "";
@@ -65,8 +65,8 @@ function createCordisPlugin(options) {
   function nativeFacts(ctx, agent) {
     if (!exactAgent(agent) || typeof agent.id !== "string" || !agent.id || !agent.session || agent.session.header?.id !== agent.id) return null;
     const cwd = agent.session.header?.cwd;
-    const title = ctx.sessionTitle.get(agent.session)?.title;
-    if (typeof cwd !== "string" || !path.isAbsolute(cwd) || path.normalize(cwd) !== cwd || typeof title !== "string" || !title) return null;
+    const title = ctx.sessionTitle.get(agent.session)?.title ?? "";
+    if (typeof cwd !== "string" || !path.isAbsolute(cwd) || path.normalize(cwd) !== cwd || typeof title !== "string") return null;
     return { cwd, title };
   }
 
@@ -138,13 +138,14 @@ function createCordisPlugin(options) {
       }
       managedAgent = agent;
       selected = true;
+      if (initialName) ctx.sessionTitle.rename(agent.session, initialName);
       announce(ctx, agent);
     });
     ctx.on("session/event", (session, event) => {
       if (!managedAgent || session !== managedAgent.session) return;
       if (event?.type === "session/title") {
         const title = ctx.sessionTitle.get(managedAgent.session)?.title;
-        if (typeof event.seq !== "number" || !Number.isSafeInteger(event.seq) || event.seq < 0 || typeof title !== "string" || !title) return;
+        if (typeof event.seq !== "number" || !Number.isSafeInteger(event.seq) || event.seq < 0 || typeof title !== "string") return;
         if (!client.sessions.has(managedAgent.id)) {
           announce(ctx, managedAgent);
         } else if (title !== observedTitle) {
@@ -187,12 +188,16 @@ function applyWithEnvironment(ctx, environment, loadNative = async () => {
     return native && typeof native.then === "function" ? native.then((loaded) => applyLanePolicy(ctx, lanePolicy, loaded)) : applyLanePolicy(ctx, lanePolicy, native);
   }
   if (!gate.active) return { active: false, reason: gate.reason };
-  validateSocket(gate.socketPath, environment);
   const client = createLiveSessionClient({ env: environment });
   // Load DSH's ESM-only native helpers only for a managed live connection; an
   // ambient profile remains entirely inert.
   return Promise.resolve(loadNative()).then(({ defineTool, createUserMessage }) =>
-    createCordisPlugin({ client, defineTool, createUserMessage }).apply(ctx));
+    createCordisPlugin({
+      client,
+      defineTool,
+      createUserMessage,
+      initialName: environment.AGENT_SESSIONS_SESSION_NAME || "",
+    }).apply(ctx));
 }
 
 function apply(ctx) { return applyWithEnvironment(ctx, process.env); }

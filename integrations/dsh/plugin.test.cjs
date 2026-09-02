@@ -17,19 +17,23 @@ class FakeLiveSession extends EventEmitter {
   stop() { return Promise.resolve(); }
 }
 
-function fixture() {
+function fixture(initialName = "") {
   const client = new FakeLiveSession();
   const handlers = new Map(), agents = new Map(), tools = [];
   const ctx = {
     agents: { get: (id) => agents.get(id), list: () => [...agents.values()] },
     tools: { register: (tool) => tools.push(tool) },
-    sessionTitle: { get: (session) => typeof session.title === "string" ? { title: session.title } : undefined },
+    sessionTitle: {
+      get: (session) => typeof session.title === "string" ? { title: session.title } : undefined,
+      rename: (session, title) => { session.title = title; return { title, eventSeq: 1 }; },
+    },
     on: (event, handler) => handlers.set(event, handler), effect: () => {},
   };
   let message = 0;
   const plugin = createCordisPlugin({
     client, defineTool: (value) => value,
     createUserMessage: (value) => ({ ...value, id: `native-${++message}`, role: "user" }),
+    initialName,
   });
   plugin.apply(ctx);
   return { client, handlers, agents, tools, ctx, plugin };
@@ -50,9 +54,25 @@ test("DSH reports one live session, updates its title, and closes it", () => {
   assert.deepEqual(value.client.reported, [{ id: "native", name: "native title" }]);
   agent.session.title = "renamed";
   value.handlers.get("session/event")(agent.session, { type: "session/title", seq: 1 });
-  assert.deepEqual(value.client.updated, [{ id: "native", name: "renamed" }]);
+  agent.session.title = "";
+  value.handlers.get("session/event")(agent.session, { type: "session/title", seq: 2 });
+  assert.deepEqual(value.client.updated, [{ id: "native", name: "renamed" }, { id: "native", name: "" }]);
   value.handlers.get("agent/disposed")({ agent });
   assert.equal(value.client.sessions.has("native"), false);
+});
+
+test("DSH reports an untitled session and writes the requested launch name through the product", () => {
+  const unnamed = fixture();
+  const unnamedAgent = add(unnamed);
+  delete unnamedAgent.agent.session.title;
+  unnamed.client.reported.length = 0;
+  unnamed.plugin.announce(unnamed.ctx, unnamedAgent.agent);
+  assert.deepEqual(unnamed.client.reported, [{ id: "native", name: "" }]);
+
+  const named = fixture("launch name");
+  const { agent } = add(named);
+  assert.equal(agent.session.title, "launch name");
+  assert.deepEqual(named.client.reported, [{ id: "native", name: "launch name" }]);
 });
 
 test("DSH live delivery follows up when idle and steers when busy", async () => {
