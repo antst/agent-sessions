@@ -94,7 +94,7 @@ func defaultCommandRunners() commandRunners {
 			if invocation.Product == "qwen" {
 				return launcher.RunQwenPeerWithDaemon(ctx, invocation.Arguments, requestQwenPreparation)
 			}
-			return runWorkflow(ctx, invocation, output, daemonpkg.RoleLauncher, "attachment."+invocation.Product+".prepare")
+			return launcher.RunManagedPeer(invocation.Product, invocation.Arguments)
 		},
 		lane: runLaneWorkflow,
 		hook: func(ctx context.Context, invocation clihelp.Invocation, output io.Writer) error {

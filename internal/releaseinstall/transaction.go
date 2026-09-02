@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 // Role selects the independently installed host or hub image.
@@ -42,11 +43,11 @@ func (role Role) aliases() []string {
 	if role == HubRole {
 		return []string{"agent-sessions-hub"}
 	}
-	return []string{
-		"agent-sessions",
-		"codex-peer", "claude-peer", "grok-peer", "qwen-peer",
-		"codex-peer-lane", "claude-peer-lane", "grok-peer-lane", "qwen-peer-lane",
+	aliases := []string{"agent-sessions"}
+	for _, product := range productcatalog.All() {
+		aliases = append(aliases, product.PeerAlias, product.LaneAlias)
 	}
+	return aliases
 }
 
 // Service performs the platform-specific validation and lifecycle boundary.

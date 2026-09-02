@@ -8,18 +8,24 @@ binaries=(
   agent-sessions-hub
 )
 host_aliases=(
-  codex-peer claude-peer grok-peer qwen-peer
-  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane
+  codex-peer claude-peer grok-peer qwen-peer opencode-peer kilo-peer pi-peer omp-peer codebuddy-peer dsh-peer
+  codex-peer-lane claude-peer-lane grok-peer-lane qwen-peer-lane opencode-peer-lane kilo-peer-lane pi-peer-lane omp-peer-lane codebuddy-peer-lane dsh-peer-lane
 )
 plugins=(
   'codex|.agents,.codex-plugin,.mcp.json,hooks,scripts,skills'
   'claude|.claude-plugin,claude'
   'grok|grok'
   'qwen|qwen'
+  'opencode|integrations/opencode'
+  'kilo|integrations/kilo'
+  'pi|integrations/pi'
+  'omp|integrations/omp'
+  'codebuddy|integrations/codebuddy'
+  'dsh|integrations/dsh'
 )
 package_paths=(
   .agents .claude-plugin .codex-plugin .mcp.json
-  claude deploy docs grok hooks qwen skills Makefile README.md
+  claude deploy docs grok hooks integrations qwen skills Makefile README.md
   scripts/cachebuster
   scripts/federation
   scripts/install-host

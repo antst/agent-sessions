@@ -34,7 +34,7 @@ func TestProjectionIsCanonicalSortedIsolatedAndSecretFree(t *testing.T) {
 	if err := json.Unmarshal(first, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProjectionSchemaV1 || len(decoded.Products) != 4 || decoded.Products[0].ID != "claude" || decoded.Products[3].ID != "qwen" {
+	if decoded.Schema != ProjectionSchemaV1 || len(decoded.Products) != 10 || decoded.Products[0].ID != "claude" || decoded.Products[9].ID != "qwen" {
 		t.Fatalf("projection = %#v", decoded)
 	}
 	for _, product := range decoded.Products {
@@ -184,7 +184,7 @@ func TestExactTupleProjectsPinnedPackageManagerVersion(t *testing.T) {
 	if legacy.Compatibility.PackageManager != "" || legacy.Compatibility.PackageManagerVersion != "" {
 		t.Fatalf("non-package-managed descriptor changed backward behavior: %#v", legacy.Compatibility)
 	}
-	legacyBody, err := ProjectionJSON(All())
+	legacyBody, err := ProjectionJSON([]Descriptor{legacy})
 	if err != nil {
 		t.Fatal(err)
 	}

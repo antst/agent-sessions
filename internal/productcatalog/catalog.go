@@ -111,14 +111,13 @@ type Descriptor struct {
 	RequiredDoctorFeatures []string
 	FederationCapabilities []string
 	NativeRegistration     NativeRegistration
+	NativeValueOptions     []string
+	NativeAttachedShort    []string
 	Acceptance             AcceptanceContract
 }
 
-const projectedProductCount = 4
-
-// descriptors is the one product inventory. Release aliases remain on the
-// original-four projection until the real-product launch slice activates the
-// new aliases, while live reconnect already recognizes every authored ID.
+// descriptors is the one product inventory used by launch, packaging, live
+// reconnect, and operator projections.
 var descriptors = [...]Descriptor{
 	baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", ".mcp.json", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
 	baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
@@ -129,37 +128,47 @@ var descriptors = [...]Descriptor{
 		"presence", "presence", "opencode-http", "opencode",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
 		[]string{"event-stream", "parent", "plugin-sdk", "prompt-async"},
+		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
+		[]string{"-m", "-s"},
 	),
 	newProductDescriptor(
 		"kilo", "Kilo Code", "kilo", "7.5.6", "kilo-global-plugin",
 		"presence", "presence", "kilo-http", "kilo",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
 		[]string{"event-stream", "parent", "plugin-sdk", "tui-routing"},
+		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
+		[]string{"-m", "-s"},
 	),
 	newProductDescriptor(
 		"pi", "Pi Coding Agent", "pi", "0.84.4", "pi-package",
 		"presence", "presence", "pi-rpc", "pi",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
 		[]string{"extension", "parent", "rpc-ready", "steer"},
+		[]string{"--model", "-m", "--extension", "-e", "--session", "--tools", "--exclude-tools"},
+		[]string{"-m", "-e"},
 	),
 	newProductDescriptor(
 		"omp", "Oh My Pi", "omp", "18.0.11", "omp-extension",
 		"presence", "presence", "omp-rpc", "omp",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
 		[]string{"extension", "parent", "rpc-ready", "steer"},
+		[]string{"--model", "-m", "--extension", "-e", "--session", "--tools", "--exclude-tools", "--approval-mode"},
+		[]string{"-m", "-e"},
 	),
 	newProductDescriptor(
 		"codebuddy", "CodeBuddy", "codebuddy", "2.143.0", "codebuddy-wrapper-plugin-mcp",
 		"presence", "presence", "codebuddy-owned-http", "codebuddy",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
 		[]string{"job-events", "native-registry", "parent", "session-reply"},
+		[]string{"--model", "-m", "--session-id", "--mcp-config", "--permission-mode"},
+		[]string{"-m"},
 	),
 	dshDescriptor(),
 }
 
 func newProductDescriptor(
 	id, label, executable, testedVersion, strategy, peerTransport, messageTransport, laneTransport, permission string,
-	capabilities []Capability, doctorFeatures []string,
+	capabilities []Capability, doctorFeatures, nativeValueOptions, nativeAttachedShort []string,
 ) Descriptor {
 	return Descriptor{
 		ID: id, Label: label, NativeExecutable: executable,
@@ -172,6 +181,8 @@ func newProductDescriptor(
 		InstallRoot: "integrations/" + id, RequiredDoctorFeatures: doctorFeatures,
 		FederationCapabilities: []string{id + "-lane"},
 		NativeRegistration:     NativeRegistration{Strategy: strategy},
+		NativeValueOptions:     nativeValueOptions,
+		NativeAttachedShort:    nativeAttachedShort,
 		Acceptance:             AcceptanceContract{RealProductRequired: true},
 	}
 }
@@ -182,6 +193,8 @@ func dshDescriptor() Descriptor {
 		"presence", "presence", "dsh-acp", "dsh",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityMCPRelay, CapabilityHook, CapabilityArchive, CapabilityDynamicPermission, CapabilityParent},
 		[]string{"acp", "cordis", "parent", "tuple"},
+		[]string{"--profile", "--patch", "--model", "-m"},
+		[]string{"-m"},
 	)
 	descriptor.Compatibility = Compatibility{
 		Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
@@ -451,10 +464,8 @@ func knownCapability(capability Capability) bool {
 	}
 }
 
-func All() []Descriptor { return cloneInventory(descriptors[:projectedProductCount]) }
+func All() []Descriptor { return cloneInventory(descriptors[:]) }
 
-// RuntimeInventory includes products whose real launch aliases are still
-// being activated. Live reconnect validates against this authored inventory.
 func RuntimeInventory() []Descriptor { return cloneInventory(descriptors[:]) }
 
 func ByID(id string) (Descriptor, bool) {

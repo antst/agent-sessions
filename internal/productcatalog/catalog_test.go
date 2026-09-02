@@ -11,7 +11,7 @@ import (
 )
 
 func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
-	wantIDs := []string{"codex", "claude", "grok", "qwen"}
+	wantIDs := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "codebuddy", "dsh"}
 	products := All()
 	if len(products) != len(wantIDs) {
 		t.Fatalf("product count = %d", len(products))
@@ -26,8 +26,8 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 		if product.SupportState != SupportGeneral || product.TestedVersion == "" || product.InstallRoot != "integrations/"+product.ID {
 			t.Fatalf("shared metadata missing from %#v", product)
 		}
-		if product.NativeRegistration.Strategy != "legacy-native-plugin" || !reflect.DeepEqual(product.NativeRegistration.Args, []string{product.ID}) {
-			t.Fatalf("%s native registration = %#v", product.ID, product.NativeRegistration)
+		if product.NativeRegistration.Strategy == "" {
+			t.Fatalf("%s native registration is empty", product.ID)
 		}
 		if !product.Acceptance.RealProductRequired || len(product.Acceptance.ExternalCells) != 0 {
 			t.Fatalf("%s acceptance = %#v", product.ID, product.Acceptance)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/releaseinstall"
 	"github.com/antst/agent-sessions/internal/releasepkg"
 )
@@ -30,9 +31,12 @@ func TestReleaseInventoryAliasesAndArchiveImagesAreExact(t *testing.T) {
 	}
 	inventory := filepath.Join(repository, "scripts", "release-inventory")
 	hostAliases := inventoryLines(t, inventory, "host-aliases")
-	wantHostAliases := []string{
-		"codex-peer", "claude-peer", "grok-peer", "qwen-peer",
-		"codex-peer-lane", "claude-peer-lane", "grok-peer-lane", "qwen-peer-lane",
+	var wantHostAliases []string
+	for _, product := range productcatalog.All() {
+		wantHostAliases = append(wantHostAliases, product.PeerAlias)
+	}
+	for _, product := range productcatalog.All() {
+		wantHostAliases = append(wantHostAliases, product.LaneAlias)
 	}
 	if !reflect.DeepEqual(hostAliases, wantHostAliases) {
 		t.Fatalf("host aliases = %q, want %q", hostAliases, wantHostAliases)

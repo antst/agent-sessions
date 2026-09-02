@@ -63,6 +63,12 @@ func ResolveProductExecutable(product string) (string, error) {
 	case "qwen":
 		return qwenExecutable()
 	default:
-		return "", fmt.Errorf("unsupported product %q", product)
+		descriptor, ok := productcatalog.ByID(product)
+		if !ok {
+			return "", fmt.Errorf("unsupported product %q", product)
+		}
+		environment := strings.ToUpper(strings.ReplaceAll(product, "-", "_")) + "_PEER_" +
+			strings.ToUpper(strings.ReplaceAll(descriptor.NativeExecutable, "-", "_")) + "_BIN"
+		return productExecutable(environment, descriptor.NativeExecutable)
 	}
 }

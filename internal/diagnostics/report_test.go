@@ -17,10 +17,10 @@ func TestStatusAndDoctorHaveFixedTruthfulSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Schema != Schema || status.Operation != "status" || !status.Ready || len(status.Checks) != 0 || len(status.Products) != 4 {
+	if status.Schema != Schema || status.Operation != "status" || !status.Ready || len(status.Checks) != 0 || len(status.Products) != 10 {
 		t.Fatalf("status report = %+v", status)
 	}
-	if status.Products[1].ID != "codex" || status.Products[1].Readiness != "available" {
+	if status.Products[2].ID != "codex" || status.Products[2].Readiness != "available" {
 		t.Fatalf("normalized products = %+v", status.Products)
 	}
 	input.Operation = "doctor"
@@ -28,7 +28,7 @@ func TestStatusAndDoctorHaveFixedTruthfulSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doctor.Operation != "doctor" || len(doctor.Checks) != 6 || doctor.Checks[2].Status != "unavailable" {
+	if doctor.Operation != "doctor" || len(doctor.Checks) != 12 || doctor.Checks[2].Status != "unavailable" {
 		t.Fatalf("doctor report = %+v", doctor)
 	}
 }

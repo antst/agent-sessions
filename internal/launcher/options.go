@@ -1,6 +1,10 @@
 package launcher
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/antst/agent-sessions/internal/productcatalog"
+)
 
 // productOptionTable contains native value arity only. It never assigns
 // meaning to vendor options and never removes or rewrites them; it protects a
@@ -48,6 +52,15 @@ var productOptionTables = map[string]productOptionTable{
 		},
 		nil,
 	),
+}
+
+func init() {
+	for _, descriptor := range productcatalog.RuntimeInventory() {
+		if len(descriptor.NativeValueOptions) == 0 {
+			continue
+		}
+		productOptionTables[descriptor.ID] = newProductOptionTable(descriptor.NativeValueOptions, descriptor.NativeAttachedShort)
+	}
 }
 
 func newProductOptionTable(values, attachedShort []string) productOptionTable {
