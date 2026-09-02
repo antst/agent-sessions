@@ -68,7 +68,7 @@ func allocateLoopbackEndpoint(context.Context, string) (string, error) {
 	}
 	address := listener.Addr().String()
 	if err := listener.Close(); err != nil {
-		return "", productruntime.ErrCleanupDebt
+		return "", fmt.Errorf("close endpoint reservation: %w", err)
 	}
 	return "http://" + address, nil
 }
@@ -232,9 +232,9 @@ func (server *LiveServer) Close(ctx context.Context) error {
 			return err
 		}
 	} else if owned == nil {
-		return productruntime.ErrCleanupDebt
+		return errors.New("native server has no owned process to close")
 	} else if err := owned.Close(ctx); err != nil {
-		return fmt.Errorf("%w: exact server exit unproven", productruntime.ErrCleanupDebt)
+		return fmt.Errorf("close exact native server: %w", err)
 	}
 	server.closed = true
 	server.password = productruntime.SensitiveValue{}

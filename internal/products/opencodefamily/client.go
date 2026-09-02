@@ -140,7 +140,7 @@ func mapTransportError(err error) error {
 		errors.Is(err, productruntime.ErrAmbiguousSession), errors.Is(err, productruntime.ErrUnsupportedPolicy),
 		errors.Is(err, productruntime.ErrUnsupportedSteer),
 		errors.Is(err, productruntime.ErrNativeRejected), errors.Is(err, productruntime.ErrProtocol),
-		errors.Is(err, productruntime.ErrTimedOut), errors.Is(err, productruntime.ErrCleanupDebt):
+		errors.Is(err, productruntime.ErrTimedOut):
 		return err
 	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("%w: native request deadline", productruntime.ErrTimedOut)

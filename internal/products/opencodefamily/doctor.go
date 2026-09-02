@@ -110,7 +110,7 @@ func (probe *DoctorProbe) Probe(ctx context.Context, request productruntime.Prob
 	defer func() {
 		if err := server.Close(context.Background()); err != nil {
 			report.State = productruntime.ProbeError
-			report.Detail = productruntime.NewRedactedString("ephemeral native feature probe left cleanup debt")
+			report.Detail = productruntime.NewRedactedString("ephemeral native feature probe failed to stop")
 		}
 	}()
 	client := server.Client()

@@ -3,6 +3,7 @@ package opencodefamily
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,15 @@ func TestLiveServerBuildsOnlyFullKiloAttachAndKeepsAuthTransient(t *testing.T) {
 		if _, err := server.BuildKiloAttach("/work/project", "ses_resume_exact", arguments, nil); err == nil {
 			t.Fatalf("topology override %v was accepted", arguments)
 		}
+	}
+}
+
+func TestLiveServerCloseReturnsSynchronousFailureWithoutDebtClassification(t *testing.T) {
+	nativeErr := errors.New("native stop failed")
+	server := &LiveServer{closeFn: func(context.Context) error { return nativeErr }}
+	err := server.Close(context.Background())
+	if !errors.Is(err, nativeErr) || errors.Is(err, productruntime.ErrCleanupDebt) {
+		t.Fatalf("Close() = %v", err)
 	}
 }
 
