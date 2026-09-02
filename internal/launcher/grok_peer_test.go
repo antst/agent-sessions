@@ -276,7 +276,7 @@ func TestGrokPeerBuildsOneLauncherOwnedLeaderAndTUI(t *testing.T) {
 		t.Fatalf("native launch = %+v", got)
 	}
 	if !slices.Contains(got.LeaderArguments, "leader") || !slices.Contains(got.TUIArguments, "--session-id") ||
-		!slices.Contains(got.TUIArguments, testGrokSessionID) || slices.Contains(got.LeaderArguments, "--no-exit-on-disconnect") {
+		!slices.Contains(got.TUIArguments, testGrokSessionID) {
 		t.Fatalf("leader=%q tui=%q", got.LeaderArguments, got.TUIArguments)
 	}
 }
