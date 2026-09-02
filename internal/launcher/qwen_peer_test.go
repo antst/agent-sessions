@@ -49,7 +49,7 @@ func TestQwenPeerManagedArgumentContract(t *testing.T) {
 		{
 			name: "wrapper yolo", args: []string{"--yolo", "--theme", "dark"},
 			wantMode: qwenPeerModeFresh, wantPref: qwenLaunchYolo,
-			wantNative: []string{"--approval-mode", "yolo", "--theme", "dark"},
+			wantNative: []string{"--yolo", "--theme", "dark"},
 		},
 		{
 			name: "wrapper no yolo", args: []string{"--no-yolo", "--theme=dark"},

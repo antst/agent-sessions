@@ -123,6 +123,10 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	if !reflect.DeepEqual(claude.NativeToolGrantArgs, []string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"}) || !reflect.DeepEqual(claude.NativeYoloArgs, []string{"--dangerously-skip-permissions"}) {
 		t.Fatalf("Claude launch policy = %#v", claude)
 	}
+	qwen, _ := ByID("qwen")
+	if len(qwen.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(qwen.NativeYoloArgs, []string{"--yolo"}) {
+		t.Fatalf("Qwen launch policy = %#v", qwen)
+	}
 	pi, _ := ByID("pi")
 	if !reflect.DeepEqual(pi.NativeToolGrantArgs, []string{"--approve"}) || !reflect.DeepEqual(pi.NativeYoloArgs, []string{"--approve"}) {
 		t.Fatalf("Pi launch policy leaked caller mutation: %#v", pi)

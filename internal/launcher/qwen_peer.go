@@ -14,6 +14,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
@@ -466,7 +467,14 @@ func parseQwenPeerArgs(args []string, cwd string, lookup qwenprofile.LookupEnv) 
 	switch {
 	case yoloCount > 0:
 		plan.launchPreference = qwenLaunchYolo
-		plan.nativeArgs = replaceQwenWrapperYolo(plan.nativeArgs, "yolo")
+		descriptor, ok := productcatalog.ByID("qwen")
+		if !ok {
+			return qwenPeerPlan{}, usageError("Qwen product descriptor is unavailable")
+		}
+		plan.nativeArgs, err = projectNativeLaunchPolicy(descriptor, plan.nativeArgs, false)
+		if err != nil {
+			return qwenPeerPlan{}, err
+		}
 	case noYoloCount > 0:
 		plan.launchPreference = qwenLaunchNonYolo
 		plan.nativeArgs = insertQwenManagedArgs(plan.nativeArgs, "--approval-mode", "default")
@@ -673,21 +681,6 @@ func inspectManagedQwenArgs(args []string) ([]string, string, string, int, error
 		}
 	}
 	return forwarded, resumeTarget, nativeMode, nativeModeCount, nil
-}
-
-func replaceQwenWrapperYolo(args []string, mode string) []string {
-	result := make([]string, 0, len(args)+1)
-	for index, argument := range args {
-		if argument == "--" {
-			return append(result, args[index:]...)
-		}
-		if argument == "--yolo" {
-			result = append(result, "--approval-mode", mode)
-			continue
-		}
-		result = append(result, argument)
-	}
-	return result
 }
 
 func insertQwenManagedArgs(args []string, managed ...string) []string {
