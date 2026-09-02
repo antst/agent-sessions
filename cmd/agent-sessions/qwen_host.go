@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +22,7 @@ type qwenPending struct {
 	root    string
 	input   string
 	events  string
-	writer  *bridge.QwenNativeInput
+	home    string
 	adopted bool
 }
 
@@ -75,13 +76,7 @@ func (c *hostCoordinator) prepareQwen(
 		}
 		_ = file.Close()
 	}
-	if !request.Resume && request.NameSpecified {
-		if err := preseedQwenNativeName(inputPath, request.Name); err != nil {
-			_ = removeQwenRoot(root, []string{inputPath, eventsPath})
-			return launcher.QwenDaemonPrepareResult{}, err
-		}
-	}
-	pending := &qwenPending{request: request, root: root, input: inputPath, events: eventsPath}
+	pending := &qwenPending{request: request, root: root, input: inputPath, events: eventsPath, home: qwenHome}
 	c.mu.Lock()
 	if c.qwenPending[request.SessionID] != nil {
 		c.mu.Unlock()
@@ -116,7 +111,7 @@ func (c *hostCoordinator) prepareQwen(
 	}, nil
 }
 
-func preseedQwenNativeName(inputPath, name string) error {
+func submitQwenNativeName(inputPath, name string) error {
 	input, err := bridge.OpenQwenNativeInput(inputPath)
 	if err != nil {
 		return fmt.Errorf("open Qwen native name input: %w", err)
@@ -126,6 +121,29 @@ func preseedQwenNativeName(inputPath, name string) error {
 		return fmt.Errorf("stage Qwen native name: %w", err)
 	}
 	return nil
+}
+
+func qwenSessionRegistered(home, sessionID string) bool {
+	entries, err := os.ReadDir(filepath.Join(home, "sessions"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		body, readErr := os.ReadFile(filepath.Join(home, "sessions", entry.Name())) //nolint:gosec // Qwen owns this selected-profile registry.
+		if readErr != nil {
+			continue
+		}
+		var record struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(body, &record) == nil && record.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func qwenInitialModeForPreference(preference string) string {
@@ -190,6 +208,14 @@ func (c *hostCoordinator) startQwenOwnerMonitor(runtime *daemonpkg.Runtime, id s
 				if evidenceErr != nil {
 					continue
 				}
+				if !pending.request.Resume && pending.request.NameSpecified {
+					if !qwenSessionRegistered(pending.home, id) {
+						continue
+					}
+					if err := submitQwenNativeName(pending.input, pending.request.Name); err != nil {
+						return
+					}
+				}
 				if _, err := runtime.Attachments().Adopt(context.Background(), id, evidence); err != nil {
 					return
 				}
@@ -234,10 +260,6 @@ func (c *hostCoordinator) cleanupQwenAttachment(_ context.Context, attachment da
 	c.mu.Unlock()
 	if pending == nil {
 		return nil
-	}
-	if pending.writer != nil {
-		_ = pending.writer.Close()
-		pending.writer = nil
 	}
 	if procinfo.Read(pending.request.Owner.PID).Status != procinfo.Absent {
 		return errors.New("native Qwen PID is not absent during cleanup")
