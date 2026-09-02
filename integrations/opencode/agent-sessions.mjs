@@ -42,6 +42,17 @@ function requireSDKSuccess(result, expectedStatus) {
   return result.data;
 }
 
+function latestPromptConfiguration(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const info = messages[index]?.info;
+    if (info?.role !== "user" || typeof info.agent !== "string" || !info.agent ||
+        typeof info.model?.providerID !== "string" || !info.model.providerID ||
+        typeof info.model?.modelID !== "string" || !info.model.modelID) continue;
+    return { agent: info.agent, model: info.model };
+  }
+  throw new Error("OpenCode session has no product-confirmed prompt configuration");
+}
+
 function abortError(message, category) {
   const error = new Error(message);
   error.category = category;
@@ -132,12 +143,19 @@ export default async function agentSessionsOpenCodePlugin({ client, directory, e
       if (!known.has(payload.nativeSessionID)) throw new Error("no exact live native session is reported");
       const messageID = nativeMessageID(payload.messageID);
       const deadline = Date.now() + DELIVERY_DEADLINE_MS;
+      const messages = requireSDKSuccess(await boundedNativeCall(() => client.session.messages({
+        path: { id: payload.nativeSessionID },
+        query: { directory, limit: 20 },
+      }, { signal: controller.signal }), deadline, controller), 200);
+      const configuration = latestPromptConfiguration(messages);
       nativeSubmitAttempted = true;
       const response = await boundedNativeCall(() => client.session.promptAsync({
         path: { id: payload.nativeSessionID },
         query: { directory },
         body: {
           messageID,
+          agent: configuration.agent,
+          model: configuration.model,
           noReply: payload.body?.no_reply === true || payload.body?.type === "notice",
           parts: [{ type: "text", text: renderAgentFrame(payload.body) }],
         },

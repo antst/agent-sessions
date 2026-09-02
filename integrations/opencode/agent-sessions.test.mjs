@@ -89,12 +89,19 @@ test("OpenCode reports an exact resumed session directly from the product", asyn
 test("OpenCode delivers and calls tools on the exact reported session", async () => {
   const live = new FakeLiveSession();
   const prompts = [];
-  const client = { session: { async promptAsync(request) { prompts.push(request); return { data: {}, response: { status: 204 } }; } } };
+  const client = { session: {
+    async messages() {
+      return { data: [{ info: { role: "user", agent: "brainstormer", model: { providerID: "google", modelID: "gemini" } } }], response: { status: 200 } };
+    },
+    async promptAsync(request) { prompts.push(request); return { data: {}, response: { status: 204 } }; },
+  } };
   const hooks = await (await loadPlugin(live))({ client, directory: "/work" });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "one", directory: "/work" } } } });
   live.emit("message", { messageID: "delivery", nativeSessionID: "ses_one", body: "hello" });
   await tick();
   assert.equal(prompts[0].path.id, "ses_one");
+  assert.equal(prompts[0].body.agent, "brainstormer");
+  assert.deepEqual(prompts[0].body.model, { providerID: "google", modelID: "gemini" });
   assert.deepEqual(live.accepted.map((value) => value.id), ["delivery"]);
   const result = await hooks.tool.agent_sessions.execute({ operation: "peers.list", arguments: {} }, {
     sessionID: "ses_one", messageID: "message", abort: new AbortController().signal,
@@ -109,11 +116,32 @@ test("OpenCode delivers and calls tools on the exact reported session", async ()
 test("OpenCode truthfully rejects native prompt refusal", async () => {
   const live = new FakeLiveSession();
   const hooks = await (await loadPlugin(live))({
-    client: { session: { promptAsync: async () => ({ error: {}, response: { status: 409 } }) } }, directory: "/work",
+    client: { session: {
+      messages: async () => ({ data: [{ info: { role: "user", agent: "build", model: { providerID: "openai", modelID: "gpt" } } }], response: { status: 200 } }),
+      promptAsync: async () => ({ error: {}, response: { status: 409 } }),
+    } }, directory: "/work",
   });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "one", directory: "/work" } } } });
   live.emit("message", { messageID: "delivery", nativeSessionID: "ses_one", body: "hello" });
   await tick();
   assert.equal(live.accepted.length, 0);
   assert.equal(live.rejected.length, 1);
+});
+
+test("OpenCode refuses delivery without product-confirmed prompt configuration", async () => {
+  const live = new FakeLiveSession();
+  let prompted = false;
+  const hooks = await (await loadPlugin(live))({
+    client: { session: {
+      messages: async () => ({ data: [], response: { status: 200 } }),
+      promptAsync: async () => { prompted = true; return { data: {}, response: { status: 204 } }; },
+    } }, directory: "/work",
+  });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "one", directory: "/work" } } } });
+  live.emit("message", { messageID: "delivery", nativeSessionID: "ses_one", body: "hello" });
+  await tick();
+  assert.equal(prompted, false);
+  assert.equal(live.accepted.length, 0);
+  assert.equal(live.rejected.length, 1);
+  assert.match(live.rejected[0].error, /product-confirmed prompt configuration/u);
 });
