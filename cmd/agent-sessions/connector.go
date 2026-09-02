@@ -20,11 +20,15 @@ import (
 )
 
 func runConnector(ctx context.Context, product string, output io.Writer) error {
+	requestedProduct := product
 	resolved, err := resolveConnectorProduct(product, os.Getenv)
 	if err != nil {
 		return err
 	}
 	product = resolved
+	if connectorDeclinesForeignManagedProduct(requestedProduct, product, os.Getenv) {
+		return nil
+	}
 	stateRoot := defaultStateRoot()
 	refresher, err := newConnectorImageRefresher(os.Args, os.Environ())
 	if err != nil {
@@ -73,6 +77,14 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func connectorDeclinesForeignManagedProduct(requestedProduct, resolvedProduct string, getenv func(string) string) bool {
+	if requestedProduct == "auto" {
+		return false
+	}
+	managedProduct := strings.TrimSpace(getenv("AGENT_SESSIONS_PRODUCT"))
+	return managedProduct != "" && managedProduct != resolvedProduct
 }
 
 func callConnectorDaemonTool(

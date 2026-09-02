@@ -60,9 +60,24 @@ func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) 
 	if connectorClaimsLivePresence(got, getenv) {
 		t.Fatal("stale Claude connector argument would replace OMP native presence")
 	}
+	if !connectorDeclinesForeignManagedProduct("claude", got, getenv) {
+		t.Fatal("foreign explicit Claude connector would serve a second OMP tool surface")
+	}
 	automatic, err := resolveConnectorProduct("auto", getenv)
 	if err != nil || automatic != "codex" || connectorClaimsLivePresence(automatic, getenv) {
 		t.Fatalf("automatic discovered connector = %q, %v; must stay inactive", automatic, err)
+	}
+	if connectorDeclinesForeignManagedProduct("auto", automatic, getenv) {
+		t.Fatal("automatic connector lost its existing tools-only behavior")
+	}
+	matching := func(name string) string {
+		if name == "AGENT_SESSIONS_PRODUCT" {
+			return "claude"
+		}
+		return ""
+	}
+	if connectorDeclinesForeignManagedProduct("claude", "claude", matching) {
+		t.Fatal("matching Claude connector was declined")
 	}
 }
 
