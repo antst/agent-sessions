@@ -88,6 +88,11 @@ test("DSH live delivery follows up when idle and steers when busy", async () => 
 test("DSH parent tool uses the exact live native session", async () => {
   const value = fixture();
   const { agent } = add(value);
+  assert.deepEqual(value.tools[0].parameters.action.enum, [
+    "peers.list", "message.send", "lane.start", "lane.run", "lane.resume", "lane.wait",
+    "lane.status", "lane.steer", "lane.interrupt", "lane.collect", "lane.archive",
+  ]);
+  assert.match(value.tools[0].description, /message\.send with \{target or targets, message, optional summary\}/u);
   assert.deepEqual(await value.tools[0].execute({ action: "peers.list", arguments: {} }, { agent }), { ok: true });
   assert.equal(value.client.calls[0].id, "native");
   await assert.rejects(value.tools[0].execute({ action: "peers.list" }, {}), /exec\.agent/u);

@@ -7,6 +7,19 @@ const name = "agent-sessions";
 const version = "0.1.2-alpha.3";
 const inject = ["agents", "tools", "sessionTitle", "sandboxPolicy"];
 const LANE_POLICY_ENV = "AGENT_SESSIONS_DSH_LANE_POLICY";
+const LIVE_OPERATIONS = Object.freeze([
+  "peers.list",
+  "message.send",
+  "lane.start",
+  "lane.run",
+  "lane.resume",
+  "lane.wait",
+  "lane.status",
+  "lane.steer",
+  "lane.interrupt",
+  "lane.collect",
+  "lane.archive",
+]);
 
 function readLanePolicy(environment) {
   const value = environment[LANE_POLICY_ENV];
@@ -99,10 +112,10 @@ function createCordisPlugin(options) {
   function registerParentTool(ctx) {
     ctx.tools.register(defineTool({
       name: "agent_sessions",
-      description: "List or message Agent Sessions peers and control exact managed child lanes.",
+      description: "Use peers.list with {}; message.send with {target or targets, message, optional summary}; or lane.start/run/resume/wait/status/steer/interrupt/collect/archive with {product, optional host, optional arguments, optional input}.",
       parameters: {
-        action: { type: "string", required: true, description: "Registered Agent Sessions operation." },
-        arguments: { type: "object", additionalProperties: true, description: "Bounded operation arguments." },
+        action: { type: "string", enum: LIVE_OPERATIONS, required: true, description: "Exact Agent Sessions operation." },
+        arguments: { type: "object", additionalProperties: true, description: "Arguments in the exact shape documented for the selected operation." },
       },
       output: {
         schema: { type: "object", additionalProperties: true, properties: {} },
