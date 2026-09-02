@@ -270,7 +270,7 @@ func TestLaneInputPolicyIsSharedAcrossEveryLifecycleCommand(t *testing.T) {
 			}
 		})
 	}
-	for _, command := range []string{"run", "start", "resume"} {
+	for _, command := range []string{"run", "start", "resume", "steer"} {
 		t.Run(command, func(t *testing.T) {
 			body, err := readLaneInput(context.Background(), []string{command}, strings.NewReader("briefing"))
 			if err != nil || string(body) != "briefing" {

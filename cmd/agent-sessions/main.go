@@ -200,7 +200,7 @@ func laneCommandConsumesInput(arguments []string) bool {
 		return false
 	}
 	switch arguments[0] {
-	case "run", "start", "resume":
+	case "run", "start", "resume", "steer":
 		return true
 	default:
 		return false
