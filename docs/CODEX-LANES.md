@@ -207,21 +207,12 @@ Consumers should identify the result by `item.completed` with `type: "agent_mess
 `wait` calls for one lane or combine `wait` with another lifecycle collector. Interactive
 `codex-peer` sessions do not use this cursor—the attached TUI owns their App Server event stream.
 While the daemon remains live, `wait`, `status`, and `interrupt` use the current App Server
-connection. After a daemon restart, an explicit resume asks Codex for the exact product session by
-name or ID; the daemon does not reconstruct a turn cursor. Installation requires App Server to be
-stopped and never replaces a live process.
-
-`archive` synchronously writes a retirement tombstone and removes the live peer transport. It keeps
-the small local lane record so the archived thread remains addressable by lane name for an explicit
-follow-up resume. On supervisor startup, loaded threads are compared with the non-archived thread
-list so a legacy archived-but-loaded thread cannot be republished.
-
-If initial authentication or another authoritative App Server rejection occurs before Codex creates
-the first rollout, there is no transcript to preserve or resume. In that narrow case, `archive`
-accepts an App Server `no rollout found` response only when the local failed record contains no turn
-ID, pending turn, collected turn, or terminal-turn evidence. It deletes that unmaterialized thread
-and writes the ordinary retirement tombstone. A transport error or any local turn evidence remains
-ambiguous and is refused rather than guessed away.
+connection. A daemon-owned headless lane has no independent worker connection to re-report after a
+daemon restart, so it is truthfully absent from the live roster. `list --all` loads the lane's UUID
+and groups from the candidate table, asks Codex whether that UUID still exists, and displays only
+Codex-confirmed sessions. `resume` then opens that exact native thread, unarchiving it only when
+Codex reports it archived, and restores the recorded secondary groups. The daemon reconstructs no
+turn cursor or live-lane claim; the product remains the owner of the thread and its state.
 
 ## Follow-up turns on the same transcript
 

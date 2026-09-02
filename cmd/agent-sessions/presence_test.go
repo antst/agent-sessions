@@ -239,7 +239,7 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 	}
 }
 
-func TestActiveLaneNameCacheAsksProductOnceAndMaterializesConfirmedCandidate(t *testing.T) {
+func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex"})
@@ -253,6 +253,9 @@ func TestActiveLaneNameCacheAsksProductOnceAndMaterializesConfirmedCandidate(t *
 	}
 	if err := engine.Remember(candidate); err != nil {
 		t.Fatal(err)
+	}
+	if _, live, err := runtime.Attachments().ActiveAttachment(candidate.NativeSessionID); err != nil || live {
+		t.Fatalf("candidate before product confirmation live=%v err=%v", live, err)
 	}
 	calls := 0
 	coordinator.resolveCandidate = func(_ context.Context, _ *daemonpkg.Runtime, _ daemonpkg.ManagedAttachment, got daemonpkg.LaneCandidate) (laneNameEntry, bool) {
@@ -280,6 +283,9 @@ func TestActiveLaneNameCacheAsksProductOnceAndMaterializesConfirmedCandidate(t *
 	}
 	if !reflect.DeepEqual(actor.groups, wantGroups) {
 		t.Fatalf("materialized groups = %v, want %v", actor.groups, wantGroups)
+	}
+	if _, live, err := runtime.Attachments().ActiveAttachment(candidate.NativeSessionID); err != nil || live {
+		t.Fatalf("product-confirmed candidate was published as live: live=%v err=%v", live, err)
 	}
 	if _, err := coordinator.resolveLaneActor(runtime, parent, "codex", "native-lane", true); err != nil {
 		t.Fatal(err)
