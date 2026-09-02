@@ -333,7 +333,7 @@ func TestLaneWorkerEnvironmentReplacesAmbientPeerAuthority(t *testing.T) {
 	actor := &laneActor{id: "lane-id", product: "qwen", capability: "lane-capability"}
 	got := laneWorkerEnvironment([]string{
 		"PATH=/bin", "AGENT_SESSIONS_SESSION_ID=parent", "AGENT_SESSIONS_PRODUCT=codex",
-		"AGENT_SESSIONS_QWEN_CAPABILITY=old", "AGENT_SESSIONS_LANE_CAPABILITY=old-lane", "AGENT_SESSIONS_HOST_BINARY=/old/runtime",
+		"AGENT_SESSIONS_LANE_CAPABILITY=old-lane", "AGENT_SESSIONS_HOST_BINARY=/old/runtime",
 	}, actor)
 	joined := "\n" + strings.Join(got, "\n") + "\n"
 	for _, wanted := range []string{"\nPATH=/bin\n", "\nAGENT_SESSIONS_SESSION_ID=lane-id\n", "\nAGENT_SESSIONS_PRODUCT=qwen\n", "\nAGENT_SESSIONS_LANE_CAPABILITY=lane-capability\n"} {
@@ -341,7 +341,7 @@ func TestLaneWorkerEnvironmentReplacesAmbientPeerAuthority(t *testing.T) {
 			t.Fatalf("lane environment %q lacks %q", joined, wanted)
 		}
 	}
-	for _, forbidden := range []string{"parent", "AGENT_SESSIONS_QWEN_CAPABILITY=old", "old-lane", "/old/runtime"} {
+	for _, forbidden := range []string{"parent", "old-lane", "/old/runtime"} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("lane environment retained %q: %q", forbidden, joined)
 		}

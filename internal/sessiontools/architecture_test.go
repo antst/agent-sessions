@@ -23,7 +23,6 @@ var frozenLegacyImporters = map[string]bool{
 	"cmd/agent-sessions/hook.go":        true,
 	"cmd/agent-sessions/lane.go":        true,
 	"cmd/agent-sessions/lane_notice.go": true,
-	"cmd/agent-sessions/qwen_host.go":   true,
 }
 
 func TestNoNewLegacyBridgeOrFederatorImports(t *testing.T) {

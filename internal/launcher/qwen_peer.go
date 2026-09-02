@@ -7,21 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const (
-	qwenCapabilityEnv    = "AGENT_SESSIONS_QWEN_CAPABILITY"
 	qwenInputEnv         = "AGENT_SESSIONS_QWEN_INPUT_FILE"
 	qwenReadinessTimeout = 45 * time.Second
+	qwenRegistryInterval = 100 * time.Millisecond
 )
 
 type qwenPeerMode string
@@ -41,91 +41,51 @@ const (
 )
 
 type qwenPeerPlan struct {
-	mode                qwenPeerMode
-	peerName            string
-	requestedCwd        string
-	sessionID           string
-	resumeTarget        string
-	launchPreference    qwenLaunchPreference
-	expectedInitialMode string
-	permissionSpecified bool
-	profile             qwenprofile.Identity
-	peerContext         peerLaunchContext
-	agentRuntimeDir     string
-	stateDir            string
-	nativeArgs          []string
-	originalArgs        []string
-	informationalPass   bool
+	mode              qwenPeerMode
+	peerName          string
+	requestedCwd      string
+	sessionID         string
+	resumeTarget      string
+	launchPreference  qwenLaunchPreference
+	profile           qwenprofile.Identity
+	peerContext       peerLaunchContext
+	agentRuntimeDir   string
+	stateDir          string
+	nativeArgs        []string
+	originalArgs      []string
+	informationalPass bool
 }
-
-// QwenDaemonPrepareRequest is the exact presence-sensitive profile and native
-// launch intent submitted before the client execs Qwen.
-type QwenDaemonPrepareRequest struct {
-	SessionID              string
-	ResumeTarget           string
-	Resume                 bool
-	Name                   string
-	NameSpecified          bool
-	Cwd                    string
-	LaunchPreference       string
-	ExpectedInitialMode    string
-	PermissionSpecified    bool
-	Profile                qwenprofile.Identity
-	QwenBin                string
-	Owner                  procinfo.Identity
-	Groups                 []string
-	GroupsSpecified        bool
-	ParentSession          string
-	ParentSpecified        bool
-	InheritParentGroups    bool
-	InheritGroupsSpecified bool
-}
-
-// QwenDaemonPrepareResult returns the daemon-owned dual-output artifacts and
-// launch capability required by Qwen's established integration protocol.
-type QwenDaemonPrepareResult struct {
-	SessionID           string
-	Cwd                 string
-	InputPath           string
-	EventsPath          string
-	Capability          string
-	LaunchPreference    string
-	ExpectedInitialMode string
-}
-
-// QwenDaemonPrepare submits one native Qwen launch intent.
-type QwenDaemonPrepare func(context.Context, QwenDaemonPrepareRequest) (QwenDaemonPrepareResult, error)
 
 type qwenPeerDependencies struct {
 	readiness func(context.Context, qwenreadiness.Request) (qwenreadiness.Report, error)
 	exec      func(string, []string, []string) error
-	capture   func(int) (procinfo.Identity, error)
+	run       func(context.Context, string, []string, []string) error
 }
 
-// RunQwenPeerWithDaemon preserves native profile selection, readiness,
-// session identity, dual-output recording, and approval-mode argv while the
-// one daemon owns lifecycle and cleanup.
+// RunQwenPeer preserves native profile selection, readiness, exact session
+// identity, and approval-mode argv. The launcher owns the two Qwen protocol
+// files for exactly the native child's lifetime; live presence belongs to the
+// installed Qwen extension.
 //
-//nolint:gocyclo // Native argv, profile, resume, attachment handoff, exec, and rollback are one launch transaction.
-func RunQwenPeerWithDaemon(ctx context.Context, args []string, prepare QwenDaemonPrepare) error {
-	return runQwenPeerWithDaemon(ctx, args, prepare, qwenPeerDependencies{
+//nolint:gocyclo // Native argv, profile, resume, launch files, and child lifetime form one operation.
+func RunQwenPeer(ctx context.Context, args []string) error {
+	return runQwenPeer(ctx, args, qwenPeerDependencies{
 		readiness: qwenreadiness.Check,
 		exec:      Exec,
-		capture:   procinfo.CaptureIdentity,
+		run:       runQwenNative,
 	})
 }
 
-func runQwenPeerWithDaemon(
+func runQwenPeer(
 	ctx context.Context,
 	args []string,
-	prepare QwenDaemonPrepare,
 	dependencies qwenPeerDependencies,
 ) error {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Print(qwenPeerUsage())
 		return nil
 	}
-	if dependencies.readiness == nil || dependencies.exec == nil || dependencies.capture == nil {
+	if dependencies.readiness == nil || dependencies.exec == nil || dependencies.run == nil {
 		return errors.New("qwen peer dependencies are incomplete")
 	}
 	cwd, err := canonicalQwenCwd()
@@ -142,9 +102,6 @@ func runQwenPeerWithDaemon(
 	}
 	if plan.mode == qwenPeerModePassthrough || plan.informationalPass {
 		return dependencies.exec(qwen, plan.nativeArgs, qwenprofile.ApplyEnvironment(os.Environ(), plan.profile))
-	}
-	if prepare == nil {
-		return errors.New("qwen daemon preparation is unavailable")
 	}
 	readinessContext, cancel := context.WithTimeout(ctx, qwenReadinessTimeout)
 	report, readinessErr := dependencies.readiness(readinessContext, qwenreadiness.Request{
@@ -173,45 +130,125 @@ func runQwenPeerWithDaemon(
 			plan.peerName = resolvedName
 		}
 	}
-	owner, err := dependencies.capture(os.Getpid())
-	if err != nil {
-		return fmt.Errorf("capture Qwen launcher process identity: %w", err)
+	qwenHome := ""
+	if plan.mode == qwenPeerModeFresh && strings.TrimSpace(plan.peerName) != "" {
+		qwenHome, err = qwenprofile.EffectiveHome(plan.profile, os.LookupEnv)
+		if err != nil {
+			return fmt.Errorf("resolve Qwen product profile: %w", err)
+		}
 	}
-	result, err := prepare(ctx, QwenDaemonPrepareRequest{
-		SessionID: plan.sessionID, ResumeTarget: plan.resumeTarget, Resume: plan.mode == qwenPeerModeResume,
-		Name: plan.peerName, NameSpecified: strings.TrimSpace(plan.peerName) != "",
-		Cwd: plan.requestedCwd, LaunchPreference: string(plan.launchPreference),
-		ExpectedInitialMode: qwenInitialModeRequest(plan), PermissionSpecified: plan.permissionSpecified,
-		Profile: plan.profile, QwenBin: qwen, Owner: owner,
-		Groups: append([]string(nil), plan.peerContext.groups...), GroupsSpecified: plan.peerContext.groupsSpecified,
-		ParentSession: plan.peerContext.parentSession, ParentSpecified: plan.peerContext.parentSpecified,
-		InheritParentGroups:    plan.peerContext.inheritParentGroups,
-		InheritGroupsSpecified: plan.peerContext.inheritGroupsSpecified,
-	})
+	root, inputPath, eventsPath, err := createQwenLaunchFiles()
 	if err != nil {
 		return err
 	}
-	if !threadIDPattern.MatchString(result.SessionID) || !filepath.IsAbs(result.InputPath) ||
-		!filepath.IsAbs(result.EventsPath) || strings.TrimSpace(result.Capability) == "" {
-		return errors.New("daemon returned an invalid Qwen launch boundary")
+	defer func() { _ = os.RemoveAll(root) }()
+	nameContext, stopName := context.WithCancel(ctx)
+	nameDone := make(chan struct{})
+	if plan.mode == qwenPeerModeFresh && strings.TrimSpace(plan.peerName) != "" {
+		go func() {
+			defer close(nameDone)
+			waitAndSubmitQwenNativeName(nameContext, qwenHome, plan.sessionID, inputPath, plan.peerName)
+		}()
+	} else {
+		close(nameDone)
 	}
+	defer func() {
+		stopName()
+		<-nameDone
+	}()
 	nativeArgs := insertQwenManagedArgs(plan.nativeArgs,
-		"--chat-recording=true", "--input-file", result.InputPath, "--json-file", result.EventsPath,
+		"--chat-recording=true", "--input-file", inputPath, "--json-file", eventsPath,
 	)
 	if plan.mode == qwenPeerModeFresh {
-		nativeArgs = insertQwenManagedArgs(nativeArgs, "--session-id", result.SessionID)
+		nativeArgs = insertQwenManagedArgs(nativeArgs, "--session-id", plan.sessionID)
 	} else {
-		nativeArgs = replaceQwenResumeTarget(nativeArgs, result.SessionID)
-	}
-	if plan.mode == qwenPeerModeResume && !plan.permissionSpecified && result.ExpectedInitialMode != "" {
-		nativeArgs = insertQwenManagedArgs(nativeArgs, "--approval-mode", result.ExpectedInitialMode)
+		nativeArgs = replaceQwenResumeTarget(nativeArgs, plan.sessionID)
 	}
 	environment := qwenprofile.ApplyEnvironment(os.Environ(), plan.profile)
-	environment = daemonPeerEnvironment(environment, result.SessionID, "qwen")
+	environment = daemonPeerEnvironment(environment, plan.sessionID, "qwen")
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
-	environment = envutil.Set(environment, qwenCapabilityEnv, result.Capability)
-	environment = envutil.Set(environment, qwenInputEnv, result.InputPath)
-	return dependencies.exec(qwen, nativeArgs, environment)
+	environment = envutil.Set(environment, qwenInputEnv, inputPath)
+	return dependencies.run(ctx, qwen, nativeArgs, environment)
+}
+
+func createQwenLaunchFiles() (string, string, string, error) {
+	root, err := os.MkdirTemp("", "agent-sessions-qwen-")
+	if err != nil {
+		return "", "", "", fmt.Errorf("create Qwen launch directory: %w", err)
+	}
+	inputPath, eventsPath := filepath.Join(root, "input.jsonl"), filepath.Join(root, "events.jsonl")
+	for _, path := range []string{inputPath, eventsPath} {
+		file, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if createErr != nil {
+			_ = os.RemoveAll(root)
+			return "", "", "", fmt.Errorf("create Qwen launch file: %w", createErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			_ = os.RemoveAll(root)
+			return "", "", "", fmt.Errorf("close Qwen launch file: %w", closeErr)
+		}
+	}
+	return root, inputPath, eventsPath, nil
+}
+
+func runQwenNative(ctx context.Context, path string, args, environment []string) error {
+	command := exec.CommandContext(ctx, path, args...) //nolint:gosec // resolved installed Qwen executable and parsed native argv.
+	command.Env = append([]string(nil), environment...)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return command.Run()
+}
+
+func waitAndSubmitQwenNativeName(ctx context.Context, home, sessionID, inputPath, name string) {
+	ticker := time.NewTicker(qwenRegistryInterval)
+	defer ticker.Stop()
+	for {
+		if qwenSessionRegistered(home, sessionID) {
+			_ = submitQwenNativeName(inputPath, name)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func submitQwenNativeName(inputPath, name string) error {
+	record, err := json.Marshal(map[string]string{"type": "submit", "text": "/rename " + strings.TrimSpace(name)})
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(inputPath, os.O_WRONLY|os.O_APPEND, 0) //nolint:gosec // launcher-owned Qwen input file.
+	if err != nil {
+		return fmt.Errorf("open Qwen native name input: %w", err)
+	}
+	record = append(record, '\n')
+	_, writeErr := file.Write(record)
+	return errors.Join(writeErr, file.Close())
+}
+
+func qwenSessionRegistered(home, sessionID string) bool {
+	entries, err := os.ReadDir(filepath.Join(home, "sessions"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		body, readErr := os.ReadFile(filepath.Join(home, "sessions", entry.Name())) //nolint:gosec // Qwen owns this selected-profile registry.
+		if readErr != nil {
+			continue
+		}
+		var record struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(body, &record) == nil && record.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func qwenExecutable() (string, error) {
@@ -333,13 +370,6 @@ func qwenReadinessError(report qwenreadiness.Report) error {
 	return fmt.Errorf("qwen is not ready: %s", strings.Join(messages, "; "))
 }
 
-func qwenInitialModeRequest(plan qwenPeerPlan) string {
-	if plan.expectedInitialMode != "" {
-		return plan.expectedInitialMode
-	}
-	return "native_default"
-}
-
 var qwenPassthroughCommands = map[string]struct{}{
 	"auth": {}, "channel": {}, "extensions": {}, "hooks": {}, "mcp": {},
 	"review": {}, "serve": {}, "sessions": {}, "update": {},
@@ -433,17 +463,15 @@ func parseQwenPeerArgs(args []string, cwd string, lookup qwenprofile.LookupEnv) 
 	if nativeModeCount > 1 {
 		return qwenPeerPlan{}, usageError("native --approval-mode was specified more than once")
 	}
-	plan.permissionSpecified = yoloCount > 0 || noYoloCount > 0 || nativeModeCount > 0
 	switch {
 	case yoloCount > 0:
-		plan.launchPreference, plan.expectedInitialMode = qwenLaunchYolo, "yolo"
+		plan.launchPreference = qwenLaunchYolo
 		plan.nativeArgs = replaceQwenWrapperYolo(plan.nativeArgs, "yolo")
 	case noYoloCount > 0:
-		plan.launchPreference, plan.expectedInitialMode = qwenLaunchNonYolo, "default"
+		plan.launchPreference = qwenLaunchNonYolo
 		plan.nativeArgs = insertQwenManagedArgs(plan.nativeArgs, "--approval-mode", "default")
 	case nativeModeCount == 1:
 		plan.launchPreference = qwenLaunchPreference("native:" + nativeMode)
-		plan.expectedInitialMode = nativeMode
 	}
 	return plan, nil
 }

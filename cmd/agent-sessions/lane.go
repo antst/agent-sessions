@@ -1624,7 +1624,7 @@ func laneExecutable(product string) (string, error) {
 func cleanLaneEnvironment(input []string) []string {
 	result := make([]string, 0, len(input))
 	for _, entry := range input {
-		if strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_ID=") || strings.HasPrefix(entry, "AGENT_SESSIONS_PRODUCT=") || strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_NAME=") || strings.HasPrefix(entry, "AGENT_SESSIONS_GROUPS=") || strings.HasPrefix(entry, "AGENT_SESSIONS_QWEN_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_LANE_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_HOST_BINARY=") {
+		if strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_ID=") || strings.HasPrefix(entry, "AGENT_SESSIONS_PRODUCT=") || strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_NAME=") || strings.HasPrefix(entry, "AGENT_SESSIONS_GROUPS=") || strings.HasPrefix(entry, "AGENT_SESSIONS_LANE_CAPABILITY=") || strings.HasPrefix(entry, "AGENT_SESSIONS_HOST_BINARY=") {
 			continue
 		}
 		result = append(result, entry)

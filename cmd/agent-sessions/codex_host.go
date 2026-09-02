@@ -41,7 +41,6 @@ type hostCoordinator struct {
 	pending            map[string]daemonpkg.NativeEvidence
 	monitored          map[string]bool
 	grokPending        map[string]*grokPending
-	qwenPending        map[string]*qwenPending
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
 	qwenLanes          *daemonpkg.QwenLaneAdapter
@@ -70,7 +69,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
 		grokPending:     map[string]*grokPending{},
-		qwenPending:     map[string]*qwenPending{},
 		claudeLanes:     daemonpkg.NewClaudeLaneAdapter(),
 		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
 		qwenLanes:       daemonpkg.NewQwenLaneAdapter(),
@@ -127,7 +125,6 @@ func (c *hostCoordinator) adapters() map[string]daemonpkg.AttachmentAdapter {
 			},
 		}),
 		"grok": c.grokAdapter(),
-		"qwen": c.qwenAdapter(),
 	}
 }
 
@@ -303,19 +300,6 @@ func (c *hostCoordinator) handle(
 			return nil, errors.New("decode Grok preparation failed")
 		}
 		result, err := c.prepareGrok(ctx, runtime, input)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(result)
-	case "attachment.qwen.prepare":
-		if runtime == nil {
-			return nil, errors.New("runtime attachment authority is unavailable")
-		}
-		var input launcher.QwenDaemonPrepareRequest
-		if json.Unmarshal(request.Payload, &input) != nil {
-			return nil, errors.New("decode Qwen preparation failed")
-		}
-		result, err := c.prepareQwen(ctx, runtime, input)
 		if err != nil {
 			return nil, err
 		}
