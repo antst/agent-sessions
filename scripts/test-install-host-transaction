@@ -196,8 +196,8 @@ release="$prefix/libexec/agent-sessions/host/releases/0.3.0"
 prior_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
 [[ -n "$prior_hash" && "$(cat "$test_root/qwen-source")" == "$release/qwen" ]]
 diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null
-[[ "$(readlink -- "$home/.config/opencode/plugins/agent-sessions.js")" == "$release/integrations/opencode/agent-sessions.mjs" ]]
-[[ "$(readlink -- "$home/.config/opencode/shared/live-session.js")" == "$release/integrations/shared/live-session.js" ]]
+cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs"
+cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js"
 find -P "$release" -type d -exec chmod 0555 {} +
 
 # Reproduce an equal-version active cache that differs from the selected
@@ -224,8 +224,8 @@ if [[ "$after_hash" != "$prior_hash" ]] ||
    [[ "$selected_release" != "$release" ]] ||
    [[ "$(cat "$test_root/qwen-source")" != "$release/qwen" ]] ||
    ! diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null ||
-   [[ "$(readlink -- "$home/.config/opencode/plugins/agent-sessions.js")" != "$release/integrations/opencode/agent-sessions.mjs" ]] ||
-   [[ "$(readlink -- "$home/.config/opencode/shared/live-session.js")" != "$release/integrations/shared/live-session.js" ]]; then
+   ! cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs" >/dev/null ||
+   ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null; then
   printf 'failed host update did not restore the exact release selection and Qwen source\n' >&2
   exit 1
 fi

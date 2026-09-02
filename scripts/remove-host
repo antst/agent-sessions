@@ -155,8 +155,9 @@ install_integrations() {
     local config_root
     config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
     mkdir -p "$config_root/plugins" "$config_root/shared"
-    ln -sfn "$current/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
-    ln -sfn "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
+    rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
+    install -m 0644 "$current/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
+    install -m 0644 "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   fi
 }
 
@@ -252,17 +253,8 @@ if [[ -n "$qwen_path" ]]; then
     "$qwen_path" extensions uninstall agent-sessions
   fi
 fi
-if [[ -n "$opencode_path" ]]; then
-  opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-  for link in "$opencode_config_root/plugins/agent-sessions.js" "$opencode_config_root/shared/live-session.js"; do
-    if [[ -L "$link" ]]; then
-      target=$(readlink -- "$link")
-      case "$target" in
-        "$host_root"/releases/*/integrations/*) rm -f -- "$link" ;;
-      esac
-    fi
-  done
-fi
+opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+rm -f -- "$opencode_config_root/plugins/agent-sessions.js" "$opencode_config_root/shared/live-session.js"
 
 case "$(uname -s)" in
   Linux)

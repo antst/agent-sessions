@@ -226,38 +226,14 @@ install_exact_claude_plugin() {
   fi
 }
 
-install_managed_plugin_link() {
-  local link=$1 target=$2 suffix=$3 prior
-  mkdir -p "$(dirname -- "$link")"
-  if [[ -e "$link" || -L "$link" ]]; then
-    [[ -L "$link" ]] || {
-      printf 'refuse to replace a non-managed product plugin: %s\n' "$link" >&2
-      return 1
-    }
-    prior=$(readlink -- "$link")
-    case "$prior" in
-      "$host_root"/releases/*/"$suffix") ;;
-      *)
-        printf 'refuse to replace a plugin link outside Agent Sessions releases: %s\n' "$link" >&2
-        return 1
-        ;;
-    esac
-  fi
-  ln -sfn "$target" "$link"
-}
-
 install_opencode_plugin() {
   local integration_root=$1 config_root
   [[ -n "$opencode_path" ]] || return 0
   config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-  install_managed_plugin_link \
-    "$config_root/plugins/agent-sessions.js" \
-    "$integration_root/integrations/opencode/agent-sessions.mjs" \
-    "integrations/opencode/agent-sessions.mjs"
-  install_managed_plugin_link \
-    "$config_root/shared/live-session.js" \
-    "$integration_root/integrations/shared/live-session.js" \
-    "integrations/shared/live-session.js"
+  mkdir -p "$config_root/plugins" "$config_root/shared"
+  rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
+  install -m 0644 "$integration_root/integrations/opencode/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
+  install -m 0644 "$integration_root/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
 }
 
 install_integrations() {
@@ -328,18 +304,9 @@ remove_integrations() {
   if [[ -n "$qwen_path" ]]; then
     "$qwen_path" extensions uninstall agent-sessions >/dev/null 2>&1 || true
   fi
-  if [[ -n "$opencode_path" ]]; then
-    local config_root link target
-    config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-    for link in "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"; do
-      if [[ -L "$link" ]]; then
-        target=$(readlink -- "$link")
-        case "$target" in
-          "$host_root"/releases/*/integrations/*) rm -f -- "$link" ;;
-        esac
-      fi
-    done
-  fi
+  local opencode_config_root
+  opencode_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+  rm -f -- "$opencode_config_root/plugins/agent-sessions.js" "$opencode_config_root/shared/live-session.js"
 }
 
 write_service_definition() {
