@@ -67,6 +67,43 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	stopClient()
 }
 
+func TestLivePresenceClientProjectsNameOnTheSameConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan liveSessionReport, 2)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
+		joined <- report
+	}, func(liveSessionReport) {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	report := liveSessionReport{UUID: "session", Name: "session", Groups: []string{"group"}, Product: "qwen"}
+	client := startLiveSessionClient(ctx, server.listener.Addr().String(), report, nil)
+	select {
+	case initial := <-joined:
+		if initial.Name != "session" {
+			t.Fatalf("initial name = %q", initial.Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial live report was not received")
+	}
+	report.Name = "product title"
+	updateCtx, stopUpdate := context.WithTimeout(ctx, 2*time.Second)
+	defer stopUpdate()
+	if err := client.UpdateReport(updateCtx, report); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case updated := <-joined:
+		if updated.Name != "product title" {
+			t.Fatalf("updated name = %q", updated.Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("updated live report was not received")
+	}
+}
+
 func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

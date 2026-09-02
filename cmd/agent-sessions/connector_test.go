@@ -79,6 +79,43 @@ func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
 	}
 }
 
+func TestQwenConnectorProjectsOnlyProductOwnedNativeTitle(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, ".qwen")
+	cwd := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QWEN_HOME", home)
+	prior, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prior) })
+	report := liveSessionReport{UUID: "11111111-2222-4333-8444-555555555555", Name: "unaccepted", Product: "qwen"}
+	if name, ok := qwenConnectorNativeName(report); ok || name != "" {
+		t.Fatalf("missing product title projected as %q/%v", name, ok)
+	}
+	path := filepath.Join(home, "projects", "workspace", "chats", report.UUID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	encodedCwd, err := json.Marshal(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"sessionId":"11111111-2222-4333-8444-555555555555","cwd":` + string(encodedCwd) + `,"type":"system","subtype":"custom_title","systemPayload":{"customTitle":"native title","titleSource":"manual"}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if name, ok := qwenConnectorNativeName(report); !ok || name != "native title" {
+		t.Fatalf("product title projection = %q/%v", name, ok)
+	}
+}
+
 func TestClaudeConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "claude.sock")
 	listener, err := net.Listen("unix", socket)

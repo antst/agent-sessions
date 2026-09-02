@@ -75,6 +75,12 @@ func (c *hostCoordinator) prepareQwen(
 		}
 		_ = file.Close()
 	}
+	if !request.Resume && request.NameSpecified {
+		if err := preseedQwenNativeName(inputPath, request.Name); err != nil {
+			_ = removeQwenRoot(root, []string{inputPath, eventsPath})
+			return launcher.QwenDaemonPrepareResult{}, err
+		}
+	}
 	pending := &qwenPending{request: request, root: root, input: inputPath, events: eventsPath}
 	c.mu.Lock()
 	if c.qwenPending[request.SessionID] != nil {
@@ -108,6 +114,18 @@ func (c *hostCoordinator) prepareQwen(
 		SessionID: prepared.ID, Cwd: request.Cwd, InputPath: inputPath, EventsPath: eventsPath, Capability: capability,
 		LaunchPreference: request.LaunchPreference, ExpectedInitialMode: request.ExpectedInitialMode,
 	}, nil
+}
+
+func preseedQwenNativeName(inputPath, name string) error {
+	input, err := bridge.OpenQwenNativeInput(inputPath)
+	if err != nil {
+		return fmt.Errorf("open Qwen native name input: %w", err)
+	}
+	defer func() { _ = input.Close() }()
+	if err := input.Submit("/rename " + strings.TrimSpace(name)); err != nil {
+		return fmt.Errorf("stage Qwen native name: %w", err)
+	}
+	return nil
 }
 
 func qwenInitialModeForPreference(preference string) string {

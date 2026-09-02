@@ -346,8 +346,26 @@ func (c *liveSessionClient) Call(ctx context.Context, id, method string, params 
 	return connection.call(ctx, "session."+id, method, params)
 }
 
+func (c *liveSessionClient) UpdateReport(ctx context.Context, report liveSessionReport) error {
+	if !validLiveSessionReport(report) {
+		return errors.New("live session update is invalid")
+	}
+	c.mu.Lock()
+	c.report = report
+	connection := c.current
+	c.mu.Unlock()
+	if connection == nil {
+		return nil
+	}
+	_, err := connection.call(ctx, "session.update", "session.update", report)
+	return err
+}
+
 func (c *liveSessionClient) run() {
-	if !validLiveSessionReport(c.report) {
+	c.mu.Lock()
+	report := c.report
+	c.mu.Unlock()
+	if !validLiveSessionReport(report) {
 		return
 	}
 	for c.ctx.Err() == nil {
@@ -362,7 +380,10 @@ func (c *liveSessionClient) run() {
 				case <-closed:
 				}
 			}()
-			err = rpc.encoder.Encode(c.report)
+			c.mu.Lock()
+			report = c.report
+			c.mu.Unlock()
+			err = rpc.encoder.Encode(report)
 			if err == nil {
 				readCtx, stopReads := context.WithCancel(c.ctx)
 				c.mu.Lock()

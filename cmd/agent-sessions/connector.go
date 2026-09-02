@@ -14,6 +14,7 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/products/codebuddy"
+	"github.com/antst/agent-sessions/internal/qwenprofile"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
@@ -36,12 +37,21 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
+	if reported && product == connectorProductQwen {
+		report.Name = report.UUID
+		if nativeName, ok := qwenConnectorNativeName(report); ok {
+			report.Name = nativeName
+		}
+	}
 	var live *liveSessionClient
 	if reported && connectorClaimsLivePresence(product, os.Getenv) {
 		live = startLiveSessionClient(ctx, livePresenceEndpoint(stateRoot), report,
 			func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, report, method, params)
 			})
+		if product == connectorProductQwen {
+			startQwenNativeNameProjection(ctx, live, report)
+		}
 	}
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
 		Product: product,
@@ -59,6 +69,45 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func qwenConnectorNativeName(report liveSessionReport) (string, bool) {
+	profile, err := qwenprofile.Current()
+	if err != nil {
+		return "", false
+	}
+	home, err := qwenprofile.EffectiveHome(profile, os.LookupEnv)
+	if err != nil {
+		return "", false
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	return bridge.QwenNativeSessionTitle(home, report.UUID, cwd)
+}
+
+func startQwenNativeNameProjection(ctx context.Context, live *liveSessionClient, report liveSessionReport) {
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		current := report.Name
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				name, ok := qwenConnectorNativeName(report)
+				if !ok || name == current {
+					continue
+				}
+				current, report.Name = name, name
+				updateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				_ = live.UpdateReport(updateCtx, report)
+				cancel()
+			}
+		}
+	}()
 }
 
 func connectorNativeCall(ctx context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
