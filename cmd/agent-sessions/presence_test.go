@@ -273,6 +273,14 @@ func TestActiveLaneNameCacheAsksProductOnceAndMaterializesConfirmedCandidate(t *
 	if actor.nativeID != "native-lane" || actor.state != "archived" || !reflect.DeepEqual(actor.explicitGroups, []string{"team"}) {
 		t.Fatalf("materialized candidate = %+v", actor)
 	}
+	wantGroups := []string{
+		"session:" + runtime.HostID() + "/parent",
+		"session:" + runtime.HostID() + "/parent/native-lane",
+		"team",
+	}
+	if !reflect.DeepEqual(actor.groups, wantGroups) {
+		t.Fatalf("materialized groups = %v, want %v", actor.groups, wantGroups)
+	}
 	if _, err := coordinator.resolveLaneActor(runtime, parent, "codex", "native-lane", true); err != nil {
 		t.Fatal(err)
 	}

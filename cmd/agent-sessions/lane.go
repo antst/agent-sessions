@@ -1310,6 +1310,17 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 		c.mu.Unlock()
 		return fmt.Errorf("native lane identity changed from %s to %s", selected, nativeID)
 	}
+	if actor.nativeID == "" {
+		primary := "session:" + runtime.HostID() + "/" + actor.parentID
+		temporary := primary + "/" + actor.id
+		stable := primary + "/" + nativeID
+		for index, group := range actor.groups {
+			if group == temporary {
+				actor.groups[index] = stable
+			}
+		}
+		actor.groups = uniqueStrings(actor.groups)
+	}
 	actor.nativeID = nativeID
 	c.mu.Unlock()
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
@@ -1987,7 +1998,7 @@ func durableLaneCandidate(runtime *daemonpkg.Runtime, actor *laneActor) (daemonp
 		return daemonpkg.LaneCandidate{}, false
 	}
 	primary := "session:" + runtime.HostID() + "/" + actor.parentID
-	laneGroup := "session:" + runtime.HostID() + "/" + actor.id
+	laneGroup := primary + "/" + actor.nativeID
 	secondary := make([]string, 0, len(actor.groups))
 	for _, group := range actor.groups {
 		if group != primary && group != laneGroup {

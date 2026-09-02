@@ -41,7 +41,7 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 		entry.UUID = candidate.NativeSessionID
 		entry.Product = candidate.Product
 		entry.Parent = candidate.Parent
-		entry.Groups = candidateLaneGroups(runtime.HostID(), candidate)
+		entry.Groups = candidateLaneGroups(candidate)
 		entry.SecondaryGroups = append([]string(nil), candidate.SecondaryGroups...)
 		if entry.Name == "" {
 			entry.Name = candidate.NativeSessionID
@@ -68,9 +68,9 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 	return nil
 }
 
-func candidateLaneGroups(hostID string, candidate daemonpkg.LaneCandidate) []string {
+func candidateLaneGroups(candidate daemonpkg.LaneCandidate) []string {
 	return uniqueStrings(append(
 		append([]string{candidate.PrimaryGroup}, candidate.SecondaryGroups...),
-		"session:"+hostID+"/"+candidate.NativeSessionID,
+		candidate.PrimaryGroup+"/"+candidate.NativeSessionID,
 	))
 }

@@ -129,6 +129,37 @@ func TestAnchorLaneGroupsCompoundsTheParentPrivateNamespace(t *testing.T) {
 	}
 }
 
+func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	primary := "session:" + runtime.HostID() + "/parent"
+	actor := &laneActor{
+		id: "temporary-lane", product: "codex", parentID: "parent", name: "worker",
+		groups: []string{primary, primary + "/temporary-lane", "project/child"},
+	}
+	if err := coordinator.recordLaneNativeID(runtime, actor, "native-lane"); err != nil {
+		t.Fatal(err)
+	}
+	wantGroups := []string{"project/child", primary, primary + "/native-lane"}
+	if !reflect.DeepEqual(actor.groups, wantGroups) {
+		t.Fatalf("bound groups = %v, want %v", actor.groups, wantGroups)
+	}
+	engine, err := daemonpkg.NewLaneEngine(runtime.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := engine.Candidates("parent", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || !reflect.DeepEqual(candidates[0].SecondaryGroups, []string{"project/child"}) {
+		t.Fatalf("stored candidates = %+v", candidates)
+	}
+	if err := engine.Remember(candidates[0]); err != nil {
+		t.Fatalf("stable candidate was not idempotent: %v", err)
+	}
+}
+
 func TestGrokLaneStartRequiresExplicitBypassBeforeRuntimeAccess(t *testing.T) {
 	coordinator := &hostCoordinator{}
 	parent := daemonpkg.ManagedAttachment{
