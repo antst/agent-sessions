@@ -102,10 +102,15 @@ test("DSH parent tool uses the exact live native session", async () => {
   await assert.rejects(value.tools[0].execute({ action: "peers.list" }, {}), /exec\.agent/u);
 });
 
-test("DSH profile rejects concurrent root sessions and stays inert without live settings", async () => {
+test("DSH gives every concurrent product root its own exact live session and stays inert without live settings", async () => {
   const value = fixture();
-  add(value);
-  assert.throws(() => add(value, "idle", "sibling"), /concurrent root/u);
+  const first = add(value);
+  const sibling = add(value, "idle", "sibling");
+  assert.deepEqual([...value.client.sessions.keys()], ["native", "sibling"]);
+  await value.plugin.deliver(value.ctx, { messageID: "sibling-message", nativeSessionID: "sibling", body: "hello sibling" });
+  assert.equal(sibling.calls[0][0], "followup");
+  value.handlers.get("agent/disposed")({ agent: first.agent });
+  assert.deepEqual([...value.client.sessions.keys()], ["sibling"]);
   let loaded = false;
   const result = await applyWithEnvironment({}, {}, async () => { loaded = true; });
   assert.equal(result.active, false);

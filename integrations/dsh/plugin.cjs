@@ -67,12 +67,13 @@ function createCordisPlugin(options) {
   const defineTool = options.defineTool;
   const createUserMessage = options.createUserMessage;
   const initialName = typeof options.initialName === "string" ? options.initialName : "";
-  let managedAgent;
-  let observedTitle = "";
+  const managedAgents = new Map();
+  const observedTitles = new Map();
+  let launchNamePending = !!initialName;
   let operationSequence = 0;
   const nextOperation = (prefix) => prefix + "-" + (++operationSequence);
 
-  function exactAgent(agent) { return managedAgent === agent; }
+  function exactAgent(agent) { return !!agent && managedAgents.get(agent.id) === agent; }
 
   function nativeFacts(ctx, agent) {
     if (!exactAgent(agent) || typeof agent.id !== "string" || !agent.id || !agent.session || agent.session.header?.id !== agent.id) return null;
@@ -86,7 +87,7 @@ function createCordisPlugin(options) {
     const facts = nativeFacts(ctx, agent);
     if (!facts) return false;
     const sent = client.report(agent.id, facts.title);
-    if (sent) observedTitle = facts.title;
+    if (sent) observedTitles.set(agent.id, facts.title);
     return sent;
   }
 
@@ -145,25 +146,29 @@ function createCordisPlugin(options) {
     });
     ctx.on("agent/created", ({ agent }) => {
       if (!ctx.agents.roots().includes(agent)) return;
-      if (managedAgent && managedAgent !== agent) throw new Error("DSH managed profile rejects concurrent root native sessions");
       const cwd = agent?.session?.header?.cwd;
       if (!agent || typeof agent.id !== "string" || !agent.id || !agent.session || agent.session.header?.id !== agent.id ||
           typeof cwd !== "string" || !path.isAbsolute(cwd) || path.normalize(cwd) !== cwd) {
         throw new Error("DSH managed profile received incomplete native session identity");
       }
-      managedAgent = agent;
-      if (initialName) ctx.sessionTitle.rename(agent.session, initialName);
+      if (managedAgents.has(agent.id)) throw new Error("DSH managed profile received a duplicate live root session");
+      managedAgents.set(agent.id, agent);
+      if (launchNamePending) {
+        launchNamePending = false;
+        ctx.sessionTitle.rename(agent.session, initialName);
+      }
       announce(ctx, agent);
     });
     ctx.on("session/event", (session, event) => {
+      const managedAgent = managedAgents.get(session?.header?.id);
       if (!managedAgent || session !== managedAgent.session) return;
       if (event?.type === "session/title") {
         const title = ctx.sessionTitle.get(managedAgent.session)?.title;
         if (typeof event.seq !== "number" || !Number.isSafeInteger(event.seq) || event.seq < 0 || typeof title !== "string") return;
         if (!client.sessions.has(managedAgent.id)) {
           announce(ctx, managedAgent);
-        } else if (title !== observedTitle) {
-          if (client.updateName(managedAgent.id, title)) observedTitle = title;
+        } else if (title !== observedTitles.get(managedAgent.id)) {
+          if (client.updateName(managedAgent.id, title)) observedTitles.set(managedAgent.id, title);
         }
         return;
       }
@@ -171,8 +176,8 @@ function createCordisPlugin(options) {
     ctx.on("agent/disposed", ({ agent }) => {
       if (!exactAgent(agent)) return;
       client.closeSession(agent.id);
-      managedAgent = undefined;
-      observedTitle = "";
+      managedAgents.delete(agent.id);
+      observedTitles.delete(agent.id);
     });
     const started = client.start();
     ctx.effect?.(() => () => client.stop(), "Agent Sessions live session");
