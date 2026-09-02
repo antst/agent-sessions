@@ -143,6 +143,27 @@ func (observer *GrokNativeObserver) SessionName(ctx context.Context) (string, er
 	return state.name, nil
 }
 
+// Rename writes one manual title through Grok's own session service. The
+// caller still confirms the resulting product row through SessionName.
+func (observer *GrokNativeObserver) Rename(ctx context.Context, title string) error {
+	if observer == nil || observer.client == nil || strings.TrimSpace(title) == "" {
+		return errors.New("grok native rename is unavailable")
+	}
+	deadline, cancel := context.WithTimeout(ctx, grokACPInterjectTimeout)
+	defer cancel()
+	result, err := observer.client.request(deadline, "_x.ai/session/rename", map[string]any{
+		"sessionId": observer.sessionID,
+		"title":     title,
+	})
+	if err != nil {
+		return err
+	}
+	if success, _ := result["success"].(bool); !success {
+		return errors.New("grok native rename was not accepted")
+	}
+	return nil
+}
+
 // SessionTitle asks Grok's own roster about one exact UUID. Dormant sessions
 // remain valid discovery candidates; the product row, not daemon state,
 // confirms their existence.

@@ -103,6 +103,20 @@ func TestControlMutationIdempotencyIsExactAndConflictSafe(t *testing.T) {
 	}
 }
 
+func TestConnectorToolCallsAreSynchronousAndUncached(t *testing.T) {
+	var handled atomic.Int64
+	server := startControlTestServer(t, 12, func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
+		return json.Marshal(map[string]int64{"count": handled.Add(1)})
+	})
+	request := ControlRequest{ID: "tool-1", Role: RoleLauncher, Operation: "connector.tool", Generation: 12}
+	first := callControlTest(t, server.Endpoint(), request)
+	request.ID = "tool-2"
+	second := callControlTest(t, server.Endpoint(), request)
+	if !first.OK || !second.OK || handled.Load() != 2 || string(first.Payload) == string(second.Payload) {
+		t.Fatalf("connector calls = first %#v second %#v calls=%d", first, second, handled.Load())
+	}
+}
+
 func TestControlMutationInFlightCoalescesByOperationKey(t *testing.T) {
 	var handled atomic.Int64
 	policy := &controlPolicy{

@@ -40,7 +40,6 @@ type hostCoordinator struct {
 	codex              *bridge.CodexNative
 	pending            map[string]daemonpkg.NativeEvidence
 	monitored          map[string]bool
-	grokPending        map[string]*grokPending
 	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
 	qwenLanes          *daemonpkg.QwenLaneAdapter
@@ -68,7 +67,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		grokPending:     map[string]*grokPending{},
 		claudeLanes:     daemonpkg.NewClaudeLaneAdapter(),
 		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
 		qwenLanes:       daemonpkg.NewQwenLaneAdapter(),
@@ -124,7 +122,6 @@ func (c *hostCoordinator) adapters() map[string]daemonpkg.AttachmentAdapter {
 				return nil
 			},
 		}),
-		"grok": c.grokAdapter(),
 	}
 }
 
@@ -242,19 +239,6 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 			name, cwd, ok := bridge.QwenNativeSessionInfo(home, candidate.NativeSessionID)
 			return laneNameEntry{Name: name, Cwd: cwd}, ok
 		},
-		laneCandidateGrok: func(ctx context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
-			c.mu.Lock()
-			var observer *bridge.GrokNativeObserver
-			if pending := c.grokPending[parent.ID]; pending != nil {
-				observer = pending.observer
-			}
-			c.mu.Unlock()
-			if observer == nil {
-				return laneNameEntry{}, false
-			}
-			name, ok := observer.SessionTitle(ctx, candidate.NativeSessionID)
-			return laneNameEntry{Name: strings.TrimSpace(name), Cwd: parent.Cwd}, ok
-		},
 	}
 }
 
@@ -291,19 +275,11 @@ func (c *hostCoordinator) handle(
 			return nil, err
 		}
 		return json.Marshal(result)
-	case "attachment.grok.prepare":
+	case "connector.tool":
 		if runtime == nil {
-			return nil, errors.New("runtime attachment authority is unavailable")
+			return nil, errors.New("runtime connector authority is unavailable")
 		}
-		var input launcher.GrokDaemonPrepareRequest
-		if json.Unmarshal(request.Payload, &input) != nil {
-			return nil, errors.New("decode Grok preparation failed")
-		}
-		result, err := c.prepareGrok(ctx, runtime, input)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(result)
+		return c.handleConnectorTool(ctx, runtime, request)
 	case "lane.command":
 		if runtime == nil {
 			return nil, errors.New("runtime lane authority is unavailable")
@@ -408,30 +384,22 @@ func (c *hostCoordinator) prepareCodex(
 }
 
 func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) error {
-	command := exec.CommandContext(ctx, launch.Executable, launch.Arguments...) //nolint:gosec // product executable and argv were resolved by the launcher.
+	command := exec.Command(launch.Executable, launch.Arguments...) //nolint:gosec // product executable and argv were resolved by the launcher.
 	command.Env = append([]string(nil), launch.Environment...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := command.Start(); err != nil {
-		return err
-	}
-
-	presenceCtx, stopPresence := context.WithCancel(ctx)
-	report := liveSessionReport{
-		UUID: launch.ThreadID, Name: launch.Name, Product: connectorProductCodex,
-		Groups: append([]string(nil), launch.Groups...),
-	}
-	client := startLiveSessionClient(presenceCtx, livePresenceEndpoint(defaultStateRoot()), report,
-		func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	return runLauncherHeldPeer(ctx, []launcherHeldChild{{
+		role: "Codex TUI", command: command, primary: true,
+	}}, func(context.Context) (launcherHeldIdentity, error) {
+		report := liveSessionReport{
+			UUID: launch.ThreadID, Name: launch.Name, Product: connectorProductCodex,
+			Groups: append([]string(nil), launch.Groups...),
+		}
+		return launcherHeldIdentity{report: report, call: func(
+			callCtx context.Context, method string, params json.RawMessage,
+		) (json.RawMessage, error) {
 			return connectorNativeCall(callCtx, report, method, params)
-		})
-	err := command.Wait()
-	stopPresence()
-	client.mu.Lock()
-	if client.current != nil {
-		_ = client.current.connection.Close()
-	}
-	client.mu.Unlock()
-	return err
+		}}, nil
+	})
 }
 
 func codexResumeCwd(request launcher.CodexDaemonPrepareRequest, _ bridge.CodexNativeThread) string {

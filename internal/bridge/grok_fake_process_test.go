@@ -25,6 +25,7 @@ func TestGrokFakeProcess(_ *testing.T) {
 func runGrokFakeACP() {
 	scanner := bufio.NewScanner(os.Stdin)
 	var activeTurnUntil time.Time
+	title := strings.TrimSpace(os.Getenv("GROK_FAKE_SESSION_TITLE"))
 	for scanner.Scan() {
 		var request map[string]any
 		if json.Unmarshal(scanner.Bytes(), &request) != nil {
@@ -91,9 +92,13 @@ func runGrokFakeACP() {
 			activity := defaultString(strings.TrimSpace(os.Getenv("GROK_FAKE_ACTIVITY")), "idle")
 			result["result"] = map[string]any{"sessions": []any{map[string]any{
 				"sessionId": defaultString(os.Getenv("GROK_FAKE_GENERATED_SESSION_ID"), os.Getenv(grokSessionIDEnv)),
-				"title":     strings.TrimSpace(os.Getenv("GROK_FAKE_SESSION_TITLE")), "resident": true,
+				"title":     title, "resident": true,
 				"yolo": yolo, "activity": activity,
 			}}}
+		case "_x.ai/session/rename":
+			params, _ := request["params"].(map[string]any)
+			title = stringValue(params["title"])
+			result["success"] = title != ""
 		case "_x.ai/mcp/call":
 			params, _ := request["params"].(map[string]any)
 			arguments, _ := params["arguments"].(map[string]any)

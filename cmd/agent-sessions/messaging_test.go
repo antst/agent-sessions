@@ -78,3 +78,35 @@ func TestUnifiedRenameNeverCreatesADurableDaemonAlias(t *testing.T) {
 		t.Fatalf("live peer leaked into durable catalog: %s", encoded)
 	}
 }
+
+func TestToolsOnlyConnectorUsesItsLiveSessionAsTheCaller(t *testing.T) {
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
+		ID: "grok-session", Product: "grok", NativeSessionID: "grok-session", Groups: []string{"review"},
+	})
+	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
+	payload, err := json.Marshal(connectorToolEnvelope{
+		SourceID: "grok-session", RequestID: "mcp-1", Name: "identity", Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if json.Unmarshal(response, &result) != nil || result.IsError || len(result.Content) != 1 ||
+		!strings.Contains(result.Content[0].Text, "grok-session") {
+		t.Fatalf("connector tool response = %s", response)
+	}
+}

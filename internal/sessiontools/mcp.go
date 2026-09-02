@@ -13,10 +13,10 @@ const maxMCPInputBytes = 1 << 20
 const genericInstructions = "Use these structured tools for Agent Sessions peer discovery, live messaging, and lane lifecycle operations from this managed product session. The current live product session supplies the caller identity; session_id is optional context."
 
 var instructions = map[string]string{
-	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a sandboxed lane executable. Tool calls activate only when Codex supplies host-owned metadata matching an attested grouped peer thread; session_id is optional corroboration.",
-	"claude": "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, reply, and Codex, Claude, Grok, or Qwen lane lifecycle operation from this managed Claude session. Use lane instead of invoking a product lane executable through Bash; the Agent Sessions daemon owns the background worker and lifecycle. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text. This MCP process activates only for exact ancestry from the live native Claude adapter plus its matching grouped host-agent registration; no model-supplied session_id is required.",
-	"grok":   "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox while retaining the attested parent identity; use it instead of a shell-executed lane launcher. This MCP process activates only for a live process-attested grok-peer launch with a matching grouped host-agent registration; session_id is optional corroboration.",
-	"qwen":   "Use these structured Agent Sessions tools for discovery, direct sends, multicast, broadcast, inbox recovery, identity, rename, and foreign lane lifecycle commands from this managed Qwen session. This MCP process activates only for exact process ancestry from the live qwen-peer adapter with a matching grouped host-agent registration; session_id is optional corroboration. Qwen's native approval mode remains Qwen-owned and may change during the session.",
+	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tool calls activate while this product session has a live Agent Sessions connection; session_id is optional context.",
+	"claude": "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, reply, and Codex, Claude, Grok, or Qwen lane lifecycle operation from this live Claude session. Use lane instead of invoking a product lane executable through Bash. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text.",
+	"grok":   "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tools activate while the launcher-held Grok session is live.",
+	"qwen":   "Use these structured Agent Sessions tools for discovery, direct sends, multicast, broadcast, identity, rename, and foreign lane lifecycle commands from this live Qwen session. Qwen's native approval mode remains Qwen-owned and may change during the session.",
 }
 
 type mcpToolPolicy struct {
@@ -30,16 +30,16 @@ var mcpToolPolicies = map[string]mcpToolPolicy{
 	"codex": {requiresSession: true},
 	"claude": {
 		contextName:        "managed Claude",
-		sessionDescription: "Optional corroboration of this Claude session UUID; process ancestry is authoritative.",
+		sessionDescription: "Optional context for this live Claude session UUID.",
 		allowedTools:       map[string]bool{"list_peers": true, "send_message": true, "broadcast": true, "rename_session": true, "lane": true},
 	},
 	"grok": {
 		contextName:        "Grok",
-		sessionDescription: "Optional corroboration of the current Grok session ID. The launch token is authoritative.",
+		sessionDescription: "Optional context for the current live Grok session ID.",
 	},
 	"qwen": {
 		contextName:        "Qwen",
-		sessionDescription: "Optional corroboration of the current Qwen session ID. Exact process and host registration attestation are authoritative.",
+		sessionDescription: "Optional context for the current live Qwen session ID.",
 	},
 }
 

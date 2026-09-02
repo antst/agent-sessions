@@ -69,7 +69,6 @@ func TestPersistentRuntimeEnvironmentDropsTransientParentIdentity(t *testing.T) 
 		peerGroupsEnv + `=["team"]`,
 		remoteParentEnv + "={}",
 		"CODEX_THREAD_ID=thread",
-		grokLaunchTokenEnv + "=secret",
 		grokSessionIDEnv + "=native",
 		agentRuntimeDirEnv + "=/runtime",
 	})

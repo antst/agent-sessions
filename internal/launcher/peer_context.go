@@ -45,7 +45,7 @@ func extractPeerLaunchContext(args []string, consumesNext func(string) bool) ([]
 func persistentRuntimeEnvironment(environment []string) []string {
 	blocked := map[string]bool{
 		peerSessionIDEnv: true, peerProductEnv: true, peerSessionNameEnv: true, peerGroupsEnv: true, remoteParentEnv: true,
-		"CODEX_THREAD_ID": true, grokLaunchTokenEnv: true, grokSessionIDEnv: true,
+		"CODEX_THREAD_ID": true, grokSessionIDEnv: true,
 	}
 	result := make([]string, 0, len(environment))
 	for _, value := range environment {

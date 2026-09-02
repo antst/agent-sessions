@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -106,10 +107,10 @@ func TestGrokPeerManagedPrefixPreservesCallerVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ready := grokHostReady{LeaderSocket: filepath.Join(root, "leader.sock")}
-	got := grokInteractiveArguments(plan, ready)
+	leaderSocket := filepath.Join(root, "leader.sock")
+	got := grokInteractiveArguments(plan, leaderSocket)
 	want := []string{
-		"--leader", "--leader-socket", ready.LeaderSocket, "--sandbox", "off",
+		"--leader", "--leader-socket", leaderSocket, "--sandbox", "off",
 		"--resume", testGrokSessionID,
 		"--rules", "first", "second", "--prompt-json", `[{"type":"text","text":"hello"}]`,
 		"--", "literal", "--leader-socket", "prompt-data",
@@ -196,8 +197,7 @@ func TestGrokPeerTitleResumePreservesNativeSelectorAndHostContext(t *testing.T) 
 	if !reflect.DeepEqual(plan.peerContext.groups, []string{"umka"}) || !plan.peerContext.groupsSpecified {
 		t.Fatalf("peer context = %+v", plan.peerContext)
 	}
-	ready := grokHostReady{LeaderSocket: filepath.Join(root, "leader.sock")}
-	managed := grokInteractiveArguments(plan, ready)
+	managed := grokInteractiveArguments(plan, filepath.Join(root, "leader.sock"))
 	if !slices.Contains(managed, "test") || slices.Contains(managed, plan.sessionID) {
 		t.Fatalf("native title selector was rewritten: %q", managed)
 	}
@@ -254,6 +254,30 @@ func TestGrokPeerCwdIsCanonicalButNativeArgvIsUntouched(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.interactiveArgs, args) {
 		t.Fatalf("cwd inspection rewrote argv: %q", plan.interactiveArgs)
+	}
+}
+
+func TestGrokPeerBuildsOneLauncherOwnedLeaderAndTUI(t *testing.T) {
+	root := t.TempDir()
+	grok := writeGrokFixture(t, root, validGrokHelpFixture())
+	t.Setenv("GROK_PEER_GROK_BIN", grok)
+	var got GrokNativeLaunch
+	err := RunGrokPeer(context.Background(), []string{
+		"--session-id", testGrokSessionID, "-n", "native-title", "-g", "project", "--no-alt-screen",
+	}, func(_ context.Context, launch GrokNativeLaunch) error {
+		got = launch
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Executable != grok || got.SessionID != testGrokSessionID || got.RequestedName != "native-title" ||
+		len(got.Groups) != 1 || got.Groups[0] != "project" || !filepath.IsAbs(got.LeaderSocket) {
+		t.Fatalf("native launch = %+v", got)
+	}
+	if !slices.Contains(got.LeaderArguments, "leader") || !slices.Contains(got.TUIArguments, "--session-id") ||
+		!slices.Contains(got.TUIArguments, testGrokSessionID) {
+		t.Fatalf("leader=%q tui=%q", got.LeaderArguments, got.TUIArguments)
 	}
 }
 

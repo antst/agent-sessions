@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/bridge"
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/products/codebuddy"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
@@ -60,6 +61,9 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live == nil {
+				if reported && product == connectorProductGrok {
+					return callConnectorDaemonTool(callCtx, report.UUID, id, method, params)
+				}
 				return nil, sessiontools.ErrConnectorInactive
 			}
 			return live.Call(callCtx, id, method, params)
@@ -69,6 +73,38 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func callConnectorDaemonTool(
+	ctx context.Context,
+	sourceID, requestID, method string,
+	params json.RawMessage,
+) (json.RawMessage, error) {
+	if method != "tools/call" {
+		return nil, fmt.Errorf("connector method %s is unsupported", method)
+	}
+	var call connectorToolCall
+	if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
+		return nil, fmt.Errorf("connector tool call is invalid")
+	}
+	payload, err := json.Marshal(connectorToolEnvelope{
+		SourceID: sourceID, RequestID: requestID, Name: call.Name, Arguments: call.Arguments,
+	})
+	if err != nil {
+		return nil, err
+	}
+	id := commandRequestID()
+	response, err := callExistingDaemon(ctx, defaultStateRoot(), daemonpkg.ControlRequest{
+		ID: id, Role: daemonpkg.RoleLauncher, Operation: "connector.tool",
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, errors.New(response.Error.Message)
+	}
+	return append(json.RawMessage(nil), response.Payload...), nil
 }
 
 func qwenConnectorNativeName(report liveSessionReport) (string, bool) {
@@ -111,21 +147,29 @@ func connectorNativeCall(ctx context.Context, report liveSessionReport, method s
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
-	var request struct {
-		MessageID string `json:"message_id"`
-		Body      string `json:"body"`
-	}
-	if json.Unmarshal(params, &request) != nil || strings.TrimSpace(request.MessageID) == "" {
-		return nil, fmt.Errorf("live message delivery is invalid")
+	messageID, body, err := liveMessageRequest(params)
+	if err != nil {
+		return nil, err
 	}
 	adapter := connectorNativeAdapters[report.Product]
 	if adapter == nil {
 		return nil, fmt.Errorf("product %s has no Go connector delivery adapter", report.Product)
 	}
-	if err := adapter(ctx, report, request.MessageID, request.Body); err != nil {
+	if err := adapter(ctx, report, messageID, body); err != nil {
 		return nil, err
 	}
 	return json.RawMessage(`{}`), nil
+}
+
+func liveMessageRequest(params json.RawMessage) (string, string, error) {
+	var request struct {
+		MessageID string `json:"message_id"`
+		Body      string `json:"body"`
+	}
+	if json.Unmarshal(params, &request) != nil || strings.TrimSpace(request.MessageID) == "" {
+		return "", "", fmt.Errorf("live message delivery is invalid")
+	}
+	return request.MessageID, request.Body, nil
 }
 
 type connectorNativeAdapter func(context.Context, liveSessionReport, string, string) error
@@ -141,7 +185,6 @@ var connectorNativeAdapters = map[string]connectorNativeAdapter{
 	connectorProductCodex:  deliverCodexConnectorMessage,
 	connectorProductClaude: deliverClaudeConnectorMessage,
 	connectorProductQwen:   deliverQwenConnectorMessage,
-	connectorProductGrok:   deliverGrokConnectorMessage,
 	codebuddy.ProductID:    deliverCodeBuddyConnectorMessage,
 }
 
@@ -149,7 +192,7 @@ var connectorNativeAdapters = map[string]connectorNativeAdapter{
 // stream. A project-discovered MCP connector may expose the same tool name,
 // but it must never open a second connection and replace the product report.
 func connectorOwnsLivePresence(product string) bool {
-	if product == connectorProductCodex {
+	if product == connectorProductCodex || product == connectorProductGrok {
 		return false
 	}
 	_, ok := connectorNativeAdapters[product]
@@ -189,30 +232,6 @@ func deliverQwenConnectorMessage(_ context.Context, _ liveSessionReport, _ strin
 	return writer.Submit(body)
 }
 
-func deliverGrokConnectorMessage(ctx context.Context, report liveSessionReport, messageID, body string) error {
-	grok := strings.TrimSpace(os.Getenv("GROK_PEER_GROK_BIN"))
-	if grok == "" {
-		var err error
-		grok, err = exec.LookPath("grok")
-		if err != nil {
-			return err
-		}
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	observer, err := bridge.OpenGrokNativeObserver(
-		ctx, grok, cwd, os.Getenv("AGENT_SESSIONS_GROK_LEADER_SOCKET"),
-		report.UUID, os.Environ(), nil,
-	)
-	if err != nil {
-		return err
-	}
-	defer observer.Close()
-	return observer.Interject(ctx, messageID, body)
-}
-
 func deliverCodeBuddyConnectorMessage(ctx context.Context, report liveSessionReport, _ string, body string) error {
 	return codebuddy.ReplyLivePeer(ctx, report.UUID, body)
 }
@@ -240,10 +259,13 @@ func sendClaudeConnectorMessage(socket, messageID, message string) error {
 
 func connectorLiveReport(product string, getenv func(string) string) (liveSessionReport, bool) {
 	uuid := ""
+	if product == connectorProductGrok {
+		uuid = strings.TrimSpace(getenv("GROK_SESSION_ID"))
+	}
 	productSessionEnv := map[string]string{
 		laneCandidateCodex: "CODEX_THREAD_ID", laneCandidateClaude: "CLAUDE_CODE_SESSION_ID", laneCandidateGrok: "AGENT_SESSIONS_GROK_SESSION_ID",
 	}
-	if name := productSessionEnv[product]; name != "" {
+	if name := productSessionEnv[product]; uuid == "" && name != "" {
 		uuid = strings.TrimSpace(getenv(name))
 	}
 	if uuid == "" {

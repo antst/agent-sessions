@@ -19,6 +19,13 @@ type connectorToolCall struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
+type connectorToolEnvelope struct {
+	SourceID  string         `json:"source_id"`
+	RequestID string         `json:"request_id"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
 type liveToolCall struct {
 	Operation string         `json:"operation"`
 	Arguments map[string]any `json:"arguments"`
@@ -38,15 +45,7 @@ func (c *hostCoordinator) handleLiveSessionCall(
 			return nil, errors.New("connector tool call is invalid")
 		}
 		result, err := c.callLocalTool(ctx, runtime, report.UUID, call.Name, call.Arguments)
-		if err != nil {
-			return json.Marshal(map[string]any{
-				"content": []map[string]any{{"type": "text", "text": err.Error()}}, "isError": true,
-			})
-		}
-		return json.Marshal(map[string]any{
-			"content":           []map[string]any{{"type": "text", "text": result.Text}},
-			"structuredContent": result.Data,
-		})
+		return marshalConnectorToolResult(result, err)
 	case "tool.call":
 		var call liveToolCall
 		if json.Unmarshal(params, &call) != nil {
@@ -67,6 +66,32 @@ func (c *hostCoordinator) handleLiveSessionCall(
 	default:
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
+}
+
+func (c *hostCoordinator) handleConnectorTool(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	request daemonpkg.ControlRequest,
+) (json.RawMessage, error) {
+	var call connectorToolEnvelope
+	if json.Unmarshal(request.Payload, &call) != nil || strings.TrimSpace(call.SourceID) == "" ||
+		strings.TrimSpace(call.RequestID) == "" || strings.TrimSpace(call.Name) == "" {
+		return nil, errors.New("connector tool call is invalid")
+	}
+	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID)
+	return marshalConnectorToolResult(result, err)
+}
+
+func marshalConnectorToolResult(result localToolResult, err error) (json.RawMessage, error) {
+	if err != nil {
+		return json.Marshal(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": err.Error()}}, "isError": true,
+		})
+	}
+	return json.Marshal(map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": result.Text}},
+		"structuredContent": result.Data,
+	})
 }
 
 func normalizeLiveToolCall(call liveToolCall) (string, map[string]any, error) {

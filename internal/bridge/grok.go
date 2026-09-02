@@ -3,85 +3,21 @@ package bridge
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/antst/agent-sessions/internal/socketpath"
 )
 
 const (
-	grokLaunchTokenEnv      = "AGENT_SESSIONS_GROK_LAUNCH_TOKEN"
 	grokSessionIDEnv        = "AGENT_SESSIONS_GROK_SESSION_ID"
 	grokACPStartupTimeout   = 15 * time.Second
 	grokACPInterjectTimeout = 30 * time.Second
 )
-
-type grokHostPaths struct {
-	Root          string
-	LaunchDir     string
-	LeaderSocket  string
-	ControlSocket string
-}
-
-// GrokHostSocketPaths returns the compact, per-launch paths shared by the
-// launcher and host. launchToken is never placed on disk verbatim.
-func GrokHostSocketPaths(runtimeDir, launchToken string) (leader, control string, err error) {
-	if !validGrokLaunchToken(launchToken) {
-		return "", "", errors.New("invalid Grok launch token")
-	}
-	paths := grokRuntimePaths(runtimeDir, os.Getuid(), launchToken)
-	return paths.LeaderSocket, paths.ControlSocket, nil
-}
-
-func grokRuntimePaths(runtimeDir string, uid int, launchToken string) grokHostPaths {
-	return grokRuntimePathsForKey(runtimeDir, uid, sessionKey(launchToken))
-}
-
-func grokRuntimePathsForKey(runtimeDir string, uid int, launchKey string) grokHostPaths {
-	root := filepath.Join(runtimeDir, fmt.Sprintf("agent-sessions-grok-%d", uid))
-	// Prefer the caller's runtime directory, but compact before any socket is
-	// created when the longest per-launch address would exceed sun_path.
-	root = socketpath.PreferRoot(
-		root,
-		filepath.Join("/tmp", fmt.Sprintf("asg-%d", uid)),
-		filepath.Join("g-"+strings.Repeat("0", 20), "control.sock"),
-	)
-	launchDir := filepath.Join(root, "g-"+launchKey)
-	return grokHostPaths{
-		Root:          root,
-		LaunchDir:     launchDir,
-		LeaderSocket:  filepath.Join(launchDir, "leader.sock"),
-		ControlSocket: filepath.Join(launchDir, "control.sock"),
-	}
-}
-
-func validGrokLaunchToken(value string) bool {
-	if len(value) < 32 || len(value) > 256 {
-		return false
-	}
-	for _, r := range value {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
-			(r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
-			return false
-		}
-	}
-	return true
-}
-
-func grokTokenHash(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
 
 type grokManagedProcess struct {
 	cmd         *exec.Cmd

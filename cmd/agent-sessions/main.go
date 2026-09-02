@@ -89,7 +89,7 @@ func defaultCommandRunners() commandRunners {
 				return launcher.RunClaudePeer(invocation.Arguments)
 			}
 			if invocation.Product == "grok" {
-				return launcher.RunGrokPeerWithDaemon(ctx, invocation.Arguments, requestGrokPreparation)
+				return launcher.RunGrokPeer(ctx, invocation.Arguments, runGrokNativePeer)
 			}
 			if invocation.Product == "qwen" {
 				return launcher.RunQwenPeer(ctx, invocation.Arguments)

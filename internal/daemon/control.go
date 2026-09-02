@@ -21,7 +21,7 @@ type ControlRole string
 const (
 	// RoleAdmin permits read-only same-user operator metadata.
 	RoleAdmin ControlRole = "admin"
-	// RoleLauncher permits attachment and lane transactions.
+	// RoleLauncher permits short-lived launcher, lane, and connector calls.
 	RoleLauncher ControlRole = "launcher"
 	// RoleHook permits exact managed lifecycle events.
 	RoleHook ControlRole = "hook"
@@ -216,7 +216,7 @@ func roleAllowsOperation(role ControlRole, operation string) bool {
 	case RoleAdmin:
 		return operation == "status" || operation == "doctor" || operation == "roster"
 	case RoleLauncher:
-		return strings.HasPrefix(operation, "attachment.") || strings.HasPrefix(operation, "lane.")
+		return strings.HasPrefix(operation, "attachment.") || strings.HasPrefix(operation, "lane.") || operation == "connector.tool"
 	case RoleHook:
 		return operation == "hook.event"
 	default:
@@ -225,7 +225,7 @@ func roleAllowsOperation(role ControlRole, operation string) bool {
 }
 
 func controlMutation(request ControlRequest) bool {
-	return request.Role != RoleAdmin
+	return request.Role != RoleAdmin && request.Operation != "connector.tool"
 }
 
 func lifecycleOperation(operation string) bool {
