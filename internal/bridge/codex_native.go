@@ -327,11 +327,21 @@ func (native *CodexNative) ResumeThread(ctx context.Context, threadID, cwd, appr
 // attempts to acquire a second writer for our own loaded thread and Codex
 // correctly rejects it. The working pre-unification supervisor kept one
 // subscription and dispatched later turns directly with turn/start.
-func (native *CodexNative) PrepareLaneThread(ctx context.Context, threadID, cwd, approvalPolicy, sandbox string, unarchive bool) (CodexNativeThread, error) {
+func (native *CodexNative) PrepareLaneThread(ctx context.Context, threadID, cwd, approvalPolicy, sandbox string) (CodexNativeThread, error) {
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
 	}
-	if unarchive {
+	native.mu.Lock()
+	loaded := native.loadedThreads[threadID]
+	native.mu.Unlock()
+	if !loaded {
+		archived, err := listThreadMembership(native.client, true)
+		if err != nil {
+			return CodexNativeThread{}, err
+		}
+		if !archived[threadID] {
+			return native.ResumeThread(ctx, threadID, cwd, approvalPolicy, sandbox)
+		}
 		if err := native.UnarchiveThread(ctx, threadID); err != nil {
 			return CodexNativeThread{}, err
 		}
@@ -341,12 +351,6 @@ func (native *CodexNative) PrepareLaneThread(ctx context.Context, threadID, cwd,
 			return CodexNativeThread{}, errors.Join(err, rollbackErr)
 		}
 		return thread, nil
-	}
-	native.mu.Lock()
-	loaded := native.loadedThreads[threadID]
-	native.mu.Unlock()
-	if !loaded {
-		return native.ResumeThread(ctx, threadID, cwd, approvalPolicy, sandbox)
 	}
 	thread, err := readExactPreparedThread(native.client, threadID)
 	if err != nil {

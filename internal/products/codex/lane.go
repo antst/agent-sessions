@@ -15,7 +15,7 @@ const ProductID = "codex"
 // LaneNative is the exact Codex App Server surface used by one lane driver.
 type LaneNative interface {
 	StartThread(context.Context, bridge.CodexStartRequest) (bridge.CodexNativeThread, error)
-	PrepareLaneThread(context.Context, string, string, string, string, bool) (bridge.CodexNativeThread, error)
+	PrepareLaneThread(context.Context, string, string, string, string) (bridge.CodexNativeThread, error)
 	StartLaneTurn(context.Context, bridge.CodexLaneTurnRequest) (string, error)
 	WaitLaneTurn(context.Context, string, string) (bridge.CodexLaneTurnResult, error)
 	InterruptLaneTurn(context.Context, string, string) error
@@ -60,7 +60,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 			ApprovalPolicy: approval, Sandbox: sandbox,
 		})
 	} else {
-		thread, err = native.PrepareLaneThread(ctx, request.ResumeNativeID, request.Cwd, approval, sandbox, request.Unarchive)
+		thread, err = native.PrepareLaneThread(ctx, request.ResumeNativeID, request.Cwd, approval, sandbox)
 	}
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err

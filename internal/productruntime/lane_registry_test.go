@@ -1,6 +1,15 @@
 package productruntime
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestLaneOpenRequestCarriesNoDaemonArchiveOpinion(t *testing.T) {
+	if _, exists := reflect.TypeOf(LaneOpenRequest{}).FieldByName("Unarchive"); exists {
+		t.Fatal("lane open request must not infer product archive membership")
+	}
+}
 
 func TestLaneRegistryIsExplicitAndImmutable(t *testing.T) {
 	driver := fakeLaneDriver{}

@@ -28,6 +28,7 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	threadID := "00000000-0000-0000-0000-00000000c001"
 	var methodsMu sync.Mutex
 	methods := []string{}
+	archived := false
 	socket := filepath.Join(home, "app-server.sock")
 	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
 		method := stringValue(request["method"])
@@ -37,8 +38,23 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 			methodsMu.Unlock()
 		}
 		switch method {
-		case "initialize", "plugin/list", "config/mcpServer/reload", "thread/name/set", "thread/settings/update", "thread/archive", "thread/unsubscribe", "thread/unarchive", "thread/delete":
+		case "initialize", "plugin/list", "config/mcpServer/reload", "thread/name/set", "thread/settings/update", "thread/unsubscribe", "thread/delete":
 			return map[string]any{}, nil
+		case "thread/archive":
+			archived = true
+			return map[string]any{}, nil
+		case "thread/unarchive":
+			if !archived {
+				return nil, errors.New("thread is not archived")
+			}
+			archived = false
+			return map[string]any{}, nil
+		case "thread/list":
+			params, _ := request["params"].(map[string]any)
+			if archived && boolValue(params["archived"]) {
+				return map[string]any{"data": []any{map[string]any{"id": threadID}}}, nil
+			}
+			return map[string]any{"data": []any{}}, nil
 		case "thread/start":
 			params, _ := request["params"].(map[string]any)
 			if stringValue(params["cwd"]) != workspace || stringValue(params["approvalPolicy"]) != "never" ||
@@ -101,7 +117,7 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	if err != nil || started.ID != threadID || started.Name != "exact-peer" || started.ApprovalPolicy != "never" {
 		t.Fatalf("started thread = %+v, %v", started, err)
 	}
-	if prepared, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access", false); err != nil || prepared.ID != threadID {
+	if prepared, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access"); err != nil || prepared.ID != threadID {
 		t.Fatalf("prepare already-loaded lane thread = %+v, %v", prepared, err)
 	}
 	resolved, err := native.ResolveThread(context.Background(), threadID)
@@ -114,7 +130,7 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	if err := native.ArchiveThread(context.Background(), threadID); err != nil {
 		t.Fatal(err)
 	}
-	if prepared, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access", true); err != nil || prepared.ID != threadID {
+	if prepared, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access"); err != nil || prepared.ID != threadID {
 		t.Fatalf("prepare archived lane thread = %+v, %v", prepared, err)
 	}
 	if err := native.DeleteThread(context.Background(), threadID); err != nil {
@@ -123,7 +139,7 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 	methodsMu.Lock()
 	gotMethods := append([]string(nil), methods...)
 	methodsMu.Unlock()
-	wantMethods := []string{"plugin/list", "config/mcpServer/reload", "thread/start", "thread/name/set", "thread/resume", "thread/settings/update", "thread/read", "thread/settings/update", "thread/read", "thread/read", "turn/start", "thread/archive", "thread/unsubscribe", "thread/unarchive", "thread/resume", "thread/settings/update", "thread/delete"}
+	wantMethods := []string{"plugin/list", "config/mcpServer/reload", "thread/start", "thread/name/set", "thread/resume", "thread/settings/update", "thread/read", "thread/settings/update", "thread/read", "thread/read", "turn/start", "thread/archive", "thread/unsubscribe", "thread/list", "thread/unarchive", "thread/resume", "thread/settings/update", "thread/delete"}
 	if !reflect.DeepEqual(gotMethods, wantMethods) {
 		t.Fatalf("native method sequence = %v, want %v", gotMethods, wantMethods)
 	}
@@ -259,6 +275,8 @@ func TestCodexNativePostRestartIdleLaneResumesWithoutUnarchive(t *testing.T) {
 		switch method {
 		case "initialize":
 			return map[string]any{}, nil
+		case "thread/list":
+			return map[string]any{"data": []any{}}, nil
 		case "thread/unarchive":
 			return nil, errors.New("thread already has an active writer")
 		case "thread/resume":
@@ -278,12 +296,57 @@ func TestCodexNativePostRestartIdleLaneResumesWithoutUnarchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(native.Close)
-	thread, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access", false)
+	thread, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access")
 	if err != nil || thread.ID != threadID || thread.Status != "idle" {
 		t.Fatalf("post-restart idle prepare = %+v, %v", thread, err)
 	}
 	if containsString(methods, "thread/unarchive") {
 		t.Fatalf("post-restart idle prepare called unarchive: %v", methods)
+	}
+}
+
+func TestCodexNativeUnarchivesOnlyWhenProductReportsArchivedMembership(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	workspace := codexNativeTestDirectory(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID := "00000000-0000-0000-0000-00000000c102"
+	methods := []string{}
+	socket := filepath.Join(home, "app-server.sock")
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		method := stringValue(request["method"])
+		if method != "initialize" {
+			methods = append(methods, method)
+		}
+		switch method {
+		case "initialize", "thread/unarchive", "thread/settings/update":
+			return map[string]any{}, nil
+		case "thread/list":
+			return map[string]any{"data": []any{map[string]any{"id": threadID}}}, nil
+		case "thread/resume":
+			return map[string]any{"thread": map[string]any{
+				"id": threadID, "cwd": workspace, "source": "appServer", "status": map[string]any{"type": "idle"},
+			}, "cwd": workspace, "approvalPolicy": "never"}, nil
+		default:
+			return nil, errors.New("unexpected native method " + method)
+		}
+	})
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	thread, err := native.PrepareLaneThread(context.Background(), threadID, workspace, "never", "danger-full-access")
+	if err != nil || thread.ID != threadID {
+		t.Fatalf("archived lane prepare = %+v, %v", thread, err)
+	}
+	want := []string{"thread/list", "thread/unarchive", "thread/resume", "thread/settings/update"}
+	if !reflect.DeepEqual(methods, want) {
+		t.Fatalf("archived lane methods = %v, want %v", methods, want)
 	}
 }
 

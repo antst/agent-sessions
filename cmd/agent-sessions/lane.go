@@ -412,7 +412,7 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		c.mu.Unlock()
 		return nil, err
 	}
-	if err := c.dispatchLaneTurn(runtime, actor, input, false, false); err != nil {
+	if err := c.dispatchLaneTurn(runtime, actor, input, false); err != nil {
 		return nil, err
 	}
 	if !wait {
@@ -438,7 +438,6 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 		c.mu.Unlock()
 		return nil, errors.New("collect or interrupt the active lane turn before resume")
 	}
-	unarchive := actor.state == "archived"
 	prepareLaneTurnLocked(actor)
 	actor.parentID = parent.ID
 	if len(options.groups) > 0 {
@@ -494,7 +493,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if err := c.commitResumeLane(runtime, actor, false); err != nil {
 		return nil, err
 	}
-	if err := c.dispatchLaneTurn(runtime, actor, input, true, unarchive); err != nil {
+	if err := c.dispatchLaneTurn(runtime, actor, input, true); err != nil {
 		return nil, err
 	}
 	return c.waitLaneActor(ctx, runtime, actor)
@@ -700,7 +699,7 @@ func (c *hostCoordinator) deliverLaneMessage(runtime *daemonpkg.Runtime, actor *
 	if err := c.commitResumeLane(runtime, actor, false); err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	return c.dispatchLaneTurn(runtime, actor, message, true, false)
+	return c.dispatchLaneTurn(runtime, actor, message, true)
 }
 
 // Claude Code treats a top-level <cross-session-message> argument as native
@@ -931,7 +930,7 @@ func qwenLaneDoctorProjection(report qwenreadiness.Report) map[string]any {
 }
 
 //nolint:gocyclo // Dispatch keeps capability, journal, native execution, and failure transitions together.
-func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string, resume, unarchive bool) error {
+func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string, resume bool) error {
 	capability, err := randomCapability()
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
@@ -946,7 +945,7 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	actor.state = "preparing"
 	c.mu.Unlock()
 	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
-		return c.dispatchProductLaneTurn(runtime, actor, prompt, resume, unarchive, driver)
+		return c.dispatchProductLaneTurn(runtime, actor, prompt, resume, driver)
 	}
 	if actor.product == "grok" || actor.product == "qwen" {
 		return c.dispatchACPLaneTurn(runtime, actor, prompt)
@@ -1025,7 +1024,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	runtime *daemonpkg.Runtime,
 	actor *laneActor,
 	prompt string,
-	resume, unarchive bool,
+	resume bool,
 	driver productruntime.LaneDriver,
 ) error {
 	mode, err := permissionmode.Parse(actor.permission)
@@ -1035,7 +1034,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
 		ProductID: actor.product, LaneID: actor.id, Name: actor.name, ResumeNativeID: actor.nativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
-		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox, Unarchive: unarchive,
+		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox,
 	})
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)

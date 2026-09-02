@@ -51,7 +51,7 @@ func (n *delayedCodexLaneNative) StartThread(ctx context.Context, _ bridge.Codex
 	}
 }
 
-func (n *delayedCodexLaneNative) PrepareLaneThread(ctx context.Context, id, _, _, _ string, _ bool) (bridge.CodexNativeThread, error) {
+func (n *delayedCodexLaneNative) PrepareLaneThread(ctx context.Context, id, _, _, _ string) (bridge.CodexNativeThread, error) {
 	_, n.setupHadDeadline = ctx.Deadline()
 	return bridge.CodexNativeThread{ID: id}, nil
 }
@@ -353,7 +353,7 @@ func TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup(t *testing.T)
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", false, false, driver); err != nil {
+	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", false, driver); err != nil {
 		t.Fatalf("dispatch after slow native setup: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed < native.setupDelay {

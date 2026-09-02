@@ -22,8 +22,8 @@ func (native *nativeFixture) StartThread(_ context.Context, request bridge.Codex
 	native.start = request
 	return bridge.CodexNativeThread{ID: "thread-start", Cwd: request.Cwd}, nil
 }
-func (native *nativeFixture) PrepareLaneThread(_ context.Context, id, cwd, approval, sandbox string, unarchive bool) (bridge.CodexNativeThread, error) {
-	native.resume = []any{id, cwd, approval, sandbox, unarchive}
+func (native *nativeFixture) PrepareLaneThread(_ context.Context, id, cwd, approval, sandbox string) (bridge.CodexNativeThread, error) {
+	native.resume = []any{id, cwd, approval, sandbox}
 	return bridge.CodexNativeThread{ID: id, Cwd: cwd}, nil
 }
 func (native *nativeFixture) StartLaneTurn(_ context.Context, request bridge.CodexLaneTurnRequest) (string, error) {
@@ -54,9 +54,9 @@ func TestLaneDriverTranslatesStartResumeTurnAndLifecycle(t *testing.T) {
 	}
 	resumed, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "lane", ResumeNativeID: "thread-resume", Cwd: "/work",
-		PermissionMode: permissionmode.Default, ApprovalPolicy: "on-request", Sandbox: "workspace-write", Unarchive: true,
+		PermissionMode: permissionmode.Default, ApprovalPolicy: "on-request", Sandbox: "workspace-write",
 	})
-	if err != nil || !reflect.DeepEqual(native.resume, []any{"thread-resume", "/work", "on-request", "workspace-write", true}) {
+	if err != nil || !reflect.DeepEqual(native.resume, []any{"thread-resume", "/work", "on-request", "workspace-write"}) {
 		t.Fatalf("resume = %#v request=%#v err=%v", resumed, native.resume, err)
 	}
 	turn, err := driver.StartTurn(context.Background(), resumed, productruntime.TurnStartRequest{
@@ -99,6 +99,6 @@ func TestLaneDriverRejectsNativeIdentitySubstitution(t *testing.T) {
 
 type substitutingNative struct{ *nativeFixture }
 
-func (native *substitutingNative) PrepareLaneThread(_ context.Context, _, cwd, _, _ string, _ bool) (bridge.CodexNativeThread, error) {
+func (native *substitutingNative) PrepareLaneThread(_ context.Context, _, cwd, _, _ string) (bridge.CodexNativeThread, error) {
 	return bridge.CodexNativeThread{ID: "other", Cwd: cwd}, nil
 }

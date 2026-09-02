@@ -131,7 +131,6 @@ type LaneOpenRequest struct {
 	Arguments       []string
 	ApprovalPolicy  string
 	Sandbox         string
-	Unarchive       bool
 }
 
 type NativeSessionRef struct {
