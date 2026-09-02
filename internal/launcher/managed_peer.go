@@ -29,17 +29,17 @@ func RunManagedPeer(product string, args []string) error {
 	if err != nil {
 		return err
 	}
-	if product == "opencode" {
+	descriptor, ok := productcatalog.ByID(product)
+	if !ok {
+		return fmt.Errorf("unsupported managed peer product %q", product)
+	}
+	if descriptor.NativeRegistration.Strategy == "opencode-global-plugin" {
 		args, err = resolveOpenCodeResume(path, args, listOpenCodeSessions)
 		if err != nil {
 			return err
 		}
 	}
 	root := ""
-	descriptor, ok := productcatalog.ByID(product)
-	if !ok {
-		return fmt.Errorf("unsupported managed peer product %q", product)
-	}
 	switch descriptor.NativeRegistration.Strategy {
 	case "pi-package", "omp-extension", "codebuddy-wrapper-plugin-mcp":
 		root, err = managedIntegrationRoot()
