@@ -546,13 +546,32 @@ func decodeEvent(event productserver.Event) (NativeEvent, error) {
 	if result.State == "" {
 		result.State = envelope.Properties.Reason
 	}
-	if len(envelope.Properties.Error) != 0 || len(envelope.Data.Error) != 0 {
-		result.Detail = "native session error"
-	}
+	result.Detail = nativeEventError(envelope.Properties.Error, envelope.Data.Error)
 	if result.Type == "" || len(result.Type) > maxNativeIDBytes {
 		return NativeEvent{}, productruntime.ErrProtocol
 	}
 	return result, nil
+}
+
+func nativeEventError(values ...json.RawMessage) string {
+	for _, raw := range values {
+		var payload struct {
+			Message string `json:"message"`
+			Data    struct {
+				Message string `json:"message"`
+			} `json:"data"`
+		}
+		if len(raw) == 0 || json.Unmarshal(raw, &payload) != nil {
+			continue
+		}
+		if payload.Data.Message != "" {
+			return payload.Data.Message
+		}
+		if payload.Message != "" {
+			return payload.Message
+		}
+	}
+	return ""
 }
 
 type PermissionDecision func(context.Context, NativeEvent) (string, error)
@@ -567,6 +586,7 @@ func (client *Client) WaitIdle(ctx context.Context, nativeSessionID string, deci
 	if client.dialect == DialectKilo {
 		streamPath = "/api/session/" + url.PathEscape(nativeSessionID) + "/event"
 	}
+	var productError string
 	err := client.http.Subscribe(ctx, productserver.EventOptions{Path: streamPath}, func(event productserver.Event) error {
 		native, err := decodeEvent(event)
 		if err != nil {
@@ -586,6 +606,10 @@ func (client *Client) WaitIdle(ctx context.Context, nativeSessionID string, deci
 			}
 			return client.ReplyPermission(ctx, nativeSessionID, native.PermissionID, decision)
 		case "session.error":
+			if native.Detail != "" {
+				productError = native.Detail
+				return errTurnTerminal
+			}
 			return productruntime.ErrNativeRejected
 		case "session.idle":
 			return errTurnTerminal
@@ -605,6 +629,9 @@ func (client *Client) WaitIdle(ctx context.Context, nativeSessionID string, deci
 		}
 		return nil
 	})
+	if productError != "" {
+		return errors.New(productError)
+	}
 	if errors.Is(err, errTurnTerminal) {
 		return nil
 	}

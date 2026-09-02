@@ -316,6 +316,24 @@ func TestKiloPermissionRelayAndInterruptUseV2Routes(t *testing.T) {
 	}
 }
 
+func TestOpenCodeSessionErrorReturnsNativeMessage(t *testing.T) {
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requireBasicAuth(t, request)
+		if request.URL.Path != "/event" {
+			http.NotFound(response, request)
+			return
+		}
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(response, `data: {"type":"session.error","properties":{"sessionID":"ses_exact","error":{"name":"UnknownError","data":{"message":"Model not found: native/product-model"}}}}`+"\n\n")
+	})
+	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
+	defer closeClient()
+	err := client.WaitIdle(context.Background(), "ses_exact", nil)
+	if err == nil || err.Error() != "Model not found: native/product-model" {
+		t.Fatalf("native session error = %v", err)
+	}
+}
+
 func TestDocumentProbeRequiresExactSupportedRoutesAndBoundsResponses(t *testing.T) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requireBasicAuthOnly(t, request)
