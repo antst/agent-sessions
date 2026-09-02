@@ -21,8 +21,8 @@ func TestCodexPeerNativeArgumentParity(t *testing.T) {
 		want []string
 	}{
 		{name: "fresh", args: []string{"-n", "reviewer", "--no-alt-screen"}, mode: modeFresh, want: []string{"--no-alt-screen"}},
-		{name: "resume", args: []string{"resume", "reviewer", "--yolo"}, mode: modeResume, want: []string{"--dangerously-bypass-approvals-and-sandbox"}},
-		{name: "global yolo resume", args: []string{"--yolo", "resume", "reviewer", "--no-alt-screen"}, mode: modeResume, want: []string{"--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"}},
+		{name: "resume", args: []string{"resume", "reviewer", "--yolo"}, mode: modeResume, want: []string{"--yolo"}},
+		{name: "global yolo resume", args: []string{"--yolo", "resume", "reviewer", "--no-alt-screen"}, mode: modeResume, want: []string{"--yolo", "--no-alt-screen"}},
 		{name: "global display resume", args: []string{"--no-alt-screen", "resume", "reviewer"}, mode: modeResume, want: []string{"--no-alt-screen"}},
 		{name: "prompt boundary", args: []string{"-C", realDirectory, "--", "-C", "prompt-data"}, mode: modeFresh, want: []string{"-C", realDirectory, "--", "-C", "prompt-data"}},
 	}
