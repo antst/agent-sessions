@@ -137,8 +137,8 @@ this closed error table:
 | ---: | --- | --- |
 | `-32602` | `Invalid params` | The method is known, but its parameters do not match the method schema. |
 | `-32001` | `Unknown session or target` | A session or message destination does not exist or is not visible to the caller. |
-| `-32002` | `Session busy` | The addressed product session or lane cannot accept input in its current state. |
-| `-32003` | `Operation not permitted` | The caller is not allowed to perform the requested operation, or the method is not part of version 1. |
+| `-32002` | `Session busy` | The addressed product session cannot accept an inbound message, or a non-steer lane operation is blocked by its current state. `lane.steer` does not use this code. |
+| `-32003` | `Operation not permitted` | The caller is not allowed to perform the operation, the method is not part of version 1, or `lane.steer` cannot be performed. A steer failure sets `data.reason` to exactly `"no running turn"` or `"steer unsupported"`. |
 | `-32004` | `Unsupported protocol version` | `session.hello.params.protocol` is not exactly `1`. |
 | `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
 
@@ -201,10 +201,10 @@ missing or invisible target returns:
 #### Lane methods
 
 The version 1 lane methods are `lane.start`, `lane.run`, `lane.resume`,
-`lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive`.
-`lane.collect` and `lane.steer` are not version 1 methods.
+`lane.steer`, `lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive`.
+`lane.collect` is not a version 1 method.
 
-Start, run, and resume use:
+Start, run, resume, and steer use:
 
 ```json
 {"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change.","host":"optional-remote-host"}
@@ -220,6 +220,19 @@ Wait, status, interrupt, and archive omit `input`:
 argument array without the method name. `input` is required and non-empty
 where shown. `host` is optional. The daemon returns `-32005` when it has no
 launcher for the requested product.
+
+`lane.steer` addresses a lane that already has a running turn. The daemon
+delivers its non-empty `input` to that exact turn and returns `turn.steered`
+with the lane's `thread_id`, the running `turn_id`, and `native_message_id`,
+the message ID returned by the product. The input must influence that current
+turn. An implementation that merely queues it for a later turn is not
+conforming.
+
+An unknown lane returns `-32001`. A known lane with no running turn returns
+`-32003` with `data.reason:"no running turn"`. A product or lane driver that
+does not support steer returns `-32003` with
+`data.reason:"steer unsupported"`. `lane.steer` never returns `-32002` merely
+because the lane is not running.
 
 ### Daemon to product: `message.deliver`
 
@@ -282,8 +295,9 @@ A conforming product provides:
   lookup by name that returns exactly one product session or fails truthfully
   on zero or multiple matches.
 - An addressable API that accepts an inbound message for one exact session and
-  wakes a model turn without keystroke injection. A busy session returns
-  `-32002`.
+  wakes a model turn without keystroke injection. A session that cannot accept
+  that inbound message returns `-32002`; lane steering instead follows the
+  `lane.steer` running-turn and `-32003` rules.
 - A finite, structured, promptless model surface for the version 1 Agent
   Sessions methods.
 - Truthful exit: the presence connection closes as soon as the product session
@@ -340,6 +354,7 @@ Conformance is checked end to end against the real product:
 | Live update | Changing the session name, model, or other info produces a successful `session.update`; the next roster read contains the complete replacement values. |
 | Model turn | The named session completes a real model turn through the product's normal runtime. |
 | Inbound round trip | `message.deliver` wakes that exact session; its model can call `message.send`, and the reply is accepted without an interactive approval prompt. |
+| Steer | A replacement prompt sent while a long lane turn runs changes that turn's final output. |
 | Daemon restart | While the product remains live, restarting the daemon makes the session reappear after a new hello with the same UUID, current stored name, original groups, and current info. |
 | Exit | Exiting or disposing the product session makes it disappear immediately. |
 | Resume | Resume by exact UUID and resume by unique name both restore and report the same product UUID. |
@@ -365,8 +380,8 @@ Request:
     "method": {
       "enum": [
         "session.hello", "session.update", "peers.list", "message.send",
-        "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-        "lane.interrupt", "lane.archive", "message.deliver"
+        "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait",
+        "lane.status", "lane.interrupt", "lane.archive", "message.deliver"
       ]
     },
     "params": {"type": "object"}
@@ -622,7 +637,7 @@ Result: an empty object.
 
 ### A.5 Lane schemas
 
-`lane.start`, `lane.run`, and `lane.resume` parameters:
+`lane.start`, `lane.run`, `lane.resume`, and `lane.steer` parameters:
 
 ```json
 {
@@ -716,6 +731,22 @@ Result: an empty object.
 }
 ```
 
+`turn.steered` result:
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "thread_id", "turn_id", "native_message_id"],
+  "properties": {
+    "type": {"const": "turn.steered"},
+    "thread_id": {"type": "string", "minLength": 1},
+    "turn_id": {"type": "string", "minLength": 1},
+    "native_message_id": {"type": "string", "minLength": 1}
+  }
+}
+```
+
 `turn.interrupting` result:
 
 ```json
@@ -774,6 +805,13 @@ Result: an empty object.
 {"jsonrpc":"2.0","id":"lane-resume-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
 ```
 
+#### `lane.steer`
+
+```json
+{"jsonrpc":"2.0","id":"lane-steer-1","method":"lane.steer","params":{"product":"pi","arguments":["reviewer"],"input":"Replace the current answer with: STEERED."}}
+{"jsonrpc":"2.0","id":"lane-steer-1","result":{"type":"turn.steered","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","turn_id":"turn-2","native_message_id":"message-6f9e8475"}}
+```
+
 #### `lane.wait`
 
 ```json
@@ -825,7 +863,9 @@ Agent Sessions must make these changes to conform to version 1:
    defined here.
 5. Replace `tool.call` with the first-class `peers.list`, `message.send`, and
    lane methods. Remove the presence-stream `tools/call` compatibility method.
-   Do not expose `lane.collect` or `lane.steer` as version 1 methods.
+   Do not expose `lane.collect` as a version 1 method. Make `lane.steer`
+   succeed only when the selected driver accepts input into the current running
+   turn, and return the native message ID with that turn's IDs.
 6. Change `message.deliver` to carry the structured `from` object and plain
    `body`. Stop wrapping message text; products render sender metadata through
    their native interfaces.
