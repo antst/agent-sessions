@@ -121,7 +121,10 @@ type Descriptor struct {
 // descriptors is the one product inventory used by launch, packaging, live
 // reconnect, and operator projections.
 var descriptors = [...]Descriptor{
-	baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
+	withNativeYolo(
+		baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
+		"--dangerously-bypass-approvals-and-sandbox",
+	),
 	withNativeLaunchPolicy(
 		baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
 		[]string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},

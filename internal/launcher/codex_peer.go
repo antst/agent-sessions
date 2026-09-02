@@ -12,6 +12,7 @@ import (
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
@@ -160,6 +161,14 @@ func codexExecutable() (string, error) {
 func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, error) {
 	plan := codexPlan{mode: modeFresh, peerNameSource: "launch", requestedCwd: cwd}
 	contextArgs, peerContext, err := scanPeerWrapperOptions("codex", args)
+	if err != nil {
+		return codexPlan{}, err
+	}
+	descriptor, ok := productcatalog.ByID("codex")
+	if !ok {
+		return codexPlan{}, usageError("Codex product descriptor is unavailable")
+	}
+	contextArgs, err = projectNativeLaunchPolicy(descriptor, contextArgs, peerContext.forceNoYolo)
 	if err != nil {
 		return codexPlan{}, err
 	}
