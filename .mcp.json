@@ -12,6 +12,12 @@
       "default_tools_approval_mode": "approve",
       "env_vars": [
         "AGENT_SESSIONS_AGENT_RUNTIME_DIR",
+        "AGENT_SESSIONS_GROUPS",
+        "AGENT_SESSIONS_HOST_BINARY",
+        "AGENT_SESSIONS_PRODUCT",
+        "AGENT_SESSIONS_PRODUCT_ID",
+        "AGENT_SESSIONS_SESSION_ID",
+        "AGENT_SESSIONS_SESSION_NAME",
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_PEER_CLAUDE_BIN",
         "CLAUDE_PLUGIN_DATA",

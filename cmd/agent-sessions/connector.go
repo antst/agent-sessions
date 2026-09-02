@@ -37,7 +37,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
 	var live *liveSessionClient
-	if reported {
+	if reported && connectorClaimsLivePresence(product, os.Getenv) {
 		live = startLiveSessionClient(ctx, livePresenceEndpoint(stateRoot), report,
 			func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, report, method, params)
@@ -97,6 +97,22 @@ var connectorNativeAdapters = map[string]connectorNativeAdapter{
 	connectorProductQwen:   deliverQwenConnectorMessage,
 	connectorProductGrok:   deliverGrokConnectorMessage,
 	codebuddy.ProductID:    deliverCodeBuddyConnectorMessage,
+}
+
+// Products with a native presence adapter already own the session's one live
+// stream. A project-discovered MCP connector may expose the same tool name,
+// but it must never open a second connection and replace the product report.
+func connectorOwnsLivePresence(product string) bool {
+	_, ok := connectorNativeAdapters[product]
+	return ok
+}
+
+func connectorClaimsLivePresence(product string, getenv func(string) string) bool {
+	managedProduct := strings.TrimSpace(getenv("AGENT_SESSIONS_PRODUCT"))
+	if managedProduct != "" && managedProduct != product {
+		return false
+	}
+	return connectorOwnsLivePresence(product)
 }
 
 func deliverCodexConnectorMessage(ctx context.Context, report liveSessionReport, _ string, body string) error {
@@ -207,10 +223,10 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 	return liveSessionReport{UUID: uuid, Name: name, Groups: uniqueStrings(groups), Product: product}, true
 }
 
-// resolveConnectorProduct keeps the repository-root Codex MCP manifest safe
-// when another supported product discovers it from the working directory.
-// Managed Claude, Grok, Qwen, and lane processes carry the daemon-minted
-// product environment; a bare environment is the Codex App Server case.
+// resolveConnectorProduct keeps the repository-root MCP manifest useful for
+// products whose Go connector owns their live adapter. Products with a native
+// extension still report themselves on their own stream, so their discovered
+// MCP subprocess stays a harmless Codex-family relay with no live connection.
 func resolveConnectorProduct(requested string, getenv func(string) string) (string, error) {
 	if requested != "auto" {
 		if _, ok := productcatalog.ByID(requested); !ok {
@@ -219,7 +235,15 @@ func resolveConnectorProduct(requested string, getenv func(string) string) (stri
 		return requested, nil
 	}
 	product := strings.TrimSpace(getenv("AGENT_SESSIONS_PRODUCT"))
-	if product == "" && strings.TrimSpace(getenv("AGENT_SESSIONS_GROK_SESSION_ID")) != "" {
+	if product != "" {
+		if _, ok := productcatalog.ByID(product); !ok {
+			return "", fmt.Errorf("automatic connector product %q is unsupported", product)
+		}
+		if !connectorOwnsLivePresence(product) {
+			return connectorProductCodex, nil
+		}
+	}
+	if strings.TrimSpace(getenv("AGENT_SESSIONS_GROK_SESSION_ID")) != "" {
 		product = "grok"
 	}
 	if product == "" {
