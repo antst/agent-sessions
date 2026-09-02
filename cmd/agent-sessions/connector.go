@@ -80,11 +80,8 @@ func qwenConnectorNativeName(report liveSessionReport) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", false
-	}
-	return bridge.QwenNativeSessionTitle(home, report.UUID, cwd)
+	title, _, ok := bridge.QwenNativeSessionInfo(home, report.UUID)
+	return title, ok
 }
 
 func startQwenNativeNameProjection(ctx context.Context, live *liveSessionClient, report liveSessionReport) {

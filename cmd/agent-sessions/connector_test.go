@@ -86,15 +86,10 @@ func TestQwenConnectorProjectsOnlyProductOwnedNativeTitle(t *testing.T) {
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if connectorCwd, err := os.Getwd(); err != nil || filepath.Clean(connectorCwd) == filepath.Clean(cwd) {
+		t.Fatal("test requires the connector cwd to differ from the Qwen session cwd")
+	}
 	t.Setenv("QWEN_HOME", home)
-	prior, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(cwd); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(prior) })
 	report := liveSessionReport{UUID: "11111111-2222-4333-8444-555555555555", Name: "unaccepted", Product: "qwen"}
 	if name, ok := qwenConnectorNativeName(report); ok || name != "" {
 		t.Fatalf("missing product title projected as %q/%v", name, ok)
