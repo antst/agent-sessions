@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
 const (
@@ -157,6 +158,14 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 			return grokPlan{}, usageError("-n/--peer-name applies only to an interactive Grok session")
 		}
 		return plan, nil
+	}
+	descriptor, ok := productcatalog.ByID("grok")
+	if !ok {
+		return grokPlan{}, usageError("Grok product descriptor is unavailable")
+	}
+	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, peerContext.forceNoYolo)
+	if err != nil {
+		return grokPlan{}, err
 	}
 	requestedCwd, explicit, err := inspectGrokWorkingDirectory(forwarded, cwd)
 	if err != nil {

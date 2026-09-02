@@ -130,7 +130,10 @@ var descriptors = [...]Descriptor{
 		[]string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
 		[]string{"--dangerously-skip-permissions"},
 	),
-	baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
+	withNativeYolo(
+		baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
+		"--yolo",
+	),
 	withNativeYolo(
 		baselineDescriptor("qwen", "Qwen Code", "qwen", "qwen-peer", "qwen-peer-lane", "qwen-lane", "qwen-lane-manager", "qwen-lane", []string{"qwen"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "0.22.0"),
 		"--yolo",

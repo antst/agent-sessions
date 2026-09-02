@@ -230,6 +230,19 @@ func TestGrokPeerPermissionPublicationUsesLastPolicyOption(t *testing.T) {
 	}
 }
 
+func TestGrokPeerProjectsDescriptorOwnedYoloLiterally(t *testing.T) {
+	plan, err := parseGrokPeerArgs([]string{"--yolo", "--no-alt-screen"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(plan.interactiveArgs, []string{"--yolo", "--no-alt-screen"}) {
+		t.Fatalf("native arguments = %q", plan.interactiveArgs)
+	}
+	if plan.permissionMode != "bypassPermissions" {
+		t.Fatalf("permission = %q", plan.permissionMode)
+	}
+}
+
 func TestGrokPeerCwdIsCanonicalButNativeArgvIsUntouched(t *testing.T) {
 	root := t.TempDir()
 	realDirectory := filepath.Join(root, "real")

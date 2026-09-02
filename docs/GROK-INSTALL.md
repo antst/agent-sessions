@@ -59,6 +59,13 @@ group-inheritance flags, and the `--yolo` convenience alias. Other options stay
 in their original order and are parsed by Grok. Fresh sessions receive a UUID
 before the TUI starts; the exit/session UI can be used to retain that UUID.
 
+Grok Build 1.0.13 cannot apply top-level `--allow` or `--deny` rules to a
+leader-backed TUI, so Agent Sessions cannot inject a launch-scoped grant for
+only its tools. A fresh non-YOLO Grok peer therefore asks once before its first
+Agent Sessions tool call. `--yolo` is passed to Grok literally and makes those
+calls promptless. Agent Sessions does not edit Grok configuration, seed Grok's
+permission store, or silently enable YOLO mode.
+
 Managed `--resume` preserves Grok's native selector: an exact UUID, a title,
 or an omitted target for the native picker. The wrapper does not scrape Grok's
 private storage or parse `grok sessions`; its private leader attests the one
