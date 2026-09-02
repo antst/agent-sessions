@@ -79,6 +79,9 @@ func daemonPeerEnvironment(environment []string, sessionID, product string) []st
 }
 
 func liveReportEnvironment(environment []string, name string, groups []string) []string {
+	if groups == nil {
+		groups = []string{}
+	}
 	encoded, _ := json.Marshal(groups)
 	environment = envutil.Set(environment, peerSessionNameEnv, name)
 	return envutil.Set(environment, peerGroupsEnv, string(encoded))

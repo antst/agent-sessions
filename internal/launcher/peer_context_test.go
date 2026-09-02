@@ -85,3 +85,11 @@ func TestLiveReportEnvironmentCarriesNameAndGroupsOnlyInChildEnvironment(t *test
 		t.Fatalf("live report environment = %q, want %q", got, want)
 	}
 }
+
+func TestLiveReportEnvironmentCarriesEmptyGroupsAsAnArray(t *testing.T) {
+	got := liveReportEnvironment(nil, "worker", nil)
+	want := []string{peerSessionNameEnv + "=worker", peerGroupsEnv + `=[]`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("live report environment = %q, want %q", got, want)
+	}
+}
