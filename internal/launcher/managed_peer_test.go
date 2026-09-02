@@ -116,25 +116,28 @@ func TestManagedGlobalPluginPeersResolveNamesFromTheirProductSessionList(t *test
 	for _, product := range []string{"opencode", "kilo"} {
 		t.Run(product, func(t *testing.T) {
 			listCalls := 0
-			list := func(executable string) ([]productSession, error) {
+			list := func(executable, cwd string) ([]productSession, error) {
 				listCalls++
 				if executable != "/native/"+product {
 					t.Fatalf("executable = %q", executable)
 				}
+				if cwd != "" {
+					t.Fatalf("cwd = %q", cwd)
+				}
 				return sessions, nil
 			}
-			resolved, err := resolveProductResume(product, "/native/"+product, []string{"--session", "review", "--model", "native"}, list)
+			resolved, err := resolveProductResume(product, "/native/"+product, "", []string{"--session", "review", "--model", "native"}, isOpenCodeSessionID, list)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(resolved, []string{"--session", "ses_one", "--model", "native"}) || listCalls != 1 {
 				t.Fatalf("resolved = %#v, list calls = %d", resolved, listCalls)
 			}
-			resolved, err = resolveProductResume(product, "/native/"+product, []string{"--session=review"}, list)
+			resolved, err = resolveProductResume(product, "/native/"+product, "", []string{"--session=review"}, isOpenCodeSessionID, list)
 			if err != nil || !reflect.DeepEqual(resolved, []string{"--session=ses_one"}) {
 				t.Fatalf("equals-form resolved = %#v, err = %v", resolved, err)
 			}
-			resolved, err = resolveProductResume(product, "/native/"+product, []string{"--session", "ses_exact"}, list)
+			resolved, err = resolveProductResume(product, "/native/"+product, "", []string{"--session", "ses_exact"}, isOpenCodeSessionID, list)
 			if err != nil || !reflect.DeepEqual(resolved, []string{"--session", "ses_exact"}) || listCalls != 2 {
 				t.Fatalf("exact-id resolved = %#v, list calls = %d, err = %v", resolved, listCalls, err)
 			}
@@ -143,19 +146,63 @@ func TestManagedGlobalPluginPeersResolveNamesFromTheirProductSessionList(t *test
 }
 
 func TestResolveProductResumeRejectsMissingAndAmbiguousProductNames(t *testing.T) {
-	list := func(string) ([]productSession, error) {
+	list := func(string, string) ([]productSession, error) {
 		return []productSession{
 			{ID: "ses_one", Title: "duplicate", Directory: "/one", Updated: 10},
 			{ID: "ses_two", Title: "duplicate", Directory: "/two", Updated: 20},
 		}, nil
 	}
-	if _, err := resolveProductResume("opencode", "opencode", []string{"--session", "missing"}, list); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := resolveProductResume("opencode", "opencode", "/work", []string{"--session", "missing"}, isOpenCodeSessionID, list); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing-name error = %v", err)
 	}
-	if _, err := resolveProductResume("opencode", "opencode", []string{"--session", "duplicate"}, list); err == nil ||
+	if _, err := resolveProductResume("opencode", "opencode", "/work", []string{"--session", "duplicate"}, isOpenCodeSessionID, list); err == nil ||
 		!strings.Contains(err.Error(), "ses_one (directory=/one updated=10)") ||
 		!strings.Contains(err.Error(), "ses_two (directory=/two updated=20)") {
 		t.Fatalf("ambiguous-name error = %v", err)
+	}
+}
+
+func TestPiResumeNamesUseTheProductsPublicSessionList(t *testing.T) {
+	sessions := []productSession{
+		{ID: "01a06232-23d2-75b4-ba75-c23bbae61751", Title: "e2e-pi", Directory: "/work", Modified: "2026-09-02T13:00:04.763Z"},
+	}
+	listCalls := 0
+	list := func(executable, cwd string) ([]productSession, error) {
+		listCalls++
+		if executable != "/native/pi" || cwd != "/work" {
+			t.Fatalf("list request = %q %q", executable, cwd)
+		}
+		return sessions, nil
+	}
+	resolved, err := resolveProductResume("pi", "/native/pi", "/work", []string{"--session", "e2e-pi"}, isPiNativeSessionSelector, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resolved, []string{"--session", sessions[0].ID}) || listCalls != 1 {
+		t.Fatalf("resolved = %#v, calls = %d", resolved, listCalls)
+	}
+	for _, selector := range []string{sessions[0].ID, "/tmp/pi-session.jsonl", "relative/session.jsonl"} {
+		resolved, err = resolveProductResume("pi", "/native/pi", "/work", []string{"--session", selector}, isPiNativeSessionSelector, list)
+		if err != nil || !reflect.DeepEqual(resolved, []string{"--session", selector}) {
+			t.Fatalf("native selector %q resolved to %#v, err %v", selector, resolved, err)
+		}
+	}
+	if listCalls != 1 {
+		t.Fatalf("native selectors queried the product list: %d calls", listCalls)
+	}
+}
+
+func TestPiAmbiguousNameListsOnlyProductProvidedIdentity(t *testing.T) {
+	list := func(string, string) ([]productSession, error) {
+		return []productSession{
+			{ID: "00000000-0000-4000-8000-000000000001", Title: "duplicate", Directory: "/one", Modified: "first"},
+			{ID: "00000000-0000-4000-8000-000000000002", Title: "duplicate", Directory: "/two", Modified: "second"},
+		}, nil
+	}
+	_, err := resolveProductResume("pi", "pi", "/work", []string{"--session", "duplicate"}, isPiNativeSessionSelector, list)
+	if err == nil || !strings.Contains(err.Error(), "00000000-0000-4000-8000-000000000001 (directory=/one updated=first)") ||
+		!strings.Contains(err.Error(), "00000000-0000-4000-8000-000000000002 (directory=/two updated=second)") {
+		t.Fatalf("ambiguous Pi name error = %v", err)
 	}
 }
 

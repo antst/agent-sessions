@@ -35,7 +35,16 @@ func RunManagedPeer(product string, args []string) error {
 	}
 	switch descriptor.NativeRegistration.Strategy {
 	case "opencode-global-plugin", "kilo-global-plugin":
-		args, err = resolveProductResume(product, path, args, listProductSessions)
+		args, err = resolveProductResume(product, path, "", args, isOpenCodeSessionID, listProductSessions)
+		if err != nil {
+			return err
+		}
+	case "pi-package":
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return fmt.Errorf("resolve working directory: %w", cwdErr)
+		}
+		args, err = resolveProductResume(product, path, cwd, args, isPiNativeSessionSelector, listPiSessions)
 		if err != nil {
 			return err
 		}
@@ -60,9 +69,10 @@ type productSession struct {
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
 	Updated   int64  `json:"updated"`
+	Modified  string `json:"modified"`
 }
 
-func listProductSessions(executable string) ([]productSession, error) {
+func listProductSessions(executable, _ string) ([]productSession, error) {
 	command := exec.Command(executable, "--pure", "session", "list", "--format", "json") //nolint:gosec // resolved installed product executable.
 	payload, err := command.Output()
 	if err != nil {
@@ -75,17 +85,62 @@ func listProductSessions(executable string) ([]productSession, error) {
 	return sessions, nil
 }
 
+const piSessionListScript = `
+import { pathToFileURL } from "node:url";
+const { SessionManager } = await import(pathToFileURL(process.argv[1]).href);
+const rows = await SessionManager.list(process.argv[2]);
+process.stdout.write(JSON.stringify(rows.map((row) => ({
+  id: row.id,
+  title: row.name ?? "",
+  directory: row.cwd,
+  modified: row.modified instanceof Date ? row.modified.toISOString() : String(row.modified),
+}))));
+`
+
+func listPiSessions(executable, cwd string) ([]productSession, error) {
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Pi executable: %w", err)
+	}
+	productAPI := filepath.Clean(filepath.Join(filepath.Dir(resolved), "..", "index.js"))
+	node, err := exec.LookPath("node")
+	if err != nil {
+		return nil, fmt.Errorf("resolve Node.js for Pi session list: %w", err)
+	}
+	command := exec.Command(node, "--input-type=module", "--eval", piSessionListScript, productAPI, cwd) //nolint:gosec // pinned product API and caller cwd.
+	command.Dir = cwd
+	payload, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list Pi sessions through product API: %w", err)
+	}
+	var sessions []productSession
+	if err := json.Unmarshal(payload, &sessions); err != nil {
+		return nil, fmt.Errorf("decode Pi product session list: %w", err)
+	}
+	return sessions, nil
+}
+
+func isOpenCodeSessionID(selector string) bool {
+	return strings.HasPrefix(selector, "ses_")
+}
+
+func isPiNativeSessionSelector(selector string) bool {
+	return threadIDPattern.MatchString(selector) || filepath.IsAbs(selector) || strings.ContainsAny(selector, `/\\`) || filepath.Ext(selector) == ".jsonl"
+}
+
 func resolveProductResume(
 	product string,
 	executable string,
+	cwd string,
 	arguments []string,
-	list func(string) ([]productSession, error),
+	isNativeSelector func(string) bool,
+	list func(string, string) ([]productSession, error),
 ) ([]string, error) {
 	selector, present, err := optionValue(arguments, "--session")
-	if err != nil || !present || strings.HasPrefix(selector, "ses_") {
+	if err != nil || !present || isNativeSelector(selector) {
 		return arguments, err
 	}
-	sessions, err := list(executable)
+	sessions, err := list(executable, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +156,11 @@ func resolveProductResume(
 	if len(matches) > 1 {
 		details := make([]string, 0, len(matches))
 		for _, match := range matches {
-			details = append(details, fmt.Sprintf("%s (directory=%s updated=%d)", match.ID, match.Directory, match.Updated))
+			updated := fmt.Sprintf("%d", match.Updated)
+			if match.Modified != "" {
+				updated = match.Modified
+			}
+			details = append(details, fmt.Sprintf("%s (directory=%s updated=%s)", match.ID, match.Directory, updated))
 		}
 		return nil, usageError(fmt.Sprintf("%s session name %q is ambiguous: %s", product, selector, strings.Join(details, ", ")))
 	}
