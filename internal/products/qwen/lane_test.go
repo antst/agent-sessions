@@ -174,6 +174,7 @@ func TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn(t *testing.T) {
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "11111111-1111-4111-8111-111111111111", Name: "native name", Cwd: "/work",
 		PermissionMode: permissionmode.BypassPermissions, Arguments: []string{"--model", "qwen3.8-max"},
+		Environment: []string{"AGENT_SESSIONS_PRODUCT=qwen", "AGENT_SESSIONS_GROUPS=[\"parent/private\"]"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +189,9 @@ func TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn(t *testing.T) {
 	}
 	if want := []string{"--acp", "--yolo", "--model", "qwen3.8-max"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Qwen args = %q, want %q", factory.command.Args, want)
+	}
+	if want := []productruntime.EnvVar{{Name: "AGENT_SESSIONS_PRODUCT", Value: "qwen"}, {Name: "AGENT_SESSIONS_GROUPS", Value: `["parent/private"]`}}; !reflect.DeepEqual(factory.command.Env, want) {
+		t.Fatalf("Qwen env = %#v, want %#v", factory.command.Env, want)
 	}
 	rename := process.request("renameSession")
 	if rename.Params["sessionId"] != ref.NativeSessionID || rename.Params["title"] != "native name" {

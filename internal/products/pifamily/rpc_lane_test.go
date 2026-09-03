@@ -207,7 +207,7 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
 		ProductID: PiProductID, LaneID: "pi-native", ResumeNativeID: "pi-native", Cwd: "/work",
-		PermissionMode: permissionmode.Default,
+		PermissionMode: permissionmode.Default, Environment: []string{"AGENT_SESSIONS_PRODUCT=pi", "EMPTY="},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +217,9 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	}
 	if want := []string{"--extension", "/managed/agent-sessions.mjs", "--mode", "rpc", "--session", "pi-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Pi resume args = %q, want %q", factory.command.Args, want)
+	}
+	if want := []productruntime.EnvVar{{Name: "AGENT_SESSIONS_PRODUCT", Value: "pi"}, {Name: "EMPTY", Value: ""}}; !reflect.DeepEqual(factory.command.Env, want) {
+		t.Fatalf("Pi environment = %#v, want %#v", factory.command.Env, want)
 	}
 	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "do work", PermissionMode: permissionmode.Default})
 	if err != nil {
@@ -397,12 +400,16 @@ func TestOMPResumeNeverRenamesNativeSession(t *testing.T) {
 	}
 	ref, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: OMPProductID, LaneID: "omp-native", ResumeNativeID: "omp-native", Cwd: "/work", PermissionMode: permissionmode.Default,
+		Environment: []string{"AGENT_SESSIONS_PRODUCT=omp", "AGENT_SESSIONS_GROUPS=[]"},
 	})
 	if err != nil || ref.NativeSessionID != "omp-native" {
 		t.Fatalf("OMP resume = %+v, %v", ref, err)
 	}
 	if want := []string{"--extension=/managed/agent-sessions.mjs", "--mode=rpc", "--session", "omp-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP resume args = %q, want %q", factory.command.Args, want)
+	}
+	if want := []productruntime.EnvVar{{Name: "AGENT_SESSIONS_PRODUCT", Value: "omp"}, {Name: "AGENT_SESSIONS_GROUPS", Value: "[]"}}; !reflect.DeepEqual(factory.command.Env, want) {
+		t.Fatalf("OMP environment = %#v, want %#v", factory.command.Env, want)
 	}
 	if got := process.commands(); !reflect.DeepEqual(got, []string{"get_state"}) {
 		t.Fatalf("OMP resume commands = %q", got)
@@ -765,6 +772,25 @@ func TestLaneRequiresManagedExtensionPathAtConstruction(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "extension path") {
 		t.Fatalf("missing extension path error = %v", err)
+	}
+}
+
+func TestLaneRejectsMalformedEnvironmentBeforeStartingProcess(t *testing.T) {
+	quirks, _ := QuirksFor(PiProductID)
+	factory := &oneProcessFactory{process: newScriptedProcess("must-not-start")}
+	driver, err := NewLaneDriver(LaneConfig{
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1,
+		Processes: factory, MapPermission: familyPermission,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: PiProductID, LaneID: "bad-environment", Name: "bad environment", Cwd: "/work",
+		PermissionMode: permissionmode.Default, Environment: []string{"MISSING_EQUALS"},
+	})
+	if !errors.Is(err, productruntime.ErrProtocol) || factory.starts != 0 {
+		t.Fatalf("malformed environment open = %v, starts = %d", err, factory.starts)
 	}
 }
 

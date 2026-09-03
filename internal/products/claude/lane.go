@@ -20,11 +20,10 @@ import (
 const ProductID = "claude"
 
 type LaneConfig struct {
-	Descriptor     productcatalog.Descriptor
-	HostExecutable string
-	Generation     uint64
-	Processes      ProcessFactory
-	Now            func() time.Time
+	Descriptor productcatalog.Descriptor
+	Generation uint64
+	Processes  ProcessFactory
+	Now        func() time.Time
 }
 
 type LaneDriver struct {
@@ -59,9 +58,8 @@ type laneTurn struct {
 }
 
 func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
-	if config.Descriptor.ID != ProductID || strings.TrimSpace(config.Descriptor.NativeExecutable) == "" ||
-		strings.TrimSpace(config.HostExecutable) == "" || config.Generation == 0 || config.Processes == nil {
-		return nil, errors.New("Claude lane requires its descriptor, host executable, generation, and process factory")
+	if config.Descriptor.ID != ProductID || strings.TrimSpace(config.Descriptor.NativeExecutable) == "" || config.Generation == 0 || config.Processes == nil {
+		return nil, errors.New("Claude lane requires its descriptor, generation, and process factory")
 	}
 	if len(config.Descriptor.NativeToolGrantArgs) == 0 || len(config.Descriptor.NativeYoloArgs) == 0 {
 		return nil, errors.New("Claude lane descriptor is missing its native launch policy")
@@ -127,7 +125,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	}
 	arguments = append(arguments, driver.config.Descriptor.NativeToolGrantArgs...)
 	arguments = append(arguments, request.Arguments...)
-	groups, err := json.Marshal(append([]string{}, request.Groups...))
+	environment, err := productruntime.ParseNativeEnvironment(request.Environment)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
@@ -135,14 +133,8 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	process, err := driver.config.Processes.StartStream(lifetime, productruntime.NativeCommand{
 		Path: driver.config.Descriptor.NativeExecutable,
 		Args: arguments,
-		Env: []productruntime.EnvVar{
-			{Name: "AGENT_SESSIONS_HOST_BINARY", Value: driver.config.HostExecutable},
-			{Name: "AGENT_SESSIONS_PRODUCT", Value: ProductID},
-			{Name: "AGENT_SESSIONS_SESSION_ID", Value: nativeID},
-			{Name: "AGENT_SESSIONS_SESSION_NAME", Value: request.Name},
-			{Name: "AGENT_SESSIONS_GROUPS", Value: string(groups)},
-		},
-		Cwd: request.Cwd,
+		Env:  environment,
+		Cwd:  request.Cwd,
 	})
 	if err != nil {
 		cancel()

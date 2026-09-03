@@ -114,8 +114,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		panic(err)
 	}
 	claudeLanes, err := claudeproduct.NewLaneDriver(claudeproduct.LaneConfig{
-		Descriptor: claudeDescriptor, HostExecutable: hostExecutable,
-		Generation: 1, Processes: claudeProcesses,
+		Descriptor: claudeDescriptor, Generation: 1, Processes: claudeProcesses,
 	})
 	if err != nil {
 		panic(err)

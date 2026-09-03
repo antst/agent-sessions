@@ -96,6 +96,10 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
+	environment, err := productruntime.ParseNativeEnvironment(request.Environment)
+	if err != nil {
+		return productruntime.NativeSessionRef{}, err
+	}
 	driver.mu.Lock()
 	if _, exists := driver.lanes[request.LaneID]; exists {
 		driver.mu.Unlock()
@@ -117,7 +121,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		}
 	}
 	arguments = append(arguments, policy.Args...)
-	command := productruntime.NativeCommand{Path: driver.config.Executable, Args: arguments, Cwd: request.Cwd}
+	command := productruntime.NativeCommand{Path: driver.config.Executable, Args: arguments, Env: environment, Cwd: request.Cwd}
 	lifetime, cancel := context.WithCancel(context.Background())
 	process, err := driver.config.Processes.StartRPC(lifetime, command)
 	if err != nil {

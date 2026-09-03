@@ -104,7 +104,7 @@ func newTestDriver(t *testing.T, process *testStreamProcess) (*LaneDriver, *test
 	descriptor.NativeExecutable = "/bin/claude"
 	factory := &testProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
-		Descriptor: descriptor, HostExecutable: "/bin/agent-sessions", Generation: 7,
+		Descriptor: descriptor, Generation: 7,
 		Processes: factory, Now: func() time.Time { return time.Unix(123, 0) },
 	})
 	if err != nil {
@@ -121,7 +121,13 @@ func TestLaneUsesNativeStreamNameGroupsPolicyAndSynchronousTurns(t *testing.T) {
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "11111111-1111-4111-8111-111111111111", Name: "native name",
 		Groups: []string{"parent/private", "project/child"}, Cwd: "/work", PermissionMode: permissionmode.Default,
-		Arguments: []string{"--model", "haiku"},
+		Arguments: []string{"--model", "haiku"}, Environment: []string{
+			"AGENT_SESSIONS_HOST_BINARY=/bin/agent-sessions",
+			"AGENT_SESSIONS_PRODUCT=claude",
+			"AGENT_SESSIONS_SESSION_ID=11111111-1111-4111-8111-111111111111",
+			"AGENT_SESSIONS_SESSION_NAME=native name",
+			`AGENT_SESSIONS_GROUPS=["parent/private","project/child"]`,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

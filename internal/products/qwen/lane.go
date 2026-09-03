@@ -81,6 +81,10 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 			return productruntime.NativeSessionRef{}, fmt.Errorf("%w: native argument %q is owned by the Qwen lane lifecycle", productruntime.ErrUnsupportedPolicy, argument)
 		}
 	}
+	environment, err := productruntime.ParseNativeEnvironment(request.Environment)
+	if err != nil {
+		return productruntime.NativeSessionRef{}, err
+	}
 	driver.mu.Lock()
 	if existing := driver.lanes[request.LaneID]; existing != nil {
 		existing.mu.Lock()
@@ -102,7 +106,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	arguments = append(arguments, request.Arguments...)
 	lifetime, cancel := context.WithCancel(context.Background())
 	process, err := driver.config.Processes.StartRPC(lifetime, productruntime.NativeCommand{
-		Path: driver.config.Executable, Args: arguments, Cwd: request.Cwd,
+		Path: driver.config.Executable, Args: arguments, Env: environment, Cwd: request.Cwd,
 	})
 	if err != nil {
 		cancel()

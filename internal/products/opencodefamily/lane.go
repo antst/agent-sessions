@@ -85,7 +85,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	environment, err := nativeEnvironment(request.Environment)
+	environment, err := productruntime.ParseNativeEnvironment(request.Environment)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
@@ -397,18 +397,6 @@ func newOperationID() (string, error) {
 		return "", fmt.Errorf("%w: generate native operation id", productruntime.ErrUnavailable)
 	}
 	return hex.EncodeToString(raw[:]), nil
-}
-
-func nativeEnvironment(environment []string) ([]productruntime.EnvVar, error) {
-	result := make([]productruntime.EnvVar, 0, len(environment))
-	for _, entry := range environment {
-		name, value, found := strings.Cut(entry, "=")
-		if !found || name == "" {
-			return nil, productruntime.ErrProtocol
-		}
-		result = append(result, productruntime.EnvVar{Name: name, Value: value})
-	}
-	return result, nil
 }
 
 var _ productruntime.LaneDriver = (*LaneDriver)(nil)
