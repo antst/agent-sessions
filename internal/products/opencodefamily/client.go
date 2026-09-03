@@ -350,6 +350,7 @@ type message struct {
 		ID        string `json:"id"`
 		SessionID string `json:"sessionID"`
 		Role      string `json:"role"`
+		Finish    string `json:"finish"`
 		Time      struct {
 			Completed *int64 `json:"completed"`
 		} `json:"time"`
@@ -359,6 +360,13 @@ type message struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"parts"`
+}
+
+func terminalAssistantFinish(dialect Dialect, finish string) bool {
+	if finish == "" || finish == "tool-calls" {
+		return false
+	}
+	return dialect == DialectKilo || finish != "unknown"
 }
 
 func (client *Client) messages(ctx context.Context, nativeSessionID string) ([]message, error) {
@@ -407,6 +415,9 @@ func (client *Client) TurnCompleted(ctx context.Context, nativeSessionID, native
 		if len(bytes.TrimSpace(candidate.Info.Error)) != 0 && !bytes.Equal(bytes.TrimSpace(candidate.Info.Error), []byte("null")) {
 			return false, productruntime.ErrNativeRejected
 		}
+		if !terminalAssistantFinish(client.dialect, candidate.Info.Finish) {
+			continue
+		}
 		return true, nil
 	}
 	return false, nil
@@ -438,6 +449,9 @@ func (client *Client) ResultAfter(ctx context.Context, nativeSessionID, nativeMe
 		}
 		if len(bytes.TrimSpace(candidate.Info.Error)) != 0 && !bytes.Equal(bytes.TrimSpace(candidate.Info.Error), []byte("null")) {
 			return "", productruntime.ErrNativeRejected
+		}
+		if !terminalAssistantFinish(client.dialect, candidate.Info.Finish) {
+			continue
 		}
 		for _, part := range candidate.Parts {
 			if part.Type != "text" || part.Text == "" {

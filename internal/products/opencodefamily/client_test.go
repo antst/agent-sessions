@@ -86,7 +86,7 @@ func TestOpenCodeTypedLifecycleAndPermissionRelay(t *testing.T) {
 			mu.Unlock()
 			_, _ = response.Write([]byte("true"))
 		case "GET /session/ses_exact/message":
-			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_exact","role":"user"},"parts":[{"type":"text","text":"input"}]},{"info":{"id":"msg_assistant","sessionID":"ses_exact","role":"assistant","parentID":%q,"time":{"completed":123}},"parts":[{"type":"text","text":"done"}]}]`, messageID, messageID)
+			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_exact","role":"user"},"parts":[{"type":"text","text":"input"}]},{"info":{"id":"msg_assistant","sessionID":"ses_exact","role":"assistant","parentID":%q,"finish":"stop","time":{"completed":123}},"parts":[{"type":"text","text":"done"}]}]`, messageID, messageID)
 		case "DELETE /session/ses_exact":
 			_, _ = response.Write([]byte("true"))
 		default:
@@ -335,7 +335,7 @@ func TestTurnReconciliationRequiresInputBeforeCompletedAssistant(t *testing.T) {
 		if complete {
 			completed = `,"time":{"completed":123}`
 		}
-		_, _ = fmt.Fprintf(response, `[{"info":{"id":"msg_old_answer","sessionID":"ses_exact","role":"assistant","time":{"completed":100}},"parts":[{"type":"text","text":"old"}]}%s,{"info":{"id":"msg_answer","sessionID":"ses_exact","role":"assistant"%s},"parts":[{"type":"text","text":"current"}]}]`, input, completed)
+		_, _ = fmt.Fprintf(response, `[{"info":{"id":"msg_old_answer","sessionID":"ses_exact","role":"assistant","finish":"stop","time":{"completed":100}},"parts":[{"type":"text","text":"old"}]}%s,{"info":{"id":"msg_answer","sessionID":"ses_exact","role":"assistant","finish":"stop"%s},"parts":[{"type":"text","text":"current"}]}]`, input, completed)
 	})
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
@@ -360,5 +360,38 @@ func TestTurnReconciliationRequiresInputBeforeCompletedAssistant(t *testing.T) {
 	}
 	if result, err := client.ResultAfter(context.Background(), "ses_exact", "msg_input"); err != nil || result != "current" {
 		t.Fatalf("result after synthetic input = %q, %v", result, err)
+	}
+}
+
+func TestTurnReconciliationUsesNativeTerminalFinishByDialect(t *testing.T) {
+	dialect := DialectOpenCode
+	finalFinish := "stop"
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requireBasicAuth(t, request)
+		if request.URL.Path != "/session/ses_exact/message" {
+			http.NotFound(response, request)
+			return
+		}
+		_, _ = fmt.Fprintf(response, `[
+			{"info":{"id":"msg_input","sessionID":"ses_exact","role":"user"},"parts":[]},
+			{"info":{"id":"msg_tool","sessionID":"ses_exact","role":"assistant","finish":"tool-calls","time":{"completed":100}},"parts":[{"type":"text","text":"intermediate"}]},
+			{"info":{"id":"msg_unknown","sessionID":"ses_exact","role":"assistant","finish":"unknown","time":{"completed":110}},"parts":[{"type":"text","text":"unknown"}]},
+			{"info":{"id":"msg_final","sessionID":"ses_exact","role":"assistant","finish":%q,"time":{"completed":120}},"parts":[{"type":"text","text":"final"}]}
+		]`, finalFinish)
+	})
+	client, closeClient := newFamilyTestClient(t, dialect, handler)
+	defer closeClient()
+
+	completed, err := client.TurnCompleted(context.Background(), "ses_exact", "msg_input")
+	if err != nil || !completed {
+		t.Fatalf("OpenCode completed=%v err=%v", completed, err)
+	}
+	if result, err := client.ResultAfter(context.Background(), "ses_exact", "msg_input"); err != nil || result != "final" {
+		t.Fatalf("OpenCode result=%q err=%v", result, err)
+	}
+
+	client.dialect = DialectKilo
+	if result, err := client.ResultAfter(context.Background(), "ses_exact", "msg_input"); err != nil || result != "unknown" {
+		t.Fatalf("Kilo result=%q err=%v", result, err)
 	}
 }

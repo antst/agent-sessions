@@ -69,7 +69,7 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 			response.Header().Set("Content-Type", "text/event-stream")
 			_, _ = fmt.Fprint(response, "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_lane\"}}\n\n")
 		case "GET /session/ses_lane/message":
-			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_lane","role":"user"},"parts":[]},{"info":{"id":"msg_answer","sessionID":"ses_lane","role":"assistant","parentID":%q,"time":{"completed":123}},"parts":[{"type":"text","text":"lane result"}]}]`, messageID.Load().(string), messageID.Load().(string))
+			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_lane","role":"user"},"parts":[]},{"info":{"id":"msg_answer","sessionID":"ses_lane","role":"assistant","parentID":%q,"finish":"stop","time":{"completed":123}},"parts":[{"type":"text","text":"lane result"}]}]`, messageID.Load().(string), messageID.Load().(string))
 		case "POST /session/ses_lane/abort":
 			_, _ = response.Write([]byte("true"))
 		case "DELETE /session/ses_lane":
@@ -276,7 +276,7 @@ func TestLaneReconcilesCompletedMessageWhenFastTerminalEventWasMissed(t *testing
 			response.WriteHeader(http.StatusNoContent)
 		case "GET /session/ses_fast/message":
 			id := nativeMessageID.Load().(string)
-			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_synthetic","sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_fast_answer","sessionID":"ses_fast","role":"assistant","parentID":"msg_synthetic","time":{"completed":999}},"parts":[{"type":"text","text":"fast result"}]}]`, id)
+			_, _ = fmt.Fprintf(response, `[{"info":{"id":%q,"sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_synthetic","sessionID":"ses_fast","role":"user"},"parts":[]},{"info":{"id":"msg_fast_answer","sessionID":"ses_fast","role":"assistant","parentID":"msg_synthetic","finish":"stop","time":{"completed":999}},"parts":[{"type":"text","text":"fast result"}]}]`, id)
 		default:
 			http.NotFound(response, request)
 		}
