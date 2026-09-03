@@ -101,8 +101,17 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		return productruntime.NativeSessionRef{}, err
 	}
 	driver.mu.Lock()
-	if _, exists := driver.lanes[request.LaneID]; exists {
+	if existing := driver.lanes[request.LaneID]; existing != nil {
+		existing.mu.Lock()
+		live := !existing.closed && request.ResumeNativeID != "" &&
+			existing.ref.LaneID == request.LaneID && existing.ref.NativeSessionID == request.ResumeNativeID &&
+			existing.permission == request.PermissionMode
+		ref := existing.ref
+		existing.mu.Unlock()
 		driver.mu.Unlock()
+		if live {
+			return ref, nil
+		}
 		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: lane %q already has an ephemeral native client", productruntime.ErrAmbiguousSession, request.LaneID)
 	}
 	driver.mu.Unlock()

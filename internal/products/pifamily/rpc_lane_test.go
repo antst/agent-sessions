@@ -298,6 +298,35 @@ func TestWaitTurnRetriesCollectionFromCachedTerminalAfterCancellation(t *testing
 	}
 }
 
+func TestLaneOpenReusesOnlyItsExactLiveNativeSession(t *testing.T) {
+	quirks, _ := QuirksFor(PiProductID)
+	factory := &oneProcessFactory{process: newScriptedProcess("exact-live")}
+	driver, err := NewLaneDriver(LaneConfig{
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 8,
+		Processes: factory, MapPermission: familyPermission,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := productruntime.LaneOpenRequest{
+		ProductID: PiProductID, LaneID: "exact-live", Name: "exact live", Cwd: "/work",
+		PermissionMode: permissionmode.Default,
+	}
+	ref, err := driver.Open(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ResumeNativeID = ref.NativeSessionID
+	resumed, err := driver.Open(context.Background(), request)
+	if err != nil || resumed != ref || factory.starts != 1 {
+		t.Fatalf("exact live resume = %+v, %v; starts = %d", resumed, err, factory.starts)
+	}
+	request.ResumeNativeID = "different-native"
+	if _, err := driver.Open(context.Background(), request); !errors.Is(err, productruntime.ErrAmbiguousSession) || factory.starts != 1 {
+		t.Fatalf("mismatched live resume = %v; starts = %d", err, factory.starts)
+	}
+}
+
 func TestWaitTurnDoesNotInventEmptyResultWhenCollectionIsUnavailable(t *testing.T) {
 	quirks, _ := QuirksFor(PiProductID)
 	process := newScriptedProcess("pi-unavailable-result")
