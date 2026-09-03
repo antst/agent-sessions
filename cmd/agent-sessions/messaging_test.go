@@ -48,6 +48,26 @@ type recordingMessageTestDriver struct {
 	err      error
 }
 
+type cwdRecordingLaneDriver struct {
+	passiveMessageTestDriver
+	opened  chan productruntime.LaneOpenRequest
+	release chan struct{}
+}
+
+func (driver *cwdRecordingLaneDriver) Open(_ context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
+	driver.opened <- request
+	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: request.LaneID, Generation: 1}, nil
+}
+
+func (*cwdRecordingLaneDriver) StartTurn(_ context.Context, session productruntime.NativeSessionRef, _ productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
+	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: "turn"}, nil
+}
+
+func (driver *cwdRecordingLaneDriver) WaitTurn(context.Context, productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
+	<-driver.release
+	return productruntime.NativeTerminal{Outcome: productruntime.TurnCompleted}, nil
+}
+
 func TestLiveSessionDispatchExposesExactlyTheFirstClassV1Methods(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
@@ -436,7 +456,7 @@ func TestToolsOnlyConnectorsUseTheirLiveSessionAsTheCaller(t *testing.T) {
 	}
 }
 
-func TestInvocationCwdIsExplicitAndOverridesOnlyThePerCallAttachmentCopy(t *testing.T) {
+func TestPresenceInvocationCwdIsExplicitAndConnectorUsesTheProductAttachmentCwd(t *testing.T) {
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -462,17 +482,74 @@ func TestInvocationCwdIsExplicitAndOverridesOnlyThePerCallAttachmentCopy(t *test
 	}
 
 	controlPayload, err := json.Marshal(connectorToolEnvelope{
-		SourceID: "session", RequestID: "request", Name: "identity", Arguments: map[string]any{}, Cwd: "/tools-only-call",
+		SourceID: "session", RequestID: "request", Name: "identity", Arguments: map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	toolsOnly, err := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: controlPayload})
-	if err != nil || !strings.Contains(string(toolsOnly), `"cwd":"/tools-only-call"`) {
+	if err != nil || !strings.Contains(string(toolsOnly), `"cwd":"/stored"`) {
 		t.Fatalf("tools-only connector result = %s, %v", toolsOnly, err)
 	}
 	stored, active, err := runtime.Attachments().ActiveAttachment("session")
 	if err != nil || !active || stored.Cwd != "/stored" {
 		t.Fatalf("stored attachment changed = %+v, active=%v, err=%v", stored, active, err)
+	}
+}
+
+func TestConnectorLaneStartUsesTheProductAttachmentCwd(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	productCwd := t.TempDir()
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
+		ID: "codex-session", Product: "codex", NativeSessionID: "codex-session", Cwd: productCwd,
+		Groups: []string{"team"}, PermissionMode: "bypassPermissions",
+	})
+	native := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(native, []byte("#!/bin/sh\nprintf '%s\\n' 'claude fixture'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", native)
+	driver := &cwdRecordingLaneDriver{opened: make(chan productruntime.LaneOpenRequest, 1), release: make(chan struct{})}
+	coordinator := newHostCoordinator(context.Background(), root)
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(connectorToolEnvelope{
+		SourceID: "codex-session", RequestID: "lane-start", Name: "lane", Arguments: map[string]any{
+			"product": "claude", "command": "start", "arguments": []string{"--name", "worker"}, "input": "work",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload})
+	if err != nil || strings.Contains(string(response), `"isError":true`) {
+		t.Fatalf("connector lane start = %s, %v", response, err)
+	}
+	select {
+	case request := <-driver.opened:
+		if request.Cwd != productCwd {
+			t.Fatalf("lane cwd = %q, want product attachment cwd %q", request.Cwd, productCwd)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("connector lane start did not reach the driver")
+	}
+	coordinator.mu.Lock()
+	var done chan struct{}
+	for _, actor := range coordinator.lanes {
+		done = actor.done
+	}
+	coordinator.mu.Unlock()
+	close(driver.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connector lane test turn did not finish")
 	}
 }

@@ -103,16 +103,6 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 					return nil, errors.New("live session identity is not confirmed by the product")
 				}
 			}
-			if method == "tools/call" {
-				cwd, cwdErr := os.Getwd()
-				if cwdErr != nil {
-					return nil, fmt.Errorf("read connector invocation cwd: %w", cwdErr)
-				}
-				params, cwdErr = stampConnectorInvocationCwd(params, cwd)
-				if cwdErr != nil {
-					return nil, cwdErr
-				}
-			}
 			sourceID := connectorRelaySource(product, callReport.UUID, os.Getenv(launcher.QwenEventsFileEnv))
 			return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
 		},
@@ -154,15 +144,6 @@ func callLiveConnectorTool(
 		delete(arguments, "command")
 	default:
 		return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"tool": call.Name})
-	}
-	if strings.HasPrefix(operation, "lane.") {
-		if _, supplied := arguments["cwd"]; !supplied {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return nil, fmt.Errorf("read connector invocation cwd: %w", err)
-			}
-			arguments["cwd"] = cwd
-		}
 	}
 	result, err := live.Call(ctx, requestID, operation, arguments)
 	if err != nil {
@@ -208,7 +189,6 @@ func callConnectorDaemonTool(
 	sourceID = connectorToolSource(product, sourceID, params, call.Arguments)
 	payload, err := json.Marshal(connectorToolEnvelope{
 		SourceID: sourceID, RequestID: requestID, Name: call.Name, Arguments: call.Arguments,
-		Cwd: call.Metadata.InvocationCwd,
 	})
 	if err != nil {
 		return nil, err
@@ -225,20 +205,6 @@ func callConnectorDaemonTool(
 		return nil, errors.New(response.Error.Message)
 	}
 	return append(json.RawMessage(nil), response.Payload...), nil
-}
-
-func stampConnectorInvocationCwd(params json.RawMessage, cwd string) (json.RawMessage, error) {
-	var call map[string]any
-	if json.Unmarshal(params, &call) != nil {
-		return nil, errors.New("connector tool call is invalid")
-	}
-	metadata, _ := call["_meta"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-		call["_meta"] = metadata
-	}
-	metadata["agent-sessions/cwd"] = cwd
-	return json.Marshal(call)
 }
 
 func connectorToolSource(product, ambient string, params json.RawMessage, arguments map[string]any) string {
@@ -356,9 +322,9 @@ func openGrokConnectorObserver(ctx context.Context, report liveSessionReport) (*
 	if err != nil {
 		return nil, err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("read Grok connector working directory: %w", err)
+	cwd := strings.TrimSpace(report.Info["cwd"])
+	if cwd == "" {
+		return nil, errors.New("Grok connector working directory is unavailable")
 	}
 	return bridge.OpenGrokNativeObserver(
 		ctx, executable, cwd, strings.TrimSpace(os.Getenv(launcher.GrokLeaderSocketEnv)),

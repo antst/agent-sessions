@@ -46,20 +46,44 @@ func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *test
 	}
 }
 
-func TestConnectorInvocationCwdIsMetadataNotAModelArgument(t *testing.T) {
-	params := json.RawMessage(`{"name":"lane","arguments":{"command":"list"},"_meta":{"threadId":"native-thread"}}`)
-	stamped, err := stampConnectorInvocationCwd(params, "/product/work")
+func TestConnectorReadsProcessCwdOnlyOnceBeforeServingCalls(t *testing.T) {
+	body, err := os.ReadFile("connector.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var call map[string]any
-	if err := json.Unmarshal(stamped, &call); err != nil {
+	if got := strings.Count(string(body), "os.Getwd()"); got != 1 {
+		t.Fatalf("connector process cwd reads = %d, want the one startup fallback", got)
+	}
+}
+
+func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
+	original, err := os.Open(".")
+	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := call["arguments"].(map[string]any)
-	metadata := call["_meta"].(map[string]any)
-	if len(arguments) != 1 || arguments["command"] != "list" || metadata["threadId"] != "native-thread" || metadata["agent-sessions/cwd"] != "/product/work" {
-		t.Fatalf("stamped connector call = %#v", call)
+	defer original.Close()
+	defer func() {
+		if err := original.Chdir(); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	}()
+	deleted := t.TempDir()
+	if err := os.Chdir(deleted); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(deleted); err != nil {
+		t.Fatal(err)
+	}
+	live := &liveSessionClient{}
+	for _, params := range []json.RawMessage{
+		json.RawMessage(`{"name":"list_peers","arguments":{}}`),
+		json.RawMessage(`{"name":"send_message","arguments":{"target":"peer","message":"hello"}}`),
+		json.RawMessage(`{"name":"lane","arguments":{"product":"codex","command":"start","arguments":["--name","worker"]}}`),
+	} {
+		_, err := callLiveConnectorTool(context.Background(), live, "request", "tools/call", params)
+		if err == nil || err.Error() != "Agent Sessions daemon is unavailable" {
+			t.Fatalf("connector call from deleted cwd error = %v", err)
+		}
 	}
 }
 

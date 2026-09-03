@@ -17,9 +17,6 @@ import (
 type connectorToolCall struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
-	Metadata  struct {
-		InvocationCwd string `json:"agent-sessions/cwd"`
-	} `json:"_meta"`
 }
 
 type connectorToolEnvelope struct {
@@ -27,7 +24,6 @@ type connectorToolEnvelope struct {
 	RequestID string         `json:"request_id"`
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
-	Cwd       string         `json:"cwd,omitempty"`
 }
 
 func (c *hostCoordinator) handleLiveSessionCall(
@@ -161,11 +157,7 @@ func (c *hostCoordinator) handleConnectorTool(
 	if json.Unmarshal(request.Payload, &call) != nil || strings.TrimSpace(call.RequestID) == "" || strings.TrimSpace(call.Name) == "" {
 		return nil, errors.New("connector tool call is invalid")
 	}
-	var invocationCwd *string
-	if strings.TrimSpace(call.Cwd) != "" {
-		invocationCwd = &call.Cwd
-	}
-	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, invocationCwd)
+	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, nil)
 	return marshalConnectorToolResult(result, err)
 }
 
