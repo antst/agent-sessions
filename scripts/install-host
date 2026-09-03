@@ -69,13 +69,15 @@ opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
 dsh_path=$(resolve_product "$dsh" "$HOME/.local/bin/dsh" || true)
 pnpm_path=$(resolve_product "$pnpm" "$HOME/.local/bin/pnpm" || true)
+dsh_skip_reason=""
 
 if [[ -n "$dsh_path" ]]; then
-  [[ -n "$pnpm_path" ]] || {
-    printf 'Cannot install the DSH integration: pnpm is not installed.\n' >&2
-    exit 1
-  }
-  validate_dsh_native_tuple "$dsh_path" "$pnpm_path"
+  if [[ -z "$pnpm_path" ]]; then
+    dsh_skip_reason="pnpm is not installed."
+    dsh_path=""
+  elif ! dsh_skip_reason=$(validate_dsh_native_tuple "$dsh_path" "$pnpm_path" 2>&1); then
+    dsh_path=""
+  fi
 fi
 
 # Grok Build may be installed only in its native self-managed downloads
@@ -305,6 +307,8 @@ install_integrations() {
   install_opencode_family_plugin kilo "$kilo_path" "$integration_root"
   if [[ -n "$dsh_path" ]]; then
     install_dsh_native_integration "$dsh_path" "$pnpm_path" "$integration_root"
+  elif [[ -n "$dsh_skip_reason" ]]; then
+    printf 'Skipping DSH lane integration: %s\n' "$dsh_skip_reason"
   else
     printf 'Skipping DSH lane integration: %s is not installed.\n' "$dsh"
   fi

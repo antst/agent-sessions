@@ -102,7 +102,8 @@ chmod 0700 "$fake_bin/pnpm"
 cat >"$fake_bin/dsh" <<'EOF'
 #!/bin/sh
 set -eu
-if [ "$1" = "--version" ]; then printf '%s\n' 'dsh 0.1.2-alpha.5'; exit 0; fi
+printf '%s\n' "$*" >>"$TEST_DSH_RECORD"
+if [ "$1" = "--version" ]; then printf '%s\n' "${TEST_DSH_VERSION:-dsh 0.1.2-alpha.5}"; exit 0; fi
 [ "$1 $2 $3" = "plugin --profile agent-sessions" ] || exit 91
 case "$4" in
   list)
@@ -239,6 +240,7 @@ common_env=(
   "TEST_CLAUDE_MARKETPLACE=$test_root/claude-marketplace"
   "TEST_CLAUDE_RECORD=$test_root/claude-record"
   "TEST_DSH_STATE=$test_root/dsh-installed"
+  "TEST_DSH_RECORD=$test_root/dsh-record"
   "TEST_DSH_PLUGIN_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
   "TEST_DSH_PACKED_SOURCE=$test_root/dsh-packed-source"
   "TEST_SERVICE_PID_FILE=$test_root/service.pid"
@@ -325,6 +327,24 @@ if [[ "$installed_hash" != "$candidate_hash" ]] ||
 fi
 if [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] || [[ ! -L "$prefix/bin/user-tool" ]]; then
   printf 'successful host update did not prune only stale managed aliases\n' >&2
+  exit 1
+fi
+: >"$test_root/dsh-record"
+if ! env "${common_env[@]}" TEST_DSH_VERSION='dsh 0.1.2-rc.1' "$root/scripts/install-host" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/incompatible-dsh.out" 2>"$test_root/incompatible-dsh.err"; then
+  cat "$test_root/incompatible-dsh.out" >&2
+  cat "$test_root/incompatible-dsh.err" >&2
+  printf 'an incompatible optional DSH aborted the host install\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'Skipping DSH lane integration: DSH version is incompatible; require exact 0.1.2-alpha.5.' \
+    "$test_root/incompatible-dsh.out" ||
+   ! grep -Fxq -- '--version' "$test_root/dsh-record" ||
+   grep -Fvxq -- '--version' "$test_root/dsh-record"; then
+  printf 'an incompatible optional DSH was not skipped before profile mutation\n' >&2
+  cat "$test_root/incompatible-dsh.out" >&2
+  cat "$test_root/dsh-record" >&2
   exit 1
 fi
 printf 'host install transaction rollback: PASS\n'
