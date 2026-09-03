@@ -140,7 +140,7 @@ for lane_help in "$codex_lane_help" "$claude_lane_help" "$grok_lane_help" "$qwen
 done
 if grep -Rq '\[TODO' "$plugin_root/skills/claude-lane" ||
    ! grep -Fq 'contract_version: 2' "$plugin_root/skills/claude-lane/SKILL.md" ||
-   ! grep -Fq 'claude-peer-lane' "$plugin_root/docs/CLAUDE-LANES.md"; then
+   ! grep -Fq '`claude-peer-lane`' "$plugin_root/docs/LANES.md"; then
   printf 'Codex Claude-lane skill or contract documentation is incomplete\n' >&2
   exit 1
 fi
@@ -160,7 +160,7 @@ if ! grep -Fq 'Do **not** poll' "$plugin_root/skills/claude-lane/SKILL.md"; then
 fi
 if grep -Rq '\[TODO' "$plugin_root/skills/grok-lane" ||
    ! grep -Fq 'contract_version: 2' "$plugin_root/skills/grok-lane/SKILL.md" ||
-   ! grep -Fq 'grok-peer-lane' "$plugin_root/docs/GROK-LANES.md"; then
+   ! grep -Fq '`grok-peer-lane`' "$plugin_root/docs/LANES.md"; then
   printf 'Codex Grok-lane skill or contract documentation is incomplete\n' >&2
   exit 1
 fi

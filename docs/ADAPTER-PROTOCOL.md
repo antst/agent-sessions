@@ -1,110 +1,80 @@
-# Product adapter protocol
+# Shipped adapter architecture
 
-## IT IS A TRUSTED ENVIRONMENT. DOT.
+The public native wire is [Native Agent Sessions Presence Protocol v1](specs/NATIVE-PEER-PROTOCOL.md).
+This document describes how the shipped product adapters reach that one wire.
 
-Agent Sessions runs the user's own agents on infrastructure the user controls.
-Deployment boundaries such as separate hosts, VLANs, or hubs provide isolation.
-The local protocol has no capability, token, process-attestation, ancestry, or
-generation-fencing layer. A process that can connect to the user-owned socket
-may report and operate its session.
+## One live plane
 
-The only security item contemplated for the future is an app key for a daemon
-joining a hub. It is not designed here, has no preparatory hooks, and does not
-change the trusted local environment.
+Every live peer or lane is represented by one acknowledged `session.hello` on `presence.sock`.
+After the hello, the newline-delimited JSON-RPC 2.0 connection carries first-class peer, message,
+session-update, and lane methods. EOF is the sole live-presence boundary; a newer accepted
+connection for the same native UUID replaces the older one.
 
-## Product inventory
+The state-root search order is identical in the Go and JavaScript clients:
 
-`internal/productcatalog` contains the authored product descriptors.
-`internal/productruntime` contains the optional lane and doctor interfaces used
-by product-local packages. There is no product registration from `init` and no
-fallback from an unknown product to another adapter.
+1. `AGENT_SESSIONS_PRESENCE_SOCKET`;
+2. `AGENT_SESSIONS_STATE_ROOT/run/presence.sock`;
+3. `$XDG_STATE_HOME/agent-sessions/run/presence.sock`;
+4. `$HOME/.local/state/agent-sessions/run/presence.sock`.
 
-Product sessions remain product-owned. Titles, state, history, results,
-resumability, and native session identity are read from the product. Agent
-Sessions attaches, routes, and presents those facts; it does not shadow a
-product session store.
+OpenCode, Kilo, Pi, and OMP share the JavaScript native client. DSH implements the same protocol in
+its native profile. Codex, Grok, and Qwen use the shared launcher-held Go client where the product
+topology requires the parent process to hold presence. Claude uses its product plugin/connector
+path. All of them use the same first-class methods and the same presence socket.
 
-## Live session connection
+## Identity and product authority
 
-Every live session or lane holds one connection to `presence.sock`. This is the
-only adapter socket. Its first newline-delimited JSON object is exactly:
+`session.hello.uuid` is the product's native session ID and is the only identity exposed after lane
+open. Product names and info come from product events or live product reads:
+
+- Codex and Pi publish native title events.
+- OpenCode and Kilo publish session updates.
+- Claude resolves the custom transcript title at query time.
+- OMP resolves the exact UUID through one batched product listing per query.
+- Grok resolves the exact UUID through its global native session listing.
+- Qwen and DSH report their product-owned title through the native client.
+
+Live title reads update one in-memory projection only. They are never durable. `session.update` may
+replace name and info but cannot change UUID, product, or connection groups.
+
+Fresh product-generated sessions receive no provisional session ID in their launch environment.
+The daemon re-keys its in-memory lane actor to the returned native ID in one locked operation. A
+daemon-owned lane keeps its already-computed effective groups when its integration reports; the
+report identifies the lane and does not become a second group authority.
+
+## Messages and tools
+
+Delivery is structured on the wire:
 
 ```json
-{"uuid":"native-id","name":"native title","groups":["group"],"product":"pi"}
+{"message_id":"m1","from":{"uuid":"source","name":"reviewer","product":"claude","groups":["team"]},"body":"Please inspect this."}
 ```
 
-The connection itself proves liveness. EOF removes the session immediately and
-fails outstanding calls. Reconnection starts from a fresh report. A newer
-connection reporting the same UUID replaces the older connection.
+The shared JavaScript client and the shared Go adapter helper each render that structure once for
+their native product input. Per-product code chooses only the native input call. Acceptance or the
+product's rejection returns synchronously and verbatim; nothing is spooled.
 
-After the report, the same connection carries small JSON-RPC-shaped objects:
+The promptless tool vocabulary covers identity, peer listing, direct/multicast send, group
+broadcast, supported rename, and lane lifecycle. Host-supplied invocation metadata identifies a
+tools-only caller where the product supplies it. Models do not restate their session identity.
 
-```json
-{"id":"session.1","method":"tool.call","params":{}}
-{"id":"daemon.2","method":"message.deliver","params":{}}
-{"id":"session.1","result":{}}
-{"id":"daemon.2","error":"native delivery failed"}
-```
+## Lane drivers
 
-Name or group changes use `session.update` on that connection. A report or
-update is generation-local memory only. There is no component socket, broker,
-binding, heartbeat, journal, replay window, or handshake capability.
+`productruntime.LaneDriver` is the single engine boundary. The coordinator performs generic
+admission, groups, result delivery, candidate persistence, and routing; product packages implement
+native Open, StartTurn, WaitTurn, Interrupt, Archive, and genuine optional Steer/message methods.
+The registry is constructed explicitly from the product catalog. Generic lane code contains no
+product dispatch literals.
 
-## Messages and parent calls
+Lane-capable native protocol clients, currently DSH, advertise `capabilities:{"lane":true}` and
+accept the protocol's daemon-to-session lane requests over their held presence connection. Other
+drivers use their product's App Server, JSONL, stream-JSON, ACP, HTTP/event, or leader interface.
 
-Messaging is a synchronous live relay. The destination must be present when
-delivery occurs. The sender sees the destination adapter's success or failure;
-the daemon does not spool messages, synthesize receipts, or promise later
-delivery. A caller that loses its call owns any retry.
+## Trust and errors
 
-Parent tool calls use the same live connection and the session UUID already
-reported by the product adapter. There is no separate parent-attestation path.
+Agent Sessions runs in a trusted same-user environment. The local socket has no authentication or
+security-redaction layer. Native product errors reach the caller unchanged. Protocol
+errors use the closed v1 code table; unclassified product failures use `-32006` with the product
+text preserved.
 
-## Lanes
-
-Lane operations call the selected product directly. Start, resume, prompt,
-wait, steer, interrupt, archive, and result semantics remain native-product
-semantics. A daemon acknowledgement is returned only after the product accepts
-the operation. Busy or unsupported operations return truthful errors instead
-of entering a daemon queue.
-
-The only durable daemon data is the lane discovery candidate row:
-
-```text
-{uuid, product, parent, primary_group, secondary_groups, optional_host}
-```
-
-It is used only to decide which UUIDs may be asked of a product when discovering
-offline lanes. The product must confirm a candidate and supplies every returned
-field. Live routing never reads this table. Stale rows are harmless and never
-served as answers.
-
-For an active parent, UUID-to-name results may be held in a disposable in-memory
-map. The map is populated from product-confirmed candidates, updated when a lane
-opens, and discarded when the parent disconnects.
-
-## Product mechanics
-
-- Pi and OMP use their native JSONL RPC modes for lanes.
-- OpenCode and Kilo use their supported HTTP/event surfaces for lanes.
-- DSH uses its pinned ACP surface for headless lanes only.
-- Claude, Codex, Grok, and Qwen use their native start and exact resume forms.
-
-Shared helpers may implement process spawning, bounded JSONL, or plain HTTP/SSE,
-but they do not add lifecycle authority above the product.
-
-## Permissions and doctor
-
-Permission mapping is product-owned and explicit. Unsupported mappings fail
-before native work; adapters do not silently widen them. Doctor probes read the
-live installation and product surfaces on each request. Readiness is not stored.
-
-## Federation
-
-Federation protocol 4 uses one explicit version. A mismatched participant is
-rejected at hello. Accepted daemons exchange one complete live roster and relay
-live calls. Disconnect triggers reconnect and in-memory resend of unacknowledged
-frames; nothing federation-related is durable.
-
-On shutdown the daemon stops accepting work, gives already-accepted live calls
-up to two seconds to finish and return acknowledgements, then exits.
+See [Persistence and state](designs/PERSISTENCE-AND-STATE.md) for the governing doctrine.

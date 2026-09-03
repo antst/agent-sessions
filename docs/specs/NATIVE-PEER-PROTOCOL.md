@@ -210,7 +210,6 @@ missing or invisible target returns:
 
 The version 1 lane methods are `lane.start`, `lane.run`, `lane.resume`,
 `lane.steer`, `lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive`.
-`lane.collect` is not a version 1 method.
 
 Start, run, resume, and steer use:
 
@@ -923,39 +922,3 @@ Result: an empty object.
 {"jsonrpc":"2.0","id":"lane-archive-2","method":"lane.archive","params":{"product":"qwen","arguments":["owned-by-another-session"]}}
 {"jsonrpc":"2.0","id":"lane-archive-2","error":{"code":-32003,"message":"Operation not permitted","data":{"method":"lane.archive"}}}
 ```
-
-## Appendix B. Agent Sessions version 1 alignment
-
-The version 1 alignment completed these implementation changes:
-
-1. Every presence frame uses JSON-RPC 2.0 with string or numeric request IDs,
-   structured errors, and acknowledged `session.update` requests. The raw
-   report and legacy response envelopes were deleted.
-2. `session.hello` is the sole first frame. The daemon acknowledges protocol
-   `1`, rejects other versions with `-32004`, and closes invalid connections.
-3. Every non-empty product string is accepted for presence, rosters, discovery,
-   and messaging. Catalog checks apply only to lane launch and drive operations.
-4. Hello groups remain exact and immutable. The product-owned `info` map is
-   live-only, passed through to rosters, and replaced with the name by
-   `session.update`.
-5. The presence stream exposes only the first-class version 1 methods.
-   `tool.call`, `tools/call`, and `lane.collect` were removed from this wire.
-6. `message.deliver` carries the structured sender and plain body. Rendering
-   sender context happens once in each native client codebase.
-7. The closed error table includes `-32006` for verbatim native product and
-   driver failures, distinct from validation, target, busy, permission,
-   version, and launchability errors.
-8. Go and JavaScript clients use the same socket-discovery order, including
-   `XDG_STATE_HOME` and an explicit presence socket.
-9. Every launcher supplies the uniform `AGENT_SESSIONS_PRODUCT`, optional
-   known `AGENT_SESSIONS_SESSION_ID`, `AGENT_SESSIONS_SESSION_NAME`, and
-   `AGENT_SESSIONS_GROUPS` context. `AGENT_SESSIONS_PRODUCT_ID` was deleted.
-10. Lane results expose the product-native `session_id` as their sole session
-    identity. The duplicate `thread_id` field was deleted.
-11. Reference clients and conformance checks cover hello acknowledgement,
-    strict framing, replacement by UUID, unknown products, immutable groups,
-    live info, structured delivery, first-class methods, and the closed errors.
-12. A session may advertise the closed `capabilities:{"lane":true}` object and
-    then accepts native lane start, wait, interrupt, and archive requests over
-    that same held connection. UI-less lane sessions resolve approval from
-    their launch policy and never wait for interactive mediation.

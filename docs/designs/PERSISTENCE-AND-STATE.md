@@ -8,34 +8,55 @@ The only security item planned is a future daemon-to-hub app key so a hub can
 admit known daemons. It is not designed today, has no preparatory hooks, and is
 the entire security roadmap.
 
-## Durable state
+## Product authority
 
-Peer sessions, messages, turns, results, titles, process identity, presence,
-and product session metadata are never persisted by Agent Sessions. Products
-and the operating system already own those facts.
+Products own session identity, titles, histories, cwd, models, permissions, results, and resume.
+Agent Sessions reads native events or product query surfaces and does not persist a copy. A lane
+has exactly one identity: the product's native session ID.
 
-The sole durable record is an archived-lane discovery candidate:
+Every invocation owns its launch facts. Start and resume receive groups, cwd, model, agent, effort,
+permission, persistence, and auto-archive choices from that invocation only. Omission means no
+override and the product applies its own default.
 
-- product;
-- native session UUID;
-- parent;
-- parent's primary group;
-- secondary groups;
-- optional parent host, stored only on the parent's host.
+## The one durable table
 
-The row remembers only which UUID Agent Sessions may ask a product about. It is
-never rendered as an answer. Listing or unarchiving loads eligible rows, asks
-the product which UUIDs still exist, and returns only product-confirmed data.
-A stale row yields nothing.
+Peers, messages, turns, results, names, process identity, live presence, and product metadata are
+never persisted by Agent Sessions. The sole durable record is an immutable offline-lane discovery
+candidate:
 
-## Live state
+- product and native session ID;
+- historical parent ID and primary private group;
+- assigned or inherited non-derived secondary groups; and
+- optional parent host.
 
-Connections report UUID, name, groups, and product. A daemon restart begins
-with an empty roster and rebuilds it as connections return. Names and lane
-lookups may be cached in memory for active sessions and disappear with the
-process.
+It is written idempotently when a fresh native identity is established and never rewritten on
+resume or handover. Derived lane anchors are recomputed as `primary/native-id`; they are not stored.
 
-Messages and turns are synchronous pass-through calls. Success is the product
-or recipient carrier's acknowledgment. Pending acknowledgments and federation
-resends are memory-only. Graceful shutdown stops new messages, drains accepted
-work for at most two seconds, then exits.
+The table answers only which UUIDs Agent Sessions may ask a product about for a group-visible
+caller. `list --all` and offline resume ask the product to confirm each eligible UUID and expose only
+product-confirmed rows. A stale candidate yields nothing. Historical parentage is never presented
+as current ownership.
+
+## Live memory
+
+An acknowledged protocol-v1 `session.hello` connection is the complete liveness proof. UUID, name,
+groups, product, and info live in memory; EOF removes them. A newer same-UUID connection replaces
+the older one. Name selectors may use a disposable UUID/name/product map, but groups and cwd never
+live there as a second copy.
+
+The daemon owns active lane actors, native driver handles, turn waiters, and current parent
+ownership in memory. Nonpersistent idle lanes retire when their parent disconnects. A persistent
+lane may become live and unowned, then attach to an eligible parent without creating a second native
+session.
+
+## Delivery, restart, and federation
+
+Messages and turns are synchronous pass-through operations. Success is the recipient or product
+acknowledgement. There is no mailbox, durable receipt, replay journal, or retry owner in the daemon.
+Federation retains only accepted unacknowledged work and rosters in process memory.
+
+After daemon replacement, daemon-owned lanes are non-live. Their product sessions remain available
+through candidate filtering, product confirmation, and exact native resume. A client that owns its
+presence connection may re-report after reconnect; the engine does not infer liveness from a row.
+
+Graceful shutdown stops new admission, drains accepted work for at most two seconds, and exits.

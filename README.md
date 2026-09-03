@@ -1,117 +1,32 @@
 # Agent Sessions
 
-Agent Sessions lets Codex, Claude Code, Grok Build, and Qwen Code work together.
+Agent Sessions lets coding agents discover one another, exchange live messages,
+and run named worker sessions across products and machines. It works with the
+products you already use: each product keeps ownership of its models,
+credentials, settings, names, transcripts, and native session IDs.
 
-Start normal interactive sessions, place them in a shared group, and they can discover and message
-one another. Any of them can also launch durable worker sessions—called lanes—in any supported
-product, locally or on another machine.
+Eight products can run as interactive peers. All eight, plus DeepSeek Harness
+(DSH), can run as worker lanes.
 
-The result is a product-neutral collaboration layer over the AI tools you already use. It does not
-replace their models, interfaces, permissions, configuration, credentials, or conversation history.
+| Product | Peer | Lane |
+| --- | :---: | :---: |
+| Codex | yes | yes |
+| Claude Code | yes | yes |
+| Grok Build | yes | yes |
+| Qwen Code | yes | yes |
+| OpenCode | yes | yes |
+| Kilo Code | yes | yes |
+| Pi | yes | yes |
+| Oh My Pi (OMP) | yes | yes |
+| DeepSeek Harness (DSH) | — | yes |
 
-## What can I use it for?
+Agent Sessions is useful when one agent should implement while another reviews,
+when specialists should keep their native conversation history across tasks, or
+when agents on separate build hosts need one shared collaboration surface.
 
-- Give an implementation to Codex and ask Claude to review it independently.
-- Let Grok research an unfamiliar subsystem while Qwen writes tests.
-- Keep a specialist worker alive for later follow-up questions instead of starting from scratch.
-- Hand work between long-running interactive sessions with clear source information.
-- Use the same orchestration instructions whether the lead session is Codex, Claude, Grok, or Qwen.
-- Coordinate Linux, macOS, and build-host sessions while developing and validating multi-platform
-  software.
-- Run cross-model acceptance, critique, and adversarial-review workflows without flattening every
-  product into the same security or model settings.
+## Quick start
 
-Agent Sessions works especially well when one model should not be both author and final judge.
-
-## A five-minute local example
-
-First install Agent Sessions, as described below. Then open two terminals in the same project:
-
-```sh
-# Terminal 1
-codex-peer -n lead -g my-project
-
-# Terminal 2
-claude-peer -n reviewer -g my-project
-```
-
-Inside either session, invoke the installed `agent-sessions` skill and ask it to list peers. You
-should see the other session. Then ask, for example:
-
-```text
-Send reviewer this message: review the authentication changes and report only concrete risks.
-```
-
-The receiving session gets a labeled message containing the sender's Agent Sessions identity. You
-can reply, multicast to selected peers, or broadcast to a shared group.
-
-You can also ask the lead session to start a worker:
-
-```text
-Use Agent Sessions to start a persistent Grok lane named auth-research.
-Ask it to inspect current OAuth guidance and send its conclusions back here.
-```
-
-The skill uses the Agent Sessions MCP tools to create and supervise the lane in the background. The
-worker's terminal status is delivered back to its immediate parent automatically; the parent then
-collects any still-owed result through the structured lane tool. The same lane can receive follow-up
-turns.
-
-## The basic ideas
-
-- A **peer** is an interactive Codex, Claude, Grok, or Qwen session started with a `*-peer`
-  command.
-- A **group** controls which peers can discover and message one another. Add one with
-  `-g NAME`; repeat it to join several groups.
-- A **lane** is a supervised worker session. It may finish one task and exit, or remain persistent
-  for follow-up work.
-- The **host daemon** is one background user service on each machine. It owns local registrations,
-  routing, lane state, and recovery.
-- The optional **hub** connects host daemons so group-visible peers and lanes can work across
-  machines.
-
-Groups restrict participant discovery and delivery. They do not grant one session authority to act
-for the user, and they do not weaken a recipient's system instructions, sandbox, or approval rules.
-
-### Registrations and connector processes
-
-`agent-sessions roster` lists managed peers and lanes. It deliberately does not list every helper or
-MCP server process. Claude, Grok, and Qwen normally start a connector under each managed interactive
-product process. Codex is different: Codex owns one durable App Server and that App Server hosts one
-shared Agent Sessions MCP connector for all of its threads.
-
-Consequently, the Codex App Server and its `agent-sessions connector auto` child may remain running
-when no Codex peer is registered. That is expected. The shared connector gets its authority from
-the native thread metadata on each call; without a matching live managed peer or lane it has no
-session authority and appears nowhere in `roster`. Agent Sessions disconnects its own App Server
-client during shutdown but does not stop the user-managed Codex App Server.
-
-A Claude process tree, by contrast, normally contains its own `agent-sessions connector claude`
-child, and that connector corresponds to the Claude row only while the daemon has adopted the exact
-native process/session evidence. Process presence alone is never a registration.
-
-## Requirements
-
-Agent Sessions supports Linux and macOS on x86-64 and arm64. You may install any subset of the four
-native products; missing products are skipped without disabling the others.
-
-| Product | Minimum supported | Current acceptance version |
-|---|---:|---:|
-| Codex CLI | 0.151.0 | 0.151.0 |
-| Claude Code | 2.1.251 | 2.1.251 |
-| Grok Build | 1.0.13 | 1.0.13 |
-| Qwen Code | 0.21.15 | 0.22.3 |
-
-Log in to each native product normally before using its peers or lanes. Qwen readiness enforces its
-version floor. Codex, Claude, and Grok validate the native capabilities they need; older versions
-are unsupported even if they happen to launch.
-
-Building from a source checkout requires Go 1.22 or newer. Packaged release archives contain
-prebuilt binaries and do not require Go.
-
-## Install
-
-From a source checkout:
+Install from a source checkout:
 
 ```sh
 git clone https://github.com/antst/agent-sessions.git
@@ -119,35 +34,151 @@ cd agent-sessions
 make install
 ```
 
-`make install-all` performs the same unified installation. It installs every available product
-integration, command aliases under `~/.local/bin`, and one enabled user service:
-
-- Linux: `agent-sessions.service`
-- macOS: `net.antst.agent-sessions`
-
-It restarts only Agent Sessions. It does not restart vendor applications, the Codex App Server, or
-the optional hub.
-
-Restart any Codex, Claude, Grok, or Qwen sessions that were already open during installation so
-they load the installed plugin and MCP inventory. On the first managed Codex launch, approve the
-one-time hook prompt for `agent-sessions@agent-sessions`; this enables session registration and
-message delivery, not broader sandbox access.
-
-Managed Claude launches add exact approvals for the Agent Sessions MCP tools they expose. Installing
-the plugin or running ordinary `claude` does not change Claude's global approval policy.
-
-Verify the installation:
+The installer adds the available product integrations, command aliases under
+`~/.local/bin`, and one user service. Start two peers in the same group:
 
 ```sh
-agent-sessions doctor
-agent-sessions status
-agent-sessions roster
+codex-peer --name lead --group demo
+claude-peer --name reviewer --group demo
 ```
 
-On Linux, also check the service:
+Inside either managed session, use the installed Agent Sessions skill and ask
+it to list peers or send a message. The model calls the structured
+`agent_sessions` tools; it does not need to invoke a shell command.
+
+For example:
+
+```text
+List the Agent Sessions peers, then ask reviewer to inspect the current diff.
+```
+
+The receiving product gets a labeled message containing the sender's native
+session ID, product-owned name, product, and groups. Delivery is synchronous:
+success means the destination product accepted the message; otherwise the
+sender receives the exact rejection.
+
+## Peers
+
+Managed peer aliases follow one pattern:
+
+```text
+codex-peer      claude-peer     grok-peer       qwen-peer
+opencode-peer   kilo-peer       pi-peer         omp-peer
+```
+
+Common wrapper options include:
+
+```sh
+PRODUCT-peer --name NAME --group GROUP [--group GROUP] [--yolo] [NATIVE_ARGS...]
+PRODUCT-peer --resume NAME_OR_NATIVE_ID [--group GROUP] [OPTIONS...]
+```
+
+`--resume` is uniform at the wrapper. Where a product accepts names natively,
+Agent Sessions passes the selector through and leaves duplicate handling to the
+product. Where the native selector accepts only IDs, Agent Sessions asks the
+product for its sessions, offers a terminal picker when necessary, and resumes
+the selected exact ID.
+
+Every invocation is complete. Omitting a group, model, agent, effort, or
+permission override on resume does not carry it forward from a prior Agent
+Sessions invocation. The product receives no replacement value and applies its
+own default. Product-specific arguments remain available as native passthrough
+arguments unless they conflict with fields the wrapper must own.
+
+See [Products](docs/PRODUCTS.md) for the exact native surfaces and supported
+wrapper translations.
+
+## Groups and messaging
+
+Groups are the visibility and routing boundary. Two sessions can discover and
+message one another when their effective group sets intersect. `--group` is
+repeatable, and membership is defined entirely by the current invocation.
+
+Each peer also receives a private group derived from its native identity:
+
+```text
+session:<host-id>/<native-session-id>
+```
+
+A lane receives its parent's private group and its own derived child anchor.
+This makes parent/child replies possible without copying a global membership
+database. Group membership does not grant instruction authority and does not
+weaken a recipient's sandbox, approval policy, or higher-priority instructions.
+
+The structured tools cover peer listing, direct and multicast sends, group
+broadcast, identity, supported native rename operations, and lane lifecycle.
+There is no mailbox: the destination must be live and the caller owns any retry.
+
+See [Groups](docs/GROUPS.md) for namespace and lane-handover rules.
+
+## Worker lanes
+
+A managed parent can run any supported lane product, including its own. DSH is
+lane-only. Inside a managed agent, use the `agent_sessions.lane` MCP tool. The
+shell aliases are the equivalent operator and scripting surface:
+
+```text
+codex-peer-lane       claude-peer-lane      grok-peer-lane
+qwen-peer-lane        opencode-peer-lane    kilo-peer-lane
+pi-peer-lane          omp-peer-lane         dsh-peer-lane
+```
+
+A blocking run looks like:
+
+```sh
+codex-peer-lane run --name reviewer --group demo/child --yolo \
+  --prompt-file review-brief.md
+```
+
+A detached turn uses `start`; later calls use the native session ID or unique
+name:
+
+```sh
+codex-peer-lane start --name reviewer --yolo --prompt-file review-brief.md
+codex-peer-lane wait reviewer --timeout 300
+codex-peer-lane resume reviewer --yolo --prompt-file follow-up.md
+codex-peer-lane interrupt reviewer
+codex-peer-lane archive reviewer
+codex-peer-lane list --all
+```
+
+`run` and `resume` return their result synchronously. A terminal notice says
+`collection=required` and includes a structured MCP `wait` hint only for a
+detached result that still needs a collector; otherwise it says
+`collection=none` and carries no hint.
+
+The product's native session ID is the lane's only identity. Archive drops the
+live worker and routing handle while preserving the product session. After a
+daemon restart, daemon-owned lanes are not live; `list --all` reads the one
+durable candidate table, asks the product to confirm each eligible native ID,
+and exposes only confirmed sessions. Resume then opens that exact product
+session again.
+
+See [Lanes](docs/LANES.md) for lifecycle, messaging, restart, and reparenting
+semantics.
+
+## Inspect and operate a host
+
+Useful commands are:
+
+```sh
+agent-sessions status
+agent-sessions doctor
+agent-sessions roster
+agent-sessions roster --json
+agent-sessions catalog --json
+```
+
+A healthy local installation has exactly one service-managed
+`agent-sessions daemon` per operating-system user. Product-launched
+`agent-sessions connector ...` processes are short-lived clients of that
+daemon, not additional daemons.
+
+On Linux:
 
 ```sh
 systemctl --user status agent-sessions.service --no-pager
+journalctl --user -u agent-sessions.service -n 100 --no-pager
 ```
 
 On macOS:
@@ -156,308 +187,47 @@ On macOS:
 launchctl print "gui/$(id -u)/net.antst.agent-sessions"
 ```
 
-No local configuration file is required for local-only use.
+See [Installation](docs/INSTALL.md) and
+[Troubleshooting](docs/TROUBLESHOOTING.md).
 
-## Start and resume peers
+## Multiple machines
 
-Use the managed wrapper for each product:
+Each host daemon may connect to one optional `agent-sessions-hub`. The hub
+relays complete live rosters, messages, and remote lane calls; it owns no
+product credentials, transcripts, or lane sessions. Shared groups work across
+hosts, and remote lifecycle calls use the same MCP operation with a `host`
+field or the CLI `--host` option.
 
-```sh
-codex-peer  -n lead        -g project-a
-claude-peer -n reviewer    -g project-a
-grok-peer   -n researcher  -g project-a
-qwen-peer   -n test-writer -g project-a
-```
+See [Federation](docs/FEDERATION.md).
 
-The wrapper launches the native interactive product with its normal configuration. Agent Sessions
-adds identity, groups, lifecycle registration, and message delivery. Product arguments such as
-model, sandbox, effort, approval, project directory, and display options continue to belong to the
-native product.
+## Trust and state
 
-Use each wrapper's documented `--resume` form to adopt or return to a native conversation. Exact
-native UUIDs are durable identities; supported wrappers also accept their documented unique-name or
-native-title selectors.
+Agent Sessions is designed for a trusted local environment: the user's own
+agents on infrastructure the user controls. Deployment boundaries such as
+separate accounts, hosts, VLANs, or hubs provide isolation.
 
-Every peer receives a private `session:<host>/<session>` group in addition to explicit groups. This
-lets child lanes talk to their immediate parent without making that private relationship globally
-visible.
+The daemon does not persist peers, messages, turns, results, names, product
+metadata, or live presence. Its sole durable data is an immutable lane
+discovery candidate row. Products remain the authority for whether a session
+exists and for every product-owned field returned to users.
 
-## Discover and message peers
+The wire contract for native clients is the
+[Native Agent Sessions Presence Protocol](docs/specs/NATIVE-PEER-PROTOCOL.md).
+The shorter [adapter architecture](docs/ADAPTER-PROTOCOL.md) explains how the
+shipped integrations apply it.
 
-Every product installs the same semantic skill named `agent-sessions`:
+## Documentation
 
-| Product | Typical invocation |
-|---|---|
-| Codex | `$agent-sessions list peers` |
-| Claude | `/agent-sessions:agent-sessions list peers` |
-| Grok | `/agent-sessions list peers` |
-| Qwen | invoke the `agent-sessions` skill and ask to list peers |
-
-Claude writes plugin skill names as `/PLUGIN:SKILL` to prevent collisions. Both names are
-`agent-sessions` here, which is why Claude's form repeats the name; an installed plugin cannot claim
-the unnamespaced `/agent-sessions` command without mutating the user's global command directory.
-
-The invocation UI differs, but the skill content and MCP operations are the same. It supports:
-
-- listing local and remote peers that share a group with the caller;
-- sending to one peer or an explicit set of peers;
-- broadcasting within a shared group;
-- replying to the verified source of an incoming message;
-- renaming the current managed registration, with later product-native renames also propagated; and
-- starting, supervising, resuming, interrupting, and archiving lanes.
-
-Product-native agent or session lists are not substitutes for Agent Sessions discovery. If a
-structured Agent Sessions operation fails, the skill reports the failure instead of silently using
-a different native messaging channel.
-
-## Use worker lanes
-
-Every supported parent can launch every supported target, including its own product. A Claude
-orchestrator can therefore launch a Claude Agent Sessions lane, a Codex lane, a Grok lane, or a Qwen
-lane through the same operation. This is separate from any product-native subagent system.
-
-The recommended interface inside a managed AI session is the shared skill, which calls
-`agent_sessions.lane` through MCP. The `*-peer-lane` commands intentionally remain supported: they
-are the operator, automation, CI, recovery, and third-party integration surface, and the daemon and
-federation adapters use the same product launchers. MCP is the agent-facing control plane over that
-CLI contract, not a replacement for it.
-
-Shell commands are therefore also available directly:
-
-```sh
-codex-peer-lane doctor --json
-claude-peer-lane start --name review - < brief.md
-grok-peer-lane wait review
-qwen-peer-lane list --all
-```
-
-All four products implement lane contract version 2 with the same lifecycle:
-
-```text
-run  start  resume  wait  status  interrupt  archive  list  doctor
-```
-
-Lane behavior is intentionally predictable:
-
-- `run`, `start`, and `resume` accept prompt input. Control commands never read terminal stdin.
-- A lane belongs to its immediate parent unless `--persistent` is explicit.
-- Parent groups are private by default. Use `--inherit-groups` or explicit `--group` values when a
-  worker should join broader collaboration.
-- Terminal status is pushed automatically to the immediate owner and can also be collected with
-  `wait`. There is no `notify_target` field or `--notify` flag.
-- Finished lanes auto-archive after 60 seconds by default. Change this with
-  `--auto-archive-after SECONDS`. `--persistent` changes parent-exit ownership
-  only; it does not disable this grace. Use `--persistent --no-auto-archive` for
-  a durable idle worker, then archive it explicitly.
-- There is no default Agent Sessions cap on model, reasoning, tokens, dollar budget, sandbox,
-  approvals, web access, or project policy. Limits apply only when you or the native product
-  configuration set them.
-- A persistent completed lane can take follow-up turns on the same native conversation.
-
-See [Codex lanes](docs/CODEX-LANES.md), [Claude lanes](docs/CLAUDE-LANES.md),
-[Grok lanes](docs/GROK-LANES.md), and [Qwen lanes](docs/QWEN-LANES.md) for target-specific options.
-
-## See what is running
-
-Peer discovery is group-restricted, but the user who owns the daemon needs to diagnose the whole
-installation. The operator roster provides that view:
-
-```sh
-agent-sessions roster
-agent-sessions roster --json
-```
-
-It shows every current local peer and lane, product, state, group, permission mode, owner, connected
-federated host, and live remote registration. It does not expose prompts, messages, results,
-credentials, capability tokens, or native evidence. The machine-readable schema is
-`agent-sessions.roster.v1`.
-
-Use the available inventories according to their purpose:
-
-- `agent_sessions.list_peers`: participants sharing a group with the managed caller;
-- `*-peer-lane list`: one product's lanes visible to or owned by the caller;
-- `agent-sessions status` and `doctor`: host-wide counts and health;
-- `agent-sessions roster`: unrestricted same-user operational metadata across groups and connected
-  hosts.
-
-## Connect multiple machines
-
-Federation is optional. Install one hub on a machine reachable by every host:
-
-This is useful for more than moving a worker to a faster machine. For cross-platform development,
-you can put Linux and macOS peers in the same project group and let them coordinate while each uses
-its own native checkout, compiler, package manager, test environment, and platform APIs. One session
-can implement a portable change, another can reproduce or fix the macOS behavior, and a third can
-run Linux integration tests or review the combined result.
-
-Other multi-host patterns include:
-
-- keeping an interactive lead on a laptop while durable implementation and test lanes run on a
-  workstation;
-- assigning hardware-, operating-system-, network-, or credential-specific validation to the host
-  that actually has that environment;
-- coordinating release checks across architectures without pretending one machine can faithfully
-  emulate every target; and
-- keeping specialized peers close to large repositories, local services, or restricted test data
-  while sharing only task messages and results with the wider group.
-
-Agent Sessions coordinates identities, work requests, status, and messages. It does not synchronize
-source trees or artifacts; use Git, your CI system, or another explicit file-transfer workflow so
-each host is working from the intended revision.
-
-Install the hub on the central machine:
-
-```sh
-make install-hub
-systemctl --user status agent-sessions-hub.service --no-pager
-```
-
-The installer enables and starts `agent-sessions-hub.service` on Linux or
-`net.antst.agent-sessions-hub` under launchd on macOS. The default listen address is TCP port 7419.
-A central machine may run both the hub service and its own normal host daemon.
-
-On Linux, an optional `~/.config/agent-sessions/hub.env` changes the listen address:
-
-```sh
-AGENT_SESSIONS_HUB_LISTEN=:7419
-```
-
-On each participating host, copy and edit the installed example:
-
-```sh
-mkdir -p ~/.config/agent-sessions
-cp -n ~/.config/agent-sessions/service.env.example \
-  ~/.config/agent-sessions/service.env
-${EDITOR:-vi} ~/.config/agent-sessions/service.env
-```
-
-Set:
-
-```sh
-AGENT_SESSIONS_HUB=hub.example:7419
-AGENT_SESSIONS_HOST_NAME=workstation-a
-```
-
-Restart that host's Agent Sessions service and inspect the connection:
-
-```sh
-systemctl --user restart agent-sessions.service
-agent-sessions roster
-```
-
-On macOS restart with:
-
-```sh
-launchctl kickstart -k "gui/$(id -u)/net.antst.agent-sessions"
-```
-
-Group-visible remote peers now appear through the same skill; no separate remote-discovery command
-is needed. To place a lane on a specific machine, choose its `host` in the MCP request or use:
-
-```sh
-grok-peer-lane --host workstation-b doctor --json
-grok-peer-lane --host workstation-b start --name remote-review - < brief.md
-```
-
-Remote work never falls back to SSH or silently runs on the source host.
-
-The current federation protocol assumes a trusted network. It does not provide TLS,
-authentication, a policy language, or hub-side offline storage. Expose port 7419 only where every
-connected host daemon is trusted. See [Federation](docs/FEDERATION.md) for the full model.
-
-## Update or uninstall
-
-Update with the same transaction:
-
-```sh
-git pull
-make install
-```
-
-It stages and validates the new release before switching, then restarts one Agent Sessions service.
-Restart already-open product sessions when plugin files changed.
-
-Remove Agent Sessions while preserving unified state and all vendor-owned data:
-
-```sh
-make remove-all
-```
-
-Remove the independent hub with:
-
-```sh
-make remove-hub
-```
-
-Delete Agent Sessions state and configuration too only with the explicit destructive target:
-
-```sh
-make purge-all
-```
-
-The repository-only `scripts/cleanup-pre-unification` tool exists for controlled development hosts
-migrating from the old unreleased split stack. It is not a normal uninstall or recovery command.
-
-## Troubleshooting
-
-Start here:
-
-```sh
-agent-sessions doctor
-agent-sessions status
-agent-sessions roster --json
-```
-
-On Linux, inspect the one user service:
-
-```sh
-systemctl --user status agent-sessions.service --no-pager
-journalctl --user -u agent-sessions.service -n 100 --no-pager
-```
-
-Restart it through the service manager:
-
-```sh
-agent-sessions daemon restart
-```
-
-Lane `doctor`, `list`, `status`, `wait`, `interrupt`, and `archive` do not consume stdin;
-`</dev/null` is unnecessary. If Codex readiness fails after upgrading Codex, check its App Server:
-
-```sh
-codex app-server daemon version
-codex app-server daemon restart
-agent-sessions daemon restart
-codex-peer-lane doctor --json
-```
-
-Do not kill healthy vendor sessions or start a second Agent Sessions daemon to work around a stale
-connector. See the [troubleshooting guide](docs/TROUBLESHOOTING.md) for process census, macOS logs,
-and safe recovery.
-
-## Security and ownership
-
-Managed peers and the daemon running as the same operating-system user are mutually trusted.
-Private runtime directories and sockets protect against other local users, but Agent Sessions is
-not a cross-user security boundary. Native product permissions remain authoritative.
-
-Groups restrict participant discovery and message delivery. They deliberately do not hide
-operational metadata from the same-user `roster` command and do not establish user delegation.
-Federation adds trusted-network routing; it does not turn groups into cryptographic authorization.
-
-## More documentation
-
-The [documentation index](docs/README.md) links the installation, groups, federation,
-troubleshooting, product-specific, protocol, and acceptance guides. Start with:
-
-- [Installation and service behavior](docs/INSTALL.md)
-- [Groups and visibility](docs/GROUPS.md)
+- [Documentation index](docs/README.md)
+- [Products](docs/PRODUCTS.md)
+- [Lanes](docs/LANES.md)
+- [Groups](docs/GROUPS.md)
+- [Installation](docs/INSTALL.md)
 - [Federation](docs/FEDERATION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Acceptance matrix](docs/ACCEPTANCE-MATRIX.md)
+- [Native peer protocol](docs/specs/NATIVE-PEER-PROTOCOL.md)
 
 ## License
 
-Agent Sessions is licensed under the [Mozilla Public License 2.0](LICENSE). Changes to covered
-source files remain available under MPL-2.0, while the license permits combining Agent Sessions
-with separately licensed software in a larger work.
+See [LICENSE](LICENSE).
