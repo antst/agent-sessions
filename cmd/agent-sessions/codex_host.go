@@ -109,6 +109,15 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 				}
 				return "", false
 			},
+			grokproduct.ProductID: func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+				executable, err := launcher.ResolveProductExecutable(grokproduct.ProductID)
+				if err != nil {
+					return "", false
+				}
+				return bridge.GrokNativeSessionTitle(
+					ctx, executable, attachment.Cwd, os.Environ(), io.Discard, attachment.NativeSessionID,
+				)
+			},
 		},
 		runtimeReady: make(chan *daemonpkg.Runtime, 1),
 		now:          time.Now,

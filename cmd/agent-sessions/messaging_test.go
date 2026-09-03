@@ -13,6 +13,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 )
 
@@ -362,6 +363,33 @@ func TestOMPHasAnOnDemandProductTitleResolver(t *testing.T) {
 		ID: "missing", NativeSessionID: "missing", Product: ompproduct.ProductID,
 	}); got != "hello-name" {
 		t.Fatalf("OMP hello fallback name = %q", got)
+	}
+}
+
+func TestGrokHasAnOnDemandProductTitleResolver(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	if coordinator.liveTitleResolvers[grokproduct.ProductID] == nil {
+		t.Fatal("Grok live title resolver was not composed")
+	}
+	coordinator.liveTitleResolvers[grokproduct.ProductID] = func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+		if attachment.NativeSessionID == "grok-session" {
+			return "native-name", true
+		}
+		return "", false
+	}
+	runtime := newPresenceTestRuntime(t)
+	runtime.Attachments().ReportLive("grok-session", "launch-name", grokproduct.ProductID, []string{"project"}, map[string]string{}, false)
+	runtime.Attachments().ReportLive("missing", "hello-name", grokproduct.ProductID, []string{"project"}, map[string]string{}, false)
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
+		ID: "grok-session", NativeSessionID: "grok-session", Product: grokproduct.ProductID,
+	}); got != "native-name" {
+		t.Fatalf("Grok display name = %q", got)
+	}
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
+		ID: "missing", NativeSessionID: "missing", Product: grokproduct.ProductID,
+	}); got != "hello-name" {
+		t.Fatalf("Grok hello fallback name = %q", got)
 	}
 }
 
