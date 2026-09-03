@@ -280,7 +280,7 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 }
 
 // ResolveThread asks the App Server for the exact UUID that native Codex has
-// already created or selected and reported through its SessionStart hook.
+// already created or selected and reported through its lifecycle stream.
 func (native *CodexNative) ResolveThread(ctx context.Context, target string) (CodexNativeThread, error) {
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
@@ -309,14 +309,23 @@ func (native *CodexNative) NameThread(ctx context.Context, threadID, requested, 
 	if err != nil {
 		return CodexNativeThread{}, err
 	}
+	return native.NameResolvedThread(ctx, thread, requested, cwd)
+}
+
+// NameResolvedThread writes the product-owned title after an exact thread/read
+// has already supplied the native identity and launch record.
+func (native *CodexNative) NameResolvedThread(ctx context.Context, thread CodexNativeThread, requested, cwd string) (CodexNativeThread, error) {
+	if !exactLaunchThreadIDRE.MatchString(thread.ID) {
+		return CodexNativeThread{}, errors.New("cannot name a Codex thread without an exact native id")
+	}
 	name := strings.TrimSpace(requested)
 	if name == "" {
-		name = defaultPeerName(cwd, threadID)
+		name = defaultPeerName(cwd, thread.ID)
 	} else {
 		name = sanitizeName(name)
 	}
 	if err := native.request(ctx, 30*time.Second, "thread/name/set", map[string]any{
-		"threadId": threadID, "name": name,
+		"threadId": thread.ID, "name": name,
 	}, nil); err != nil {
 		return CodexNativeThread{}, err
 	}
@@ -904,6 +913,9 @@ func (native *CodexNative) observeNotification(notification rpcNotification) {
 	}
 	event := CodexNativeEvent{Kind: notification.Method, ThreadID: stringValue(params["threadId"])}
 	switch notification.Method {
+	case "thread/started":
+		thread, _ := params["thread"].(map[string]any)
+		event.ThreadID = stringValue(thread["id"])
 	case "turn/started":
 		turn, _ := params["turn"].(map[string]any)
 		event.TurnID = stringValue(turn["id"])

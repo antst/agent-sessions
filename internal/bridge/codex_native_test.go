@@ -828,6 +828,24 @@ func codexTurnCompletedNotification(t *testing.T, threadID, turnID, status strin
 	return rpcNotification{Method: "turn/completed", Params: params}
 }
 
+func TestCodexNativeProjectsNestedThreadStartedIdentity(t *testing.T) {
+	var observed CodexNativeEvent
+	native := &CodexNative{config: CodexNativeConfig{OnEvent: func(event CodexNativeEvent) { observed = event }}}
+	params, err := json.Marshal(map[string]any{
+		"thread": map[string]any{
+			"id":  "00000000-0000-0000-0000-00000000c023",
+			"cwd": "/native/cwd",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native.observeNotification(rpcNotification{Method: "thread/started", Params: params})
+	if observed.Kind != "thread/started" || observed.ThreadID != "00000000-0000-0000-0000-00000000c023" {
+		t.Fatalf("thread/started event = %+v", observed)
+	}
+}
+
 func TestCodexNativeLiveFreshPreparation(t *testing.T) {
 	if os.Getenv("AGENT_SESSIONS_CODEX_LIVE") != "1" {
 		t.Skip("set AGENT_SESSIONS_CODEX_LIVE=1 for an authenticated local App Server probe")

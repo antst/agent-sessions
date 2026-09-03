@@ -85,16 +85,21 @@ func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/true")
 	remote := "unix://" + filepath.Join(home, "app-server-control", "app-server-control.sock")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
-		name       string
-		arguments  []string
-		mode       string
-		wantNative []string
+		name         string
+		arguments    []string
+		selectorKind string
+		wantNative   []string
 	}{
-		{name: "fresh", arguments: []string{"-n", "native-name", "-g", "project"}, mode: "pending-fresh", wantNative: []string{"--remote", remote}},
-		{name: "resume name", arguments: []string{"--resume", "duplicate native name", "-g", "project"}, mode: "pending-resume", wantNative: []string{"--remote", remote, "resume", "duplicate native name"}},
-		{name: "resume uuid", arguments: []string{"--resume", "00000000-0000-0000-0000-00000000c011"}, mode: "pending-resume", wantNative: []string{"--remote", remote, "resume", "00000000-0000-0000-0000-00000000c011"}},
-		{name: "bare resume", arguments: []string{"--resume"}, mode: "pending-resume", wantNative: []string{"--remote", remote, "resume"}},
+		{name: "fresh", arguments: []string{"-n", "native-name", "-g", "project"}, selectorKind: CodexLaunchSelectorFresh, wantNative: []string{"--remote", remote, "-C", workingDirectory}},
+		{name: "resume name", arguments: []string{"--resume", "duplicate native name", "-g", "project"}, selectorKind: CodexLaunchSelectorName, wantNative: []string{"--remote", remote, "-C", workingDirectory, "resume", "duplicate native name"}},
+		{name: "resume uuid", arguments: []string{"--resume", "00000000-0000-0000-0000-00000000c011"}, selectorKind: CodexLaunchSelectorID, wantNative: []string{"--remote", remote, "-C", workingDirectory, "resume", "00000000-0000-0000-0000-00000000c011"}},
+		{name: "bare resume", arguments: []string{"--resume"}, selectorKind: CodexLaunchSelectorBare, wantNative: []string{"--remote", remote, "-C", workingDirectory, "resume"}},
+		{name: "explicit cwd", arguments: []string{"-C", home, "--resume", "selected"}, selectorKind: CodexLaunchSelectorName, wantNative: []string{"--remote", remote, "resume", "selected", "-C", home}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			sequence := []string{}
@@ -112,8 +117,8 @@ func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
 					if !reflect.DeepEqual(launch.Arguments, test.wantNative) {
 						t.Fatalf("native argv = %q, want %q", launch.Arguments, test.wantNative)
 					}
-					if value := environmentValue(launch.Environment, CodexPendingLaunchEnv); value != request.PendingToken || value == "" {
-						t.Fatalf("pending token env = %q, request = %q", value, request.PendingToken)
+					if value := environmentValue(launch.Environment, "AGENT_SESSIONS_CODEX_PENDING_LAUNCH"); value != "" {
+						t.Fatalf("pending token leaked into native environment: %q", value)
 					}
 					if value := environmentValue(launch.Environment, peerSessionIDEnv); value != "" {
 						t.Fatalf("provisional session id reached native launch: %q", value)
@@ -127,13 +132,29 @@ func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if request.Mode != test.mode || len(request.PendingToken) != 64 || !reflect.DeepEqual(sequence, []string{"pending", "native"}) {
+			if request.SelectorKind != test.selectorKind || len(request.PendingToken) != 64 || !reflect.DeepEqual(sequence, []string{"pending", "native"}) {
 				t.Fatalf("pending request = %+v, sequence = %v", request, sequence)
 			}
 			if !pending.awaited || !pending.closed {
 				t.Fatalf("pending lifecycle awaited=%v closed=%v", pending.awaited, pending.closed)
 			}
 		})
+	}
+}
+
+func TestCodexPeerUsageErrorsPrecedePendingDaemonContact(t *testing.T) {
+	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/true")
+	contacts := 0
+	err := RunCodexPeerWithDaemon(context.Background(), []string{"--peer-name", ""},
+		func(context.Context, CodexDaemonPrepareRequest) (CodexPendingLaunch, error) {
+			contacts++
+			return nil, nil
+		}, func(context.Context, CodexNativeLaunch) error {
+			t.Fatal("native Codex started after a usage error")
+			return nil
+		})
+	if err == nil || contacts != 0 {
+		t.Fatalf("usage error = %v, daemon contacts = %d", err, contacts)
 	}
 }
 

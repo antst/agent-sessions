@@ -17,8 +17,10 @@ import (
 
 // TestPeerResumeBelongsEntirelyToTheProduct pins the owner's permanent rule:
 // Agent Sessions may translate the wrapper's resume spelling, but it must not
-// inspect, classify, list, title-match, or choose the selector. The product
-// receives the bytes verbatim and owns every name, ID, picker, and error.
+// list, title-match across sessions, or choose the selector. The product
+// receives the bytes verbatim and owns every name, ID, picker, and error; a
+// launcher may classify those same bytes only to verify the identity that the
+// product reports after making its choice.
 func TestPeerResumeBelongsEntirelyToTheProduct(t *testing.T) {
 	want := map[string][]string{
 		"codex": {"resume", "opaque duplicate name"}, "claude": {"--resume", "opaque duplicate name"},

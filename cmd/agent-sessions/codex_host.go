@@ -75,6 +75,7 @@ type hostCoordinator struct {
 
 type pendingCodexLaunch struct {
 	request launcher.CodexDaemonPrepareRequest
+	ctx     context.Context
 	done    chan pendingCodexLaunchResult
 }
 
@@ -590,21 +591,6 @@ func (c *hostCoordinator) handle(
 		}
 		return c.operatorRoster(runtime)
 	case "hook.event":
-		var input struct {
-			Product string          `json:"product"`
-			Event   string          `json:"event"`
-			Input   json.RawMessage `json:"input"`
-		}
-		if json.Unmarshal(request.Payload, &input) == nil && input.Product == codexproduct.ProductID && input.Event == "SessionStart" {
-			var nativeInput struct {
-				PendingToken string `json:"agent_sessions_pending_launch"`
-			}
-			if json.Unmarshal(input.Input, &nativeInput) == nil && strings.TrimSpace(nativeInput.PendingToken) != "" {
-				if err := c.consumeCodexPendingLaunch(ctx, runtime, nativeInput.PendingToken, input.Input); err != nil {
-					return nil, err
-				}
-			}
-		}
 		return json.Marshal(map[string]any{})
 	default:
 		return nil, fmt.Errorf("operation %s is not implemented", request.Operation)
@@ -613,65 +599,36 @@ func (c *hostCoordinator) handle(
 
 func (c *hostCoordinator) awaitCodexPendingLaunch(
 	ctx context.Context,
-	runtime *daemonpkg.Runtime,
+	_ *daemonpkg.Runtime,
 	request launcher.CodexDaemonPrepareRequest,
 ) (launcher.CodexDaemonPrepareResult, error) {
-	if request.Mode != "pending-fresh" && request.Mode != "pending-resume" {
-		return launcher.CodexDaemonPrepareResult{}, fmt.Errorf("unsupported Codex pending launch mode %q", request.Mode)
-	}
 	tokenBody, err := hex.DecodeString(request.PendingToken)
 	if err != nil || len(tokenBody) != 32 {
 		return launcher.CodexDaemonPrepareResult{}, errors.New("Codex pending launch token is invalid")
 	}
-	if procinfo.ObserveIdentity(request.Owner).Status != procinfo.IdentityMatches {
-		return launcher.CodexDaemonPrepareResult{}, errors.New("codex launcher identity is not live")
-	}
-	native, err := c.codexNative()
-	if err != nil {
+	if err := validatePendingCodexLaunch(request); err != nil {
 		return launcher.CodexDaemonPrepareResult{}, err
-	}
-	appPID, appStart, socket, err := native.RefreshAppServerEvidence(ctx)
-	if err != nil {
-		return launcher.CodexDaemonPrepareResult{}, err
-	}
-	appServer, err := procinfo.CaptureIdentity(appPID)
-	if err != nil || appStart == "" || appServer.Start != appStart {
-		return launcher.CodexDaemonPrepareResult{}, errors.New("codex App Server identity changed during pending launch")
-	}
-	evidence := daemonpkg.NativeEvidence{
-		Process: request.Owner, Ancestry: []procinfo.Identity{appServer}, Executable: codexBinary(),
-		SocketPath: socket, ThreadID: request.PendingToken,
 	}
 	c.mu.Lock()
 	if c.pendingCodexLaunches[request.PendingToken] != nil {
 		c.mu.Unlock()
 		return launcher.CodexDaemonPrepareResult{}, errors.New("Codex pending launch token is already active")
 	}
-	record := &pendingCodexLaunch{request: request, done: make(chan pendingCodexLaunchResult, 1)}
-	c.pending[request.PendingToken] = evidence
+	for _, waiting := range c.pendingCodexLaunches {
+		if pendingCodexLaunchesOverlap(waiting.request, request) {
+			pid := waiting.request.Owner.PID
+			c.mu.Unlock()
+			return launcher.CodexDaemonPrepareResult{}, fmt.Errorf("Codex launch already waiting in %s under wrapper pid %d", request.Cwd, pid)
+		}
+	}
+	record := &pendingCodexLaunch{request: request, ctx: ctx, done: make(chan pendingCodexLaunchResult, 1)}
 	c.pendingCodexLaunches[request.PendingToken] = record
 	c.mu.Unlock()
-	permission := "default"
-	if request.ApprovalPolicy == "never" {
-		permission = "bypassPermissions"
-	}
-	launchIntent := "non_yolo"
-	if permission == "bypassPermissions" {
-		launchIntent = "yolo"
-	}
-	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
-		ID: request.PendingToken, CapabilityHash: daemonpkg.CapabilityDigest(request.PendingToken), Product: "codex",
-		ProfileIdentity: codexHome(), LaunchIntent: launchIntent,
-		NativeSessionID: request.PendingToken, Cwd: request.Cwd,
-		Groups: append([]string(nil), request.Groups...), PermissionMode: permission,
-	})
-	if err == nil {
-		_, err = runtime.Attachments().Adopt(ctx, prepared.ID, evidence)
-	}
-	if err != nil {
+	if _, err := c.codexNative(); err != nil {
 		c.mu.Lock()
-		delete(c.pending, request.PendingToken)
-		delete(c.pendingCodexLaunches, request.PendingToken)
+		if c.pendingCodexLaunches[request.PendingToken] == record {
+			delete(c.pendingCodexLaunches, request.PendingToken)
+		}
 		c.mu.Unlock()
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
@@ -680,67 +637,71 @@ func (c *hostCoordinator) awaitCodexPendingLaunch(
 		return result.handoff, result.err
 	case <-ctx.Done():
 		c.mu.Lock()
-		owned := false
 		if c.pendingCodexLaunches[request.PendingToken] == record {
 			delete(c.pendingCodexLaunches, request.PendingToken)
-			owned = true
 		}
 		c.mu.Unlock()
-		if owned {
-			_, _ = runtime.Attachments().Rollback(context.Background(), request.PendingToken, "pending-launch-caller-exited")
-		}
 		return launcher.CodexDaemonPrepareResult{}, ctx.Err()
 	}
 }
 
-func (c *hostCoordinator) consumeCodexPendingLaunch(
-	ctx context.Context,
-	runtime *daemonpkg.Runtime,
-	token string,
-	input json.RawMessage,
-) error {
-	c.mu.Lock()
-	record := c.pendingCodexLaunches[token]
-	if record != nil {
-		delete(c.pendingCodexLaunches, token)
+func validatePendingCodexLaunch(request launcher.CodexDaemonPrepareRequest) error {
+	switch request.SelectorKind {
+	case launcher.CodexLaunchSelectorFresh:
+		if request.Selector != "" {
+			return errors.New("fresh Codex pending launch selector is invalid")
+		}
+	case launcher.CodexLaunchSelectorBare:
+		if request.Selector != "" {
+			return errors.New("bare Codex pending launch selector is invalid")
+		}
+	case launcher.CodexLaunchSelectorName, launcher.CodexLaunchSelectorID:
+		if strings.TrimSpace(request.Selector) == "" {
+			return errors.New("Codex pending launch selector is invalid")
+		}
+	default:
+		return fmt.Errorf("unsupported Codex pending launch selector kind %q", request.SelectorKind)
 	}
-	c.mu.Unlock()
-	if record == nil {
-		return errors.New("Codex pending launch is unavailable")
+	return nil
+}
+
+func pendingCodexLaunchesOverlap(first, second launcher.CodexDaemonPrepareRequest) bool {
+	if first.Cwd != second.Cwd {
+		return false
 	}
-	_, rollbackErr := runtime.Attachments().Rollback(context.Background(), token, "native-session-selected")
-	threadID, identityErr := bridge.CodexHookThreadIDFromInput(input)
-	result := pendingCodexLaunchResult{}
-	if rollbackErr != nil {
-		result.err = rollbackErr
-	} else if identityErr != nil {
-		result.err = identityErr
-	} else {
-		result.handoff, result.err = c.adoptCodexPeer(ctx, runtime, record.request, threadID)
+	if first.SelectorKind == launcher.CodexLaunchSelectorFresh || first.SelectorKind == launcher.CodexLaunchSelectorBare ||
+		second.SelectorKind == launcher.CodexLaunchSelectorFresh || second.SelectorKind == launcher.CodexLaunchSelectorBare {
+		return true
 	}
-	record.done <- result
-	return result.err
+	return first.SelectorKind == second.SelectorKind && first.Selector == second.Selector
+}
+
+func pendingCodexLaunchMatches(request launcher.CodexDaemonPrepareRequest, thread bridge.CodexNativeThread) bool {
+	if request.Cwd != thread.Cwd {
+		return false
+	}
+	switch request.SelectorKind {
+	case launcher.CodexLaunchSelectorFresh, launcher.CodexLaunchSelectorBare:
+		return true
+	case launcher.CodexLaunchSelectorName:
+		return request.Selector == thread.Name
+	case launcher.CodexLaunchSelectorID:
+		return request.Selector == thread.ID
+	default:
+		return false
+	}
 }
 
 func (c *hostCoordinator) adoptCodexPeer(
 	ctx context.Context,
 	runtime *daemonpkg.Runtime,
 	request launcher.CodexDaemonPrepareRequest,
-	threadID string,
+	native *bridge.CodexNative,
+	thread bridge.CodexNativeThread,
 ) (launcher.CodexDaemonPrepareResult, error) {
-	if procinfo.ObserveIdentity(request.Owner).Status != procinfo.IdentityMatches {
-		return launcher.CodexDaemonPrepareResult{}, errors.New("codex launcher identity is not live")
-	}
-	native, err := c.codexNative()
-	if err != nil {
-		return launcher.CodexDaemonPrepareResult{}, err
-	}
-	thread, err := native.ResolveThread(ctx, threadID)
-	if err != nil {
-		return launcher.CodexDaemonPrepareResult{}, err
-	}
-	if request.Mode == "pending-fresh" {
-		thread, err = native.NameThread(ctx, thread.ID, request.Name, request.Cwd)
+	var err error
+	if request.SelectorKind == launcher.CodexLaunchSelectorFresh {
+		thread, err = native.NameResolvedThread(ctx, thread, request.Name, request.Cwd)
 		if err != nil {
 			return launcher.CodexDaemonPrepareResult{}, err
 		}
@@ -898,22 +859,70 @@ func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 }
 
 func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent) {
-	if event.Kind != "thread/name/updated" || strings.TrimSpace(event.ThreadID) == "" || strings.TrimSpace(event.Name) == "" {
+	if strings.TrimSpace(event.ThreadID) == "" {
+		return
+	}
+	if event.Kind == "thread/name/updated" && strings.TrimSpace(event.Name) != "" {
+		c.mu.Lock()
+		report, live := c.liveReports[event.ThreadID]
+		runtime := c.runtime
+		if live && report.Product == codexproduct.ProductID {
+			report.Name = event.Name
+			c.liveReports[event.ThreadID] = report
+		}
+		c.mu.Unlock()
+		if live && runtime != nil {
+			c.syncLiveSessions(runtime)
+		}
+	}
+	if event.Kind != "thread/started" && event.Kind != "thread/status/changed" {
+		return
+	}
+	go c.matchPendingCodexLaunch(event.ThreadID)
+}
+
+func (c *hostCoordinator) matchPendingCodexLaunch(threadID string) {
+	c.mu.Lock()
+	runtime := c.runtime
+	hasPending := len(c.pendingCodexLaunches) != 0
+	c.mu.Unlock()
+	if runtime == nil || !hasPending {
+		return
+	}
+	if _, active, err := runtime.Attachments().ActiveAttachment(threadID); err != nil || active {
+		return
+	}
+	native, err := c.codexNative()
+	if err != nil {
+		return
+	}
+	thread, err := native.ResolveThread(c.ctx, threadID)
+	if err != nil {
 		return
 	}
 	c.mu.Lock()
-	report, live := c.liveReports[event.ThreadID]
-	runtime := c.runtime
-	if !live || report.Product != codexproduct.ProductID {
-		c.mu.Unlock()
+	matches := make([]*pendingCodexLaunch, 0, 1)
+	for token, record := range c.pendingCodexLaunches {
+		if pendingCodexLaunchMatches(record.request, thread) {
+			matches = append(matches, record)
+			delete(c.pendingCodexLaunches, token)
+		}
+	}
+	c.mu.Unlock()
+	if len(matches) == 0 {
 		return
 	}
-	report.Name = event.Name
-	c.liveReports[event.ThreadID] = report
-	c.mu.Unlock()
-	if runtime != nil {
-		c.syncLiveSessions(runtime)
+	if len(matches) > 1 {
+		result := pendingCodexLaunchResult{err: fmt.Errorf("ambiguous concurrent Codex launches matched thread %s", thread.ID)}
+		for _, record := range matches {
+			record.done <- result
+		}
+		return
 	}
+	record := matches[0]
+	result := pendingCodexLaunchResult{}
+	result.handoff, result.err = c.adoptCodexPeer(record.ctx, runtime, record.request, native, thread)
+	record.done <- result
 }
 
 type codexPendingControlCall struct{ call *daemonpkg.ControlCall }

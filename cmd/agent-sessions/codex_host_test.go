@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/procinfo"
 	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
@@ -255,6 +257,92 @@ func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
 	})
 	if title, ok, err := runtime.Attachments().LiveNativeTitle("codex-thread"); err != nil || ok || title != "" {
 		t.Fatalf("departed Codex title was revived: %q, ok=%v, err=%v", title, ok, err)
+	}
+}
+
+func TestCodexPendingLaunchMatchesOnlyTheProductSelectedThread(t *testing.T) {
+	cwd := t.TempDir()
+	thread := bridge.CodexNativeThread{
+		ID: "00000000-0000-0000-0000-00000000c021", Name: "Exact Native Name", Cwd: cwd,
+	}
+	for _, test := range []struct {
+		name    string
+		kind    string
+		value   string
+		cwd     string
+		matches bool
+	}{
+		{name: "fresh cwd", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, matches: true},
+		{name: "bare resume cwd", kind: launcher.CodexLaunchSelectorBare, cwd: cwd, matches: true},
+		{name: "exact name", kind: launcher.CodexLaunchSelectorName, value: thread.Name, cwd: cwd, matches: true},
+		{name: "name is case sensitive", kind: launcher.CodexLaunchSelectorName, value: "exact native name", cwd: cwd},
+		{name: "name is not a prefix", kind: launcher.CodexLaunchSelectorName, value: "Exact Native", cwd: cwd},
+		{name: "exact id", kind: launcher.CodexLaunchSelectorID, value: thread.ID, cwd: cwd, matches: true},
+		{name: "foreign cwd", kind: launcher.CodexLaunchSelectorID, value: thread.ID, cwd: t.TempDir()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := launcher.CodexDaemonPrepareRequest{SelectorKind: test.kind, Selector: test.value, Cwd: test.cwd}
+			if got := pendingCodexLaunchMatches(request, thread); got != test.matches {
+				t.Fatalf("match = %v, want %v", got, test.matches)
+			}
+		})
+	}
+}
+
+func TestCodexPendingLaunchOverlapRefusesEveryAmbiguousRegistration(t *testing.T) {
+	cwd := t.TempDir()
+	name := launcher.CodexDaemonPrepareRequest{Cwd: cwd, SelectorKind: launcher.CodexLaunchSelectorName, Selector: "selected"}
+	if !pendingCodexLaunchesOverlap(name, name) {
+		t.Fatal("same cwd and name were not recognized as duplicate")
+	}
+	otherName := name
+	otherName.Selector = "another"
+	if pendingCodexLaunchesOverlap(name, otherName) {
+		t.Fatal("distinct native names were made ambiguous")
+	}
+	fresh := launcher.CodexDaemonPrepareRequest{Cwd: cwd, SelectorKind: launcher.CodexLaunchSelectorFresh}
+	if !pendingCodexLaunchesOverlap(fresh, otherName) {
+		t.Fatal("cwd-only fresh launch was allowed to overlap a name-bound launch")
+	}
+	foreign := name
+	foreign.Cwd = t.TempDir()
+	if pendingCodexLaunchesOverlap(name, foreign) {
+		t.Fatal("independent working directories were treated as ambiguous")
+	}
+}
+
+func TestCodexPendingLaunchDuplicateNamesWaitingWrapperPID(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	cwd := t.TempDir()
+	coordinator.pendingCodexLaunches["first"] = &pendingCodexLaunch{request: launcher.CodexDaemonPrepareRequest{
+		Cwd: cwd, SelectorKind: launcher.CodexLaunchSelectorName, Selector: "duplicate", Owner: procinfo.Identity{PID: 4242},
+	}}
+	_, err := coordinator.awaitCodexPendingLaunch(context.Background(), nil, launcher.CodexDaemonPrepareRequest{
+		Cwd: cwd, SelectorKind: launcher.CodexLaunchSelectorName, Selector: "duplicate",
+		PendingToken: strings.Repeat("a", 64), Owner: procinfo.Identity{PID: 4343},
+	})
+	if err == nil || !strings.Contains(err.Error(), "wrapper pid 4242") {
+		t.Fatalf("duplicate pending launch error = %v", err)
+	}
+}
+
+func TestCodexPendingLaunchCallerEOFLeavesNothingDangling(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	coordinator.codex = &bridge.CodexNative{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	token := strings.Repeat("b", 64)
+	_, err := coordinator.awaitCodexPendingLaunch(ctx, nil, launcher.CodexDaemonPrepareRequest{
+		Cwd: t.TempDir(), SelectorKind: launcher.CodexLaunchSelectorFresh,
+		PendingToken: token, Owner: procinfo.Identity{PID: 4444},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pending launch EOF = %v", err)
+	}
+	if coordinator.pendingCodexLaunches[token] != nil || len(coordinator.pending) != 0 {
+		t.Fatalf("canceled pending launch remained: launches=%#v evidence=%#v", coordinator.pendingCodexLaunches, coordinator.pending)
 	}
 }
 

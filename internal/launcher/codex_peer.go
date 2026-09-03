@@ -17,11 +17,14 @@ import (
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
-// CodexPendingLaunchEnv is inherited by the exact native SessionStart hook
-// while Codex resolves a resume name or UUID itself.
-const CodexPendingLaunchEnv = "AGENT_SESSIONS_CODEX_PENDING_LAUNCH"
-
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+const (
+	CodexLaunchSelectorFresh = "fresh"
+	CodexLaunchSelectorBare  = "bare"
+	CodexLaunchSelectorName  = "name"
+	CodexLaunchSelectorID    = "id"
+)
 
 type codexMode string
 
@@ -36,6 +39,7 @@ type codexPlan struct {
 	mode              codexMode
 	peerName          string
 	requestedCwd      string
+	cwdExplicit       bool
 	requestedYolo     bool
 	peerContext       peerLaunchContext
 	originalArgs      []string
@@ -48,13 +52,14 @@ type codexPlan struct {
 // already-running user daemon. The launcher remains the terminal-owning
 // process and the daemon remains the sole Agent Sessions authority.
 type CodexDaemonPrepareRequest struct {
-	Mode           string
 	Cwd            string
 	Name           string
 	ApprovalPolicy string
 	Owner          procinfo.Identity
 	Groups         []string
 	PendingToken   string
+	SelectorKind   string
+	Selector       string
 }
 
 // CodexDaemonPrepareResult is the exact native handoff.
@@ -65,7 +70,7 @@ type CodexDaemonPrepareResult struct {
 }
 
 // CodexPendingLaunch is one request written before native Codex starts and
-// completed by the SessionStart hook in the product-selected thread.
+// completed when the App Server reports the product-selected thread.
 type CodexPendingLaunch interface {
 	Await() (CodexDaemonPrepareResult, error)
 	Close() error
@@ -92,7 +97,7 @@ type CodexNativeLaunch struct {
 type CodexNativeRunner func(context.Context, CodexNativeLaunch) error
 
 // RunCodexPeerWithDaemon lets Codex create or select its own thread, then
-// attaches the exact SessionStart identity reported by the native hook.
+// attaches the exact identity reported by the App Server lifecycle stream.
 func RunCodexPeerWithDaemon(
 	ctx context.Context,
 	args []string,
@@ -117,28 +122,6 @@ func RunCodexPeerWithDaemon(
 	if plan.mode == modePassthrough || plan.informationalPass {
 		return Exec(codex, plan.originalArgs, nil)
 	}
-	owner, err := procinfo.CaptureIdentity(os.Getpid())
-	if err != nil {
-		return fmt.Errorf("capture Codex launcher identity: %w", err)
-	}
-	approval := ""
-	if plan.requestedYolo {
-		approval = "never"
-	}
-	request := CodexDaemonPrepareRequest{
-		Mode: string(plan.mode), Cwd: plan.requestedCwd, Name: plan.peerName,
-		ApprovalPolicy: approval, Owner: owner, Groups: append([]string(nil), plan.peerContext.groups...),
-	}
-	request.Mode = "pending-" + string(plan.mode)
-	request.PendingToken, err = randomPendingLaunchToken()
-	if err != nil {
-		return err
-	}
-	pending, err := beginLaunch(ctx, request)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = pending.Close() }()
 	if _, present := os.LookupEnv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT"); !present {
 		_ = os.Setenv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT", "1")
 	}
@@ -148,6 +131,9 @@ func RunCodexPeerWithDaemon(
 		return err
 	}
 	launchArgs := []string{"--remote", remote}
+	if !plan.cwdExplicit {
+		launchArgs = append(launchArgs, "-C", plan.requestedCwd)
+	}
 	if plan.mode == modeResume {
 		launchArgs = append(launchArgs, "resume")
 		if plan.selectionTarget != "" {
@@ -156,8 +142,29 @@ func RunCodexPeerWithDaemon(
 	}
 	launchArgs = append(launchArgs, plan.interactiveArgs...)
 	environment := envutil.Set(os.Environ(), peerProductEnv, "codex")
-	environment = envutil.Set(environment, CodexPendingLaunchEnv, request.PendingToken)
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
+	owner, err := procinfo.CaptureIdentity(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("capture Codex launcher identity: %w", err)
+	}
+	approval := ""
+	if plan.requestedYolo {
+		approval = "never"
+	}
+	request := CodexDaemonPrepareRequest{
+		Cwd: plan.requestedCwd, Name: plan.peerName,
+		ApprovalPolicy: approval, Owner: owner, Groups: append([]string(nil), plan.peerContext.groups...),
+		SelectorKind: plan.selectorKind(), Selector: plan.selectionTarget,
+	}
+	request.PendingToken, err = randomPendingLaunchToken()
+	if err != nil {
+		return err
+	}
+	pending, err := beginLaunch(ctx, request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = pending.Close() }()
 	return run(ctx, CodexNativeLaunch{
 		Executable: codex, Arguments: launchArgs, Environment: environment,
 		Cwd: plan.requestedCwd, Groups: append([]string(nil), plan.peerContext.groups...), Confirm: pending.Await,
@@ -232,17 +239,31 @@ func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, 
 		plan.informationalPass, plan.mode = true, modePassthrough
 		return plan, nil
 	}
-	requestedCwd, _, err := inspectWorkingDirectory(codexArgs, cwd)
+	requestedCwd, cwdExplicit, err := inspectWorkingDirectory(codexArgs, cwd)
 	if err != nil {
 		return codexPlan{}, err
 	}
 	plan.requestedCwd = requestedCwd
+	plan.cwdExplicit = cwdExplicit
 	mode, commandIndex, err := classifyCodexMode(codexArgs)
 	if err != nil {
 		return codexPlan{}, err
 	}
 	plan.mode = mode
 	return finalizeCodexPlan(plan, codexArgs, commandIndex, environmentName)
+}
+
+func (plan codexPlan) selectorKind() string {
+	if plan.mode == modeFresh {
+		return CodexLaunchSelectorFresh
+	}
+	if plan.selectionTarget == "" {
+		return CodexLaunchSelectorBare
+	}
+	if threadIDPattern.MatchString(plan.selectionTarget) {
+		return CodexLaunchSelectorID
+	}
+	return CodexLaunchSelectorName
 }
 
 func extractPeerNameArgs(args []string) ([]string, string, error) {
