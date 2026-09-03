@@ -310,7 +310,10 @@ if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
   find "$state_root" -maxdepth 3 -print >&2
   exit 1
 fi
-ln -s "$prefix/libexec/agent-sessions/host/current/bin/agent-sessions" "$prefix/bin/peer"
+legacy_alias_directory="$prefix/libexec/agent-sessions/bin/linux-x64"
+mkdir -p "$legacy_alias_directory"
+cp -- "$candidate" "$legacy_alias_directory/peer"
+ln -s "$legacy_alias_directory/peer" "$prefix/bin/peer"
 ln -s /bin/true "$prefix/bin/user-tool"
 env "${common_env[@]}" "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >/dev/null
