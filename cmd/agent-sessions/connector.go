@@ -42,14 +42,21 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
+	var resolveReport func(context.Context) (liveSessionReport, bool)
+	if product == connectorProductClaude {
+		report, reported = connectorReportFields(product, os.Getenv)
+		report.UUID, report.Name = "", ""
+		parentPID := os.Getppid()
+		base := cloneLiveSessionReport(report)
+		resolveReport = func(resolveCtx context.Context) (liveSessionReport, bool) {
+			return claudeActiveSessionForParent(resolveCtx, parentPID, base)
+		}
+	}
 	if reported {
 		cwd, cwdErr := os.Getwd()
 		if cwdErr == nil {
 			report.Info = liveCwdInfo(cwd)
 		}
-	}
-	if reported && product == connectorProductClaude && report.Name == "" {
-		report.Name = claudeActiveSessionName(ctx, report.UUID)
 	}
 	if reported && product == connectorProductGrok && report.Name != "" {
 		observer, observerErr := openGrokConnectorObserver(ctx, report)
@@ -67,10 +74,17 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	}
 	var live *liveSessionClient
 	if reported && connectorClaimsLivePresence(requestedProduct, product, os.Getenv) {
-		live = startLiveSessionClient(ctx, defaultPresenceEndpoint(), report,
-			func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
-				return connectorNativeCall(callCtx, report, method, params)
+		if product == connectorProductClaude {
+			base := cloneLiveSessionReport(report)
+			live = startResolvingLiveSessionClient(ctx, defaultPresenceEndpoint(), resolveReport, func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+				return connectorNativeCall(callCtx, base, method, params)
 			})
+		} else {
+			live = startLiveSessionClient(ctx, defaultPresenceEndpoint(), report,
+				func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+					return connectorNativeCall(callCtx, report, method, params)
+				})
+		}
 	}
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
 		Product: product,
@@ -80,6 +94,14 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live != nil {
 				return callLiveConnectorTool(callCtx, live, id, method, params)
+			}
+			callReport := report
+			if resolveReport != nil {
+				var confirmed bool
+				callReport, confirmed = resolveReport(callCtx)
+				if !confirmed {
+					return nil, errors.New("live session identity is not confirmed by the product")
+				}
 			}
 			if method == "tools/call" {
 				cwd, cwdErr := os.Getwd()
@@ -91,7 +113,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 					return nil, cwdErr
 				}
 			}
-			sourceID := connectorRelaySource(product, report.UUID, os.Getenv(launcher.QwenEventsFileEnv))
+			sourceID := connectorRelaySource(product, callReport.UUID, os.Getenv(launcher.QwenEventsFileEnv))
 			return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
 		},
 	})
@@ -383,6 +405,10 @@ func sendClaudeConnectorMessage(socket, messageID, message string) error {
 }
 
 func connectorLiveReport(product string, getenv func(string) string) (liveSessionReport, bool) {
+	report, ok := connectorReportFields(product, getenv)
+	if !ok {
+		return liveSessionReport{}, false
+	}
 	uuid := ""
 	if product == connectorProductGrok {
 		uuid = strings.TrimSpace(getenv("GROK_SESSION_ID"))
@@ -406,49 +432,62 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 	if uuid == "" {
 		return liveSessionReport{}, false
 	}
-	name := strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_NAME"))
+	report.UUID = uuid
+	return report, true
+}
+
+func connectorReportFields(product string, getenv func(string) string) (liveSessionReport, bool) {
 	var groups []string
 	if encoded := strings.TrimSpace(getenv("AGENT_SESSIONS_GROUPS")); encoded != "" {
 		if json.Unmarshal([]byte(encoded), &groups) != nil {
 			return liveSessionReport{}, false
 		}
 	}
-	return liveSessionReport{UUID: uuid, Name: name, Groups: append([]string(nil), groups...), Product: product, Info: map[string]string{}}, true
+	return liveSessionReport{
+		Name: strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_NAME")), Groups: append([]string(nil), groups...),
+		Product: product, Info: map[string]string{},
+	}, true
 }
 
-func claudeActiveSessionName(ctx context.Context, sessionID string) string {
+func claudeActiveSessionForParent(ctx context.Context, parentPID int, base liveSessionReport) (liveSessionReport, bool) {
 	executable, err := launcher.ResolveProductExecutable(connectorProductClaude)
 	if err != nil {
-		return ""
+		return liveSessionReport{}, false
 	}
 	payload, err := exec.CommandContext(ctx, executable, "agents", "--json").Output() //nolint:gosec // selected native Claude executable.
 	if err != nil {
-		return ""
+		return liveSessionReport{}, false
 	}
-	return claudeActiveSessionNameFromJSON(payload, sessionID)
+	return claudeActiveSessionForParentFromJSON(payload, parentPID, base)
 }
 
-func claudeActiveSessionNameFromJSON(payload []byte, sessionID string) string {
+func claudeActiveSessionForParentFromJSON(payload []byte, parentPID int, base liveSessionReport) (liveSessionReport, bool) {
 	var sessions []struct {
 		SessionID string `json:"sessionId"`
 		Name      string `json:"name"`
 		Kind      string `json:"kind"`
+		Cwd       string `json:"cwd"`
+		PID       int    `json:"pid"`
 	}
 	if json.Unmarshal(payload, &sessions) != nil {
-		return ""
+		return liveSessionReport{}, false
 	}
-	name := ""
+	var confirmed liveSessionReport
 	for _, session := range sessions {
-		candidate := strings.TrimSpace(session.Name)
-		if session.SessionID != sessionID || session.Kind != "interactive" || candidate == "" {
+		sessionID := strings.TrimSpace(session.SessionID)
+		if session.PID != parentPID || session.Kind != "interactive" || sessionID == "" {
 			continue
 		}
-		if name != "" && name != candidate {
-			return ""
+		candidate := cloneLiveSessionReport(base)
+		candidate.UUID = sessionID
+		candidate.Name = strings.TrimSpace(session.Name)
+		candidate.Info = liveCwdInfo(strings.TrimSpace(session.Cwd))
+		if confirmed.UUID != "" && (confirmed.UUID != candidate.UUID || confirmed.Name != candidate.Name || confirmed.Info["cwd"] != candidate.Info["cwd"]) {
+			return liveSessionReport{}, false
 		}
-		name = candidate
+		confirmed = candidate
 	}
-	return name
+	return confirmed, confirmed.UUID != ""
 }
 
 // resolveConnectorProduct keeps an automatically discovered connector on the

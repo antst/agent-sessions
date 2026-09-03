@@ -620,9 +620,10 @@ func liveRPCFailureFromError(id json.RawMessage, method string, err error) liveR
 }
 
 type liveSessionClient struct {
-	ctx      context.Context
-	endpoint string
-	report   liveSessionReport
+	ctx           context.Context
+	endpoint      string
+	report        liveSessionReport
+	resolveReport func(context.Context) (liveSessionReport, bool)
 
 	mu      sync.Mutex
 	current *liveRPCConnection
@@ -637,6 +638,19 @@ func startLiveSessionClient(
 ) *liveSessionClient {
 	report = normalizeLiveSessionReport(report)
 	client := &liveSessionClient{ctx: ctx, endpoint: endpoint, report: report, call: call}
+	if validLiveSessionReport(report) {
+		go client.run()
+	}
+	return client
+}
+
+func startResolvingLiveSessionClient(
+	ctx context.Context,
+	endpoint string,
+	resolveReport func(context.Context) (liveSessionReport, bool),
+	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
+) *liveSessionClient {
+	client := &liveSessionClient{ctx: ctx, endpoint: endpoint, resolveReport: resolveReport, call: call}
 	go client.run()
 	return client
 }
@@ -644,8 +658,12 @@ func startLiveSessionClient(
 func (c *liveSessionClient) Call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
 	connection := c.current
+	resolvesProductIdentity := c.resolveReport != nil
 	c.mu.Unlock()
 	if connection == nil {
+		if resolvesProductIdentity {
+			return nil, errors.New("live session identity is not confirmed by the product")
+		}
 		return nil, errors.New("Agent Sessions daemon is unavailable")
 	}
 	return connection.call(ctx, "session."+id, method, params)
@@ -678,46 +696,53 @@ func normalizeLiveSessionReport(report liveSessionReport) liveSessionReport {
 }
 
 func (c *liveSessionClient) run() {
-	c.mu.Lock()
-	report := c.report
-	c.mu.Unlock()
-	if !validLiveSessionReport(report) {
-		return
-	}
 	for c.ctx.Err() == nil {
 		connection, err := (&net.Dialer{}).DialContext(c.ctx, "unix", c.endpoint)
 		if err == nil {
-			rpc := newLiveRPCConnection(connection)
-			rpc.decoder.DisallowUnknownFields()
-			closed := make(chan struct{})
-			go func() {
-				select {
-				case <-c.ctx.Done():
-					_ = connection.Close()
-				case <-closed:
-				}
-			}()
 			c.mu.Lock()
-			report = cloneLiveSessionReport(c.report)
-			err = liveSessionHello(rpc, report)
-			if err == nil {
-				rpc.report = cloneLiveSessionReport(report)
-				c.current = rpc
-			}
+			report := cloneLiveSessionReport(c.report)
+			resolveReport := c.resolveReport
 			c.mu.Unlock()
-			if err == nil {
-				readCtx, stopReads := context.WithCancel(c.ctx)
-				c.read(readCtx, rpc)
-				stopReads()
+			confirmed := true
+			if resolveReport != nil {
+				report, confirmed = resolveReport(c.ctx)
+			}
+			report = normalizeLiveSessionReport(report)
+			if !confirmed || !validLiveSessionReport(report) {
+				_ = connection.Close()
+			} else {
+				rpc := newLiveRPCConnection(connection)
+				rpc.decoder.DisallowUnknownFields()
+				closed := make(chan struct{})
+				go func() {
+					select {
+					case <-c.ctx.Done():
+						_ = connection.Close()
+					case <-closed:
+					}
+				}()
 				c.mu.Lock()
-				if c.current == rpc {
-					c.current = nil
+				c.report = cloneLiveSessionReport(report)
+				err = liveSessionHello(rpc, report)
+				if err == nil {
+					rpc.report = cloneLiveSessionReport(report)
+					c.current = rpc
 				}
 				c.mu.Unlock()
+				if err == nil {
+					readCtx, stopReads := context.WithCancel(c.ctx)
+					c.read(readCtx, rpc)
+					stopReads()
+					c.mu.Lock()
+					if c.current == rpc {
+						c.current = nil
+					}
+					c.mu.Unlock()
+				}
+				rpc.fail()
+				_ = connection.Close()
+				close(closed)
 			}
-			rpc.fail()
-			_ = connection.Close()
-			close(closed)
 		}
 		select {
 		case <-c.ctx.Done():

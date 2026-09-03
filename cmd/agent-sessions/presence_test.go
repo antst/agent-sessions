@@ -267,6 +267,57 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	stopClient()
 }
 
+func TestResolvingLivePresenceDoesNotHelloUntilProductConfirmsIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan liveSessionReport, 1)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
+		joined <- report
+	}, func(liveSessionReport) {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	attempted := make(chan struct{}, 1)
+	confirmed := make(chan struct{})
+	client := startResolvingLiveSessionClient(ctx, server.listener.Addr().String(), func(context.Context) (liveSessionReport, bool) {
+		select {
+		case attempted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-confirmed:
+			return liveSessionReport{
+				UUID: "product-session", Name: "product-name", Groups: []string{"team"}, Product: "claude", Info: map[string]string{},
+			}, true
+		default:
+			return liveSessionReport{}, false
+		}
+	}, nil)
+	select {
+	case <-attempted:
+	case <-time.After(time.Second):
+		t.Fatal("product identity resolver was not called")
+	}
+	if _, err := client.Call(ctx, "probe", "peers.list", map[string]any{}); err == nil || err.Error() != "live session identity is not confirmed by the product" {
+		t.Fatalf("unconfirmed connector call error = %v", err)
+	}
+	select {
+	case report := <-joined:
+		t.Fatalf("unconfirmed product identity sent hello: %+v", report)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(confirmed)
+	select {
+	case report := <-joined:
+		if report.UUID != "product-session" || report.Name != "product-name" {
+			t.Fatalf("confirmed product report = %+v", report)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("confirmed product identity did not reconnect")
+	}
+}
+
 func TestLivePresenceClientProjectsNameOnTheSameConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -904,22 +955,24 @@ func TestConnectorLiveReportNeverFabricatesAProductName(t *testing.T) {
 	}
 }
 
-func TestClaudeActiveSessionNameComesFromExactNativeInteractiveRow(t *testing.T) {
+func TestClaudeActiveSessionComesFromExactNativeParentPID(t *testing.T) {
 	payload := []byte(`[
-		{"sessionId":"target","name":"background","kind":"background"},
-		{"sessionId":"other","name":"other title","kind":"interactive"},
-		{"sessionId":"target","name":"product title","kind":"interactive"}
+		{"pid":42,"sessionId":"provisional","name":"background","kind":"background","cwd":"/wrong"},
+		{"pid":7,"sessionId":"other","name":"other title","kind":"interactive","cwd":"/other"},
+		{"pid":42,"sessionId":"native-session","name":"product title","kind":"interactive","cwd":"/product"}
 	]`)
-	if got := claudeActiveSessionNameFromJSON(payload, "target"); got != "product title" {
-		t.Fatalf("Claude active session name = %q", got)
+	base := liveSessionReport{Product: "claude", Groups: []string{"team"}, Info: map[string]string{}}
+	got, ok := claudeActiveSessionForParentFromJSON(payload, 42, base)
+	if !ok || got.UUID != "native-session" || got.Name != "product title" || got.Info["cwd"] != "/product" || !reflect.DeepEqual(got.Groups, []string{"team"}) {
+		t.Fatalf("Claude active session = %+v, ok=%v", got, ok)
 	}
 	for _, invalid := range [][]byte{
 		[]byte(`not-json`),
-		[]byte(`[{"sessionId":"other","name":"product title","kind":"interactive"}]`),
-		[]byte(`[{"sessionId":"target","name":"one","kind":"interactive"},{"sessionId":"target","name":"two","kind":"interactive"}]`),
+		[]byte(`[{"pid":7,"sessionId":"native-session","name":"product title","kind":"interactive"}]`),
+		[]byte(`[{"pid":42,"sessionId":"one","name":"one","kind":"interactive"},{"pid":42,"sessionId":"two","name":"two","kind":"interactive"}]`),
 	} {
-		if got := claudeActiveSessionNameFromJSON(invalid, "target"); got != "" {
-			t.Fatalf("invalid native rows produced name %q from %s", got, invalid)
+		if got, ok := claudeActiveSessionForParentFromJSON(invalid, 42, base); ok {
+			t.Fatalf("invalid native rows produced session %+v from %s", got, invalid)
 		}
 	}
 }
