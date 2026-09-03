@@ -24,6 +24,7 @@ opencode=${OPENCODE:-opencode}
 kilo=${KILO:-kilo}
 dsh=${DSH:-dsh}
 pnpm=${PNPM:-pnpm}
+npm=${NPM:-npm}
 
 binary_release_identity() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -69,11 +70,15 @@ opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
 dsh_path=$(resolve_product "$dsh" "$HOME/.local/bin/dsh" || true)
 pnpm_path=$(resolve_product "$pnpm" "$HOME/.local/bin/pnpm" || true)
+npm_path=$(resolve_product "$npm" "$HOME/.local/bin/npm" || true)
 dsh_skip_reason=""
 
 if [[ -n "$dsh_path" ]]; then
   if [[ -z "$pnpm_path" ]]; then
     dsh_skip_reason="pnpm is not installed."
+    dsh_path=""
+  elif [[ -z "$npm_path" ]]; then
+    dsh_skip_reason="npm is not installed."
     dsh_path=""
   elif ! dsh_skip_reason=$(validate_dsh_native_tuple "$dsh_path" "$pnpm_path" 2>&1); then
     dsh_path=""
@@ -124,7 +129,7 @@ payload=(
   .agents .claude-plugin .codex-plugin
   claude grok hooks integrations qwen skills README.md
 )
-for path in "${payload[@]}" .codex-plugin/mcp.json scripts/native-entry scripts/release-inventory deploy/agent-sessions; do
+for path in "${payload[@]}" .codex-plugin/mcp.json scripts/native-entry scripts/pack-packages scripts/release-inventory deploy/agent-sessions; do
   [[ -e "$source_root/$path" && ! -L "$source_root/$path" ]] || {
     printf 'host payload is missing or indirect: %s\n' "$path" >&2
     exit 1
@@ -163,11 +168,12 @@ cp -- "$stage/.codex-plugin/mcp.json" "$stage/.mcp.json"
 rm -- "$stage/.codex-plugin/mcp.json"
 mkdir -p "$stage/scripts" "$stage/deploy"
 cp -- "$source_root/scripts/native-entry" "$stage/scripts/native-entry"
+cp -- "$source_root/scripts/pack-packages" "$stage/scripts/pack-packages"
 cp -- "$source_root/scripts/release-inventory" "$stage/scripts/release-inventory"
 cp -R -- "$source_root/deploy/agent-sessions" "$stage/deploy/"
 mkdir -p "$stage/bin"
 install -m 0755 "$host_binary" "$stage/bin/agent-sessions"
-chmod 0755 "$stage/scripts/native-entry" "$stage/scripts/release-inventory" \
+chmod 0755 "$stage/scripts/native-entry" "$stage/scripts/pack-packages" "$stage/scripts/release-inventory" \
   "$stage/grok/scripts/native-entry" "$stage/qwen/scripts/native-entry"
 printf '%s\n' "$platform" >"$stage/PLATFORM"
 
@@ -308,7 +314,7 @@ install_integrations() {
   install_opencode_family_plugin opencode "$opencode_path" "$integration_root"
   install_opencode_family_plugin kilo "$kilo_path" "$integration_root"
   if [[ -n "$dsh_path" ]]; then
-    install_dsh_native_integration "$dsh_path" "$pnpm_path" "$integration_root"
+    install_dsh_integrations "$dsh_path" "$pnpm_path" "$npm_path" "$integration_root"
   elif [[ -n "$dsh_skip_reason" ]]; then
     printf 'Skipping DSH lane integration: %s\n' "$dsh_skip_reason"
   else
@@ -337,7 +343,7 @@ remove_integrations() {
     rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
   done
   if [[ -n "$dsh_path" && -n "$pnpm_path" ]]; then
-    remove_dsh_native_integration "$dsh_path" "$pnpm_path" >/dev/null 2>&1 || true
+    remove_dsh_integrations "$dsh_path" "$pnpm_path" >/dev/null 2>&1 || true
   fi
 }
 

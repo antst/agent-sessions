@@ -130,7 +130,7 @@ reinstall:
 	$(MAKE) install
 
 install install-all dev-install dev-install-all: build
-	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" \
+	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" NPM="$(NPM)" \
 		./scripts/install-host "$(CURDIR)" "$(abspath $(BIN_DIR))/agent-sessions" \
 		"$(abspath $(PREFIX))" "$(HOST_RELEASE_VERSION)" "$(PLATFORM)"
 
@@ -139,11 +139,11 @@ install-hub: build
 		"$(abspath $(PREFIX))" "$(HOST_RELEASE_VERSION)" "$(PLATFORM)"
 
 remove-all:
-	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" \
+	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" NPM="$(NPM)" \
 		./scripts/remove-host "$(abspath $(PREFIX))"
 
 purge-all:
-	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" \
+	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" NPM="$(NPM)" \
 		./scripts/remove-host "$(abspath $(PREFIX))" --purge
 
 remove-hub:

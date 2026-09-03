@@ -23,45 +23,47 @@ validate_dsh_native_tuple() {
   fi
 }
 
-dsh_profile_has_agent_sessions() {
-  local dsh_path=$1 pnpm_path=$2 inventory
+dsh_profile_has_package() {
+  local dsh_path=$1 pnpm_path=$2 package_name=$3 inventory
   inventory=$(dsh_profile_command "$dsh_path" "$pnpm_path" list --depth 0 --json)
-  grep -Fq '"@agent-sessions/dsh-native"' <<<"$inventory"
+  grep -Fq "\"$package_name\"" <<<"$inventory"
 }
 
-remove_dsh_native_integration() {
-  local dsh_path=$1 pnpm_path=$2
-  if dsh_profile_has_agent_sessions "$dsh_path" "$pnpm_path"; then
-    dsh_profile_command "$dsh_path" "$pnpm_path" remove @agent-sessions/dsh-native
-  fi
+remove_dsh_integrations() {
+  local dsh_path=$1 pnpm_path=$2 package_name
+  for package_name in @agent-sessions/dsh-lane @agent-sessions/dsh-comms @agent-sessions/dsh-native; do
+    if dsh_profile_has_package "$dsh_path" "$pnpm_path" "$package_name"; then
+      dsh_profile_command "$dsh_path" "$pnpm_path" remove "$package_name"
+    fi
+  done
 }
 
-install_dsh_native_integration() {
-  local dsh_path=$1 pnpm_path=$2 integration_root=$3 temporary_parent temporary_root status
+install_dsh_integrations() {
+  local dsh_path=$1 pnpm_path=$2 npm_path=$3 integration_root=$4 temporary_parent temporary_root status
   temporary_parent=$(cd -P -- "${TMPDIR:-/tmp}" && pwd)
   temporary_root=$(mktemp -d "$temporary_parent/agent-sessions-dsh.XXXXXX")
   status=0
   (
-    package_root="$temporary_root/package"
-    mkdir -p "$package_root/shared"
-    install -m 0644 "$integration_root/integrations/dsh/package.json" "$package_root/package.json"
-    install -m 0644 "$integration_root/integrations/dsh/plugin.cjs" "$package_root/plugin.cjs"
-    install -m 0644 "$integration_root/integrations/dsh/cordis.patch.yml" "$package_root/cordis.patch.yml"
-    install -m 0644 "$integration_root/integrations/shared/live-session.js" "$package_root/shared/live-session.cjs"
+    artifacts="$temporary_root/artifacts"
+    NPM="$npm_path" PACKAGE_OUTPUT_DIR="$artifacts" "$integration_root/scripts/pack-packages" >/dev/null || exit $?
+    set -- "$artifacts"/agent-sessions-dsh-comms-*.tgz
+    [[ $# -eq 1 && -f "$1" ]] || exit 1
+    comms_archive="$integration_root/integrations/dsh/$(basename -- "$1")"
+    if [[ ! -f "$comms_archive" ]] || ! cmp -s -- "$1" "$comms_archive"; then
+      install -m 0644 "$1" "$comms_archive" || exit $?
+    fi
+    set -- "$artifacts"/agent-sessions-dsh-lane-*.tgz
+    [[ $# -eq 1 && -f "$1" ]] || exit 1
+    lane_archive="$integration_root/integrations/dsh/$(basename -- "$1")"
+    if [[ ! -f "$lane_archive" ]] || ! cmp -s -- "$1" "$lane_archive"; then
+      install -m 0644 "$1" "$lane_archive" || exit $?
+    fi
 
-    # DSH owns profile/plugin mutation. DSH has no package-build command, so
-    # this one staging step turns the release files into a physical tarball.
-    # Keep that tarball beside its selected release: pnpm records file package
-    # sources in the product-owned profile manifest, so the source must outlive
-    # this install process.
-    "$pnpm_path" --dir "$package_root" pack --pack-destination "$temporary_root" >/dev/null
-    set -- "$temporary_root"/*.tgz
-    [[ $# -eq 1 && -f "$1" ]]
-    archive=$1
-    stable_archive="$integration_root/integrations/dsh/$(basename -- "$archive")"
-    install -m 0644 "$archive" "$stable_archive"
-    remove_dsh_native_integration "$dsh_path" "$pnpm_path"
-    dsh_profile_command "$dsh_path" "$pnpm_path" add "$stable_archive"
+    # DSH owns profile/plugin mutation. Keep the exact npm-pack artifacts beside
+    # the selected release because the product records the physical source.
+    remove_dsh_integrations "$dsh_path" "$pnpm_path" || exit $?
+    dsh_profile_command "$dsh_path" "$pnpm_path" add "$comms_archive" || exit $?
+    dsh_profile_command "$dsh_path" "$pnpm_path" add "$lane_archive" || exit $?
   ) || status=$?
   remove_managed_tree "$temporary_root" "$temporary_parent"
   return "$status"

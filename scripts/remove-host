@@ -23,6 +23,7 @@ opencode=${OPENCODE:-opencode}
 kilo=${KILO:-kilo}
 dsh=${DSH:-dsh}
 pnpm=${PNPM:-pnpm}
+npm=${NPM:-npm}
 host_root="$prefix/libexec/agent-sessions/host"
 
 resolve_product() {
@@ -46,9 +47,14 @@ opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
 dsh_path=$(resolve_product "$dsh" "$HOME/.local/bin/dsh" || true)
 pnpm_path=$(resolve_product "$pnpm" "$HOME/.local/bin/pnpm" || true)
+npm_path=$(resolve_product "$npm" "$HOME/.local/bin/npm" || true)
 if [[ -n "$dsh_path" ]]; then
   [[ -n "$pnpm_path" ]] || {
     printf 'Cannot remove the DSH integration: pnpm is not installed.\n' >&2
+    exit 1
+  }
+  [[ -n "$npm_path" ]] || {
+    printf 'Cannot restore the DSH integration during rollback: npm is not installed.\n' >&2
     exit 1
   }
   validate_dsh_native_tuple "$dsh_path" "$pnpm_path"
@@ -176,7 +182,7 @@ install_integrations() {
     install -m 0644 "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   done
   if [[ -n "$dsh_path" ]]; then
-    install_dsh_native_integration "$dsh_path" "$pnpm_path" "$current"
+    install_dsh_integrations "$dsh_path" "$pnpm_path" "$npm_path" "$current"
   fi
 }
 
@@ -273,7 +279,7 @@ if [[ -n "$qwen_path" ]]; then
   fi
 fi
 if [[ -n "$dsh_path" ]]; then
-  remove_dsh_native_integration "$dsh_path" "$pnpm_path"
+  remove_dsh_integrations "$dsh_path" "$pnpm_path"
 fi
 for product in opencode kilo; do
   config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"

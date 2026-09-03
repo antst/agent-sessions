@@ -35,6 +35,7 @@ trap cleanup EXIT
 
 mkdir -p "$temporary_root/stage"
 cp -R -- "$root/integrations" "$temporary_root/stage/integrations"
+find -P "$temporary_root/stage/integrations" -type d -exec chmod u+rwx {} +
 rm -rf -- "$output"
 mkdir -p "$output"
 

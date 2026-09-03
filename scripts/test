@@ -56,6 +56,12 @@ while IFS= read -r -d '' integration_test; do integration_tests+=("$integration_
 [[ ${#integration_tests[@]} -gt 0 ]]
 node --test "${integration_tests[@]}"
 
+if grep -R -En --include='*.js' --include='*.cjs' --include='*.mjs' \
+  'process\.cwd\(\)' "$plugin_root/integrations"; then
+  printf 'an integration derives a session working directory from its plugin process\n' >&2
+  exit 1
+fi
+
 if grep -En 'agent-session-runtime-release-packager|AGENT_SESSIONS_RELEASE_PACKAGER' \
   "$plugin_root/Makefile" "$plugin_root/scripts/package-release"; then
   printf 'active release packaging still depends on the obsolete runtime image\n' >&2

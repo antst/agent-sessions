@@ -112,6 +112,7 @@ func TestNativeLaneUsesOnePresenceConnectionAndProductIdentity(t *testing.T) {
 	wantEnv := []productruntime.EnvVar{
 		{Name: "AGENT_SESSIONS_PRODUCT", Value: "dsh"},
 		{Name: "AGENT_SESSIONS_SESSION_ID", Value: "session-native"},
+		{Name: cwdEnvironment, Value: "/work"},
 		{Name: permissionPresetEnv, Value: "workspace-write-noninteractive"},
 		{Name: modelProviderEnv, Value: "deepseek"},
 		{Name: modelIDEnvironment, Value: "deepseek-v4-flash"},

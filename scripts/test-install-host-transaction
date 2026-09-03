@@ -50,6 +50,7 @@ home="$test_root/home"
 prefix="$test_root/prefix"
 fake_bin="$test_root/bin"
 state_root="$test_root/state"
+real_npm=$(command -v npm)
 mkdir -p "$home" "$prefix" "$fake_bin" "$state_root"
 
 cat >"$fake_bin/qwen" <<'EOF'
@@ -102,11 +103,6 @@ cat >"$fake_bin/pnpm" <<'EOF'
 #!/bin/sh
 set -eu
 if [ "$1" = "--version" ]; then printf '%s\n' '10.28.1'; exit 0; fi
-if [ "$1" = "--dir" ] && [ "$3" = "pack" ] && [ "$4" = "--pack-destination" ]; then
-  printf '%s\n' "$2" >"$TEST_DSH_PACKED_SOURCE"
-  : >"$5/agent-sessions-dsh-native-0.3.0.tgz"
-  exit 0
-fi
 exit 91
 EOF
 chmod 0700 "$fake_bin/pnpm"
@@ -119,22 +115,43 @@ if [ "$1" = "--version" ]; then printf '%s\n' "${TEST_DSH_VERSION:-dsh 0.1.2-alp
 [ "$1 $2 $3" = "plugin --profile agent-sessions" ] || exit 91
 case "$4" in
   list)
-    if [ -e "$TEST_DSH_STATE" ]; then printf '%s\n' '{"dependencies":{"@agent-sessions/dsh-native":{}}}'; else printf '%s\n' '{}'; fi
+    first=1
+    printf '%s' '{"dependencies":{'
+    for package in dsh-native dsh-comms dsh-lane; do
+      if [ -e "$TEST_DSH_STATE_DIR/$package" ]; then
+        if [ "$first" = 0 ]; then printf ','; fi
+        printf '"@agent-sessions/%s":{}' "$package"
+        first=0
+      fi
+    done
+    printf '%s\n' '}}'
     ;;
   remove)
-    rm -f -- "$TEST_DSH_STATE"
-    rm -rf -- "$TEST_DSH_PLUGIN_ROOT"
+    package=${5#@agent-sessions/}
+    rm -f -- "$TEST_DSH_STATE_DIR/$package"
+    case "$package" in
+      dsh-native) rm -rf -- "$TEST_DSH_LEGACY_ROOT" ;;
+      dsh-comms) rm -rf -- "$TEST_DSH_COMMS_ROOT" ;;
+      dsh-lane) rm -rf -- "$TEST_DSH_LANE_ROOT" ;;
+      *) exit 93 ;;
+    esac
     ;;
   add)
-    case "$5" in
-      "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/agent-sessions-dsh-native-*.tgz) ;;
+    case "${5##*/}" in
+      agent-sessions-dsh-comms-*.tgz) package=dsh-comms; plugin_root=$TEST_DSH_COMMS_ROOT ;;
+      agent-sessions-dsh-lane-*.tgz) package=dsh-lane; plugin_root=$TEST_DSH_LANE_ROOT ;;
       *) exit 92 ;;
     esac
-    source_root=$(cat "$TEST_DSH_PACKED_SOURCE")
-    rm -rf -- "$TEST_DSH_PLUGIN_ROOT"
-    mkdir -p "$TEST_DSH_PLUGIN_ROOT"
-    cp -R -- "$source_root/." "$TEST_DSH_PLUGIN_ROOT/"
-    : >"$TEST_DSH_STATE"
+    case "$5" in
+      "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/*.tgz) ;;
+      *) exit 92 ;;
+    esac
+    extract="$TEST_DSH_EXTRACT_ROOT/$package"
+    rm -rf -- "$extract" "$plugin_root"
+    mkdir -p "$extract" "$(dirname -- "$plugin_root")" "$TEST_DSH_STATE_DIR"
+    tar -xzf "$5" -C "$extract"
+    mv -- "$extract/package" "$plugin_root"
+    : >"$TEST_DSH_STATE_DIR/$package"
     ;;
   *) exit 91 ;;
 esac
@@ -279,6 +296,7 @@ common_env=(
   "KILO=kilo"
   "DSH=dsh"
   "PNPM=pnpm"
+  "NPM=$real_npm"
   "DSH_HOME=$home/.dsh"
   "TEST_PREFIX=$prefix"
   "TEST_QWEN_STATE=$test_root/qwen-source"
@@ -287,14 +305,19 @@ common_env=(
   "TEST_CLAUDE_CACHE=$test_root/claude-cache"
   "TEST_CLAUDE_MARKETPLACE=$test_root/claude-marketplace"
   "TEST_CLAUDE_RECORD=$test_root/claude-record"
-  "TEST_DSH_STATE=$test_root/dsh-installed"
+  "TEST_DSH_STATE_DIR=$test_root/dsh-state"
   "TEST_DSH_RECORD=$test_root/dsh-record"
-  "TEST_DSH_PLUGIN_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
-  "TEST_DSH_PACKED_SOURCE=$test_root/dsh-packed-source"
+  "TEST_DSH_LEGACY_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
+  "TEST_DSH_COMMS_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms"
+  "TEST_DSH_LANE_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane"
+  "TEST_DSH_EXTRACT_ROOT=$test_root/dsh-extract"
   "TEST_SERVICE_PID_FILE=$test_root/service.pid"
   "TEST_SERVICE_LOG=$test_root/service.log"
   "TEST_REAL_HOST_BINARY=$host_binary"
 )
+
+mkdir -p "$test_root/dsh-state" "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
+: >"$test_root/dsh-state/dsh-native"
 
 env "${common_env[@]}" "$root/scripts/install-host" \
   "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
@@ -306,9 +329,17 @@ cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations
 cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js"
 cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs"
 cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js"
-cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
-cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/shared/live-session.cjs" "$release/integrations/shared/live-session.js"
-test -f "$release/integrations/dsh/agent-sessions-dsh-native-0.3.0.tgz"
+cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/plugin.cjs" "$release/integrations/dsh/comms/plugin.cjs"
+cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/shared/live-session.cjs" "$release/integrations/shared/live-session.js"
+cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs"
+test ! -e "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
+test -f "$release/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz"
+test -f "$release/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz"
+test -x "$release/scripts/pack-packages"
+legacy_remove_line=$(grep -nF 'plugin --profile agent-sessions remove @agent-sessions/dsh-native' "$test_root/dsh-record" | head -1 | cut -d: -f1)
+comms_add_line=$(grep -nF 'plugin --profile agent-sessions add ' "$test_root/dsh-record" | head -1 | cut -d: -f1)
+lane_add_line=$(grep -nF 'plugin --profile agent-sessions add ' "$test_root/dsh-record" | tail -1 | cut -d: -f1)
+[[ "$legacy_remove_line" -lt "$comms_add_line" && "$comms_add_line" -lt "$lane_add_line" ]]
 test -x "$release/scripts/release-inventory"
 find -P "$release" -type d -exec chmod 0555 {} +
 
@@ -340,8 +371,9 @@ if [[ "$after_hash" != "$prior_hash" ]] ||
    ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
    ! cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs" >/dev/null ||
    ! cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
-   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/plugin.cjs" "$release/integrations/dsh/plugin.cjs" >/dev/null ||
-   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/shared/live-session.cjs" "$release/integrations/shared/live-session.js" >/dev/null; then
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/plugin.cjs" "$release/integrations/dsh/comms/plugin.cjs" >/dev/null ||
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/shared/live-session.cjs" "$release/integrations/shared/live-session.js" >/dev/null ||
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs" >/dev/null; then
   printf 'failed host update did not restore the exact release selection and Qwen source\n' >&2
   exit 1
 fi

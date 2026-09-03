@@ -25,6 +25,7 @@ const (
 	reasoningEffortEnv    = "AGENT_SESSIONS_DSH_REASONING_EFFORT"
 	permissionPresetEnv   = "AGENT_SESSIONS_DSH_PERMISSION_PRESET"
 	inspectSessionEnv     = "AGENT_SESSIONS_DSH_INSPECT_SESSION_ID"
+	cwdEnvironment        = "AGENT_SESSIONS_DSH_CWD"
 	defaultStartupTimeout = 15 * time.Second
 )
 
@@ -110,6 +111,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
+	environment = setEnvVar(environment, cwdEnvironment, request.Cwd)
 	environment = setEnvVar(environment, permissionPresetEnv, policy.Preset)
 	if request.ResumeNativeID != "" {
 		environment = setEnvVar(environment, resumeEnvironment, "1")
