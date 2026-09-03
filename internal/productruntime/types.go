@@ -124,6 +124,7 @@ type LaneOpenRequest struct {
 	ProductID       string
 	LaneID          string
 	Name            string
+	Groups          []string
 	ResumeNativeID  string
 	Cwd             string
 	PermissionMode  permissionmode.Mode
