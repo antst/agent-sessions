@@ -328,6 +328,24 @@ func laneNativeOptionTakesValue(argument string) bool {
 	return false
 }
 
+func laneInvocationCwd(parent, requested string) (string, error) {
+	cwd := requested
+	if cwd == "" {
+		cwd = parent
+	}
+	if !filepath.IsAbs(cwd) {
+		if parent == "" {
+			return "", errors.New("lane cwd is unavailable")
+		}
+		cwd = filepath.Join(parent, cwd)
+	}
+	resolved, err := pathidentity.ExistingDirectory(filepath.Clean(cwd))
+	if err != nil {
+		return "", errors.New("lane cwd is unavailable")
+	}
+	return resolved, nil
+}
+
 //nolint:gocyclo // Start is one durable authorization, native dispatch, publication, and rollback transaction.
 func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string, wait bool) (map[string]any, error) {
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(options.name) == "" {
@@ -336,16 +354,9 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if err := validateGrokLanePermission(product, options, true); err != nil {
 		return nil, err
 	}
-	cwd := options.cwd
-	if cwd == "" {
-		cwd = parent.Cwd
-	}
-	if !filepath.IsAbs(cwd) {
-		cwd = filepath.Join(parent.Cwd, cwd)
-	}
-	cwd, err := pathidentity.ExistingDirectory(filepath.Clean(cwd))
+	cwd, err := laneInvocationCwd(parent.Cwd, options.cwd)
 	if err != nil {
-		return nil, errors.New("lane cwd is unavailable")
+		return nil, err
 	}
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
 	if err != nil {
@@ -433,6 +444,10 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if err != nil {
 		return nil, err
 	}
+	cwd, err := laneInvocationCwd(parent.Cwd, options.cwd)
+	if err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	if actor.state == "running" {
 		c.mu.Unlock()
@@ -440,6 +455,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	}
 	prepareLaneTurnLocked(actor)
 	actor.parentID = parent.ID
+	actor.cwd = cwd
 	if len(options.groups) > 0 {
 		actor.explicitGroups = uniqueStrings(options.groups)
 	}

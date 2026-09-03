@@ -270,6 +270,35 @@ func TestParseUnifiedLaneCommandRejectsMissingValuesAndPreservesNativeArguments(
 	}
 }
 
+func TestLaneInvocationCwdUsesOnlyTheCurrentInvocation(t *testing.T) {
+	parent := t.TempDir()
+	explicit := t.TempDir()
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, parent, requested, want string
+	}{
+		{name: "explicit overrides empty candidate", requested: explicit, want: explicit},
+		{name: "omitted uses current parent", parent: parent, want: parent},
+		{name: "relative uses current parent", parent: parent, requested: "child", want: child},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := laneInvocationCwd(test.parent, test.requested)
+			if err != nil || got != test.want {
+				t.Fatalf("lane cwd = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	if _, err := laneInvocationCwd("", "missing-relative"); err == nil {
+		t.Fatal("relative cwd without a current parent cwd succeeded")
+	}
+	if _, err := laneInvocationCwd(parent, "missing"); err == nil {
+		t.Fatal("missing lane cwd succeeded")
+	}
+}
+
 func TestValidateLaneGroupNamesAcceptsOnlyParentGroupsAndTheirSubgroups(t *testing.T) {
 	parents := []string{"project", "session:host/parent"}
 	if err := validateLaneGroupNames([]string{
