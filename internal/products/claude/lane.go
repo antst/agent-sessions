@@ -42,6 +42,8 @@ type laneSession struct {
 	active     *laneTurn
 	controls   map[string]chan error
 	nextID     uint64
+	writes     uint64
+	replays    uint64
 	failed     error
 	closed     bool
 }
@@ -50,6 +52,8 @@ type laneTurn struct {
 	ref      productruntime.NativeTurnRef
 	done     chan struct{}
 	once     sync.Once
+	write    uint64
+	consumed bool
 	terminal productruntime.NativeTerminal
 	err      error
 }
@@ -106,7 +110,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	driver.mu.Unlock()
 
 	nativeID := request.ResumeNativeID
-	arguments := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
+	arguments := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"}
 	if nativeID == "" {
 		nativeID = request.LaneID
 		arguments = append(arguments, "--session-id", nativeID, "--name", request.Name)
@@ -180,30 +184,19 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, ref productruntime.Nati
 		return productruntime.NativeTurnRef{}, err
 	}
 	session.mu.Lock()
-	if session.closed || session.failed != nil || session.active != nil && session.active.ref.NativeTurnID != "" {
+	if session.closed || session.failed != nil || session.active != nil {
 		session.mu.Unlock()
 		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: Claude lane is not idle", productruntime.ErrAmbiguousSession)
 	}
 	session.nextID++
-	turn := session.active
-	attached := turn != nil
 	turnRef := productruntime.NativeTurnRef{NativeSessionRef: ref, NativeTurnID: strconv.FormatUint(session.nextID, 10)}
-	if turn == nil {
-		turn = &laneTurn{done: make(chan struct{})}
-	}
-	turn.ref = turnRef
-	session.active = turn
-	if err := session.writeUser(ctx, prompt); err != nil {
-		if session.active == turn {
-			if attached {
-				turn.ref = productruntime.NativeTurnRef{NativeSessionRef: ref}
-			} else {
-				session.active = nil
-			}
-		}
+	turn := &laneTurn{ref: turnRef, done: make(chan struct{})}
+	if err := session.writeUserLocked(ctx, prompt); err != nil {
 		session.mu.Unlock()
 		return productruntime.NativeTurnRef{}, err
 	}
+	turn.write = session.writes
+	session.active = turn
 	session.mu.Unlock()
 	return turnRef, nil
 }
@@ -230,7 +223,7 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, ref productruntime.Nativ
 }
 
 func (driver *LaneDriver) Steer(ctx context.Context, ref productruntime.NativeTurnRef, request productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
-	session, _, err := driver.turn(ref, true)
+	session, turn, err := driver.turn(ref, true)
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
@@ -241,9 +234,16 @@ func (driver *LaneDriver) Steer(ctx context.Context, ref productruntime.NativeTu
 	if err != nil {
 		return productruntime.NativeAcceptance{}, err
 	}
-	if err := session.writeUser(ctx, prompt); err != nil {
+	session.mu.Lock()
+	if session.active != turn {
+		session.mu.Unlock()
+		return productruntime.NativeAcceptance{}, productruntime.ErrStale
+	}
+	if err := session.writeUserLocked(ctx, prompt); err != nil {
+		session.mu.Unlock()
 		return productruntime.NativeAcceptance{}, err
 	}
+	session.mu.Unlock()
 	return productruntime.NativeAcceptance{
 		NativeSessionID: ref.NativeSessionID, NativeMessageID: ref.NativeTurnID, AcceptedAt: driver.config.Now().UTC(),
 	}, nil
@@ -263,15 +263,7 @@ func (driver *LaneDriver) SendMessage(ctx context.Context, ref productruntime.Na
 		session.mu.Unlock()
 		return fmt.Errorf("%w: Claude lane stream is unavailable", productruntime.ErrUnavailable)
 	}
-	marker := session.active
-	if marker == nil {
-		marker = &laneTurn{ref: productruntime.NativeTurnRef{NativeSessionRef: ref}, done: make(chan struct{})}
-		session.active = marker
-	}
-	if err := session.writeUser(ctx, prompt); err != nil {
-		if marker.ref.NativeTurnID == "" && session.active == marker {
-			session.active = nil
-		}
+	if err := session.writeUserLocked(ctx, prompt); err != nil {
 		session.mu.Unlock()
 		return err
 	}
@@ -408,7 +400,9 @@ func lanePrompt(prompt string) (string, error) {
 	return prompt, nil
 }
 
-func (session *laneSession) writeUser(ctx context.Context, prompt string) error {
+// writeUserLocked writes one product input and advances its FIFO position.
+// The caller holds session.mu so stdout replay cannot overtake publication.
+func (session *laneSession) writeUserLocked(ctx context.Context, prompt string) error {
 	body, err := json.Marshal(map[string]any{
 		"type": "user", "message": map[string]any{
 			"role": "user", "content": []map[string]any{{"type": "text", "text": prompt}},
@@ -417,7 +411,11 @@ func (session *laneSession) writeUser(ctx context.Context, prompt string) error 
 	if err != nil {
 		return err
 	}
-	return session.process.WriteFrame(ctx, body)
+	if err := session.process.WriteFrame(ctx, body); err != nil {
+		return err
+	}
+	session.writes++
+	return nil
 }
 
 func (session *laneSession) readLoop() {
@@ -443,10 +441,23 @@ func (session *laneSession) readLoop() {
 			}
 		case "control_response":
 			session.deliverControl(frame)
+		case "user":
+			if replayed, _ := frame["isReplay"].(bool); replayed {
+				session.consumeReplay()
+			}
 		case "result":
 			session.deliverResult(frame)
 		}
 	}
+}
+
+func (session *laneSession) consumeReplay() {
+	session.mu.Lock()
+	session.replays++
+	if session.active != nil && session.replays >= session.active.write {
+		session.active.consumed = true
+	}
+	session.mu.Unlock()
 }
 
 func (session *laneSession) checkIdentity(frame map[string]any) {
@@ -484,21 +495,14 @@ func (session *laneSession) deliverControl(frame map[string]any) {
 func (session *laneSession) deliverResult(frame map[string]any) {
 	session.mu.Lock()
 	turn := session.active
-	if turn == nil {
-		session.mu.Unlock()
-		session.fail(fmt.Errorf("%w: Claude stream returned a result without an active native run", productruntime.ErrProtocol))
-		return
-	}
-	tracked := turn.ref.NativeTurnID != ""
 	nativeID, _ := frame["session_id"].(string)
 	if nativeID != "" && nativeID != session.ref.NativeSessionID {
 		session.mu.Unlock()
-		identityErr := fmt.Errorf("%w: Claude result changed native session", productruntime.ErrAmbiguousSession)
-		if !tracked {
-			session.fail(identityErr)
-			return
-		}
-		turn.resolve(productruntime.NativeTerminal{Outcome: productruntime.TurnFailed, ExitLike: 1}, identityErr)
+		session.fail(fmt.Errorf("%w: Claude result changed native session", productruntime.ErrAmbiguousSession))
+		return
+	}
+	if turn == nil || !turn.consumed {
+		session.mu.Unlock()
 		return
 	}
 	result, _ := frame["result"].(string)
@@ -507,13 +511,6 @@ func (session *laneSession) deliverResult(frame map[string]any) {
 	isError, _ := frame["is_error"].(bool)
 	terminal := productruntime.NativeTerminal{
 		Outcome: productruntime.TurnCompleted, Result: result, ResultDigest: sha256.Sum256([]byte(result)), NativeStopReason: reason,
-	}
-	if !tracked {
-		if session.active == turn {
-			session.active = nil
-		}
-		session.mu.Unlock()
-		return
 	}
 	session.mu.Unlock()
 	switch {
@@ -576,7 +573,7 @@ func reservedArgument(argument string) bool {
 		name = name[:index]
 	}
 	switch name {
-	case "-p", "--print", "--input-format", "--output-format", "--verbose", "--session-id", "--resume", "-r", "--name", "-n", "--permission-mode", "--dangerously-skip-permissions", "--yolo":
+	case "-p", "--print", "--input-format", "--output-format", "--verbose", "--replay-user-messages", "--session-id", "--resume", "-r", "--name", "-n", "--permission-mode", "--dangerously-skip-permissions", "--yolo":
 		return true
 	default:
 		return argument == "--"

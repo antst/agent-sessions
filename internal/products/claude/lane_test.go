@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,7 +130,7 @@ func TestLaneUsesNativeStreamNameGroupsPolicyAndSynchronousTurns(t *testing.T) {
 		t.Fatalf("session ref = %+v", ref)
 	}
 	wantArgs := []string{
-		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages",
 		"--session-id", ref.NativeSessionID, "--name", "native name", "--permission-mode", "dontAsk",
 		"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--model", "haiku",
 	}
@@ -154,6 +153,7 @@ func TestLaneUsesNativeStreamNameGroupsPolicyAndSynchronousTurns(t *testing.T) {
 	}
 	assertUserText(t, process.waitWritten(t, 0), "preserve this prompt")
 	process.emit(map[string]any{"type": "system", "subtype": "init", "session_id": ref.NativeSessionID})
+	emitReplay(process, ref.NativeSessionID, "preserve this prompt")
 	process.emit(map[string]any{
 		"type": "result", "subtype": "success", "is_error": false,
 		"result": "native answer", "terminal_reason": "completed", "session_id": ref.NativeSessionID,
@@ -196,6 +196,8 @@ func TestLaneSemanticSteerAndControlInterruptShareOneStream(t *testing.T) {
 	}
 	assertUserText(t, process.waitWritten(t, 0), "original")
 	assertUserText(t, process.waitWritten(t, 1), "steered")
+	emitReplay(process, ref.NativeSessionID, "original")
+	emitReplay(process, ref.NativeSessionID, "steered")
 	process.emit(map[string]any{
 		"type": "result", "subtype": "success", "result": "STEERED_SENTINEL",
 		"terminal_reason": "completed", "session_id": ref.NativeSessionID,
@@ -209,6 +211,7 @@ func TestLaneSemanticSteerAndControlInterruptShareOneStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	emitReplay(process, ref.NativeSessionID, "sleep")
 	interruptDone := make(chan error, 1)
 	go func() { interruptDone <- driver.Interrupt(ctx, interruptedTurn) }()
 	control := process.waitWritten(t, 3)
@@ -237,6 +240,7 @@ func TestLaneSemanticSteerAndControlInterruptShareOneStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	emitReplay(process, ref.NativeSessionID, "after")
 	process.emit(map[string]any{"type": "result", "subtype": "success", "result": "AFTER_INTERRUPT", "session_id": ref.NativeSessionID})
 	terminal, err = driver.WaitTurn(ctx, finalTurn)
 	if err != nil || terminal.Result != "AFTER_INTERRUPT" {
@@ -244,7 +248,7 @@ func TestLaneSemanticSteerAndControlInterruptShareOneStream(t *testing.T) {
 	}
 }
 
-func TestLaneMessageUsesTheProductStreamWithoutOwningATurn(t *testing.T) {
+func TestLaneMessageCorrelatesProductReplayAcrossInterjectionAndEnqueue(t *testing.T) {
 	process := newTestStreamProcess()
 	driver, _ := newTestDriver(t, process)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -266,6 +270,8 @@ func TestLaneMessageUsesTheProductStreamWithoutOwningATurn(t *testing.T) {
 	}
 	assertUserText(t, process.waitWritten(t, 0), "original")
 	assertUserText(t, process.waitWritten(t, 1), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+message)
+	emitReplay(process, ref.NativeSessionID, "original")
+	emitReplay(process, ref.NativeSessionID, message)
 	process.emit(map[string]any{
 		"type": "result", "subtype": "success", "result": "BUSY_MESSAGE_SENTINEL",
 		"session_id": ref.NativeSessionID,
@@ -275,50 +281,74 @@ func TestLaneMessageUsesTheProductStreamWithoutOwningATurn(t *testing.T) {
 		t.Fatalf("busy-message terminal = %+v, %v", terminal, err)
 	}
 
+	queuedMessage := `<cross-session-message from="parent">queue after final inference</cross-session-message>`
+	queuedTurn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "final inference", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 2), "final inference")
+	emitReplay(process, ref.NativeSessionID, "final inference")
+	if err := driver.SendMessage(ctx, ref, queuedMessage); err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 3), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+queuedMessage)
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "FINAL_INFERENCE_RESULT",
+		"session_id": ref.NativeSessionID,
+	})
+	terminal, err = driver.WaitTurn(ctx, queuedTurn)
+	if err != nil || terminal.Result != "FINAL_INFERENCE_RESULT" {
+		t.Fatalf("final-inference terminal = %+v, %v", terminal, err)
+	}
+	emitReplay(process, ref.NativeSessionID, queuedMessage)
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "QUEUED_MESSAGE_RESULT",
+		"session_id": ref.NativeSessionID,
+	})
+	waitReplayCount(t, driver, ref, 4)
+
 	idleMessage := `<cross-session-message from="parent">reply then finish</cross-session-message>`
 	if err := driver.SendMessage(ctx, ref, idleMessage); err != nil {
 		t.Fatal(err)
 	}
-	assertUserText(t, process.waitWritten(t, 2), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+idleMessage)
-	immediate, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "join the message run", PermissionMode: permissionmode.Default})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertUserText(t, process.waitWritten(t, 3), "join the message run")
-	process.emit(map[string]any{
-		"type": "result", "subtype": "success", "result": "ATTACHED_MESSAGE_RUN",
-		"session_id": ref.NativeSessionID,
-	})
-	terminal, err = driver.WaitTurn(ctx, immediate)
-	if err != nil || terminal.Result != "ATTACHED_MESSAGE_RUN" {
-		t.Fatalf("attached-message terminal = %+v, %v", terminal, err)
-	}
-
-	if err := driver.SendMessage(ctx, ref, idleMessage); err != nil {
-		t.Fatal(err)
-	}
 	assertUserText(t, process.waitWritten(t, 4), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+idleMessage)
-	process.emit(map[string]any{
-		"type": "result", "subtype": "success", "result": "UNTRACKED_MESSAGE_RESULT",
-		"session_id": ref.NativeSessionID,
-	})
-	waitSessionIdle(t, driver, ref)
-	after, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "tracked after message", PermissionMode: permissionmode.Default})
+	immediate, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "tracked after message", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertUserText(t, process.waitWritten(t, 5), "tracked after message")
 	process.emit(map[string]any{
+		"type": "user", "session_id": ref.NativeSessionID,
+		"message": map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "native-tool"}}},
+	})
+	emitReplay(process, ref.NativeSessionID, idleMessage)
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "UNTRACKED_MESSAGE_RESULT",
+		"session_id": ref.NativeSessionID,
+	})
+	emitReplay(process, ref.NativeSessionID, "tracked after message")
+	process.emit(map[string]any{
 		"type": "result", "subtype": "success", "result": "TRACKED_AFTER_MESSAGE",
 		"session_id": ref.NativeSessionID,
 	})
-	terminal, err = driver.WaitTurn(ctx, after)
+	terminal, err = driver.WaitTurn(ctx, immediate)
 	if err != nil || terminal.Result != "TRACKED_AFTER_MESSAGE" {
-		t.Fatalf("post-message terminal = %+v, %v", terminal, err)
+		t.Fatalf("immediate post-message terminal = %+v, %v", terminal, err)
+	}
+
+	after, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "healthy after queued result", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitReplay(process, ref.NativeSessionID, "healthy after queued result")
+	process.emit(map[string]any{"type": "result", "subtype": "success", "result": "STILL_HEALTHY", "session_id": ref.NativeSessionID})
+	terminal, err = driver.WaitTurn(ctx, after)
+	if err != nil || terminal.Result != "STILL_HEALTHY" {
+		t.Fatalf("healthy terminal = %+v, %v", terminal, err)
 	}
 }
 
-func TestLaneRejectsStrayProductTerminal(t *testing.T) {
+func TestLaneIgnoresResultWithoutAConsumedTrackedTurn(t *testing.T) {
 	process := newTestStreamProcess()
 	driver, _ := newTestDriver(t, process)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -332,37 +362,15 @@ func TestLaneRejectsStrayProductTerminal(t *testing.T) {
 	process.emit(map[string]any{
 		"type": "result", "subtype": "success", "result": "unowned", "session_id": ref.NativeSessionID,
 	})
-	deadline := time.Now().Add(time.Second)
-	for {
-		_, lookupErr := driver.session(ref)
-		if lookupErr != nil && strings.Contains(lookupErr.Error(), "without an active native run") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stray terminal error = %v", lookupErr)
-		}
-		time.Sleep(time.Millisecond)
+	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "after ignored result", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func waitSessionIdle(t *testing.T, driver *LaneDriver, ref productruntime.NativeSessionRef) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
-		session, err := driver.lookupSession(ref)
-		if err != nil {
-			t.Fatal(err)
-		}
-		session.mu.Lock()
-		active := session.active
-		session.mu.Unlock()
-		if active == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("Claude native run did not become idle")
-		}
-		time.Sleep(time.Millisecond)
+	emitReplay(process, ref.NativeSessionID, "after ignored result")
+	process.emit(map[string]any{"type": "result", "subtype": "success", "result": "owned", "session_id": ref.NativeSessionID})
+	terminal, err := driver.WaitTurn(ctx, turn)
+	if err != nil || terminal.Result != "owned" {
+		t.Fatalf("terminal after ignored result = %+v, %v", terminal, err)
 	}
 }
 
@@ -384,6 +392,7 @@ func TestLaneTurnSurfacesProductError(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUserText(t, process.waitWritten(t, 0), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+message)
+	emitReplay(process, ref.NativeSessionID, message)
 	process.emit(map[string]any{
 		"type": "result", "subtype": "error_max_turns", "is_error": true,
 		"result": "Claude product refused this exact turn", "session_id": ref.NativeSessionID,
@@ -407,7 +416,7 @@ func TestLaneResumeUsesExactNativeIDWithoutRenamingAndRejectsLifecycleArgs(t *te
 		t.Fatal(err)
 	}
 	want := []string{
-		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages",
 		"--resume", ref.NativeSessionID, "--dangerously-skip-permissions",
 		"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*",
 	}
@@ -423,6 +432,32 @@ func TestLaneResumeUsesExactNativeIDWithoutRenamingAndRejectsLifecycleArgs(t *te
 	if !errors.Is(err, productruntime.ErrUnsupportedPolicy) {
 		t.Fatalf("reserved argument error = %v", err)
 	}
+}
+
+func emitReplay(process *testStreamProcess, sessionID, text string) {
+	process.emit(map[string]any{
+		"type": "user", "isReplay": true, "session_id": sessionID,
+		"message": map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": text}}},
+	})
+}
+
+func waitReplayCount(t *testing.T, driver *LaneDriver, ref productruntime.NativeSessionRef, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		session, err := driver.lookupSession(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session.mu.Lock()
+		replays := session.replays
+		session.mu.Unlock()
+		if replays >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Claude replay count did not reach %d", want)
 }
 
 func assertUserText(t *testing.T, frame map[string]any, want string) {
