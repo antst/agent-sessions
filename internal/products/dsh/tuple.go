@@ -9,7 +9,7 @@ import (
 
 const (
 	ProductID     = "dsh"
-	PinnedVersion = "0.1.2-alpha.5"
+	PinnedVersion = "0.1.2-rc.1"
 	RequiredPNPM  = "pnpm"
 	PinnedPNPM    = "10.28.1"
 )

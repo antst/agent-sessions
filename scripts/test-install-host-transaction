@@ -111,7 +111,7 @@ cat >"$fake_bin/dsh" <<'EOF'
 #!/bin/sh
 set -eu
 printf '%s\n' "$*" >>"$TEST_DSH_RECORD"
-if [ "$1" = "--version" ]; then printf '%s\n' "${TEST_DSH_VERSION:-dsh 0.1.2-alpha.5}"; exit 0; fi
+if [ "$1" = "--version" ]; then printf '%s\n' "${TEST_DSH_VERSION:-dsh 0.1.2-rc.1}"; exit 0; fi
 [ "$1 $2 $3" = "plugin --profile agent-sessions" ] || exit 91
 case "$4" in
   list)
@@ -553,7 +553,7 @@ if [[ -e "$home/.config/opencode/plugins/agent-sessions.js" ]] ||
 fi
 
 : >"$test_root/dsh-record"
-if ! env "${common_env[@]}" TEST_DSH_VERSION='dsh 0.1.2-rc.1' "$root/scripts/install-host" \
+if ! env "${common_env[@]}" TEST_DSH_VERSION='dsh 0.1.2-alpha.5' "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
   >"$test_root/incompatible-dsh.out" 2>"$test_root/incompatible-dsh.err"; then
   cat "$test_root/incompatible-dsh.out" >&2
@@ -561,7 +561,7 @@ if ! env "${common_env[@]}" TEST_DSH_VERSION='dsh 0.1.2-rc.1' "$root/scripts/ins
   printf 'an incompatible optional DSH aborted the host install\n' >&2
   exit 1
 fi
-if ! grep -Fq 'Skipping DSH lane integration: DSH version is incompatible; require exact 0.1.2-alpha.5.' \
+if ! grep -Fq 'Skipping DSH lane integration: DSH version is incompatible; require exact 0.1.2-rc.1.' \
     "$test_root/incompatible-dsh.out" ||
    ! grep -Fxq -- '--version' "$test_root/dsh-record" ||
    grep -Fvxq -- '--version' "$test_root/dsh-record"; then

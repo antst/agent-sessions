@@ -12,8 +12,8 @@ dsh_profile_command() {
 validate_dsh_native_tuple() {
   local dsh_path=$1 pnpm_path=$2 dsh_version pnpm_version
   dsh_version=$("$dsh_path" --version)
-  if ! grep -Eq '(^|[[:space:]])0\.1\.2-alpha\.5($|[[:space:]])' <<<"$dsh_version"; then
-    printf 'DSH version is incompatible; require exact 0.1.2-alpha.5.\n' >&2
+  if ! grep -Eq '(^|[[:space:]])0\.1\.2-rc\.1($|[[:space:]])' <<<"$dsh_version"; then
+    printf 'DSH version is incompatible; require exact 0.1.2-rc.1.\n' >&2
     return 1
   fi
   pnpm_version=$("$pnpm_path" --version)

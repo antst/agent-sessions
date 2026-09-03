@@ -29,7 +29,7 @@ func (probe testCommandProbe) Output(_ context.Context, path string, _ []string,
 }
 
 func TestDoctorRequiresExactNativeV1Tuple(t *testing.T) {
-	doctor, err := NewDoctorProbe(DoctorConfig{Commands: testCommandProbe{cli: "dsh 0.1.2-alpha.5\n", pnpm: "10.28.1\n"}})
+	doctor, err := NewDoctorProbe(DoctorConfig{Commands: testCommandProbe{cli: "dsh 0.1.2-rc.1\n", pnpm: "10.28.1\n"}})
 	if err != nil {
 		t.Fatal(err)
 	}

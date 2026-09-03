@@ -14,7 +14,7 @@ and performs resume, prompting, interruption, and archive behavior through its o
 | Kilo Code | `kilo-peer` | `kilo-peer-lane` | exact 7.5.6 |
 | Pi | `pi-peer` | `pi-peer-lane` | exact 0.84.4 |
 | Oh My Pi | `omp-peer` | `omp-peer-lane` | exact 18.0.11 |
-| DeepSeek Harness | — | `dsh-peer-lane` | exact 0.1.2-alpha.5 |
+| DeepSeek Harness | — | `dsh-peer-lane` | exact 0.1.2-rc.1 |
 
 The installer detects available products independently. A missing product does not prevent the
 other integrations from being installed.
