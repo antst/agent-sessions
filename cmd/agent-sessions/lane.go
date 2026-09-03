@@ -908,10 +908,14 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
+	environment, err := laneWorkerEnvironment(runtime, os.Environ(), actor, driver.Capabilities())
+	if err != nil {
+		return c.failLaneDispatch(runtime, actor, err)
+	}
 	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
 		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: actor.nativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
-		Environment: laneWorkerEnvironment(os.Environ(), actor), ApprovalPolicy: actor.approvalPolicy,
+		Environment: environment, ApprovalPolicy: actor.approvalPolicy,
 		Sandbox: actor.sandbox, Capability: actor.capability,
 	})
 	if err != nil {
@@ -1208,19 +1212,40 @@ func cleanLaneEnvironment(input []string) []string {
 	return result
 }
 
-func laneWorkerEnvironment(input []string, actor *laneActor) []string {
+func laneWorkerEnvironment(runtime *daemonpkg.Runtime, input []string, actor *laneActor, capabilities productruntime.LaneCapabilitySet) ([]string, error) {
 	result := cleanLaneEnvironment(input)
-	groups, _ := json.Marshal(actor.groups)
+	groups := append([]string(nil), actor.groups...)
+	sessionID := actor.nativeID
+	if sessionID == "" && capabilities.CallerSuppliedSessionID {
+		sessionID = actor.id
+	}
+	if sessionID == "" {
+		primary, err := parentPrivateGroup(runtime, daemonpkg.ManagedAttachment{ID: actor.parentID, Groups: actor.groups})
+		if err != nil {
+			return nil, err
+		}
+		provisionalAnchor := primary + "/" + actor.id
+		filtered := groups[:0]
+		for _, group := range groups {
+			if group != provisionalAnchor {
+				filtered = append(filtered, group)
+			}
+		}
+		groups = filtered
+	}
+	encodedGroups, _ := json.Marshal(groups)
 	if executable, err := os.Executable(); err == nil {
 		result = append(result, "AGENT_SESSIONS_HOST_BINARY="+executable)
 	}
+	if sessionID != "" {
+		result = append(result, "AGENT_SESSIONS_SESSION_ID="+sessionID)
+	}
 	return append(result,
-		"AGENT_SESSIONS_SESSION_ID="+actor.id,
 		"AGENT_SESSIONS_PRODUCT="+actor.product,
 		"AGENT_SESSIONS_SESSION_NAME="+actor.name,
-		"AGENT_SESSIONS_GROUPS="+string(groups),
+		"AGENT_SESSIONS_GROUPS="+string(encodedGroups),
 		"AGENT_SESSIONS_LANE_CAPABILITY="+actor.capability,
-	)
+	), nil
 }
 
 func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product, target string, all bool) (*laneActor, error) {

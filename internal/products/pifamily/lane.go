@@ -66,8 +66,11 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 	return &LaneDriver{config: config, lanes: make(map[string]*laneSession)}, nil
 }
 
-func (*LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
-	return productruntime.LaneCapabilitySet{Steer: true, DurableResume: true}
+func (driver *LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
+	return productruntime.LaneCapabilitySet{
+		Steer: true, DurableResume: true,
+		CallerSuppliedSessionID: driver.config.Quirks.NativeSessionEnv,
+	}
 }
 
 func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {

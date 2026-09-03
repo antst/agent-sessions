@@ -73,7 +73,7 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 }
 
 func (*LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
-	return productruntime.LaneCapabilitySet{Steer: true, DurableResume: true}
+	return productruntime.LaneCapabilitySet{Steer: true, DurableResume: true, CallerSuppliedSessionID: true}
 }
 
 func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {

@@ -606,10 +606,13 @@ func TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup(t *testing.T)
 
 func TestLaneWorkerEnvironmentReplacesAmbientPeerAuthority(t *testing.T) {
 	actor := &laneActor{id: "lane-id", product: "qwen", capability: "lane-capability"}
-	got := laneWorkerEnvironment([]string{
+	got, err := laneWorkerEnvironment(nil, []string{
 		"PATH=/bin", "AGENT_SESSIONS_SESSION_ID=parent", "AGENT_SESSIONS_PRODUCT=codex",
 		"AGENT_SESSIONS_LANE_CAPABILITY=old-lane", "AGENT_SESSIONS_HOST_BINARY=/old/runtime",
-	}, actor)
+	}, actor, productruntime.LaneCapabilitySet{CallerSuppliedSessionID: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	joined := "\n" + strings.Join(got, "\n") + "\n"
 	for _, wanted := range []string{"\nPATH=/bin\n", "\nAGENT_SESSIONS_SESSION_ID=lane-id\n", "\nAGENT_SESSIONS_PRODUCT=qwen\n", "\nAGENT_SESSIONS_LANE_CAPABILITY=lane-capability\n"} {
 		if !strings.Contains(joined, wanted) {
@@ -620,6 +623,42 @@ func TestLaneWorkerEnvironmentReplacesAmbientPeerAuthority(t *testing.T) {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("lane environment retained %q: %q", forbidden, joined)
 		}
+	}
+}
+
+func TestFreshProductGeneratedLaneEnvironmentOmitsProvisionalIdentity(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	primary := "session:" + runtime.HostID() + "/parent"
+	actor := &laneActor{
+		id: "provisional", parentID: "parent", product: "opencode", name: "worker", capability: "lane-capability",
+		groups: []string{"project/child", primary, primary + "/provisional"},
+	}
+	got, err := laneWorkerEnvironment(runtime, []string{"PATH=/bin", "AGENT_SESSIONS_SESSION_ID=parent"}, actor, productruntime.LaneCapabilitySet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := "\n" + strings.Join(got, "\n") + "\n"
+	if strings.Contains(joined, "\nAGENT_SESSIONS_SESSION_ID=") || strings.Contains(joined, primary+"/provisional") {
+		t.Fatalf("fresh product-generated lane environment retained provisional identity: %q", joined)
+	}
+	if !strings.Contains(joined, "\nAGENT_SESSIONS_GROUPS=[\"project/child\",\""+primary+"\"]\n") {
+		t.Fatalf("fresh product-generated lane environment lost invocation groups: %q", joined)
+	}
+
+	actor.id, actor.nativeID = "ses_exact", "ses_exact"
+	actor.groups = []string{"project/child", primary, primary + "/ses_exact"}
+	got, err = laneWorkerEnvironment(runtime, nil, actor, productruntime.LaneCapabilitySet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined = "\n" + strings.Join(got, "\n") + "\n"
+	if !strings.Contains(joined, "\nAGENT_SESSIONS_SESSION_ID=ses_exact\n") || !strings.Contains(joined, primary+"/ses_exact") {
+		t.Fatalf("resume environment omitted exact native identity: %q", joined)
 	}
 }
 
