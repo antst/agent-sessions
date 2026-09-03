@@ -103,7 +103,7 @@ func baseToolDefinitions() []map[string]any {
 		{"name": "list_peers", "description": "List live local or federated Agent Sessions peers that share at least one group with this session.", "inputSchema": objectSchema(map[string]any{}, nil)},
 		{"name": "send_message", "description": "Send a plain-text message to one peer or an explicit multicast set visible through this session's groups. Use list_peers first if a target is ambiguous.", "inputSchema": objectSchema(map[string]any{
 			"target": map[string]any{"type": "string", "description": "Visible peer name, exact session ID, display name, or host/session ID."}, "targets": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "description": "Explicit multicast recipients. Use either target or targets."},
-			"message": map[string]any{"type": "string", "minLength": 1, "maxLength": 900000}, "summary": map[string]any{"type": "string", "description": "Optional short description of why the message is being sent."}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
+			"message": map[string]any{"type": "string", "minLength": 1, "maxLength": 900000}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
 		}, []string{"message", "session_id"})},
 		{"name": "broadcast", "description": "Broadcast a plain-text message to every other current member of one group this session belongs to.", "inputSchema": objectSchema(map[string]any{
 			"group": map[string]any{"type": "string", "minLength": 1}, "message": map[string]any{"type": "string", "minLength": 1, "maxLength": 900000}, "summary": map[string]any{"type": "string"}, "session_id": sessionProperty(""),

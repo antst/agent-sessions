@@ -30,6 +30,15 @@ type ControlServer struct {
 	wg        sync.WaitGroup
 }
 
+// ControlCall is one already-admitted request whose response may arrive after
+// a native process reports the fact needed to complete it.
+type ControlCall struct {
+	connection net.Conn
+	requestID  string
+	stopCancel func() bool
+	closeOnce  sync.Once
+}
+
 // ControlEndpoint returns the fixed canonical endpoint for one state root.
 func ControlEndpoint(stateRoot string) (string, error) {
 	endpoint, err := pathidentity.FuturePath(filepath.Join(stateRoot, "run", "daemon.sock"))
@@ -224,9 +233,76 @@ func (s *ControlServer) serveConnection(connection *net.UnixConn) {
 	// and real provider turns routinely exceed thirty seconds; the client
 	// context remains the authority for cancelling the call.
 	_ = connection.SetDeadline(time.Time{})
-	response := s.policy.handle(s.ctx, request)
+	requestCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	go func() {
+		var extra [1]byte
+		if _, err := connection.Read(extra[:]); err != nil {
+			cancel()
+		}
+	}()
+	response := s.policy.handle(requestCtx, request)
 	response.Generation = s.policy.generation
 	_ = writeControlFrame(connection, response)
+}
+
+// BeginControlCall writes one request before returning. Await completes that
+// same request; closing the caller or cancelling its context cancels the
+// server-side handler through connection EOF.
+func BeginControlCall(ctx context.Context, endpoint string, request ControlRequest) (*ControlCall, error) {
+	if ctx == nil {
+		return nil, errors.New("control call context is nil")
+	}
+	if err := socketpath.Validate(endpoint); err != nil {
+		return nil, err
+	}
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("dial daemon control endpoint: %w", err)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	if err := writeControlFrame(connection, request); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	call := &ControlCall{connection: connection, requestID: request.ID}
+	call.stopCancel = context.AfterFunc(ctx, func() { _ = call.Close() })
+	return call, nil
+}
+
+// Await reads the response to the request written by BeginControlCall.
+func (c *ControlCall) Await() (ControlResponse, error) {
+	if c == nil || c.connection == nil {
+		return ControlResponse{}, errors.New("control call is unavailable")
+	}
+	defer func() { _ = c.Close() }()
+	var response ControlResponse
+	if err := readControlFrame(c.connection, &response); err != nil {
+		return ControlResponse{}, err
+	}
+	if response.ID != c.requestID {
+		return ControlResponse{}, errors.New("daemon control response correlation mismatch")
+	}
+	return response, nil
+}
+
+// Close abandons the one in-flight call.
+func (c *ControlCall) Close() error {
+	if c == nil {
+		return nil
+	}
+	var err error
+	c.closeOnce.Do(func() {
+		if c.stopCancel != nil {
+			c.stopCancel()
+		}
+		if c.connection != nil {
+			err = c.connection.Close()
+		}
+	})
+	return err
 }
 
 // CallControl performs one bounded request against the running daemon.

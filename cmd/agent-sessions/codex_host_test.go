@@ -139,14 +139,18 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 
 	launch := launcher.CodexNativeLaunch{
 		Executable: "/bin/sh", Arguments: []string{"-c", "sleep 1"},
-		ThreadID: "00000000-0000-0000-0000-00000000c001", Name: "reviewer", Groups: []string{"project"},
+		Groups: []string{"project"}, Confirm: func() (launcher.CodexDaemonPrepareResult, error) {
+			return launcher.CodexDaemonPrepareResult{
+				ThreadID: "00000000-0000-0000-0000-00000000c001", Name: "reviewer",
+			}, nil
+		},
 	}
 	done := make(chan error, 1)
 	go func() { done <- runCodexNativePeer(context.Background(), launch) }()
 
 	select {
 	case report := <-joined:
-		if report.UUID != launch.ThreadID || report.Name != launch.Name || report.Product != "codex" || len(report.Groups) != 1 || report.Groups[0] != "project" {
+		if report.UUID != "00000000-0000-0000-0000-00000000c001" || report.Name != "reviewer" || report.Product != "codex" || len(report.Groups) != 1 || report.Groups[0] != "project" {
 			t.Fatalf("live report = %+v", report)
 		}
 		params, _ := json.Marshal(map[string]any{
@@ -161,7 +165,7 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 	}
 	select {
 	case report := <-delivered:
-		if report.UUID != launch.ThreadID {
+		if report.UUID != "00000000-0000-0000-0000-00000000c001" {
 			t.Fatalf("delivery targeted %q", report.UUID)
 		}
 	case <-time.After(time.Second):
@@ -172,7 +176,7 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 	}
 	select {
 	case report := <-left:
-		if report.UUID != launch.ThreadID {
+		if report.UUID != "00000000-0000-0000-0000-00000000c001" {
 			t.Fatalf("departed report = %+v", report)
 		}
 	case <-time.After(time.Second):
@@ -275,16 +279,5 @@ func TestCodexDetachReleasesNativeSubscriptionBeforeLocalBookkeeping(t *testing.
 	}
 	if _, ok := coordinator.pending[threadID]; ok || coordinator.monitored[threadID] {
 		t.Fatal("Codex detach retained process-local bookkeeping")
-	}
-}
-
-func TestCodexResumeUsesInvocationCwdWhenRecordedWorkspaceMoved(t *testing.T) {
-	current := t.TempDir()
-	removed := filepath.Join(t.TempDir(), "removed-workspace")
-	request := launcher.CodexDaemonPrepareRequest{Cwd: current, CwdExplicit: false}
-	thread := bridge.CodexNativeThread{Cwd: removed}
-
-	if got := codexResumeCwd(request, thread); got != current {
-		t.Fatalf("resume cwd = %q, want invocation cwd %q", got, current)
 	}
 }

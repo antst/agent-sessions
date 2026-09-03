@@ -153,8 +153,6 @@ func TestCodexNativeListsEveryProductMatchAndResolvesOnlyExactID(t *testing.T) {
 		t.Fatal(err)
 	}
 	exactID := "00000000-0000-0000-0000-00000000c011"
-	firstID := "00000000-0000-0000-0000-00000000c012"
-	secondID := "00000000-0000-0000-0000-00000000c013"
 	socket := filepath.Join(home, "app-server.sock")
 	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
 		method := stringValue(request["method"])
@@ -168,15 +166,6 @@ func TestCodexNativeListsEveryProductMatchAndResolvesOnlyExactID(t *testing.T) {
 			}
 			return map[string]any{"thread": map[string]any{
 				"id": exactID, "name": "exact-id", "cwd": home, "source": "appServer",
-			}}, nil
-		case "thread/list":
-			archived, _ := params["archived"].(bool)
-			if archived {
-				return map[string]any{"data": []any{}}, nil
-			}
-			return map[string]any{"data": []any{
-				map[string]any{"id": firstID, "name": "shared-name", "cwd": home, "source": "appServer"},
-				map[string]any{"id": secondID, "name": "shared-name", "cwd": home, "source": "appServer"},
 			}}, nil
 		default:
 			return nil, fmt.Errorf("unexpected method %s", method)
@@ -196,13 +185,6 @@ func TestCodexNativeListsEveryProductMatchAndResolvesOnlyExactID(t *testing.T) {
 	}
 	if _, err := native.ResolveThread(context.Background(), "shared-name"); err == nil || !strings.Contains(err.Error(), "exact thread UUID") {
 		t.Fatalf("daemon accepted name selection: %v", err)
-	}
-	listed, err := native.ListPeerThreads(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(listed) != 2 || listed[0].ID != firstID || listed[1].ID != secondID {
-		t.Fatalf("product thread list = %+v", listed)
 	}
 }
 
@@ -492,6 +474,83 @@ func TestCodexNativeLazilyStartsSupportedAppServerAndLeavesItRunning(t *testing.
 	_ = connection.Close()
 	if fake == nil || strings.TrimSpace(socket) == "" {
 		t.Fatal("lazy App Server fixture was not created")
+	}
+}
+
+func TestCodexNativeReopensOnceOnOperationAfterAppServerReplacement(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(home, "app-server.sock")
+	threadID := "00000000-0000-0000-0000-00000000c044"
+	operationEntered := make(chan struct{})
+	releaseOldOperation := make(chan struct{})
+	first := startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/read":
+			close(operationEntered)
+			<-releaseOldOperation
+			return map[string]any{"thread": map[string]any{"id": threadID}}, nil
+		default:
+			return nil, errors.New("unexpected old App Server operation")
+		}
+	})
+	starts := 0
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+		Start: func(context.Context, string, []string, []string) error {
+			starts++
+			return errors.New("replacement was already running")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	oldClient := native.clientSnapshot()
+	failed := make(chan error, 1)
+	go func() {
+		_, resolveErr := native.ResolveThread(context.Background(), threadID)
+		failed <- resolveErr
+	}()
+	select {
+	case <-operationEntered:
+	case <-time.After(time.Second):
+		t.Fatal("operation did not reach old App Server")
+	}
+	oldClient.close()
+	first.close()
+	close(releaseOldOperation)
+	if err := <-failed; err == nil {
+		t.Fatal("operation crossing App Server replacement was replayed or reported successful")
+	}
+	select {
+	case <-oldClient.done:
+	case <-time.After(time.Second):
+		t.Fatal("old App Server connection did not close")
+	}
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/read":
+			return map[string]any{"thread": map[string]any{
+				"id": threadID, "name": "replacement", "cwd": home, "source": "appServer",
+			}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected replacement method %s", stringValue(request["method"]))
+		}
+	})
+	thread, err := native.ResolveThread(context.Background(), threadID)
+	if err != nil || thread.ID != threadID || thread.Name != "replacement" {
+		t.Fatalf("replacement operation = %+v, %v", thread, err)
+	}
+	if starts != 0 {
+		t.Fatalf("running replacement started %d extra App Servers", starts)
 	}
 }
 

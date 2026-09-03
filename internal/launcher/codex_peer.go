@@ -2,6 +2,8 @@ package launcher
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +16,10 @@ import (
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
+
+// CodexPendingLaunchEnv is inherited by the exact native SessionStart hook
+// while Codex resolves a resume name or UUID itself.
+const CodexPendingLaunchEnv = "AGENT_SESSIONS_CODEX_PENDING_LAUNCH"
 
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 
@@ -29,11 +35,8 @@ const (
 type codexPlan struct {
 	mode              codexMode
 	peerName          string
-	peerNameSource    string
 	requestedCwd      string
-	cwdExplicit       bool
 	requestedYolo     bool
-	yoloSpecified     bool
 	peerContext       peerLaunchContext
 	originalArgs      []string
 	interactiveArgs   []string
@@ -45,44 +48,31 @@ type codexPlan struct {
 // already-running user daemon. The launcher remains the terminal-owning
 // process and the daemon remains the sole Agent Sessions authority.
 type CodexDaemonPrepareRequest struct {
-	Mode                   string
-	Target                 string
-	Cwd                    string
-	CwdExplicit            bool
-	Name                   string
-	NameSource             string
-	ApprovalPolicy         string
-	Sandbox                string
-	PermissionSpecified    bool
-	Owner                  procinfo.Identity
-	Groups                 []string
-	GroupsSpecified        bool
-	ParentSession          string
-	ParentSpecified        bool
-	InheritParentGroups    bool
-	InheritGroupsSpecified bool
+	Mode           string
+	Cwd            string
+	Name           string
+	ApprovalPolicy string
+	Owner          procinfo.Identity
+	Groups         []string
+	PendingToken   string
 }
 
-// CodexDaemonPrepareResult is either the exact native handoff or the ephemeral
-// product rows needed before an interactive name choice.
+// CodexDaemonPrepareResult is the exact native handoff.
 type CodexDaemonPrepareResult struct {
-	ThreadID   string
-	Name       string
-	Cwd        string
-	Candidates []CodexResumeCandidate
+	ThreadID string
+	Name     string
+	Cwd      string
 }
 
-// CodexResumeCandidate is one product-owned root-thread row offered to the
-// terminal-owning wrapper when a name needs disambiguation.
-type CodexResumeCandidate struct {
-	ID        string
-	Name      string
-	Cwd       string
-	UpdatedAt int64
+// CodexPendingLaunch is one request written before native Codex starts and
+// completed by the SessionStart hook in the product-selected thread.
+type CodexPendingLaunch interface {
+	Await() (CodexDaemonPrepareResult, error)
+	Close() error
 }
 
-// CodexDaemonPrepare submits one parsed Codex launch intent.
-type CodexDaemonPrepare func(context.Context, CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error)
+// CodexDaemonBeginLaunch begins one pending native-created or native-selected attachment.
+type CodexDaemonBeginLaunch func(context.Context, CodexDaemonPrepareRequest) (CodexPendingLaunch, error)
 
 // CodexNativeLaunch is the product-issued thread and native process handoff.
 // The caller stays alive as the process parent so its one presence connection
@@ -95,17 +85,21 @@ type CodexNativeLaunch struct {
 	Name        string
 	Cwd         string
 	Groups      []string
+	Confirm     func() (CodexDaemonPrepareResult, error)
 }
 
 // CodexNativeRunner starts the native TUI and holds its live presence stream.
 type CodexNativeRunner func(context.Context, CodexNativeLaunch) error
 
-// RunCodexPeerWithDaemon preserves the baseline parser and native exec path
-// while replacing the legacy runtime/supervisor transaction with stateless
-// product-list selection followed by one exact daemon preparation. It never
-// starts or stops Agent Sessions authority.
-func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDaemonPrepare, run CodexNativeRunner) error {
-	if ctx == nil || prepare == nil || run == nil {
+// RunCodexPeerWithDaemon lets Codex create or select its own thread, then
+// attaches the exact SessionStart identity reported by the native hook.
+func RunCodexPeerWithDaemon(
+	ctx context.Context,
+	args []string,
+	beginLaunch CodexDaemonBeginLaunch,
+	run CodexNativeRunner,
+) error {
+	if ctx == nil || beginLaunch == nil || run == nil {
 		return errors.New("codex daemon launch coordinator is unavailable")
 	}
 	cwd, err := os.Getwd()
@@ -116,9 +110,7 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDae
 	if err != nil {
 		return err
 	}
-	plan, err := projectCodexLaunchPlan(
-		ctx, args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"), codex, prepare, terminalProductSessionChooser,
-	)
+	plan, err := projectCodexLaunchPlan(args, cwd, os.Getenv("CLAUDE_PEER_SESSION_NAME"))
 	if err != nil {
 		return err
 	}
@@ -129,52 +121,52 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDae
 	if err != nil {
 		return fmt.Errorf("capture Codex launcher identity: %w", err)
 	}
-	approval, sandbox := "", ""
+	approval := ""
 	if plan.requestedYolo {
-		approval, sandbox = "never", "danger-full-access"
+		approval = "never"
 	}
-	result, err := prepare(ctx, CodexDaemonPrepareRequest{
-		Mode: string(plan.mode), Target: plan.selectionTarget, Cwd: plan.requestedCwd,
-		CwdExplicit: plan.cwdExplicit, Name: plan.peerName, NameSource: plan.peerNameSource,
-		ApprovalPolicy: approval, Sandbox: sandbox, Owner: owner,
-		PermissionSpecified: plan.yoloSpecified,
-		Groups:              append([]string(nil), plan.peerContext.groups...),
-		GroupsSpecified:     plan.peerContext.groupsSpecified,
-		ParentSession:       plan.peerContext.parentSession, ParentSpecified: plan.peerContext.parentSpecified,
-		InheritParentGroups:    plan.peerContext.inheritParentGroups,
-		InheritGroupsSpecified: plan.peerContext.inheritGroupsSpecified,
-	})
+	request := CodexDaemonPrepareRequest{
+		Mode: string(plan.mode), Cwd: plan.requestedCwd, Name: plan.peerName,
+		ApprovalPolicy: approval, Owner: owner, Groups: append([]string(nil), plan.peerContext.groups...),
+	}
+	request.Mode = "pending-" + string(plan.mode)
+	request.PendingToken, err = randomPendingLaunchToken()
 	if err != nil {
 		return err
 	}
-	if !threadIDPattern.MatchString(result.ThreadID) || strings.TrimSpace(result.Cwd) == "" {
-		return errors.New("daemon returned an invalid Codex native handoff")
+	pending, err := beginLaunch(ctx, request)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = pending.Close() }()
 	if _, present := os.LookupEnv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT"); !present {
 		_ = os.Setenv("CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT", "1")
 	}
 	resetTerminalEnhancement()
-	launchArgs := []string{"--remote", "unix://", "resume", result.ThreadID}
-	if !plan.cwdExplicit {
-		launchArgs = append(launchArgs, "-C", result.Cwd)
+	remote, err := codexRemoteAddress()
+	if err != nil {
+		return err
+	}
+	launchArgs := []string{"--remote", remote}
+	if plan.mode == modeResume {
+		launchArgs = append(launchArgs, "resume")
+		if plan.selectionTarget != "" {
+			launchArgs = append(launchArgs, plan.selectionTarget)
+		}
 	}
 	launchArgs = append(launchArgs, plan.interactiveArgs...)
-	environment := envutil.Set(os.Environ(), peerSessionIDEnv, result.ThreadID)
-	environment = envutil.Set(environment, peerProductEnv, "codex")
-	environment = liveReportEnvironment(environment, result.Name, plan.peerContext.groups)
+	environment := envutil.Set(os.Environ(), peerProductEnv, "codex")
+	environment = envutil.Set(environment, CodexPendingLaunchEnv, request.PendingToken)
+	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	return run(ctx, CodexNativeLaunch{
 		Executable: codex, Arguments: launchArgs, Environment: environment,
-		ThreadID: result.ThreadID, Name: result.Name, Cwd: result.Cwd,
-		Groups: append([]string(nil), plan.peerContext.groups...),
+		Cwd: plan.requestedCwd, Groups: append([]string(nil), plan.peerContext.groups...), Confirm: pending.Await,
 	})
 }
 
 func projectCodexLaunchPlan(
-	ctx context.Context,
 	args []string,
-	cwd, environmentName, executable string,
-	prepare CodexDaemonPrepare,
-	choose productSessionChooser,
+	cwd, environmentName string,
 ) (codexPlan, error) {
 	descriptor, ok := productcatalog.ByID("codex")
 	if !ok {
@@ -184,40 +176,39 @@ func projectCodexLaunchPlan(
 	if err != nil {
 		return codexPlan{}, err
 	}
-	plan, err := parseCodexPeerArgs(projected, cwd, environmentName)
-	if err != nil || plan.mode != modeResume {
-		return plan, err
+	return parseCodexPeerArgs(projected, cwd, environmentName)
+}
+
+func randomPendingLaunchToken() (string, error) {
+	body := make([]byte, 32)
+	if _, err := rand.Read(body); err != nil {
+		return "", fmt.Errorf("mint Codex pending launch token: %w", err)
 	}
-	listProductRows := func(_, _ string) ([]productSession, error) {
-		result, listErr := prepare(ctx, CodexDaemonPrepareRequest{Mode: "list"})
-		if listErr != nil {
-			return nil, listErr
-		}
-		rows := make([]productSession, 0, len(result.Candidates))
-		for _, candidate := range result.Candidates {
-			rows = append(rows, productSession{
-				ID: candidate.ID, Title: candidate.Name, Directory: candidate.Cwd, Updated: candidate.UpdatedAt,
-			})
-		}
-		return rows, nil
-	}
-	plan.selectionTarget, err = resolveNativeArgumentHandlerValue(
-		descriptor, productcatalog.NativeArgumentPeer, executable, plan.requestedCwd, "resume", plan.selectionTarget,
-		map[string]productArgumentHandler{"codex-thread-list": {
-			isNativeSelector: func(selector string) bool { return threadIDPattern.MatchString(selector) },
-			list:             listProductRows,
-		}},
-		choose,
-	)
-	return plan, err
+	return hex.EncodeToString(body), nil
 }
 
 func codexExecutable() (string, error) {
 	return productExecutable("CODEX_PEER_CODEX_BIN", "codex")
 }
 
+func codexRemoteAddress() (string, error) {
+	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve Codex home: %w", err)
+		}
+		home = filepath.Join(userHome, ".codex")
+	}
+	socket, err := pathidentity.FuturePath(filepath.Join(home, "app-server-control", "app-server-control.sock"))
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex App Server socket: %w", err)
+	}
+	return "unix://" + socket, nil
+}
+
 func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, error) {
-	plan := codexPlan{mode: modeFresh, peerNameSource: "launch", requestedCwd: cwd}
+	plan := codexPlan{mode: modeFresh, requestedCwd: cwd}
 	contextArgs, peerContext, err := scanPeerWrapperOptions("codex", args)
 	if err != nil {
 		return codexPlan{}, err
@@ -241,11 +232,11 @@ func parseCodexPeerArgs(args []string, cwd, environmentName string) (codexPlan, 
 		plan.informationalPass, plan.mode = true, modePassthrough
 		return plan, nil
 	}
-	requestedCwd, cwdExplicit, err := inspectWorkingDirectory(codexArgs, cwd)
+	requestedCwd, _, err := inspectWorkingDirectory(codexArgs, cwd)
 	if err != nil {
 		return codexPlan{}, err
 	}
-	plan.requestedCwd, plan.cwdExplicit = requestedCwd, cwdExplicit
+	plan.requestedCwd = requestedCwd
 	mode, commandIndex, err := classifyCodexMode(codexArgs)
 	if err != nil {
 		return codexPlan{}, err
@@ -404,7 +395,7 @@ func applyEnvironmentName(plan *codexPlan, environmentName string) error {
 	if strings.TrimSpace(environmentName) == "" {
 		return usageError("CLAUDE_PEER_SESSION_NAME requires a non-empty value")
 	}
-	plan.peerName, plan.peerNameSource = environmentName, "explicit"
+	plan.peerName = environmentName
 	return nil
 }
 
@@ -418,7 +409,9 @@ func configureInteractiveArgs(plan *codexPlan, forwarded []string, commandIndex 
 		return err
 	}
 	if targetIndex < 0 {
-		return usageError("resume requires an explicit UUID or session name; picker and --last are unsupported")
+		plan.interactiveArgs = append(plan.interactiveArgs[:0], forwarded[:commandIndex]...)
+		plan.interactiveArgs = append(plan.interactiveArgs, forwarded[commandIndex+1:]...)
+		return nil
 	}
 	plan.selectionTarget = forwarded[targetIndex]
 	plan.interactiveArgs = plan.interactiveArgs[:0]
@@ -439,7 +432,6 @@ func validateInteractiveOptions(plan *codexPlan, forwarded []string) error {
 		}
 		if isYolo(argument) {
 			plan.requestedYolo = true
-			plan.yoloSpecified = true
 		}
 		if codexOptionConsumesNext(argument) {
 			index++
@@ -449,7 +441,6 @@ func validateInteractiveOptions(plan *codexPlan, forwarded []string) error {
 		if plan.requestedYolo {
 			return usageError("--no-yolo conflicts with a Codex yolo option")
 		}
-		plan.yoloSpecified = true
 	}
 	return nil
 }
@@ -465,9 +456,6 @@ func explicitResumeTarget(args []string, commandIndex int) (int, error) {
 				return index + 1, nil
 			}
 			return -1, nil
-		}
-		if argument == "--last" {
-			return -1, usageError("resume requires an explicit UUID or session name; picker and --last are unsupported")
 		}
 		if strings.HasPrefix(argument, "-") {
 			if codexOptionConsumesNext(argument) {

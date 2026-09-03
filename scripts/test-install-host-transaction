@@ -310,6 +310,8 @@ if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
   find "$state_root" -maxdepth 3 -print >&2
   exit 1
 fi
+ln -s "$prefix/libexec/agent-sessions/host/current/bin/agent-sessions" "$prefix/bin/peer"
+ln -s /bin/true "$prefix/bin/user-tool"
 env "${common_env[@]}" "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >/dev/null
 candidate_hash=$(sha256sum "$candidate" | awk '{print $1}')
@@ -318,6 +320,10 @@ if [[ "$installed_hash" != "$candidate_hash" ]] ||
    find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 \
      -name '.previous-*' -print -quit | grep -q .; then
   printf 'successful host update did not remove its immutable prior release\n' >&2
+  exit 1
+fi
+if [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] || [[ ! -L "$prefix/bin/user-tool" ]]; then
+  printf 'successful host update did not prune only stale managed aliases\n' >&2
   exit 1
 fi
 printf 'host install transaction rollback: PASS\n'

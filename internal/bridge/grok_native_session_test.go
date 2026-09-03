@@ -14,13 +14,14 @@ func TestGrokNativeLeaderBootstrapOwnsTheOneLeaderArgv(t *testing.T) {
 	root := t.TempDir()
 	bootstrap, err := NewGrokNativeLeaderBootstrap(
 		"/usr/bin/grok", root, filepath.Join(root, "leader.sock"), []string{"PATH=/bin"}, io.Discard,
+		"default", []string{"--allow", "MCPTool(agent_sessions__*)"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	command := bootstrap.Command()
 	want := []string{
-		"/usr/bin/grok", "--permission-mode", "default", "agent", "leader", "--leader-socket",
+		"/usr/bin/grok", "--permission-mode", "default", "--allow", "MCPTool(agent_sessions__*)", "agent", "leader", "--leader-socket",
 		filepath.Join(root, "leader.sock"), "--relay-on-demand", "--no-auto-update",
 	}
 	if !reflect.DeepEqual(command.Args, want) || command.Dir != root || !reflect.DeepEqual(command.Env, []string{"PATH=/bin"}) {
@@ -35,6 +36,24 @@ func TestGrokNativeLeaderBootstrapOwnsTheOneLeaderArgv(t *testing.T) {
 		t.Fatal("leader diagnostics were not shared")
 	}
 	_ = os.Remove(filepath.Join(root, "leader.sock"))
+}
+
+func TestGrokNativeLeaderReceivesInvocationYoloInsteadOfDefaultPolicy(t *testing.T) {
+	root := t.TempDir()
+	bootstrap, err := NewGrokNativeLeaderBootstrap(
+		"/usr/bin/grok", root, filepath.Join(root, "leader.sock"), []string{"PATH=/bin"}, io.Discard,
+		"bypassPermissions", []string{"--allow", "MCPTool(agent_sessions__*)"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"/usr/bin/grok", "--permission-mode", "bypassPermissions", "agent", "leader", "--leader-socket",
+		filepath.Join(root, "leader.sock"), "--relay-on-demand", "--no-auto-update",
+	}
+	if got := bootstrap.Command().Args; !reflect.DeepEqual(got, want) {
+		t.Fatalf("yolo leader argv = %q, want %q", got, want)
+	}
 }
 
 func TestGrokNativeSessionTitleUsesGlobalNoLeaderRoster(t *testing.T) {

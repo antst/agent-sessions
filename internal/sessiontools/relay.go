@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
@@ -48,6 +47,7 @@ type relayResponse struct {
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 func NewMCPRelay(config MCPRelayConfig) (*MCPRelay, error) {
@@ -196,16 +196,14 @@ func (r *MCPRelay) forward(ctx context.Context, request relayRequest) (json.RawM
 	id := string(request.ID)
 	response, err := r.config.Call(ctx, id, request.Method, append(json.RawMessage(nil), request.Params...))
 	if err != nil {
-		return marshalRelayResult(inactiveResult()), nil
+		return nil, &rpcError{Code: -32006, Message: err.Error(), Data: map[string]any{
+			"detail": err.Error(), "agent_sessions_bug_report": BugReportGuidance,
+		}}
 	}
 	if len(response) == 0 || !json.Valid(response) {
 		return nil, &rpcError{Code: -32603, Message: "Agent Sessions daemon returned an invalid response"}
 	}
 	return append(json.RawMessage(nil), response...), nil
-}
-
-func inactiveResult() map[string]any {
-	return map[string]any{"content": []map[string]any{{"type": "text", "text": daemon.CanonicalInactiveMessage}}, "isError": true}
 }
 
 func writeRelayResponse(writer io.Writer, id, result json.RawMessage, failure *rpcError) error {

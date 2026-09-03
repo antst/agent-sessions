@@ -18,10 +18,10 @@ func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *test
 	}{
 		{name: "codex fallback", want: "codex"},
 		{name: "codex explicit environment", product: "codex", want: "codex"},
-		{name: "claude", product: "claude", want: "codex"},
-		{name: "qwen", product: "qwen", want: "codex"},
-		{name: "grok product", product: "grok", want: "codex"},
-		{name: "OMP native extension", product: "omp", want: "codex"},
+		{name: "claude", product: "claude", want: "claude"},
+		{name: "qwen", product: "qwen", want: "qwen"},
+		{name: "grok product", product: "grok", want: "grok"},
+		{name: "OMP native extension", product: "omp", want: "omp"},
 		{name: "grok private launch", grokSession: "session", want: "grok"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -74,14 +74,14 @@ func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) 
 	if err != nil || got != "claude" {
 		t.Fatalf("explicit connector product = %q, %v; want claude", got, err)
 	}
-	if connectorClaimsLivePresence(got, getenv) {
+	if connectorClaimsLivePresence("claude", got, getenv) {
 		t.Fatal("stale Claude connector argument would replace OMP native presence")
 	}
 	if !connectorDeclinesForeignManagedProduct("claude", got, getenv) {
 		t.Fatal("foreign explicit Claude connector would serve a second OMP tool surface")
 	}
 	automatic, err := resolveConnectorProduct("auto", getenv)
-	if err != nil || automatic != "codex" || connectorClaimsLivePresence(automatic, getenv) {
+	if err != nil || automatic != "omp" || connectorClaimsLivePresence("auto", automatic, getenv) {
 		t.Fatalf("automatic discovered connector = %q, %v; must stay inactive", automatic, err)
 	}
 	if connectorDeclinesForeignManagedProduct("auto", automatic, getenv) {
@@ -98,13 +98,51 @@ func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) 
 	}
 }
 
+func TestOnlyExplicitClaudePluginConnectorClaimsPresence(t *testing.T) {
+	getenv := func(name string) string {
+		if name == "AGENT_SESSIONS_PRODUCT" {
+			return "claude"
+		}
+		return ""
+	}
+	if !connectorClaimsLivePresence("claude", "claude", getenv) {
+		t.Fatal("explicit Claude plugin connector did not claim its one presence stream")
+	}
+	automatic, err := resolveConnectorProduct("auto", getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if automatic != "claude" || connectorClaimsLivePresence("auto", automatic, getenv) {
+		t.Fatal("automatic project connector opened a second presence stream")
+	}
+	arguments := map[string]any{"session_id": "model-supplied-stale-value"}
+	if source := connectorToolSource(automatic, "native-claude-session", nil, arguments); source != "native-claude-session" {
+		t.Fatalf("automatic Claude connector source = %q", source)
+	}
+}
+
+func TestLiveSendProjectsOnlyTheDaemonMessageContract(t *testing.T) {
+	projected := liveMessageSendArguments(map[string]any{
+		"target": "architect", "message": "hello", "summary": "stale schema field", "session_id": "source",
+	})
+	if len(projected) != 2 || projected["target"] != "architect" || projected["message"] != "hello" {
+		t.Fatalf("live message projection = %#v", projected)
+	}
+	if _, ok := projected["summary"]; ok {
+		t.Fatal("summary reached message.send")
+	}
+	if _, ok := projected["session_id"]; ok {
+		t.Fatal("session_id reached message.send")
+	}
+}
+
 func TestProjectDiscoveredConnectorNeverReplacesNativePresence(t *testing.T) {
-	for _, product := range []string{"codex", "grok", "qwen", "opencode", "kilo", "pi", "omp", "dsh"} {
+	for _, product := range []string{"codex", "qwen", "opencode", "kilo", "pi", "omp", "dsh"} {
 		if connectorOwnsLivePresence(product) {
 			t.Fatalf("%s project connector would replace its native presence stream", product)
 		}
 	}
-	for _, product := range []string{"claude"} {
+	for _, product := range []string{"claude", "grok"} {
 		if !connectorOwnsLivePresence(product) {
 			t.Fatalf("%s connector lost its only live presence stream", product)
 		}

@@ -144,7 +144,7 @@ func TestDefaultWorkflowUnavailableDoesNotCreateStateOrStartDaemon(t *testing.T)
 	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/echo")
 
 	err := run(context.Background(), "agent-sessions", []string{"peer", "codex"}, &bytes.Buffer{}, defaultCommandRunners())
-	if err == nil || !strings.Contains(err.Error(), "daemon is unavailable") {
+	if err == nil || !strings.Contains(err.Error(), "dial daemon control endpoint") {
 		t.Fatalf("peer without daemon error = %v", err)
 	}
 	if _, statErr := os.Lstat(stateRoot); !errors.Is(statErr, os.ErrNotExist) {

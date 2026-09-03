@@ -120,7 +120,6 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	again, _ := ByID("codex")
 	wantCodexRules := []NativeArgumentRule{
 		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "resume"),
-		nativeArgumentHandler(NativeArgumentPeer, "resume", "codex-thread-list"),
 		nativeArgumentValueTranslation(NativeArgumentPeer, "--effort", "model_reasoning_effort=", "-c"),
 		nativeArgumentValueTranslation(NativeArgumentPeer, "--reasoning-effort", "model_reasoning_effort=", "-c"),
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
@@ -134,7 +133,7 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 		t.Fatalf("Claude launch policy = %#v", claude)
 	}
 	grok, _ := ByID("grok")
-	if len(grok.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(grok.NativeYoloArgs, []string{"--yolo"}) {
+	if !reflect.DeepEqual(grok.NativeToolGrantArgs, []string{"--allow", "MCPTool(agent_sessions__*)"}) || !reflect.DeepEqual(grok.NativeYoloArgs, []string{"--yolo"}) {
 		t.Fatalf("Grok launch policy = %#v", grok)
 	}
 	qwen, _ := ByID("qwen")
@@ -165,7 +164,6 @@ func TestCatalogOwnsOnlyNativeProvenArgumentRules(t *testing.T) {
 	want := map[string][]NativeArgumentRule{
 		"codex": {
 			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "resume"),
-			nativeArgumentHandler(NativeArgumentPeer, "resume", "codex-thread-list"),
 			nativeArgumentValueTranslation(NativeArgumentPeer, "--effort", "model_reasoning_effort=", "-c"),
 			nativeArgumentValueTranslation(NativeArgumentPeer, "--reasoning-effort", "model_reasoning_effort=", "-c"),
 			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
@@ -194,8 +192,6 @@ func TestCatalogOwnsOnlyNativeProvenArgumentRules(t *testing.T) {
 		},
 		"opencode": {
 			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
-			nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
-			nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
 			nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
 			nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
 			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
@@ -203,23 +199,20 @@ func TestCatalogOwnsOnlyNativeProvenArgumentRules(t *testing.T) {
 		},
 		"kilo": {
 			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
-			nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
-			nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
 			nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
 			nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
 			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
 			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 		},
 		"pi": {
-			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
-			nativeArgumentHandler(NativeArgumentPeer, "--session", "pi-session-list"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 			nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
 			nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
 			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),
 			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--thinking"),
 		},
 		"omp": {
-			nativeArgumentHandler(NativeArgumentPeer, "--resume", "omp-session-list"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 			nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
 			nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
 			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),

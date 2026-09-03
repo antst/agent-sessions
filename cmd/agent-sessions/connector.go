@@ -51,8 +51,22 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if reported && product == connectorProductClaude && report.Name == "" {
 		report.Name = claudeActiveSessionName(ctx, report.UUID)
 	}
+	if reported && product == connectorProductGrok && report.Name != "" {
+		observer, observerErr := openGrokConnectorObserver(ctx, report)
+		if observerErr != nil {
+			return fmt.Errorf("open Grok connector for native rename: %w", observerErr)
+		}
+		renameErr := observer.Rename(ctx, report.Name)
+		observer.Close()
+		if renameErr != nil {
+			return fmt.Errorf("rename Grok session: %w", renameErr)
+		}
+	}
+	if reported && product == connectorProductGrok && report.Name == "" {
+		report.Name = report.UUID
+	}
 	var live *liveSessionClient
-	if reported && connectorClaimsLivePresence(product, os.Getenv) {
+	if reported && connectorClaimsLivePresence(requestedProduct, product, os.Getenv) {
 		live = startLiveSessionClient(ctx, defaultPresenceEndpoint(), report,
 			func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, report, method, params)
@@ -108,6 +122,7 @@ func callLiveConnectorTool(
 		arguments = map[string]any{}
 	case "send_message":
 		operation = "message.send"
+		arguments = liveMessageSendArguments(arguments)
 	case "lane":
 		command := strings.TrimSpace(mapString(arguments, "command"))
 		if command == "collect" || !containsString([]string{"start", "run", "resume", "steer", "wait", "status", "interrupt", "archive"}, command) {
@@ -261,21 +276,36 @@ const (
 var connectorNativeAdapters = map[string]connectorNativeAdapter{
 	connectorProductCodex:  deliverCodexConnectorMessage,
 	connectorProductClaude: deliverClaudeConnectorMessage,
+	connectorProductGrok:   deliverGrokConnectorMessage,
 }
 
 // Products with a native presence adapter already own the session's one live
 // stream. A project-discovered MCP connector may expose the same tool name,
 // but it must never open a second connection and replace the product report.
 func connectorOwnsLivePresence(product string) bool {
-	return product == connectorProductClaude
+	return product == connectorProductClaude || product == connectorProductGrok
 }
 
-func connectorClaimsLivePresence(product string, getenv func(string) string) bool {
+func connectorClaimsLivePresence(requestedProduct, product string, getenv func(string) string) bool {
+	if requestedProduct == "auto" {
+		return false
+	}
 	managedProduct := strings.TrimSpace(getenv("AGENT_SESSIONS_PRODUCT"))
 	if managedProduct != "" && managedProduct != product {
 		return false
 	}
 	return connectorOwnsLivePresence(product)
+}
+
+func liveMessageSendArguments(arguments map[string]any) map[string]any {
+	projected := map[string]any{"message": mapString(arguments, "message")}
+	if target := mapString(arguments, "target"); target != "" {
+		projected["target"] = target
+	}
+	if targets := mapStringSlice(arguments, "targets"); len(targets) > 0 {
+		projected["targets"] = targets
+	}
+	return projected
 }
 
 func deliverCodexConnectorMessage(ctx context.Context, report liveSessionReport, _ string, body string) error {
@@ -288,6 +318,30 @@ func deliverCodexConnectorMessage(ctx context.Context, report liveSessionReport,
 	defer native.Close()
 	_, err = native.SendMessage(ctx, report.UUID, body)
 	return err
+}
+
+func deliverGrokConnectorMessage(ctx context.Context, report liveSessionReport, messageID, body string) error {
+	observer, err := openGrokConnectorObserver(ctx, report)
+	if err != nil {
+		return err
+	}
+	defer observer.Close()
+	return observer.Interject(ctx, messageID, body)
+}
+
+func openGrokConnectorObserver(ctx context.Context, report liveSessionReport) (*bridge.GrokNativeObserver, error) {
+	executable, err := launcher.ResolveProductExecutable(connectorProductGrok)
+	if err != nil {
+		return nil, err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("read Grok connector working directory: %w", err)
+	}
+	return bridge.OpenGrokNativeObserver(
+		ctx, executable, cwd, strings.TrimSpace(os.Getenv(launcher.GrokLeaderSocketEnv)),
+		report.UUID, os.Environ(), os.Stderr,
+	)
 }
 
 func deliverClaudeConnectorMessage(_ context.Context, _ liveSessionReport, messageID, body string) error {
@@ -397,10 +451,9 @@ func claudeActiveSessionNameFromJSON(payload []byte, sessionID string) string {
 	return name
 }
 
-// resolveConnectorProduct keeps the repository-root MCP manifest useful for
-// products whose Go connector owns their live adapter. Products with a native
-// extension still report themselves on their own stream, so their discovered
-// MCP subprocess stays a harmless Codex-family relay with no live connection.
+// resolveConnectorProduct keeps an automatically discovered connector on the
+// managed product's own tools and identity projection. Automatic connectors
+// remain tools-only; they never compete with the product's presence owner.
 func resolveConnectorProduct(requested string, getenv func(string) string) (string, error) {
 	if requested != "auto" {
 		if _, ok := productcatalog.ByID(requested); !ok {
@@ -413,7 +466,7 @@ func resolveConnectorProduct(requested string, getenv func(string) string) (stri
 		if _, ok := productcatalog.ByID(product); !ok {
 			return "", fmt.Errorf("automatic connector product %q is unsupported", product)
 		}
-		return connectorProductCodex, nil
+		return product, nil
 	}
 	if strings.TrimSpace(getenv("AGENT_SESSIONS_GROK_SESSION_ID")) != "" {
 		product = "grok"

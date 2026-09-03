@@ -10,9 +10,44 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/antst/agent-sessions/internal/pathidentity"
 )
+
+func TestBlockingControlCallDiesWithItsCaller(t *testing.T) {
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	server := startControlTestServer(t, 1, func(ctx context.Context, request ControlRequest) (json.RawMessage, error) {
+		if request.Operation != "attachment.codex.pending" {
+			t.Fatalf("operation = %q", request.Operation)
+		}
+		close(entered)
+		<-ctx.Done()
+		close(exited)
+		return nil, ctx.Err()
+	})
+	call, err := BeginControlCall(context.Background(), server.Endpoint(), ControlRequest{
+		ID: "pending", Role: RoleLauncher, Operation: "attachment.codex.pending", Generation: 1,
+		IdempotencyKey: "pending", Payload: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pending call did not reach daemon")
+	}
+	if err := call.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("caller EOF did not cancel pending daemon work")
+	}
+}
 
 func TestControlEndpointIsFixedPrivateAndIndependentOfTMPDIR(t *testing.T) {
 	root := shortDaemonTestRoot(t)

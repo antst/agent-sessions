@@ -545,6 +545,23 @@ install_integrations "$release"
 install_service "$release"
 wait_for_host_service
 
+# The release inventory is the complete public alias set. Remove only stale
+# symbolic aliases that still select this managed host image; unrelated user
+# commands and non-symbolic paths are never touched.
+desired_aliases=" agent-sessions $("$source_root/scripts/release-inventory" host-aliases | tr '\n' ' ') "
+for alias_path in "$prefix/bin/"*; do
+  [[ -L "$alias_path" ]] || continue
+  alias=${alias_path##*/}
+  case "$desired_aliases" in *" $alias "*) continue ;; esac
+  target=$(readlink -- "$alias_path")
+  if [[ "$target" != /* ]]; then target="$(dirname -- "$alias_path")/$target"; fi
+  target_directory=$(cd -P -- "$(dirname -- "$target")" 2>/dev/null && pwd) || continue
+  if [[ "$target_directory/$(basename -- "$target")" == "$release/bin/agent-sessions" ]]; then
+    rm -f -- "$alias_path"
+    printf 'Removed stale Agent Sessions alias %s.\n' "$alias_path"
+  fi
+done
+
 if [[ -n "$backup" && -d "$backup" ]]; then
   remove_managed_tree "$backup" "$releases"
 fi

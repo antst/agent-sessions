@@ -9,6 +9,22 @@ import (
 	"testing"
 )
 
+type codexPendingLaunchFixture struct {
+	result  CodexDaemonPrepareResult
+	awaited bool
+	closed  bool
+}
+
+func (fixture *codexPendingLaunchFixture) Await() (CodexDaemonPrepareResult, error) {
+	fixture.awaited = true
+	return fixture.result, nil
+}
+
+func (fixture *codexPendingLaunchFixture) Close() error {
+	fixture.closed = true
+	return nil
+}
+
 func TestCodexPeerNativeArgumentParity(t *testing.T) {
 	root := t.TempDir()
 	realDirectory := filepath.Join(root, "real")
@@ -46,41 +62,78 @@ func TestCodexPeerNativeArgumentParity(t *testing.T) {
 	}
 }
 
-func TestCodexDescriptorHandlerChoosesAmongEveryProductMatch(t *testing.T) {
+func TestCodexResumeSelectorPassesToProductVerbatim(t *testing.T) {
 	root := t.TempDir()
-	first := "00000000-0000-0000-0000-00000000c011"
-	second := "00000000-0000-0000-0000-00000000c012"
-	listCalls := 0
-	prepare := func(_ context.Context, request CodexDaemonPrepareRequest) (CodexDaemonPrepareResult, error) {
-		listCalls++
-		if request.Mode != "list" {
-			t.Fatalf("selection request mode = %q", request.Mode)
-		}
-		return CodexDaemonPrepareResult{Candidates: []CodexResumeCandidate{
-			{ID: first, Name: "shared", Cwd: "/first", UpdatedAt: 1},
-			{ID: second, Name: "shared", Cwd: "/second", UpdatedAt: 2},
-		}}, nil
-	}
-	choose := func(product, selector string, matches []productSession) (string, error) {
-		if product != "codex" || selector != "shared" || len(matches) != 2 {
-			t.Fatalf("chooser input = product %q selector %q matches %+v", product, selector, matches)
-		}
-		return matches[1].ID, nil
-	}
-	plan, err := projectCodexLaunchPlan(context.Background(), []string{"--resume", "shared", "-g", "current"}, root, "", "/native/codex", prepare, choose)
+	plan, err := projectCodexLaunchPlan([]string{"--resume", "shared", "-g", "current"}, root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.mode != modeResume || plan.selectionTarget != second || listCalls != 1 || !reflect.DeepEqual(plan.peerContext.groups, []string{"current"}) {
-		t.Fatalf("projected plan = %+v, list calls %d", plan, listCalls)
+	if plan.mode != modeResume || plan.selectionTarget != "shared" || !reflect.DeepEqual(plan.peerContext.groups, []string{"current"}) {
+		t.Fatalf("projected plan = %+v", plan)
 	}
+	plan, err = projectCodexLaunchPlan([]string{"--resume"}, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.mode != modeResume || plan.selectionTarget != "" {
+		t.Fatalf("bare native resume projection = %+v", plan)
+	}
+}
 
-	plan, err = projectCodexLaunchPlan(context.Background(), []string{"resume", first}, root, "", "/native/codex", prepare, choose)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.selectionTarget != first || listCalls != 1 {
-		t.Fatalf("exact UUID projection = %+v, list calls %d", plan, listCalls)
+func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/true")
+	remote := "unix://" + filepath.Join(home, "app-server-control", "app-server-control.sock")
+	for _, test := range []struct {
+		name       string
+		arguments  []string
+		mode       string
+		wantNative []string
+	}{
+		{name: "fresh", arguments: []string{"-n", "native-name", "-g", "project"}, mode: "pending-fresh", wantNative: []string{"--remote", remote}},
+		{name: "resume name", arguments: []string{"--resume", "duplicate native name", "-g", "project"}, mode: "pending-resume", wantNative: []string{"--remote", remote, "resume", "duplicate native name"}},
+		{name: "resume uuid", arguments: []string{"--resume", "00000000-0000-0000-0000-00000000c011"}, mode: "pending-resume", wantNative: []string{"--remote", remote, "resume", "00000000-0000-0000-0000-00000000c011"}},
+		{name: "bare resume", arguments: []string{"--resume"}, mode: "pending-resume", wantNative: []string{"--remote", remote, "resume"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sequence := []string{}
+			var request CodexDaemonPrepareRequest
+			pending := &codexPendingLaunchFixture{result: CodexDaemonPrepareResult{
+				ThreadID: "00000000-0000-0000-0000-00000000c012", Name: "selected", Cwd: home,
+			}}
+			err := RunCodexPeerWithDaemon(context.Background(), test.arguments,
+				func(_ context.Context, input CodexDaemonPrepareRequest) (CodexPendingLaunch, error) {
+					sequence = append(sequence, "pending")
+					request = input
+					return pending, nil
+				}, func(_ context.Context, launch CodexNativeLaunch) error {
+					sequence = append(sequence, "native")
+					if !reflect.DeepEqual(launch.Arguments, test.wantNative) {
+						t.Fatalf("native argv = %q, want %q", launch.Arguments, test.wantNative)
+					}
+					if value := environmentValue(launch.Environment, CodexPendingLaunchEnv); value != request.PendingToken || value == "" {
+						t.Fatalf("pending token env = %q, request = %q", value, request.PendingToken)
+					}
+					if value := environmentValue(launch.Environment, peerSessionIDEnv); value != "" {
+						t.Fatalf("provisional session id reached native launch: %q", value)
+					}
+					result, confirmErr := launch.Confirm()
+					if confirmErr != nil || result.ThreadID != pending.result.ThreadID {
+						t.Fatalf("native confirmation = %+v, %v", result, confirmErr)
+					}
+					return nil
+				})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.Mode != test.mode || len(request.PendingToken) != 64 || !reflect.DeepEqual(sequence, []string{"pending", "native"}) {
+				t.Fatalf("pending request = %+v, sequence = %v", request, sequence)
+			}
+			if !pending.awaited || !pending.closed {
+				t.Fatalf("pending lifecycle awaited=%v closed=%v", pending.awaited, pending.closed)
+			}
+		})
 	}
 }
 
@@ -144,7 +197,6 @@ func TestCodexPeerForwardsNativeOptionsAndRejectsUnattestedOperations(t *testing
 		}
 	}
 	for _, args := range [][]string{
-		{"resume", "--last"},
 		{"resume", "thread", "--remote", "tcp://host"},
 		{"resume", "thread", "--remote-auth-token-env=TOKEN"},
 	} {

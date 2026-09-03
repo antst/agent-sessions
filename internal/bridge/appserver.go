@@ -110,7 +110,7 @@ func dialAppServer(ctx context.Context, socketPath string) (*appServerClient, er
 	var initialized map[string]any
 	if err := client.request(initCtx, "initialize", map[string]any{
 		"clientInfo": map[string]any{
-			"name": "claude_code_peer_native", "title": "Claude Code Peer Bridge", "version": "0.3.0",
+			"name": "claude_code_peer_native", "title": "Claude Code Peer Bridge", "version": "0.4.0",
 		},
 		"capabilities": map[string]any{"experimentalApi": true},
 	}, &initialized); err != nil {

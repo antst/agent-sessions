@@ -56,10 +56,9 @@ only that product.
 
 ## Resume cannot find a name
 
-Name selection follows [Products](PRODUCTS.md). Name-capable products receive the selector natively.
-ID-only products are resolved from their product session list. With duplicate names, use the native
-picker or choose the exact native ID; without a terminal the wrapper prints the product-provided
-candidates and exits.
+Peer selection belongs entirely to the product. Agent Sessions passes the optional resume selector
+verbatim and never lists or title-matches product sessions. Use an exact native ID, a selector the
+product supports, or its bare native picker; any rejection is the product's own diagnostic.
 
 An offline lane appears under `list --all` only if the caller shares a recorded group and the
 product confirms the exact ID. A stale candidate row intentionally produces no result.

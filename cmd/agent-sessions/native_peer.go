@@ -29,15 +29,15 @@ type launcherHeldExit struct {
 	err   error
 }
 
-// runLauncherHeldPeer is the one topology for product sessions whose terminal
-// launcher proves liveness. The two product inputs are the children to own and
-// the product-native identity confirmation performed after they start.
+// runLauncherHeldPeer owns the exact product children for one terminal launch.
+// A non-nil confirmation adds launcher-held presence; nil leaves presence to
+// the product-launched connector while retaining the same child supervision.
 func runLauncherHeldPeer(
 	ctx context.Context,
 	children []launcherHeldChild,
 	confirm func(context.Context) (launcherHeldIdentity, error),
 ) error {
-	if ctx == nil || confirm == nil || len(children) == 0 {
+	if ctx == nil || len(children) == 0 {
 		return errors.New("launcher-held peer dependencies are incomplete")
 	}
 	primary := -1
@@ -92,45 +92,47 @@ func runLauncherHeldPeer(
 		}
 	}
 
-	confirmed := make(chan struct {
-		identity launcherHeldIdentity
-		err      error
-	}, 1)
-	go func() {
-		identity, err := confirm(runCtx)
-		confirmed <- struct {
+	if confirm != nil {
+		confirmed := make(chan struct {
 			identity launcherHeldIdentity
 			err      error
-		}{identity: identity, err: err}
-	}()
-	var identity launcherHeldIdentity
-	select {
-	case result := <-confirmed:
-		if result.err != nil {
-			return result.err
+		}, 1)
+		go func() {
+			identity, err := confirm(runCtx)
+			confirmed <- struct {
+				identity launcherHeldIdentity
+				err      error
+			}{identity: identity, err: err}
+		}()
+		var identity launcherHeldIdentity
+		select {
+		case result := <-confirmed:
+			if result.err != nil {
+				return result.err
+			}
+			identity = result.identity
+		case exited := <-exits:
+			return launcherHeldChildError(children[exited.index].role, exited.err)
+		case <-runCtx.Done():
+			return runCtx.Err()
 		}
-		identity = result.identity
-	case exited := <-exits:
-		return launcherHeldChildError(children[exited.index].role, exited.err)
-	case <-runCtx.Done():
-		return runCtx.Err()
-	}
-	if !validLiveSessionReport(identity.report) {
-		return errors.New("product returned an invalid live session identity")
-	}
+		if !validLiveSessionReport(identity.report) {
+			return errors.New("product returned an invalid live session identity")
+		}
 
-	client := startLiveSessionClient(runCtx, defaultPresenceEndpoint(), identity.report, identity.call)
-	if identity.watch != nil {
-		identity.watch(runCtx, client, identity.report)
-	}
-	defer func() {
-		cancel()
-		client.mu.Lock()
-		if client.current != nil {
-			_ = client.current.connection.Close()
+		client := startLiveSessionClient(runCtx, defaultPresenceEndpoint(), identity.report, identity.call)
+		if identity.watch != nil {
+			identity.watch(runCtx, client, identity.report)
 		}
-		client.mu.Unlock()
-	}()
+		defer func() {
+			cancel()
+			client.mu.Lock()
+			if client.current != nil {
+				_ = client.current.connection.Close()
+			}
+			client.mu.Unlock()
+		}()
+	}
 	for {
 		select {
 		case exited := <-exits:

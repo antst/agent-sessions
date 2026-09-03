@@ -6,36 +6,6 @@ import (
 	"strings"
 )
 
-var errGrokSelectionPending = errors.New("native Grok resume selection is not resident yet")
-
-func grokSelectedResidentSession(response map[string]any) (string, grokRosterState, error) {
-	result, _ := response["result"].(map[string]any)
-	sessions, ok := result["sessions"].([]any)
-	if !ok {
-		return "", grokRosterState{}, errors.New("native Grok resume roster has no sessions")
-	}
-	selected := ""
-	for _, raw := range sessions {
-		row, _ := raw.(map[string]any)
-		id := stringValue(row["sessionId"])
-		resident, residentOK := row["resident"].(bool)
-		activity := stringValue(row["activity"])
-		if !validSessionID(id) || !residentOK || !resident ||
-			activity == "completed" || activity == "dormant" || activity == "dead" {
-			continue
-		}
-		if selected != "" && selected != id {
-			return "", grokRosterState{}, errors.New("private Grok leader reported multiple resident resume selections")
-		}
-		selected = id
-	}
-	if selected == "" {
-		return "", grokRosterState{}, errGrokSelectionPending
-	}
-	state, err := grokRosterStateFromResponse(response, selected)
-	return selected, state, err
-}
-
 func grokRosterStateFromResponse(response map[string]any, sessionID string) (grokRosterState, error) {
 	result, _ := response["result"].(map[string]any)
 	sessions, ok := result["sessions"].([]any)

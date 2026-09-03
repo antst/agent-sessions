@@ -155,7 +155,6 @@ var descriptors = [...]Descriptor{
 		"--yolo",
 	),
 		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "resume"),
-		nativeArgumentHandler(NativeArgumentPeer, "resume", "codex-thread-list"),
 		nativeArgumentValueTranslation(NativeArgumentPeer, "--effort", "model_reasoning_effort=", "-c"),
 		nativeArgumentValueTranslation(NativeArgumentPeer, "--reasoning-effort", "model_reasoning_effort=", "-c"),
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
@@ -174,9 +173,10 @@ var descriptors = [...]Descriptor{
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
 		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 	),
-	withNativeArgumentRules(withNativeYolo(
+	withNativeArgumentRules(withNativeLaunchPolicy(
 		baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
-		"--yolo",
+		[]string{"--allow", "MCPTool(agent_sessions__*)"},
+		[]string{"--yolo"},
 	),
 		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
@@ -199,8 +199,6 @@ var descriptors = [...]Descriptor{
 		[]string{"-m", "-s"},
 	), "--yolo"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
-		nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
-		nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
 		nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
@@ -215,8 +213,6 @@ var descriptors = [...]Descriptor{
 		[]string{"-m", "-s"},
 	), "--yolo"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
-		nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
-		nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
 		nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
@@ -315,8 +311,7 @@ func piDescriptor() Descriptor {
 	descriptor.NativeToolGrantArgs = []string{"--approve"}
 	descriptor.NativeYoloArgs = []string{"--approve"}
 	descriptor.NativeArgumentRules = []NativeArgumentRule{
-		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
-		nativeArgumentHandler(NativeArgumentPeer, "--session", "pi-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),
@@ -336,7 +331,7 @@ func ompDescriptor() Descriptor {
 	)
 	descriptor.NativeYoloArgs = []string{"--yolo"}
 	descriptor.NativeArgumentRules = []NativeArgumentRule{
-		nativeArgumentHandler(NativeArgumentPeer, "--resume", "omp-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),

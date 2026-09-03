@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	grokSessionIDEnv    = "AGENT_SESSIONS_GROK_SESSION_ID"
-	grokLeaderSocketEnv = "AGENT_SESSIONS_GROK_LEADER_SOCKET"
+	grokSessionIDEnv = "AGENT_SESSIONS_GROK_SESSION_ID"
+	// GrokLeaderSocketEnv is inherited by Grok's product-launched MCP connector,
+	// which owns the session's one presence and inbound-message stream.
+	GrokLeaderSocketEnv = "AGENT_SESSIONS_GROK_LEADER_SOCKET"
 	grokProbeTimeout    = 5 * time.Second
 )
 
@@ -57,17 +59,17 @@ type grokPlan struct {
 	cwdExplicit         bool
 	sessionID           string
 	resumeTarget        string
-	lateBoundResume     bool
 	permissionMode      string
 	permissionSpecified bool
+	nativeToolGrant     []string
 	peerContext         peerLaunchContext
 	originalArgs        []string
 	interactiveArgs     []string
 	informationalPass   bool
 }
 
-// GrokNativeLaunch is one launcher-owned private leader and TUI. The caller
-// holds their lifetime and the session's one live presence stream together.
+// GrokNativeLaunch is one launcher-owned private leader and TUI. Grok's
+// product-launched MCP connector owns the session's one live presence stream.
 type GrokNativeLaunch struct {
 	Executable        string
 	Cwd               string
@@ -75,14 +77,12 @@ type GrokNativeLaunch struct {
 	LeaderEnvironment []string
 	TUIArguments      []string
 	TUIEnvironment    []string
-	SessionID         string
-	RequestedName     string
-	LateBoundResume   bool
 	Groups            []string
+	PermissionMode    string
+	NativeToolGrant   []string
 }
 
-// GrokNativeRunner owns the private leader, TUI, and product-confirmed live
-// report for exactly one interactive launch.
+// GrokNativeRunner owns the private leader and TUI for one interactive launch.
 type GrokNativeRunner func(context.Context, GrokNativeLaunch) error
 
 // RunGrokPeer preserves Grok's native parser and exact resume selector while
@@ -116,13 +116,13 @@ func RunGrokPeer(ctx context.Context, args []string, run GrokNativeRunner) error
 	managed := grokInteractiveArguments(plan, leaderSocket)
 	environment := grokPeerEnvironment(os.Environ(), plan.sessionID)
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
-	environment = envutil.Set(environment, grokLeaderSocketEnv, leaderSocket)
+	environment = envutil.Set(environment, GrokLeaderSocketEnv, leaderSocket)
 	leaderEnvironment := envutil.Set(os.Environ(), peerProductEnv, "grok")
 	return run(ctx, GrokNativeLaunch{
 		Executable: grok, Cwd: plan.requestedCwd, LeaderSocket: leaderSocket,
 		LeaderEnvironment: leaderEnvironment, TUIArguments: managed, TUIEnvironment: environment,
-		SessionID: plan.sessionID, RequestedName: plan.peerName, LateBoundResume: plan.lateBoundResume,
-		Groups: append([]string(nil), plan.peerContext.groups...),
+		Groups:         append([]string(nil), plan.peerContext.groups...),
+		PermissionMode: plan.permissionMode, NativeToolGrant: append([]string(nil), plan.nativeToolGrant...),
 	})
 }
 
@@ -142,6 +142,7 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 		return grokPlan{}, err
 	}
 	plan.peerContext = peerContext
+	plan.nativeToolGrant = append([]string(nil), descriptor.NativeToolGrantArgs...)
 	mode, commandIndex, informational, err := classifyGrokMode(contextArgs)
 	if err != nil {
 		return grokPlan{}, err
@@ -162,7 +163,9 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 		}
 		return plan, nil
 	}
-	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, peerContext.forceNoYolo)
+	tuiPolicy := descriptor
+	tuiPolicy.NativeToolGrantArgs = nil
+	forwarded, err = projectNativeLaunchPolicy(tuiPolicy, forwarded, peerContext.forceNoYolo)
 	if err != nil {
 		return grokPlan{}, err
 	}
@@ -184,15 +187,6 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 	if resume {
 		plan.mode = grokModeResume
 		plan.resumeTarget = sessionID
-		if threadIDPattern.MatchString(sessionID) {
-			plan.sessionID = sessionID
-		} else {
-			plan.sessionID, err = newGrokSessionID()
-			if err != nil {
-				return grokPlan{}, fmt.Errorf("generate Grok attachment ID: %w", err)
-			}
-			plan.lateBoundResume = true
-		}
 		return plan, nil
 	}
 	if sessionID == "" {
@@ -684,13 +678,9 @@ func grokInteractiveArguments(plan grokPlan, leaderSocket string) []string {
 	if plan.mode == grokModeFresh {
 		managed = append(managed, "--session-id", plan.sessionID)
 	} else {
-		resumeTarget := plan.sessionID
-		if plan.lateBoundResume {
-			resumeTarget = plan.resumeTarget
-		}
 		managed = append(managed, "--resume")
-		if resumeTarget != "" {
-			managed = append(managed, resumeTarget)
+		if plan.resumeTarget != "" {
+			managed = append(managed, plan.resumeTarget)
 		}
 	}
 	return append(managed, plan.interactiveArgs...)
@@ -725,9 +715,9 @@ func grokPeerEnvironment(environment []string, sessionID string) []string {
 			updated = append(updated, entry)
 		}
 	}
-	updated = append(updated,
-		grokSessionIDEnv+"="+sessionID,
-		peerSessionIDEnv+"="+sessionID, peerProductEnv+"=grok",
-	)
+	if sessionID != "" {
+		updated = append(updated, grokSessionIDEnv+"="+sessionID, peerSessionIDEnv+"="+sessionID)
+	}
+	updated = append(updated, peerProductEnv+"=grok")
 	return updated
 }

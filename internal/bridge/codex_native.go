@@ -89,9 +89,12 @@ type codexLaneTurnKey struct {
 type CodexNative struct {
 	config        CodexNativeConfig
 	paths         nativePaths
+	connectionMu  sync.Mutex
 	client        *appServerClient
+	eventCtx      context.Context
 	cancel        context.CancelFunc
-	eventDone     chan struct{}
+	eventWG       sync.WaitGroup
+	closed        bool
 	mu            sync.Mutex
 	activeTurns   map[string]string
 	turnWaiters   map[codexLaneTurnKey]chan struct{}
@@ -127,39 +130,18 @@ func OpenCodexNative(ctx context.Context, config CodexNativeConfig) (*CodexNativ
 		return nil, fmt.Errorf("resolve Codex App Server socket: %w", err)
 	}
 
-	client, dialErr := dialCodexNative(ctx, config.SocketPath, 500*time.Millisecond)
-	if dialErr != nil {
-		if !errors.Is(dialErr, os.ErrNotExist) && !errors.Is(dialErr, syscall.ECONNREFUSED) {
-			return nil, fmt.Errorf("connect Codex App Server: %w", dialErr)
-		}
-		start := config.Start
-		if start == nil {
-			start = startCodexAppServer
-		}
-		if err := start(ctx, binary, []string{"app-server", "daemon", "start"}, config.Environment); err != nil {
-			return nil, fmt.Errorf("start Codex App Server: %w", err)
-		}
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			client, dialErr = dialCodexNative(ctx, config.SocketPath, 2*time.Second)
-			if dialErr == nil {
-				break
-			}
-			if ctx.Err() != nil || time.Now().After(deadline) {
-				return nil, fmt.Errorf("connect lazily started Codex App Server: %w", dialErr)
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
 	eventCtx, cancel := context.WithCancel(ctx)
 	paths := resolveNativePaths()
 	paths.codexHome = home
 	native := &CodexNative{
-		config: config, paths: paths, client: client, cancel: cancel,
-		eventDone: make(chan struct{}), activeTurns: map[string]string{},
+		config: config, paths: paths, eventCtx: eventCtx, cancel: cancel,
+		activeTurns: map[string]string{},
 		turnWaiters: map[codexLaneTurnKey]chan struct{}{}, loadedThreads: map[string]bool{},
 	}
-	go native.observe(eventCtx)
+	if _, err := native.clientForOperation(ctx); err != nil {
+		cancel()
+		return nil, err
+	}
 	return native, nil
 }
 
@@ -169,14 +151,38 @@ func (native *CodexNative) Close() {
 	if native == nil {
 		return
 	}
+	native.connectionMu.Lock()
+	if native.closed {
+		native.connectionMu.Unlock()
+		return
+	}
+	native.closed = true
+	client := native.client
+	native.connectionMu.Unlock()
 	native.cancel()
-	native.client.close()
-	<-native.eventDone
+	if client != nil {
+		client.close()
+	}
+	native.eventWG.Wait()
 }
 
 // AppServerEvidence returns the exact peer identity corroborated at socket dial.
 func (native *CodexNative) AppServerEvidence() (int, string, string) {
-	return native.client.peerPID, native.client.peerProcStart, native.config.SocketPath
+	client := native.clientSnapshot()
+	if client == nil {
+		return 0, "", native.config.SocketPath
+	}
+	return client.peerPID, client.peerProcStart, native.config.SocketPath
+}
+
+// RefreshAppServerEvidence opens one replacement connection when the previous
+// App Server connection has closed. It never replays the operation that saw EOF.
+func (native *CodexNative) RefreshAppServerEvidence(ctx context.Context) (int, string, string, error) {
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return 0, "", native.config.SocketPath, err
+	}
+	return client.peerPID, client.peerProcStart, native.config.SocketPath, nil
 }
 
 // ReloadMCPServers asks the already-running App Server to replace its MCP
@@ -185,7 +191,7 @@ func (native *CodexNative) AppServerEvidence() (int, string, string) {
 // connector process would otherwise preserve the previous Agent Sessions image
 // indefinitely. This supported App Server operation refreshes only MCPs.
 func (native *CodexNative) ReloadMCPServers(ctx context.Context) error {
-	if native == nil || native.client == nil {
+	if native == nil {
 		return errors.New("codex App Server client is unavailable")
 	}
 	// Plugin installation is external to the long-lived App Server. Refresh its
@@ -203,6 +209,10 @@ func (native *CodexNative) ReloadMCPServers(ctx context.Context) error {
 // validation, native naming, and delete-on-failed-preparation transaction.
 func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRequest) (result CodexNativeThread, resultErr error) {
 	cwd, err := canonicalLaunchDirectory(request.Cwd)
+	if err != nil {
+		return CodexNativeThread{}, err
+	}
+	client, err := native.clientForOperation(ctx)
 	if err != nil {
 		return CodexNativeThread{}, err
 	}
@@ -226,7 +236,7 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 	created := validSessionID(threadID)
 	defer func() {
 		if resultErr != nil && created {
-			resultErr = errors.Join(resultErr, deletePreparedThread(native.client, threadID))
+			resultErr = errors.Join(resultErr, deletePreparedThread(client, threadID))
 		}
 	}()
 	if !created {
@@ -255,7 +265,7 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 	// without it a remote TUI can
 	// reject the otherwise valid UUID as a paginated lineage with no source
 	// rollout.
-	resumed, effectiveApproval, err := resumePreparedThread(native.client, threadID, map[string]any{
+	resumed, effectiveApproval, err := resumePreparedThread(client, threadID, map[string]any{
 		"cwd": cwd, "approvalPolicy": request.ApprovalPolicy, "sandbox": request.Sandbox,
 	})
 	if err != nil {
@@ -269,8 +279,8 @@ func (native *CodexNative) StartThread(ctx context.Context, request CodexStartRe
 	return exportedCodexThread(*resumed, effectiveApproval), nil
 }
 
-// ResolveThread asks Codex for one exact UUID. Name selection happens in the
-// terminal-owning launcher because only that process can present ambiguity.
+// ResolveThread asks the App Server for the exact UUID that native Codex has
+// already created or selected and reported through its SessionStart hook.
 func (native *CodexNative) ResolveThread(ctx context.Context, target string) (CodexNativeThread, error) {
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
@@ -278,7 +288,11 @@ func (native *CodexNative) ResolveThread(ctx context.Context, target string) (Co
 	if !exactLaunchThreadIDRE.MatchString(target) {
 		return CodexNativeThread{}, fmt.Errorf("codex resume requires an exact thread UUID, got %q", target)
 	}
-	thread, err := readExactPreparedThread(native.client, target)
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return CodexNativeThread{}, err
+	}
+	thread, err := readExactPreparedThread(client, target)
 	if err != nil {
 		return CodexNativeThread{}, err
 	}
@@ -288,26 +302,27 @@ func (native *CodexNative) ResolveThread(ctx context.Context, target string) (Co
 	return exportedCodexThread(thread, ""), nil
 }
 
-// ListPeerThreads projects Codex's own resumable root-thread list for the
-// launcher's name chooser. It keeps no index and makes no selection.
-func (native *CodexNative) ListPeerThreads(ctx context.Context) ([]CodexNativeThread, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	archived, err := listThreadMembership(native.client, true)
+// NameThread writes the fresh peer's product-owned title after Codex reports
+// the thread it created. Resume never renames an existing product session.
+func (native *CodexNative) NameThread(ctx context.Context, threadID, requested, cwd string) (CodexNativeThread, error) {
+	thread, err := native.ResolveThread(ctx, threadID)
 	if err != nil {
-		return nil, err
+		return CodexNativeThread{}, err
 	}
-	threads := make([]CodexNativeThread, 0)
-	seen := map[string]bool{}
-	err = visitPreparedThreads(native.client, false, func(thread appThread) {
-		if archived[thread.ID] || seen[thread.ID] || validatePreparedRootThread(thread) != nil {
-			return
-		}
-		seen[thread.ID] = true
-		threads = append(threads, exportedCodexThread(thread, ""))
-	})
-	return threads, err
+	name := strings.TrimSpace(requested)
+	if name == "" {
+		name = defaultPeerName(cwd, threadID)
+	} else {
+		name = sanitizeName(name)
+	}
+	if err := native.request(ctx, 30*time.Second, "thread/name/set", map[string]any{
+		"threadId": threadID, "name": name,
+	}, nil); err != nil {
+		return CodexNativeThread{}, err
+	}
+	thread.Name = name
+	thread.Cwd = cwd
+	return thread, nil
 }
 
 // ResumeThread performs the same exclude-turns native subscription used by
@@ -316,7 +331,11 @@ func (native *CodexNative) ResumeThread(ctx context.Context, threadID, cwd, appr
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
 	}
-	thread, effectiveApproval, err := resumePreparedThread(native.client, threadID, map[string]any{
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return CodexNativeThread{}, err
+	}
+	thread, effectiveApproval, err := resumePreparedThread(client, threadID, map[string]any{
 		"cwd": cwd, "approvalPolicy": approvalPolicy, "sandbox": sandbox,
 	})
 	if err != nil {
@@ -338,11 +357,15 @@ func (native *CodexNative) PrepareLaneThread(ctx context.Context, threadID, cwd,
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
 	}
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return CodexNativeThread{}, err
+	}
 	native.mu.Lock()
 	loaded := native.loadedThreads[threadID]
 	native.mu.Unlock()
 	if !loaded {
-		archived, err := listThreadMembership(native.client, true)
+		archived, err := listThreadMembership(client, true)
 		if err != nil {
 			return CodexNativeThread{}, err
 		}
@@ -359,7 +382,7 @@ func (native *CodexNative) PrepareLaneThread(ctx context.Context, threadID, cwd,
 		}
 		return thread, nil
 	}
-	thread, err := readExactPreparedThread(native.client, threadID)
+	thread, err := readExactPreparedThread(client, threadID)
 	if err != nil {
 		return CodexNativeThread{}, err
 	}
@@ -372,7 +395,7 @@ func (native *CodexNative) PrepareLaneThread(ctx context.Context, threadID, cwd,
 	if expected := strings.TrimSpace(cwd); expected != "" && strings.TrimSpace(thread.Cwd) != expected {
 		return CodexNativeThread{}, fmt.Errorf("loaded Codex lane cwd %q, expected %q", thread.Cwd, expected)
 	}
-	if err := updatePreparedThreadSettings(native.client, threadID, approvalPolicy, sandbox); err != nil {
+	if err := updatePreparedThreadSettings(client, threadID, approvalPolicy, sandbox); err != nil {
 		return CodexNativeThread{}, err
 	}
 	return exportedCodexThread(thread, approvalPolicy), nil
@@ -385,7 +408,11 @@ func (native *CodexNative) ReattachThread(ctx context.Context, threadID string) 
 	if err := ctx.Err(); err != nil {
 		return CodexNativeThread{}, err
 	}
-	thread, err := resumeThreadForPeer(native.client, threadID)
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return CodexNativeThread{}, err
+	}
+	thread, err := resumeThreadForPeer(client, threadID)
 	if err != nil {
 		return CodexNativeThread{}, err
 	}
@@ -404,7 +431,7 @@ func (native *CodexNative) ReattachThread(ctx context.Context, threadID string) 
 // recorded dispatch ID must still exist; the newest native turn is used only
 // for the narrow crash window after turn/start succeeded but before its ID was
 // committed to daemon state.
-func (native *CodexNative) ResolveLaneTurnID(_ context.Context, threadID, preferred string) (string, error) {
+func (native *CodexNative) ResolveLaneTurnID(ctx context.Context, threadID, preferred string) (string, error) {
 	if !validSessionID(threadID) {
 		return "", errors.New("codex lane recovery requires an exact thread id")
 	}
@@ -416,7 +443,11 @@ func (native *CodexNative) ResolveLaneTurnID(_ context.Context, threadID, prefer
 			return "", fmt.Errorf("active Codex lane turn %q does not match durable turn %q", active, preferred)
 		}
 	}
-	turns, err := listLaneTurns(native.client, threadID, "notLoaded")
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return "", err
+	}
+	turns, err := listLaneTurns(client, threadID, "notLoaded")
 	if err != nil {
 		return "", err
 	}
@@ -445,12 +476,16 @@ func (native *CodexNative) SendMessage(ctx context.Context, threadID, message st
 	if !validSessionID(threadID) || strings.TrimSpace(message) == "" {
 		return "", errors.New("codex message requires an exact thread and non-empty content")
 	}
-	thread, err := readExactPreparedThread(native.client, threadID)
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return "", err
+	}
+	thread, err := readExactPreparedThread(client, threadID)
 	if err != nil {
 		return "", err
 	}
 	if statusType(thread.Status) == "notLoaded" {
-		resumed, resumeErr := resumeThreadForPeer(native.client, threadID)
+		resumed, resumeErr := resumeThreadForPeer(client, threadID)
 		if resumeErr != nil {
 			return "", resumeErr
 		}
@@ -769,18 +804,92 @@ func (native *CodexNative) DeleteThread(ctx context.Context, threadID string) er
 }
 
 func (native *CodexNative) request(ctx context.Context, timeout time.Duration, method string, params, output any) error {
+	client, err := native.clientForOperation(ctx)
+	if err != nil {
+		return err
+	}
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return native.client.request(requestCtx, method, params, output)
+	return client.request(requestCtx, method, params, output)
 }
 
-func (native *CodexNative) observe(ctx context.Context) {
-	defer close(native.eventDone)
+func (native *CodexNative) clientSnapshot() *appServerClient {
+	if native == nil {
+		return nil
+	}
+	native.connectionMu.Lock()
+	defer native.connectionMu.Unlock()
+	return native.client
+}
+
+func (native *CodexNative) clientForOperation(ctx context.Context) (*appServerClient, error) {
+	if native == nil {
+		return nil, errors.New("codex App Server client is unavailable")
+	}
+	native.connectionMu.Lock()
+	defer native.connectionMu.Unlock()
+	if native.closed {
+		return nil, errors.New("codex App Server client is closed")
+	}
+	if native.client != nil {
+		select {
+		case <-native.client.done:
+		default:
+			return native.client, nil
+		}
+	}
+	client, err := openCodexNativeClient(ctx, native.config)
+	if err != nil {
+		return nil, err
+	}
+	native.client = client
+	native.mu.Lock()
+	native.loadedThreads = map[string]bool{}
+	native.activeTurns = map[string]string{}
+	for key, waiter := range native.turnWaiters {
+		delete(native.turnWaiters, key)
+		close(waiter)
+	}
+	native.mu.Unlock()
+	native.eventWG.Add(1)
+	go native.observe(native.eventCtx, client)
+	return client, nil
+}
+
+func openCodexNativeClient(ctx context.Context, config CodexNativeConfig) (*appServerClient, error) {
+	client, dialErr := dialCodexNative(ctx, config.SocketPath, 500*time.Millisecond)
+	if dialErr == nil {
+		return client, nil
+	}
+	if !errors.Is(dialErr, os.ErrNotExist) && !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		return nil, fmt.Errorf("connect Codex App Server: %w", dialErr)
+	}
+	start := config.Start
+	if start == nil {
+		start = startCodexAppServer
+	}
+	if err := start(ctx, config.CodexBinary, []string{"app-server", "daemon", "start"}, config.Environment); err != nil {
+		return nil, fmt.Errorf("start Codex App Server: %w", err)
+	}
+	client, dialErr = dialCodexNative(ctx, config.SocketPath, 2*time.Second)
+	if dialErr != nil {
+		return nil, fmt.Errorf("connect lazily started Codex App Server: %w", dialErr)
+	}
+	return client, nil
+}
+
+func (native *CodexNative) observe(ctx context.Context, client *appServerClient) {
+	defer native.eventWG.Done()
 	for {
 		select {
-		case notification := <-native.client.notifications:
-			native.observeNotification(notification)
-		case <-native.client.done:
+		case notification := <-client.notifications:
+			native.connectionMu.Lock()
+			current := !native.closed && native.client == client
+			native.connectionMu.Unlock()
+			if current {
+				native.observeNotification(notification)
+			}
+		case <-client.done:
 			return
 		case <-ctx.Done():
 			return

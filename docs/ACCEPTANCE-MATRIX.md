@@ -33,6 +33,9 @@ native behavior; unit or mock evidence cannot receive that credit.
 | U-10 | Linux, macOS | Malformed product launch inventory fails with its exact diagnostic. |
 | U-11 | Linux, macOS | Qwen installation uses the selected profile and preserves settings, credentials, other extensions, and transcripts. |
 | U-12 | Linux, macOS | The release contains exactly `agent-sessions` and `agent-sessions-hub` executable images; host and hub targets select only their role. |
+| U-13 | Live host | An in-place install with running product sessions replaces the daemon and every live connector re-establishes exactly one presence owner. |
+| U-14 | Live host | Restarting the product-owned Codex App Server under a running Agent Sessions daemon makes the failed operation fail once and the next operation reopen successfully. |
+| U-15 | Live host | A terminal `claude-peer --resume NAME` uses Claude's native selector and starts with Agent Sessions tools active under one presence owner. |
 
 ## Codex interactive peer (`T/F`)
 
@@ -40,7 +43,7 @@ native behavior; unit or mock evidence cannot receive that credit.
 | --- | --- |
 | C-01 | Fresh named launch reaches the native composer and exits normally. |
 | C-02 | A real prompt returns output while retaining one product thread UUID. |
-| C-03 | Name and exact-ID resume reuse the product thread; ambiguity uses the shared picker because external native choice is not observable. |
+| C-03 | Name, exact-ID, and bare resume pass to Codex verbatim; Codex's remote client owns duplicate-name choice and its native picker. |
 | C-04 | Global flags before or after the resume target project to equivalent native argv. |
 | C-05 | Model, sandbox, approval, config, display, image, attached-value, and `--` arguments remain intact. |
 | C-06 | Repeated native permission booleans retain product last-value semantics. |
@@ -206,7 +209,6 @@ tools, messaging, result, and cleanup.
 Peer mode is credited for Codex, Claude, Grok, Qwen, OpenCode, Kilo, Pi, and OMP. Lane mode is
 credited for those eight products plus DSH.
 
-Qwen lane credit remains provisional until the quota-blocked outbound peer and fresh lane cells are
-rerun after 2026-09-04 16:07 UTC. Claude accepts `--effort` natively
-(`low|medium|high|xhigh|max`) and records it per session; the product exposes no effort echo in
-transcripts or results, so its runtime effect is product-owned and not asserted here.
+Qwen's outbound peer and fresh-lane cells are credited on the real product. Claude accepts
+`--effort` natively (`low|medium|high|xhigh|max`) and records it per session; the product exposes no
+effort echo in transcripts or results, so its runtime effect is product-owned and not asserted here.

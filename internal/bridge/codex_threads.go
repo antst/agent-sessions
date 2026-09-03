@@ -27,32 +27,6 @@ func readExactPreparedThread(client *appServerClient, threadID string) (appThrea
 	return read.Thread, nil
 }
 
-func visitPreparedThreads(client *appServerClient, archived bool, visit func(appThread)) error {
-	cursor := ""
-	seen := map[string]bool{}
-	for {
-		params := map[string]any{"archived": archived, "limit": 100, "sortDirection": "desc", "sortKey": "updated_at"}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		var page struct {
-			Data       []appThread `json:"data"`
-			NextCursor string      `json:"nextCursor"`
-		}
-		if err := requestWithTimeout(client, 30*time.Second, "thread/list", params, &page); err != nil {
-			return err
-		}
-		for _, thread := range page.Data {
-			visit(thread)
-		}
-		if page.NextCursor == "" || seen[page.NextCursor] {
-			return nil
-		}
-		seen[page.NextCursor] = true
-		cursor = page.NextCursor
-	}
-}
-
 func validatePreparedRootThread(thread appThread) error {
 	if thread.ParentThreadID != "" || !rootThreadSource(thread.Source) {
 		return fmt.Errorf("codex thread %s is not an interactive root and cannot be resumed as a peer", thread.ID)

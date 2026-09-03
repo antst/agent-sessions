@@ -33,6 +33,8 @@ func NewGrokNativeLeaderBootstrap(
 	bin, cwd, leaderSocket string,
 	environment []string,
 	diagnostics io.Writer,
+	permissionMode string,
+	nativeToolGrant []string,
 ) (*GrokNativeLeaderBootstrap, error) {
 	if strings.TrimSpace(bin) == "" || strings.TrimSpace(cwd) == "" || !strings.HasPrefix(leaderSocket, "/") {
 		return nil, errors.New("invalid Grok private leader configuration")
@@ -40,10 +42,13 @@ func NewGrokNativeLeaderBootstrap(
 	if diagnostics == nil {
 		diagnostics = os.Stderr
 	}
-	command := exec.Command(bin, //nolint:gosec // Exact installed product binary and closed native argv.
-		"--permission-mode", "default", "agent", "leader", "--leader-socket", leaderSocket,
-		"--relay-on-demand", "--no-auto-update",
-	)
+	permissionArguments, err := grokNativeLeaderPermissionArguments(permissionMode, nativeToolGrant)
+	if err != nil {
+		return nil, err
+	}
+	arguments := append([]string(nil), permissionArguments...)
+	arguments = append(arguments, "agent", "leader", "--leader-socket", leaderSocket, "--relay-on-demand", "--no-auto-update")
+	command := exec.Command(bin, arguments...) //nolint:gosec // Exact installed product binary and closed native argv.
 	command.Dir = cwd
 	command.Env = append([]string(nil), environment...)
 	command.Stdout, command.Stderr = diagnostics, diagnostics
@@ -52,6 +57,20 @@ func NewGrokNativeLeaderBootstrap(
 		command: command, leaderSocket: leaderSocket, bin: bin, cwd: cwd,
 		environment: append([]string(nil), environment...), diagnostics: diagnostics,
 	}, nil
+}
+
+func grokNativeLeaderPermissionArguments(permissionMode string, nativeToolGrant []string) ([]string, error) {
+	switch permissionMode {
+	case "bypassPermissions":
+		return []string{"--permission-mode", "bypassPermissions"}, nil
+	case "default":
+		if len(nativeToolGrant) != 2 || nativeToolGrant[0] != "--allow" || nativeToolGrant[1] != "MCPTool(agent_sessions__*)" {
+			return nil, errors.New("Grok native leader is missing the exact Agent Sessions tool grant")
+		}
+		return []string{"--permission-mode", "default", nativeToolGrant[0], nativeToolGrant[1]}, nil
+	default:
+		return nil, fmt.Errorf("unsupported Grok native leader permission mode %q", permissionMode)
+	}
 }
 
 func (bootstrap *GrokNativeLeaderBootstrap) Command() *exec.Cmd {

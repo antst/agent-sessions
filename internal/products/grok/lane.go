@@ -39,6 +39,7 @@ type NativeSession interface {
 
 type NativeOpenRequest struct {
 	LaneID, Name, ResumeNativeID, Cwd, Capability string
+	PermissionMode                                string
 	Groups                                        []string
 	Arguments                                     []string
 	Environment                                   []string
@@ -141,7 +142,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	native, err := driver.config.Native.Open(ctx, NativeOpenRequest{
 		LaneID: request.LaneID, Name: request.Name, ResumeNativeID: request.ResumeNativeID,
 		Cwd: request.Cwd, Capability: request.Capability, Groups: append([]string(nil), request.Groups...),
-		Arguments: arguments, Environment: append([]string(nil), request.Environment...),
+		Arguments: arguments, Environment: append([]string(nil), request.Environment...), PermissionMode: string(request.PermissionMode),
 	})
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err

@@ -70,14 +70,13 @@ Common wrapper options include:
 
 ```sh
 PRODUCT-peer --name NAME --group GROUP [--group GROUP] [--yolo] [NATIVE_ARGS...]
-PRODUCT-peer --resume NAME_OR_NATIVE_ID [--group GROUP] [OPTIONS...]
+PRODUCT-peer --resume [NATIVE_SELECTOR] [--group GROUP] [OPTIONS...]
 ```
 
-`--resume` is uniform at the wrapper. Where a product accepts names natively,
-Agent Sessions passes the selector through and leaves duplicate handling to the
-product. Where the native selector accepts only IDs, Agent Sessions asks the
-product for its sessions, offers a terminal picker when necessary, and resumes
-the selected exact ID.
+`--resume` is uniform only at the wrapper boundary. Agent Sessions translates
+the flag and passes its optional selector verbatim; the product owns names,
+IDs, duplicate handling, native pickers, and errors. Agent Sessions never lists
+or matches product sessions to resolve a peer resume.
 
 Every invocation is complete. Omitting a group, model, agent, effort, or
 permission override on resume does not carry it forward from a prior Agent

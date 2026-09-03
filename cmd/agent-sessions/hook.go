@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/launcher"
 )
 
 const maxHookInputBytes = 2 << 20
@@ -30,6 +32,17 @@ func runHookInput(ctx context.Context, product string, input io.Reader, output i
 	if json.Unmarshal(body, &eventInput) != nil || strings.TrimSpace(eventInput.Event) == "" {
 		return nil //nolint:nilerr // Unrecognized vendor hook input is deliberately a silent no-op.
 	}
+	if product == connectorProductCodex && eventInput.Event == "SessionStart" {
+		if token := strings.TrimSpace(os.Getenv(launcher.CodexPendingLaunchEnv)); token != "" {
+			var values map[string]any
+			if json.Unmarshal(body, &values) == nil {
+				values["agent_sessions_pending_launch"] = token
+				if encoded, encodeErr := json.Marshal(values); encodeErr == nil {
+					body = encoded
+				}
+			}
+		}
+	}
 	stateRoot := defaultStateRoot()
 	endpoint, err := daemonpkg.ControlEndpoint(stateRoot)
 	if err != nil {
@@ -46,6 +59,22 @@ func runHookInput(ctx context.Context, product string, input io.Reader, output i
 			threadID, identityErr := bridge.CodexHookThreadIDFromInput(input)
 			if identityErr != nil {
 				return bridge.HookAttestation{}, bridge.ErrConnectorInactive
+			}
+			var pending struct {
+				Token string `json:"agent_sessions_pending_launch"`
+			}
+			if json.Unmarshal(input, &pending) == nil && strings.TrimSpace(pending.Token) != "" {
+				caller, ancestry, ancestryErr := bridge.CaptureNativeAncestry(os.Getpid(), 24)
+				if ancestryErr != nil {
+					return bridge.HookAttestation{}, bridge.ErrConnectorInactive
+				}
+				return bridge.HookAttestation{
+					AttachmentID: pending.Token, Capability: pending.Token,
+					Evidence: daemonpkg.NativeEvidence{
+						Process: caller, Ancestry: ancestry, ThreadID: pending.Token,
+						SocketPath: filepath.Join(codexHome(), "app-server-control", "app-server-control.sock"),
+					},
+				}, nil
 			}
 			return attestHook(product, threadID)
 		},

@@ -84,7 +84,7 @@ func defaultCommandRunners() commandRunners {
 		catalog: runCatalog,
 		peer: func(ctx context.Context, invocation clihelp.Invocation, output io.Writer) error {
 			if invocation.Product == "codex" {
-				return launcher.RunCodexPeerWithDaemon(ctx, invocation.Arguments, requestCodexPreparation, runCodexNativePeer)
+				return launcher.RunCodexPeerWithDaemon(ctx, invocation.Arguments, beginCodexPendingLaunch, runCodexNativePeer)
 			}
 			if invocation.Product == "claude" {
 				return launcher.RunClaudePeer(invocation.Arguments)
@@ -259,6 +259,9 @@ func runDaemon(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 	}
 	if set.NArg() != 0 {
 		return errors.New("agent-sessions daemon accepts run, start, stop, restart, and run service options")
+	}
+	if err := daemonpkg.PrepareStateRoot(*stateRoot, 8<<20, output); err != nil {
+		return fmt.Errorf("prepare daemon state root: %w", err)
 	}
 	coordinator := newHostCoordinator(ctx, *stateRoot)
 	var runtime *daemonpkg.Runtime

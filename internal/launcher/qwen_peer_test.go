@@ -72,6 +72,11 @@ func TestQwenPeerManagedArgumentContract(t *testing.T) {
 			wantNative: []string{"--resume=reviewer"},
 		},
 		{
+			name: "bare resume remains product selector", args: []string{"--resume"},
+			wantMode: qwenPeerModeResume, wantPref: qwenLaunchNativeDefault,
+			wantNative: []string{"--resume"},
+		},
+		{
 			name: "explicit profile", args: []string{"--qwen-home", profile},
 			wantMode: qwenPeerModeFresh, wantPref: qwenLaunchNativeDefault, wantHome: qwenTestCanonicalPath(t, profile),
 		},
@@ -111,8 +116,7 @@ func TestQwenPeerRejectsConflictingOrInexactWrapperArguments(t *testing.T) {
 		{name: "repeated yolo", args: []string{"--yolo", "--yolo"}, want: "permission"},
 		{name: "contradictory wrapper", args: []string{"--yolo", "--no-yolo"}, want: "conflict"},
 		{name: "wrapper then native", args: []string{"--yolo", "--approval-mode", "yolo"}, want: "conflict"},
-		{name: "continue", args: []string{"--continue"}, want: "exact"},
-		{name: "resume missing", args: []string{"--resume"}, want: "requires"},
+		{name: "continue", args: []string{"--continue"}, want: "managed resume"},
 		{name: "resume repeated", args: []string{"--resume", testQwenSessionID, "--resume=other"}, want: "more than once"},
 		{name: "session id caller controlled", args: []string{"--session-id", testQwenSessionID}, want: "managed"},
 		{name: "relative profile", args: []string{"--qwen-home", "relative"}, want: "absolute"},

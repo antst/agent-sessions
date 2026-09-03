@@ -37,10 +37,11 @@ func CodexHookThreadIDFromInput(input json.RawMessage) (string, error) {
 // the relay must descend from the exact connected App Server and the exact
 // thread comes from Codex-owned turn metadata, never tool arguments.
 func (native *CodexNative) AttestMCPCall(startPID int, params json.RawMessage) (ConnectorAttestation, error) {
-	if native == nil || native.client == nil {
+	client := native.clientSnapshot()
+	if client == nil {
 		return ConnectorAttestation{}, ErrConnectorInactive
 	}
-	appServer := procinfo.Identity{PID: native.client.peerPID, Start: native.client.peerProcStart}
+	appServer := procinfo.Identity{PID: client.peerPID, Start: client.peerProcStart}
 	if appServer.PID <= 1 || appServer.Start == "" || !exactProcessIdentityMatch(appServer.PID, appServer.Start) ||
 		!processHasAncestor(startPID, appServer.PID) {
 		return ConnectorAttestation{}, ErrConnectorInactive
@@ -69,7 +70,7 @@ func (native *CodexNative) AttestHookEvent(
 	event string,
 	input json.RawMessage,
 ) (HookAttestation, error) {
-	if native == nil || native.client == nil {
+	if native == nil || native.clientSnapshot() == nil {
 		return HookAttestation{}, ErrConnectorInactive
 	}
 	event = strings.TrimSpace(event)

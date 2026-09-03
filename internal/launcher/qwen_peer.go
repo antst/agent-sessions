@@ -300,7 +300,12 @@ func parseQwenPeerArgs(args []string, cwd string, lookup qwenprofile.LookupEnv) 
 	}
 	args = projected
 	noYoloCount := countQwenOption(args, "--no-yolo")
-	contextArgs, context, err := scanPeerWrapperOptions("qwen", args)
+	contextArgs, context, err := scanPeerWrapperOptionsWithArity(args, func(argument string) bool {
+		if argument == "--resume" || argument == "-r" {
+			return false
+		}
+		return qwenOptionConsumesNext(argument)
+	})
 	if err != nil {
 		return qwenPeerPlan{}, err
 	}
@@ -348,12 +353,12 @@ func parseQwenPeerArgs(args []string, cwd string, lookup qwenprofile.LookupEnv) 
 		return plan, nil
 	}
 
-	managed, resumeTarget, nativeMode, nativeModeCount, err := inspectManagedQwenArgs(forwarded)
+	managed, resume, resumeTarget, nativeMode, nativeModeCount, err := inspectManagedQwenArgs(forwarded)
 	if err != nil {
 		return qwenPeerPlan{}, err
 	}
 	plan.nativeArgs = managed
-	if resumeTarget != "" {
+	if resume {
 		plan.mode, plan.resumeTarget = qwenPeerModeResume, resumeTarget
 	} else {
 		plan.sessionID, err = newGrokSessionID()
@@ -510,6 +515,9 @@ func classifyQwenPeerMode(args []string) (qwenPeerMode, bool, error) {
 		if argument == "-h" || argument == "--help" || argument == "-v" || argument == "--version" {
 			return qwenPeerModePassthrough, true, nil
 		}
+		if argument == "--resume" || argument == "-r" {
+			continue
+		}
 		if strings.HasPrefix(argument, "-") {
 			if qwenOptionConsumesNext(argument) {
 				if index+1 >= len(args) {
@@ -527,8 +535,9 @@ func classifyQwenPeerMode(args []string) (qwenPeerMode, bool, error) {
 }
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
-func inspectManagedQwenArgs(args []string) ([]string, string, string, int, error) {
+func inspectManagedQwenArgs(args []string) ([]string, bool, string, string, int, error) {
 	forwarded := make([]string, 0, len(args))
+	resume := false
 	resumeTarget := ""
 	nativeMode := ""
 	nativeModeCount := 0
@@ -540,34 +549,33 @@ func inspectManagedQwenArgs(args []string) ([]string, string, string, int, error
 		}
 		switch {
 		case argument == "--continue" || argument == "-c":
-			return nil, "", "", 0, usageError("--continue cannot identify an exact managed Qwen session; use qwen-peer --resume UUID or native qwen")
+			return nil, false, "", "", 0, usageError("--continue is not the managed resume surface; use qwen-peer --resume or native qwen")
 		case argument == "--fork-session" || strings.HasPrefix(argument, "--fork-session="):
-			return nil, "", "", 0, usageError("--fork-session is not owner-attested; use native qwen or start a fresh peer")
+			return nil, false, "", "", 0, usageError("--fork-session is not owner-attested; use native qwen or start a fresh peer")
 		case argument == "--session-id" || strings.HasPrefix(argument, "--session-id="):
-			return nil, "", "", 0, usageError("caller-controlled --session-id is incompatible with a managed Qwen peer")
+			return nil, false, "", "", 0, usageError("caller-controlled --session-id is incompatible with a managed Qwen peer")
 		case argument == "--resume" || argument == "-r":
-			if resumeTarget != "" {
-				return nil, "", "", 0, usageError("Qwen resume target was specified more than once")
+			if resume {
+				return nil, false, "", "", 0, usageError("Qwen resume was specified more than once")
 			}
-			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" || strings.HasPrefix(args[index+1], "-") {
-				return nil, "", "", 0, usageError("--resume requires an exact UUID or unique managed session name")
+			resume = true
+			forwarded = append(forwarded, argument)
+			if index+1 < len(args) && !strings.HasPrefix(args[index+1], "-") {
+				resumeTarget = args[index+1]
+				forwarded = append(forwarded, resumeTarget)
+				index++
 			}
-			resumeTarget = args[index+1]
-			forwarded = append(forwarded, argument, resumeTarget)
-			index++
 		case strings.HasPrefix(argument, "--resume=") || strings.HasPrefix(argument, "-r="):
-			if resumeTarget != "" {
-				return nil, "", "", 0, usageError("Qwen resume target was specified more than once")
+			if resume {
+				return nil, false, "", "", 0, usageError("Qwen resume was specified more than once")
 			}
+			resume = true
 			_, resumeTarget, _ = strings.Cut(argument, "=")
-			if strings.TrimSpace(resumeTarget) == "" {
-				return nil, "", "", 0, usageError("--resume requires an exact UUID or unique managed session name")
-			}
 			forwarded = append(forwarded, argument)
 		case argument == "--approval-mode":
 			nativeModeCount++
 			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
-				return nil, "", "", 0, usageError("--approval-mode requires a non-empty value")
+				return nil, false, "", "", 0, usageError("--approval-mode requires a non-empty value")
 			}
 			nativeMode = args[index+1]
 			forwarded = append(forwarded, argument, nativeMode)
@@ -576,7 +584,7 @@ func inspectManagedQwenArgs(args []string) ([]string, string, string, int, error
 			nativeModeCount++
 			nativeMode = strings.TrimPrefix(argument, "--approval-mode=")
 			if strings.TrimSpace(nativeMode) == "" {
-				return nil, "", "", 0, usageError("--approval-mode requires a non-empty value")
+				return nil, false, "", "", 0, usageError("--approval-mode requires a non-empty value")
 			}
 			forwarded = append(forwarded, argument)
 		default:
@@ -587,7 +595,7 @@ func inspectManagedQwenArgs(args []string) ([]string, string, string, int, error
 			}
 		}
 	}
-	return forwarded, resumeTarget, nativeMode, nativeModeCount, nil
+	return forwarded, resume, resumeTarget, nativeMode, nativeModeCount, nil
 }
 
 func insertQwenManagedArgs(args []string, managed ...string) []string {
@@ -623,7 +631,7 @@ func qwenOptionConsumesNext(argument string) bool {
 
 func qwenPeerUsage() string {
 	return `Usage: qwen-peer [WRAPPER_OPTIONS...] [NATIVE_QWEN_OPTIONS...]
-       qwen-peer --resume UUID_OR_UNIQUE_NAME [WRAPPER_OPTIONS...] [NATIVE_QWEN_OPTIONS...]
+       qwen-peer --resume [NATIVE_SELECTOR] [WRAPPER_OPTIONS...] [NATIVE_QWEN_OPTIONS...]
 
 Wrapper options:
   -n, --name NAME             stable Agent Sessions name
@@ -635,7 +643,7 @@ Wrapper options:
       --qwen-home PATH        explicit absolute native Qwen profile
       --runtime-dir PATH      Agent Sessions runtime selection
       --state-dir PATH        Agent Sessions state selection
-      --resume TARGET         exact UUID or unique managed name
+      --resume [SELECTOR]     pass the optional selector to Qwen verbatim
   -h, --help                  show this help
 
 Native boundary:

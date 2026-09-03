@@ -44,32 +44,43 @@ const (
 )
 
 type hostCoordinator struct {
-	ctx                context.Context
-	stateRoot          string
-	openCodex          func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error)
-	reloadCodex        func(context.Context, *bridge.CodexNative) error
-	unsubscribeCodex   func(context.Context, string) error
-	mu                 sync.Mutex
-	noticeMu           sync.Mutex
-	codex              *bridge.CodexNative
-	pending            map[string]daemonpkg.NativeEvidence
-	monitored          map[string]bool
-	laneProcesses      *structuredprocess.Supervisor
-	laneDrivers        *productruntime.LaneRegistry
-	lanes              map[string]*laneActor
-	liveReports        map[string]liveSessionReport
-	reportedLanes      map[string]string
-	reportedPeers      map[string]bool
-	laneNames          map[string]map[string]laneNameEntry
-	presence           *livePresenceServer
-	resolveCandidate   func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
-	candidateResolvers map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
-	liveTitleResolvers map[string]func([]daemonpkg.ManagedAttachment) map[string]string
-	lanesLoaded        bool
-	now                func() time.Time
-	runtime            *daemonpkg.Runtime
-	runtimeReady       chan *daemonpkg.Runtime
-	federation         *daemonpkg.Federation
+	ctx                  context.Context
+	stateRoot            string
+	openCodex            func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error)
+	reloadCodex          func(context.Context, *bridge.CodexNative) error
+	unsubscribeCodex     func(context.Context, string) error
+	mu                   sync.Mutex
+	noticeMu             sync.Mutex
+	codex                *bridge.CodexNative
+	pending              map[string]daemonpkg.NativeEvidence
+	pendingCodexLaunches map[string]*pendingCodexLaunch
+	monitored            map[string]bool
+	laneProcesses        *structuredprocess.Supervisor
+	laneDrivers          *productruntime.LaneRegistry
+	lanes                map[string]*laneActor
+	liveReports          map[string]liveSessionReport
+	reportedLanes        map[string]string
+	reportedPeers        map[string]bool
+	laneNames            map[string]map[string]laneNameEntry
+	presence             *livePresenceServer
+	resolveCandidate     func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
+	candidateResolvers   map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
+	liveTitleResolvers   map[string]func([]daemonpkg.ManagedAttachment) map[string]string
+	lanesLoaded          bool
+	now                  func() time.Time
+	runtime              *daemonpkg.Runtime
+	runtimeReady         chan *daemonpkg.Runtime
+	federation           *daemonpkg.Federation
+}
+
+type pendingCodexLaunch struct {
+	request launcher.CodexDaemonPrepareRequest
+	done    chan pendingCodexLaunchResult
+}
+
+type pendingCodexLaunchResult struct {
+	handoff launcher.CodexDaemonPrepareResult
+	err     error
 }
 
 func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator {
@@ -79,7 +90,8 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		reloadCodex: func(ctx context.Context, native *bridge.CodexNative) error {
 			return native.ReloadMCPServers(ctx)
 		},
-		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
+		pending: map[string]daemonpkg.NativeEvidence{}, pendingCodexLaunches: map[string]*pendingCodexLaunch{},
+		monitored:     map[string]bool{},
 		lanes:         map[string]*laneActor{},
 		liveReports:   map[string]liveSessionReport{},
 		reportedLanes: map[string]string{},
@@ -189,6 +201,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	}
 	grokNative, err := newGrokBridgeFactory(BridgeFactoryConfig{
 		Executable: grokDescriptor.NativeExecutable, HostExecutable: hostExecutable,
+		NativeToolGrant: append([]string(nil), grokDescriptor.NativeToolGrantArgs...),
 	})
 	if err != nil {
 		panic(err)
@@ -548,15 +561,15 @@ func (c *hostCoordinator) handle(
 	request daemonpkg.ControlRequest,
 ) (json.RawMessage, error) {
 	switch request.Operation {
-	case "attachment.codex.prepare":
+	case "attachment.codex.pending":
 		if runtime == nil {
 			return nil, errors.New("runtime attachment authority is unavailable")
 		}
 		var input launcher.CodexDaemonPrepareRequest
 		if json.Unmarshal(request.Payload, &input) != nil {
-			return nil, errors.New("decode Codex preparation failed")
+			return nil, errors.New("decode Codex pending launch failed")
 		}
-		result, err := c.prepareCodex(ctx, runtime, input)
+		result, err := c.awaitCodexPendingLaunch(ctx, runtime, input)
 		if err != nil {
 			return nil, err
 		}
@@ -577,34 +590,38 @@ func (c *hostCoordinator) handle(
 		}
 		return c.operatorRoster(runtime)
 	case "hook.event":
+		var input struct {
+			Product string          `json:"product"`
+			Event   string          `json:"event"`
+			Input   json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(request.Payload, &input) == nil && input.Product == codexproduct.ProductID && input.Event == "SessionStart" {
+			var nativeInput struct {
+				PendingToken string `json:"agent_sessions_pending_launch"`
+			}
+			if json.Unmarshal(input.Input, &nativeInput) == nil && strings.TrimSpace(nativeInput.PendingToken) != "" {
+				if err := c.consumeCodexPendingLaunch(ctx, runtime, nativeInput.PendingToken, input.Input); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return json.Marshal(map[string]any{})
 	default:
 		return nil, fmt.Errorf("operation %s is not implemented", request.Operation)
 	}
 }
 
-//nolint:gocyclo // Native thread, App Server, resume, attachment, and rollback gates form one transaction.
-func (c *hostCoordinator) prepareCodex(
+func (c *hostCoordinator) awaitCodexPendingLaunch(
 	ctx context.Context,
 	runtime *daemonpkg.Runtime,
 	request launcher.CodexDaemonPrepareRequest,
 ) (launcher.CodexDaemonPrepareResult, error) {
-	if request.Mode == "list" {
-		native, err := c.codexNative()
-		if err != nil {
-			return launcher.CodexDaemonPrepareResult{}, err
-		}
-		threads, err := native.ListPeerThreads(ctx)
-		if err != nil {
-			return launcher.CodexDaemonPrepareResult{}, err
-		}
-		candidates := make([]launcher.CodexResumeCandidate, 0, len(threads))
-		for _, thread := range threads {
-			candidates = append(candidates, launcher.CodexResumeCandidate{
-				ID: thread.ID, Name: thread.Name, Cwd: thread.Cwd, UpdatedAt: thread.UpdatedAt,
-			})
-		}
-		return launcher.CodexDaemonPrepareResult{Candidates: candidates}, nil
+	if request.Mode != "pending-fresh" && request.Mode != "pending-resume" {
+		return launcher.CodexDaemonPrepareResult{}, fmt.Errorf("unsupported Codex pending launch mode %q", request.Mode)
+	}
+	tokenBody, err := hex.DecodeString(request.PendingToken)
+	if err != nil || len(tokenBody) != 32 {
+		return launcher.CodexDaemonPrepareResult{}, errors.New("Codex pending launch token is invalid")
 	}
 	if procinfo.ObserveIdentity(request.Owner).Status != procinfo.IdentityMatches {
 		return launcher.CodexDaemonPrepareResult{}, errors.New("codex launcher identity is not live")
@@ -613,37 +630,131 @@ func (c *hostCoordinator) prepareCodex(
 	if err != nil {
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
-	cwd := request.Cwd
-	var thread bridge.CodexNativeThread
-	switch request.Mode {
-	case "fresh":
-		thread, err = native.StartThread(ctx, bridge.CodexStartRequest{
-			Cwd: request.Cwd, Name: request.Name, NameSource: request.NameSource,
-			ApprovalPolicy: request.ApprovalPolicy, Sandbox: request.Sandbox,
-		})
-	case "resume":
-		thread, err = native.ResolveThread(ctx, request.Target)
-		if err == nil {
-			// Match native `codex resume` and the established peer launcher:
-			// every resume uses the launcher's effective cwd. The thread's
-			// persisted cwd is historical metadata and may name a workspace
-			// that has since moved or been removed.
-			cwd = codexResumeCwd(request, thread)
-			thread, err = native.ResumeThread(ctx, thread.ID, cwd, request.ApprovalPolicy, request.Sandbox)
-		}
-	default:
-		err = fmt.Errorf("unsupported Codex peer mode %q", request.Mode)
-	}
+	appPID, appStart, socket, err := native.RefreshAppServerEvidence(ctx)
 	if err != nil {
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
-	appPID, appStart, socket := native.AppServerEvidence()
 	appServer, err := procinfo.CaptureIdentity(appPID)
 	if err != nil || appStart == "" || appServer.Start != appStart {
-		if request.Mode == "fresh" {
-			_ = native.DeleteThread(context.Background(), thread.ID)
+		return launcher.CodexDaemonPrepareResult{}, errors.New("codex App Server identity changed during pending launch")
+	}
+	evidence := daemonpkg.NativeEvidence{
+		Process: request.Owner, Ancestry: []procinfo.Identity{appServer}, Executable: codexBinary(),
+		SocketPath: socket, ThreadID: request.PendingToken,
+	}
+	c.mu.Lock()
+	if c.pendingCodexLaunches[request.PendingToken] != nil {
+		c.mu.Unlock()
+		return launcher.CodexDaemonPrepareResult{}, errors.New("Codex pending launch token is already active")
+	}
+	record := &pendingCodexLaunch{request: request, done: make(chan pendingCodexLaunchResult, 1)}
+	c.pending[request.PendingToken] = evidence
+	c.pendingCodexLaunches[request.PendingToken] = record
+	c.mu.Unlock()
+	permission := "default"
+	if request.ApprovalPolicy == "never" {
+		permission = "bypassPermissions"
+	}
+	launchIntent := "non_yolo"
+	if permission == "bypassPermissions" {
+		launchIntent = "yolo"
+	}
+	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
+		ID: request.PendingToken, CapabilityHash: daemonpkg.CapabilityDigest(request.PendingToken), Product: "codex",
+		ProfileIdentity: codexHome(), LaunchIntent: launchIntent,
+		NativeSessionID: request.PendingToken, Cwd: request.Cwd,
+		Groups: append([]string(nil), request.Groups...), PermissionMode: permission,
+	})
+	if err == nil {
+		_, err = runtime.Attachments().Adopt(ctx, prepared.ID, evidence)
+	}
+	if err != nil {
+		c.mu.Lock()
+		delete(c.pending, request.PendingToken)
+		delete(c.pendingCodexLaunches, request.PendingToken)
+		c.mu.Unlock()
+		return launcher.CodexDaemonPrepareResult{}, err
+	}
+	select {
+	case result := <-record.done:
+		return result.handoff, result.err
+	case <-ctx.Done():
+		c.mu.Lock()
+		owned := false
+		if c.pendingCodexLaunches[request.PendingToken] == record {
+			delete(c.pendingCodexLaunches, request.PendingToken)
+			owned = true
 		}
-		return launcher.CodexDaemonPrepareResult{}, errors.New("codex App Server identity changed during preparation")
+		c.mu.Unlock()
+		if owned {
+			_, _ = runtime.Attachments().Rollback(context.Background(), request.PendingToken, "pending-launch-caller-exited")
+		}
+		return launcher.CodexDaemonPrepareResult{}, ctx.Err()
+	}
+}
+
+func (c *hostCoordinator) consumeCodexPendingLaunch(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	token string,
+	input json.RawMessage,
+) error {
+	c.mu.Lock()
+	record := c.pendingCodexLaunches[token]
+	if record != nil {
+		delete(c.pendingCodexLaunches, token)
+	}
+	c.mu.Unlock()
+	if record == nil {
+		return errors.New("Codex pending launch is unavailable")
+	}
+	_, rollbackErr := runtime.Attachments().Rollback(context.Background(), token, "native-session-selected")
+	threadID, identityErr := bridge.CodexHookThreadIDFromInput(input)
+	result := pendingCodexLaunchResult{}
+	if rollbackErr != nil {
+		result.err = rollbackErr
+	} else if identityErr != nil {
+		result.err = identityErr
+	} else {
+		result.handoff, result.err = c.adoptCodexPeer(ctx, runtime, record.request, threadID)
+	}
+	record.done <- result
+	return result.err
+}
+
+func (c *hostCoordinator) adoptCodexPeer(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	request launcher.CodexDaemonPrepareRequest,
+	threadID string,
+) (launcher.CodexDaemonPrepareResult, error) {
+	if procinfo.ObserveIdentity(request.Owner).Status != procinfo.IdentityMatches {
+		return launcher.CodexDaemonPrepareResult{}, errors.New("codex launcher identity is not live")
+	}
+	native, err := c.codexNative()
+	if err != nil {
+		return launcher.CodexDaemonPrepareResult{}, err
+	}
+	thread, err := native.ResolveThread(ctx, threadID)
+	if err != nil {
+		return launcher.CodexDaemonPrepareResult{}, err
+	}
+	if request.Mode == "pending-fresh" {
+		thread, err = native.NameThread(ctx, thread.ID, request.Name, request.Cwd)
+		if err != nil {
+			return launcher.CodexDaemonPrepareResult{}, err
+		}
+	}
+	if strings.TrimSpace(thread.Name) == "" {
+		thread.Name = thread.ID
+	}
+	appPID, appStart, socket, err := native.RefreshAppServerEvidence(ctx)
+	if err != nil {
+		return launcher.CodexDaemonPrepareResult{}, err
+	}
+	appServer, err := procinfo.CaptureIdentity(appPID)
+	if err != nil || appStart == "" || appServer.Start != appStart {
+		return launcher.CodexDaemonPrepareResult{}, errors.New("codex App Server identity changed during attachment")
 	}
 	evidence := daemonpkg.NativeEvidence{
 		Process: request.Owner, Ancestry: []procinfo.Identity{appServer}, Executable: codexBinary(),
@@ -660,15 +771,11 @@ func (c *hostCoordinator) prepareCodex(
 	if request.ApprovalPolicy == "never" {
 		permission = "bypassPermissions"
 	}
-	launchIntent := "non_yolo"
-	if permission == "bypassPermissions" {
-		launchIntent = "yolo"
-	}
 	prepared, err := runtime.Attachments().Prepare(ctx, daemonpkg.ManagedAttachment{
 		ID: thread.ID, CapabilityHash: daemonpkg.CapabilityDigest(capability), Product: "codex",
-		ProfileIdentity: codexHome(), LaunchIntent: launchIntent,
-		NativeSessionID: thread.ID, Cwd: cwd,
-		Groups: append([]string(nil), request.Groups...), PermissionMode: permission,
+		ProfileIdentity: codexHome(), LaunchIntent: map[bool]string{true: "yolo", false: "non_yolo"}[permission == "bypassPermissions"],
+		NativeSessionID: thread.ID, Cwd: request.Cwd, Groups: append([]string(nil), request.Groups...),
+		PermissionMode: permission,
 	})
 	if err == nil {
 		_, err = runtime.Attachments().Adopt(ctx, prepared.ID, evidence)
@@ -677,13 +784,10 @@ func (c *hostCoordinator) prepareCodex(
 		c.mu.Lock()
 		delete(c.pending, thread.ID)
 		c.mu.Unlock()
-		if request.Mode == "fresh" {
-			_ = native.DeleteThread(context.Background(), thread.ID)
-		}
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
 	c.startCodexOwnerMonitor(runtime, thread.ID, request.Owner)
-	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Name: thread.Name, Cwd: cwd}, nil
+	return launcher.CodexDaemonPrepareResult{ThreadID: thread.ID, Name: thread.Name, Cwd: request.Cwd}, nil
 }
 
 func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) error {
@@ -693,9 +797,16 @@ func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) 
 	return runLauncherHeldPeer(ctx, []launcherHeldChild{{
 		role: "Codex TUI", command: command, primary: true,
 	}}, func(context.Context) (launcherHeldIdentity, error) {
+		if launch.Confirm == nil {
+			return launcherHeldIdentity{}, errors.New("Codex native identity confirmation is unavailable")
+		}
+		confirmed, err := launch.Confirm()
+		if err != nil {
+			return launcherHeldIdentity{}, err
+		}
 		report := liveSessionReport{
-			UUID: launch.ThreadID, Name: launch.Name, Product: connectorProductCodex,
-			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(launch.Cwd),
+			UUID: confirmed.ThreadID, Name: confirmed.Name, Product: connectorProductCodex,
+			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(confirmed.Cwd),
 		}
 		return launcherHeldIdentity{report: report, call: func(
 			callCtx context.Context, method string, params json.RawMessage,
@@ -703,10 +814,6 @@ func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) 
 			return connectorNativeCall(callCtx, report, method, params)
 		}}, nil
 	})
-}
-
-func codexResumeCwd(request launcher.CodexDaemonPrepareRequest, _ bridge.CodexNativeThread) string {
-	return request.Cwd
 }
 
 func (c *hostCoordinator) startCodexOwnerMonitor(runtime *daemonpkg.Runtime, id string, owner procinfo.Identity) {
@@ -742,21 +849,25 @@ func (c *hostCoordinator) refreshCodexAttachment(
 	if procinfo.ObserveIdentity(attachment.Evidence.Process).Status != procinfo.IdentityMatches {
 		return daemonpkg.NativeEvidence{}, errors.New("codex TUI owner is not live")
 	}
-	appServer := procinfo.Identity{}
-	if len(attachment.Evidence.Ancestry) > 0 {
-		appServer = attachment.Evidence.Ancestry[0]
-	}
-	if procinfo.ObserveIdentity(appServer).Status != procinfo.IdentityMatches {
-		return daemonpkg.NativeEvidence{}, errors.New("codex App Server is not live")
-	}
 	native, err := c.codexNative()
 	if err != nil {
 		return daemonpkg.NativeEvidence{}, err
 	}
+	appPID, appStart, socket, err := native.RefreshAppServerEvidence(ctx)
+	if err != nil {
+		return daemonpkg.NativeEvidence{}, err
+	}
+	appServer, err := procinfo.CaptureIdentity(appPID)
+	if err != nil || appStart == "" || appServer.Start != appStart {
+		return daemonpkg.NativeEvidence{}, errors.New("codex App Server identity changed during refresh")
+	}
 	if _, err := native.ReattachThread(ctx, attachment.NativeSessionID); err != nil {
 		return daemonpkg.NativeEvidence{}, fmt.Errorf("reattach Codex App Server thread: %w", err)
 	}
-	return attachment.Evidence, nil
+	evidence := attachment.Evidence
+	evidence.Ancestry = []procinfo.Identity{appServer}
+	evidence.SocketPath = socket
+	return evidence, nil
 }
 
 func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
@@ -805,14 +916,47 @@ func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent)
 	}
 }
 
-func requestCodexPreparation(
+type codexPendingControlCall struct{ call *daemonpkg.ControlCall }
+
+func beginCodexPendingLaunch(
 	ctx context.Context,
 	request launcher.CodexDaemonPrepareRequest,
-) (launcher.CodexDaemonPrepareResult, error) {
-	return requestPreparation[launcher.CodexDaemonPrepareRequest, launcher.CodexDaemonPrepareResult](
-		ctx, "attachment.codex.prepare", request,
-	)
+) (launcher.CodexPendingLaunch, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := daemonpkg.ControlEndpoint(defaultStateRoot())
+	if err != nil {
+		return nil, err
+	}
+	requestID := commandRequestID()
+	call, err := daemonpkg.BeginControlCall(ctx, endpoint, daemonpkg.ControlRequest{
+		ID: requestID, Role: daemonpkg.RoleLauncher, Operation: "attachment.codex.pending",
+		Generation: 1, IdempotencyKey: requestID, Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &codexPendingControlCall{call: call}, nil
 }
+
+func (c *codexPendingControlCall) Await() (launcher.CodexDaemonPrepareResult, error) {
+	var result launcher.CodexDaemonPrepareResult
+	response, err := c.call.Await()
+	if err != nil {
+		return result, err
+	}
+	if response.Error != nil {
+		return result, errors.New(response.Error.Message)
+	}
+	if json.Unmarshal(response.Payload, &result) != nil {
+		return result, errors.New("daemon returned an invalid Codex native handoff")
+	}
+	return result, nil
+}
+
+func (c *codexPendingControlCall) Close() error { return c.call.Close() }
 
 func codexBinary() string {
 	if value := strings.TrimSpace(os.Getenv("CODEX_PEER_CODEX_BIN")); value != "" {

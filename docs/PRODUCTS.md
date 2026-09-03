@@ -21,15 +21,15 @@ other integrations from being installed.
 
 ## Resume selectors
 
-Every peer wrapper accepts one uniform `--resume NAME_OR_ID` option. Agent Sessions uses the
-product's native selector wherever it can:
+Every peer wrapper accepts one uniform `--resume [NATIVE_SELECTOR]` option. Agent Sessions only
+translates the flag; it passes the optional selector verbatim and never lists or matches product
+sessions in a peer resume path:
 
 | Product | Resume behavior |
 | --- | --- |
-| Claude, Grok, Qwen | Name or ID passes to the native selector; the product owns duplicate handling. |
-| Codex | Exact IDs pass natively. Names are resolved from product rows because Codex does not expose the native selector's chosen thread to an external parent. Ambiguity opens a picker on a terminal or prints candidates without a terminal. |
-| OpenCode, Kilo | The native selector accepts an exact session ID. Name lookup uses the product session list and the shared picker. |
-| Pi, OMP | The native selector accepts an exact UUID or path/prefix. Name lookup uses the product session list and the shared picker. |
+| Codex | `codex --remote … resume [SELECTOR]`; the remote client owns name/ID resolution, duplicate handling, and its bare native picker. |
+| Claude, Grok, Qwen | The optional selector passes to the product's native resume flag unchanged. |
+| OpenCode, Kilo, Pi, OMP | The optional selector passes to the translated native resume flag unchanged. The product alone decides whether it is a valid ID, path, name, or picker request. |
 
 Lane resume always resolves to one exact product session ID. Offline candidates are returned only
 after the product confirms that ID still exists.

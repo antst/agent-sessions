@@ -1,17 +1,14 @@
 package launcher
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/envutil"
@@ -36,11 +33,7 @@ func RunManagedPeer(product string, args []string) error {
 	if !ok || !descriptor.Has(productcatalog.CapabilityInteractive) {
 		return fmt.Errorf("unsupported managed peer product %q", product)
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("resolve working directory: %w", err)
-	}
-	args, err = projectNativeArgumentRules(descriptor, path, cwd, args, terminalProductSessionChooser)
+	args, err = projectNativeArgumentRules(descriptor, args)
 	if err != nil {
 		return err
 	}
@@ -80,10 +73,6 @@ func ListProductSessions(ctx context.Context, executable string) ([]ProductSessi
 		return nil, fmt.Errorf("decode product session list: %w", err)
 	}
 	return sessions, nil
-}
-
-func listProductSessions(executable, _ string) ([]productSession, error) {
-	return ListProductSessions(context.Background(), executable)
 }
 
 const packageSessionListScript = `
@@ -129,10 +118,6 @@ func ListAllPiSessions(ctx context.Context, executable string) ([]ProductSession
 	return listPiSessionsWithScope(ctx, executable, "all", "")
 }
 
-func listPiSessions(executable, cwd string) ([]productSession, error) {
-	return listPiSessionsWithScope(context.Background(), executable, "cwd", cwd)
-}
-
 func listOMPSessionsWithScope(ctx context.Context, executable, scope, cwd string) ([]ProductSession, error) {
 	resolved, err := filepath.EvalSymlinks(executable)
 	if err != nil {
@@ -160,31 +145,6 @@ func ListAllOMPSessions(ctx context.Context, executable string) ([]ProductSessio
 	return listOMPSessionsWithScope(ctx, executable, "all", "")
 }
 
-func listOMPSessions(executable, cwd string) ([]productSession, error) {
-	return listOMPSessionsWithScope(context.Background(), executable, "cwd", cwd)
-}
-
-func isOpenCodeSessionID(selector string) bool {
-	return strings.HasPrefix(selector, "ses_")
-}
-
-func isPiNativeSessionSelector(selector string) bool {
-	return threadIDPattern.MatchString(selector) || filepath.IsAbs(selector) || strings.ContainsAny(selector, `/\\`) || filepath.Ext(selector) == ".jsonl"
-}
-
-type productSessionChooser func(string, string, []productSession) (string, error)
-
-type productArgumentHandler struct {
-	isNativeSelector func(string) bool
-	list             func(string, string) ([]productSession, error)
-}
-
-var productArgumentHandlers = map[string]productArgumentHandler{
-	"opencode-session-list": {isNativeSelector: isOpenCodeSessionID, list: listProductSessions},
-	"pi-session-list":       {isNativeSelector: isPiNativeSessionSelector, list: listPiSessions},
-	"omp-session-list":      {isNativeSelector: isPiNativeSessionSelector, list: listOMPSessions},
-}
-
 func projectNativeArgumentTranslations(
 	descriptor productcatalog.Descriptor,
 	surface productcatalog.NativeArgumentSurface,
@@ -207,34 +167,9 @@ func projectNativeArgumentTranslations(
 	return projected, nil
 }
 
-func resolveNativeArgumentHandlerValue(
-	descriptor productcatalog.Descriptor,
-	surface productcatalog.NativeArgumentSurface,
-	executable, cwd, option, selector string,
-	handlers map[string]productArgumentHandler,
-	choose productSessionChooser,
-) (string, error) {
-	for _, rule := range descriptor.NativeArgumentRules {
-		if rule.Surface != surface || rule.Kind != productcatalog.NativeArgumentHandler || rule.Option != option {
-			continue
-		}
-		handler, ok := handlers[rule.Handler]
-		if !ok {
-			return "", fmt.Errorf("native argument handler %q is unavailable", rule.Handler)
-		}
-		return resolveProductSession(
-			descriptor.ID, executable, cwd, selector,
-			handler.isNativeSelector, handler.list, choose,
-		)
-	}
-	return selector, nil
-}
-
 func projectNativeArgumentRules(
 	descriptor productcatalog.Descriptor,
-	executable, cwd string,
 	arguments []string,
-	choose productSessionChooser,
 ) ([]string, error) {
 	if err := requireNativeSelectionSupport(descriptor, productcatalog.NativeArgumentPeer, arguments); err != nil {
 		return nil, err
@@ -249,14 +184,7 @@ func projectNativeArgumentRules(
 		case productcatalog.NativeArgumentTranslation:
 			projected, err = translateNativeOption(projected, rule.Option, rule.Replacement, rule.ValuePrefix)
 		case productcatalog.NativeArgumentHandler:
-			handler, ok := productArgumentHandlers[rule.Handler]
-			if !ok {
-				return nil, fmt.Errorf("native argument handler %q is unavailable", rule.Handler)
-			}
-			projected, err = resolveProductResume(
-				descriptor.ID, executable, cwd, projected, rule.Option,
-				handler.isNativeSelector, handler.list, choose,
-			)
+			return nil, fmt.Errorf("peer native argument handler %q is forbidden; resume belongs to the product", rule.Handler)
 		default:
 			return nil, fmt.Errorf("native argument rule kind %q is unsupported", rule.Kind)
 		}
@@ -276,6 +204,14 @@ func translateNativeOption(arguments []string, option string, replacement []stri
 		argument := arguments[index]
 		if argument == "--" {
 			return append(result, arguments[index:]...), nil
+		}
+		if option == "--resume" && argument == option {
+			result = append(result, replacement...)
+			if index+1 < len(arguments) && !strings.HasPrefix(arguments[index+1], "-") {
+				result = append(result, valuePrefix+arguments[index+1])
+				index++
+			}
+			continue
 		}
 		value, matched, consumed, err := argumentOptionValue(arguments, index, option)
 		if err != nil {
@@ -380,120 +316,6 @@ func ProjectNativeLaneArguments(product string, arguments []string) ([]string, e
 		}
 	}
 	return projected, nil
-}
-
-func resolveProductResume(
-	product, executable, cwd string,
-	arguments []string,
-	option string,
-	isNativeSelector func(string) bool,
-	list func(string, string) ([]productSession, error),
-	choose productSessionChooser,
-) ([]string, error) {
-	selector, present, err := optionValue(arguments, option)
-	if err != nil || !present || isNativeSelector(selector) {
-		return arguments, err
-	}
-	selected, err := resolveProductSession(product, executable, cwd, selector, isNativeSelector, list, choose)
-	if err != nil {
-		return nil, err
-	}
-	return replaceNativeOptionValue(arguments, option, selected), nil
-}
-
-func resolveProductSession(
-	product, executable, cwd, selector string,
-	isNativeSelector func(string) bool,
-	list func(string, string) ([]productSession, error),
-	choose productSessionChooser,
-) (string, error) {
-	if isNativeSelector(selector) {
-		return selector, nil
-	}
-	sessions, err := list(executable, cwd)
-	if err != nil {
-		return "", err
-	}
-	matches := make([]productSession, 0, 1)
-	for _, session := range sessions {
-		if session.Title == selector {
-			matches = append(matches, session)
-		}
-	}
-	selected, err := choose(product, selector, matches)
-	if err != nil {
-		return "", err
-	}
-	return selected, nil
-}
-
-func terminalProductSessionChooser(product, selector string, matches []productSession) (string, error) {
-	info, err := os.Stdin.Stat()
-	interactive := err == nil && info.Mode()&os.ModeCharDevice != 0
-	return chooseProductSession(product, selector, matches, os.Stdin, os.Stderr, interactive)
-}
-
-func chooseProductSession(
-	product, selector string,
-	matches []productSession,
-	input io.Reader,
-	output io.Writer,
-	interactive bool,
-) (string, error) {
-	if len(matches) == 0 {
-		return "", usageError(fmt.Sprintf("%s session name %q was not found in the product session list", product, selector))
-	}
-	if len(matches) == 1 {
-		return matches[0].ID, nil
-	}
-	details := formatProductSessionCandidates(matches)
-	if !interactive {
-		return "", usageError(fmt.Sprintf("%s session name %q has multiple matches; choose an exact session ID: %s", product, selector, strings.Join(details, ", ")))
-	}
-	_, _ = fmt.Fprintf(output, "%s has multiple sessions named %q:\n", product, selector)
-	for index, detail := range details {
-		_, _ = fmt.Fprintf(output, "  %d. %s\n", index+1, detail)
-	}
-	_, _ = fmt.Fprintf(output, "Select session [1-%d]: ", len(matches))
-	line, err := bufio.NewReader(input).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	choice, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil || choice < 1 || choice > len(matches) {
-		return "", usageError("session selection is invalid")
-	}
-	return matches[choice-1].ID, nil
-}
-
-func formatProductSessionCandidates(matches []productSession) []string {
-	details := make([]string, 0, len(matches))
-	for _, match := range matches {
-		updated := fmt.Sprintf("%d", match.Updated)
-		if match.Modified != "" {
-			updated = match.Modified
-		}
-		details = append(details, fmt.Sprintf("%s (directory=%s updated=%s)", match.ID, match.Directory, updated))
-	}
-	return details
-}
-
-func replaceNativeOptionValue(arguments []string, option, value string) []string {
-	resolved := append([]string(nil), arguments...)
-	for index, argument := range beforeDoubleDash(resolved) {
-		switch {
-		case argument == option:
-			resolved[index+1] = value
-			return resolved
-		case strings.HasPrefix(argument, option+"="):
-			resolved[index] = option + "=" + value
-			return resolved
-		case len(option) == 2 && strings.HasPrefix(argument, option) && argument != option:
-			resolved[index] = option + value
-			return resolved
-		}
-	}
-	return resolved
 }
 
 func argumentOptionValue(arguments []string, index int, option string) (string, bool, bool, error) {

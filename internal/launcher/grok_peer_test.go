@@ -25,7 +25,6 @@ func TestGrokPeerManagedArgumentParity(t *testing.T) {
 		wantName   string
 		wantNative []string
 		wantTarget string
-		wantLate   bool
 	}{
 		{
 			name:     "fresh strips only peer name",
@@ -59,14 +58,13 @@ func TestGrokPeerManagedArgumentParity(t *testing.T) {
 			args:       []string{"--resume", "test", "--always-approve"},
 			wantMode:   grokModeResume,
 			wantNative: []string{"--always-approve"},
-			wantTarget: "test", wantLate: true,
+			wantTarget: "test",
 		},
 		{
 			name:       "bare native resume is late bound",
 			args:       []string{"--resume", "--no-alt-screen"},
 			wantMode:   grokModeResume,
 			wantNative: []string{"--no-alt-screen"},
-			wantLate:   true,
 		},
 		{
 			name:     "bare boundary is untouched",
@@ -84,10 +82,10 @@ func TestGrokPeerManagedArgumentParity(t *testing.T) {
 			if plan.mode != test.wantMode || plan.peerName != test.wantName {
 				t.Fatalf("plan identity = %+v, want mode=%s name=%q", plan, test.wantMode, test.wantName)
 			}
-			if plan.resumeTarget != test.wantTarget || plan.lateBoundResume != test.wantLate {
-				t.Fatalf("resume selection = target %q late=%v, want %q/%v", plan.resumeTarget, plan.lateBoundResume, test.wantTarget, test.wantLate)
+			if plan.resumeTarget != test.wantTarget {
+				t.Fatalf("resume selection = target %q, want %q", plan.resumeTarget, test.wantTarget)
 			}
-			if !threadIDPattern.MatchString(plan.sessionID) {
+			if plan.mode == grokModeFresh && !threadIDPattern.MatchString(plan.sessionID) {
 				t.Fatalf("session id = %q", plan.sessionID)
 			}
 			if !reflect.DeepEqual(plan.interactiveArgs, test.wantNative) {
@@ -191,8 +189,8 @@ func TestGrokPeerTitleResumePreservesNativeSelectorAndHostContext(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.lateBoundResume || plan.resumeTarget != "test" || !threadIDPattern.MatchString(plan.sessionID) {
-		t.Fatalf("late-bound plan = %+v", plan)
+	if plan.resumeTarget != "test" || plan.sessionID != "" {
+		t.Fatalf("product-owned resume plan = %+v", plan)
 	}
 	if !reflect.DeepEqual(plan.peerContext.groups, []string{"umka"}) || !plan.peerContext.groupsSpecified {
 		t.Fatalf("peer context = %+v", plan.peerContext)
@@ -284,8 +282,7 @@ func TestGrokPeerBuildsOneLauncherOwnedLeaderAndTUI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Executable != grok || got.SessionID != testGrokSessionID || got.RequestedName != "native-title" ||
-		len(got.Groups) != 1 || got.Groups[0] != "project" || !filepath.IsAbs(got.LeaderSocket) {
+	if got.Executable != grok || len(got.Groups) != 1 || got.Groups[0] != "project" || !filepath.IsAbs(got.LeaderSocket) {
 		t.Fatalf("native launch = %+v", got)
 	}
 	if !slices.Contains(got.TUIArguments, "--session-id") || !slices.Contains(got.TUIArguments, testGrokSessionID) {

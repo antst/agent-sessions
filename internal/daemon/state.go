@@ -6,12 +6,179 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/statestore"
 )
+
+// PrepareStateRoot removes only the exact pre-0.4.0 multi-ledger state shape.
+// Every other unreadable root fails closed; a valid one-table root is never
+// rewritten by this probe.
+func PrepareStateRoot(root string, maxBytes int64, output io.Writer) error {
+	if output == nil {
+		output = io.Discard
+	}
+	if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
+		return errors.New("refuse to prepare an unsafe daemon state root")
+	}
+	identity, err := pathidentity.ExistingNoFollow(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("validate daemon state root: %w", err)
+	}
+	if identity.Kind != pathidentity.KindDirectory {
+		return errors.New("daemon state root is not a directory")
+	}
+	legacy, reason := legacyStateRoot(root, maxBytes)
+	if legacy {
+		if err := os.RemoveAll(root); err != nil {
+			return fmt.Errorf("remove incompatible daemon state root %s: %w", root, err)
+		}
+		if _, err := fmt.Fprintf(output, "Removed incompatible pre-0.4.0 Agent Sessions state root %s: %s\n", root, reason); err != nil {
+			return err
+		}
+		return nil
+	}
+	return validateCurrentStateRoot(root, maxBytes)
+}
+
+func legacyStateRoot(root string, maxBytes int64) (bool, string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, ""
+	}
+	allowedRootEntries := map[string]bool{
+		"state.json": true, "state.lock": true, "agents": true, "native": true, "sessions": true, "run": true,
+	}
+	for _, entry := range entries {
+		if !allowedRootEntries[entry.Name()] {
+			return false, ""
+		}
+	}
+	statePath := filepath.Join(root, "state.json")
+	info, err := os.Lstat(statePath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxBytes {
+		return false, ""
+	}
+	body, err := os.ReadFile(statePath)
+	if err != nil {
+		return false, ""
+	}
+	var disk struct {
+		Schema  int                        `json:"schema"`
+		Records map[string]json.RawMessage `json:"records"`
+	}
+	if json.Unmarshal(body, &disk) != nil || disk.Schema != 1 || len(disk.Records) != 1 {
+		return false, ""
+	}
+	var catalog map[string]json.RawMessage
+	if json.Unmarshal(disk.Records[catalogRecord], &catalog) != nil {
+		return false, ""
+	}
+	required := []string{"attachments", "deliveries", "lanes", "turns"}
+	allowed := map[string]bool{"attachments": true, "cleanup_debts": true, "deliveries": true, "host": true, "lanes": true, "turns": true}
+	for _, key := range required {
+		if _, ok := catalog[key]; !ok {
+			return false, ""
+		}
+	}
+	for key := range catalog {
+		if !allowed[key] {
+			return false, ""
+		}
+	}
+	for _, directory := range []string{"agents", "native", "sessions"} {
+		entry, err := pathidentity.ExistingNoFollow(filepath.Join(root, directory))
+		if err != nil || entry.Kind != pathidentity.KindDirectory {
+			return false, ""
+		}
+	}
+	if lock, err := os.Lstat(filepath.Join(root, "state.lock")); err == nil {
+		if !lock.Mode().IsRegular() || lock.Mode()&os.ModeSymlink != 0 {
+			return false, ""
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, ""
+	}
+	if run, err := pathidentity.ExistingNoFollow(filepath.Join(root, "run")); err == nil {
+		if run.Kind != pathidentity.KindDirectory {
+			return false, ""
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, ""
+	}
+	return true, "legacy attachments/deliveries/turns catalog and sessions/native/agents directories"
+}
+
+func validateCurrentStateRoot(root string, maxBytes int64) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("read daemon state root: %w", err)
+	}
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "state.json":
+		case "state.lock":
+			info, statErr := os.Lstat(filepath.Join(root, entry.Name()))
+			if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("daemon state lock is invalid")
+			}
+		case "run":
+			identity, identityErr := pathidentity.ExistingNoFollow(filepath.Join(root, entry.Name()))
+			if identityErr != nil || identity.Kind != pathidentity.KindDirectory {
+				return errors.New("daemon runtime directory is invalid")
+			}
+		default:
+			return errors.New("daemon state root contains an unknown entry")
+		}
+	}
+	statePath := filepath.Join(root, "state.json")
+	info, err := os.Lstat(statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		for _, entry := range entries {
+			if entry.Name() != "state.lock" && entry.Name() != "run" {
+				return errors.New("daemon state root is neither empty nor a current one-table store")
+			}
+		}
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxBytes {
+		return errors.New("daemon state snapshot is invalid")
+	}
+	body, err := os.ReadFile(statePath)
+	if err != nil {
+		return fmt.Errorf("read daemon state snapshot: %w", err)
+	}
+	var disk struct {
+		Schema   int                        `json:"schema"`
+		Revision uint64                     `json:"revision"`
+		Records  map[string]json.RawMessage `json:"records"`
+	}
+	if json.Unmarshal(body, &disk) != nil || disk.Schema != 1 || disk.Revision == 0 || len(disk.Records) != 1 {
+		return errors.New("daemon state snapshot is not a current one-table store")
+	}
+	catalogBody, ok := disk.Records[catalogRecord]
+	if !ok {
+		return errors.New("daemon catalog record is missing")
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(catalogBody, &fields) != nil || len(fields) != 1 || fields["lanes"] == nil {
+		return errors.New("daemon catalog record is not the current one-table shape")
+	}
+	var catalog Catalog
+	if json.Unmarshal(catalogBody, &catalog) != nil {
+		return errors.New("daemon catalog record is invalid")
+	}
+	return validateCatalog(normalizedCatalog(catalog))
+}
 
 const (
 	catalogRecord = "catalog"

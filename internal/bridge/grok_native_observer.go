@@ -57,39 +57,16 @@ func OpenGrokNativeObserver(
 	environment []string,
 	diagnostics io.Writer,
 ) (*GrokNativeObserver, error) {
-	observer, _, err := openGrokNativeObserver(ctx, bin, cwd, leaderSocket, sessionID, false, environment, diagnostics)
-	return observer, err
-}
-
-// OpenGrokNativeSelectionObserver asks the product which resident session a
-// native --resume selector opened. The provisional ID only scopes the launch;
-// the returned UUID comes from Grok's live session roster.
-func OpenGrokNativeSelectionObserver(
-	ctx context.Context,
-	bin, cwd, leaderSocket, provisionalID string,
-	environment []string,
-	diagnostics io.Writer,
-) (*GrokNativeObserver, string, error) {
-	return openGrokNativeObserver(ctx, bin, cwd, leaderSocket, provisionalID, true, environment, diagnostics)
-}
-
-func openGrokNativeObserver(
-	ctx context.Context,
-	bin, cwd, leaderSocket, sessionID string,
-	selectResident bool,
-	environment []string,
-	diagnostics io.Writer,
-) (*GrokNativeObserver, string, error) {
 	if ctx == nil || !validSessionID(sessionID) || !strings.HasPrefix(leaderSocket, "/") {
-		return nil, "", errors.New("invalid Grok ACP observer identity")
+		return nil, errors.New("invalid Grok ACP observer identity")
 	}
 	client, err := openGrokAuthenticatedClient(ctx, bin, cwd, leaderSocket, sessionID, environment, diagnostics)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	fail := func(cause error) (*GrokNativeObserver, string, error) {
+	fail := func(cause error) (*GrokNativeObserver, error) {
 		client.close()
-		return nil, "", cause
+		return nil, cause
 	}
 	rosterCtx, cancel := context.WithTimeout(ctx, grokACPStartupTimeout)
 	defer cancel()
@@ -97,16 +74,11 @@ func openGrokNativeObserver(
 	if err != nil {
 		return fail(err)
 	}
-	selectedID := sessionID
-	if selectResident {
-		selectedID, _, err = grokSelectedResidentSession(roster)
-	} else {
-		_, err = grokRosterStateFromResponse(roster, sessionID)
-	}
+	_, err = grokRosterStateFromResponse(roster, sessionID)
 	if err != nil {
 		return fail(err)
 	}
-	return &GrokNativeObserver{client: client, sessionID: selectedID}, selectedID, nil
+	return &GrokNativeObserver{client: client, sessionID: sessionID}, nil
 }
 
 func openGrokAuthenticatedClient(

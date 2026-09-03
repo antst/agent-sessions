@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
@@ -134,7 +133,7 @@ func TestNormalizePeerName(t *testing.T) {
 	}
 }
 
-func TestMCPRelayRejectsUnknownProductAndReturnsCanonicalInactive(t *testing.T) {
+func TestMCPRelayRejectsUnknownProductAndReturnsRealCallError(t *testing.T) {
 	config := MCPRelayConfig{
 		Product: "unknown",
 		Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
@@ -153,7 +152,7 @@ func TestMCPRelayRejectsUnknownProductAndReturnsCanonicalInactive(t *testing.T) 
 	if err := relay.Serve(context.Background(), strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n"), &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), daemon.CanonicalInactiveMessage) || !strings.Contains(output.String(), `"isError":true`) {
+	if !strings.Contains(output.String(), `"code":-32006`) || !strings.Contains(output.String(), `"detail":"connector is inactive"`) {
 		t.Fatalf("inactive response = %s", output.String())
 	}
 }
