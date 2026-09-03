@@ -901,15 +901,25 @@ func (c *hostCoordinator) matchPendingCodexLaunch(threadID string) {
 	if runtime == nil || !hasPending {
 		return
 	}
-	if _, active, err := runtime.Attachments().ActiveAttachment(threadID); err != nil || active {
+	if _, active, err := runtime.Attachments().ActiveAttachment(threadID); err != nil {
+		if !c.failExactCodexPendingLaunch(threadID, err) {
+			fmt.Fprintf(os.Stderr, "Codex launch candidate %s attachment check failed: %v\n", threadID, err)
+		}
+		return
+	} else if active {
+		c.failExactCodexPendingLaunch(threadID, fmt.Errorf("Codex thread %s is already attached", threadID))
 		return
 	}
 	native, err := c.codexNative()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Codex launch candidate %s native client failed: %v\n", threadID, err)
 		return
 	}
 	thread, err := native.ResolveThread(c.ctx, threadID)
 	if err != nil {
+		if !c.failExactCodexPendingLaunch(threadID, err) {
+			fmt.Fprintf(os.Stderr, "Codex launch candidate %s exact read failed: %v\n", threadID, err)
+		}
 		return
 	}
 	c.mu.Lock()
@@ -935,6 +945,24 @@ func (c *hostCoordinator) matchPendingCodexLaunch(threadID string) {
 	result := pendingCodexLaunchResult{}
 	result.handoff, result.err = c.adoptCodexPeer(record.ctx, runtime, record.request, native, thread)
 	record.done <- result
+}
+
+func (c *hostCoordinator) failExactCodexPendingLaunch(threadID string, failure error) bool {
+	c.mu.Lock()
+	var failed *pendingCodexLaunch
+	for token, record := range c.pendingCodexLaunches {
+		if record.request.SelectorKind == launcher.CodexLaunchSelectorID && record.request.Selector == threadID {
+			failed = record
+			delete(c.pendingCodexLaunches, token)
+			break
+		}
+	}
+	c.mu.Unlock()
+	if failed == nil {
+		return false
+	}
+	failed.done <- pendingCodexLaunchResult{err: failure}
+	return true
 }
 
 type codexPendingControlCall struct{ call *daemonpkg.ControlCall }

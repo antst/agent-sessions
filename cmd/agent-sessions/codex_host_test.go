@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -323,6 +324,37 @@ func TestCodexPendingLaunchDuplicateNamesWaitingWrapperPID(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "wrapper pid 4242") {
 		t.Fatalf("duplicate pending launch error = %v", err)
+	}
+}
+
+func TestExactIDPendingLaunchReceivesItsNativeMatchFailure(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	threadID := "00000000-0000-0000-0000-00000000c023"
+	exact := &pendingCodexLaunch{
+		request: launcher.CodexDaemonPrepareRequest{SelectorKind: launcher.CodexLaunchSelectorID, Selector: threadID},
+		done:    make(chan pendingCodexLaunchResult, 1),
+	}
+	byName := &pendingCodexLaunch{
+		request: launcher.CodexDaemonPrepareRequest{SelectorKind: launcher.CodexLaunchSelectorName, Selector: "same-thread"},
+		done:    make(chan pendingCodexLaunchResult, 1),
+	}
+	coordinator.pendingCodexLaunches["exact"] = exact
+	coordinator.pendingCodexLaunches["name"] = byName
+	nativeFailure := errors.New("native exact read failed")
+	if !coordinator.failExactCodexPendingLaunch(threadID, nativeFailure) {
+		t.Fatal("exact-id pending launch did not accept its native failure")
+	}
+	if result := <-exact.done; !errors.Is(result.err, nativeFailure) {
+		t.Fatalf("exact-id failure = %v", result.err)
+	}
+	if coordinator.pendingCodexLaunches["exact"] != nil || coordinator.pendingCodexLaunches["name"] != byName {
+		t.Fatal("failure removed any pending launch other than the exact-id owner")
+	}
+	select {
+	case result := <-byName.done:
+		t.Fatalf("unmatched name launch received failure: %v", result.err)
+	default:
 	}
 }
 
