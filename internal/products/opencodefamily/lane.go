@@ -175,11 +175,12 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	if _, err := driver.config.MapPermission(request.PermissionMode); err != nil {
 		return productruntime.NativeTurnRef{}, err
 	}
-	var model *NativeModel
-	_, model, err = splitLaneArguments(request.Arguments)
+	var promptOptions NativePromptOptions
+	_, promptOptions, err = splitLaneArguments(request.Arguments)
 	if err != nil {
 		return productruntime.NativeTurnRef{}, err
 	}
+	promptOptions.Variant = request.Effort
 	live, err := driver.lockLive(session)
 	if err != nil {
 		return productruntime.NativeTurnRef{}, err
@@ -195,7 +196,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	live.turn = &laneTurn{operationID: operationID}
 	driver.mu.Unlock()
 	body := []byte(request.Prompt)
-	accepted, err := live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false, model)
+	accepted, err := live.client.PromptAsync(ctx, session.NativeSessionID, operationID, body, false, promptOptions)
 	if err != nil {
 		driver.clearTurn(session.LaneID, operationID)
 		return productruntime.NativeTurnRef{}, err
@@ -211,9 +212,9 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: accepted.NativeMessageID}, nil
 }
 
-func splitLaneArguments(arguments []string) ([]string, *NativeModel, error) {
+func splitLaneArguments(arguments []string) ([]string, NativePromptOptions, error) {
 	serverArguments := make([]string, 0, len(arguments))
-	var model *NativeModel
+	var options NativePromptOptions
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		var value string
@@ -221,22 +222,38 @@ func splitLaneArguments(arguments []string) ([]string, *NativeModel, error) {
 		case argument == "--model" || argument == "-m":
 			index++
 			if index >= len(arguments) {
-				return nil, nil, fmt.Errorf("%s requires a provider/model value", argument)
+				return nil, NativePromptOptions{}, fmt.Errorf("%s requires a provider/model value", argument)
 			}
 			value = arguments[index]
 		case strings.HasPrefix(argument, "--model="):
 			value = strings.TrimPrefix(argument, "--model=")
+		case argument == "--agent":
+			index++
+			if index >= len(arguments) || strings.TrimSpace(arguments[index]) == "" {
+				return nil, NativePromptOptions{}, fmt.Errorf("--agent requires a value")
+			}
+			if options.Agent != "" {
+				return nil, NativePromptOptions{}, fmt.Errorf("--agent accepts one value")
+			}
+			options.Agent = arguments[index]
+			continue
+		case strings.HasPrefix(argument, "--agent="):
+			if options.Agent != "" || strings.TrimSpace(strings.TrimPrefix(argument, "--agent=")) == "" {
+				return nil, NativePromptOptions{}, fmt.Errorf("--agent accepts one value")
+			}
+			options.Agent = strings.TrimPrefix(argument, "--agent=")
+			continue
 		default:
 			serverArguments = append(serverArguments, argument)
 			continue
 		}
 		providerID, modelID, ok := strings.Cut(value, "/")
-		if model != nil || !ok || !validModelPart(providerID) || !validModelPart(modelID) {
-			return nil, nil, fmt.Errorf("--model requires one provider/model value")
+		if options.Model != nil || !ok || !validModelPart(providerID) || !validModelPart(modelID) {
+			return nil, NativePromptOptions{}, fmt.Errorf("--model requires one provider/model value")
 		}
-		model = &NativeModel{ProviderID: providerID, ModelID: modelID}
+		options.Model = &NativeModel{ProviderID: providerID, ModelID: modelID}
 	}
-	return serverArguments, model, nil
+	return serverArguments, options, nil
 }
 
 func (*LaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {

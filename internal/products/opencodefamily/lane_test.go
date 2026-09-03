@@ -56,11 +56,14 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 			_, _ = response.Write([]byte(`{"id":"ses_lane","title":"worker"}`))
 		case "POST /session/ses_lane/prompt_async":
 			var body struct {
-				ID    string       `json:"messageID"`
-				Model *NativeModel `json:"model"`
+				ID      string       `json:"messageID"`
+				Model   *NativeModel `json:"model"`
+				Agent   string       `json:"agent"`
+				Variant string       `json:"variant"`
 			}
 			if decodeJSON(request.Body, &body) != nil || body.ID == "" || body.Model == nil ||
-				body.Model.ProviderID != "google" || body.Model.ModelID != "gemini-3.1-pro-preview" {
+				body.Model.ProviderID != "google" || body.Model.ModelID != "gemini-3.1-pro-preview" ||
+				body.Agent != "octto" || body.Variant != "high" {
 				t.Errorf("prompt body = %#v", body)
 			}
 			messageID.Store(body.ID)
@@ -91,7 +94,7 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
-		Arguments:   []string{"--model", "google/gemini-3.1-pro-preview"},
+		Arguments:   []string{"--model", "google/gemini-3.1-pro-preview", "--agent", "octto"},
 		Environment: []string{"AGENT_SESSIONS_PRODUCT=opencode", "AGENT_SESSIONS_SESSION_ID=lane-one", "AGENT_SESSIONS_GROUPS=[]"},
 	})
 	if err != nil || session.LaneID != "ses_lane" || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
@@ -114,8 +117,8 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 		t.Fatalf("serve environment = %#v, want %#v", got, wantEnvironment)
 	}
 	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{
-		Prompt: "perform task", PermissionMode: permissionmode.Default,
-		Arguments: []string{"--model", "google/gemini-3.1-pro-preview"},
+		Prompt: "perform task", PermissionMode: permissionmode.Default, Effort: "high",
+		Arguments: []string{"--model", "google/gemini-3.1-pro-preview", "--agent", "octto"},
 	})
 	if err != nil || turn.NativeTurnID == "" {
 		t.Fatalf("start = %#v, %v", turn, err)
@@ -187,11 +190,14 @@ func TestKiloLaneInitialPromptUsesLegacyRouteAndRejectsSteer(t *testing.T) {
 			_, _ = response.Write([]byte(`{"id":"ses_kilo_lane","title":""}`))
 		case "POST /session/ses_kilo_lane/prompt_async":
 			var body struct {
-				ID    string       `json:"messageID"`
-				Model *NativeModel `json:"model"`
+				ID      string       `json:"messageID"`
+				Model   *NativeModel `json:"model"`
+				Agent   string       `json:"agent"`
+				Variant string       `json:"variant"`
 			}
 			if decodeJSON(request.Body, &body) != nil || body.ID == "" || body.Model == nil ||
-				body.Model.ProviderID != "deepseek" || body.Model.ModelID != "deepseek-v4-flash" {
+				body.Model.ProviderID != "deepseek" || body.Model.ModelID != "deepseek-v4-flash" ||
+				body.Agent != "plan" || body.Variant != "minimal" {
 				t.Errorf("Kilo initial prompt = %#v", body)
 			}
 			deliveriesMu.Lock()
@@ -213,7 +219,7 @@ func TestKiloLaneInitialPromptUsesLegacyRouteAndRejectsSteer(t *testing.T) {
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: "kilo", LaneID: "lane-kilo", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.BypassPermissions,
-		Arguments:   []string{"--model", "deepseek/deepseek-v4-flash"},
+		Arguments:   []string{"--model", "deepseek/deepseek-v4-flash", "--agent", "plan"},
 		Environment: []string{"AGENT_SESSIONS_PRODUCT=kilo", "AGENT_SESSIONS_SESSION_ID=lane-kilo", "AGENT_SESSIONS_GROUPS=[]"},
 	})
 	if err != nil {
@@ -231,8 +237,8 @@ func TestKiloLaneInitialPromptUsesLegacyRouteAndRejectsSteer(t *testing.T) {
 		t.Fatalf("Kilo serve environment = %#v, want %#v", got, wantEnvironment)
 	}
 	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{
-		Prompt: "first", PermissionMode: permissionmode.BypassPermissions,
-		Arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
+		Prompt: "first", PermissionMode: permissionmode.BypassPermissions, Effort: "minimal",
+		Arguments: []string{"--model", "deepseek/deepseek-v4-flash", "--agent", "plan"},
 	})
 	if err != nil {
 		t.Fatal(err)

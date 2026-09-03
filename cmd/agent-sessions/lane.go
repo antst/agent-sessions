@@ -80,7 +80,11 @@ func (c *hostCoordinator) handleLaneCommand(
 	if envelope.Command != "" {
 		envelope.Arguments = append([]string{envelope.Command}, envelope.Arguments...)
 	}
-	parsed, err := parseUnifiedLaneCommand(envelope.Arguments)
+	projected, err := launcher.ProjectNativeLaneArguments(envelope.Product, envelope.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := parseUnifiedLaneCommand(projected)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +321,7 @@ func laneNativeOptionTakesValue(argument string) bool {
 	if strings.Contains(argument, "=") {
 		return false
 	}
-	for _, candidate := range []string{"-m", "--model", "--effort", "--reasoning-effort", "--sandbox", "--approval-policy", "--config", "-c", "--schema", "--max-budget-usd", "--tools", "--allowed-tools", "--disallowed-tools", "--qwen-home"} {
+	for _, candidate := range []string{"-m", "--model", "--agent", "--effort", "--reasoning-effort", "--thinking", "--sandbox", "--approval-policy", "--config", "-c", "--schema", "--max-budget-usd", "--tools", "--allowed-tools", "--disallowed-tools", "--qwen-home"} {
 		if argument == candidate {
 			return true
 		}
@@ -470,22 +474,15 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if options.noInheritGroups {
 		actor.inheritGroups = false
 	}
-	if options.approvalPolicy != "" {
-		actor.approvalPolicy = options.approvalPolicy
+	actor.approvalPolicy = options.approvalPolicy
+	actor.sandbox = options.sandbox
+	actor.effort = options.effort
+	actor.schema = options.schema
+	actor.arguments = append([]string(nil), options.native...)
+	actor.permission = options.permission
+	if actor.permission == "" {
+		actor.permission = laneDefaultPermission(parent.PermissionMode)
 	}
-	if options.sandbox != "" {
-		actor.sandbox = options.sandbox
-	}
-	if options.effort != "" {
-		actor.effort = options.effort
-	}
-	if options.schema != "" {
-		actor.schema = options.schema
-	}
-	if len(options.native) > 0 {
-		actor.arguments = append([]string(nil), options.native...)
-	}
-	actor.permission = laneResumePermission(actor.permission, options.permission, parent.PermissionMode)
 	if options.persistentSet {
 		actor.persistent = options.persistent
 	}
@@ -1406,16 +1403,6 @@ func laneDefaultPermission(parent string) string {
 		return parent
 	}
 	return "default"
-}
-
-func laneResumePermission(existing, requested, parent string) string {
-	if requested != "" {
-		return requested
-	}
-	if existing != "" {
-		return existing
-	}
-	return laneDefaultPermission(parent)
 }
 
 func uniqueStrings(values []string) []string {

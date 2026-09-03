@@ -185,14 +185,21 @@ var productArgumentHandlers = map[string]productArgumentHandler{
 	"omp-session-list":      {isNativeSelector: isPiNativeSessionSelector, list: listOMPSessions},
 }
 
-func projectNativeArgumentTranslations(descriptor productcatalog.Descriptor, arguments []string) ([]string, error) {
+func projectNativeArgumentTranslations(
+	descriptor productcatalog.Descriptor,
+	surface productcatalog.NativeArgumentSurface,
+	arguments []string,
+) ([]string, error) {
+	if err := requireNativeSelectionSupport(descriptor, surface, arguments); err != nil {
+		return nil, err
+	}
 	projected := append([]string(nil), arguments...)
 	for _, rule := range descriptor.NativeArgumentRules {
-		if rule.Kind != productcatalog.NativeArgumentTranslation {
+		if rule.Surface != surface || rule.Kind != productcatalog.NativeArgumentTranslation {
 			continue
 		}
 		var err error
-		projected, err = translateNativeOption(projected, rule.Option, rule.Replacement)
+		projected, err = translateNativeOption(projected, rule.Option, rule.Replacement, rule.ValuePrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -202,12 +209,13 @@ func projectNativeArgumentTranslations(descriptor productcatalog.Descriptor, arg
 
 func resolveNativeArgumentHandlerValue(
 	descriptor productcatalog.Descriptor,
+	surface productcatalog.NativeArgumentSurface,
 	executable, cwd, option, selector string,
 	handlers map[string]productArgumentHandler,
 	choose productSessionChooser,
 ) (string, error) {
 	for _, rule := range descriptor.NativeArgumentRules {
-		if rule.Kind != productcatalog.NativeArgumentHandler || rule.Option != option {
+		if rule.Surface != surface || rule.Kind != productcatalog.NativeArgumentHandler || rule.Option != option {
 			continue
 		}
 		handler, ok := handlers[rule.Handler]
@@ -228,12 +236,18 @@ func projectNativeArgumentRules(
 	arguments []string,
 	choose productSessionChooser,
 ) ([]string, error) {
+	if err := requireNativeSelectionSupport(descriptor, productcatalog.NativeArgumentPeer, arguments); err != nil {
+		return nil, err
+	}
 	projected := append([]string(nil), arguments...)
 	for _, rule := range descriptor.NativeArgumentRules {
+		if rule.Surface != productcatalog.NativeArgumentPeer {
+			continue
+		}
 		var err error
 		switch rule.Kind {
 		case productcatalog.NativeArgumentTranslation:
-			projected, err = translateNativeOption(projected, rule.Option, rule.Replacement)
+			projected, err = translateNativeOption(projected, rule.Option, rule.Replacement, rule.ValuePrefix)
 		case productcatalog.NativeArgumentHandler:
 			handler, ok := productArgumentHandlers[rule.Handler]
 			if !ok {
@@ -253,7 +267,10 @@ func projectNativeArgumentRules(
 	return projected, nil
 }
 
-func translateNativeOption(arguments []string, option string, replacement []string) ([]string, error) {
+func translateNativeOption(arguments []string, option string, replacement []string, valuePrefix string) ([]string, error) {
+	if len(replacement) == 1 && replacement[0] == option && valuePrefix == "" {
+		return append([]string(nil), arguments...), nil
+	}
 	result := make([]string, 0, len(arguments)+len(replacement))
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
@@ -269,12 +286,100 @@ func translateNativeOption(arguments []string, option string, replacement []stri
 			continue
 		}
 		result = append(result, replacement...)
-		result = append(result, value)
+		result = append(result, valuePrefix+value)
 		if consumed {
 			index++
 		}
 	}
 	return result, nil
+}
+
+var nativeSelectionLabels = map[string]string{
+	"--agent":            "agent",
+	"--effort":           "effort",
+	"--reasoning-effort": "effort",
+}
+
+func requireNativeSelectionSupport(
+	descriptor productcatalog.Descriptor,
+	surface productcatalog.NativeArgumentSurface,
+	arguments []string,
+) error {
+	for _, argument := range beforeDoubleDash(arguments) {
+		option := argument
+		if strings.Contains(option, "=") {
+			option, _, _ = strings.Cut(option, "=")
+		}
+		label, owned := nativeSelectionLabels[option]
+		if !owned {
+			continue
+		}
+		supported := false
+		for _, rule := range descriptor.NativeArgumentRules {
+			if rule.Surface == surface && rule.Option == option {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return usageError(fmt.Sprintf("%s has no native %s selector", descriptor.ID, label))
+		}
+	}
+	return nil
+}
+
+type laneArgumentHandler func(productcatalog.Descriptor, []string, productcatalog.NativeArgumentRule) ([]string, error)
+
+var laneArgumentHandlers = map[string]laneArgumentHandler{
+	"dsh-effort-with-model": func(descriptor productcatalog.Descriptor, arguments []string, rule productcatalog.NativeArgumentRule) ([]string, error) {
+		_, selected, err := optionValue(arguments, rule.Option)
+		if err != nil || !selected {
+			return arguments, err
+		}
+		_, present, err := optionValue(arguments, "--model")
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, usageError(descriptor.ID + " effort requires --model in the same invocation")
+		}
+		return translateNativeOption(arguments, rule.Option, []string{"--effort"}, "")
+	},
+}
+
+// ProjectNativeLaneArguments applies only descriptor-owned uniform lane
+// options. Product-specific native argv remains otherwise untouched.
+func ProjectNativeLaneArguments(product string, arguments []string) ([]string, error) {
+	descriptor, ok := productcatalog.ByID(product)
+	if !ok {
+		return nil, usageError("unsupported lane product: " + product)
+	}
+	if err := requireNativeSelectionSupport(descriptor, productcatalog.NativeArgumentLane, arguments); err != nil {
+		return nil, err
+	}
+	projected := append([]string(nil), arguments...)
+	for _, rule := range descriptor.NativeArgumentRules {
+		if rule.Surface != productcatalog.NativeArgumentLane {
+			continue
+		}
+		var err error
+		switch rule.Kind {
+		case productcatalog.NativeArgumentTranslation:
+			projected, err = translateNativeOption(projected, rule.Option, rule.Replacement, rule.ValuePrefix)
+		case productcatalog.NativeArgumentHandler:
+			handler, ok := laneArgumentHandlers[rule.Handler]
+			if !ok {
+				return nil, fmt.Errorf("native lane argument handler %q is unavailable", rule.Handler)
+			}
+			projected, err = handler(descriptor, projected, rule)
+		default:
+			return nil, fmt.Errorf("native argument rule kind %q is unsupported", rule.Kind)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return projected, nil
 }
 
 func resolveProductResume(

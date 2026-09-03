@@ -290,6 +290,15 @@ func parseQwenPeerArgs(args []string, cwd string, lookup qwenprofile.LookupEnv) 
 	if lookup == nil {
 		return qwenPeerPlan{}, usageError("Qwen profile environment lookup is unavailable")
 	}
+	descriptor, ok := productcatalog.ByID("qwen")
+	if !ok {
+		return qwenPeerPlan{}, usageError("Qwen product descriptor is unavailable")
+	}
+	projected, err := projectNativeArgumentTranslations(descriptor, productcatalog.NativeArgumentPeer, args)
+	if err != nil {
+		return qwenPeerPlan{}, err
+	}
+	args = projected
 	noYoloCount := countQwenOption(args, "--no-yolo")
 	contextArgs, context, err := scanPeerWrapperOptions("qwen", args)
 	if err != nil {
@@ -369,10 +378,6 @@ func parseQwenPeerArgs(args []string, cwd string, lookup qwenprofile.LookupEnv) 
 	switch {
 	case yoloCount > 0:
 		plan.launchPreference = qwenLaunchYolo
-		descriptor, ok := productcatalog.ByID("qwen")
-		if !ok {
-			return qwenPeerPlan{}, usageError("Qwen product descriptor is unavailable")
-		}
 		plan.nativeArgs, err = projectNativeLaunchPolicy(descriptor, plan.nativeArgs, false)
 		if err != nil {
 			return qwenPeerPlan{}, err

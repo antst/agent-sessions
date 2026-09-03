@@ -14,6 +14,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -283,7 +284,11 @@ func (c *hostCoordinator) runFederatedLane(
 	if err := authorizeFederatedLane(ctx, request.Product, request.Capability); err != nil {
 		return federationpkg.RemoteLaneResult{}, err
 	}
-	parsed, err := parseUnifiedLaneCommand(request.Arguments)
+	projected, err := launcher.ProjectNativeLaneArguments(request.Product, request.Arguments)
+	if err != nil {
+		return federationpkg.RemoteLaneResult{}, err
+	}
+	parsed, err := parseUnifiedLaneCommand(projected)
 	if err != nil {
 		return federationpkg.RemoteLaneResult{}, err
 	}

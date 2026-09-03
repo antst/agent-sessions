@@ -125,6 +125,9 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		arguments = append(arguments, "--permission-mode", "dontAsk")
 	}
 	arguments = append(arguments, driver.config.Descriptor.NativeToolGrantArgs...)
+	if request.Effort != "" {
+		arguments = append(arguments, "--effort", request.Effort)
+	}
 	arguments = append(arguments, request.Arguments...)
 	environment, err := productruntime.ParseNativeEnvironment(request.Environment)
 	if err != nil {

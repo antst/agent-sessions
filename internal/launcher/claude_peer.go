@@ -37,13 +37,17 @@ func RunClaudePeer(args []string) error {
 // Agent Sessions wrapper flags. Native --name, --resume, and --session-id are
 // deliberately left for Claude to resolve and validate.
 func parseClaudePeerArgs(args []string) (claudePeerPlan, error) {
-	forwarded, context, err := scanPeerWrapperOptions("claude", args)
-	if err != nil {
-		return claudePeerPlan{}, err
-	}
 	descriptor, ok := productcatalog.ByID("claude")
 	if !ok {
 		return claudePeerPlan{}, usageError("Claude product descriptor is unavailable")
+	}
+	projected, err := projectNativeArgumentTranslations(descriptor, productcatalog.NativeArgumentPeer, args)
+	if err != nil {
+		return claudePeerPlan{}, err
+	}
+	forwarded, context, err := scanPeerWrapperOptions("claude", projected)
+	if err != nil {
+		return claudePeerPlan{}, err
 	}
 	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, context.forceNoYolo)
 	if err != nil {

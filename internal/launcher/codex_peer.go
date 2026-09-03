@@ -180,7 +180,7 @@ func projectCodexLaunchPlan(
 	if !ok {
 		return codexPlan{}, usageError("Codex product descriptor is unavailable")
 	}
-	projected, err := projectNativeArgumentTranslations(descriptor, args)
+	projected, err := projectNativeArgumentTranslations(descriptor, productcatalog.NativeArgumentPeer, args)
 	if err != nil {
 		return codexPlan{}, err
 	}
@@ -202,7 +202,7 @@ func projectCodexLaunchPlan(
 		return rows, nil
 	}
 	plan.selectionTarget, err = resolveNativeArgumentHandlerValue(
-		descriptor, executable, plan.requestedCwd, "resume", plan.selectionTarget,
+		descriptor, productcatalog.NativeArgumentPeer, executable, plan.requestedCwd, "resume", plan.selectionTarget,
 		map[string]productArgumentHandler{"codex-thread-list": {
 			isNativeSelector: func(selector string) bool { return threadIDPattern.MatchString(selector) },
 			list:             listProductRows,

@@ -91,13 +91,23 @@ const (
 	NativeArgumentHandler     NativeArgumentRuleKind = "handler"
 )
 
+type NativeArgumentSurface string
+
+const (
+	NativeArgumentPeer NativeArgumentSurface = "peer"
+	NativeArgumentLane NativeArgumentSurface = "lane"
+)
+
 // NativeArgumentRule is one descriptor-owned wrapper argument operation. A
 // translation rewrites one option into native argv; a handler names the
-// product-list adapter used only where semantic probes proved a native gap.
+// product-specific operation used only where semantic probes proved that a
+// literal translation is insufficient.
 type NativeArgumentRule struct {
+	Surface     NativeArgumentSurface
 	Kind        NativeArgumentRuleKind
 	Option      string
 	Replacement []string
+	ValuePrefix string
 	Handler     string
 }
 
@@ -144,22 +154,42 @@ var descriptors = [...]Descriptor{
 		baselineDescriptor("codex", "Codex", "codex", "codex-peer", "codex-peer-lane", "lane", "", "codex-lane", []string{".agents", ".codex-plugin", "hooks", "scripts", "skills"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityHook, CapabilityArchive}, ResumeSubcommand, false, "0.151.0"),
 		"--yolo",
 	),
-		nativeArgumentTranslation("--resume", "resume"),
-		nativeArgumentHandler("resume", "codex-thread-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "resume"),
+		nativeArgumentHandler(NativeArgumentPeer, "resume", "codex-thread-list"),
+		nativeArgumentValueTranslation(NativeArgumentPeer, "--effort", "model_reasoning_effort=", "-c"),
+		nativeArgumentValueTranslation(NativeArgumentPeer, "--reasoning-effort", "model_reasoning_effort=", "-c"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 	),
 	withNativeArgumentRules(withNativeLaunchPolicy(
 		baselineDescriptor("claude", "Claude Code", "claude", "claude-peer", "claude-peer-lane", "claude-lane", "claude-lane-manager", "claude-lane", []string{".claude-plugin", "claude"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay}, ResumeFlag, true, "2.1.252"),
 		[]string{"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*"},
 		[]string{"--dangerously-skip-permissions"},
-	), nativeArgumentTranslation("--resume", "--resume")),
+	),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
+	),
 	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
 		"--yolo",
-	), nativeArgumentTranslation("--resume", "--resume")),
+	),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--reasoning-effort"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--reasoning-effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
+	),
 	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("qwen", "Qwen Code", "qwen", "qwen-peer", "qwen-peer-lane", "qwen-lane", "qwen-lane-manager", "qwen-lane", []string{"qwen"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "0.22.0"),
 		"--yolo",
-	), nativeArgumentTranslation("--resume", "--resume")),
+	), nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume")),
 	withNativeArgumentRules(withNativeYolo(newProductDescriptor(
 		"opencode", "OpenCode", "opencode", "1.18.25", "opencode-global-plugin",
 		"presence", "presence", "opencode-http", "opencode",
@@ -168,9 +198,13 @@ var descriptors = [...]Descriptor{
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
 	), "--yolo"),
-		nativeArgumentTranslation("--resume", "--session"),
-		nativeArgumentHandler("--session", "opencode-session-list"),
-		nativeArgumentHandler("-s", "opencode-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
+		nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
+		nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 	),
 	withNativeArgumentRules(withNativeYolo(newProductDescriptor(
 		"kilo", "Kilo Code", "kilo", "7.5.6", "kilo-global-plugin",
@@ -180,9 +214,13 @@ var descriptors = [...]Descriptor{
 		[]string{"--log-level", "--port", "--hostname", "--mdns-domain", "--cors", "--model", "-m", "--session", "-s", "--prompt", "--agent"},
 		[]string{"-m", "-s"},
 	), "--yolo"),
-		nativeArgumentTranslation("--resume", "--session"),
-		nativeArgumentHandler("--session", "opencode-session-list"),
-		nativeArgumentHandler("-s", "opencode-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
+		nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
+		nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 	),
 	piDescriptor(),
 	ompDescriptor(),
@@ -226,16 +264,22 @@ func withNativeArgumentRules(descriptor Descriptor, rules ...NativeArgumentRule)
 	return descriptor
 }
 
-func nativeArgumentTranslation(option string, replacement ...string) NativeArgumentRule {
-	return NativeArgumentRule{Kind: NativeArgumentTranslation, Option: option, Replacement: append([]string(nil), replacement...)}
+func nativeArgumentTranslation(surface NativeArgumentSurface, option string, replacement ...string) NativeArgumentRule {
+	return NativeArgumentRule{Surface: surface, Kind: NativeArgumentTranslation, Option: option, Replacement: append([]string(nil), replacement...)}
 }
 
-func nativeArgumentHandler(option, handler string) NativeArgumentRule {
-	return NativeArgumentRule{Kind: NativeArgumentHandler, Option: option, Handler: handler}
+func nativeArgumentValueTranslation(surface NativeArgumentSurface, option, valuePrefix string, replacement ...string) NativeArgumentRule {
+	rule := nativeArgumentTranslation(surface, option, replacement...)
+	rule.ValuePrefix = valuePrefix
+	return rule
+}
+
+func nativeArgumentHandler(surface NativeArgumentSurface, option, handler string) NativeArgumentRule {
+	return NativeArgumentRule{Surface: surface, Kind: NativeArgumentHandler, Option: option, Handler: handler}
 }
 
 func dshDescriptor() Descriptor {
-	return Descriptor{
+	descriptor := Descriptor{
 		ID: "dsh", Label: "DeepSeek Harness", NativeExecutable: "dsh",
 		LaneAlias: "dsh-peer-lane", LaneRuntimeRole: "dsh-lane",
 		LaneManagerRole: "dsh-lane-manager", LaneCapability: "dsh-lane",
@@ -252,6 +296,11 @@ func dshDescriptor() Descriptor {
 		FederationCapabilities: []string{"dsh-lane"},
 		Acceptance:             AcceptanceContract{RealProductRequired: true},
 	}
+	descriptor.NativeArgumentRules = []NativeArgumentRule{
+		nativeArgumentHandler(NativeArgumentLane, "--effort", "dsh-effort-with-model"),
+		nativeArgumentHandler(NativeArgumentLane, "--reasoning-effort", "dsh-effort-with-model"),
+	}
+	return descriptor
 }
 
 func piDescriptor() Descriptor {
@@ -260,14 +309,18 @@ func piDescriptor() Descriptor {
 		"presence", "presence", "pi-rpc", "pi",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
 		[]string{"extension", "parent", "rpc-ready", "steer"},
-		[]string{"--model", "-m", "--extension", "-e", "--session", "--tools", "--exclude-tools"},
+		[]string{"--model", "-m", "--extension", "-e", "--session", "--thinking", "--tools", "--exclude-tools"},
 		[]string{"-m", "-e"},
 	)
 	descriptor.NativeToolGrantArgs = []string{"--approve"}
 	descriptor.NativeYoloArgs = []string{"--approve"}
 	descriptor.NativeArgumentRules = []NativeArgumentRule{
-		nativeArgumentTranslation("--resume", "--session"),
-		nativeArgumentHandler("--session", "pi-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
+		nativeArgumentHandler(NativeArgumentPeer, "--session", "pi-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--thinking"),
 	}
 	return descriptor
 }
@@ -278,12 +331,16 @@ func ompDescriptor() Descriptor {
 		"presence", "presence", "omp-rpc", "omp",
 		[]Capability{CapabilityInteractive, CapabilityLane, CapabilityArchive, CapabilityParent},
 		[]string{"extension", "parent", "rpc-ready", "steer"},
-		[]string{"--model", "-m", "--extension", "-e", "--resume", "--tools", "--exclude-tools", "--approval-mode"},
+		[]string{"--model", "-m", "--extension", "-e", "--resume", "--thinking", "--tools", "--exclude-tools", "--approval-mode"},
 		[]string{"-m", "-e"},
 	)
 	descriptor.NativeYoloArgs = []string{"--yolo"}
 	descriptor.NativeArgumentRules = []NativeArgumentRule{
-		nativeArgumentHandler("--resume", "omp-session-list"),
+		nativeArgumentHandler(NativeArgumentPeer, "--resume", "omp-session-list"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
+		nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--thinking"),
 	}
 	return descriptor
 }
@@ -551,6 +608,9 @@ func validateDescriptor(descriptor Descriptor) error {
 	}
 	seenRules := map[string]bool{}
 	for _, rule := range descriptor.NativeArgumentRules {
+		if rule.Surface != NativeArgumentPeer && rule.Surface != NativeArgumentLane {
+			return errors.New("native argument rule contains an invalid surface")
+		}
 		validOption := strings.HasPrefix(rule.Option, "-") && !strings.ContainsRune(rule.Option, 0)
 		if !strings.HasPrefix(rule.Option, "-") {
 			validOption = ValidateToken(rule.Option) == nil
@@ -558,7 +618,7 @@ func validateDescriptor(descriptor Descriptor) error {
 		if strings.TrimSpace(rule.Option) != rule.Option || !validOption {
 			return errors.New("native argument rule contains an invalid option")
 		}
-		key := string(rule.Kind) + "\x00" + rule.Option
+		key := string(rule.Surface) + "\x00" + string(rule.Kind) + "\x00" + rule.Option
 		if seenRules[key] {
 			return fmt.Errorf("duplicate native argument rule %s for %s", rule.Kind, rule.Option)
 		}
@@ -568,13 +628,16 @@ func validateDescriptor(descriptor Descriptor) error {
 			if rule.Handler != "" || len(rule.Replacement) == 0 {
 				return errors.New("native argument translation must have only a replacement")
 			}
+			if strings.ContainsRune(rule.ValuePrefix, 0) {
+				return errors.New("native argument translation contains an invalid value prefix")
+			}
 			for _, argument := range rule.Replacement {
 				if strings.TrimSpace(argument) == "" || strings.ContainsRune(argument, 0) {
 					return errors.New("native argument translation contains an invalid replacement")
 				}
 			}
 		case NativeArgumentHandler:
-			if len(rule.Replacement) != 0 || ValidateToken(rule.Handler) != nil {
+			if len(rule.Replacement) != 0 || rule.ValuePrefix != "" || ValidateToken(rule.Handler) != nil {
 				return errors.New("native argument handler must have only a valid handler name")
 			}
 		default:

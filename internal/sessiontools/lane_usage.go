@@ -34,7 +34,7 @@ Usage:
   codex-peer-lane list [--all] [--mine]
   codex-peer-lane doctor [--json]
 
-Options include --name, --cd, --model, --effort, --sandbox, --approval-policy, --yolo, --no-yolo,
+Options include --name, --cd, --model, --effort/--reasoning-effort, --sandbox, --approval-policy, --yolo, --no-yolo,
 --timeout, --persistent, --auto-archive-after, --no-auto-archive, --schema,
 --worktree, --group GROUP, --inherit-groups, --no-inherit-groups, and --mine.
 Headless lanes cannot answer approval prompts; the wrapper never widens policy.
@@ -52,7 +52,7 @@ Usage:
   claude-peer-lane list [--all] [--mine]
   claude-peer-lane doctor [--json]
 
-Options include --name, --cd, --model, --effort, --permission-mode, --yolo, --no-yolo,
+Options include --name, --cd, --model, --agent, --effort/--reasoning-effort, --permission-mode, --yolo, --no-yolo,
 --max-budget-usd, --tools, --allowed-tools, --disallowed-tools, --schema, --bare,
 --timeout, --persistent, --auto-archive-after, --no-auto-archive, --worktree,
 --group GROUP, --inherit-groups, --no-inherit-groups, and --mine.
@@ -70,7 +70,7 @@ Usage:
   grok-peer-lane list [--all] [--mine]
   grok-peer-lane doctor [--json]
 
-Options include --name, --cd, --model, --reasoning-effort, --yolo, --no-yolo,
+Options include --name, --cd, --model, --agent, --effort/--reasoning-effort, --yolo, --no-yolo,
 --permission-mode bypassPermissions, --timeout, --persistent,
 --auto-archive-after, --no-auto-archive, --group GROUP, --inherit-groups,
 --no-inherit-groups, and --mine.

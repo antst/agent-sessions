@@ -118,10 +118,15 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	products[0].NativeRegistration.AssetOnly = true
 	products[0].Acceptance.ExternalCells = []ExternalAcceptanceCell{{ID: "mutated"}}
 	again, _ := ByID("codex")
-	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 || len(again.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(again.NativeYoloArgs, []string{"--yolo"}) || !reflect.DeepEqual(again.NativeArgumentRules, []NativeArgumentRule{
-		{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"resume"}},
-		{Kind: NativeArgumentHandler, Option: "resume", Handler: "codex-thread-list"},
-	}) {
+	wantCodexRules := []NativeArgumentRule{
+		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "resume"),
+		nativeArgumentHandler(NativeArgumentPeer, "resume", "codex-thread-list"),
+		nativeArgumentValueTranslation(NativeArgumentPeer, "--effort", "model_reasoning_effort=", "-c"),
+		nativeArgumentValueTranslation(NativeArgumentPeer, "--reasoning-effort", "model_reasoning_effort=", "-c"),
+		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
+	}
+	if again.PluginArchivePaths[0] != ".agents" || again.Capabilities[0] != CapabilityInteractive || again.RequiredDoctorFeatures[0] != "native-cli" || again.FederationCapabilities[0] != "codex-lane" || len(again.Compatibility.TupleMembers) != 0 || again.NativeRegistration.Args[0] != "codex" || again.NativeRegistration.AssetOnly || len(again.Acceptance.ExternalCells) != 0 || len(again.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(again.NativeYoloArgs, []string{"--yolo"}) || !reflect.DeepEqual(again.NativeArgumentRules, wantCodexRules) {
 		t.Fatalf("catalog leaked caller mutation: %#v", again)
 	}
 	claude, _ := ByID("claude")
@@ -156,37 +161,73 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 	}
 }
 
-func TestCatalogOwnsUniformResumeTranslationsAndOnlyProvenGapHandlers(t *testing.T) {
+func TestCatalogOwnsOnlyNativeProvenArgumentRules(t *testing.T) {
 	want := map[string][]NativeArgumentRule{
 		"codex": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"resume"}},
-			{Kind: NativeArgumentHandler, Option: "resume", Handler: "codex-thread-list"},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "resume"),
+			nativeArgumentHandler(NativeArgumentPeer, "resume", "codex-thread-list"),
+			nativeArgumentValueTranslation(NativeArgumentPeer, "--effort", "model_reasoning_effort=", "-c"),
+			nativeArgumentValueTranslation(NativeArgumentPeer, "--reasoning-effort", "model_reasoning_effort=", "-c"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 		},
 		"claude": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--resume"}},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 		},
 		"grok": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--resume"}},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--reasoning-effort"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--reasoning-effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 		},
 		"qwen": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--resume"}},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 		},
 		"opencode": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--session"}},
-			{Kind: NativeArgumentHandler, Option: "--session", Handler: "opencode-session-list"},
-			{Kind: NativeArgumentHandler, Option: "-s", Handler: "opencode-session-list"},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
+			nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
+			nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 		},
 		"kilo": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--session"}},
-			{Kind: NativeArgumentHandler, Option: "--session", Handler: "opencode-session-list"},
-			{Kind: NativeArgumentHandler, Option: "-s", Handler: "opencode-session-list"},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
+			nativeArgumentHandler(NativeArgumentPeer, "--session", "opencode-session-list"),
+			nativeArgumentHandler(NativeArgumentPeer, "-s", "opencode-session-list"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentLane, "--agent", "--agent"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 		},
 		"pi": {
-			{Kind: NativeArgumentTranslation, Option: "--resume", Replacement: []string{"--session"}},
-			{Kind: NativeArgumentHandler, Option: "--session", Handler: "pi-session-list"},
+			nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--session"),
+			nativeArgumentHandler(NativeArgumentPeer, "--session", "pi-session-list"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--thinking"),
 		},
 		"omp": {
-			{Kind: NativeArgumentHandler, Option: "--resume", Handler: "omp-session-list"},
+			nativeArgumentHandler(NativeArgumentPeer, "--resume", "omp-session-list"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--effort", "--thinking"),
+			nativeArgumentTranslation(NativeArgumentPeer, "--reasoning-effort", "--thinking"),
+			nativeArgumentTranslation(NativeArgumentLane, "--effort", "--thinking"),
+			nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--thinking"),
+		},
+		"dsh": {
+			nativeArgumentHandler(NativeArgumentLane, "--effort", "dsh-effort-with-model"),
+			nativeArgumentHandler(NativeArgumentLane, "--reasoning-effort", "dsh-effort-with-model"),
 		},
 	}
 	for product, rules := range want {
@@ -197,10 +238,6 @@ func TestCatalogOwnsUniformResumeTranslationsAndOnlyProvenGapHandlers(t *testing
 		if !reflect.DeepEqual(descriptor.NativeArgumentRules, rules) {
 			t.Fatalf("%s native argument rules = %#v, want %#v", product, descriptor.NativeArgumentRules, rules)
 		}
-	}
-	dsh, _ := ByID("dsh")
-	if len(dsh.NativeArgumentRules) != 0 {
-		t.Fatalf("lane-only DSH carries peer argument rules: %#v", dsh.NativeArgumentRules)
 	}
 }
 

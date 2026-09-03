@@ -66,15 +66,12 @@ func TestOpenCodeTypedLifecycleAndPermissionRelay(t *testing.T) {
 		case "PATCH /session/ses_exact":
 			_, _ = response.Write([]byte(`{"id":"ses_exact","title":"renamed"}`))
 		case "POST /session/ses_exact/prompt_async":
-			var body struct {
-				MessageID string          `json:"messageID"`
-				NoReply   bool            `json:"noReply"`
-				Model     json.RawMessage `json:"model"`
+			var body map[string]json.RawMessage
+			if json.NewDecoder(request.Body).Decode(&body) != nil || len(body["messageID"]) == 0 || string(body["noReply"]) != "false" ||
+				len(body["model"]) != 0 || len(body["agent"]) != 0 || len(body["variant"]) != 0 {
+				t.Errorf("prompt body with omitted selections = %#v", body)
 			}
-			if json.NewDecoder(request.Body).Decode(&body) != nil || body.MessageID == "" || body.NoReply || len(body.Model) != 0 {
-				t.Errorf("prompt body = %#v", body)
-			}
-			messageID = body.MessageID
+			_ = json.Unmarshal(body["messageID"], &messageID)
 			response.WriteHeader(http.StatusNoContent)
 		case "GET /event":
 			response.Header().Set("Content-Type", "text/event-stream")
@@ -100,7 +97,7 @@ func TestOpenCodeTypedLifecycleAndPermissionRelay(t *testing.T) {
 	if err != nil || session.ID != "ses_exact" {
 		t.Fatalf("create = %#v, %v", session, err)
 	}
-	accepted, err := client.PromptAsync(context.Background(), session.ID, "receipt-1", []byte("input"), false, nil)
+	accepted, err := client.PromptAsync(context.Background(), session.ID, "receipt-1", []byte("input"), false, NativePromptOptions{})
 	if err != nil || accepted.NativeMessageID == "" || !accepted.AcceptedAt.Equal(time.Unix(123, 0)) {
 		t.Fatalf("accepted = %#v, %v", accepted, err)
 	}
@@ -219,7 +216,7 @@ func TestOpenCodeNoReplyAndAbortRequireExactNativeAcceptance(t *testing.T) {
 	})
 	client, closeClient := newFamilyTestClient(t, DialectOpenCode, handler)
 	defer closeClient()
-	if _, err := client.PromptAsync(context.Background(), "ses_exact", "notice-one", []byte("visible notice"), true, nil); err != nil {
+	if _, err := client.PromptAsync(context.Background(), "ses_exact", "notice-one", []byte("visible notice"), true, NativePromptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Interrupt(context.Background(), "ses_exact"); !errors.Is(err, productruntime.ErrNativeRejected) {
@@ -313,7 +310,7 @@ func TestDocumentProbeRequiresExactSupportedRoutesAndBoundsResponses(t *testing.
 	if err != nil || !features["/session"] || !features["/event"] || features["/experimental/unsafe"] {
 		t.Fatalf("features = %#v, %v", features, err)
 	}
-	if _, err := client.PromptAsync(context.Background(), "ses_exact", "receipt", []byte(strings.Repeat("x", maxResultBytes+1)), false, nil); !errors.Is(err, productruntime.ErrProtocol) {
+	if _, err := client.PromptAsync(context.Background(), "ses_exact", "receipt", []byte(strings.Repeat("x", maxResultBytes+1)), false, NativePromptOptions{}); !errors.Is(err, productruntime.ErrProtocol) {
 		t.Fatalf("oversized prompt = %v", err)
 	}
 }

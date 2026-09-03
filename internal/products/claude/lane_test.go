@@ -137,7 +137,7 @@ func TestLaneUsesNativeStreamNameGroupsPolicyAndSynchronousTurns(t *testing.T) {
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "11111111-1111-4111-8111-111111111111", Name: "native name",
 		Groups: []string{"parent/private", "project/child"}, Cwd: "/work", PermissionMode: permissionmode.Default,
-		Arguments: []string{"--model", "haiku"}, Environment: []string{
+		Effort: "high", Arguments: []string{"--model", "haiku", "--agent", "Explore"}, Environment: []string{
 			"AGENT_SESSIONS_HOST_BINARY=/bin/agent-sessions",
 			"AGENT_SESSIONS_PRODUCT=claude",
 			"AGENT_SESSIONS_SESSION_ID=11111111-1111-4111-8111-111111111111",
@@ -159,7 +159,7 @@ func TestLaneUsesNativeStreamNameGroupsPolicyAndSynchronousTurns(t *testing.T) {
 	wantArgs := []string{
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages",
 		"--session-id", ref.NativeSessionID, "--name", "native name", "--permission-mode", "dontAsk",
-		"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--model", "haiku",
+		"--allowedTools", "mcp__plugin_agent-sessions_agent_sessions__*", "--effort", "high", "--model", "haiku", "--agent", "Explore",
 	}
 	if !reflect.DeepEqual(factory.command.Args, wantArgs) {
 		t.Fatalf("Claude args = %q, want %q", factory.command.Args, wantArgs)

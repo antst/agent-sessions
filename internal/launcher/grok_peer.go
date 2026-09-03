@@ -129,7 +129,15 @@ func RunGrokPeer(ctx context.Context, args []string, run GrokNativeRunner) error
 //nolint:gocyclo // CLI parsing preserves Grok arguments while extracting the shared peer layer.
 func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 	plan := grokPlan{mode: grokModeFresh, requestedCwd: cwd, permissionMode: "default"}
-	contextArgs, peerContext, err := scanPeerWrapperOptions("grok", args)
+	descriptor, ok := productcatalog.ByID("grok")
+	if !ok {
+		return grokPlan{}, usageError("Grok product descriptor is unavailable")
+	}
+	projected, err := projectNativeArgumentTranslations(descriptor, productcatalog.NativeArgumentPeer, args)
+	if err != nil {
+		return grokPlan{}, err
+	}
+	contextArgs, peerContext, err := scanPeerWrapperOptions("grok", projected)
 	if err != nil {
 		return grokPlan{}, err
 	}
@@ -153,10 +161,6 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 			return grokPlan{}, usageError("-n/--peer-name applies only to an interactive Grok session")
 		}
 		return plan, nil
-	}
-	descriptor, ok := productcatalog.ByID("grok")
-	if !ok {
-		return grokPlan{}, usageError("Grok product descriptor is unavailable")
 	}
 	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, peerContext.forceNoYolo)
 	if err != nil {

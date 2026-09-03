@@ -117,7 +117,7 @@ func TestLaneOpenCarriesNativeFactsAndAppliesOnlyRequestedModel(t *testing.T) {
 	session := &fakeSession{id: testNativeID}
 	driver, factory := testDriver(t, session)
 	request := openRequest()
-	request.Arguments = []string{"--model", "grok-4.5", "--tools", "shell"}
+	request.Arguments = []string{"--model", "grok-4.5", "--agent", "plan", "--tools", "shell"}
 	ref, err := driver.Open(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestLaneOpenCarriesNativeFactsAndAppliesOnlyRequestedModel(t *testing.T) {
 	}
 	if factory.calls != 1 || factory.request.Name != "named-grok" || factory.request.Capability != "lane-capability" ||
 		!reflect.DeepEqual(factory.request.Groups, request.Groups) || !reflect.DeepEqual(factory.request.Environment, request.Environment) ||
-		!reflect.DeepEqual(factory.request.Arguments, []string{"--tools", "shell"}) {
+		!reflect.DeepEqual(factory.request.Arguments, []string{"--agent", "plan", "--tools", "shell"}) {
 		t.Fatalf("native open = %#v", factory.request)
 	}
 	if !reflect.DeepEqual(session.models, []string{"grok-4.5"}) || len(session.modes) != 0 {

@@ -343,7 +343,7 @@ func TestTranslateNativeOptionPreservesFormAndDoubleDashBoundary(t *testing.T) {
 		{name: "boundary", arguments: []string{"--", "--resume", "prompt-data"}, replacement: []string{"--session"}, want: []string{"--", "--resume", "prompt-data"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := translateNativeOption(test.arguments, "--resume", test.replacement)
+			got, err := translateNativeOption(test.arguments, "--resume", test.replacement, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -351,6 +351,121 @@ func TestTranslateNativeOptionPreservesFormAndDoubleDashBoundary(t *testing.T) {
 				t.Fatalf("translation = %#v, want %#v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestNativeSelectionRulesProjectExactPeerAndLaneSurfaces(t *testing.T) {
+	peerCases := []struct {
+		product string
+		args    []string
+		want    []string
+	}{
+		{product: "codex", args: []string{"--effort", "low"}, want: []string{"-c", "model_reasoning_effort=low"}},
+		{product: "claude", args: []string{"--agent=Explore", "--reasoning-effort", "high"}, want: []string{"--agent=Explore", "--effort", "high"}},
+		{product: "grok", args: []string{"--agent", "plan", "--effort=low"}, want: []string{"--agent", "plan", "--reasoning-effort", "low"}},
+		{product: "opencode", args: []string{"--agent", "octto"}, want: []string{"--agent", "octto"}},
+		{product: "kilo", args: []string{"--agent=plan"}, want: []string{"--agent=plan"}},
+		{product: "pi", args: []string{"--reasoning-effort", "low"}, want: []string{"--thinking", "low"}},
+		{product: "omp", args: []string{"--effort=low"}, want: []string{"--thinking", "low"}},
+	}
+	for _, test := range peerCases {
+		t.Run("peer-"+test.product, func(t *testing.T) {
+			descriptor, _ := productcatalog.ByID(test.product)
+			got, err := projectNativeArgumentTranslations(descriptor, productcatalog.NativeArgumentPeer, test.args)
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("projection = %#v, %v; want %#v", got, err, test.want)
+			}
+		})
+	}
+	laneCases := []struct {
+		product string
+		args    []string
+		want    []string
+	}{
+		{product: "codex", args: []string{"run", "--reasoning-effort", "low"}, want: []string{"run", "--effort", "low"}},
+		{product: "claude", args: []string{"run", "--agent", "Explore", "--effort", "high"}, want: []string{"run", "--agent", "Explore", "--effort", "high"}},
+		{product: "grok", args: []string{"run", "--agent=plan", "--reasoning-effort=low"}, want: []string{"run", "--agent=plan", "--effort", "low"}},
+		{product: "opencode", args: []string{"run", "--agent", "octto", "--effort", "high"}, want: []string{"run", "--agent", "octto", "--effort", "high"}},
+		{product: "kilo", args: []string{"run", "--agent", "plan", "--reasoning-effort", "minimal"}, want: []string{"run", "--agent", "plan", "--effort", "minimal"}},
+		{product: "pi", args: []string{"run", "--effort", "low"}, want: []string{"run", "--thinking", "low"}},
+		{product: "omp", args: []string{"run", "--reasoning-effort=low"}, want: []string{"run", "--thinking", "low"}},
+		{product: "dsh", args: []string{"run", "--model", "deepseek/deepseek-v4-flash", "--effort", "high"}, want: []string{"run", "--model", "deepseek/deepseek-v4-flash", "--effort", "high"}},
+	}
+	for _, test := range laneCases {
+		t.Run("lane-"+test.product, func(t *testing.T) {
+			got, err := ProjectNativeLaneArguments(test.product, test.args)
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("projection = %#v, %v; want %#v", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeSelectionRulesRejectUnsupportedBeforeLaunch(t *testing.T) {
+	tests := []struct {
+		product string
+		surface productcatalog.NativeArgumentSurface
+		args    []string
+		want    string
+	}{
+		{product: "codex", surface: productcatalog.NativeArgumentPeer, args: []string{"--agent", "plan"}, want: "codex has no native agent selector"},
+		{product: "codex", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--agent", "plan"}, want: "codex has no native agent selector"},
+		{product: "qwen", surface: productcatalog.NativeArgumentPeer, args: []string{"--agent", "plan"}, want: "qwen has no native agent selector"},
+		{product: "qwen", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--agent", "plan"}, want: "qwen has no native agent selector"},
+		{product: "qwen", surface: productcatalog.NativeArgumentPeer, args: []string{"--effort", "low"}, want: "qwen has no native effort selector"},
+		{product: "qwen", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--effort", "low"}, want: "qwen has no native effort selector"},
+		{product: "opencode", surface: productcatalog.NativeArgumentPeer, args: []string{"--reasoning-effort=high"}, want: "opencode has no native effort selector"},
+		{product: "kilo", surface: productcatalog.NativeArgumentPeer, args: []string{"--effort", "minimal"}, want: "kilo has no native effort selector"},
+		{product: "pi", surface: productcatalog.NativeArgumentPeer, args: []string{"--agent", "plan"}, want: "pi has no native agent selector"},
+		{product: "pi", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--agent=plan"}, want: "pi has no native agent selector"},
+		{product: "omp", surface: productcatalog.NativeArgumentPeer, args: []string{"--agent", "plan"}, want: "omp has no native agent selector"},
+		{product: "omp", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--agent", "plan"}, want: "omp has no native agent selector"},
+		{product: "dsh", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--agent", "plan"}, want: "dsh has no native agent selector"},
+		{product: "dsh", surface: productcatalog.NativeArgumentLane, args: []string{"run", "--effort", "high"}, want: "dsh effort requires --model in the same invocation"},
+	}
+	for _, test := range tests {
+		t.Run(test.product+"-"+string(test.surface), func(t *testing.T) {
+			var err error
+			if test.surface == productcatalog.NativeArgumentPeer {
+				descriptor, _ := productcatalog.ByID(test.product)
+				_, err = projectNativeArgumentTranslations(descriptor, test.surface, test.args)
+			} else {
+				_, err = ProjectNativeLaneArguments(test.product, test.args)
+			}
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	descriptor, _ := productcatalog.ByID("qwen")
+	got, err := projectNativeArgumentTranslations(descriptor, productcatalog.NativeArgumentPeer, []string{"--", "--agent", "plan"})
+	if err != nil || !reflect.DeepEqual(got, []string{"--", "--agent", "plan"}) {
+		t.Fatalf("double-dash projection = %#v, %v", got, err)
+	}
+}
+
+func TestNativeSelectionOmissionLeavesEverySurfaceByteIdentical(t *testing.T) {
+	for _, descriptor := range productcatalog.RuntimeInventory() {
+		for _, surface := range []productcatalog.NativeArgumentSurface{productcatalog.NativeArgumentPeer, productcatalog.NativeArgumentLane} {
+			if surface == productcatalog.NativeArgumentPeer && !descriptor.Has(productcatalog.CapabilityInteractive) {
+				continue
+			}
+			args := []string{"run", "--model", "native-model", "--product-only=value"}
+			var got []string
+			var err error
+			if surface == productcatalog.NativeArgumentLane {
+				got, err = ProjectNativeLaneArguments(descriptor.ID, args)
+			} else {
+				got, err = projectNativeArgumentTranslations(descriptor, surface, args)
+			}
+			if err != nil || !reflect.DeepEqual(got, args) {
+				t.Fatalf("%s %s omission projection = %#v, %v; want %#v", descriptor.ID, surface, got, err, args)
+			}
+		}
+	}
+	got, err := ProjectNativeLaneArguments("dsh", []string{"run"})
+	if err != nil || !reflect.DeepEqual(got, []string{"run"}) {
+		t.Fatalf("DSH omission projection = %#v, %v", got, err)
 	}
 }
 

@@ -83,6 +83,7 @@ type steerRecordingLaneDriver struct {
 
 type parentExitLaneDriver struct {
 	opens    []productruntime.LaneOpenRequest
+	turns    []productruntime.TurnStartRequest
 	archives []productruntime.NativeSessionRef
 }
 
@@ -93,7 +94,8 @@ func (d *parentExitLaneDriver) Open(_ context.Context, request productruntime.La
 	d.opens = append(d.opens, request)
 	return productruntime.NativeSessionRef{LaneID: request.ResumeNativeID, NativeSessionID: request.ResumeNativeID, Generation: 7}, nil
 }
-func (*parentExitLaneDriver) StartTurn(_ context.Context, session productruntime.NativeSessionRef, _ productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
+func (d *parentExitLaneDriver) StartTurn(_ context.Context, session productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
+	d.turns = append(d.turns, request)
 	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: "turn"}, nil
 }
 func (*parentExitLaneDriver) WaitTurn(context.Context, productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
@@ -457,18 +459,6 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 	}
 }
 
-func TestLaneResumePermissionUsesInvocationThenLiveValueThenFreshDefault(t *testing.T) {
-	if got := laneResumePermission("bypassPermissions", "default", "bypassPermissions"); got != "default" {
-		t.Fatalf("explicit resume permission = %q", got)
-	}
-	if got := laneResumePermission("bypassPermissions", "", "default"); got != "bypassPermissions" {
-		t.Fatalf("live resume permission = %q", got)
-	}
-	if got := laneResumePermission("", "", "default"); got != "default" {
-		t.Fatalf("candidate resume permission = %q", got)
-	}
-}
-
 func TestResumeRefusesLaneLiveUnderAnotherParent(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
@@ -481,6 +471,41 @@ func TestResumeRefusesLaneLiveUnderAnotherParent(t *testing.T) {
 	_, err := coordinator.resumeLane(context.Background(), runtime, parent, "claude", parsedLaneCommand{target: "worker"}, "continue")
 	if err == nil || err.Error() != "lane is live under parent-a" {
 		t.Fatalf("cross-parent live resume error = %v", err)
+	}
+}
+
+func TestResumeReplacesEveryInvocationSelectionInsteadOfCarryingItForward(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}, PermissionMode: "default"}
+	actor := &laneActor{
+		id: "native", nativeID: "native", nativeGeneration: 7, name: "worker", product: "claude", parentID: parent.ID,
+		groups: []string{"shared", "session:host/parent", "session:host/parent/native"}, explicitGroups: []string{"shared"},
+		state: "archived", done: closedLaneDone(), permission: "bypassPermissions",
+		approvalPolicy: "never", sandbox: "danger-full-access", effort: "high", schema: "/old/schema.json",
+		arguments: []string{"--model", "old-model", "--agent", "old-agent"},
+	}
+	coordinator.lanesLoaded = true
+	coordinator.lanes[actor.id] = actor
+	driver := &parentExitLaneDriver{}
+	var err error
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.resumeLane(context.Background(), runtime, parent, "claude", parsedLaneCommand{target: actor.id}, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	if len(driver.opens) != 1 || len(driver.turns) != 1 {
+		t.Fatalf("native calls: open=%d turn=%d", len(driver.opens), len(driver.turns))
+	}
+	open, turn := driver.opens[0], driver.turns[0]
+	if len(open.Arguments) != 0 || open.Effort != "" || open.ApprovalPolicy != "" || open.Sandbox != "" ||
+		len(turn.Arguments) != 0 || turn.Effort != "" || turn.ApprovalPolicy != "" || turn.Sandbox != "" || turn.SchemaPath != "" {
+		t.Fatalf("omitted resume selections reached native open=%+v turn=%+v", open, turn)
+	}
+	if open.PermissionMode != permissionmode.Default || turn.PermissionMode != permissionmode.Default || actor.permission != "default" {
+		t.Fatalf("omitted resume permission carried forward: open=%q turn=%q actor=%q", open.PermissionMode, turn.PermissionMode, actor.permission)
 	}
 }
 
