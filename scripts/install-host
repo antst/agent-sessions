@@ -500,7 +500,7 @@ fi
 
 rollback_install() {
   local status=$1
-  trap - ERR EXIT
+  trap - ERR EXIT INT TERM
   set +e
   remove_service
   if [[ -n "$stage" && -d "$stage" ]]; then
@@ -529,6 +529,8 @@ rollback_install() {
   exit "$status"
 }
 trap 'rollback_install $?' ERR
+trap 'rollback_install 130' INT
+trap 'rollback_install 143' TERM
 
 if [[ -e "$release" || -L "$release" ]]; then
   [[ -d "$release" && ! -L "$release" ]] || {
@@ -572,8 +574,20 @@ for alias_path in "$prefix/bin/"*; do
   fi
 done
 
+# A successful transaction retains exactly the selected immutable release.
+# Old versions and debris from interrupted prior installers are safe to remove
+# only after the replacement service and integrations have passed readiness.
+for stale_release in "$releases"/* "$releases"/.previous-* "$releases"/.stage.*; do
+  [[ -e "$stale_release" || -L "$stale_release" ]] || continue
+  [[ "$stale_release" == "$release" ]] && continue
+  if [[ -n "$backup" && "$stale_release" == "$backup" ]]; then continue; fi
+  remove_managed_tree "$stale_release" "$releases"
+  printf 'Removed stale Agent Sessions release path %s.\n' "$stale_release"
+done
+
 if [[ -n "$backup" && -d "$backup" ]]; then
   remove_managed_tree "$backup" "$releases"
+  printf 'Removed stale Agent Sessions release path %s.\n' "$backup"
 fi
-trap - ERR
+trap - ERR INT TERM
 printf 'Installed Agent Sessions %s for %s and restarted the user service.\n' "$version" "$platform"

@@ -67,6 +67,11 @@ case "$1 $2" in
       : >"$TEST_QWEN_FAILURE_MARKER"
       exit 44
     fi
+    if [ -n "${TEST_QWEN_SIGNAL_INSTALLER:-}" ] && [ ! -e "$TEST_QWEN_SIGNAL_MARKER" ]; then
+      : >"$TEST_QWEN_SIGNAL_MARKER"
+      kill -s "$TEST_QWEN_SIGNAL_INSTALLER" "$PPID"
+      exit 0
+    fi
     printf '%s\n' "$3" >"$TEST_QWEN_STATE"
     ;;
   *) exit 91 ;;
@@ -312,17 +317,57 @@ if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
   find "$state_root" -maxdepth 3 -print >&2
   exit 1
 fi
+
+for signal_case in TERM INT; do
+  signal_marker="$test_root/qwen-signal-$signal_case"
+  case "$signal_case" in
+    TERM) expected_status=143 ;;
+    INT) expected_status=130 ;;
+  esac
+  set +e
+  env "${common_env[@]}" \
+    "TEST_QWEN_SIGNAL_INSTALLER=$signal_case" \
+    "TEST_QWEN_SIGNAL_MARKER=$signal_marker" \
+    "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+    >"$test_root/signal-$signal_case.out" 2>"$test_root/signal-$signal_case.err"
+  signal_status=$?
+  set -e
+  after_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
+  selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd)
+  if [[ $signal_status -ne $expected_status ]] ||
+     [[ "$after_hash" != "$prior_hash" ]] ||
+     [[ "$selected_release" != "$release" ]] ||
+     find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 \
+       \( -name '.previous-*' -o -name '.stage.*' \) -print -quit | grep -q .; then
+    printf '%s signal did not restore the exact prior release (status=%s)\n' \
+      "$signal_case" "$signal_status" >&2
+    cat "$test_root/signal-$signal_case.out" >&2
+    cat "$test_root/signal-$signal_case.err" >&2
+    exit 1
+  fi
+done
+
 legacy_alias_directory="$prefix/libexec/agent-sessions/bin/linux-x64"
 ln -s "$legacy_alias_directory/peer" "$prefix/bin/peer"
 ln -s /bin/true "$prefix/bin/user-tool"
+old_release="$prefix/libexec/agent-sessions/host/releases/0.2.0"
+orphan_backup="$prefix/libexec/agent-sessions/host/releases/.previous-0.2.0-123"
+orphan_stage="$prefix/libexec/agent-sessions/host/releases/.stage.orphan"
+mkdir -p "$old_release" "$orphan_backup" "$orphan_stage"
+: >"$old_release/stale"
+: >"$orphan_backup/stale"
+: >"$orphan_stage/stale"
 env "${common_env[@]}" "$root/scripts/install-host" \
-  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >/dev/null
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >"$test_root/success.out"
 candidate_hash=$(sha256sum "$candidate" | awk '{print $1}')
 installed_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
 if [[ "$installed_hash" != "$candidate_hash" ]] ||
-   find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 \
-     -name '.previous-*' -print -quit | grep -q .; then
-  printf 'successful host update did not remove its immutable prior release\n' >&2
+   [[ $(find "$prefix/libexec/agent-sessions/host/releases" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]') -ne 1 ]] ||
+   ! grep -Fxq "Removed stale Agent Sessions release path $old_release." "$test_root/success.out" ||
+   ! grep -Fxq "Removed stale Agent Sessions release path $orphan_backup." "$test_root/success.out" ||
+   ! grep -Fxq "Removed stale Agent Sessions release path $orphan_stage." "$test_root/success.out"; then
+  printf 'successful host update did not retain only its current immutable release\n' >&2
+  cat "$test_root/success.out" >&2
   exit 1
 fi
 if [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] || [[ ! -L "$prefix/bin/user-tool" ]]; then
