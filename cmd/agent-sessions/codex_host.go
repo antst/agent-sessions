@@ -614,9 +614,7 @@ func (c *hostCoordinator) startCodexOwnerMonitor(runtime *daemonpkg.Runtime, id 
 			case <-ticker.C:
 				observation := procinfo.ObserveIdentity(owner)
 				if observation.Status == procinfo.IdentityStale {
-					if _, err := runtime.Attachments().Detach(context.Background(), id, "native-owner-exited"); err == nil {
-						c.archiveIdleLanesForParent(runtime, id)
-					}
+					_, _ = runtime.Attachments().Detach(context.Background(), id, "native-owner-exited")
 					return
 				}
 			}
