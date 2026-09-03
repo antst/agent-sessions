@@ -60,6 +60,13 @@ case "$1 $2" in
     if [ -s "$TEST_QWEN_STATE" ]; then printf '%s\n' 'agent-sessions enabled'; fi
     ;;
   "extensions uninstall")
+    if [ -n "${TEST_QWEN_UNINSTALL_RECORD:-}" ]; then
+      if [ -d "$TEST_QWEN_UNINSTALL_RELEASE" ]; then
+        printf '%s\n' release-present >>"$TEST_QWEN_UNINSTALL_RECORD"
+      else
+        printf '%s\n' release-missing >>"$TEST_QWEN_UNINSTALL_RECORD"
+      fi
+    fi
     rm -f -- "$TEST_QWEN_STATE"
     ;;
   "extensions install")
@@ -302,6 +309,7 @@ cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared
 cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
 cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/shared/live-session.cjs" "$release/integrations/shared/live-session.js"
 test -f "$release/integrations/dsh/agent-sessions-dsh-native-0.3.0.tgz"
+test -x "$release/scripts/release-inventory"
 find -P "$release" -type d -exec chmod 0555 {} +
 
 # Reproduce an equal-version active cache that differs from the selected
@@ -446,6 +454,72 @@ if [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] || [[ ! -L "$prefix/bin/
   printf 'successful host update did not prune only stale managed aliases\n' >&2
   exit 1
 fi
+
+# A pre-campaign prior release has no managed integrations or release
+# inventory. Rollback must remove the replacement integrations before their
+# release tree, restore only that prior host/service, and never point the new
+# alias inventory at an old binary that cannot serve it.
+find -P "$release" -type d -exec chmod u+rwx {} +
+rm -rf -- "$release/integrations"
+rm -f -- "$release/scripts/release-inventory"
+cat >"$release/bin/agent-sessions.pre-managed" <<'EOF'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+  daemon)
+    trap 'exit 0' TERM INT
+    while :; do sleep 1; done
+    ;;
+  status) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod 0755 "$release/bin/agent-sessions.pre-managed"
+mv -- "$release/bin/agent-sessions.pre-managed" "$release/bin/agent-sessions"
+pre_managed_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
+hub_binary="$prefix/libexec/agent-sessions/hub/current/bin/agent-sessions-hub"
+mkdir -p "$(dirname -- "$hub_binary")"
+: >"$hub_binary"
+ln -s "$hub_binary" "$prefix/bin/agent-sessions-hub"
+rm -f -- "$test_root/qwen-failed-once"
+: >"$test_root/qwen-uninstall-record"
+set +e
+env "${common_env[@]}" \
+  "TEST_QWEN_UNINSTALL_RECORD=$test_root/qwen-uninstall-record" \
+  "TEST_QWEN_UNINSTALL_RELEASE=$release" \
+  TEST_QWEN_FAIL_ONCE=1 \
+  "$root/scripts/install-host" "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/pre-managed.out" 2>"$test_root/pre-managed.err"
+pre_managed_status=$?
+set -e
+if [[ $pre_managed_status -eq 0 ]] ||
+   ! grep -Fq "Prior release $release predates managed integrations; integrations were not restored — rerun that release's installer." \
+     "$test_root/pre-managed.err" ||
+   [[ $(grep -Fxc release-present "$test_root/qwen-uninstall-record") -ne 2 ]] ||
+   grep -Fq release-missing "$test_root/qwen-uninstall-record" ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$pre_managed_hash" ]] ||
+   [[ $(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd) != "$release" ]] ||
+   [[ ! -L "$prefix/bin/agent-sessions" ]] || [[ ! -L "$prefix/bin/agent-sessions-hub" ]] ||
+   [[ $(readlink -- "$prefix/bin/agent-sessions-hub") != "$hub_binary" ]]; then
+  printf 'pre-managed rollback did not restore only the prior host/service\n' >&2
+  cat "$test_root/pre-managed.out" >&2
+  cat "$test_root/pre-managed.err" >&2
+  cat "$test_root/qwen-uninstall-record" >&2
+  exit 1
+fi
+while IFS= read -r alias; do
+  if [[ -e "$prefix/bin/$alias" || -L "$prefix/bin/$alias" ]]; then
+    printf 'pre-managed rollback left unsupported alias %s\n' "$alias" >&2
+    exit 1
+  fi
+done < <("$root/scripts/release-inventory" host-aliases)
+if [[ -e "$home/.config/opencode/plugins/agent-sessions.js" ]] ||
+   [[ -e "$home/.config/kilo/plugins/agent-sessions.js" ]] ||
+   ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status >/dev/null 2>&1; then
+  printf 'pre-managed rollback restored new integrations or left its prior service unavailable\n' >&2
+  exit 1
+fi
+
 : >"$test_root/dsh-record"
 if ! env "${common_env[@]}" TEST_DSH_VERSION='dsh 0.1.2-rc.1' "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \

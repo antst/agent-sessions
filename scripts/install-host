@@ -124,7 +124,7 @@ payload=(
   .agents .claude-plugin .codex-plugin
   claude grok hooks integrations qwen skills README.md
 )
-for path in "${payload[@]}" .codex-plugin/mcp.json scripts/native-entry deploy/agent-sessions; do
+for path in "${payload[@]}" .codex-plugin/mcp.json scripts/native-entry scripts/release-inventory deploy/agent-sessions; do
   [[ -e "$source_root/$path" && ! -L "$source_root/$path" ]] || {
     printf 'host payload is missing or indirect: %s\n' "$path" >&2
     exit 1
@@ -163,10 +163,12 @@ cp -- "$stage/.codex-plugin/mcp.json" "$stage/.mcp.json"
 rm -- "$stage/.codex-plugin/mcp.json"
 mkdir -p "$stage/scripts" "$stage/deploy"
 cp -- "$source_root/scripts/native-entry" "$stage/scripts/native-entry"
+cp -- "$source_root/scripts/release-inventory" "$stage/scripts/release-inventory"
 cp -R -- "$source_root/deploy/agent-sessions" "$stage/deploy/"
 mkdir -p "$stage/bin"
 install -m 0755 "$host_binary" "$stage/bin/agent-sessions"
-chmod 0755 "$stage/scripts/native-entry" "$stage/grok/scripts/native-entry" "$stage/qwen/scripts/native-entry"
+chmod 0755 "$stage/scripts/native-entry" "$stage/scripts/release-inventory" \
+  "$stage/grok/scripts/native-entry" "$stage/qwen/scripts/native-entry"
 printf '%s\n' "$platform" >"$stage/PLATFORM"
 
 # Native products may keep stdio MCP children alive across plugin and daemon
@@ -545,11 +547,33 @@ elif [[ -e "$host_root/current" ]]; then
   exit 1
 fi
 
+restore_managed_host_aliases() {
+  local inventory=$1 aliases alias desired_aliases
+  aliases=$("$inventory" host-aliases)
+  for alias in agent-sessions $aliases; do
+    ln -sfn "$host_root/current/bin/agent-sessions" "$prefix/bin/$alias"
+  done
+  desired_aliases=" agent-sessions $(tr '\n' ' ' <<<"$aliases") "
+  while IFS= read -r alias; do
+    case "$desired_aliases" in *" $alias "*) continue ;; esac
+    if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
+  done < <("$source_root/scripts/release-inventory" host-aliases)
+}
+
+restore_pre_managed_host_aliases() {
+  local alias
+  ln -sfn "$host_root/current/bin/agent-sessions" "$prefix/bin/agent-sessions"
+  while IFS= read -r alias; do
+    if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
+  done < <("$source_root/scripts/release-inventory" host-aliases)
+}
+
 rollback_install() {
-  local status=$1
+  local status=$1 prior_inventory rollback_summary
   trap - ERR EXIT INT TERM
   set +e
   remove_service
+  if [[ $new_release_selected -eq 1 ]]; then remove_integrations; fi
   if [[ -n "$stage" && -d "$stage" ]]; then
     remove_managed_tree "$stage" "$releases"
   fi
@@ -559,22 +583,31 @@ rollback_install() {
   if [[ -n "$backup" && -d "$backup" ]]; then mv -- "$backup" "$release"; fi
   if [[ -n "$prior_current" && -d "$prior_current" ]]; then
     ln -sfn "$prior_current" "$host_root/current"
-    for alias in agent-sessions $("$source_root/scripts/release-inventory" host-aliases); do
-      ln -sfn "$host_root/current/bin/agent-sessions" "$prefix/bin/$alias"
-    done
-    install_integrations "$prior_current"
+    if [[ -d "$prior_current/integrations" && ! -L "$prior_current/integrations" ]]; then
+      prior_inventory="$prior_current/scripts/release-inventory"
+      if [[ ! -x "$prior_inventory" ]]; then prior_inventory="$source_root/scripts/release-inventory"; fi
+      restore_managed_host_aliases "$prior_inventory"
+      install_integrations "$prior_current"
+      rollback_summary='Agent Sessions installation failed; restored the prior host release and integrations.'
+    else
+      restore_pre_managed_host_aliases
+      printf 'Prior release %s predates managed integrations; integrations were not restored — rerun that release'\''s installer.\n' \
+        "$prior_current" >&2
+      rollback_summary='Agent Sessions installation failed; restored the prior host release and service.'
+    fi
     restore_prior_service "$prior_current"
     if [[ $prior_service_active -eq 1 ]]; then wait_for_host_service; fi
   else
-    remove_integrations
     rm -f -- "$host_root/current"
     for alias in agent-sessions $("$source_root/scripts/release-inventory" host-aliases); do
       if [[ -L "$prefix/bin/$alias" ]]; then rm -f -- "$prefix/bin/$alias"; fi
     done
+    rollback_summary='Agent Sessions installation failed; removed the incomplete host release and integrations.'
   fi
-  printf 'Agent Sessions installation failed; restored the prior host release and integrations.\n' >&2
+  printf '%s\n' "$rollback_summary" >&2
   exit "$status"
 }
+new_release_selected=0
 trap 'rollback_install $?' ERR
 trap 'rollback_install 130' INT
 trap 'rollback_install 143' TERM
@@ -590,6 +623,7 @@ fi
 mv -- "$stage" "$release"
 stage=""
 ln -sfn "$release" "$host_root/current"
+new_release_selected=1
 
 for alias in agent-sessions $("$source_root/scripts/release-inventory" host-aliases); do
   ln -sfn "$host_root/current/bin/agent-sessions" "$prefix/bin/$alias"
