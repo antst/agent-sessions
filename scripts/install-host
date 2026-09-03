@@ -384,6 +384,7 @@ install_service() {
   case "$(uname -s)" in
     Linux)
       systemctl --user enable agent-sessions.service
+      service_restart_baseline=$(linux_service_restart_count || printf '0\n')
       systemctl --user restart agent-sessions.service
       ;;
     Darwin)
@@ -397,17 +398,61 @@ install_service() {
   esac
 }
 
+linux_service_restart_count() {
+  local count
+  count=$(systemctl --user show agent-sessions.service -p NRestarts --value 2>/dev/null) || return 1
+  [[ "$count" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$count"
+}
+
+linux_service_failed_since_start() {
+  local properties restarts result active
+  properties=$(systemctl --user show agent-sessions.service \
+    -p NRestarts -p Result -p ActiveState --no-pager 2>/dev/null) || return 1
+  restarts=$(sed -n 's/^NRestarts=//p' <<<"$properties")
+  result=$(sed -n 's/^Result=//p' <<<"$properties")
+  active=$(sed -n 's/^ActiveState=//p' <<<"$properties")
+  [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
+  [[ "$active" == failed ]] || [[ -n "$result" && "$result" != success ]] ||
+    ((restarts > service_restart_baseline))
+}
+
+print_host_service_logs() {
+  case "$(uname -s)" in
+    Linux)
+      journalctl --user -u agent-sessions.service -n 20 --no-pager >&2 || true
+      ;;
+    Darwin)
+      local log
+      for log in \
+        "$HOME/.local/state/agent-sessions/logs/agent-sessions.stdout.log" \
+        "$HOME/.local/state/agent-sessions/logs/agent-sessions.stderr.log"; do
+        [[ -f "$log" ]] || continue
+        printf '%s\n' "--- $log ---" >&2
+        tail -n 20 "$log" >&2 || true
+      done
+      ;;
+  esac
+}
+
 wait_for_host_service() {
   # A surviving Codex App Server may need both its plugin inventory refresh
   # and its MCP-server reload before the replacement daemon can recorroborate
   # live attachments. Each supported App Server operation has a 30-second
   # bound, so the installer must not kill the daemon at the old five-second
   # readiness deadline while that transaction is still in flight.
-  local deadline=650
-  while ! "$prefix/bin/agent-sessions" status >/dev/null 2>&1; do
+  local deadline=650 status_error
+  while ! status_error=$("$prefix/bin/agent-sessions" status 2>&1); do
+    if [[ "$(uname -s)" == Linux ]] && linux_service_failed_since_start; then
+      printf 'installed Agent Sessions service failed before becoming ready\n' >&2
+      print_host_service_logs
+      return 1
+    fi
     deadline=$((deadline - 1))
     if [[ $deadline -eq 0 ]]; then
       printf 'installed Agent Sessions service did not become ready\n' >&2
+      if [[ -n "$status_error" ]]; then printf 'last status error: %s\n' "$status_error" >&2; fi
+      print_host_service_logs
       return 1
     fi
     sleep 0.1
@@ -434,6 +479,7 @@ remove_service() {
 prior_service_definition=0
 prior_service_enabled=0
 prior_service_active=0
+service_restart_baseline=0
 case "$(uname -s)" in
   Linux)
     [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions.service" ]] && prior_service_definition=1
@@ -465,6 +511,7 @@ restore_prior_service() {
         systemctl --user disable agent-sessions.service
       fi
       if [[ $prior_service_active -eq 1 ]]; then
+        service_restart_baseline=$(linux_service_restart_count || printf '0\n')
         systemctl --user restart agent-sessions.service
       else
         systemctl --user stop agent-sessions.service

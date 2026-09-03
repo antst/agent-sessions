@@ -203,10 +203,34 @@ case "$arguments" in
       "$TEST_PREFIX/bin/agent-sessions" daemon >"$TEST_SERVICE_LOG" 2>&1 &
     printf '%s\n' "$!" >"$TEST_SERVICE_PID_FILE"
     ;;
+  *" show agent-sessions.service "*)
+    if [ -f "$TEST_SERVICE_PID_FILE" ] &&
+       pid=$(cat "$TEST_SERVICE_PID_FILE" 2>/dev/null) &&
+       kill -0 "$pid" >/dev/null 2>&1; then
+      restarts=0 result=success active=active
+    elif grep -Fq 'LU15 fixture daemon failure' "$TEST_SERVICE_LOG" 2>/dev/null; then
+      restarts=1 result=exit-code active=failed
+    else
+      restarts=0 result=success active=inactive
+    fi
+    case "$arguments" in
+      *" -p NRestarts --value "*) printf '%s\n' "$restarts" ;;
+      *)
+        printf 'NRestarts=%s\nResult=%s\nActiveState=%s\n' "$restarts" "$result" "$active"
+        ;;
+    esac
+    ;;
 esac
 exit 0
 EOF
 chmod 0700 "$fake_bin/systemctl"
+
+cat >"$fake_bin/journalctl" <<'EOF'
+#!/bin/sh
+set -eu
+cat "$TEST_SERVICE_LOG"
+EOF
+chmod 0700 "$fake_bin/journalctl"
 
 # This transaction tests the Linux service adapter on every CI host. Without
 # an isolated uname, a macOS runner reaches its real launchd domain even
@@ -222,6 +246,18 @@ candidate="$test_root/candidate-agent-sessions"
 cp -- "$host_binary" "$candidate"
 printf 'different-candidate\n' >>"$candidate"
 chmod 0755 "$candidate"
+
+failing_candidate="$test_root/failing-agent-sessions"
+cat >"$failing_candidate" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = daemon ]; then
+  printf '%s\n' 'LU15 fixture daemon failure' >&2
+  exit 1
+fi
+exec "$TEST_REAL_HOST_BINARY" "$@"
+EOF
+chmod 0755 "$failing_candidate"
 
 common_env=(
   "HOME=$home"
@@ -250,6 +286,7 @@ common_env=(
   "TEST_DSH_PACKED_SOURCE=$test_root/dsh-packed-source"
   "TEST_SERVICE_PID_FILE=$test_root/service.pid"
   "TEST_SERVICE_LOG=$test_root/service.log"
+  "TEST_REAL_HOST_BINARY=$host_binary"
 )
 
 env "${common_env[@]}" "$root/scripts/install-host" \
@@ -315,6 +352,28 @@ if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
     fi
   fi
   find "$state_root" -maxdepth 3 -print >&2
+  exit 1
+fi
+
+: >"$test_root/service.log"
+SECONDS=0
+set +e
+env "${common_env[@]}" "$root/scripts/install-host" \
+  "$root" "$failing_candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/daemon-failure.out" 2>"$test_root/daemon-failure.err"
+daemon_failure_status=$?
+set -e
+daemon_failure_seconds=$SECONDS
+if [[ $daemon_failure_status -eq 0 ]] || [[ $daemon_failure_seconds -gt 3 ]] ||
+   ! grep -Fq 'LU15 fixture daemon failure' "$test_root/daemon-failure.err"; then
+  printf 'failed daemon was not surfaced immediately (status=%s seconds=%s)\n' \
+    "$daemon_failure_status" "$daemon_failure_seconds" >&2
+  cat "$test_root/daemon-failure.out" >&2
+  cat "$test_root/daemon-failure.err" >&2
+  exit 1
+fi
+if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status >/dev/null 2>&1; then
+  printf 'daemon-failure rollback did not restore the ready prior service\n' >&2
   exit 1
 fi
 
