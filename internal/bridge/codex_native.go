@@ -79,6 +79,11 @@ type CodexLaneTurnResult struct {
 	Result   string
 }
 
+type codexLaneTurnKey struct {
+	threadID string
+	turnID   string
+}
+
 // CodexNative is the in-process native App Server surface transplanted from
 // the working supervisor. It owns no user service or per-session process.
 type CodexNative struct {
@@ -89,6 +94,7 @@ type CodexNative struct {
 	eventDone     chan struct{}
 	mu            sync.Mutex
 	activeTurns   map[string]string
+	turnWaiters   map[codexLaneTurnKey]chan struct{}
 	loadedThreads map[string]bool
 }
 
@@ -150,7 +156,8 @@ func OpenCodexNative(ctx context.Context, config CodexNativeConfig) (*CodexNativ
 	paths.codexHome = home
 	native := &CodexNative{
 		config: config, paths: paths, client: client, cancel: cancel,
-		eventDone: make(chan struct{}), activeTurns: map[string]string{}, loadedThreads: map[string]bool{},
+		eventDone: make(chan struct{}), activeTurns: map[string]string{},
+		turnWaiters: map[codexLaneTurnKey]chan struct{}{}, loadedThreads: map[string]bool{},
 	}
 	go native.observe(eventCtx)
 	return native, nil
@@ -535,11 +542,11 @@ func (native *CodexNative) StartLaneTurn(ctx context.Context, request CodexLaneT
 	return started.Turn.ID, nil
 }
 
-// WaitLaneTurn polls Codex's native turn projection, preserving the legacy
-// requirement that a completed turn is not collectable until its final answer
-// is materialized. Cancellation abandons only this process-local waiter; the
-// daemon owns the separate decision to interrupt an exact native turn. This is
-// what lets a successor daemon reattach after a service restart.
+// WaitLaneTurn waits for Codex's exact turn/completed notification, then reads
+// the closed native turn once to collect its product-owned result. Cancellation
+// abandons only this process-local waiter; the daemon owns the separate decision
+// to interrupt an exact native turn. A successor daemon whose turn completed
+// while disconnected proceeds directly to the same exact product read.
 func (native *CodexNative) WaitLaneTurn(
 	ctx context.Context,
 	threadID, turnID string,
@@ -547,38 +554,69 @@ func (native *CodexNative) WaitLaneTurn(
 	if !validSessionID(threadID) || turnID == "" {
 		return CodexLaneTurnResult{}, errors.New("codex lane wait requires an exact thread and turn")
 	}
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		turns, err := listLaneTurns(native.client, threadID, "full")
-		if err != nil {
-			return CodexLaneTurnResult{}, err
-		}
-		for _, turn := range turns {
-			if turn.ID != turnID {
-				continue
-			}
-			outcome := normalizeStatus(turn.Status)
-			if !statusTerminal(outcome) || turn.CompletedAt == nil {
-				break
-			}
-			result := codexLaneFinalAnswer(turn)
-			if outcome == "completed" && strings.TrimSpace(result) == "" {
-				break
-			}
-			native.mu.Lock()
-			delete(native.activeTurns, threadID)
+	key := codexLaneTurnKey{threadID: threadID, turnID: turnID}
+	native.mu.Lock()
+	active := native.activeTurns[threadID]
+	if active != "" && active != turnID {
+		native.mu.Unlock()
+		return CodexLaneTurnResult{}, fmt.Errorf("active Codex lane turn %q does not match wait turn %q", active, turnID)
+	}
+	var completed <-chan struct{}
+	if active != "" {
+		if _, exists := native.turnWaiters[key]; exists {
 			native.mu.Unlock()
-			return CodexLaneTurnResult{
-				ThreadID: threadID, TurnID: turnID, Outcome: outcome, Result: result,
-			}, nil
+			return CodexLaneTurnResult{}, fmt.Errorf("Codex lane turn %s already has a waiter", turnID)
 		}
+		waiter := make(chan struct{})
+		native.turnWaiters[key] = waiter
+		completed = waiter
+	}
+	native.mu.Unlock()
+
+	if completed != nil {
 		select {
+		case <-completed:
 		case <-ctx.Done():
+			native.mu.Lock()
+			if native.turnWaiters[key] == completed {
+				delete(native.turnWaiters, key)
+			}
+			native.mu.Unlock()
 			return CodexLaneTurnResult{}, ctx.Err()
-		case <-ticker.C:
 		}
 	}
+	turn, err := native.readExactLaneTurn(ctx, threadID, turnID)
+	if err != nil {
+		return CodexLaneTurnResult{}, err
+	}
+	outcome := normalizeStatus(turn.Status)
+	if !statusTerminal(outcome) || turn.CompletedAt == nil {
+		return CodexLaneTurnResult{}, fmt.Errorf("Codex lane turn %s is not product-closed", turnID)
+	}
+	result := codexLaneFinalAnswer(turn)
+	if outcome == "completed" && strings.TrimSpace(result) == "" {
+		return CodexLaneTurnResult{}, fmt.Errorf("completed Codex lane turn %s has no final answer", turnID)
+	}
+	return CodexLaneTurnResult{
+		ThreadID: threadID, TurnID: turnID, Outcome: outcome, Result: result,
+	}, nil
+}
+
+func (native *CodexNative) readExactLaneTurn(ctx context.Context, threadID, turnID string) (appTurn, error) {
+	var page struct {
+		Data []appTurn `json:"data"`
+	}
+	if err := native.request(ctx, 30*time.Second, "thread/turns/list", map[string]any{
+		"threadId": threadID, "limit": 100, "sortDirection": "desc", "itemsView": "full",
+	}, &page); err != nil {
+		return appTurn{}, err
+	}
+	for _, turn := range page.Data {
+		if turn.ID == turnID {
+			return turn, nil
+		}
+	}
+	return appTurn{}, fmt.Errorf("codex lane turn %s is absent from thread %s", turnID, threadID)
 }
 
 // InterruptLaneTurn interrupts only the selected App Server turn.
@@ -766,9 +804,21 @@ func (native *CodexNative) observeNotification(notification rpcNotification) {
 			native.mu.Unlock()
 		}
 	case "turn/completed":
-		native.mu.Lock()
-		delete(native.activeTurns, event.ThreadID)
-		native.mu.Unlock()
+		turn, _ := params["turn"].(map[string]any)
+		event.TurnID = stringValue(turn["id"])
+		event.Status = normalizeStatus(turn["status"])
+		if event.ThreadID != "" && event.TurnID != "" {
+			key := codexLaneTurnKey{threadID: event.ThreadID, turnID: event.TurnID}
+			native.mu.Lock()
+			if native.activeTurns[event.ThreadID] == event.TurnID {
+				delete(native.activeTurns, event.ThreadID)
+			}
+			if waiter := native.turnWaiters[key]; waiter != nil {
+				delete(native.turnWaiters, key)
+				close(waiter)
+			}
+			native.mu.Unlock()
+		}
 	case "thread/status/changed":
 		event.Status = statusType(params["status"])
 	case "thread/name/updated":

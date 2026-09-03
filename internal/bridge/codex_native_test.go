@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -257,67 +258,53 @@ func TestCodexLaneRecoveryAcceptsPreferredTurnCompletedDuringDowntimeWithoutComp
 	}
 }
 
-func TestCodexNativeWaitRequiresProductCompletionClosure(t *testing.T) {
+func TestCodexNativeWaitReadsProductClosureExactlyOnce(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	tests := []struct {
 		name        string
-		turns       []map[string]any
+		turn        map[string]any
 		wantOutcome string
 		wantResult  string
-		wantCalls   int
+		wantError   string
 	}{
 		{
-			name: "transient interrupted before start",
-			turns: []map[string]any{
-				{"id": "turn-transient-interrupted", "status": "interrupted"},
-				{
-					"id": "turn-transient-interrupted", "status": "completed", "completedAt": int64(2),
-					"items": []any{map[string]any{
-						"type": "agent_message", "phase": "final_answer", "text": "completed after start",
-					}},
-				},
+			name: "closed completed turn",
+			turn: map[string]any{
+				"id": "turn-closed-completed", "status": "completed", "completedAt": int64(2),
+				"items": []any{map[string]any{
+					"type": "agent_message", "phase": "final_answer", "text": "completed after event",
+				}},
 			},
 			wantOutcome: "completed",
-			wantResult:  "completed after start",
-			wantCalls:   2,
+			wantResult:  "completed after event",
 		},
 		{
-			name: "closed interrupted turn",
-			turns: []map[string]any{
-				{"id": "turn-closed-interrupted", "status": "interrupted", "completedAt": int64(2)},
-			},
+			name:        "closed interrupted turn",
+			turn:        map[string]any{"id": "turn-closed-interrupted", "status": "interrupted", "completedAt": int64(2)},
 			wantOutcome: "interrupted",
-			wantCalls:   1,
 		},
 		{
-			name: "completed status before closure",
-			turns: []map[string]any{
-				{
-					"id": "turn-completed-before-closure", "status": "completed",
-					"items": []any{map[string]any{
-						"type": "agent_message", "phase": "final_answer", "text": "not closed yet",
-					}},
-				},
-				{
-					"id": "turn-completed-before-closure", "status": "completed", "completedAt": int64(2),
-					"items": []any{map[string]any{
-						"type": "agent_message", "phase": "final_answer", "text": "closed result",
-					}},
-				},
+			name:      "pre-closure interrupted projection",
+			turn:      map[string]any{"id": "turn-open-interrupted", "status": "interrupted"},
+			wantError: "not product-closed",
+		},
+		{
+			name: "closed completed turn without final answer",
+			turn: map[string]any{
+				"id": "turn-completed-no-answer", "status": "completed", "completedAt": int64(2),
 			},
-			wantOutcome: "completed",
-			wantResult:  "closed result",
-			wantCalls:   2,
+			wantError: "has no final answer",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
 			socket := filepath.Join(home, "app-server.sock")
-			turnID := stringValue(test.turns[0]["id"])
+			threadID := "00000000-0000-0000-0000-00000000c0ac"
+			turnID := stringValue(test.turn["id"])
 			var callsMu sync.Mutex
 			calls := 0
 			startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
@@ -325,14 +312,15 @@ func TestCodexNativeWaitRequiresProductCompletionClosure(t *testing.T) {
 				case "initialize":
 					return map[string]any{}, nil
 				case "thread/turns/list":
+					params, _ := request["params"].(map[string]any)
+					if stringValue(params["threadId"]) != threadID || intValue(params["limit"]) != 100 ||
+						stringValue(params["sortDirection"]) != "desc" || stringValue(params["itemsView"]) != "full" || params["cursor"] != nil {
+						return nil, errors.New("exact turn read parameters changed")
+					}
 					callsMu.Lock()
-					index := calls
 					calls++
 					callsMu.Unlock()
-					if index >= len(test.turns) {
-						index = len(test.turns) - 1
-					}
-					return map[string]any{"data": []any{test.turns[index]}}, nil
+					return map[string]any{"data": []any{test.turn}}, nil
 				default:
 					return nil, fmt.Errorf("unexpected method %s", stringValue(request["method"]))
 				}
@@ -346,15 +334,19 @@ func TestCodexNativeWaitRequiresProductCompletionClosure(t *testing.T) {
 			t.Cleanup(native.Close)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			result, err := native.WaitLaneTurn(ctx, "00000000-0000-0000-0000-00000000c0ac", turnID)
-			if err != nil || result.Outcome != test.wantOutcome || result.Result != test.wantResult {
+			result, err := native.WaitLaneTurn(ctx, threadID, turnID)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("wait error = %v, want %q", err, test.wantError)
+				}
+			} else if err != nil || result.Outcome != test.wantOutcome || result.Result != test.wantResult {
 				t.Fatalf("wait result = %+v, %v; want outcome %q result %q", result, err, test.wantOutcome, test.wantResult)
 			}
 			callsMu.Lock()
 			gotCalls := calls
 			callsMu.Unlock()
-			if gotCalls != test.wantCalls {
-				t.Fatalf("thread/turns/list calls = %d, want %d", gotCalls, test.wantCalls)
+			if gotCalls != 1 {
+				t.Fatalf("thread/turns/list calls = %d, want 1", gotCalls)
 			}
 		})
 	}
@@ -617,6 +609,9 @@ func TestCodexNativeLaneTurnUsesAppServerAndCollectsFinalAnswer(t *testing.T) {
 	if err != nil || started != turnID {
 		t.Fatalf("start lane turn = %q, %v", started, err)
 	}
+	// Product closure arrived before the waiter registered. The absence of the
+	// exact active turn sends WaitLaneTurn directly to its one product read.
+	native.observeNotification(codexTurnCompletedNotification(t, threadID, turnID, "completed"))
 	result, err := native.WaitLaneTurn(context.Background(), threadID, turnID)
 	if err != nil || result.Outcome != "completed" || result.Result != "native lane result" {
 		t.Fatalf("wait lane turn = %+v, %v", result, err)
@@ -653,6 +648,9 @@ func TestCodexNativeWaitCancellationDoesNotInterruptProductTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(native.Close)
+	native.mu.Lock()
+	native.activeTurns[threadID] = turnID
+	native.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := native.WaitLaneTurn(ctx, threadID, turnID); !errors.Is(err, context.Canceled) {
@@ -661,6 +659,114 @@ func TestCodexNativeWaitCancellationDoesNotInterruptProductTurn(t *testing.T) {
 	if interrupts != 0 {
 		t.Fatalf("process-local wait cancellation sent %d native interrupts", interrupts)
 	}
+	native.mu.Lock()
+	defer native.mu.Unlock()
+	if len(native.turnWaiters) != 0 {
+		t.Fatalf("canceled wait left waiters = %#v", native.turnWaiters)
+	}
+}
+
+func TestCodexNativeWaitWakesOnlyForExactProductCompletion(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID := "00000000-0000-0000-0000-00000000c005"
+	turnID := "turn-c005"
+	var readsMu sync.Mutex
+	reads := 0
+	socket := filepath.Join(home, "app-server.sock")
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/turns/list":
+			readsMu.Lock()
+			reads++
+			readsMu.Unlock()
+			return map[string]any{"data": []any{map[string]any{
+				"id": turnID, "status": "interrupted", "completedAt": int64(2),
+			}}}, nil
+		default:
+			return nil, errors.New("unexpected native method " + stringValue(request["method"]))
+		}
+	})
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	native.mu.Lock()
+	native.activeTurns[threadID] = turnID
+	native.mu.Unlock()
+
+	resultCh := make(chan CodexLaneTurnResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, waitErr := native.WaitLaneTurn(context.Background(), threadID, turnID)
+		resultCh <- result
+		errCh <- waitErr
+	}()
+	waitForCodexTurnWaiter(t, native, codexLaneTurnKey{threadID: threadID, turnID: turnID})
+
+	native.observeNotification(codexTurnCompletedNotification(t, threadID, "another-turn", "completed"))
+	native.observeNotification(codexTurnCompletedNotification(t, "another-thread", turnID, "completed"))
+	native.mu.Lock()
+	active := native.activeTurns[threadID]
+	waiters := len(native.turnWaiters)
+	native.mu.Unlock()
+	readsMu.Lock()
+	readCount := reads
+	readsMu.Unlock()
+	if active != turnID || waiters != 1 || readCount != 0 {
+		t.Fatalf("unrelated completion changed active=%q waiters=%d reads=%d", active, waiters, readCount)
+	}
+
+	// The real App Server uses turn/completed with status interrupted after an
+	// exact turn/interrupt; the same exact closure wakes the waiter.
+	native.observeNotification(codexTurnCompletedNotification(t, threadID, turnID, "interrupted"))
+	result := <-resultCh
+	if waitErr := <-errCh; waitErr != nil || result.Outcome != "interrupted" || result.TurnID != turnID {
+		t.Fatalf("interrupted wait = %+v, %v", result, waitErr)
+	}
+	readsMu.Lock()
+	readCount = reads
+	readsMu.Unlock()
+	if readCount != 1 {
+		t.Fatalf("exact product reads = %d, want 1", readCount)
+	}
+}
+
+func waitForCodexTurnWaiter(t *testing.T, native *CodexNative, key codexLaneTurnKey) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		native.mu.Lock()
+		registered := native.turnWaiters[key] != nil
+		native.mu.Unlock()
+		if registered {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("Codex turn waiter was not registered")
+}
+
+func codexTurnCompletedNotification(t *testing.T, threadID, turnID, status string) rpcNotification {
+	t.Helper()
+	params, err := json.Marshal(map[string]any{
+		"threadId": threadID,
+		"turn": map[string]any{
+			"id": turnID, "status": status, "completedAt": int64(2),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rpcNotification{Method: "turn/completed", Params: params}
 }
 
 func TestCodexNativeLiveFreshPreparation(t *testing.T) {
