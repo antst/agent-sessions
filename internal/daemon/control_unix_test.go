@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,28 +18,51 @@ import (
 
 func TestBlockingControlCallDiesWithItsCaller(t *testing.T) {
 	entered := make(chan struct{})
+	allowAdmission := make(chan struct{})
 	exited := make(chan struct{})
 	server := startControlTestServer(t, 1, func(ctx context.Context, request ControlRequest) (json.RawMessage, error) {
 		if request.Operation != "attachment.codex.pending" {
 			t.Fatalf("operation = %q", request.Operation)
 		}
 		close(entered)
+		<-allowAdmission
+		if !AdmitControlCall(ctx) {
+			t.Error("blocking control call had no admission channel")
+		}
 		<-ctx.Done()
 		close(exited)
 		return nil, ctx.Err()
 	})
-	call, err := BeginControlCall(context.Background(), server.Endpoint(), ControlRequest{
-		ID: "pending", Role: RoleLauncher, Operation: "attachment.codex.pending", Generation: 1,
-		IdempotencyKey: "pending", Payload: json.RawMessage(`{}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := make(chan struct {
+		call *ControlCall
+		err  error
+	}, 1)
+	go func() {
+		call, err := BeginControlCall(context.Background(), server.Endpoint(), ControlRequest{
+			ID: "pending", Role: RoleLauncher, Operation: "attachment.codex.pending", Generation: 1,
+			IdempotencyKey: "pending", Payload: json.RawMessage(`{}`), WaitAdmission: true,
+		})
+		result <- struct {
+			call *ControlCall
+			err  error
+		}{call: call, err: err}
+	}()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("pending call did not reach daemon")
 	}
+	select {
+	case <-result:
+		t.Fatal("blocking call returned before daemon admission")
+	default:
+	}
+	close(allowAdmission)
+	admitted := <-result
+	if admitted.err != nil {
+		t.Fatal(admitted.err)
+	}
+	call := admitted.call
 	if err := call.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +70,29 @@ func TestBlockingControlCallDiesWithItsCaller(t *testing.T) {
 	case <-exited:
 	case <-time.After(time.Second):
 		t.Fatal("caller EOF did not cancel pending daemon work")
+	}
+}
+
+func TestAdmittedControlCallCarriesItsFinalResponseOnTheSameConnection(t *testing.T) {
+	release := make(chan struct{})
+	server := startControlTestServer(t, 1, func(ctx context.Context, _ ControlRequest) (json.RawMessage, error) {
+		if !AdmitControlCall(ctx) {
+			return nil, errors.New("admission channel is unavailable")
+		}
+		<-release
+		return json.RawMessage(`{"selected":"native-id"}`), nil
+	})
+	call, err := BeginControlCall(context.Background(), server.Endpoint(), ControlRequest{
+		ID: "pending-final", Role: RoleLauncher, Operation: "attachment.codex.pending", Generation: 1,
+		IdempotencyKey: "pending-final", Payload: json.RawMessage(`{}`), WaitAdmission: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	response, err := call.Await()
+	if err != nil || !response.OK || string(response.Payload) != `{"selected":"native-id"}` || response.Admitted {
+		t.Fatalf("final response = %+v, %v", response, err)
 	}
 }
 

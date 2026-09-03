@@ -632,6 +632,14 @@ func (c *hostCoordinator) awaitCodexPendingLaunch(
 		c.mu.Unlock()
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
+	if !daemonpkg.AdmitControlCall(ctx) {
+		c.mu.Lock()
+		if c.pendingCodexLaunches[request.PendingToken] == record {
+			delete(c.pendingCodexLaunches, request.PendingToken)
+		}
+		c.mu.Unlock()
+		return launcher.CodexDaemonPrepareResult{}, errors.New("Codex pending launch admission is unavailable")
+	}
 	select {
 	case result := <-record.done:
 		return result.handoff, result.err
@@ -942,7 +950,7 @@ func beginCodexPendingLaunch(
 	requestID := commandRequestID()
 	call, err := daemonpkg.BeginControlCall(ctx, endpoint, daemonpkg.ControlRequest{
 		ID: requestID, Role: daemonpkg.RoleLauncher, Operation: "attachment.codex.pending",
-		Generation: 1, IdempotencyKey: requestID, Payload: payload,
+		Generation: 1, IdempotencyKey: requestID, Payload: payload, WaitAdmission: true,
 	})
 	if err != nil {
 		return nil, err

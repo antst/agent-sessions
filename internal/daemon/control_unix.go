@@ -39,6 +39,19 @@ type ControlCall struct {
 	closeOnce  sync.Once
 }
 
+type controlAdmissionContextKey struct{}
+
+// AdmitControlCall acknowledges that a blocking request is fully registered.
+// The caller may start the native process only after this same-call ack.
+func AdmitControlCall(ctx context.Context) bool {
+	admit, ok := ctx.Value(controlAdmissionContextKey{}).(func())
+	if !ok {
+		return false
+	}
+	admit()
+	return true
+}
+
 // ControlEndpoint returns the fixed canonical endpoint for one state root.
 func ControlEndpoint(stateRoot string) (string, error) {
 	endpoint, err := pathidentity.FuturePath(filepath.Join(stateRoot, "run", "daemon.sock"))
@@ -241,6 +254,33 @@ func (s *ControlServer) serveConnection(connection *net.UnixConn) {
 			cancel()
 		}
 	}()
+	if request.WaitAdmission {
+		admitted := make(chan struct{})
+		var admitOnce sync.Once
+		requestCtx = context.WithValue(requestCtx, controlAdmissionContextKey{}, func() {
+			admitOnce.Do(func() { close(admitted) })
+		})
+		completed := make(chan ControlResponse, 1)
+		go func() { completed <- s.policy.handle(requestCtx, request) }()
+		select {
+		case response := <-completed:
+			response.Generation = s.policy.generation
+			_ = writeControlFrame(connection, response)
+			return
+		case <-admitted:
+			if err := writeControlFrame(connection, ControlResponse{
+				ID: request.ID, Generation: s.policy.generation, OK: true, Admitted: true,
+			}); err != nil {
+				return
+			}
+		case <-requestCtx.Done():
+			return
+		}
+		response := <-completed
+		response.Generation = s.policy.generation
+		_ = writeControlFrame(connection, response)
+		return
+	}
 	response := s.policy.handle(requestCtx, request)
 	response.Generation = s.policy.generation
 	_ = writeControlFrame(connection, response)
@@ -269,6 +309,25 @@ func BeginControlCall(ctx context.Context, endpoint string, request ControlReque
 	}
 	call := &ControlCall{connection: connection, requestID: request.ID}
 	call.stopCancel = context.AfterFunc(ctx, func() { _ = call.Close() })
+	if request.WaitAdmission {
+		var response ControlResponse
+		if err := readControlFrame(connection, &response); err != nil {
+			_ = call.Close()
+			return nil, err
+		}
+		if response.ID != request.ID {
+			_ = call.Close()
+			return nil, errors.New("daemon control admission correlation mismatch")
+		}
+		if response.Error != nil {
+			_ = call.Close()
+			return nil, errors.New(response.Error.Message)
+		}
+		if !response.OK || !response.Admitted {
+			_ = call.Close()
+			return nil, errors.New("daemon did not admit the blocking control call")
+		}
+	}
 	return call, nil
 }
 

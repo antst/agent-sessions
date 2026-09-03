@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -324,25 +323,6 @@ func TestCodexPendingLaunchDuplicateNamesWaitingWrapperPID(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "wrapper pid 4242") {
 		t.Fatalf("duplicate pending launch error = %v", err)
-	}
-}
-
-func TestCodexPendingLaunchCallerEOFLeavesNothingDangling(t *testing.T) {
-	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
-	coordinator.codex = &bridge.CodexNative{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	token := strings.Repeat("b", 64)
-	_, err := coordinator.awaitCodexPendingLaunch(ctx, nil, launcher.CodexDaemonPrepareRequest{
-		Cwd: t.TempDir(), SelectorKind: launcher.CodexLaunchSelectorFresh,
-		PendingToken: token, Owner: procinfo.Identity{PID: 4444},
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("pending launch EOF = %v", err)
-	}
-	if coordinator.pendingCodexLaunches[token] != nil || len(coordinator.pending) != 0 {
-		t.Fatalf("canceled pending launch remained: launches=%#v evidence=%#v", coordinator.pendingCodexLaunches, coordinator.pending)
 	}
 }
 

@@ -55,6 +55,7 @@ type ControlRequest struct {
 	AttachmentID   string          `json:"attachment_id,omitempty"`
 	Capability     string          `json:"capability,omitempty"`
 	Payload        json.RawMessage `json:"payload,omitempty"`
+	WaitAdmission  bool            `json:"wait_admission,omitempty"`
 }
 
 // ControlFailure is one operation failure returned to the same-user caller.
@@ -70,6 +71,7 @@ type ControlResponse struct {
 	OK         bool            `json:"ok"`
 	Payload    json.RawMessage `json:"payload,omitempty"`
 	Error      *ControlFailure `json:"error,omitempty"`
+	Admitted   bool            `json:"admitted,omitempty"`
 }
 
 // ControlHandler executes one already-framed, authorized operation.
