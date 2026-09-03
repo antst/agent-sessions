@@ -545,6 +545,12 @@ func TestCodexNativeReopensOnceOnOperationAfterAppServerReplacement(t *testing.T
 			return nil, fmt.Errorf("unexpected replacement method %s", stringValue(request["method"]))
 		}
 	})
+	if _, _, gotSocket, err := native.RefreshAppServerEvidence(context.Background()); err != nil || gotSocket != socket {
+		t.Fatalf("refresh replacement evidence socket = %q, err = %v", gotSocket, err)
+	}
+	if native.clientSnapshot() == oldClient {
+		t.Fatal("refresh retained the closed App Server observer")
+	}
 	thread, err := native.ResolveThread(context.Background(), threadID)
 	if err != nil || thread.ID != threadID || thread.Name != "replacement" {
 		t.Fatalf("replacement operation = %+v, %v", thread, err)

@@ -624,7 +624,11 @@ func (c *hostCoordinator) awaitCodexPendingLaunch(
 	record := &pendingCodexLaunch{request: request, ctx: ctx, done: make(chan pendingCodexLaunchResult, 1)}
 	c.pendingCodexLaunches[request.PendingToken] = record
 	c.mu.Unlock()
-	if _, err := c.codexNative(); err != nil {
+	native, err := c.codexNative()
+	if err == nil {
+		_, _, _, err = native.RefreshAppServerEvidence(ctx)
+	}
+	if err != nil {
 		c.mu.Lock()
 		if c.pendingCodexLaunches[request.PendingToken] == record {
 			delete(c.pendingCodexLaunches, request.PendingToken)
