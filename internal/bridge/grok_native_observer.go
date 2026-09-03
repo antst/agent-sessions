@@ -193,7 +193,7 @@ func GrokNativeSessionTitle(
 	diagnostics io.Writer,
 	sessionID string,
 ) (string, bool) {
-	if ctx == nil || !validSessionID(sessionID) || strings.TrimSpace(cwd) == "" {
+	if ctx == nil || !validSessionID(sessionID) {
 		return "", false
 	}
 	client, err := openGrokAuthenticatedClientCommand(

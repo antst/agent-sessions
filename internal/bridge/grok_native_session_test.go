@@ -56,7 +56,7 @@ func TestGrokNativeSessionTitleUsesGlobalNoLeaderRoster(t *testing.T) {
 		"GROK_FAKE_SESSION_TITLE=global lane",
 		"GROK_FAKE_ACTIVITY=dormant",
 	)
-	name, ok := GrokNativeSessionTitle(context.Background(), wrapper, root, environment, io.Discard, testGrokNativeID)
+	name, ok := GrokNativeSessionTitle(context.Background(), wrapper, "", environment, io.Discard, testGrokNativeID)
 	if !ok || name != "global lane" {
 		t.Fatalf("global Grok title = %q, ok=%v", name, ok)
 	}
