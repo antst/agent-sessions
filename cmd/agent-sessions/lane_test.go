@@ -386,10 +386,10 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 	}
 	coordinator.lanes[actor.id] = actor
 	coordinator.reportedLanes["native-lane"] = actor.id
-	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "other", NativeSessionID: "native-lane", Generation: 1}); !errors.Is(err, productruntime.ErrProtocol) {
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "other", NativeSessionID: "native-lane", Generation: 1}, true); !errors.Is(err, productruntime.ErrProtocol) {
 		t.Fatalf("split driver identity returned %v", err)
 	}
-	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}); err != nil {
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}, true); err != nil {
 		t.Fatal(err)
 	}
 	if actor.id != "native-lane" || coordinator.lanes["native-lane"] != actor || coordinator.lanes["temporary-lane"] != nil ||

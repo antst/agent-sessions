@@ -240,7 +240,7 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 	coordinator.mu.Lock()
 	actor := coordinator.lanes["public-lane"]
 	coordinator.mu.Unlock()
-	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}); err != nil {
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}, true); err != nil {
 		t.Fatal(err)
 	}
 	coordinator.mu.Lock()
@@ -260,6 +260,51 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 	parent, active, err := runtime.Attachments().ActiveAttachment("parent")
 	if err != nil || !active || !reflect.DeepEqual(parent.Groups, parentGroups) {
 		t.Fatalf("ordinary peer attachment = %+v, active=%v, err=%v", parent, active, err)
+	}
+}
+
+func TestCallerSuppliedLanePresenceBeforeOpenStillRemembersCandidate(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"team"}})
+	primary := "session:" + runtime.HostID() + "/parent"
+	actor := &laneActor{
+		id: "native-lane", product: "pi", name: "worker", parentID: "parent", state: "running",
+		groups: []string{"team/child", primary, primary + "/native-lane"}, done: make(chan struct{}),
+	}
+	coordinator.mu.Lock()
+	coordinator.lanes[actor.id] = actor
+	coordinator.mu.Unlock()
+	coordinator.joinLiveSession(runtime, liveSessionReport{
+		UUID: "native-lane", Name: "worker", Product: "pi", Groups: []string{"team/child", primary},
+	})
+	if actor.nativeID != "native-lane" {
+		t.Fatalf("presence did not bind caller-supplied identity: %+v", actor)
+	}
+	ref := productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}
+	if err := coordinator.recordLaneNativeID(runtime, actor, ref, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := daemonpkg.LaneCandidate{
+		NativeSessionID: "native-lane", Product: "pi", Parent: "parent",
+		PrimaryGroup: primary, SecondaryGroups: []string{"team/child"},
+	}
+	if got := before.Catalog.Lanes["native-lane"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("presence-first candidate = %+v, want %+v", got, want)
+	}
+	if err := coordinator.recordLaneNativeID(runtime, actor, ref, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.Catalog.Lanes, before.Catalog.Lanes) {
+		t.Fatalf("idempotent identity record changed candidate rows: before=%+v after=%+v", before.Catalog.Lanes, after.Catalog.Lanes)
 	}
 }
 
@@ -541,7 +586,7 @@ func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: candidate.NativeSessionID, NativeSessionID: candidate.NativeSessionID, Generation: 1}); err != nil {
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: candidate.NativeSessionID, NativeSessionID: candidate.NativeSessionID, Generation: 1}, false); err != nil {
 		t.Fatalf("resume rewrote immutable candidate: %v", err)
 	}
 	after, err := runtime.State().Read()

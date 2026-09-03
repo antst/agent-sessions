@@ -912,8 +912,9 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
+	resumeNativeID := actor.nativeID
 	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
-		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: actor.nativeID,
+		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: resumeNativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
 		Environment: environment, ApprovalPolicy: actor.approvalPolicy,
 		Sandbox: actor.sandbox, Capability: actor.capability,
@@ -921,7 +922,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	if err := c.recordLaneNativeID(runtime, actor, session); err != nil {
+	if err := c.recordLaneNativeID(runtime, actor, session, resumeNativeID == ""); err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	c.mu.Lock()
@@ -992,7 +993,7 @@ func (c *hostCoordinator) beginLaneExecution(runtime *daemonpkg.Runtime, actor *
 	return c.markLaneRunning(runtime, actor)
 }
 
-func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *laneActor, session productruntime.NativeSessionRef) error {
+func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *laneActor, session productruntime.NativeSessionRef, fresh bool) error {
 	nativeID := session.NativeSessionID
 	if strings.TrimSpace(nativeID) == "" {
 		return errors.New("native lane session identity is empty")
@@ -1006,11 +1007,6 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 			selected := actor.nativeID
 			c.mu.Unlock()
 			return fmt.Errorf("native lane identity changed from %s to %s", selected, nativeID)
-		}
-		if actor.id == nativeID {
-			c.mu.Unlock()
-			c.rememberActiveLaneName(actor)
-			return nil
 		}
 	}
 	primary := "session:" + runtime.HostID() + "/" + actor.parentID
@@ -1043,16 +1039,18 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 	}
 	actor.nativeID = nativeID
 	c.mu.Unlock()
-	engine, err := daemonpkg.NewLaneEngine(runtime.State())
-	if err != nil {
-		return err
-	}
-	candidate, ok := durableLaneCandidate(runtime, actor)
-	if !ok {
-		return nil
-	}
-	if err := engine.Remember(candidate); err != nil {
-		return err
+	if fresh {
+		engine, err := daemonpkg.NewLaneEngine(runtime.State())
+		if err != nil {
+			return err
+		}
+		candidate, ok := durableLaneCandidate(runtime, actor)
+		if !ok {
+			return nil
+		}
+		if err := engine.Remember(candidate); err != nil {
+			return err
+		}
 	}
 	c.rememberActiveLaneName(actor)
 	return nil
