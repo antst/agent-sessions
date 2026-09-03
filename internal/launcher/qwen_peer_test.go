@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/qwenprofile"
-	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const testQwenSessionID = "12345678-1234-4234-8234-123456789abc"
@@ -161,9 +161,6 @@ func TestRunQwenPeerPassesNativeNameAndOwnsLaunchFiles(t *testing.T) {
 	launchRoot := ""
 	err := runQwenPeer(context.Background(), []string{"--qwen-home", home, "--resume", "Reviewer", "-g", "project"},
 		qwenPeerDependencies{
-			readiness: func(context.Context, qwenreadiness.Request) (qwenreadiness.Report, error) {
-				return qwenreadiness.Report{Ready: true, IntegrationReady: true}, nil
-			},
 			exec: func(string, []string, []string) error { return errors.New("unexpected exec") },
 			run: func(_ context.Context, launch QwenNativeLaunch) error {
 				executed = true
@@ -205,25 +202,34 @@ func TestRunQwenPeerPassesNativeNameAndOwnsLaunchFiles(t *testing.T) {
 	}
 }
 
-func TestRunQwenPeerDoesNotCreateLaunchFilesBeforeReadiness(t *testing.T) {
+func TestRunQwenPeerExecutesOnlyTheNativeLaunchWithoutAProductProbe(t *testing.T) {
 	root := t.TempDir()
 	qwenTestChdir(t, root)
 	executable := filepath.Join(root, "qwen")
-	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	invocations := filepath.Join(root, "invocations")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s\\n' launch >>\"$QWEN_INVOCATIONS\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("QWEN_PEER_QWEN_BIN", executable)
-	executed := false
+	t.Setenv("QWEN_INVOCATIONS", invocations)
 	err := runQwenPeer(context.Background(), nil,
 		qwenPeerDependencies{
-			readiness: func(context.Context, qwenreadiness.Request) (qwenreadiness.Report, error) {
-				return qwenreadiness.Report{Ready: false, IntegrationReady: true, Issues: []qwenreadiness.Issue{{Code: "auth", Message: "not ready"}}}, nil
+			exec: func(string, []string, []string) error { return errors.New("unexpected exec") },
+			run: func(_ context.Context, launch QwenNativeLaunch) error {
+				command := exec.Command(launch.Executable, launch.Arguments...) //nolint:gosec // test-owned executable.
+				command.Env = launch.Environment
+				return command.Run()
 			},
-			exec: func(string, []string, []string) error { executed = true; return nil },
-			run:  func(context.Context, QwenNativeLaunch) error { executed = true; return nil },
 		})
-	if err == nil || !strings.Contains(err.Error(), "not ready") || executed {
-		t.Fatalf("readiness result = %v, executed=%v", err, executed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "launch\n" {
+		t.Fatalf("Qwen executable invocations = %q, want one native launch", body)
 	}
 }
 
@@ -241,9 +247,6 @@ func TestQwenLaunchDoesNotCollideWithStaleSessionScopedArtifacts(t *testing.T) {
 	}
 	runs := 0
 	err := runQwenPeer(context.Background(), []string{"--state-dir", filepath.Join(root, "state"), "--resume", testQwenSessionID}, qwenPeerDependencies{
-		readiness: func(context.Context, qwenreadiness.Request) (qwenreadiness.Report, error) {
-			return qwenreadiness.Report{Ready: true, IntegrationReady: true}, nil
-		},
 		exec: func(string, []string, []string) error { return errors.New("unexpected exec") },
 		run: func(_ context.Context, launch QwenNativeLaunch) error {
 			runs++

@@ -2,14 +2,12 @@ package launcher
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -298,51 +296,29 @@ func TestGrokPeerBuildsOneLauncherOwnedLeaderAndTUI(t *testing.T) {
 	}
 }
 
-func TestGrokExecutableSkipsInvalidPathCandidateAndValidatesOverride(t *testing.T) {
+func TestGrokExecutableSelectsFirstStaticCandidateWithoutProbing(t *testing.T) {
 	root := t.TempDir()
-	invalidDirectory := filepath.Join(root, "invalid")
+	firstDirectory := filepath.Join(root, "first")
 	validDirectory := filepath.Join(root, "valid")
-	invalidMarker := filepath.Join(root, "invalid-called")
-	writeGrokFixture(t, invalidDirectory, `: >"$INVALID_MARKER"; printf '%s\n' 'Desktop Grok helper'`)
-	valid := writeGrokFixture(t, validDirectory, validGrokHelpFixture())
+	firstMarker := filepath.Join(root, "first-called")
+	first := writeGrokFixture(t, firstDirectory, `: >"$FIRST_MARKER"; printf '%s\n' 'Desktop Grok helper'`)
+	_ = writeGrokFixture(t, validDirectory, validGrokHelpFixture())
 	t.Setenv("HOME", filepath.Join(root, "empty-home"))
-	t.Setenv("PATH", invalidDirectory+string(os.PathListSeparator)+validDirectory)
-	t.Setenv("INVALID_MARKER", invalidMarker)
+	t.Setenv("PATH", firstDirectory+string(os.PathListSeparator)+validDirectory)
+	t.Setenv("FIRST_MARKER", firstMarker)
 	t.Setenv("GROK_PEER_GROK_BIN", "")
 	got, err := grokExecutable()
-	if err != nil || got != valid {
-		t.Fatalf("grok executable = %q, %v; want %q", got, err, valid)
+	if err != nil || got != first {
+		t.Fatalf("grok executable = %q, %v; want first static candidate %q", got, err, first)
 	}
-	if _, err := os.Stat(invalidMarker); err != nil {
-		t.Fatalf("invalid candidate was not actually probed: %v", err)
+	if _, err := os.Stat(firstMarker); !os.IsNotExist(err) {
+		t.Fatalf("Grok executable was invoked during launch planning: %v", err)
 	}
 
-	t.Setenv("GROK_PEER_GROK_BIN", filepath.Join(invalidDirectory, "grok"))
-	_, err = grokExecutable()
-	var exitErr *ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 127 {
-		t.Fatalf("invalid override error = %v", err)
-	}
-}
-
-func TestGrokExecutableFallsBackToVendorCLIWhenPathContainsChatProduct(t *testing.T) {
-	root := t.TempDir()
-	chatDirectory := filepath.Join(root, "chat")
-	home := filepath.Join(root, "home")
-	chatMarker := filepath.Join(root, "chat-probed")
-	writeGrokFixture(t, chatDirectory, `: >"$GROK_CHAT_MARKER"; printf '%s\n' 'AI coding agent powered by Grok' 'Commands:' '  daemon'`)
-	want := writeGrokFixture(t, filepath.Join(home, ".grok", "bin"), validGrokHelpFixture())
-	t.Setenv("HOME", home)
-	t.Setenv("PATH", chatDirectory)
-	t.Setenv("GROK_CHAT_MARKER", chatMarker)
-	t.Setenv("GROK_PEER_GROK_BIN", "")
-
-	got, err := grokExecutable()
-	if err != nil || got != want {
-		t.Fatalf("grok executable = %q, %v; want vendor fallback %q", got, err, want)
-	}
-	if _, err := os.Stat(chatMarker); err != nil {
-		t.Fatalf("chat candidate was not contract-probed before fallback: %v", err)
+	t.Setenv("GROK_PEER_GROK_BIN", first)
+	got, err = grokExecutable()
+	if err != nil || got != first {
+		t.Fatalf("configured Grok executable = %q, %v", got, err)
 	}
 }
 
@@ -516,15 +492,5 @@ func writeGrokFixture(t *testing.T, directory, body string) string {
 }
 
 func validGrokHelpFixture() string {
-	markers := append([]string(nil), grokCLIHelpMarkers...)
-	sort.Strings(markers)
-	return "printf '%s\\n' " + strings.Join(quoteShellWords(markers), " ")
-}
-
-func quoteShellWords(words []string) []string {
-	quoted := make([]string, len(words))
-	for index, word := range words {
-		quoted[index] = "'" + strings.ReplaceAll(word, "'", "'\\''") + "'"
-	}
-	return quoted
+	return "printf '%s\\n' 'Grok Build TUI'"
 }

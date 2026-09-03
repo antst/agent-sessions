@@ -14,13 +14,11 @@ import (
 	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
-	"github.com/antst/agent-sessions/internal/qwenreadiness"
 )
 
 const (
 	QwenInputFileEnv     = "AGENT_SESSIONS_QWEN_INPUT_FILE"
 	QwenEventsFileEnv    = "AGENT_SESSIONS_QWEN_EVENTS_FILE"
-	qwenReadinessTimeout = 45 * time.Second
 	qwenRegistryInterval = 100 * time.Millisecond
 )
 
@@ -57,9 +55,8 @@ type qwenPeerPlan struct {
 }
 
 type qwenPeerDependencies struct {
-	readiness func(context.Context, qwenreadiness.Request) (qwenreadiness.Report, error)
-	exec      func(string, []string, []string) error
-	run       QwenNativeRunner
+	exec func(string, []string, []string) error
+	run  QwenNativeRunner
 }
 
 // QwenNativeLaunch is one launcher-owned interactive child and its two native
@@ -79,16 +76,15 @@ type QwenNativeLaunch struct {
 // holds the one live presence stream for exactly the native child's lifetime.
 type QwenNativeRunner func(context.Context, QwenNativeLaunch) error
 
-// RunQwenPeer preserves native profile selection, readiness, exact session
-// identity, and approval-mode argv. The launcher owns the two Qwen protocol
+// RunQwenPeer preserves native profile selection, exact session identity, and
+// approval-mode argv. The launcher owns the two Qwen protocol
 // files and its one live presence stream for exactly the native child's lifetime.
 //
 //nolint:gocyclo // Native argv, profile, resume, launch files, and child lifetime form one operation.
 func RunQwenPeer(ctx context.Context, args []string, run QwenNativeRunner) error {
 	return runQwenPeer(ctx, args, qwenPeerDependencies{
-		readiness: qwenreadiness.Check,
-		exec:      Exec,
-		run:       run,
+		exec: Exec,
+		run:  run,
 	})
 }
 
@@ -101,7 +97,7 @@ func runQwenPeer(
 		fmt.Print(qwenPeerUsage())
 		return nil
 	}
-	if dependencies.readiness == nil || dependencies.exec == nil || dependencies.run == nil {
+	if dependencies.exec == nil || dependencies.run == nil {
 		return errors.New("qwen peer dependencies are incomplete")
 	}
 	cwd, err := canonicalQwenCwd()
@@ -118,19 +114,6 @@ func runQwenPeer(
 	}
 	if plan.mode == qwenPeerModePassthrough || plan.informationalPass {
 		return dependencies.exec(qwen, plan.nativeArgs, qwenprofile.ApplyEnvironment(os.Environ(), plan.profile))
-	}
-	readinessContext, cancel := context.WithTimeout(ctx, qwenReadinessTimeout)
-	report, readinessErr := dependencies.readiness(readinessContext, qwenreadiness.Request{
-		Executable: qwen, Workspace: plan.requestedCwd, Profile: plan.profile,
-		ExpectedIntegrationVersion: qwenreadiness.IntegrationVersion,
-		Source:                     qwenreadiness.NewNativeSource(os.Environ()),
-	})
-	cancel()
-	if readinessErr != nil {
-		return fmt.Errorf("check Qwen readiness: %w", readinessErr)
-	}
-	if !report.Ready {
-		return qwenReadinessError(report)
 	}
 	qwenHome, err := qwenprofile.EffectiveHome(plan.profile, os.LookupEnv)
 	if err != nil {
@@ -260,17 +243,6 @@ func canonicalQwenCwd() (string, error) {
 		return "", fmt.Errorf("canonicalize Qwen working directory: %w", err)
 	}
 	return canonical, nil
-}
-
-func qwenReadinessError(report qwenreadiness.Report) error {
-	if !report.IntegrationReady {
-		return fmt.Errorf("qwen Agent Sessions integration is not ready in the selected profile; run make install-qwen for that exact profile")
-	}
-	messages := make([]string, 0, len(report.Issues))
-	for _, issue := range report.Issues {
-		messages = append(messages, issue.Code+": "+issue.Message)
-	}
-	return fmt.Errorf("qwen is not ready: %s", strings.Join(messages, "; "))
 }
 
 var qwenPassthroughCommands = map[string]struct{}{

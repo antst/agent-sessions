@@ -363,13 +363,8 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if err := validateLaneGroupNames(options.groups, parentGroups); err != nil {
 		return nil, classifyLiveError(errLiveInvalidParams, err)
 	}
-	nativePath, err := laneExecutable(product)
-	if err != nil {
+	if _, err := laneExecutable(product); err != nil {
 		return nil, classifyLiveError(errLiveProductUnavailable, err)
-	}
-	readiness := inspectLaneProductReadiness(ctx, product, nativePath, cwd)
-	if ready, _ := readiness["ready"].(bool); !ready {
-		return nil, classifyLiveError(errLiveProductUnavailable, fmt.Errorf("%s lane readiness is not established: %v", product, readiness["readiness_error"]))
 	}
 	explicitGroups := uniqueStrings(options.groups)
 	groups := append([]string(nil), explicitGroups...)

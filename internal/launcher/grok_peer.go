@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -24,7 +23,6 @@ const (
 	// GrokLeaderSocketEnv is inherited by Grok's product-launched MCP connector,
 	// which owns the session's one presence and inbound-message stream.
 	GrokLeaderSocketEnv = "AGENT_SESSIONS_GROK_LEADER_SOCKET"
-	grokProbeTimeout    = 5 * time.Second
 )
 
 type grokMode string
@@ -41,15 +39,6 @@ var grokPassthroughCommands = map[string]struct{}{
 	"leader": {}, "login": {}, "logout": {}, "mcp": {}, "memory": {},
 	"models": {}, "plugin": {}, "sessions": {}, "setup": {}, "trace": {},
 	"update": {}, "version": {}, "v": {}, "worktree": {}, "wrap": {},
-}
-
-var grokCLIHelpMarkers = []string{
-	"Grok Build TUI",
-	"Usage: grok",
-	"--leader-socket",
-	"Commands:",
-	"agent",
-	"leader",
 }
 
 type grokPlan struct {
@@ -492,14 +481,14 @@ func grokExecutable() (string, error) {
 		if err != nil {
 			return "", &ExitError{Code: 127, Err: fmt.Errorf("GROK_PEER_GROK_BIN is unavailable: %s", configured)}
 		}
-		if err := validateGrokCLI(path); err != nil {
-			return "", &ExitError{Code: 127, Err: fmt.Errorf("GROK_PEER_GROK_BIN is not the headless Grok CLI: %s: %w", path, err)}
+		if err := rejectMacOSAppBundleExecutable(path); err != nil {
+			return "", &ExitError{Code: 127, Err: fmt.Errorf("GROK_PEER_GROK_BIN is not a standalone Grok CLI: %s: %w", path, err)}
 		}
 		return path, nil
 	}
 	var rejected []string
 	for _, candidate := range grokExecutableCandidates() {
-		if err := validateGrokCLI(candidate); err == nil {
+		if err := rejectMacOSAppBundleExecutable(candidate); err == nil {
 			return candidate, nil
 		}
 		rejected = append(rejected, candidate)
@@ -547,7 +536,7 @@ func grokExecutableCandidates() []string {
 // installation layout. Some releases install no PATH shim and retain multiple
 // versioned binaries beside an older unversioned bootstrap, so candidates are
 // ordered by numeric release version before the unversioned fallback. Every
-// candidate still passes validateGrokCLI before it can be selected.
+// candidate is selected without executing the product during launch planning.
 //
 //nolint:gocyclo // Candidate expansion enumerates the vendor's supported OS/architecture spellings explicitly.
 func grokManagedDownloadCandidates(root string) []string {
@@ -619,35 +608,11 @@ func grokManagedDownloadCandidates(root string) []string {
 	return append(result, unversioned...)
 }
 
-func validateGrokCLI(path string) error {
-	if err := rejectMacOSAppBundleExecutable(path); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), grokProbeTimeout)
-	defer cancel()
-	// #nosec G702 -- The candidate is a resolved local executable and the probe argv is fixed.
-	command := exec.CommandContext(ctx, path, "--no-auto-update", "--help")
-	output, err := command.CombinedOutput()
-	if ctx.Err() != nil {
-		return errors.New("--help probe timed out")
-	}
-	if err != nil {
-		return fmt.Errorf("--help probe failed: %w", err)
-	}
-	help := string(output)
-	for _, marker := range grokCLIHelpMarkers {
-		if !strings.Contains(help, marker) {
-			return fmt.Errorf("--help output is missing %q", marker)
-		}
-	}
-	return nil
-}
-
 // rejectMacOSAppBundleExecutable prevents a desktop application helper from
 // being executed as part of CLI validation. macOS commonly exposes helpers
 // through PATH symlinks, and its default filesystems accept case-variant
 // spellings, so both the selected path and its resolved target are matched
-// case-insensitively before running even the otherwise inert --help probe.
+// case-insensitively without executing the product.
 func rejectMacOSAppBundleExecutable(path string) error {
 	if pathInsideMacOSAppContents(path) {
 		return errors.New("executable is inside a macOS application bundle, not a standalone Grok CLI")
