@@ -215,8 +215,27 @@ ln -sfn "$release" "$hub_root/current"
 ln -sfn "$hub_root/current/bin/agent-sessions-hub" "$prefix/bin/agent-sessions-hub"
 install_hub_service "$release"
 
+# A successful transaction retains exactly the selected immutable release.
+# Old versions and debris from interrupted prior installers are safe to remove
+# only after the replacement hub service has passed readiness.
+for stale_release in "$releases"/* "$releases"/.previous-* "$releases"/.stage.*; do
+  [[ -e "$stale_release" || -L "$stale_release" ]] || continue
+  [[ "$stale_release" == "$release" ]] && continue
+  if [[ -n "$backup" && "$stale_release" == "$backup" ]]; then continue; fi
+  if [[ ! -d "$stale_release" || -L "$stale_release" ]]; then
+    printf 'Left Agent Sessions hub release path %s in place; it is not a real directory.\n' "$stale_release"
+    continue
+  fi
+  if ! remove_managed_tree "$stale_release" "$releases"; then
+    printf 'Left Agent Sessions hub release path %s in place; safe removal was refused.\n' "$stale_release"
+    continue
+  fi
+  printf 'Removed stale Agent Sessions hub release path %s.\n' "$stale_release"
+done
+
 if [[ -n "$backup" && -d "$backup" ]]; then
   remove_managed_tree "$backup" "$releases"
+  printf 'Removed stale Agent Sessions hub release path %s.\n' "$backup"
 fi
 trap - ERR
 printf 'Installed Agent Sessions hub %s for %s.\n' "$version" "$platform"
