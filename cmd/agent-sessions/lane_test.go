@@ -478,6 +478,7 @@ func TestResumeReplacesEveryInvocationSelectionInsteadOfCarryingItForward(t *tes
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}, PermissionMode: "default"}
+	runtime.Attachments().ReportLive(parent.ID, parent.ID, parent.Product, parent.Groups, map[string]string{}, false)
 	actor := &laneActor{
 		id: "native", nativeID: "native", nativeGeneration: 7, name: "worker", product: "claude", parentID: parent.ID,
 		groups: []string{"shared", "session:host/parent", "session:host/parent/native"}, explicitGroups: []string{"shared"},
