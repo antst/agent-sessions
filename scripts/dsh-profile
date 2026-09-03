@@ -50,14 +50,18 @@ install_dsh_native_integration() {
     install -m 0644 "$integration_root/integrations/shared/live-session.js" "$package_root/shared/live-session.cjs"
 
     # DSH owns profile/plugin mutation. DSH has no package-build command, so
-    # this one staging step turns the release files into a physical tarball;
-    # `dsh plugin add` performs the actual install and profile composition.
+    # this one staging step turns the release files into a physical tarball.
+    # Keep that tarball beside its selected release: pnpm records file package
+    # sources in the product-owned profile manifest, so the source must outlive
+    # this install process.
     "$pnpm_path" --dir "$package_root" pack --pack-destination "$temporary_root" >/dev/null
     set -- "$temporary_root"/*.tgz
     [[ $# -eq 1 && -f "$1" ]]
     archive=$1
+    stable_archive="$integration_root/integrations/dsh/$(basename -- "$archive")"
+    install -m 0644 "$archive" "$stable_archive"
     remove_dsh_native_integration "$dsh_path" "$pnpm_path"
-    dsh_profile_command "$dsh_path" "$pnpm_path" add "$archive"
+    dsh_profile_command "$dsh_path" "$pnpm_path" add "$stable_archive"
   ) || status=$?
   remove_managed_tree "$temporary_root" "$temporary_parent"
   return "$status"

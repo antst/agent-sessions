@@ -113,6 +113,10 @@ case "$4" in
     rm -rf -- "$TEST_DSH_PLUGIN_ROOT"
     ;;
   add)
+    case "$5" in
+      "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/agent-sessions-dsh-native-*.tgz) ;;
+      *) exit 92 ;;
+    esac
     source_root=$(cat "$TEST_DSH_PACKED_SOURCE")
     rm -rf -- "$TEST_DSH_PLUGIN_ROOT"
     mkdir -p "$TEST_DSH_PLUGIN_ROOT"
@@ -253,6 +257,7 @@ cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kil
 cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js"
 cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
 cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/shared/live-session.cjs" "$release/integrations/shared/live-session.js"
+test -f "$release/integrations/dsh/agent-sessions-dsh-native-0.3.0.tgz"
 find -P "$release" -type d -exec chmod 0555 {} +
 
 # Reproduce an equal-version active cache that differs from the selected
