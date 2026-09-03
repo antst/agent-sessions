@@ -656,14 +656,23 @@ done
 
 # DSH is the last fallible state change. Its two packages are added in one
 # offline native operation; generic rollback never touches the prior profile.
+dsh_inventory=""
 if [[ -n "$dsh_path" ]]; then
-  install_dsh_integrations "$dsh_path" "$pnpm_path" "$release"
+  if dsh_inventory=$(dsh_profile_command "$dsh_path" "$pnpm_path" list --depth 0 --json); then
+    :
+  else
+    dsh_inventory_status=$?
+    rollback_install "$dsh_inventory_status"
+  fi
+fi
+trap - ERR INT TERM
+if [[ -n "$dsh_path" ]]; then
+  install_dsh_integrations "$dsh_path" "$pnpm_path" "$release" "$dsh_inventory"
 elif [[ -n "$dsh_skip_reason" ]]; then
   printf 'Skipping DSH lane integration: %s\n' "$dsh_skip_reason"
 else
   printf 'Skipping DSH lane integration: %s is not installed.\n' "$dsh"
 fi
-trap - ERR INT TERM
 
 # No failure after the DSH commit may reopen the completed transaction. Release
 # cleanup is best effort and reports every path it cannot safely remove.

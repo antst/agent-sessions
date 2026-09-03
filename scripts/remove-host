@@ -126,6 +126,7 @@ if [[ $purge -eq 1 ]]; then
 fi
 
 install_integrations() {
+  local dsh_inventory
   if [[ -n "$codex_path" ]]; then
     local codex_plugins codex_marketplaces
     codex_plugins=$("$codex_path" plugin list --json)
@@ -176,7 +177,8 @@ install_integrations() {
     install -m 0644 "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   done
   if [[ -n "$dsh_path" ]]; then
-    install_dsh_integrations "$dsh_path" "$pnpm_path" "$current"
+    dsh_inventory=$(dsh_profile_command "$dsh_path" "$pnpm_path" list --depth 0 --json) || return $?
+    install_dsh_integrations "$dsh_path" "$pnpm_path" "$current" "$dsh_inventory"
   fi
 }
 

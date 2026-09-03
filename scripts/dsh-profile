@@ -23,16 +23,11 @@ validate_dsh_native_tuple() {
   fi
 }
 
-dsh_profile_has_package() {
-  local dsh_path=$1 pnpm_path=$2 package_name=$3 inventory
-  inventory=$(dsh_profile_command "$dsh_path" "$pnpm_path" list --depth 0 --json)
-  grep -Fq "\"$package_name\"" <<<"$inventory"
-}
-
 remove_dsh_integrations() {
-  local dsh_path=$1 pnpm_path=$2 package_name
+  local dsh_path=$1 pnpm_path=$2 package_name inventory
+  inventory=$(dsh_profile_command "$dsh_path" "$pnpm_path" list --depth 0 --json) || return $?
   for package_name in @agent-sessions/dsh-lane @agent-sessions/dsh-comms @agent-sessions/dsh-native; do
-    if dsh_profile_has_package "$dsh_path" "$pnpm_path" "$package_name"; then
+    if grep -Eq "\"$package_name\"[[:space:]]*:" <<<"$inventory"; then
       dsh_profile_command "$dsh_path" "$pnpm_path" remove "$package_name"
     fi
   done
@@ -71,7 +66,7 @@ stage_dsh_integration_archives() {
 }
 
 install_dsh_integrations() {
-  local dsh_path=$1 pnpm_path=$2 integration_root=$3 had_legacy=0 status
+  local dsh_path=$1 pnpm_path=$2 integration_root=$3 inventory=$4 had_legacy=0 status
   local -a comms_archives lane_archives
   shopt -s nullglob
   comms_archives=("$integration_root"/integrations/dsh/agent-sessions-dsh-comms-*.tgz)
@@ -82,7 +77,7 @@ install_dsh_integrations() {
     return 1
   fi
 
-  if dsh_profile_has_package "$dsh_path" "$pnpm_path" @agent-sessions/dsh-native; then
+  if grep -Eq '"@agent-sessions/dsh-native"[[:space:]]*:' <<<"$inventory"; then
     had_legacy=1
   fi
 

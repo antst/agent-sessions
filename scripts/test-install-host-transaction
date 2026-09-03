@@ -126,6 +126,7 @@ if [ "$1" = "--version" ]; then printf '%s\n' "${TEST_DSH_VERSION:-dsh 0.1.2-rc.
 [ "$1 $2 $3" = "plugin --profile agent-sessions" ] || exit 91
 case "$4" in
   list)
+    if [ "${TEST_DSH_LIST_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$TEST_DSH_LIST_FAILURE_MARKER" ]; then : >"$TEST_DSH_LIST_FAILURE_MARKER"; printf '%s\n' 'fixture DSH list failure' >&2; exit 48; fi
     first=1
     printf '%s' '{"dependencies":{'
     for package in dsh-native dsh-comms dsh-lane; do
@@ -139,6 +140,7 @@ case "$4" in
     ;;
   remove)
     shift 4
+    if [ "${TEST_DSH_PAIR_REMOVE_FAIL:-0}" = 1 ] && [ "$#" = 2 ]; then printf '%s\n' 'fixture DSH pair removal failure' >&2; exit 49; fi
     for requested in "$@"; do
       package=${requested#@agent-sessions/}
       if [ "$package" = dsh-native ] && [ "${TEST_DSH_LEGACY_REMOVE_FAIL_ONCE:-0}" = 1 ] &&
@@ -159,6 +161,7 @@ case "$4" in
   add)
     [ "$5" = --offline ] && [ "$#" = 7 ] || exit 92
     "$TEST_PREFIX/bin/agent-sessions" status >/dev/null 2>&1 || exit 94
+    if [ "${TEST_DSH_REQUIRE_PRIOR_ARCHIVE:-0}" = 1 ]; then find "$TEST_PREFIX/libexec/agent-sessions/host/releases" -path '*/.previous-*/integrations/dsh/*.tgz' -print -quit | grep -q . || exit 95; fi
     if [ "${TEST_DSH_ADD_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$TEST_DSH_ADD_FAILURE_MARKER" ]; then
       : >"$TEST_DSH_ADD_FAILURE_MARKER"
       printf '%s\n' 'fixture DSH add failure' >&2
@@ -180,6 +183,7 @@ case "$4" in
       mv -- "$extract/package" "$plugin_root"
       : >"$TEST_DSH_STATE_DIR/$package"
     done
+    case "${TEST_DSH_SIGNAL_ADD:-}" in INT) kill -s INT "$PPID"; exit 130 ;; TERM) kill -s TERM "$PPID"; exit 143 ;; esac
     ;;
   *) exit 91 ;;
 esac
@@ -298,6 +302,7 @@ candidate="$test_root/candidate-agent-sessions"
 cp -- "$host_binary" "$candidate"
 printf 'different-candidate\n' >>"$candidate"
 chmod 0755 "$candidate"
+candidate_hash=$(sha256sum "$candidate" | awk '{print $1}')
 
 failing_candidate="$test_root/failing-agent-sessions"
 cat >"$failing_candidate" <<'EOF'
@@ -341,6 +346,7 @@ common_env=(
   "TEST_DSH_LANE_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane"
   "TEST_DSH_EXTRACT_ROOT=$test_root/dsh-extract"
   "TEST_DSH_ADD_FAILURE_MARKER=$test_root/dsh-add-failed-once"
+  "TEST_DSH_LIST_FAILURE_MARKER=$test_root/dsh-list-failed-once"
   "TEST_DSH_LEGACY_REMOVE_MARKER=$test_root/dsh-legacy-remove-failed-once"
   "TEST_SERVICE_PID_FILE=$test_root/service.pid"
   "TEST_SERVICE_LOG=$test_root/service.log"
@@ -394,8 +400,22 @@ if [[ $pack_failure_status -eq 0 ]] ||
   exit 1
 fi
 
-# A native add failure occurs only after candidate readiness and leaves the
-# already installed DSH pair byte-for-byte untouched; rollback never calls DSH.
+: >"$test_root/dsh-record"; rm -f -- "$test_root/dsh-list-failed-once"
+set +e
+env "${common_env[@]}" TEST_DSH_LIST_FAIL_ONCE=1 "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/dsh-list-failure.out" 2>"$test_root/dsh-list-failure.err"
+dsh_list_failure_status=$?; set -e
+if [[ $dsh_list_failure_status -ne 48 ]] ||
+   ! grep -Fq 'fixture DSH list failure' "$test_root/dsh-list-failure.err" ||
+   grep -Eq 'plugin --profile agent-sessions (add|remove) ' "$test_root/dsh-record" ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$prior_hash" ]] ||
+   [[ $(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd) != "$release" ]]; then
+  printf 'DSH inventory failure did not preserve its status and roll back before mutation\n' >&2
+  exit 1
+fi
+
+# A native add failure occurs after host commit. The ready candidate and both
+# archive generations stay available while the prior DSH pair remains untouched.
 : >"$test_root/dsh-record"
 rm -f -- "$test_root/dsh-add-failed-once"
 set +e
@@ -404,16 +424,22 @@ env "${common_env[@]}" TEST_DSH_ADD_FAIL_ONCE=1 "$root/scripts/install-host" \
   >"$test_root/dsh-add-failure.out" 2>"$test_root/dsh-add-failure.err"
 dsh_add_failure_status=$?
 set -e
+add_failure_backup=$(find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 -type d -name '.previous-0.3.0-*' -print -quit)
 if [[ $dsh_add_failure_status -eq 0 ]] ||
    ! grep -Fq 'fixture DSH add failure' "$test_root/dsh-add-failure.err" ||
    [[ $(grep -Fc 'plugin --profile agent-sessions add --offline ' "$test_root/dsh-record") -ne 1 ]] ||
    grep -Fq 'plugin --profile agent-sessions remove ' "$test_root/dsh-record" ||
-   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$prior_hash" ]] ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$candidate_hash" ]] ||
+   [[ -z "$add_failure_backup" ]] ||
+   [[ ! -f "$add_failure_backup/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz" ]] ||
+   [[ ! -f "$release/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz" ]] ||
    ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/plugin.cjs" "$release/integrations/dsh/comms/plugin.cjs" >/dev/null ||
    ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs" >/dev/null; then
-  printf 'DSH add failure changed the prior DSH profile or invoked DSH during rollback\n' >&2
+  printf 'DSH add failure rolled back the ready host or lost a referenced archive\n' >&2
   exit 1
 fi
+env "${common_env[@]}" "$root/scripts/install-host" "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
+find -P "$release" -type d -exec chmod 0555 {} +
 
 # Reproduce an equal-version active cache that differs from the selected
 # release. The next install must refresh it through Claude's supported
@@ -511,8 +537,7 @@ for signal_case in TERM INT; do
     "TEST_QWEN_SIGNAL_MARKER=$signal_marker" \
     "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
     >"$test_root/signal-$signal_case.out" 2>"$test_root/signal-$signal_case.err"
-  signal_status=$?
-  set -e
+  signal_status=$?; set -e
   after_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
   selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd)
   if [[ $signal_status -ne $expected_status ]] ||
@@ -527,6 +552,33 @@ for signal_case in TERM INT; do
     exit 1
   fi
 done
+
+run_dsh_commit_signal() {
+  local signal_case=$1 prior_kind=${2:-pair-only} expected_status signal_status retained_backup
+  case "$signal_case" in TERM) expected_status=143 ;; INT) expected_status=130 ;; esac
+  : >"$test_root/dsh-record"
+  set +e
+  env "${common_env[@]}" "TEST_DSH_SIGNAL_ADD=$signal_case" "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+    >"$test_root/dsh-signal-$signal_case.out" 2>"$test_root/dsh-signal-$signal_case.err"
+  signal_status=$?
+  set -e
+  retained_backup=$(find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 -type d -name '.previous-0.3.0-*' -print -quit)
+  if [[ $signal_status -ne $expected_status ]] ||
+     [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$candidate_hash" ]] ||
+     [[ -z "$retained_backup" ]] ||
+     [[ ! -f "$retained_backup/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz" ]] ||
+     [[ ! -f "$release/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz" ]] ||
+     [[ ! -f "$test_root/dsh-state/dsh-comms" || ! -f "$test_root/dsh-state/dsh-lane" ]] ||
+     [[ "$prior_kind" == legacy && ! -f "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary" ]] ||
+     [[ "$prior_kind" == pair-only && -e "$test_root/dsh-state/dsh-native" ]] ||
+     [[ $(grep -Fc 'plugin --profile agent-sessions add --offline ' "$test_root/dsh-record") -ne 1 ]] ||
+     grep -Fq 'plugin --profile agent-sessions remove ' "$test_root/dsh-record"; then
+    printf '%s signal during %s DSH commit rolled back the host or lost an archive\n' "$signal_case" "$prior_kind" >&2
+    exit 1
+  fi
+}
+run_dsh_commit_signal TERM
+run_dsh_commit_signal INT
 
 legacy_alias_directory="$prefix/libexec/agent-sessions/bin/linux-x64"
 ln -s "$legacy_alias_directory/peer" "$prefix/bin/peer"
@@ -545,9 +597,8 @@ mkdir -p "$unsafe_release"
 : >"$stray_file"
 ln -s /bin/true "$stray_link"
 ln -s /bin/true "$unsafe_release/inner-link"
-env "${common_env[@]}" "$root/scripts/install-host" \
+env "${common_env[@]}" TEST_DSH_REQUIRE_PRIOR_ARCHIVE=1 "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >"$test_root/success.out"
-candidate_hash=$(sha256sum "$candidate" | awk '{print $1}')
 installed_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
 selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd)
 if [[ "$installed_hash" != "$candidate_hash" ]] ||
@@ -572,12 +623,19 @@ fi
 # The supported pre-managed state is legacy-only. If its removal fails after
 # the native pair add, one native pair removal compensates and the real failure
 # remains visible while the legacy profile is left intact.
-rm -f -- "$test_root/dsh-state/dsh-comms" "$test_root/dsh-state/dsh-lane"
-rm -rf -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms" \
-  "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane"
-mkdir -p "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
-printf 'legacy-canary\n' >"$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary"
-: >"$test_root/dsh-state/dsh-native"
+set_legacy_only() {
+  rm -f -- "$test_root/dsh-state/dsh-comms" "$test_root/dsh-state/dsh-lane"
+  rm -rf -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms" \
+    "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane"
+  mkdir -p "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
+  printf 'legacy-canary\n' >"$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary"
+  : >"$test_root/dsh-state/dsh-native"
+}
+set_legacy_only
+run_dsh_commit_signal TERM legacy
+set_legacy_only
+run_dsh_commit_signal INT legacy
+set_legacy_only
 : >"$test_root/dsh-record"
 rm -f -- "$test_root/dsh-legacy-remove-failed-once"
 set +e
@@ -586,11 +644,16 @@ env "${common_env[@]}" TEST_DSH_LEGACY_REMOVE_FAIL_ONCE=1 "$root/scripts/install
   >"$test_root/legacy-remove-failure.out" 2>"$test_root/legacy-remove-failure.err"
 legacy_failure_status=$?
 set -e
+legacy_failure_backup=$(find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 -type d -name '.previous-0.3.0-*' -print -quit)
 if [[ $legacy_failure_status -ne 47 ]] ||
    ! grep -Fq 'fixture legacy removal failure' "$test_root/legacy-remove-failure.err" ||
    [[ $(grep -Fc 'plugin --profile agent-sessions add --offline ' "$test_root/dsh-record") -ne 1 ]] ||
    [[ $(grep -Fxc 'plugin --profile agent-sessions remove @agent-sessions/dsh-native' "$test_root/dsh-record") -ne 1 ]] ||
    [[ $(grep -Fxc 'plugin --profile agent-sessions remove @agent-sessions/dsh-lane @agent-sessions/dsh-comms' "$test_root/dsh-record") -ne 1 ]] ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$prior_hash" ]] ||
+   [[ -z "$legacy_failure_backup" ]] ||
+   [[ ! -f "$legacy_failure_backup/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz" ]] ||
+   [[ ! -f "$release/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz" ]] ||
    [[ ! -f "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary" ]] ||
    [[ -e "$test_root/dsh-state/dsh-comms" || -e "$test_root/dsh-state/dsh-lane" ]] ||
    [[ -e "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms" ]] ||
@@ -600,6 +663,28 @@ if [[ $legacy_failure_status -ne 47 ]] ||
   cat "$test_root/dsh-record" >&2
   exit 1
 fi
+
+# If compensation itself fails, preserving the committed release is the only
+# safe outcome because both the legacy package and new pair may reference it.
+: >"$test_root/dsh-record"
+rm -f -- "$test_root/dsh-legacy-remove-failed-once"
+set +e
+env "${common_env[@]}" TEST_DSH_LEGACY_REMOVE_FAIL_ONCE=1 TEST_DSH_PAIR_REMOVE_FAIL=1 \
+  "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/compensation-failure.out" 2>"$test_root/compensation-failure.err"
+compensation_failure_status=$?; set -e
+compensation_backup=$(find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 -type d -name '.previous-0.3.0-*' -print -quit)
+if [[ $compensation_failure_status -ne 47 ]] ||
+   ! grep -Fq 'fixture DSH pair removal failure' "$test_root/compensation-failure.err" ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$candidate_hash" ]] ||
+   [[ -z "$compensation_backup" ]] ||
+   [[ ! -f "$compensation_backup/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz" ]] ||
+   [[ ! -f "$release/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz" ]] ||
+   [[ ! -f "$test_root/dsh-state/dsh-native" || ! -f "$test_root/dsh-state/dsh-comms" || ! -f "$test_root/dsh-state/dsh-lane" ]]; then
+  printf 'failed DSH compensation did not retain the candidate and every archive source\n' >&2
+  exit 1
+fi
+set_legacy_only
 
 # A pre-campaign prior release has no managed integrations or release
 # inventory. Rollback must remove the replacement integrations before their
