@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
@@ -23,7 +22,6 @@ type MCPRelayConfig struct {
 	MaxFrameBytes int
 	Call          func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
 	Refresh       func(context.Context) error
-	RefreshEvery  time.Duration
 }
 
 type MCPRelay struct {
@@ -79,17 +77,6 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 	scanner.Buffer(make([]byte, initial), r.config.MaxFrameBytes)
 	writer := bufio.NewWriter(output)
 	defer func() { _ = writer.Flush() }()
-	var refresh <-chan time.Time
-	var ticker *time.Ticker
-	if r.config.Refresh != nil {
-		interval := r.config.RefreshEvery
-		if interval <= 0 {
-			interval = time.Second
-		}
-		ticker = time.NewTicker(interval)
-		refresh = ticker.C
-		defer ticker.Stop()
-	}
 	frames := make(chan relayFrame, 1)
 	go func() {
 		defer close(frames)
@@ -111,15 +98,9 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 		if frames == nil && inFlight == 0 {
 			return writer.Flush()
 		}
-		refreshReady := refresh
-		if inFlight > 0 {
-			refreshReady = nil
-		}
 		select {
 		case <-ctx.Done():
 			return writer.Flush()
-		case <-refreshReady:
-			_ = r.config.Refresh(ctx)
 		case response := <-responses:
 			if err := writeRelayResponse(writer, response.id, response.result, response.failure); err != nil {
 				return err
@@ -128,6 +109,9 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 				return fmt.Errorf("flush MCP relay response: %w", err)
 			}
 			inFlight--
+			if r.config.Refresh != nil && inFlight == 0 {
+				_ = r.config.Refresh(ctx)
+			}
 		case frame, ok := <-frames:
 			if !ok {
 				frames = nil

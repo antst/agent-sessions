@@ -91,6 +91,21 @@ func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
 	}
 }
 
+func TestLiveSendProjectsOnlyTheDaemonMessageContract(t *testing.T) {
+	projected := liveMessageSendArguments(map[string]any{
+		"target": "architect", "message": "hello", "summary": "stale schema field", "session_id": "source",
+	})
+	if len(projected) != 2 || projected["target"] != "architect" || projected["message"] != "hello" {
+		t.Fatalf("live message projection = %#v", projected)
+	}
+	if _, ok := projected["summary"]; ok {
+		t.Fatal("summary reached message.send")
+	}
+	if _, ok := projected["session_id"]; ok {
+		t.Fatal("session_id reached message.send")
+	}
+}
+
 func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) {
 	getenv := func(name string) string {
 		if name == "AGENT_SESSIONS_PRODUCT" {
@@ -146,21 +161,6 @@ func TestOnlyExplicitClaudePluginConnectorClaimsPresence(t *testing.T) {
 	arguments := map[string]any{"session_id": "model-supplied-stale-value"}
 	if source := connectorToolSource(automatic, "native-claude-session", nil, arguments); source != "native-claude-session" {
 		t.Fatalf("automatic Claude connector source = %q", source)
-	}
-}
-
-func TestLiveSendProjectsOnlyTheDaemonMessageContract(t *testing.T) {
-	projected := liveMessageSendArguments(map[string]any{
-		"target": "architect", "message": "hello", "summary": "stale schema field", "session_id": "source",
-	})
-	if len(projected) != 2 || projected["target"] != "architect" || projected["message"] != "hello" {
-		t.Fatalf("live message projection = %#v", projected)
-	}
-	if _, ok := projected["summary"]; ok {
-		t.Fatal("summary reached message.send")
-	}
-	if _, ok := projected["session_id"]; ok {
-		t.Fatal("session_id reached message.send")
 	}
 }
 

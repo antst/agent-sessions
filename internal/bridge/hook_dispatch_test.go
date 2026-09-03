@@ -13,7 +13,7 @@ import (
 func TestHookDispatcherForwardsOnlyDeclaredExactManagedEvents(t *testing.T) {
 	root := shortSocketTestRoot(t, "hd-")
 	var got []hookDispatchPayload
-	server, err := daemonpkg.StartControlServer(context.Background(), root, 5, func(_ context.Context, request daemonpkg.ControlRequest) (json.RawMessage, error) {
+	server, err := daemonpkg.StartControlServer(context.Background(), root, 5, "", func(_ context.Context, request daemonpkg.ControlRequest) (json.RawMessage, error) {
 		if request.AttachmentID != "codex-thread" || request.Capability != "codex-capability" {
 			t.Fatalf("attestation = %q / %q", request.AttachmentID, request.Capability)
 		}
@@ -68,7 +68,7 @@ func TestHookDispatcherForwardsOnlyDeclaredExactManagedEvents(t *testing.T) {
 func TestHookDispatcherIsSilentForBareSessionsAndProductsWithoutHooks(t *testing.T) {
 	root := shortSocketTestRoot(t, "hd-")
 	calls := 0
-	server, err := daemonpkg.StartControlServer(context.Background(), root, 2, func(context.Context, daemonpkg.ControlRequest) (json.RawMessage, error) {
+	server, err := daemonpkg.StartControlServer(context.Background(), root, 2, "", func(context.Context, daemonpkg.ControlRequest) (json.RawMessage, error) {
 		calls++
 		return nil, errors.New("unexpected hook mutation")
 	})

@@ -66,12 +66,13 @@ type ControlFailure struct {
 
 // ControlResponse is one correlated local result.
 type ControlResponse struct {
-	ID         string          `json:"id"`
-	Generation uint64          `json:"generation"`
-	OK         bool            `json:"ok"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
-	Error      *ControlFailure `json:"error,omitempty"`
-	Admitted   bool            `json:"admitted,omitempty"`
+	ID              string          `json:"id"`
+	Generation      uint64          `json:"generation"`
+	ReleaseIdentity string          `json:"release_identity,omitempty"`
+	OK              bool            `json:"ok"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Error           *ControlFailure `json:"error,omitempty"`
+	Admitted        bool            `json:"admitted,omitempty"`
 }
 
 // ControlHandler executes one already-framed, authorized operation.
@@ -94,11 +95,12 @@ type inFlightControlResponse struct {
 }
 
 type controlPolicy struct {
-	generation uint64
-	handler    ControlHandler
-	mu         sync.Mutex
-	cache      map[controlMutationCacheKey]cachedControlResponse
-	inFlight   map[controlMutationCacheKey]*inFlightControlResponse
+	generation      uint64
+	releaseIdentity string
+	handler         ControlHandler
+	mu              sync.Mutex
+	cache           map[controlMutationCacheKey]cachedControlResponse
+	inFlight        map[controlMutationCacheKey]*inFlightControlResponse
 }
 
 type classifiedControlError struct{ code string }

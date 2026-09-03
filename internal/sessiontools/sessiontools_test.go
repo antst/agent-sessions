@@ -156,3 +156,31 @@ func TestMCPRelayRejectsUnknownProductAndReturnsRealCallError(t *testing.T) {
 		t.Fatalf("inactive response = %s", output.String())
 	}
 }
+
+func TestMCPRelayRefreshesOnlyAfterDaemonResponseIsFlushed(t *testing.T) {
+	var output bytes.Buffer
+	refreshed := 0
+	relay, err := NewMCPRelay(MCPRelayConfig{
+		Product: "claude",
+		Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"content":[],"structuredContent":{}}`), nil
+		},
+		Refresh: func(context.Context) error {
+			refreshed++
+			if !strings.Contains(output.String(), `"structuredContent":{}`) {
+				t.Fatal("connector refresh ran before the MCP response was flushed")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n")
+	if err := relay.Serve(context.Background(), input, &output); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshed)
+	}
+}

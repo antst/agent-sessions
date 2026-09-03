@@ -55,7 +55,7 @@ func TestControlRolesGenerationBareInactivityAndNoLifecycleOverSocket(t *testing
 	})
 
 	status := callControlTest(t, server.Endpoint(), ControlRequest{ID: "status", Role: RoleAdmin, Operation: "status", Generation: 7})
-	if !status.OK || string(status.Payload) != `{"operation":"status"}` {
+	if !status.OK || string(status.Payload) != `{"operation":"status"}` || status.ReleaseIdentity != "test-release-identity" {
 		t.Fatalf("admin status = %#v", status)
 	}
 	roster := callControlTest(t, server.Endpoint(), ControlRequest{ID: "roster", Role: RoleAdmin, Operation: "roster", Generation: 7})
@@ -210,7 +210,7 @@ func TestControlMutationsWithDifferentKeysDoNotSerializeNestedWork(t *testing.T)
 
 func startControlTestServer(t *testing.T, generation uint64, handler ControlHandler) *ControlServer {
 	t.Helper()
-	server, err := StartControlServer(context.Background(), shortDaemonTestRoot(t), generation, handler)
+	server, err := StartControlServer(context.Background(), shortDaemonTestRoot(t), generation, "test-release-identity", handler)
 	if err != nil {
 		t.Fatal(err)
 	}

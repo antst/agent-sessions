@@ -66,7 +66,9 @@ func ControlEndpoint(stateRoot string) (string, error) {
 
 // StartControlServer binds and starts one local control authority. A live or
 // ambiguous pre-existing endpoint is never unlinked.
-func StartControlServer(parent context.Context, stateRoot string, generation uint64, handler ControlHandler) (*ControlServer, error) {
+func StartControlServer(
+	parent context.Context, stateRoot string, generation uint64, releaseIdentity string, handler ControlHandler,
+) (*ControlServer, error) {
 	if parent == nil {
 		return nil, errors.New("control server context is nil")
 	}
@@ -95,7 +97,7 @@ func StartControlServer(parent context.Context, stateRoot string, generation uin
 	server := &ControlServer{
 		endpoint: endpoint, listener: listener, lease: lease,
 		policy: &controlPolicy{
-			generation: generation, handler: handler,
+			generation: generation, releaseIdentity: releaseIdentity, handler: handler,
 			cache:    map[controlMutationCacheKey]cachedControlResponse{},
 			inFlight: map[controlMutationCacheKey]*inFlightControlResponse{},
 		},
@@ -265,11 +267,12 @@ func (s *ControlServer) serveConnection(connection *net.UnixConn) {
 		select {
 		case response := <-completed:
 			response.Generation = s.policy.generation
+			response.ReleaseIdentity = s.policy.releaseIdentity
 			_ = writeControlFrame(connection, response)
 			return
 		case <-admitted:
 			if err := writeControlFrame(connection, ControlResponse{
-				ID: request.ID, Generation: s.policy.generation, OK: true, Admitted: true,
+				ID: request.ID, Generation: s.policy.generation, ReleaseIdentity: s.policy.releaseIdentity, OK: true, Admitted: true,
 			}); err != nil {
 				return
 			}
@@ -278,11 +281,13 @@ func (s *ControlServer) serveConnection(connection *net.UnixConn) {
 		}
 		response := <-completed
 		response.Generation = s.policy.generation
+		response.ReleaseIdentity = s.policy.releaseIdentity
 		_ = writeControlFrame(connection, response)
 		return
 	}
 	response := s.policy.handle(requestCtx, request)
 	response.Generation = s.policy.generation
+	response.ReleaseIdentity = s.policy.releaseIdentity
 	_ = writeControlFrame(connection, response)
 }
 

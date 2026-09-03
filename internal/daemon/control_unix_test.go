@@ -130,7 +130,7 @@ func TestControlEndpointIsFixedPrivateAndIndependentOfTMPDIR(t *testing.T) {
 
 func TestControlRejectsDuplicateDaemonWithoutTouchingLiveSocket(t *testing.T) {
 	root := shortDaemonTestRoot(t)
-	first, err := StartControlServer(context.Background(), root, 3, func(context.Context, ControlRequest) (json.RawMessage, error) {
+	first, err := StartControlServer(context.Background(), root, 3, "", func(context.Context, ControlRequest) (json.RawMessage, error) {
 		return json.RawMessage(`{"live":true}`), nil
 	})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestControlRejectsDuplicateDaemonWithoutTouchingLiveSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second, err := StartControlServer(context.Background(), root, 4, nil); err == nil {
+	if second, err := StartControlServer(context.Background(), root, 4, "", nil); err == nil {
 		_ = second.Close()
 		t.Fatal("second daemon acquired the live endpoint")
 	}
@@ -175,7 +175,7 @@ func TestControlRecoversExactStaleSocketAfterAbruptExit(t *testing.T) {
 	if info, err := os.Lstat(endpoint); err != nil || info.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("stale endpoint fixture = %+v, %v", info, err)
 	}
-	server, err := StartControlServer(context.Background(), root, 7, func(context.Context, ControlRequest) (json.RawMessage, error) {
+	server, err := StartControlServer(context.Background(), root, 7, "", func(context.Context, ControlRequest) (json.RawMessage, error) {
 		return json.RawMessage(`{"recovered":true}`), nil
 	})
 	if err != nil {

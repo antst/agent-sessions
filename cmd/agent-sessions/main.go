@@ -263,12 +263,21 @@ func runDaemon(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 	if err := daemonpkg.PrepareStateRoot(*stateRoot, 8<<20, output); err != nil {
 		return fmt.Errorf("prepare daemon state root: %w", err)
 	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve daemon executable: %w", err)
+	}
+	releaseIdentity, err := connectorBinaryIdentity(executable)
+	if err != nil {
+		return fmt.Errorf("identify daemon executable: %w", err)
+	}
 	coordinator := newHostCoordinator(ctx, *stateRoot)
 	var runtime *daemonpkg.Runtime
-	runtime, err := daemonpkg.StartRuntime(ctx, daemonpkg.RuntimeConfig{
-		StateRoot: *stateRoot,
-		Release:   version,
-		Adapters:  coordinator.adapters(),
+	runtime, err = daemonpkg.StartRuntime(ctx, daemonpkg.RuntimeConfig{
+		StateRoot:       *stateRoot,
+		Release:         version,
+		ReleaseIdentity: releaseIdentity,
+		Adapters:        coordinator.adapters(),
 		Handler: func(callCtx context.Context, request daemonpkg.ControlRequest) (json.RawMessage, error) {
 			return coordinator.handle(callCtx, runtime, request)
 		},

@@ -32,6 +32,7 @@ type RuntimeConfig struct {
 	StateRoot                  string
 	MaxStateBytes              int64
 	Release                    string
+	ReleaseIdentity            string
 	Adapters                   map[string]AttachmentAdapter
 	ProductDiagnosticsProvider ProductDiagnosticsProvider
 	Handler                    ControlHandler
@@ -47,6 +48,7 @@ type Runtime struct {
 	generation                 uint64
 	hostID                     string
 	release                    string
+	releaseIdentity            string
 	handler                    ControlHandler
 	productDiagnosticsProvider ProductDiagnosticsProvider
 
@@ -92,11 +94,12 @@ func StartRuntime(parent context.Context, config RuntimeConfig) (*Runtime, error
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &Runtime{
 		state: state, attachments: attachments, generation: generation,
-		hostID: currentRuntimeHost(), release: strings.TrimSpace(config.Release), handler: config.Handler,
+		hostID: currentRuntimeHost(), release: strings.TrimSpace(config.Release),
+		releaseIdentity: strings.TrimSpace(config.ReleaseIdentity), handler: config.Handler,
 		productDiagnosticsProvider: config.ProductDiagnosticsProvider,
 		ctx:                        ctx, cancel: cancel, done: make(chan struct{}),
 	}
-	control, err := StartControlServer(ctx, config.StateRoot, generation, runtime.handleControl)
+	control, err := StartControlServer(ctx, config.StateRoot, generation, runtime.releaseIdentity, runtime.handleControl)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("start runtime control authority: existing authority or unsafe endpoint: %w", err)

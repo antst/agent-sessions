@@ -9,13 +9,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 type connectorImageRefresher struct {
+	mu               sync.Mutex
 	target           string
-	launched         os.FileInfo
 	launchedIdentity string
+	daemonIdentity   string
 	args             []string
 	environ          []string
 	exec             func(string, []string, []string) error
@@ -37,47 +39,55 @@ func newConnectorImageRefresher(args, environ []string) (*connectorImageRefreshe
 	if err != nil {
 		return nil, err
 	}
-	launched, err := os.Stat(absolute)
-	if err != nil {
-		return nil, err
-	}
 	identity, err := connectorBinaryIdentity(absolute)
 	if err != nil {
 		return nil, err
 	}
 	return &connectorImageRefresher{
-		target: absolute, launched: launched, launchedIdentity: identity,
+		target: absolute, launchedIdentity: identity,
 		args: append([]string(nil), args...), environ: append([]string(nil), environ...),
 		exec: syscall.Exec,
 	}, nil
+}
+
+func (r *connectorImageRefresher) observeDaemon(identity string) {
+	if r == nil || !validConnectorReleaseIdentity(identity) {
+		return
+	}
+	r.mu.Lock()
+	r.daemonIdentity = identity
+	r.mu.Unlock()
 }
 
 func (r *connectorImageRefresher) refresh() error {
 	if r == nil {
 		return nil
 	}
-	// #nosec G703 -- target is the absolute executable captured from this process's argv.
-	current, err := os.Stat(r.target)
-	if err != nil {
-		return nil //nolint:nilerr // Keep serving from the loaded image during an atomic install window.
-	}
-	identity := r.launchedIdentity
-	if !os.SameFile(r.launched, current) {
-		identity, err = connectorBinaryIdentity(r.target)
-		if err != nil {
-			return nil //nolint:nilerr // Keep serving from the loaded image during an atomic install window.
-		}
-	}
-	args, exact := connectorArgsWithReleaseIdentity(r.args, identity)
-	if os.SameFile(r.launched, current) && exact {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.daemonIdentity == "" || r.daemonIdentity == r.launchedIdentity {
 		return nil
 	}
+	identity, err := connectorBinaryIdentity(r.target)
+	if err != nil || identity != r.daemonIdentity {
+		return nil //nolint:nilerr // A staged or rolled-back file is not the ready daemon's release.
+	}
+	args, _ := connectorArgsWithReleaseIdentity(r.args, r.daemonIdentity)
 	args[0] = r.target
 	// Exec preserves the vendor-owned stdin/stdout descriptors and PID,
-	// replacing only our stale connector image between protocol frames. The
-	// argv identity changes with the image so process census never reports the
-	// source placeholder or a previous release after the exec succeeds.
-	return r.exec(r.target, args, append([]string(nil), r.environ...))
+	// replacing only an image attested by the ready daemon. The MCP response
+	// carrying that identity has already reached the vendor before this runs.
+	if err := r.exec(r.target, args, append([]string(nil), r.environ...)); err != nil {
+		return err
+	}
+	r.launchedIdentity = r.daemonIdentity
+	r.args = args
+	return nil
+}
+
+func validConnectorReleaseIdentity(identity string) bool {
+	decoded, err := hex.DecodeString(identity)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func connectorBinaryIdentity(path string) (string, error) {

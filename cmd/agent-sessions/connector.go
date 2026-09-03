@@ -34,13 +34,6 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("track installed connector image: %w", err)
 	}
-	// Normalize source-tree placeholders and stale pre-upgrade argv before the
-	// vendor observes a ready MCP server. A successful refresh replaces this
-	// process image and never returns; the replacement sees the exact current
-	// identity and continues without another exec.
-	if err := refresher.refresh(); err != nil {
-		return fmt.Errorf("normalize installed connector image: %w", err)
-	}
 	report, reported := connectorLiveReport(product, os.Getenv)
 	var resolveReport func(context.Context) (liveSessionReport, bool)
 	if product == connectorProductClaude {
@@ -93,7 +86,9 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
 			if live != nil {
-				return callLiveConnectorTool(callCtx, live, id, method, params)
+				result, callErr := callLiveConnectorTool(callCtx, live, id, method, params)
+				refresher.observeDaemon(connectorDaemonReleaseIdentity(callCtx))
+				return result, callErr
 			}
 			callReport := report
 			if resolveReport != nil {
@@ -104,7 +99,9 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 				}
 			}
 			sourceID := connectorRelaySource(product, callReport.UUID, os.Getenv(launcher.QwenEventsFileEnv))
-			return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
+			result, releaseIdentity, callErr := callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
+			refresher.observeDaemon(releaseIdentity)
+			return result, callErr
 		},
 	})
 	if err != nil {
@@ -158,6 +155,16 @@ func callLiveConnectorTool(
 	})
 }
 
+func connectorDaemonReleaseIdentity(ctx context.Context) string {
+	response, err := callExistingDaemon(ctx, defaultStateRoot(), daemonpkg.ControlRequest{
+		ID: commandRequestID(), Role: daemonpkg.RoleAdmin, Operation: "status",
+	})
+	if err != nil || response.Error != nil {
+		return ""
+	}
+	return response.ReleaseIdentity
+}
+
 func connectorRelaySource(product, ambient, qwenEventsPath string) string {
 	if ambient != "" || product != connectorProductQwen {
 		return ambient
@@ -178,20 +185,20 @@ func callConnectorDaemonTool(
 	ctx context.Context, product string,
 	sourceID, requestID, method string,
 	params json.RawMessage,
-) (json.RawMessage, error) {
+) (json.RawMessage, string, error) {
 	if method != "tools/call" {
-		return nil, fmt.Errorf("connector method %s is unsupported", method)
+		return nil, "", fmt.Errorf("connector method %s is unsupported", method)
 	}
 	var call connectorToolCall
 	if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
-		return nil, fmt.Errorf("connector tool call is invalid")
+		return nil, "", fmt.Errorf("connector tool call is invalid")
 	}
 	sourceID = connectorToolSource(product, sourceID, params, call.Arguments)
 	payload, err := json.Marshal(connectorToolEnvelope{
 		SourceID: sourceID, RequestID: requestID, Name: call.Name, Arguments: call.Arguments,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	id := commandRequestID()
 	response, err := callExistingDaemon(ctx, defaultStateRoot(), daemonpkg.ControlRequest{
@@ -199,12 +206,12 @@ func callConnectorDaemonTool(
 		Payload: payload,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if response.Error != nil {
-		return nil, errors.New(response.Error.Message)
+		return nil, response.ReleaseIdentity, errors.New(response.Error.Message)
 	}
-	return append(json.RawMessage(nil), response.Payload...), nil
+	return append(json.RawMessage(nil), response.Payload...), response.ReleaseIdentity, nil
 }
 
 func connectorToolSource(product, ambient string, params json.RawMessage, arguments map[string]any) string {
