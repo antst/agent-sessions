@@ -444,11 +444,25 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if err != nil {
 		return nil, err
 	}
+	if len(options.groups) > 0 {
+		parentGroups, groupErr := c.attachmentVisibilityGroups(runtime, parent)
+		if groupErr != nil {
+			return nil, groupErr
+		}
+		if groupErr := validateLaneGroupNames(options.groups, parentGroups); groupErr != nil {
+			return nil, groupErr
+		}
+	}
 	cwd, err := laneInvocationCwd(parent.Cwd, options.cwd)
 	if err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
+	if actor.parentID != parent.ID && actor.state != "archived" {
+		owner := actor.parentID
+		c.mu.Unlock()
+		return nil, fmt.Errorf("lane is live under %s", owner)
+	}
 	if actor.state == "running" {
 		c.mu.Unlock()
 		return nil, errors.New("collect or interrupt the active lane turn before resume")
@@ -604,7 +618,7 @@ func (c *hostCoordinator) listLanes(runtime *daemonpkg.Runtime, parent daemonpkg
 			}
 			lanes = append(lanes, laneActorStatus(&laneActor{
 				id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
-				name: entry.Name, cwd: entry.Cwd, parentID: entry.Parent,
+				name: entry.Name, cwd: entry.Cwd, parentID: parent.ID,
 				groups: append([]string(nil), entry.Groups...), state: "archived",
 			}))
 		}
@@ -1152,22 +1166,25 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 		return errors.New("native lane session identity is empty")
 	}
 	c.mu.Lock()
-	if actor.nativeID != "" && actor.nativeID != nativeID {
-		selected := actor.nativeID
-		c.mu.Unlock()
-		return fmt.Errorf("native lane identity changed from %s to %s", selected, nativeID)
-	}
-	if actor.nativeID == "" {
-		primary := "session:" + runtime.HostID() + "/" + actor.parentID
-		temporary := primary + "/" + actor.id
-		stable := primary + "/" + nativeID
-		for index, group := range actor.groups {
-			if group == temporary {
-				actor.groups[index] = stable
-			}
+	if actor.nativeID != "" {
+		if actor.nativeID != nativeID {
+			selected := actor.nativeID
+			c.mu.Unlock()
+			return fmt.Errorf("native lane identity changed from %s to %s", selected, nativeID)
 		}
-		actor.groups = uniqueStrings(actor.groups)
+		c.mu.Unlock()
+		c.rememberActiveLaneName(actor)
+		return nil
 	}
+	primary := "session:" + runtime.HostID() + "/" + actor.parentID
+	temporary := primary + "/" + actor.id
+	stable := primary + "/" + nativeID
+	for index, group := range actor.groups {
+		if group == temporary {
+			actor.groups[index] = stable
+		}
+	}
+	actor.groups = uniqueStrings(actor.groups)
 	actor.nativeID = nativeID
 	c.mu.Unlock()
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
@@ -1510,7 +1527,7 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 			}
 			actor := &laneActor{
 				id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
-				name: entry.Name, cwd: entry.Cwd, parentID: entry.Parent,
+				name: entry.Name, cwd: entry.Cwd, parentID: parent.ID,
 				groups:         append([]string(nil), entry.Groups...),
 				explicitGroups: append([]string(nil), entry.SecondaryGroups...),
 				state:          "archived", done: make(chan struct{}),
@@ -1577,13 +1594,6 @@ func (c *hostCoordinator) attachmentVisibilityGroups(runtime *daemonpkg.Runtime,
 }
 
 func (c *hostCoordinator) effectiveLaneGroups(runtime *daemonpkg.Runtime, actor *laneActor, parent daemonpkg.ManagedAttachment) ([]string, error) {
-	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateLaneGroupNames(actor.explicitGroups, parentGroups); err != nil {
-		return nil, err
-	}
 	groups := append([]string(nil), actor.explicitGroups...)
 	if actor.inheritGroups {
 		groups = append(groups, parent.Groups...)
@@ -1758,7 +1768,7 @@ func (c *hostCoordinator) rememberActiveLaneName(actor *laneActor) {
 		c.laneNames[actor.parentID] = map[string]laneNameEntry{}
 	}
 	c.laneNames[actor.parentID][actor.nativeID] = laneNameEntry{
-		UUID: actor.nativeID, Name: actor.name, Product: actor.product, Parent: actor.parentID,
+		UUID: actor.nativeID, Name: actor.name, Product: actor.product,
 		Groups: append([]string(nil), actor.groups...),
 	}
 }

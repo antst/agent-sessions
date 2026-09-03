@@ -29,7 +29,6 @@ type laneNameEntry struct {
 	UUID            string
 	Name            string
 	Product         string
-	Parent          string
 	Groups          []string
 	SecondaryGroups []string
 	Cwd             string
@@ -546,7 +545,7 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 			c.laneNames[actor.parentID] = map[string]laneNameEntry{}
 		}
 		c.laneNames[actor.parentID][id] = laneNameEntry{
-			UUID: id, Name: actor.name, Product: actor.product, Parent: actor.parentID,
+			UUID: id, Name: actor.name, Product: actor.product,
 			Groups: append([]string(nil), actor.groups...),
 		}
 	}

@@ -19,10 +19,10 @@ type LaneEngine struct {
 	mu    sync.Mutex
 }
 
-// Candidates returns only the UUID questions owned by one parent for one
-// product. Callers must still ask the product whether each UUID exists.
-func (e *LaneEngine) Candidates(parent, product string) ([]LaneCandidate, error) {
-	if strings.TrimSpace(parent) == "" || strings.TrimSpace(product) == "" {
+// Candidates returns the durable UUID questions for one product. Callers must
+// still apply live group visibility and ask the product whether each UUID exists.
+func (e *LaneEngine) Candidates(product string) ([]LaneCandidate, error) {
+	if strings.TrimSpace(product) == "" {
 		return nil, errors.New("lane candidate selector is incomplete")
 	}
 	snapshot, err := e.store.Read()
@@ -31,7 +31,7 @@ func (e *LaneEngine) Candidates(parent, product string) ([]LaneCandidate, error)
 	}
 	result := make([]LaneCandidate, 0)
 	for _, candidate := range snapshot.Catalog.Lanes {
-		if candidate.Parent != parent || candidate.Product != product {
+		if candidate.Product != product {
 			continue
 		}
 		candidate.SecondaryGroups = slices.Clone(candidate.SecondaryGroups)

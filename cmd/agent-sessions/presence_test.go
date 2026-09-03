@@ -295,6 +295,72 @@ func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) 
 	}
 }
 
+func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	engine, err := daemonpkg.NewLaneEngine(runtime.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := daemonpkg.LaneCandidate{
+		NativeSessionID: "native-lane", Product: "claude", Parent: "parent-a",
+		PrimaryGroup:    "session:" + runtime.HostID() + "/parent-a",
+		SecondaryGroups: []string{"parent-a/child", "shared"},
+	}
+	if err := engine.Remember(candidate); err != nil {
+		t.Fatal(err)
+	}
+	confirmations := 0
+	coordinator.resolveCandidate = func(_ context.Context, _ *daemonpkg.Runtime, _ daemonpkg.ManagedAttachment, got daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+		confirmations++
+		if !reflect.DeepEqual(got, candidate) {
+			t.Fatalf("candidate = %+v", got)
+		}
+		return laneNameEntry{Name: "shared-worker", Cwd: t.TempDir()}, true
+	}
+	outsider := daemonpkg.ManagedAttachment{ID: "parent-outside", Product: "claude", Cwd: t.TempDir(), Groups: []string{"outside"}}
+	coordinator.liveReports[outsider.ID] = liveSessionReport{UUID: outsider.ID, Product: outsider.Product, Groups: outsider.Groups}
+	if err := coordinator.ensureActiveLaneNames(context.Background(), runtime, outsider, candidate.Product); err != nil {
+		t.Fatal(err)
+	}
+	if confirmations != 0 || len(coordinator.laneNames[outsider.ID]) != 0 {
+		t.Fatalf("non-sharing parent confirmed candidate: calls=%d names=%+v", confirmations, coordinator.laneNames[outsider.ID])
+	}
+
+	parentB := daemonpkg.ManagedAttachment{ID: "parent-b", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}}
+	coordinator.liveReports[parentB.ID] = liveSessionReport{UUID: parentB.ID, Product: parentB.Product, Groups: parentB.Groups}
+	actor, err := coordinator.resolveLaneActor(runtime, parentB, candidate.Product, "shared-worker", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmations != 1 || actor.parentID != parentB.ID || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) {
+		t.Fatalf("shared candidate actor=%+v confirmations=%d", actor, confirmations)
+	}
+	actor.groups, err = coordinator.effectiveLaneGroups(runtime, actor, parentB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentBAnchor := "session:" + runtime.HostID() + "/" + parentB.ID
+	wantGroups := []string{"parent-a/child", parentBAnchor, parentBAnchor + "/" + candidate.NativeSessionID, "shared"}
+	if !reflect.DeepEqual(actor.groups, wantGroups) {
+		t.Fatalf("handed-over groups = %v, want %v", actor.groups, wantGroups)
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.recordLaneNativeID(runtime, actor, candidate.NativeSessionID); err != nil {
+		t.Fatalf("resume rewrote immutable candidate: %v", err)
+	}
+	after, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("resume changed durable candidate: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
@@ -308,7 +374,7 @@ func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testi
 	}
 	coordinator.lanes[actor.id] = actor
 	coordinator.laneNames[parent.ID] = map[string]laneNameEntry{
-		actor.nativeID: {UUID: actor.nativeID, Name: actor.name, Product: actor.product, Parent: parent.ID},
+		actor.nativeID: {UUID: actor.nativeID, Name: actor.name, Product: actor.product},
 	}
 
 	resolved, err := coordinator.resolveLaneActor(runtime, parent, actor.product, actor.nativeID, true)

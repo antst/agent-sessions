@@ -25,22 +25,28 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 	if err != nil {
 		return err
 	}
-	candidates, err := engine.Candidates(parent.ID, product)
+	candidates, err := engine.Candidates(product)
 	if err != nil {
 		c.mu.Lock()
 		delete(c.laneNamesLoaded, parent.ID)
 		c.mu.Unlock()
 		return err
 	}
+	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
+	if err != nil {
+		return err
+	}
 	confirmed := make([]laneNameEntry, 0, len(candidates))
 	for _, candidate := range candidates {
+		if !groupsIntersect(parentGroups, candidateLaneGroups(candidate)) {
+			continue
+		}
 		entry, ok := c.resolveCandidate(ctx, runtime, parent, candidate)
 		if !ok {
 			continue
 		}
 		entry.UUID = candidate.NativeSessionID
 		entry.Product = candidate.Product
-		entry.Parent = candidate.Parent
 		entry.Groups = candidateLaneGroups(candidate)
 		entry.SecondaryGroups = append([]string(nil), candidate.SecondaryGroups...)
 		if entry.Name == "" {

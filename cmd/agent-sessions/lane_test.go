@@ -365,7 +365,7 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates, err := engine.Candidates("parent", "codex")
+	candidates, err := engine.Candidates("codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,6 +446,21 @@ func TestLaneResumePermissionUsesInvocationThenLiveValueThenFreshDefault(t *test
 	}
 	if got := laneResumePermission("", "", "default"); got != "default" {
 		t.Fatalf("candidate resume permission = %q", got)
+	}
+}
+
+func TestResumeRefusesLaneLiveUnderAnotherParent(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	parent := daemonpkg.ManagedAttachment{ID: "parent-b", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}}
+	coordinator.liveReports[parent.ID] = liveSessionReport{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
+	coordinator.lanes["lane"] = &laneActor{
+		id: "lane", nativeID: "native", name: "worker", product: "claude", parentID: "parent-a",
+		groups: []string{"shared"}, state: "idle", done: closedLaneDone(),
+	}
+	_, err := coordinator.resumeLane(context.Background(), runtime, parent, "claude", parsedLaneCommand{target: "worker"}, "continue")
+	if err == nil || err.Error() != "lane is live under parent-a" {
+		t.Fatalf("cross-parent live resume error = %v", err)
 	}
 }
 
