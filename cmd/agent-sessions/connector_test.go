@@ -61,7 +61,11 @@ func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer original.Close()
+	defer func() {
+		if err := original.Close(); err != nil {
+			t.Errorf("close original working directory: %v", err)
+		}
+	}()
 	defer func() {
 		if err := original.Chdir(); err != nil {
 			t.Errorf("restore working directory: %v", err)

@@ -324,7 +324,7 @@ func openGrokConnectorObserver(ctx context.Context, report liveSessionReport) (*
 	}
 	cwd := strings.TrimSpace(report.Info["cwd"])
 	if cwd == "" {
-		return nil, errors.New("Grok connector working directory is unavailable")
+		return nil, errors.New("grok connector working directory is unavailable")
 	}
 	return bridge.OpenGrokNativeObserver(
 		ctx, executable, cwd, strings.TrimSpace(os.Getenv(launcher.GrokLeaderSocketEnv)),
