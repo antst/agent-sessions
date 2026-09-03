@@ -105,11 +105,12 @@ func (supervisor *Supervisor) StartProcess(ctx context.Context, native productru
 	if err != nil {
 		return nil, fmt.Errorf("open structured process stdin: %w", err)
 	}
-	stdout, err := command.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("open structured process stdout: %w", err)
 	}
+	command.Stdout = childStdout
 	command.Stderr = io.Discard
 	configureOwnedProcessGroup(command)
 
@@ -118,6 +119,7 @@ func (supervisor *Supervisor) StartProcess(ctx context.Context, native productru
 		supervisor.mu.Unlock()
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = childStdout.Close()
 		return nil, ErrSupervisorClosed
 	}
 	if err := command.Start(); err != nil {
@@ -125,9 +127,11 @@ func (supervisor *Supervisor) StartProcess(ctx context.Context, native productru
 		command.Env = nil
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = childStdout.Close()
 		return nil, fmt.Errorf("start structured process %q: %w", native.Path, err)
 	}
 	command.Env = nil
+	_ = childStdout.Close()
 
 	identity := procinfo.Identity{PID: command.Process.Pid}
 	if captured, captureErr := procinfo.CaptureIdentity(command.Process.Pid); captureErr == nil {
@@ -138,6 +142,8 @@ func (supervisor *Supervisor) StartProcess(ctx context.Context, native productru
 		supervisor.mu.Unlock()
 		_ = command.Process.Kill()
 		_ = command.Wait()
+		_ = stdout.Close()
+		_ = stdin.Close()
 		return nil, err
 	}
 	process := &Process{

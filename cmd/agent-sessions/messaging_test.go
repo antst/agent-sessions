@@ -345,24 +345,28 @@ func TestOMPHasAnOnDemandProductTitleResolver(t *testing.T) {
 	if coordinator.liveTitleResolvers[ompproduct.ProductID] == nil {
 		t.Fatal("OMP live title resolver was not composed")
 	}
-	coordinator.liveTitleResolvers[ompproduct.ProductID] = func(attachment daemonpkg.ManagedAttachment) (string, bool) {
-		if attachment.NativeSessionID == "omp-session" {
-			return "native-name", true
+	calls := 0
+	coordinator.liveTitleResolvers[ompproduct.ProductID] = func(attachments []daemonpkg.ManagedAttachment) map[string]string {
+		calls++
+		if len(attachments) != 2 {
+			t.Fatalf("OMP resolver attachments = %#v", attachments)
 		}
-		return "", false
+		return map[string]string{"omp-session": "native-name"}
 	}
 	runtime := newPresenceTestRuntime(t)
 	runtime.Attachments().ReportLive("omp-session", "launch-name", ompproduct.ProductID, []string{"project"}, map[string]string{}, false)
 	runtime.Attachments().ReportLive("missing", "hello-name", ompproduct.ProductID, []string{"project"}, map[string]string{}, false)
-	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
-		ID: "omp-session", NativeSessionID: "omp-session", Product: ompproduct.ProductID,
-	}); got != "native-name" {
-		t.Fatalf("OMP display name = %q", got)
+	attachments := []daemonpkg.ManagedAttachment{
+		{ID: "omp-session", NativeSessionID: "omp-session", Product: ompproduct.ProductID},
+		{ID: "missing", NativeSessionID: "missing", Product: ompproduct.ProductID},
 	}
-	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
-		ID: "missing", NativeSessionID: "missing", Product: ompproduct.ProductID,
-	}); got != "hello-name" {
-		t.Fatalf("OMP hello fallback name = %q", got)
+	names := coordinator.attachmentDisplayNames(runtime, attachments)
+	if names["omp-session"] != "native-name" || names["missing"] != "hello-name" || calls != 1 {
+		t.Fatalf("OMP display names = %#v, resolver calls = %d", names, calls)
+	}
+	names = coordinator.attachmentDisplayNames(runtime, attachments)
+	if names["omp-session"] != "native-name" || names["missing"] != "hello-name" || calls != 2 {
+		t.Fatalf("second OMP query names = %#v, resolver calls = %d", names, calls)
 	}
 }
 
@@ -372,11 +376,13 @@ func TestGrokHasAnOnDemandProductTitleResolver(t *testing.T) {
 	if coordinator.liveTitleResolvers[grokproduct.ProductID] == nil {
 		t.Fatal("Grok live title resolver was not composed")
 	}
-	coordinator.liveTitleResolvers[grokproduct.ProductID] = func(attachment daemonpkg.ManagedAttachment) (string, bool) {
-		if attachment.NativeSessionID == "grok-session" {
-			return "native-name", true
+	coordinator.liveTitleResolvers[grokproduct.ProductID] = func(attachments []daemonpkg.ManagedAttachment) map[string]string {
+		for _, attachment := range attachments {
+			if attachment.NativeSessionID == "grok-session" {
+				return map[string]string{attachment.ID: "native-name"}
+			}
 		}
-		return "", false
+		return map[string]string{}
 	}
 	runtime := newPresenceTestRuntime(t)
 	runtime.Attachments().ReportLive("grok-session", "launch-name", grokproduct.ProductID, []string{"project"}, map[string]string{}, false)

@@ -41,10 +41,18 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 			if test.code == liveRPCProductFailure && frame.Error.Message != test.err.Error() {
 				t.Fatalf("product message = %q", frame.Error.Message)
 			}
+			if test.code == liveRPCProductFailure && !strings.Contains(string(frame.Error.Data), `"agent_sessions_bug_report"`) {
+				t.Fatalf("unexpected failure has no bug-report guidance: %s", frame.Error.Data)
+			}
 			if test.reason != "" && !strings.Contains(string(frame.Error.Data), `"reason":"`+test.reason+`"`) {
 				t.Fatalf("error data = %s", frame.Error.Data)
 			}
 		})
+	}
+	structured := newLiveRPCError(liveRPCProductFailure, "native exact failure", map[string]any{"detail": "native exact failure"})
+	frame := liveRPCFailureFromError(json.RawMessage(`2`), "lane.turn.wait", structured)
+	if frame.Error == nil || string(frame.Error.Data) != `{"detail":"native exact failure"}` {
+		t.Fatalf("structured native failure was changed: %+v", frame.Error)
 	}
 }
 

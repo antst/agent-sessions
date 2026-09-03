@@ -551,11 +551,12 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 	if err != nil {
 		return nil, err
 	}
+	displayNames := c.attachmentDisplayNames(runtime, attachments)
 	targets := make([]localPeerTarget, 0, len(attachments)+len(c.lanes))
 	for index := range attachments {
 		attachment := attachments[index]
 		targets = append(targets, localPeerTarget{
-			attachment: &attachment, name: c.attachmentDisplayName(runtime, attachment),
+			attachment: &attachment, name: displayNames[attachment.ID],
 		})
 	}
 	c.mu.Lock()
@@ -728,27 +729,50 @@ func publicAttachment(attachment daemonpkg.ManagedAttachment, name string) map[s
 }
 
 func (c *hostCoordinator) attachmentDisplayName(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) string {
+	return c.attachmentDisplayNames(runtime, []daemonpkg.ManagedAttachment{attachment})[attachment.ID]
+}
+
+func (c *hostCoordinator) attachmentDisplayNames(
+	runtime *daemonpkg.Runtime,
+	attachments []daemonpkg.ManagedAttachment,
+) map[string]string {
+	names := make(map[string]string, len(attachments))
+	byProduct := make(map[string][]daemonpkg.ManagedAttachment)
 	c.mu.Lock()
-	lane := c.lanes[attachment.ID]
-	laneName := ""
-	if lane != nil {
-		laneName = lane.name
+	for _, attachment := range attachments {
+		if lane := c.lanes[attachment.ID]; lane != nil && strings.TrimSpace(lane.name) != "" {
+			names[attachment.ID] = lane.name
+		}
 	}
 	c.mu.Unlock()
-	if strings.TrimSpace(laneName) != "" {
-		return laneName
-	}
-	if resolver := c.liveTitleResolvers[attachment.Product]; resolver != nil {
-		if title, observed := resolver(attachment); observed {
-			return title
+	for _, attachment := range attachments {
+		if _, resolved := names[attachment.ID]; resolved {
+			continue
+		}
+		if c.liveTitleResolvers[attachment.Product] != nil {
+			byProduct[attachment.Product] = append(byProduct[attachment.Product], attachment)
 		}
 	}
-	if runtime != nil {
-		if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
-			return title
+	for product, productAttachments := range byProduct {
+		for id, title := range c.liveTitleResolvers[product](productAttachments) {
+			if strings.TrimSpace(title) != "" {
+				names[id] = title
+			}
 		}
 	}
-	return attachment.ID
+	for _, attachment := range attachments {
+		if _, resolved := names[attachment.ID]; resolved {
+			continue
+		}
+		if runtime != nil {
+			if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
+				names[attachment.ID] = title
+				continue
+			}
+		}
+		names[attachment.ID] = attachment.ID
+	}
+	return names
 }
 
 func groupsIntersect(left, right []string) bool {

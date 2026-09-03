@@ -10,7 +10,9 @@ import (
 
 const maxMCPInputBytes = 1 << 20
 
-const genericInstructions = "Use these structured tools for Agent Sessions peer discovery, live messaging, and lane lifecycle operations from this managed product session. The current live product session supplies the caller identity; session_id is optional context."
+const BugReportGuidance = "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/agent-sessions with gh issue create, including the exact command, observed behavior, and expected behavior."
+
+const genericInstructions = "Use these structured tools for Agent Sessions peer discovery, live messaging, and lane lifecycle operations from this managed product session. The current live product session supplies the caller identity; session_id is optional context. " + BugReportGuidance
 
 var instructions = map[string]string{
 	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tool calls activate while this product session has a live Agent Sessions connection; session_id is optional context.",

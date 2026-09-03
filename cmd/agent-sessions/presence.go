@@ -18,6 +18,7 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 	"github.com/antst/agent-sessions/internal/stateroot"
 )
 
@@ -610,7 +611,9 @@ func liveRPCFailureFromError(id json.RawMessage, method string, err error) liveR
 	if errors.Is(err, errLiveProductUnavailable) || errors.Is(err, productruntime.ErrUnavailable) || errors.Is(err, productruntime.ErrIncompatible) {
 		return liveRPCFailure(id, liveRPCProductUnavailable, "Product not launchable", map[string]any{"detail": err.Error()})
 	}
-	return liveRPCFailure(id, liveRPCProductFailure, err.Error(), map[string]any{"detail": err.Error()})
+	return liveRPCFailure(id, liveRPCProductFailure, err.Error(), map[string]any{
+		"detail": err.Error(), "agent_sessions_bug_report": sessiontools.BugReportGuidance,
+	})
 }
 
 type liveSessionClient struct {

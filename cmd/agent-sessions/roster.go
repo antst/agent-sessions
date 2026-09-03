@@ -99,6 +99,7 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 	if err != nil {
 		return nil, err
 	}
+	displayNames := c.attachmentDisplayNames(runtime, attachments)
 	c.mu.Lock()
 	federationHost := c.federation
 	c.mu.Unlock()
@@ -139,8 +140,8 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 		if entry.Kind != "peer" || !entry.Live {
 			continue
 		}
-		if attachment, active, activeErr := runtime.Attachments().ActiveAttachment(entry.ID); activeErr == nil && active {
-			entry.Name = c.attachmentDisplayName(runtime, attachment)
+		if name := displayNames[entry.ID]; name != "" {
+			entry.Name = name
 		}
 	}
 	return json.Marshal(report)

@@ -68,12 +68,13 @@ func (c *hostCoordinator) federationSnapshot(runtime *daemonpkg.Runtime, hostID,
 	if err != nil {
 		return nil, err
 	}
+	displayNames := c.attachmentDisplayNames(runtime, attachments)
 	peers := make([]federationpkg.Peer, 0, len(attachments))
 	for _, attachment := range attachments {
 		groups := uniqueStrings(append(append([]string(nil), attachment.Groups...), "session:"+hostID+"/"+attachment.ID))
 		instance := attachmentFederationInstance(attachment)
 		peer, buildErr := federationpkg.BuildPeer(
-			hostID, hostName, attachment.ID, c.attachmentDisplayName(runtime, attachment), "idle", attachment.Cwd,
+			hostID, hostName, attachment.ID, displayNames[attachment.ID], "idle", attachment.Cwd,
 			attachment.Product, attachment.PermissionMode, instance, "", groups,
 		)
 		if buildErr != nil {

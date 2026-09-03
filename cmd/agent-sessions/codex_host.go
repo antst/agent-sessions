@@ -64,7 +64,7 @@ type hostCoordinator struct {
 	presence           *livePresenceServer
 	resolveCandidate   func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
 	candidateResolvers map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
-	liveTitleResolvers map[string]func(daemonpkg.ManagedAttachment) (string, bool)
+	liveTitleResolvers map[string]func([]daemonpkg.ManagedAttachment) map[string]string
 	lanesLoaded        bool
 	now                func() time.Time
 	runtime            *daemonpkg.Runtime
@@ -85,39 +85,59 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		reportedLanes: map[string]string{},
 		reportedPeers: map[string]bool{},
 		laneNames:     map[string]map[string]laneNameEntry{},
-		liveTitleResolvers: map[string]func(daemonpkg.ManagedAttachment) (string, bool){
-			claudeproduct.ProductID: func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+		liveTitleResolvers: map[string]func([]daemonpkg.ManagedAttachment) map[string]string{
+			claudeproduct.ProductID: func(attachments []daemonpkg.ManagedAttachment) map[string]string {
+				titles := make(map[string]string, len(attachments))
 				source, err := claudeprofile.CurrentSource()
 				if err != nil {
-					return "", false
+					return titles
 				}
-				title, observed := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, attachment.NativeSessionID)
-				return title, observed && title != attachment.NativeSessionID
+				for _, attachment := range attachments {
+					title, observed := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, attachment.NativeSessionID)
+					if observed && title != attachment.NativeSessionID {
+						titles[attachment.ID] = title
+					}
+				}
+				return titles
 			},
-			ompproduct.ProductID: func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+			ompproduct.ProductID: func(attachments []daemonpkg.ManagedAttachment) map[string]string {
+				titles := make(map[string]string, len(attachments))
 				executable, err := launcher.ResolveProductExecutable(ompproduct.ProductID)
 				if err != nil {
-					return "", false
+					return titles
 				}
 				sessions, err := launcher.ListAllOMPSessions(ctx, executable)
 				if err != nil {
-					return "", false
+					return titles
 				}
+				byID := make(map[string]string, len(sessions))
 				for _, session := range sessions {
-					if session.ID == attachment.NativeSessionID {
-						return session.Title, strings.TrimSpace(session.Title) != ""
+					if strings.TrimSpace(session.Title) != "" {
+						byID[session.ID] = session.Title
 					}
 				}
-				return "", false
+				for _, attachment := range attachments {
+					if title := byID[attachment.NativeSessionID]; title != "" {
+						titles[attachment.ID] = title
+					}
+				}
+				return titles
 			},
-			grokproduct.ProductID: func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+			grokproduct.ProductID: func(attachments []daemonpkg.ManagedAttachment) map[string]string {
+				titles := make(map[string]string, len(attachments))
 				executable, err := launcher.ResolveProductExecutable(grokproduct.ProductID)
 				if err != nil {
-					return "", false
+					return titles
 				}
-				return bridge.GrokNativeSessionTitle(
-					ctx, executable, attachment.Cwd, os.Environ(), io.Discard, attachment.NativeSessionID,
-				)
+				for _, attachment := range attachments {
+					title, observed := bridge.GrokNativeSessionTitle(
+						ctx, executable, attachment.Cwd, os.Environ(), io.Discard, attachment.NativeSessionID,
+					)
+					if observed {
+						titles[attachment.ID] = title
+					}
+				}
+				return titles
 			},
 		},
 		runtimeReady: make(chan *daemonpkg.Runtime, 1),
