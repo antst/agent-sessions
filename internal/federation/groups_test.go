@@ -1,6 +1,9 @@
 package federation
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestChildGroupsAlwaysAnchorImmediateParentAndOptionallyInherit(t *testing.T) {
 	parent, err := EffectiveGroups("host-a", "parent", []string{"team"}, nil)
@@ -26,7 +29,7 @@ func TestChildGroupsAlwaysAnchorImmediateParentAndOptionallyInherit(t *testing.T
 	}
 }
 
-func TestAdmitFiltersHiddenCollisionsAndSnapshotsMulticastAndBroadcast(t *testing.T) {
+func TestAdmitFiltersHiddenCollisionsAndSnapshotsExplicitAndGroupSends(t *testing.T) {
 	source := Peer{ID: "source", SessionID: "source", Name: "source", Groups: []string{"team"}}
 	visibleA := Peer{ID: "a", SessionID: "a", Name: "duplicate", Groups: []string{"team"}}
 	visibleB := Peer{ID: "b", SessionID: "b", Name: "reader", Groups: []string{"team", "other"}}
@@ -40,18 +43,24 @@ func TestAdmitFiltersHiddenCollisionsAndSnapshotsMulticastAndBroadcast(t *testin
 	if len(admission.Targets) != 2 || admission.Targets[0].ID != "a" || admission.Targets[1].ID != "b" {
 		t.Fatalf("multicast targets = %+v", admission.Targets)
 	}
-	broadcast, err := Admit(AgentFrame{
-		Version: AgentFrameVersion, Type: "broadcast", MessageID: "m2", Group: "team", Content: "hello",
+	groupSend, err := Admit(AgentFrame{
+		Version: AgentFrameVersion, Type: "send", MessageID: "m2", Group: "team", Content: "hello",
 	}, source, []Peer{hidden, visibleB, visibleA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(broadcast.Targets) != 2 || broadcast.Targets[0].ID != "a" || broadcast.Targets[1].ID != "b" {
-		t.Fatalf("broadcast targets = %+v", broadcast.Targets)
+	if len(groupSend.Targets) != 2 || groupSend.Targets[0].ID != "a" || groupSend.Targets[1].ID != "b" {
+		t.Fatalf("group send targets = %+v", groupSend.Targets)
+	}
+	empty, err := Admit(AgentFrame{
+		Version: AgentFrameVersion, Type: "send", MessageID: "m3", Group: "session:host/source", Content: "hello",
+	}, Peer{ID: "source", SessionID: "source", Groups: []string{"session:host/source"}}, []Peer{visibleA, visibleB})
+	if err != nil || len(empty.Targets) != 0 {
+		t.Fatalf("private-anchor group send = %+v, %v", empty, err)
 	}
 }
 
-func TestAdmitRejectsDuplicateResolutionAndUnauthorizedBroadcast(t *testing.T) {
+func TestAdmitRejectsDuplicateResolutionAndUnauthorizedGroupSend(t *testing.T) {
 	source := Peer{ID: "source", SessionID: "source", Groups: []string{"team"}}
 	peer := Peer{ID: "a", SessionID: "session-a", Name: "reader", Groups: []string{"team"}}
 	if _, err := Admit(AgentFrame{
@@ -60,8 +69,18 @@ func TestAdmitRejectsDuplicateResolutionAndUnauthorizedBroadcast(t *testing.T) {
 		t.Fatal("send accepted two aliases resolving to one destination")
 	}
 	if _, err := Admit(AgentFrame{
-		Version: AgentFrameVersion, Type: "broadcast", MessageID: "m2", Group: "secret", Content: "hello",
+		Version: AgentFrameVersion, Type: "send", MessageID: "m2", Group: "secret", Content: "hello",
 	}, source, []Peer{peer}); err == nil {
-		t.Fatal("broadcast accepted a nonmember sender")
+		t.Fatal("group send accepted a nonmember sender")
+	}
+}
+
+func TestResolvePreservesTheExactUnknownOrSelfTarget(t *testing.T) {
+	for _, target := range []string{"missing", "source"} {
+		_, err := Resolve(target, []Peer{{ID: "other", SessionID: "other", Groups: []string{"team"}}})
+		var unknown *UnknownTargetError
+		if !errors.As(err, &unknown) || unknown.Target != target || !errors.Is(err, ErrUnknownTarget) {
+			t.Fatalf("target %q error = %#v", target, err)
+		}
 	}
 }

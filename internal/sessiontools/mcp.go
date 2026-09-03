@@ -15,10 +15,10 @@ const BugReportGuidance = "If Agent Sessions behaves contrary to this descriptio
 const genericInstructions = "Use these structured tools for Agent Sessions peer discovery, live messaging, and lane lifecycle operations from this managed product session. The current live product session supplies the caller identity; session_id is optional context. " + BugReportGuidance
 
 var instructions = map[string]string{
-	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tool calls activate while this product session has a live Agent Sessions connection; session_id is optional context.",
+	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message takes one target, an explicit multicast, or one group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tool calls activate while this product session has a live Agent Sessions connection; session_id is optional context.",
 	"claude": "Use these structured tools for Agent Sessions discovery, direct or multicast messaging, replies, and supported-product lane lifecycle operations from this live Claude session. Use lane instead of invoking a product lane executable through Bash. For an incoming delivery, send_message back to the source UUID or unique name.",
-	"grok":   "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tools activate while the launcher-held Grok session is live.",
-	"qwen":   "Use these structured Agent Sessions tools for discovery, direct sends, multicast, broadcast, identity, rename, and foreign lane lifecycle commands from this live Qwen session. Qwen's native approval mode remains Qwen-owned and may change during the session.",
+	"grok":   "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message takes one target, an explicit multicast, or one group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tools activate while the launcher-held Grok session is live.",
+	"qwen":   "Use these structured Agent Sessions tools for discovery, direct sends, multicast, group sends, identity, rename, and foreign lane lifecycle commands from this live Qwen session. Qwen's native approval mode remains Qwen-owned and may change during the session.",
 }
 
 type mcpToolPolicy struct {
@@ -99,15 +99,20 @@ func baseToolDefinitions() []map[string]any {
 			laneProducts = append(laneProducts, descriptor.ID)
 		}
 	}
+	sendSchema := objectSchema(map[string]any{
+		"target":  map[string]any{"type": "string", "minLength": 1, "description": "Visible peer name, exact session ID, display name, or host/session ID."},
+		"targets": map[string]any{"type": "array", "items": map[string]any{"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true, "description": "Explicit multicast recipients."},
+		"group":   map[string]any{"type": "string", "minLength": 1, "description": "One group this session belongs to; sends to every other current member."},
+		"message": map[string]any{"type": "string", "minLength": 1, "maxLength": 900000}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
+	}, []string{"message", "session_id"})
+	sendSchema["oneOf"] = []map[string]any{
+		{"required": []string{"target"}},
+		{"required": []string{"targets"}},
+		{"required": []string{"group"}},
+	}
 	return []map[string]any{
 		{"name": "list_peers", "description": "List live local or federated Agent Sessions peers that share at least one group with this session.", "inputSchema": objectSchema(map[string]any{}, nil)},
-		{"name": "send_message", "description": "Send a plain-text message to one peer or an explicit multicast set visible through this session's groups. Use list_peers first if a target is ambiguous.", "inputSchema": objectSchema(map[string]any{
-			"target": map[string]any{"type": "string", "description": "Visible peer name, exact session ID, display name, or host/session ID."}, "targets": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "description": "Explicit multicast recipients. Use either target or targets."},
-			"message": map[string]any{"type": "string", "minLength": 1, "maxLength": 900000}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
-		}, []string{"message", "session_id"})},
-		{"name": "broadcast", "description": "Broadcast a plain-text message to every other current member of one group this session belongs to.", "inputSchema": objectSchema(map[string]any{
-			"group": map[string]any{"type": "string", "minLength": 1}, "message": map[string]any{"type": "string", "minLength": 1, "maxLength": 900000}, "summary": map[string]any{"type": "string"}, "session_id": sessionProperty(""),
-		}, []string{"group", "message", "session_id"})},
+		{"name": "send_message", "description": "Send plain text to one peer, an explicit multicast set, or every other current member of one group this session belongs to. Use list_peers first if a target is ambiguous.", "inputSchema": sendSchema},
 		{"name": "check_inbox", "description": "Recovery-only: read and consume peer messages queued past an automatic delivery boundary. Active peer messages are pushed into the session automatically; do not poll this tool.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "identity", "description": "Show this Codex session's Claude-compatible peer name and address.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "rename_session", "description": "Change this managed session's public Agent Sessions peer name.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."), "name": map[string]any{"type": "string", "minLength": 1, "maxLength": 80}}, []string{"session_id", "name"})},

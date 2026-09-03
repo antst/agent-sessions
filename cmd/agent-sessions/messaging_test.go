@@ -12,6 +12,7 @@ import (
 	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
@@ -102,6 +103,29 @@ func TestLiveSessionDispatchExposesExactlyTheFirstClassV1Methods(t *testing.T) {
 		var rpcErr *liveRPCError
 		if !errors.As(err, &rpcErr) || rpcErr.Code != liveRPCNotPermitted {
 			t.Fatalf("legacy method %s = %v", method, err)
+		}
+	}
+}
+
+func TestLiveMessageSendRequiresExactlyOneSelector(t *testing.T) {
+	for _, input := range []string{
+		`{"target":"peer","message":"hello"}`,
+		`{"targets":["one","two"],"message":"hello"}`,
+		`{"group":"team","message":"hello"}`,
+	} {
+		if _, err := decodeLiveMessageSend(json.RawMessage(input)); err != nil {
+			t.Fatalf("valid message.send %s: %v", input, err)
+		}
+	}
+	for _, input := range []string{
+		`{"message":"hello"}`,
+		`{"target":"one","targets":["two"],"message":"hello"}`,
+		`{"target":"one","group":"team","message":"hello"}`,
+		`{"targets":[],"message":"hello"}`,
+		`{"group":"","message":"hello"}`,
+	} {
+		if _, err := decodeLiveMessageSend(json.RawMessage(input)); err == nil {
+			t.Fatalf("invalid message.send accepted: %s", input)
 		}
 	}
 }
@@ -282,6 +306,25 @@ func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("send to %q was not delivered", target)
 		}
+	}
+	if _, err := coordinator.callLocalTool(context.Background(), runtime, "lane-id", "send_message", map[string]any{
+		"group": parentAnchor, "message": "to parent group",
+	}); err != nil {
+		t.Fatalf("group send: %v", err)
+	}
+	select {
+	case delivery := <-delivered:
+		if delivery.Body != "to parent group" {
+			t.Fatalf("group delivery = %#v", delivery)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("group send was not delivered")
+	}
+	empty, err := coordinator.callLocalTool(context.Background(), runtime, "lane-id", "send_message", map[string]any{
+		"group": parentAnchor + "/lane-native", "message": "only me",
+	})
+	if err != nil || len(empty.Data.(map[string]any)["deliveries"].([]federationpkg.DeliveryResult)) != 0 {
+		t.Fatalf("private group send = %#v, %v", empty, err)
 	}
 	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{ID: "parent-id"}); got != "parent-name" {
 		t.Fatalf("peer display name changed = %q", got)

@@ -119,6 +119,13 @@ func (e *liveRPCError) Error() string {
 	return e.Message
 }
 
+func (e *liveRPCError) RPCErrorDetails() (int, string, json.RawMessage) {
+	if e == nil {
+		return liveRPCProductFailure, "live RPC error", nil
+	}
+	return e.Code, e.Message, append(json.RawMessage(nil), e.Data...)
+}
+
 type liveRPCConnection struct {
 	connection net.Conn
 	encoder    *json.Encoder
@@ -591,6 +598,14 @@ func liveRPCFailureFromError(id json.RawMessage, method string, err error) liveR
 	var remote *liveRPCError
 	if errors.As(err, &remote) && validLiveRPCError(remote) {
 		return liveRPCFrame{JSONRPC: "2.0", ID: append(json.RawMessage(nil), id...), Error: remote}
+	}
+	var unknownTarget *federationpkg.UnknownTargetError
+	if errors.As(err, &unknownTarget) {
+		return liveRPCFailure(id, liveRPCUnknown, "Unknown session or target", map[string]any{"target": unknownTarget.Target})
+	}
+	var forbiddenGroup *federationpkg.GroupNotPermittedError
+	if errors.As(err, &forbiddenGroup) {
+		return liveRPCFailure(id, liveRPCNotPermitted, "Operation not permitted", map[string]any{"group": forbiddenGroup.Group})
 	}
 	if errors.Is(err, daemonpkg.InactiveControlError()) || errors.Is(err, federationpkg.ErrUnknownTarget) || errors.Is(err, errLiveUnknown) {
 		return liveRPCFailure(id, liveRPCUnknown, "Unknown session or target", map[string]any{"detail": err.Error()})

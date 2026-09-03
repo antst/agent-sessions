@@ -106,6 +106,13 @@ func TestLiveSendProjectsOnlyTheDaemonMessageContract(t *testing.T) {
 	}
 }
 
+func TestLiveSendProjectsAGroupSelector(t *testing.T) {
+	projected := liveMessageSendArguments(map[string]any{"group": "team", "message": "hello"})
+	if len(projected) != 2 || projected["group"] != "team" || projected["message"] != "hello" {
+		t.Fatalf("live group projection = %#v", projected)
+	}
+}
+
 func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) {
 	getenv := func(name string) string {
 		if name == "AGENT_SESSIONS_PRODUCT" {

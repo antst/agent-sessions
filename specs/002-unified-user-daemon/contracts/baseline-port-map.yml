@@ -170,8 +170,8 @@ entries:
     replacement_tests:
       - internal/federation/frame_test.go:TestDeliveryFramePreservesNeutralProvenanceAndRequestIdentity
       - internal/federation/groups_test.go:TestChildGroupsAlwaysAnchorImmediateParentAndOptionallyInherit
-      - internal/federation/groups_test.go:TestAdmitFiltersHiddenCollisionsAndSnapshotsMulticastAndBroadcast
-      - internal/federation/groups_test.go:TestAdmitRejectsDuplicateResolutionAndUnauthorizedBroadcast
+      - internal/federation/groups_test.go:TestAdmitFiltersHiddenCollisionsAndSnapshotsExplicitAndGroupSends
+      - internal/federation/groups_test.go:TestAdmitRejectsDuplicateResolutionAndUnauthorizedGroupSend
       - internal/daemon/delivery_test.go:TestRouteDeliveryUsesOnlyLiveDestinationAcceptance
       - internal/daemon/delivery_test.go:TestRouteDeliveryReturnsTruthfulFailureAndCallerRetryRepresents
     acceptance_cells:
@@ -810,7 +810,7 @@ entries:
       - internal/federation/hub_test.go:TestLiveHubDeliversIdenticalCompleteRosterToEveryClient
       - internal/federation/hub_test.go:TestHubRejectsDuplicateDeliveryWhileOriginalIsPending
       - internal/federation/hub_test.go:TestHubDestinationDisconnectFailsPendingDelivery
-      - internal/federation/hub_test.go:TestHubRejectsStaleBroadcastThroughDifferentSharedGroup
+      - internal/federation/hub_test.go:TestHubRejectsStaleGroupSendThroughDifferentSharedGroup
       - internal/federation/protocol_test.go:TestProtocolRejectsEveryMismatchedVersionBeforeRegistration
       - internal/federation/protocol_test.go:TestProtocolRejectsMalformedAndOversizedFrames
       - internal/federation/protocol_test.go:TestProtocolRelaysEachLiveDelivery

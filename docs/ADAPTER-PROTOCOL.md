@@ -54,8 +54,8 @@ The shared JavaScript client and the shared Go adapter helper each render that s
 their native product input. Per-product code chooses only the native input call. Acceptance or the
 product's rejection returns synchronously and verbatim; nothing is spooled.
 
-The promptless tool vocabulary covers identity, peer listing, direct/multicast send, group
-broadcast, supported rename, and lane lifecycle. Host-supplied invocation metadata identifies a
+The promptless tool vocabulary covers identity, peer listing, direct, multicast, and group send,
+supported rename, and lane lifecycle. Host-supplied invocation metadata identifies a
 tools-only caller where the product supplies it. Models do not restate their session identity.
 
 ## Lane drivers

@@ -28,6 +28,13 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   fixture.write({ jsonrpc: "2.0", id: fixture.requests[0].id, result: { peers: 2 } });
   assert.deepEqual(await call, { peers: 2 });
 
+  const groupCall = client.callTool("native", "group-one", "message.send", { group: "team", message: "hello all" });
+  await until(() => fixture.requests.some((frame) => frame.method === "message.send"));
+  const groupRequest = fixture.requests.find((frame) => frame.method === "message.send");
+  assert.deepEqual(groupRequest.params, { group: "team", message: "hello all" });
+  fixture.write({ jsonrpc: "2.0", id: groupRequest.id, result: { message_id: "group-message", deliveries: [] } });
+  assert.deepEqual(await groupCall, { message_id: "group-message", deliveries: [] });
+
   const laneCall = client.callTool("native", "lane-one", "lane.status", { product: "qwen", arguments: ["worker"] });
   await until(() => fixture.requests.some((frame) => frame.method === "lane.status"));
   const laneRequest = fixture.requests.find((frame) => frame.method === "lane.status");

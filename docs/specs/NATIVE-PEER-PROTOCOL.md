@@ -196,15 +196,21 @@ uncatalogued product appears with its reported product identifier. Every peer's
 {"jsonrpc":"2.0","id":"send-1","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
 ```
 
-`target` selects one `Peer.id` returned by `peers.list`. `targets` may instead
-select a non-empty array of distinct peer IDs. The forms are mutually
-exclusive. Success means every selected product accepted its delivery. A
-missing or invisible target returns:
+`target` selects one visible peer by exact identity or unique name. `targets`
+may instead select a non-empty array of distinct peer selectors. `group`
+selects every other current local or federated member of one group the sender
+belongs to. The three forms are mutually exclusive. A group containing no
+other current members succeeds with an empty `deliveries` array. Otherwise, success means every
+selected product accepted its delivery. A missing, invisible, ambiguous, or
+self target returns:
 
 ```json
 {"jsonrpc":"2.0","id":"send-2","method":"message.send","params":{"target":"missing","message":"Hello"}}
 {"jsonrpc":"2.0","id":"send-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
 ```
+
+A group outside the sender's effective membership returns `-32003` with
+`{"group":"<requested-group>"}` as its data.
 
 #### Lane methods
 
@@ -622,11 +628,13 @@ Frames:
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
     },
+    "group": {"type": "string", "minLength": 1},
     "message": {"type": "string", "minLength": 1}
   },
   "oneOf": [
-    {"required": ["target"], "not": {"required": ["targets"]}},
-    {"required": ["targets"], "not": {"required": ["target"]}}
+    {"required": ["target"]},
+    {"required": ["targets"]},
+    {"required": ["group"]}
   ]
 }
 ```
@@ -642,7 +650,6 @@ Frames:
     "message_id": {"type": "string", "minLength": 1},
     "deliveries": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -664,6 +671,8 @@ Frames:
 ```json
 {"jsonrpc":"2.0","id":"send-1","method":"message.send","params":{"target":"target-native","message":"Please review this."}}
 {"jsonrpc":"2.0","id":"send-1","result":{"message_id":"9a58e98f39cc2d47a1c3f09a77bc8310","deliveries":[{"target":"target-native","session_id":"target-native","delivery_id":"delivery-718e3cdb1e3f61786d95879632973bb7","status":"accepted"}]}}
+{"jsonrpc":"2.0","id":"send-group","method":"message.send","params":{"group":"team","message":"Please review this."}}
+{"jsonrpc":"2.0","id":"send-group","result":{"message_id":"47e671b79fa4412696d0df3557cad74f","deliveries":[]}}
 {"jsonrpc":"2.0","id":"send-2","method":"message.send","params":{"target":"missing","message":"Hello"}}
 {"jsonrpc":"2.0","id":"send-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
 ```

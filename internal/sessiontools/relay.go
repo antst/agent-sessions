@@ -48,6 +48,11 @@ type rpcError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
+type structuredRPCError interface {
+	error
+	RPCErrorDetails() (int, string, json.RawMessage)
+}
+
 func NewMCPRelay(config MCPRelayConfig) (*MCPRelay, error) {
 	if _, ok := productcatalog.ByID(config.Product); !ok {
 		return nil, fmt.Errorf("MCP relay product %q is unsupported", config.Product)
@@ -180,6 +185,11 @@ func (r *MCPRelay) forward(ctx context.Context, request relayRequest) (json.RawM
 	id := string(request.ID)
 	response, err := r.config.Call(ctx, id, request.Method, append(json.RawMessage(nil), request.Params...))
 	if err != nil {
+		var structured structuredRPCError
+		if errors.As(err, &structured) {
+			code, message, data := structured.RPCErrorDetails()
+			return nil, &rpcError{Code: code, Message: message, Data: data}
+		}
 		return nil, &rpcError{Code: -32006, Message: err.Error(), Data: map[string]any{
 			"detail": err.Error(), "agent_sessions_bug_report": BugReportGuidance,
 		}}

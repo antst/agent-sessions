@@ -21,7 +21,7 @@ type DeliveryPresenter func(
 	federation.AgentFrame,
 ) error
 
-// RouteDelivery admits one live discover/send/broadcast frame and presents it
+// RouteDelivery admits one live discover/send frame and presents it
 // directly to every currently live destination. A returned accepted result is
 // the recipient carrier's acceptance. The daemon never queues, retries, or
 // records the message itself.

@@ -54,6 +54,16 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 	if frame.Error == nil || string(frame.Error.Data) != `{"detail":"native exact failure"}` {
 		t.Fatalf("structured native failure was changed: %+v", frame.Error)
 	}
+	frame = liveRPCFailureFromError(json.RawMessage(`3`), "message.send", &federationpkg.UnknownTargetError{
+		Target: "self", Detail: "no live peer session or lane matching self",
+	})
+	if frame.Error == nil || frame.Error.Code != liveRPCUnknown || string(frame.Error.Data) != `{"target":"self"}` {
+		t.Fatalf("unknown target data = %+v", frame.Error)
+	}
+	frame = liveRPCFailureFromError(json.RawMessage(`4`), "message.send", &federationpkg.GroupNotPermittedError{Group: "other"})
+	if frame.Error == nil || frame.Error.Code != liveRPCNotPermitted || string(frame.Error.Data) != `{"group":"other"}` {
+		t.Fatalf("forbidden group data = %+v", frame.Error)
+	}
 }
 
 func TestLiveSessionReconnectCadenceIsTwoSeconds(t *testing.T) {

@@ -76,7 +76,7 @@ func TestHubDestinationDisconnectFailsPendingDelivery(t *testing.T) {
 	}
 }
 
-func TestHubRejectsStaleBroadcastThroughDifferentSharedGroup(t *testing.T) {
+func TestHubRejectsStaleGroupSendThroughDifferentSharedGroup(t *testing.T) {
 	sourcePeer := mustTestPeer(t, "host-a", "source", "codex", "remaining")
 	targetPeer := mustTestPeer(t, "host-b", "target", "qwen", "remaining")
 	source := &hubClient{hostID: "host-a", peers: map[string]Peer{sourcePeer.ID: sourcePeer}}
@@ -86,7 +86,7 @@ func TestHubRejectsStaleBroadcastThroughDifferentSharedGroup(t *testing.T) {
 		laneRoutes: map[string]*laneRoute{}, deliveryRoutes: map[string]*deliveryRoute{},
 	}
 	frame, err := json.Marshal(AgentFrame{
-		Version: AgentFrameVersion, Type: "delivery", MessageID: "stale-broadcast",
+		Version: AgentFrameVersion, Type: "delivery", MessageID: "stale-group-send",
 		SourceSessionID: sourcePeer.SessionID, Source: &sourcePeer, Group: "removed", Content: "must not cross",
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestHubRejectsStaleBroadcastThroughDifferentSharedGroup(t *testing.T) {
 		Type: "group_deliver", RequestID: "stale-request", SourceID: sourcePeer.ID,
 		TargetID: targetPeer.ID, Frame: frame,
 	}); err == nil {
-		t.Fatal("hub forwarded a stale broadcast through an unrelated shared group")
+		t.Fatal("hub forwarded a stale group send through an unrelated shared group")
 	}
 }
 

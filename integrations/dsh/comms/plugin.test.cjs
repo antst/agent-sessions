@@ -24,16 +24,25 @@ class FakeClient extends EventEmitter {
     this.reports = [];
     this.accepted = [];
     this.rejected = [];
+    this.calls = [];
   }
   report(...argumentsValue) { this.reports.push(argumentsValue); return true; }
   closeSession() {}
   handleLaneRequests(handler) { this.laneHandler = handler; }
   acceptMessage(...argumentsValue) { this.accepted.push(argumentsValue); }
   rejectMessage(...argumentsValue) { this.rejected.push(argumentsValue); }
-  callTool() { return Promise.resolve({}); }
+  callTool(...argumentsValue) { this.calls.push(argumentsValue); return Promise.resolve({}); }
   updateName() {}
   stop() { return Promise.resolve(); }
 }
+
+test("group send uses the one message.send operation unchanged", async () => {
+  const { agent, client, runtime } = harness();
+  const root = agent();
+  runtime.present(root);
+  await runtime.callTool(root, "message.send", { group: "team", message: "hello all" });
+  assert.deepEqual(client.calls, [["session-native", "dsh-tool-1", "message.send", { group: "team", message: "hello all" }]]);
+});
 
 function harness(environmentValues = {}, config = {}) {
   const listeners = new Map();

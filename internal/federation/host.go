@@ -1097,7 +1097,7 @@ func validateLocalPeer(peer Peer, hostID string) error {
 func validateDeliveryGroups(source, target Peer, frame AgentFrame) error {
 	if frame.Group != "" {
 		if !contains(source.Groups, frame.Group) || !contains(target.Groups, frame.Group) {
-			return errors.New("federated broadcast peers are not current members of the named group")
+			return errors.New("federated group-send peers are not current members of the named group")
 		}
 		return nil
 	}

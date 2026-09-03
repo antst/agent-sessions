@@ -209,7 +209,7 @@ async function apply(ctx, config = {}) {
   ctx.provide(serviceName, runtime);
   ctx.tools.register(defineTool({
     name: "agent_sessions",
-    description: "Use one exact Agent Sessions communication operation: peers.list or message.send.",
+    description: "Use peers.list or message.send; message.send selects one target, targets array, or group.",
     parameters: {
       action: { type: "string", enum: OPERATIONS, required: true, description: "Exact Agent Sessions operation." },
       arguments: { type: "object", additionalProperties: true, description: "Arguments in the exact shape for the selected operation." },

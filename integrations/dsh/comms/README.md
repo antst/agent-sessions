@@ -2,7 +2,7 @@
 
 `@agent-sessions/dsh-comms` publishes each live top-level DeepSeek Harness
 session to the Agent Sessions presence socket. It adds `peers.list` and
-`message.send`, and delivers inbound messages through DSH's native
+`message.send` (one target, explicit targets, or a group), and delivers inbound messages through DSH's native
 `Agent.steer` path.
 
 A DSH product bundle includes the package by listing it as a bundle dependency

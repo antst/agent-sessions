@@ -300,6 +300,9 @@ func liveMessageSendArguments(arguments map[string]any) map[string]any {
 	if targets := mapStringSlice(arguments, "targets"); len(targets) > 0 {
 		projected["targets"] = targets
 	}
+	if group := mapString(arguments, "group"); group != "" {
+		projected["group"] = group
+	}
 	return projected
 }
 

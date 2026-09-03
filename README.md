@@ -104,8 +104,8 @@ This makes parent/child replies possible without copying a global membership
 database. Group membership does not grant instruction authority and does not
 weaken a recipient's sandbox, approval policy, or higher-priority instructions.
 
-The structured tools cover peer listing, direct and multicast sends, group
-broadcast, identity, supported native rename operations, and lane lifecycle.
+The structured tools cover peer listing, direct, multicast, and group sends,
+identity, supported native rename operations, and lane lifecycle.
 There is no mailbox: the destination must be live and the caller owns any retry.
 
 See [Groups](docs/GROUPS.md) for namespace and lane-handover rules.

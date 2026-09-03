@@ -27,7 +27,7 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 7 {
+	if len(tools) != 6 {
 		t.Fatalf("tool count = %d", len(tools))
 	}
 	tools[0]["name"] = "mutated"
@@ -60,13 +60,28 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	if _, present := codexProperties["session_id"]; present {
 		t.Fatal("Codex still asks the model to restate its host-supplied thread identity")
 	}
+	if _, present := codexProperties["group"]; !present || len(codexSendSchema["oneOf"].([]any)) != 3 {
+		t.Fatalf("send_message selector schema = %#v", codexSendSchema)
+	}
+	for _, tool := range tools {
+		if tool["name"] == "broadcast" {
+			t.Fatal("legacy broadcast tool remains")
+		}
+	}
 	for _, product := range []string{"opencode", "kilo", "pi", "omp", "dsh"} {
 		instruction, instructionErr := ProductMCPInstructions(product)
 		productTools, toolsErr := ProductMCPTools(product)
-		if instructionErr != nil || !strings.Contains(instruction, BugReportGuidance) || toolsErr != nil || len(productTools) != 7 {
+		if instructionErr != nil || !strings.Contains(instruction, BugReportGuidance) || toolsErr != nil || len(productTools) != 6 {
 			t.Fatalf("%s MCP surface = instruction %q err %v, tools %d err %v", product, instruction, instructionErr, len(productTools), toolsErr)
 		}
 	}
+}
+
+type testStructuredRPCError struct{}
+
+func (testStructuredRPCError) Error() string { return "masked message" }
+func (testStructuredRPCError) RPCErrorDetails() (int, string, json.RawMessage) {
+	return -32001, "Unknown session or target", json.RawMessage(`{"target":"self"}`)
 }
 
 func TestEveryLaneHelpAdvertisesUniformYoloAliases(t *testing.T) {
@@ -154,6 +169,26 @@ func TestMCPRelayRejectsUnknownProductAndReturnsRealCallError(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"code":-32006`) || !strings.Contains(output.String(), `"detail":"connector is inactive"`) {
 		t.Fatalf("inactive response = %s", output.String())
+	}
+}
+
+func TestMCPRelayPreservesStructuredDaemonErrors(t *testing.T) {
+	relay, err := NewMCPRelay(MCPRelayConfig{
+		Product: "grok",
+		Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+			return nil, testStructuredRPCError{}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := relay.Serve(context.Background(), strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n"), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"code":-32001`) || !strings.Contains(output.String(), `"message":"Unknown session or target"`) ||
+		!strings.Contains(output.String(), `"data":{"target":"self"}`) || strings.Contains(output.String(), "masked message") {
+		t.Fatalf("structured response = %s", output.String())
 	}
 }
 

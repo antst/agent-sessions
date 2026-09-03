@@ -10,13 +10,31 @@ import (
 
 var ErrUnknownTarget = errors.New("unknown session or target")
 
+// UnknownTargetError preserves the exact unresolved selector for protocol
+// error data without exposing hidden roster entries.
+type UnknownTargetError struct {
+	Target string
+	Detail string
+}
+
+func (e *UnknownTargetError) Error() string { return fmt.Sprintf("%s: %s", ErrUnknownTarget, e.Detail) }
+func (e *UnknownTargetError) Unwrap() error { return ErrUnknownTarget }
+
+// GroupNotPermittedError identifies a syntactically valid group selector
+// that is outside the sender's effective membership.
+type GroupNotPermittedError struct{ Group string }
+
+func (e *GroupNotPermittedError) Error() string {
+	return fmt.Sprintf("sender is not a member of group %q", e.Group)
+}
+
 const (
 	privateGroupPrefix = "session:"
 	maxGroupBytes      = 192
 	maxSessionIDBytes  = 128
 )
 
-// Admission is one immutable routing decision. Broadcast membership is
+// Admission is one immutable routing decision. Group membership is
 // snapshotted here before any destination callback runs.
 type Admission struct {
 	Source  Peer
@@ -73,7 +91,7 @@ func PrivateGroup(hostID, sessionID string) string {
 	return privateGroupPrefix + hostID + "/" + sessionID
 }
 
-// Admit validates a discover, send, or broadcast request and returns its
+// Admit validates a discover or send request and returns its
 // group-filtered immutable target snapshot.
 func Admit(frame AgentFrame, source Peer, peers []Peer) (Admission, error) { //nolint:gocyclo
 	if frame.Version != AgentFrameVersion {
@@ -104,8 +122,20 @@ func Admit(frame AgentFrame, source Peer, peers []Peer) (Admission, error) { //n
 		result.Targets = visible
 		return result, nil
 	case "send":
-		if len(frame.Targets) == 0 || frame.Group != "" || frame.Content == "" {
-			return Admission{}, errors.New("send requires targets and content")
+		hasTargets, hasGroup := len(frame.Targets) != 0, frame.Group != ""
+		if hasTargets == hasGroup || frame.Content == "" {
+			return Admission{}, errors.New("send requires exactly one target selector and content")
+		}
+		if hasGroup {
+			if !contains(source.Groups, frame.Group) {
+				return Admission{}, &GroupNotPermittedError{Group: frame.Group}
+			}
+			for _, peer := range visible {
+				if contains(peer.Groups, frame.Group) {
+					result.Targets = append(result.Targets, clonePeer(peer))
+				}
+			}
+			return result, nil
 		}
 		if duplicateStrings(frame.Targets) {
 			return Admission{}, errors.New("send targets contain duplicates")
@@ -123,20 +153,6 @@ func Admit(frame AgentFrame, source Peer, peers []Peer) (Admission, error) { //n
 			result.Targets = append(result.Targets, peer)
 		}
 		return result, nil
-	case "broadcast":
-		if frame.Group == "" || len(frame.Targets) != 0 || frame.Content == "" {
-			return Admission{}, errors.New("broadcast requires group and content")
-		}
-		if !contains(source.Groups, frame.Group) {
-			return Admission{}, errors.New("broadcast sender is not a member of the group")
-		}
-		for _, peer := range peers {
-			if peer.ID != source.ID && contains(peer.Groups, frame.Group) {
-				result.Targets = append(result.Targets, clonePeer(peer))
-			}
-		}
-		sort.Slice(result.Targets, func(i, j int) bool { return result.Targets[i].ID < result.Targets[j].ID })
-		return result, nil
 	default:
 		return Admission{}, fmt.Errorf("unsupported agent frame type %q", frame.Type)
 	}
@@ -148,7 +164,7 @@ func Admit(frame AgentFrame, source Peer, peers []Peer) (Admission, error) { //n
 func Resolve(raw string, peers []Peer) (Peer, error) {
 	raw = strings.TrimSpace(strings.TrimPrefix(raw, "session:"))
 	if raw == "" {
-		return Peer{}, fmt.Errorf("%w: peer target is empty", ErrUnknownTarget)
+		return Peer{}, &UnknownTargetError{Target: raw, Detail: "peer target is empty"}
 	}
 	matches := make([]Peer, 0, 1)
 	for _, peer := range peers {
@@ -160,10 +176,10 @@ func Resolve(raw string, peers []Peer) (Peer, error) {
 		}
 	}
 	if len(matches) == 0 {
-		return Peer{}, fmt.Errorf("%w: no live peer session or lane matching %q", ErrUnknownTarget, raw)
+		return Peer{}, &UnknownTargetError{Target: raw, Detail: fmt.Sprintf("no live peer session or lane matching %q", raw)}
 	}
 	if len(matches) != 1 {
-		return Peer{}, fmt.Errorf("%w: peer name %q is ambiguous; use an exact host/session identity", ErrUnknownTarget, raw)
+		return Peer{}, &UnknownTargetError{Target: raw, Detail: fmt.Sprintf("peer name %q is ambiguous; use an exact host/session identity", raw)}
 	}
 	return matches[0], nil
 }

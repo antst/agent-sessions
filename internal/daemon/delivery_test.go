@@ -36,12 +36,19 @@ func TestRouteDeliveryUsesOnlyLiveDestinationAcceptance(t *testing.T) {
 	if err != nil || len(multicast.Deliveries) != 2 || multicast.Deliveries[0].Status != "accepted" || multicast.Deliveries[1].Status != "accepted" {
 		t.Fatalf("multicast = %+v, %v", multicast, err)
 	}
-	broadcast, err := RouteDelivery(context.Background(), federation.AgentFrame{
-		Version: federation.AgentFrameVersion, Type: "broadcast", MessageID: "broadcast-1",
+	groupSend, err := RouteDelivery(context.Background(), federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "group-1",
 		Group: "team", Content: "hello",
 	}, source, peers, present)
-	if err != nil || len(broadcast.Deliveries) != 2 || len(accepted) != 4 {
-		t.Fatalf("broadcast = %+v accepted=%v err=%v", broadcast, accepted, err)
+	if err != nil || len(groupSend.Deliveries) != 2 || len(accepted) != 4 {
+		t.Fatalf("group send = %+v accepted=%v err=%v", groupSend, accepted, err)
+	}
+	empty, err := RouteDelivery(context.Background(), federation.AgentFrame{
+		Version: federation.AgentFrameVersion, Type: "send", MessageID: "private-1",
+		Group: "private", Content: "hello",
+	}, federation.Peer{ID: "source", SessionID: "source", Groups: []string{"private"}}, peers, present)
+	if err != nil || len(empty.Deliveries) != 0 {
+		t.Fatalf("empty group send = %+v, %v", empty, err)
 	}
 }
 

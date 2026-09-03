@@ -71,7 +71,7 @@ native behavior; unit or mock evidence cannot receive that credit.
 | CL-05 | Linux, macOS | Native transcript title changes appear on the next roster and route-by-name query. |
 | CL-06 | Linux, macOS | A retained live connector re-reports the same native session after daemon replacement. |
 | CL-07 | Linux, macOS | Exit and connection failure retire only the exact live row and preserve Claude-owned data. |
-| CL-08 | Linux, macOS | Structured list/send/broadcast and replies work with host-supplied identity and protocol-v1 delivery. |
+| CL-08 | Linux, macOS | Structured list, direct/multicast/group sends, and replies work with host-supplied identity and protocol-v1 delivery. |
 | CL-09 | Linux, macOS | A Claude parent can launch each catalogued lane product with correct parent context. |
 | CL-10 | Linux, macOS | Invalid launch, native startup failure, and selector failure leave no false live row or altered product session. |
 | CL-11 | Linux, macOS with Claude in Chrome installed | Explicit Chrome choices remain native while managed headless lanes never wait on Chrome interaction. |
@@ -112,7 +112,7 @@ native behavior; unit or mock evidence cannot receive that credit.
 | Q-04 | Linux, macOS | Default and permissive launches map to the product's native approval mode; omission sends nothing. |
 | Q-05 | Linux, macOS | The native session-start event supplies the exact product UUID before live publication. |
 | Q-06 | Linux, macOS | The held protocol-v1 presence path is private and addresses the exact live session. |
-| Q-07 | Linux, macOS | Structured discovery, direct/multicast/broadcast, reply, and native busy behavior are exact once. |
+| Q-07 | Linux, macOS | Structured discovery, direct/multicast/group send, reply, and native busy behavior are exact once. |
 | Q-08 | Linux, macOS | Reconnect republishes the same live product UUID without duplicating it. |
 | Q-09 | Linux, macOS | Exit, signal, crash, and publication failure remove only Agent Sessions-owned live state. |
 | Q-10 | Linux, macOS | Ordinary and managed use share product credentials, settings, extensions, and transcripts without migration. |

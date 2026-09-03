@@ -26,9 +26,8 @@ Sessions registration are attested.
 
 - Use `agent_sessions.list_peers` to discover visible peers. Prefer a stable,
   unique peer name and list first when a requested target may be ambiguous.
-- Use `agent_sessions.send_message` for one target or an explicit multicast.
-- Use `agent_sessions.broadcast` only for a named group to which this session
-  belongs. Agent Sessions has no global broadcast.
+- Use `agent_sessions.send_message` with one target, an explicit multicast, or
+  a named group to which this session belongs. There is no global all-sessions form.
 - Use `agent_sessions.rename_session` to change this managed attachment's
   public Agent Sessions name. Product-native rename commands also propagate
   after the native adapter observes them.

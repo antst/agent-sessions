@@ -77,10 +77,11 @@ func decodeLiveMessageSend(raw json.RawMessage) (map[string]any, error) {
 	var params struct {
 		Target  *string   `json:"target"`
 		Targets *[]string `json:"targets"`
+		Group   *string   `json:"group"`
 		Message *string   `json:"message"`
 	}
 	if err := decodeStrictJSON(raw, &params); err != nil || params.Message == nil || strings.TrimSpace(*params.Message) == "" ||
-		(params.Target == nil) == (params.Targets == nil) {
+		boolCount(params.Target != nil, params.Targets != nil, params.Group != nil) != 1 {
 		return nil, errors.New("message send params are invalid")
 	}
 	arguments := map[string]any{"message": *params.Message}
@@ -89,6 +90,13 @@ func decodeLiveMessageSend(raw json.RawMessage) (map[string]any, error) {
 			return nil, errors.New("message target is invalid")
 		}
 		arguments["target"] = *params.Target
+		return arguments, nil
+	}
+	if params.Group != nil {
+		if strings.TrimSpace(*params.Group) == "" {
+			return nil, errors.New("message group is invalid")
+		}
+		arguments["group"] = *params.Group
 		return arguments, nil
 	}
 	if len(*params.Targets) == 0 {
@@ -254,7 +262,7 @@ func (c *hostCoordinator) callLocalToolWithID(
 		if message == "" {
 			return localToolResult{}, errors.New("message is required")
 		}
-		targets, err := requestedLocalTargets(args)
+		targets, group, err := requestedLocalSelector(args)
 		if err != nil {
 			return localToolResult{}, err
 		}
@@ -264,7 +272,7 @@ func (c *hostCoordinator) callLocalToolWithID(
 		}
 		result, err := c.routeMessageFrame(ctx, runtime, source, peers, federationpkg.AgentFrame{
 			Version: federationpkg.AgentFrameVersion, Type: "send", MessageID: commandRequestID(),
-			Targets: targets, Content: message,
+			Targets: targets, Group: group, Content: message,
 		})
 		if err != nil {
 			return localToolResult{}, err
@@ -274,30 +282,6 @@ func (c *hostCoordinator) callLocalToolWithID(
 		}
 		return localToolResult{
 			Text: fmt.Sprintf("Message accepted by %d peer(s).", len(result.Deliveries)),
-			Data: map[string]any{"message_id": result.MessageID, "deliveries": result.Deliveries},
-		}, nil
-	case "broadcast":
-		group := strings.TrimSpace(mapString(args, "group"))
-		message := strings.TrimSpace(mapString(args, "message"))
-		if group == "" || message == "" || !containsString(source.Groups, group) {
-			return localToolResult{}, errors.New("broadcast requires one of the sender's groups and a message")
-		}
-		peers, err := c.visibleMessageTargets(runtime, source)
-		if err != nil {
-			return localToolResult{}, err
-		}
-		result, err := c.routeMessageFrame(ctx, runtime, source, peers, federationpkg.AgentFrame{
-			Version: federationpkg.AgentFrameVersion, Type: "broadcast", MessageID: commandRequestID(),
-			Group: group, Content: message,
-		})
-		if err != nil {
-			return localToolResult{}, err
-		}
-		if err := requireAcceptedDeliveries(result.Deliveries); err != nil {
-			return localToolResult{}, err
-		}
-		return localToolResult{
-			Text: fmt.Sprintf("Broadcast accepted by %d peer(s).", len(result.Deliveries)),
 			Data: map[string]any{"message_id": result.MessageID, "deliveries": result.Deliveries},
 		}, nil
 	case "lane":
@@ -682,33 +666,67 @@ func (c *hostCoordinator) nativeMessage(runtime *daemonpkg.Runtime, source daemo
 	}
 }
 
-func requestedLocalTargets(args map[string]any) ([]string, error) {
+func requestedLocalSelector(args map[string]any) ([]string, string, error) {
+	_, singlePresent := args["target"]
+	_, targetsPresent := args["targets"]
+	_, groupPresent := args["group"]
+	if boolCount(singlePresent, targetsPresent, groupPresent) != 1 {
+		return nil, "", errors.New("use exactly one of target, targets, or group")
+	}
 	single := strings.TrimSpace(mapString(args, "target"))
+	group := strings.TrimSpace(mapString(args, "group"))
 	var targets []string
-	if raw, ok := args["targets"].([]any); ok {
-		for _, value := range raw {
-			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+	if targetsPresent {
+		switch raw := args["targets"].(type) {
+		case []string:
+			for _, target := range raw {
+				if strings.TrimSpace(target) == "" {
+					return nil, "", errors.New("targets must be non-empty strings")
+				}
+				targets = append(targets, strings.TrimSpace(target))
+			}
+		case []any:
+			for _, value := range raw {
+				text, ok := value.(string)
+				if !ok || strings.TrimSpace(text) == "" {
+					return nil, "", errors.New("targets must be non-empty strings")
+				}
 				targets = append(targets, strings.TrimSpace(text))
 			}
+		default:
+			return nil, "", errors.New("targets must be an array")
 		}
 	}
-	if single != "" {
-		if len(targets) != 0 {
-			return nil, errors.New("use either target or targets")
+	if singlePresent {
+		if single == "" {
+			return nil, "", errors.New("target must be non-empty")
 		}
 		targets = []string{single}
 	}
-	if len(targets) == 0 {
-		return nil, errors.New("target or targets is required")
+	if targetsPresent && len(targets) == 0 {
+		return nil, "", errors.New("targets must not be empty")
+	}
+	if groupPresent && group == "" {
+		return nil, "", errors.New("group must be non-empty")
 	}
 	seen := map[string]bool{}
 	for _, target := range targets {
 		if seen[target] {
-			return nil, errors.New("targets contain duplicates")
+			return nil, "", errors.New("targets contain duplicates")
 		}
 		seen[target] = true
 	}
-	return targets, nil
+	return targets, group, nil
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
 
 func publicAttachment(attachment daemonpkg.ManagedAttachment, name string) map[string]any {

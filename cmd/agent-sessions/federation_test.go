@@ -143,6 +143,19 @@ func TestMessagingToolsDiscoverAndDeliverThroughEmbeddedFederation(t *testing.T)
 	case <-time.After(3 * time.Second):
 		t.Fatal("messaging tool did not reach remote daemon")
 	}
+	if _, err := coordinator.callLocalTool(context.Background(), runtime, "parent", "send_message", map[string]any{
+		"group": "project", "message": "hello remote group",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-delivered:
+		if frame.Content != "hello remote group" || frame.Group != "project" {
+			t.Fatalf("group-delivered frame = %#v", frame)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("group messaging did not reach remote daemon")
+	}
 }
 
 func TestFederationSnapshotProjectsCurrentDaemonAttachmentsAndLanes(t *testing.T) {

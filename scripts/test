@@ -207,7 +207,7 @@ for product_skill in \
     exit 1
   fi
 done
-for contract_text in agent_sessions.list_peers agent_sessions.send_message agent_sessions.broadcast agent_sessions.lane owner_session_id; do
+for contract_text in agent_sessions.list_peers agent_sessions.send_message agent_sessions.lane owner_session_id; do
   if ! grep -Fq "$contract_text" "$canonical_agent_sessions_skill"; then
     printf 'Canonical agent-sessions skill is missing %s\n' "$contract_text" >&2
     exit 1
