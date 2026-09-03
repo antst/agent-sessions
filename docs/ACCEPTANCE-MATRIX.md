@@ -207,6 +207,6 @@ Peer mode is credited for Codex, Claude, Grok, Qwen, OpenCode, Kilo, Pi, and OMP
 credited for those eight products plus DSH.
 
 Qwen lane credit remains provisional until the quota-blocked outbound peer and fresh lane cells are
-rerun after 2026-09-04 16:07 UTC. Claude's native `--effort` option is passed through unchanged, but
-its runtime semantic effect remains to be verified after Claude authentication is restored on the
-acceptance host.
+rerun after 2026-09-04 16:07 UTC. Claude accepts `--effort` natively
+(`low|medium|high|xhigh|max`) and records it per session; the product exposes no effort echo in
+transcripts or results, so its runtime effect is product-owned and not asserted here.
