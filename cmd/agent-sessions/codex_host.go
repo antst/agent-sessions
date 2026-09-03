@@ -63,6 +63,7 @@ type hostCoordinator struct {
 	presence           *livePresenceServer
 	resolveCandidate   func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
 	candidateResolvers map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
+	liveTitleResolvers map[string]func(daemonpkg.ManagedAttachment) (string, bool)
 	lanesLoaded        bool
 	now                func() time.Time
 	runtime            *daemonpkg.Runtime
@@ -83,8 +84,18 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		reportedLanes: map[string]string{},
 		reportedPeers: map[string]bool{},
 		laneNames:     map[string]map[string]laneNameEntry{},
-		runtimeReady:  make(chan *daemonpkg.Runtime, 1),
-		now:           time.Now,
+		liveTitleResolvers: map[string]func(daemonpkg.ManagedAttachment) (string, bool){
+			claudeproduct.ProductID: func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+				source, err := claudeprofile.CurrentSource()
+				if err != nil {
+					return "", false
+				}
+				title, observed := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, attachment.NativeSessionID)
+				return title, observed && title != attachment.NativeSessionID
+			},
+		},
+		runtimeReady: make(chan *daemonpkg.Runtime, 1),
+		now:          time.Now,
 	}
 	coordinator.resolveCandidate = coordinator.resolveProductLaneCandidate
 	coordinator.candidateResolvers = coordinator.productLaneCandidateResolvers()

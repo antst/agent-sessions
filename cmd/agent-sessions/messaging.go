@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	"github.com/antst/agent-sessions/internal/claudeprofile"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productruntime"
@@ -740,11 +738,9 @@ func (c *hostCoordinator) attachmentDisplayName(runtime *daemonpkg.Runtime, atta
 	if strings.TrimSpace(laneName) != "" {
 		return laneName
 	}
-	if attachment.Product == "claude" && strings.TrimSpace(attachment.NativeSessionID) != "" {
-		if source, err := claudeprofile.CurrentSource(); err == nil {
-			if title, observed := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, attachment.NativeSessionID); observed && title != attachment.NativeSessionID {
-				return title
-			}
+	if resolver := c.liveTitleResolvers[attachment.Product]; resolver != nil {
+		if title, observed := resolver(attachment); observed {
+			return title
 		}
 	}
 	if runtime != nil {
