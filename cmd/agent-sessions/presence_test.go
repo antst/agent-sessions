@@ -441,6 +441,19 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 		driver.opens[0].LaneID != persistent.id || driver.opens[0].ResumeNativeID != persistent.nativeID {
 		t.Fatalf("persistent reattach result=%+v actor=%+v opens=%+v", result, persistent, driver.opens)
 	}
+	if !persistent.autoArchive || persistent.autoArchiveDelay != defaultUnifiedLaneAutoArchiveDelay {
+		t.Fatalf("resume auto-archive default = enabled:%t delay:%s", persistent.autoArchive, persistent.autoArchiveDelay)
+	}
+	openEnvironment := "\n" + strings.Join(driver.opens[0].Environment, "\n") + "\n"
+	for _, expected := range []string{
+		"\nAGENT_SESSIONS_SESSION_ID=" + persistent.id + "\n",
+		"\nAGENT_SESSIONS_PRODUCT=claude\n",
+		"\nAGENT_SESSIONS_SESSION_NAME=" + persistent.name + "\n",
+	} {
+		if !strings.Contains(openEnvironment, expected) {
+			t.Fatalf("driver open environment %q lacks %q", openEnvironment, expected)
+		}
+	}
 	after, err := runtime.State().Read()
 	if err != nil {
 		t.Fatal(err)

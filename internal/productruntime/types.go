@@ -131,6 +131,7 @@ type LaneOpenRequest struct {
 	ProfileIdentity string
 	Capability      string
 	Arguments       []string
+	Environment     []string
 	ApprovalPolicy  string
 	Sandbox         string
 }

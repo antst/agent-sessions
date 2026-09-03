@@ -273,7 +273,7 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 		uuid = strings.TrimSpace(getenv("GROK_SESSION_ID"))
 	}
 	productSessionEnv := map[string]string{
-		laneCandidateCodex: "CODEX_THREAD_ID", laneCandidateClaude: "CLAUDE_CODE_SESSION_ID", laneCandidateGrok: "AGENT_SESSIONS_GROK_SESSION_ID",
+		laneCandidateCodex: "CODEX_THREAD_ID", laneCandidateClaude: "CLAUDE_CODE_SESSION_ID", connectorProductGrok: "AGENT_SESSIONS_GROK_SESSION_ID",
 	}
 	if name := productSessionEnv[product]; uuid == "" && name != "" {
 		uuid = strings.TrimSpace(getenv(name))

@@ -729,10 +729,10 @@ entries:
       - internal/daemon/adapter_codex_lane.go:CodexLaneAdapter.Wait
       - internal/daemon/adapter_codex_lane.go:CodexLaneAdapter.Interrupt
       - internal/daemon/adapter_codex_lane.go:CodexLaneAdapter.Archive
-      - internal/daemon/adapter_grok_lane.go:NewGrokLaneAdapter
-      - internal/daemon/adapter_grok_lane.go:GrokLaneAdapter.Run
-      - internal/daemon/adapter_grok_lane.go:GrokLaneAdapter.Interrupt
-      - internal/daemon/adapter_grok_lane.go:GrokLaneAdapter.Archive
+      - internal/products/grok/lane.go:NewLaneDriver
+      - internal/products/grok/lane.go:LaneDriver.StartTurn
+      - internal/products/grok/lane.go:LaneDriver.Interrupt
+      - internal/products/grok/lane.go:LaneDriver.Archive
     replacement_tests:
       - internal/daemon/adapter_codex_test.go:TestCodexAdapterAdoptsExactThreadOwnerAppServerAndSocket
       - internal/daemon/adapter_codex_test.go:TestCodexAdapterAuthorizesOnlyExactManagedThreadAncestry
@@ -747,7 +747,7 @@ entries:
       - cmd/agent-sessions/lane_test.go:TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch
       - internal/products/codex/lane_test.go:TestLaneDriverTranslatesStartResumeTurnAndLifecycle
       - internal/products/codex/lane_test.go:TestLaneDriverRejectsNativeIdentitySubstitution
-      - internal/daemon/adapter_grok_lane_test.go:TestGrokLaneAdapterIsSoleACPDriverAndPreservesExplicitPolicy
+      - internal/products/grok/lane_test.go:TestLaneInterruptIsProductTerminalAndSessionRemainsReusable
       - internal/products/qwen/lane_test.go:TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn
       - internal/products/qwen/lane_test.go:TestLaneResumesExactSessionWithoutRenamingAndInterruptsWithAcknowledgement
     acceptance_cells: [L-20, L-21, L-22, L-23, L-24, L-25, L-26, L-27, L-28, L-29, L-30, P-C-C, P-C-CL, P-C-G, P-C-Q, P-CL-C, P-CL-CL, P-CL-G, P-CL-Q, P-G-C, P-G-CL, P-G-G, P-G-Q, P-Q-C, P-Q-CL, P-Q-G, P-Q-Q, A-C, A-CL, A-G, A-Q]

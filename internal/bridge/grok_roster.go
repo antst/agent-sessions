@@ -120,6 +120,19 @@ func grokRosterStateFromRows(rows []any, sessionID string) (grokRosterState, int
 	return state, matches, nil
 }
 
+func grokRosterTitleFromRows(rows []any, sessionID string) (string, int) {
+	name, matches := "", 0
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		if stringValue(row["sessionId"]) != sessionID {
+			continue
+		}
+		matches++
+		name = strings.TrimSpace(stringValue(row["title"]))
+	}
+	return name, matches
+}
+
 func grokRosterActivityStatus(activity string) (string, error) {
 	switch activity {
 	case "working":

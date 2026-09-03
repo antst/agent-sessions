@@ -128,6 +128,16 @@ func openGrokAuthenticatedClientWithArguments(
 	argv := []string{"--no-auto-update"}
 	argv = append(argv, arguments...)
 	argv = append(argv, "--leader-socket", leaderSocket, "agent", "--leader", "stdio")
+	return openGrokAuthenticatedClientCommand(ctx, bin, cwd, sessionID, environment, diagnostics, argv)
+}
+
+func openGrokAuthenticatedClientCommand(
+	ctx context.Context,
+	bin, cwd, sessionID string,
+	environment []string,
+	diagnostics io.Writer,
+	argv []string,
+) (*grokACPClient, error) {
 	command := exec.CommandContext(ctx, bin, argv...) //nolint:gosec // Exact native binary is selected and validated by the daemon preparation.
 	command.Dir = cwd
 	command.Env = append([]string(nil), environment...)
@@ -172,6 +182,44 @@ func openGrokAuthenticatedClientWithArguments(
 		return fail(err)
 	}
 	return client, nil
+}
+
+// GrokNativeSessionTitle asks Grok's own global roster to confirm one exact
+// dormant or resident session. The no-leader client owns no product session.
+func GrokNativeSessionTitle(
+	ctx context.Context,
+	bin, cwd string,
+	environment []string,
+	diagnostics io.Writer,
+	sessionID string,
+) (string, bool) {
+	if ctx == nil || !validSessionID(sessionID) || strings.TrimSpace(cwd) == "" {
+		return "", false
+	}
+	client, err := openGrokAuthenticatedClientCommand(
+		ctx, bin, cwd, sessionID, environment, diagnostics,
+		[]string{"--no-auto-update", "--yolo", "agent", "--no-leader", "stdio"},
+	)
+	if err != nil {
+		return "", false
+	}
+	defer client.close()
+	deadline, cancel := context.WithTimeout(ctx, grokACPInterjectTimeout)
+	defer cancel()
+	roster, err := client.request(deadline, "_x.ai/sessions/list", map[string]any{})
+	if err != nil {
+		return "", false
+	}
+	result, _ := roster["result"].(map[string]any)
+	rows, _ := result["sessions"].([]any)
+	name, matches := grokRosterTitleFromRows(rows, sessionID)
+	if matches != 1 {
+		return "", false
+	}
+	if name == "" {
+		name = sessionID
+	}
+	return name, true
 }
 
 // Interject delivers exactly one immutable message to the resident actor.
@@ -239,11 +287,10 @@ func (observer *GrokNativeObserver) SessionTitle(ctx context.Context, sessionID 
 	}
 	result, _ := roster["result"].(map[string]any)
 	rows, _ := result["sessions"].([]any)
-	state, matches, err := grokRosterStateFromRows(rows, sessionID)
-	if err != nil || matches != 1 {
+	name, matches := grokRosterTitleFromRows(rows, sessionID)
+	if matches != 1 {
 		return "", false
 	}
-	name := strings.TrimSpace(state.name)
 	if name == "" {
 		name = sessionID
 	}

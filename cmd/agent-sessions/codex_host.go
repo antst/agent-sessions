@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,7 +39,6 @@ import (
 const (
 	laneCandidateCodex  = "codex"
 	laneCandidateClaude = "claude"
-	laneCandidateGrok   = "grok"
 	laneCandidateQwen   = "qwen"
 )
 
@@ -53,7 +53,6 @@ type hostCoordinator struct {
 	codex              *bridge.CodexNative
 	pending            map[string]daemonpkg.NativeEvidence
 	monitored          map[string]bool
-	grokLanes          *daemonpkg.GrokLaneAdapter
 	laneProcesses      *structuredprocess.Supervisor
 	laneDrivers        *productruntime.LaneRegistry
 	lanes              map[string]*laneActor
@@ -79,7 +78,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		grokLanes:     daemonpkg.NewGrokLaneAdapter(),
 		lanes:         map[string]*laneActor{},
 		liveReports:   map[string]liveSessionReport{},
 		reportedLanes: map[string]string{},
@@ -135,7 +133,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	}
 	grokNative, err := newGrokBridgeFactory(BridgeFactoryConfig{
 		Executable: grokDescriptor.NativeExecutable, HostExecutable: hostExecutable,
-		Environment: os.Environ(),
 	})
 	if err != nil {
 		panic(err)
@@ -370,6 +367,16 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 				return laneNameEntry{}, false
 			}
 			name, ok := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, candidate.NativeSessionID)
+			return laneNameEntry{Name: name}, ok
+		},
+		grokproduct.ProductID: func(ctx context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			executable, err := launcher.ResolveProductExecutable(grokproduct.ProductID)
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			name, ok := bridge.GrokNativeSessionTitle(
+				ctx, executable, parent.Cwd, os.Environ(), io.Discard, candidate.NativeSessionID,
+			)
 			return laneNameEntry{Name: name}, ok
 		},
 		laneCandidateQwen: func(_ context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {

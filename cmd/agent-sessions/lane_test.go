@@ -412,60 +412,6 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 	}
 }
 
-func TestGrokLaneStartRequiresExplicitBypassBeforeRuntimeAccess(t *testing.T) {
-	coordinator := &hostCoordinator{}
-	parent := daemonpkg.ManagedAttachment{
-		ID: "parent", Cwd: t.TempDir(), PermissionMode: "bypassPermissions",
-	}
-	for _, arguments := range [][]string{
-		{"start", "--name", "worker"},
-		{"start", "--name", "worker", "--permission-mode", "default"},
-		{"start", "--name", "worker", "--no-yolo"},
-	} {
-		parsed, err := parseUnifiedLaneCommand(arguments)
-		if err != nil {
-			t.Fatalf("parse %v: %v", arguments, err)
-		}
-		// A nil runtime is deliberate: rejection must happen before readiness,
-		// catalog mutation, adapter dispatch, or native invocation.
-		if _, err = coordinator.startLane(context.Background(), nil, parent, "grok", parsed, "prompt", false); err == nil ||
-			!strings.Contains(err.Error(), "explicit bypassPermissions") {
-			t.Fatalf("start %v error = %v", arguments, err)
-		}
-	}
-
-	for _, arguments := range [][]string{
-		{"start", "--name", "worker", "--permission-mode", "bypassPermissions"},
-		{"start", "--name", "worker", "--always-approve"},
-		{"start", "--name", "worker", "--approval-policy", "never"},
-	} {
-		parsed, err := parseUnifiedLaneCommand(arguments)
-		if err != nil {
-			t.Fatalf("parse %v: %v", arguments, err)
-		}
-		if err := validateGrokLanePermission("grok", parsed, true); err != nil {
-			t.Fatalf("explicit bypass %v rejected: %v", arguments, err)
-		}
-	}
-}
-
-func TestGrokLaneResumeRejectsExplicitSaferReplacementButKeepsRecordedMode(t *testing.T) {
-	omitted, err := parseUnifiedLaneCommand([]string{"resume", "worker"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateGrokLanePermission("grok", omitted, false); err != nil {
-		t.Fatalf("recorded permission reuse rejected: %v", err)
-	}
-	explicitDefault, err := parseUnifiedLaneCommand([]string{"resume", "worker", "--permission-mode", "default"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateGrokLanePermission("grok", explicitDefault, false); err == nil {
-		t.Fatal("explicit unsupported Grok resume permission succeeded")
-	}
-}
-
 func TestLaneResumePermissionUsesInvocationThenLiveValueThenFreshDefault(t *testing.T) {
 	if got := laneResumePermission("bypassPermissions", "default", "bypassPermissions"); got != "default" {
 		t.Fatalf("explicit resume permission = %q", got)

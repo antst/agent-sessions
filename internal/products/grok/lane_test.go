@@ -92,6 +92,7 @@ func openRequest() productruntime.LaneOpenRequest {
 	return productruntime.LaneOpenRequest{
 		ProductID: ProductID, LaneID: "lane-1", Name: "named-grok", Cwd: "/work",
 		Capability: "lane-capability", Groups: []string{"parent", "parent/child"},
+		Environment:    []string{"PATH=/bin", "AGENT_SESSIONS_SESSION_ID=lane-1"},
 		PermissionMode: permissionmode.BypassPermissions,
 	}
 }
@@ -109,7 +110,8 @@ func TestLaneOpenCarriesNativeFactsAndAppliesOnlyRequestedModel(t *testing.T) {
 		t.Fatalf("ref = %#v", ref)
 	}
 	if factory.calls != 1 || factory.request.Name != "named-grok" || factory.request.Capability != "lane-capability" ||
-		!reflect.DeepEqual(factory.request.Groups, request.Groups) || !reflect.DeepEqual(factory.request.Arguments, []string{"--tools", "shell"}) {
+		!reflect.DeepEqual(factory.request.Groups, request.Groups) || !reflect.DeepEqual(factory.request.Environment, request.Environment) ||
+		!reflect.DeepEqual(factory.request.Arguments, []string{"--tools", "shell"}) {
 		t.Fatalf("native open = %#v", factory.request)
 	}
 	if !reflect.DeepEqual(session.models, []string{"grok-4.5"}) || len(session.modes) != 0 {

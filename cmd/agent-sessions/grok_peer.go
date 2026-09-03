@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/bridge"
-	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/launcher"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 )
@@ -148,7 +147,6 @@ func grokLauncherLiveCall(
 type BridgeFactoryConfig struct {
 	Executable     string
 	HostExecutable string
-	Environment    []string
 	Diagnostics    io.Writer
 }
 
@@ -186,7 +184,7 @@ func (factory *grokBridgeFactory) Open(ctx context.Context, request grokproduct.
 		return nil, cause
 	}
 	socket := filepath.Join(root, "leader.sock")
-	environment := grokLaneEnvironment(factory.config.Environment, request)
+	environment := append([]string(nil), request.Environment...)
 	startup, err := bridge.NewGrokNativeLeaderBootstrap(
 		factory.config.Executable, request.Cwd, socket, environment, factory.config.Diagnostics,
 	)
@@ -288,26 +286,6 @@ type bridgePrompt struct{ prompt *bridge.GrokNativePrompt }
 func (prompt bridgePrompt) Wait(ctx context.Context) (grokproduct.NativePromptResult, error) {
 	result, err := prompt.prompt.Wait(ctx)
 	return grokproduct.NativePromptResult{Output: result.Output, StopReason: result.StopReason}, err
-}
-
-func grokLaneEnvironment(input []string, request grokproduct.NativeOpenRequest) []string {
-	result := make([]string, 0, len(input)+4)
-	for _, entry := range input {
-		if strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_ID=") ||
-			strings.HasPrefix(entry, "AGENT_SESSIONS_PRODUCT=") ||
-			strings.HasPrefix(entry, "AGENT_SESSIONS_SESSION_NAME=") ||
-			strings.HasPrefix(entry, "AGENT_SESSIONS_GROUPS=") ||
-			strings.HasPrefix(entry, "AGENT_SESSIONS_LANE_CAPABILITY=") ||
-			strings.HasPrefix(entry, "AGENT_SESSIONS_HOST_BINARY=") {
-			continue
-		}
-		result = append(result, entry)
-	}
-	groups, _ := json.Marshal(append([]string{}, request.Groups...))
-	result = envutil.Set(result, "AGENT_SESSIONS_PRODUCT", grokproduct.ProductID)
-	result = envutil.Set(result, "AGENT_SESSIONS_SESSION_ID", request.LaneID)
-	result = envutil.Set(result, "AGENT_SESSIONS_SESSION_NAME", request.Name)
-	return envutil.Set(result, "AGENT_SESSIONS_GROUPS", string(groups))
 }
 
 func grokLaneMCPServer(hostExecutable string, request grokproduct.NativeOpenRequest) map[string]any {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,8 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
@@ -24,7 +21,6 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-const laneOutputLimit = 16 << 20
 const defaultUnifiedLaneAutoArchiveDelay = time.Minute
 
 type laneActor struct {
@@ -48,7 +44,6 @@ type laneActor struct {
 	cancel                                     context.CancelFunc
 	done                                       chan struct{}
 	collecting                                 bool
-	interruptRequested                         bool
 }
 
 type laneCommandEnvelope struct {
@@ -353,9 +348,6 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(options.name) == "" {
 		return nil, errors.New("lane start/run requires --name and non-empty input")
 	}
-	if err := validateGrokLanePermission(product, options, true); err != nil {
-		return nil, err
-	}
 	cwd, err := laneInvocationCwd(parent.Cwd, options.cwd)
 	if err != nil {
 		return nil, err
@@ -425,7 +417,7 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		c.mu.Unlock()
 		return nil, err
 	}
-	if err := c.dispatchLaneTurn(runtime, actor, input, false); err != nil {
+	if err := c.dispatchLaneTurn(runtime, actor, input); err != nil {
 		return nil, err
 	}
 	if !wait {
@@ -438,9 +430,6 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string) (map[string]any, error) {
 	if strings.TrimSpace(options.target) == "" || strings.TrimSpace(input) == "" {
 		return nil, errors.New("lane resume requires one selector and non-empty input")
-	}
-	if err := validateGrokLanePermission(product, options, false); err != nil {
-		return nil, err
 	}
 	actor, err := c.resolveLaneActor(runtime, parent, product, options.target, true)
 	if err != nil {
@@ -500,6 +489,8 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if options.persistentSet {
 		actor.persistent = options.persistent
 	}
+	actor.autoArchive, actor.autoArchiveDelay = true, defaultUnifiedLaneAutoArchiveDelay
+	actor.autoArchiveAt = 0
 	if options.autoArchiveAfterSet {
 		actor.autoArchive, actor.autoArchiveDelay = true, options.autoArchiveAfter
 	}
@@ -523,7 +514,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if err := c.commitResumeLane(runtime, actor, false); err != nil {
 		return nil, err
 	}
-	if err := c.dispatchLaneTurn(runtime, actor, input, true); err != nil {
+	if err := c.dispatchLaneTurn(runtime, actor, input); err != nil {
 		return nil, err
 	}
 	return c.waitLaneActor(ctx, runtime, actor)
@@ -624,7 +615,6 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 	c.mu.Lock()
 	running := actor.state == "running" && actor.cancel != nil
 	if running {
-		actor.interruptRequested = true
 		actor.state = "interrupting"
 	}
 	c.mu.Unlock()
@@ -693,23 +683,19 @@ func (c *hostCoordinator) steerLane(
 
 func (c *hostCoordinator) interruptLaneNative(actor *laneActor) error {
 	c.mu.Lock()
-	product, laneID := actor.product, actor.id
+	product := actor.product
 	session := productruntime.NativeSessionRef{
 		LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
 	}
 	turn := productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: actor.nativeTurnID}
 	c.mu.Unlock()
-	if driver, ok := c.laneDrivers.ByProduct(product); ok {
-		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer interruptCancel()
-		return driver.Interrupt(interruptCtx, turn)
-	}
-	switch product {
-	case "grok":
-		return c.grokLanes.Interrupt(laneID)
-	default:
+	driver, ok := c.laneDrivers.ByProduct(product)
+	if !ok {
 		return fmt.Errorf("unsupported lane product %q", product)
 	}
+	interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer interruptCancel()
+	return driver.Interrupt(interruptCtx, turn)
 }
 
 func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand) (map[string]any, error) {
@@ -814,7 +800,6 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 		var cancel context.CancelFunc
 		if (actor.state == "running" || actor.state == "preparing" || actor.state == "interrupting") && actor.cancel != nil {
 			state, cancel = "retiring", actor.cancel
-			actor.interruptRequested = true
 		}
 		actor.state = state
 		candidates = append(candidates, transition{actor: actor, state: state, cancel: cancel})
@@ -831,6 +816,7 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 				if err := c.interruptLaneNative(candidate.actor); err != nil {
 					return err
 				}
+				continue
 			}
 			candidate.cancel()
 		}
@@ -877,11 +863,7 @@ func inspectLaneProductReadiness(ctx context.Context, product, path, cwd string)
 func inspectLaneNativeVersion(ctx context.Context, product, path string) (string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	arguments := []string{"--version"}
-	if product == "grok" {
-		arguments = []string{"--no-auto-update", "--version"}
-	}
-	body, err := exec.CommandContext(probeCtx, path, arguments...).CombinedOutput()
+	body, err := exec.CommandContext(probeCtx, path, "--version").CombinedOutput()
 	if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
 		return "", fmt.Errorf("%s version check timed out", product)
 	}
@@ -895,8 +877,7 @@ func inspectLaneNativeVersion(ctx context.Context, product, path string) (string
 	return version, nil
 }
 
-//nolint:gocyclo // Dispatch keeps capability, journal, native execution, and failure transitions together.
-func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string, resume bool) error {
+func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string) error {
 	capability, err := randomCapability()
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
@@ -910,61 +891,11 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	c.mu.Lock()
 	actor.state = "preparing"
 	c.mu.Unlock()
-	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
-		return c.dispatchProductLaneTurn(runtime, actor, prompt, driver)
+	driver, ok := c.laneDrivers.ByProduct(actor.product)
+	if !ok {
+		return c.failLaneDispatch(runtime, actor, fmt.Errorf("unsupported lane product %q", actor.product))
 	}
-	command, err := laneNativeCommand(actor, prompt, resume)
-	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	turnCtx, cancel := laneTurnContext(c.ctx, actor.turnTimeout)
-	command = exec.CommandContext(turnCtx, command.Path, command.Args[1:]...) //nolint:gosec // path and argv are constructed from the installed product inventory.
-	command.Dir, command.Env = actor.cwd, laneWorkerEnvironment(os.Environ(), actor)
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var stdout, stderr cappedLaneBuffer
-	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Start(); err != nil {
-		cancel()
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	c.mu.Lock()
-	actor.cancel, actor.state, actor.startedAt = cancel, "running", time.Now().UnixMilli()
-	if actor.turnTimeout > 0 {
-		actor.deadlineAt = actor.startedAt + actor.turnTimeout.Milliseconds()
-	}
-	actor.interruptRequested = false
-	c.mu.Unlock()
-	if err := c.markLaneRunning(runtime, actor); err != nil {
-		cancel()
-		_ = command.Wait()
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	go func() {
-		c.mu.Lock()
-		dispatchedTurnID, dispatchedDone := actor.turnID, actor.done
-		c.mu.Unlock()
-		err := command.Wait()
-		outcome := "completed"
-		if err != nil {
-			outcome = "failed"
-		}
-		if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
-			outcome = "timed_out"
-		}
-		result, nativeID := parseLaneNativeResult(stdout.Bytes())
-		if result == "" {
-			result = strings.TrimSpace(stdout.String())
-		}
-		failure := ""
-		if err != nil {
-			failure = strings.TrimSpace(stderr.String())
-		}
-		cancel()
-		c.completeLaneTurn(runtime, actor, dispatchedTurnID, dispatchedDone, laneTurnCompletion{
-			outcome: outcome, result: result, failure: failure, nativeID: nativeID, failed: err != nil,
-		})
-	}()
-	return nil
+	return c.dispatchProductLaneTurn(runtime, actor, prompt, driver)
 }
 
 func (c *hostCoordinator) dispatchProductLaneTurn(
@@ -980,7 +911,8 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
 		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: actor.nativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
-		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox, Capability: actor.capability,
+		Environment: laneWorkerEnvironment(os.Environ(), actor), ApprovalPolicy: actor.approvalPolicy,
+		Sandbox: actor.sandbox, Capability: actor.capability,
 	})
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
@@ -1052,7 +984,6 @@ func (c *hostCoordinator) beginLaneExecution(runtime *daemonpkg.Runtime, actor *
 	if actor.turnTimeout > 0 {
 		actor.deadlineAt = actor.startedAt + actor.turnTimeout.Milliseconds()
 	}
-	actor.interruptRequested = false
 	c.mu.Unlock()
 	return c.markLaneRunning(runtime, actor)
 }
@@ -1134,9 +1065,6 @@ func prepareLaneTurnLocked(actor *laneActor) {
 	actor.outcome, actor.result, actor.failure = "", "", ""
 	actor.startedAt, actor.completedAt, actor.deadlineAt = 0, 0, 0
 	actor.cancel, actor.nativeTurnID = nil, ""
-	actor.interruptRequested = false
-	// Claim native dispatch while holding the coordinator lock. A concurrent
-	// delivery is rejected truthfully while the product is busy.
 	actor.state = "preparing"
 }
 
@@ -1165,9 +1093,6 @@ func (c *hostCoordinator) completeLaneTurn(
 	if actor.turnID != dispatchedTurnID || actor.done != dispatchedDone {
 		c.mu.Unlock()
 		return
-	}
-	if actor.interruptRequested && completion.failed {
-		completion.outcome = "interrupted"
 	}
 	if completion.nativeID != "" && completion.nativeID != actor.nativeID {
 		completion.failed, completion.outcome = true, "failed"
@@ -1223,74 +1148,16 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 	if actor == nil {
 		return nil
 	}
-	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
-		if actor.nativeID == "" {
-			return nil
-		}
-		return driver.Archive(context.Background(), productruntime.NativeSessionRef{
-			LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
-		})
+	driver, ok := c.laneDrivers.ByProduct(actor.product)
+	if !ok {
+		return fmt.Errorf("unsupported lane product %q", actor.product)
 	}
-	switch actor.product {
-	case "grok":
-		return c.grokLanes.Archive(actor.id)
-	default:
-		return errors.New("unsupported lane product")
+	if actor.nativeID == "" {
+		return nil
 	}
-}
-
-type cappedLaneBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *cappedLaneBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	if b.buffer.Len()+len(p) > laneOutputLimit {
-		b.mu.Unlock()
-		return 0, errors.New("native lane output exceeded 16 MiB")
-	}
-	n, err := b.buffer.Write(p)
-	b.mu.Unlock()
-	return n, err
-}
-
-func (b *cappedLaneBuffer) Bytes() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]byte(nil), b.buffer.Bytes()...)
-}
-
-func (b *cappedLaneBuffer) String() string {
-	return string(b.Bytes())
-}
-
-//nolint:gocyclo // Product-specific argv construction preserves each native CLI's distinct contract.
-func laneNativeCommand(actor *laneActor, prompt string, resume bool) (*exec.Cmd, error) {
-	path, err := laneExecutable(actor.product)
-	if err != nil {
-		return nil, err
-	}
-	args := make([]string, 0, 16+len(actor.arguments))
-	switch actor.product {
-	case "grok":
-		args = append(args, "--no-auto-update", "--output-format", "json", "--cwd", actor.cwd)
-		if resume {
-			args = append(args, "--resume", actor.nativeID)
-		} else {
-			args = append(args, "--session-id", actor.id)
-		}
-		if actor.permission == "bypassPermissions" {
-			args = append(args, "--always-approve")
-		} else if actor.permission != "" {
-			args = append(args, "--permission-mode", actor.permission)
-		}
-		args = append(args, actor.arguments...)
-		args = append(args, "--single", prompt)
-	default:
-		return nil, errors.New("unsupported lane product")
-	}
-	return exec.Command(path, args...), nil //nolint:gosec // installed product and structured arguments.
+	return driver.Archive(context.Background(), productruntime.NativeSessionRef{
+		LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
+	})
 }
 
 func laneExecutable(product string) (string, error) {
@@ -1329,68 +1196,6 @@ func laneWorkerEnvironment(input []string, actor *laneActor) []string {
 		"AGENT_SESSIONS_GROUPS="+string(groups),
 		"AGENT_SESSIONS_LANE_CAPABILITY="+actor.capability,
 	)
-}
-
-//nolint:gocyclo // Native result decoding accepts the documented result forms for all four products.
-func parseLaneNativeResult(body []byte) (string, string) {
-	var documents []any
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) > 0 && trimmed[0] == '[' {
-		var values []any
-		if json.Unmarshal(trimmed, &values) == nil {
-			documents = values
-		}
-	} else {
-		for _, line := range bytes.Split(trimmed, []byte{'\n'}) {
-			var value any
-			if json.Unmarshal(line, &value) == nil {
-				documents = append(documents, value)
-			}
-		}
-		if len(documents) == 0 {
-			var value any
-			if json.Unmarshal(trimmed, &value) == nil {
-				documents = append(documents, value)
-			}
-		}
-	}
-	var session, result string
-	var walk func(any)
-	walk = func(value any) {
-		switch typed := value.(type) {
-		case map[string]any:
-			for key, child := range typed {
-				text, _ := child.(string)
-				switch key {
-				case "session_id", "thread_id", "threadId":
-					if session == "" && looksLikeUUID(text) {
-						session = text
-					}
-				case "result":
-					if text != "" {
-						result = text
-					}
-				case "text":
-					if text != "" && result == "" {
-						result = text
-					}
-				}
-				walk(child)
-			}
-		case []any:
-			for _, child := range typed {
-				walk(child)
-			}
-		}
-	}
-	for _, document := range documents {
-		walk(document)
-	}
-	return result, session
-}
-
-func looksLikeUUID(value string) bool {
-	return len(value) == 36 && value[8] == '-' && value[13] == '-' && value[18] == '-' && value[23] == '-'
 }
 
 func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product, target string, all bool) (*laneActor, error) {
@@ -1568,23 +1373,6 @@ func laneResumePermission(existing, requested, parent string) string {
 	return laneDefaultPermission(parent)
 }
 
-// validateGrokLanePermission prevents the generic option layer from silently
-// widening a Grok lane. A new Grok lane requires an explicit request that
-// canonicalizes to bypassPermissions; inheriting a bypass parent is not that
-// request. Resume keeps the permission recorded by a previously accepted lane,
-// but an explicitly supplied replacement must still be the supported mode.
-func validateGrokLanePermission(product string, options parsedLaneCommand, start bool) error {
-	if product != "grok" {
-		return nil
-	}
-	if options.permissionExplicit && options.permission == "bypassPermissions" {
-		return nil
-	}
-	if !start && !options.permissionExplicit {
-		return nil
-	}
-	return errors.New("grok lanes require an explicit bypassPermissions permission selection")
-}
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}

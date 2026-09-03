@@ -12,6 +12,7 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
+	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
@@ -27,6 +28,9 @@ func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *
 	}
 	if _, ok := coordinator.laneDrivers.ByProduct(claudeproduct.ProductID); !ok {
 		t.Fatal("Claude lane driver is absent from the production registry")
+	}
+	if _, ok := coordinator.laneDrivers.ByProduct(grokproduct.ProductID); !ok || coordinator.candidateResolvers[grokproduct.ProductID] == nil {
+		t.Fatal("Grok lane driver or product-global candidate resolver is absent from the production registry")
 	}
 	for _, product := range []struct {
 		id          string
