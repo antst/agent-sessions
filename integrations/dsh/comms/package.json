@@ -1,0 +1,37 @@
+{
+  "name": "@agent-sessions/dsh-comms",
+  "version": "0.4.0",
+  "type": "commonjs",
+  "main": "plugin.cjs",
+  "scripts": {
+    "prepack": "node prepack.cjs",
+    "test": "node --test plugin.test.cjs"
+  },
+  "exports": {
+    ".": "./plugin.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "README.md",
+    "plugin.cjs",
+    "prepack.cjs",
+    "cordis.patch.yml",
+    "shared/live-session.cjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
+    "@deepseek-ai/dsh-agent": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-launch-environment": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1"
+  }
+}

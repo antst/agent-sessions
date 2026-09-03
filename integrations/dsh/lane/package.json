@@ -1,0 +1,41 @@
+{
+  "name": "@agent-sessions/dsh-lane",
+  "version": "0.4.0",
+  "type": "commonjs",
+  "main": "plugin.cjs",
+  "scripts": {
+    "test": "node --test plugin.test.cjs"
+  },
+  "exports": {
+    ".": "./plugin.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "README.md",
+    "plugin.cjs",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@agent-sessions/dsh-comms": "0.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
+    "@deepseek-ai/dsh-agent": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-cmdline": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-permission-presets": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-session": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-session-title": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-workspace": "^0.1.2-rc.1"
+  }
+}

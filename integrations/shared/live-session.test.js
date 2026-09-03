@@ -31,7 +31,7 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   const laneCall = client.callTool("native", "lane-one", "lane.status", { product: "qwen", arguments: ["worker"] });
   await until(() => fixture.requests.some((frame) => frame.method === "lane.status"));
   const laneRequest = fixture.requests.find((frame) => frame.method === "lane.status");
-  assert.equal(laneRequest.params.cwd, process.cwd());
+  assert.equal(laneRequest.params.cwd, "/work");
   fixture.write({ jsonrpc: "2.0", id: laneRequest.id, result: { type: "lane.status" } });
   assert.deepEqual(await laneCall, { type: "lane.status" });
 
@@ -76,6 +76,16 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   assert.deepEqual(fixture.responses.find((frame) => frame.id === "daemon.native-failed").error, {
     code: -32006, message: "native exact failure", data: { detail: "native exact failure" },
   });
+});
+
+test("one session may report product-owned groups instead of process launch groups", async (t) => {
+  const fixture = await server(t);
+  const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
+  t.after(() => client.stop());
+  assert.equal(client.report("native", "", { cwd: "/native" }, {}, ["profile-group"]), true);
+  await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
+  assert.deepEqual(fixture.reports[0].groups, ["profile-group"]);
+  assert.equal(client.report("other", "", { cwd: "/native" }, {}, [1]), false);
 });
 
 test("disconnect rejects calls and reconnect reports from scratch", async (t) => {

@@ -45,13 +45,13 @@ class LiveSessionClient extends EventEmitter {
     return Promise.resolve(this.active ? { active: true } : { active: false, reason: this.inactiveReason });
   }
 
-  report(nativeSessionID, name, info = {}, capabilities = {}) {
+  report(nativeSessionID, name, info = {}, capabilities = {}, groups = this.groups) {
     if (!this.active || this.stopping || !text(nativeSessionID) || typeof name !== "string") return false;
     const existing = this.sessions.get(nativeSessionID);
     if (existing) return this.update(nativeSessionID, name, info);
-    if (!stringMap(info) || !validCapabilities(capabilities)) return false;
+    if (!stringMap(info) || !validCapabilities(capabilities) || !stringList(groups)) return false;
     const session = {
-      id: nativeSessionID, name, info: { ...info }, capabilities: { ...capabilities },
+      id: nativeSessionID, name, info: { ...info }, capabilities: { ...capabilities }, groups: [...groups],
       socket: null, ready: false, buffer: "", pending: new Map(), timer: null,
     };
     this.sessions.set(nativeSessionID, session);
@@ -90,7 +90,7 @@ class LiveSessionClient extends EventEmitter {
     if (!session?.ready) return Promise.reject(new InactiveError("disconnected"));
     let params = argumentsValue ?? {};
     if (operation.startsWith("lane.") && !Object.hasOwn(params, "cwd")) {
-      params = { ...params, cwd: process.cwd() };
+      params = { ...params, cwd: session.info.cwd };
     }
     return this._call(session, callID, operation, params);
   }
@@ -135,7 +135,7 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _hello(session) {
-    const hello = { protocol: 1, uuid: session.id, name: session.name, groups: [...this.groups], product: this.productID, info: { ...session.info } };
+    const hello = { protocol: 1, uuid: session.id, name: session.name, groups: [...session.groups], product: this.productID, info: { ...session.info } };
     if (Object.keys(session.capabilities).length > 0) hello.capabilities = { ...session.capabilities };
     return hello;
   }
@@ -271,6 +271,9 @@ function exactKeys(value, allowed) {
 }
 function stringMap(value) {
   return exactKeys(value, Object.keys(value ?? {})) && Object.values(value).every((item) => typeof item === "string");
+}
+function stringList(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 function validCapabilities(value) {
   return exactKeys(value, ["lane"]) && (!("lane" in value) || value.lane === true);
