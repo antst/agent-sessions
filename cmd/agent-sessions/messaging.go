@@ -678,6 +678,16 @@ func publicAttachment(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAt
 }
 
 func (c *hostCoordinator) attachmentDisplayName(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) string {
+	c.mu.Lock()
+	lane := c.lanes[attachment.ID]
+	laneName := ""
+	if lane != nil {
+		laneName = lane.name
+	}
+	c.mu.Unlock()
+	if strings.TrimSpace(laneName) != "" {
+		return laneName
+	}
 	if runtime != nil {
 		if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
 			return title

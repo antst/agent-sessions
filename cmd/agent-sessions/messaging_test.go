@@ -170,14 +170,20 @@ func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = presence.Close() })
 	coordinator.presence = presence
-	delivered := make(chan struct{}, 2)
+	delivered := make(chan string, 2)
 	_ = startLiveSessionClient(ctx, presence.listener.Addr().String(), liveSessionReport{
 		UUID: "parent-id", Name: "parent-name", Product: "claude",
-	}, func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if method != "message.deliver" {
 			t.Fatalf("delivery method = %q", method)
 		}
-		delivered <- struct{}{}
+		var delivery struct {
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal(params, &delivery); err != nil {
+			t.Fatalf("decode delivery: %v", err)
+		}
+		delivered <- delivery.Body
 		return json.RawMessage(`{}`), nil
 	})
 	for deadline := time.Now().Add(2 * time.Second); ; {
@@ -205,10 +211,17 @@ func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
 			t.Fatalf("send to %q: %v", target, err)
 		}
 		select {
-		case <-delivered:
+		case body := <-delivered:
+			if !strings.Contains(body, `from-session="lane-native"`) ||
+				!strings.Contains(body, `from-name="lane-name"`) {
+				t.Fatalf("lane envelope = %q", body)
+			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("send to %q was not delivered", target)
 		}
+	}
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{ID: "parent-id"}); got != "parent-name" {
+		t.Fatalf("peer display name changed = %q", got)
 	}
 }
 
