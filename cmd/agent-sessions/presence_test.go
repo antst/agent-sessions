@@ -405,6 +405,14 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 		parentID: parentA.UUID, groups: []string{"shared"}, permission: "default", persistent: true, state: "idle", done: closedLaneDone(),
 	}
 	coordinator.lanes[idle.id], coordinator.lanes[persistent.id] = idle, persistent
+	laneReport := liveSessionReport{
+		UUID: persistent.nativeID, Name: persistent.name, Product: persistent.product,
+		Groups: []string{"shared", "session:" + runtime.HostID() + "/" + parentA.UUID},
+	}
+	coordinator.joinLiveSession(runtime, laneReport)
+	if coordinator.reportedLanes[persistent.nativeID] != persistent.id {
+		t.Fatalf("persistent lane report was not bound to its launched actor: %+v", coordinator.reportedLanes)
+	}
 
 	coordinator.leaveLiveSession(runtime, parentA)
 	coordinator.leaveLiveSession(runtime, parentA)
@@ -417,6 +425,9 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 
 	parentBReport := liveSessionReport{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
 	coordinator.joinLiveSession(runtime, parentBReport)
+	if coordinator.lanes[persistent.id] != persistent || !persistent.persistent || coordinator.reportedLanes[persistent.nativeID] != persistent.id {
+		t.Fatalf("unowned persistent lane was reclassified: actor=%+v lanes=%+v reported=%+v", persistent, coordinator.lanes, coordinator.reportedLanes)
+	}
 	parentB, active, err := runtime.Attachments().ActiveAttachment(parentBReport.UUID)
 	if err != nil || !active {
 		t.Fatalf("parent B active=%v err=%v", active, err)

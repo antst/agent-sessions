@@ -499,7 +499,7 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 		if actorKey == "" && parentID != "" {
 			actorKey = c.unboundReportedLaneContextLocked(parentID, report)
 		}
-		if parentID == "" {
+		if actorKey == "" && parentID == "" {
 			product, _ := productcatalog.ByID(report.Product)
 			if product.Has(productcatalog.CapabilityInteractive) {
 				peerIDs[id] = true
