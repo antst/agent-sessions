@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -290,6 +292,48 @@ func TestUnifiedRenameNeverCreatesADurableDaemonAlias(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), `"attachments"`) || strings.Contains(string(encoded), `"name"`) {
 		t.Fatalf("live peer leaked into durable catalog: %s", encoded)
+	}
+}
+
+func TestClaudePeerNameComesFromTheProductTranscriptAtQueryTime(t *testing.T) {
+	profile := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", profile)
+	project := filepath.Join(profile, "projects", "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const id = "11111111-1111-4111-8111-111111111111"
+	if err := os.WriteFile(filepath.Join(project, id+".jsonl"), []byte(
+		`{"sessionId":"`+id+`","type":"custom-title","customTitle":"native-name"}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newPresenceTestRuntime(t)
+	runtime.Attachments().ReportLive("source", "source", "codex", []string{"project"}, map[string]string{}, false)
+	runtime.Attachments().ReportLive(id, "launch-name", "claude", []string{"project"}, map[string]string{}, false)
+	runtime.Attachments().ReportLive("22222222-2222-4222-8222-222222222222", "hello-name", "claude", []string{"project"}, map[string]string{}, false)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
+		ID: id, NativeSessionID: id, Product: "claude",
+	}); got != "native-name" {
+		t.Fatalf("Claude display name = %q", got)
+	}
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
+		ID: "22222222-2222-4222-8222-222222222222", NativeSessionID: "22222222-2222-4222-8222-222222222222", Product: "claude",
+	}); got != "hello-name" {
+		t.Fatalf("Claude hello fallback name = %q", got)
+	}
+	listed, err := coordinator.callLocalTool(context.Background(), runtime, "source", "list_peers", map[string]any{})
+	if err != nil || !strings.Contains(listed.Text, "native-name") {
+		t.Fatalf("Claude peer list = %q, %v", listed.Text, err)
+	}
+	_, err = coordinator.callLocalTool(context.Background(), runtime, "source", "send_message", map[string]any{
+		"target": "native-name", "message": "hello",
+	})
+	if err == nil || err.Error() != "live session channel is unavailable" {
+		t.Fatalf("send-by-native-name did not select the live Claude peer: %v", err)
 	}
 }
 

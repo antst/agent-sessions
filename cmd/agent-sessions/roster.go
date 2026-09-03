@@ -139,8 +139,8 @@ func (c *hostCoordinator) operatorRoster(runtime *daemonpkg.Runtime) (json.RawMe
 		if entry.Kind != "peer" || !entry.Live {
 			continue
 		}
-		if title, observed, titleErr := runtime.Attachments().LiveNativeTitle(entry.ID); titleErr == nil && observed && title != "" {
-			entry.Name = title
+		if attachment, active, activeErr := runtime.Attachments().ActiveAttachment(entry.ID); activeErr == nil && active {
+			entry.Name = c.attachmentDisplayName(runtime, attachment)
 		}
 	}
 	return json.Marshal(report)

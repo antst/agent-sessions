@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/antst/agent-sessions/internal/bridge"
+	"github.com/antst/agent-sessions/internal/claudeprofile"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productruntime"
@@ -246,7 +248,7 @@ func (c *hostCoordinator) callLocalToolWithID(
 		return localToolResult{Text: text, Data: map[string]any{"peers": publicMessageTargets(peers)}}, nil
 	case "identity":
 		displayName := c.attachmentDisplayName(runtime, source)
-		return localToolResult{Text: displayName + " — session:" + source.ID, Data: publicAttachment(runtime, source)}, nil
+		return localToolResult{Text: displayName + " — session:" + source.ID, Data: publicAttachment(source, displayName)}, nil
 	case "rename_session":
 		if strings.TrimSpace(mapString(args, "name")) == "" {
 			return localToolResult{}, errors.New("name is required")
@@ -718,13 +720,7 @@ func requestedLocalTargets(args map[string]any) ([]string, error) {
 	return targets, nil
 }
 
-func publicAttachment(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAttachment) map[string]any {
-	name := attachment.ID
-	if runtime != nil {
-		if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
-			name = title
-		}
-	}
+func publicAttachment(attachment daemonpkg.ManagedAttachment, name string) map[string]any {
 	return map[string]any{
 		"id": attachment.ID, "session_id": attachment.NativeSessionID,
 		"name": name, "product": attachment.Product, "status": "live",
@@ -743,6 +739,13 @@ func (c *hostCoordinator) attachmentDisplayName(runtime *daemonpkg.Runtime, atta
 	c.mu.Unlock()
 	if strings.TrimSpace(laneName) != "" {
 		return laneName
+	}
+	if attachment.Product == "claude" && strings.TrimSpace(attachment.NativeSessionID) != "" {
+		if source, err := claudeprofile.CurrentSource(); err == nil {
+			if title, observed := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, attachment.NativeSessionID); observed && title != attachment.NativeSessionID {
+				return title
+			}
+		}
 	}
 	if runtime != nil {
 		if title, observed, err := runtime.Attachments().LiveNativeTitle(attachment.ID); err == nil && observed && title != "" {
