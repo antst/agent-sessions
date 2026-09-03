@@ -116,6 +116,7 @@ func runLauncherHeldPeer(
 		case <-runCtx.Done():
 			return runCtx.Err()
 		}
+		identity.report = normalizeLiveSessionReport(identity.report)
 		if !validLiveSessionReport(identity.report) {
 			return errors.New("product returned an invalid live session identity")
 		}

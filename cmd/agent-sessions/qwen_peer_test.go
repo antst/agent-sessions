@@ -64,7 +64,7 @@ func TestQwenLauncherDeliversOverItsOwnedInput(t *testing.T) {
 	}
 }
 
-func TestQwenLauncherConfirmsProductIdentityBeforeChildExit(t *testing.T) {
+func TestQwenLauncherAcceptsIdentityWithoutExplicitGroupsBeforeChildExit(t *testing.T) {
 	root := t.TempDir()
 	events := filepath.Join(root, "events.jsonl")
 	input := filepath.Join(root, "input.jsonl")
@@ -81,7 +81,6 @@ func TestQwenLauncherConfirmsProductIdentityBeforeChildExit(t *testing.T) {
 	err := runQwenNativePeer(context.Background(), launcher.QwenNativeLaunch{
 		Executable: script, Environment: []string{launcher.QwenEventsFileEnv + "=" + events},
 		Cwd: root, QwenHome: filepath.Join(root, "qwen-home"), InputPath: input, EventsPath: events,
-		Groups: []string{"project"},
 	})
 	if err != nil {
 		t.Fatal(err)
