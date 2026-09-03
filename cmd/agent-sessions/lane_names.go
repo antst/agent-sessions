@@ -14,11 +14,10 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 ) error {
 	c.mu.Lock()
 	_, active := c.liveReports[parent.ID]
-	if !active || c.laneNamesLoaded[parent.ID] {
+	if !active {
 		c.mu.Unlock()
 		return nil
 	}
-	c.laneNamesLoaded[parent.ID] = true
 	c.mu.Unlock()
 
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
@@ -27,9 +26,6 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 	}
 	candidates, err := engine.Candidates(product)
 	if err != nil {
-		c.mu.Lock()
-		delete(c.laneNamesLoaded, parent.ID)
-		c.mu.Unlock()
 		return err
 	}
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
@@ -61,7 +57,6 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 	defer c.mu.Unlock()
 	if _, stillActive := c.liveReports[parent.ID]; !stillActive {
 		delete(c.laneNames, parent.ID)
-		delete(c.laneNamesLoaded, parent.ID)
 		return nil
 	}
 	if c.laneNames[parent.ID] == nil {

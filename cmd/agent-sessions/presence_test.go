@@ -290,8 +290,8 @@ func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) 
 	if _, err := coordinator.resolveLaneActor(runtime, parent, "codex", "native-lane", true); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("product confirmation calls = %d, want 1", calls)
+	if calls != 2 {
+		t.Fatalf("product confirmation calls = %d, want one per explicit lookup", calls)
 	}
 }
 
@@ -336,20 +336,28 @@ func TestLaneEOFRematerializesArchivedGroupsOnlyFromDurableCandidate(t *testing.
 		Groups: candidateLaneGroups(candidate),
 	}
 	coordinator.joinLiveSession(runtime, laneReport)
+	parentBReport := liveSessionReport{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
+	coordinator.joinLiveSession(runtime, parentBReport)
+	parentB, active, err := runtime.Attachments().ActiveAttachment(parentBReport.UUID)
+	if err != nil || !active {
+		t.Fatalf("parent B active=%v err=%v", active, err)
+	}
+	if _, err := coordinator.resolveLaneActor(runtime, parentB, candidate.Product, "worker", true); err != nil {
+		t.Fatal(err)
+	}
 	coordinator.leaveLiveSession(runtime, laneReport)
 	coordinator.mu.Lock()
 	_, actorSurvived := coordinator.lanes[candidate.NativeSessionID]
-	loadedSurvived := coordinator.laneNamesLoaded[parent.ID]
 	coordinator.mu.Unlock()
-	if actorSurvived || loadedSurvived {
-		t.Fatalf("EOF left actor=%v loaded-candidate-bit=%v", actorSurvived, loadedSurvived)
+	if actorSurvived {
+		t.Fatal("EOF left the live lane actor")
 	}
 
-	actor, err := coordinator.resolveLaneActor(runtime, parent, candidate.Product, "worker", true)
+	actor, err := coordinator.resolveLaneActor(runtime, parentB, candidate.Product, "worker", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if confirmations != 2 || actor.cwd != "" || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) || !reflect.DeepEqual(actor.groups, candidateLaneGroups(candidate)) {
+	if confirmations != 3 || actor.parentID != parentB.ID || actor.cwd != "" || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) || !reflect.DeepEqual(actor.groups, candidateLaneGroups(candidate)) {
 		t.Fatalf("rematerialized actor=%+v confirmations=%d", actor, confirmations)
 	}
 	after, err := runtime.State().Read()
@@ -502,7 +510,6 @@ func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testi
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "opencode", Cwd: "/workspace", Groups: []string{"team"}}
 	coordinator.liveReports[parent.ID] = liveSessionReport{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
-	coordinator.laneNamesLoaded[parent.ID] = true
 	actor := &laneActor{
 		id: "agent-sessions-lane", nativeID: "ses_product", product: "opencode", name: "worker",
 		cwd: "/workspace", parentID: parent.ID, groups: []string{"team"}, explicitGroups: []string{"team/worker"},

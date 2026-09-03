@@ -457,7 +457,6 @@ func (c *hostCoordinator) joinLiveSession(runtime *daemonpkg.Runtime, report liv
 	c.mu.Lock()
 	if _, existed := c.liveReports[report.UUID]; !existed {
 		delete(c.laneNames, report.UUID)
-		delete(c.laneNamesLoaded, report.UUID)
 	}
 	c.liveReports[report.UUID] = report
 	c.mu.Unlock()
@@ -471,7 +470,6 @@ func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report li
 	if departed {
 		delete(c.liveReports, report.UUID)
 		delete(c.laneNames, report.UUID)
-		delete(c.laneNamesLoaded, report.UUID)
 	}
 	c.mu.Unlock()
 	c.syncLiveSessions(runtime)
@@ -528,16 +526,12 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 
 	for id, actorKey := range oldLanes {
 		if _, ok := laneKeys[id]; !ok {
-			if actor := c.lanes[actorKey]; actor != nil {
-				delete(c.laneNamesLoaded, actor.parentID)
-			}
 			delete(c.lanes, actorKey)
 		}
 	}
 	for id := range oldPeers {
 		if !peerIDs[id] {
 			delete(c.laneNames, id)
-			delete(c.laneNamesLoaded, id)
 		}
 	}
 	for id, actorKey := range laneKeys {

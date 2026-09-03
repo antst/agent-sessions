@@ -60,7 +60,6 @@ type hostCoordinator struct {
 	reportedLanes      map[string]string
 	reportedPeers      map[string]bool
 	laneNames          map[string]map[string]laneNameEntry
-	laneNamesLoaded    map[string]bool
 	presence           *livePresenceServer
 	resolveCandidate   func(context.Context, *daemonpkg.Runtime, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
 	candidateResolvers map[string]func(context.Context, daemonpkg.ManagedAttachment, daemonpkg.LaneCandidate) (laneNameEntry, bool)
@@ -79,15 +78,14 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
-		lanes:           map[string]*laneActor{},
-		liveReports:     map[string]liveSessionReport{},
-		reportedLanes:   map[string]string{},
-		reportedPeers:   map[string]bool{},
-		laneNames:       map[string]map[string]laneNameEntry{},
-		laneNamesLoaded: map[string]bool{},
-		runtimeReady:    make(chan *daemonpkg.Runtime, 1),
-		now:             time.Now,
+		grokLanes:     daemonpkg.NewGrokLaneAdapter(),
+		lanes:         map[string]*laneActor{},
+		liveReports:   map[string]liveSessionReport{},
+		reportedLanes: map[string]string{},
+		reportedPeers: map[string]bool{},
+		laneNames:     map[string]map[string]laneNameEntry{},
+		runtimeReady:  make(chan *daemonpkg.Runtime, 1),
+		now:           time.Now,
 	}
 	coordinator.resolveCandidate = coordinator.resolveProductLaneCandidate
 	coordinator.candidateResolvers = coordinator.productLaneCandidateResolvers()
