@@ -41,6 +41,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
+	if standingMatrixRequested(args) {
+		return runStandingMatrix(ctx, args, output)
+	}
 	config, err := parseOptions(args)
 	if err != nil {
 		return err
