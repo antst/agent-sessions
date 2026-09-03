@@ -195,6 +195,9 @@ for manifest in "$stage/.mcp.json" "$stage/claude/.mcp.json" "$stage/grok/.mcp.j
   sed "s|@AGENT_SESSIONS_RELEASE_ID@|$release_identity|g" "$manifest" >"$manifest.next"
   mv -- "$manifest.next" "$manifest"
 done
+if [[ -n "$dsh_path" ]]; then
+  stage_dsh_integration_archives "$npm_path" "$stage"
+fi
 
 claude_plugin_install_path() {
   local inventory=$1
@@ -261,7 +264,7 @@ install_opencode_family_plugin() {
   install -m 0644 "$integration_root/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
 }
 
-install_integrations() {
+install_non_dsh_integrations() {
   local integration_root=$1
   if [[ -n "$codex_path" ]]; then
     local codex_plugins codex_marketplaces
@@ -313,16 +316,9 @@ install_integrations() {
 
   install_opencode_family_plugin opencode "$opencode_path" "$integration_root"
   install_opencode_family_plugin kilo "$kilo_path" "$integration_root"
-  if [[ -n "$dsh_path" ]]; then
-    install_dsh_integrations "$dsh_path" "$pnpm_path" "$npm_path" "$integration_root"
-  elif [[ -n "$dsh_skip_reason" ]]; then
-    printf 'Skipping DSH lane integration: %s\n' "$dsh_skip_reason"
-  else
-    printf 'Skipping DSH lane integration: %s is not installed.\n' "$dsh"
-  fi
 }
 
-remove_integrations() {
+remove_non_dsh_integrations() {
   if [[ -n "$codex_path" ]]; then
     "$codex_path" plugin remove agent-sessions@agent-sessions >/dev/null 2>&1 || true
     "$codex_path" plugin marketplace remove agent-sessions >/dev/null 2>&1 || true
@@ -342,9 +338,6 @@ remove_integrations() {
     config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"
     rm -f -- "$config_root/plugins/agent-sessions.js" "$config_root/shared/live-session.js"
   done
-  if [[ -n "$dsh_path" && -n "$pnpm_path" ]]; then
-    remove_dsh_integrations "$dsh_path" "$pnpm_path" >/dev/null 2>&1 || true
-  fi
 }
 
 write_service_definition() {
@@ -579,7 +572,7 @@ rollback_install() {
   trap - ERR EXIT INT TERM
   set +e
   remove_service
-  if [[ $new_release_selected -eq 1 ]]; then remove_integrations; fi
+  if [[ $new_release_selected -eq 1 ]]; then remove_non_dsh_integrations; fi
   if [[ -n "$stage" && -d "$stage" ]]; then
     remove_managed_tree "$stage" "$releases"
   fi
@@ -593,7 +586,7 @@ rollback_install() {
       prior_inventory="$prior_current/scripts/release-inventory"
       if [[ ! -x "$prior_inventory" ]]; then prior_inventory="$source_root/scripts/release-inventory"; fi
       restore_managed_host_aliases "$prior_inventory"
-      install_integrations "$prior_current"
+      install_non_dsh_integrations "$prior_current"
       rollback_summary='Agent Sessions installation failed; restored the prior host release and integrations.'
     else
       restore_pre_managed_host_aliases
@@ -634,7 +627,7 @@ new_release_selected=1
 for alias in agent-sessions $("$source_root/scripts/release-inventory" host-aliases); do
   ln -sfn "$host_root/current/bin/agent-sessions" "$prefix/bin/$alias"
 done
-install_integrations "$release"
+install_non_dsh_integrations "$release"
 install_service "$release"
 wait_for_host_service
 
@@ -661,27 +654,39 @@ for alias_path in "$prefix/bin/"*; do
   fi
 done
 
-# A successful transaction retains exactly the selected immutable release.
-# Old versions and debris from interrupted prior installers are safe to remove
-# only after the replacement service and integrations have passed readiness.
+# DSH is the last fallible state change. Its two packages are added in one
+# offline native operation; generic rollback never touches the prior profile.
+if [[ -n "$dsh_path" ]]; then
+  install_dsh_integrations "$dsh_path" "$pnpm_path" "$release"
+elif [[ -n "$dsh_skip_reason" ]]; then
+  printf 'Skipping DSH lane integration: %s\n' "$dsh_skip_reason"
+else
+  printf 'Skipping DSH lane integration: %s is not installed.\n' "$dsh"
+fi
+trap - ERR INT TERM
+
+# No failure after the DSH commit may reopen the completed transaction. Release
+# cleanup is best effort and reports every path it cannot safely remove.
 for stale_release in "$releases"/* "$releases"/.previous-* "$releases"/.stage.*; do
   [[ -e "$stale_release" || -L "$stale_release" ]] || continue
   [[ "$stale_release" == "$release" ]] && continue
   if [[ -n "$backup" && "$stale_release" == "$backup" ]]; then continue; fi
   if [[ ! -d "$stale_release" || -L "$stale_release" ]]; then
-    printf 'Left Agent Sessions release path %s in place; it is not a real directory.\n' "$stale_release"
+    printf 'Left Agent Sessions release path %s in place; it is not a real directory.\n' "$stale_release" || true
     continue
   fi
   if ! remove_managed_tree "$stale_release" "$releases"; then
-    printf 'Left Agent Sessions release path %s in place; safe removal was refused.\n' "$stale_release"
+    printf 'Left Agent Sessions release path %s in place; safe removal was refused.\n' "$stale_release" || true
     continue
   fi
-  printf 'Removed stale Agent Sessions release path %s.\n' "$stale_release"
+  printf 'Removed stale Agent Sessions release path %s.\n' "$stale_release" || true
 done
 
 if [[ -n "$backup" && -d "$backup" ]]; then
-  remove_managed_tree "$backup" "$releases"
-  printf 'Removed stale Agent Sessions release path %s.\n' "$backup"
+  if remove_managed_tree "$backup" "$releases"; then
+    printf 'Removed stale Agent Sessions release path %s.\n' "$backup" || true
+  else
+    printf 'Left Agent Sessions release path %s in place; safe removal was refused.\n' "$backup" || true
+  fi
 fi
-trap - ERR INT TERM
-printf 'Installed Agent Sessions %s for %s and restarted the user service.\n' "$version" "$platform"
+printf 'Installed Agent Sessions %s for %s and restarted the user service.\n' "$version" "$platform" || true

@@ -16,7 +16,7 @@ const packageSpecs = [
     bundled: [["shared/live-session.cjs", "shared/live-session.js"]],
     generated: ["shared"],
   },
-  { packagePath: "dsh/lane", name: "@agent-sessions/dsh-lane" },
+  { packagePath: "dsh/lane", name: "@agent-sessions/dsh-lane", commsPeer: true },
   {
     packagePath: "opencode", name: "@agent-sessions/opencode",
     bundled: [
@@ -142,6 +142,10 @@ test("all npm packages are exact public, self-contained installation artifacts",
       if (spec.piExtension) {
         assert.ok(manifest.keywords.includes("pi-package"));
         assert.deepEqual(manifest.pi, { extensions: ["./plugin/agent-sessions.mjs"] });
+      }
+      if (spec.commsPeer) {
+        assert.equal(manifest.dependencies?.["@agent-sessions/dsh-comms"], undefined);
+        assert.equal(manifest.peerDependencies?.["@agent-sessions/dsh-comms"], "0.4.0");
       }
       assertSelfContained(packageRoot, manifest);
       if (spec.importable) {

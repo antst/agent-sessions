@@ -53,6 +53,17 @@ state_root="$test_root/state"
 real_npm=$(command -v npm)
 mkdir -p "$home" "$prefix" "$fake_bin" "$state_root"
 
+cat >"$fake_bin/npm" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${TEST_NPM_FAIL_PACK:-0}" = 1 ] && [ "${1:-}" = pack ]; then
+  printf '%s\n' 'fixture npm pack failure' >&2
+  exit 55
+fi
+exec "$TEST_REAL_NPM" "$@"
+EOF
+chmod 0700 "$fake_bin/npm"
+
 cat >"$fake_bin/qwen" <<'EOF'
 #!/bin/sh
 set -eu
@@ -127,31 +138,48 @@ case "$4" in
     printf '%s\n' '}}'
     ;;
   remove)
-    package=${5#@agent-sessions/}
-    rm -f -- "$TEST_DSH_STATE_DIR/$package"
-    case "$package" in
-      dsh-native) rm -rf -- "$TEST_DSH_LEGACY_ROOT" ;;
-      dsh-comms) rm -rf -- "$TEST_DSH_COMMS_ROOT" ;;
-      dsh-lane) rm -rf -- "$TEST_DSH_LANE_ROOT" ;;
-      *) exit 93 ;;
-    esac
+    shift 4
+    for requested in "$@"; do
+      package=${requested#@agent-sessions/}
+      if [ "$package" = dsh-native ] && [ "${TEST_DSH_LEGACY_REMOVE_FAIL_ONCE:-0}" = 1 ] &&
+         [ ! -e "$TEST_DSH_LEGACY_REMOVE_MARKER" ]; then
+        : >"$TEST_DSH_LEGACY_REMOVE_MARKER"
+        printf '%s\n' 'fixture legacy removal failure' >&2
+        exit 47
+      fi
+      rm -f -- "$TEST_DSH_STATE_DIR/$package"
+      case "$package" in
+        dsh-native) rm -rf -- "$TEST_DSH_LEGACY_ROOT" ;;
+        dsh-comms) rm -rf -- "$TEST_DSH_COMMS_ROOT" ;;
+        dsh-lane) rm -rf -- "$TEST_DSH_LANE_ROOT" ;;
+        *) exit 93 ;;
+      esac
+    done
     ;;
   add)
-    case "${5##*/}" in
-      agent-sessions-dsh-comms-*.tgz) package=dsh-comms; plugin_root=$TEST_DSH_COMMS_ROOT ;;
-      agent-sessions-dsh-lane-*.tgz) package=dsh-lane; plugin_root=$TEST_DSH_LANE_ROOT ;;
-      *) exit 92 ;;
-    esac
-    case "$5" in
-      "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/*.tgz) ;;
-      *) exit 92 ;;
-    esac
-    extract="$TEST_DSH_EXTRACT_ROOT/$package"
-    rm -rf -- "$extract" "$plugin_root"
-    mkdir -p "$extract" "$(dirname -- "$plugin_root")" "$TEST_DSH_STATE_DIR"
-    tar -xzf "$5" -C "$extract"
-    mv -- "$extract/package" "$plugin_root"
-    : >"$TEST_DSH_STATE_DIR/$package"
+    [ "$5" = --offline ] && [ "$#" = 7 ] || exit 92
+    "$TEST_PREFIX/bin/agent-sessions" status >/dev/null 2>&1 || exit 94
+    if [ "${TEST_DSH_ADD_FAIL_ONCE:-0}" = 1 ] && [ ! -e "$TEST_DSH_ADD_FAILURE_MARKER" ]; then
+      : >"$TEST_DSH_ADD_FAILURE_MARKER"
+      printf '%s\n' 'fixture DSH add failure' >&2
+      exit 46
+    fi
+    shift 5
+    for archive in "$@"; do
+      case "$archive" in
+        "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/agent-sessions-dsh-comms-*.tgz)
+          package=dsh-comms; plugin_root=$TEST_DSH_COMMS_ROOT ;;
+        "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/agent-sessions-dsh-lane-*.tgz)
+          package=dsh-lane; plugin_root=$TEST_DSH_LANE_ROOT ;;
+        *) exit 92 ;;
+      esac
+      extract="$TEST_DSH_EXTRACT_ROOT/$package"
+      rm -rf -- "$extract" "$plugin_root"
+      mkdir -p "$extract" "$(dirname -- "$plugin_root")" "$TEST_DSH_STATE_DIR"
+      tar -xzf "$archive" -C "$extract"
+      mv -- "$extract/package" "$plugin_root"
+      : >"$TEST_DSH_STATE_DIR/$package"
+    done
     ;;
   *) exit 91 ;;
 esac
@@ -296,7 +324,8 @@ common_env=(
   "KILO=kilo"
   "DSH=dsh"
   "PNPM=pnpm"
-  "NPM=$real_npm"
+  "NPM=npm"
+  "TEST_REAL_NPM=$real_npm"
   "DSH_HOME=$home/.dsh"
   "TEST_PREFIX=$prefix"
   "TEST_QWEN_STATE=$test_root/qwen-source"
@@ -311,6 +340,8 @@ common_env=(
   "TEST_DSH_COMMS_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms"
   "TEST_DSH_LANE_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane"
   "TEST_DSH_EXTRACT_ROOT=$test_root/dsh-extract"
+  "TEST_DSH_ADD_FAILURE_MARKER=$test_root/dsh-add-failed-once"
+  "TEST_DSH_LEGACY_REMOVE_MARKER=$test_root/dsh-legacy-remove-failed-once"
   "TEST_SERVICE_PID_FILE=$test_root/service.pid"
   "TEST_SERVICE_LOG=$test_root/service.log"
   "TEST_REAL_HOST_BINARY=$host_binary"
@@ -335,18 +366,60 @@ cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane
 test ! -e "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
 test -f "$release/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz"
 test -f "$release/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz"
+[[ $(find "$release/integrations/dsh" -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d '[:space:]') -eq 2 ]]
 test -x "$release/scripts/pack-packages"
 legacy_remove_line=$(grep -nF 'plugin --profile agent-sessions remove @agent-sessions/dsh-native' "$test_root/dsh-record" | head -1 | cut -d: -f1)
-comms_add_line=$(grep -nF 'plugin --profile agent-sessions add ' "$test_root/dsh-record" | head -1 | cut -d: -f1)
-lane_add_line=$(grep -nF 'plugin --profile agent-sessions add ' "$test_root/dsh-record" | tail -1 | cut -d: -f1)
-[[ "$legacy_remove_line" -lt "$comms_add_line" && "$comms_add_line" -lt "$lane_add_line" ]]
+add_command="plugin --profile agent-sessions add --offline $release/integrations/dsh/agent-sessions-dsh-comms-0.4.0.tgz $release/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz"
+add_line=$(grep -nFx "$add_command" "$test_root/dsh-record" | cut -d: -f1)
+[[ $(grep -Fxc "$add_command" "$test_root/dsh-record") -eq 1 && "$add_line" -lt "$legacy_remove_line" ]]
 test -x "$release/scripts/release-inventory"
 find -P "$release" -type d -exec chmod 0555 {} +
+
+# Package construction happens before release selection or product mutation.
+: >"$test_root/dsh-record"
+set +e
+env "${common_env[@]}" TEST_NPM_FAIL_PACK=1 "$root/scripts/install-host" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/pack-failure.out" 2>"$test_root/pack-failure.err"
+pack_failure_status=$?
+set -e
+if [[ $pack_failure_status -eq 0 ]] ||
+   ! grep -Fq 'fixture npm pack failure' "$test_root/pack-failure.err" ||
+   grep -Fq 'plugin --profile agent-sessions' "$test_root/dsh-record" ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$prior_hash" ]] ||
+   [[ $(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd) != "$release" ]] ||
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/plugin.cjs" "$release/integrations/dsh/comms/plugin.cjs" >/dev/null ||
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs" >/dev/null; then
+  printf 'DSH pack failure changed the selected release or prior DSH profile\n' >&2
+  exit 1
+fi
+
+# A native add failure occurs only after candidate readiness and leaves the
+# already installed DSH pair byte-for-byte untouched; rollback never calls DSH.
+: >"$test_root/dsh-record"
+rm -f -- "$test_root/dsh-add-failed-once"
+set +e
+env "${common_env[@]}" TEST_DSH_ADD_FAIL_ONCE=1 "$root/scripts/install-host" \
+  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/dsh-add-failure.out" 2>"$test_root/dsh-add-failure.err"
+dsh_add_failure_status=$?
+set -e
+if [[ $dsh_add_failure_status -eq 0 ]] ||
+   ! grep -Fq 'fixture DSH add failure' "$test_root/dsh-add-failure.err" ||
+   [[ $(grep -Fc 'plugin --profile agent-sessions add --offline ' "$test_root/dsh-record") -ne 1 ]] ||
+   grep -Fq 'plugin --profile agent-sessions remove ' "$test_root/dsh-record" ||
+   [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$prior_hash" ]] ||
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/plugin.cjs" "$release/integrations/dsh/comms/plugin.cjs" >/dev/null ||
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs" >/dev/null; then
+  printf 'DSH add failure changed the prior DSH profile or invoked DSH during rollback\n' >&2
+  exit 1
+fi
 
 # Reproduce an equal-version active cache that differs from the selected
 # release. The next install must refresh it through Claude's supported
 # lifecycle before the deliberately later Qwen failure exercises rollback.
 printf 'stale same-version cache\n' >>"$test_root/claude-cache/skills/codex-lane/SKILL.md"
+: >"$test_root/dsh-record"
 
 set +e
 env "${common_env[@]}" TEST_QWEN_FAIL_ONCE=1 "$root/scripts/install-host" \
@@ -382,6 +455,10 @@ if ! grep -Fxq 'plugin uninstall --scope user --keep-data agent-sessions@agent-s
   printf 'same-version Claude cache was not refreshed with persistent data preserved\n' >&2
   exit 1
 fi
+if grep -Fq 'plugin --profile agent-sessions' "$test_root/dsh-record"; then
+  printf 'non-DSH integration rollback unexpectedly mutated the DSH profile\n' >&2
+  exit 1
+fi
 if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
   >"$test_root/status.out" 2>"$test_root/status.err"; then
   cat "$test_root/status.err" >&2
@@ -396,6 +473,7 @@ if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
 fi
 
 : >"$test_root/service.log"
+: >"$test_root/dsh-record"
 SECONDS=0
 set +e
 env "${common_env[@]}" "$root/scripts/install-host" \
@@ -414,6 +492,10 @@ if [[ $daemon_failure_status -eq 0 ]] || [[ $daemon_failure_seconds -gt 3 ]] ||
 fi
 if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status >/dev/null 2>&1; then
   printf 'daemon-failure rollback did not restore the ready prior service\n' >&2
+  exit 1
+fi
+if grep -Fq 'plugin --profile agent-sessions' "$test_root/dsh-record"; then
+  printf 'daemon-readiness rollback unexpectedly mutated the DSH profile\n' >&2
   exit 1
 fi
 
@@ -487,13 +569,45 @@ if [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] || [[ ! -L "$prefix/bin/
   exit 1
 fi
 
+# The supported pre-managed state is legacy-only. If its removal fails after
+# the native pair add, one native pair removal compensates and the real failure
+# remains visible while the legacy profile is left intact.
+rm -f -- "$test_root/dsh-state/dsh-comms" "$test_root/dsh-state/dsh-lane"
+rm -rf -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms" \
+  "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane"
+mkdir -p "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
+printf 'legacy-canary\n' >"$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary"
+: >"$test_root/dsh-state/dsh-native"
+: >"$test_root/dsh-record"
+rm -f -- "$test_root/dsh-legacy-remove-failed-once"
+set +e
+env "${common_env[@]}" TEST_DSH_LEGACY_REMOVE_FAIL_ONCE=1 "$root/scripts/install-host" \
+  "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 \
+  >"$test_root/legacy-remove-failure.out" 2>"$test_root/legacy-remove-failure.err"
+legacy_failure_status=$?
+set -e
+if [[ $legacy_failure_status -ne 47 ]] ||
+   ! grep -Fq 'fixture legacy removal failure' "$test_root/legacy-remove-failure.err" ||
+   [[ $(grep -Fc 'plugin --profile agent-sessions add --offline ' "$test_root/dsh-record") -ne 1 ]] ||
+   [[ $(grep -Fxc 'plugin --profile agent-sessions remove @agent-sessions/dsh-native' "$test_root/dsh-record") -ne 1 ]] ||
+   [[ $(grep -Fxc 'plugin --profile agent-sessions remove @agent-sessions/dsh-lane @agent-sessions/dsh-comms' "$test_root/dsh-record") -ne 1 ]] ||
+   [[ ! -f "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary" ]] ||
+   [[ -e "$test_root/dsh-state/dsh-comms" || -e "$test_root/dsh-state/dsh-lane" ]] ||
+   [[ -e "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms" ]] ||
+   [[ -e "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane" ]]; then
+  printf 'legacy removal failure was not truthfully compensated by one native pair removal\n' >&2
+  cat "$test_root/legacy-remove-failure.err" >&2
+  cat "$test_root/dsh-record" >&2
+  exit 1
+fi
+
 # A pre-campaign prior release has no managed integrations or release
 # inventory. Rollback must remove the replacement integrations before their
 # release tree, restore only that prior host/service, and never point the new
 # alias inventory at an old binary that cannot serve it.
 find -P "$release" -type d -exec chmod u+rwx {} +
 rm -rf -- "$release/integrations"
-rm -f -- "$release/scripts/release-inventory"
+rm -f -- "$release/scripts/release-inventory" "$release/scripts/pack-packages"
 cat >"$release/bin/agent-sessions.pre-managed" <<'EOF'
 #!/bin/sh
 set -eu
@@ -515,6 +629,7 @@ mkdir -p "$(dirname -- "$hub_binary")"
 ln -s "$hub_binary" "$prefix/bin/agent-sessions-hub"
 rm -f -- "$test_root/qwen-failed-once"
 : >"$test_root/qwen-uninstall-record"
+: >"$test_root/dsh-record"
 set +e
 env "${common_env[@]}" \
   "TEST_QWEN_UNINSTALL_RECORD=$test_root/qwen-uninstall-record" \
@@ -531,6 +646,8 @@ if [[ $pre_managed_status -eq 0 ]] ||
    grep -Fq release-missing "$test_root/qwen-uninstall-record" ||
    [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$pre_managed_hash" ]] ||
    [[ $(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd) != "$release" ]] ||
+   [[ ! -f "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/canary" ]] ||
+   grep -Fq 'plugin --profile agent-sessions' "$test_root/dsh-record" ||
    [[ ! -L "$prefix/bin/agent-sessions" ]] || [[ ! -L "$prefix/bin/agent-sessions-hub" ]] ||
    [[ $(readlink -- "$prefix/bin/agent-sessions-hub") != "$hub_binary" ]]; then
   printf 'pre-managed rollback did not restore only the prior host/service\n' >&2

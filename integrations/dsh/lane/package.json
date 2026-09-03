@@ -28,10 +28,8 @@
     "url": "git+https://github.com/antst/agent-sessions.git",
     "directory": "integrations/dsh/lane"
   },
-  "dependencies": {
-    "@agent-sessions/dsh-comms": "0.4.0"
-  },
   "peerDependencies": {
+    "@agent-sessions/dsh-comms": "0.4.0",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
     "@deepseek-ai/dsh-agent": "^0.1.2-rc.1",

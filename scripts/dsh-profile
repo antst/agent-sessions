@@ -38,8 +38,8 @@ remove_dsh_integrations() {
   done
 }
 
-install_dsh_integrations() {
-  local dsh_path=$1 pnpm_path=$2 npm_path=$3 integration_root=$4 temporary_parent temporary_root status
+stage_dsh_integration_archives() {
+  local npm_path=$1 integration_root=$2 temporary_parent temporary_root status
   temporary_parent=$(cd -P -- "${TMPDIR:-/tmp}" && pwd)
   temporary_root=$(mktemp -d "$temporary_parent/agent-sessions-dsh.XXXXXX")
   status=0
@@ -47,25 +47,58 @@ install_dsh_integrations() {
     artifacts="$temporary_root/artifacts"
     NPM="$npm_path" PACKAGE_OUTPUT_DIR="$artifacts" "$integration_root/scripts/pack-packages" \
       @agent-sessions/dsh-comms @agent-sessions/dsh-lane >/dev/null || exit $?
-    set -- "$artifacts"/agent-sessions-dsh-comms-*.tgz
-    [[ $# -eq 1 && -f "$1" ]] || exit 1
-    comms_archive="$integration_root/integrations/dsh/$(basename -- "$1")"
-    if [[ ! -f "$comms_archive" ]] || ! cmp -s -- "$1" "$comms_archive"; then
-      install -m 0644 "$1" "$comms_archive" || exit $?
-    fi
-    set -- "$artifacts"/agent-sessions-dsh-lane-*.tgz
-    [[ $# -eq 1 && -f "$1" ]] || exit 1
-    lane_archive="$integration_root/integrations/dsh/$(basename -- "$1")"
-    if [[ ! -f "$lane_archive" ]] || ! cmp -s -- "$1" "$lane_archive"; then
-      install -m 0644 "$1" "$lane_archive" || exit $?
-    fi
 
-    # DSH owns profile/plugin mutation. Keep the exact npm-pack artifacts beside
-    # the selected release because the product records the physical source.
-    remove_dsh_integrations "$dsh_path" "$pnpm_path" || exit $?
-    dsh_profile_command "$dsh_path" "$pnpm_path" add "$comms_archive" || exit $?
-    dsh_profile_command "$dsh_path" "$pnpm_path" add "$lane_archive" || exit $?
+    shopt -s nullglob
+    comms_archives=("$artifacts"/agent-sessions-dsh-comms-*.tgz)
+    lane_archives=("$artifacts"/agent-sessions-dsh-lane-*.tgz)
+    shopt -u nullglob
+    if [[ ${#comms_archives[@]} -ne 1 || ${#lane_archives[@]} -ne 1 ]]; then
+      printf 'DSH package staging did not produce exactly one archive per integration.\n' >&2
+      exit 1
+    fi
+    install -m 0644 "${comms_archives[0]}" "$integration_root/integrations/dsh/" || exit $?
+    install -m 0644 "${lane_archives[0]}" "$integration_root/integrations/dsh/" || exit $?
+    shopt -s nullglob
+    comms_archives=("$integration_root"/integrations/dsh/agent-sessions-dsh-comms-*.tgz)
+    lane_archives=("$integration_root"/integrations/dsh/agent-sessions-dsh-lane-*.tgz)
+    shopt -u nullglob
+    [[ ${#comms_archives[@]} -eq 1 && ${#lane_archives[@]} -eq 1 ]] || exit 1
   ) || status=$?
-  remove_managed_tree "$temporary_root" "$temporary_parent"
+  if ! remove_managed_tree "$temporary_root" "$temporary_parent"; then
+    [[ $status -ne 0 ]] || status=1
+  fi
+  return "$status"
+}
+
+install_dsh_integrations() {
+  local dsh_path=$1 pnpm_path=$2 integration_root=$3 had_legacy=0 status
+  local -a comms_archives lane_archives
+  shopt -s nullglob
+  comms_archives=("$integration_root"/integrations/dsh/agent-sessions-dsh-comms-*.tgz)
+  lane_archives=("$integration_root"/integrations/dsh/agent-sessions-dsh-lane-*.tgz)
+  shopt -u nullglob
+  if [[ ${#comms_archives[@]} -ne 1 || ${#lane_archives[@]} -ne 1 ]]; then
+    printf 'Selected release does not contain exactly one stable DSH archive per integration.\n' >&2
+    return 1
+  fi
+
+  if dsh_profile_has_package "$dsh_path" "$pnpm_path" @agent-sessions/dsh-native; then
+    had_legacy=1
+  fi
+
+  # One offline native transaction lets pnpm satisfy the lane's exact comms
+  # peer from the second local archive without consulting a registry.
+  dsh_profile_command "$dsh_path" "$pnpm_path" add --offline "${comms_archives[0]}" "${lane_archives[0]}" || return $?
+  if [[ $had_legacy -eq 0 ]]; then return 0; fi
+
+  if dsh_profile_command "$dsh_path" "$pnpm_path" remove @agent-sessions/dsh-native; then
+    return 0
+  else
+    status=$?
+  fi
+  if ! dsh_profile_command "$dsh_path" "$pnpm_path" remove \
+    @agent-sessions/dsh-lane @agent-sessions/dsh-comms; then
+    printf 'DSH legacy removal failed and cleanup of the newly added integration pair also failed.\n' >&2
+  fi
   return "$status"
 }

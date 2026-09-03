@@ -122,31 +122,36 @@ case "$4" in
     printf '%s\n' '}}'
     ;;
   remove)
-    package=${5#@agent-sessions/}
-    rm -f -- "$TEST_DSH_STATE_DIR/$package"
-    case "$package" in
-      dsh-native) rm -rf -- "$TEST_DSH_LEGACY_ROOT" ;;
-      dsh-comms) rm -rf -- "$TEST_DSH_COMMS_ROOT" ;;
-      dsh-lane) rm -rf -- "$TEST_DSH_LANE_ROOT" ;;
-      *) exit 93 ;;
-    esac
+    shift 4
+    for requested in "$@"; do
+      package=${requested#@agent-sessions/}
+      rm -f -- "$TEST_DSH_STATE_DIR/$package"
+      case "$package" in
+        dsh-native) rm -rf -- "$TEST_DSH_LEGACY_ROOT" ;;
+        dsh-comms) rm -rf -- "$TEST_DSH_COMMS_ROOT" ;;
+        dsh-lane) rm -rf -- "$TEST_DSH_LANE_ROOT" ;;
+        *) exit 93 ;;
+      esac
+    done
     ;;
   add)
-    case "${5##*/}" in
-      agent-sessions-dsh-comms-*.tgz) package=dsh-comms; plugin_root=$TEST_DSH_COMMS_ROOT ;;
-      agent-sessions-dsh-lane-*.tgz) package=dsh-lane; plugin_root=$TEST_DSH_LANE_ROOT ;;
-      *) exit 92 ;;
-    esac
-    case "$5" in
-      "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/*.tgz) ;;
-      *) exit 92 ;;
-    esac
-    extract="$TEST_DSH_EXTRACT_ROOT/$package"
-    rm -rf -- "$extract" "$plugin_root"
-    mkdir -p "$extract" "$(dirname -- "$plugin_root")" "$TEST_DSH_STATE_DIR"
-    tar -xzf "$5" -C "$extract"
-    mv -- "$extract/package" "$plugin_root"
-    : >"$TEST_DSH_STATE_DIR/$package"
+    [ "$5" = --offline ] && [ "$#" = 7 ] || exit 92
+    shift 5
+    for archive in "$@"; do
+      case "$archive" in
+        "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/agent-sessions-dsh-comms-*.tgz)
+          package=dsh-comms; plugin_root=$TEST_DSH_COMMS_ROOT ;;
+        "$TEST_PREFIX"/libexec/agent-sessions/host/releases/*/integrations/dsh/agent-sessions-dsh-lane-*.tgz)
+          package=dsh-lane; plugin_root=$TEST_DSH_LANE_ROOT ;;
+        *) exit 92 ;;
+      esac
+      extract="$TEST_DSH_EXTRACT_ROOT/$package"
+      rm -rf -- "$extract" "$plugin_root"
+      mkdir -p "$extract" "$(dirname -- "$plugin_root")" "$TEST_DSH_STATE_DIR"
+      tar -xzf "$archive" -C "$extract"
+      mv -- "$extract/package" "$plugin_root"
+      : >"$TEST_DSH_STATE_DIR/$package"
+    done
     ;;
   *) exit 91 ;;
 esac
