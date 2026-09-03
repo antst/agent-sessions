@@ -229,7 +229,7 @@ func TestCodexLaneRecoveryAcceptsPreferredTurnCompletedDuringDowntimeWithoutComp
 			return map[string]any{}, nil
 		case "thread/turns/list":
 			return map[string]any{"data": []map[string]any{{
-				"id": turnID, "status": "completed", "items": []any{map[string]any{
+				"id": turnID, "status": "completed", "completedAt": int64(2), "items": []any{map[string]any{
 					"type": "agent_message", "phase": "final_answer", "text": "downtime terminal result",
 				}},
 			}}}, nil
@@ -254,6 +254,109 @@ func TestCodexLaneRecoveryAcceptsPreferredTurnCompletedDuringDowntimeWithoutComp
 	result, err := native.WaitLaneTurn(context.Background(), threadID, resolved)
 	if err != nil || result.TurnID != turnID || result.Outcome != "completed" || result.Result != "downtime terminal result" {
 		t.Fatalf("completed preferred collection = %+v, %v", result, err)
+	}
+}
+
+func TestCodexNativeWaitRequiresProductCompletionClosure(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		turns       []map[string]any
+		wantOutcome string
+		wantResult  string
+		wantCalls   int
+	}{
+		{
+			name: "transient interrupted before start",
+			turns: []map[string]any{
+				{"id": "turn-transient-interrupted", "status": "interrupted"},
+				{
+					"id": "turn-transient-interrupted", "status": "completed", "completedAt": int64(2),
+					"items": []any{map[string]any{
+						"type": "agent_message", "phase": "final_answer", "text": "completed after start",
+					}},
+				},
+			},
+			wantOutcome: "completed",
+			wantResult:  "completed after start",
+			wantCalls:   2,
+		},
+		{
+			name: "closed interrupted turn",
+			turns: []map[string]any{
+				{"id": "turn-closed-interrupted", "status": "interrupted", "completedAt": int64(2)},
+			},
+			wantOutcome: "interrupted",
+			wantCalls:   1,
+		},
+		{
+			name: "completed status before closure",
+			turns: []map[string]any{
+				{
+					"id": "turn-completed-before-closure", "status": "completed",
+					"items": []any{map[string]any{
+						"type": "agent_message", "phase": "final_answer", "text": "not closed yet",
+					}},
+				},
+				{
+					"id": "turn-completed-before-closure", "status": "completed", "completedAt": int64(2),
+					"items": []any{map[string]any{
+						"type": "agent_message", "phase": "final_answer", "text": "closed result",
+					}},
+				},
+			},
+			wantOutcome: "completed",
+			wantResult:  "closed result",
+			wantCalls:   2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+			socket := filepath.Join(home, "app-server.sock")
+			turnID := stringValue(test.turns[0]["id"])
+			var callsMu sync.Mutex
+			calls := 0
+			startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+				switch stringValue(request["method"]) {
+				case "initialize":
+					return map[string]any{}, nil
+				case "thread/turns/list":
+					callsMu.Lock()
+					index := calls
+					calls++
+					callsMu.Unlock()
+					if index >= len(test.turns) {
+						index = len(test.turns) - 1
+					}
+					return map[string]any{"data": []any{test.turns[index]}}, nil
+				default:
+					return nil, fmt.Errorf("unexpected method %s", stringValue(request["method"]))
+				}
+			})
+			native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+				CodexBinary: executable, CodexHome: home, SocketPath: socket,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(native.Close)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			result, err := native.WaitLaneTurn(ctx, "00000000-0000-0000-0000-00000000c0ac", turnID)
+			if err != nil || result.Outcome != test.wantOutcome || result.Result != test.wantResult {
+				t.Fatalf("wait result = %+v, %v; want outcome %q result %q", result, err, test.wantOutcome, test.wantResult)
+			}
+			callsMu.Lock()
+			gotCalls := calls
+			callsMu.Unlock()
+			if gotCalls != test.wantCalls {
+				t.Fatalf("thread/turns/list calls = %d, want %d", gotCalls, test.wantCalls)
+			}
+		})
 	}
 }
 
@@ -491,7 +594,7 @@ func TestCodexNativeLaneTurnUsesAppServerAndCollectsFinalAnswer(t *testing.T) {
 			return map[string]any{"turn": map[string]any{"id": turnID, "status": "inProgress"}}, nil
 		case "thread/turns/list":
 			return map[string]any{"data": []any{map[string]any{
-				"id": turnID, "status": "completed", "items": []any{map[string]any{
+				"id": turnID, "status": "completed", "completedAt": int64(2), "items": []any{map[string]any{
 					"type": "agent_message", "phase": "final_answer", "text": "native lane result",
 				}},
 			}}}, nil

@@ -559,7 +559,7 @@ func (native *CodexNative) WaitLaneTurn(
 				continue
 			}
 			outcome := normalizeStatus(turn.Status)
-			if !statusTerminal(outcome) {
+			if !statusTerminal(outcome) || turn.CompletedAt == nil {
 				break
 			}
 			result := codexLaneFinalAnswer(turn)
