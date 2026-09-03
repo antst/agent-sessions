@@ -45,7 +45,7 @@ func NewLaneDriver(config Config) (*pifamily.LaneDriver, error) {
 		return nil, err
 	}
 	return pifamily.NewLaneDriver(pifamily.LaneConfig{
-		Quirks: quirks, Executable: config.Executable, Generation: config.Deps.Generation,
+		Quirks: quirks, Executable: config.Executable, ExtensionPath: config.ExtensionPath, Generation: config.Deps.Generation,
 		Processes: config.Processes, MapPermission: MapPermission, Now: config.Now,
 	})
 }

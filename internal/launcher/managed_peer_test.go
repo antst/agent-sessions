@@ -25,9 +25,13 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.product, func(t *testing.T) {
+			asset := ""
+			if test.product == "pi" || test.product == "omp" {
+				asset = filepath.Join(root, "integrations", test.product, "agent-sessions.mjs")
+			}
 			plan, err := buildManagedPeerPlan(test.product, []string{
 				"--group", "project", "--peer-name", "reviewer", "--model", "native-model",
-			}, []string{"PATH=/bin"}, root, "/native/"+test.product)
+			}, []string{"PATH=/bin"}, asset, "/native/"+test.product)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,6 +52,26 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 				t.Fatalf("AGENT_SESSIONS_GROUPS = %#v, %v", groups, err)
 			}
 		})
+	}
+}
+
+func TestManagedIntegrationAssetIsThePeerPlanPayload(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AGENT_SESSIONS_PLUGIN_ROOT", root)
+	asset, err := ManagedIntegrationAsset("pi", "agent-sessions.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "integrations", "pi", "agent-sessions.mjs")
+	if asset != want {
+		t.Fatalf("managed asset = %q, want %q", asset, want)
+	}
+	plan, err := buildManagedPeerPlan("pi", nil, nil, asset, "/native/pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plan.args[:2], []string{"--extension", asset}) {
+		t.Fatalf("peer extension args = %#v", plan.args)
 	}
 }
 
@@ -112,7 +136,11 @@ func TestManagedPeerPlanPreservesProductOwnedResumeSelectors(t *testing.T) {
 		{product: "omp", args: []string{"--resume", "native-exact"}},
 	} {
 		t.Run(test.product, func(t *testing.T) {
-			plan, err := buildManagedPeerPlan(test.product, test.args, nil, root, "/native/"+test.product)
+			asset := ""
+			if test.product == "pi" || test.product == "omp" {
+				asset = filepath.Join(root, "integrations", test.product, "agent-sessions.mjs")
+			}
+			plan, err := buildManagedPeerPlan(test.product, test.args, nil, asset, "/native/"+test.product)
 			if err != nil {
 				t.Fatal(err)
 			}

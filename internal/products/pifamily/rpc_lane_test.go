@@ -196,7 +196,7 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	process := newScriptedProcess("pi-native")
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
-		Quirks: quirks, Generation: 7, Processes: factory,
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 7, Processes: factory,
 		MapPermission: familyPermission,
 		Now:           func() time.Time { return time.Unix(100, 0) },
 	})
@@ -215,7 +215,7 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	if ref.LaneID != ref.NativeSessionID || ref.NativeSessionID != "pi-native" {
 		t.Fatalf("Pi native-keyed ref = %+v", ref)
 	}
-	if want := []string{"--mode", "rpc", "--session", "pi-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
+	if want := []string{"--extension", "/managed/agent-sessions.mjs", "--mode", "rpc", "--session", "pi-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Pi resume args = %q, want %q", factory.command.Args, want)
 	}
 	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "do work", PermissionMode: permissionmode.Default})
@@ -248,7 +248,7 @@ func TestWaitTurnRetriesCollectionFromCachedTerminalAfterCancellation(t *testing
 	process.suppressLastResponses = 1
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
-		Quirks: quirks, Generation: 8, Processes: factory,
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 8, Processes: factory,
 		MapPermission: familyPermission,
 	})
 	if err != nil {
@@ -300,7 +300,7 @@ func TestWaitTurnDoesNotInventEmptyResultWhenCollectionIsUnavailable(t *testing.
 	process := newScriptedProcess("pi-unavailable-result")
 	process.closeOnLastResponse = true
 	driver, err := NewLaneDriver(LaneConfig{
-		Quirks: quirks, Generation: 9, Processes: &oneProcessFactory{process: process},
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 9, Processes: &oneProcessFactory{process: process},
 		MapPermission: familyPermission,
 	})
 	if err != nil {
@@ -337,7 +337,7 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1, 2}, "maxFrameBytes": MaxRPCFrameBytes})
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
-		Quirks: quirks, Generation: 11, Processes: factory,
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 11, Processes: factory,
 		MapPermission: familyPermission,
 		Now:           func() time.Time { return time.Unix(200, 0) },
 	})
@@ -353,7 +353,7 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	if ref.LaneID != ref.NativeSessionID || ref.NativeSessionID != "omp-native" {
 		t.Fatalf("OMP native-keyed ref = %+v", ref)
 	}
-	if want := []string{"--mode=rpc", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
+	if want := []string{"--extension=/managed/agent-sessions.mjs", "--mode=rpc", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP args = %q, want %q", factory.command.Args, want)
 	}
 	if got := process.nameFor("set_session_name"); got != "native lane name" {
@@ -390,7 +390,7 @@ func TestOMPResumeNeverRenamesNativeSession(t *testing.T) {
 	process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
 	factory := &oneProcessFactory{process: process}
 	driver, err := NewLaneDriver(LaneConfig{
-		Quirks: quirks, Generation: 1, Processes: factory, MapPermission: familyPermission,
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: factory, MapPermission: familyPermission,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -401,7 +401,7 @@ func TestOMPResumeNeverRenamesNativeSession(t *testing.T) {
 	if err != nil || ref.NativeSessionID != "omp-native" {
 		t.Fatalf("OMP resume = %+v, %v", ref, err)
 	}
-	if want := []string{"--mode=rpc", "--session", "omp-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
+	if want := []string{"--extension=/managed/agent-sessions.mjs", "--mode=rpc", "--session", "omp-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP resume args = %q, want %q", factory.command.Args, want)
 	}
 	if got := process.commands(); !reflect.DeepEqual(got, []string{"get_state"}) {
@@ -433,7 +433,7 @@ func TestLaneInterruptUsesCorrelatedAbortAndProductTerminalStrategy(t *testing.T
 				})
 			}
 			driver, err := NewLaneDriver(LaneConfig{
-				Quirks: quirks, Generation: 12, Processes: &oneProcessFactory{process: process},
+				Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 12, Processes: &oneProcessFactory{process: process},
 				MapPermission: familyPermission,
 			})
 			if err != nil {
@@ -500,7 +500,7 @@ func TestLaneInterruptWriteFailureRollsBackInterruptedOutcome(t *testing.T) {
 				process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
 			}
 			driver, err := NewLaneDriver(LaneConfig{
-				Quirks: quirks, Generation: 13, Processes: &oneProcessFactory{process: process},
+				Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 13, Processes: &oneProcessFactory{process: process},
 				MapPermission: familyPermission,
 			})
 			if err != nil {
@@ -568,7 +568,7 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 		process.cleanupErr = cleanupErr
 		process.emit(map[string]any{"type": "response", "id": "foreign", "command": "get_state", "success": true})
 		driver, err := NewLaneDriver(LaneConfig{
-			Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
+			Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: &oneProcessFactory{process: process},
 			MapPermission: familyPermission,
 		})
 		if err != nil {
@@ -588,7 +588,7 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 		cleanupErr := errors.New("cleanup failed")
 		process.cleanupErr = cleanupErr
 		driver, err := NewLaneDriver(LaneConfig{
-			Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
+			Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: &oneProcessFactory{process: process},
 			MapPermission: familyPermission,
 		})
 		if err != nil {
@@ -614,7 +614,7 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 		second.cleanupErr = cleanupErr
 		factory := &sequenceProcessFactory{processes: []*scriptedRPCProcess{first, second}}
 		driver, err := NewLaneDriver(LaneConfig{
-			Quirks: quirks, Generation: 1, Processes: factory,
+			Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: factory,
 			MapPermission: familyPermission,
 		})
 		if err != nil {
@@ -700,7 +700,7 @@ func TestLaneOpenPassesProductNativeArgumentsAndName(t *testing.T) {
 			}
 			factory := &oneProcessFactory{process: process}
 			driver, err := NewLaneDriver(LaneConfig{
-				Quirks: quirks, Generation: 1, Processes: factory,
+				Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: factory,
 				MapPermission: familyPermission,
 			})
 			if err != nil {
@@ -718,7 +718,8 @@ func TestLaneOpenPassesProductNativeArgumentsAndName(t *testing.T) {
 			if _, err := driver.StartTurn(context.Background(), split, productruntime.TurnStartRequest{Prompt: "must not run", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrStale) {
 				t.Fatalf("provisional identity start error = %v", err)
 			}
-			want := append(quirks.modeArguments(), "--model", "deepseek/deepseek-v4-flash")
+			want := append(quirks.extensionArguments("/managed/agent-sessions.mjs"), quirks.modeArguments()...)
+			want = append(want, "--model", "deepseek/deepseek-v4-flash")
 			if quirks.FreshSessionIDFlag != "" {
 				want = append(want, quirks.FreshSessionIDFlag, "argument-passed")
 			}
@@ -741,7 +742,7 @@ func TestLaneOpenRejectsLifecycleOwnedNativeArgumentsBeforeStartingProcess(t *te
 	for _, argument := range []string{"--mode=rpc", "--session", "--name=other", "--extension=/tmp/x", "--approval-mode=yolo", "--tools", "--"} {
 		t.Run(argument, func(t *testing.T) {
 			factory := &oneProcessFactory{process: newScriptedProcess("must-not-start")}
-			driver, err := NewLaneDriver(LaneConfig{Quirks: quirks, Generation: 1, Processes: factory, MapPermission: familyPermission})
+			driver, err := NewLaneDriver(LaneConfig{Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: factory, MapPermission: familyPermission})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -756,12 +757,23 @@ func TestLaneOpenRejectsLifecycleOwnedNativeArgumentsBeforeStartingProcess(t *te
 	}
 }
 
+func TestLaneRequiresManagedExtensionPathAtConstruction(t *testing.T) {
+	quirks, _ := QuirksFor(PiProductID)
+	_, err := NewLaneDriver(LaneConfig{
+		Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: newScriptedProcess("unused")},
+		MapPermission: familyPermission,
+	})
+	if err == nil || !strings.Contains(err.Error(), "extension path") {
+		t.Fatalf("missing extension path error = %v", err)
+	}
+}
+
 func TestRPCProductErrorIsReturnedVerbatim(t *testing.T) {
 	quirks, _ := QuirksFor(PiProductID)
 	process := newScriptedProcess("pi-error")
 	process.responseErrors = map[string]string{"get_state": "native provider rejected sk-product-detail"}
 	driver, err := NewLaneDriver(LaneConfig{
-		Quirks: quirks, Generation: 1, Processes: &oneProcessFactory{process: process},
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: &oneProcessFactory{process: process},
 		MapPermission: familyPermission,
 	})
 	if err != nil {

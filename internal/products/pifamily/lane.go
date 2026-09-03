@@ -20,6 +20,7 @@ type PermissionMapper func(permissionmode.Mode) (PermissionPolicy, error)
 type LaneConfig struct {
 	Quirks        Quirks
 	Executable    string
+	ExtensionPath string
 	Generation    uint64
 	Processes     ProcessFactory
 	MapPermission PermissionMapper
@@ -57,8 +58,8 @@ func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 	if strings.TrimSpace(config.Executable) == "" {
 		config.Executable = config.Quirks.Executable
 	}
-	if config.Generation == 0 || config.Processes == nil || config.MapPermission == nil {
-		return nil, errors.New("Pi-family lane requires generation, process factory, and permission mapper")
+	if strings.TrimSpace(config.ExtensionPath) == "" || config.Generation == 0 || config.Processes == nil || config.MapPermission == nil {
+		return nil, errors.New("Pi-family lane requires extension path, generation, process factory, and permission mapper")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -102,7 +103,9 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	}
 	driver.mu.Unlock()
 
-	arguments := append(driver.config.Quirks.modeArguments(), request.Arguments...)
+	arguments := append([]string(nil), driver.config.Quirks.extensionArguments(driver.config.ExtensionPath)...)
+	arguments = append(arguments, driver.config.Quirks.modeArguments()...)
+	arguments = append(arguments, request.Arguments...)
 	if request.ResumeNativeID != "" {
 		arguments = append(arguments, driver.config.Quirks.resumeArguments(request.ResumeNativeID)...)
 	} else {

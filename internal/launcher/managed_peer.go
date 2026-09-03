@@ -44,15 +44,15 @@ func RunManagedPeer(product string, args []string) error {
 	if err != nil {
 		return err
 	}
-	root := ""
+	asset := ""
 	switch descriptor.NativeRegistration.Strategy {
 	case "pi-package", "omp-extension":
-		root, err = managedIntegrationRoot()
+		asset, err = ManagedIntegrationAsset(product, "agent-sessions.mjs")
 		if err != nil {
 			return err
 		}
 	}
-	plan, err := buildManagedPeerPlan(product, args, os.Environ(), root, path)
+	plan, err := buildManagedPeerPlan(product, args, os.Environ(), asset, path)
 	if err != nil {
 		return err
 	}
@@ -419,7 +419,7 @@ func argumentOptionValue(arguments []string, index int, option string) (string, 
 func buildManagedPeerPlan(
 	product string,
 	args, environment []string,
-	pluginRoot, executable string,
+	integrationPath, executable string,
 ) (managedPeerPlan, error) {
 	descriptor, ok := productcatalog.ByID(product)
 	if !ok || !descriptor.Has(productcatalog.CapabilityInteractive) {
@@ -450,9 +450,9 @@ func buildManagedPeerPlan(
 			environment = envutil.Set(environment, peerSessionIDEnv, resumeID)
 		}
 	case "pi-package":
-		forwarded = append([]string{"--extension", integrationAsset(pluginRoot, descriptor.ID, "agent-sessions.mjs")}, forwarded...)
+		forwarded = append([]string{"--extension", integrationPath}, forwarded...)
 	case "omp-extension":
-		forwarded = append([]string{"--extension=" + integrationAsset(pluginRoot, descriptor.ID, "agent-sessions.mjs")}, forwarded...)
+		forwarded = append([]string{"--extension=" + integrationPath}, forwarded...)
 	default:
 		return managedPeerPlan{}, fmt.Errorf("unsupported managed peer product %q", product)
 	}
@@ -520,6 +520,15 @@ func managedLiveEnvironment(environment []string, product, name string, groups [
 
 func integrationAsset(root, product, name string) string {
 	return filepath.Join(root, "integrations", product, name)
+}
+
+// ManagedIntegrationAsset resolves one release-owned integration payload.
+func ManagedIntegrationAsset(product, name string) (string, error) {
+	root, err := managedIntegrationRoot()
+	if err != nil {
+		return "", err
+	}
+	return integrationAsset(root, product, name), nil
 }
 
 func managedIntegrationRoot() (string, error) {

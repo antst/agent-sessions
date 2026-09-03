@@ -35,7 +35,7 @@ func TestDefaultApprovalPolicyRejectsBeforeStartingUnattendedRPC(t *testing.T) {
 	quirks, _ := pifamily.QuirksFor(ProductID)
 	factory := &rejectingProcessFactory{}
 	driver, err := pifamily.NewLaneDriver(pifamily.LaneConfig{
-		Quirks: quirks, Generation: 1, Processes: factory, MapPermission: MapPermission,
+		Quirks: quirks, ExtensionPath: "/managed/agent-sessions.mjs", Generation: 1, Processes: factory, MapPermission: MapPermission,
 	})
 	if err != nil {
 		t.Fatal(err)

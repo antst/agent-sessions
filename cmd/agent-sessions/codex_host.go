@@ -191,9 +191,13 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if err != nil {
 		panic(err)
 	}
+	piExtensionPath, err := launcher.ManagedIntegrationAsset(piproduct.ProductID, "agent-sessions.mjs")
+	if err != nil {
+		panic(err)
+	}
 	piLanes, err := piproduct.NewLaneDriver(piproduct.Config{
 		Deps:       productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses},
-		Executable: piDescriptor.NativeExecutable, Processes: piFamilyProcesses,
+		Executable: piDescriptor.NativeExecutable, ExtensionPath: piExtensionPath, Processes: piFamilyProcesses,
 	})
 	if err != nil {
 		panic(err)
@@ -202,9 +206,13 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if !ok {
 		panic("OMP product descriptor is unavailable")
 	}
+	ompExtensionPath, err := launcher.ManagedIntegrationAsset(ompproduct.ProductID, "agent-sessions.mjs")
+	if err != nil {
+		panic(err)
+	}
 	ompLanes, err := ompproduct.NewLaneDriver(ompproduct.Config{
 		Deps:       productruntime.HostDeps{Generation: 1, OwnedProcesses: laneProcesses},
-		Executable: ompDescriptor.NativeExecutable, Processes: piFamilyProcesses,
+		Executable: ompDescriptor.NativeExecutable, ExtensionPath: ompExtensionPath, Processes: piFamilyProcesses,
 	})
 	if err != nil {
 		panic(err)
