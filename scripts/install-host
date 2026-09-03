@@ -549,16 +549,20 @@ wait_for_host_service
 # symbolic aliases that still select this managed host image; unrelated user
 # commands and non-symbolic paths are never touched.
 desired_aliases=" agent-sessions $("$source_root/scripts/release-inventory" host-aliases | tr '\n' ' ') "
-legacy_alias_directory=$(cd -P -- "$install_root/bin/$platform" 2>/dev/null && pwd) || legacy_alias_directory=""
+legacy_alias_directory="$install_root/bin/$platform"
 for alias_path in "$prefix/bin/"*; do
   [[ -L "$alias_path" ]] || continue
   alias=${alias_path##*/}
   case "$desired_aliases" in *" $alias "*) continue ;; esac
   target=$(readlink -- "$alias_path")
   if [[ "$target" != /* ]]; then target="$(dirname -- "$alias_path")/$target"; fi
+  if [[ "$(dirname -- "$target")" == "$legacy_alias_directory" ]]; then
+    rm -f -- "$alias_path"
+    printf 'Removed stale Agent Sessions alias %s.\n' "$alias_path"
+    continue
+  fi
   target_directory=$(cd -P -- "$(dirname -- "$target")" 2>/dev/null && pwd) || continue
-  if [[ "$target_directory/$(basename -- "$target")" == "$release/bin/agent-sessions" ]] ||
-     [[ -n "$legacy_alias_directory" && "$target_directory" == "$legacy_alias_directory" ]]; then
+  if [[ "$target_directory/$(basename -- "$target")" == "$release/bin/agent-sessions" ]]; then
     rm -f -- "$alias_path"
     printf 'Removed stale Agent Sessions alias %s.\n' "$alias_path"
   fi

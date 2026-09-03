@@ -311,8 +311,6 @@ if ! env "${common_env[@]}" "$prefix/bin/agent-sessions" status \
   exit 1
 fi
 legacy_alias_directory="$prefix/libexec/agent-sessions/bin/linux-x64"
-mkdir -p "$legacy_alias_directory"
-cp -- "$candidate" "$legacy_alias_directory/peer"
 ln -s "$legacy_alias_directory/peer" "$prefix/bin/peer"
 ln -s /bin/true "$prefix/bin/user-tool"
 env "${common_env[@]}" "$root/scripts/install-host" \
