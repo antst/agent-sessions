@@ -1,12 +1,12 @@
 import { tool } from "@opencode-ai/plugin";
 import liveSessionModule from "../shared/live-session.js";
 
-const { createLiveSessionClient } = liveSessionModule;
+const { createLiveSessionClient, renderDelivery } = liveSessionModule;
 
 const OPERATIONS = [
   "peers.list", "message.send",
   "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-  "lane.steer", "lane.interrupt", "lane.collect", "lane.archive",
+  "lane.steer", "lane.interrupt", "lane.archive",
 ];
 const DELIVERY_DEADLINE_MS = 10_000;
 
@@ -81,13 +81,6 @@ async function boundedNativeCall(invoke, deadline, controller) {
   }
 }
 
-function renderAgentFrame(frame) {
-	if (typeof frame === "string") return boundedText(frame);
-	const content = boundedText(frame?.content ?? JSON.stringify(frame));
-  const from = frame?.source?.name ?? frame?.source?.id ?? frame?.source_session_id ?? "peer";
-  return `<cross-session-message from="${String(from).replace(/[<>"\r\n]/gu, "")}">\n${content.replace(/<\/cross-session-message/giu, "<\\/cross-session-message")}\n</cross-session-message>`;
-}
-
 function sessionInfo(event) {
   const properties = event?.properties ?? {};
   return properties.info ?? properties.session ?? properties;
@@ -132,7 +125,7 @@ export default async function agentSessionsOpenCodePlugin({ client, directory, e
       const resumedTitle = eventNativeTitle(resumed?.title);
       if (resumedTitle === undefined) throw new Error("OpenCode resume omitted the native session title");
       known.set(resumedSessionID, { title: resumedTitle, cwd: resumed?.directory ?? directory });
-      live.report(resumedSessionID, resumedTitle);
+      live.report(resumedSessionID, resumedTitle, { cwd: resumed?.directory ?? directory });
     }).catch((error) => live.emit("diagnostic", String(error?.message ?? error)));
   }
 
@@ -156,8 +149,7 @@ export default async function agentSessionsOpenCodePlugin({ client, directory, e
           messageID,
           agent: configuration.agent,
           model: configuration.model,
-          noReply: payload.body?.no_reply === true || payload.body?.type === "notice",
-          parts: [{ type: "text", text: renderAgentFrame(payload.body) }],
+          parts: [{ type: "text", text: renderDelivery(payload) }],
         },
       }, { signal: controller.signal }), deadline, controller);
       requireSDKSuccess(response, 204);
@@ -193,7 +185,7 @@ export default async function agentSessionsOpenCodePlugin({ client, directory, e
           const prior = known.get(sessionID);
           known.set(sessionID, { title: nativeTitle, cwd: info?.directory ?? directory });
           if (!prior) {
-            live.report(sessionID, nativeTitle);
+            live.report(sessionID, nativeTitle, { cwd: info?.directory ?? directory });
           } else if (nativeTitle !== prior.title) {
             live.updateName(sessionID, nativeTitle);
           }
@@ -213,7 +205,7 @@ export default async function agentSessionsOpenCodePlugin({ client, directory, e
       const hasNativeTitle = Object.hasOwn(input, "title") && typeof input.title === "string" &&
         validNativeTitleObservation(input.title);
       if (!known.has(sessionID) && hasNativeTitle) {
-        live.report(sessionID, input.title);
+        live.report(sessionID, input.title, { cwd: input.cwd ?? directory });
         known.set(sessionID, { title: input.title, cwd: input.cwd ?? directory });
       }
     },

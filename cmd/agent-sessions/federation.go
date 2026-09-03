@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
 func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemonpkg.Federation, error) {
@@ -203,25 +203,24 @@ func (c *hostCoordinator) deliverFederated(
 		if admittedTarget.ID != target.ID {
 			return errors.New("admitted federated target changed")
 		}
-		mode := "prompting"
-		if source.PermissionMode == "bypassPermissions" || source.PermissionMode == "bypass" {
-			mode = "bypass"
-		}
 		name := source.DisplayName
 		if strings.TrimSpace(name) == "" {
 			name = source.Name
 		}
-		message := bridge.WrapPeerMessage(
-			source.Entrypoint, "session:"+source.GlobalID, source.SessionID, name, mode,
-			deliveryID, delivered.SentAt, delivered.Content,
-		)
+		message := productruntime.NativeMessage{
+			ID: deliveryID, Body: delivered.Content,
+			From: productruntime.NativeMessageSource{
+				UUID: source.SessionID, Name: name, Product: source.Entrypoint,
+				Groups: append([]string(nil), source.Groups...),
+			},
+		}
 		if local.attachment != nil {
-			return c.deliverPreparedMessage(callCtx, *local.attachment, deliveryID, message)
+			return c.deliverPreparedMessage(callCtx, *local.attachment, message)
 		}
 		if local.lane == nil {
 			return errors.New("federated target disappeared")
 		}
-		return c.deliverLaneMessage(callCtx, local.lane, deliveryID, message)
+		return c.deliverLaneMessage(callCtx, local.lane, message)
 	})
 	if err != nil {
 		return err

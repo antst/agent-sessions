@@ -11,9 +11,25 @@ import (
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 const testNativeID = "01a06515-4dd7-7fe3-b0fa-63749ce9e1c7"
+
+func grokTestMessage(body string) productruntime.NativeMessage {
+	return productruntime.NativeMessage{ID: "message", Body: body, From: productruntime.NativeMessageSource{
+		UUID: "parent", Name: "parent", Product: "claude", Groups: []string{"team"},
+	}}
+}
+
+func renderGrokTestMessage(t *testing.T, body string) string {
+	t.Helper()
+	rendered, err := sessiontools.RenderNativeMessage(grokTestMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
+}
 
 type fakeFactory struct {
 	request NativeOpenRequest
@@ -111,7 +127,7 @@ func TestLaneOpenCarriesNativeFactsAndAppliesOnlyRequestedModel(t *testing.T) {
 	}
 	split := ref
 	split.LaneID = request.LaneID
-	if err := driver.SendMessage(context.Background(), split, "must not deliver"); !errors.Is(err, productruntime.ErrStale) {
+	if err := driver.SendMessage(context.Background(), split, grokTestMessage("must not deliver")); !errors.Is(err, productruntime.ErrStale) {
 		t.Fatalf("provisional identity message error = %v", err)
 	}
 	if factory.calls != 1 || factory.request.Name != "named-grok" || factory.request.Capability != "lane-capability" ||
@@ -208,11 +224,11 @@ func TestSteerAndMessageShareNativeInterjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := driver.SendMessage(context.Background(), ref, "inbound"); err != nil {
+	if err := driver.SendMessage(context.Background(), ref, grokTestMessage("inbound")); err != nil {
 		t.Fatal(err)
 	}
 	if accepted.NativeSessionID != testNativeID || accepted.NativeMessageID == "" || len(session.interjections) != 2 ||
-		session.interjections[0][1] != "change" || session.interjections[1][1] != "inbound" {
+		session.interjections[0][1] != "change" || session.interjections[1][1] != renderGrokTestMessage(t, "inbound") {
 		t.Fatalf("accepted=%#v interjections=%v", accepted, session.interjections)
 	}
 }

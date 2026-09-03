@@ -9,7 +9,7 @@ class FakeLiveSession extends EventEmitter {
     this.accepted = []; this.rejected = []; this.calls = [];
   }
   async start() { return this.active ? { active: true } : { active: false, reason: "inert" }; }
-  report(id, name) { this.sessions.set(id, { id, name }); this.reported.push({ id, name }); return true; }
+  report(id, name, info = {}) { this.sessions.set(id, { id, name, info }); this.reported.push({ id, name, info }); return true; }
   updateName(id, name) { this.sessions.get(id).name = name; this.updated.push({ id, name }); return true; }
   closeSession(id) { this.sessions.delete(id); }
   acceptMessage(id, result) { this.accepted.push({ id, result }); return true; }
@@ -26,11 +26,12 @@ fakeTool.schema = { enum: () => ({}), string: () => ({}), any: () => ({}), recor
 async function loadPlugin(live, deadline = 10_000) {
   globalThis.__testTool = fakeTool;
   globalThis.__testLiveFactory = () => live;
+	globalThis.__testRenderDelivery = (payload) => payload.body;
   let source = await readFile(new URL("./agent-sessions.mjs", import.meta.url), "utf8");
   source = source
     .replace('import { tool } from "@opencode-ai/plugin";', "const tool = globalThis.__testTool;")
     .replace('import liveSessionModule from "../shared/live-session.js";', "")
-    .replace('const { createLiveSessionClient } = liveSessionModule;', "const createLiveSessionClient = globalThis.__testLiveFactory;")
+		.replace('const { createLiveSessionClient, renderDelivery } = liveSessionModule;', "const createLiveSessionClient = globalThis.__testLiveFactory; const renderDelivery = globalThis.__testRenderDelivery;")
     .replace("const DELIVERY_DEADLINE_MS = 10_000;", `const DELIVERY_DEADLINE_MS = ${deadline};`);
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Math.random()}`)).default;
 }
@@ -41,7 +42,7 @@ test("OpenCode reports live sessions, title changes, and closes on deletion", as
   const live = new FakeLiveSession();
   const hooks = await (await loadPlugin(live))({ client: {}, directory: "/work" });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "", directory: "/work" } } } });
-  assert.deepEqual(live.reported, [{ id: "ses_one", name: "" }]);
+  assert.deepEqual(live.reported, [{ id: "ses_one", name: "", info: { cwd: "/work" } }]);
   await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_one", title: "native", directory: "/work" } } } });
   assert.deepEqual(live.updated, [{ id: "ses_one", name: "native" }]);
   await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "ses_one" } } } });
@@ -66,7 +67,7 @@ test("OpenCode writes a requested fresh name through the native session API befo
   assert.deepEqual(updates, [{
     path: { id: "ses_one" }, query: { directory: "/work" }, body: { title: "named-opencode" },
   }]);
-  assert.deepEqual(live.reported, [{ id: "ses_one", name: "named-opencode" }]);
+  assert.deepEqual(live.reported, [{ id: "ses_one", name: "named-opencode", info: { cwd: "/work" } }]);
 });
 
 test("OpenCode reports an exact resumed session directly from the product", async () => {
@@ -83,7 +84,7 @@ test("OpenCode reports an exact resumed session directly from the product", asyn
   });
   await tick();
   assert.deepEqual(gets, [{ path: { id: "ses_exact" }, query: { directory: "/work" } }]);
-  assert.deepEqual(live.reported, [{ id: "ses_exact", name: "existing-title" }]);
+  assert.deepEqual(live.reported, [{ id: "ses_exact", name: "existing-title", info: { cwd: "/work" } }]);
 });
 
 test("OpenCode delivers and calls tools on the exact reported session", async () => {

@@ -13,6 +13,7 @@ import (
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 const ProductID = "grok"
@@ -243,15 +244,16 @@ func (driver *LaneDriver) Steer(ctx context.Context, ref productruntime.NativeTu
 	}, nil
 }
 
-func (driver *LaneDriver) SendMessage(ctx context.Context, ref productruntime.NativeSessionRef, message string) error {
+func (driver *LaneDriver) SendMessage(ctx context.Context, ref productruntime.NativeSessionRef, message productruntime.NativeMessage) error {
 	session, err := driver.session(ref)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(message) == "" {
-		return fmt.Errorf("%w: Grok lane message is empty", productruntime.ErrNativeRejected)
+	rendered, err := sessiontools.RenderNativeMessage(message)
+	if err != nil {
+		return productruntime.ErrProtocol
 	}
-	return session.native.Interject(ctx, session.nextMessageID("message"), message)
+	return session.native.Interject(ctx, session.nextMessageID("message"), rendered)
 }
 
 func (driver *LaneDriver) Interrupt(_ context.Context, ref productruntime.NativeTurnRef) error {

@@ -49,10 +49,11 @@ func TestRouteDeliveryReturnsTruthfulFailureAndCallerRetryRepresents(t *testing.
 	source, peers := deliveryTestPeers()
 	var calls []string
 	fail := true
+	rejection := errors.New("recipient unavailable")
 	present := func(_ context.Context, _, _ federation.Peer, deliveryID string, _ federation.AgentFrame) error {
 		calls = append(calls, deliveryID)
 		if fail {
-			return errors.New("recipient unavailable")
+			return rejection
 		}
 		return nil
 	}
@@ -61,7 +62,8 @@ func TestRouteDeliveryReturnsTruthfulFailureAndCallerRetryRepresents(t *testing.
 		Targets: []string{"a"}, Content: "sender retains this body",
 	}
 	first, err := RouteDelivery(context.Background(), frame, source, peers, present)
-	if err != nil || len(first.Deliveries) != 1 || first.Deliveries[0].Status != "failed" {
+	if err != nil || len(first.Deliveries) != 1 || first.Deliveries[0].Status != "failed" ||
+		first.Deliveries[0].Error != rejection.Error() || !errors.Is(first.Deliveries[0].Cause, rejection) {
 		t.Fatalf("first = %+v, %v", first, err)
 	}
 	fail = false

@@ -3,6 +3,9 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { createPiFamilyExtension } from "./pifamily.mjs";
+import liveSessionModule from "../shared/live-session.js";
+
+const { renderDelivery } = liveSessionModule;
 
 class FakeLiveSession extends EventEmitter {
   constructor(active = true) {
@@ -10,7 +13,7 @@ class FakeLiveSession extends EventEmitter {
     this.accepted = []; this.rejected = []; this.calls = []; this.stopped = false;
   }
   async start() { return this.active ? { active: true } : { active: false, reason: "inert" }; }
-  report(id, name) { this.sessions.set(id, { id, name }); this.reported.push({ id, name }); return true; }
+  report(id, name, info = {}) { this.sessions.set(id, { id, name, info }); this.reported.push({ id, name, info }); return true; }
   updateName(id, name) { this.sessions.get(id).name = name; this.updated.push({ id, name }); return true; }
   closeSession(id) { this.sessions.delete(id); }
   acceptMessage(id, result) { this.accepted.push({ id, result }); return true; }
@@ -45,7 +48,7 @@ test("Pi and OMP report the current product session and its native title", async
     createPiFamilyExtension(product, { liveSessionClient: live })(pi);
     const ctx = context(`${product}-session`);
     await pi.fire("session_start", {}, ctx);
-    assert.deepEqual(live.reported, [{ id: `${product}-session`, name: "first" }]);
+    assert.deepEqual(live.reported, [{ id: `${product}-session`, name: "first", info: { cwd: "/work" } }]);
     await pi.fire("session_info_changed", { name: "renamed" }, ctx);
     assert.deepEqual(live.updated, [{ id: `${product}-session`, name: "renamed" }]);
   });
@@ -61,7 +64,7 @@ test("Pi and OMP seed a requested fresh name through the product title writer", 
     })(pi);
     await pi.fire("session_start", {}, context(`${product}-session`));
     assert.equal(pi.getSessionName(), `named-${product}`);
-    assert.deepEqual(live.reported, [{ id: `${product}-session`, name: `named-${product}` }]);
+    assert.deepEqual(live.reported, [{ id: `${product}-session`, name: `named-${product}`, info: { cwd: "/work" } }]);
   });
 });
 
@@ -78,7 +81,7 @@ test("a synchronous native title event during startup is carried by the initial 
     await this.fire("session_info_changed", { name }, ctx);
   };
   await pi.fire("session_start", {}, ctx);
-  assert.deepEqual(live.reported, [{ id: "pi-session", name: "named-pi" }]);
+  assert.deepEqual(live.reported, [{ id: "pi-session", name: "named-pi", info: { cwd: "/work" } }]);
   assert.deepEqual(live.updated, []);
 });
 
@@ -91,7 +94,7 @@ test("Pi-family reconnect preserves an existing product title", async () => {
   })(pi);
   await pi.fire("session_start", {}, context("pi-session"));
   assert.equal(pi.getSessionName(), "product-owned");
-  assert.deepEqual(live.reported, [{ id: "pi-session", name: "product-owned" }]);
+  assert.deepEqual(live.reported, [{ id: "pi-session", name: "product-owned", info: { cwd: "/work" } }]);
 });
 
 test("Pi family live delivery uses ordinary send when idle and native steer when busy", async () => {
@@ -100,9 +103,13 @@ test("Pi family live delivery uses ordinary send when idle and native steer when
   createPiFamilyExtension("omp", { liveSessionClient: live })(pi);
   const ctx = context("omp-session", false);
   await pi.fire("session_start", {}, ctx);
-  live.emit("message", { messageID: "delivery", nativeSessionID: "omp-session", body: "priority" });
+	const delivery = {
+		messageID: "delivery", nativeSessionID: "omp-session", body: "priority",
+		from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] },
+	};
+	live.emit("message", delivery);
   await tick();
-  assert.deepEqual(pi.messages, [{ content: "priority", options: { deliverAs: "steer" } }]);
+	assert.deepEqual(pi.messages, [{ content: renderDelivery(delivery), options: { deliverAs: "steer" } }]);
   assert.deepEqual(live.accepted.map((value) => value.id), ["delivery"]);
 });
 

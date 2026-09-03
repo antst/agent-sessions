@@ -166,8 +166,8 @@ func TestRunQwenPeerPassesNativeNameAndOwnsLaunchFiles(t *testing.T) {
 				if launch.Executable != executable || !slices.Contains(launch.Arguments, "Reviewer") || slices.Contains(launch.Arguments, testQwenSessionID) {
 					t.Fatalf("native exec = %q %q", launch.Executable, launch.Arguments)
 				}
-				if value, ok := qwenTestEnvironment(launch.Environment, peerSessionIDEnv); !ok || value != "" {
-					t.Fatalf("native session environment = %q/%v", value, ok)
+				if value, ok := qwenTestEnvironment(launch.Environment, peerSessionIDEnv); ok {
+					t.Fatalf("unknown resume identity was exported as %q", value)
 				}
 				input, ok := qwenTestEnvironment(launch.Environment, QwenInputFileEnv)
 				if !ok || !filepath.IsAbs(input) {

@@ -17,6 +17,7 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	"github.com/antst/agent-sessions/internal/launcher"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 const grokPeerReadyTimeout = 15 * time.Second
@@ -69,7 +70,7 @@ func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) er
 		}
 		report := liveSessionReport{
 			UUID: sessionID, Name: name, Product: connectorProductGrok,
-			Groups: append([]string(nil), launch.Groups...),
+			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(launch.Cwd),
 		}
 		return launcherHeldIdentity{report: report, call: func(
 			callCtx context.Context, method string, params json.RawMessage,
@@ -126,9 +127,13 @@ func grokLauncherLiveCall(
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
-	messageID, body, err := liveMessageRequest(params)
+	message, err := liveMessageRequest(params)
 	if err != nil {
 		return nil, err
+	}
+	body, err := sessiontools.RenderNativeMessage(message)
+	if err != nil {
+		return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	observer, err := bridge.OpenGrokNativeObserver(
 		ctx, launch.Executable, launch.Cwd, launch.LeaderSocket,
@@ -138,7 +143,7 @@ func grokLauncherLiveCall(
 		return nil, err
 	}
 	defer observer.Close()
-	if err := observer.Interject(ctx, messageID, body); err != nil {
+	if err := observer.Interject(ctx, message.ID, body); err != nil {
 		return nil, err
 	}
 	return json.RawMessage(`{}`), nil

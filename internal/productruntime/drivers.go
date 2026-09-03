@@ -26,7 +26,20 @@ type LaneDriver interface {
 // native inbound message path. Other lane drivers receive messages through
 // their held presence connection.
 type LaneMessageDriver interface {
-	SendMessage(context.Context, NativeSessionRef, string) error
+	SendMessage(context.Context, NativeSessionRef, NativeMessage) error
+}
+
+type NativeMessageSource struct {
+	UUID    string   `json:"uuid"`
+	Name    string   `json:"name"`
+	Product string   `json:"product"`
+	Groups  []string `json:"groups"`
+}
+
+type NativeMessage struct {
+	ID   string              `json:"message_id"`
+	From NativeMessageSource `json:"from"`
+	Body string              `json:"body"`
 }
 
 type DoctorProbe interface {

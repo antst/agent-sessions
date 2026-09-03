@@ -49,7 +49,7 @@ func TestAttachmentRegistryIsLiveAndProcessLocal(t *testing.T) {
 	if err != nil || len(active) != 0 {
 		t.Fatalf("adopted preparation was listed without a report: %+v, %v", active, err)
 	}
-	engine.ReportLive("peer", "reviewer", "codex", []string{"project"}, false)
+	engine.ReportLive("peer", "reviewer", "codex", []string{"project"}, map[string]string{}, false)
 	active, err = engine.ListActive()
 	if err != nil || len(active) != 1 || active[0].ID != "peer" {
 		t.Fatalf("reported active = %+v, %v", active, err)

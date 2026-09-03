@@ -39,5 +39,5 @@ func activateTestAttachment(t testing.TB, runtime *daemonpkg.Runtime, attachment
 	if _, err := runtime.Attachments().Adopt(context.Background(), attachment.ID, daemonpkg.NativeEvidence{ThreadID: attachment.NativeSessionID}); err != nil {
 		t.Fatal(err)
 	}
-	runtime.Attachments().ReportLive(attachment.ID, attachment.ID, attachment.Product, attachment.Groups, false)
+	runtime.Attachments().ReportLive(attachment.ID, attachment.ID, attachment.Product, attachment.Groups, map[string]string{}, false)
 }

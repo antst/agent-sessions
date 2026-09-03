@@ -44,9 +44,47 @@ type recordingMessageTestDriver struct {
 	err      error
 }
 
-func (driver *recordingMessageTestDriver) SendMessage(_ context.Context, ref productruntime.NativeSessionRef, message string) error {
+func TestLiveSessionDispatchExposesExactlyTheFirstClassV1Methods(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
+	report := liveSessionReport{UUID: "missing-source", Product: "future", Groups: []string{"team"}, Info: map[string]string{}}
+	supported := map[string]string{
+		"peers.list":     `{}`,
+		"message.send":   `{"target":"peer","message":"hello"}`,
+		"lane.start":     `{"product":"codex","arguments":["--name","worker"],"input":"work"}`,
+		"lane.run":       `{"product":"codex","arguments":["--name","worker"],"input":"work"}`,
+		"lane.resume":    `{"product":"codex","arguments":["worker"],"input":"work"}`,
+		"lane.steer":     `{"product":"codex","arguments":["worker"],"input":"work"}`,
+		"lane.wait":      `{"product":"codex","arguments":["worker"]}`,
+		"lane.status":    `{"product":"codex","arguments":["worker"]}`,
+		"lane.interrupt": `{"product":"codex","arguments":["worker"]}`,
+		"lane.archive":   `{"product":"codex","arguments":["worker"]}`,
+	}
+	for method, params := range supported {
+		_, err := coordinator.handleLiveSessionCall(context.Background(), runtime, report, "request", method, json.RawMessage(params))
+		var rpcErr *liveRPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == liveRPCNotPermitted {
+			t.Fatalf("supported method %s was refused: %v", method, err)
+		}
+	}
+	_, err := coordinator.handleLiveSessionCall(context.Background(), runtime, report, "request", "lane.status",
+		json.RawMessage(`{"product":"codex","arguments":["worker"],"cwd":"relative"}`))
+	var invalid *liveRPCError
+	if !errors.As(err, &invalid) || invalid.Code != liveRPCInvalidParams {
+		t.Fatalf("relative lane cwd = %v", err)
+	}
+	for _, method := range []string{"tool.call", "tools/call", "lane.collect", "broadcast", "identity"} {
+		_, err := coordinator.handleLiveSessionCall(context.Background(), runtime, report, "request", method, json.RawMessage(`{}`))
+		var rpcErr *liveRPCError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != liveRPCNotPermitted {
+			t.Fatalf("legacy method %s = %v", method, err)
+		}
+	}
+}
+
+func (driver *recordingMessageTestDriver) SendMessage(_ context.Context, ref productruntime.NativeSessionRef, message productruntime.NativeMessage) error {
 	driver.refs = append(driver.refs, ref)
-	driver.messages = append(driver.messages, message)
+	driver.messages = append(driver.messages, message.Body)
 	return driver.err
 }
 
@@ -143,7 +181,11 @@ func TestPluginLaneMessageUsesPresenceOnceAndReturnsProductErrorVerbatim(t *test
 		id: "lane-id", nativeID: "native-id", nativeGeneration: 4, product: "qwen",
 		state: "running", turnID: "untouched", nativeTurnID: "untouched-native",
 	}
-	err = coordinator.deliverLaneMessage(context.Background(), actor, "delivery", "wrapped")
+	err = coordinator.deliverLaneMessage(context.Background(), actor, productruntime.NativeMessage{
+		ID: "delivery", Body: "wrapped", From: productruntime.NativeMessageSource{
+			UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"shared"},
+		},
+	})
 	if err == nil || err.Error() != "product rejected exact delivery" || calls != 1 {
 		t.Fatalf("presence calls=%d err=%v", calls, err)
 	}
@@ -170,20 +212,18 @@ func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = presence.Close() })
 	coordinator.presence = presence
-	delivered := make(chan string, 2)
+	delivered := make(chan productruntime.NativeMessage, 2)
 	_ = startLiveSessionClient(ctx, presence.listener.Addr().String(), liveSessionReport{
 		UUID: "parent-id", Name: "parent-name", Product: "claude",
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if method != "message.deliver" {
 			t.Fatalf("delivery method = %q", method)
 		}
-		var delivery struct {
-			Body string `json:"body"`
-		}
+		var delivery productruntime.NativeMessage
 		if err := json.Unmarshal(params, &delivery); err != nil {
 			t.Fatalf("decode delivery: %v", err)
 		}
-		delivered <- delivery.Body
+		delivered <- delivery
 		return json.RawMessage(`{}`), nil
 	})
 	for deadline := time.Now().Add(2 * time.Second); ; {
@@ -211,10 +251,9 @@ func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
 			t.Fatalf("send to %q: %v", target, err)
 		}
 		select {
-		case body := <-delivered:
-			if !strings.Contains(body, `from-session="lane-native"`) ||
-				!strings.Contains(body, `from-name="lane-name"`) {
-				t.Fatalf("lane envelope = %q", body)
+		case delivery := <-delivered:
+			if delivery.Body != "from lane" || delivery.From.UUID != "lane-native" || delivery.From.Name != "lane-name" {
+				t.Fatalf("lane delivery = %#v", delivery)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("send to %q was not delivered", target)
@@ -291,7 +330,7 @@ func TestToolsOnlyConnectorsUseTheirLiveSessionAsTheCaller(t *testing.T) {
 	}
 }
 
-func TestConnectorInvocationCwdOverridesOnlyThePerCallAttachmentCopy(t *testing.T) {
+func TestInvocationCwdIsExplicitAndOverridesOnlyThePerCallAttachmentCopy(t *testing.T) {
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -302,15 +341,16 @@ func TestConnectorInvocationCwdOverridesOnlyThePerCallAttachmentCopy(t *testing.
 	})
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 
-	liveParams, err := json.Marshal(map[string]any{
-		"name": "identity", "arguments": map[string]any{},
-		"_meta": map[string]any{"agent-sessions/cwd": "/live-call"},
-	})
-	if err != nil {
-		t.Fatal(err)
+	emptyCwd := ""
+	withoutCwd, err := coordinator.callLiveTool(context.Background(), runtime,
+		"session", "without-cwd", "identity", map[string]any{}, &emptyCwd)
+	if err != nil || !strings.Contains(string(withoutCwd), `"cwd":""`) {
+		t.Fatalf("live call without cwd = %s, %v", withoutCwd, err)
 	}
-	live, err := coordinator.handleLiveSessionCall(context.Background(), runtime,
-		liveSessionReport{UUID: "session", Product: "claude"}, "tools/call", liveParams)
+
+	liveCwd := "/live-call"
+	live, err := coordinator.callLiveTool(context.Background(), runtime,
+		"session", "request", "identity", map[string]any{}, &liveCwd)
 	if err != nil || !strings.Contains(string(live), `"cwd":"/live-call"`) {
 		t.Fatalf("live connector result = %s, %v", live, err)
 	}

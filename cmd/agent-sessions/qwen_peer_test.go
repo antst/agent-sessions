@@ -45,7 +45,10 @@ func TestQwenLauncherDeliversOverItsOwnedInput(t *testing.T) {
 	if err := os.WriteFile(input, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	params, err := json.Marshal(map[string]string{"message_id": "message-1", "body": "hello"})
+	params, err := json.Marshal(map[string]any{
+		"message_id": "message-1", "body": "hello",
+		"from": map[string]any{"uuid": "parent", "name": "parent", "product": "codex", "groups": []string{"team"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

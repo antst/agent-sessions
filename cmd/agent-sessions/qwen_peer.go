@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 const qwenPeerReadyTimeout = 45 * time.Second
@@ -38,7 +39,7 @@ func runQwenNativePeer(ctx context.Context, launch launcher.QwenNativeLaunch) er
 		}
 		report := liveSessionReport{
 			UUID: sessionID, Name: name, Product: connectorProductQwen,
-			Groups: append([]string(nil), launch.Groups...),
+			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(launch.Cwd),
 		}
 		return launcherHeldIdentity{
 			report: report,
@@ -129,9 +130,13 @@ func qwenLauncherLiveCall(
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
-	_, body, err := liveMessageRequest(params)
+	message, err := liveMessageRequest(params)
 	if err != nil {
 		return nil, err
+	}
+	body, err := sessiontools.RenderNativeMessage(message)
+	if err != nil {
+		return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	if err := submitQwenNativeInput(inputPath, body); err != nil {
 		return nil, err

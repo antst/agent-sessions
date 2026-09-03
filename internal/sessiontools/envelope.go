@@ -2,51 +2,28 @@ package sessiontools
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-// ProductLabel resolves only an exact catalog product; empty and unknown
-// entrypoints never masquerade as Claude or Codex.
-func ProductLabel(product string) (string, error) {
-	descriptor, ok := productcatalog.ByID(product)
-	if !ok {
-		return "", fmt.Errorf("session tool product %q is unsupported", product)
+// RenderNativeMessage is the one Go-side rendering of a structured v1
+// delivery at a product's native text-input boundary.
+func RenderNativeMessage(message productruntime.NativeMessage) (string, error) {
+	if strings.TrimSpace(message.From.UUID) == "" || strings.TrimSpace(message.From.Product) == "" {
+		return "", errors.New("structured message sender is incomplete")
 	}
-	return descriptor.Label, nil
-}
-
-// WrapPeerMessage preserves the native cross-session carrier while deriving
-// product identity from the sole catalog and escaping closing-tag injection.
-func WrapPeerMessage(product, from, sessionID, name, mode, messageID, sentAt, message string) (string, error) {
-	if _, err := ProductLabel(product); err != nil {
-		return "", err
-	}
-	attributes := []string{}
-	if from != "" {
-		attributes = append(attributes, `from="`+safeAttribute(from)+`"`)
-	}
-	if normalizedSessionID, ok := normalizeNativeID(sessionID); ok {
-		attributes = append(attributes, `from-session="`+normalizedSessionID+`"`)
-	}
-	if name != "" {
-		attributes = append(attributes, `from-name="`+safeAttribute(name)+`"`)
-	}
-	if mode == "bypass" || mode == "prompting" {
-		attributes = append(attributes, `from-mode="`+mode+`"`)
-	}
-	metadata, err := json.Marshal(map[string]any{"fromProduct": product, "messageId": safeAttribute(messageID), "sentAt": safeAttribute(sentAt)})
+	attributes := []string{`from="` + safeAttribute(message.From.Name) + `"`, `from-session="` + safeAttribute(message.From.UUID) + `"`}
+	metadata, err := json.Marshal(map[string]any{
+		"fromProduct": message.From.Product, "messageId": safeAttribute(message.ID), "groups": message.From.Groups,
+	})
 	if err != nil {
 		return "", err
 	}
-	suffix := ""
-	if len(attributes) > 0 {
-		suffix = " " + strings.Join(attributes, " ")
-	}
-	return "<cross-session-message" + suffix + ">\n[codex-peer-metadata: " + string(metadata) + "]\n" + escapeEnvelopeBody(message) + "\n</cross-session-message>", nil
+	return "<cross-session-message " + strings.Join(attributes, " ") + ">\n[codex-peer-metadata: " + string(metadata) + "]\n" +
+		escapeEnvelopeBody(message.Body) + "\n</cross-session-message>", nil
 }
 
 func safeAttribute(value string) string {

@@ -8,18 +8,18 @@ to a file and parse it; do not rely on `jq` being installed.
 
 | `type` | Emitted by | Key fields |
 |---|---|---|
-| `thread.started` | `run`, `start` | `thread_id`, `session_id`, `peer_name` |
-| `thread.resumed` | `resume` | `thread_id`, `session_id`, `peer_name` |
-| `turn.started` | `run`, `start`, `resume`, `wait` | `thread_id`, `turn_id` |
-| `lane.ready` | `start` | `contract_version`, `product`, `name`, `thread_id`, `session_id`, `turn_id`, `cwd`, `groups`, `permission_mode`, `state`, `persistent`, `collection_debt`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id` |
+| `thread.started` | `run`, `start` | `session_id`, `peer_name` |
+| `thread.resumed` | `resume` | `session_id`, `peer_name` |
+| `turn.started` | `run`, `start`, `resume`, `wait` | `session_id`, `turn_id` |
+| `lane.ready` | `start` | `contract_version`, `product`, `name`, `session_id`, `turn_id`, `cwd`, `groups`, `permission_mode`, `state`, `persistent`, `collection_debt`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id` |
 | `item.completed` | `run`, `resume`, `wait` | `turn_id`, `item` |
-| `turn.schema_retry` | `run`, `resume`, `wait` | `thread_id`, `turn_id`, `attempt` |
+| `turn.schema_retry` | `run`, `resume`, `wait` | `session_id`, `turn_id`, `attempt` |
 | `turn.completed` | `run`, `resume`, `wait` | `turn_id`, `status`, `outcome`, `exit`, `accounting`, `usage`, `error` |
-| `turn.interrupted` | `interrupt` | `thread_id`, `turn_id` |
+| `turn.interrupted` | `interrupt` | `session_id`, `turn_id` |
 | `lane.status` | `status` | see below |
 | `lane.list` | `list` | `contract_version`, `lanes` |
 | `lane.doctor` | `doctor --json` | `contract_version`, reachability, runtime/profile paths |
-| `lane.archived` | `archive` | `name`, `thread_id`, `notices_dropped` or `already_archived`; repeated archive also reports `retirement_reasserted` |
+| `lane.archived` | `archive` | `name`, `session_id`, `notices_dropped` or `already_archived`; repeated archive also reports `retirement_reasserted` |
 | `error` | any | `message`, `timeout` |
 
 `lane.ready` is the readiness barrier: the lane's turn has already started, its durable state
@@ -56,7 +56,7 @@ They differ when a durable deadline fires: raw `status` is usually `interrupted`
 
 ## `lane.status`
 
-`name`, `thread_id`, `session_id`, `status`, `cwd`, `turn_id`, `turn_status`, `collected_turn_id`,
+`name`, `session_id`, `status`, `cwd`, `turn_id`, `turn_status`, `collected_turn_id`,
 `persistent`, `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`,
 `outcome`, `exit`.
 
@@ -67,7 +67,7 @@ uncollected detached answer is no longer available through `wait`.
 
 ## Discovery and preflight
 
-`lane.list` contains a `lanes` array. Each row carries `name`, `thread_id`, `session_id`, `cwd`,
+`lane.list` contains a `lanes` array. Each row carries `name`, `session_id`, `cwd`,
 `status`, `turn_id`, `collected_turn_id`, `persistent`,
 `auto_archive`, `auto_archive_after_seconds`, `auto_archive_at`, `owner_session_id`, `outcome`, and `exit`.
 Active lanes are returned by default and `--all` adds archived, resumable lanes.

@@ -119,7 +119,7 @@ func runLauncherHeldPeer(
 		return errors.New("product returned an invalid live session identity")
 	}
 
-	client := startLiveSessionClient(runCtx, livePresenceEndpoint(defaultStateRoot()), identity.report, identity.call)
+	client := startLiveSessionClient(runCtx, defaultPresenceEndpoint(), identity.report, identity.call)
 	if identity.watch != nil {
 		identity.watch(runCtx, client, identity.report)
 	}

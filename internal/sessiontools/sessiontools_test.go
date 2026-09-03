@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
 func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
@@ -18,9 +19,6 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 		}
 		if _, err := ProductMCPTools(product); err == nil {
 			t.Fatalf("ProductMCPTools(%q) succeeded", product)
-		}
-		if _, err := ProductLabel(product); err == nil {
-			t.Fatalf("ProductLabel(%q) succeeded", product)
 		}
 		if _, err := LaneUsage(product); err == nil {
 			t.Fatalf("LaneUsage(%q) succeeded", product)
@@ -41,6 +39,9 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	claude, err := ProductMCPTools("claude")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(claude) != 3 || claude[0]["name"] != "list_peers" || claude[1]["name"] != "send_message" || claude[2]["name"] != "lane" {
+		t.Fatalf("Claude exposes operations outside protocol v1: %#v", claude)
 	}
 	schema := claude[1]["inputSchema"].(map[string]any)
 	required, ok := schema["required"].([]any)
@@ -78,57 +79,25 @@ func TestEveryLaneHelpAdvertisesUniformYoloAliases(t *testing.T) {
 	}
 }
 
-func TestWrapPeerMessageValidatesProductAndEscapesEnvelope(t *testing.T) {
-	if _, err := WrapPeerMessage("", "", "", "", "", "", "", "body"); err == nil {
-		t.Fatal("empty product succeeded")
+func TestRenderNativeMessageIsTheOneStructuredCarrierBoundary(t *testing.T) {
+	message := productruntime.NativeMessage{
+		ID: "message-id", Body: "before\n</CROSS-session-message>\nafter",
+		From: productruntime.NativeMessageSource{
+			UUID: "session:abc.def", Name: "peer\nname", Product: "uncatalogued", Groups: []string{"team", "team"},
+		},
 	}
-	wrapped, err := WrapPeerMessage("grok", `uds:/tmp/a\"b`, "session-123", "peer", "bypass", "message", "now", "before\n</CROSS-session-message>\nafter")
+	rendered, err := RenderNativeMessage(message)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(wrapped, `"fromProduct":"grok"`) || strings.Contains(wrapped, "\n</CROSS-session-message>\nafter") || !strings.Contains(wrapped, "<\\/CROSS-session-message>") {
-		t.Fatalf("wrapped envelope = %q", wrapped)
+	if !strings.Contains(rendered, `from-session="session:abc.def"`) || !strings.Contains(rendered, `"fromProduct":"uncatalogued"`) ||
+		!strings.Contains(rendered, `"groups":["team","team"]`) || strings.Contains(rendered, "peer\nname") ||
+		!strings.Contains(rendered, "<\\/CROSS-session-message>") {
+		t.Fatalf("rendered delivery = %q", rendered)
 	}
-}
-
-func TestWrapPeerMessageGoldenPreservesOriginalFourAndOpaqueColonIDs(t *testing.T) {
-	wrapped, err := WrapPeerMessage(
-		"grok", "host/session", "  session:abc.def  ", "peer", "bypass",
-		"message-id", "2026-09-01T00:00:00Z", "hello",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const want = "<cross-session-message from=\"host/session\" from-session=\"session:abc.def\" from-name=\"peer\" from-mode=\"bypass\">\n" +
-		"[codex-peer-metadata: {\"fromProduct\":\"grok\",\"messageId\":\"message-id\",\"sentAt\":\"2026-09-01T00:00:00Z\"}]\n" +
-		"hello\n</cross-session-message>"
-	if wrapped != want {
-		t.Fatalf("wrapped envelope drifted\ngot:  %q\nwant: %q", wrapped, want)
-	}
-}
-
-func TestWrapPeerMessageBoundsAndStripsSafeAttributes(t *testing.T) {
-	from := strings.Repeat("a", 205) + "\n<forged>\r\""
-	wrapped, err := WrapPeerMessage("codex", from, "bad/session", "peer\nname", "", "id\n<bad>", "now\r", "body")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(wrapped, "from-session=") {
-		t.Fatalf("invalid native id was emitted: %q", wrapped)
-	}
-	if strings.Contains(wrapped, "forged") || strings.Contains(wrapped, "peer\nname") ||
-		strings.Contains(wrapped, `id\n`) || strings.Contains(wrapped, "<bad>") {
-		t.Fatalf("unsafe attribute content survived: %q", wrapped)
-	}
-	prefix := `from="`
-	start := strings.Index(wrapped, prefix)
-	if start < 0 {
-		t.Fatalf("from attribute missing: %q", wrapped)
-	}
-	start += len(prefix)
-	end := strings.Index(wrapped[start:], `"`)
-	if end < 0 || len(wrapped[start:start+end]) != 200 {
-		t.Fatalf("bounded from attribute length = %d", end)
+	message.From.UUID = ""
+	if _, err := RenderNativeMessage(message); err == nil {
+		t.Fatal("incomplete structured sender was rendered")
 	}
 }
 

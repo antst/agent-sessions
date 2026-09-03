@@ -8,6 +8,8 @@ import (
 	"unicode"
 )
 
+var ErrUnknownTarget = errors.New("unknown session or target")
+
 const (
 	privateGroupPrefix = "session:"
 	maxGroupBytes      = 192
@@ -146,7 +148,7 @@ func Admit(frame AgentFrame, source Peer, peers []Peer) (Admission, error) { //n
 func Resolve(raw string, peers []Peer) (Peer, error) {
 	raw = strings.TrimSpace(strings.TrimPrefix(raw, "session:"))
 	if raw == "" {
-		return Peer{}, errors.New("peer target is empty")
+		return Peer{}, fmt.Errorf("%w: peer target is empty", ErrUnknownTarget)
 	}
 	matches := make([]Peer, 0, 1)
 	for _, peer := range peers {
@@ -158,10 +160,10 @@ func Resolve(raw string, peers []Peer) (Peer, error) {
 		}
 	}
 	if len(matches) == 0 {
-		return Peer{}, fmt.Errorf("no live peer session or lane matching %q", raw)
+		return Peer{}, fmt.Errorf("%w: no live peer session or lane matching %q", ErrUnknownTarget, raw)
 	}
 	if len(matches) != 1 {
-		return Peer{}, fmt.Errorf("peer name %q is ambiguous; use an exact host/session identity", raw)
+		return Peer{}, fmt.Errorf("%w: peer name %q is ambiguous; use an exact host/session identity", ErrUnknownTarget, raw)
 	}
 	return matches[0], nil
 }

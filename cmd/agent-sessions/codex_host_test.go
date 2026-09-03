@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,7 +130,7 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 	defer func() { connectorNativeAdapters[connectorProductCodex] = original }()
 	delivered := make(chan liveSessionReport, 1)
 	connectorNativeAdapters[connectorProductCodex] = func(_ context.Context, report liveSessionReport, _ string, body string) error {
-		if body != "hello" {
+		if !strings.Contains(body, "hello") || !strings.Contains(body, `from-session="parent"`) {
 			t.Errorf("delivered body = %q", body)
 		}
 		delivered <- report
@@ -148,7 +149,10 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 		if report.UUID != launch.ThreadID || report.Name != launch.Name || report.Product != "codex" || len(report.Groups) != 1 || report.Groups[0] != "project" {
 			t.Fatalf("live report = %+v", report)
 		}
-		params, _ := json.Marshal(map[string]any{"message_id": "message-1", "body": "hello"})
+		params, _ := json.Marshal(map[string]any{
+			"message_id": "message-1", "body": "hello",
+			"from": map[string]any{"uuid": "parent", "name": "parent", "product": "claude", "groups": []string{"project"}},
+		})
 		if _, err := server.Call(context.Background(), report.UUID, "test", "message.deliver", json.RawMessage(params)); err != nil {
 			t.Fatal(err)
 		}

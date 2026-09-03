@@ -284,8 +284,8 @@ func (c *hostCoordinator) run(ctx context.Context) error {
 	presence, err := startLivePresenceServer(ctx, c.stateRoot,
 		func(report liveSessionReport) { c.joinLiveSession(runtime, report) },
 		func(report liveSessionReport) { c.leaveLiveSession(runtime, report) },
-		func(callCtx context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
-			return c.handleLiveSessionCall(callCtx, runtime, report, method, params)
+		func(callCtx context.Context, report liveSessionReport, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
+			return c.handleLiveSessionCall(callCtx, runtime, report, requestID, method, params)
 		},
 	)
 	if err != nil {
@@ -615,7 +615,7 @@ func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) 
 	}}, func(context.Context) (launcherHeldIdentity, error) {
 		report := liveSessionReport{
 			UUID: launch.ThreadID, Name: launch.Name, Product: connectorProductCodex,
-			Groups: append([]string(nil), launch.Groups...),
+			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(launch.Cwd),
 		}
 		return launcherHeldIdentity{report: report, call: func(
 			callCtx context.Context, method string, params json.RawMessage,

@@ -1,11 +1,11 @@
 import { tool } from "@kilocode/plugin";
 import liveSessionModule from "../shared/live-session.js";
 
-const { createLiveSessionClient } = liveSessionModule;
+const { createLiveSessionClient, renderDelivery } = liveSessionModule;
 const OPERATIONS = [
   "peers.list", "message.send",
   "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-  "lane.steer", "lane.interrupt", "lane.collect", "lane.archive",
+  "lane.steer", "lane.interrupt", "lane.archive",
 ];
 const MAX_MESSAGE_SNAPSHOT_BYTES = 1024 * 1024;
 const MAX_MESSAGE_ENTRIES = 4096;
@@ -21,13 +21,6 @@ function boundedText(value, maximum = 1024 * 1024) {
 function validNativeID(value, prefix) {
   return typeof value === "string" && value.length > prefix.length && Buffer.byteLength(value, "utf8") <= 256 &&
     value.startsWith(prefix) && new RegExp(`^${prefix}[A-Za-z0-9_-]+$`, "u").test(value);
-}
-
-function renderAgentFrame(frame) {
-	if (typeof frame === "string") return boundedText(frame);
-  const content = boundedText(frame?.content ?? JSON.stringify(frame));
-  const from = frame?.source?.name ?? frame?.source?.id ?? frame?.source_session_id ?? "peer";
-  return `<cross-session-message from="${String(from).replace(/[<>"\r\n]/gu, "")}">\n${content.replace(/<\/cross-session-message/giu, "<\\/cross-session-message")}\n</cross-session-message>`;
 }
 
 function toolCallID(counter, messageID) {
@@ -130,7 +123,7 @@ export default async function agentSessionsKiloPlugin({ client, directory, envir
       const resumedTitle = eventNativeTitle(resumed?.title);
       if (resumedTitle === undefined) throw new Error("Kilo resume omitted the native session title");
       known.set(resumedSessionID, { title: resumedTitle, cwd: resumed?.directory ?? directory });
-      live.report(resumedSessionID, resumedTitle);
+      live.report(resumedSessionID, resumedTitle, { cwd: resumed?.directory ?? directory });
     }).catch((error) => live.emit("diagnostic", String(error?.message ?? error)));
   }
 
@@ -141,7 +134,7 @@ export default async function agentSessionsKiloPlugin({ client, directory, envir
       if (!known.has(payload.nativeSessionID)) throw new Error("no exact live native session is reported");
       const deadline = Date.now() + DELIVERY_DEADLINE_MS;
       const before = new Set((await listMessages(client, directory, payload.nativeSessionID, deadline, controller)).map((entry) => entry?.info?.id));
-      const text = renderAgentFrame(payload.body);
+      const text = renderDelivery(payload);
       requireSDKSuccess(await boundedNativeCall(() => client.tui.clearPrompt(
         { query: { directory } }, { signal: controller.signal },
       ), deadline, controller), 200, true);
@@ -195,7 +188,7 @@ export default async function agentSessionsKiloPlugin({ client, directory, envir
           const prior = known.get(sessionID);
           known.set(sessionID, { title: nativeTitle, cwd: info?.directory ?? directory });
           if (!prior) {
-            live.report(sessionID, nativeTitle);
+            live.report(sessionID, nativeTitle, { cwd: info?.directory ?? directory });
           } else if (nativeTitle !== prior.title) {
             live.updateName(sessionID, nativeTitle);
           }
@@ -215,7 +208,7 @@ export default async function agentSessionsKiloPlugin({ client, directory, envir
       const hasNativeTitle = Object.hasOwn(input, "title") && typeof input.title === "string" &&
         validNativeTitleObservation(input.title);
       if (!known.has(sessionID) && hasNativeTitle) {
-        live.report(sessionID, input.title);
+        live.report(sessionID, input.title, { cwd: input.cwd ?? directory });
         known.set(sessionID, { title: input.title, cwd: input.cwd ?? directory });
       }
     },

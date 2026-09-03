@@ -14,26 +14,49 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
   t.after(() => client.stop());
   assert.deepEqual(await client.start(), { active: true });
-  assert.equal(client.report("native", "before"), true);
+  assert.equal(client.report("native", "before", { cwd: "/work" }), true);
   await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
-  assert.deepEqual(fixture.reports[0], { uuid: "native", name: "before", groups: ["team"], product: "pi" });
+  assert.deepEqual(fixture.reports[0], { protocol: 1, uuid: "native", name: "before", groups: ["team", "team"], product: "pi", info: { cwd: "/work" } });
 
   const call = client.callTool("native", "tool-one", "peers.list", {});
-  await until(() => fixture.requests.some((frame) => frame.method === "tool.call"));
-  fixture.write({ id: fixture.requests[0].id, result: { peers: 2 } });
+  await until(() => fixture.requests.some((frame) => frame.method === "peers.list"));
+  fixture.write({ jsonrpc: "2.0", id: fixture.requests[0].id, result: { peers: 2 } });
   assert.deepEqual(await call, { peers: 2 });
+
+  const laneCall = client.callTool("native", "lane-one", "lane.status", { product: "qwen", arguments: ["worker"] });
+  await until(() => fixture.requests.some((frame) => frame.method === "lane.status"));
+  const laneRequest = fixture.requests.find((frame) => frame.method === "lane.status");
+  assert.equal(laneRequest.params.cwd, process.cwd());
+  fixture.write({ jsonrpc: "2.0", id: laneRequest.id, result: { type: "lane.status" } });
+  assert.deepEqual(await laneCall, { type: "lane.status" });
 
   client.updateName("native", "after");
   await until(() => fixture.requests.some((frame) => frame.method === "session.update"));
   const update = fixture.requests.find((frame) => frame.method === "session.update");
   assert.equal(update.params.name, "after");
-  fixture.write({ id: update.id, result: {} });
+  fixture.write({ jsonrpc: "2.0", id: update.id, result: {} });
 
   const delivered = new Promise((resolve) => client.once("message", resolve));
-  fixture.write({ id: "daemon.message", method: "message.deliver", params: { message_id: "message", body: "hello" } });
-  assert.deepEqual(await delivered, { messageID: "message", nativeSessionID: "native", body: "hello" });
+  fixture.write({ jsonrpc: "2.0", id: "daemon.message", method: "message.deliver", params: {
+    message_id: "message", from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] }, body: "hello",
+  } });
+  assert.deepEqual(await delivered, {
+    messageID: "message", nativeSessionID: "native",
+    from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] }, body: "hello",
+  });
   client.acceptMessage("message");
   await until(() => fixture.responses.some((frame) => frame.id === "daemon.message"));
+
+  const rejected = new Promise((resolve) => client.once("message", resolve));
+  fixture.write({ jsonrpc: "2.0", id: "daemon.failed", method: "message.deliver", params: {
+    message_id: "failed", from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] }, body: "fail",
+  } });
+  await rejected;
+  client.rejectMessage("failed", "product rejected exact input");
+  await until(() => fixture.responses.some((frame) => frame.id === "daemon.failed"));
+  assert.deepEqual(fixture.responses.find((frame) => frame.id === "daemon.failed").error, {
+    code: -32006, message: "product rejected exact input", data: { detail: "product rejected exact input" },
+  });
 });
 
 test("disconnect rejects calls and reconnect reports from scratch", async (t) => {
@@ -58,8 +81,25 @@ test("inactive client never connects", async () => {
   assert.equal(connects, 0);
 });
 
+test("socket discovery honors explicit, state-root, XDG, then home", () => {
+  assert.equal(readConfiguration({
+    AGENT_SESSIONS_PRESENCE_SOCKET: "/explicit.sock", AGENT_SESSIONS_STATE_ROOT: "/state",
+    XDG_STATE_HOME: "/xdg", HOME: "/home", AGENT_SESSIONS_PRODUCT: "pi", AGENT_SESSIONS_GROUPS: "[]",
+  }).socketPath, "/explicit.sock");
+  assert.equal(readConfiguration({
+    AGENT_SESSIONS_STATE_ROOT: "/state", XDG_STATE_HOME: "/xdg", HOME: "/home",
+    AGENT_SESSIONS_PRODUCT: "pi", AGENT_SESSIONS_GROUPS: "[]",
+  }).socketPath, "/state/run/presence.sock");
+  assert.equal(readConfiguration({
+    XDG_STATE_HOME: "/xdg", HOME: "/home", AGENT_SESSIONS_PRODUCT: "pi", AGENT_SESSIONS_GROUPS: "[]",
+  }).socketPath, "/xdg/agent-sessions/run/presence.sock");
+  assert.equal(readConfiguration({
+    HOME: "/home", AGENT_SESSIONS_PRODUCT: "pi", AGENT_SESSIONS_GROUPS: "[]",
+  }).socketPath, "/home/.local/state/agent-sessions/run/presence.sock");
+});
+
 function env(socketPath) {
-  return { AGENT_SESSIONS_PRESENCE_SOCKET: socketPath, AGENT_SESSIONS_PRODUCT_ID: "pi", AGENT_SESSIONS_GROUPS: '["team","team"]' };
+  return { AGENT_SESSIONS_PRESENCE_SOCKET: socketPath, AGENT_SESSIONS_PRODUCT: "pi", AGENT_SESSIONS_GROUPS: '["team","team"]' };
 }
 
 async function server(t) {
@@ -80,7 +120,12 @@ async function server(t) {
         if (newline < 0) return;
         const frame = JSON.parse(buffer.slice(0, newline));
         buffer = buffer.slice(newline + 1);
-        if (!reported) { reported = true; reports.push(frame); }
+        if (!reported) {
+          if (frame.jsonrpc !== "2.0" || frame.method !== "session.hello") return connection.destroy();
+          reported = true;
+          reports.push(frame.params);
+          connection.write(`${JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: {} })}\n`);
+        }
         else if (frame.method) requests.push(frame); else responses.push(frame);
       }
     });

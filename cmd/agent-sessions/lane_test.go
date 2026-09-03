@@ -107,7 +107,7 @@ func TestSteerLaneDispatchesOneExactActiveNativeTurn(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	actor := &laneActor{
-		id: "lane", nativeID: "ses_native", nativeTurnID: "msg_turn", nativeGeneration: 7,
+		id: "ses_native", nativeID: "ses_native", nativeTurnID: "msg_turn", nativeGeneration: 7,
 		parentID: "parent", product: "kilo", name: "worker", groups: []string{"shared"},
 		permission: "bypassPermissions", arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
 		approvalPolicy: "never", sandbox: "workspace-write", effort: "high", schema: "/schema.json",
@@ -140,7 +140,7 @@ func TestSteerLaneDispatchesOneExactActiveNativeTurn(t *testing.T) {
 		driver.request.Effort != actor.effort || driver.request.SchemaPath != actor.schema {
 		t.Fatalf("steer call count=%d turn=%+v request=%+v", driver.calls, driver.turn, driver.request)
 	}
-	if result["type"] != "turn.steered" || result["thread_id"] != actor.id || result["session_id"] != actor.nativeID ||
+	if result["type"] != "turn.steered" || result["session_id"] != actor.nativeID || result["thread_id"] != nil ||
 		result["turn_id"] != actor.turnID || result["native_message_id"] != driver.acceptance.NativeMessageID {
 		t.Fatalf("steer result = %#v", result)
 	}
@@ -396,7 +396,7 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 		coordinator.reportedLanes["native-lane"] != "native-lane" {
 		t.Fatalf("actor was not re-keyed to its sole native identity: id=%q lanes=%+v reports=%+v", actor.id, coordinator.lanes, coordinator.reportedLanes)
 	}
-	if status := laneActorStatus(actor); status["thread_id"] != "native-lane" || status["session_id"] != "native-lane" {
+	if status := laneActorStatus(actor); status["thread_id"] != nil || status["session_id"] != "native-lane" {
 		t.Fatalf("public lane identity remained split: %+v", status)
 	}
 	wantGroups := []string{"project/child", primary, primary + "/native-lane"}
@@ -849,16 +849,16 @@ func TestIdleLaneRemainsLiveOwnerOfItsChildUntilParentArchive(t *testing.T) {
 	}
 }
 
-func TestLaneReadyKeepsAgentSessionsOwnerDistinctFromNativeSession(t *testing.T) {
+func TestLaneReadyUsesOnlyNativeSessionIdentityAndDistinctOwner(t *testing.T) {
 	actor := &laneActor{
-		id:       "agent-sessions-child-id",
+		id:       "native-vendor-session-id",
 		parentID: "agent-sessions-parent-id",
 		nativeID: "native-vendor-session-id",
 		product:  "qwen",
 		state:    "running",
 	}
 	ready := laneReadyResult(actor)
-	if ready["thread_id"] != actor.id || ready["owner_session_id"] != actor.parentID || ready["session_id"] != actor.nativeID {
+	if ready["thread_id"] != nil || ready["owner_session_id"] != actor.parentID || ready["session_id"] != actor.nativeID {
 		t.Fatalf("lane identity projection = %#v", ready)
 	}
 	if ready["owner_session_id"] == ready["session_id"] {

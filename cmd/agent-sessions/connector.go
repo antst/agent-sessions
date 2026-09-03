@@ -16,6 +16,7 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
@@ -29,7 +30,6 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if connectorDeclinesForeignManagedProduct(requestedProduct, product, os.Getenv) {
 		return nil
 	}
-	stateRoot := defaultStateRoot()
 	refresher, err := newConnectorImageRefresher(os.Args, os.Environ())
 	if err != nil {
 		return fmt.Errorf("track installed connector image: %w", err)
@@ -42,12 +42,18 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return fmt.Errorf("normalize installed connector image: %w", err)
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
+	if reported {
+		cwd, cwdErr := os.Getwd()
+		if cwdErr == nil {
+			report.Info = liveCwdInfo(cwd)
+		}
+	}
 	if reported && product == connectorProductClaude && report.Name == "" {
 		report.Name = claudeActiveSessionName(ctx, report.UUID)
 	}
 	var live *liveSessionClient
 	if reported && connectorClaimsLivePresence(product, os.Getenv) {
-		live = startLiveSessionClient(ctx, livePresenceEndpoint(stateRoot), report,
+		live = startLiveSessionClient(ctx, defaultPresenceEndpoint(), report,
 			func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, report, method, params)
 			})
@@ -58,6 +64,9 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 			return refresher.refresh()
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
+			if live != nil {
+				return callLiveConnectorTool(callCtx, live, id, method, params)
+			}
 			if method == "tools/call" {
 				cwd, cwdErr := os.Getwd()
 				if cwdErr != nil {
@@ -68,17 +77,67 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 					return nil, cwdErr
 				}
 			}
-			if live == nil {
-				sourceID := connectorRelaySource(product, report.UUID, os.Getenv(launcher.QwenEventsFileEnv))
-				return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
-			}
-			return live.Call(callCtx, id, method, params)
+			sourceID := connectorRelaySource(product, report.UUID, os.Getenv(launcher.QwenEventsFileEnv))
+			return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
 		},
 	})
 	if err != nil {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func callLiveConnectorTool(
+	ctx context.Context, live *liveSessionClient, requestID, method string, params json.RawMessage,
+) (json.RawMessage, error) {
+	if method != "tools/call" {
+		return nil, fmt.Errorf("connector method %s is unsupported", method)
+	}
+	var call connectorToolCall
+	if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
+		return nil, errors.New("connector tool call is invalid")
+	}
+	arguments := call.Arguments
+	if arguments == nil {
+		arguments = map[string]any{}
+	}
+	var operation string
+	switch call.Name {
+	case "list_peers":
+		operation = "peers.list"
+		arguments = map[string]any{}
+	case "send_message":
+		operation = "message.send"
+	case "lane":
+		command := strings.TrimSpace(mapString(arguments, "command"))
+		if command == "collect" || !containsString([]string{"start", "run", "resume", "steer", "wait", "status", "interrupt", "archive"}, command) {
+			return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"method": "lane." + command})
+		}
+		operation = "lane." + command
+		delete(arguments, "command")
+	default:
+		return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"tool": call.Name})
+	}
+	if strings.HasPrefix(operation, "lane.") {
+		if _, supplied := arguments["cwd"]; !supplied {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("read connector invocation cwd: %w", err)
+			}
+			arguments["cwd"] = cwd
+		}
+	}
+	result, err := live.Call(ctx, requestID, operation, arguments)
+	if err != nil {
+		return nil, err
+	}
+	var structured any = map[string]any{}
+	if len(result) != 0 && string(result) != "null" && json.Unmarshal(result, &structured) != nil {
+		return nil, errors.New("presence method returned invalid JSON")
+	}
+	return json.Marshal(map[string]any{
+		"content": []map[string]any{{"type": "text", "text": string(result)}}, "structuredContent": structured,
+	})
 }
 
 func connectorRelaySource(product, ambient, qwenEventsPath string) string {
@@ -163,29 +222,31 @@ func connectorNativeCall(ctx context.Context, report liveSessionReport, method s
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
-	messageID, body, err := liveMessageRequest(params)
+	message, err := liveMessageRequest(params)
 	if err != nil {
 		return nil, err
+	}
+	body, err := sessiontools.RenderNativeMessage(message)
+	if err != nil {
+		return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	adapter := connectorNativeAdapters[report.Product]
 	if adapter == nil {
 		return nil, fmt.Errorf("product %s has no Go connector delivery adapter", report.Product)
 	}
-	if err := adapter(ctx, report, messageID, body); err != nil {
+	if err := adapter(ctx, report, message.ID, body); err != nil {
 		return nil, err
 	}
 	return json.RawMessage(`{}`), nil
 }
 
-func liveMessageRequest(params json.RawMessage) (string, string, error) {
-	var request struct {
-		MessageID string `json:"message_id"`
-		Body      string `json:"body"`
+func liveMessageRequest(params json.RawMessage) (productruntime.NativeMessage, error) {
+	var request productruntime.NativeMessage
+	if decodeStrictJSON(params, &request) != nil || strings.TrimSpace(request.ID) == "" || strings.TrimSpace(request.From.UUID) == "" ||
+		strings.TrimSpace(request.From.Product) == "" || request.From.Groups == nil {
+		return productruntime.NativeMessage{}, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": "message.deliver"})
 	}
-	if json.Unmarshal(params, &request) != nil || strings.TrimSpace(request.MessageID) == "" {
-		return "", "", fmt.Errorf("live message delivery is invalid")
-	}
-	return request.MessageID, request.Body, nil
+	return request, nil
 }
 
 type connectorNativeAdapter func(context.Context, liveSessionReport, string, string) error
@@ -298,7 +359,7 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 			return liveSessionReport{}, false
 		}
 	}
-	return liveSessionReport{UUID: uuid, Name: name, Groups: uniqueStrings(groups), Product: product}, true
+	return liveSessionReport{UUID: uuid, Name: name, Groups: append([]string(nil), groups...), Product: product, Info: map[string]string{}}, true
 }
 
 func claudeActiveSessionName(ctx context.Context, sessionID string) string {

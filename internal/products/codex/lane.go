@@ -8,6 +8,7 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 const ProductID = "codex"
@@ -125,15 +126,19 @@ func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.Nat
 	return native.InterruptLaneTurn(ctx, turn.NativeSessionID, turn.NativeTurnID)
 }
 
-func (driver *LaneDriver) SendMessage(ctx context.Context, session productruntime.NativeSessionRef, message string) error {
-	if session.Generation != 1 || session.LaneID == "" || session.LaneID != session.NativeSessionID || strings.TrimSpace(message) == "" {
+func (driver *LaneDriver) SendMessage(ctx context.Context, session productruntime.NativeSessionRef, message productruntime.NativeMessage) error {
+	if session.Generation != 1 || session.LaneID == "" || session.LaneID != session.NativeSessionID {
+		return productruntime.ErrProtocol
+	}
+	prompt, err := sessiontools.RenderNativeMessage(message)
+	if err != nil {
 		return productruntime.ErrProtocol
 	}
 	native, err := driver.native()
 	if err != nil {
 		return err
 	}
-	_, err = native.SendMessage(ctx, session.NativeSessionID, message)
+	_, err = native.SendMessage(ctx, session.NativeSessionID, prompt)
 	return err
 }
 

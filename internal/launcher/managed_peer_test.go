@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/antst/agent-sessions/internal/envutil"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
@@ -41,11 +42,14 @@ func TestManagedPeerPlansUseProductNativeLaunchSurfaces(t *testing.T) {
 			if got := environmentValue(plan.environment, peerProductEnv); got != test.product {
 				t.Fatalf("AGENT_SESSIONS_PRODUCT = %q", got)
 			}
-			if got := environmentValue(plan.environment, "AGENT_SESSIONS_PRODUCT_ID"); got != test.product {
-				t.Fatalf("AGENT_SESSIONS_PRODUCT_ID = %q", got)
+			if got := environmentValue(plan.environment, "AGENT_SESSIONS_PRODUCT_ID"); got != "" {
+				t.Fatalf("obsolete AGENT_SESSIONS_PRODUCT_ID = %q", got)
 			}
 			if got := environmentValue(plan.environment, peerSessionNameEnv); got != "reviewer" {
 				t.Fatalf("AGENT_SESSIONS_SESSION_NAME = %q", got)
+			}
+			if _, present := envutil.Lookup(plan.environment)(peerSessionIDEnv); present {
+				t.Fatal("fresh product-generated session exported AGENT_SESSIONS_SESSION_ID")
 			}
 			var groups []string
 			if err := json.Unmarshal([]byte(environmentValue(plan.environment, peerGroupsEnv)), &groups); err != nil || !reflect.DeepEqual(groups, []string{"project"}) {

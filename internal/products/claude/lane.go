@@ -15,6 +15,7 @@ import (
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 const ProductID = "claude"
@@ -244,12 +245,16 @@ func (driver *LaneDriver) Steer(ctx context.Context, ref productruntime.NativeTu
 	}, nil
 }
 
-func (driver *LaneDriver) SendMessage(ctx context.Context, ref productruntime.NativeSessionRef, message string) error {
+func (driver *LaneDriver) SendMessage(ctx context.Context, ref productruntime.NativeSessionRef, message productruntime.NativeMessage) error {
 	session, err := driver.session(ref)
 	if err != nil {
 		return err
 	}
-	prompt, err := lanePrompt(message)
+	rendered, err := sessiontools.RenderNativeMessage(message)
+	if err != nil {
+		return productruntime.ErrProtocol
+	}
+	prompt, err := lanePrompt(rendered)
 	if err != nil {
 		return err
 	}

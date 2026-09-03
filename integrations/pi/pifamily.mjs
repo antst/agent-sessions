@@ -1,11 +1,11 @@
 import liveSessionModule from "../shared/live-session.js";
 
-const { createLiveSessionClient } = liveSessionModule;
+const { createLiveSessionClient, renderDelivery } = liveSessionModule;
 
 const OPERATIONS = Object.freeze([
   "peers.list", "message.send",
   "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-  "lane.steer", "lane.interrupt", "lane.collect", "lane.archive",
+  "lane.steer", "lane.interrupt", "lane.archive",
 ]);
 const LANE_OPERATIONS = new Set(OPERATIONS.filter((operation) => operation.startsWith("lane.")));
 const MAX_TEXT_BYTES = 1024 * 1024;
@@ -17,14 +17,6 @@ function boundedText(value, maximum = MAX_TEXT_BYTES) {
     throw new Error("native product text is missing or outside its bound");
   }
   return text;
-}
-
-function exactAgentFrame(value) {
-  if (typeof value === "string") return { messageID: `live-${Date.now()}`, content: boundedText(value) };
-  if (!value || value.version !== 1 || value.type !== "delivery" || typeof value.message_id !== "string") {
-    throw new Error("delivery body is not an AgentFrame v1 delivery");
-  }
-  return { messageID: boundedText(value.message_id, 512), content: boundedText(value.content) };
 }
 
 function schema() {
@@ -174,7 +166,7 @@ export function createPiFamilyExtension(productID, options = {}) {
             if (!current || payload.nativeSessionID !== current.nativeSessionID) {
               throw new Error("delivery targets a different live native session");
             }
-            const frame = exactAgentFrame(payload.body);
+            const frame = { messageID: payload.messageID, content: renderDelivery(payload) };
             if (current.ctx.isIdle()) {
               await Promise.resolve(pi.sendUserMessage(frame.content));
             } else {
@@ -187,7 +179,7 @@ export function createPiFamilyExtension(productID, options = {}) {
         };
         live.on("message", deliveryHandler);
       }
-      live.report(current.nativeSessionID, initialNativeTitle);
+      live.report(current.nativeSessionID, initialNativeTitle, { cwd: current.ctx.cwd ?? "" });
     });
 
     pi.on("session_info_changed", (event, ctx) => {

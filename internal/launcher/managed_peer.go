@@ -514,7 +514,6 @@ func containsArgumentSequence(arguments, sequence []string) bool {
 
 func managedLiveEnvironment(environment []string, product, name string, groups []string) []string {
 	environment = daemonPeerEnvironment(environment, "", product)
-	environment = envutil.Set(environment, "AGENT_SESSIONS_PRODUCT_ID", product)
 	return liveReportEnvironment(environment, name, groups)
 }
 

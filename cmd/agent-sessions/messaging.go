@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
 type connectorToolCall struct {
@@ -30,46 +30,126 @@ type connectorToolEnvelope struct {
 	Cwd       string         `json:"cwd,omitempty"`
 }
 
-type liveToolCall struct {
-	Operation string         `json:"operation"`
-	Arguments map[string]any `json:"arguments"`
-}
-
 func (c *hostCoordinator) handleLiveSessionCall(
 	ctx context.Context,
 	runtime *daemonpkg.Runtime,
 	report liveSessionReport,
+	requestID string,
 	method string,
 	params json.RawMessage,
 ) (json.RawMessage, error) {
 	switch method {
-	case "tools/call":
-		var call connectorToolCall
-		if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
-			return nil, errors.New("connector tool call is invalid")
+	case "peers.list":
+		if err := decodeStrictJSON(params, &struct{}{}); err != nil {
+			return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
 		}
-		result, err := c.callLocalToolWithID(ctx, runtime, report.UUID, call.Name, call.Arguments, "", call.Metadata.InvocationCwd)
-		return marshalConnectorToolResult(result, err)
-	case "tool.call":
-		var call liveToolCall
-		if json.Unmarshal(params, &call) != nil {
-			return nil, errors.New("live tool call is invalid")
-		}
-		name, arguments, err := normalizeLiveToolCall(call)
+		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "list_peers", map[string]any{}, nil)
+	case "message.send":
+		arguments, err := decodeLiveMessageSend(params)
 		if err != nil {
-			return nil, err
+			return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
 		}
-		result, err := c.callLocalTool(ctx, runtime, report.UUID, name, arguments)
+		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "send_message", arguments, nil)
+	case "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
+		arguments, invocationCwd, err := decodeLiveLaneCall(method, params)
 		if err != nil {
-			return nil, err
+			return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
 		}
-		if result.Data != nil {
-			return json.Marshal(result.Data)
-		}
-		return json.Marshal(map[string]any{"text": result.Text})
+		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "lane", arguments, &invocationCwd)
 	default:
-		return nil, fmt.Errorf("live session method %s is unsupported", method)
+		return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"method": method})
 	}
+}
+
+func (c *hostCoordinator) callLiveTool(
+	ctx context.Context,
+	runtime *daemonpkg.Runtime,
+	sourceID, requestID, name string,
+	arguments map[string]any, invocationCwd *string,
+) (json.RawMessage, error) {
+	result, err := c.callLocalToolWithID(ctx, runtime, sourceID, name, arguments, "presence:"+sourceID+":"+requestID, invocationCwd)
+	if err != nil {
+		return nil, err
+	}
+	if result.Data == nil {
+		return json.RawMessage(`{}`), nil
+	}
+	return json.Marshal(result.Data)
+}
+
+func decodeLiveMessageSend(raw json.RawMessage) (map[string]any, error) {
+	var params struct {
+		Target  *string   `json:"target"`
+		Targets *[]string `json:"targets"`
+		Message *string   `json:"message"`
+	}
+	if err := decodeStrictJSON(raw, &params); err != nil || params.Message == nil || strings.TrimSpace(*params.Message) == "" ||
+		(params.Target == nil) == (params.Targets == nil) {
+		return nil, errors.New("message send params are invalid")
+	}
+	arguments := map[string]any{"message": *params.Message}
+	if params.Target != nil {
+		if strings.TrimSpace(*params.Target) == "" {
+			return nil, errors.New("message target is invalid")
+		}
+		arguments["target"] = *params.Target
+		return arguments, nil
+	}
+	if len(*params.Targets) == 0 {
+		return nil, errors.New("message targets are invalid")
+	}
+	seen := map[string]bool{}
+	values := make([]any, 0, len(*params.Targets))
+	for _, target := range *params.Targets {
+		if strings.TrimSpace(target) == "" || seen[target] {
+			return nil, errors.New("message targets are invalid")
+		}
+		seen[target] = true
+		values = append(values, target)
+	}
+	arguments["targets"] = values
+	return arguments, nil
+}
+
+func decodeLiveLaneCall(method string, raw json.RawMessage) (map[string]any, string, error) {
+	var params struct {
+		Product   *string   `json:"product"`
+		Arguments *[]string `json:"arguments"`
+		Input     *string   `json:"input"`
+		Host      *string   `json:"host"`
+		Cwd       *string   `json:"cwd"`
+	}
+	if err := decodeStrictJSON(raw, &params); err != nil || params.Product == nil || strings.TrimSpace(*params.Product) == "" || params.Arguments == nil {
+		return nil, "", errors.New("lane params are invalid")
+	}
+	needsInput := method == "lane.start" || method == "lane.run" || method == "lane.resume" || method == "lane.steer"
+	if needsInput != (params.Input != nil) || needsInput && strings.TrimSpace(*params.Input) == "" || params.Host != nil && strings.TrimSpace(*params.Host) == "" {
+		return nil, "", errors.New("lane params are invalid")
+	}
+	invocationCwd := ""
+	if params.Cwd != nil {
+		invocationCwd = *params.Cwd
+		if strings.TrimSpace(invocationCwd) == "" || !filepath.IsAbs(invocationCwd) {
+			return nil, "", errors.New("lane cwd is invalid")
+		}
+	}
+	for _, argument := range *params.Arguments {
+		if strings.ContainsAny(argument, "\x00\r\n") {
+			return nil, "", errors.New("lane argument is invalid")
+		}
+	}
+	operation := strings.TrimPrefix(method, "lane.")
+	if _, err := parseUnifiedLaneCommand(append([]string{operation}, (*params.Arguments)...)); err != nil {
+		return nil, "", err
+	}
+	arguments := map[string]any{"product": *params.Product, "command": operation, "arguments": append([]string(nil), (*params.Arguments)...)}
+	if params.Input != nil {
+		arguments["input"] = *params.Input
+	}
+	if params.Host != nil {
+		arguments["host"] = *params.Host
+	}
+	return arguments, invocationCwd, nil
 }
 
 func (c *hostCoordinator) handleConnectorTool(
@@ -81,7 +161,11 @@ func (c *hostCoordinator) handleConnectorTool(
 	if json.Unmarshal(request.Payload, &call) != nil || strings.TrimSpace(call.RequestID) == "" || strings.TrimSpace(call.Name) == "" {
 		return nil, errors.New("connector tool call is invalid")
 	}
-	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, call.Cwd)
+	var invocationCwd *string
+	if strings.TrimSpace(call.Cwd) != "" {
+		invocationCwd = &call.Cwd
+	}
+	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, invocationCwd)
 	return marshalConnectorToolResult(result, err)
 }
 
@@ -95,25 +179,6 @@ func marshalConnectorToolResult(result localToolResult, err error) (json.RawMess
 		"content":           []map[string]any{{"type": "text", "text": result.Text}},
 		"structuredContent": result.Data,
 	})
-}
-
-func normalizeLiveToolCall(call liveToolCall) (string, map[string]any, error) {
-	arguments := call.Arguments
-	if arguments == nil {
-		arguments = map[string]any{}
-	}
-	switch call.Operation {
-	case "peers.list":
-		return "list_peers", arguments, nil
-	case "message.send":
-		return "send_message", arguments, nil
-	case "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status", "lane.steer", "lane.interrupt", "lane.collect", "lane.archive":
-		parts := strings.SplitN(call.Operation, ".", 2)
-		arguments["command"] = parts[1]
-		return "lane", arguments, nil
-	default:
-		return "", nil, fmt.Errorf("live tool operation %s is unsupported", call.Operation)
-	}
 }
 
 type localToolResult struct {
@@ -139,7 +204,7 @@ func (c *hostCoordinator) callLocalTool(
 	sourceID, name string,
 	args map[string]any,
 ) (localToolResult, error) {
-	return c.callLocalToolWithID(ctx, runtime, sourceID, name, args, "", "")
+	return c.callLocalToolWithID(ctx, runtime, sourceID, name, args, "", nil)
 }
 
 // callLocalToolWithID preserves the connector/MCP operation identity through
@@ -150,7 +215,7 @@ func (c *hostCoordinator) callLocalToolWithID(
 	runtime *daemonpkg.Runtime,
 	sourceID, name string,
 	args map[string]any,
-	operationID, invocationCwd string,
+	operationID string, invocationCwd *string,
 ) (localToolResult, error) {
 	source, ok, err := c.activeLocalParent(runtime, sourceID)
 	if err != nil {
@@ -159,8 +224,8 @@ func (c *hostCoordinator) callLocalToolWithID(
 	if !ok {
 		return localToolResult{}, daemonpkg.InactiveControlError()
 	}
-	if strings.TrimSpace(invocationCwd) != "" {
-		source.Cwd = invocationCwd
+	if invocationCwd != nil {
+		source.Cwd = *invocationCwd
 	}
 	switch name {
 	case "list_peers":
@@ -279,6 +344,7 @@ func (c *hostCoordinator) routeMessageFrame(
 	if err != nil {
 		return federationpkg.AgentFrameResult{}, err
 	}
+	source.Groups = sourceGroups
 	sourcePeer := federationpkg.Peer{
 		ID: source.ID, SessionID: source.NativeSessionID, Name: c.attachmentDisplayName(runtime, source),
 		Product: source.Product, Cwd: source.Cwd, PermissionMode: source.PermissionMode,
@@ -329,7 +395,10 @@ func routingPeer(target messagePeerTarget) federationpkg.Peer {
 func requireAcceptedDeliveries(deliveries []federationpkg.DeliveryResult) error {
 	for _, delivery := range deliveries {
 		if delivery.Status != "accepted" {
-			return fmt.Errorf("destination %s did not accept the delivery", delivery.Target)
+			if delivery.Cause != nil {
+				return delivery.Cause
+			}
+			return errors.New(delivery.Error)
 		}
 	}
 	return nil
@@ -417,7 +486,7 @@ func publicMessageTarget(target messagePeerTarget) map[string]any {
 		"status": target.remote.Status, "cwd": target.remote.Cwd,
 		"groups":          append([]string(nil), target.remote.Groups...),
 		"permission_mode": target.remote.PermissionMode, "host_id": target.remote.HostID,
-		"kind": "remote-peer",
+		"kind": "remote-peer", "info": map[string]string{},
 	}
 }
 
@@ -507,25 +576,14 @@ func (c *hostCoordinator) visibleTargets(runtime *daemonpkg.Runtime, source daem
 }
 
 func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg.Runtime, source daemonpkg.ManagedAttachment, target localPeerTarget, messageID, body string) error {
+	message := c.nativeMessage(runtime, source, messageID, body)
 	if target.attachment != nil {
-		return c.deliverLocal(ctx, runtime, source, *target.attachment, messageID, body)
+		return c.deliverPreparedMessage(ctx, *target.attachment, message)
 	}
 	if target.lane == nil {
 		return errors.New("target disappeared")
 	}
-	mode := "prompting"
-	if source.PermissionMode == "bypassPermissions" {
-		mode = "bypass"
-	}
-	message, err := sessiontools.WrapPeerMessage(
-		source.Product, "session:"+source.ID, source.NativeSessionID,
-		c.attachmentDisplayName(runtime, source), mode,
-		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
-	)
-	if err != nil {
-		return err
-	}
-	return c.deliverLaneMessage(ctx, target.lane, messageID, message)
+	return c.deliverLaneMessage(ctx, target.lane, message)
 }
 
 func publicLocalTarget(target localPeerTarget) map[string]any {
@@ -534,7 +592,7 @@ func publicLocalTarget(target localPeerTarget) map[string]any {
 			"id": target.attachment.ID, "session_id": target.attachment.NativeSessionID,
 			"name": target.name, "product": target.attachment.Product, "status": "live",
 			"cwd": target.attachment.Cwd, "groups": append([]string(nil), target.attachment.Groups...),
-			"permission_mode": target.attachment.PermissionMode,
+			"permission_mode": target.attachment.PermissionMode, "info": cloneLiveInfo(target.attachment.Info),
 		}
 	}
 	if target.lane == nil {
@@ -548,7 +606,7 @@ func publicLocalTarget(target localPeerTarget) map[string]any {
 		"id": target.lane.id, "session_id": target.lane.nativeID,
 		"name": target.lane.name, "product": target.lane.product, "status": targetStatus,
 		"cwd": target.lane.cwd, "groups": append([]string(nil), target.lane.groups...),
-		"permission_mode": target.lane.permission, "kind": "lane",
+		"permission_mode": target.lane.permission, "kind": "lane", "info": map[string]string{},
 	}
 }
 
@@ -602,31 +660,10 @@ func (c *hostCoordinator) visiblePeers(
 	return visible, nil
 }
 
-func (c *hostCoordinator) deliverLocal(
-	ctx context.Context,
-	runtime *daemonpkg.Runtime,
-	source, target daemonpkg.ManagedAttachment,
-	messageID, body string,
-) error {
-	mode := "prompting"
-	if source.PermissionMode == "bypassPermissions" {
-		mode = "bypass"
-	}
-	message, err := sessiontools.WrapPeerMessage(
-		source.Product, "session:"+source.ID, source.NativeSessionID,
-		c.attachmentDisplayName(runtime, source), mode,
-		messageID, time.Now().UTC().Format(time.RFC3339Nano), body,
-	)
-	if err != nil {
-		return err
-	}
-	return c.deliverPreparedMessage(ctx, target, messageID, message)
-}
-
 func (c *hostCoordinator) deliverPreparedMessage(
 	ctx context.Context,
 	target daemonpkg.ManagedAttachment,
-	messageID, message string,
+	message productruntime.NativeMessage,
 ) error {
 	c.mu.Lock()
 	presence := c.presence
@@ -634,10 +671,22 @@ func (c *hostCoordinator) deliverPreparedMessage(
 	if presence == nil {
 		return errors.New("live session channel is unavailable")
 	}
-	_, err := presence.Call(ctx, target.ID, messageID, "message.deliver", map[string]any{
-		"message_id": messageID, "body": message,
-	})
+	_, err := presence.Call(ctx, target.ID, message.ID, "message.deliver", message)
 	return err
+}
+
+func (c *hostCoordinator) nativeMessage(runtime *daemonpkg.Runtime, source daemonpkg.ManagedAttachment, messageID, body string) productruntime.NativeMessage {
+	uuid := source.NativeSessionID
+	if uuid == "" {
+		uuid = source.ID
+	}
+	return productruntime.NativeMessage{
+		ID: messageID, Body: body,
+		From: productruntime.NativeMessageSource{
+			UUID: uuid, Name: c.attachmentDisplayName(runtime, source), Product: source.Product,
+			Groups: append([]string(nil), source.Groups...),
+		},
+	}
 }
 
 func requestedLocalTargets(args map[string]any) ([]string, error) {
@@ -680,7 +729,7 @@ func publicAttachment(runtime *daemonpkg.Runtime, attachment daemonpkg.ManagedAt
 		"id": attachment.ID, "session_id": attachment.NativeSessionID,
 		"name": name, "product": attachment.Product, "status": "live",
 		"cwd": attachment.Cwd, "groups": append([]string(nil), attachment.Groups...),
-		"permission_mode": attachment.PermissionMode,
+		"permission_mode": attachment.PermissionMode, "info": cloneLiveInfo(attachment.Info),
 	}
 }
 

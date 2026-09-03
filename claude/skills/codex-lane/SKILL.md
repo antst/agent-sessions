@@ -91,7 +91,7 @@ Only `--name` is required. Add policy flags **only** when the caller specified t
 Pick a stable, role-based kebab-case name and check structured `list --all` plus an Agent
 Sessions `discover` request from this session. The same name may exist in disjoint groups; a
 messaging ambiguity matters only when it is visible to this sender. Parse stdout JSONL until
-`{"type":"lane.ready"}`; retain its `thread_id` and confirm
+`{"type":"lane.ready"}`; retain its `session_id` and confirm
 `contract_version` is 2. Everything after `lane.ready` may be ignored for a detached lane.
 
 Use structured `list` with arguments `["--mine"]` when only lanes owned by this Claude orchestrator are relevant.

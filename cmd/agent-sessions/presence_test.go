@@ -1,16 +1,189 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
+
+func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		code   int
+		reason string
+	}{
+		{name: "unknown", err: fmt.Errorf("%w: missing", federationpkg.ErrUnknownTarget), code: liveRPCUnknown},
+		{name: "busy", err: classifyLiveError(errLiveBusy, errors.New("exact busy detail")), code: liveRPCBusy},
+		{name: "no running turn", err: classifyLiveError(errLiveNoRunningTurn, errors.New("exact turn detail")), code: liveRPCNotPermitted, reason: "no running turn"},
+		{name: "steer unsupported", err: productruntime.ErrUnsupportedSteer, code: liveRPCNotPermitted, reason: "steer unsupported"},
+		{name: "unavailable", err: productruntime.ErrUnavailable, code: liveRPCProductUnavailable},
+		{name: "product failure", err: errors.New("product exact failure"), code: liveRPCProductFailure},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			frame := liveRPCFailureFromError(json.RawMessage(`1`), "lane.steer", test.err)
+			if frame.Error == nil || frame.Error.Code != test.code {
+				t.Fatalf("error frame = %+v", frame)
+			}
+			if test.code == liveRPCProductFailure && frame.Error.Message != test.err.Error() {
+				t.Fatalf("product message = %q", frame.Error.Message)
+			}
+			if test.reason != "" && !strings.Contains(string(frame.Error.Data), `"reason":"`+test.reason+`"`) {
+				t.Fatalf("error data = %s", frame.Error.Data)
+			}
+		})
+	}
+}
+
+func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(liveSessionReport) {}, func(liveSessionReport) {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	for _, line := range []string{
+		`{"uuid":"legacy","name":"legacy","groups":[],"product":"codex"}`,
+		`[{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{}}]`,
+		`{"jsonrpc":"2.0","method":"session.hello","params":{}}`,
+		`not-json`,
+	} {
+		connection, dialErr := net.Dial("unix", server.listener.Addr().String())
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		if _, writeErr := fmt.Fprintln(connection, line); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+		if _, readErr := bufio.NewReader(connection).ReadByte(); !errors.Is(readErr, io.EOF) {
+			t.Fatalf("frame %q was not closed: %v", line, readErr)
+		}
+		_ = connection.Close()
+	}
+}
+
+func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(liveSessionReport) {}, func(liveSessionReport) {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	connection, err := net.Dial("unix", server.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
+	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session.hello", "params": map[string]any{
+		"protocol": 2, "uuid": "version", "name": "", "groups": []string{}, "product": "future", "info": map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var response liveRPCFrame
+	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != liveRPCUnsupportedVersion {
+		t.Fatalf("unsupported-version response = %+v, %v", response, err)
+	}
+	if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
+		t.Fatalf("unsupported-version connection remained open: %v", err)
+	}
+	_ = connection.Close()
+
+	connection, err = net.Dial("unix", server.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	encoder, decoder = json.NewEncoder(connection), json.NewDecoder(connection)
+	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
+		"protocol": 1, "uuid": "update", "name": "before", "groups": []string{"team"}, "product": "future", "info": map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	response = liveRPCFrame{}
+	if err := decoder.Decode(&response); err != nil || response.Error != nil {
+		t.Fatalf("hello response = %+v, %v", response, err)
+	}
+	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "update", "method": "session.update", "params": map[string]any{
+		"name": "after", "info": map[string]string{}, "groups": []string{"other"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	response = liveRPCFrame{}
+	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != liveRPCInvalidParams {
+		t.Fatalf("group-update response = %+v, %v", response, err)
+	}
+}
+
+func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan liveSessionReport, 2)
+	left := make(chan liveSessionReport, 2)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) { joined <- report }, func(report liveSessionReport) { left <- report }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	connect := func(name string) net.Conn {
+		connection, dialErr := net.Dial("unix", server.listener.Addr().String())
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		if encodeErr := json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": name, "method": "session.hello", "params": map[string]any{
+			"protocol": 1, "uuid": "same", "name": name, "groups": []string{"team"}, "product": "future", "info": map[string]string{},
+		}}); encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		var response liveRPCFrame
+		if decodeErr := json.NewDecoder(connection).Decode(&response); decodeErr != nil || response.Error != nil {
+			t.Fatalf("hello %s = %+v, %v", name, response, decodeErr)
+		}
+		return connection
+	}
+	first := connect("first")
+	if got := <-joined; got.Name != "first" {
+		t.Fatalf("first join = %+v", got)
+	}
+	second := connect("second")
+	if got := <-joined; got.Name != "second" {
+		t.Fatalf("replacement join = %+v", got)
+	}
+	_ = first.SetReadDeadline(time.Now().Add(time.Second))
+	if _, readErr := bufio.NewReader(first).ReadByte(); !errors.Is(readErr, io.EOF) {
+		t.Fatalf("older connection was not closed: %v", readErr)
+	}
+	select {
+	case report := <-left:
+		t.Fatalf("older connection removed replacement: %+v", report)
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = second.Close()
+	select {
+	case report := <-left:
+		if report.Name != "second" {
+			t.Fatalf("leave report = %+v", report)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement close was not observed")
+	}
+}
 
 func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -31,7 +204,7 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	go maintainLivePresence(clientCtx, server.listener.Addr().String(), report)
 	select {
 	case got := <-joined:
-		if got.UUID != report.UUID || got.Name != report.Name || !reflect.DeepEqual(got.Groups, []string{"team"}) {
+		if got.UUID != report.UUID || got.Name != report.Name || !reflect.DeepEqual(got.Groups, []string{"team", "team"}) {
 			t.Fatalf("join report = %+v", got)
 		}
 	case <-time.After(2 * time.Second):
@@ -110,8 +283,8 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	joined := make(chan liveSessionReport, 1)
 	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
 		joined <- report
-	}, func(liveSessionReport) {}, func(_ context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
-		if report.UUID != "session-rpc" || method != "tools/call" {
+	}, func(liveSessionReport) {}, func(_ context.Context, report liveSessionReport, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
+		if report.UUID != "session-rpc" || requestID != "session.tool" || method != "peers.list" {
 			t.Fatalf("server call = %+v %q", report, method)
 		}
 		return append(json.RawMessage(nil), params...), nil
@@ -135,7 +308,7 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	}
 	var fromSession json.RawMessage
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		fromSession, err = client.Call(ctx, "tool", "tools/call", map[string]string{"name": "list_peers"})
+		fromSession, err = client.Call(ctx, "tool", "peers.list", map[string]string{"probe": "list_peers"})
 		if err == nil {
 			break
 		}
@@ -153,10 +326,14 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	parent := liveSessionReport{UUID: "parent", Name: "reviewer", Groups: []string{"team"}, Product: "codex"}
+	parent := liveSessionReport{
+		UUID: "parent", Name: "reviewer", Groups: []string{"team"}, Product: "codex",
+		Info: map[string]string{"model": "native-model", "cwd": "/workspace", "future": "verbatim"},
+	}
 	coordinator.joinLiveSession(runtime, parent)
 	attachment, active, err := runtime.Attachments().ActiveAttachment("parent")
-	if err != nil || !active || attachment.Product != "codex" || !reflect.DeepEqual(attachment.Groups, []string{"team"}) {
+	if err != nil || !active || attachment.Product != "codex" || !reflect.DeepEqual(attachment.Groups, []string{"team"}) ||
+		!reflect.DeepEqual(attachment.Info, parent.Info) || attachment.Cwd != "" {
 		t.Fatalf("reported parent = %+v, active=%v, err=%v", attachment, active, err)
 	}
 	lane := liveSessionReport{
@@ -194,12 +371,12 @@ func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 	}
 }
 
-func TestLaneOnlyProductReportCannotBecomePeerButItsLaneRemainsLive(t *testing.T) {
+func TestUncataloguedAndLaneOnlyProductReportsRemainVisible(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "dsh-root", Name: "root", Product: "dsh"})
-	if attachment, active, err := runtime.Attachments().ActiveAttachment("dsh-root"); err != nil || active {
-		t.Fatalf("lane-only root projected as peer: %+v, active=%v, err=%v", attachment, active, err)
+	if attachment, active, err := runtime.Attachments().ActiveAttachment("dsh-root"); err != nil || !active || attachment.Product != "dsh" {
+		t.Fatalf("uncatalogued live product missing: %+v, active=%v, err=%v", attachment, active, err)
 	}
 
 	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex"})
@@ -212,7 +389,7 @@ func TestLaneOnlyProductReportCannotBecomePeerButItsLaneRemainsLive(t *testing.T
 		t.Fatalf("DSH lane report = %+v, active=%v, err=%v", lane, active, err)
 	}
 	peers, err := runtime.Attachments().ListActive()
-	if err != nil || len(peers) != 1 || peers[0].ID != "parent" {
+	if err != nil || len(peers) != 2 || peers[0].ID != "dsh-root" || peers[1].ID != "parent" {
 		t.Fatalf("peer roster with lane-only reports = %+v, err=%v", peers, err)
 	}
 }
@@ -633,7 +810,7 @@ func TestConnectorLiveReportUsesOnlyReportedFields(t *testing.T) {
 	}
 	report, ok := connectorLiveReport("claude", func(name string) string { return values[name] })
 	if !ok || !reflect.DeepEqual(report, liveSessionReport{
-		UUID: "session-1", Name: "reviewer", Groups: []string{"team"}, Product: "claude",
+		UUID: "session-1", Name: "reviewer", Groups: []string{"team", "team"}, Product: "claude", Info: map[string]string{},
 	}) {
 		t.Fatalf("connector report = %+v, ok=%v", report, ok)
 	}

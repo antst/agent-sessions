@@ -22,6 +22,7 @@ import (
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/servicecontrol"
 	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/agent-sessions/internal/stateroot"
 )
 
 var version = "dev"
@@ -453,14 +454,11 @@ func parseStateRoot(command string, args []string) (string, error) {
 }
 
 func defaultStateRoot() string {
-	if configured := os.Getenv("AGENT_SESSIONS_STATE_ROOT"); configured != "" {
-		return configured
-	}
-	home, err := os.UserHomeDir()
+	root, err := stateroot.Resolve()
 	if err != nil {
 		return filepath.Join(os.TempDir(), "agent-sessions-state-unavailable")
 	}
-	return filepath.Join(home, ".local", "state", "agent-sessions")
+	return root
 }
 
 func commandRequestID() string {

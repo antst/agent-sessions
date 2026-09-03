@@ -17,13 +17,11 @@ import (
 // from central code move into their owning product package; every other change
 // must shrink the inventory rather than create another bridge dependency.
 var frozenLegacyImporters = map[string]bool{
-	"cmd/agent-sessions/codex_host.go":  true,
-	"cmd/agent-sessions/connector.go":   true,
-	"cmd/agent-sessions/federation.go":  true,
-	"cmd/agent-sessions/grok_peer.go":   true,
-	"cmd/agent-sessions/hook.go":        true,
-	"cmd/agent-sessions/lane_notice.go": true,
-	"internal/products/codex/lane.go":   true,
+	"cmd/agent-sessions/codex_host.go": true,
+	"cmd/agent-sessions/connector.go":  true,
+	"cmd/agent-sessions/grok_peer.go":  true,
+	"cmd/agent-sessions/hook.go":       true,
+	"internal/products/codex/lane.go":  true,
 }
 
 func TestNoNewLegacyBridgeOrFederatorImports(t *testing.T) {

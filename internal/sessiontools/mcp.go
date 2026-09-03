@@ -14,7 +14,7 @@ const genericInstructions = "Use these structured tools for Agent Sessions peer 
 
 var instructions = map[string]string{
 	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tool calls activate while this product session has a live Agent Sessions connection; session_id is optional context.",
-	"claude": "Use these structured tools for every Agent Sessions discovery, send, multicast, broadcast, acknowledgment, reply, and Codex, Claude, Grok, or Qwen lane lifecycle operation from this live Claude session. Use lane instead of invoking a product lane executable through Bash. For an incoming delivery, send_message back to source.id (or source.name when unique). Never send plain text to the native agent-sessions--HOST service: native SendMessage reports only carrier acceptance and does not route unframed text.",
+	"claude": "Use these structured tools for Agent Sessions discovery, direct or multicast messaging, replies, and supported-product lane lifecycle operations from this live Claude session. Use lane instead of invoking a product lane executable through Bash. For an incoming delivery, send_message back to the source UUID or unique name.",
 	"grok":   "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message supports one target or an explicit multicast; broadcast requires a group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tools activate while the launcher-held Grok session is live.",
 	"qwen":   "Use these structured Agent Sessions tools for discovery, direct sends, multicast, broadcast, identity, rename, and foreign lane lifecycle commands from this live Qwen session. Qwen's native approval mode remains Qwen-owned and may change during the session.",
 }
@@ -31,7 +31,7 @@ var mcpToolPolicies = map[string]mcpToolPolicy{
 	"claude": {
 		contextName:        "managed Claude",
 		sessionDescription: "Optional context for this live Claude session UUID.",
-		allowedTools:       map[string]bool{"list_peers": true, "send_message": true, "broadcast": true, "rename_session": true, "lane": true},
+		allowedTools:       map[string]bool{"list_peers": true, "send_message": true, "lane": true},
 	},
 	"grok": {
 		contextName:        "Grok",

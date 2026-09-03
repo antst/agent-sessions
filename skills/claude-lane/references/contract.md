@@ -13,9 +13,9 @@ There is no Claude thread-archive API. Archive shuts down the manager, native st
 
 ## Events
 
-- `thread.started`: `thread_id`, `session_id`
-- `thread.resumed`: `thread_id`, `session_id`
-- `turn.started`: `thread_id`, `turn_id`
+- `thread.started`: `session_id`
+- `thread.resumed`: `session_id`
+- `turn.started`: `session_id`, `turn_id`
 - `lane.ready`: contract version, product, lifecycle identity, owner, notification, and auto-archive fields
 - `item.completed`: normalized `user_message` or `agent_message`
 - `turn.completed`: terminal `status`, `outcome`, `exit`, `error`, `usage`, and `accounting`

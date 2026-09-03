@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/stateroot"
 )
 
 const bootstrapTimeout = 30 * time.Second
@@ -210,20 +212,7 @@ func readPluginVersion(path string) (string, error) {
 }
 
 func stateRoot() (string, error) {
-	root := os.Getenv("AGENT_SESSIONS_STATE_ROOT")
-	if root == "" {
-		root = os.Getenv("XDG_STATE_HOME")
-		if root != "" {
-			root = filepath.Join(root, "agent-sessions")
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("resolve home directory: %w", err)
-			}
-			root = filepath.Join(home, ".local", "state", "agent-sessions")
-		}
-	}
-	root, err := filepath.Abs(root)
+	root, err := stateroot.Resolve()
 	if err != nil {
 		return "", fmt.Errorf("resolve state root: %w", err)
 	}

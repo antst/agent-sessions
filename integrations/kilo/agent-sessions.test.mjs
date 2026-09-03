@@ -6,7 +6,7 @@ import test from "node:test";
 class FakeLiveSession extends EventEmitter {
   constructor() { super(); this.active = true; this.sessions = new Map(); this.reported = []; this.updated = []; this.accepted = []; this.rejected = []; this.calls = []; }
   async start() { return { active: true }; }
-  report(id, name) { this.sessions.set(id, { id, name }); this.reported.push({ id, name }); return true; }
+  report(id, name, info = {}) { this.sessions.set(id, { id, name, info }); this.reported.push({ id, name, info }); return true; }
   updateName(id, name) { this.sessions.get(id).name = name; this.updated.push({ id, name }); return true; }
   closeSession(id) { this.sessions.delete(id); }
   acceptMessage(id, result) { this.accepted.push({ id, result }); return true; }
@@ -19,12 +19,12 @@ function fakeTool(definition) { return definition; }
 fakeTool.schema = { enum: () => ({}), string: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
 
 async function loadPlugin(live) {
-  globalThis.__testTool = fakeTool; globalThis.__testLiveFactory = () => live;
+  globalThis.__testTool = fakeTool; globalThis.__testLiveFactory = () => live; globalThis.__testRenderDelivery = (payload) => payload.body;
   let source = await readFile(new URL("./agent-sessions.mjs", import.meta.url), "utf8");
   source = source
     .replace('import { tool } from "@kilocode/plugin";', "const tool = globalThis.__testTool;")
     .replace('import liveSessionModule from "../shared/live-session.js";', "")
-    .replace('const { createLiveSessionClient } = liveSessionModule;', "const createLiveSessionClient = globalThis.__testLiveFactory;");
+		.replace('const { createLiveSessionClient, renderDelivery } = liveSessionModule;', "const createLiveSessionClient = globalThis.__testLiveFactory; const renderDelivery = globalThis.__testRenderDelivery;");
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Math.random()}`)).default;
 }
 
@@ -35,7 +35,7 @@ test("Kilo reports live sessions and title changes", async () => {
   const hooks = await (await loadPlugin(live))({ client: {}, directory: "/work" });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "", directory: "/work" } } } });
   await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_one", title: "native", directory: "/work" } } } });
-  assert.deepEqual(live.reported, [{ id: "ses_one", name: "" }]);
+  assert.deepEqual(live.reported, [{ id: "ses_one", name: "", info: { cwd: "/work" } }]);
   assert.deepEqual(live.updated, [{ id: "ses_one", name: "native" }]);
 });
 
@@ -57,7 +57,7 @@ test("Kilo writes a requested fresh name through the native session API before r
   assert.deepEqual(updates, [{
     path: { id: "ses_one" }, query: { directory: "/work" }, body: { title: "named-kilo" },
   }]);
-  assert.deepEqual(live.reported, [{ id: "ses_one", name: "named-kilo" }]);
+  assert.deepEqual(live.reported, [{ id: "ses_one", name: "named-kilo", info: { cwd: "/work" } }]);
 });
 
 test("Kilo reports an exact resumed session directly from the product", async () => {
@@ -74,7 +74,7 @@ test("Kilo reports an exact resumed session directly from the product", async ()
   });
   await tick();
   assert.deepEqual(gets, [{ path: { id: "ses_exact" }, query: { directory: "/work" } }]);
-  assert.deepEqual(live.reported, [{ id: "ses_exact", name: "existing-title" }]);
+  assert.deepEqual(live.reported, [{ id: "ses_exact", name: "existing-title", info: { cwd: "/work" } }]);
 });
 
 test("Kilo submits to the exact live session and acknowledges native evidence", async () => {

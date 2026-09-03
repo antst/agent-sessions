@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
 
@@ -86,15 +86,14 @@ func (c *hostCoordinator) presentLaneTerminalNotice(
 		if !ok {
 			return errors.New("lane parent is no longer an active local attachment")
 		}
-		mode := "prompting"
-		if actor.permission == "bypassPermissions" {
-			mode = "bypass"
+		message := productruntime.NativeMessage{
+			ID: noticeID, Body: body,
+			From: productruntime.NativeMessageSource{
+				UUID: actor.nativeID, Name: actor.name, Product: actor.product,
+				Groups: append([]string(nil), actor.groups...),
+			},
 		}
-		message := bridge.WrapPeerMessage(
-			actor.product, "session:"+actor.id, actor.nativeID, actor.name, mode,
-			noticeID, time.Now().UTC().Format(time.RFC3339Nano), body,
-		)
-		return c.deliverPreparedMessage(ctx, target, noticeID, message)
+		return c.deliverPreparedMessage(ctx, target, message)
 	}
 	c.mu.Lock()
 	host := c.federation

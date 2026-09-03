@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/federation"
@@ -49,9 +50,16 @@ func RouteDelivery(
 		outcome := federation.DeliveryResult{
 			Target: target.ID, SessionID: target.SessionID, DeliveryID: deliveryID, Status: "accepted",
 		}
-		if present == nil || present(ctx, admission.Source, target, deliveryID, delivered) != nil {
+		var presentErr error
+		if present == nil {
+			presentErr = errors.New("destination has no delivery path")
+		} else {
+			presentErr = present(ctx, admission.Source, target, deliveryID, delivered)
+		}
+		if presentErr != nil {
 			outcome.Status = "failed"
-			outcome.Error = "destination did not accept the delivery"
+			outcome.Error = presentErr.Error()
+			outcome.Cause = presentErr
 		}
 		result.Deliveries = append(result.Deliveries, outcome)
 	}

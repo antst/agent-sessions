@@ -59,6 +59,7 @@ type ManagedAttachment struct {
 	NativeProfileRoot  string
 	Cwd                string
 	Groups             []string
+	Info               map[string]string
 	PermissionMode     string
 	ExpectedEvidence   NativeEvidence
 	Evidence           NativeEvidence
@@ -280,7 +281,7 @@ func (e *AttachmentEngine) ActiveAttachment(id string) (ManagedAttachment, bool,
 
 // ReportLive accepts the product session currently speaking over the local
 // presence socket. The report is process-local reality, not durable state.
-func (e *AttachmentEngine) ReportLive(id, name, product string, groups []string, lane bool) {
+func (e *AttachmentEngine) ReportLive(id, name, product string, groups []string, info map[string]string, lane bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	attachment := e.active[id]
@@ -288,6 +289,7 @@ func (e *AttachmentEngine) ReportLive(id, name, product string, groups []string,
 	attachment.NativeSessionID = id
 	attachment.Product = product
 	attachment.Groups = append([]string(nil), groups...)
+	attachment.Info = cloneStringMap(info)
 	attachment.State = "attached"
 	if lane {
 		attachment.State = "lane"
@@ -389,9 +391,18 @@ func validateAttachmentRequest(attachment ManagedAttachment) error {
 
 func cloneAttachment(attachment ManagedAttachment) ManagedAttachment {
 	attachment.Groups = append([]string(nil), attachment.Groups...)
+	attachment.Info = cloneStringMap(attachment.Info)
 	attachment.ExpectedEvidence = cloneEvidence(attachment.ExpectedEvidence)
 	attachment.Evidence = cloneEvidence(attachment.Evidence)
 	return attachment
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func cloneEvidence(evidence NativeEvidence) NativeEvidence {

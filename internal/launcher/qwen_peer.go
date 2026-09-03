@@ -162,7 +162,7 @@ func runQwenPeer(
 		nativeArgs = insertQwenManagedArgs(nativeArgs, "--session-id", plan.sessionID)
 	}
 	environment := qwenprofile.ApplyEnvironment(os.Environ(), plan.profile)
-	environment = daemonPeerEnvironment(environment, "", "qwen")
+	environment = daemonPeerEnvironment(environment, plan.sessionID, "qwen")
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	environment = envutil.Set(environment, QwenInputFileEnv, inputPath)
 	environment = envutil.Set(environment, QwenEventsFileEnv, eventsPath)

@@ -24,7 +24,12 @@ func RunClaudePeer(args []string) error {
 	if err != nil {
 		return err
 	}
-	environment := liveReportEnvironment(os.Environ(), plan.peerName, plan.context.groups)
+	sessionID, _, err := optionValue(plan.args, "--session-id")
+	if err != nil {
+		return err
+	}
+	environment := daemonPeerEnvironment(os.Environ(), sessionID, "claude")
+	environment = liveReportEnvironment(environment, plan.peerName, plan.context.groups)
 	return Exec(claude, plan.args, environment)
 }
 

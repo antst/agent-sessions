@@ -54,6 +54,7 @@ type DeliveryResult struct {
 	DeliveryID string `json:"delivery_id,omitempty"`
 	Status     string `json:"status"`
 	Error      string `json:"error,omitempty"`
+	Cause      error  `json:"-"`
 }
 
 // AgentFrameResult is the product-neutral synchronous routing result.

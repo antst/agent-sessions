@@ -13,7 +13,23 @@ import (
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
+
+func claudeTestMessage(body string) productruntime.NativeMessage {
+	return productruntime.NativeMessage{ID: "message", Body: body, From: productruntime.NativeMessageSource{
+		UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"team"},
+	}}
+}
+
+func renderClaudeTestMessage(t *testing.T, body string) string {
+	t.Helper()
+	rendered, err := sessiontools.RenderNativeMessage(claudeTestMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
+}
 
 type testStreamProcess struct {
 	reads chan []byte
@@ -275,12 +291,12 @@ func TestLaneMessageCorrelatesProductReplayAcrossInterjectionAndEnqueue(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := `<cross-session-message from="parent">change course</cross-session-message>`
-	if err := driver.SendMessage(ctx, ref, message); err != nil {
+	message := "change course"
+	if err := driver.SendMessage(ctx, ref, claudeTestMessage(message)); err != nil {
 		t.Fatal(err)
 	}
 	assertUserText(t, process.waitWritten(t, 0), "original")
-	assertUserText(t, process.waitWritten(t, 1), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+message)
+	assertUserText(t, process.waitWritten(t, 1), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+renderClaudeTestMessage(t, message))
 	emitReplay(process, ref.NativeSessionID, "original")
 	emitReplay(process, ref.NativeSessionID, message)
 	process.emit(map[string]any{
@@ -292,17 +308,17 @@ func TestLaneMessageCorrelatesProductReplayAcrossInterjectionAndEnqueue(t *testi
 		t.Fatalf("busy-message terminal = %+v, %v", terminal, err)
 	}
 
-	queuedMessage := `<cross-session-message from="parent">queue after final inference</cross-session-message>`
+	queuedMessage := "queue after final inference"
 	queuedTurn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "final inference", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertUserText(t, process.waitWritten(t, 2), "final inference")
 	emitReplay(process, ref.NativeSessionID, "final inference")
-	if err := driver.SendMessage(ctx, ref, queuedMessage); err != nil {
+	if err := driver.SendMessage(ctx, ref, claudeTestMessage(queuedMessage)); err != nil {
 		t.Fatal(err)
 	}
-	assertUserText(t, process.waitWritten(t, 3), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+queuedMessage)
+	assertUserText(t, process.waitWritten(t, 3), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+renderClaudeTestMessage(t, queuedMessage))
 	process.emit(map[string]any{
 		"type": "result", "subtype": "success", "result": "FINAL_INFERENCE_RESULT",
 		"session_id": ref.NativeSessionID,
@@ -318,11 +334,11 @@ func TestLaneMessageCorrelatesProductReplayAcrossInterjectionAndEnqueue(t *testi
 	})
 	waitReplayCount(t, driver, ref, 4)
 
-	idleMessage := `<cross-session-message from="parent">reply then finish</cross-session-message>`
-	if err := driver.SendMessage(ctx, ref, idleMessage); err != nil {
+	idleMessage := "reply then finish"
+	if err := driver.SendMessage(ctx, ref, claudeTestMessage(idleMessage)); err != nil {
 		t.Fatal(err)
 	}
-	assertUserText(t, process.waitWritten(t, 4), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+idleMessage)
+	assertUserText(t, process.waitWritten(t, 4), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+renderClaudeTestMessage(t, idleMessage))
 	immediate, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "tracked after message", PermissionMode: permissionmode.Default})
 	if err != nil {
 		t.Fatal(err)

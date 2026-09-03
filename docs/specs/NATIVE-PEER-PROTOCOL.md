@@ -1,10 +1,10 @@
 # Native Agent Sessions Presence Protocol
 
-Status: target protocol, version 1.
+Status: protocol version 1.
 
 This specification defines the small native connection a coding-agent product
 implements to participate in Agent Sessions without a product-specific plugin.
-Agent Sessions will align its implementation to this protocol.
+Agent Sessions implements this protocol directly.
 
 ## 1. Purpose and trust model
 
@@ -45,12 +45,14 @@ the authority for the session UUID and stored title.
 
 | Variable | Meaning |
 | --- | --- |
+| `AGENT_SESSIONS_PRODUCT` | Product string identifier. |
+| `AGENT_SESSIONS_SESSION_ID` | Exact session ID when identity is known at launch; absent for a fresh product-generated identity. It is never a request to invent a product session ID. |
 | `AGENT_SESSIONS_SESSION_NAME` | Requested start-time title, or an empty string. |
 | `AGENT_SESSIONS_GROUPS` | JSON array of group strings collected from the launch arguments. |
-| `AGENT_SESSIONS_PRODUCT_ID` | Product string identifier on launch paths that set it. `AGENT_SESSIONS_PRODUCT` is the current fallback. |
-| `AGENT_SESSIONS_SESSION_ID` | Exact resume ID when already known; empty or absent for a fresh session. It is never a request to invent a product session ID. |
 
-Current launchers do not uniformly set every variable, and they preserve an
+Every Agent Sessions launcher uses this one context. A tools-only connector
+also receives `AGENT_SESSIONS_LANE_CAPABILITY` and
+`AGENT_SESSIONS_HOST_BINARY` when those values apply. Launchers preserve an
 explicit socket or state root already present in their environment. A product
 started outside Agent Sessions may set the socket directly or use the
 conventional path, choose its own groups, and report its built-in product
@@ -65,7 +67,8 @@ The first line on every connection is a JSON-RPC 2.0 request:
 {"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"uuid":"01J8YF6M7W1A2B3C4D5E6F7G8H","name":"reviewer","groups":["team"],"product":"opencode","info":{"model":"gpt-5.6-sol","cwd":"/work/project"}}}
 ```
 
-The daemon validates the report, installs the connection as live, and replies:
+The daemon validates and acknowledges the report, then installs the connection
+as live:
 
 ```json
 {"jsonrpc":"2.0","id":1,"result":{}}
@@ -141,10 +144,12 @@ this closed error table:
 | `-32003` | `Operation not permitted` | The caller is not allowed to perform the operation, the method is not part of version 1, or `lane.steer` cannot be performed. A steer failure sets `data.reason` to exactly `"no running turn"` or `"steer unsupported"`. |
 | `-32004` | `Unsupported protocol version` | `session.hello.params.protocol` is not exactly `1`. |
 | `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
+| `-32006` | `Product operation failed` | A native product or driver operation failed for a reason not represented by another code. The product's error text is preserved verbatim in `message` and `data`. |
 
-Messages may add detail after the canonical text, and `data` may identify the
-field, UUID, target, method, or product. No other error code is emitted by a
-version 1 endpoint. A line that is not a JSON object with
+Messages for the first six rows use the canonical text; `data` may identify the
+field, UUID, target, method, or product. A `-32006` response instead uses the
+native product text verbatim as both its message and data detail. No other
+error code is emitted by a version 1 endpoint. A line that is not a JSON object with
 `"jsonrpc":"2.0"` is not a protocol frame; the receiver closes the connection.
 
 ### Product to daemon
@@ -165,7 +170,7 @@ product always learns whether its update was applied:
 
 ```json
 {"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","info":{},"groups":["other-team"]}}
-{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"field":"groups"}}}
+{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"method":"session.update"}}}
 ```
 
 Changing groups requires a new connection and a new `session.hello`.
@@ -207,23 +212,24 @@ The version 1 lane methods are `lane.start`, `lane.run`, `lane.resume`,
 Start, run, resume, and steer use:
 
 ```json
-{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change.","host":"optional-remote-host"}
+{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change.","cwd":"/work/project","host":"optional-remote-host"}
 ```
 
 Wait, status, interrupt, and archive omit `input`:
 
 ```json
-{"product":"qwen","arguments":["reviewer","--timeout","300"],"host":"optional-remote-host"}
+{"product":"qwen","arguments":["reviewer","--timeout","300"],"cwd":"/work/project","host":"optional-remote-host"}
 ```
 
 `product` selects the lane product. `arguments` is the bounded lane command
 argument array without the method name. `input` is required and non-empty
-where shown. `host` is optional. The daemon returns `-32005` when it has no
-launcher for the requested product.
+where shown. `cwd` is the optional absolute invocation directory supplied by the
+calling product; it is independent of `session.hello.info`. `host` is optional.
+The daemon returns `-32005` when it has no launcher for the requested product.
 
 `lane.steer` addresses a lane that already has a running turn. The daemon
 delivers its non-empty `input` to that exact turn and returns `turn.steered`
-with the lane's `thread_id`, the running `turn_id`, and `native_message_id`,
+with the lane's product-native `session_id`, the running `turn_id`, and `native_message_id`,
 the message ID returned by the product. The input must influence that current
 turn. An implementation that merely queues it for a later turn is not
 conforming.
@@ -328,7 +334,7 @@ presence(session):
         uuid: session.uuid,
         name: session.stored_name_or_empty,
         groups: session.launch_groups,
-        product: PRODUCT_ID,
+        product: PRODUCT,
         info: session.current_info
       })
       session.on_presence_change((name, info) =>
@@ -421,7 +427,7 @@ Error response:
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": [-32602, -32001, -32002, -32003, -32004, -32005]},
+        "code": {"enum": [-32602, -32001, -32002, -32003, -32004, -32005, -32006]},
         "message": {"type": "string"},
         "data": {}
       }
@@ -481,7 +487,7 @@ Result: an empty object.
 {"jsonrpc":"2.0","id":"update-1","method":"session.update","params":{"name":"reviewer: tests complete","info":{"model":"opus-4.8","cwd":"/work/project"}}}
 {"jsonrpc":"2.0","id":"update-1","result":{}}
 {"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","info":{},"groups":["other-team"]}}
-{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"field":"groups"}}}
+{"jsonrpc":"2.0","id":"update-2","error":{"code":-32602,"message":"Invalid params","data":{"method":"session.update"}}}
 ```
 
 ### A.4 Peer and message schemas
@@ -648,6 +654,7 @@ Result: an empty object.
     "product": {"type": "string", "minLength": 1},
     "arguments": {"type": "array", "items": {"type": "string"}},
     "input": {"type": "string", "minLength": 1},
+    "cwd": {"type": "string", "minLength": 1},
     "host": {"type": "string", "minLength": 1}
   }
 }
@@ -663,6 +670,7 @@ Result: an empty object.
   "properties": {
     "product": {"type": "string", "minLength": 1},
     "arguments": {"type": "array", "items": {"type": "string"}},
+    "cwd": {"type": "string", "minLength": 1},
     "host": {"type": "string", "minLength": 1}
   }
 }
@@ -675,7 +683,7 @@ Result: an empty object.
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "type", "product", "thread_id", "session_id", "name", "cwd", "groups",
+    "type", "product", "session_id", "name", "cwd", "groups",
     "permission_mode", "state", "turn_id", "outcome", "exit",
     "owner_session_id", "persistent", "auto_archive",
     "auto_archive_after_seconds", "auto_archive_at"
@@ -684,7 +692,6 @@ Result: an empty object.
     "type": {"enum": ["lane.ready", "lane.status"]},
     "contract_version": {"const": 2},
     "product": {"type": "string"},
-    "thread_id": {"type": "string"},
     "session_id": {"type": "string"},
     "name": {"type": "string"},
     "cwd": {"type": "string"},
@@ -715,11 +722,10 @@ Result: an empty object.
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "product", "thread_id", "session_id", "turn_id", "status", "outcome", "exit", "result", "diagnostic"],
+  "required": ["type", "product", "session_id", "turn_id", "status", "outcome", "exit", "result", "diagnostic"],
   "properties": {
     "type": {"const": "turn.completed"},
     "product": {"type": "string"},
-    "thread_id": {"type": "string"},
     "session_id": {"type": "string"},
     "turn_id": {"type": "string"},
     "status": {"type": "string"},
@@ -737,10 +743,10 @@ Result: an empty object.
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "thread_id", "turn_id", "native_message_id"],
+  "required": ["type", "session_id", "turn_id", "native_message_id"],
   "properties": {
     "type": {"const": "turn.steered"},
-    "thread_id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
     "turn_id": {"type": "string", "minLength": 1},
     "native_message_id": {"type": "string", "minLength": 1}
   }
@@ -753,10 +759,10 @@ Result: an empty object.
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "thread_id", "turn_id"],
+  "required": ["type", "session_id", "turn_id"],
   "properties": {
     "type": {"const": "turn.interrupting"},
-    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
     "turn_id": {"type": "string"}
   }
 }
@@ -768,11 +774,10 @@ Result: an empty object.
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "product", "thread_id", "session_id", "name"],
+  "required": ["type", "product", "session_id", "name"],
   "properties": {
     "type": {"const": "lane.archived"},
     "product": {"type": "string"},
-    "thread_id": {"type": "string"},
     "session_id": {"type": "string"},
     "name": {"type": "string"},
     "already_archived": {"type": "boolean"}
@@ -784,7 +789,7 @@ Result: an empty object.
 
 ```json
 {"jsonrpc":"2.0","id":"lane-start-1","method":"lane.start","params":{"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change."}}
-{"jsonrpc":"2.0","id":"lane-start-1","result":{"type":"lane.ready","contract_version":2,"product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"running","turn_id":"turn-1","outcome":"","exit":null,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+{"jsonrpc":"2.0","id":"lane-start-1","result":{"type":"lane.ready","contract_version":2,"product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"running","turn_id":"turn-1","outcome":"","exit":null,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
 {"jsonrpc":"2.0","id":"lane-start-2","method":"lane.start","params":{"product":"new-agent","arguments":["--name","reviewer"],"input":"Review the change."}}
 {"jsonrpc":"2.0","id":"lane-start-2","error":{"code":-32005,"message":"Product not launchable","data":{"product":"new-agent"}}}
 ```
@@ -793,14 +798,14 @@ Result: an empty object.
 
 ```json
 {"jsonrpc":"2.0","id":"lane-run-1","method":"lane.run","params":{"product":"qwen","arguments":["--name","reviewer"],"input":"Review the change."}}
-{"jsonrpc":"2.0","id":"lane-run-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-1","status":"completed","outcome":"completed","exit":0,"result":"Looks good.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-run-1","result":{"type":"turn.completed","product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-1","status":"completed","outcome":"completed","exit":0,"result":"Looks good.","diagnostic":""}}
 ```
 
 #### `lane.resume`
 
 ```json
 {"jsonrpc":"2.0","id":"lane-resume-1","method":"lane.resume","params":{"product":"qwen","arguments":["reviewer"],"input":"Check one more thing."}}
-{"jsonrpc":"2.0","id":"lane-resume-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-resume-1","result":{"type":"turn.completed","product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
 {"jsonrpc":"2.0","id":"lane-resume-2","method":"lane.resume","params":{"product":"qwen","arguments":["missing"],"input":"Continue."}}
 {"jsonrpc":"2.0","id":"lane-resume-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"missing"}}}
 ```
@@ -809,73 +814,67 @@ Result: an empty object.
 
 ```json
 {"jsonrpc":"2.0","id":"lane-steer-1","method":"lane.steer","params":{"product":"pi","arguments":["reviewer"],"input":"Replace the current answer with: STEERED."}}
-{"jsonrpc":"2.0","id":"lane-steer-1","result":{"type":"turn.steered","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","turn_id":"turn-2","native_message_id":"message-6f9e8475"}}
+{"jsonrpc":"2.0","id":"lane-steer-1","result":{"type":"turn.steered","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","native_message_id":"message-6f9e8475"}}
 ```
 
 #### `lane.wait`
 
 ```json
 {"jsonrpc":"2.0","id":"lane-wait-1","method":"lane.wait","params":{"product":"qwen","arguments":["reviewer","--timeout","300"]}}
-{"jsonrpc":"2.0","id":"lane-wait-1","result":{"type":"turn.completed","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
+{"jsonrpc":"2.0","id":"lane-wait-1","result":{"type":"turn.completed","product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2","status":"completed","outcome":"completed","exit":0,"result":"Done.","diagnostic":""}}
 ```
 
 #### `lane.status`
 
 ```json
 {"jsonrpc":"2.0","id":"lane-status-1","method":"lane.status","params":{"product":"qwen","arguments":["reviewer"]}}
-{"jsonrpc":"2.0","id":"lane-status-1","result":{"type":"lane.status","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"idle","turn_id":"turn-2","outcome":"completed","exit":0,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
+{"jsonrpc":"2.0","id":"lane-status-1","result":{"type":"lane.status","product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer","cwd":"/work/project","groups":["team"],"permission_mode":"default","state":"idle","turn_id":"turn-2","outcome":"completed","exit":0,"owner_session_id":"parent-native","persistent":false,"auto_archive":true,"auto_archive_after_seconds":60,"auto_archive_at":0}}
 ```
 
 #### `lane.interrupt`
 
 ```json
 {"jsonrpc":"2.0","id":"lane-interrupt-1","method":"lane.interrupt","params":{"product":"qwen","arguments":["reviewer"]}}
-{"jsonrpc":"2.0","id":"lane-interrupt-1","result":{"type":"turn.interrupting","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","turn_id":"turn-2"}}
+{"jsonrpc":"2.0","id":"lane-interrupt-1","result":{"type":"turn.interrupting","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","turn_id":"turn-2"}}
 ```
 
 #### `lane.archive`
 
 ```json
 {"jsonrpc":"2.0","id":"lane-archive-1","method":"lane.archive","params":{"product":"qwen","arguments":["reviewer"]}}
-{"jsonrpc":"2.0","id":"lane-archive-1","result":{"type":"lane.archived","product":"qwen","thread_id":"7e1a58f4-c2dd-4d79-a5b4-0a560acdf590","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer"}}
+{"jsonrpc":"2.0","id":"lane-archive-1","result":{"type":"lane.archived","product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer"}}
 {"jsonrpc":"2.0","id":"lane-archive-2","method":"lane.archive","params":{"product":"qwen","arguments":["owned-by-another-session"]}}
 {"jsonrpc":"2.0","id":"lane-archive-2","error":{"code":-32003,"message":"Operation not permitted","data":{"method":"lane.archive"}}}
 ```
 
-## Appendix B. Differences from the current Agent Sessions implementation
+## Appendix B. Agent Sessions version 1 alignment
 
-Agent Sessions must make these changes to conform to version 1:
+The version 1 alignment completed these implementation changes:
 
-1. Add `"jsonrpc":"2.0"` to every presence frame; accept string and numeric
-   request IDs; replace string errors with the error objects and fixed codes in
-   this specification; and make `session.update` an acknowledged request.
-2. Replace the raw first report with the `session.hello` request, acknowledge
-   it before accepting other methods, reject any protocol value other than
-   `1` with `-32004`, and then close that connection.
-3. Accept every non-empty product string for presence, rosters, discovery, and
-   messaging. Apply catalog checks only when a lane method asks the daemon to
-   launch or drive a product. This also allows a standalone DSH root to appear
-   as a peer.
-4. Preserve hello groups exactly instead of removing duplicate strings. Keep
-   them immutable for the connection. Add the product-owned `info` map to hello,
-   live roster entries, and peer results without interpreting or persisting it;
-   change `session.update` from a full report to the name-and-info replacement
-   defined here.
-5. Replace `tool.call` with the first-class `peers.list`, `message.send`, and
-   lane methods. Remove the presence-stream `tools/call` compatibility method.
-   Do not expose `lane.collect` as a version 1 method. Make `lane.steer`
-   succeed only when the selected driver accepts input into the current running
-   turn, and return the native message ID with that turn's IDs.
-6. Change `message.deliver` to carry the structured `from` object and plain
-   `body`. Stop wrapping message text; products render sender metadata through
-   their native interfaces.
-7. Map validation, routing, busy-state, permission, version, and lane-product
-   failures to the closed error table instead of returning implementation
-   error strings.
-8. Align the daemon's default state-root discovery with the client's
-   `XDG_STATE_HOME` rule, or publish the authoritative socket path explicitly,
-   so both sides select the same Unix socket.
-9. Update the shared reference client and end-to-end product checks for hello
-   acknowledgement, exact JSON-RPC framing, unknown-product presence,
-   immutable groups, live info, structured delivery, first-class methods, and
-   standard errors.
+1. Every presence frame uses JSON-RPC 2.0 with string or numeric request IDs,
+   structured errors, and acknowledged `session.update` requests. The raw
+   report and legacy response envelopes were deleted.
+2. `session.hello` is the sole first frame. The daemon acknowledges protocol
+   `1`, rejects other versions with `-32004`, and closes invalid connections.
+3. Every non-empty product string is accepted for presence, rosters, discovery,
+   and messaging. Catalog checks apply only to lane launch and drive operations.
+4. Hello groups remain exact and immutable. The product-owned `info` map is
+   live-only, passed through to rosters, and replaced with the name by
+   `session.update`.
+5. The presence stream exposes only the first-class version 1 methods.
+   `tool.call`, `tools/call`, and `lane.collect` were removed from this wire.
+6. `message.deliver` carries the structured sender and plain body. Rendering
+   sender context happens once in each native client codebase.
+7. The closed error table includes `-32006` for verbatim native product and
+   driver failures, distinct from validation, target, busy, permission,
+   version, and launchability errors.
+8. Go and JavaScript clients use the same socket-discovery order, including
+   `XDG_STATE_HOME` and an explicit presence socket.
+9. Every launcher supplies the uniform `AGENT_SESSIONS_PRODUCT`, optional
+   known `AGENT_SESSIONS_SESSION_ID`, `AGENT_SESSIONS_SESSION_NAME`, and
+   `AGENT_SESSIONS_GROUPS` context. `AGENT_SESSIONS_PRODUCT_ID` was deleted.
+10. Lane results expose the product-native `session_id` as their sole session
+    identity. The duplicate `thread_id` field was deleted.
+11. Reference clients and conformance checks cover hello acknowledgement,
+    strict framing, replacement by UUID, unknown products, immutable groups,
+    live info, structured delivery, first-class methods, and the closed errors.

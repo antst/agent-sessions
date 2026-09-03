@@ -170,7 +170,10 @@ func TestClaudeConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
 			received <- message
 		}
 	}()
-	params, _ := json.Marshal(map[string]any{"message_id": "message-1", "body": "hello"})
+	params, _ := json.Marshal(map[string]any{
+		"message_id": "message-1", "body": "hello",
+		"from": map[string]any{"uuid": "parent", "name": "parent", "product": "codex", "groups": []string{"team"}},
+	})
 	if _, err := connectorNativeCall(context.Background(), liveSessionReport{UUID: "session-1", Product: "claude"}, "message.deliver", params); err != nil {
 		t.Fatal(err)
 	}

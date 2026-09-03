@@ -93,6 +93,7 @@ type CodexNativeLaunch struct {
 	Environment []string
 	ThreadID    string
 	Name        string
+	Cwd         string
 	Groups      []string
 }
 
@@ -163,7 +164,8 @@ func RunCodexPeerWithDaemon(ctx context.Context, args []string, prepare CodexDae
 	environment = liveReportEnvironment(environment, result.Name, plan.peerContext.groups)
 	return run(ctx, CodexNativeLaunch{
 		Executable: codex, Arguments: launchArgs, Environment: environment,
-		ThreadID: result.ThreadID, Name: result.Name, Groups: append([]string(nil), plan.peerContext.groups...),
+		ThreadID: result.ThreadID, Name: result.Name, Cwd: result.Cwd,
+		Groups: append([]string(nil), plan.peerContext.groups...),
 	})
 }
 

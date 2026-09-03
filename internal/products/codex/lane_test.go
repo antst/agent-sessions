@@ -9,7 +9,23 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
+
+func codexTestMessage(body string) productruntime.NativeMessage {
+	return productruntime.NativeMessage{ID: "message", Body: body, From: productruntime.NativeMessageSource{
+		UUID: "parent", Name: "parent", Product: "claude", Groups: []string{"team"},
+	}}
+}
+
+func renderCodexTestMessage(t *testing.T, body string) string {
+	t.Helper()
+	rendered, err := sessiontools.RenderNativeMessage(codexTestMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
+}
 
 type nativeFixture struct {
 	start      bridge.CodexStartRequest
@@ -79,8 +95,8 @@ func TestLaneDriverTranslatesStartResumeTurnAndLifecycle(t *testing.T) {
 	if err := driver.Interrupt(context.Background(), turn); err != nil {
 		t.Fatal(err)
 	}
-	if err := driver.SendMessage(context.Background(), resumed, "peer message"); err != nil ||
-		!reflect.DeepEqual(native.messages, []string{"thread-resume:peer message"}) {
+	if err := driver.SendMessage(context.Background(), resumed, codexTestMessage("peer message")); err != nil ||
+		!reflect.DeepEqual(native.messages, []string{"thread-resume:" + renderCodexTestMessage(t, "peer message")}) {
 		t.Fatalf("messages = %v, err=%v", native.messages, err)
 	}
 	if err := driver.Archive(context.Background(), resumed); err != nil || native.archived != "thread-resume" {
@@ -96,8 +112,8 @@ func TestLaneMessageUsesOneNativeCallAndReturnsItsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := productruntime.NativeSessionRef{LaneID: "thread", NativeSessionID: "thread", Generation: 1}
-	err = driver.SendMessage(context.Background(), ref, "deliver once")
-	if !errors.Is(err, nativeErr) || !reflect.DeepEqual(native.messages, []string{"thread:deliver once"}) {
+	err = driver.SendMessage(context.Background(), ref, codexTestMessage("deliver once"))
+	if !errors.Is(err, nativeErr) || !reflect.DeepEqual(native.messages, []string{"thread:" + renderCodexTestMessage(t, "deliver once")}) {
 		t.Fatalf("messages = %v, err=%v", native.messages, err)
 	}
 }
@@ -114,7 +130,7 @@ func TestLaneDriverRejectsProvisionalIdentityAfterOpen(t *testing.T) {
 	}); !errors.Is(err, productruntime.ErrProtocol) {
 		t.Fatalf("start with provisional identity error = %v", err)
 	}
-	if err := driver.SendMessage(context.Background(), split, "message"); !errors.Is(err, productruntime.ErrProtocol) {
+	if err := driver.SendMessage(context.Background(), split, codexTestMessage("message")); !errors.Is(err, productruntime.ErrProtocol) {
 		t.Fatalf("message with provisional identity error = %v", err)
 	}
 	if err := driver.Archive(context.Background(), split); !errors.Is(err, productruntime.ErrProtocol) {

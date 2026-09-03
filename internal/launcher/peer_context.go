@@ -57,12 +57,6 @@ func persistentRuntimeEnvironment(environment []string) []string {
 	return result
 }
 
-func peerEnvironment(environment []string, sessionID, product string) []string {
-	environment = envutil.Set(environment, agentRuntimeDirEnv, agentRuntimeDir())
-	environment = envutil.Set(environment, peerSessionIDEnv, sessionID)
-	return envutil.Set(environment, peerProductEnv, product)
-}
-
 // daemonPeerEnvironment publishes only the attachment identity consumed by
 // product hooks/connectors. The retired per-host federator runtime pointer is
 // intentionally removed.
@@ -74,7 +68,9 @@ func daemonPeerEnvironment(environment []string, sessionID, product string) []st
 			filtered = append(filtered, entry)
 		}
 	}
-	filtered = envutil.Set(filtered, peerSessionIDEnv, sessionID)
+	if sessionID != "" {
+		filtered = envutil.Set(filtered, peerSessionIDEnv, sessionID)
+	}
 	return envutil.Set(filtered, peerProductEnv, product)
 }
 
