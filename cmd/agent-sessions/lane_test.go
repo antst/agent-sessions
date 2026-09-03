@@ -208,6 +208,9 @@ func (*delayedCodexLaneNative) WaitLaneTurn(ctx context.Context, threadID, turnI
 }
 
 func (*delayedCodexLaneNative) InterruptLaneTurn(context.Context, string, string) error { return nil }
+func (*delayedCodexLaneNative) SendMessage(context.Context, string, string) (string, error) {
+	return "started", nil
+}
 func (n *delayedCodexLaneNative) ArchiveThread(_ context.Context, id string) error {
 	n.archived = append(n.archived, id)
 	return nil

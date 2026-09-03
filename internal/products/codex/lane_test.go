@@ -12,10 +12,12 @@ import (
 )
 
 type nativeFixture struct {
-	start    bridge.CodexStartRequest
-	resume   []any
-	turn     bridge.CodexLaneTurnRequest
-	archived string
+	start      bridge.CodexStartRequest
+	resume     []any
+	turn       bridge.CodexLaneTurnRequest
+	archived   string
+	messages   []string
+	messageErr error
 }
 
 func (native *nativeFixture) StartThread(_ context.Context, request bridge.CodexStartRequest) (bridge.CodexNativeThread, error) {
@@ -34,6 +36,10 @@ func (*nativeFixture) WaitLaneTurn(_ context.Context, thread, turn string) (brid
 	return bridge.CodexLaneTurnResult{ThreadID: thread, TurnID: turn, Outcome: "completed", Result: "done"}, nil
 }
 func (*nativeFixture) InterruptLaneTurn(context.Context, string, string) error { return nil }
+func (native *nativeFixture) SendMessage(_ context.Context, thread, message string) (string, error) {
+	native.messages = append(native.messages, thread+":"+message)
+	return "started", native.messageErr
+}
 func (native *nativeFixture) ArchiveThread(_ context.Context, id string) error {
 	native.archived = id
 	return nil
@@ -73,8 +79,26 @@ func TestLaneDriverTranslatesStartResumeTurnAndLifecycle(t *testing.T) {
 	if err := driver.Interrupt(context.Background(), turn); err != nil {
 		t.Fatal(err)
 	}
+	if err := driver.SendMessage(context.Background(), resumed, "peer message"); err != nil ||
+		!reflect.DeepEqual(native.messages, []string{"thread-resume:peer message"}) {
+		t.Fatalf("messages = %v, err=%v", native.messages, err)
+	}
 	if err := driver.Archive(context.Background(), resumed); err != nil || native.archived != "thread-resume" {
 		t.Fatalf("archive=%q err=%v", native.archived, err)
+	}
+}
+
+func TestLaneMessageUsesOneNativeCallAndReturnsItsError(t *testing.T) {
+	nativeErr := errors.New("product refused exact message")
+	native := &nativeFixture{messageErr: nativeErr}
+	driver, err := NewLaneDriver(func() (LaneNative, error) { return native, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := productruntime.NativeSessionRef{LaneID: "lane", NativeSessionID: "thread", Generation: 1}
+	err = driver.SendMessage(context.Background(), ref, "deliver once")
+	if !errors.Is(err, nativeErr) || !reflect.DeepEqual(native.messages, []string{"thread:deliver once"}) {
+		t.Fatalf("messages = %v, err=%v", native.messages, err)
 	}
 }
 

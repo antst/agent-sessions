@@ -180,26 +180,32 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, ref productruntime.Nati
 		return productruntime.NativeTurnRef{}, err
 	}
 	session.mu.Lock()
-	if session.closed || session.failed != nil || session.active != nil {
+	if session.closed || session.failed != nil || session.active != nil && session.active.ref.NativeTurnID != "" {
 		session.mu.Unlock()
 		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: Claude lane is not idle", productruntime.ErrAmbiguousSession)
 	}
 	session.nextID++
-	turn := &laneTurn{
-		ref:  productruntime.NativeTurnRef{NativeSessionRef: ref, NativeTurnID: strconv.FormatUint(session.nextID, 10)},
-		done: make(chan struct{}),
+	turn := session.active
+	attached := turn != nil
+	turnRef := productruntime.NativeTurnRef{NativeSessionRef: ref, NativeTurnID: strconv.FormatUint(session.nextID, 10)}
+	if turn == nil {
+		turn = &laneTurn{done: make(chan struct{})}
 	}
+	turn.ref = turnRef
 	session.active = turn
-	session.mu.Unlock()
 	if err := session.writeUser(ctx, prompt); err != nil {
-		session.mu.Lock()
 		if session.active == turn {
-			session.active = nil
+			if attached {
+				turn.ref = productruntime.NativeTurnRef{NativeSessionRef: ref}
+			} else {
+				session.active = nil
+			}
 		}
 		session.mu.Unlock()
 		return productruntime.NativeTurnRef{}, err
 	}
-	return turn.ref, nil
+	session.mu.Unlock()
+	return turnRef, nil
 }
 
 func (driver *LaneDriver) WaitTurn(ctx context.Context, ref productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
@@ -241,6 +247,36 @@ func (driver *LaneDriver) Steer(ctx context.Context, ref productruntime.NativeTu
 	return productruntime.NativeAcceptance{
 		NativeSessionID: ref.NativeSessionID, NativeMessageID: ref.NativeTurnID, AcceptedAt: driver.config.Now().UTC(),
 	}, nil
+}
+
+func (driver *LaneDriver) SendMessage(ctx context.Context, ref productruntime.NativeSessionRef, message string) error {
+	session, err := driver.session(ref)
+	if err != nil {
+		return err
+	}
+	prompt, err := lanePrompt(message)
+	if err != nil {
+		return err
+	}
+	session.mu.Lock()
+	if session.closed || session.failed != nil {
+		session.mu.Unlock()
+		return fmt.Errorf("%w: Claude lane stream is unavailable", productruntime.ErrUnavailable)
+	}
+	marker := session.active
+	if marker == nil {
+		marker = &laneTurn{ref: productruntime.NativeTurnRef{NativeSessionRef: ref}, done: make(chan struct{})}
+		session.active = marker
+	}
+	if err := session.writeUser(ctx, prompt); err != nil {
+		if marker.ref.NativeTurnID == "" && session.active == marker {
+			session.active = nil
+		}
+		session.mu.Unlock()
+		return err
+	}
+	session.mu.Unlock()
+	return nil
 }
 
 func (driver *LaneDriver) Interrupt(ctx context.Context, ref productruntime.NativeTurnRef) error {
@@ -448,13 +484,21 @@ func (session *laneSession) deliverControl(frame map[string]any) {
 func (session *laneSession) deliverResult(frame map[string]any) {
 	session.mu.Lock()
 	turn := session.active
-	session.mu.Unlock()
 	if turn == nil {
+		session.mu.Unlock()
+		session.fail(fmt.Errorf("%w: Claude stream returned a result without an active native run", productruntime.ErrProtocol))
 		return
 	}
+	tracked := turn.ref.NativeTurnID != ""
 	nativeID, _ := frame["session_id"].(string)
 	if nativeID != "" && nativeID != session.ref.NativeSessionID {
-		turn.resolve(productruntime.NativeTerminal{Outcome: productruntime.TurnFailed, ExitLike: 1}, fmt.Errorf("%w: Claude result changed native session", productruntime.ErrAmbiguousSession))
+		session.mu.Unlock()
+		identityErr := fmt.Errorf("%w: Claude result changed native session", productruntime.ErrAmbiguousSession)
+		if !tracked {
+			session.fail(identityErr)
+			return
+		}
+		turn.resolve(productruntime.NativeTerminal{Outcome: productruntime.TurnFailed, ExitLike: 1}, identityErr)
 		return
 	}
 	result, _ := frame["result"].(string)
@@ -464,6 +508,14 @@ func (session *laneSession) deliverResult(frame map[string]any) {
 	terminal := productruntime.NativeTerminal{
 		Outcome: productruntime.TurnCompleted, Result: result, ResultDigest: sha256.Sum256([]byte(result)), NativeStopReason: reason,
 	}
+	if !tracked {
+		if session.active == turn {
+			session.active = nil
+		}
+		session.mu.Unlock()
+		return
+	}
+	session.mu.Unlock()
 	switch {
 	case subtype == "interrupted" || reason == "interrupted" || reason == "aborted_streaming":
 		terminal.Outcome, terminal.ExitLike = productruntime.TurnInterrupted, 130
@@ -532,3 +584,4 @@ func reservedArgument(argument string) bool {
 }
 
 var _ productruntime.LaneDriver = (*LaneDriver)(nil)
+var _ productruntime.LaneMessageDriver = (*LaneDriver)(nil)

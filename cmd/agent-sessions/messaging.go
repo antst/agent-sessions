@@ -518,7 +518,7 @@ func (c *hostCoordinator) deliverUnified(ctx context.Context, runtime *daemonpkg
 	if err != nil {
 		return err
 	}
-	return c.deliverLaneMessage(runtime, target.lane, message)
+	return c.deliverLaneMessage(ctx, target.lane, messageID, message)
 }
 
 func publicLocalTarget(target localPeerTarget) map[string]any {

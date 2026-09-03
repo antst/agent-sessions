@@ -221,7 +221,7 @@ func (c *hostCoordinator) deliverFederated(
 		if local.lane == nil {
 			return errors.New("federated target disappeared")
 		}
-		return c.deliverLaneMessage(runtime, local.lane, message)
+		return c.deliverLaneMessage(callCtx, local.lane, deliveryID, message)
 	})
 	if err != nil {
 		return err

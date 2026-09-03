@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,7 +244,129 @@ func TestLaneSemanticSteerAndControlInterruptShareOneStream(t *testing.T) {
 	}
 }
 
-func TestLaneWrapsInboundPeerFrameAndSurfacesProductError(t *testing.T) {
+func TestLaneMessageUsesTheProductStreamWithoutOwningATurn(t *testing.T) {
+	process := newTestStreamProcess()
+	driver, _ := newTestDriver(t, process)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
+		ProductID: ProductID, LaneID: "33333333-3333-4333-8333-333333333333", Name: "worker",
+		Cwd: "/work", PermissionMode: permissionmode.Default,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "original", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := `<cross-session-message from="parent">change course</cross-session-message>`
+	if err := driver.SendMessage(ctx, ref, message); err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 0), "original")
+	assertUserText(t, process.waitWritten(t, 1), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+message)
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "BUSY_MESSAGE_SENTINEL",
+		"session_id": ref.NativeSessionID,
+	})
+	terminal, err := driver.WaitTurn(ctx, turn)
+	if err != nil || terminal.Result != "BUSY_MESSAGE_SENTINEL" {
+		t.Fatalf("busy-message terminal = %+v, %v", terminal, err)
+	}
+
+	idleMessage := `<cross-session-message from="parent">reply then finish</cross-session-message>`
+	if err := driver.SendMessage(ctx, ref, idleMessage); err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 2), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+idleMessage)
+	immediate, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "join the message run", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 3), "join the message run")
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "ATTACHED_MESSAGE_RUN",
+		"session_id": ref.NativeSessionID,
+	})
+	terminal, err = driver.WaitTurn(ctx, immediate)
+	if err != nil || terminal.Result != "ATTACHED_MESSAGE_RUN" {
+		t.Fatalf("attached-message terminal = %+v, %v", terminal, err)
+	}
+
+	if err := driver.SendMessage(ctx, ref, idleMessage); err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 4), "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n"+idleMessage)
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "UNTRACKED_MESSAGE_RESULT",
+		"session_id": ref.NativeSessionID,
+	})
+	waitSessionIdle(t, driver, ref)
+	after, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{Prompt: "tracked after message", PermissionMode: permissionmode.Default})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUserText(t, process.waitWritten(t, 5), "tracked after message")
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "TRACKED_AFTER_MESSAGE",
+		"session_id": ref.NativeSessionID,
+	})
+	terminal, err = driver.WaitTurn(ctx, after)
+	if err != nil || terminal.Result != "TRACKED_AFTER_MESSAGE" {
+		t.Fatalf("post-message terminal = %+v, %v", terminal, err)
+	}
+}
+
+func TestLaneRejectsStrayProductTerminal(t *testing.T) {
+	process := newTestStreamProcess()
+	driver, _ := newTestDriver(t, process)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
+		ProductID: ProductID, LaneID: "stray", Name: "worker", Cwd: "/work", PermissionMode: permissionmode.Default,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.emit(map[string]any{
+		"type": "result", "subtype": "success", "result": "unowned", "session_id": ref.NativeSessionID,
+	})
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, lookupErr := driver.session(ref)
+		if lookupErr != nil && strings.Contains(lookupErr.Error(), "without an active native run") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stray terminal error = %v", lookupErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitSessionIdle(t *testing.T, driver *LaneDriver, ref productruntime.NativeSessionRef) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		session, err := driver.lookupSession(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session.mu.Lock()
+		active := session.active
+		session.mu.Unlock()
+		if active == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Claude native run did not become idle")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLaneTurnSurfacesProductError(t *testing.T) {
 	process := newTestStreamProcess()
 	driver, _ := newTestDriver(t, process)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

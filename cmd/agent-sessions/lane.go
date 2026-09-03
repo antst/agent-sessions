@@ -723,22 +723,21 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 	return map[string]any{"type": "lane.archived", "product": product, "thread_id": actor.id, "session_id": actor.nativeID, "name": actor.name}, nil
 }
 
-func (c *hostCoordinator) deliverLaneMessage(runtime *daemonpkg.Runtime, actor *laneActor, message string) error {
+func (c *hostCoordinator) deliverLaneMessage(ctx context.Context, actor *laneActor, messageID, message string) error {
 	c.mu.Lock()
-	switch actor.state {
-	case "archived", "retiring":
-		c.mu.Unlock()
-		return errors.New("lane has no live message recipient")
-	case "running", "preparing", "transitioning", "interrupting":
-		c.mu.Unlock()
-		return errors.New("lane product is busy and did not accept the message")
+	product := actor.product
+	session := productruntime.NativeSessionRef{
+		LaneID: actor.id, NativeSessionID: actor.nativeID, Generation: actor.nativeGeneration,
 	}
-	prepareLaneTurnLocked(actor)
+	driver, managed := c.laneDrivers.ByProduct(product)
 	c.mu.Unlock()
-	if err := c.commitResumeLane(runtime, actor, false); err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
+	if !managed {
+		return fmt.Errorf("%s lane has no native inbound path", product)
 	}
-	return c.dispatchLaneTurn(runtime, actor, message, true)
+	if messenger, ok := driver.(productruntime.LaneMessageDriver); ok {
+		return messenger.SendMessage(ctx, session, message)
+	}
+	return c.deliverPreparedMessage(ctx, daemonpkg.ManagedAttachment{ID: session.NativeSessionID}, messageID, message)
 }
 
 func (c *hostCoordinator) reconcileOrphanedLanes(runtime *daemonpkg.Runtime) error {

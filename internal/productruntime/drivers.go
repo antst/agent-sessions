@@ -22,6 +22,13 @@ type LaneDriver interface {
 	Archive(context.Context, NativeSessionRef) error
 }
 
+// LaneMessageDriver is implemented when a daemon-owned product session has a
+// native inbound message path. Other lane drivers receive messages through
+// their held presence connection.
+type LaneMessageDriver interface {
+	SendMessage(context.Context, NativeSessionRef, string) error
+}
+
 type DoctorProbe interface {
 	Probe(context.Context, ProbeRequest) (ProbeReport, error)
 }

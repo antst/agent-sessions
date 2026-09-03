@@ -19,6 +19,7 @@ type LaneNative interface {
 	StartLaneTurn(context.Context, bridge.CodexLaneTurnRequest) (string, error)
 	WaitLaneTurn(context.Context, string, string) (bridge.CodexLaneTurnResult, error)
 	InterruptLaneTurn(context.Context, string, string) error
+	SendMessage(context.Context, string, string) (string, error)
 	ArchiveThread(context.Context, string) error
 }
 
@@ -124,6 +125,18 @@ func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.Nat
 	return native.InterruptLaneTurn(ctx, turn.NativeSessionID, turn.NativeTurnID)
 }
 
+func (driver *LaneDriver) SendMessage(ctx context.Context, session productruntime.NativeSessionRef, message string) error {
+	if session.Generation != 1 || session.NativeSessionID == "" || strings.TrimSpace(message) == "" {
+		return productruntime.ErrProtocol
+	}
+	native, err := driver.native()
+	if err != nil {
+		return err
+	}
+	_, err = native.SendMessage(ctx, session.NativeSessionID, message)
+	return err
+}
+
 func (driver *LaneDriver) Archive(ctx context.Context, session productruntime.NativeSessionRef) error {
 	if session.Generation != 1 || session.NativeSessionID == "" {
 		return productruntime.ErrProtocol
@@ -143,3 +156,4 @@ func codexPolicy(mode permissionmode.Mode, approval, sandbox string) (string, st
 }
 
 var _ productruntime.LaneDriver = (*LaneDriver)(nil)
+var _ productruntime.LaneMessageDriver = (*LaneDriver)(nil)
