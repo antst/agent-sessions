@@ -126,8 +126,13 @@ func TestLaneUsesNativeStreamNameGroupsPolicyAndSynchronousTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.NativeSessionID != "11111111-1111-4111-8111-111111111111" || ref.Generation != 7 {
+	if ref.LaneID != ref.NativeSessionID || ref.NativeSessionID != "11111111-1111-4111-8111-111111111111" || ref.Generation != 7 {
 		t.Fatalf("session ref = %+v", ref)
+	}
+	split := ref
+	split.LaneID = "provisional"
+	if _, err := driver.StartTurn(ctx, split, productruntime.TurnStartRequest{Prompt: "must not run", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("provisional identity start error = %v", err)
 	}
 	wantArgs := []string{
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages",
@@ -409,7 +414,7 @@ func TestLaneResumeUsesExactNativeIDWithoutRenamingAndRejectsLifecycleArgs(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "lane", Name: "cached name", ResumeNativeID: "44444444-4444-4444-8444-444444444444",
+		ProductID: ProductID, LaneID: "44444444-4444-4444-8444-444444444444", Name: "cached name", ResumeNativeID: "44444444-4444-4444-8444-444444444444",
 		Cwd: "/work", PermissionMode: permissionmode.BypassPermissions,
 	})
 	if err != nil {

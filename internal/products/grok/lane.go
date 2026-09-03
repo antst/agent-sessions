@@ -156,15 +156,15 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 			return productruntime.NativeSessionRef{}, err
 		}
 	}
-	ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: nativeID, Generation: driver.config.Generation}
+	ref := productruntime.NativeSessionRef{LaneID: nativeID, NativeSessionID: nativeID, Generation: driver.config.Generation}
 	session := &laneSession{ref: ref, permission: request.PermissionMode, native: native}
 	driver.mu.Lock()
-	if _, exists := driver.lanes[request.LaneID]; exists || driver.nativeSessionInUseLocked(nativeID) {
+	if _, exists := driver.lanes[nativeID]; exists {
 		driver.mu.Unlock()
 		native.Close()
 		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: Grok native session %q already has a lane owner", productruntime.ErrAmbiguousSession, nativeID)
 	}
-	driver.lanes[request.LaneID] = session
+	driver.lanes[nativeID] = session
 	driver.mu.Unlock()
 	return ref, nil
 }
@@ -298,7 +298,7 @@ func (driver *LaneDriver) session(ref productruntime.NativeSessionRef) (*laneSes
 }
 
 func (driver *LaneDriver) lookupSession(ref productruntime.NativeSessionRef) (*laneSession, error) {
-	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || strings.TrimSpace(ref.NativeSessionID) == "" {
+	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || ref.LaneID != ref.NativeSessionID {
 		return nil, productruntime.ErrStale
 	}
 	driver.mu.Lock()
@@ -330,15 +330,6 @@ func (*LaneDriver) clearTurn(session *laneSession, turn *laneTurn) {
 		session.active = nil
 	}
 	session.mu.Unlock()
-}
-
-func (driver *LaneDriver) nativeSessionInUseLocked(nativeID string) bool {
-	for _, session := range driver.lanes {
-		if !session.closed && session.ref.NativeSessionID == nativeID {
-			return true
-		}
-	}
-	return false
 }
 
 func (session *laneSession) nextMessageID(kind string) string {

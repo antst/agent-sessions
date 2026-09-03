@@ -92,8 +92,13 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
 		Arguments: []string{"--model", "google/gemini-3.1-pro-preview"},
 	})
-	if err != nil || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
+	if err != nil || session.LaneID != "ses_lane" || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
 		t.Fatalf("open = %#v, %v", session, err)
+	}
+	split := session
+	split.LaneID = "lane-one"
+	if _, err := driver.StartTurn(context.Background(), split, productruntime.TurnStartRequest{Prompt: "must not run", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("provisional identity start error = %v", err)
 	}
 	if got := servers.request.Load().(ServerOpenRequest).Arguments; len(got) != 0 {
 		t.Fatalf("serve arguments = %v, want model consumed by prompt", got)
@@ -113,7 +118,7 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 		t.Fatalf("terminal = %#v, %v", terminal, err)
 	}
 	reused, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: "opencode", LaneID: "lane-one", ResumeNativeID: session.NativeSessionID,
+		ProductID: "opencode", LaneID: session.NativeSessionID, ResumeNativeID: session.NativeSessionID,
 		Cwd: "/work/project", PermissionMode: permissionmode.Default,
 	})
 	if err != nil || reused != session || servers.openCount.Load() != 1 {
@@ -129,7 +134,7 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 		t.Fatalf("server closes = %d", servers.closed.Load())
 	}
 	resumed, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: "opencode", LaneID: "lane-one", ResumeNativeID: session.NativeSessionID,
+		ProductID: "opencode", LaneID: session.NativeSessionID, ResumeNativeID: session.NativeSessionID,
 		Cwd: "/work/project", PermissionMode: permissionmode.Default,
 	})
 	if err != nil || resumed != session || getCalls.Load() != 1 || servers.openCount.Load() != 2 {

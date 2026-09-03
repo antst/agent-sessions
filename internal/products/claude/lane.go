@@ -117,6 +117,9 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	} else {
 		arguments = append(arguments, "--resume", nativeID)
 	}
+	if request.LaneID != nativeID {
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: Claude lane identity must equal its native session", productruntime.ErrProtocol)
+	}
 	if request.PermissionMode == permissionmode.BypassPermissions {
 		arguments = append(arguments, driver.config.Descriptor.NativeYoloArgs...)
 	} else {
@@ -135,7 +138,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		Env: []productruntime.EnvVar{
 			{Name: "AGENT_SESSIONS_HOST_BINARY", Value: driver.config.HostExecutable},
 			{Name: "AGENT_SESSIONS_PRODUCT", Value: ProductID},
-			{Name: "AGENT_SESSIONS_SESSION_ID", Value: request.LaneID},
+			{Name: "AGENT_SESSIONS_SESSION_ID", Value: nativeID},
 			{Name: "AGENT_SESSIONS_SESSION_NAME", Value: request.Name},
 			{Name: "AGENT_SESSIONS_GROUPS", Value: string(groups)},
 		},
@@ -145,17 +148,17 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		cancel()
 		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: start Claude stream: %v", productruntime.ErrUnavailable, err)
 	}
-	ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: nativeID, Generation: driver.config.Generation}
+	ref := productruntime.NativeSessionRef{LaneID: nativeID, NativeSessionID: nativeID, Generation: driver.config.Generation}
 	session := &laneSession{
 		ref: ref, permission: request.PermissionMode, process: process, cancel: cancel,
 		controls: make(map[string]chan error),
 	}
 	driver.mu.Lock()
-	if _, exists := driver.lanes[request.LaneID]; exists || driver.nativeSessionInUseLocked(nativeID) {
+	if _, exists := driver.lanes[nativeID]; exists {
 		driver.mu.Unlock()
 		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, fmt.Errorf("%w: Claude native session %q already has a lane owner", productruntime.ErrAmbiguousSession, nativeID))
 	}
-	driver.lanes[request.LaneID] = session
+	driver.lanes[nativeID] = session
 	driver.mu.Unlock()
 	go session.readLoop()
 	return ref, nil
@@ -345,7 +348,7 @@ func (driver *LaneDriver) session(ref productruntime.NativeSessionRef) (*laneSes
 }
 
 func (driver *LaneDriver) lookupSession(ref productruntime.NativeSessionRef) (*laneSession, error) {
-	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || strings.TrimSpace(ref.NativeSessionID) == "" {
+	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || ref.LaneID != ref.NativeSessionID {
 		return nil, productruntime.ErrStale
 	}
 	driver.mu.Lock()
@@ -378,15 +381,6 @@ func (driver *LaneDriver) turn(ref productruntime.NativeTurnRef, requireRunning 
 		return nil, nil, productruntime.ErrStale
 	}
 	return session, turn, nil
-}
-
-func (driver *LaneDriver) nativeSessionInUseLocked(nativeID string) bool {
-	for _, session := range driver.lanes {
-		if session.ref.NativeSessionID == nativeID {
-			return true
-		}
-	}
-	return false
 }
 
 func lanePrompt(prompt string) (string, error) {

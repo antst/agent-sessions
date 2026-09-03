@@ -106,8 +106,13 @@ func TestLaneOpenCarriesNativeFactsAndAppliesOnlyRequestedModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.NativeSessionID != testNativeID || ref.Generation != 7 {
+	if ref.LaneID != testNativeID || ref.NativeSessionID != testNativeID || ref.Generation != 7 {
 		t.Fatalf("ref = %#v", ref)
+	}
+	split := ref
+	split.LaneID = request.LaneID
+	if err := driver.SendMessage(context.Background(), split, "must not deliver"); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("provisional identity message error = %v", err)
 	}
 	if factory.calls != 1 || factory.request.Name != "named-grok" || factory.request.Capability != "lane-capability" ||
 		!reflect.DeepEqual(factory.request.Groups, request.Groups) || !reflect.DeepEqual(factory.request.Environment, request.Environment) ||
@@ -217,6 +222,7 @@ func TestExactResumeReusesOneNativeOwnerAndArchiveClosesIt(t *testing.T) {
 	driver, factory := testDriver(t, session)
 	request := openRequest()
 	request.ResumeNativeID = testNativeID
+	request.LaneID = testNativeID
 	ref, err := driver.Open(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)

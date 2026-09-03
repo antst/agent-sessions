@@ -576,7 +576,7 @@ func (c *hostCoordinator) reportedLaneContextLocked(nativeID string) (string, st
 		}
 	}
 	for actorKey, actor := range c.lanes {
-		if actor != nil && (actor.id == nativeID || actor.nativeID == nativeID) && actor.parentID != "" {
+		if actor != nil && actor.id == nativeID && actor.parentID != "" {
 			return actorKey, actor.parentID
 		}
 	}

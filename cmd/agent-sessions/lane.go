@@ -917,7 +917,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	if err := c.recordLaneNativeID(runtime, actor, session.NativeSessionID); err != nil {
+	if err := c.recordLaneNativeID(runtime, actor, session); err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	c.mu.Lock()
@@ -988,9 +988,13 @@ func (c *hostCoordinator) beginLaneExecution(runtime *daemonpkg.Runtime, actor *
 	return c.markLaneRunning(runtime, actor)
 }
 
-func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *laneActor, nativeID string) error {
+func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *laneActor, session productruntime.NativeSessionRef) error {
+	nativeID := session.NativeSessionID
 	if strings.TrimSpace(nativeID) == "" {
 		return errors.New("native lane session identity is empty")
+	}
+	if session.LaneID != nativeID {
+		return fmt.Errorf("%w: lane driver returned lane %q for native session %q", productruntime.ErrProtocol, session.LaneID, nativeID)
 	}
 	c.mu.Lock()
 	if actor.nativeID != "" {
@@ -999,9 +1003,11 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 			c.mu.Unlock()
 			return fmt.Errorf("native lane identity changed from %s to %s", selected, nativeID)
 		}
-		c.mu.Unlock()
-		c.rememberActiveLaneName(actor)
-		return nil
+		if actor.id == nativeID {
+			c.mu.Unlock()
+			c.rememberActiveLaneName(actor)
+			return nil
+		}
 	}
 	primary := "session:" + runtime.HostID() + "/" + actor.parentID
 	temporary := primary + "/" + actor.id
@@ -1012,6 +1018,25 @@ func (c *hostCoordinator) recordLaneNativeID(runtime *daemonpkg.Runtime, actor *
 		}
 	}
 	actor.groups = uniqueStrings(actor.groups)
+	if actor.id != nativeID {
+		if current := c.lanes[actor.id]; current != actor {
+			c.mu.Unlock()
+			return fmt.Errorf("%w: provisional lane identity is stale", productruntime.ErrStale)
+		}
+		if current := c.lanes[nativeID]; current != nil && current != actor {
+			c.mu.Unlock()
+			return fmt.Errorf("%w: native lane %q already has an actor", productruntime.ErrAmbiguousSession, nativeID)
+		}
+		oldID := actor.id
+		delete(c.lanes, oldID)
+		c.lanes[nativeID] = actor
+		for reportedID, actorID := range c.reportedLanes {
+			if actorID == oldID {
+				c.reportedLanes[reportedID] = nativeID
+			}
+		}
+		actor.id = nativeID
+	}
 	actor.nativeID = nativeID
 	c.mu.Unlock()
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
@@ -1216,7 +1241,7 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 	defer c.mu.Unlock()
 	var matches []*laneActor
 	for _, actor := range c.lanes {
-		if actor.product != product || actor.id != target && actor.nativeID != target && actor.name != target || !all && actor.state == "archived" || actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
+		if actor.product != product || actor.id != target && actor.name != target || !all && actor.state == "archived" || actor.parentID != parent.ID && !groupsIntersect(parentGroups, actor.groups) {
 			continue
 		}
 		matches = append(matches, actor)
@@ -1285,9 +1310,6 @@ func (c *hostCoordinator) effectiveLaneGroups(runtime *daemonpkg.Runtime, actor 
 }
 
 func laneGroupIdentity(actor *laneActor) string {
-	if actor.nativeID != "" {
-		return actor.nativeID
-	}
 	return actor.id
 }
 

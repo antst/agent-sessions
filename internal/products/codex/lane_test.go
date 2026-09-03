@@ -55,14 +55,14 @@ func TestLaneDriverTranslatesStartResumeTurnAndLifecycle(t *testing.T) {
 		ProductID: ProductID, LaneID: "lane", Name: "named", Cwd: "/work",
 		PermissionMode: permissionmode.BypassPermissions,
 	})
-	if err != nil || started.NativeSessionID != "thread-start" || native.start.ApprovalPolicy != "never" || native.start.Sandbox != "danger-full-access" {
+	if err != nil || started.LaneID != "thread-start" || started.NativeSessionID != "thread-start" || native.start.ApprovalPolicy != "never" || native.start.Sandbox != "danger-full-access" {
 		t.Fatalf("start = %#v request=%#v err=%v", started, native.start, err)
 	}
 	resumed, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "lane", ResumeNativeID: "thread-resume", Cwd: "/work",
+		ProductID: ProductID, LaneID: "thread-resume", ResumeNativeID: "thread-resume", Cwd: "/work",
 		PermissionMode: permissionmode.Default, ApprovalPolicy: "on-request", Sandbox: "workspace-write",
 	})
-	if err != nil || !reflect.DeepEqual(native.resume, []any{"thread-resume", "/work", "on-request", "workspace-write"}) {
+	if err != nil || resumed.LaneID != resumed.NativeSessionID || resumed.LaneID != "thread-resume" || !reflect.DeepEqual(native.resume, []any{"thread-resume", "/work", "on-request", "workspace-write"}) {
 		t.Fatalf("resume = %#v request=%#v err=%v", resumed, native.resume, err)
 	}
 	turn, err := driver.StartTurn(context.Background(), resumed, productruntime.TurnStartRequest{
@@ -95,10 +95,33 @@ func TestLaneMessageUsesOneNativeCallAndReturnsItsError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := productruntime.NativeSessionRef{LaneID: "lane", NativeSessionID: "thread", Generation: 1}
+	ref := productruntime.NativeSessionRef{LaneID: "thread", NativeSessionID: "thread", Generation: 1}
 	err = driver.SendMessage(context.Background(), ref, "deliver once")
 	if !errors.Is(err, nativeErr) || !reflect.DeepEqual(native.messages, []string{"thread:deliver once"}) {
 		t.Fatalf("messages = %v, err=%v", native.messages, err)
+	}
+}
+
+func TestLaneDriverRejectsProvisionalIdentityAfterOpen(t *testing.T) {
+	native := &nativeFixture{}
+	driver, err := NewLaneDriver(func() (LaneNative, error) { return native, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	split := productruntime.NativeSessionRef{LaneID: "provisional", NativeSessionID: "thread", Generation: 1}
+	if _, err := driver.StartTurn(context.Background(), split, productruntime.TurnStartRequest{
+		Prompt: "work", PermissionMode: permissionmode.Default,
+	}); !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("start with provisional identity error = %v", err)
+	}
+	if err := driver.SendMessage(context.Background(), split, "message"); !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("message with provisional identity error = %v", err)
+	}
+	if err := driver.Archive(context.Background(), split); !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("archive with provisional identity error = %v", err)
+	}
+	if len(native.messages) != 0 || native.archived != "" {
+		t.Fatalf("provisional identity reached native calls: messages=%v archive=%q", native.messages, native.archived)
 	}
 }
 
@@ -109,7 +132,7 @@ func TestLaneDriverRejectsNativeIdentitySubstitution(t *testing.T) {
 	bad := &substitutingNative{nativeFixture: native}
 	driver.native = func() (LaneNative, error) { return bad, nil }
 	if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "lane", ResumeNativeID: "wanted", Cwd: "/work", PermissionMode: permissionmode.Default,
+		ProductID: ProductID, LaneID: "wanted", ResumeNativeID: "wanted", Cwd: "/work", PermissionMode: permissionmode.Default,
 	}); err == nil {
 		t.Fatal("resume identity substitution unexpectedly accepted")
 	}

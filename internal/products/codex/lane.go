@@ -69,11 +69,11 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if strings.TrimSpace(thread.ID) == "" || request.ResumeNativeID != "" && thread.ID != request.ResumeNativeID {
 		return productruntime.NativeSessionRef{}, errors.New("codex App Server selected a different thread")
 	}
-	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: thread.ID, Generation: 1}, nil
+	return productruntime.NativeSessionRef{LaneID: thread.ID, NativeSessionID: thread.ID, Generation: 1}, nil
 }
 
 func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
-	if session.LaneID == "" || session.NativeSessionID == "" || session.Generation != 1 || strings.TrimSpace(request.Prompt) == "" || !request.PermissionMode.Valid() {
+	if session.LaneID == "" || session.LaneID != session.NativeSessionID || session.Generation != 1 || strings.TrimSpace(request.Prompt) == "" || !request.PermissionMode.Valid() {
 		return productruntime.NativeTurnRef{}, productruntime.ErrProtocol
 	}
 	approval, sandbox := codexPolicy(request.PermissionMode, request.ApprovalPolicy, request.Sandbox)
@@ -96,7 +96,7 @@ func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.
 }
 
 func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
-	if turn.Generation != 1 || turn.NativeSessionID == "" || turn.NativeTurnID == "" {
+	if turn.Generation != 1 || turn.LaneID == "" || turn.LaneID != turn.NativeSessionID || turn.NativeTurnID == "" {
 		return productruntime.NativeTerminal{}, productruntime.ErrProtocol
 	}
 	native, err := driver.native()
@@ -115,7 +115,7 @@ func (*LaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productr
 }
 
 func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.NativeTurnRef) error {
-	if turn.Generation != 1 || turn.NativeSessionID == "" || turn.NativeTurnID == "" {
+	if turn.Generation != 1 || turn.LaneID == "" || turn.LaneID != turn.NativeSessionID || turn.NativeTurnID == "" {
 		return productruntime.ErrProtocol
 	}
 	native, err := driver.native()
@@ -126,7 +126,7 @@ func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.Nat
 }
 
 func (driver *LaneDriver) SendMessage(ctx context.Context, session productruntime.NativeSessionRef, message string) error {
-	if session.Generation != 1 || session.NativeSessionID == "" || strings.TrimSpace(message) == "" {
+	if session.Generation != 1 || session.LaneID == "" || session.LaneID != session.NativeSessionID || strings.TrimSpace(message) == "" {
 		return productruntime.ErrProtocol
 	}
 	native, err := driver.native()
@@ -138,7 +138,7 @@ func (driver *LaneDriver) SendMessage(ctx context.Context, session productruntim
 }
 
 func (driver *LaneDriver) Archive(ctx context.Context, session productruntime.NativeSessionRef) error {
-	if session.Generation != 1 || session.NativeSessionID == "" {
+	if session.Generation != 1 || session.LaneID == "" || session.LaneID != session.NativeSessionID {
 		return productruntime.ErrProtocol
 	}
 	native, err := driver.native()

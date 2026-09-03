@@ -136,6 +136,8 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 			return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, fmt.Errorf("%w: Qwen ACP does not support session resume", productruntime.ErrIncompatible))
 		}
 		method, params["sessionId"] = "session/resume", request.ResumeNativeID
+	} else {
+		params["_meta"] = map[string]any{"qwen-code/sessionId": request.LaneID}
 	}
 	opened, err := client.call(ctx, method, params)
 	if err != nil {
@@ -147,6 +149,12 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	}
 	if nativeID == "" || request.ResumeNativeID != "" && nativeID != request.ResumeNativeID {
 		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, fmt.Errorf("%w: Qwen ACP selected a different native session", productruntime.ErrAmbiguousSession))
+	}
+	if request.ResumeNativeID == "" && request.LaneID != nativeID {
+		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, fmt.Errorf("%w: Qwen ignored the requested native session identity", productruntime.ErrProtocol))
+	}
+	if request.LaneID != nativeID {
+		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, fmt.Errorf("%w: Qwen lane identity must equal its native session", productruntime.ErrProtocol))
 	}
 	mode, _ := mapValue(opened["modes"])["currentModeId"].(string)
 	if request.PermissionMode == permissionmode.BypassPermissions && mode != "yolo" {
@@ -162,15 +170,15 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 			return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, renameErr)
 		}
 	}
-	ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: nativeID, Generation: driver.config.Generation}
+	ref := productruntime.NativeSessionRef{LaneID: nativeID, NativeSessionID: nativeID, Generation: driver.config.Generation}
 	session := &laneSession{ref: ref, permission: request.PermissionMode, process: process, client: client, cancel: cancel}
 	client.setNotificationHandler(session.handleNotification)
 	driver.mu.Lock()
-	if _, exists := driver.lanes[request.LaneID]; exists || driver.nativeSessionInUseLocked(nativeID) {
+	if _, exists := driver.lanes[nativeID]; exists {
 		driver.mu.Unlock()
 		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, fmt.Errorf("%w: Qwen native session %q already has a lane owner", productruntime.ErrAmbiguousSession, nativeID))
 	}
-	driver.lanes[request.LaneID] = session
+	driver.lanes[nativeID] = session
 	driver.mu.Unlock()
 	return ref, nil
 }
@@ -293,7 +301,7 @@ func (driver *LaneDriver) Archive(ctx context.Context, ref productruntime.Native
 }
 
 func (driver *LaneDriver) session(ref productruntime.NativeSessionRef) (*laneSession, error) {
-	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || strings.TrimSpace(ref.NativeSessionID) == "" {
+	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || ref.LaneID != ref.NativeSessionID {
 		return nil, productruntime.ErrStale
 	}
 	driver.mu.Lock()
@@ -326,15 +334,6 @@ func (driver *LaneDriver) clearTurn(session *laneSession, turn *laneTurn) {
 		session.active = nil
 	}
 	session.mu.Unlock()
-}
-
-func (driver *LaneDriver) nativeSessionInUseLocked(nativeID string) bool {
-	for _, session := range driver.lanes {
-		if session.ref.NativeSessionID == nativeID {
-			return true
-		}
-	}
-	return false
 }
 
 func (session *laneSession) handleNotification(message map[string]any) {

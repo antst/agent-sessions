@@ -232,10 +232,16 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 	})
 	coordinator.mu.Lock()
 	actor := coordinator.lanes["public-lane"]
-	_, duplicate := coordinator.lanes["native-lane"]
 	coordinator.mu.Unlock()
-	if duplicate || actor == nil || actor.nativeID != "native-lane" || actor.state != "running" {
-		t.Fatalf("bound actor = %+v, duplicate=%v", actor, duplicate)
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.mu.Lock()
+	bound := coordinator.lanes["native-lane"]
+	_, provisional := coordinator.lanes["public-lane"]
+	coordinator.mu.Unlock()
+	if provisional || bound != actor || actor.id != "native-lane" || actor.nativeID != "native-lane" || actor.state != "running" {
+		t.Fatalf("bound actor = %+v, provisional=%v", actor, provisional)
 	}
 }
 
@@ -397,11 +403,11 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 		t.Fatal(err)
 	}
 	idle := &laneActor{
-		id: "lane-idle", nativeID: "native-idle", nativeGeneration: 7, product: "claude", name: "worker-idle",
+		id: "native-idle", nativeID: "native-idle", nativeGeneration: 7, product: "claude", name: "worker-idle",
 		parentID: parentA.UUID, groups: []string{"shared"}, state: "idle", done: closedLaneDone(),
 	}
 	persistent := &laneActor{
-		id: "lane-persistent", nativeID: "native-persistent", nativeGeneration: 7, product: "claude", name: "worker-persistent",
+		id: "native-persistent", nativeID: "native-persistent", nativeGeneration: 7, product: "claude", name: "worker-persistent",
 		parentID: parentA.UUID, groups: []string{"shared"}, permission: "default", persistent: true, state: "idle", done: closedLaneDone(),
 	}
 	coordinator.lanes[idle.id], coordinator.lanes[persistent.id] = idle, persistent
@@ -517,7 +523,7 @@ func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.recordLaneNativeID(runtime, actor, candidate.NativeSessionID); err != nil {
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: candidate.NativeSessionID, NativeSessionID: candidate.NativeSessionID, Generation: 1}); err != nil {
 		t.Fatalf("resume rewrote immutable candidate: %v", err)
 	}
 	after, err := runtime.State().Read()
@@ -535,7 +541,7 @@ func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testi
 	parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "opencode", Cwd: "/workspace", Groups: []string{"team"}}
 	coordinator.liveReports[parent.ID] = liveSessionReport{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
 	actor := &laneActor{
-		id: "agent-sessions-lane", nativeID: "ses_product", product: "opencode", name: "worker",
+		id: "ses_product", nativeID: "ses_product", product: "opencode", name: "worker",
 		cwd: "/workspace", parentID: parent.ID, groups: []string{"team"}, explicitGroups: []string{"team/worker"},
 		state: "archived", done: closedLaneDone(),
 	}
@@ -548,7 +554,7 @@ func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != actor || resolved.id != "agent-sessions-lane" || resolved.cwd != "/workspace" || !reflect.DeepEqual(resolved.explicitGroups, []string{"team/worker"}) {
+	if resolved != actor || resolved.id != "ses_product" || resolved.cwd != "/workspace" || !reflect.DeepEqual(resolved.explicitGroups, []string{"team/worker"}) {
 		t.Fatalf("resolved actor = %+v, want original %+v", resolved, actor)
 	}
 	if len(coordinator.lanes) != 1 {

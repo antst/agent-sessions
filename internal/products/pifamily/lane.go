@@ -102,8 +102,13 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	arguments := append(driver.config.Quirks.modeArguments(), request.Arguments...)
 	if request.ResumeNativeID != "" {
 		arguments = append(arguments, driver.config.Quirks.resumeArguments(request.ResumeNativeID)...)
-	} else if !driver.config.Quirks.SetNameByRPC {
-		arguments = append(arguments, "--name", request.Name)
+	} else {
+		if driver.config.Quirks.FreshSessionIDFlag != "" {
+			arguments = append(arguments, driver.config.Quirks.FreshSessionIDFlag, request.LaneID)
+		}
+		if !driver.config.Quirks.SetNameByRPC {
+			arguments = append(arguments, "--name", request.Name)
+		}
 	}
 	arguments = append(arguments, policy.Args...)
 	command := productruntime.NativeCommand{Path: driver.config.Executable, Args: arguments, Cwd: request.Cwd}
@@ -130,15 +135,19 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		primary := fmt.Errorf("%w: resume returned native session %q, want %q", productruntime.ErrAmbiguousSession, state.SessionID, request.ResumeNativeID)
 		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, primary)
 	}
-	ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: state.SessionID, Generation: driver.config.Generation}
+	if request.ResumeNativeID == "" && driver.config.Quirks.FreshSessionIDFlag != "" && state.SessionID != request.LaneID {
+		primary := fmt.Errorf("%w: %s ignored the requested native session identity", productruntime.ErrProtocol, request.ProductID)
+		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, primary)
+	}
+	ref := productruntime.NativeSessionRef{LaneID: state.SessionID, NativeSessionID: state.SessionID, Generation: driver.config.Generation}
 	session := &laneSession{ref: ref, permission: request.PermissionMode, process: process, client: client, cancel: cancel}
 	driver.mu.Lock()
-	if _, exists := driver.lanes[request.LaneID]; exists || driver.nativeSessionInUseLocked(state.SessionID) {
+	if _, exists := driver.lanes[state.SessionID]; exists {
 		driver.mu.Unlock()
 		primary := fmt.Errorf("%w: native session %q already has a lane owner", productruntime.ErrAmbiguousSession, state.SessionID)
 		return productruntime.NativeSessionRef{}, cleanupOpenFailure(cancel, process, primary)
 	}
-	driver.lanes[request.LaneID] = session
+	driver.lanes[state.SessionID] = session
 	driver.mu.Unlock()
 	return ref, nil
 }
@@ -356,6 +365,9 @@ func (driver *LaneDriver) Archive(ctx context.Context, ref productruntime.Native
 }
 
 func (driver *LaneDriver) session(ref productruntime.NativeSessionRef) (*laneSession, error) {
+	if ref.LaneID == "" || ref.LaneID != ref.NativeSessionID {
+		return nil, fmt.Errorf("%w: native lane reference is stale", productruntime.ErrStale)
+	}
 	driver.mu.Lock()
 	session := driver.lanes[ref.LaneID]
 	driver.mu.Unlock()
@@ -398,15 +410,6 @@ func (driver *LaneDriver) reconcileState(ctx context.Context, session *laneSessi
 		return rpcSessionState{}, fmt.Errorf("%w: live RPC session changed from %q to %q", productruntime.ErrAmbiguousSession, session.ref.NativeSessionID, state.SessionID)
 	}
 	return state, nil
-}
-
-func (driver *LaneDriver) nativeSessionInUseLocked(nativeSessionID string) bool {
-	for _, session := range driver.lanes {
-		if session.ref.NativeSessionID == nativeSessionID {
-			return true
-		}
-	}
-	return false
 }
 
 func lanePrompt(prompt string) (string, error) {

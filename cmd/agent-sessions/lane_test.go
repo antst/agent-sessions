@@ -59,7 +59,7 @@ func (*parentExitLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
 }
 func (d *parentExitLaneDriver) Open(_ context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
 	d.opens = append(d.opens, request)
-	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: request.ResumeNativeID, Generation: 7}, nil
+	return productruntime.NativeSessionRef{LaneID: request.ResumeNativeID, NativeSessionID: request.ResumeNativeID, Generation: 7}, nil
 }
 func (*parentExitLaneDriver) StartTurn(_ context.Context, session productruntime.NativeSessionRef, _ productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
 	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: "turn"}, nil
@@ -262,6 +262,7 @@ func TestProductLaneTurnFailureLeavesNativeSessionForExplicitLifecycle(t *testin
 		id: "lane", parentID: "parent", product: "codex", name: "worker", cwd: root,
 		permission: "default", turnID: "turn", state: "preparing", done: make(chan struct{}),
 	}
+	coordinator.lanes[actor.id] = actor
 	if err := coordinator.dispatchProductLaneTurn(runtime, actor, "work", driver); !errors.Is(err, native.turnStartErr) {
 		t.Fatalf("dispatch error = %v", err)
 	}
@@ -383,8 +384,20 @@ func TestNativeLaneBindingReplacesTemporaryPrivateGroupBeforeRemember(t *testing
 		id: "temporary-lane", product: "codex", parentID: "parent", name: "worker",
 		groups: []string{primary, primary + "/temporary-lane", "project/child"},
 	}
-	if err := coordinator.recordLaneNativeID(runtime, actor, "native-lane"); err != nil {
+	coordinator.lanes[actor.id] = actor
+	coordinator.reportedLanes["native-lane"] = actor.id
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "other", NativeSessionID: "native-lane", Generation: 1}); !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("split driver identity returned %v", err)
+	}
+	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: "native-lane", NativeSessionID: "native-lane", Generation: 1}); err != nil {
 		t.Fatal(err)
+	}
+	if actor.id != "native-lane" || coordinator.lanes["native-lane"] != actor || coordinator.lanes["temporary-lane"] != nil ||
+		coordinator.reportedLanes["native-lane"] != "native-lane" {
+		t.Fatalf("actor was not re-keyed to its sole native identity: id=%q lanes=%+v reports=%+v", actor.id, coordinator.lanes, coordinator.reportedLanes)
+	}
+	if status := laneActorStatus(actor); status["thread_id"] != "native-lane" || status["session_id"] != "native-lane" {
+		t.Fatalf("public lane identity remained split: %+v", status)
 	}
 	wantGroups := []string{"project/child", primary, primary + "/native-lane"}
 	if !reflect.DeepEqual(actor.groups, wantGroups) {
@@ -554,6 +567,7 @@ func TestCodexExecutionTimeoutDoesNotExpireDuringNativeThreadSetup(t *testing.T)
 		turnTimeout: 20 * time.Millisecond, done: make(chan struct{}),
 	}
 	coordinator := newHostCoordinator(context.Background(), root)
+	coordinator.lanes[actor.id] = actor
 	native := &delayedCodexLaneNative{setupDelay: 2 * actor.turnTimeout}
 	driver, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) { return native, nil })
 	if err != nil {

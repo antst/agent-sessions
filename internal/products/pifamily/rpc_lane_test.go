@@ -158,19 +158,30 @@ type sequenceProcessFactory struct {
 	next      int
 }
 
-func (factory *sequenceProcessFactory) StartRPC(context.Context, productruntime.NativeCommand) (RPCProcess, error) {
+func (factory *sequenceProcessFactory) StartRPC(_ context.Context, command productruntime.NativeCommand) (RPCProcess, error) {
 	if factory.next >= len(factory.processes) {
 		return nil, errors.New("no scripted process")
 	}
 	process := factory.processes[factory.next]
 	factory.next++
+	applyRequestedSessionID(process, command)
 	return process, nil
 }
 
 func (factory *oneProcessFactory) StartRPC(_ context.Context, command productruntime.NativeCommand) (RPCProcess, error) {
 	factory.command = command
 	factory.starts++
+	applyRequestedSessionID(factory.process, command)
 	return factory.process, nil
+}
+
+func applyRequestedSessionID(process *scriptedRPCProcess, command productruntime.NativeCommand) {
+	for index := 0; index+1 < len(command.Args); index++ {
+		if command.Args[index] == "--session-id" {
+			process.sessionID = command.Args[index+1]
+			return
+		}
+	}
 }
 
 func familyPermission(mode permissionmode.Mode) (PermissionPolicy, error) {
@@ -195,11 +206,14 @@ func TestPiLaneUsesStateReadinessAgentSettledAndExactResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: PiProductID, LaneID: "lane-pi", ResumeNativeID: "pi-native", Cwd: "/work",
+		ProductID: PiProductID, LaneID: "pi-native", ResumeNativeID: "pi-native", Cwd: "/work",
 		PermissionMode: permissionmode.Default,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if ref.LaneID != ref.NativeSessionID || ref.NativeSessionID != "pi-native" {
+		t.Fatalf("Pi native-keyed ref = %+v", ref)
 	}
 	if want := []string{"--mode", "rpc", "--session", "pi-native", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Pi resume args = %q, want %q", factory.command.Args, want)
@@ -336,6 +350,9 @@ func TestOMPLaneRequiresReadyPreservesSteerAndIgnoresContinuingEnd(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ref.LaneID != ref.NativeSessionID || ref.NativeSessionID != "omp-native" {
+		t.Fatalf("OMP native-keyed ref = %+v", ref)
+	}
 	if want := []string{"--mode=rpc", "--tools", "read"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("OMP args = %q, want %q", factory.command.Args, want)
 	}
@@ -379,7 +396,7 @@ func TestOMPResumeNeverRenamesNativeSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-		ProductID: OMPProductID, LaneID: "resume-omp", ResumeNativeID: "omp-native", Cwd: "/work", PermissionMode: permissionmode.Default,
+		ProductID: OMPProductID, LaneID: "omp-native", ResumeNativeID: "omp-native", Cwd: "/work", PermissionMode: permissionmode.Default,
 	})
 	if err != nil || ref.NativeSessionID != "omp-native" {
 		t.Fatalf("OMP resume = %+v, %v", ref, err)
@@ -587,9 +604,12 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 	})
 
 	t.Run("final native ownership collision", func(t *testing.T) {
-		quirks, _ := QuirksFor(PiProductID)
+		quirks, _ := QuirksFor(OMPProductID)
 		first := newScriptedProcess("shared-native")
 		second := newScriptedProcess("shared-native")
+		for _, process := range []*scriptedRPCProcess{first, second} {
+			process.emit(map[string]any{"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": []int{1}, "maxFrameBytes": MaxRPCFrameBytes})
+		}
 		cleanupErr := errors.New("cleanup failed")
 		second.cleanupErr = cleanupErr
 		factory := &sequenceProcessFactory{processes: []*scriptedRPCProcess{first, second}}
@@ -601,12 +621,12 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
-			ProductID: PiProductID, LaneID: "first-owner", Name: "first owner", Cwd: "/work", PermissionMode: permissionmode.Default,
+			ProductID: OMPProductID, LaneID: "first-owner", Name: "first owner", Cwd: "/work", PermissionMode: permissionmode.Default,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
-			ProductID: PiProductID, LaneID: "second-owner", Name: "second owner", Cwd: "/work", PermissionMode: permissionmode.Default,
+			ProductID: OMPProductID, LaneID: "second-owner", Name: "second owner", Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
 		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !second.cleaned {
 			t.Fatalf("collision cleanup = %v, cleaned = %t", err, second.cleaned)
@@ -686,14 +706,22 @@ func TestLaneOpenPassesProductNativeArgumentsAndName(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
+			ref, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 				ProductID: productID, LaneID: "argument-passed", Name: "product native name", Cwd: "/work",
 				PermissionMode: permissionmode.Default, Arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
+			split := ref
+			split.LaneID = "provisional"
+			if _, err := driver.StartTurn(context.Background(), split, productruntime.TurnStartRequest{Prompt: "must not run", PermissionMode: permissionmode.Default}); !errors.Is(err, productruntime.ErrStale) {
+				t.Fatalf("provisional identity start error = %v", err)
+			}
 			want := append(quirks.modeArguments(), "--model", "deepseek/deepseek-v4-flash")
+			if quirks.FreshSessionIDFlag != "" {
+				want = append(want, quirks.FreshSessionIDFlag, "argument-passed")
+			}
 			if !quirks.SetNameByRPC {
 				want = append(want, "--name", "product native name")
 			}

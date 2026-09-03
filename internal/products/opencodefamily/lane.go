@@ -89,7 +89,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if existing := driver.lanes[request.LaneID]; existing != nil {
 		if request.ResumeNativeID != "" && existing.nativeID == request.ResumeNativeID &&
 			existing.permissionMode == request.PermissionMode && existing.server != nil && existing.client != nil {
-			ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: existing.nativeID, Generation: driver.config.Generation}
+			ref := productruntime.NativeSessionRef{LaneID: existing.nativeID, NativeSessionID: existing.nativeID, Generation: driver.config.Generation}
 			driver.mu.Unlock()
 			return ref, nil
 		}
@@ -133,11 +133,19 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 		driver.mu.Unlock()
 		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, server, productruntime.ErrAmbiguousSession)
 	}
+	if current := driver.lanes[session.ID]; current != nil && current != live {
+		driver.mu.Unlock()
+		return productruntime.NativeSessionRef{}, driver.failOpen(context.Background(), request.LaneID, live, server, productruntime.ErrAmbiguousSession)
+	}
 	live.server = server
 	live.client = client
 	live.nativeID = session.ID
+	if request.LaneID != session.ID {
+		delete(driver.lanes, request.LaneID)
+		driver.lanes[session.ID] = live
+	}
 	driver.mu.Unlock()
-	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: session.ID, Generation: driver.config.Generation}, nil
+	return productruntime.NativeSessionRef{LaneID: session.ID, NativeSessionID: session.ID, Generation: driver.config.Generation}, nil
 }
 
 func (driver *LaneDriver) failOpen(ctx context.Context, laneID string, live *laneSession, server *LiveServer, cause error) error {
@@ -348,7 +356,7 @@ func (driver *LaneDriver) Archive(ctx context.Context, session productruntime.Na
 
 func (driver *LaneDriver) lockLive(ref productruntime.NativeSessionRef) (*laneSession, error) {
 	driver.mu.Lock()
-	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || !validNativeID(ref.NativeSessionID, "ses_") {
+	if ref.Generation != driver.config.Generation || strings.TrimSpace(ref.LaneID) == "" || ref.LaneID != ref.NativeSessionID || !validNativeID(ref.NativeSessionID, "ses_") {
 		driver.mu.Unlock()
 		return nil, productruntime.ErrStale
 	}

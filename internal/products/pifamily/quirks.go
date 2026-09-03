@@ -53,6 +53,7 @@ type Quirks struct {
 	TerminalEvent      string
 	NativeSteerFraming bool
 	NativeSessionEnv   bool
+	FreshSessionIDFlag string
 	SetNameByRPC       bool
 	ResumeFlag         string
 	DefaultPolicy      string
@@ -64,7 +65,7 @@ var quirkTable = map[string]Quirks{
 		ProductID: PiProductID, Executable: "pi", Runtime: "node", TestedVersion: PiTestedVersion,
 		AgentDirectory: ".pi/agent", ExtensionArgStyle: ArgSeparate, ModeArgStyle: ArgSeparate,
 		ReadyStrategy: ReadyByStateProbe, TerminalEvent: "agent_settled", NativeSteerFraming: false,
-		NativeSessionEnv: true, ResumeFlag: "--session", DefaultPolicy: "restricted-tools",
+		NativeSessionEnv: true, FreshSessionIDFlag: "--session-id", ResumeFlag: "--session", DefaultPolicy: "restricted-tools",
 		BypassPolicy: "full-tools",
 	},
 	OMPProductID: {

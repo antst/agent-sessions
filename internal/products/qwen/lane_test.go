@@ -151,14 +151,16 @@ func TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn(t *testing.T) {
 		}
 		switch request.Method {
 		case "session/new":
+			meta := mapValue(request.Params["_meta"])
+			requested, _ := meta["qwen-code/sessionId"].(string)
 			process.respond(request.ID, map[string]any{
-				"sessionId": "qwen-native", "modes": map[string]any{"currentModeId": "yolo"},
+				"sessionId": requested, "modes": map[string]any{"currentModeId": "yolo"},
 			})
 		case "renameSession":
 			process.respond(request.ID, map[string]any{"success": true})
 		case "session/prompt":
 			process.notify("session/update", map[string]any{
-				"sessionId": "qwen-native",
+				"sessionId": "11111111-1111-4111-8111-111111111111",
 				"update": map[string]any{
 					"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "native answer"},
 				},
@@ -170,25 +172,33 @@ func TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "lane", Name: "native name", Cwd: "/work",
+		ProductID: ProductID, LaneID: "11111111-1111-4111-8111-111111111111", Name: "native name", Cwd: "/work",
 		PermissionMode: permissionmode.BypassPermissions, Arguments: []string{"--model", "qwen3.8-max"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.NativeSessionID != "qwen-native" || ref.Generation != 7 {
+	if ref.LaneID != ref.NativeSessionID || ref.NativeSessionID != "11111111-1111-4111-8111-111111111111" || ref.Generation != 7 {
 		t.Fatalf("session ref = %+v", ref)
+	}
+	split := ref
+	split.LaneID = "provisional"
+	if _, err := driver.StartTurn(ctx, split, productruntime.TurnStartRequest{Prompt: "must not run", PermissionMode: permissionmode.BypassPermissions}); !errors.Is(err, productruntime.ErrStale) {
+		t.Fatalf("provisional identity start error = %v", err)
 	}
 	if want := []string{"--acp", "--yolo", "--model", "qwen3.8-max"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Qwen args = %q, want %q", factory.command.Args, want)
 	}
 	rename := process.request("renameSession")
-	if rename.Params["sessionId"] != "qwen-native" || rename.Params["title"] != "native name" {
+	if rename.Params["sessionId"] != ref.NativeSessionID || rename.Params["title"] != "native name" {
 		t.Fatalf("rename request = %+v", rename)
 	}
 	server := mapValue(process.request("session/new").Params["mcpServers"].([]any)[0])
 	if server["command"] != "/bin/agent-sessions" {
 		t.Fatalf("MCP server = %+v", server)
+	}
+	if meta := mapValue(process.request("session/new").Params["_meta"]); meta["qwen-code/sessionId"] != ref.NativeSessionID {
+		t.Fatalf("native session request metadata = %+v", meta)
 	}
 	turn, err := driver.StartTurn(ctx, ref, productruntime.TurnStartRequest{
 		Prompt: "  preserve this prompt  ", PermissionMode: permissionmode.BypassPermissions,
@@ -209,7 +219,7 @@ func TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn(t *testing.T) {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 	resumed, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "lane", ResumeNativeID: ref.NativeSessionID, Cwd: "/work",
+		ProductID: ProductID, LaneID: ref.NativeSessionID, ResumeNativeID: ref.NativeSessionID, Cwd: "/work",
 		PermissionMode: permissionmode.BypassPermissions, Arguments: []string{"--model", "qwen3.8-max"},
 	})
 	if err != nil || resumed != ref {
@@ -244,7 +254,7 @@ func TestLaneResumesExactSessionWithoutRenamingAndInterruptsWithAcknowledgement(
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ref, err := driver.Open(ctx, productruntime.LaneOpenRequest{
-		ProductID: ProductID, LaneID: "lane", ResumeNativeID: "exact-native", Cwd: "/elsewhere",
+		ProductID: ProductID, LaneID: "exact-native", ResumeNativeID: "exact-native", Cwd: "/elsewhere",
 		PermissionMode: permissionmode.Default,
 	})
 	if err != nil {
@@ -275,5 +285,28 @@ func TestLaneResumesExactSessionWithoutRenamingAndInterruptsWithAcknowledgement(
 	}
 	if err := driver.Archive(ctx, ref); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFreshLaneRejectsQwenIgnoringRequestedNativeIdentity(t *testing.T) {
+	process := newTestRPCProcess()
+	process.handle = func(request testRPCRequest) {
+		if initializeQwen(process, request) {
+			return
+		}
+		if request.Method == "session/new" {
+			process.respond(request.ID, map[string]any{
+				"sessionId": "22222222-2222-4222-8222-222222222222",
+				"modes":     map[string]any{"currentModeId": "default"},
+			})
+		}
+	}
+	driver, _ := newTestDriver(t, process)
+	_, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
+		ProductID: ProductID, LaneID: "11111111-1111-4111-8111-111111111111", Name: "native name",
+		Cwd: "/work", PermissionMode: permissionmode.Default,
+	})
+	if !errors.Is(err, productruntime.ErrProtocol) {
+		t.Fatalf("ignored requested session id returned %v", err)
 	}
 }
