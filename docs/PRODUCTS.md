@@ -9,7 +9,7 @@ and performs resume, prompting, interruption, and archive behavior through its o
 | Codex | `codex-peer` | `codex-peer-lane` | minimum 0.151.0 |
 | Claude Code | `claude-peer` | `claude-peer-lane` | minimum 2.1.252 |
 | Grok Build | `grok-peer` | `grok-peer-lane` | minimum 1.0.5; accepted on 1.0.13 |
-| Qwen Code | `qwen-peer` | `qwen-peer-lane` | minimum 0.22.0; accepted on 0.22.3 |
+| Qwen Code | `qwen-peer` | `qwen-peer-lane` | minimum 0.22.0; validated on 0.22.3 and 0.23.0 |
 | OpenCode | `opencode-peer` | `opencode-peer-lane` | exact 1.18.25 |
 | Kilo Code | `kilo-peer` | `kilo-peer-lane` | exact 7.5.6 |
 | Pi | `pi-peer` | `pi-peer-lane` | exact 0.84.4 |
@@ -54,6 +54,20 @@ Uniform opt-in options use the descriptor argument table:
 OpenCode and Kilo pass optional agent/model/variant values on each prompt, not to their server
 process. Grok applies effort through its native session mode. DSH selects its product-owned model
 and reasoning effort together. No wrapper stores or mirrors a product default.
+
+### Qwen 0.23.0 approval policy
+
+Qwen owns the approval decision for actions prompted by a delivered peer message. In 0.23.0,
+`yolo` acts; `auto` and the omitted-mode default block tool actions triggered solely by a
+cross-session message; `auto-edit` and `default` prompt the human in the TUI; and `plan` rejects
+the action. These are Qwen product rules, not Agent Sessions routing rules. Qwen documents the
+five native modes in `lib/bundled/qc-helper/docs/features/approval-mode.md:3-31`, declares `auto`
+as the default in `lib/bundled/qc-helper/docs/configuration/settings.md:374`, and implements the
+cross-session authorization boundary in `lib/chunks/chunk-4F7GQGXB.js:50826-50840`.
+
+On Qwen 0.23.0, a lane must use `permission_mode=bypass` (`--yolo`) to act on a steer. A
+default-mode lane still completes its turn truthfully, but Qwen's policy prevents it from taking
+the requested tool action.
 
 ## Native mechanics
 
