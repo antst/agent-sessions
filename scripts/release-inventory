@@ -21,6 +21,10 @@ plugins=(
   'pi|integrations/pi'
   'omp|integrations/omp'
 )
+packages=(
+  'integrations/dsh/comms|@agent-sessions/dsh-comms'
+  'integrations/dsh/lane|@agent-sessions/dsh-lane'
+)
 package_paths=(
   .agents .claude-plugin .codex-plugin
   claude deploy docs grok hooks integrations qwen skills Makefile README.md
@@ -32,6 +36,7 @@ package_paths=(
   scripts/launchd-control
   scripts/managed-tree
   scripts/native-entry
+  scripts/pack-packages
   scripts/package-release
   scripts/realproducts
   scripts/release-final-gate
@@ -87,6 +92,9 @@ case "${1:-}" in
   plugins)
     printf '%s\n' "${plugins[@]}"
     ;;
+  packages)
+    printf '%s\n' "${packages[@]}"
+    ;;
   package-paths)
     printf '%s\n' "${package_paths[@]}"
     ;;
@@ -123,7 +131,7 @@ case "${1:-}" in
     printf ']}\n'
     ;;
   *)
-    printf 'usage: %s binaries|host-aliases|plugins|package-paths|platforms|matrix-json|package-inventory-json\n' "${0##*/}" >&2
+    printf 'usage: %s binaries|host-aliases|plugins|packages|package-paths|platforms|matrix-json|package-inventory-json\n' "${0##*/}" >&2
     exit 2
     ;;
 esac

@@ -69,6 +69,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Test plugin, native runtime, and federation
         run: ./scripts/test
 
@@ -86,6 +89,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Race test plugin, native runtime, and federation
         run: make test-race
 

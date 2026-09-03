@@ -36,10 +36,25 @@ bash -n \
   "$plugin_root/scripts/test-launchd-control" \
   "$plugin_root/scripts/test-removal-transaction" \
   "$plugin_root/scripts/native-entry" \
+  "$plugin_root/scripts/pack-packages" \
   "$plugin_root/claude/skills/grok-lane/scripts/lane-preflight" \
   "$plugin_root/grok/scripts/native-entry" \
   "$plugin_root/qwen/scripts/native-entry" \
   "$plugin_root/scripts/test"
+
+minimum_node=$(<"$plugin_root/deploy/agent-sessions/NODE_VERSION")
+node -e '
+const minimum = Number(process.argv[1]);
+const current = Number(process.versions.node.split(".")[0]);
+if (!Number.isSafeInteger(minimum) || current < minimum) {
+  throw new Error(`Agent Sessions integration tests require Node ${minimum} or newer; found ${process.versions.node}`);
+}
+' "$minimum_node"
+integration_tests=()
+while IFS= read -r -d '' integration_test; do integration_tests+=("$integration_test"); done \
+  < <(find "$plugin_root/integrations" -type f \( -name '*.test.js' -o -name '*.test.cjs' -o -name '*.test.mjs' \) -print0)
+[[ ${#integration_tests[@]} -gt 0 ]]
+node --test "${integration_tests[@]}"
 
 if grep -En 'agent-session-runtime-release-packager|AGENT_SESSIONS_RELEASE_PACKAGER' \
   "$plugin_root/Makefile" "$plugin_root/scripts/package-release"; then

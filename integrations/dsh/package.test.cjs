@@ -45,3 +45,38 @@ test("DSH packages pack into the exact public artifacts used by installation", (
     fs.rmSync(path.join(root, "comms", "shared"), { recursive: true, force: true });
   }
 });
+
+test("pack-packages stages an exact prerelease without changing source manifests", () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-dsh-prerelease-"));
+  const extract = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-dsh-prerelease-extract-"));
+  const source = new Map(["comms", "lane"].map((packageName) => [
+    packageName, fs.readFileSync(path.join(root, packageName, "package.json")),
+  ]));
+  try {
+    execFileSync(path.join(root, "..", "..", "scripts", "pack-packages"), [], {
+      env: { ...process.env, PACKAGE_OUTPUT_DIR: output, PRERELEASE: "pre.1" },
+      encoding: "utf8",
+    });
+    const archives = fs.readdirSync(output).filter((entry) => entry.endsWith(".tgz")).sort();
+    assert.deepEqual(archives, [
+      "agent-sessions-dsh-comms-0.4.0-pre.1.tgz",
+      "agent-sessions-dsh-lane-0.4.0-pre.1.tgz",
+    ]);
+    for (const archive of archives) {
+      fs.rmSync(path.join(extract, "package"), { recursive: true, force: true });
+      execFileSync("tar", ["-xzf", path.join(output, archive), "-C", extract]);
+      const manifest = JSON.parse(fs.readFileSync(path.join(extract, "package", "package.json"), "utf8"));
+      assert.equal(manifest.version, "0.4.0-pre.1");
+      if (manifest.name === "@agent-sessions/dsh-lane") {
+        assert.equal(manifest.dependencies["@agent-sessions/dsh-comms"], "0.4.0-pre.1");
+      }
+    }
+    for (const [packageName, encoded] of source) {
+      assert.deepEqual(fs.readFileSync(path.join(root, packageName, "package.json")), encoded);
+    }
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+    fs.rmSync(extract, { recursive: true, force: true });
+    fs.rmSync(path.join(root, "comms", "shared"), { recursive: true, force: true });
+  }
+});

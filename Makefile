@@ -7,6 +7,7 @@ OPENCODE ?= opencode
 KILO ?= kilo
 DSH ?= dsh
 PNPM ?= pnpm
+NPM ?= npm
 # Ignore an inherited GROK environment variable: a long-lived peer may have
 # pinned its own launcher, but that must not disable discovery for a later
 # install. An explicit make command-line GROK=/absolute/path pins one candidate.
@@ -61,11 +62,15 @@ BINARY_NAMES := $(shell ./scripts/release-inventory binaries)
 .PHONY: all lint lint-tool test test-race build install dev-install reinstall install-all dev-install-all \
 	install-hub remove-all remove-hub purge-all repair-projection clean
 
-.PHONY: release-inventory build-release-platform
+.PHONY: release-inventory build-release-platform pack-packages
 
 release-inventory:
 	@./scripts/release-inventory binaries
 	@./scripts/release-inventory plugins
+	@./scripts/release-inventory packages
+
+pack-packages:
+	@NPM="$(NPM)" PRERELEASE="$(PRERELEASE)" ./scripts/pack-packages
 
 build-release-platform:
 	@test -n "$(RELEASE_OUTPUT_DIR)" || { printf 'RELEASE_OUTPUT_DIR is required\n' >&2; exit 2; }

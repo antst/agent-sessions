@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do
+  script_dir="$(cd -P -- "$(dirname -- "$script_path")" && pwd)"
+  link_target="$(readlink -- "$script_path")"
+  if [[ "$link_target" == /* ]]; then script_path="$link_target"; else script_path="$script_dir/$link_target"; fi
+done
+root="$(cd -P -- "$(dirname -- "$script_path")/.." && pwd)"
+npm_path=${NPM:-npm}
+output=${PACKAGE_OUTPUT_DIR:-$root/dist/packages}
+base_version=$(<"$root/deploy/agent-sessions/VERSION")
+suffix=${PRERELEASE:-}
+
+if [[ -n "$suffix" ]] && [[ ! "$suffix" =~ ^[0-9A-Za-z]+([.-][0-9A-Za-z]+)*$ ]]; then
+  printf 'invalid npm prerelease suffix: %s\n' "$suffix" >&2
+  exit 2
+fi
+version=$base_version
+if [[ -n "$suffix" ]]; then version="$base_version-$suffix"; fi
+
+declare -a package_paths=() package_names=()
+while IFS='|' read -r package_path package_name; do
+  [[ -n "$package_path" && -n "$package_name" ]]
+  package_paths+=("$package_path")
+  package_names+=("$package_name")
+done < <("$root/scripts/release-inventory" packages)
+[[ ${#package_paths[@]} -gt 0 ]]
+
+temporary_parent=$(cd -P -- "${TMPDIR:-/tmp}" && pwd)
+temporary_root=$(mktemp -d "$temporary_parent/agent-sessions-packages.XXXXXX")
+cleanup() { rm -rf -- "$temporary_root"; }
+trap cleanup EXIT
+
+mkdir -p "$temporary_root/stage"
+cp -R -- "$root/integrations" "$temporary_root/stage/integrations"
+rm -rf -- "$output"
+mkdir -p "$output"
+
+for package_path in "${package_paths[@]}"; do
+  manifest="$temporary_root/stage/$package_path/package.json"
+  [[ -f "$manifest" ]]
+  node - "$manifest" "$version" "${package_names[@]}" <<'NODE'
+const fs = require("node:fs");
+const [manifestPath, version, ...packageNames] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+manifest.version = version;
+for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+  const dependencies = manifest[field] ?? {};
+  for (const [name, requested] of Object.entries(dependencies)) {
+    if (/^(file:|workspace:)/u.test(requested)) throw new Error(`${manifest.name} has non-publishable ${field} ${name}=${requested}`);
+    if (packageNames.includes(name)) dependencies[name] = version;
+  }
+}
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+  packed=$(
+    cd -- "$(dirname -- "$manifest")"
+    "$npm_path" pack --json --pack-destination "$output"
+  )
+  archive=$(
+    node -e 'const value=JSON.parse(process.argv[1]); if(value.length!==1||!value[0].filename)process.exit(1); process.stdout.write(value[0].filename)' "$packed"
+  )
+  archive="$output/$archive"
+  packed_manifest=$(tar -xOf "$archive" package/package.json)
+  node - "$packed_manifest" "$version" "${package_names[@]}" <<'NODE'
+const [encoded, version, ...packageNames] = process.argv.slice(2);
+const manifest = JSON.parse(encoded);
+if (manifest.version !== version) throw new Error(`${manifest.name} packed the wrong version`);
+for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+  for (const [name, requested] of Object.entries(manifest[field] ?? {})) {
+    if (/^(file:|workspace:)/u.test(requested)) throw new Error(`${manifest.name} packed non-publishable ${field} ${name}`);
+    if (packageNames.includes(name) && requested !== version) throw new Error(`${manifest.name} did not pin ${name} to ${version}`);
+  }
+}
+NODE
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum -- "$archive" | awk '{print $1}')
+  else
+    digest=$(shasum -a 256 -- "$archive" | awk '{print $1}')
+  fi
+  printf '%s sha256:%s\n' "$archive" "$digest"
+done
