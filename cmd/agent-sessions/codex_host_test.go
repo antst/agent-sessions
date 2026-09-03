@@ -220,8 +220,12 @@ func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
 	runtime := newPresenceTestRuntime(t)
 	coordinator.publishRuntime(runtime)
-	runtime.Attachments().ReportLive("codex-thread", "launch-name", "codex", []string{"project"}, map[string]string{}, false)
-	runtime.Attachments().ReportLive("claude-session", "claude-name", "claude", []string{"project"}, map[string]string{}, false)
+	coordinator.joinLiveSession(runtime, liveSessionReport{
+		UUID: "codex-thread", Name: "launch-name", Product: "codex", Groups: []string{"project"}, Info: map[string]string{},
+	})
+	coordinator.joinLiveSession(runtime, liveSessionReport{
+		UUID: "claude-session", Name: "claude-name", Product: "claude", Groups: []string{"project"}, Info: map[string]string{},
+	})
 
 	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{
 		Kind: "thread/name/updated", ThreadID: "codex-thread", Name: "native-name",
@@ -235,7 +239,13 @@ func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
 	if title, ok, err := runtime.Attachments().LiveNativeTitle("claude-session"); err != nil || !ok || title != "claude-name" {
 		t.Fatalf("Claude title changed by Codex event: %q, ok=%v, err=%v", title, ok, err)
 	}
-	runtime.Attachments().ForgetLive("codex-thread")
+	coordinator.joinLiveSession(runtime, liveSessionReport{
+		UUID: "unrelated", Name: "updated-peer", Product: "qwen", Groups: []string{"project"}, Info: map[string]string{},
+	})
+	if title, ok, err := runtime.Attachments().LiveNativeTitle("codex-thread"); err != nil || !ok || title != "native-name" {
+		t.Fatalf("unrelated report reverted Codex title: %q, ok=%v, err=%v", title, ok, err)
+	}
+	coordinator.leaveLiveSession(runtime, liveSessionReport{UUID: "codex-thread", Product: "codex"})
 	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{
 		Kind: "thread/name/updated", ThreadID: "codex-thread", Name: "late-name",
 	})

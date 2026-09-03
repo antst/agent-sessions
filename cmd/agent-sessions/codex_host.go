@@ -722,10 +722,17 @@ func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent)
 		return
 	}
 	c.mu.Lock()
+	report, live := c.liveReports[event.ThreadID]
 	runtime := c.runtime
+	if !live || report.Product != codexproduct.ProductID {
+		c.mu.Unlock()
+		return
+	}
+	report.Name = event.Name
+	c.liveReports[event.ThreadID] = report
 	c.mu.Unlock()
 	if runtime != nil {
-		runtime.Attachments().UpdateLiveNativeTitle(event.ThreadID, "codex", event.Name)
+		c.syncLiveSessions(runtime)
 	}
 }
 

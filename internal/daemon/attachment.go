@@ -317,20 +317,6 @@ func (e *AttachmentEngine) LiveNativeTitle(id string) (string, bool, error) {
 	return observation.value, true, nil
 }
 
-// UpdateLiveNativeTitle records a product-emitted title for one currently live
-// attachment. Product and lifecycle checks keep unrelated or departed sessions
-// from being revived by a late native event.
-func (e *AttachmentEngine) UpdateLiveNativeTitle(id, product, name string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	attachment, ok := e.active[id]
-	if !ok || attachment.State != "attached" || attachment.Product != product {
-		return false
-	}
-	e.titles[id] = liveNativeTitle{nativeSessionID: attachment.NativeSessionID, value: name}
-	return true
-}
-
 func (e *AttachmentEngine) Authorize(ctx context.Context, id, capability, product string, evidence NativeEvidence) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
