@@ -17,9 +17,9 @@ import (
 	"github.com/antst/agent-sessions/internal/statestore"
 )
 
-// PrepareStateRoot removes only the exact pre-0.4.0 multi-ledger state shape.
-// Every other unreadable root fails closed; a valid one-table root is never
-// rewritten by this probe.
+// PrepareStateRoot keeps only an empty root or the current one-table state.
+// Every other safe directory is pre-campaign state and is removed whole; a
+// valid one-table root is never rewritten by this probe.
 func PrepareStateRoot(root string, maxBytes int64, output io.Writer) error {
 	if output == nil {
 		output = io.Discard
@@ -37,85 +37,15 @@ func PrepareStateRoot(root string, maxBytes int64, output io.Writer) error {
 	if identity.Kind != pathidentity.KindDirectory {
 		return errors.New("daemon state root is not a directory")
 	}
-	legacy, reason := legacyStateRoot(root, maxBytes)
-	if legacy {
-		if err := os.RemoveAll(root); err != nil {
-			return fmt.Errorf("remove incompatible daemon state root %s: %w", root, err)
-		}
-		if _, err := fmt.Fprintf(output, "Removed incompatible pre-0.4.0 Agent Sessions state root %s: %s\n", root, reason); err != nil {
-			return err
-		}
+	reason := validateCurrentStateRoot(root, maxBytes)
+	if reason == nil {
 		return nil
 	}
-	return validateCurrentStateRoot(root, maxBytes)
-}
-
-func legacyStateRoot(root string, maxBytes int64) (bool, string) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return false, ""
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("remove incompatible daemon state root %s: %w", root, err)
 	}
-	allowedRootEntries := map[string]bool{
-		"state.json": true, "state.lock": true, "agents": true, "native": true, "sessions": true, "run": true,
-	}
-	for _, entry := range entries {
-		if !allowedRootEntries[entry.Name()] {
-			return false, ""
-		}
-	}
-	statePath := filepath.Join(root, "state.json")
-	info, err := os.Lstat(statePath)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxBytes {
-		return false, ""
-	}
-	body, err := os.ReadFile(statePath)
-	if err != nil {
-		return false, ""
-	}
-	var disk struct {
-		Schema  int                        `json:"schema"`
-		Records map[string]json.RawMessage `json:"records"`
-	}
-	if json.Unmarshal(body, &disk) != nil || disk.Schema != 1 || len(disk.Records) != 1 {
-		return false, ""
-	}
-	var catalog map[string]json.RawMessage
-	if json.Unmarshal(disk.Records[catalogRecord], &catalog) != nil {
-		return false, ""
-	}
-	required := []string{"attachments", "deliveries", "lanes", "turns"}
-	allowed := map[string]bool{"attachments": true, "cleanup_debts": true, "deliveries": true, "host": true, "lanes": true, "turns": true}
-	for _, key := range required {
-		if _, ok := catalog[key]; !ok {
-			return false, ""
-		}
-	}
-	for key := range catalog {
-		if !allowed[key] {
-			return false, ""
-		}
-	}
-	for _, directory := range []string{"agents", "native", "sessions"} {
-		entry, err := pathidentity.ExistingNoFollow(filepath.Join(root, directory))
-		if err != nil || entry.Kind != pathidentity.KindDirectory {
-			return false, ""
-		}
-	}
-	if lock, err := os.Lstat(filepath.Join(root, "state.lock")); err == nil {
-		if !lock.Mode().IsRegular() || lock.Mode()&os.ModeSymlink != 0 {
-			return false, ""
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, ""
-	}
-	if run, err := pathidentity.ExistingNoFollow(filepath.Join(root, "run")); err == nil {
-		if run.Kind != pathidentity.KindDirectory {
-			return false, ""
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, ""
-	}
-	return true, "legacy attachments/deliveries/turns catalog and sessions/native/agents directories"
+	_, err = fmt.Fprintf(output, "Removed incompatible pre-0.4.0 Agent Sessions state root %s: %s\n", root, reason)
+	return err
 }
 
 func validateCurrentStateRoot(root string, maxBytes int64) error {
@@ -137,7 +67,7 @@ func validateCurrentStateRoot(root string, maxBytes int64) error {
 				return errors.New("daemon runtime directory is invalid")
 			}
 		default:
-			return errors.New("daemon state root contains an unknown entry")
+			return fmt.Errorf("daemon state root contains unknown entry %q", entry.Name())
 		}
 	}
 	statePath := filepath.Join(root, "state.json")
