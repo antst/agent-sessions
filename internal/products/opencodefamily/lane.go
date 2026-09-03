@@ -85,6 +85,10 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
+	environment, err := nativeEnvironment(request.Environment)
+	if err != nil {
+		return productruntime.NativeSessionRef{}, err
+	}
 	driver.mu.Lock()
 	if existing := driver.lanes[request.LaneID]; existing != nil {
 		if request.ResumeNativeID != "" && existing.nativeID == request.ResumeNativeID &&
@@ -101,7 +105,7 @@ func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneO
 	driver.mu.Unlock()
 
 	server, err := driver.config.Servers.Open(ctx, ServerOpenRequest{
-		Key: request.LaneID, Cwd: request.Cwd, Arguments: serverArguments, PermissionRules: permissions,
+		Key: request.LaneID, Cwd: request.Cwd, Arguments: serverArguments, Env: environment, PermissionRules: permissions,
 	})
 	if server == nil {
 		if err == nil {
@@ -393,6 +397,18 @@ func newOperationID() (string, error) {
 		return "", fmt.Errorf("%w: generate native operation id", productruntime.ErrUnavailable)
 	}
 	return hex.EncodeToString(raw[:]), nil
+}
+
+func nativeEnvironment(environment []string) ([]productruntime.EnvVar, error) {
+	result := make([]productruntime.EnvVar, 0, len(environment))
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || name == "" {
+			return nil, productruntime.ErrProtocol
+		}
+		result = append(result, productruntime.EnvVar{Name: name, Value: value})
+	}
+	return result, nil
 }
 
 var _ productruntime.LaneDriver = (*LaneDriver)(nil)

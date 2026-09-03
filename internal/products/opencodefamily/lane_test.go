@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -90,7 +91,8 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: "opencode", LaneID: "lane-one", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.Default,
-		Arguments: []string{"--model", "google/gemini-3.1-pro-preview"},
+		Arguments:   []string{"--model", "google/gemini-3.1-pro-preview"},
+		Environment: []string{"AGENT_SESSIONS_PRODUCT=opencode", "AGENT_SESSIONS_SESSION_ID=lane-one", "AGENT_SESSIONS_GROUPS=[]"},
 	})
 	if err != nil || session.LaneID != "ses_lane" || session.NativeSessionID != "ses_lane" || session.Generation != 7 {
 		t.Fatalf("open = %#v, %v", session, err)
@@ -102,6 +104,14 @@ func TestOpenCodeLaneLifecycleUsesDirectPrompt(t *testing.T) {
 	}
 	if got := servers.request.Load().(ServerOpenRequest).Arguments; len(got) != 0 {
 		t.Fatalf("serve arguments = %v, want model consumed by prompt", got)
+	}
+	wantEnvironment := []productruntime.EnvVar{
+		{Name: "AGENT_SESSIONS_PRODUCT", Value: "opencode"},
+		{Name: "AGENT_SESSIONS_SESSION_ID", Value: "lane-one"},
+		{Name: "AGENT_SESSIONS_GROUPS", Value: "[]"},
+	}
+	if got := servers.request.Load().(ServerOpenRequest).Env; !reflect.DeepEqual(got, wantEnvironment) {
+		t.Fatalf("serve environment = %#v, want %#v", got, wantEnvironment)
 	}
 	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{
 		Prompt: "perform task", PermissionMode: permissionmode.Default,
@@ -203,13 +213,22 @@ func TestKiloLaneInitialPromptUsesLegacyRouteAndRejectsSteer(t *testing.T) {
 	}
 	session, err := driver.Open(context.Background(), productruntime.LaneOpenRequest{
 		ProductID: "kilo", LaneID: "lane-kilo", Name: "worker", Cwd: "/work/project", PermissionMode: permissionmode.BypassPermissions,
-		Arguments: []string{"--model", "deepseek/deepseek-v4-flash"},
+		Arguments:   []string{"--model", "deepseek/deepseek-v4-flash"},
+		Environment: []string{"AGENT_SESSIONS_PRODUCT=kilo", "AGENT_SESSIONS_SESSION_ID=lane-kilo", "AGENT_SESSIONS_GROUPS=[]"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := driver.config.Servers.(*testServerManager).request.Load().(ServerOpenRequest).Arguments; len(got) != 0 {
 		t.Fatalf("Kilo serve arguments = %v, want model consumed by prompt", got)
+	}
+	wantEnvironment := []productruntime.EnvVar{
+		{Name: "AGENT_SESSIONS_PRODUCT", Value: "kilo"},
+		{Name: "AGENT_SESSIONS_SESSION_ID", Value: "lane-kilo"},
+		{Name: "AGENT_SESSIONS_GROUPS", Value: "[]"},
+	}
+	if got := driver.config.Servers.(*testServerManager).request.Load().(ServerOpenRequest).Env; !reflect.DeepEqual(got, wantEnvironment) {
+		t.Fatalf("Kilo serve environment = %#v, want %#v", got, wantEnvironment)
 	}
 	turn, err := driver.StartTurn(context.Background(), session, productruntime.TurnStartRequest{
 		Prompt: "first", PermissionMode: permissionmode.BypassPermissions,
