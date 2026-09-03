@@ -1,10 +1,30 @@
 {
   "name": "@agent-sessions/kilo",
-  "version": "1.0.0",
-  "private": true,
+  "version": "0.4.0",
   "type": "module",
+  "main": "plugin/agent-sessions.mjs",
   "scripts": {
+    "prepack": "node prepack.cjs",
     "test": "node --test agent-sessions.test.mjs"
+  },
+  "exports": {
+    ".": "./plugin/agent-sessions.mjs"
+  },
+  "files": [
+    "README.md",
+    "prepack.cjs",
+    "plugin/agent-sessions.mjs",
+    "shared/live-session.cjs",
+    "commands",
+    "skills"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antst/agent-sessions.git",
+    "directory": "integrations/kilo"
   },
   "peerDependencies": {
     "@kilocode/cli": "7.5.6",

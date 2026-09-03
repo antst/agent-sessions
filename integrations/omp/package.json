@@ -1,11 +1,11 @@
 {
-  "name": "@agent-sessions/opencode",
+  "name": "@agent-sessions/omp",
   "version": "0.4.0",
   "type": "module",
   "main": "plugin/agent-sessions.mjs",
   "scripts": {
     "prepack": "node prepack.cjs",
-    "test": "node --test agent-sessions.test.mjs"
+    "test": "node --test entrypoint.test.mjs"
   },
   "exports": {
     ".": "./plugin/agent-sessions.mjs"
@@ -14,9 +14,8 @@
     "README.md",
     "prepack.cjs",
     "plugin/agent-sessions.mjs",
-    "shared/live-session.cjs",
-    "commands",
-    "skills"
+    "pi/pifamily.mjs",
+    "shared/live-session.cjs"
   ],
   "publishConfig": {
     "access": "public"
@@ -24,9 +23,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/antst/agent-sessions.git",
-    "directory": "integrations/opencode"
-  },
-  "peerDependencies": {
-    "@opencode-ai/plugin": "1.18.25"
+    "directory": "integrations/omp"
   }
 }

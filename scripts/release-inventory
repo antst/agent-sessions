@@ -24,6 +24,10 @@ plugins=(
 packages=(
   'integrations/dsh/comms|@agent-sessions/dsh-comms'
   'integrations/dsh/lane|@agent-sessions/dsh-lane'
+  'integrations/opencode|@agent-sessions/opencode'
+  'integrations/kilo|@agent-sessions/kilo'
+  'integrations/pi|@agent-sessions/pi'
+  'integrations/omp|@agent-sessions/omp'
 )
 package_paths=(
   .agents .claude-plugin .codex-plugin

@@ -108,6 +108,10 @@ if {entry.get("product") for entry in inventory.get("plugin_payloads", [])} != {
 if inventory.get("npm_packages") != [
     {"path": "integrations/dsh/comms", "name": "@agent-sessions/dsh-comms"},
     {"path": "integrations/dsh/lane", "name": "@agent-sessions/dsh-lane"},
+    {"path": "integrations/opencode", "name": "@agent-sessions/opencode"},
+    {"path": "integrations/kilo", "name": "@agent-sessions/kilo"},
+    {"path": "integrations/pi", "name": "@agent-sessions/pi"},
+    {"path": "integrations/omp", "name": "@agent-sessions/omp"},
 ]:
     raise SystemExit("authoritative npm package inventory is incomplete")
 if aliases != [

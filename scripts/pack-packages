@@ -20,12 +20,44 @@ fi
 version=$base_version
 if [[ -n "$suffix" ]]; then version="$base_version-$suffix"; fi
 
-declare -a package_paths=() package_names=()
+declare -a inventory_paths=() inventory_names=() package_paths=() package_names=()
 while IFS='|' read -r package_path package_name; do
   [[ -n "$package_path" && -n "$package_name" ]]
-  package_paths+=("$package_path")
-  package_names+=("$package_name")
+  inventory_paths+=("$package_path")
+  inventory_names+=("$package_name")
 done < <("$root/scripts/release-inventory" packages)
+if [[ $# -eq 0 ]]; then
+  package_paths=("${inventory_paths[@]}")
+  package_names=("${inventory_names[@]}")
+else
+  declare -a requested_names=("$@")
+  for requested_index in "${!requested_names[@]}"; do
+    requested=${requested_names[$requested_index]}
+    found=false
+    for inventory_name in "${inventory_names[@]}"; do
+      if [[ "$inventory_name" == "$requested" ]]; then found=true; break; fi
+    done
+    if [[ "$found" != true ]]; then
+      printf 'unknown npm package: %s\n' "$requested" >&2
+      exit 2
+    fi
+    for ((prior_index = 0; prior_index < requested_index; prior_index += 1)); do
+      if [[ "${requested_names[$prior_index]}" == "$requested" ]]; then
+        printf 'duplicate npm package: %s\n' "$requested" >&2
+        exit 2
+      fi
+    done
+  done
+  for inventory_index in "${!inventory_names[@]}"; do
+    for requested in "${requested_names[@]}"; do
+      if [[ "${inventory_names[$inventory_index]}" == "$requested" ]]; then
+        package_paths+=("${inventory_paths[$inventory_index]}")
+        package_names+=("${inventory_names[$inventory_index]}")
+        break
+      fi
+    done
+  done
+fi
 [[ ${#package_paths[@]} -gt 0 ]]
 
 temporary_parent=$(cd -P -- "${TMPDIR:-/tmp}" && pwd)

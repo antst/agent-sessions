@@ -45,7 +45,8 @@ install_dsh_integrations() {
   status=0
   (
     artifacts="$temporary_root/artifacts"
-    NPM="$npm_path" PACKAGE_OUTPUT_DIR="$artifacts" "$integration_root/scripts/pack-packages" >/dev/null || exit $?
+    NPM="$npm_path" PACKAGE_OUTPUT_DIR="$artifacts" "$integration_root/scripts/pack-packages" \
+      @agent-sessions/dsh-comms @agent-sessions/dsh-lane >/dev/null || exit $?
     set -- "$artifacts"/agent-sessions-dsh-comms-*.tgz
     [[ $# -eq 1 && -f "$1" ]] || exit 1
     comms_archive="$integration_root/integrations/dsh/$(basename -- "$1")"

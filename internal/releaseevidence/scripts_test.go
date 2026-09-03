@@ -256,14 +256,21 @@ func installPackageVersionFixture(t *testing.T, root, version string) {
 			t.Fatal(err)
 		}
 	}
-	for packagePath, name := range map[string]string{
-		"comms": "@agent-sessions/dsh-comms", "lane": "@agent-sessions/dsh-lane",
-	} {
-		directory := filepath.Join(root, "integrations", "dsh", packagePath)
+	inventory := exec.Command(filepath.Join(root, "scripts", "release-inventory"), "packages")
+	output, err := inventory.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read package inventory fixture: %v: %s", err, output)
+	}
+	for _, row := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Split(row, "|")
+		if len(fields) != 2 || fields[0] == "" || fields[1] == "" {
+			t.Fatalf("malformed package inventory fixture row %q", row)
+		}
+		directory := filepath.Join(root, filepath.FromSlash(fields[0]))
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		writeJSONTestFile(t, filepath.Join(directory, "package.json"), map[string]any{"name": name, "version": version})
+		writeJSONTestFile(t, filepath.Join(directory, "package.json"), map[string]any{"name": fields[1], "version": version})
 	}
 }
 
