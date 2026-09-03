@@ -117,10 +117,9 @@ func RunGrokPeer(ctx context.Context, args []string, run GrokNativeRunner) error
 	environment := grokPeerEnvironment(os.Environ(), plan.sessionID)
 	environment = liveReportEnvironment(environment, plan.peerName, plan.peerContext.groups)
 	environment = envutil.Set(environment, GrokLeaderSocketEnv, leaderSocket)
-	leaderEnvironment := envutil.Set(os.Environ(), peerProductEnv, "grok")
 	return run(ctx, GrokNativeLaunch{
 		Executable: grok, Cwd: plan.requestedCwd, LeaderSocket: leaderSocket,
-		LeaderEnvironment: leaderEnvironment, TUIArguments: managed, TUIEnvironment: environment,
+		LeaderEnvironment: append([]string(nil), environment...), TUIArguments: managed, TUIEnvironment: environment,
 		Groups:         append([]string(nil), plan.peerContext.groups...),
 		PermissionMode: plan.permissionMode, NativeToolGrant: append([]string(nil), plan.nativeToolGrant...),
 	})

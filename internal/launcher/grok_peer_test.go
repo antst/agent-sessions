@@ -288,6 +288,14 @@ func TestGrokPeerBuildsOneLauncherOwnedLeaderAndTUI(t *testing.T) {
 	if !slices.Contains(got.TUIArguments, "--session-id") || !slices.Contains(got.TUIArguments, testGrokSessionID) {
 		t.Fatalf("tui=%q", got.TUIArguments)
 	}
+	if !reflect.DeepEqual(got.LeaderEnvironment, got.TUIEnvironment) ||
+		environmentValue(got.LeaderEnvironment, peerSessionIDEnv) != testGrokSessionID ||
+		environmentValue(got.LeaderEnvironment, peerProductEnv) != "grok" ||
+		environmentValue(got.LeaderEnvironment, peerSessionNameEnv) != "native-title" ||
+		environmentValue(got.LeaderEnvironment, peerGroupsEnv) != `["project"]` ||
+		environmentValue(got.LeaderEnvironment, GrokLeaderSocketEnv) != got.LeaderSocket {
+		t.Fatalf("leader and TUI launch context differ: leader=%q tui=%q", got.LeaderEnvironment, got.TUIEnvironment)
+	}
 }
 
 func TestGrokExecutableSkipsInvalidPathCandidateAndValidatesOverride(t *testing.T) {
