@@ -687,6 +687,7 @@ func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 	}
 	native, err := c.openCodex(c.ctx, bridge.CodexNativeConfig{
 		CodexBinary: codexBinary(), CodexHome: codexHome(), Environment: os.Environ(),
+		OnEvent: c.observeCodexNativeEvent,
 	})
 	if err != nil {
 		return nil, err
@@ -703,6 +704,18 @@ func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 	}
 	c.codex = native
 	return native, nil
+}
+
+func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent) {
+	if event.Kind != "thread/name/updated" || strings.TrimSpace(event.ThreadID) == "" || strings.TrimSpace(event.Name) == "" {
+		return
+	}
+	c.mu.Lock()
+	runtime := c.runtime
+	c.mu.Unlock()
+	if runtime != nil {
+		runtime.Attachments().UpdateLiveNativeTitle(event.ThreadID, "codex", event.Name)
+	}
 }
 
 func requestCodexPreparation(

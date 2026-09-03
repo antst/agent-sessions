@@ -50,6 +50,15 @@ func TestAttachmentRegistryIsLiveAndProcessLocal(t *testing.T) {
 		t.Fatalf("adopted preparation was listed without a report: %+v, %v", active, err)
 	}
 	engine.ReportLive("peer", "reviewer", "codex", []string{"project"}, map[string]string{}, false)
+	if !engine.UpdateLiveNativeTitle("peer", "codex", "renamed") {
+		t.Fatal("live Codex title update was ignored")
+	}
+	if title, ok, err := engine.LiveNativeTitle("peer"); err != nil || !ok || title != "renamed" {
+		t.Fatalf("updated title = %q, ok=%v, err=%v", title, ok, err)
+	}
+	if engine.UpdateLiveNativeTitle("peer", "claude", "wrong") {
+		t.Fatal("wrong-product title update was accepted")
+	}
 	active, err = engine.ListActive()
 	if err != nil || len(active) != 1 || active[0].ID != "peer" {
 		t.Fatalf("reported active = %+v, %v", active, err)

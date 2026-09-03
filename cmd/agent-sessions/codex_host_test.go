@@ -185,8 +185,10 @@ func TestCodexNativeReloadsDaemonWideMCPInventoryOncePerGeneration(t *testing.T)
 	want := &bridge.CodexNative{}
 	openCalls := 0
 	reloadCalls := 0
-	coordinator.openCodex = func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error) {
+	var onEvent func(bridge.CodexNativeEvent)
+	coordinator.openCodex = func(_ context.Context, config bridge.CodexNativeConfig) (*bridge.CodexNative, error) {
 		openCalls++
+		onEvent = config.OnEvent
 		return want, nil
 	}
 	coordinator.reloadCodex = func(_ context.Context, got *bridge.CodexNative) error {
@@ -207,6 +209,38 @@ func TestCodexNativeReloadsDaemonWideMCPInventoryOncePerGeneration(t *testing.T)
 	}
 	if first != want || second != want || openCalls != 1 || reloadCalls != 1 {
 		t.Fatalf("Codex native generation = first %p second %p opens %d reloads %d", first, second, openCalls, reloadCalls)
+	}
+	if onEvent == nil {
+		t.Fatal("Codex native title observer was not composed")
+	}
+}
+
+func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	runtime := newPresenceTestRuntime(t)
+	coordinator.publishRuntime(runtime)
+	runtime.Attachments().ReportLive("codex-thread", "launch-name", "codex", []string{"project"}, map[string]string{}, false)
+	runtime.Attachments().ReportLive("claude-session", "claude-name", "claude", []string{"project"}, map[string]string{}, false)
+
+	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{
+		Kind: "thread/name/updated", ThreadID: "codex-thread", Name: "native-name",
+	})
+	if title, ok, err := runtime.Attachments().LiveNativeTitle("codex-thread"); err != nil || !ok || title != "native-name" {
+		t.Fatalf("Codex native title = %q, ok=%v, err=%v", title, ok, err)
+	}
+	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{
+		Kind: "thread/name/updated", ThreadID: "claude-session", Name: "wrong-product",
+	})
+	if title, ok, err := runtime.Attachments().LiveNativeTitle("claude-session"); err != nil || !ok || title != "claude-name" {
+		t.Fatalf("Claude title changed by Codex event: %q, ok=%v, err=%v", title, ok, err)
+	}
+	runtime.Attachments().ForgetLive("codex-thread")
+	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{
+		Kind: "thread/name/updated", ThreadID: "codex-thread", Name: "late-name",
+	})
+	if title, ok, err := runtime.Attachments().LiveNativeTitle("codex-thread"); err != nil || ok || title != "" {
+		t.Fatalf("departed Codex title was revived: %q, ok=%v, err=%v", title, ok, err)
 	}
 }
 
