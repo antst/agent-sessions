@@ -61,7 +61,7 @@ function createLaneRuntime(ctx, createUserMessage, agent) {
       if (event.data.outcome === "canceled") {
         for (const message of removedBy(agent, event)) {
           const record = inflight.get(message.id);
-          if (record) finish(record, { outcome: "failed", result: "", reason: { type: "canceled", outcome: event.data.outcome } });
+          if (record) finish(record, { error: new Error("DSH canceled native input before consumption") });
         }
       }
       for (const message of event.data.inserted ?? []) {
@@ -78,7 +78,7 @@ function createLaneRuntime(ctx, createUserMessage, agent) {
       const record = inflight.get(event.data.id);
       if (!record) return;
       if (!Number.isSafeInteger(openTurn)) {
-        finish(record, { outcome: "failed", result: "", reason: { type: "protocol", detail: "DSH consumed input outside a turn" } });
+        finish(record, { error: new Error("DSH consumed native input outside a turn") });
         return;
       }
       record.turn = openTurn;
@@ -166,7 +166,7 @@ function createLaneRuntime(ctx, createUserMessage, agent) {
   function close() {
     removeEvents();
     for (const record of inflight.values()) {
-      finish(record, { outcome: "failed", result: "", reason: { type: "disposed" } });
+      finish(record, { error: new Error("DSH lane disposed before native turn completion") });
     }
   }
 

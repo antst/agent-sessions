@@ -58,3 +58,39 @@ test("steer receives the same synchronous native splice receipt", () => {
   assert.equal(runtime.submit("steer-1", "replace it", "steer"), "dsh-1");
   assert.equal(runtime.byInput.get("steer-1"), "dsh-1");
 });
+
+test("every product terminal reason is returned by identity with outcome derived only from kind", async () => {
+  const cases = [
+    [{ kind: "completed" }, "completed"],
+    [{ kind: "aborted", reason: { kind: "user" } }, "interrupted"],
+    [{ kind: "aborted", reason: { kind: "parent" } }, "interrupted"],
+    [{ kind: "aborted", reason: { kind: "disposed" } }, "interrupted"],
+    [{ kind: "aborted", reason: { kind: "hook", reason: "native hook" } }, "interrupted"],
+    [{ kind: "aborted", reason: { kind: "legacy" } }, "interrupted"],
+    [{ kind: "blocked" }, "failed"],
+    [{ kind: "error", error: { message: "native refusal", code: "NATIVE" } }, "failed"],
+    [{ kind: "max-tokens" }, "failed"],
+    [{ kind: "interrupted" }, "interrupted"],
+  ];
+  for (const [reason, outcome] of cases) {
+    const { emit, runtime } = harness();
+    const nativeID = runtime.submit(`input-${reason.kind}`, "do it", "followup");
+    emit("turn/start", { turn: 1 });
+    emit("user/message", { id: nativeID });
+    emit("turn/end", { turn: 1, reason });
+    const result = await runtime.wait(nativeID);
+    assert.equal(result.outcome, outcome);
+    assert.equal(result.result, "");
+    assert.strictEqual(result.reason, reason);
+  }
+});
+
+test("pre-terminal cancellation is a request failure and never a synthesized reason", async () => {
+  const { agent, emit, runtime } = harness();
+  const nativeID = runtime.submit("input-cancel", "later", "followup");
+  emit("agent/inbox/spliced", {
+    target: "next-turn", start: 0, removedCount: 1, inserted: [], outcome: "canceled",
+  });
+  agent.inbox.nextTurn.splice(0, 1);
+  await assert.rejects(runtime.wait(nativeID), /canceled native input before consumption/u);
+});

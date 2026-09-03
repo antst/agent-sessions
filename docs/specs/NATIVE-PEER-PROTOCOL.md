@@ -296,7 +296,10 @@ product. Neither is durable Agent Sessions state.
 `outcome` is `completed`, `interrupted`, or `failed`; `result` is the product's
 assistant text; and `reason` is the product's native terminal reason without
 reinterpretation. For DSH this is its discriminated object, such as
-`{"kind":"completed"}`. The product owns input-to-turn correlation.
+`{"kind":"completed"}`. DSH 0.1.2-rc.1 defines that closed `TurnEndReason`
+shape in `packages/core/session/src/types.ts:180-196`; the adapter returns the
+`turn/end` event's `reason` value unchanged. The product owns input-to-turn
+correlation.
 
 `lane.turn.interrupt` takes `{}` and asks the product to cancel the active turn
 without discarding already accepted follow-up input. It returns `{}` after the
