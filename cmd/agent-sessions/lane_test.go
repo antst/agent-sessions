@@ -44,6 +44,7 @@ type steerRecordingLaneDriver struct {
 	capabilities productruntime.LaneCapabilitySet
 	acceptance   productruntime.NativeAcceptance
 	calls        int
+	interrupts   int
 	turn         productruntime.NativeTurnRef
 	request      productruntime.TurnStartRequest
 }
@@ -65,7 +66,8 @@ func (d *steerRecordingLaneDriver) Steer(_ context.Context, turn productruntime.
 	d.turn, d.request = turn, request
 	return d.acceptance, nil
 }
-func (*steerRecordingLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
+func (d *steerRecordingLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
+	d.interrupts++
 	return nil
 }
 func (*steerRecordingLaneDriver) Archive(context.Context, productruntime.NativeSessionRef) error {
@@ -141,6 +143,37 @@ func TestSteerLaneRejectsUnsupportedAndIdleWithoutCallingDriver(t *testing.T) {
 	}
 	if driver.calls != 0 {
 		t.Fatalf("rejected steer called driver %d times", driver.calls)
+	}
+}
+
+func TestInterruptLaneLeavesProductWaitAsSoleTerminalAuthority(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	canceled := false
+	actor := &laneActor{
+		id: "lane", nativeID: "native", nativeTurnID: "native-turn", nativeGeneration: 7,
+		parentID: "parent", product: "claude", name: "worker", groups: []string{"shared"},
+		permission: "default", turnID: "turn", state: "running", done: make(chan struct{}),
+		cancel: func() { canceled = true },
+	}
+	coordinator.lanesLoaded = true
+	coordinator.lanes[actor.id] = actor
+	driver := &steerRecordingLaneDriver{}
+	var err error
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := daemonpkg.ManagedAttachment{ID: actor.parentID, Groups: []string{"shared"}}
+	result, err := coordinator.interruptLane(runtime, parent, actor.product, parsedLaneCommand{target: actor.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driver.interrupts != 1 || canceled {
+		t.Fatalf("interrupts = %d, engine canceled wait = %v", driver.interrupts, canceled)
+	}
+	if result["type"] != "turn.interrupting" || actor.state != "interrupting" {
+		t.Fatalf("result = %#v, actor = %+v", result, actor)
 	}
 }
 

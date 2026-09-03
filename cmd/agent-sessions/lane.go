@@ -604,23 +604,18 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 		return nil, err
 	}
 	c.mu.Lock()
-	cancel := actor.cancel
-	running := actor.state == "running"
-	if running && cancel != nil {
+	running := actor.state == "running" && actor.cancel != nil
+	if running {
 		actor.interruptRequested = true
 		actor.state = "interrupting"
 	}
 	c.mu.Unlock()
-	if !running || cancel == nil {
+	if !running {
 		return nil, errors.New("lane has no active turn")
-	}
-	if err := c.commitLaneState(runtime, actor.id, "interrupting"); err != nil {
-		return nil, err
 	}
 	if err := c.interruptLaneNative(actor); err != nil {
 		return nil, err
 	}
-	cancel()
 	return map[string]any{"type": "turn.interrupting", "thread_id": actor.id, "turn_id": actor.turnID}, nil
 }
 
@@ -719,9 +714,6 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 	}
 	actor.state = "archived"
 	c.mu.Unlock()
-	if err := c.commitLaneState(runtime, actor.id, "archived"); err != nil {
-		return nil, err
-	}
 	if err := c.archiveNativeLane(actor); err != nil {
 		return nil, err
 	}
@@ -808,9 +800,6 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 	}
 	c.mu.Unlock()
 	for _, candidate := range candidates {
-		if err := c.commitLaneState(runtime, candidate.actor.id, candidate.state); err != nil {
-			return err
-		}
 		if candidate.state == "archived" {
 			if err := c.archiveNativeLane(candidate.actor); err != nil {
 				return err
@@ -1299,7 +1288,7 @@ func (c *hostCoordinator) archiveOrphanedCompletedLane(runtime *daemonpkg.Runtim
 	}
 	actor.state = "archived"
 	c.mu.Unlock()
-	return c.commitLaneState(runtime, actor.id, "archived") == nil && c.archiveNativeLane(actor) == nil
+	return c.archiveNativeLane(actor) == nil
 }
 
 func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
@@ -1761,7 +1750,6 @@ func (c *hostCoordinator) rememberActiveLaneName(actor *laneActor) {
 func (c *hostCoordinator) markLaneRunning(*daemonpkg.Runtime, *laneActor) error        { return nil }
 func (c *hostCoordinator) markLaneTerminal(*daemonpkg.Runtime, *laneActor) error       { return nil }
 func (c *hostCoordinator) commitResumeLane(*daemonpkg.Runtime, *laneActor, bool) error { return nil }
-func (c *hostCoordinator) commitLaneState(*daemonpkg.Runtime, string, string) error    { return nil }
 
 func durableLaneCandidate(runtime *daemonpkg.Runtime, actor *laneActor) (daemonpkg.LaneCandidate, bool) {
 	if actor == nil || strings.TrimSpace(actor.nativeID) == "" || strings.Contains(actor.parentID, "/") {
@@ -1817,7 +1805,7 @@ func (c *hostCoordinator) scheduleLaneAutoArchive(runtime *daemonpkg.Runtime, ac
 		}
 		actor.state, actor.autoArchiveAt = "archived", 0
 		c.mu.Unlock()
-		if c.commitLaneState(runtime, actor.id, "archived") == nil && c.archiveNativeLane(actor) == nil {
+		if c.archiveNativeLane(actor) == nil {
 			_ = c.retireParentLanes(runtime, actor.id)
 		}
 	}(due)
