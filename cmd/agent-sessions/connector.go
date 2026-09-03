@@ -58,6 +58,16 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 			return refresher.refresh()
 		},
 		Call: func(callCtx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
+			if method == "tools/call" {
+				cwd, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					return nil, fmt.Errorf("read connector invocation cwd: %w", cwdErr)
+				}
+				params, cwdErr = stampConnectorInvocationCwd(params, cwd)
+				if cwdErr != nil {
+					return nil, cwdErr
+				}
+			}
 			if live == nil {
 				sourceID := connectorRelaySource(product, report.UUID, os.Getenv(launcher.QwenEventsFileEnv))
 				return callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
@@ -102,6 +112,7 @@ func callConnectorDaemonTool(
 	sourceID = connectorToolSource(product, sourceID, params, call.Arguments)
 	payload, err := json.Marshal(connectorToolEnvelope{
 		SourceID: sourceID, RequestID: requestID, Name: call.Name, Arguments: call.Arguments,
+		Cwd: call.Metadata.InvocationCwd,
 	})
 	if err != nil {
 		return nil, err
@@ -118,6 +129,20 @@ func callConnectorDaemonTool(
 		return nil, errors.New(response.Error.Message)
 	}
 	return append(json.RawMessage(nil), response.Payload...), nil
+}
+
+func stampConnectorInvocationCwd(params json.RawMessage, cwd string) (json.RawMessage, error) {
+	var call map[string]any
+	if json.Unmarshal(params, &call) != nil {
+		return nil, errors.New("connector tool call is invalid")
+	}
+	metadata, _ := call["_meta"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+		call["_meta"] = metadata
+	}
+	metadata["agent-sessions/cwd"] = cwd
+	return json.Marshal(call)
 }
 
 func connectorToolSource(product, ambient string, params json.RawMessage, arguments map[string]any) string {

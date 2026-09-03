@@ -111,6 +111,9 @@ func (c *hostCoordinator) handleLaneCommand(
 	if !ok {
 		return nil, errors.New("lane command requires one live attested parent")
 	}
+	if strings.TrimSpace(envelope.Cwd) != "" {
+		parent.Cwd = envelope.Cwd
+	}
 	if err := c.ensureLaneActors(runtime); err != nil {
 		return nil, err
 	}

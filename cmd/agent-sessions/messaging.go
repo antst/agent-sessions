@@ -17,6 +17,9 @@ import (
 type connectorToolCall struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+	Metadata  struct {
+		InvocationCwd string `json:"agent-sessions/cwd"`
+	} `json:"_meta"`
 }
 
 type connectorToolEnvelope struct {
@@ -24,6 +27,7 @@ type connectorToolEnvelope struct {
 	RequestID string         `json:"request_id"`
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+	Cwd       string         `json:"cwd,omitempty"`
 }
 
 type liveToolCall struct {
@@ -44,7 +48,7 @@ func (c *hostCoordinator) handleLiveSessionCall(
 		if json.Unmarshal(params, &call) != nil || strings.TrimSpace(call.Name) == "" {
 			return nil, errors.New("connector tool call is invalid")
 		}
-		result, err := c.callLocalTool(ctx, runtime, report.UUID, call.Name, call.Arguments)
+		result, err := c.callLocalToolWithID(ctx, runtime, report.UUID, call.Name, call.Arguments, "", call.Metadata.InvocationCwd)
 		return marshalConnectorToolResult(result, err)
 	case "tool.call":
 		var call liveToolCall
@@ -77,7 +81,7 @@ func (c *hostCoordinator) handleConnectorTool(
 	if json.Unmarshal(request.Payload, &call) != nil || strings.TrimSpace(call.RequestID) == "" || strings.TrimSpace(call.Name) == "" {
 		return nil, errors.New("connector tool call is invalid")
 	}
-	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID)
+	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, call.Cwd)
 	return marshalConnectorToolResult(result, err)
 }
 
@@ -135,7 +139,7 @@ func (c *hostCoordinator) callLocalTool(
 	sourceID, name string,
 	args map[string]any,
 ) (localToolResult, error) {
-	return c.callLocalToolWithID(ctx, runtime, sourceID, name, args, "")
+	return c.callLocalToolWithID(ctx, runtime, sourceID, name, args, "", "")
 }
 
 // callLocalToolWithID preserves the connector/MCP operation identity through
@@ -146,7 +150,7 @@ func (c *hostCoordinator) callLocalToolWithID(
 	runtime *daemonpkg.Runtime,
 	sourceID, name string,
 	args map[string]any,
-	operationID string,
+	operationID, invocationCwd string,
 ) (localToolResult, error) {
 	source, ok, err := c.activeLocalParent(runtime, sourceID)
 	if err != nil {
@@ -154,6 +158,9 @@ func (c *hostCoordinator) callLocalToolWithID(
 	}
 	if !ok {
 		return localToolResult{}, daemonpkg.InactiveControlError()
+	}
+	if strings.TrimSpace(invocationCwd) != "" {
+		source.Cwd = invocationCwd
 	}
 	switch name {
 	case "list_peers":

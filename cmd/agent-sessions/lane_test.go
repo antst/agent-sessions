@@ -729,6 +729,45 @@ func TestLaneDoctorDoesNotRequirePeerAttachment(t *testing.T) {
 	}
 }
 
+func TestDirectLaneCommandUsesItsInvocationCwd(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	parentID := "parent"
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
+		ID: parentID, Product: "claude", NativeSessionID: parentID, Groups: []string{"shared"},
+	})
+	coordinator.liveReports[parentID] = liveSessionReport{UUID: parentID, Name: "parent", Product: "claude", Groups: []string{"shared"}}
+	engine, err := daemonpkg.NewLaneEngine(runtime.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Remember(daemonpkg.LaneCandidate{
+		NativeSessionID: "native-lane", Product: "claude", Parent: parentID,
+		PrimaryGroup: "session:" + runtime.HostID() + "/" + parentID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantCwd := t.TempDir()
+	gotCwd := ""
+	coordinator.resolveCandidate = func(_ context.Context, _ *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, _ daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+		gotCwd = parent.Cwd
+		return laneNameEntry{Name: "worker"}, true
+	}
+	payload, err := json.Marshal(laneCommandEnvelope{
+		Product: "claude", Command: "list", Arguments: []string{"list", "--all"},
+		Cwd: wantCwd, SourceAttachmentID: parentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.handleLaneCommand(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if gotCwd != wantCwd {
+		t.Fatalf("candidate confirmation cwd = %q, want invocation %q", gotCwd, wantCwd)
+	}
+}
+
 func TestLaneDoctorUsesNativeVersionReadinessForACPProducts(t *testing.T) {
 	for _, product := range []struct{ id, version string }{{"grok", "grok 1.0.13"}, {"qwen", "qwen 0.22.3"}} {
 		t.Run(product.id, func(t *testing.T) {

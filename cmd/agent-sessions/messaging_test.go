@@ -290,3 +290,43 @@ func TestToolsOnlyConnectorsUseTheirLiveSessionAsTheCaller(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectorInvocationCwdOverridesOnlyThePerCallAttachmentCopy(t *testing.T) {
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
+		ID: "session", Product: "claude", NativeSessionID: "native", Cwd: "/stored",
+	})
+	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
+
+	liveParams, err := json.Marshal(map[string]any{
+		"name": "identity", "arguments": map[string]any{},
+		"_meta": map[string]any{"agent-sessions/cwd": "/live-call"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := coordinator.handleLiveSessionCall(context.Background(), runtime,
+		liveSessionReport{UUID: "session", Product: "claude"}, "tools/call", liveParams)
+	if err != nil || !strings.Contains(string(live), `"cwd":"/live-call"`) {
+		t.Fatalf("live connector result = %s, %v", live, err)
+	}
+
+	controlPayload, err := json.Marshal(connectorToolEnvelope{
+		SourceID: "session", RequestID: "request", Name: "identity", Arguments: map[string]any{}, Cwd: "/tools-only-call",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsOnly, err := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: controlPayload})
+	if err != nil || !strings.Contains(string(toolsOnly), `"cwd":"/tools-only-call"`) {
+		t.Fatalf("tools-only connector result = %s, %v", toolsOnly, err)
+	}
+	stored, active, err := runtime.Attachments().ActiveAttachment("session")
+	if err != nil || !active || stored.Cwd != "/stored" {
+		t.Fatalf("stored attachment changed = %+v, active=%v, err=%v", stored, active, err)
+	}
+}

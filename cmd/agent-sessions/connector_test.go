@@ -46,6 +46,23 @@ func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *test
 	}
 }
 
+func TestConnectorInvocationCwdIsMetadataNotAModelArgument(t *testing.T) {
+	params := json.RawMessage(`{"name":"lane","arguments":{"command":"list"},"_meta":{"threadId":"native-thread"}}`)
+	stamped, err := stampConnectorInvocationCwd(params, "/product/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var call map[string]any
+	if err := json.Unmarshal(stamped, &call); err != nil {
+		t.Fatal(err)
+	}
+	arguments := call["arguments"].(map[string]any)
+	metadata := call["_meta"].(map[string]any)
+	if len(arguments) != 1 || arguments["command"] != "list" || metadata["threadId"] != "native-thread" || metadata["agent-sessions/cwd"] != "/product/work" {
+		t.Fatalf("stamped connector call = %#v", call)
+	}
+}
+
 func TestManagedLaunchProductOverridesDiscoveredConnectorArgument(t *testing.T) {
 	getenv := func(name string) string {
 		if name == "AGENT_SESSIONS_PRODUCT" {
