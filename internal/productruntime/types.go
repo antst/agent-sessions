@@ -134,6 +134,7 @@ type LaneOpenRequest struct {
 	Environment     []string
 	ApprovalPolicy  string
 	Sandbox         string
+	Effort          string
 }
 
 type NativeSessionRef struct {

@@ -88,6 +88,9 @@ mean:
 - `info` is a string-to-string object owned by the product. The daemon passes
   every key and value through verbatim to rosters and `peers.list` results and
   never interprets them.
+- `capabilities` is optional. It is a closed object; version 1 defines only
+  `"lane":true`, meaning this session accepts the daemon-to-product lane
+  requests in section 4. Unknown keys and `lane:false` are invalid.
 
 Products may add any `info` keys. Unknown keys are valid by design. Two keys
 have well-known display meanings and SHOULD be set whenever the product knows
@@ -115,7 +118,7 @@ rosters, peer discovery, and messaging, and is displayed as reported. Catalog
 knowledge is required only when Agent Sessions is asked to launch or drive
 that product as a lane. This is the adoption rule: **you can join with four
 identity fields and an info map; nothing else is required.** The map may be
-empty.
+empty and capabilities may be omitted.
 
 ## 4. The JSON-RPC stream
 
@@ -263,6 +266,52 @@ error:
 The daemon does not wrap `body`, queue it for a disconnected product, or
 synthesize acceptance.
 
+### Daemon to lane-capable product sessions
+
+A session that reports `capabilities:{"lane":true}` is driven over its held
+presence connection. The daemon sends the following requests to that exact
+session; a client that did not advertise the capability rejects them with
+`-32003`.
+
+`lane.turn.start` submits one input and acknowledges only after the product has
+accepted it into its native inbox:
+
+```json
+{"jsonrpc":"2.0","id":"daemon.input-1","method":"lane.turn.start","params":{"input_id":"input-1","body":"Review this change.","mode":"followup"}}
+{"jsonrpc":"2.0","id":"daemon.input-1","result":{"native_message_id":"message-product-1"}}
+```
+
+`mode` is exactly `followup` or `steer`. `followup` starts its own ordinary
+turn. `steer` enters the running turn at the product's next native step
+boundary, or starts a turn if the product is idle. `input_id` is the daemon's
+in-flight call identity; `native_message_id` is the identity issued by the
+product. Neither is durable Agent Sessions state.
+
+`lane.turn.wait` waits for the product turn that consumes that native message:
+
+```json
+{"jsonrpc":"2.0","id":"daemon.wait-1","method":"lane.turn.wait","params":{"native_message_id":"message-product-1"}}
+{"jsonrpc":"2.0","id":"daemon.wait-1","result":{"outcome":"completed","result":"The change is sound.","reason":"completed"}}
+```
+
+`outcome` is `completed`, `interrupted`, or `failed`; `result` is the product's
+assistant text; and `reason` is the product's native terminal reason without
+reinterpretation. The product owns input-to-turn correlation.
+
+`lane.turn.interrupt` takes `{}` and asks the product to cancel the active turn
+without discarding already accepted follow-up input. It returns `{}` after the
+native cancellation request is accepted. `lane.session.archive` also takes
+`{}`; it cancels the session, flushes the product store, returns `{}`, and then
+closes the presence connection as the product process exits. Title and info
+changes continue to use `session.update`; there is no separate lane update
+method.
+
+A UI-less lane-capable session must never block on an interactive approval.
+It resolves permissions from the invocation's launch policy or fails the
+native operation. The Agent Sessions DSH adapter selects
+`workspace-write-noninteractive` (workspace-write sandbox, approval `never`)
+for ordinary lanes and DSH's `danger-full-access` preset for `--yolo` lanes.
+
 ### Model exposure
 
 The presence methods are the wire contract, not a required model-facing tool
@@ -335,7 +384,8 @@ presence(session):
         name: session.stored_name_or_empty,
         groups: session.launch_groups,
         product: PRODUCT,
-        info: session.current_info
+        info: session.current_info,
+        capabilities: session.can_drive_lanes ? {lane: true} : omitted
       })
       session.on_presence_change((name, info) =>
         rpc.call("session.update", {name: name, info: info}))
@@ -387,7 +437,9 @@ Request:
       "enum": [
         "session.hello", "session.update", "peers.list", "message.send",
         "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait",
-        "lane.status", "lane.interrupt", "lane.archive", "message.deliver"
+        "lane.status", "lane.interrupt", "lane.archive", "message.deliver",
+        "lane.turn.start", "lane.turn.wait", "lane.turn.interrupt",
+        "lane.session.archive"
       ]
     },
     "params": {"type": "object"}
@@ -451,7 +503,13 @@ Parameters:
     "name": {"type": "string"},
     "groups": {"type": "array", "items": {"type": "string"}},
     "product": {"type": "string", "minLength": 1},
-    "info": {"type": "object", "additionalProperties": {"type": "string"}}
+    "info": {"type": "object", "additionalProperties": {"type": "string"}},
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lane"],
+      "properties": {"lane": {"const": true}}
+    }
   }
 }
 ```
@@ -641,7 +699,25 @@ Result: an empty object.
 {"jsonrpc":"2.0","id":"delivery-2","error":{"code":-32002,"message":"Session busy","data":{"uuid":"target-native"}}}
 ```
 
-### A.5 Lane schemas
+### A.5 Native lane-session schemas
+
+`lane.turn.start` parameters and result:
+
+```json
+{"type":"object","additionalProperties":false,"required":["input_id","body","mode"],"properties":{"input_id":{"type":"string","minLength":1},"body":{"type":"string","minLength":1},"mode":{"enum":["followup","steer"]}}}
+{"type":"object","additionalProperties":false,"required":["native_message_id"],"properties":{"native_message_id":{"type":"string","minLength":1}}}
+```
+
+`lane.turn.wait` parameters and result:
+
+```json
+{"type":"object","additionalProperties":false,"required":["native_message_id"],"properties":{"native_message_id":{"type":"string","minLength":1}}}
+{"type":"object","additionalProperties":false,"required":["outcome","result","reason"],"properties":{"outcome":{"enum":["completed","interrupted","failed"]},"result":{"type":"string"},"reason":{}}}
+```
+
+`lane.turn.interrupt` and `lane.session.archive` each take `{}` and return `{}`.
+
+### A.6 Agent Sessions lane-control schemas
 
 `lane.start`, `lane.run`, `lane.resume`, and `lane.steer` parameters:
 
@@ -878,3 +954,7 @@ The version 1 alignment completed these implementation changes:
 11. Reference clients and conformance checks cover hello acknowledgement,
     strict framing, replacement by UUID, unknown products, immutable groups,
     live info, structured delivery, first-class methods, and the closed errors.
+12. A session may advertise the closed `capabilities:{"lane":true}` object and
+    then accepts native lane start, wait, interrupt, and archive requests over
+    that same held connection. UI-less lane sessions resolve approval from
+    their launch policy and never wait for interactive mediation.

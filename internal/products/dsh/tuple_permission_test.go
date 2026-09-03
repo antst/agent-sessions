@@ -18,7 +18,6 @@ func TestExactTupleRejectsEveryMismatchedMemberAndRequiresPNPM(t *testing.T) {
 		edit func(*Tuple)
 	}{
 		{"cli", func(tuple *Tuple) { tuple.CLI = "0.1.2-alpha.4" }},
-		{"acp-app", func(tuple *Tuple) { tuple.ACPApp = "0.1.1-rc.2" }},
 		{"package-manager", func(tuple *Tuple) { tuple.PackageManager = "npm" }},
 		{"pnpm-version", func(tuple *Tuple) { tuple.PNPMVersion = "10.27.0" }},
 	}
@@ -38,8 +37,8 @@ func TestPermissionMapperIsExactAndFailClosed(t *testing.T) {
 		mode permissionmode.Mode
 		want NativePolicy
 	}{
-		{permissionmode.Default, NativePolicy{Sandbox: SandboxWorkspaceWrite, Approval: ApprovalAsk}},
-		{permissionmode.BypassPermissions, NativePolicy{Sandbox: SandboxDangerFullAccess, Approval: ApprovalNever}},
+		{permissionmode.Default, NativePolicy{Sandbox: SandboxWorkspaceWrite, Approval: ApprovalNever, Preset: "workspace-write-noninteractive"}},
+		{permissionmode.BypassPermissions, NativePolicy{Sandbox: SandboxDangerFullAccess, Approval: ApprovalNever, Preset: "danger-full-access"}},
 	}
 	for _, test := range tests {
 		got, err := MapPermission(test.mode)

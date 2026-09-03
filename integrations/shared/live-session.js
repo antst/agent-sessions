@@ -37,18 +37,22 @@ class LiveSessionClient extends EventEmitter {
     this.stopping = false;
     this.sessions = new Map();
     this.inbound = new Map();
+    this.laneHandler = null;
   }
 
   start() {
     return Promise.resolve(this.active ? { active: true } : { active: false, reason: this.inactiveReason });
   }
 
-  report(nativeSessionID, name, info = {}) {
+  report(nativeSessionID, name, info = {}, capabilities = {}) {
     if (!this.active || this.stopping || !text(nativeSessionID) || typeof name !== "string") return false;
     const existing = this.sessions.get(nativeSessionID);
     if (existing) return this.update(nativeSessionID, name, info);
-    if (!stringMap(info)) return false;
-    const session = { id: nativeSessionID, name, info: { ...info }, socket: null, ready: false, buffer: "", pending: new Map(), timer: null };
+    if (!stringMap(info) || !validCapabilities(capabilities)) return false;
+    const session = {
+      id: nativeSessionID, name, info: { ...info }, capabilities: { ...capabilities },
+      socket: null, ready: false, buffer: "", pending: new Map(), timer: null,
+    };
     this.sessions.set(nativeSessionID, session);
     this._open(session);
     return true;
@@ -93,6 +97,11 @@ class LiveSessionClient extends EventEmitter {
   acceptMessage(messageID, result = {}) { return this._answer(messageID, result); }
   rejectMessage(messageID, error) { return this._answer(messageID, null, error); }
 
+  handleLaneRequests(handler) {
+    if (handler !== null && typeof handler !== "function") throw new Error("lane request handler must be a function");
+    this.laneHandler = handler;
+  }
+
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
@@ -125,7 +134,9 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _hello(session) {
-    return { protocol: 1, uuid: session.id, name: session.name, groups: [...this.groups], product: this.productID, info: { ...session.info } };
+    const hello = { protocol: 1, uuid: session.id, name: session.name, groups: [...this.groups], product: this.productID, info: { ...session.info } };
+    if (Object.keys(session.capabilities).length > 0) hello.capabilities = { ...session.capabilities };
+    return hello;
   }
 
   _data(session, chunk) {
@@ -149,17 +160,26 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _request(session, frame) {
-    if (frame.method !== "message.deliver") {
-      this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32003, message: "Operation not permitted", data: { method: frame.method } } });
+    if (frame.method === "message.deliver") {
+      if (!validDelivery(frame.params)) {
+        this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32602, message: "Invalid params", data: { method: frame.method } } });
+        return;
+      }
+      const messageID = frame.params.message_id;
+      this.inbound.set(messageID, { session, wireID: frame.id });
+      this.emit("message", { messageID, nativeSessionID: session.id, from: { ...frame.params.from, groups: [...frame.params.from.groups] }, body: frame.params.body });
       return;
     }
-    if (!validDelivery(frame.params)) {
-      this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32602, message: "Invalid params", data: { method: frame.method } } });
+    if (!session.capabilities.lane || !this.laneHandler || !validLaneSessionRequest(frame.method, frame.params)) {
+      const error = session.capabilities.lane && this.laneHandler && laneSessionMethod(frame.method)
+        ? { code: -32602, message: "Invalid params", data: { method: frame.method } }
+        : { code: -32003, message: "Operation not permitted", data: { method: frame.method } };
+      this._write(session, { jsonrpc: "2.0", id: frame.id, error });
       return;
     }
-    const messageID = frame.params.message_id;
-    this.inbound.set(messageID, { session, wireID: frame.id });
-    this.emit("message", { messageID, nativeSessionID: session.id, from: { ...frame.params.from, groups: [...frame.params.from.groups] }, body: frame.params.body });
+    Promise.resolve(this.laneHandler({ nativeSessionID: session.id, method: frame.method, params: frame.params }))
+      .then((result) => this._write(session, { jsonrpc: "2.0", id: frame.id, result: result ?? {} }))
+      .catch((error) => this._write(session, { jsonrpc: "2.0", id: frame.id, error: wireError(error) }));
   }
 
   _response(session, frame) {
@@ -167,14 +187,17 @@ class LiveSessionClient extends EventEmitter {
     if (!pending) return;
     session.pending.delete(frame.id);
     if (frame.error) pending.reject(Object.assign(new Error(frame.error.message), { category: "unavailable", code: frame.error.code, data: frame.error.data }));
-    else pending.resolve(frame.result ?? {});
+    else {
+      if (pending.handshake) session.ready = true;
+      pending.resolve(frame.result ?? {});
+    }
   }
 
   _call(session, id, method, params, handshake = false) {
     const wireID = `session.${id}`;
     if (session.pending.has(wireID)) return Promise.reject(new Error("live call id is already outstanding"));
     return new Promise((resolve, reject) => {
-      session.pending.set(wireID, { resolve, reject });
+      session.pending.set(wireID, { resolve, reject, handshake });
       if (!this._write(session, { jsonrpc: "2.0", id: wireID, method, params }, handshake)) {
         session.pending.delete(wireID);
         reject(new InactiveError("disconnected"));
@@ -248,6 +271,9 @@ function exactKeys(value, allowed) {
 function stringMap(value) {
   return exactKeys(value, Object.keys(value ?? {})) && Object.values(value).every((item) => typeof item === "string");
 }
+function validCapabilities(value) {
+  return exactKeys(value, ["lane"]) && (!("lane" in value) || value.lane === true);
+}
 function validID(value) { return typeof value === "string" || Number.isFinite(value); }
 function validError(value) {
   return exactKeys(value, ["code", "message", "data"]) &&
@@ -269,6 +295,20 @@ function validDelivery(params) {
   return exactKeys(params, ["message_id", "from", "body"]) && text(params.message_id) && typeof params.body === "string" &&
     exactKeys(params.from, ["uuid", "name", "product", "groups"]) && text(params.from.uuid) && typeof params.from.name === "string" &&
     text(params.from.product) && Array.isArray(params.from.groups) && params.from.groups.every((group) => typeof group === "string");
+}
+function laneSessionMethod(method) {
+  return ["lane.turn.start", "lane.turn.wait", "lane.turn.interrupt", "lane.session.archive"].includes(method);
+}
+function validLaneSessionRequest(method, params) {
+  if (!laneSessionMethod(method)) return false;
+  if (method === "lane.turn.start") {
+    return exactKeys(params, ["input_id", "body", "mode"]) && text(params.input_id) && typeof params.body === "string" && params.body.length > 0 &&
+      ["followup", "steer"].includes(params.mode);
+  }
+  if (method === "lane.turn.wait") {
+    return exactKeys(params, ["native_message_id"]) && text(params.native_message_id);
+  }
+  return exactKeys(params, []) && Object.keys(params).length === 0;
 }
 function renderDelivery(payload) {
   if (!payload || !validDelivery({ message_id: payload.messageID, from: payload.from, body: payload.body })) throw new Error("live message delivery is invalid");

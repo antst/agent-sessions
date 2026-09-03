@@ -50,7 +50,7 @@ func TestLiveServerCloseReturnsSynchronousFailureWithoutDebtClassification(t *te
 	nativeErr := errors.New("native stop failed")
 	server := &LiveServer{closeFn: func(context.Context) error { return nativeErr }}
 	err := server.Close(context.Background())
-	if !errors.Is(err, nativeErr) || errors.Is(err, productruntime.ErrCleanupDebt) {
+	if !errors.Is(err, nativeErr) {
 		t.Fatalf("Close() = %v", err)
 	}
 }

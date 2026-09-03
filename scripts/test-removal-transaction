@@ -95,6 +95,42 @@ cat >"$fake_bin/kilo" <<'EOF'
 exit 0
 EOF
 
+cat >"$fake_bin/pnpm" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "$1" = "--version" ]; then printf '%s\n' '10.28.1'; exit 0; fi
+if [ "$1" = "--dir" ] && [ "$3" = "pack" ] && [ "$4" = "--pack-destination" ]; then
+  printf '%s\n' "$2" >"$TEST_DSH_PACKED_SOURCE"
+  : >"$5/agent-sessions-dsh-native-0.3.0.tgz"
+  exit 0
+fi
+exit 91
+EOF
+
+cat >"$fake_bin/dsh" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "$1" = "--version" ]; then printf '%s\n' 'dsh 0.1.2-alpha.5'; exit 0; fi
+[ "$1 $2 $3" = "plugin --profile agent-sessions" ] || exit 91
+case "$4" in
+  list)
+    if [ -e "$TEST_DSH_STATE" ]; then printf '%s\n' '{"dependencies":{"@agent-sessions/dsh-native":{}}}'; else printf '%s\n' '{}'; fi
+    ;;
+  remove)
+    rm -f -- "$TEST_DSH_STATE"
+    rm -rf -- "$TEST_DSH_PLUGIN_ROOT"
+    ;;
+  add)
+    source_root=$(cat "$TEST_DSH_PACKED_SOURCE")
+    rm -rf -- "$TEST_DSH_PLUGIN_ROOT"
+    mkdir -p "$TEST_DSH_PLUGIN_ROOT"
+    cp -R -- "$source_root/." "$TEST_DSH_PLUGIN_ROOT/"
+    : >"$TEST_DSH_STATE"
+    ;;
+  *) exit 91 ;;
+esac
+EOF
+
 cat >"$fake_bin/grok" <<'EOF'
 #!/bin/sh
 set -eu
@@ -162,7 +198,7 @@ case "$arguments" in
 esac
 exit 0
 EOF
-chmod 0700 "$fake_bin/uname" "$fake_bin/qwen" "$fake_bin/grok" "$fake_bin/opencode" "$fake_bin/kilo" "$fake_bin/systemctl"
+chmod 0700 "$fake_bin/uname" "$fake_bin/qwen" "$fake_bin/grok" "$fake_bin/opencode" "$fake_bin/kilo" "$fake_bin/dsh" "$fake_bin/pnpm" "$fake_bin/systemctl"
 
 common_env=(
   "HOME=$home"
@@ -175,12 +211,18 @@ common_env=(
   "QWEN=qwen"
   "OPENCODE=opencode"
   "KILO=kilo"
+  "DSH=dsh"
+  "PNPM=pnpm"
+  "DSH_HOME=$home/.dsh"
   "TEST_PREFIX=$prefix"
   "TEST_QWEN_STATE=$test_root/qwen-source"
   "TEST_QWEN_REMOVE_MARKER=$test_root/qwen-remove-failed"
   "TEST_GROK_STATE=$test_root/grok-installed"
   "TEST_GROK_PLUGIN_ROOT=$home/.grok/plugins/agent-sessions"
   "TEST_GROK_LOG=$test_root/grok.log"
+  "TEST_DSH_STATE=$test_root/dsh-installed"
+  "TEST_DSH_PLUGIN_ROOT=$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
+  "TEST_DSH_PACKED_SOURCE=$test_root/dsh-packed-source"
   "TEST_SERVICE_PID_FILE=$test_root/service.pid"
   "TEST_SERVICE_LOG=$test_root/service.log"
 )
@@ -196,6 +238,7 @@ cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations
 cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js"
 cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs"
 cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js"
+cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/plugin.cjs" "$release/integrations/dsh/plugin.cjs"
 find -P "$release" -type d -exec chmod 0555 {} +
 printf 'unified-state-canary\n' >"$state_root/canary"
 printf 'unified-config-canary\n' >"$home/.config/agent-sessions/preserved"
@@ -214,6 +257,8 @@ if [[ $failed_status -eq 0 ]] ||
    [[ "$(cat "$test_root/qwen-source")" != "$release/qwen" ]] ||
    [[ ! -f "$test_root/grok-installed" ]] ||
    [[ ! -f "$home/.grok/plugins/agent-sessions/.grok-plugin/plugin.json" ]] ||
+   [[ ! -f "$test_root/dsh-installed" ]] ||
+   [[ ! -f "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native/plugin.cjs" ]] ||
    ! cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs" >/dev/null ||
    ! cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
    ! cmp -- "$home/.config/kilo/plugins/agent-sessions.js" "$release/integrations/kilo/agent-sessions.mjs" >/dev/null ||
@@ -229,6 +274,8 @@ if [[ -e "$prefix/libexec/agent-sessions/host" ]] ||
    [[ -e "$test_root/qwen-source" ]] ||
    [[ -e "$test_root/grok-installed" ]] ||
    [[ -e "$home/.grok/plugins/agent-sessions" ]] ||
+   [[ -e "$test_root/dsh-installed" ]] ||
+   [[ -e "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native" ]] ||
    [[ -e "$home/.config/opencode/plugins/agent-sessions.js" || -L "$home/.config/opencode/plugins/agent-sessions.js" ]] ||
    [[ -e "$home/.config/opencode/shared/live-session.js" || -L "$home/.config/opencode/shared/live-session.js" ]] ||
    [[ -e "$home/.config/kilo/plugins/agent-sessions.js" || -L "$home/.config/kilo/plugins/agent-sessions.js" ]] ||

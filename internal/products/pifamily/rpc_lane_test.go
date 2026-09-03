@@ -613,7 +613,7 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 		_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
 			ProductID: OMPProductID, LaneID: "handshake-debt", Name: "handshake failure", Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
-		if !errors.Is(err, productruntime.ErrProtocol) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !process.cleaned {
+		if !errors.Is(err, productruntime.ErrProtocol) || !errors.Is(err, cleanupErr) || !process.cleaned {
 			t.Fatalf("handshake cleanup = %v, cleaned = %t", err, process.cleaned)
 		}
 	})
@@ -634,7 +634,7 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 			ProductID: PiProductID, LaneID: "resume-debt", ResumeNativeID: "expected-native",
 			Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
-		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !process.cleaned {
+		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || !process.cleaned {
 			t.Fatalf("resume cleanup = %v, cleaned = %t", err, process.cleaned)
 		}
 	})
@@ -664,7 +664,7 @@ func TestLaneOpenFailureSurfacesSynchronousCleanupError(t *testing.T) {
 		_, err = driver.Open(context.Background(), productruntime.LaneOpenRequest{
 			ProductID: OMPProductID, LaneID: "second-owner", Name: "second owner", Cwd: "/work", PermissionMode: permissionmode.Default,
 		})
-		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || errors.Is(err, productruntime.ErrCleanupDebt) || !second.cleaned {
+		if !errors.Is(err, productruntime.ErrAmbiguousSession) || !errors.Is(err, cleanupErr) || !second.cleaned {
 			t.Fatalf("collision cleanup = %v, cleaned = %t", err, second.cleaned)
 		}
 	})

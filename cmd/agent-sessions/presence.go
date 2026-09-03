@@ -60,11 +60,16 @@ func classifyLiveError(class, cause error) error {
 // liveSessionReport is the complete reconnect vocabulary. A connection that
 // carries this report is live; closing the connection removes the report.
 type liveSessionReport struct {
-	UUID    string            `json:"uuid"`
-	Name    string            `json:"name"`
-	Groups  []string          `json:"groups"`
-	Product string            `json:"product"`
-	Info    map[string]string `json:"info"`
+	UUID         string                  `json:"uuid"`
+	Name         string                  `json:"name"`
+	Groups       []string                `json:"groups"`
+	Product      string                  `json:"product"`
+	Info         map[string]string       `json:"info"`
+	Capabilities liveSessionCapabilities `json:"capabilities,omitempty"`
+}
+
+type liveSessionCapabilities struct {
+	Lane bool `json:"lane,omitempty"`
 }
 
 type laneNameEntry struct {
@@ -81,6 +86,7 @@ type livePresenceServer struct {
 
 	mu       sync.Mutex
 	current  map[string]*liveRPCConnection
+	changed  chan struct{}
 	wg       sync.WaitGroup
 	close    sync.Once
 	closeErr error
@@ -240,7 +246,7 @@ func startLivePresenceServer(
 	}
 	server := &livePresenceServer{
 		listener: listener, join: join, leave: leave, call: call,
-		current: map[string]*liveRPCConnection{},
+		current: map[string]*liveRPCConnection{}, changed: make(chan struct{}),
 	}
 	server.wg.Add(1)
 	go server.accept()
@@ -294,6 +300,7 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	s.mu.Lock()
 	previous := s.current[report.UUID]
 	s.current[report.UUID] = rpc
+	s.signalChangedLocked()
 	s.mu.Unlock()
 	if previous != nil {
 		_ = previous.connection.Close()
@@ -319,6 +326,7 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	current := s.current[report.UUID] == rpc
 	if current {
 		delete(s.current, report.UUID)
+		s.signalChangedLocked()
 	}
 	s.mu.Unlock()
 	if current {
@@ -369,6 +377,32 @@ func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, 
 		return nil, classifyLiveError(errLiveUnknown, errors.New("live session is unavailable"))
 	}
 	return connection.call(ctx, "daemon."+id, method, params)
+}
+
+func (s *livePresenceServer) Wait(ctx context.Context, uuid, product string, lane bool) error {
+	for {
+		s.mu.Lock()
+		connection := s.current[uuid]
+		changed := s.changed
+		var report liveSessionReport
+		if connection != nil {
+			report = connection.liveReport()
+		}
+		s.mu.Unlock()
+		if connection != nil && report.Product == product && (!lane || report.Capabilities.Lane) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (s *livePresenceServer) signalChangedLocked() {
+	close(s.changed)
+	s.changed = make(chan struct{})
 }
 
 func (s *livePresenceServer) Close() error {
@@ -477,15 +511,16 @@ func validLiveRPCError(rpcErr *liveRPCError) bool {
 
 func decodeLiveHello(raw json.RawMessage) (liveSessionReport, int, error) {
 	var params struct {
-		Protocol *int               `json:"protocol"`
-		UUID     *string            `json:"uuid"`
-		Name     *string            `json:"name"`
-		Groups   *[]string          `json:"groups"`
-		Product  *string            `json:"product"`
-		Info     *map[string]string `json:"info"`
+		Protocol     *int                     `json:"protocol"`
+		UUID         *string                  `json:"uuid"`
+		Name         *string                  `json:"name"`
+		Groups       *[]string                `json:"groups"`
+		Product      *string                  `json:"product"`
+		Info         *map[string]string       `json:"info"`
+		Capabilities *liveSessionCapabilities `json:"capabilities,omitempty"`
 	}
 	if err := decodeStrictJSON(raw, &params); err != nil || params.Protocol == nil || params.UUID == nil || params.Name == nil ||
-		params.Groups == nil || params.Product == nil || params.Info == nil {
+		params.Groups == nil || params.Product == nil || params.Info == nil || params.Capabilities != nil && !params.Capabilities.Lane {
 		return liveSessionReport{}, 0, errors.New("session hello is invalid")
 	}
 	groups := make([]string, len(*params.Groups))
@@ -493,6 +528,9 @@ func decodeLiveHello(raw json.RawMessage) (liveSessionReport, int, error) {
 	report := liveSessionReport{
 		UUID: *params.UUID, Name: *params.Name, Groups: groups,
 		Product: *params.Product, Info: cloneLiveInfo(*params.Info),
+	}
+	if params.Capabilities != nil {
+		report.Capabilities = *params.Capabilities
 	}
 	if !validLiveSessionReport(report) {
 		return liveSessionReport{}, *params.Protocol, errors.New("session hello is invalid")
@@ -717,10 +755,14 @@ func (c *liveSessionClient) read(ctx context.Context, connection *liveRPCConnect
 
 func liveSessionHello(connection *liveRPCConnection, report liveSessionReport) error {
 	id := json.RawMessage(`"session.hello"`)
-	params, err := json.Marshal(map[string]any{
+	hello := map[string]any{
 		"protocol": liveProtocolVersion, "uuid": report.UUID, "name": report.Name,
 		"groups": report.Groups, "product": report.Product, "info": report.Info,
-	})
+	}
+	if report.Capabilities.Lane {
+		hello["capabilities"] = report.Capabilities
+	}
+	params, err := json.Marshal(hello)
 	if err != nil {
 		return err
 	}

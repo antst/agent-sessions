@@ -13,7 +13,6 @@ type ApprovalMode string
 const (
 	SandboxWorkspaceWrite   SandboxMode  = "workspace-write"
 	SandboxDangerFullAccess SandboxMode  = "danger-full-access"
-	ApprovalAsk             ApprovalMode = "ask"
 	ApprovalNever           ApprovalMode = "never"
 )
 
@@ -22,14 +21,15 @@ const (
 type NativePolicy struct {
 	Sandbox  SandboxMode
 	Approval ApprovalMode
+	Preset   string
 }
 
 func MapPermission(mode permissionmode.Mode) (NativePolicy, error) {
 	switch mode {
 	case permissionmode.Default:
-		return NativePolicy{Sandbox: SandboxWorkspaceWrite, Approval: ApprovalAsk}, nil
+		return NativePolicy{Sandbox: SandboxWorkspaceWrite, Approval: ApprovalNever, Preset: "workspace-write-noninteractive"}, nil
 	case permissionmode.BypassPermissions:
-		return NativePolicy{Sandbox: SandboxDangerFullAccess, Approval: ApprovalNever}, nil
+		return NativePolicy{Sandbox: SandboxDangerFullAccess, Approval: ApprovalNever, Preset: "danger-full-access"}, nil
 	default:
 		return NativePolicy{}, fmt.Errorf("%w: DSH cannot exactly represent %q", productruntime.ErrUnsupportedPolicy, mode)
 	}

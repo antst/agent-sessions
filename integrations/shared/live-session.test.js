@@ -72,6 +72,46 @@ test("disconnect rejects calls and reconnect reports from scratch", async (t) =>
   await until(() => fixture.reports.length === 2 && client.sessions.get("native")?.ready);
 });
 
+test("lane capability serves native lane requests on the held socket", async (t) => {
+  const fixture = await server(t);
+  const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
+  t.after(() => client.stop());
+  const handled = [];
+  client.handleLaneRequests(({ nativeSessionID, method, params }) => {
+    handled.push({ nativeSessionID, method, params });
+    return { native_message_id: "product-message" };
+  });
+  assert.equal(client.report("native-lane", "lane", {}, { lane: true }), true);
+  await until(() => fixture.reports.length === 1 && client.sessions.get("native-lane")?.ready);
+  assert.deepEqual(fixture.reports[0].capabilities, { lane: true });
+
+  fixture.write({ jsonrpc: "2.0", id: "daemon.start", method: "lane.turn.start", params: {
+    input_id: "input", body: "work", mode: "followup",
+  } });
+  await until(() => fixture.responses.some((frame) => frame.id === "daemon.start"));
+  assert.deepEqual(handled, [{
+    nativeSessionID: "native-lane", method: "lane.turn.start",
+    params: { input_id: "input", body: "work", mode: "followup" },
+  }]);
+  assert.deepEqual(fixture.responses.find((frame) => frame.id === "daemon.start").result, { native_message_id: "product-message" });
+
+  fixture.write({ jsonrpc: "2.0", id: "daemon.invalid", method: "lane.turn.start", params: { input_id: "input" } });
+  await until(() => fixture.responses.some((frame) => frame.id === "daemon.invalid"));
+  assert.equal(fixture.responses.find((frame) => frame.id === "daemon.invalid").error.code, -32602);
+});
+
+test("hello acknowledgement publishes readiness before a coalesced lane request", async (t) => {
+  const fixture = await server(t, { jsonrpc: "2.0", id: "daemon.first", method: "lane.turn.start", params: {
+    input_id: "first", body: "work", mode: "followup",
+  } });
+  const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
+  t.after(() => client.stop());
+  client.handleLaneRequests(() => ({ native_message_id: "product-first" }));
+  assert.equal(client.report("native-lane", "lane", {}, { lane: true }), true);
+  await until(() => fixture.responses.some((frame) => frame.id === "daemon.first"));
+  assert.deepEqual(fixture.responses.find((frame) => frame.id === "daemon.first").result, { native_message_id: "product-first" });
+});
+
 test("inactive client never connects", async () => {
   let connects = 0;
   const client = new LiveSessionClient({ env: {}, connect: () => { connects += 1; } });
@@ -102,7 +142,7 @@ function env(socketPath) {
   return { AGENT_SESSIONS_PRESENCE_SOCKET: socketPath, AGENT_SESSIONS_PRODUCT: "pi", AGENT_SESSIONS_GROUPS: '["team","team"]' };
 }
 
-async function server(t) {
+async function server(t, firstRequest = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-live-"));
   const socketPath = path.join(root, "presence.sock");
   const reports = [], requests = [], responses = [], sockets = [];
@@ -124,7 +164,9 @@ async function server(t) {
           if (frame.jsonrpc !== "2.0" || frame.method !== "session.hello") return connection.destroy();
           reported = true;
           reports.push(frame.params);
-          connection.write(`${JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: {} })}\n`);
+          const acknowledgement = `${JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: {} })}\n`;
+          const request = firstRequest === null ? "" : `${JSON.stringify(firstRequest)}\n`;
+          connection.write(acknowledgement + request);
         }
         else if (frame.method) requests.push(frame); else responses.push(frame);
       }

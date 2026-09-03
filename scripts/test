@@ -26,6 +26,7 @@ bash -n \
   "$plugin_root/scripts/release-tag-verify" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/install-host" \
+  "$plugin_root/scripts/dsh-profile" \
   "$plugin_root/scripts/install-hub" \
   "$plugin_root/scripts/launchd-control" \
   "$plugin_root/scripts/remove-host" \
@@ -79,12 +80,13 @@ if platforms != {"linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"}:
 if inventory.get("executables") != ["agent-sessions", "agent-sessions-hub"]:
     raise SystemExit("authoritative release executable inventory is not the exact two-image contract")
 if {entry.get("product") for entry in inventory.get("plugin_payloads", [])} != {
-    "codex", "claude", "grok", "qwen"
+    "codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp"
 }:
     raise SystemExit("authoritative release plugin inventory is incomplete")
 if aliases != [
-    "codex-peer", "claude-peer", "grok-peer", "qwen-peer",
+    "codex-peer", "claude-peer", "grok-peer", "qwen-peer", "opencode-peer", "kilo-peer", "pi-peer", "omp-peer",
     "codex-peer-lane", "claude-peer-lane", "grok-peer-lane", "qwen-peer-lane",
+    "opencode-peer-lane", "kilo-peer-lane", "pi-peer-lane", "omp-peer-lane", "dsh-peer-lane",
 ]:
     raise SystemExit("authoritative installed host alias inventory is incomplete")
 PY

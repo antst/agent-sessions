@@ -917,7 +917,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: resumeNativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
 		Environment: environment, ApprovalPolicy: actor.approvalPolicy,
-		Sandbox: actor.sandbox, Capability: actor.capability,
+		Sandbox: actor.sandbox, Capability: actor.capability, Effort: actor.effort,
 	})
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)

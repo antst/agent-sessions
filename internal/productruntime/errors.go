@@ -16,5 +16,4 @@ var (
 	ErrNativeRejected    = errors.New("product native operation rejected")
 	ErrProtocol          = errors.New("product native protocol error")
 	ErrTimedOut          = errors.New("product native operation timed out")
-	ErrCleanupDebt       = errors.New("product native cleanup debt")
 )

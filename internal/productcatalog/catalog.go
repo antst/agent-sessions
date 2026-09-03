@@ -240,16 +240,15 @@ func dshDescriptor() Descriptor {
 		LaneAlias: "dsh-peer-lane", LaneRuntimeRole: "dsh-lane",
 		LaneManagerRole: "dsh-lane-manager", LaneCapability: "dsh-lane",
 		Capabilities: []Capability{CapabilityLane, CapabilityArchive, CapabilityDynamicPermission},
-		ResumeStyle:  ResumeFlag, SupportState: SupportGeneral, TestedVersion: "0.1.2-alpha.3",
+		ResumeStyle:  ResumeFlag, SupportState: SupportGeneral, TestedVersion: "0.1.2-alpha.5",
 		Compatibility: Compatibility{
 			Policy: VersionExact, PackageManager: "pnpm", PackageManagerVersion: "10.28.1",
 			TupleMembers: []TupleMember{
-				{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.3"},
-				{Name: "@deepseek-ai/dsh-acp-app", Version: "0.1.2-alpha.3"},
+				{Name: "@deepseek-ai/dsh", Version: "0.1.2-alpha.5"},
 			},
 		},
-		LaneTransport: "dsh-acp", DoctorProbeKey: "dsh-doctor", PermissionProfileKey: "dsh",
-		RequiredDoctorFeatures: []string{"acp", "lane", "native-cli", "tuple"},
+		LaneTransport: "native-presence-v1", DoctorProbeKey: "dsh-doctor", PermissionProfileKey: "dsh",
+		RequiredDoctorFeatures: []string{"exact-tuple", "lane", "native-cli", "native-v1", "pnpm"},
 		FederationCapabilities: []string{"dsh-lane"},
 		Acceptance:             AcceptanceContract{RealProductRequired: true},
 	}

@@ -1,6 +1,6 @@
 package dsh
 
-import "errors"
+import "fmt"
 
 type DriverConfig struct {
 	Lane   LaneConfig
@@ -17,15 +17,12 @@ func NewDrivers(config DriverConfig) (Drivers, error) {
 	if err != nil {
 		return Drivers{}, err
 	}
-	if config.Lane.TupleVerifier == nil {
-		config.Lane.TupleVerifier = doctor
-	}
 	lane, err := NewLaneDriver(config.Lane)
 	if err != nil {
 		return Drivers{}, err
 	}
-	if lane.config.Executable != doctor.config.Executable || lane.config.DSHHome != doctor.config.DSHHome {
-		return Drivers{}, errors.New("DSH lane and doctor must share one executable and managed home")
+	if lane.config.Executable != doctor.config.Executable {
+		return Drivers{}, fmt.Errorf("DSH lane and doctor must share one executable")
 	}
 	return Drivers{Lane: lane, Doctor: doctor}, nil
 }

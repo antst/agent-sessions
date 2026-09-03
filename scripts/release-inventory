@@ -25,6 +25,7 @@ package_paths=(
   .agents .claude-plugin .codex-plugin
   claude deploy docs grok hooks integrations qwen skills Makefile README.md
   scripts/cachebuster
+  scripts/dsh-profile
   scripts/federation
   scripts/install-host
   scripts/install-hub

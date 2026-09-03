@@ -4,6 +4,7 @@ set -Eeuo pipefail
 script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_directory/managed-tree"
 source "$script_directory/launchd-control"
+source "$script_directory/dsh-profile"
 
 if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != --purge ) ]]; then
   printf 'usage: %s PREFIX [--purge]\n' "${0##*/}" >&2
@@ -20,6 +21,8 @@ grok=${GROK:-grok}
 qwen=${QWEN:-qwen}
 opencode=${OPENCODE:-opencode}
 kilo=${KILO:-kilo}
+dsh=${DSH:-dsh}
+pnpm=${PNPM:-pnpm}
 host_root="$prefix/libexec/agent-sessions/host"
 
 resolve_product() {
@@ -41,6 +44,15 @@ claude_path=$(resolve_product "$claude" "$HOME/.local/bin/claude" || true)
 qwen_path=$(resolve_product "$qwen" "$HOME/.local/bin/qwen" || true)
 opencode_path=$(resolve_product "$opencode" "$HOME/.local/bin/opencode" || true)
 kilo_path=$(resolve_product "$kilo" "$HOME/.local/bin/kilo" || true)
+dsh_path=$(resolve_product "$dsh" "$HOME/.local/bin/dsh" || true)
+pnpm_path=$(resolve_product "$pnpm" "$HOME/.local/bin/pnpm" || true)
+if [[ -n "$dsh_path" ]]; then
+  [[ -n "$pnpm_path" ]] || {
+    printf 'Cannot remove the DSH integration: pnpm is not installed.\n' >&2
+    exit 1
+  }
+  validate_dsh_native_tuple "$dsh_path" "$pnpm_path"
+fi
 grok_override=$(resolve_product "$grok" "$HOME/.grok/bin/grok" || true)
 run_grok() {
   if [[ -n "$grok_override" ]]; then
@@ -163,6 +175,9 @@ install_integrations() {
     install -m 0644 "$current/integrations/$product/agent-sessions.mjs" "$config_root/plugins/agent-sessions.js"
     install -m 0644 "$current/integrations/shared/live-session.js" "$config_root/shared/live-session.js"
   done
+  if [[ -n "$dsh_path" ]]; then
+    install_dsh_native_integration "$dsh_path" "$pnpm_path" "$current"
+  fi
 }
 
 install_service() {
@@ -256,6 +271,9 @@ if [[ -n "$qwen_path" ]]; then
   if grep -Eq '^[^[:alnum:]]*agent-sessions[[:space:]]' <<<"$extensions"; then
     "$qwen_path" extensions uninstall agent-sessions
   fi
+fi
+if [[ -n "$dsh_path" ]]; then
+  remove_dsh_native_integration "$dsh_path" "$pnpm_path"
 fi
 for product in opencode kilo; do
   config_root="${XDG_CONFIG_HOME:-$HOME/.config}/$product"

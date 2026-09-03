@@ -24,6 +24,7 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
+	dshproduct "github.com/antst/agent-sessions/internal/products/dsh"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
@@ -252,6 +253,17 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if err != nil {
 		panic(err)
 	}
+	dshDescriptor, ok := productcatalog.ByID(dshproduct.ProductID)
+	if !ok {
+		panic("DSH product descriptor is unavailable")
+	}
+	dshLanes, err := dshproduct.NewLaneDriver(dshproduct.LaneConfig{
+		Executable: dshDescriptor.NativeExecutable, Profile: dshproduct.ManagedProfile,
+		Generation: 1, Processes: laneProcesses, Presence: coordinatorDSHPresence{coordinator: coordinator},
+	})
+	if err != nil {
+		panic(err)
+	}
 	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
 		claudeproduct.ProductID:   claudeLanes,
 		codexproduct.ProductID:    codexLanes,
@@ -261,6 +273,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		piproduct.ProductID:       piLanes,
 		ompproduct.ProductID:      ompLanes,
 		qwenproduct.ProductID:     qwenLanes,
+		dshproduct.ProductID:      dshLanes,
 	})
 	if err != nil {
 		panic(err)
@@ -438,6 +451,17 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 		kiloproduct.ProductID:     productListLaneCandidateResolver(kiloproduct.ProductID),
 		piproduct.ProductID:       packageListLaneCandidateResolver(piproduct.ProductID, launcher.ListAllPiSessions),
 		ompproduct.ProductID:      packageListLaneCandidateResolver(ompproduct.ProductID, launcher.ListAllOMPSessions),
+		dshproduct.ProductID: func(ctx context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+			executable, err := launcher.ResolveProductExecutable(dshproduct.ProductID)
+			if err != nil {
+				return laneNameEntry{}, false
+			}
+			observed, found, err := dshproduct.InspectSession(ctx, executable, candidate.NativeSessionID, os.Environ())
+			if err != nil || !found {
+				return laneNameEntry{}, false
+			}
+			return laneNameEntry{Name: observed.Name}, true
+		},
 	}
 }
 

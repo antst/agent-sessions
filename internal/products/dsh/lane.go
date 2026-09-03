@@ -1,9 +1,9 @@
 package dsh
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,846 +16,322 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
+const ManagedProfile = "agent-sessions"
+
 const (
-	maxPromptBytes        = 1 << 20
-	maxResultBytes        = 1 << 20
-	maxSessionPages       = 32
-	maxSessionInfos       = 1024
-	maxTurnMessages       = 1024
-	maxSettledTurns       = 256
-	maxSettledTurnBytes   = 4 << 20
-	maxNativeIDBytes      = 1024
-	maxLaneIDBytes        = 1024
-	maxProfileBytes       = 256
-	maxCwdBytes           = 32 << 10
-	maxLaneArguments      = 256
-	maxLaneArgumentBytes  = 32 << 10
-	maxLaneArgumentsBytes = 1 << 20
-	maxArchiveEvidence    = 1024
-	processCleanupTimeout = 5 * time.Second
-	turnReservedID        = "\x00reserved"
+	resumeEnvironment     = "AGENT_SESSIONS_DSH_RESUME"
+	modelProviderEnv      = "AGENT_SESSIONS_DSH_MODEL_PROVIDER"
+	modelIDEnvironment    = "AGENT_SESSIONS_DSH_MODEL_ID"
+	reasoningEffortEnv    = "AGENT_SESSIONS_DSH_REASONING_EFFORT"
+	permissionPresetEnv   = "AGENT_SESSIONS_DSH_PERMISSION_PRESET"
+	inspectSessionEnv     = "AGENT_SESSIONS_DSH_INSPECT_SESSION_ID"
+	defaultStartupTimeout = 15 * time.Second
 )
 
+type PresenceRPC interface {
+	WaitLane(context.Context, string) error
+	CallLane(context.Context, string, string, string, any) (json.RawMessage, error)
+}
+
 type LaneConfig struct {
-	Executable    string
-	ACPProfile    string
-	DSHHome       string
-	Generation    uint64
-	TupleVerifier TupleVerifier
-	Processes     ACPProcessFactory
-	Environment   []productruntime.EnvVar
+	Executable     string
+	Profile        string
+	Generation     uint64
+	Processes      productruntime.OwnedProcessSupervisor
+	Presence       PresenceRPC
+	StartupTimeout time.Duration
 }
 
 type laneSession struct {
-	reference      productruntime.NativeSessionRef
-	cwd            string
-	policy         NativePolicy
-	process        ACPProcess
-	client         *ACPClient
-	cancel         context.CancelFunc
-	active         string
-	turns          map[string]*laneTurn
-	turnOrder      []string
-	terminalBytes  int
-	poisoned       error
-	archiving      bool
-	closeAttempted bool
-	closed         bool
-	cleaned        bool
-}
-
-type laneTurn struct {
-	reference     productruntime.NativeTurnRef
-	future        rpcFuture
-	result        []byte
-	lastResult    []byte
-	resultErr     error
-	messageID     string
-	messageIDs    map[string]struct{}
-	admitted      chan struct{}
-	admitOnce     sync.Once
-	terminal      *productruntime.NativeTerminal
-	terminalErr   error
-	evidenceBytes int
-	settled       chan struct{}
-	settleOnce    sync.Once
-}
-
-type lanePermissionPolicy struct {
-	mu        sync.Mutex
-	sessionID string
-	policy    NativePolicy
+	ref        productruntime.NativeSessionRef
+	process    productruntime.OwnedProcessRef
+	permission permissionmode.Mode
 }
 
 type LaneDriver struct {
-	config          LaneConfig
-	mu              sync.Mutex
-	sessions        map[string]*laneSession
-	opening         map[string]struct{}
-	archived        map[productruntime.NativeSessionRef]uint64
-	archiveOrder    []archiveEvidence
-	archiveSequence uint64
-}
+	config LaneConfig
 
-type archiveEvidence struct {
-	reference productruntime.NativeSessionRef
-	sequence  uint64
-}
-
-func envValue(environment []productruntime.EnvVar, name string) string {
-	for index := len(environment) - 1; index >= 0; index-- {
-		if environment[index].Name == name {
-			return environment[index].Value
-		}
-	}
-	return ""
-}
-
-func overridesDSHProfile(argument string) bool {
-	return argument == "--profile" || strings.HasPrefix(argument, "--profile=") ||
-		argument == "--patch" || strings.HasPrefix(argument, "--patch=") ||
-		argument == "--dump-config" || argument == "--dump-default-config"
+	mu       sync.Mutex
+	sessions map[string]*laneSession
 }
 
 func NewLaneDriver(config LaneConfig) (*LaneDriver, error) {
 	if config.Executable == "" {
 		config.Executable = "dsh"
 	}
-	if config.ACPProfile == "" {
-		config.ACPProfile = "acp"
+	if config.Profile == "" {
+		config.Profile = ManagedProfile
 	}
-	if filepath.Base(config.Executable) != "dsh" || len(config.ACPProfile) == 0 || len(config.ACPProfile) > maxProfileBytes || config.ACPProfile != strings.TrimSpace(config.ACPProfile) || strings.ContainsAny(config.ACPProfile, "\x00/\\") || config.Generation == 0 || config.TupleVerifier == nil ||
-		config.Processes == nil {
-		return nil, errors.New("DSH lane driver requires profile, generation, tuple, and process dependencies")
+	if config.Generation == 0 {
+		config.Generation = 1
 	}
-	if err := validateManagedDSHHomeShape(config.DSHHome); err != nil {
-		return nil, err
+	if config.StartupTimeout == 0 {
+		config.StartupTimeout = defaultStartupTimeout
 	}
-	return &LaneDriver{config: config, sessions: make(map[string]*laneSession), opening: make(map[string]struct{}), archived: make(map[productruntime.NativeSessionRef]uint64)}, nil
+	if filepath.Base(config.Executable) != "dsh" || config.Profile != ManagedProfile || config.Processes == nil || config.Presence == nil ||
+		config.StartupTimeout < time.Millisecond || config.StartupTimeout > time.Minute {
+		return nil, errors.New("DSH native lane driver configuration is incomplete")
+	}
+	return &LaneDriver{config: config, sessions: map[string]*laneSession{}}, nil
 }
 
-func (*LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
-	// ACP rejects a second prompt while busy, so advertising native lane
-	// steering would be untruthful.
-	return productruntime.LaneCapabilitySet{Steer: false, DurableResume: true}
+func (driver *LaneDriver) Capabilities() productruntime.LaneCapabilitySet {
+	return productruntime.LaneCapabilitySet{Steer: true, DurableResume: true, CallerSuppliedSessionID: true}
 }
 
 func (driver *LaneDriver) Open(ctx context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
-	request.PermissionMode = normalizePermission(request.PermissionMode)
-	if err := validateOpenRequest(request); err != nil {
-		return productruntime.NativeSessionRef{}, err
+	if ctx == nil || request.ProductID != ProductID || strings.TrimSpace(request.LaneID) == "" || !validCwd(request.Cwd) {
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH lane open request is invalid", productruntime.ErrProtocol)
 	}
-	if err := driver.reserveLane(request.LaneID); err != nil {
-		return productruntime.NativeSessionRef{}, err
-	}
-	defer driver.unreserveLane(request.LaneID)
-	if _, err := verifyPinnedTuple(ctx, driver.config.TupleVerifier, request.ProfileIdentity); err != nil {
-		return productruntime.NativeSessionRef{}, err
+	if request.ResumeNativeID != "" && request.ResumeNativeID != request.LaneID {
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH resume identity differs from the lane identity", productruntime.ErrProtocol)
 	}
 	policy, err := MapPermission(request.PermissionMode)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	process, client, cancel, permissions, err := driver.startClient(request.ProfileIdentity, request.Cwd, request.Arguments, policy)
+	driver.mu.Lock()
+	if current := driver.sessions[request.LaneID]; current != nil {
+		if request.ResumeNativeID == request.LaneID && current.permission == request.PermissionMode {
+			ref := current.ref
+			driver.mu.Unlock()
+			return ref, nil
+		}
+		driver.mu.Unlock()
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH session %q is already open", productruntime.ErrAmbiguousSession, request.LaneID)
+	}
+	driver.mu.Unlock()
+
+	provider, model, err := dshModelArgument(request.Arguments)
 	if err != nil {
 		return productruntime.NativeSessionRef{}, err
 	}
-	fail := func(failure error) (productruntime.NativeSessionRef, error) {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cleanupErr := process.Cleanup(cleanupCtx)
-		cleanupCancel()
-		cancel()
-		return productruntime.NativeSessionRef{}, errors.Join(failure, cleanupErr)
-	}
-	if err := client.Initialize(ctx); err != nil {
-		return fail(err)
-	}
-	listed, err := listACPSessions(ctx, client, request.Cwd)
+	environment, err := productruntime.ParseNativeEnvironment(request.Environment)
 	if err != nil {
-		return fail(err)
+		return productruntime.NativeSessionRef{}, err
 	}
-
-	var nativeID string
+	environment = setEnvVar(environment, permissionPresetEnv, policy.Preset)
 	if request.ResumeNativeID != "" {
-		nativeID = request.ResumeNativeID
-		if !listedSessionAtCwd(listed, nativeID, request.Cwd) {
-			return fail(fmt.Errorf("%w: DSH resume identity is not listed at the exact cwd", productruntime.ErrStale))
-		}
-		var resumed struct {
-			SessionID string `json:"sessionId"`
-		}
-		if err := client.Request(ctx, "session/resume", sessionParams(nativeID, request.Cwd, policy), &resumed); err != nil {
-			return fail(err)
-		}
-		if resumed.SessionID != "" && !validNativeID(resumed.SessionID) {
-			return fail(fmt.Errorf("%w: DSH resume returned a non-canonical native identity", productruntime.ErrProtocol))
-		}
-		if resumed.SessionID != "" && resumed.SessionID != nativeID {
-			return fail(fmt.Errorf("%w: DSH resumed a different native session", productruntime.ErrAmbiguousSession))
-		}
-	} else {
-		var created struct {
-			SessionID string `json:"sessionId"`
-		}
-		if err := client.Request(ctx, "session/new", sessionParams("", request.Cwd, policy), &created); err != nil {
-			return fail(err)
-		}
-		if !validNativeID(created.SessionID) {
-			return fail(fmt.Errorf("%w: DSH ACP returned no session identity", productruntime.ErrProtocol))
-		}
-		nativeID = created.SessionID
-		if listedSessionID(listed, nativeID) {
-			return fail(fmt.Errorf("%w: DSH session/new reused an existing native identity", productruntime.ErrAmbiguousSession))
-		}
+		environment = setEnvVar(environment, resumeEnvironment, "1")
 	}
-	if err := permissions.bind(nativeID); err != nil {
-		return fail(err)
+	if model != "" {
+		environment = setEnvVar(environment, modelProviderEnv, provider)
+		environment = setEnvVar(environment, modelIDEnvironment, model)
 	}
-
-	reference := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: nativeID, Generation: driver.config.Generation}
-	session := &laneSession{
-		reference: reference, cwd: request.Cwd, policy: policy,
-		process: process, client: client, cancel: cancel, turns: make(map[string]*laneTurn),
+	if request.Effort != "" {
+		environment = setEnvVar(environment, reasoningEffortEnv, request.Effort)
 	}
-	driver.mu.Lock()
-	if _, exists := driver.sessions[request.LaneID]; exists {
-		driver.mu.Unlock()
-		return fail(fmt.Errorf("%w: DSH lane already has a live ACP owner", productruntime.ErrNativeRejected))
-	}
-	delete(driver.archived, reference)
-	driver.sessions[request.LaneID] = session
-	driver.mu.Unlock()
-	return reference, nil
-}
-
-func (driver *LaneDriver) StartTurn(ctx context.Context, reference productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
-	request.PermissionMode = normalizePermission(request.PermissionMode)
-	session, err := driver.exactSession(reference)
-	if err != nil {
-		return productruntime.NativeTurnRef{}, err
-	}
-	policy, err := MapPermission(request.PermissionMode)
-	if err != nil {
-		return productruntime.NativeTurnRef{}, err
-	}
-	if policy != session.policy {
-		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: DSH turn policy differs from its exact session policy", productruntime.ErrUnsupportedPolicy)
-	}
-	if strings.TrimSpace(request.Prompt) == "" || len(request.Prompt) > maxPromptBytes {
-		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: DSH prompt is outside fixed bounds", productruntime.ErrProtocol)
-	}
-	driver.mu.Lock()
-	if session.poisoned != nil {
-		failure := session.poisoned
-		driver.mu.Unlock()
-		return productruntime.NativeTurnRef{}, failure
-	}
-	if session.active != "" {
-		driver.mu.Unlock()
-		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: DSH ACP prompt is already in flight", productruntime.ErrUnsupportedSteer)
-	}
-	// Reserve the session before allocating/writing the ACP request. Without
-	// this fence two concurrent callers can both observe idle and create native
-	// prompts before either callback publishes its request ID.
-	session.active = turnReservedID
-	driver.mu.Unlock()
-
-	var created *laneTurn
-	future, err := session.client.startRequest(ctx, "session/prompt", map[string]any{
-		"sessionId": reference.NativeSessionID,
-		"prompt":    []map[string]string{{"type": "text", "text": request.Prompt}},
-	}, func(future rpcFuture) {
-		turnReference := productruntime.NativeTurnRef{NativeSessionRef: reference, NativeTurnID: future.id}
-		created = &laneTurn{reference: turnReference, future: future, admitted: make(chan struct{}), settled: make(chan struct{})}
-		driver.mu.Lock()
-		if session.active == turnReservedID {
-			session.turns[future.id], session.active = created, future.id
-		}
-		driver.mu.Unlock()
+	process, err := driver.config.Processes.Start(ctx, productruntime.NativeCommand{
+		Path: driver.config.Executable, Args: []string{"--profile", driver.config.Profile}, Env: environment, Cwd: request.Cwd,
 	})
 	if err != nil {
-		var possibleWrite *possibleACPWriteError
-		if errors.As(err, &possibleWrite) {
-			failure := fmt.Errorf("%w: DSH ACP prompt write completion is ambiguous: %v", productruntime.ErrAmbiguousSession, possibleWrite)
-			return productruntime.NativeTurnRef{}, driver.poisonAfterPossibleWrite(session, failure)
-		}
-		driver.clearTurnOrReservation(session, created)
-		return productruntime.NativeTurnRef{}, err
+		return productruntime.NativeSessionRef{}, fmt.Errorf("start DSH native lane: %w", err)
 	}
-	created.future = future
-	go driver.settleTurn(session, created)
-	select {
-	case <-created.settled:
-		driver.mu.Lock()
-		terminalErr := created.terminalErr
+	readyCtx, cancelReady := context.WithTimeout(ctx, driver.config.StartupTimeout)
+	err = driver.config.Presence.WaitLane(readyCtx, request.LaneID)
+	cancelReady()
+	if err != nil {
+		driver.stopProcess(process)
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH native lane did not publish presence: %v", productruntime.ErrUnavailable, err)
+	}
+	ref := productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: request.LaneID, Generation: driver.config.Generation}
+	session := &laneSession{ref: ref, process: process, permission: request.PermissionMode}
+	driver.mu.Lock()
+	if driver.sessions[request.LaneID] != nil {
 		driver.mu.Unlock()
-		if terminalErr != nil {
-			driver.clearTurn(session, created)
-			return productruntime.NativeTurnRef{}, terminalErr
-		}
-		return created.reference, nil
-	case <-created.admitted:
-		return created.reference, nil
-	case <-ctx.Done():
-		failure := fmt.Errorf("%w: DSH ACP prompt may have been written before admission timed out: %v", productruntime.ErrAmbiguousSession, ctx.Err())
-		return productruntime.NativeTurnRef{}, driver.poisonAfterPossibleWrite(session, failure)
+		driver.stopProcess(process)
+		return productruntime.NativeSessionRef{}, fmt.Errorf("%w: DSH session %q opened twice", productruntime.ErrAmbiguousSession, request.LaneID)
 	}
+	driver.sessions[request.LaneID] = session
+	driver.mu.Unlock()
+	go driver.observeExit(session)
+	return ref, nil
 }
 
-func (driver *LaneDriver) WaitTurn(ctx context.Context, reference productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
-	session, err := driver.exactSession(reference.NativeSessionRef)
+func (driver *LaneDriver) StartTurn(ctx context.Context, session productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
+	if strings.TrimSpace(request.Prompt) == "" {
+		return productruntime.NativeTurnRef{}, fmt.Errorf("%w: DSH lane prompt is empty", productruntime.ErrProtocol)
+	}
+	nativeMessageID, err := driver.startInput(ctx, session, request.Prompt, "followup")
+	if err != nil {
+		return productruntime.NativeTurnRef{}, err
+	}
+	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: nativeMessageID}, nil
+}
+
+func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
+	if _, err := driver.exactSession(turn.NativeSessionRef); err != nil {
+		return productruntime.NativeTerminal{}, err
+	}
+	var result struct {
+		Outcome string          `json:"outcome"`
+		Result  string          `json:"result"`
+		Reason  json.RawMessage `json:"reason"`
+	}
+	if err := driver.call(ctx, turn.NativeSessionID, "wait", "lane.turn.wait", map[string]any{
+		"native_message_id": turn.NativeTurnID,
+	}, &result); err != nil {
+		return productruntime.NativeTerminal{}, err
+	}
+	outcome, exitLike, err := dshTurnOutcome(result.Outcome)
 	if err != nil {
 		return productruntime.NativeTerminal{}, err
 	}
-	driver.mu.Lock()
-	turn := session.turns[reference.NativeTurnID]
-	if turn == nil || turn.reference != reference {
-		driver.mu.Unlock()
-		return productruntime.NativeTerminal{}, fmt.Errorf("%w: DSH native turn is unknown", productruntime.ErrStale)
-	}
-	if turn.terminal != nil {
-		terminal := *turn.terminal
-		driver.mu.Unlock()
-		return terminal, nil
-	}
-	if turn.terminalErr != nil {
-		failure := turn.terminalErr
-		driver.mu.Unlock()
-		return productruntime.NativeTerminal{}, failure
-	}
-	settled := turn.settled
-	driver.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return productruntime.NativeTerminal{}, fmt.Errorf("%w: DSH ACP wait: %v", productruntime.ErrTimedOut, ctx.Err())
-	case <-settled:
-	}
-	driver.mu.Lock()
-	defer driver.mu.Unlock()
-	if turn.terminalErr != nil {
-		return productruntime.NativeTerminal{}, turn.terminalErr
-	}
-	if turn.terminal == nil {
-		return productruntime.NativeTerminal{}, fmt.Errorf("%w: DSH ACP turn settled without a terminal", productruntime.ErrProtocol)
-	}
-	return *turn.terminal, nil
+	return productruntime.NativeTerminal{
+		Outcome: outcome, ExitLike: exitLike, Result: result.Result, NativeStopReason: strings.TrimSpace(string(result.Reason)),
+	}, nil
 }
 
-func (*LaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
-	return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
+func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeTurnRef, request productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
+	if strings.TrimSpace(request.Prompt) == "" {
+		return productruntime.NativeAcceptance{}, fmt.Errorf("%w: DSH steer input is empty", productruntime.ErrProtocol)
+	}
+	nativeMessageID, err := driver.startInput(ctx, turn.NativeSessionRef, request.Prompt, "steer")
+	if err != nil {
+		return productruntime.NativeAcceptance{}, err
+	}
+	return productruntime.NativeAcceptance{NativeSessionID: turn.NativeSessionID, NativeMessageID: nativeMessageID, AcceptedAt: time.Now()}, nil
 }
 
-func (driver *LaneDriver) Interrupt(ctx context.Context, reference productruntime.NativeTurnRef) error {
-	session, err := driver.exactSession(reference.NativeSessionRef)
+func (driver *LaneDriver) Interrupt(ctx context.Context, turn productruntime.NativeTurnRef) error {
+	if _, err := driver.exactSession(turn.NativeSessionRef); err != nil {
+		return err
+	}
+	return driver.call(ctx, turn.NativeSessionID, "interrupt", "lane.turn.interrupt", map[string]any{}, &struct{}{})
+}
+
+func (driver *LaneDriver) Archive(ctx context.Context, session productruntime.NativeSessionRef) error {
+	owned, err := driver.exactSession(session)
 	if err != nil {
 		return err
 	}
+	if err := driver.call(ctx, session.NativeSessionID, "archive", "lane.session.archive", map[string]any{}, &struct{}{}); err != nil {
+		return err
+	}
+	if _, err := driver.config.Processes.Wait(ctx, owned.process); err != nil {
+		return fmt.Errorf("wait for archived DSH lane: %w", err)
+	}
 	driver.mu.Lock()
-	active := session.active == reference.NativeTurnID && session.turns[reference.NativeTurnID] != nil
+	if driver.sessions[session.NativeSessionID] == owned {
+		delete(driver.sessions, session.NativeSessionID)
+	}
 	driver.mu.Unlock()
-	if !active {
-		return fmt.Errorf("%w: DSH native turn is not active", productruntime.ErrStale)
-	}
-	// ACP session/cancel is intentionally a JSON-RPC notification. Adding an id
-	// changes it into the unsupported request form (-32601).
-	return session.client.Notify(ctx, "session/cancel", map[string]string{"sessionId": reference.NativeSessionID})
+	return nil
 }
 
-func (driver *LaneDriver) Archive(ctx context.Context, reference productruntime.NativeSessionRef) error {
+func (driver *LaneDriver) startInput(ctx context.Context, session productruntime.NativeSessionRef, body, mode string) (string, error) {
+	if _, err := driver.exactSession(session); err != nil {
+		return "", err
+	}
+	inputID, err := newInputID()
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		NativeMessageID string `json:"native_message_id"`
+	}
+	if err := driver.call(ctx, session.NativeSessionID, inputID, "lane.turn.start", map[string]any{
+		"input_id": inputID, "body": body, "mode": mode,
+	}, &result); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(result.NativeMessageID) == "" {
+		return "", fmt.Errorf("%w: DSH omitted its native message identity", productruntime.ErrProtocol)
+	}
+	return result.NativeMessageID, nil
+}
+
+func (driver *LaneDriver) call(ctx context.Context, sessionID, callID, method string, params any, output any) error {
+	raw, err := driver.config.Presence.CallLane(ctx, sessionID, callID, method, params)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, output); err != nil {
+		return fmt.Errorf("%w: decode DSH native %s result: %v", productruntime.ErrProtocol, method, err)
+	}
+	return nil
+}
+
+func (driver *LaneDriver) exactSession(ref productruntime.NativeSessionRef) (*laneSession, error) {
+	if ref.LaneID == "" || ref.LaneID != ref.NativeSessionID || ref.Generation != driver.config.Generation {
+		return nil, fmt.Errorf("%w: DSH lane reference is stale", productruntime.ErrStale)
+	}
 	driver.mu.Lock()
-	if _, complete := driver.archived[reference]; complete {
-		driver.mu.Unlock()
-		return nil
-	}
-	session := driver.sessions[reference.LaneID]
-	if session == nil || session.reference != reference || reference.Generation != driver.config.Generation {
-		driver.mu.Unlock()
-		return fmt.Errorf("%w: DSH native session reference is stale", productruntime.ErrStale)
-	}
-	if session.active != "" && session.poisoned == nil {
-		driver.mu.Unlock()
-		return fmt.Errorf("%w: refuse to archive active DSH ACP session", productruntime.ErrNativeRejected)
-	}
-	if session.archiving {
-		driver.mu.Unlock()
-		return fmt.Errorf("%w: DSH archive is already reconciling", productruntime.ErrCleanupDebt)
-	}
-	session.archiving = true
+	session := driver.sessions[ref.NativeSessionID]
 	driver.mu.Unlock()
-	defer func() {
-		driver.mu.Lock()
-		session.archiving = false
-		driver.mu.Unlock()
-	}()
-	return driver.archiveSteps(ctx, session)
-}
-
-func (driver *LaneDriver) startClient(profile, cwd string, arguments []string, policy NativePolicy) (ACPProcess, *ACPClient, context.CancelFunc, *lanePermissionPolicy, error) {
-	for _, argument := range arguments {
-		if overridesDSHProfile(argument) || argument == "--resume" || strings.HasPrefix(argument, "--resume=") {
-			return nil, nil, nil, nil, fmt.Errorf("%w: DSH ACP profile/session cannot be overridden", productruntime.ErrUnsupportedPolicy)
-		}
-	}
-	processCtx, cancel := context.WithCancel(context.Background())
-	environment := setEnvVar(driver.config.Environment, "DSH_PERMISSION_MODE", string(policy.Sandbox))
-	environment = setEnvVar(environment, "DSH_HOME", driver.config.DSHHome)
-	command := productruntime.NativeCommand{
-		Path: driver.config.Executable, Args: append([]string{"--profile", profile}, arguments...),
-		Env: environment, Cwd: cwd,
-	}
-	process, err := driver.config.Processes.StartACPProcess(processCtx, command)
-	if err != nil {
-		cancel()
-		return nil, nil, nil, nil, fmt.Errorf("%w: start exact DSH ACP tuple: %v", productruntime.ErrUnavailable, err)
-	}
-	permissions := &lanePermissionPolicy{policy: policy}
-	client, err := NewACPClient(process, driver.handleNotification, permissions.handle)
-	if err != nil {
-		_ = cleanupACPProcess(process)
-		cancel()
-		return nil, nil, nil, nil, err
-	}
-	return process, client, cancel, permissions, nil
-}
-
-func (driver *LaneDriver) handleNotification(notification acpNotification) {
-	if notification.Method != "session/update" {
-		return
-	}
-	var params struct {
-		SessionID string `json:"sessionId"`
-		Update    struct {
-			Kind      string `json:"sessionUpdate"`
-			MessageID string `json:"messageId"`
-			Content   struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"update"`
-	}
-	if json.Unmarshal(notification.Params, &params) != nil || params.SessionID == "" {
-		return
-	}
-	driver.mu.Lock()
-	defer driver.mu.Unlock()
-	for _, session := range driver.sessions {
-		if session.reference.NativeSessionID != params.SessionID || session.active == "" {
-			continue
-		}
-		turn := session.turns[session.active]
-		if turn == nil || turn.resultErr != nil {
-			return
-		}
-		if params.Update.Kind != "agent_message_chunk" {
-			return
-		}
-		if params.Update.MessageID == "" || len(params.Update.MessageID) > 1024 || params.Update.Content.Type != "text" {
-			turn.resultErr = fmt.Errorf("%w: DSH ACP assistant update omitted exact message identity", productruntime.ErrProtocol)
-			return
-		}
-		if turn.messageID != params.Update.MessageID {
-			if turn.messageIDs == nil {
-				turn.messageIDs = make(map[string]struct{})
-			}
-			if _, seen := turn.messageIDs[params.Update.MessageID]; seen {
-				turn.resultErr = fmt.Errorf("%w: DSH ACP assistant messages interleaved native identities", productruntime.ErrProtocol)
-				return
-			}
-			if len(turn.messageIDs) >= maxTurnMessages {
-				turn.resultErr = fmt.Errorf("%w: DSH ACP turn exceeds bounded assistant-message identities", productruntime.ErrProtocol)
-				return
-			}
-			if len(turn.result) != 0 {
-				turn.lastResult = append(turn.lastResult[:0], turn.result...)
-			}
-			turn.result = turn.result[:0]
-			turn.messageIDs[params.Update.MessageID] = struct{}{}
-			turn.messageID = params.Update.MessageID
-		}
-		turn.admitOnce.Do(func() { close(turn.admitted) })
-		if len(params.Update.Content.Text) > maxResultBytes-len(turn.result) {
-			turn.resultErr = fmt.Errorf("%w: DSH ACP result exceeds fixed bound", productruntime.ErrProtocol)
-			return
-		}
-		turn.result = append(turn.result, params.Update.Content.Text...)
-		return
-	}
-}
-
-func (driver *LaneDriver) exactSession(reference productruntime.NativeSessionRef) (*laneSession, error) {
-	driver.mu.Lock()
-	defer driver.mu.Unlock()
-	session := driver.sessions[reference.LaneID]
-	if session == nil || session.reference != reference || reference.Generation != driver.config.Generation {
-		return nil, fmt.Errorf("%w: DSH native session reference is stale", productruntime.ErrStale)
+	if session == nil || session.ref != ref {
+		return nil, fmt.Errorf("%w: DSH lane %q is not open", productruntime.ErrStale, ref.NativeSessionID)
 	}
 	return session, nil
 }
 
-func (driver *LaneDriver) reserveLane(laneID string) error {
+func (driver *LaneDriver) observeExit(session *laneSession) {
+	_, _ = driver.config.Processes.Wait(context.Background(), session.process)
 	driver.mu.Lock()
-	defer driver.mu.Unlock()
-	if driver.sessions[laneID] != nil {
-		return fmt.Errorf("%w: DSH lane already has a live ACP owner", productruntime.ErrNativeRejected)
-	}
-	if _, exists := driver.opening[laneID]; exists {
-		return fmt.Errorf("%w: DSH lane open is already in progress", productruntime.ErrNativeRejected)
-	}
-	driver.opening[laneID] = struct{}{}
-	return nil
-}
-
-func (driver *LaneDriver) unreserveLane(laneID string) {
-	driver.mu.Lock()
-	delete(driver.opening, laneID)
-	driver.mu.Unlock()
-}
-
-func (driver *LaneDriver) clearTurn(session *laneSession, turn *laneTurn) {
-	if turn == nil {
-		return
-	}
-	driver.mu.Lock()
-	turnID := turn.reference.NativeTurnID
-	if current := session.turns[turnID]; current == turn {
-		delete(session.turns, turnID)
-		for index, cachedID := range session.turnOrder {
-			if cachedID != turnID {
-				continue
-			}
-			session.terminalBytes -= turn.evidenceBytes
-			copy(session.turnOrder[index:], session.turnOrder[index+1:])
-			session.turnOrder = session.turnOrder[:len(session.turnOrder)-1]
-			break
-		}
-	}
-	if session.active == turnID {
-		session.active = ""
+	if driver.sessions[session.ref.NativeSessionID] == session {
+		delete(driver.sessions, session.ref.NativeSessionID)
 	}
 	driver.mu.Unlock()
 }
 
-func (driver *LaneDriver) clearTurnOrReservation(session *laneSession, turn *laneTurn) {
-	if turn != nil {
-		driver.clearTurn(session, turn)
-		return
-	}
-	driver.mu.Lock()
-	if session.active == turnReservedID {
-		session.active = ""
-	}
-	driver.mu.Unlock()
+func (driver *LaneDriver) stopProcess(process productruntime.OwnedProcessRef) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = driver.config.Processes.Signal(ctx, process, productruntime.ProcessTerminate)
+	_, _ = driver.config.Processes.Wait(ctx, process)
 }
 
-func (driver *LaneDriver) clearActive(session *laneSession, turnID string) {
-	driver.mu.Lock()
-	if session.active == turnID {
-		session.active = ""
-	}
-	driver.mu.Unlock()
-}
-
-func (driver *LaneDriver) settleTurn(session *laneSession, turn *laneTurn) {
-	response := <-turn.future.done
-	var terminal *productruntime.NativeTerminal
-	var terminalErr error
-	if response.err != nil {
-		terminalErr = mapACPError("session/prompt", response.err)
-	} else {
-		var completed struct {
-			StopReason string `json:"stopReason"`
-		}
-		if err := json.Unmarshal(response.result, &completed); err != nil || completed.StopReason == "" {
-			terminalErr = fmt.Errorf("%w: DSH ACP prompt omitted stop reason", productruntime.ErrProtocol)
-		} else {
-			driver.mu.Lock()
-			resultBytes, resultErr := turn.result, turn.resultErr
-			if len(resultBytes) == 0 && len(turn.lastResult) != 0 {
-				resultBytes = turn.lastResult
-			}
-			result := string(resultBytes)
-			driver.mu.Unlock()
-			if resultErr != nil {
-				terminalErr = resultErr
-			} else {
-				value := nativeTerminal(completed.StopReason, result)
-				terminal = &value
-			}
-		}
-	}
-	driver.mu.Lock()
-	turn.terminal, turn.terminalErr = terminal, terminalErr
-	if terminal != nil {
-		turn.evidenceBytes = len(terminal.Result)
-	} else if terminalErr != nil {
-		turn.evidenceBytes = len(terminalErr.Error())
-	}
-	turn.result, turn.lastResult, turn.messageIDs, turn.messageID = nil, nil, nil, ""
-	if session.active == turn.reference.NativeTurnID {
-		session.active = ""
-	}
-	driver.cacheSettledTurnLocked(session, turn)
-	turn.settleOnce.Do(func() { close(turn.settled) })
-	driver.mu.Unlock()
-}
-
-func (driver *LaneDriver) cacheSettledTurnLocked(session *laneSession, turn *laneTurn) {
-	session.turnOrder = append(session.turnOrder, turn.reference.NativeTurnID)
-	session.terminalBytes += turn.evidenceBytes
-	for len(session.turnOrder) > maxSettledTurns || session.terminalBytes > maxSettledTurnBytes {
-		oldestID := session.turnOrder[0]
-		session.turnOrder = session.turnOrder[1:]
-		oldest := session.turns[oldestID]
-		if oldest == nil {
+func dshModelArgument(arguments []string) (string, string, error) {
+	var selected string
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if strings.HasPrefix(argument, "--model=") {
+			selected = strings.TrimPrefix(argument, "--model=")
 			continue
 		}
-		session.terminalBytes -= oldest.evidenceBytes
-		delete(session.turns, oldestID)
-	}
-}
-
-func (driver *LaneDriver) poisonAfterPossibleWrite(session *laneSession, failure error) error {
-	driver.mu.Lock()
-	if session.poisoned == nil {
-		session.poisoned = failure
-	}
-	if session.archiving {
-		driver.mu.Unlock()
-		return failure
-	}
-	session.archiving = true
-	driver.mu.Unlock()
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	cleanupErr := driver.archiveSteps(cleanupCtx, session)
-	cancel()
-	driver.mu.Lock()
-	session.archiving = false
-	driver.mu.Unlock()
-	return errors.Join(failure, cleanupErr)
-}
-
-func (driver *LaneDriver) archiveSteps(ctx context.Context, session *laneSession) error {
-	driver.mu.Lock()
-	poisoned, closeAttempted, cleaned := session.poisoned != nil, session.closeAttempted, session.cleaned
-	driver.mu.Unlock()
-	var closeErr error
-	if !poisoned && !closeAttempted {
-		closeErr = session.client.Request(ctx, "session/close", map[string]string{"sessionId": session.reference.NativeSessionID}, nil)
-		driver.mu.Lock()
-		session.closeAttempted = true
-		session.closed = closeErr == nil
-		driver.mu.Unlock()
-		if closeErr != nil {
-			closeErr = fmt.Errorf("%w: DSH session/close may have been written before its result was lost: %v", productruntime.ErrAmbiguousSession, closeErr)
-		}
-	}
-	if !cleaned {
-		var err error
-		if closeErr != nil {
-			err = cleanupACPProcess(session.process)
-		} else {
-			err = session.process.Cleanup(ctx)
-		}
-		if err != nil {
-			return errors.Join(closeErr, err)
-		}
-		session.cancel()
-		driver.mu.Lock()
-		session.cleaned = true
-		driver.mu.Unlock()
-	}
-	driver.mu.Lock()
-	if current := driver.sessions[session.reference.LaneID]; current == session {
-		delete(driver.sessions, session.reference.LaneID)
-		driver.markArchiveCompleteLocked(session.reference)
-	}
-	driver.mu.Unlock()
-	if closeErr != nil {
-		return closeErr
-	}
-	return nil
-}
-
-func cleanupACPProcess(process ACPProcess) error {
-	ctx, cancel := context.WithTimeout(context.Background(), processCleanupTimeout)
-	defer cancel()
-	return process.Cleanup(ctx)
-}
-
-func (driver *LaneDriver) markArchiveCompleteLocked(reference productruntime.NativeSessionRef) {
-	driver.archiveSequence++
-	sequence := driver.archiveSequence
-	driver.archived[reference] = sequence
-	driver.archiveOrder = append(driver.archiveOrder, archiveEvidence{reference: reference, sequence: sequence})
-	for len(driver.archiveOrder) > maxArchiveEvidence {
-		oldest := driver.archiveOrder[0]
-		driver.archiveOrder = driver.archiveOrder[1:]
-		if driver.archived[oldest.reference] == oldest.sequence {
-			delete(driver.archived, oldest.reference)
-		}
-	}
-}
-
-func (policy *lanePermissionPolicy) bind(sessionID string) error {
-	policy.mu.Lock()
-	defer policy.mu.Unlock()
-	if sessionID == "" || policy.sessionID != "" && policy.sessionID != sessionID {
-		return fmt.Errorf("%w: DSH ACP permission policy changed native session", productruntime.ErrAmbiguousSession)
-	}
-	policy.sessionID = sessionID
-	return nil
-}
-
-func (policy *lanePermissionPolicy) handle(request acpServerRequest) (any, *rpcError) {
-	if request.Method != "session/request_permission" {
-		return nil, &rpcError{Code: -32601, Message: "unsupported ACP client method"}
-	}
-	var params struct {
-		SessionID string `json:"sessionId"`
-		ToolCall  struct {
-			ToolCallID string `json:"toolCallId"`
-		} `json:"toolCall"`
-		Options []struct {
-			OptionID string `json:"optionId"`
-			Name     string `json:"name"`
-			Kind     string `json:"kind"`
-		} `json:"options"`
-	}
-	if len(request.Params) == 0 || len(request.Params) > maxACPFrameBytes || json.Unmarshal(request.Params, &params) != nil ||
-		params.SessionID == "" || params.ToolCall.ToolCallID == "" || len(params.Options) == 0 || len(params.Options) > 64 {
-		return nil, &rpcError{Code: -32602, Message: "invalid DSH ACP permission request"}
-	}
-	policy.mu.Lock()
-	sessionID, nativePolicy := policy.sessionID, policy.policy
-	policy.mu.Unlock()
-	if sessionID == "" || params.SessionID != sessionID {
-		return nil, &rpcError{Code: -32602, Message: "permission request changed the exact DSH session"}
-	}
-	if nativePolicy.Approval != ApprovalAsk && nativePolicy.Approval != ApprovalNever {
-		return nil, &rpcError{Code: -32602, Message: "DSH ACP approval policy is invalid"}
-	}
-	// The lane is non-interactive and has no user-approval relay. Neither the
-	// ordinary ask policy nor an unexpected callback under approval=never is
-	// authority to grant a tool call. Select only the exact one-call rejection.
-	wanted := "reject_once"
-	knownKinds := map[string]struct{}{"allow_once": {}, "allow_always": {}, "reject_once": {}, "reject_always": {}}
-	seenIDs := make(map[string]struct{}, len(params.Options))
-	selected := ""
-	for _, option := range params.Options {
-		if option.OptionID == "" || len(option.OptionID) > 1024 || len(option.Name) > 4096 || len(option.Kind) > 64 {
-			return nil, &rpcError{Code: -32602, Message: "invalid DSH ACP permission option"}
-		}
-		if _, known := knownKinds[option.Kind]; !known {
-			return nil, &rpcError{Code: -32602, Message: "unknown DSH ACP permission option kind"}
-		}
-		if _, duplicate := seenIDs[option.OptionID]; duplicate {
-			return nil, &rpcError{Code: -32602, Message: "duplicate DSH ACP permission option identity"}
-		}
-		seenIDs[option.OptionID] = struct{}{}
-		if option.Kind == wanted {
-			if selected != "" {
-				return nil, &rpcError{Code: -32602, Message: "ambiguous DSH ACP one-call rejection option"}
+		if argument == "--model" || argument == "-m" {
+			index++
+			if index >= len(arguments) {
+				return "", "", fmt.Errorf("%w: %s requires provider/model", productruntime.ErrNativeRejected, argument)
 			}
-			selected = option.OptionID
+			selected = arguments[index]
+			continue
 		}
+		return "", "", fmt.Errorf("%w: DSH lane option %q is unsupported", productruntime.ErrNativeRejected, argument)
 	}
-	if selected != "" {
-		return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}, nil
+	if selected == "" {
+		return "", "", nil
 	}
-	return nil, &rpcError{Code: -32602, Message: "DSH ACP permission options cannot represent the lane policy"}
+	provider, model, ok := strings.Cut(selected, "/")
+	if !ok || strings.TrimSpace(provider) != provider || strings.TrimSpace(model) != model || provider == "" || model == "" || strings.Contains(model, "/") {
+		return "", "", fmt.Errorf("%w: DSH --model requires provider/model", productruntime.ErrNativeRejected)
+	}
+	return provider, model, nil
 }
 
-type acpSessionInfo struct {
-	SessionID string `json:"sessionId"`
-	Cwd       string `json:"cwd"`
+func dshTurnOutcome(value string) (productruntime.TurnOutcome, int, error) {
+	switch value {
+	case "completed":
+		return productruntime.TurnCompleted, 0, nil
+	case "interrupted":
+		return productruntime.TurnInterrupted, 130, nil
+	case "failed":
+		return productruntime.TurnFailed, 1, nil
+	default:
+		return "", 0, fmt.Errorf("%w: DSH returned unknown turn outcome %q", productruntime.ErrProtocol, value)
+	}
 }
 
-func listACPSessions(ctx context.Context, client *ACPClient, cwd string) ([]acpSessionInfo, error) {
-	var result []acpSessionInfo
-	seenSessions := make(map[string]struct{})
-	cursor := ""
-	seenCursors := make(map[string]struct{})
-	for page := 0; page < maxSessionPages; page++ {
-		params := map[string]any{"cwd": cwd}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		var response struct {
-			Sessions   json.RawMessage `json:"sessions"`
-			NextCursor string          `json:"nextCursor"`
-		}
-		if err := client.Request(ctx, "session/list", params, &response); err != nil {
-			return nil, err
-		}
-		var sessions []acpSessionInfo
-		if len(response.Sessions) == 0 || bytes.Equal(bytes.TrimSpace(response.Sessions), []byte("null")) || json.Unmarshal(response.Sessions, &sessions) != nil {
-			return nil, fmt.Errorf("%w: DSH ACP session/list omitted its sessions array", productruntime.ErrProtocol)
-		}
-		if len(sessions) > maxSessionInfos-len(result) {
-			return nil, fmt.Errorf("%w: DSH ACP session/list exceeds fixed bounds", productruntime.ErrProtocol)
-		}
-		for _, session := range sessions {
-			if !validNativeID(session.SessionID) || len(session.Cwd) > maxCwdBytes || !sameCwd(session.Cwd, cwd) {
-				return nil, fmt.Errorf("%w: DSH ACP session/list returned an invalid identity or cwd", productruntime.ErrProtocol)
-			}
-			if _, duplicate := seenSessions[session.SessionID]; duplicate {
-				return nil, fmt.Errorf("%w: DSH ACP session/list repeated a native identity", productruntime.ErrProtocol)
-			}
-			seenSessions[session.SessionID] = struct{}{}
-			result = append(result, session)
-		}
-		if response.NextCursor == "" {
-			return result, nil
-		}
-		if len(response.NextCursor) > 1024 {
-			return nil, fmt.Errorf("%w: DSH ACP session/list cursor exceeds fixed bounds", productruntime.ErrProtocol)
-		}
-		if _, duplicate := seenCursors[response.NextCursor]; duplicate {
-			return nil, fmt.Errorf("%w: DSH ACP session/list repeated a cursor", productruntime.ErrProtocol)
-		}
-		seenCursors[response.NextCursor], cursor = struct{}{}, response.NextCursor
+func newInputID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
 	}
-	return nil, fmt.Errorf("%w: DSH ACP session/list pagination exceeds fixed bounds", productruntime.ErrProtocol)
+	return "input-" + hex.EncodeToString(bytes), nil
 }
 
-func listedSessionAtCwd(sessions []acpSessionInfo, nativeID, cwd string) bool {
-	for _, session := range sessions {
-		if session.SessionID == nativeID && sameCwd(session.Cwd, cwd) {
-			return true
-		}
-	}
-	return false
-}
-
-func listedSessionID(sessions []acpSessionInfo, nativeID string) bool {
-	for _, session := range sessions {
-		if session.SessionID == nativeID {
-			return true
-		}
-	}
-	return false
-}
-
-func sameCwd(left, right string) bool {
-	if !filepath.IsAbs(left) || !filepath.IsAbs(right) || filepath.Clean(left) != left || filepath.Clean(right) != right {
-		return false
-	}
-	resolvedLeft, leftErr := filepath.EvalSymlinks(left)
-	resolvedRight, rightErr := filepath.EvalSymlinks(right)
-	if leftErr == nil && rightErr == nil {
-		return resolvedLeft == resolvedRight
-	}
-	return left == right
-}
-
-func sessionParams(nativeID, cwd string, _ NativePolicy) map[string]any {
-	parameters := map[string]any{
-		"cwd": cwd, "mcpServers": []any{},
-	}
-	if nativeID != "" {
-		parameters["sessionId"] = nativeID
-	}
-	return parameters
+func validCwd(cwd string) bool {
+	return cwd != "" && filepath.IsAbs(cwd) && filepath.Clean(cwd) == cwd
 }
 
 func setEnvVar(environment []productruntime.EnvVar, name, value string) []productruntime.EnvVar {
@@ -867,55 +343,3 @@ func setEnvVar(environment []productruntime.EnvVar, name, value string) []produc
 	}
 	return append(result, productruntime.EnvVar{Name: name, Value: value})
 }
-
-func validateOpenRequest(request productruntime.LaneOpenRequest) error {
-	if request.ProductID != ProductID || request.LaneID == "" || len(request.LaneID) > maxLaneIDBytes || request.ResumeNativeID != "" && !validNativeID(request.ResumeNativeID) ||
-		!validCwd(request.Cwd) ||
-		request.ProfileIdentity == "" || len(request.ProfileIdentity) > maxProfileBytes || !request.PermissionMode.Valid() || len(request.Arguments) > maxLaneArguments {
-		return fmt.Errorf("%w: DSH lane open request is incomplete", productruntime.ErrNativeRejected)
-	}
-	if err := validateProfileIdentity(request.ProfileIdentity); err != nil {
-		return err
-	}
-	totalArguments := 0
-	for _, argument := range request.Arguments {
-		if len(argument) > maxLaneArgumentBytes {
-			return fmt.Errorf("%w: DSH lane argument exceeds its fixed bound", productruntime.ErrNativeRejected)
-		}
-		totalArguments += len(argument)
-		if totalArguments > maxLaneArgumentsBytes {
-			return fmt.Errorf("%w: DSH lane arguments exceed their fixed total bound", productruntime.ErrNativeRejected)
-		}
-	}
-	return nil
-}
-
-func validNativeID(nativeID string) bool {
-	return nativeID != "" && len(nativeID) <= maxNativeIDBytes && strings.TrimSpace(nativeID) == nativeID && !strings.ContainsAny(nativeID, "\x00\r\n")
-}
-
-func validCwd(cwd string) bool {
-	return filepath.IsAbs(cwd) && filepath.Clean(cwd) == cwd && len(cwd) <= maxCwdBytes
-}
-
-func normalizePermission(mode permissionmode.Mode) permissionmode.Mode {
-	if mode == "" {
-		return permissionmode.Default
-	}
-	return mode
-}
-
-func nativeTerminal(stopReason, result string) productruntime.NativeTerminal {
-	terminal := productruntime.NativeTerminal{Result: result, ResultDigest: sha256.Sum256([]byte(result)), NativeStopReason: stopReason}
-	switch stopReason {
-	case "end_turn", "max_tokens", "max_turn_requests":
-		terminal.Outcome = productruntime.TurnCompleted
-	case "cancelled":
-		terminal.Outcome, terminal.ExitLike = productruntime.TurnInterrupted, 130
-	default:
-		terminal.Outcome, terminal.ExitLike = productruntime.TurnFailed, 1
-	}
-	return terminal
-}
-
-var _ productruntime.LaneDriver = (*LaneDriver)(nil)

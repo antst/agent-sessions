@@ -131,6 +131,19 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	}
 }
 
+func TestLiveHelloCapabilitiesAreClosedAndOnlyAdvertiseTrueLaneSupport(t *testing.T) {
+	base := `{"protocol":1,"uuid":"session","name":"","groups":[],"product":"dsh","info":{},"capabilities":%s}`
+	for _, invalid := range []string{`{}`, `{"lane":false}`, `{"future":true}`} {
+		if _, _, err := decodeLiveHello(json.RawMessage(fmt.Sprintf(base, invalid))); err == nil {
+			t.Fatalf("invalid capabilities accepted: %s", invalid)
+		}
+	}
+	report, protocol, err := decodeLiveHello(json.RawMessage(fmt.Sprintf(base, `{"lane":true}`)))
+	if err != nil || protocol != 1 || !report.Capabilities.Lane {
+		t.Fatalf("lane hello = %+v, protocol=%d, err=%v", report, protocol, err)
+	}
+}
+
 func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -320,6 +333,45 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	fromDaemon, err := server.Call(ctx, "session-rpc", "delivery", "message.deliver", map[string]string{"body": "hello"})
 	if err != nil || !strings.Contains(string(fromDaemon), "hello") {
 		t.Fatalf("daemon-to-session call = %s, %v", fromDaemon, err)
+	}
+}
+
+func TestLivePresencePublishesLaneCapabilityAndServesLaneCalls(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	joined := make(chan liveSessionReport, 1)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) { joined <- report }, func(liveSessionReport) {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	startLiveSessionClient(ctx, server.listener.Addr().String(), liveSessionReport{
+		UUID: "dsh-native", Name: "worker", Groups: []string{"team"}, Product: "dsh", Info: map[string]string{},
+		Capabilities: liveSessionCapabilities{Lane: true},
+	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+		if method != "lane.turn.start" || !strings.Contains(string(params), `"input_id":"input"`) {
+			t.Fatalf("lane request = %q %s", method, params)
+		}
+		return json.RawMessage(`{"native_message_id":"product-message"}`), nil
+	})
+	select {
+	case report := <-joined:
+		if !report.Capabilities.Lane {
+			t.Fatalf("lane capability = %#v", report.Capabilities)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lane-capable session did not join")
+	}
+	waitCtx, stopWait := context.WithTimeout(ctx, time.Second)
+	defer stopWait()
+	if err := server.Wait(waitCtx, "dsh-native", "dsh", true); err != nil {
+		t.Fatal(err)
+	}
+	result, err := server.Call(ctx, "dsh-native", "input", "lane.turn.start", map[string]string{
+		"input_id": "input", "body": "work", "mode": "followup",
+	})
+	if err != nil || !strings.Contains(string(result), "product-message") {
+		t.Fatalf("lane response = %s, %v", result, err)
 	}
 }
 

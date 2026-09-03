@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+# Native DSH profile operations shared by install and removal transactions.
+# The caller owns strict shell options and provides remove_managed_tree.
+
+dsh_profile_command() {
+  local dsh_path=$1 pnpm_path=$2
+  shift 2
+  PATH="$(dirname -- "$pnpm_path"):$PATH" "$dsh_path" plugin --profile agent-sessions "$@"
+}
+
+validate_dsh_native_tuple() {
+  local dsh_path=$1 pnpm_path=$2 dsh_version pnpm_version
+  dsh_version=$("$dsh_path" --version)
+  if ! grep -Eq '(^|[[:space:]])0\.1\.2-alpha\.5($|[[:space:]])' <<<"$dsh_version"; then
+    printf 'DSH version is incompatible; require exact 0.1.2-alpha.5.\n' >&2
+    return 1
+  fi
+  pnpm_version=$("$pnpm_path" --version)
+  if [[ "$pnpm_version" != 10.28.1 ]]; then
+    printf 'pnpm version is incompatible with DSH; require exact 10.28.1.\n' >&2
+    return 1
+  fi
+}
+
+dsh_profile_has_agent_sessions() {
+  local dsh_path=$1 pnpm_path=$2 inventory
+  inventory=$(dsh_profile_command "$dsh_path" "$pnpm_path" list --depth 0 --json)
+  grep -Fq '"@agent-sessions/dsh-native"' <<<"$inventory"
+}
+
+remove_dsh_native_integration() {
+  local dsh_path=$1 pnpm_path=$2
+  if dsh_profile_has_agent_sessions "$dsh_path" "$pnpm_path"; then
+    dsh_profile_command "$dsh_path" "$pnpm_path" remove @agent-sessions/dsh-native
+  fi
+}
+
+install_dsh_native_integration() {
+  local dsh_path=$1 pnpm_path=$2 integration_root=$3 temporary_parent temporary_root status
+  temporary_parent=$(cd -P -- "${TMPDIR:-/tmp}" && pwd)
+  temporary_root=$(mktemp -d "$temporary_parent/agent-sessions-dsh.XXXXXX")
+  status=0
+  (
+    package_root="$temporary_root/package"
+    mkdir -p "$package_root/shared"
+    install -m 0644 "$integration_root/integrations/dsh/package.json" "$package_root/package.json"
+    install -m 0644 "$integration_root/integrations/dsh/plugin.cjs" "$package_root/plugin.cjs"
+    install -m 0644 "$integration_root/integrations/dsh/cordis.patch.yml" "$package_root/cordis.patch.yml"
+    install -m 0644 "$integration_root/integrations/shared/live-session.js" "$package_root/shared/live-session.cjs"
+
+    # DSH owns profile/plugin mutation. DSH has no package-build command, so
+    # this one staging step turns the release files into a physical tarball;
+    # `dsh plugin add` performs the actual install and profile composition.
+    "$pnpm_path" --dir "$package_root" pack --pack-destination "$temporary_root" >/dev/null
+    set -- "$temporary_root"/*.tgz
+    [[ $# -eq 1 && -f "$1" ]]
+    archive=$1
+    remove_dsh_native_integration "$dsh_path" "$pnpm_path"
+    dsh_profile_command "$dsh_path" "$pnpm_path" add "$archive"
+  ) || status=$?
+  remove_managed_tree "$temporary_root" "$temporary_parent"
+  return "$status"
+}
