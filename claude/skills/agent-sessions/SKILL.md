@@ -59,7 +59,7 @@ recovery, and third-party callers; they are not a managed-agent fallback.
 Sessions daemon owns the background worker. A terminal notice is status
 metadata, not the answer. When it says `collection=required`, follow its
 structured `agent_sessions.lane` collection hint with one `wait` consumer and
-match the final answer to the terminal turn. `collection=not_required` means
+match the final answer to the terminal turn. `collection=none` means
 another collector already consumed that turn. Use the target product's lane skill for detailed
 policy, readiness, collection, and cleanup rules.
 

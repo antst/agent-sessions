@@ -393,19 +393,25 @@ func TestRemoteLaneTerminalNoticeIsAcknowledgedOnceAndPointsBackToDestination(t 
 	case frame := <-delivered:
 		if frame.MessageID != laneTerminalNoticeID("lane", "turn") ||
 			!strings.Contains(frame.Content, "QWEN_LANE_TERMINAL") ||
-			!strings.Contains(frame.Content, "collection=not_required") ||
+			!strings.Contains(frame.Content, "collection=required") ||
+			!strings.Contains(frame.Content, `mcp_hint={"tool":"agent_sessions.lane","arguments":{"host":"`+localHost+`","product":"qwen","command":"wait","arguments":["lane"]}}`) ||
 			strings.Contains(frame.Content, "Collection hint:") {
 			t.Fatalf("terminal frame = %#v", frame)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("remote terminal notice was not delivered")
 	}
-	if err := coordinator.publishLaneTerminalNotice(runtime, actor); err != nil {
+	terminal := cloneLaneActor(actor)
+	coordinator.mu.Lock()
+	actor.state = "idle"
+	coordinator.mu.Unlock()
+	if err := coordinator.publishLaneTerminalNotice(runtime, &terminal); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case repeated := <-delivered:
-		if repeated.MessageID != laneTerminalNoticeID("lane", "turn") {
+		if repeated.MessageID != laneTerminalNoticeID("lane", "turn") ||
+			!strings.Contains(repeated.Content, "collection=none") || strings.Contains(repeated.Content, "mcp_hint=") {
 			t.Fatalf("repeated live terminal frame = %#v", repeated)
 		}
 	case <-time.After(3 * time.Second):

@@ -90,7 +90,7 @@ Read the last `turn.completed`, then select the `item.completed` agent message w
 `lane.ready` event is only a startup pointer, never a result. The owner also receives a
 `GROK_LANE_TERMINAL` notice; continue useful work until it arrives. When it says
 `collection=required`, follow its structured `agent_sessions.lane` `wait` hint;
-`collection=not_required` means another collector already consumed it. Do not
+`collection=none` means another collector already consumed it. Do not
 treat the notice as the answer.
 
 ## Messages and follow-up

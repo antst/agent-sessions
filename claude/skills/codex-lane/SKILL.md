@@ -124,7 +124,7 @@ Pick one mode. Modes A and B are both correct; C is a fallback.
 **A. Push-notice driven.** Continue with other work. The lane's
 terminal notice arrives as a peer message. If it carries `collection=required`,
 follow its structured `agent_sessions.lane` `wait` hint. If it carries
-`collection=not_required`, another collector already consumed the turn. The
+`collection=none`, another collector already consumed the turn. The
 message is status metadata, never a result.
 
 Peer delivery is push-based. Do **not** poll `agent_sessions.check_inbox`, sleep, or block the

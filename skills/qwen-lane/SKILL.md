@@ -42,7 +42,7 @@ at `lane.ready`, not at the answer. Select the final `agent_message` matching th
 last `turn.completed`, and report its outcome and exit. A wait timeout exits 124
 without cancelling work. A `QWEN_LANE_TERMINAL` notice is status metadata,
 not the answer. If it says `collection=required`, follow its structured
-`agent_sessions.lane` collection hint; `collection=not_required` means another
+`agent_sessions.lane` collection hint; `collection=none` means another
 collector already consumed the turn.
 
 The live lane accepts Agent Sessions messages. An idle message creates one durable

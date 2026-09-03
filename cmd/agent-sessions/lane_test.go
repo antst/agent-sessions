@@ -22,13 +22,45 @@ func TestLaneTerminalNoticeBodyGatesStructuredCollectionHint(t *testing.T) {
 	actor := laneActor{id: "lane", product: "codex", name: "worker", turnID: "turn", outcome: "completed"}
 	required := laneTerminalNoticeBody(actor, "remote", true)
 	if !strings.Contains(required, "collection=required") ||
-		!strings.Contains(required, "Collection hint: agent_sessions.lane host=remote product=codex command=wait arguments=[\"lane\"]") ||
+		!strings.Contains(required, `mcp_hint={"tool":"agent_sessions.lane","arguments":{"host":"remote","product":"codex","command":"wait","arguments":["lane"]}}`) ||
+		strings.Contains(required, "Collection hint:") ||
 		strings.Contains(required, "codex-peer-lane") {
 		t.Fatalf("required notice = %q", required)
 	}
 	collected := laneTerminalNoticeBody(actor, "remote", false)
-	if !strings.Contains(collected, "collection=not_required") || strings.Contains(collected, "Collection hint:") {
+	if !strings.Contains(collected, "collection=none") || strings.Contains(collected, "mcp_hint=") {
 		t.Fatalf("collected notice = %q", collected)
+	}
+	local := laneTerminalNoticeBody(actor, "", true)
+	if !strings.Contains(local, `mcp_hint={"tool":"agent_sessions.lane","arguments":{"product":"codex","command":"wait","arguments":["lane"]}}`) ||
+		strings.Contains(local, `"host"`) {
+		t.Fatalf("local required notice = %q", local)
+	}
+}
+
+func TestLaneTerminalCollectionRequiredUsesCurrentLiveTurnTruth(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	current := &laneActor{id: "lane", turnID: "turn", state: "terminal"}
+	coordinator.lanes[current.id] = current
+	notice := cloneLaneActor(current)
+	if !coordinator.laneTerminalCollectionRequired(notice) {
+		t.Fatal("uncollected detached turn did not require collection")
+	}
+	current.collecting = true
+	if coordinator.laneTerminalCollectionRequired(notice) {
+		t.Fatal("turn with an attached blocking collector required another collection")
+	}
+	current.collecting, current.state = false, "idle"
+	if coordinator.laneTerminalCollectionRequired(notice) {
+		t.Fatal("already collected turn required another collection")
+	}
+	current.state, current.turnID = "terminal", "later-turn"
+	if coordinator.laneTerminalCollectionRequired(notice) {
+		t.Fatal("superseded terminal turn required collection")
+	}
+	delete(coordinator.lanes, current.id)
+	if coordinator.laneTerminalCollectionRequired(notice) {
+		t.Fatal("absent lane required collection")
 	}
 }
 

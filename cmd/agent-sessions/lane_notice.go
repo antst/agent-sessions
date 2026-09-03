@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,18 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
+
+type laneTerminalMCPArguments struct {
+	Host      string   `json:"host,omitempty"`
+	Product   string   `json:"product"`
+	Command   string   `json:"command"`
+	Arguments []string `json:"arguments"`
+}
+
+type laneTerminalMCPHint struct {
+	Tool      string                   `json:"tool"`
+	Arguments laneTerminalMCPArguments `json:"arguments"`
+}
 
 const (
 	laneNoticeDeliveryTimeout = 10 * time.Second
@@ -27,16 +40,25 @@ func laneTerminalNoticeBody(actor laneActor, destinationHost string, collectionR
 		"%s_LANE_TERMINAL notice=%s name=%s session=%s turn=%s status=%s outcome=%s exit=%v collection=%s",
 		strings.ToUpper(actor.product), laneTerminalNoticeID(actor.id, actor.turnID), actor.name,
 		actor.id, actor.turnID, actor.outcome, actor.outcome, laneOutcomeExit(actor.outcome),
-		map[bool]string{true: "required", false: "not_required"}[collectionRequired],
+		map[bool]string{true: "required", false: "none"}[collectionRequired],
 	)
 	if !collectionRequired {
 		return body
 	}
-	hint := fmt.Sprintf("agent_sessions.lane product=%s command=wait arguments=[%q]", actor.product, actor.id)
-	if destinationHost != "" {
-		hint = fmt.Sprintf("agent_sessions.lane host=%s product=%s command=wait arguments=[%q]", destinationHost, actor.product, actor.id)
-	}
-	return body + "\nCollection hint: " + hint
+	hint, _ := json.Marshal(laneTerminalMCPHint{
+		Tool: "agent_sessions.lane",
+		Arguments: laneTerminalMCPArguments{
+			Host: destinationHost, Product: actor.product, Command: "wait", Arguments: []string{actor.id},
+		},
+	})
+	return body + "\nmcp_hint=" + string(hint)
+}
+
+func (c *hostCoordinator) laneTerminalCollectionRequired(notice laneActor) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	actor := c.lanes[notice.id]
+	return actor != nil && actor.turnID == notice.turnID && actor.state == "terminal" && !actor.collecting
 }
 
 func (c *hostCoordinator) queueLaneTerminalNotice(runtime *daemonpkg.Runtime, actor *laneActor) {
@@ -77,7 +99,11 @@ func (c *hostCoordinator) presentLaneTerminalNotice(
 ) error {
 	hostID := strings.TrimSpace(runtime.HostID())
 	remoteParent := strings.Contains(actor.parentID, "/")
-	body := laneTerminalNoticeBody(actor, map[bool]string{true: hostID}[remoteParent], false)
+	body := laneTerminalNoticeBody(
+		actor,
+		map[bool]string{true: hostID}[remoteParent],
+		c.laneTerminalCollectionRequired(actor),
+	)
 	if !remoteParent {
 		target, ok, targetErr := runtime.Attachments().ActiveAttachment(actor.parentID)
 		if targetErr != nil {
