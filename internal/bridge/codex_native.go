@@ -844,7 +844,10 @@ func (native *CodexNative) clientForOperation(ctx context.Context) (*appServerCl
 		select {
 		case <-native.client.done:
 		default:
-			return native.client, nil
+			if exactProcessIdentityMatch(native.client.peerPID, native.client.peerProcStart) {
+				return native.client, nil
+			}
+			native.client.close()
 		}
 	}
 	client, err := openCodexNativeClient(ctx, native.config)

@@ -560,6 +560,59 @@ func TestCodexNativeReopensOnceOnOperationAfterAppServerReplacement(t *testing.T
 	}
 }
 
+func TestCodexNativeRefreshReplacesStalePeerBeforeSocketEOF(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(home, "app-server.sock")
+	threadID := "00000000-0000-0000-0000-00000000c045"
+	first := startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		if stringValue(request["method"]) != "initialize" {
+			return nil, errors.New("unexpected old App Server operation")
+		}
+		return map[string]any{}, nil
+	})
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	oldClient := native.clientSnapshot()
+	oldClient.peerProcStart = "stale-peer-start"
+	first.close()
+	startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/read":
+			return map[string]any{"thread": map[string]any{
+				"id": threadID, "name": "replacement", "cwd": home, "source": "appServer",
+			}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected replacement method %s", stringValue(request["method"]))
+		}
+	})
+	if _, _, gotSocket, err := native.RefreshAppServerEvidence(context.Background()); err != nil || gotSocket != socket {
+		t.Fatalf("refresh stale evidence socket = %q, err = %v", gotSocket, err)
+	}
+	if native.clientSnapshot() == oldClient {
+		t.Fatal("refresh retained a client whose socket peer identity was stale")
+	}
+	select {
+	case <-oldClient.done:
+	default:
+		t.Fatal("refresh did not close the stale client")
+	}
+	thread, err := native.ResolveThread(context.Background(), threadID)
+	if err != nil || thread.ID != threadID || thread.Name != "replacement" {
+		t.Fatalf("replacement operation = %+v, %v", thread, err)
+	}
+}
+
 func TestCodexNativeRecoversActiveTurnAfterDaemonRestart(t *testing.T) {
 	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
 	executable, err := os.Executable()
