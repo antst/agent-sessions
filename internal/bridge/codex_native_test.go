@@ -88,21 +88,13 @@ func TestCodexNativePreservesLaunchResolveDeliveryAndArchiveProtocol(t *testing.
 			return nil, errors.New("unexpected native method " + method)
 		}
 	})
-	startedNative := 0
 	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
 		CodexBinary: executable, CodexHome: home, SocketPath: socket,
-		Start: func(context.Context, string, []string, []string) error {
-			startedNative++
-			return nil
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(native.Close)
-	if startedNative != 0 {
-		t.Fatal("live App Server was started again")
-	}
 	if err := native.ReloadMCPServers(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -222,9 +214,6 @@ func TestCodexLaneRecoveryAcceptsPreferredTurnCompletedDuringDowntimeWithoutComp
 	})
 	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
 		CodexBinary: executable, CodexHome: home, SocketPath: socket,
-		Start: func(context.Context, string, []string, []string) error {
-			return errors.New("live app server must not restart")
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -427,7 +416,7 @@ func TestCodexNativeUnarchivesOnlyWhenProductReportsArchivedMembership(t *testin
 	}
 }
 
-func TestCodexNativeLazilyStartsSupportedAppServerAndLeavesItRunning(t *testing.T) {
+func TestCodexNativeRequiresProductOwnedAppServer(t *testing.T) {
 	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", filepath.Join("app-server-control", "app-server-control.sock")))
 	executable, err := os.Executable()
 	if err != nil {
@@ -442,38 +431,11 @@ func TestCodexNativeLazilyStartsSupportedAppServerAndLeavesItRunning(t *testing.
 		t.Fatal(err)
 	}
 	socket := filepath.Join(socketRoot, "app-server-control.sock")
-	startCalls := 0
-	var fake *fakeAppServer
-	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+	_, err = OpenCodexNative(context.Background(), CodexNativeConfig{
 		CodexBinary: executable, CodexHome: home, SocketPath: socket,
-		Start: func(_ context.Context, binary string, args, _ []string) error {
-			startCalls++
-			if binary != executable || !reflect.DeepEqual(args, []string{"app-server", "daemon", "start"}) {
-				return errors.New("lazy start command changed")
-			}
-			fake = startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
-				if stringValue(request["method"]) != "initialize" {
-					return nil, errors.New("unexpected request")
-				}
-				return map[string]any{}, nil
-			})
-			return nil
-		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if startCalls != 1 {
-		t.Fatalf("lazy start calls = %d", startCalls)
-	}
-	native.Close()
-	connection, err := net.DialTimeout("unix", socket, time.Second)
-	if err != nil {
-		t.Fatalf("closing daemon client stopped native App Server: %v", err)
-	}
-	_ = connection.Close()
-	if fake == nil || strings.TrimSpace(socket) == "" {
-		t.Fatal("lazy App Server fixture was not created")
+	if err == nil || err.Error() != "Codex App Server is not running: run codex app-server daemon start" {
+		t.Fatalf("missing product App Server error = %v", err)
 	}
 }
 
@@ -499,13 +461,8 @@ func TestCodexNativeReopensOnceOnOperationAfterAppServerReplacement(t *testing.T
 			return nil, errors.New("unexpected old App Server operation")
 		}
 	})
-	starts := 0
 	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
 		CodexBinary: executable, CodexHome: home, SocketPath: socket,
-		Start: func(context.Context, string, []string, []string) error {
-			starts++
-			return errors.New("replacement was already running")
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -554,9 +511,6 @@ func TestCodexNativeReopensOnceOnOperationAfterAppServerReplacement(t *testing.T
 	thread, err := native.ResolveThread(context.Background(), threadID)
 	if err != nil || thread.ID != threadID || thread.Name != "replacement" {
 		t.Fatalf("replacement operation = %+v, %v", thread, err)
-	}
-	if starts != 0 {
-		t.Fatalf("running replacement started %d extra App Servers", starts)
 	}
 }
 
@@ -613,6 +567,89 @@ func TestCodexNativeRefreshReplacesStalePeerBeforeSocketEOF(t *testing.T) {
 	}
 }
 
+func TestCodexNativeReopenRestoresKnownThreadSubscriptions(t *testing.T) {
+	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(home, "app-server.sock")
+	threadID := "00000000-0000-0000-0000-00000000c046"
+	turnID := "turn-after-reopen"
+	threadResult := map[string]any{"thread": map[string]any{
+		"id": threadID, "name": "known", "cwd": home, "source": "appServer", "status": map[string]any{"type": "idle"},
+	}}
+	first := startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/resume":
+			return threadResult, nil
+		default:
+			return nil, errors.New("unexpected old App Server operation")
+		}
+	})
+	events := make(chan CodexNativeEvent, 1)
+	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
+		CodexBinary: executable, CodexHome: home, SocketPath: socket,
+		OnEvent: func(event CodexNativeEvent) {
+			if event.Kind == "turn/started" {
+				events <- event
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(native.Close)
+	if _, err := native.ReattachThread(context.Background(), threadID); err != nil {
+		t.Fatal(err)
+	}
+	native.clientSnapshot().peerProcStart = "stale-peer-start"
+	first.close()
+	replacement := startFakeNativeAppServerAt(t, socket, func(request map[string]any) (any, error) {
+		switch stringValue(request["method"]) {
+		case "initialize":
+			return map[string]any{}, nil
+		case "thread/resume":
+			params, _ := request["params"].(map[string]any)
+			if stringValue(params["threadId"]) != threadID || !boolValue(params["excludeTurns"]) {
+				return nil, errors.New("replacement subscription target changed")
+			}
+			return threadResult, nil
+		default:
+			return nil, errors.New("unexpected replacement App Server operation")
+		}
+	})
+	replacement.afterResponse = func(conn net.Conn, request map[string]any) {
+		if stringValue(request["method"]) != "thread/resume" {
+			return
+		}
+		body, _ := json.Marshal(map[string]any{
+			"method": "turn/started",
+			"params": map[string]any{"threadId": threadID, "turn": map[string]any{"id": turnID}},
+		})
+		_ = writeTestFrame(conn, body)
+	}
+	if _, _, _, err := native.RefreshAppServerEvidence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.ThreadID != threadID || event.TurnID != turnID {
+			t.Fatalf("replacement event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement observer did not receive the known thread event")
+	}
+	native.mu.Lock()
+	activeTurn := native.activeTurns[threadID]
+	native.mu.Unlock()
+	if activeTurn != turnID {
+		t.Fatalf("active turn after replacement = %q, want %q", activeTurn, turnID)
+	}
+}
+
 func TestCodexNativeRecoversActiveTurnAfterDaemonRestart(t *testing.T) {
 	home := codexNativeCanonicalDirectory(t, testutil.ShortSocketRoot(t, "cn-", "app-server.sock"))
 	executable, err := os.Executable()
@@ -664,13 +701,16 @@ func TestCodexNativeRecoversActiveTurnAfterDaemonRestart(t *testing.T) {
 	if err != nil || resolvedTurn != turnID {
 		t.Fatalf("resolved recovered turn = %q, %v", resolvedTurn, err)
 	}
+	native.mu.Lock()
+	native.activeTurns[threadID] = "stale-cached-turn"
+	native.mu.Unlock()
 	if delivery, err := native.SendMessage(context.Background(), threadID, "after restart"); err != nil || delivery != "steered" {
 		t.Fatalf("delivery = %q, %v", delivery, err)
 	}
 	methodsMu.Lock()
 	gotMethods := append([]string(nil), methods...)
 	methodsMu.Unlock()
-	wantMethods := []string{"thread/resume", "thread/turns/list", "thread/turns/list", "thread/read", "turn/steer"}
+	wantMethods := []string{"thread/resume", "thread/turns/list", "thread/turns/list", "thread/read", "thread/turns/list", "turn/steer"}
 	if !reflect.DeepEqual(gotMethods, wantMethods) {
 		t.Fatalf("native method sequence = %v, want %v", gotMethods, wantMethods)
 	}
@@ -918,7 +958,7 @@ func TestCodexNativeLiveFreshPreparation(t *testing.T) {
 		t.Fatal(err)
 	}
 	native, err := OpenCodexNative(context.Background(), CodexNativeConfig{
-		CodexBinary: binary, CodexHome: filepath.Join(home, ".codex"), Environment: os.Environ(),
+		CodexBinary: binary, CodexHome: filepath.Join(home, ".codex"),
 	})
 	if err != nil {
 		t.Fatal(err)

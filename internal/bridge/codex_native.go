@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,14 +17,12 @@ import (
 	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
-// CodexNativeConfig selects the user's real Codex profile and supported App
-// Server lifecycle command. It never creates or copies a credential profile.
+// CodexNativeConfig selects the user's real Codex profile and product-owned
+// App Server. It never creates or copies a credential profile.
 type CodexNativeConfig struct {
 	CodexBinary string
 	CodexHome   string
 	SocketPath  string
-	Environment []string
-	Start       func(context.Context, string, []string, []string) error
 	OnEvent     func(CodexNativeEvent)
 }
 
@@ -101,10 +100,9 @@ type CodexNative struct {
 	loadedThreads map[string]bool
 }
 
-// OpenCodexNative connects to the selected App Server and lazily starts it
-// through `codex app-server daemon start` only when the native socket is absent.
+// OpenCodexNative connects to the selected product-owned App Server.
 //
-//nolint:gocyclo // Lazy native startup validates every profile, executable, socket, and timeout boundary.
+//nolint:gocyclo // Native connection validates the profile, socket, and every timeout boundary.
 func OpenCodexNative(ctx context.Context, config CodexNativeConfig) (*CodexNative, error) {
 	if ctx == nil {
 		return nil, errors.New("codex native context is nil")
@@ -119,9 +117,6 @@ func OpenCodexNative(ctx context.Context, config CodexNativeConfig) (*CodexNativ
 	}
 	config.CodexBinary = binary
 	config.CodexHome = home
-	if len(config.Environment) == 0 {
-		config.Environment = os.Environ()
-	}
 	if config.SocketPath == "" {
 		config.SocketPath = filepath.Join(home, "app-server-control", "app-server-control.sock")
 	}
@@ -502,14 +497,9 @@ func (native *CodexNative) SendMessage(ctx context.Context, threadID, message st
 	}
 	input := []map[string]any{{"type": "text", "text": message}}
 	if statusType(thread.Status) == "active" {
-		native.mu.Lock()
-		turnID := native.activeTurns[threadID]
-		native.mu.Unlock()
-		if turnID == "" {
-			turnID, err = native.recoverActiveTurn(ctx, threadID)
-			if err != nil {
-				return "", err
-			}
+		turnID, recoverErr := native.recoverActiveTurn(ctx, threadID)
+		if recoverErr != nil {
+			return "", recoverErr
 		}
 		if err := native.request(ctx, 30*time.Second, "turn/steer", map[string]any{
 			"threadId": threadID, "input": input, "expectedTurnId": turnID,
@@ -854,9 +844,21 @@ func (native *CodexNative) clientForOperation(ctx context.Context) (*appServerCl
 	if err != nil {
 		return nil, err
 	}
+	native.mu.Lock()
+	loadedThreads := make([]string, 0, len(native.loadedThreads))
+	for threadID := range native.loadedThreads {
+		loadedThreads = append(loadedThreads, threadID)
+	}
+	native.mu.Unlock()
+	sort.Strings(loadedThreads)
+	for _, threadID := range loadedThreads {
+		if _, err := resumeThreadForPeer(client, threadID); err != nil {
+			client.close()
+			return nil, fmt.Errorf("restore Codex thread subscription %s: %w", threadID, err)
+		}
+	}
 	native.client = client
 	native.mu.Lock()
-	native.loadedThreads = map[string]bool{}
 	native.activeTurns = map[string]string{}
 	for key, waiter := range native.turnWaiters {
 		delete(native.turnWaiters, key)
@@ -873,21 +875,10 @@ func openCodexNativeClient(ctx context.Context, config CodexNativeConfig) (*appS
 	if dialErr == nil {
 		return client, nil
 	}
-	if !errors.Is(dialErr, os.ErrNotExist) && !errors.Is(dialErr, syscall.ECONNREFUSED) {
-		return nil, fmt.Errorf("connect Codex App Server: %w", dialErr)
+	if errors.Is(dialErr, os.ErrNotExist) || errors.Is(dialErr, syscall.ECONNREFUSED) {
+		return nil, errors.New("Codex App Server is not running: run codex app-server daemon start")
 	}
-	start := config.Start
-	if start == nil {
-		start = startCodexAppServer
-	}
-	if err := start(ctx, config.CodexBinary, []string{"app-server", "daemon", "start"}, config.Environment); err != nil {
-		return nil, fmt.Errorf("start Codex App Server: %w", err)
-	}
-	client, dialErr = dialCodexNative(ctx, config.SocketPath, 2*time.Second)
-	if dialErr != nil {
-		return nil, fmt.Errorf("connect lazily started Codex App Server: %w", dialErr)
-	}
-	return client, nil
+	return nil, fmt.Errorf("connect Codex App Server: %w", dialErr)
 }
 
 func (native *CodexNative) observe(ctx context.Context, client *appServerClient) {
@@ -964,15 +955,6 @@ func dialCodexNative(ctx context.Context, socket string, timeout time.Duration) 
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return dialAppServer(dialCtx, socket)
-}
-
-func startCodexAppServer(ctx context.Context, binary string, args, environment []string) error {
-	command := exec.CommandContext(ctx, binary, args...) //nolint:gosec // binary is canonical and args are fixed above.
-	command.Env = environment
-	command.Stdin = nil
-	command.Stdout = nil
-	command.Stderr = nil
-	return command.Run()
 }
 
 func canonicalExecutable(value string) (string, error) {

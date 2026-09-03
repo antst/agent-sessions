@@ -112,8 +112,9 @@ The default hub listener is `:7419`; Linux may override it through
 
 `make reinstall` refreshes integration manifests and performs the same validated host transaction.
 A successful update changes the selected release and restarts exactly the Agent Sessions user
-service. systemd's normal control-group behavior terminates the daemon-owned worker tree; product
-session state remains in the product and returns through confirmed resume.
+service. systemd's normal control-group behavior terminates the daemon and its lane worker tree.
+The product-owned Codex App Server runs outside that service and remains available to live Codex
+clients; other product session state remains in the product and returns through confirmed resume.
 
 Remove Agent Sessions while preserving all Agent Sessions and product state:
 

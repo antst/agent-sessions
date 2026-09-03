@@ -310,7 +310,7 @@ func liveMessageSendArguments(arguments map[string]any) map[string]any {
 
 func deliverCodexConnectorMessage(ctx context.Context, report liveSessionReport, _ string, body string) error {
 	native, err := bridge.OpenCodexNative(ctx, bridge.CodexNativeConfig{
-		CodexBinary: codexBinary(), CodexHome: codexHome(), Environment: os.Environ(),
+		CodexBinary: codexBinary(), CodexHome: codexHome(),
 	})
 	if err != nil {
 		return err

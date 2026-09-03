@@ -850,8 +850,7 @@ func (c *hostCoordinator) codexNative() (*bridge.CodexNative, error) {
 		return c.codex, nil
 	}
 	native, err := c.openCodex(c.ctx, bridge.CodexNativeConfig{
-		CodexBinary: codexBinary(), CodexHome: codexHome(), Environment: os.Environ(),
-		OnEvent: c.observeCodexNativeEvent,
+		CodexBinary: codexBinary(), CodexHome: codexHome(), OnEvent: c.observeCodexNativeEvent,
 	})
 	if err != nil {
 		return nil, err

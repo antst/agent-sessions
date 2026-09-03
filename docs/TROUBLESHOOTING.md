@@ -36,8 +36,9 @@ agent-sessions daemon restart
 agent-sessions doctor
 ```
 
-systemd must terminate the whole daemon-owned control group. Left-over App Server, leader, server,
-connector, or lane-profile processes after restart indicate an unclean service stop.
+systemd must terminate the whole daemon-owned control group. Left-over leader, server, connector,
+or lane-profile processes after restart indicate an unclean service stop. The product-owned Codex
+App Server is outside that group and is expected to survive.
 
 ## A peer is missing
 

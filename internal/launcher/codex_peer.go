@@ -130,6 +130,11 @@ func RunCodexPeerWithDaemon(
 	if err != nil {
 		return err
 	}
+	if err := runQuietWithEnvironment(
+		persistentRuntimeEnvironment(os.Environ()), codex, "app-server", "daemon", "start",
+	); err != nil {
+		return fmt.Errorf("start Codex App Server: %w", err)
+	}
 	launchArgs := []string{"--remote", remote}
 	if !plan.cwdExplicit {
 		launchArgs = append(launchArgs, "-C", plan.requestedCwd)

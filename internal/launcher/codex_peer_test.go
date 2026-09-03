@@ -83,7 +83,6 @@ func TestCodexResumeSelectorPassesToProductVerbatim(t *testing.T) {
 func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	t.Setenv("CODEX_PEER_CODEX_BIN", "/bin/true")
 	remote := "unix://" + filepath.Join(home, "app-server-control", "app-server-control.sock")
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -102,6 +101,14 @@ func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
 		{name: "explicit cwd", arguments: []string{"-C", home, "--resume", "selected"}, selectorKind: CodexLaunchSelectorName, wantNative: []string{"--remote", remote, "resume", "selected", "-C", home}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			fixtureRoot := t.TempDir()
+			nativeLog := filepath.Join(fixtureRoot, "native.log")
+			nativeExecutable := filepath.Join(fixtureRoot, "codex")
+			if err := os.WriteFile(nativeExecutable, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$CODEX_PEER_TEST_LOG\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CODEX_PEER_CODEX_BIN", nativeExecutable)
+			t.Setenv("CODEX_PEER_TEST_LOG", nativeLog)
 			sequence := []string{}
 			var request CodexDaemonPrepareRequest
 			pending := &codexPendingLaunchFixture{result: CodexDaemonPrepareResult{
@@ -109,6 +116,10 @@ func TestCodexPeerFreshAndResumeUseOnePendingNativeSelectionPath(t *testing.T) {
 			}}
 			err := RunCodexPeerWithDaemon(context.Background(), test.arguments,
 				func(_ context.Context, input CodexDaemonPrepareRequest) (CodexPendingLaunch, error) {
+					started, readErr := os.ReadFile(nativeLog)
+					if readErr != nil || string(started) != "app-server daemon start\n" {
+						t.Fatalf("product App Server start before daemon admission = %q, %v", started, readErr)
+					}
 					sequence = append(sequence, "pending")
 					request = input
 					return pending, nil
