@@ -353,20 +353,33 @@ ln -s /bin/true "$prefix/bin/user-tool"
 old_release="$prefix/libexec/agent-sessions/host/releases/0.2.0"
 orphan_backup="$prefix/libexec/agent-sessions/host/releases/.previous-0.2.0-123"
 orphan_stage="$prefix/libexec/agent-sessions/host/releases/.stage.orphan"
+stray_file="$prefix/libexec/agent-sessions/host/releases/unexpected-file"
+stray_link="$prefix/libexec/agent-sessions/host/releases/unexpected-link"
+unsafe_release="$prefix/libexec/agent-sessions/host/releases/0.1.0"
 mkdir -p "$old_release" "$orphan_backup" "$orphan_stage"
+mkdir -p "$unsafe_release"
 : >"$old_release/stale"
 : >"$orphan_backup/stale"
 : >"$orphan_stage/stale"
+: >"$stray_file"
+ln -s /bin/true "$stray_link"
+ln -s /bin/true "$unsafe_release/inner-link"
 env "${common_env[@]}" "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 >"$test_root/success.out"
 candidate_hash=$(sha256sum "$candidate" | awk '{print $1}')
 installed_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
+selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd)
 if [[ "$installed_hash" != "$candidate_hash" ]] ||
-   [[ $(find "$prefix/libexec/agent-sessions/host/releases" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]') -ne 1 ]] ||
+   [[ "$selected_release" != "$release" ]] ||
+   [[ $(find "$prefix/libexec/agent-sessions/host/releases" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]') -ne 4 ]] ||
+   [[ ! -f "$stray_file" || ! -L "$stray_link" || ! -L "$unsafe_release/inner-link" ]] ||
    ! grep -Fxq "Removed stale Agent Sessions release path $old_release." "$test_root/success.out" ||
    ! grep -Fxq "Removed stale Agent Sessions release path $orphan_backup." "$test_root/success.out" ||
-   ! grep -Fxq "Removed stale Agent Sessions release path $orphan_stage." "$test_root/success.out"; then
-  printf 'successful host update did not retain only its current immutable release\n' >&2
+   ! grep -Fxq "Removed stale Agent Sessions release path $orphan_stage." "$test_root/success.out" ||
+   ! grep -Fxq "Left Agent Sessions release path $stray_file in place; it is not a real directory." "$test_root/success.out" ||
+   ! grep -Fxq "Left Agent Sessions release path $stray_link in place; it is not a real directory." "$test_root/success.out" ||
+   ! grep -Fxq "Left Agent Sessions release path $unsafe_release in place; safe removal was refused." "$test_root/success.out"; then
+  printf 'successful host update did not prune only safely removable release paths\n' >&2
   cat "$test_root/success.out" >&2
   exit 1
 fi

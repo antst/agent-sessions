@@ -581,7 +581,14 @@ for stale_release in "$releases"/* "$releases"/.previous-* "$releases"/.stage.*;
   [[ -e "$stale_release" || -L "$stale_release" ]] || continue
   [[ "$stale_release" == "$release" ]] && continue
   if [[ -n "$backup" && "$stale_release" == "$backup" ]]; then continue; fi
-  remove_managed_tree "$stale_release" "$releases"
+  if [[ ! -d "$stale_release" || -L "$stale_release" ]]; then
+    printf 'Left Agent Sessions release path %s in place; it is not a real directory.\n' "$stale_release"
+    continue
+  fi
+  if ! remove_managed_tree "$stale_release" "$releases"; then
+    printf 'Left Agent Sessions release path %s in place; safe removal was refused.\n' "$stale_release"
+    continue
+  fi
   printf 'Removed stale Agent Sessions release path %s.\n' "$stale_release"
 done
 
