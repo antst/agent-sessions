@@ -53,9 +53,38 @@ test("followup receipt binds consumption and the product terminal", async () => 
   emit("user/message", { id: nativeID });
   emit("assistant/message", { turn: 4, message: { content: [{ type: "text", text: "DSH_" }] } });
   emit("assistant/message", { turn: 4, message: { content: [{ type: "text", text: "OK" }] } });
-  emit("turn/end", { turn: 4, reason: "completed" });
-  assert.deepEqual(await runtime.wait(nativeID), { outcome: "completed", result: "DSH_OK", reason: "completed" });
+  emit("turn/end", { turn: 4, reason: { kind: "completed" } });
+  assert.deepEqual(await runtime.wait(nativeID), { outcome: "completed", result: "DSH_OK", reason: { kind: "completed" } });
   assert.equal(runtime.byInput.size, 0);
+});
+
+test("native terminal reasons use DSH's closed discriminated vocabulary", async () => {
+  const cases = [
+    [{ kind: "aborted", reason: { kind: "user" } }, "interrupted"],
+    [{ kind: "interrupted" }, "interrupted"],
+    [{ kind: "blocked" }, "failed"],
+    [{ kind: "error", error: { message: "native refusal", code: "NATIVE" } }, "failed"],
+    [{ kind: "max-tokens" }, "failed"],
+  ];
+  for (const [reason, outcome] of cases) {
+    const { emit, runtime } = harness();
+    const nativeID = runtime.submit(`input-${reason.kind}`, "do it", "followup");
+    emit("turn/start", { turn: 1 });
+    emit("user/message", { id: nativeID });
+    emit("turn/end", { turn: 1, reason });
+    assert.deepEqual(await runtime.wait(nativeID), { outcome, result: "", reason });
+  }
+});
+
+test("unknown or missing native terminal kind is a product protocol failure", async () => {
+  for (const reason of [{ kind: "future-reason" }, {}]) {
+    const { emit, runtime } = harness();
+    const nativeID = runtime.submit("input-invalid", "do it", "followup");
+    emit("turn/start", { turn: 1 });
+    emit("user/message", { id: nativeID });
+    emit("turn/end", { turn: 1, reason });
+    await assert.rejects(runtime.wait(nativeID), /DSH returned unknown turn end reason/u);
+  }
 });
 
 test("steer acknowledges its native receipt without retaining a waiter", () => {

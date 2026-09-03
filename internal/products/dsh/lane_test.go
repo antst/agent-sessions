@@ -71,7 +71,7 @@ func (presence *testPresence) CallLane(_ context.Context, sessionID, _ string, m
 		_ = json.Unmarshal(body, &request)
 		return json.RawMessage(`{"native_message_id":"native-` + request.Mode + `"}`), nil
 	case "lane.turn.wait":
-		return json.RawMessage(`{"outcome":"completed","result":"DSH_OK","reason":{"type":"completed"}}`), nil
+		return json.RawMessage(`{"outcome":"completed","result":"DSH_OK","reason":{"kind":"completed"}}`), nil
 	case "lane.turn.interrupt":
 		return json.RawMessage(`{}`), nil
 	case "lane.session.archive":

@@ -31,9 +31,13 @@ function modelOf(agent) {
 }
 
 function resultReason(reason) {
-  if (reason === "completed") return { outcome: "completed", reason };
-  if (reason === "interrupted" || reason?.type === "aborted") return { outcome: "interrupted", reason };
-  return { outcome: "failed", reason };
+  if (reason?.kind === "completed") return { outcome: "completed", reason };
+  if (reason?.kind === "aborted" || reason?.kind === "interrupted") return { outcome: "interrupted", reason };
+  if (reason?.kind === "blocked" || reason?.kind === "error" || reason?.kind === "max-tokens") {
+    return { outcome: "failed", reason };
+  }
+  const native = JSON.stringify(reason);
+  throw new Error(`DSH returned unknown turn end reason ${native === undefined ? String(reason) : native}`);
 }
 
 function createRuntime(ctx, createUserMessage, agent) {
@@ -93,7 +97,11 @@ function createRuntime(ctx, createUserMessage, agent) {
     if (event.type === "turn/end") {
       for (const record of inflight.values()) {
         if (record.consumed && record.turn === event.data.turn && !record.terminal) {
-          finish(record, { ...resultReason(event.data.reason), result: record.result });
+          try {
+            finish(record, { ...resultReason(event.data.reason), result: record.result });
+          } catch (error) {
+            finish(record, { error });
+          }
         }
       }
       if (openTurn === event.data.turn) openTurn = null;
@@ -138,6 +146,7 @@ function createRuntime(ctx, createUserMessage, agent) {
     }
     inflight.delete(nativeMessageID);
     byInput.delete(record.inputID);
+    if (record.terminal.error) throw record.terminal.error;
     return record.terminal;
   }
 

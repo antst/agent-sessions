@@ -291,12 +291,13 @@ product. Neither is durable Agent Sessions state.
 
 ```json
 {"jsonrpc":"2.0","id":"daemon.wait-1","method":"lane.turn.wait","params":{"native_message_id":"message-product-1"}}
-{"jsonrpc":"2.0","id":"daemon.wait-1","result":{"outcome":"completed","result":"The change is sound.","reason":"completed"}}
+{"jsonrpc":"2.0","id":"daemon.wait-1","result":{"outcome":"completed","result":"The change is sound.","reason":{"kind":"completed"}}}
 ```
 
 `outcome` is `completed`, `interrupted`, or `failed`; `result` is the product's
 assistant text; and `reason` is the product's native terminal reason without
-reinterpretation. The product owns input-to-turn correlation.
+reinterpretation. For DSH this is its discriminated object, such as
+`{"kind":"completed"}`. The product owns input-to-turn correlation.
 
 `lane.turn.interrupt` takes `{}` and asks the product to cancel the active turn
 without discarding already accepted follow-up input. It returns `{}` after the

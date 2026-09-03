@@ -177,9 +177,13 @@ func (driver *LaneDriver) WaitTurn(ctx context.Context, turn productruntime.Nati
 	if err != nil {
 		return productruntime.NativeTerminal{}, err
 	}
-	return productruntime.NativeTerminal{
+	terminal := productruntime.NativeTerminal{
 		Outcome: outcome, ExitLike: exitLike, Result: result.Result, NativeStopReason: strings.TrimSpace(string(result.Reason)),
-	}, nil
+	}
+	if outcome == productruntime.TurnFailed {
+		return terminal, errors.New(terminal.NativeStopReason)
+	}
+	return terminal, nil
 }
 
 func (driver *LaneDriver) Steer(ctx context.Context, turn productruntime.NativeTurnRef, request productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
