@@ -24,6 +24,7 @@ bash -n \
   "$plugin_root/scripts/release-publication-preflight" \
   "$plugin_root/scripts/release-tag-preflight" \
   "$plugin_root/scripts/release-tag-verify" \
+  "$plugin_root/scripts/verify-package-versions" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/install-host" \
   "$plugin_root/scripts/dsh-profile" \
@@ -104,6 +105,11 @@ if {entry.get("product") for entry in inventory.get("plugin_payloads", [])} != {
     "codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp"
 }:
     raise SystemExit("authoritative release plugin inventory is incomplete")
+if inventory.get("npm_packages") != [
+    {"path": "integrations/dsh/comms", "name": "@agent-sessions/dsh-comms"},
+    {"path": "integrations/dsh/lane", "name": "@agent-sessions/dsh-lane"},
+]:
+    raise SystemExit("authoritative npm package inventory is incomplete")
 if aliases != [
     "codex-peer", "claude-peer", "grok-peer", "qwen-peer", "opencode-peer", "kilo-peer", "pi-peer", "omp-peer",
     "codex-peer-lane", "claude-peer-lane", "grok-peer-lane", "qwen-peer-lane",

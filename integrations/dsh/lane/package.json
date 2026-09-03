@@ -23,6 +23,11 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antst/agent-sessions.git",
+    "directory": "integrations/dsh/lane"
+  },
   "dependencies": {
     "@agent-sessions/dsh-comms": "0.4.0"
   },

@@ -1,12 +1,15 @@
 package releaseevidence
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/releasepkg"
@@ -73,18 +76,19 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	document := testEvidenceDocument(t, root, archiveDir, gateDir)
 	schema := filepath.Join("..", "..", "specs", "002-unified-user-daemon", "contracts", "release-evidence.schema.json")
 	input := filepath.Join(root, "input.json")
-	canonical := filepath.Join(root, "agent-sessions-v0.3.0-release-evidence.json")
+	packageDir := filepath.Join(root, "packages")
+	canonical := filepath.Join(root, "agent-sessions-v0.4.0-release-evidence.json")
 	writeJSONTestFile(t, input, document)
 	if err := Canonicalize(schema, input, canonical); err != nil {
 		t.Fatal(err)
 	}
-	if err := CrossCheck(schema, canonical, archiveDir, gateDir, testCommit, testTree, testRunID); err != nil {
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID); err != nil {
 		t.Fatalf("exact release evidence failed: %v", err)
 	}
-	if err := CrossCheck(schema, canonical, archiveDir, gateDir, "3333333333333333333333333333333333333333", testTree, testRunID); err == nil {
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, "3333333333333333333333333333333333333333", testTree, testRunID); err == nil {
 		t.Fatal("changed release commit escaped cross-check")
 	}
-	if err := CrossCheck(schema, canonical, archiveDir, gateDir, testCommit, testTree, testRunID+1); err == nil {
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID+1); err == nil {
 		t.Fatal("changed workflow run escaped cross-check")
 	}
 
@@ -94,7 +98,7 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	}
 	nonCanonical := filepath.Join(root, "noncanonical.json")
 	writeTestFile(t, nonCanonical, " \n"+string(body))
-	if err := CrossCheck(schema, nonCanonical, archiveDir, gateDir, testCommit, testTree, testRunID); err == nil {
+	if err := CrossCheck(schema, nonCanonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID); err == nil {
 		t.Fatal("non-canonical evidence bytes escaped cross-check")
 	}
 	gateArtifact := filepath.Join(gateDir, "linux-normal.txt")
@@ -105,14 +109,38 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	if err := os.WriteFile(gateArtifact, append(originalGate, []byte("changed\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CrossCheck(schema, canonical, archiveDir, gateDir, testCommit, testTree, testRunID); err == nil {
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID); err == nil {
 		t.Fatal("changed gate evidence escaped cross-check")
 	}
 	if err := os.WriteFile(gateArtifact, originalGate, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	packageArtifact := filepath.Join(packageDir, "agent-sessions-dsh-comms-0.4.0.tgz")
+	originalPackage, err := os.ReadFile(packageArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(packageArtifact, append(originalPackage, []byte("changed")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID); err == nil {
+		t.Fatal("changed npm package bytes escaped cross-check")
+	}
+	if err := os.WriteFile(packageArtifact, originalPackage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unexpected := filepath.Join(packageDir, "unexpected-0.4.0.tgz")
+	if err := os.WriteFile(unexpected, originalPackage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID); err == nil {
+		t.Fatal("unexpected npm package artifact escaped cross-check")
+	}
+	if err := os.Remove(unexpected); err != nil {
+		t.Fatal(err)
+	}
 
-	archive := filepath.Join(archiveDir, "agent-sessions-0.3.0-linux-x64.tar.gz")
+	archive := filepath.Join(archiveDir, "agent-sessions-0.4.0-linux-x64.tar.gz")
 	file, err := os.OpenFile(archive, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +152,7 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := CrossCheck(schema, canonical, archiveDir, gateDir, testCommit, testTree, testRunID); err == nil {
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID); err == nil {
 		t.Fatal("changed archive bytes escaped cross-check")
 	}
 }
@@ -152,11 +180,12 @@ func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 	writeJSONTestFile(t, macosPath, map[string]any{
 		"toolchain": toolchains["macos"], "native_clients": clients["macos"], "gates": gates["macos"],
 	})
-	output := filepath.Join(root, "agent-sessions-v0.3.0-release-evidence.json")
+	output := filepath.Join(root, "agent-sessions-v0.4.0-release-evidence.json")
 	err := Generate(GenerateOptions{
 		SchemaPath:    filepath.Join("..", "..", "specs", "002-unified-user-daemon", "contracts", "release-evidence.schema.json"),
-		InventoryPath: inventoryPath, PlatformsPath: platformsPath, ArchiveDir: archiveDir, GateDir: gateDir,
-		LinuxGatePath: linuxPath, MacOSGatePath: macosPath, OutputPath: output, Version: "0.3.0",
+		InventoryPath: inventoryPath, PlatformsPath: platformsPath, ArchiveDir: archiveDir,
+		PackageDir: filepath.Join(root, "packages"), GateDir: gateDir,
+		LinuxGatePath: linuxPath, MacOSGatePath: macosPath, OutputPath: output, Version: "0.4.0",
 		Commit: testCommit, Tree: testTree, RunID: testRunID, RunAttempt: 1,
 		RunURL: "https://github.com/antst/agent-sessions/actions/runs/123456",
 	})
@@ -180,10 +209,41 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		{"product": "claude", "plugin_id": "agent-sessions", "archive_paths": []string{".claude-plugin", "claude"}},
 		{"product": "grok", "plugin_id": "agent-sessions", "archive_paths": []string{"grok"}},
 		{"product": "qwen", "plugin_id": "agent-sessions", "archive_paths": []string{"qwen"}},
+		{"product": "opencode", "plugin_id": "agent-sessions", "archive_paths": []string{"integrations/opencode"}},
+		{"product": "kilo", "plugin_id": "agent-sessions", "archive_paths": []string{"integrations/kilo"}},
+		{"product": "pi", "plugin_id": "agent-sessions", "archive_paths": []string{"integrations/pi"}},
+		{"product": "omp", "plugin_id": "agent-sessions", "archive_paths": []string{"integrations/omp"}},
+	}
+	npmInventory := []map[string]any{
+		{"path": "integrations/dsh/comms", "name": "@agent-sessions/dsh-comms"},
+		{"path": "integrations/dsh/lane", "name": "@agent-sessions/dsh-lane"},
+	}
+	packageDir := filepath.Join(root, "packages")
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	npmArtifacts := make([]any, 0, len(npmInventory))
+	for _, npmPackage := range npmInventory {
+		name := npmPackage["name"].(string)
+		filename := strings.TrimPrefix(strings.ReplaceAll(name, "/", "-"), "@") + "-0.4.0.tgz"
+		path := filepath.Join(packageDir, filename)
+		writeNPMPackageFixture(t, path, name, "0.4.0")
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, err := fileSHA256(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		npmArtifacts = append(npmArtifacts, map[string]any{
+			"path": npmPackage["path"], "name": name, "version": "0.4.0", "filename": filename,
+			"byte_size": info.Size(), "sha256": digest, "source_commit": testCommit,
+		})
 	}
 	archives := map[string]any{}
 	for _, platform := range []string{"linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"} {
-		packageName := "agent-sessions-0.3.0-" + platform
+		packageName := "agent-sessions-0.4.0-" + platform
 		stage := filepath.Join(root, "stage-"+platform)
 		packageRoot := filepath.Join(stage, packageName)
 		for _, executable := range executables {
@@ -257,11 +317,11 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 	toolchain := map[string]any{"go": "go1.25.0", "golangci_lint": "2.12.2"}
 	clients := map[string]any{"qwen": "0.22.0", "codex": "0.148.0", "claude": "2.1.237", "grok": "1.0.0"}
 	return map[string]any{
-		"schema_version": 1, "release_version": "0.3.0", "intended_tag": "v0.3.0",
+		"schema_version": 1, "release_version": "0.4.0", "intended_tag": "v0.4.0",
 		"commit_sha": testCommit, "tree_sha": testTree,
 		"artifact": map[string]any{
-			"file_name":              "agent-sessions-v0.3.0-release-evidence.json",
-			"workflow_artifact_name": "agent-sessions-v0.3.0-release-evidence-" + testCommit,
+			"file_name":              "agent-sessions-v0.4.0-release-evidence.json",
+			"workflow_artifact_name": "agent-sessions-v0.4.0-release-evidence-" + testCommit,
 			"retention_days":         90,
 		},
 		"workflow": map[string]any{
@@ -270,8 +330,41 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		},
 		"toolchains":     map[string]any{"linux": toolchain, "macos": toolchain},
 		"native_clients": map[string]any{"linux": clients, "macos": clients},
-		"gates":          gates, "archives": archives,
-		"package_inventory": map[string]any{"executables": executables, "plugin_payloads": plugins},
+		"gates":          gates, "archives": archives, "npm_packages": npmArtifacts,
+		"package_inventory": map[string]any{
+			"executables": executables, "plugin_payloads": plugins, "npm_packages": npmInventory,
+		},
+	}
+}
+
+func writeNPMPackageFixture(t *testing.T, path, name, version string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	body, err := json.Marshal(map[string]any{"name": name, "version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.WriteHeader(&tar.Header{
+		Name: "package/package.json", Mode: 0o600, Size: int64(len(body)), Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

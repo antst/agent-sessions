@@ -11,6 +11,7 @@ expected_tree=$3
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 version="$(<"$root/deploy/agent-sessions/VERSION")"
 [[ "$tag" == "v$version" ]] || { printf 'tag/version mismatch\n' >&2; exit 1; }
+"$root/scripts/verify-package-versions" "$version"
 [[ "$(git -C "$root" cat-file -t "refs/tags/$tag")" == tag ]] || {
   printf '%s is not an annotated tag\n' "$tag" >&2
   exit 1

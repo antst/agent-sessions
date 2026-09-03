@@ -41,7 +41,7 @@ func runEvidence(args []string) error {
 	}
 	switch args[0] {
 	case "generate":
-		values, err := exactNamedArguments(args[1:], "schema", "inventory", "platforms", "archive-dir", "gate-dir", "linux-gate", "macos-gate", "output", "version", "commit", "tree", "run-id", "run-attempt", "run-url")
+		values, err := exactNamedArguments(args[1:], "schema", "inventory", "platforms", "archive-dir", "package-dir", "gate-dir", "linux-gate", "macos-gate", "output", "version", "commit", "tree", "run-id", "run-attempt", "run-url")
 		if err != nil {
 			return err
 		}
@@ -56,7 +56,8 @@ func runEvidence(args []string) error {
 		return releaseevidence.Generate(releaseevidence.GenerateOptions{
 			SchemaPath: values["schema"], InventoryPath: values["inventory"],
 			PlatformsPath: values["platforms"], ArchiveDir: values["archive-dir"],
-			GateDir: values["gate-dir"], LinuxGatePath: values["linux-gate"],
+			PackageDir: values["package-dir"],
+			GateDir:    values["gate-dir"], LinuxGatePath: values["linux-gate"],
 			MacOSGatePath: values["macos-gate"], OutputPath: values["output"],
 			Version: values["version"], Commit: values["commit"], Tree: values["tree"],
 			RunID: runID, RunAttempt: runAttempt, RunURL: values["run-url"],
@@ -68,7 +69,7 @@ func runEvidence(args []string) error {
 		}
 		return releaseevidence.Canonicalize(values["schema"], values["input"], values["output"])
 	case "validate":
-		values, err := exactNamedArguments(args[1:], "schema", "document", "archive-dir", "gate-dir", "commit", "tree", "run-id")
+		values, err := exactNamedArguments(args[1:], "schema", "document", "archive-dir", "package-dir", "gate-dir", "commit", "tree", "run-id")
 		if err != nil {
 			return err
 		}
@@ -76,7 +77,7 @@ func runEvidence(args []string) error {
 		if err != nil {
 			return fmt.Errorf("run-id: %w", err)
 		}
-		return releaseevidence.CrossCheck(values["schema"], values["document"], values["archive-dir"], values["gate-dir"], values["commit"], values["tree"], runID)
+		return releaseevidence.CrossCheck(values["schema"], values["document"], values["archive-dir"], values["package-dir"], values["gate-dir"], values["commit"], values["tree"], runID)
 	default:
 		return fmt.Errorf("unknown evidence operation %q", args[0])
 	}

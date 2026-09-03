@@ -16,28 +16,45 @@ function pack(packagePath, output) {
   const result = JSON.parse(encoded);
   assert.equal(result.length, 1);
   assert.match(result[0].integrity, /^sha512-/u);
-  return path.join(output, result[0].filename);
+  return { archive: path.join(output, result[0].filename), result: result[0] };
+}
+
+function publishDryRun(packed) {
+  const encoded = execFileSync(
+    "npm", ["publish", "--dry-run", "--json", "--access", "public", packed.archive],
+    { encoding: "utf8" },
+  );
+  const result = JSON.parse(encoded);
+  assert.equal(result.integrity, packed.result.integrity);
+  return result;
 }
 
 test("DSH packages pack into the exact public artifacts used by installation", () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-dsh-pack-"));
   const extract = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-dsh-extract-"));
   try {
-    const commsArchive = pack(path.join(root, "comms"), output);
-    const laneArchive = pack(path.join(root, "lane"), output);
-    execFileSync("tar", ["-xzf", commsArchive, "-C", extract]);
+    const commsPacked = pack(path.join(root, "comms"), output);
+    const lanePacked = pack(path.join(root, "lane"), output);
+    assert.equal(publishDryRun(commsPacked).id, "@agent-sessions/dsh-comms@0.4.0");
+    assert.equal(publishDryRun(lanePacked).id, "@agent-sessions/dsh-lane@0.4.0");
+    execFileSync("tar", ["-xzf", commsPacked.archive, "-C", extract]);
     assert.deepEqual(
       fs.readFileSync(path.join(extract, "package", "shared", "live-session.cjs")),
       fs.readFileSync(path.join(root, "..", "shared", "live-session.js")),
     );
     fs.rmSync(path.join(extract, "package"), { recursive: true, force: true });
-    execFileSync("tar", ["-xzf", laneArchive, "-C", extract]);
+    execFileSync("tar", ["-xzf", lanePacked.archive, "-C", extract]);
     const lanePackage = JSON.parse(fs.readFileSync(path.join(extract, "package", "package.json"), "utf8"));
     assert.equal(lanePackage.dependencies["@agent-sessions/dsh-comms"], "0.4.0");
     for (const packageName of ["comms", "lane"]) {
       const manifest = JSON.parse(fs.readFileSync(path.join(root, packageName, "package.json"), "utf8"));
       assert.equal(manifest.private, undefined);
       assert.deepEqual(manifest.publishConfig, { access: "public" });
+      assert.deepEqual(manifest.repository, {
+        type: "git",
+        url: "git+https://github.com/antst/agent-sessions.git",
+        directory: `integrations/dsh/${packageName}`,
+      });
     }
   } finally {
     fs.rmSync(output, { recursive: true, force: true });

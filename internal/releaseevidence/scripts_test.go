@@ -90,7 +90,17 @@ func TestReleaseWorkflowDownloadsExactCandidateArtifacts(t *testing.T) {
 		`gh run download "${{ steps.tag.outputs.run_id }}" --repo "$GITHUB_REPOSITORY"`,
 		`--name "agent-sessions-$platform" --dir dist/release`,
 		`evidence="dist/candidate/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json"`,
-		`--document "$evidence" --archive-dir dist/release --gate-dir dist/candidate/gates`,
+		`--document "$evidence" --archive-dir dist/release --package-dir dist/candidate/packages`,
+		`--archive-dir dist/release --package-dir dist/packages --gate-dir dist/gates`,
+		"dist/packages/*.tgz",
+		"id-token: write",
+		`npm publish "$archive" --provenance --access public`,
+		`npm view "$package_name@$version" version`,
+		`cp dist/candidate/packages/*.tgz dist/release/`,
+		"publish-preview:",
+		"needs: [lint, test, build]",
+		`npx --yes pkg-pr-new publish "${package_paths[@]}"`,
+		"actionlint .github/workflows/ci.yml",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("release workflow is missing exact-candidate boundary %q", required)
@@ -98,6 +108,14 @@ func TestReleaseWorkflowDownloadsExactCandidateArtifacts(t *testing.T) {
 	}
 	if strings.Contains(workflow, "- name: Download platform archives\n        uses: actions/download-artifact") {
 		t.Fatal("release workflow downloads platform archives from the tag run instead of the evidence-bound candidate run")
+	}
+	if strings.Contains(workflow, "environment:") || strings.Contains(workflow, "NODE_AUTH_TOKEN") ||
+		strings.Contains(workflow, "@agent-sessions/dsh-") || strings.Contains(workflow, "node-version: 24") {
+		t.Fatal("release workflow has an environment, token, hard-coded package, or second Node version source")
+	}
+	if setupCount := strings.Count(workflow, "uses: actions/setup-node@"); setupCount == 0 ||
+		setupCount != strings.Count(workflow, "node-version-file: deploy/agent-sessions/NODE_VERSION") {
+		t.Fatal("not every Node setup consumes the authoritative Node version file")
 	}
 }
 
@@ -120,6 +138,7 @@ func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "deploy", "agent-sessions", "VERSION"), []byte("0.2.4\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	installPackageVersionFixture(t, root, "0.2.4")
 	runGit(t, root, "init", "-q")
 	runGit(t, root, "config", "user.name", "Release Test")
 	runGit(t, root, "config", "user.email", "release@example.invalid")
@@ -132,6 +151,15 @@ func TestReleaseTagPreflightRejectsLocalAndRemoteCollisions(t *testing.T) {
 	if output, err := exec.Command(preflight, "v0.2.4", "origin").CombinedOutput(); err != nil {
 		t.Fatalf("absent tag was rejected: %v: %s", err, output)
 	}
+	writeJSONTestFile(t, filepath.Join(root, "integrations", "dsh", "lane", "package.json"), map[string]any{
+		"name": "@agent-sessions/dsh-lane", "version": "0.2.3",
+	})
+	if output, err := exec.Command(preflight, "v0.2.4", "origin").CombinedOutput(); err == nil || !strings.Contains(string(output), "does not match release") {
+		t.Fatalf("package version drift = %v: %s", err, output)
+	}
+	writeJSONTestFile(t, filepath.Join(root, "integrations", "dsh", "lane", "package.json"), map[string]any{
+		"name": "@agent-sessions/dsh-lane", "version": "0.2.4",
+	})
 	runGit(t, root, "tag", "v0.2.4")
 	output, err := exec.Command(preflight, "v0.2.4", "origin").CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "local release tag") {
@@ -167,6 +195,7 @@ func TestReleaseTagVerifyParsesTrailersBeforeSignatureBlock(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "deploy", "agent-sessions", "VERSION"), []byte("0.2.4\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	installPackageVersionFixture(t, root, "0.2.4")
 	runGit(t, root, "init", "-q")
 	runGit(t, root, "config", "user.name", "Release Test")
 	runGit(t, root, "config", "user.email", "release@example.invalid")
@@ -213,6 +242,28 @@ func TestReleaseTagVerifyParsesTrailersBeforeSignatureBlock(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "run_id=123") || !strings.Contains(string(output), strings.Repeat("a", 64)) {
 		t.Fatalf("verified tag output omitted evidence binding: %s", output)
+	}
+}
+
+func installPackageVersionFixture(t *testing.T, root, version string) {
+	t.Helper()
+	for _, script := range []string{"release-inventory", "verify-package-versions"} {
+		body, err := os.ReadFile(filepath.Join("..", "..", "scripts", script))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "scripts", script), body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for packagePath, name := range map[string]string{
+		"comms": "@agent-sessions/dsh-comms", "lane": "@agent-sessions/dsh-lane",
+	} {
+		directory := filepath.Join(root, "integrations", "dsh", packagePath)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeJSONTestFile(t, filepath.Join(directory, "package.json"), map[string]any{"name": name, "version": version})
 	}
 }
 

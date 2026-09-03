@@ -19,6 +19,7 @@ permissions:
 env:
   GO_VERSION: '1.25.0'
   GOLANGCI_LINT_VERSION: 'v2.12.2'
+  ACTIONLINT_VERSION: 'v1.7.7'
 
 jobs:
   inventory:
@@ -52,8 +53,14 @@ jobs:
           cache: true
       - name: Install golangci-lint
         run: go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+      - name: Install actionlint
+        if: runner.os == 'Linux'
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
       - name: Lint
         run: make lint
+      - name: Lint GitHub Actions workflow
+        if: runner.os == 'Linux'
+        run: actionlint .github/workflows/ci.yml
 
   test:
     strategy:
@@ -140,6 +147,26 @@ jobs:
           path: dist/release/*.tar.gz
           if-no-files-found: error
 
+  publish-preview:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    needs: [lint, test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version-file: deploy/agent-sessions/NODE_VERSION
+      - name: Pack publishable packages
+        env:
+          PACKAGE_OUTPUT_DIR: dist/packages
+        run: make pack-packages
+      - name: Publish package previews
+        run: |
+          package_paths=()
+          while IFS='|' read -r package_path _; do package_paths+=("$package_path"); done \
+            < <(./scripts/release-inventory packages)
+          npx --yes pkg-pr-new publish "${package_paths[@]}"
+
   release-linux:
     name: release-linux
     if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
@@ -221,6 +248,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Require signed release commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -236,6 +266,10 @@ jobs:
           pattern: release-gate-*-${{ github.sha }}
           path: dist/gates
           merge-multiple: true
+      - name: Pack immutable npm package artifacts
+        env:
+          PACKAGE_OUTPUT_DIR: dist/packages
+        run: make pack-packages
       - name: Generate and validate immutable release evidence
         run: |
           make build GOOS=linux GOARCH=amd64
@@ -246,7 +280,7 @@ jobs:
           go run ./scripts/releasetool evidence generate \
             --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
             --inventory dist/package-inventory.json --platforms dist/platforms.txt \
-            --archive-dir dist/release --gate-dir dist/gates \
+            --archive-dir dist/release --package-dir dist/packages --gate-dir dist/gates \
             --linux-gate dist/gates/linux.json --macos-gate dist/gates/macos.json \
             --output "dist/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" \
             --version "${{ needs.inventory.outputs.version }}" --commit "$GITHUB_SHA" --tree "$tree_sha" \
@@ -258,6 +292,7 @@ jobs:
           path: |
             dist/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json
             dist/gates/*.txt
+            dist/packages/*.tgz
           if-no-files-found: error
           retention-days: 90
 
@@ -268,6 +303,7 @@ jobs:
     permissions:
       actions: read
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -276,6 +312,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version-file: deploy/agent-sessions/NODE_VERSION
       - id: tag
         name: Require exact signed evidence-bound tag
         env:
@@ -311,7 +350,8 @@ jobs:
           make build GOOS=linux GOARCH=amd64
           go run ./scripts/releasetool evidence validate \
             --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
-            --document "$evidence" --archive-dir dist/release --gate-dir dist/candidate/gates \
+            --document "$evidence" --archive-dir dist/release --package-dir dist/candidate/packages \
+            --gate-dir dist/candidate/gates \
             --commit "$GITHUB_SHA" --tree "$(git rev-parse HEAD^{tree})" \
             --run-id "${{ steps.tag.outputs.run_id }}"
       - name: Refuse release and asset collisions
@@ -322,12 +362,45 @@ jobs:
           while IFS='|' read -r _ _ platform; do
             assets+=("agent-sessions-${{ needs.inventory.outputs.version }}-$platform.tar.gz")
           done < <(./scripts/release-inventory platforms)
+          while IFS='|' read -r _ package_name; do
+            archive_name="${package_name#@}"
+            assets+=("${archive_name//\//-}-${{ needs.inventory.outputs.version }}.tgz")
+          done < <(./scripts/release-inventory packages)
           ./scripts/release-publication-preflight "$GITHUB_REF_NAME" "${assets[@]}"
+      - name: Publish exact candidate npm packages
+        run: |
+          node -e '
+          const [major, minor] = process.argv[1].split(".").map(Number);
+          if (major < 11 || (major === 11 && minor < 5)) throw new Error(`npm 11.5.1 or newer is required; found ${process.argv[1]}`);
+          ' "$(npm --version)"
+          version="${{ needs.inventory.outputs.version }}"
+          while IFS='|' read -r _ package_name; do
+            archive_name="${package_name#@}"
+            archive="dist/candidate/packages/${archive_name//\//-}-$version.tgz"
+            packed_manifest="$(tar -xOf "$archive" package/package.json)"
+            node - "$packed_manifest" "$package_name" "$version" <<'NODE'
+          const [encoded, name, version] = process.argv.slice(2);
+          const manifest = JSON.parse(encoded);
+          if (manifest.name !== name || manifest.version !== version) {
+            throw new Error(`candidate package ${manifest.name}@${manifest.version} does not match ${name}@${version}`);
+          }
+          NODE
+            view_error="$RUNNER_TEMP/npm-view-error"
+            if npm view "$package_name@$version" version > /dev/null 2>"$view_error"; then
+              printf 'npm package %s@%s already exists; skipping\n' "$package_name" "$version"
+            elif grep -Fq 'E404' "$view_error"; then
+              npm publish "$archive" --provenance --access public
+            else
+              sed -n '1,80p' "$view_error" >&2
+              exit 1
+            fi
+          done < <(./scripts/release-inventory packages)
       - name: Generate complete checksums
         run: |
           cp "dist/candidate/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" dist/release/
+          cp dist/candidate/packages/*.tgz dist/release/
           cd dist/release
-          sha256sum agent-sessions-*.tar.gz agent-sessions-v*-release-evidence.json > SHA256SUMS
+          sha256sum agent-sessions-*.tar.gz agent-sessions-*.tgz agent-sessions-v*-release-evidence.json > SHA256SUMS
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

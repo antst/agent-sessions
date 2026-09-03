@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# > 1 )); then
+  printf 'usage: %s [VERSION]\n' "${0##*/}" >&2
+  exit 2
+fi
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+version=${1:-$(<"$root/deploy/agent-sessions/VERSION")}
+while IFS='|' read -r package_path package_name; do
+  node - "$root/$package_path/package.json" "$package_path" "$package_name" "$version" <<'NODE'
+const fs = require("node:fs");
+const [manifestPath, packagePath, packageName, version] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+if (manifest.name !== packageName) {
+  throw new Error(`${packagePath} package name ${manifest.name} does not match ${packageName}`);
+}
+if (manifest.version !== version) {
+  throw new Error(`${packageName} version ${manifest.version} does not match release ${version}`);
+}
+NODE
+done < <("$root/scripts/release-inventory" packages)

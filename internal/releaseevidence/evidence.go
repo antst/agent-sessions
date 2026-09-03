@@ -28,6 +28,7 @@ type GenerateOptions struct {
 	InventoryPath string
 	PlatformsPath string
 	ArchiveDir    string
+	PackageDir    string
 	GateDir       string
 	LinuxGatePath string
 	MacOSGatePath string
@@ -55,8 +56,12 @@ func Generate(options GenerateOptions) error {
 	if err != nil {
 		return fmt.Errorf("decode authoritative package inventory: %w", err)
 	}
-	if !exactObjectKeys(inventory, "executables", "plugin_payloads") {
+	if !exactObjectKeys(inventory, "executables", "plugin_payloads", "npm_packages") {
 		return errors.New("authoritative package inventory has unexpected fields")
+	}
+	npmPackages, err := npmPackageInventory(inventory)
+	if err != nil {
+		return err
 	}
 	platforms, err := readPlatforms(options.PlatformsPath)
 	if err != nil {
@@ -87,6 +92,10 @@ func Generate(options GenerateOptions) error {
 			"sha256": digest, "source_commit": options.Commit, "inventory_verified": true,
 		}
 	}
+	npmArtifacts, err := collectNPMPackageArtifacts(options.PackageDir, npmPackages, options.Version, options.Commit)
+	if err != nil {
+		return err
+	}
 	document := map[string]any{
 		"schema_version":  1,
 		"release_version": options.Version,
@@ -112,6 +121,7 @@ func Generate(options GenerateOptions) error {
 			"linux": linux["gates"], "macos": macos["gates"],
 		},
 		"archives":          archives,
+		"npm_packages":      npmArtifacts,
 		"package_inventory": inventory,
 	}
 	body, err := json.Marshal(document)
@@ -137,7 +147,7 @@ func Generate(options GenerateOptions) error {
 	if err := Canonicalize(options.SchemaPath, rawPath, options.OutputPath); err != nil {
 		return err
 	}
-	return CrossCheck(options.SchemaPath, options.OutputPath, options.ArchiveDir, options.GateDir,
+	return CrossCheck(options.SchemaPath, options.OutputPath, options.ArchiveDir, options.PackageDir, options.GateDir,
 		options.Commit, options.Tree, options.RunID)
 }
 
@@ -159,7 +169,7 @@ func Canonicalize(schemaPath, inputPath, outputPath string) error {
 // Schema cannot express, including archive hashes and declared inventory.
 //
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
-func CrossCheck(schemaPath, documentPath, archiveDir, gateDir, commit, tree string, runID int64) error {
+func CrossCheck(schemaPath, documentPath, archiveDir, packageDir, gateDir, commit, tree string, runID int64) error {
 	value, body, err := decodeAndValidateSchema(schemaPath, documentPath)
 	if err != nil {
 		return err
@@ -200,7 +210,7 @@ func CrossCheck(schemaPath, documentPath, archiveDir, gateDir, commit, tree stri
 			}
 		}
 	}
-	executables, pluginPaths, err := documentInventory(root["package_inventory"])
+	inventory, err := documentInventory(root["package_inventory"])
 	if err != nil {
 		return err
 	}
@@ -218,9 +228,12 @@ func CrossCheck(schemaPath, documentPath, archiveDir, gateDir, commit, tree stri
 		if digestErr != nil || digest != stringField(archive, "sha256") {
 			return fmt.Errorf("archive %s SHA-256 does not match evidence", platform)
 		}
-		if err := verifyArchiveInventory(path, platform, executables, pluginPaths); err != nil {
+		if err := verifyArchiveInventory(path, platform, inventory.executables, inventory.pluginPaths); err != nil {
 			return fmt.Errorf("archive %s inventory: %w", platform, err)
 		}
+	}
+	if err := verifyNPMPackageArtifacts(packageDir, version, commit, inventory.npmPackages, array(root["npm_packages"])); err != nil {
+		return err
 	}
 	return nil
 }
@@ -261,7 +274,18 @@ func canonicalDocument(body []byte) ([]byte, error) {
 	return append(canonical, '\n'), nil
 }
 
-func documentInventory(raw any) ([]string, []string, error) {
+type npmPackageSpec struct {
+	Path string
+	Name string
+}
+
+type releaseInventory struct {
+	executables []string
+	pluginPaths []string
+	npmPackages []npmPackageSpec
+}
+
+func documentInventory(raw any) (releaseInventory, error) {
 	inventory := object(raw)
 	rawExecutables := array(inventory["executables"])
 	executables := make([]string, 0, len(rawExecutables))
@@ -274,10 +298,175 @@ func documentInventory(raw any) ([]string, []string, error) {
 			pluginPaths = append(pluginPaths, rawPath.(string))
 		}
 	}
-	if len(executables) == 0 || len(pluginPaths) == 0 {
-		return nil, nil, errors.New("release evidence inventory is empty")
+	npmPackages, err := npmPackageInventory(inventory)
+	if err != nil {
+		return releaseInventory{}, err
 	}
-	return executables, pluginPaths, nil
+	if len(executables) == 0 || len(pluginPaths) == 0 {
+		return releaseInventory{}, errors.New("release evidence inventory is empty")
+	}
+	return releaseInventory{executables: executables, pluginPaths: pluginPaths, npmPackages: npmPackages}, nil
+}
+
+func npmPackageInventory(inventory map[string]any) ([]npmPackageSpec, error) {
+	rawPackages := array(inventory["npm_packages"])
+	packages := make([]npmPackageSpec, 0, len(rawPackages))
+	seenNames := make(map[string]bool, len(rawPackages))
+	seenPaths := make(map[string]bool, len(rawPackages))
+	for _, rawPackage := range rawPackages {
+		entry := object(rawPackage)
+		if !exactObjectKeys(entry, "path", "name") {
+			return nil, errors.New("authoritative npm package inventory has unexpected fields")
+		}
+		packagePath, name := stringField(entry, "path"), stringField(entry, "name")
+		if packagePath == "" || name == "" || filepath.IsAbs(packagePath) ||
+			filepath.Clean(packagePath) != packagePath || packagePath == "." ||
+			strings.HasPrefix(packagePath, ".."+string(filepath.Separator)) ||
+			seenNames[name] || seenPaths[packagePath] {
+			return nil, errors.New("authoritative npm package inventory is malformed or duplicated")
+		}
+		seenNames[name], seenPaths[packagePath] = true, true
+		packages = append(packages, npmPackageSpec{Path: packagePath, Name: name})
+	}
+	if len(packages) == 0 {
+		return nil, errors.New("authoritative npm package inventory is empty")
+	}
+	return packages, nil
+}
+
+func collectNPMPackageArtifacts(packageDir string, packages []npmPackageSpec, version, commit string) ([]any, error) {
+	entries, err := os.ReadDir(packageDir)
+	if err != nil {
+		return nil, fmt.Errorf("read npm package artifacts: %w", err)
+	}
+	byName := make(map[string]map[string]any, len(packages))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".tgz" {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+			return nil, fmt.Errorf("npm package artifact %s is not a nonempty regular file", entry.Name())
+		}
+		path := filepath.Join(packageDir, entry.Name())
+		name, packedVersion, manifestErr := readNPMPackageManifest(path)
+		if manifestErr != nil {
+			return nil, fmt.Errorf("read npm package artifact %s: %w", entry.Name(), manifestErr)
+		}
+		if _, duplicate := byName[name]; duplicate {
+			return nil, fmt.Errorf("npm package artifact for %s is duplicated", name)
+		}
+		digest, digestErr := fileSHA256(path)
+		if digestErr != nil {
+			return nil, digestErr
+		}
+		byName[name] = map[string]any{
+			"name": name, "version": packedVersion, "filename": entry.Name(),
+			"byte_size": info.Size(), "sha256": digest, "source_commit": commit,
+		}
+	}
+	artifacts := make([]any, 0, len(packages))
+	for _, spec := range packages {
+		artifact, ok := byName[spec.Name]
+		if !ok {
+			return nil, fmt.Errorf("npm package artifact for %s is missing", spec.Name)
+		}
+		if stringField(artifact, "version") != version {
+			return nil, fmt.Errorf("npm package artifact %s has version %s, want %s", spec.Name, stringField(artifact, "version"), version)
+		}
+		artifact["path"] = spec.Path
+		artifacts = append(artifacts, artifact)
+		delete(byName, spec.Name)
+	}
+	for name := range byName {
+		return nil, fmt.Errorf("npm package artifact %s is not in the authoritative inventory", name)
+	}
+	return artifacts, nil
+}
+
+//nolint:gocyclo // Artifact identity, bytes, manifest, and exact directory membership are one fail-closed boundary.
+func verifyNPMPackageArtifacts(packageDir, version, commit string, packages []npmPackageSpec, rawArtifacts []any) error {
+	if len(rawArtifacts) != len(packages) {
+		return errors.New("npm package artifacts do not match the authoritative inventory")
+	}
+	wantedFiles := make(map[string]bool, len(packages))
+	for index, spec := range packages {
+		artifact := object(rawArtifacts[index])
+		if stringField(artifact, "path") != spec.Path || stringField(artifact, "name") != spec.Name ||
+			stringField(artifact, "version") != version || stringField(artifact, "source_commit") != commit {
+			return fmt.Errorf("npm package artifact %s identity is inconsistent", spec.Name)
+		}
+		filename := stringField(artifact, "filename")
+		if filename == "" || filepath.Base(filename) != filename || filepath.Ext(filename) != ".tgz" || wantedFiles[filename] {
+			return fmt.Errorf("npm package artifact %s filename is invalid or duplicated", spec.Name)
+		}
+		wantedFiles[filename] = true
+		path := filepath.Join(packageDir, filename)
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() != integerField(artifact, "byte_size") {
+			return fmt.Errorf("npm package artifact %s size or file identity does not match evidence", spec.Name)
+		}
+		digest, digestErr := fileSHA256(path)
+		if digestErr != nil || digest != stringField(artifact, "sha256") {
+			return fmt.Errorf("npm package artifact %s SHA-256 does not match evidence", spec.Name)
+		}
+		name, packedVersion, manifestErr := readNPMPackageManifest(path)
+		if manifestErr != nil || name != spec.Name || packedVersion != version {
+			return fmt.Errorf("npm package artifact %s manifest does not match evidence", spec.Name)
+		}
+	}
+	entries, err := os.ReadDir(packageDir)
+	if err != nil {
+		return fmt.Errorf("read npm package artifacts: %w", err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".tgz" && !wantedFiles[entry.Name()] {
+			return fmt.Errorf("npm package artifact %s is not declared by evidence", entry.Name())
+		}
+	}
+	return nil
+}
+
+func readNPMPackageManifest(path string) (string, string, error) {
+	file, err := os.Open(path) //nolint:gosec // exact package artifact selected by the release workflow.
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = file.Close() }()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = gzipReader.Close() }()
+	reader := tar.NewReader(gzipReader)
+	for {
+		header, nextErr := reader.Next()
+		if nextErr == io.EOF {
+			return "", "", errors.New("package/package.json is missing")
+		}
+		if nextErr != nil {
+			return "", "", nextErr
+		}
+		if header.Name != "package/package.json" {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg || header.Size <= 0 || header.Size > 1<<20 {
+			return "", "", errors.New("package/package.json is not a bounded regular file")
+		}
+		body, readErr := io.ReadAll(io.LimitReader(reader, header.Size))
+		if readErr != nil {
+			return "", "", readErr
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(body, &manifest); err != nil {
+			return "", "", err
+		}
+		name, version := stringField(manifest, "name"), stringField(manifest, "version")
+		if name == "" || version == "" {
+			return "", "", errors.New("package manifest has no name or version")
+		}
+		return name, version, nil
+	}
 }
 
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.

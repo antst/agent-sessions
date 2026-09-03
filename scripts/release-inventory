@@ -46,6 +46,7 @@ package_paths=(
   scripts/release-publication-preflight
   scripts/release-tag-preflight
   scripts/release-tag-verify
+  scripts/verify-package-versions
   scripts/releasetool
   scripts/remove-host
   scripts/remove-hub
@@ -126,6 +127,15 @@ case "${1:-}" in
       printf '{"product":'; json_string "$product"
       printf ',"plugin_id":"agent-sessions","archive_paths":'
       json_string_array "${archive_paths[@]}"
+      printf '}'
+    done
+    printf '],"npm_packages":['
+    first=true
+    for row in "${packages[@]}"; do
+      IFS='|' read -r package_path package_name <<<"$row"
+      if [[ "$first" == true ]]; then first=false; else printf ','; fi
+      printf '{"path":'; json_string "$package_path"
+      printf ',"name":'; json_string "$package_name"
       printf '}'
     done
     printf ']}\n'

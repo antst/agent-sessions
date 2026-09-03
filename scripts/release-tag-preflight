@@ -13,6 +13,7 @@ if [[ "$tag" != "v$version" ]]; then
   printf 'release tag %s does not match authoritative version v%s\n' "$tag" "$version" >&2
   exit 1
 fi
+"$root/scripts/verify-package-versions" "$version"
 if git -C "$root" show-ref --verify --quiet "refs/tags/$tag"; then
   printf 'local release tag %s already exists; refusing creation\n' "$tag" >&2
   exit 1

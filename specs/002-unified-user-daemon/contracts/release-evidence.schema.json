@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/antst/agent-sessions/specs/002-unified-user-daemon/contracts/release-evidence.schema.json",
-  "title": "Agent Sessions v0.3.0 release evidence",
+  "title": "Agent Sessions v0.4.0 release evidence",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,6 +16,7 @@
     "native_clients",
     "gates",
     "archives",
+    "npm_packages",
     "package_inventory"
   ],
   "properties": {
@@ -23,10 +24,10 @@
       "const": 1
     },
     "release_version": {
-      "const": "0.3.0"
+      "const": "0.4.0"
     },
     "intended_tag": {
-      "const": "v0.3.0"
+      "const": "v0.4.0"
     },
     "commit_sha": {
       "$ref": "#/$defs/gitSha"
@@ -44,11 +45,11 @@
       ],
       "properties": {
         "file_name": {
-          "const": "agent-sessions-v0.3.0-release-evidence.json"
+          "const": "agent-sessions-v0.4.0-release-evidence.json"
         },
         "workflow_artifact_name": {
           "type": "string",
-          "pattern": "^agent-sessions-v0\\.3\\.0-release-evidence-[0-9a-f]{40}$"
+          "pattern": "^agent-sessions-v0\\.4\\.0-release-evidence-[0-9a-f]{40}$"
         },
         "retention_days": {
           "const": 90
@@ -152,7 +153,7 @@
                   "const": "linux-x64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.3.0-linux-x64.tar.gz"
+                  "const": "agent-sessions-0.4.0-linux-x64.tar.gz"
                 }
               }
             }
@@ -170,7 +171,7 @@
                   "const": "linux-arm64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.3.0-linux-arm64.tar.gz"
+                  "const": "agent-sessions-0.4.0-linux-arm64.tar.gz"
                 }
               }
             }
@@ -188,7 +189,7 @@
                   "const": "darwin-x64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.3.0-darwin-x64.tar.gz"
+                  "const": "agent-sessions-0.4.0-darwin-x64.tar.gz"
                 }
               }
             }
@@ -206,7 +207,7 @@
                   "const": "darwin-arm64"
                 },
                 "filename": {
-                  "const": "agent-sessions-0.3.0-darwin-arm64.tar.gz"
+                  "const": "agent-sessions-0.4.0-darwin-arm64.tar.gz"
                 }
               }
             }
@@ -214,12 +215,20 @@
         }
       }
     },
+    "npm_packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/npmPackageArtifact"
+      }
+    },
     "package_inventory": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "executables",
-        "plugin_payloads"
+        "plugin_payloads",
+        "npm_packages"
       ],
       "properties": {
         "executables": {
@@ -262,8 +271,43 @@
               "archive_paths": [
                 "qwen"
               ]
+            },
+            {
+              "product": "opencode",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                "integrations/opencode"
+              ]
+            },
+            {
+              "product": "kilo",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                "integrations/kilo"
+              ]
+            },
+            {
+              "product": "pi",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                "integrations/pi"
+              ]
+            },
+            {
+              "product": "omp",
+              "plugin_id": "agent-sessions",
+              "archive_paths": [
+                "integrations/omp"
+              ]
             }
           ]
+        },
+        "npm_packages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/npmPackageInventory"
+          }
         }
       }
     }
@@ -420,7 +464,7 @@
         },
         "filename": {
           "type": "string",
-          "pattern": "^agent-sessions-0\\.3\\.0-(linux|darwin)-(x64|arm64)\\.tar\\.gz$"
+          "pattern": "^agent-sessions-0\\.4\\.0-(linux|darwin)-(x64|arm64)\\.tar\\.gz$"
         },
         "byte_size": {
           "type": "integer",
@@ -434,6 +478,64 @@
         },
         "inventory_verified": {
           "const": true
+        }
+      }
+    },
+    "npmPackageInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "name"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^@[a-z0-9._-]+/[a-z0-9._-]+$"
+        }
+      }
+    },
+    "npmPackageArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "name",
+        "version",
+        "filename",
+        "byte_size",
+        "sha256",
+        "source_commit"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^@[a-z0-9._-]+/[a-z0-9._-]+$"
+        },
+        "version": {
+          "const": "0.4.0"
+        },
+        "filename": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*-0\\.4\\.0\\.tgz$"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/gitSha"
         }
       }
     }
