@@ -115,10 +115,20 @@ func openGrokAuthenticatedClient(
 	environment []string,
 	diagnostics io.Writer,
 ) (*grokACPClient, error) {
-	command := exec.CommandContext(ctx, bin, //nolint:gosec // Exact native binary is selected and validated by the daemon preparation.
-		"--no-auto-update", "--permission-mode", "default",
-		"--leader-socket", leaderSocket, "agent", "--leader", "stdio",
-	)
+	return openGrokAuthenticatedClientWithArguments(ctx, bin, cwd, leaderSocket, sessionID, environment, diagnostics, nil)
+}
+
+func openGrokAuthenticatedClientWithArguments(
+	ctx context.Context,
+	bin, cwd, leaderSocket, sessionID string,
+	environment []string,
+	diagnostics io.Writer,
+	arguments []string,
+) (*grokACPClient, error) {
+	argv := []string{"--no-auto-update"}
+	argv = append(argv, arguments...)
+	argv = append(argv, "--leader-socket", leaderSocket, "agent", "--leader", "stdio")
+	command := exec.CommandContext(ctx, bin, argv...) //nolint:gosec // Exact native binary is selected and validated by the daemon preparation.
 	command.Dir = cwd
 	command.Env = append([]string(nil), environment...)
 	if diagnostics == nil {

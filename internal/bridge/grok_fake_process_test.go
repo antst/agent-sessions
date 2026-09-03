@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,10 +20,43 @@ func TestGrokFakeProcess(_ *testing.T) {
 	if os.Getenv(grokFakeProcessEnv) != "1" {
 		return
 	}
+	if socket := grokFakeLeaderSocket(os.Args); socket != "" {
+		runGrokFakeLeader(socket)
+		return
+	}
 	runGrokFakeACP()
 }
 
+func grokFakeLeaderSocket(arguments []string) string {
+	for index, argument := range arguments {
+		if argument == "--leader-socket" && index+1 < len(arguments) {
+			for _, candidate := range arguments {
+				if candidate == "leader" {
+					return arguments[index+1]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func runGrokFakeLeader(socket string) {
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		os.Exit(2)
+	}
+	defer listener.Close()
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = connection.Close()
+	}
+}
+
 func runGrokFakeACP() {
+	recordGrokFake(map[string]any{"kind": "argv", "arguments": os.Args})
 	scanner := bufio.NewScanner(os.Stdin)
 	var activeTurnUntil time.Time
 	title := strings.TrimSpace(os.Getenv("GROK_FAKE_SESSION_TITLE"))

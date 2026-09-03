@@ -72,7 +72,6 @@ type GrokNativeLaunch struct {
 	Executable        string
 	Cwd               string
 	LeaderSocket      string
-	LeaderArguments   []string
 	LeaderEnvironment []string
 	TUIArguments      []string
 	TUIEnvironment    []string
@@ -121,10 +120,6 @@ func RunGrokPeer(ctx context.Context, args []string, run GrokNativeRunner) error
 	leaderEnvironment := envutil.Set(os.Environ(), peerProductEnv, "grok")
 	return run(ctx, GrokNativeLaunch{
 		Executable: grok, Cwd: plan.requestedCwd, LeaderSocket: leaderSocket,
-		LeaderArguments: []string{
-			"--permission-mode", "default", "agent", "leader", "--leader-socket", leaderSocket,
-			"--relay-on-demand", "--no-auto-update",
-		},
 		LeaderEnvironment: leaderEnvironment, TUIArguments: managed, TUIEnvironment: environment,
 		SessionID: plan.sessionID, RequestedName: plan.peerName, LateBoundResume: plan.lateBoundResume,
 		Groups: append([]string(nil), plan.peerContext.groups...),

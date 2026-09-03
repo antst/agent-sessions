@@ -109,6 +109,12 @@ type grokACPClient struct {
 	nextID    int64
 }
 
+type grokRequestFuture struct {
+	done   chan struct{}
+	result map[string]any
+	err    error
+}
+
 func (c *grokACPClient) readError() error {
 	if c == nil {
 		return io.EOF
@@ -301,17 +307,57 @@ func (c *grokACPClient) requestInterjection(ctx context.Context, sessionID, mess
 func (c *grokACPClient) request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
+	return c.requestLocked(ctx, method, params, nil)
+}
+
+func (c *grokACPClient) requestAsync(
+	ctx context.Context,
+	method string,
+	params map[string]any,
+) (*grokRequestFuture, error) {
+	started := make(chan error, 1)
+	future := &grokRequestFuture{done: make(chan struct{})}
+	go func() {
+		c.requestMu.Lock()
+		future.result, future.err = c.requestLocked(ctx, method, params, started)
+		c.requestMu.Unlock()
+		close(future.done)
+	}()
+	if err := <-started; err != nil {
+		return nil, err
+	}
+	return future, nil
+}
+
+func (c *grokACPClient) requestLocked(
+	ctx context.Context,
+	method string,
+	params map[string]any,
+	started chan<- error,
+) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		if started != nil {
+			started <- err
+		}
+		return nil, err
+	}
 	c.nextID++
 	id := c.nextID
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": method, "params": params,
 	})
 	if err != nil {
+		if started != nil {
+			started <- err
+		}
 		return nil, err
 	}
 	c.writeMu.Lock()
 	_, err = c.stdin.Write(append(body, '\n'))
 	c.writeMu.Unlock()
+	if started != nil {
+		started <- err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("write Grok ACP %s: %w", method, err)
 	}
@@ -341,6 +387,18 @@ func (c *grokACPClient) request(ctx context.Context, method string, params map[s
 		case <-ctx.Done():
 			return nil, fmt.Errorf("grok ACP %s: %w", method, ctx.Err())
 		}
+	}
+}
+
+func (future *grokRequestFuture) wait(ctx context.Context) (map[string]any, error) {
+	if future == nil {
+		return nil, errors.New("Grok ACP request is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-future.done:
+		return future.result, future.err
 	}
 }
 

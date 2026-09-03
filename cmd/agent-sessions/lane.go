@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/pathidentity"
@@ -914,9 +913,6 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	if driver, ok := c.laneDrivers.ByProduct(actor.product); ok {
 		return c.dispatchProductLaneTurn(runtime, actor, prompt, driver)
 	}
-	if actor.product == "grok" {
-		return c.dispatchACPLaneTurn(runtime, actor, prompt)
-	}
 	command, err := laneNativeCommand(actor, prompt, resume)
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
@@ -984,7 +980,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
 		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: actor.nativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
-		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox,
+		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox, Capability: actor.capability,
 	})
 	if err != nil {
 		return c.failLaneDispatch(runtime, actor, err)
@@ -1047,99 +1043,6 @@ func (c *hostCoordinator) watchProductLaneTurn(
 	c.completeLaneTurn(runtime, actor, dispatchedTurnID, dispatchedDone, laneTurnCompletion{
 		outcome: outcome, result: result.Result, failure: failure, failed: waitErr != nil, clearNativeTurn: true,
 	})
-}
-
-func (c *hostCoordinator) dispatchACPLaneTurn(runtime *daemonpkg.Runtime, actor *laneActor, prompt string) error {
-	executable, err := laneExecutable(actor.product)
-	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	hostExecutable, err := os.Executable()
-	if err != nil {
-		return c.failLaneDispatch(runtime, actor, err)
-	}
-	c.mu.Lock()
-	product, cwd, laneID := actor.product, actor.cwd, actor.id
-	permission, effort := actor.permission, actor.effort
-	timeout := actor.turnTimeout
-	c.mu.Unlock()
-	lifecycleCtx, cancel := context.WithCancel(c.ctx)
-	c.mu.Lock()
-	capability := actor.capability
-	nativeID := actor.nativeID
-	c.mu.Unlock()
-	type acpLaneEvent struct {
-		ready  bool
-		result bridge.NativeLaneACPResult
-		err    error
-	}
-	events := make(chan acpLaneEvent, 2)
-	runNative := func(runCtx context.Context, permissionMode, selectedNativeID string) (daemonpkg.NativeACPLaneResult, error) {
-		result, runErr := bridge.RunNativeLaneACP(runCtx, bridge.NativeLaneACPConfig{
-			Product: product, Executable: executable, HostExecutable: hostExecutable,
-			Cwd: cwd, LaneID: laneID, Capability: capability,
-			NativeSessionID: selectedNativeID, PermissionMode: permissionMode,
-			Effort: effort, Prompt: prompt, Environment: laneWorkerEnvironment(os.Environ(), actor),
-			ExecutionTimeout: timeout,
-			SessionOpened:    func(opened string) error { return c.recordLaneNativeID(runtime, actor, opened) },
-			ExecutionStarted: func() error {
-				if err := c.beginLaneExecution(runtime, actor, cancel); err != nil {
-					return err
-				}
-				events <- acpLaneEvent{ready: true}
-				return nil
-			},
-		})
-		return daemonpkg.NativeACPLaneResult{
-			NativeSessionID: result.NativeSessionID, Output: result.Output, Mode: result.Mode,
-		}, runErr
-	}
-	go func() {
-		var (
-			result daemonpkg.NativeACPLaneResult
-			runErr error
-		)
-		result, runErr = c.grokLanes.Run(lifecycleCtx, daemonpkg.GrokACPLaneRequest{
-			LaneID: laneID, NativeSession: nativeID, PermissionMode: permission, Prompt: prompt,
-		}, func(runCtx context.Context, request daemonpkg.GrokACPLaneRequest) (daemonpkg.NativeACPLaneResult, error) {
-			return runNative(runCtx, request.PermissionMode, request.NativeSession)
-		})
-		events <- acpLaneEvent{result: bridge.NativeLaneACPResult{
-			NativeSessionID: result.NativeSessionID, Output: result.Output, Mode: result.Mode,
-		}, err: runErr}
-	}()
-	first := <-events
-	if !first.ready {
-		cancel()
-		if first.err == nil {
-			first.err = errors.New("native ACP lane exited before its execution became ready")
-		}
-		return c.failLaneDispatch(runtime, actor, first.err)
-	}
-	go func() {
-		terminal := <-events
-		c.mu.Lock()
-		dispatchedTurnID, dispatchedDone := actor.turnID, actor.done
-		c.mu.Unlock()
-		result, runErr := terminal.result, terminal.err
-		outcome := "completed"
-		if runErr != nil {
-			outcome = "failed"
-		}
-		if errors.Is(runErr, context.DeadlineExceeded) {
-			outcome = "timed_out"
-		}
-		cancel()
-		failure := ""
-		if runErr != nil {
-			failure = runErr.Error()
-		}
-		c.completeLaneTurn(runtime, actor, dispatchedTurnID, dispatchedDone, laneTurnCompletion{
-			outcome: outcome, result: result.Output, failure: failure,
-			nativeID: result.NativeSessionID, failed: runErr != nil,
-		})
-	}()
-	return nil
 }
 
 func (c *hostCoordinator) beginLaneExecution(runtime *daemonpkg.Runtime, actor *laneActor, cancel context.CancelFunc) error {

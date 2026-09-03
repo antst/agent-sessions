@@ -23,6 +23,7 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
+	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
@@ -128,6 +129,23 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	if err != nil {
 		panic(err)
 	}
+	grokDescriptor, ok := productcatalog.ByID(grokproduct.ProductID)
+	if !ok {
+		panic("Grok product descriptor is unavailable")
+	}
+	grokNative, err := newGrokBridgeFactory(BridgeFactoryConfig{
+		Executable: grokDescriptor.NativeExecutable, HostExecutable: hostExecutable,
+		Environment: os.Environ(),
+	})
+	if err != nil {
+		panic(err)
+	}
+	grokLaneDriver, err := grokproduct.NewLaneDriver(grokproduct.LaneConfig{
+		Descriptor: grokDescriptor, Generation: 1, Native: grokNative,
+	})
+	if err != nil {
+		panic(err)
+	}
 	codexLanes, err := codexproduct.NewLaneDriver(func() (codexproduct.LaneNative, error) {
 		return coordinator.codexNative()
 	})
@@ -197,6 +215,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
 		claudeproduct.ProductID:   claudeLanes,
 		codexproduct.ProductID:    codexLanes,
+		grokproduct.ProductID:     grokLaneDriver,
 		opencodeproduct.ProductID: opencodeLanes,
 		kiloproduct.ProductID:     kiloLanes,
 		piproduct.ProductID:       piLanes,

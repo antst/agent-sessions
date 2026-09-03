@@ -22,7 +22,6 @@ var frozenLegacyImporters = map[string]bool{
 	"cmd/agent-sessions/federation.go":  true,
 	"cmd/agent-sessions/grok_peer.go":   true,
 	"cmd/agent-sessions/hook.go":        true,
-	"cmd/agent-sessions/lane.go":        true,
 	"cmd/agent-sessions/lane_notice.go": true,
 	"internal/products/codex/lane.go":   true,
 }

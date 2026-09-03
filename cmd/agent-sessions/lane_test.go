@@ -689,7 +689,7 @@ func TestParentDetachRetiresActiveLaneAndPreservesPersistentLane(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), root)
 	cancelled := make(chan struct{})
 	active := &laneActor{
-		id: "active", parentID: "parent", product: "grok", state: "running", done: make(chan struct{}),
+		id: "active", parentID: "parent", product: "dsh", state: "running", done: make(chan struct{}),
 		cancel: func() { close(cancelled) },
 	}
 	persistent := &laneActor{id: "persistent", parentID: "parent", product: "claude", state: "idle", persistent: true, done: closedLaneDone()}

@@ -129,6 +129,7 @@ type LaneOpenRequest struct {
 	Cwd             string
 	PermissionMode  permissionmode.Mode
 	ProfileIdentity string
+	Capability      string
 	Arguments       []string
 	ApprovalPolicy  string
 	Sandbox         string
