@@ -373,13 +373,13 @@ func TestGrokLaneResumeRejectsExplicitSaferReplacementButKeepsRecordedMode(t *te
 }
 
 func TestLaneResumePermissionUsesInvocationThenLiveValueThenFreshDefault(t *testing.T) {
-	if got := laneResumePermission("bypassPermissions", "default", "kilo", "bypassPermissions"); got != "default" {
+	if got := laneResumePermission("bypassPermissions", "default", "bypassPermissions"); got != "default" {
 		t.Fatalf("explicit resume permission = %q", got)
 	}
-	if got := laneResumePermission("bypassPermissions", "", "kilo", "default"); got != "bypassPermissions" {
+	if got := laneResumePermission("bypassPermissions", "", "default"); got != "bypassPermissions" {
 		t.Fatalf("live resume permission = %q", got)
 	}
-	if got := laneResumePermission("", "", "kilo", "default"); got != "default" {
+	if got := laneResumePermission("", "", "default"); got != "default" {
 		t.Fatalf("candidate resume permission = %q", got)
 	}
 }
@@ -551,69 +551,6 @@ func TestLaneWorkerEnvironmentReplacesAmbientPeerAuthority(t *testing.T) {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("lane environment retained %q: %q", forbidden, joined)
 		}
-	}
-}
-
-func TestClaudeInboundPeerFrameRemainsAQueryInOneShotNativeMode(t *testing.T) {
-	frame := `<cross-session-message from="session:source">work</cross-session-message>`
-	got := laneInboundPrompt("claude", frame)
-	if strings.HasPrefix(got, "<cross-session-message ") || !strings.HasSuffix(got, frame) {
-		t.Fatalf("Claude inbound prompt = %q", got)
-	}
-	for _, product := range []string{"codex", "grok", "qwen"} {
-		if got := laneInboundPrompt(product, frame); got != frame {
-			t.Fatalf("%s inbound prompt changed to %q", product, got)
-		}
-	}
-	plain := "ordinary explicit follow-up"
-	if got := laneInboundPrompt("claude", plain); got != plain {
-		t.Fatalf("ordinary Claude prompt changed to %q", got)
-	}
-}
-
-func TestClaudeInboundPeerFrameDispatchesAsOrdinaryNativeQuery(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	claudeBin := filepath.Join(root, "claude")
-	if err := os.WriteFile(claudeBin, []byte(`#!/bin/sh
-last=
-for argument do
-  last="$argument"
-done
-case "$last" in
-  "The following Agent Sessions peer message is the current user turn."*)
-    printf '%s\n' '{"session_id":"00000000-0000-0000-0000-000000000001","result":"wrapped peer query completed"}'
-    ;;
-  *)
-    printf '%s\n' 'Error: No messages returned from query' >&2
-    exit 31
-    ;;
-esac
-`), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", claudeBin)
-	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: filepath.Join(root, "state")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	actor := &laneActor{
-		id: "00000000-0000-0000-0000-000000000002", parentID: "parent", product: "claude", name: "worker",
-		cwd: root, nativeID: "00000000-0000-0000-0000-000000000001", permission: "dontAsk", state: "idle", done: closedLaneDone(),
-	}
-	coordinator := newHostCoordinator(context.Background(), root)
-	coordinator.lanesLoaded = true
-	coordinator.lanes[actor.id] = actor
-	frame := `<cross-session-message from="session:source">work</cross-session-message>`
-	if err := coordinator.deliverLaneMessage(runtime, actor, frame); err != nil {
-		t.Fatalf("deliver Claude peer frame: %v", err)
-	}
-	result, err := coordinator.waitLaneActor(context.Background(), runtime, actor)
-	if err != nil {
-		t.Fatalf("wait Claude peer frame: %v", err)
-	}
-	if result["outcome"] != "completed" || result["result"] != "wrapped peer query completed" || result["diagnostic"] != "" {
-		t.Fatalf("Claude peer-frame result = %#v", result)
 	}
 }
 

@@ -369,7 +369,7 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	}
 	permission := options.permission
 	if permission == "" {
-		permission = laneDefaultPermission(product, parent.PermissionMode)
+		permission = laneDefaultPermission(parent.PermissionMode)
 	}
 	id, err := newLaneUUID()
 	if err != nil {
@@ -396,9 +396,6 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		if err != nil {
 			return nil, err
 		}
-	}
-	if product == "claude" {
-		actor.nativeID = id
 	}
 	c.mu.Lock()
 	if conflict := c.liveLaneNameLocked(runtime, parent, options.name); conflict {
@@ -467,7 +464,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	if len(options.native) > 0 {
 		actor.arguments = append([]string(nil), options.native...)
 	}
-	actor.permission = laneResumePermission(actor.permission, options.permission, product, parent.PermissionMode)
+	actor.permission = laneResumePermission(actor.permission, options.permission, parent.PermissionMode)
 	if options.persistentSet {
 		actor.persistent = options.persistent
 	}
@@ -695,8 +692,6 @@ func (c *hostCoordinator) interruptLaneNative(actor *laneActor) error {
 		return driver.Interrupt(interruptCtx, turn)
 	}
 	switch product {
-	case "claude":
-		return c.claudeLanes.Interrupt(laneID)
 	case "grok":
 		return c.grokLanes.Interrupt(laneID)
 	default:
@@ -737,7 +732,6 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 }
 
 func (c *hostCoordinator) deliverLaneMessage(runtime *daemonpkg.Runtime, actor *laneActor, message string) error {
-	message = laneInboundPrompt(actor.product, message)
 	c.mu.Lock()
 	switch actor.state {
 	case "archived", "retiring":
@@ -753,21 +747,6 @@ func (c *hostCoordinator) deliverLaneMessage(runtime *daemonpkg.Runtime, actor *
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	return c.dispatchLaneTurn(runtime, actor, message, true)
-}
-
-// Claude Code treats a top-level <cross-session-message> argument as native
-// asynchronous input. In one-shot --print mode that consumes the argument
-// without opening a query and exits with "No messages returned from query".
-// The legacy Claude lane used a long-lived stream-json worker, where the same
-// frame arrived inside an ordinary user envelope. Preserve that established
-// behavior while the unified daemon owns turn serialization by putting the
-// peer frame inside an explicit user prompt before invoking Claude.
-func laneInboundPrompt(product, message string) string {
-	if product != "claude" || !strings.HasPrefix(strings.TrimSpace(message), "<cross-session-message ") {
-		return message
-	}
-	return "The following Agent Sessions peer message is the current user turn. " +
-		"Act on its enclosed content and preserve its sender metadata.\n\n" + message
 }
 
 func (c *hostCoordinator) reconcileOrphanedLanes(runtime *daemonpkg.Runtime) error {
@@ -882,21 +861,6 @@ func inspectLaneProductReadiness(ctx context.Context, product, path, cwd string)
 		report["ready"] = false
 		report["readiness_error"] = versionErr.Error()
 	}
-	if product != "claude" {
-		return report
-	}
-	status, err := bridge.InspectClaudeLaneReadiness(path)
-	report["claude_logged_in"] = status.LoggedIn
-	report["claude_auth_method"] = status.AuthMethod
-	report["claude_api_provider"] = status.APIProvider
-	switch {
-	case err != nil:
-		report["ready"] = false
-		report["readiness_error"] = err.Error()
-	case !status.LoggedIn:
-		report["ready"] = false
-		report["readiness_error"] = "Claude Code is not authenticated"
-	}
 	return report
 }
 
@@ -956,13 +920,6 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 		cancel()
 		return c.failLaneDispatch(runtime, actor, err)
 	}
-	if actor.product == "claude" {
-		if err := c.claudeLanes.Register(actor.id, cancel); err != nil {
-			cancel()
-			_ = command.Wait()
-			return c.failLaneDispatch(runtime, actor, err)
-		}
-	}
 	c.mu.Lock()
 	actor.cancel, actor.state, actor.startedAt = cancel, "running", time.Now().UnixMilli()
 	if actor.turnTimeout > 0 {
@@ -973,9 +930,6 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 	if err := c.markLaneRunning(runtime, actor); err != nil {
 		cancel()
 		_ = command.Wait()
-		if actor.product == "claude" {
-			c.claudeLanes.Complete(actor.id)
-		}
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	go func() {
@@ -983,12 +937,6 @@ func (c *hostCoordinator) dispatchLaneTurn(runtime *daemonpkg.Runtime, actor *la
 		dispatchedTurnID, dispatchedDone := actor.turnID, actor.done
 		c.mu.Unlock()
 		err := command.Wait()
-		if actor.product == "claude" {
-			// A queued turn is dispatched synchronously by completeLaneTurn.
-			// Release the exited per-turn worker before that dispatch registers
-			// its successor, while retaining one-worker-at-a-time serialization.
-			c.claudeLanes.Complete(actor.id)
-		}
 		outcome := "completed"
 		if err != nil {
 			outcome = "failed"
@@ -1023,7 +971,7 @@ func (c *hostCoordinator) dispatchProductLaneTurn(
 		return c.failLaneDispatch(runtime, actor, err)
 	}
 	session, err := driver.Open(c.ctx, productruntime.LaneOpenRequest{
-		ProductID: actor.product, LaneID: actor.id, Name: actor.name, ResumeNativeID: actor.nativeID,
+		ProductID: actor.product, LaneID: actor.id, Name: actor.name, Groups: append([]string(nil), actor.groups...), ResumeNativeID: actor.nativeID,
 		Cwd: actor.cwd, PermissionMode: mode, Arguments: append([]string(nil), actor.arguments...),
 		ApprovalPolicy: actor.approvalPolicy, Sandbox: actor.sandbox,
 	})
@@ -1367,8 +1315,6 @@ func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
 		})
 	}
 	switch actor.product {
-	case "claude":
-		return c.claudeLanes.Archive(actor.id)
 	case "grok":
 		return c.grokLanes.Archive(actor.id)
 	default:
@@ -1410,15 +1356,6 @@ func laneNativeCommand(actor *laneActor, prompt string, resume bool) (*exec.Cmd,
 	}
 	args := make([]string, 0, 16+len(actor.arguments))
 	switch actor.product {
-	case "claude":
-		command, commandErr := daemonpkg.NewClaudeLaneAdapter().Command(daemonpkg.ClaudeLaneRequest{
-			LaneID: actor.id, NativeSession: actor.nativeID, Name: actor.name, Prompt: prompt,
-			PermissionMode: actor.permission, Arguments: append([]string(nil), actor.arguments...), Resume: resume,
-		})
-		if commandErr != nil {
-			return nil, commandErr
-		}
-		args = command.Arguments
 	case "grok":
 		args = append(args, "--no-auto-update", "--output-format", "json", "--cwd", actor.cwd)
 		if resume {
@@ -1722,24 +1659,21 @@ func laneOutcomeExitCode(outcome string) int {
 	}
 }
 
-func laneDefaultPermission(product, parent string) string {
+func laneDefaultPermission(parent string) string {
 	if parent == "bypassPermissions" {
 		return parent
-	}
-	if product == "claude" {
-		return "dontAsk"
 	}
 	return "default"
 }
 
-func laneResumePermission(existing, requested, product, parent string) string {
+func laneResumePermission(existing, requested, parent string) string {
 	if requested != "" {
 		return requested
 	}
 	if existing != "" {
 		return existing
 	}
-	return laneDefaultPermission(product, parent)
+	return laneDefaultPermission(parent)
 }
 
 // validateGrokLanePermission prevents the generic option layer from silently

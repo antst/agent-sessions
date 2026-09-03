@@ -31,7 +31,7 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 	want := map[string]int{
 		"cmd/agent-sessions/codex_host.go":                1,
 		"cmd/agent-sessions/hook.go":                      1,
-		"cmd/agent-sessions/lane.go":                      16,
+		"cmd/agent-sessions/lane.go":                      6,
 		"cmd/agent-sessions/main.go":                      4,
 		"internal/bridge/native_lane_acp.go":              1,
 		"internal/daemon/adapter_claude.go":               1,
@@ -152,6 +152,26 @@ func TestCodexLaneDispatchCannotReturnToCentralEngine(t *testing.T) {
 		value, err := strconv.Unquote(literal.Value)
 		if err == nil && value == "codex" {
 			t.Fatalf("Codex lane dispatch returned to %s; compose its LaneDriver at the host root", path)
+		}
+		return true
+	})
+}
+
+func TestClaudeLaneDispatchCannotReturnToCentralEngine(t *testing.T) {
+	root := productCatalogRepositoryRoot(t)
+	path := filepath.Join(root, "cmd", "agent-sessions", "lane.go")
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		literal, ok := node.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		value, err := strconv.Unquote(literal.Value)
+		if err == nil && value == "claude" {
+			t.Fatalf("Claude lane dispatch returned to %s; compose its LaneDriver at the host root", path)
 		}
 		return true
 	})

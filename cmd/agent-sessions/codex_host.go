@@ -21,6 +21,7 @@ import (
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
@@ -51,7 +52,6 @@ type hostCoordinator struct {
 	codex              *bridge.CodexNative
 	pending            map[string]daemonpkg.NativeEvidence
 	monitored          map[string]bool
-	claudeLanes        *daemonpkg.ClaudeLaneAdapter
 	grokLanes          *daemonpkg.GrokLaneAdapter
 	laneProcesses      *structuredprocess.Supervisor
 	laneDrivers        *productruntime.LaneRegistry
@@ -79,7 +79,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 			return native.ReloadMCPServers(ctx)
 		},
 		pending: map[string]daemonpkg.NativeEvidence{}, monitored: map[string]bool{},
-		claudeLanes:     daemonpkg.NewClaudeLaneAdapter(),
 		grokLanes:       daemonpkg.NewGrokLaneAdapter(),
 		lanes:           map[string]*laneActor{},
 		liveReports:     map[string]liveSessionReport{},
@@ -106,6 +105,21 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		panic(err)
 	}
 	hostExecutable, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	claudeDescriptor, ok := productcatalog.ByID(claudeproduct.ProductID)
+	if !ok {
+		panic("Claude product descriptor is unavailable")
+	}
+	claudeProcesses, err := claudeproduct.NewStructuredProcessFactory(laneProcesses)
+	if err != nil {
+		panic(err)
+	}
+	claudeLanes, err := claudeproduct.NewLaneDriver(claudeproduct.LaneConfig{
+		Descriptor: claudeDescriptor, HostExecutable: hostExecutable,
+		Generation: 1, Processes: claudeProcesses,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -183,6 +197,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		panic(err)
 	}
 	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{
+		claudeproduct.ProductID:   claudeLanes,
 		codexproduct.ProductID:    codexLanes,
 		opencodeproduct.ProductID: opencodeLanes,
 		kiloproduct.ProductID:     kiloLanes,

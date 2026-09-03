@@ -11,6 +11,7 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
@@ -23,6 +24,9 @@ func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
 	if _, ok := coordinator.laneDrivers.ByProduct(qwenproduct.ProductID); !ok {
 		t.Fatal("Qwen lane driver is absent from the production registry")
+	}
+	if _, ok := coordinator.laneDrivers.ByProduct(claudeproduct.ProductID); !ok {
+		t.Fatal("Claude lane driver is absent from the production registry")
 	}
 	for _, product := range []struct {
 		id          string
