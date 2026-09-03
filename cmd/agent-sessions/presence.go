@@ -509,12 +509,16 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 		actor := c.lanes[actorKey]
 		if actor == nil {
 			actorKey = id
-			actor = &laneActor{id: id, nativeID: id, done: make(chan struct{})}
+			actor = &laneActor{
+				id: id, nativeID: id, groups: append([]string(nil), report.Groups...), done: make(chan struct{}),
+			}
 			c.lanes[actorKey] = actor
+		} else {
+			report.Groups = append([]string(nil), actor.groups...)
+			reports[id] = report
 		}
 		actor.product = report.Product
 		actor.name = report.Name
-		actor.groups = append([]string(nil), report.Groups...)
 		actor.parentID = parentID
 		actor.nativeID = id
 		if actor.state == "" {

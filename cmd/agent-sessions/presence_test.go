@@ -220,15 +220,22 @@ func TestLaneOnlyProductReportCannotBecomePeerButItsLaneRemainsLive(t *testing.T
 func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex"})
+	parentGroups := []string{"team"}
+	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex", Groups: parentGroups})
+	stableGroups := []string{
+		"session:" + runtime.HostID() + "/parent",
+		"session:" + runtime.HostID() + "/parent/native-lane",
+		"team/child",
+	}
 	coordinator.mu.Lock()
 	coordinator.lanes["public-lane"] = &laneActor{
-		id: "public-lane", product: "codex", name: "worker", parentID: "parent", state: "running", done: make(chan struct{}),
+		id: "public-lane", product: "codex", name: "worker", parentID: "parent", state: "running",
+		groups: stableGroups, done: make(chan struct{}),
 	}
 	coordinator.mu.Unlock()
 	coordinator.joinLiveSession(runtime, liveSessionReport{
 		UUID: "native-lane", Name: "worker", Product: "codex",
-		Groups: []string{"session:" + runtime.HostID() + "/parent", "session:" + runtime.HostID() + "/public-lane"},
+		Groups: []string{"team/child", "session:" + runtime.HostID() + "/parent"},
 	})
 	coordinator.mu.Lock()
 	actor := coordinator.lanes["public-lane"]
@@ -242,6 +249,17 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 	coordinator.mu.Unlock()
 	if provisional || bound != actor || actor.id != "native-lane" || actor.nativeID != "native-lane" || actor.state != "running" {
 		t.Fatalf("bound actor = %+v, provisional=%v", actor, provisional)
+	}
+	if !reflect.DeepEqual(actor.groups, stableGroups) {
+		t.Fatalf("bound actor groups = %v, want %v", actor.groups, stableGroups)
+	}
+	attachment, active, err := runtime.Attachments().ActiveAttachment("native-lane")
+	if err != nil || !active || !reflect.DeepEqual(attachment.Groups, stableGroups) {
+		t.Fatalf("bound lane attachment = %+v, active=%v, err=%v", attachment, active, err)
+	}
+	parent, active, err := runtime.Attachments().ActiveAttachment("parent")
+	if err != nil || !active || !reflect.DeepEqual(parent.Groups, parentGroups) {
+		t.Fatalf("ordinary peer attachment = %+v, active=%v, err=%v", parent, active, err)
 	}
 }
 
