@@ -13,6 +13,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
 )
 
 type passiveMessageTestDriver struct{}
@@ -334,6 +335,33 @@ func TestClaudePeerNameComesFromTheProductTranscriptAtQueryTime(t *testing.T) {
 	})
 	if err == nil || err.Error() != "live session channel is unavailable" {
 		t.Fatalf("send-by-native-name did not select the live Claude peer: %v", err)
+	}
+}
+
+func TestOMPHasAnOnDemandProductTitleResolver(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	if coordinator.liveTitleResolvers[ompproduct.ProductID] == nil {
+		t.Fatal("OMP live title resolver was not composed")
+	}
+	coordinator.liveTitleResolvers[ompproduct.ProductID] = func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+		if attachment.NativeSessionID == "omp-session" {
+			return "native-name", true
+		}
+		return "", false
+	}
+	runtime := newPresenceTestRuntime(t)
+	runtime.Attachments().ReportLive("omp-session", "launch-name", ompproduct.ProductID, []string{"project"}, map[string]string{}, false)
+	runtime.Attachments().ReportLive("missing", "hello-name", ompproduct.ProductID, []string{"project"}, map[string]string{}, false)
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
+		ID: "omp-session", NativeSessionID: "omp-session", Product: ompproduct.ProductID,
+	}); got != "native-name" {
+		t.Fatalf("OMP display name = %q", got)
+	}
+	if got := coordinator.attachmentDisplayName(runtime, daemonpkg.ManagedAttachment{
+		ID: "missing", NativeSessionID: "missing", Product: ompproduct.ProductID,
+	}); got != "hello-name" {
+		t.Fatalf("OMP hello fallback name = %q", got)
 	}
 }
 

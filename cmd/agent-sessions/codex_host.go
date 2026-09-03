@@ -93,6 +93,22 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 				title, observed := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, attachment.NativeSessionID)
 				return title, observed && title != attachment.NativeSessionID
 			},
+			ompproduct.ProductID: func(attachment daemonpkg.ManagedAttachment) (string, bool) {
+				executable, err := launcher.ResolveProductExecutable(ompproduct.ProductID)
+				if err != nil {
+					return "", false
+				}
+				sessions, err := launcher.ListAllOMPSessions(ctx, executable)
+				if err != nil {
+					return "", false
+				}
+				for _, session := range sessions {
+					if session.ID == attachment.NativeSessionID {
+						return session.Title, strings.TrimSpace(session.Title) != ""
+					}
+				}
+				return "", false
+			},
 		},
 		runtimeReady: make(chan *daemonpkg.Runtime, 1),
 		now:          time.Now,

@@ -41,7 +41,7 @@ function context(id, idle = true) {
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-test("Pi and OMP report the current product session and its native title", async (t) => {
+test("Pi and OMP report the current product session and its initial native title", async (t) => {
   for (const product of ["pi", "omp"]) await t.test(product, async () => {
     const live = new FakeLiveSession();
     const pi = new FakePi("first");
@@ -49,9 +49,17 @@ test("Pi and OMP report the current product session and its native title", async
     const ctx = context(`${product}-session`);
     await pi.fire("session_start", {}, ctx);
     assert.deepEqual(live.reported, [{ id: `${product}-session`, name: "first", info: { cwd: "/work" } }]);
-    await pi.fire("session_info_changed", { name: "renamed" }, ctx);
-    assert.deepEqual(live.updated, [{ id: `${product}-session`, name: "renamed" }]);
   });
+});
+
+test("Pi reports its native session title event", async () => {
+  const live = new FakeLiveSession();
+  const pi = new FakePi("first");
+  createPiFamilyExtension("pi", { liveSessionClient: live })(pi);
+  const ctx = context("pi-session");
+  await pi.fire("session_start", {}, ctx);
+  await pi.fire("session_info_changed", { name: "renamed" }, ctx);
+  assert.deepEqual(live.updated, [{ id: "pi-session", name: "renamed" }]);
 });
 
 test("Pi and OMP seed a requested fresh name through the product title writer", async (t) => {
