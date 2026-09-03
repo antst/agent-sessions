@@ -606,25 +606,11 @@ func (c *hostCoordinator) listLanes(runtime *daemonpkg.Runtime, parent daemonpkg
 	}
 	c.mu.Lock()
 	lanes := make([]map[string]any, 0)
-	liveNativeIDs := map[string]bool{}
 	for _, actor := range c.lanes {
 		if actor.product != product || options.mine && actor.parentID != parent.ID || !options.all && actor.state == "archived" || !groupsIntersect(parentGroups, actor.groups) && actor.parentID != parent.ID {
 			continue
 		}
 		lanes = append(lanes, laneActorStatus(actor))
-		liveNativeIDs[actor.nativeID] = true
-	}
-	if options.all {
-		for _, entry := range c.laneNames[parent.ID] {
-			if entry.Product != product || liveNativeIDs[entry.UUID] {
-				continue
-			}
-			lanes = append(lanes, laneActorStatus(&laneActor{
-				id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
-				name: entry.Name, cwd: entry.Cwd, parentID: parent.ID,
-				groups: append([]string(nil), entry.Groups...), state: "archived",
-			}))
-		}
 	}
 	c.mu.Unlock()
 	sort.Slice(lanes, func(i, j int) bool { return fmt.Sprint(lanes[i]["name"]) < fmt.Sprint(lanes[j]["name"]) })
@@ -1523,24 +1509,6 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 		}
 		matches = append(matches, actor)
 	}
-	if len(matches) == 0 && all {
-		for _, entry := range c.laneNames[parent.ID] {
-			if entry.Product != product || entry.UUID != target && entry.Name != target {
-				continue
-			}
-			actor := &laneActor{
-				id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
-				name: entry.Name, cwd: entry.Cwd, parentID: parent.ID,
-				groups:         append([]string(nil), entry.Groups...),
-				explicitGroups: append([]string(nil), entry.SecondaryGroups...),
-				state:          "archived", done: make(chan struct{}),
-			}
-			matches = append(matches, actor)
-		}
-		if len(matches) == 1 {
-			c.lanes[matches[0].id] = matches[0]
-		}
-	}
 	if len(matches) == 0 {
 		return nil, errors.New("lane was not found")
 	}
@@ -1772,7 +1740,6 @@ func (c *hostCoordinator) rememberActiveLaneName(actor *laneActor) {
 	}
 	c.laneNames[actor.parentID][actor.nativeID] = laneNameEntry{
 		UUID: actor.nativeID, Name: actor.name, Product: actor.product,
-		Groups: append([]string(nil), actor.groups...),
 	}
 }
 func (c *hostCoordinator) markLaneRunning(*daemonpkg.Runtime, *laneActor) error        { return nil }

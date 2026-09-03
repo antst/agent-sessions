@@ -26,12 +26,9 @@ type liveSessionReport struct {
 }
 
 type laneNameEntry struct {
-	UUID            string
-	Name            string
-	Product         string
-	Groups          []string
-	SecondaryGroups []string
-	Cwd             string
+	UUID    string
+	Name    string
+	Product string
 }
 
 type livePresenceServer struct {
@@ -527,6 +524,9 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 
 	for id, actorKey := range oldLanes {
 		if _, ok := laneKeys[id]; !ok {
+			if actor := c.lanes[actorKey]; actor != nil {
+				delete(c.laneNamesLoaded, actor.parentID)
+			}
 			delete(c.lanes, actorKey)
 		}
 	}
@@ -546,7 +546,6 @@ func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 		}
 		c.laneNames[actor.parentID][id] = laneNameEntry{
 			UUID: id, Name: actor.name, Product: actor.product,
-			Groups: append([]string(nil), actor.groups...),
 		}
 	}
 	c.reportedPeers = peerIDs

@@ -36,7 +36,11 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 	if err != nil {
 		return err
 	}
-	confirmed := make([]laneNameEntry, 0, len(candidates))
+	type confirmedLane struct {
+		entry     laneNameEntry
+		candidate daemonpkg.LaneCandidate
+	}
+	confirmed := make([]confirmedLane, 0, len(candidates))
 	for _, candidate := range candidates {
 		if !groupsIntersect(parentGroups, candidateLaneGroups(candidate)) {
 			continue
@@ -47,15 +51,10 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 		}
 		entry.UUID = candidate.NativeSessionID
 		entry.Product = candidate.Product
-		entry.Groups = candidateLaneGroups(candidate)
-		entry.SecondaryGroups = append([]string(nil), candidate.SecondaryGroups...)
 		if entry.Name == "" {
 			entry.Name = candidate.NativeSessionID
 		}
-		if entry.Cwd == "" {
-			entry.Cwd = parent.Cwd
-		}
-		confirmed = append(confirmed, entry)
+		confirmed = append(confirmed, confirmedLane{entry: entry, candidate: candidate})
 	}
 
 	c.mu.Lock()
@@ -68,8 +67,26 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 	if c.laneNames[parent.ID] == nil {
 		c.laneNames[parent.ID] = map[string]laneNameEntry{}
 	}
-	for _, entry := range confirmed {
+	for _, confirmed := range confirmed {
+		entry := confirmed.entry
 		c.laneNames[parent.ID][entry.UUID] = entry
+		found := false
+		for _, actor := range c.lanes {
+			if actor.product == entry.Product && actor.nativeID == entry.UUID {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		c.lanes[entry.UUID] = &laneActor{
+			id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
+			name: entry.Name, parentID: parent.ID,
+			groups:         candidateLaneGroups(confirmed.candidate),
+			explicitGroups: append([]string(nil), confirmed.candidate.SecondaryGroups...),
+			state:          "archived", done: make(chan struct{}),
+		}
 	}
 	return nil
 }

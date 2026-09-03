@@ -49,7 +49,7 @@ func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *
 			entry, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{}, daemonpkg.LaneCandidate{
 				Product: product.id, NativeSessionID: "ses_" + product.id,
 			})
-			if !ok || entry.Name != "reviewer-"+product.id || entry.Cwd != "/work/"+product.id {
+			if !ok || entry.Name != "reviewer-"+product.id {
 				t.Fatalf("product-confirmed candidate = %+v, ok=%v", entry, ok)
 			}
 			if _, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{}, daemonpkg.LaneCandidate{
@@ -94,7 +94,7 @@ func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *
 			entry, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{Cwd: t.TempDir()}, daemonpkg.LaneCandidate{
 				Product: product.id, NativeSessionID: product.id + "-native",
 			})
-			if !ok || entry.Name != "reviewer-"+product.id || entry.Cwd != "/work/"+product.id {
+			if !ok || entry.Name != "reviewer-"+product.id {
 				t.Fatalf("%s product-confirmed candidate = %+v, ok=%v", product.id, entry, ok)
 			}
 			if _, ok := resolver(context.Background(), daemonpkg.ManagedAttachment{Cwd: t.TempDir()}, daemonpkg.LaneCandidate{

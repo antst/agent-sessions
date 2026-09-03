@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -263,7 +262,7 @@ func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) 
 		if got.NativeSessionID != candidate.NativeSessionID {
 			return laneNameEntry{}, false
 		}
-		return laneNameEntry{Name: "archived-worker", Cwd: filepath.Clean(t.TempDir())}, true
+		return laneNameEntry{Name: "archived-worker"}, true
 	}
 	parent, active, err := runtime.Attachments().ActiveAttachment("parent")
 	if err != nil || !active {
@@ -295,6 +294,72 @@ func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) 
 	}
 }
 
+func TestLaneEOFRematerializesArchivedGroupsOnlyFromDurableCandidate(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	parentReport := liveSessionReport{UUID: "parent", Name: "parent", Product: "claude", Groups: []string{"shared"}}
+	coordinator.joinLiveSession(runtime, parentReport)
+	engine, err := daemonpkg.NewLaneEngine(runtime.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := daemonpkg.LaneCandidate{
+		NativeSessionID: "native-lane", Product: "claude", Parent: "parent",
+		PrimaryGroup:    "session:" + runtime.HostID() + "/parent",
+		SecondaryGroups: []string{"shared/child", "shared"},
+	}
+	if err := engine.Remember(candidate); err != nil {
+		t.Fatal(err)
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmations := 0
+	coordinator.resolveCandidate = func(_ context.Context, _ *daemonpkg.Runtime, _ daemonpkg.ManagedAttachment, got daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+		confirmations++
+		if !reflect.DeepEqual(got, candidate) {
+			t.Fatalf("candidate = %+v", got)
+		}
+		return laneNameEntry{Name: "worker"}, true
+	}
+	parent, active, err := runtime.Attachments().ActiveAttachment(parentReport.UUID)
+	if err != nil || !active {
+		t.Fatalf("parent active=%v err=%v", active, err)
+	}
+	if _, err := coordinator.resolveLaneActor(runtime, parent, candidate.Product, "worker", true); err != nil {
+		t.Fatal(err)
+	}
+	laneReport := liveSessionReport{
+		UUID: candidate.NativeSessionID, Name: "worker", Product: candidate.Product,
+		Groups: candidateLaneGroups(candidate),
+	}
+	coordinator.joinLiveSession(runtime, laneReport)
+	coordinator.leaveLiveSession(runtime, laneReport)
+	coordinator.mu.Lock()
+	_, actorSurvived := coordinator.lanes[candidate.NativeSessionID]
+	loadedSurvived := coordinator.laneNamesLoaded[parent.ID]
+	coordinator.mu.Unlock()
+	if actorSurvived || loadedSurvived {
+		t.Fatalf("EOF left actor=%v loaded-candidate-bit=%v", actorSurvived, loadedSurvived)
+	}
+
+	actor, err := coordinator.resolveLaneActor(runtime, parent, candidate.Product, "worker", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmations != 2 || actor.cwd != "" || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) || !reflect.DeepEqual(actor.groups, candidateLaneGroups(candidate)) {
+		t.Fatalf("rematerialized actor=%+v confirmations=%d", actor, confirmations)
+	}
+	after, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("rematerialization changed durable candidate: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
@@ -316,7 +381,7 @@ func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *tes
 		if !reflect.DeepEqual(got, candidate) {
 			t.Fatalf("candidate = %+v", got)
 		}
-		return laneNameEntry{Name: "shared-worker", Cwd: t.TempDir()}, true
+		return laneNameEntry{Name: "shared-worker"}, true
 	}
 	outsider := daemonpkg.ManagedAttachment{ID: "parent-outside", Product: "claude", Cwd: t.TempDir(), Groups: []string{"outside"}}
 	coordinator.liveReports[outsider.ID] = liveSessionReport{UUID: outsider.ID, Product: outsider.Product, Groups: outsider.Groups}

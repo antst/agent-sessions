@@ -345,15 +345,15 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 			if err != nil || thread.ID != candidate.NativeSessionID {
 				return laneNameEntry{}, false
 			}
-			return laneNameEntry{Name: thread.Name, Cwd: thread.Cwd}, true
+			return laneNameEntry{Name: thread.Name}, true
 		},
-		laneCandidateClaude: func(_ context.Context, parent daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
+		laneCandidateClaude: func(_ context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
 			source, err := claudeprofile.CurrentSource()
 			if err != nil {
 				return laneNameEntry{}, false
 			}
 			name, ok := bridge.ClaudeNativeSessionTitle(source.ConfigRoot, candidate.NativeSessionID)
-			return laneNameEntry{Name: name, Cwd: parent.Cwd}, ok
+			return laneNameEntry{Name: name}, ok
 		},
 		laneCandidateQwen: func(_ context.Context, _ daemonpkg.ManagedAttachment, candidate daemonpkg.LaneCandidate) (laneNameEntry, bool) {
 			profile, err := qwenprofile.Current()
@@ -364,8 +364,8 @@ func (c *hostCoordinator) productLaneCandidateResolvers() map[string]func(
 			if err != nil {
 				return laneNameEntry{}, false
 			}
-			name, cwd, ok := bridge.QwenNativeSessionInfo(home, candidate.NativeSessionID)
-			return laneNameEntry{Name: name, Cwd: cwd}, ok
+			name, _, ok := bridge.QwenNativeSessionInfo(home, candidate.NativeSessionID)
+			return laneNameEntry{Name: name}, ok
 		},
 		opencodeproduct.ProductID: productListLaneCandidateResolver(opencodeproduct.ProductID),
 		kiloproduct.ProductID:     productListLaneCandidateResolver(kiloproduct.ProductID),
@@ -389,7 +389,7 @@ func packageListLaneCandidateResolver(
 		}
 		for _, session := range sessions {
 			if session.ID == candidate.NativeSessionID {
-				return laneNameEntry{Name: session.Title, Cwd: session.Directory}, true
+				return laneNameEntry{Name: session.Title}, true
 			}
 		}
 		return laneNameEntry{}, false
@@ -410,7 +410,7 @@ func productListLaneCandidateResolver(product string) func(
 		}
 		for _, session := range sessions {
 			if session.ID == candidate.NativeSessionID {
-				return laneNameEntry{Name: session.Title, Cwd: session.Directory}, true
+				return laneNameEntry{Name: session.Title}, true
 			}
 		}
 		return laneNameEntry{}, false
