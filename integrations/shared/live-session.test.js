@@ -9,6 +9,11 @@ const test = require("node:test");
 
 const { InactiveError, LiveSessionClient, readConfiguration } = require("./live-session.js");
 
+test("default reconnect cadence is two seconds", () => {
+  const client = new LiveSessionClient({ env: {} });
+  assert.equal(client.reconnectMs, 2000);
+});
+
 test("one socket reports, calls, updates, and receives messages", async (t) => {
   const fixture = await server(t);
   const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });

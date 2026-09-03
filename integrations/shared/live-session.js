@@ -10,6 +10,7 @@ const ENV = Object.freeze({
   product: "AGENT_SESSIONS_PRODUCT",
   groups: "AGENT_SESSIONS_GROUPS",
 });
+const DEFAULT_RECONNECT_MS = 2000;
 
 class InactiveError extends Error {
   constructor(reason) {
@@ -27,7 +28,7 @@ class LiveSessionClient extends EventEmitter {
     super();
     this.env = options.env ?? process.env;
     this.connect = options.connect ?? ((socketPath) => net.createConnection(socketPath));
-    this.reconnectMs = integer(options.reconnectMs ?? 100, 1, 60000, "reconnectMs");
+    this.reconnectMs = integer(options.reconnectMs ?? DEFAULT_RECONNECT_MS, 1, 60000, "reconnectMs");
     const config = readConfiguration(this.env);
     this.active = config.active;
     this.inactiveReason = config.reason;

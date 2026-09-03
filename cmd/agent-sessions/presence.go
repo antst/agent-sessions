@@ -22,7 +22,10 @@ import (
 	"github.com/antst/agent-sessions/internal/stateroot"
 )
 
-const liveProtocolVersion = 1
+const (
+	liveProtocolVersion          = 1
+	liveSessionReconnectInterval = 2 * time.Second
+)
 
 const (
 	liveRPCInvalidParams      = -32602
@@ -719,7 +722,7 @@ func (c *liveSessionClient) run() {
 		select {
 		case <-c.ctx.Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(liveSessionReconnectInterval):
 		}
 	}
 }

@@ -56,6 +56,12 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 	}
 }
 
+func TestLiveSessionReconnectCadenceIsTwoSeconds(t *testing.T) {
+	if liveSessionReconnectInterval != 2*time.Second {
+		t.Fatalf("live reconnect interval = %s", liveSessionReconnectInterval)
+	}
+}
+
 func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -255,7 +261,7 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 		if got.UUID != report.UUID {
 			t.Fatalf("reconnect report = %+v", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("live session did not reconnect to the successor daemon")
 	}
 	stopClient()
