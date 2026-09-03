@@ -9,6 +9,7 @@ import (
 	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
 func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
@@ -357,6 +358,76 @@ func TestLaneEOFRematerializesArchivedGroupsOnlyFromDurableCandidate(t *testing.
 	}
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("rematerialization changed durable candidate: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	driver := &parentExitLaneDriver{}
+	var err error
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentA := liveSessionReport{UUID: "parent-a", Name: "parent-a", Product: "claude", Groups: []string{"shared"}}
+	coordinator.joinLiveSession(runtime, parentA)
+	engine, err := daemonpkg.NewLaneEngine(runtime.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nativeID := range []string{"native-idle", "native-persistent"} {
+		if err := engine.Remember(daemonpkg.LaneCandidate{
+			NativeSessionID: nativeID, Product: "claude", Parent: parentA.UUID,
+			PrimaryGroup: "session:" + runtime.HostID() + "/" + parentA.UUID, SecondaryGroups: []string{"shared"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle := &laneActor{
+		id: "lane-idle", nativeID: "native-idle", nativeGeneration: 7, product: "claude", name: "worker-idle",
+		parentID: parentA.UUID, groups: []string{"shared"}, state: "idle", done: closedLaneDone(),
+	}
+	persistent := &laneActor{
+		id: "lane-persistent", nativeID: "native-persistent", nativeGeneration: 7, product: "claude", name: "worker-persistent",
+		parentID: parentA.UUID, groups: []string{"shared"}, permission: "default", persistent: true, state: "idle", done: closedLaneDone(),
+	}
+	coordinator.lanes[idle.id], coordinator.lanes[persistent.id] = idle, persistent
+
+	coordinator.leaveLiveSession(runtime, parentA)
+	coordinator.leaveLiveSession(runtime, parentA)
+	if idle.state != "archived" || len(driver.archives) != 1 || driver.archives[0].NativeSessionID != idle.nativeID {
+		t.Fatalf("nonpersistent parent exit actor=%+v archives=%+v", idle, driver.archives)
+	}
+	if persistent.state != "idle" || persistent.parentID != "" {
+		t.Fatalf("persistent parent exit actor=%+v", persistent)
+	}
+
+	parentBReport := liveSessionReport{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
+	coordinator.joinLiveSession(runtime, parentBReport)
+	parentB, active, err := runtime.Attachments().ActiveAttachment(parentBReport.UUID)
+	if err != nil || !active {
+		t.Fatalf("parent B active=%v err=%v", active, err)
+	}
+	parentB.Cwd = t.TempDir()
+	result, err := coordinator.resumeLane(context.Background(), runtime, parentB, "claude", parsedLaneCommand{target: persistent.name}, "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["result"] != "resumed" || persistent.parentID != parentB.ID || len(driver.opens) != 1 ||
+		driver.opens[0].LaneID != persistent.id || driver.opens[0].ResumeNativeID != persistent.nativeID {
+		t.Fatalf("persistent reattach result=%+v actor=%+v opens=%+v", result, persistent, driver.opens)
+	}
+	after, err := runtime.State().Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("parent exit or handover changed durable rows: before=%+v after=%+v", before, after)
 	}
 }
 

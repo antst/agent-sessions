@@ -49,6 +49,35 @@ type steerRecordingLaneDriver struct {
 	request      productruntime.TurnStartRequest
 }
 
+type parentExitLaneDriver struct {
+	opens    []productruntime.LaneOpenRequest
+	archives []productruntime.NativeSessionRef
+}
+
+func (*parentExitLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
+	return productruntime.LaneCapabilitySet{DurableResume: true}
+}
+func (d *parentExitLaneDriver) Open(_ context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
+	d.opens = append(d.opens, request)
+	return productruntime.NativeSessionRef{LaneID: request.LaneID, NativeSessionID: request.ResumeNativeID, Generation: 7}, nil
+}
+func (*parentExitLaneDriver) StartTurn(_ context.Context, session productruntime.NativeSessionRef, _ productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
+	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: "turn"}, nil
+}
+func (*parentExitLaneDriver) WaitTurn(context.Context, productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
+	return productruntime.NativeTerminal{Outcome: productruntime.TurnCompleted, Result: "resumed"}, nil
+}
+func (*parentExitLaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
+	return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
+}
+func (*parentExitLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
+	return nil
+}
+func (d *parentExitLaneDriver) Archive(_ context.Context, session productruntime.NativeSessionRef) error {
+	d.archives = append(d.archives, session)
+	return nil
+}
+
 func (d *steerRecordingLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
 	return d.capabilities
 }

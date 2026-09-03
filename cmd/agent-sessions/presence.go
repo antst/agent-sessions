@@ -467,13 +467,17 @@ func (c *hostCoordinator) joinLiveSession(runtime *daemonpkg.Runtime, report liv
 func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report liveSessionReport) {
 	c.mu.Lock()
 	current, ok := c.liveReports[report.UUID]
-	if ok && current.Product == report.Product {
+	departed := ok && current.Product == report.Product
+	if departed {
 		delete(c.liveReports, report.UUID)
 		delete(c.laneNames, report.UUID)
 		delete(c.laneNamesLoaded, report.UUID)
 	}
 	c.mu.Unlock()
 	c.syncLiveSessions(runtime)
+	if departed {
+		c.archiveIdleLanesForParent(runtime, report.UUID)
+	}
 }
 
 func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {

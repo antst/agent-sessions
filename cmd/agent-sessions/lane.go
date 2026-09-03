@@ -461,7 +461,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 		return nil, err
 	}
 	c.mu.Lock()
-	if actor.parentID != parent.ID && actor.state != "archived" {
+	if actor.parentID != "" && actor.parentID != parent.ID && actor.state != "archived" {
 		owner := actor.parentID
 		c.mu.Unlock()
 		return nil, fmt.Errorf("lane is live under %s", owner)
@@ -804,7 +804,11 @@ func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID
 	c.mu.Lock()
 	candidates := make([]transition, 0)
 	for _, actor := range c.lanes {
-		if actor.parentID != parentID || actor.persistent || actor.state == "archived" || actor.state == "retiring" {
+		if actor.parentID != parentID || actor.state == "archived" || actor.state == "retiring" {
+			continue
+		}
+		if actor.persistent {
+			actor.parentID = ""
 			continue
 		}
 		state := "archived"
