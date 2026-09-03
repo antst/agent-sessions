@@ -665,7 +665,9 @@ if [[ -n "$dsh_path" ]]; then
     rollback_install "$dsh_inventory_status"
   fi
 fi
-trap - ERR INT TERM
+trap - ERR
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [[ -n "$dsh_path" ]]; then
   install_dsh_integrations "$dsh_path" "$pnpm_path" "$release" "$dsh_inventory"
 elif [[ -n "$dsh_skip_reason" ]]; then

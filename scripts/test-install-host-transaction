@@ -183,7 +183,10 @@ case "$4" in
       mv -- "$extract/package" "$plugin_root"
       : >"$TEST_DSH_STATE_DIR/$package"
     done
-    case "${TEST_DSH_SIGNAL_ADD:-}" in INT) kill -s INT "$PPID"; exit 130 ;; TERM) kill -s TERM "$PPID"; exit 143 ;; esac
+    case "${TEST_DSH_SIGNAL_ADD:-}" in
+      INT) kill -s INT "$PPID"; sleep 0.4; : >"$TEST_DSH_SIGNAL_DONE"; exit 130 ;;
+      TERM) kill -s TERM "$PPID"; sleep 0.4; : >"$TEST_DSH_SIGNAL_DONE"; exit 143 ;;
+    esac
     ;;
   *) exit 91 ;;
 esac
@@ -554,16 +557,19 @@ for signal_case in TERM INT; do
 done
 
 run_dsh_commit_signal() {
-  local signal_case=$1 prior_kind=${2:-pair-only} expected_status signal_status retained_backup
+  local signal_case=$1 prior_kind=${2:-pair-only} expected_status signal_status retained_backup signal_done
   case "$signal_case" in TERM) expected_status=143 ;; INT) expected_status=130 ;; esac
+  signal_done="$test_root/dsh-signal-done-$signal_case-$prior_kind"
+  rm -f -- "$signal_done"
   : >"$test_root/dsh-record"
   set +e
-  env "${common_env[@]}" "TEST_DSH_SIGNAL_ADD=$signal_case" "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  env "${common_env[@]}" "TEST_DSH_SIGNAL_ADD=$signal_case" "TEST_DSH_SIGNAL_DONE=$signal_done" "$root/scripts/install-host" "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
     >"$test_root/dsh-signal-$signal_case.out" 2>"$test_root/dsh-signal-$signal_case.err"
   signal_status=$?
   set -e
   retained_backup=$(find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 -type d -name '.previous-0.3.0-*' -print -quit)
   if [[ $signal_status -ne $expected_status ]] ||
+     [[ ! -f "$signal_done" ]] ||
      [[ $(sha256sum "$release/bin/agent-sessions" | awk '{print $1}') != "$candidate_hash" ]] ||
      [[ -z "$retained_backup" ]] ||
      [[ ! -f "$retained_backup/integrations/dsh/agent-sessions-dsh-lane-0.4.0.tgz" ]] ||
