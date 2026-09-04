@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -147,8 +148,29 @@ type LaneReadiness struct {
 	Error         string `json:"error,omitempty"`
 }
 
+// WireInteger accepts every JSON spelling of an exact IEEE-754 safe integer.
+// JSON Schema numeric equality is mathematical, so 1, 1.0, and 1e0 are the
+// same protocol value.
+type WireInteger int64
+
+func (value *WireInteger) UnmarshalJSON(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var raw any
+	if decoder.Decode(&raw) != nil {
+		return errors.New("wire integer is invalid")
+	}
+	number, ok := raw.(json.Number)
+	parsed, err := number.Float64()
+	if !ok || err != nil || !wireInteger(parsed) {
+		return errors.New("wire integer is invalid")
+	}
+	*value = WireInteger(parsed)
+	return nil
+}
+
 type LaneWorkerHello struct {
-	Protocol       int                 `json:"protocol"`
+	Protocol       WireInteger         `json:"protocol"`
 	LaunchToken    string              `json:"launch_token"`
 	Product        string              `json:"product"`
 	Capabilities   LaneCapabilitySet   `json:"capabilities"`
@@ -192,7 +214,7 @@ type LaneOpenRequest struct {
 
 type LaneDoctorResult struct {
 	Type                string              `json:"type"`
-	ContractVersion     int                 `json:"contract_version"`
+	ContractVersion     WireInteger         `json:"contract_version"`
 	Authority           string              `json:"authority"`
 	Product             string              `json:"product"`
 	Ready               bool                `json:"ready"`
@@ -207,23 +229,30 @@ type LaneDoctorResult struct {
 }
 
 type LaneStatusProjection struct {
-	Name          string `json:"name"`
-	State         string `json:"state"`
-	TurnID        string `json:"turn_id"`
-	Outcome       string `json:"outcome"`
-	AutoArchiveAt int64  `json:"auto_archive_at"`
+	Name          string      `json:"name"`
+	State         string      `json:"state"`
+	TurnID        string      `json:"turn_id"`
+	Outcome       string      `json:"outcome"`
+	AutoArchiveAt WireInteger `json:"auto_archive_at"`
 }
 
 func (p LaneStatusProjection) Valid() bool {
-	state := p.State == "idle" || p.State == "running" || p.State == "interrupting" || p.State == "terminal" || p.State == "archived"
-	outcome := p.Outcome == "" || p.Outcome == "completed" || p.Outcome == "interrupted" || p.Outcome == "failed" || p.Outcome == "timed_out"
-	if !state || !outcome || p.AutoArchiveAt < 0 {
+	terminal := p.Outcome == "completed" || p.Outcome == "interrupted" || p.Outcome == "failed" || p.Outcome == "timed_out"
+	if p.Name == "" || p.AutoArchiveAt < 0 || p.AutoArchiveAt > 0 && p.State != "idle" {
 		return false
 	}
-	if p.State == "running" || p.State == "interrupting" || p.State == "terminal" {
-		return p.TurnID != ""
+	switch p.State {
+	case "running", "interrupting":
+		return p.TurnID != "" && p.Outcome == "" && p.AutoArchiveAt == 0
+	case "terminal":
+		return p.TurnID != "" && terminal && p.AutoArchiveAt == 0
+	case "idle":
+		return p.Outcome == "" && p.TurnID == "" || terminal && p.TurnID != ""
+	case "archived":
+		return p.AutoArchiveAt == 0 && (p.Outcome == "" && p.TurnID == "" || terminal && p.TurnID != "")
+	default:
+		return false
 	}
-	return true
 }
 
 type NativeSessionRef struct {
@@ -293,10 +322,10 @@ func (s *LaneWireSchema) valid(node map[string]any, value any) bool {
 		}
 		return s.valid(resolved, value)
 	}
-	if constant, ok := node["const"]; ok && !reflect.DeepEqual(constant, value) {
+	if constant, ok := node["const"]; ok && !equalJSON(constant, value) {
 		return false
 	}
-	if options, ok := node["enum"].([]any); ok && !slices.ContainsFunc(options, func(option any) bool { return reflect.DeepEqual(option, value) }) {
+	if options, ok := node["enum"].([]any); ok && !slices.ContainsFunc(options, func(option any) bool { return equalJSON(option, value) }) {
 		return false
 	}
 	typeName, _ := node["type"].(string)
@@ -326,8 +355,10 @@ func (s *LaneWireSchema) valid(node map[string]any, value any) bool {
 		if _, ok := value.(bool); !ok {
 			return false
 		}
-	} else if typeName == "number" {
-		if _, ok := value.(json.Number); !ok {
+	} else if typeName == "number" || typeName == "integer" {
+		numeric, ok := value.(json.Number)
+		parsed, err := numeric.Float64()
+		if !ok || err != nil || typeName == "integer" && !wireInteger(parsed) {
 			return false
 		}
 	}
@@ -373,6 +404,12 @@ func (s *LaneWireSchema) keywords(value any, definitions bool) bool {
 		}
 		if !allowed[key] {
 			return false
+		}
+		if key == "type" {
+			typeName, ok := item.(string)
+			if !ok || !slices.Contains([]string{"object", "array", "string", "boolean", "number", "integer"}, typeName) {
+				return false
+			}
 		}
 		if key == "items" || key == "if" || key == "then" || key == "else" || key == "not" {
 			if !s.keywords(item, false) {
@@ -426,6 +463,25 @@ func uniqueJSON(values []any) bool {
 		seen[string(body)] = true
 	}
 	return true
+}
+
+func equalJSON(left, right any) bool {
+	leftNumber, leftNumeric := left.(json.Number)
+	rightNumber, rightNumeric := right.(json.Number)
+	if leftNumeric || rightNumeric {
+		if !leftNumeric || !rightNumeric {
+			return false
+		}
+		leftValue, leftErr := leftNumber.Float64()
+		rightValue, rightErr := rightNumber.Float64()
+		return leftErr == nil && rightErr == nil && leftValue == rightValue
+	}
+	return reflect.DeepEqual(left, right)
+}
+
+func wireInteger(value float64) bool {
+	const int64Limit = float64(uint64(1) << 63)
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && math.Trunc(value) == value && value >= -int64Limit && value < int64Limit
 }
 
 func decodeClosed(body []byte, output any) error {

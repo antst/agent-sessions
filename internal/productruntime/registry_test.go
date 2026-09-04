@@ -33,6 +33,7 @@ func TestLaneWorkerSchemaMatchesAuthoritativeGoStructs(t *testing.T) {
 		"LaneWorkerHello":      reflect.TypeOf(LaneWorkerHello{}),
 		"LaneDoctorResult":     reflect.TypeOf(LaneDoctorResult{}),
 		"LaneTurnStartRequest": reflect.TypeOf(LaneTurnStartRequest{}),
+		"LaneStatusProjection": reflect.TypeOf(LaneStatusProjection{}),
 	}
 	if len(schema.Definitions) != len(types) {
 		t.Fatalf("schema definitions = %v", reflect.ValueOf(schema.Definitions).MapKeys())
@@ -64,7 +65,6 @@ func TestLaneWorkerWireTypesRejectUnknownNullAndInvalidTimeout(t *testing.T) {
 	for _, invalid := range []string{
 		strings.TrimSuffix(open, "}") + `,"extra":true}`,
 		strings.Replace(open, `"name":"worker"`, `"name":null`, 1),
-		strings.Replace(open, `"resume":false`, `"resume":true`, 1),
 	} {
 		if err := schema.Decode("LaneOpenRequest", []byte(invalid), &LaneOpenRequest{}); err == nil {
 			t.Fatalf("invalid open accepted: %s", invalid)
@@ -96,7 +96,7 @@ func TestLaneWorkerSharedFixtures(t *testing.T) {
 		Valid      bool            `json:"valid"`
 		Value      json.RawMessage `json:"value"`
 	}
-	if err := json.Unmarshal(body, &fixtures); err != nil || len(fixtures) != 25 {
+	if err := json.Unmarshal(body, &fixtures); err != nil || len(fixtures) != 49 {
 		t.Fatalf("decode shared fixtures: %v (%d)", err, len(fixtures))
 	}
 	for _, fixture := range fixtures {
@@ -110,6 +110,8 @@ func TestLaneWorkerSharedFixtures(t *testing.T) {
 			output = &LaneDoctorResult{}
 		case "LaneTurnStartRequest":
 			output = &LaneTurnStartRequest{}
+		case "LaneStatusProjection":
+			output = &LaneStatusProjection{}
 		default:
 			t.Fatalf("unknown shared fixture definition %q", fixture.Definition)
 		}

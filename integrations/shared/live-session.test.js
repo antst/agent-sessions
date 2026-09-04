@@ -103,7 +103,7 @@ test("shared params authority follows Appendix A grammar", async () => {
 
 test("one shipped schema validates one shared Go and JavaScript fixture table", () => {
   const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, "lane-worker.fixtures.json"), "utf8"));
-  assert.equal(fixtures.length, 25);
+  assert.equal(fixtures.length, 49);
   for (const fixture of fixtures)
     assert.equal(validLaneWorkerSchema(fixture.definition, fixture.value), fixture.valid, fixture.definition);
 });
@@ -114,6 +114,7 @@ test("the JavaScript schema interpreter rejects unknown schema keywords", () => 
   const walk = (node) => {
     for (const [key, value] of Object.entries(node)) {
       assert.ok(keywords.has(key), `unsupported schema keyword ${key}`);
+      if (key === "type") assert.ok(["object", "array", "string", "boolean", "number", "integer"].includes(value), `unsupported schema type ${value}`);
       if (key === "properties") Object.values(value).forEach(walk);
       else if (key === "items" || key === "if" || key === "then" || key === "else" || key === "not") walk(value);
       else if (key === "allOf") value.forEach(walk);

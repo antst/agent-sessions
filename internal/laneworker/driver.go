@@ -33,14 +33,27 @@ type tokenPayload struct {
 }
 
 type Registration struct {
+	authority  *Authority
 	token      string
 	purpose    TokenPurpose
 	product    string
 	laneID     string
 	generation uint64
 	expires    time.Time
-	ready      chan *Binding
+	state      registrationState
+	binding    *Binding
+	err        error
+	done       chan struct{}
 }
+
+type registrationState uint8
+
+const (
+	registrationPending registrationState = iota
+	registrationAccepting
+	registrationAccepted
+	registrationFinished
+)
 
 type Authority struct {
 	endpoint string
@@ -67,8 +80,8 @@ func (a *Authority) Register(purpose TokenPurpose, product, laneID string, gener
 	}
 	payload, _ := json.Marshal(tokenPayload{Endpoint: a.endpoint, Nonce: hex.EncodeToString(nonce)})
 	registration := &Registration{
-		token: base64.RawURLEncoding.EncodeToString(payload), purpose: purpose, product: product, laneID: laneID,
-		generation: generation, expires: a.now().Add(lifetime), ready: make(chan *Binding, 1),
+		authority: a, token: base64.RawURLEncoding.EncodeToString(payload), purpose: purpose, product: product, laneID: laneID,
+		generation: generation, expires: a.now().Add(lifetime), done: make(chan struct{}),
 	}
 	a.mu.Lock()
 	a.tokens[registration.token] = registration
@@ -77,14 +90,7 @@ func (a *Authority) Register(purpose TokenPurpose, product, laneID string, gener
 }
 
 func (a *Authority) Cancel(registration *Registration) {
-	if registration == nil {
-		return
-	}
-	a.mu.Lock()
-	if a.tokens[registration.token] == registration {
-		delete(a.tokens, registration.token)
-	}
-	a.mu.Unlock()
+	a.finish(registration, errors.New("lane worker token reservation was canceled"))
 }
 
 func (r *Registration) Token() productruntime.SensitiveValue {
@@ -99,24 +105,48 @@ func (r *Registration) Wait(ctx context.Context) (*Binding, error) {
 		return nil, errors.New("lane worker wait is incomplete")
 	}
 	select {
+	case <-r.done:
+		return r.result()
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case binding := <-r.ready:
-		return binding, nil
+		r.authority.finish(r, ctx.Err())
+		return r.result()
 	}
 }
 
-func TokenEndpoint(token string) (string, error) {
-	body, err := base64.RawURLEncoding.DecodeString(token)
-	var payload tokenPayload
-	if err != nil || json.Unmarshal(body, &payload) != nil || !strings.HasPrefix(payload.Endpoint, "/") || len(payload.Nonce) != 64 {
-		return "", errors.New("lane worker launch token is invalid")
+func (r *Registration) result() (*Binding, error) {
+	r.authority.mu.Lock()
+	binding, err := r.binding, r.err
+	r.authority.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
-	return payload.Endpoint, nil
+	return binding, err
+}
+
+func (a *Authority) finish(registration *Registration, err error) {
+	if registration == nil {
+		return
+	}
+	a.mu.Lock()
+	if registration.state == registrationAccepted || registration.state == registrationFinished {
+		a.mu.Unlock()
+		return
+	}
+	if a.tokens[registration.token] == registration {
+		delete(a.tokens, registration.token)
+	}
+	registration.state, registration.err = registrationFinished, err
+	binding := registration.binding
+	close(registration.done)
+	a.mu.Unlock()
+	if binding != nil {
+		_ = binding.disconnect()
+	}
 }
 
 type Binding struct {
 	connection   *livepresence.Connection
+	schema       *productruntime.LaneWireSchema
 	Hello        productruntime.LaneWorkerHello
 	Purpose      TokenPurpose
 	LaneID       string
@@ -124,6 +154,7 @@ type Binding struct {
 	sequence     atomic.Int64
 	done         chan struct{}
 	disconnected sync.Once
+	closeErr     error
 }
 
 func (a *Authority) Accept(connection *livepresence.Connection, first livepresence.Frame) (*Binding, error) {
@@ -137,17 +168,37 @@ func (a *Authority) Accept(connection *livepresence.Connection, first livepresen
 	a.mu.Lock()
 	registration := a.tokens[hello.LaunchToken]
 	if registration == nil || !a.now().Before(registration.expires) || registration.product != hello.Product {
+		if registration != nil && !a.now().Before(registration.expires) {
+			delete(a.tokens, registration.token)
+			registration.state = registrationFinished
+			registration.err = errors.New("lane worker launch token expired")
+			close(registration.done)
+		}
 		a.mu.Unlock()
 		return nil, errors.New("lane worker launch token was rejected")
 	}
 	delete(a.tokens, registration.token)
+	binding := &Binding{connection: connection, schema: a.schema, Hello: hello, Purpose: registration.purpose, LaneID: registration.laneID, Generation: registration.generation, done: make(chan struct{})}
+	registration.state, registration.binding = registrationAccepting, binding
 	a.mu.Unlock()
-	binding := &Binding{connection: connection, Hello: hello, Purpose: registration.purpose, LaneID: registration.laneID, Generation: registration.generation, done: make(chan struct{})}
-	if err := binding.connection.Write(livepresence.Success(first.ID, json.RawMessage(`{}`))); err != nil {
-		binding.disconnect()
+	writeErr := binding.connection.Write(livepresence.Success(first.ID, json.RawMessage(`{}`)))
+	a.mu.Lock()
+	if registration.state == registrationFinished {
+		err := registration.err
+		a.mu.Unlock()
+		_ = binding.disconnect()
 		return nil, err
 	}
-	registration.ready <- binding
+	if writeErr != nil {
+		registration.state, registration.err = registrationFinished, writeErr
+		close(registration.done)
+		a.mu.Unlock()
+		_ = binding.disconnect()
+		return nil, writeErr
+	}
+	registration.state = registrationAccepted
+	close(registration.done)
+	a.mu.Unlock()
 	return binding, nil
 }
 
@@ -171,6 +222,9 @@ func (b *Binding) Serve(ctx context.Context, update func(productruntime.LaneStat
 		if err := b.connection.DecodeWire(&frame); err != nil {
 			return err
 		}
+		if !livepresence.ValidFrame(frame) || !integerID(frame.ID) {
+			return errors.New("lane worker returned an invalid private frame")
+		}
 		if frame.Method == "" {
 			if !b.connection.Resolve(frame) {
 				return errors.New("lane worker returned an unknown response")
@@ -180,7 +234,7 @@ func (b *Binding) Serve(ctx context.Context, update func(productruntime.LaneStat
 		response := livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method})
 		if frame.Method == "session.update" && update != nil {
 			var projection productruntime.LaneStatusProjection
-			if err := productruntime.DecodeClosed(frame.Params, &projection); err == nil && projection.Valid() {
+			if err := b.schema.Decode("LaneStatusProjection", frame.Params, &projection); err == nil && projection.Valid() {
 				if err = update(projection); err == nil {
 					response = livepresence.Success(frame.ID, json.RawMessage(`{}`))
 				} else {
@@ -196,15 +250,16 @@ func (b *Binding) Serve(ctx context.Context, update func(productruntime.LaneStat
 	}
 }
 
-func (b *Binding) Close() error          { return b.connection.Close() }
+func (b *Binding) Close() error          { return b.disconnect() }
 func (b *Binding) Done() <-chan struct{} { return b.done }
 
-func (b *Binding) disconnect() {
+func (b *Binding) disconnect() error {
 	b.disconnected.Do(func() {
 		b.connection.Fail()
-		_ = b.connection.Close()
+		b.closeErr = b.connection.Close()
 		close(b.done)
 	})
+	return b.closeErr
 }
 
 func integerID(raw json.RawMessage) bool {

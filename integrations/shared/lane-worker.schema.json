@@ -29,15 +29,14 @@
         "sandbox": {"type": "string", "minLength": 1},
         "auto_archive_after_seconds": {"type": "number", "minimum": 0},
         "arguments": {"type": "array", "items": {"type": "string"}}
-      },
-      "allOf": [{"if": {"properties": {"resume": {"const": true}}, "required": ["resume"]}, "then": {"required": ["session_id"]}, "else": {"not": {"required": ["session_id"]}}}]
+      }
     },
     "LaneWorkerHello": {
       "type": "object",
       "additionalProperties": false,
       "required": ["protocol", "launch_token", "product", "capabilities", "extra_arguments", "readiness"],
       "properties": {
-        "protocol": {"const": 1},
+        "protocol": {"type": "integer", "const": 1},
         "launch_token": {"type": "string", "minLength": 1},
         "product": {"type": "string", "minLength": 1},
         "capabilities": {
@@ -92,7 +91,7 @@
       "required": ["type", "contract_version", "authority", "product", "ready", "native_path", "native_version", "runtime_path", "daemon_reachable", "supervisor_reachable", "capabilities", "extra_arguments"],
       "properties": {
         "type": {"const": "lane.doctor"},
-        "contract_version": {"const": 2},
+        "contract_version": {"type": "integer", "const": 2},
         "authority": {"const": "daemon"},
         "product": {"type": "string", "minLength": 1},
         "ready": {"type": "boolean"},
@@ -106,6 +105,18 @@
         "extra_arguments": {"$ref": "#/$defs/LaneWorkerHello/properties/extra_arguments"}
       },
       "allOf": [{"if": {"properties": {"ready": {"const": true}}}, "then": {"properties": {"native_path": {"minLength": 1}, "native_version": {"minLength": 1}}, "not": {"required": ["readiness_error"]}}, "else": {"required": ["readiness_error"]}}]
+    },
+    "LaneStatusProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "state", "turn_id", "outcome", "auto_archive_at"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "state": {"enum": ["idle", "running", "interrupting", "terminal", "archived"]},
+        "turn_id": {"type": "string"},
+        "outcome": {"enum": ["", "completed", "interrupted", "failed", "timed_out"]},
+        "auto_archive_at": {"type": "integer", "minimum": 0}
+      }
     },
     "LaneTurnStartRequest": {
       "type": "object",

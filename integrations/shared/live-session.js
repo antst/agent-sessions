@@ -371,7 +371,7 @@ function validateSchemaNode(node, value) {
   } else if (node.type === "string") {
     if (typeof value !== "string" || node.minLength !== undefined && value.length < node.minLength) return false;
   } else if (node.type === "boolean" && typeof value !== "boolean") return false;
-  else if (node.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) return false;
+  else if ((node.type === "number" || node.type === "integer") && (typeof value !== "number" || !Number.isFinite(value) || node.type === "integer" && (!Number.isInteger(value) || value < -9223372036854775808 || value >= 9223372036854775808))) return false;
   if (typeof value === "number" && (node.minimum !== undefined && value < node.minimum || node.exclusiveMinimum !== undefined && value <= node.exclusiveMinimum)) return false;
   if (node.allOf?.some((child) => !validateSchemaNode(child, value))) return false;
   if (node.if) {
