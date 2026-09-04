@@ -679,8 +679,12 @@ display-message) printf '%s\n' "$MATRIX_PANE_CWD";;
 capture-pane) [ "$MATRIX_CAPTURE_FAIL" = 1 ] && exit 4; printf '%s\n' "$MATRIX_PANE";;
 kill-session) printf '%s\n' "$3" >>"$MATRIX_TMUX_KILLS"; rm -f "$MATRIX_TMUX_LIVE";;
 esac`)
-	cwd := filepath.Join(t.TempDir(), `odd ' cwd`)
-	if err := os.Mkdir(cwd, 0o700); err != nil {
+	rawCWD := filepath.Join(t.TempDir(), `odd ' cwd`)
+	if err := os.Mkdir(rawCWD, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := existingDirectory(rawCWD)
+	if err != nil {
 		t.Fatal(err)
 	}
 	runner := matrixRunner{config: matrixOptions{cwd: cwd, tmux: fake, evidenceDir: t.TempDir()}, runID: "test", active: map[string]*matrixTUI{}}
@@ -694,7 +698,10 @@ esac`)
 			}
 		}
 	}
-	wrong := t.TempDir()
+	wrong, err := existingDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	live, kills := filepath.Join(t.TempDir(), "live"), filepath.Join(t.TempDir(), "kills")
 	t.Setenv("MATRIX_PANE_CWD", wrong)
 	t.Setenv("MATRIX_TMUX_LIVE", live)
@@ -710,7 +717,7 @@ esac`)
 	tui := &matrixTUI{tmuxName: "owned", pane: "owned:0.0"}
 	t.Setenv("MATRIX_PANE", product.nativeTrustPrompt)
 	evidence := map[string]any{}
-	err := runner.diagnoseAttachFailure(product, "identity", tui, evidence, fmt.Errorf("attach failed"))
+	err = runner.diagnoseAttachFailure(product, "identity", tui, evidence, fmt.Errorf("attach failed"))
 	if err == nil || !strings.Contains(err.Error(), "trust "+cwd+" once via codex's own prompt") || evidence["pane_evidence"] == nil {
 		t.Fatalf("trust diagnosis/evidence = %v/%v", err, evidence)
 	}
