@@ -1005,16 +1005,17 @@ owner-controlled.
 
 | Phase | Source deliverable | Gate | Runtime rule |
 | ---: | --- | --- | --- |
-| 0 | Signed document, closed schema, shared validator fixtures, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d. | No daemon or product runtime. |
-| 1 | Universal daemon, durable lane table, executable registry, reference caller, and `asl-lane-example` reference worker. | Daemon caps hold; unit/race/vet/build green; old actor/driver/control packages absent; contract learned nothing from adapters: **yes**. | Daemon integration runs only on `umka-dev1`, against an empty universal table. |
-| 2 | Go and JavaScript native kits, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both kits; DSH passes both cells in Section 5.5. | DSH runtime proof only on `umka-dev1`; no other product is enabled. |
+| 0 | Signed document, closed schema, shared validator fixtures, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d. | No installed daemon or product runtime. |
+| 1 | Universal daemon, durable lane table, executable registry, Go caller kit, reference caller, and `asl-lane-example` reference worker. | Daemon caps hold; unit/race/vet/build green; old actor/driver/control packages absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
+| 2 | Go and JavaScript native kits, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
 | 3 | Resident lane wrappers and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
-| 4 | CLI/caller kits, package projections, install/remove inventory, documentation, and federation. | Full unit/race/vet/build/package gates; federation assertions follow Section 5.7; all 18 cells pass in one clean candidate run. | The sole full runtime matrix runs on `umka-dev1`; no install elsewhere. |
+| 4 | CLI rendering, package projections, install/remove inventory, documentation, and federation. | Full unit/race/vet/build/package gates; federation assertions follow Section 5.7; all 18 cells pass in one clean candidate run. | The sole full runtime matrix runs on `umka-dev1`; no install elsewhere. |
 | 5 | Release candidate. | Universal state starts empty; no old protocol endpoint, actor, driver, launcher process, socket, or compatibility package remains. | Production installation requires owner authorization after the clean `umka-dev1` evidence is sealed. |
 
-Source compilation and deterministic unit tests may run in isolated clones on
-other hosts. Starting the daemon, a wrapper, a product, a TUI, or a conformance
-cell is runtime testing and is permitted only on `umka-dev1`.
+Source compilation and unit/race tests, including in-process daemons and workers
+on temporary sockets, may run in any isolated clone. Installing or running the
+daemon, a wrapper, a product, a TUI, or a conformance cell as a service or
+against installed products is permitted only on `umka-dev1`.
 
 ### 5.3 Reference sides
 
@@ -1109,6 +1110,7 @@ from the same conformance matrix.
 | Go/JavaScript lifecycle duplication | The one 14-row fixture table runs unchanged through both native kits and the reference worker. |
 | Connector and plugin tool tests | Caller-kit conformance C1-C9 through the installed peer MCP/plugin entry, with product-private transport tested only at its local boundary. |
 | Packaging and release projections | Package tests assert one schema/kit projection, correct peer and lane entry forms, no deleted compatibility artifact, and byte-identical installed assets. |
+| Protocol and design documentation | Generate `docs/PROTOCOL.md` from Sections 1 and 3.1 verbatim, with this document as the sole source. Delete every superseded lane-convergence, presence-supersession, adapter-boundary, and DSH-adapter note under `docs/designs`; do not retain archived or paraphrased protocol authorities. |
 
 Rehoming is mandatory proof, not permission to preserve a deleted abstraction
 under a new test helper. Every deleted test is named in the implementation
