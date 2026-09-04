@@ -51,6 +51,8 @@ type matrixProduct struct {
 	nativeReadyMarker     string
 	nativeBusyMarker      string
 	nativeSubmitDelay     time.Duration
+	nativeEnvelopeFormat  string
+	nativeQuotaMarker     string
 }
 
 type matrixRoster struct {
@@ -367,6 +369,7 @@ func matrixProductInventory() []matrixProduct {
 			nativeQuitDocumentURL: "https://github.com/openai/codex/blob/main/codex-rs/tui/src/slash_command.rs",
 			nativeTrustPrompt:     "Do you trust the contents of this directory?",
 			nativeReadyMarker:     "› Ask Codex to do anything",
+			nativeEnvelopeFormat:  `<cross-session-message from="%s"`,
 		},
 		{
 			id: "claude", nativeExecutable: "claude", peerExecutable: "claude-peer",
@@ -374,12 +377,14 @@ func matrixProductInventory() []matrixProduct {
 			nativeQuitDocumentURL: "https://code.claude.com/docs/en/commands",
 			nativeTrustPrompt:     "Permission Required: Accessing workspace:",
 			nativeReadyMarker:     "\n$\n",
+			nativeEnvelopeFormat:  "Message from @%s:",
 		},
 		{
 			id: "grok", nativeExecutable: "grok", peerExecutable: "grok-peer",
 			displayArguments: []string{"--no-alt-screen", "--minimal"}, nativeQuitCommand: "/quit",
 			nativeQuitDocumentURL: "https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md",
 			nativeReadyMarker:     "\n❯\nGrok ",
+			nativeEnvelopeFormat:  `<cross-session-message from="%s"`,
 		},
 		{
 			id: "qwen", nativeExecutable: "qwen", peerExecutable: "qwen-peer",
@@ -387,6 +392,8 @@ func matrixProductInventory() []matrixProduct {
 			nativeQuitDocumentURL: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/commands.md",
 			nativeReadyMarker:     "Auto mode   Type your message or @path/to/file",
 			nativeBusyMarker:      "esc to cancel",
+			nativeEnvelopeFormat:  `<cross-session-message from="%s"`,
+			nativeQuotaMarker:     "insufficient_quota: 429",
 		},
 	}
 }
@@ -501,10 +508,13 @@ func (runner *matrixRunner) runProduct(ctx context.Context, product matrixProduc
 		}
 		return
 	}
-	resumed := runner.runResumeCell(ctx, product, identity, identityName, identityGroup)
+	resumed, blockedReason := runner.runResumeCell(ctx, product, identity, identityName, identityGroup)
 	if resumed == nil {
-		runner.record(product.id, "07-terminal-quit", matrixSkip, "resume cell did not produce a live TUI", nil)
-		runner.record(product.id, "07b-native-quit-resume", matrixSkip, "resume cell did not produce a live TUI", nil)
+		if blockedReason == "" {
+			blockedReason = "resume cell did not produce a live TUI"
+		}
+		runner.record(product.id, "07-terminal-quit", matrixSkip, blockedReason, nil)
+		runner.record(product.id, "07b-native-quit-resume", matrixSkip, blockedReason, nil)
 		return
 	}
 	if err := runner.endTUI(ctx, resumed); err != nil {
@@ -552,16 +562,17 @@ func (runner *matrixRunner) runDirectCell(ctx context.Context, product matrixPro
 	name, group := prefix+"-direct", prefix+"-direct"
 	tui, evidence, err := runner.launchNamed(ctx, product, name, group, "direct")
 	if err == nil {
-		marker := matrixReceiptToken(runner.runID, "03")
-		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "direct", group, map[string]any{
-			"target": name, "message": marker,
+		token := matrixReceiptToken(runner.runID, "03")
+		source := matrixEnvelopeSource(token, product.id)
+		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "direct", group, source, map[string]any{
+			"target": name, "message": matrixDeliveryMessage(token),
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
 		if sendErr == nil {
 			sendErr = requireAcceptedSessions(response, []string{tui.sessionID})
 		}
-		capturePath, receiptErr := runner.captureReceipt(ctx, product.id, "03-direct-send", tui, marker, "target", "", "")
+		capturePath, receiptErr := runner.captureReceipt(ctx, product, "03-direct-send", tui, matrixEnvelopeMarker(product, source), "target", "", "")
 		evidence["pane_evidence"] = capturePath
 		err = errors.Join(sendErr, receiptErr)
 	}
@@ -582,17 +593,19 @@ func (runner *matrixRunner) runMulticastCell(ctx context.Context, product matrix
 	evidence := map[string]any{"first_launch": firstEvidence, "second_launch": secondEvidence}
 	err := errors.Join(firstErr, secondErr)
 	if err == nil {
-		marker := matrixReceiptToken(runner.runID, "04")
-		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "multicast", group, map[string]any{
-			"targets": []string{first.name, second.name}, "message": marker,
+		token := matrixReceiptToken(runner.runID, "04")
+		source := matrixEnvelopeSource(token, product.id)
+		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "multicast", group, source, map[string]any{
+			"targets": []string{first.name, second.name}, "message": matrixDeliveryMessage(token),
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
 		if sendErr == nil {
 			sendErr = requireAcceptedSessions(response, []string{first.sessionID, second.sessionID})
 		}
-		firstCapture, firstReceipt := runner.captureReceipt(ctx, product.id, "04-targets-multicast", first, marker, "target-a", "", "")
-		secondCapture, secondReceipt := runner.captureReceipt(ctx, product.id, "04-targets-multicast", second, marker, "target-b", "", "")
+		envelope := matrixEnvelopeMarker(product, source)
+		firstCapture, firstReceipt := runner.captureReceipt(ctx, product, "04-targets-multicast", first, envelope, "target-a", "", "")
+		secondCapture, secondReceipt := runner.captureReceipt(ctx, product, "04-targets-multicast", second, envelope, "target-b", "", "")
 		evidence["pane_evidence"] = []string{firstCapture, secondCapture}
 		err = errors.Join(sendErr, firstReceipt, secondReceipt)
 	}
@@ -617,9 +630,10 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 	err := errors.Join(firstErr, secondErr)
 	status, detail := matrixPass, "group selector reached exactly the two group member TUIs"
 	if err == nil {
-		marker := matrixReceiptToken(runner.runID, "05")
-		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "group", group, map[string]any{
-			"group": group, "message": marker,
+		token := matrixReceiptToken(runner.runID, "05")
+		source := matrixEnvelopeSource(token, product.id)
+		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "group", group, source, map[string]any{
+			"group": group, "message": matrixDeliveryMessage(token),
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
@@ -636,8 +650,9 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 		} else if acceptErr := requireAcceptedSessions(response, []string{first.sessionID, second.sessionID}); acceptErr != nil {
 			err = acceptErr
 		} else {
-			firstCapture, firstReceipt := runner.captureReceipt(ctx, product.id, "05-group-send", first, marker, "target-a", "", "")
-			secondCapture, secondReceipt := runner.captureReceipt(ctx, product.id, "05-group-send", second, marker, "target-b", "", "")
+			envelope := matrixEnvelopeMarker(product, source)
+			firstCapture, firstReceipt := runner.captureReceipt(ctx, product, "05-group-send", first, envelope, "target-a", "", "")
+			secondCapture, secondReceipt := runner.captureReceipt(ctx, product, "05-group-send", second, envelope, "target-b", "", "")
 			evidence["pane_evidence"] = []string{firstCapture, secondCapture}
 			err = errors.Join(firstReceipt, secondReceipt)
 		}
@@ -659,18 +674,23 @@ func (runner *matrixRunner) runResumeCell(
 	product matrixProduct,
 	identity *matrixTUI,
 	name, group string,
-) *matrixTUI {
+) (*matrixTUI, string) {
 	evidence := map[string]any{"original_native_session_id": identity.sessionID}
 	persistencePath, persistenceErr := runner.persistNativeTurn(ctx, product, identity)
 	evidence["persistence_pane"] = persistencePath
 	if persistenceErr != nil {
+		blockedReason := ""
+		if strings.HasPrefix(persistenceErr.Error(), "OWNER-ENVIRONMENT quota:") {
+			evidence["classification"] = "OWNER-ENVIRONMENT"
+			blockedReason = persistenceErr.Error()
+		}
 		persistenceErr = errors.Join(persistenceErr, runner.endTUI(ctx, identity))
 		runner.record(product.id, "06-resume-by-name", matrixFail, persistenceErr.Error(), evidence)
-		return nil
+		return nil, blockedReason
 	}
 	if err := runner.endTUI(ctx, identity); err != nil {
 		runner.record(product.id, "06-resume-by-name", matrixFail, err.Error(), evidence)
-		return nil
+		return nil, ""
 	}
 	resumed, launchEvidence, err := runner.launchResume(ctx, product, name, group, "resume-1", identity.sessionID)
 	evidence["resume_launch"] = launchEvidence
@@ -679,21 +699,21 @@ func (runner *matrixRunner) runResumeCell(
 			err = errors.Join(err, runner.endTUI(ctx, resumed))
 		}
 		runner.record(product.id, "06-resume-by-name", matrixFail, err.Error(), evidence)
-		return nil
+		return nil, ""
 	}
 	runner.record(product.id, "06-resume-by-name", matrixPass, "resume by exact unique name retained the product-native id without a fork", evidence)
-	return resumed
+	return resumed, ""
 }
 
 func (runner *matrixRunner) persistNativeTurn(ctx context.Context, product matrixProduct, tui *matrixTUI) (string, error) {
-	if _, err := runner.captureReceipt(ctx, product.id, "06-resume-by-name", tui, product.nativeReadyMarker, "ready-before-persistence", "", product.nativeBusyMarker); err != nil {
+	if _, err := runner.captureReceipt(ctx, product, "06-resume-by-name", tui, product.nativeReadyMarker, "ready-before-persistence", "", product.nativeBusyMarker); err != nil {
 		return "", err
 	}
 	prompt, expected := matrixPersistencePrompt(runner.runID)
 	if err := runner.sendTUIInput(ctx, tui, prompt); err != nil {
 		return "", err
 	}
-	return runner.captureReceipt(ctx, product.id, "06-resume-by-name", tui, expected, "persistence", product.nativeReadyMarker, product.nativeBusyMarker)
+	return runner.captureReceipt(ctx, product, "06-resume-by-name", tui, expected, "persistence", product.nativeReadyMarker, product.nativeBusyMarker)
 }
 
 func (runner *matrixRunner) runNativeQuitResumeCell(
@@ -1112,7 +1132,7 @@ func equalOrderedStrings(left, right []string) bool {
 
 func (runner *matrixRunner) sendV1(
 	ctx context.Context,
-	product, cell, group string,
+	product, cell, group, source string,
 	params map[string]any,
 ) (matrixRPCResponse, string, error) {
 	uuid, err := matrixUUID()
@@ -1129,7 +1149,7 @@ func (runner *matrixRunner) sendV1(
 		filepath.Join(runner.config.repositoryRoot, "scripts", "realproducts", "matrix_v1.py"),
 		"--socket", runner.config.presenceSocket,
 		"--uuid", uuid,
-		"--name", "matrix-" + runner.runID + "-source-" + product + "-" + cell,
+		"--name", source,
 		"--group", group,
 		"--params", string(body),
 		"--evidence", evidencePath,
@@ -1164,6 +1184,18 @@ func matrixReceiptToken(runID, cell string) string {
 	return "MX" + runID[len(runID)-8:] + cell
 }
 
+func matrixEnvelopeSource(token, product string) string {
+	return token + "-" + product
+}
+
+func matrixDeliveryMessage(token string) string {
+	return "Matrix delivery " + token + "."
+}
+
+func matrixEnvelopeMarker(product matrixProduct, source string) string {
+	return fmt.Sprintf(product.nativeEnvelopeFormat, source)
+}
+
 func matrixPersistencePrompt(runID string) (string, string) {
 	expected := matrixReceiptToken(runID, "06")
 	left, right := expected[:len(expected)/2], expected[len(expected)/2:]
@@ -1196,12 +1228,13 @@ func requireAcceptedSessions(response matrixRPCResponse, expected []string) erro
 
 func (runner *matrixRunner) captureReceipt(
 	ctx context.Context,
-	product, cell string,
+	product matrixProduct,
+	cell string,
 	tui *matrixTUI,
 	marker, label string,
 	afterMarker, busyMarker string,
 ) (string, error) {
-	relative := filepath.Join(product, cell+"-"+label+".pane.txt")
+	relative := filepath.Join(product.id, cell+"-"+label+".pane.txt")
 	deadline, cancel := context.WithTimeout(ctx, runner.config.timeout)
 	defer cancel()
 	ticker := time.NewTicker(250 * time.Millisecond)
@@ -1222,10 +1255,31 @@ func (runner *matrixRunner) captureReceipt(
 			if writeErr != nil {
 				return path, writeErr
 			}
+			if detail := matrixOwnerEnvironmentDetail(product, last); detail != "" {
+				return path, errors.New(detail)
+			}
 			return path, fmt.Errorf("product TUI did not reach expected marker state %s", marker)
 		case <-ticker.C:
 		}
 	}
+}
+
+func matrixOwnerEnvironmentDetail(product matrixProduct, capture string) string {
+	const startText, endText = "Quota exhausted:", "(Press Ctrl+Y to retry)"
+	start := strings.Index(capture, startText)
+	if start < 0 {
+		return ""
+	}
+	verbatim := capture[start:]
+	end := strings.Index(verbatim, endText)
+	if end < 0 {
+		return ""
+	}
+	verbatim = verbatim[:end+len(endText)]
+	if product.nativeQuotaMarker == "" || !strings.Contains(verbatim, product.nativeQuotaMarker) {
+		return ""
+	}
+	return "OWNER-ENVIRONMENT quota: " + strings.TrimSpace(verbatim)
 }
 
 func paneHasMarkerThenReady(capture, marker, readyMarker, busyMarker string) bool {

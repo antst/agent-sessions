@@ -356,6 +356,58 @@ func TestMatrixPersistenceRequiresOutputBeforeNativeReady(t *testing.T) {
 	}
 }
 
+func TestMatrixDeliveryRequiresTheRenderedSourceEnvelope(t *testing.T) {
+	const runID = "1788480387-3a1ce53dd5a8"
+	seen := map[string]bool{}
+	for _, cell := range []string{"03", "04", "05"} {
+		token := matrixReceiptToken(runID, cell)
+		message := matrixDeliveryMessage(token)
+		if message != "Matrix delivery "+token+"." || strings.Contains(message, "\n") {
+			t.Fatalf("delivery message = %q", message)
+		}
+		for _, product := range matrixProductInventory() {
+			source := matrixEnvelopeSource(token, product.id)
+			if seen[source] || len(source) > 24 {
+				t.Fatalf("source is not compact and unique: %q", source)
+			}
+			seen[source] = true
+			marker := matrixEnvelopeMarker(product, source)
+			if !paneHasMarkerThenReady("chrome\n"+marker+"\ncollapsed body", marker, "", "") {
+				t.Fatalf("%s envelope marker did not match", product.id)
+			}
+			if paneHasMarkerThenReady("assistant: "+token+"\n"+message, marker, "", "") {
+				t.Fatalf("%s accepted a model echo without the source envelope", product.id)
+			}
+		}
+	}
+}
+
+func TestMatrixQwenQuotaIsAnOwnerEnvironmentFailure(t *testing.T) {
+	const pane = "✕ Quota exhausted: Your token-plan 1-week quota has been\n" +
+		"exhausted. (cause: insufficient_quota: 429 Your token-plan 1-week quota has been exhausted.) (Press Ctrl+Y to retry)\n" +
+		"Auto mode   Type your message"
+	wantVerbatim := "Quota exhausted: Your token-plan 1-week quota has been\n" +
+		"exhausted. (cause: insufficient_quota: 429 Your token-plan 1-week quota has been exhausted.) (Press Ctrl+Y to retry)"
+	products := matrixProductInventory()
+	detail := matrixOwnerEnvironmentDetail(products[3], pane)
+	if detail != "OWNER-ENVIRONMENT quota: "+wantVerbatim {
+		t.Fatalf("quota detail = %q", detail)
+	}
+	for _, test := range []struct {
+		product matrixProduct
+		pane    string
+	}{
+		{products[0], pane},
+		{products[3], "Quota exhausted without a 429"},
+		{products[3], "insufficient_quota: 429 without product heading"},
+		{products[3], "Quota exhausted: unrelated (Press Ctrl+Y to retry)\ninsufficient_quota: 429 outside the quota block"},
+	} {
+		if got := matrixOwnerEnvironmentDetail(test.product, test.pane); got != "" {
+			t.Fatalf("unexpected classification for %s/%q: %q", test.product.id, test.pane, got)
+		}
+	}
+}
+
 func TestMatrixCodexSubmitDelayAndCancellation(t *testing.T) {
 	log, fake := filepath.Join(t.TempDir(), "keys"), filepath.Join(t.TempDir(), "tmux")
 	writeMatrixTestExecutable(t, fake, `[ "$1" = has-session ] && exit 0; printf '%s\n' "$*" >>"$MATRIX_KEYS"`)
