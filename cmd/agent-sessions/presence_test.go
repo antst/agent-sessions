@@ -282,7 +282,10 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 	left := make(chan livepresence.Report, 2)
 	var server *livePresenceServer
 	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) { joined <- report }, func(livepresence.Report) {}, nil, func(report livepresence.Report) {
-		_, _ = server.Call(context.Background(), "absent", "post-leave", "message.deliver", nil)
+		if !server.mu.TryLock() {
+			panic("post-leave callback ran under presence lock")
+		}
+		server.mu.Unlock()
 		left <- report
 	})
 	if err != nil {
