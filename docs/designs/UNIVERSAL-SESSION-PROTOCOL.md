@@ -839,12 +839,14 @@ ID. Run submits one user message and converts the observed DSH terminal reason
 to the three wire outcomes. Deliver never starts an unrequested DSH turn and
 the native plugin contains no delivery queue; `queued_for_next_turn` exists for
 non-native wrappers only. A running delivery is `injected` exactly when
-`agent.steer` resolves; there is no receipt polling. A DSH rename is a fresh
-peer hello on a new connection that supersedes the old connection, never a
-status update. The registered Agent Sessions tool exposes the caller kit's
-start/wait/status/spawn/describe/close/list/send surface defined once in
-Sections 4 and 5. Close cancels if needed, flushes the session, waits for the
-kit's `closed` signal, and calls `appExit(0)`; control EOF follows the same
+`agent.steer` resolves; there is no receipt polling. In peer mode only, a DSH
+rename is a fresh hello on a new connection that supersedes the old connection.
+A lane never re-hellos: its identity is the daemon row, and a lane-mode native
+rename is a no-op on the wire. The registered Agent Sessions tool exposes the
+caller kit's start/wait/status/interrupt/spawn/describe/close/list/send surface
+defined once in Sections 4 and 5. The close callback cancels if needed, flushes
+the session, and returns; a separate outer plugin task awaits the kit's
+`closed` signal and then calls `appExit(0)`. Control EOF follows the same
 product cleanup and exit path.
 
 The DSH-specific layer is capped at 300 production and 300 test logical lines,
@@ -892,7 +894,7 @@ must remain net-negative after the kit is accounted separately.
 | Argument ownership | Each wrapper has one closed argv builder and one fixture-pinned order. An `arguments` entry selecting the same native control as any typed open field fails open with `spawn_failed` and `stderr_tail:["argument conflicts with typed field <name>"]`. | Typed fields have one authority; accepting a second spelling would make argv order decide which value wins. |
 | Tool ingress | In lane mode the wrapper serves loopback HTTP MCP when the product accepts HTTP; otherwise a packaged stdio helper or JavaScript plugin connects only to a private wrapper endpoint. In peer mode that same MCP entry or plugin connects directly to the daemon through the peer kit. | Each mode still has exactly one daemon connection: wrapper-owned for a lane, product-integration-owned for a peer. Private lane helpers never become presence. |
 | Wrapper-only queue | A wrapper that lacks native append/injection owns one in-memory FIFO capped at 64 deliveries and 1 MiB total after rendering and newline separators. The shared wrapper host alone renders every entry with the exact c5 carrier `internal/sessiontools.RenderNativeMessage` (`internal/sessiontools/envelope.go:11-32`), preserves arrival order, joins rendered entries with newlines, and prepends the result before caller input. At run start it atomically swaps the FIFO; overflow is rejected as `queue_full`. | One renderer prevents product wrappers from changing sender metadata or queue semantics. `queued_for_next_turn` remains truthful; loss with wrapper exit is the accepted loss in Section 1.2. |
-| Caller tool surface | Every product exposes the same caller-kit start/wait/status/spawn/describe/close/list/send operations; product plugins do not invent wire methods. | Tool presentation is kit sugar over the eleven methods and is identical for native and wrapped products. |
+| Caller tool surface | Every product exposes the same caller-kit start/wait/status/interrupt/spawn/describe/close/list/send operations; product plugins do not invent wire methods. | Tool presentation is kit sugar over the eleven methods and is identical for native and wrapped products. |
 | Shared size cap | Wrapper host, local HTTP MCP, stdio/plugin bridge protocol, and bounded FIFO together: **400 production / 400 test logical lines**. | Product-independent scaffolding larger than the daemon router would be a second protocol implementation. |
 | Shared deletion | Delete the 16 non-product-specific files in `internal/launcher` (2,199 lines) and `cmd/agent-sessions/connector_refresh.go` plus its test (333 lines). Rewrite `connector.go`/test as the peer-mode MCP entry that owns a direct peer connection, and rewrite `native_peer.go` as thin exec-time product configuration; lane-wrapper composition is separate. | The old launcher package still dies: CLI parsing and thin peer exec plans move to `cmd`, lane process ownership to `structuredprocess`, and lane recipes to wrappers. Connector self-exec/release refresh is unnecessary when the installed MCP entry already is the peer connection holder. |
 
@@ -1016,11 +1018,11 @@ owner-controlled.
 | Phase | Source deliverable | Gate | Runtime rule |
 | ---: | --- | --- | --- |
 | 0 | Signed document, closed schema, shared validator fixtures, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d. | No installed daemon or product runtime. |
-| 1 | Universal daemon, durable lane table, executable registry, Go caller kit, reference caller, and `asl-lane-example` reference worker. | Daemon caps hold; unit/race/vet/build green; old actor/driver/control packages absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
-| 2 | Go and JavaScript native kits, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
+| 1 | Go worker kit, universal daemon, durable lane table, executable registry, Go caller kit, reference caller, and `asl-lane-example` reference worker. | Daemon caps hold; unit/race/vet/build green; an in-process restart with durable rows proves every row loads offline with empty maps/reservations and no spawn; old actor/driver/control packages are absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
+| 2 | JavaScript worker kit, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both worker kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
 | 3 | Resident lane wrappers and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
 | 4 | CLI rendering, package projections, install/remove inventory, documentation, and federation. | Full unit/race/vet/build/package gates; federation assertions follow Section 5.7; all 18 cells pass in one clean candidate run. | The sole full runtime matrix runs on `umka-dev1`; no install elsewhere. |
-| 5 | Release candidate. | Universal state starts empty; no old protocol endpoint, actor, driver, launcher process, socket, or compatibility package remains. | Production installation requires owner authorization after the clean `umka-dev1` evidence is sealed. |
+| 5 | Release candidate. | Universal state starts empty; no old protocol endpoint, actor, driver, launcher process, socket, or compatibility package remains; the c5 catalog file's SHA-256 is recorded before and after the install and full run on `umka-dev1` and must be identical. | Production installation requires owner authorization after the clean `umka-dev1` evidence is sealed. |
 
 Source compilation and unit/race tests, including in-process daemons and workers
 on temporary sockets, may run in any isolated clone. Installing or running the
@@ -1031,24 +1033,36 @@ against installed products is permitted only on `umka-dev1`.
 
 | Reference | Closed behavior |
 | --- | --- |
-| Reference worker | PATH-resolved `asl-lane-example` with an arbitrary registry product, executable, and optional immutable fixed argv; worker hello declares all five open fields, open returns a deterministic native ID, run can echo/block/fail, deliver can inject/reject, interrupt releases a blocked run, close exits, and outbound tools are scriptable. It imports no product package. |
-| Reference caller | One peer connection plus the shared caller kit. It can issue every client-to-daemon method, deliberately abandon reply sinks, supersede itself, inspect `last_turn`, and script delivery responses. It contains no product condition. |
+| Reference worker | PATH-resolved `asl-lane-example` with an arbitrary registry product, executable, and optional immutable fixed argv; worker hello declares all five open fields, open returns a deterministic native ID, run can echo/block/fail or never settle, interrupt and close can independently never settle, deliver is scriptable to `injected`, `queued_for_next_turn`, or `rejected`, and outbound tools are scriptable. It imports no product package. |
+| Reference caller | Up to two peer connections plus the shared caller kit. They can issue every client-to-daemon method, deliberately abandon reply sinks, supersede the same identity, prove second-visible-peer and invisible-peer authorization, inspect `last_turn`, and script delivery responses. They contain no product condition. |
 | Worker invocation | The worker suite accepts only `product`, `executable`, and immutable `fixed_argv`; every vendor and the reference executable run the identical trace. |
 | Caller invocation | The caller suite invokes the product's installed Agent Sessions tool, not a private test API; every product runs the identical trace against the reference worker. |
+
+The caller/reference size contract is final logical lines:
+
+| Reference surface | Production | Tests |
+| --- | ---: | ---: |
+| Go caller kit | 250 | 250 |
+| JavaScript caller kit, additional to the 260-line JavaScript client/worker cap | 200 | 200 |
+| Reference caller | 200 | 200 |
+| Reference worker | 250 | 150 |
+
+A caller kit over its cap has become a second router and is a design finding,
+not a reason to move lines into a product integration.
 
 ### 5.4 Vendor acceptance traces
 
 | Trace | Caller against reference worker |
 | --- | --- |
-| C1 | Peer hello, exact session identity, visibility-filtered list, and full tool schema. |
+| C1 | Two peer connections prove exact session identity, visibility-filtered list, and the full tool schema; the second visible peer can run, interrupt, and close the lane. |
 | C2 | Describe without open or residue; fresh spawn with identity, groups, all declared open fields, and ordered arguments. |
 | C3 | Local-kit start returns a local ID while one wire `turn.run` remains outstanding; status is running and bounded wait timeout does not cancel it. |
 | C4 | Wait returns the terminal; an abandoned caller sink still yields the same `last_turn` through filtered list. |
-| C5 | Send resolves ID/name/group, deduplicates, and returns injected, queued, rejected, ambiguous, and no-receipt forms exactly. |
+| C5 | Send resolves ID/name/group, deduplicates, and returns dispositions `injected`, `queued_for_next_turn`, or `rejected`, including exact rejected reasons `ambiguous` and `no_receipt`; an invisible peer receives `unknown_session`. |
 | C6 | Concurrent interrupts coalesce to one worker interrupt and idle interrupt maps `not_running`. |
 | C7 | Explicit close during a run orders terminal-if-observed before closed; forced supervisor close invents no terminal. |
 | C8 | Peer EOF reconnects; same-ID hello supersedes the displaced identity terminally with no flap. |
-| C9 | Offline resume replays stored open byte-for-byte; closed/name-taken/already-connected/not-connected errors match Section 1.4; cleanup leaves no connection, process, token, or pending call. |
+| C9 | Offline resume replays stored open byte-for-byte; `closed` is checked before `not_connected`, and `name_taken`, `already_connected`, and `not_connected` match Section 1.4; cleanup leaves no connection, process, token, or pending call. |
 
 | Trace | Worker against reference caller |
 | --- | --- |
@@ -1116,7 +1130,7 @@ from the same conformance matrix.
 | --- | --- |
 | Daemon lane actors, registries, projections, collectors, archives, timers, product dispatch, and argv reparse | Router/table tests drive the eleven methods over a real connection and assert only rows, current pointers, pending calls, and supervisor ownership. |
 | Presence, messaging, federation, roster, names, and notices | Daemon visibility/resolution tests plus the federation gate; no test constructs a private actor or product driver. |
-| Product lane drivers and peer launchers | Each Section 4 wrapper test drives its six callbacks and exact native transcript; peer exec-plan tests stop at product config and never claim socket ownership. |
+| Product lane drivers and peer launchers | Each Section 4 wrapper test drives its six callbacks and exact native transcript; the shared wrapper-host unit suite proves the FIFO cap of 64 deliveries / 1 MiB rendered bytes and an overflow `queue_full` receipt; peer exec-plan tests stop at product config and never claim socket ownership. |
 | Go/JavaScript lifecycle duplication | The one 14-row fixture table runs unchanged through both native kits and the reference worker. |
 | Connector and plugin tool tests | Caller-kit conformance C1-C9 through the installed peer MCP/plugin entry, with product-private transport tested only at its local boundary. |
 | Packaging and release projections | Package tests assert one schema/kit projection, correct peer and lane entry forms, no deleted compatibility artifact, and byte-identical installed assets. |
