@@ -12,10 +12,21 @@ const ENV = Object.freeze({
 });
 const DEFAULT_RECONNECT_MS = 2000;
 const MAX_FRAME_BYTES = 1024 * 1024;
-const CLIENT_OPERATIONS = Object.freeze([
-  "peers.list", "message.send", "lane.doctor", "lane.list", "lane.start", "lane.run", "lane.resume",
-  "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive",
-]);
+const result = (validate) => (_params, value) => validate(value);
+const method = (direction, params, validate, lane = false, tool = false, first = false, needsInput = false) => Object.freeze({ direction, params, result: validate, lane, tool, first, needsInput });
+const laneMethod = (input, validate) => method("client", (value) => validLaneCall(value, input), validate, true, true, false, input);
+const nativeMethod = (name) => method("daemon", (value) => validNative(name, value, false), (_params, value) => validNative(name, value, true), true);
+const METHOD_DEFINITIONS = Object.freeze({
+  "session.hello": method("client", validHello, result(validEmpty), false, false, true), "session.update": method("client", validUpdate, result(validEmpty)),
+  "peers.list": method("client", validEmpty, result(validPeersResult), false, true), "message.send": method("client", validMessageSend, result(validMessageSendResult), false, true),
+  "lane.doctor": laneMethod(false, validDoctorResult), "lane.list": laneMethod(false, validListResult),
+  "lane.start": laneMethod(true, validReadyResult), "lane.run": laneMethod(true, validCompletedResult), "lane.resume": laneMethod(true, validCompletedResult), "lane.steer": laneMethod(true, validSteeredResult),
+  "lane.wait": laneMethod(false, validCompletedResult), "lane.status": laneMethod(false, validStatusResult), "lane.interrupt": laneMethod(false, validInterruptingResult), "lane.archive": laneMethod(false, validArchivedResult),
+  "message.deliver": method("daemon", validDelivery, result(validEmpty)),
+  "lane.turn.start": nativeMethod("lane.turn.start"), "lane.turn.wait": nativeMethod("lane.turn.wait"),
+  "lane.turn.interrupt": nativeMethod("lane.turn.interrupt"), "lane.session.archive": nativeMethod("lane.session.archive"),
+});
+const CLIENT_OPERATIONS = Object.freeze(Object.keys(METHOD_DEFINITIONS).filter((name) => METHOD_DEFINITIONS[name].tool));
 
 class InactiveError extends Error {
   constructor(reason) {
@@ -54,7 +65,7 @@ class LiveSessionClient extends EventEmitter {
     if (!this.active || this.stopping || !text(nativeSessionID) || typeof name !== "string") return false;
     const existing = this.sessions.get(nativeSessionID);
     if (existing) return this.update(nativeSessionID, name, info);
-    if (!validInfo(info) || !validCapabilities(capabilities) || !stringList(groups)) return false;
+    if (!validInfo(info) || !(validEmpty(capabilities) || validCapabilities(capabilities)) || !stringList(groups)) return false;
     const session = {
       id: nativeSessionID, name, info: { ...info }, capabilities: { ...capabilities }, groups: [...groups],
       socket: null, ready: false, buffer: "", pending: new Map(), timer: null, serial: 0,
@@ -167,25 +178,23 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _request(session, frame) {
+    const spec = METHOD_DEFINITIONS[frame.method];
+    if (!spec || spec.direction !== "daemon" || (spec.lane && (!session.capabilities.lane || !this.laneHandler))) {
+      this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32003, message: "Operation not permitted", data: { method: frame.method } } });
+      return;
+    }
+    if (!spec.params(frame.params)) {
+      this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32602, message: "Invalid params", data: { method: frame.method } } });
+      return;
+    }
     if (frame.method === "message.deliver") {
-      if (!validDelivery(frame.params)) {
-        this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32602, message: "Invalid params", data: { method: frame.method } } });
-        return;
-      }
       const messageID = frame.params.message_id;
-      this.inbound.set(messageID, { session, wireID: frame.id });
+      this.inbound.set(messageID, { session, wireID: frame.id, params: frame.params });
       this.emit("message", { messageID, nativeSessionID: session.id, from: { ...frame.params.from, groups: [...frame.params.from.groups] }, body: frame.params.body });
       return;
     }
-    if (!session.capabilities.lane || !this.laneHandler || !validLaneSessionRequest(frame.method, frame.params)) {
-      const error = session.capabilities.lane && this.laneHandler && laneSessionMethod(frame.method)
-        ? { code: -32602, message: "Invalid params", data: { method: frame.method } }
-        : { code: -32003, message: "Operation not permitted", data: { method: frame.method } };
-      this._write(session, { jsonrpc: "2.0", id: frame.id, error });
-      return;
-    }
     Promise.resolve(this.laneHandler({ nativeSessionID: session.id, method: frame.method, params: frame.params }))
-      .then((result) => { if (!validLaneSessionResult(frame.method, result)) throw new Error(`invalid ${frame.method} native result`); this._write(session, { jsonrpc: "2.0", id: frame.id, result }); })
+      .then((resultValue) => { if (!spec.result(frame.params, resultValue)) throw new Error(`invalid ${frame.method} native result`); this._write(session, { jsonrpc: "2.0", id: frame.id, result: resultValue }); })
       .catch((error) => this._write(session, { jsonrpc: "2.0", id: frame.id, error: wireError(error) }));
   }
 
@@ -194,17 +203,22 @@ class LiveSessionClient extends EventEmitter {
     if (!pending) { session.socket.destroy(); return; }
     session.pending.delete(frame.id);
     if (frame.error) pending.reject(Object.assign(new Error(frame.error.message), { category: "unavailable", code: frame.error.code, data: frame.error.data }));
+    else if (!pending.spec.result(pending.params, frame.result)) pending.reject(new Error(`invalid ${pending.method} result`));
     else {
       if (pending.handshake) session.ready = true;
-      pending.resolve(frame.result ?? {});
+      pending.resolve(frame.result);
     }
   }
 
   _call(session, id, method, params, handshake = false) {
     const wireID = `session.${id}`;
+    const spec = METHOD_DEFINITIONS[method];
+    if (!spec || spec.direction !== "client") return Promise.reject(new Error("unsupported Agent Sessions operation"));
+    if (spec.first !== handshake) return Promise.reject(new Error(`${method} is invalid at this connection phase`));
+    if (!spec.params(params)) return Promise.reject(new Error(`invalid ${method} params`));
     if (session.pending.has(wireID)) return Promise.reject(new Error("live call id is already outstanding"));
     return new Promise((resolve, reject) => {
-      session.pending.set(wireID, { resolve, reject, handshake });
+      session.pending.set(wireID, { resolve, reject, handshake, method, params, spec });
       if (!this._write(session, { jsonrpc: "2.0", id: wireID, method, params }, handshake)) {
         session.pending.delete(wireID);
         reject(new InactiveError("disconnected"));
@@ -215,10 +229,11 @@ class LiveSessionClient extends EventEmitter {
   _answer(messageID, result, error) {
     const inbound = this.inbound.get(messageID);
     if (!inbound) return false;
+    if (!error && !METHOD_DEFINITIONS["message.deliver"].result(inbound.params, result)) return false;
     this.inbound.delete(messageID);
     return this._write(inbound.session, error
       ? { jsonrpc: "2.0", id: inbound.wireID, error: wireError(error) }
-      : { jsonrpc: "2.0", id: inbound.wireID, result: result ?? {} });
+      : { jsonrpc: "2.0", id: inbound.wireID, result });
   }
 
   _write(session, frame, handshake = false) {
@@ -274,6 +289,7 @@ function presenceSocket(env) {
 
 function ownDataKeys(value) { if (!value || typeof value !== "object" || Array.isArray(value)) return false; const prototype = Object.getPrototypeOf(value), keys = Reflect.ownKeys(value); return (prototype === Object.prototype || prototype === null) && keys.every((key) => { const descriptor = Object.getOwnPropertyDescriptor(value, key); return typeof key === "string" && descriptor?.enumerable === true && Object.hasOwn(descriptor, "value"); }) ? keys : false; }
 function exactKeys(value, allowed) { const keys = ownDataKeys(value); return !!keys && keys.every((key) => allowed.includes(key)); }
+function exactShape(value, required, optional = []) { const keys = ownDataKeys(value); return !!keys && required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => required.includes(key) || optional.includes(key)); }
 function stringMap(value) {
   return exactKeys(value, Object.keys(value ?? {})) && Object.values(value).every((item) => typeof item === "string");
 }
@@ -284,12 +300,13 @@ function stringList(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 function validCapabilities(value) {
-  return exactKeys(value, ["lane"]) && (!("lane" in value) || value.lane === true);
+  return exactShape(value, ["lane"]) && value.lane === true;
 }
 function validID(value) { return typeof value === "string" || Number.isSafeInteger(value); }
-function boundedWireText(value, maximum) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maximum && !/[\s/\p{Cc}]/u.test(value); }
+function boundedWireText(value, maximum) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maximum && !/[\p{White_Space}/\p{Cc}]/u.test(value); }
 function validWireProduct(value) { return typeof value === "string" && Buffer.byteLength(value, "utf8") <= 64 && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9]))*$/u.test(value); }
 function validWireGroup(value) { if (typeof value !== "string" || !value.startsWith("session:")) return boundedWireText(value, 192); const [host, nativeID, extra] = value.slice(8).split("/"); return extra === undefined && Buffer.byteLength(value, "utf8") <= 192 && boundedWireText(nativeID, 128) && typeof host === "string" && Buffer.byteLength(host, "utf8") <= 128 && /^[\p{L}\p{N}._-]+$/u.test(host); }
+function validWireName(value) { return typeof value === "string" && Buffer.byteLength(value, "utf8") <= 256 && !/\p{Cc}/u.test(value); }
 function validMethod(value) { return typeof value === "string" && value.length > 0 && !/[\p{White_Space}\p{Cc}]/u.test(value); }
 function validErrorStringData(value, key, validate = text) { return exactKeys(value.data, [key]) && validate(value.data[key]); }
 function validJSON(value, stack = new Set()) { if (value === null || typeof value === "string" || typeof value === "boolean") return true; if (typeof value === "number") return Number.isFinite(value); if (typeof value !== "object" || stack.has(value)) return false; let keys; if (Array.isArray(value)) { keys = Object.keys(value); if (Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== value.length + 1 || keys.length !== value.length || !keys.every((key, index) => key === String(index) && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key), "value"))) return false; } else if (!(keys = ownDataKeys(value))) return false; stack.add(value); const valid = keys.every((key) => validJSON(value[key], stack)); stack.delete(value); return valid; }
@@ -309,26 +326,29 @@ function validFrame(frame) {
   }
   return !("method" in frame) && !("params" in frame) && (("result" in frame) !== ("error" in frame)) && (!("error" in frame) || validError(frame.error));
 }
+function validEmpty(value) { return exactShape(value, []); }
+function validHello(value) { return exactShape(value, ["protocol", "uuid", "name", "groups", "product", "info"], ["capabilities"]) && Number.isSafeInteger(value.protocol) && boundedWireText(value.uuid, 128) && validWireName(value.name) && stringList(value.groups) && value.groups.every(validWireGroup) && validWireProduct(value.product) && validInfo(value.info) && (!("capabilities" in value) || exactShape(value.capabilities, ["lane"]) && value.capabilities.lane === true); }
+function validUpdate(value) { return exactShape(value, ["name", "info"]) && validWireName(value.name) && validInfo(value.info); }
+function validMessageSend(value) { if (!exactShape(value, ["message"], ["target", "targets", "group"]) || typeof value.message !== "string" || value.message.length === 0) return false; const selectors = ["target", "targets", "group"].filter((key) => key in value); if (selectors.length !== 1) return false; if ("targets" in value) return value.targets.length > 0 && stringList(value.targets) && value.targets.every((item) => item.length > 0) && new Set(value.targets).size === value.targets.length; return typeof value[selectors[0]] === "string" && value[selectors[0]].length > 0; }
+function validPeer(value) { return exactShape(value, ["id", "session_id", "name", "product", "status", "cwd", "groups", "permission_mode", "info"], ["kind", "host_id"]) && ["id", "session_id", "name", "product", "cwd", "permission_mode"].every((key) => typeof value[key] === "string") && ["live", "idle", "busy"].includes(value.status) && stringList(value.groups) && stringMap(value.info) && (!("kind" in value) || ["lane", "remote-peer"].includes(value.kind)) && (!("host_id" in value) || typeof value.host_id === "string"); }
+function validPeersResult(value) { return exactShape(value, ["peers"]) && Array.isArray(value.peers) && value.peers.every(validPeer); }
+function validMessageSendResult(value) { return exactShape(value, ["message_id", "deliveries"]) && typeof value.message_id === "string" && value.message_id.length > 0 && Array.isArray(value.deliveries) && value.deliveries.every((item) => exactShape(item, ["target", "session_id", "delivery_id", "status"]) && ["target", "session_id", "delivery_id"].every((key) => typeof item[key] === "string") && item.status === "accepted"); }
 function validDelivery(params) {
-  return exactKeys(params, ["message_id", "from", "body"]) && text(params.message_id) && typeof params.body === "string" &&
-    exactKeys(params.from, ["uuid", "name", "product", "groups"]) && text(params.from.uuid) && typeof params.from.name === "string" &&
-    text(params.from.product) && Array.isArray(params.from.groups) && params.from.groups.every((group) => typeof group === "string");
+  return exactShape(params, ["message_id", "from", "body"]) && typeof params.message_id === "string" && params.message_id.length > 0 && typeof params.body === "string" &&
+    exactShape(params.from, ["uuid", "name", "product", "groups"]) && boundedWireText(params.from.uuid, 128) && validWireName(params.from.name) &&
+    typeof params.from.product === "string" && params.from.product.length > 0 && stringList(params.from.groups);
 }
-function laneSessionMethod(method) {
-  return ["lane.turn.start", "lane.turn.wait", "lane.turn.interrupt", "lane.session.archive"].includes(method);
-}
-function validLaneSessionRequest(method, params) {
-  if (!laneSessionMethod(method)) return false;
-  if (method === "lane.turn.start") {
-    return exactKeys(params, ["input_id", "body", "mode"]) && text(params.input_id) && typeof params.body === "string" && params.body.length > 0 &&
-      ["followup", "steer"].includes(params.mode);
-  }
-  if (method === "lane.turn.wait") {
-    return exactKeys(params, ["native_message_id"]) && text(params.native_message_id);
-  }
-  return exactKeys(params, []) && Object.keys(params).length === 0;
-}
-function validLaneSessionResult(method, result) { if (method === "lane.turn.start") return exactKeys(result, ["native_message_id"]) && text(result.native_message_id); if (method === "lane.turn.wait") return exactKeys(result, ["outcome", "result", "reason"]) && ["completed", "interrupted", "failed"].includes(result.outcome) && typeof result.result === "string" && validJSON(result.reason); return (method === "lane.turn.interrupt" || method === "lane.session.archive") && exactKeys(result, []); }
+function validLaneCall(value, input) { return exactShape(value, ["product", "arguments", ...(input ? ["input"] : [])], ["cwd", "host"]) && validWireProduct(value.product) && stringList(value.arguments) && (!input || typeof value.input === "string" && value.input.length > 0) && (!("cwd" in value) || typeof value.cwd === "string" && value.cwd.length > 0 && path.isAbsolute(value.cwd)) && (!("host" in value) || typeof value.host === "string" && value.host.length > 0); }
+function validNative(name, value, result) { if (name === "lane.turn.interrupt" || name === "lane.session.archive") return validEmpty(value); if (name === "lane.turn.start" && !result) return exactShape(value, ["input_id", "body", "mode"]) && typeof value.input_id === "string" && value.input_id.length > 0 && typeof value.body === "string" && value.body.length > 0 && ["followup", "steer"].includes(value.mode); if (name === "lane.turn.start" || !result) return exactShape(value, ["native_message_id"]) && typeof value.native_message_id === "string" && value.native_message_id.length > 0; return exactShape(value, ["outcome", "result", "reason"]) && ["completed", "interrupted", "failed"].includes(value.outcome) && typeof value.result === "string" && validJSON(value.reason); }
+function validDoctorResult(params, value) { const product = value?.product; if (!validWireProduct(product) || product !== params.product) return false; const required = ["type", "contract_version", "authority", "product", "ready", "native_path", "runtime_path", "daemon_reachable", "supervisor_reachable", `${product}_available`, `${product}_path`, `${product}_version`]; if (!exactShape(value, required, [`${product}_error`, "readiness_error"]) || value.type !== "lane.doctor" || value.contract_version !== 2 || value.authority !== "daemon") return false; return ["ready", "daemon_reachable", "supervisor_reachable", `${product}_available`].every((key) => typeof value[key] === "boolean") && ["native_path", "runtime_path", `${product}_path`, `${product}_version`, `${product}_error`, "readiness_error"].every((key) => !(key in value) || typeof value[key] === "string"); }
+function validLaneStatus(value, product) { return exactShape(value, ["type", "product", "session_id", "name", "cwd", "groups", "permission_mode", "state", "turn_id", "outcome", "exit", "owner_session_id", "persistent", "auto_archive", "auto_archive_after_seconds", "auto_archive_at"]) && value.type === "lane.status" && value.product === product && ["session_id", "name", "cwd", "permission_mode", "state", "turn_id", "outcome", "owner_session_id"].every((key) => typeof value[key] === "string") && stringList(value.groups) && ["persistent", "auto_archive"].every((key) => typeof value[key] === "boolean") && typeof value.auto_archive_after_seconds === "number" && Number.isInteger(value.auto_archive_at) && (value.exit === null || Number.isInteger(value.exit)); }
+function validListResult(params, value) { return exactShape(value, ["type", "product", "lanes"]) && value.type === "lane.list" && value.product === params.product && validWireProduct(value.product) && Array.isArray(value.lanes) && value.lanes.every((lane) => validLaneStatus(lane, value.product)); }
+function validReadyResult(params, value) { const { contract_version: version, ...status } = value ?? {}; return value?.type === "lane.ready" && version === 2 && validLaneStatus({ ...status, type: "lane.status" }, params.product); }
+function validStatusResult(params, value) { return validLaneStatus(value, params.product); }
+function validCompletedResult(params, value) { return exactShape(value, ["type", "product", "session_id", "turn_id", "status", "outcome", "exit", "result", "diagnostic"], ["native_stop_reason"]) && value.type === "turn.completed" && value.product === params.product && ["session_id", "turn_id", "status", "outcome", "result", "diagnostic"].every((key) => typeof value[key] === "string") && (value.exit === null || Number.isInteger(value.exit)) && (!("native_stop_reason" in value) || typeof value.native_stop_reason === "string" && value.native_stop_reason.length > 0); }
+function validSteeredResult(_params, value) { return exactShape(value, ["type", "session_id", "turn_id", "native_message_id"]) && value.type === "turn.steered" && ["session_id", "turn_id", "native_message_id"].every((key) => typeof value[key] === "string" && value[key].length > 0); }
+function validInterruptingResult(_params, value) { return exactShape(value, ["type", "session_id", "turn_id"]) && value.type === "turn.interrupting" && ["session_id", "turn_id"].every((key) => typeof value[key] === "string"); }
+function validArchivedResult(params, value) { return exactShape(value, ["type", "product", "session_id", "name"], ["already_archived"]) && value.type === "lane.archived" && value.product === params.product && ["session_id", "name"].every((key) => typeof value[key] === "string") && (!("already_archived" in value) || typeof value.already_archived === "boolean"); }
 function renderDelivery(payload) {
   if (!payload || !validDelivery({ message_id: payload.messageID, from: payload.from, body: payload.body })) throw new Error("live message delivery is invalid");
   const from = payload.from.name || payload.from.uuid;
@@ -344,4 +364,4 @@ function integer(value, minimum, maximum, name) {
 function cleanError(error) { return String(error?.message ?? error ?? "live session error").replace(/[\0\r\n]/gu, " ").slice(0, 512); }
 function createLiveSessionClient(options) { return new LiveSessionClient(options); }
 
-module.exports = { CLIENT_OPERATIONS, ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery };
+module.exports = { CLIENT_OPERATIONS, METHOD_DEFINITIONS, ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery };

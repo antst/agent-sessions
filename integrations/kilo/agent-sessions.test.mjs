@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import liveSessionModule from "../shared/live-session.js";
 
 class FakeLiveSession extends EventEmitter {
   constructor() { super(); this.active = true; this.sessions = new Map(); this.reported = []; this.updated = []; this.accepted = []; this.rejected = []; this.calls = []; }
@@ -19,12 +20,12 @@ function fakeTool(definition) { return definition; }
 fakeTool.schema = { enum: (values) => ({ values }), string: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
 
 async function loadPlugin(live) {
-  globalThis.__testTool = fakeTool; globalThis.__testLiveFactory = () => live; globalThis.__testRenderDelivery = (payload) => payload.body;
+  globalThis.__testTool = fakeTool;
+  globalThis.__testLiveSessionModule = { ...liveSessionModule, createLiveSessionClient: () => live, renderDelivery: (payload) => payload.body };
   let source = await readFile(new URL("./agent-sessions.mjs", import.meta.url), "utf8");
   source = source
     .replace('import { tool } from "@kilocode/plugin";', "const tool = globalThis.__testTool;")
-    .replace('import liveSessionModule from "../shared/live-session.js";', "")
-		.replace('const { CLIENT_OPERATIONS: OPERATIONS, createLiveSessionClient, renderDelivery } = liveSessionModule;', 'const OPERATIONS = ["peers.list", "message.send", "lane.doctor", "lane.list"]; const createLiveSessionClient = globalThis.__testLiveFactory; const renderDelivery = globalThis.__testRenderDelivery;');
+    .replace('import liveSessionModule from "../shared/live-session.js";', "const liveSessionModule = globalThis.__testLiveSessionModule;");
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Math.random()}`)).default;
 }
 
@@ -33,7 +34,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 test("Kilo reports live sessions and title changes", async () => {
   const live = new FakeLiveSession();
   const hooks = await (await loadPlugin(live))({ client: {}, directory: "/work" });
-  assert.deepEqual(hooks.tool.agent_sessions.args.operation.values, ["peers.list", "message.send", "lane.doctor", "lane.list"]);
+  assert.deepEqual(hooks.tool.agent_sessions.args.operation.values, liveSessionModule.CLIENT_OPERATIONS);
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "", directory: "/work" } } } });
   await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_one", title: "native", directory: "/work" } } } });
   assert.deepEqual(live.reported, [{ id: "ses_one", name: "", info: { cwd: "/work" } }]);
@@ -97,11 +98,15 @@ test("Kilo submits to the exact live session and acknowledges native evidence", 
   live.emit("message", { messageID: "delivery", nativeSessionID: "ses_one", body: "hello" });
   await tick();
   assert.deepEqual(live.accepted, [{ id: "delivery", result: { native_message_id: "msg_one" } }]);
-  const result = await hooks.tool.agent_sessions.execute({ operation: "peers.list", arguments: {} }, {
-    sessionID: "ses_one", messageID: "message", abort: new AbortController().signal,
-  });
-  assert.equal(JSON.parse(result).ok, true);
-  assert.equal(live.calls[0].id, "ses_one");
+  for (const operation of ["lane.doctor", "lane.list"]) {
+    const result = await hooks.tool.agent_sessions.execute({ operation, arguments: { product: "codex", arguments: [] } }, {
+      sessionID: "ses_one", messageID: operation, abort: new AbortController().signal,
+    });
+    assert.equal(JSON.parse(result).ok, true);
+  }
+  assert.deepEqual(live.calls.map(({ id, operation }) => ({ id, operation })), [
+    { id: "ses_one", operation: "lane.doctor" }, { id: "ses_one", operation: "lane.list" },
+  ]);
 });
 
 test("Kilo rejects failed native submission", async () => {

@@ -12,12 +12,10 @@ const maxMCPInputBytes = 1 << 20
 
 const BugReportGuidance = "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/agent-sessions with gh issue create, including the exact command, observed behavior, and expected behavior."
 
-const genericInstructions = "Use these structured tools for Agent Sessions peer discovery, live messaging, and lane lifecycle operations from this managed product session. The current live product session supplies the caller identity; session_id is optional context. " + BugReportGuidance
+const genericInstructions = "Use stable peer names with these structured tools for Agent Sessions peer discovery, live messaging, and token-named product lane lifecycle operations from this managed product session. The daemon decides whether a lane product is launchable; the current live product session supplies the caller identity and session_id is optional context. " + BugReportGuidance
 
 var instructions = map[string]string{
-	"codex":  "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message takes one target, an explicit multicast, or one group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tool calls activate while this product session has a live Agent Sessions connection; session_id is optional context.",
 	"claude": "Use these structured tools for Agent Sessions discovery, direct or multicast messaging, replies, and supported-product lane lifecycle operations from this live Claude session. Use lane instead of invoking a product lane executable through Bash. For an incoming delivery, send_message back to the source UUID or unique name.",
-	"grok":   "Use stable peer names as primary addresses. Discovery and delivery are limited to peers sharing this session's Agent Sessions groups. send_message takes one target, an explicit multicast, or one group this session belongs to. lane runs an exact Codex, Claude, Grok, or Qwen lane lifecycle command outside the caller's shell sandbox. Tools activate while the launcher-held Grok session is live.",
 	"qwen":   "Use these structured Agent Sessions tools for discovery, direct sends, multicast, group sends, identity, rename, and foreign lane lifecycle commands from this live Qwen session. Qwen's native approval mode remains Qwen-owned and may change during the session.",
 }
 
@@ -93,12 +91,6 @@ func ProductMCPTools(product string) ([]map[string]any, error) {
 }
 
 func baseToolDefinitions() []map[string]any {
-	laneProducts := make([]string, 0)
-	for _, descriptor := range productcatalog.All() {
-		if descriptor.Has(productcatalog.CapabilityLane) {
-			laneProducts = append(laneProducts, descriptor.ID)
-		}
-	}
 	sendSchema := objectSchema(map[string]any{
 		"target":  map[string]any{"type": "string", "minLength": 1, "description": "Visible peer name, exact session ID, display name, or host/session ID."},
 		"targets": map[string]any{"type": "array", "items": map[string]any{"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true, "description": "Explicit multicast recipients."},
@@ -116,8 +108,8 @@ func baseToolDefinitions() []map[string]any {
 		{"name": "check_inbox", "description": "Recovery-only: read and consume peer messages queued past an automatic delivery boundary. Active peer messages are pushed into the session automatically; do not poll this tool.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "identity", "description": "Show this Codex session's Claude-compatible peer name and address.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "rename_session", "description": "Change this managed session's public Agent Sessions peer name.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."), "name": map[string]any{"type": "string", "minLength": 1, "maxLength": 80}}, []string{"session_id", "name"})},
-		{"name": "lane", "description": "Run one exact local or federated supported-product lane lifecycle command for this attested parent. Use this instead of invoking a lane executable from a sandboxed shell.", "inputSchema": objectSchema(map[string]any{
-			"product": map[string]any{"type": "string", "enum": laneProducts}, "command": map[string]any{"type": "string", "enum": []string{"doctor", "list", "run", "start", "resume", "wait", "status", "interrupt", "archive"}},
+		{"name": "lane", "description": "Run one exact local or federated token-named product lane lifecycle command for this attested parent. The daemon alone decides whether the product is launchable.", "inputSchema": objectSchema(map[string]any{
+			"product": map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, "description": "Opaque product token resolved by the daemon."}, "command": map[string]any{"type": "string", "enum": []string{"doctor", "list", "run", "start", "resume", "wait", "status", "interrupt", "archive"}},
 			"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": 4096}, "maxItems": 256, "description": "Native arguments after the lifecycle command."}, "input": map[string]any{"type": "string", "maxLength": maxMCPInputBytes, "description": "Optional stdin briefing for run, start, or resume."}, "host": map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
 		}, []string{"product", "command", "session_id"})},
 	}

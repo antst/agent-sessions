@@ -65,6 +65,9 @@ type ControlFailure struct {
 	RPCCode int             `json:"rpc_code,omitempty"`
 	RPCData json.RawMessage `json:"rpc_data,omitempty"`
 }
+type rpcErrorDetails interface {
+	RPCErrorDetails() (int, string, json.RawMessage)
+}
 
 // ControlResponse is one correlated local result.
 type ControlResponse struct {
@@ -209,9 +212,7 @@ func (p *controlPolicy) invoke(ctx context.Context, request ControlRequest) Cont
 		if errors.As(err, &classified) && classified.code == ErrorInactive {
 			return failedControlResponse(request.ID, ErrorInactive, CanonicalInactiveMessage)
 		}
-		var rpc interface {
-			RPCErrorDetails() (int, string, json.RawMessage)
-		}
+		var rpc rpcErrorDetails
 		if errors.As(err, &rpc) {
 			code, message, data := rpc.RPCErrorDetails()
 			return ControlResponse{ID: request.ID, Error: &ControlFailure{

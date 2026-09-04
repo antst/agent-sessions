@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -94,7 +95,6 @@ type Frame struct {
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *RPCError       `json:"error,omitempty"`
 }
-
 type MethodDirection string
 
 const (
@@ -103,186 +103,187 @@ const (
 )
 
 type MethodSpec struct {
-	Direction        MethodDirection
-	Lane, NeedsInput bool
-	params, result   func(json.RawMessage) bool
+	Direction               MethodDirection
+	Lane, NeedsInput, First bool
+	params                  func(json.RawMessage) bool
+	result                  byte
 }
-
 type LaneCallParams struct {
 	Product          string
 	Arguments        []string
 	Input, Cwd, Host *string
 }
 
-func LookupMethod(name string) (MethodSpec, bool) {
-	spec := MethodSpec{Direction: ClientToDaemon}
-	switch name {
-	case "session.hello", "session.update", "peers.list", "message.send":
-	case "lane.doctor", "lane.list", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
-		spec.Lane = true
-		if name == "lane.doctor" || name == "lane.list" {
-			spec.result = map[string]func(json.RawMessage) bool{"lane.doctor": validDoctorResult, "lane.list": validListResult}[name]
-		}
-	case "lane.start", "lane.run", "lane.resume", "lane.steer":
-		spec.Lane, spec.NeedsInput = true, true
-	case "message.deliver":
-		spec.Direction = DaemonToClient
-	case "lane.turn.start", "lane.turn.wait", "lane.turn.interrupt", "lane.session.archive":
-		spec.Direction, spec.Lane = DaemonToClient, true
-		spec.params, spec.result = nativeValidators(name)
-	default:
-		return MethodSpec{}, false
-	}
-	if spec.Lane && spec.Direction == ClientToDaemon {
-		spec.params = func(raw json.RawMessage) bool { _, ok := DecodeLaneCall(spec, raw); return ok }
-	}
-	return spec, true
+var methodTable = map[string]MethodSpec{
+	"session.hello": {Direction: ClientToDaemon, First: true, params: func(raw json.RawMessage) bool { _, _, err := DecodeHello(raw); return err == nil }, result: 'e'}, "session.update": {Direction: ClientToDaemon, params: func(raw json.RawMessage) bool { _, _, err := DecodeUpdate(raw); return err == nil }, result: 'e'},
+	"peers.list": {Direction: ClientToDaemon, params: validEmptyObject, result: 'p'}, "message.send": {Direction: ClientToDaemon, params: func(raw json.RawMessage) bool { _, ok := DecodeMessageSend(raw); return ok }, result: 'm'},
+	"lane.doctor": laneMethod(false, 'd'), "lane.list": laneMethod(false, 'l'),
+	"lane.start": laneMethod(true, 'r'), "lane.run": laneMethod(true, 'c'), "lane.resume": laneMethod(true, 'c'), "lane.steer": laneMethod(true, 's'),
+	"lane.wait": laneMethod(false, 'c'), "lane.status": laneMethod(false, 't'), "lane.interrupt": laneMethod(false, 'i'), "lane.archive": laneMethod(false, 'a'),
+	"message.deliver": {Direction: DaemonToClient, params: func(raw json.RawMessage) bool { _, err := DecodeDeliver(raw); return err == nil }, result: 'e'},
+	"lane.turn.start": nativeMethod("lane.turn.start", 'n'), "lane.turn.wait": nativeMethod("lane.turn.wait", 'w'),
+	"lane.turn.interrupt": nativeMethod("lane.turn.interrupt", 'e'), "lane.session.archive": nativeMethod("lane.session.archive", 'e'),
 }
 
-func ValidMethodParams(spec MethodSpec, raw json.RawMessage) bool {
-	return spec.params == nil || spec.params(raw)
+func LookupMethod(name string) (MethodSpec, bool)            { spec, ok := methodTable[name]; return spec, ok }
+func ValidMethodParams(s MethodSpec, b json.RawMessage) bool { return s.params != nil && s.params(b) }
+func ValidMethodResult(spec MethodSpec, params, result json.RawMessage) bool {
+	var value map[string]any
+	_, exists := resultSchemas[spec.result]
+	return exists && DecodeStrict(result, &value) == nil && validResultObject(spec.result, params, value)
 }
-
 func DecodeLaneCall(spec MethodSpec, raw json.RawMessage) (LaneCallParams, bool) {
 	var p LaneCallParams
-	if DecodeStrict(raw, &p) != nil || productcatalog.ValidateToken(p.Product) != nil || p.Arguments == nil || spec.NeedsInput != (p.Input != nil) || p.Input != nil && !textValue(*p.Input) || p.Cwd != nil && (*p.Cwd == "" || !filepath.IsAbs(*p.Cwd)) || p.Host != nil && !textValue(*p.Host) {
+	if DecodeStrict(raw, &p) != nil || productcatalog.ValidateToken(p.Product) != nil || p.Arguments == nil || spec.NeedsInput != (p.Input != nil) || p.Input != nil && *p.Input == "" || p.Cwd != nil && (*p.Cwd == "" || !filepath.IsAbs(*p.Cwd)) || p.Host != nil && *p.Host == "" {
 		return p, false
-	}
-	for _, argument := range p.Arguments {
-		if strings.ContainsAny(argument, "\x00\r\n") {
-			return p, false
-		}
 	}
 	return p, true
 }
 
-func ValidMethodResult(spec MethodSpec, raw json.RawMessage) bool {
-	return spec.result == nil || spec.result(raw)
+func laneMethod(needsInput bool, result byte) MethodSpec {
+	spec := MethodSpec{Direction: ClientToDaemon, Lane: true, NeedsInput: needsInput, result: result}
+	spec.params = func(raw json.RawMessage) bool { _, ok := DecodeLaneCall(spec, raw); return ok }
+	return spec
 }
-
-func textValue(value string) bool { return strings.TrimSpace(value) != "" }
-func nativeValidators(method string) (func(json.RawMessage) bool, func(json.RawMessage) bool) {
-	return func(raw json.RawMessage) bool { return validNative(method, false, raw) }, func(raw json.RawMessage) bool { return validNative(method, true, raw) }
+func nativeMethod(method string, result byte) MethodSpec {
+	return MethodSpec{Direction: DaemonToClient, Lane: true, params: func(raw json.RawMessage) bool { return validNativeParams(method, raw) }, result: result}
 }
-func validNative(method string, result bool, raw json.RawMessage) bool {
+func validNativeParams(method string, raw json.RawMessage) bool {
 	if method == "lane.turn.interrupt" || method == "lane.session.archive" {
-		_, ok := object(raw, "", "")
-		return ok
+		return validEmptyObject(raw)
 	}
-	if method == "lane.turn.start" && !result {
+	if method == "lane.turn.start" {
 		v, ok := object(raw, "input_id body mode", "")
-		input, inputOK := stringField(v, "input_id")
-		body, bodyOK := stringField(v, "body")
-		mode, modeOK := stringField(v, "mode")
-		return ok && inputOK && textValue(input) && bodyOK && body != "" && modeOK && (mode == "followup" || mode == "steer")
+		return ok && nonempty(v["input_id"]) && nonempty(v["body"]) && (v["mode"] == "followup" || v["mode"] == "steer")
 	}
-	if method == "lane.turn.start" || !result {
-		v, ok := object(raw, "native_message_id", "")
-		value, textOK := stringField(v, "native_message_id")
-		return ok && textOK && textValue(value)
-	}
-	v, ok := object(raw, "outcome result reason", "")
-	outcome, outcomeOK := stringField(v, "outcome")
-	_, resultOK := stringField(v, "result")
-	return ok && outcomeOK && resultOK && (outcome == "completed" || outcome == "interrupted" || outcome == "failed")
+	v, ok := object(raw, "native_message_id", "")
+	return ok && nonempty(v["native_message_id"])
 }
 func object(raw json.RawMessage, required, optional string) (map[string]any, bool) {
-	var value map[string]any
+	value := map[string]any{}
 	return value, DecodeStrict(raw, &value) == nil && exactObject(value, required, optional)
 }
 func exactObject(value map[string]any, required, optional string) bool {
-	if value == nil || len(value) < len(strings.Fields(required)) {
-		return false
-	}
-	allowed := " " + required + " " + optional + " "
-	for key := range value {
-		if !strings.Contains(allowed, " "+key+" ") {
-			return false
+	requiredFields, allowed := strings.Fields(required), strings.Fields(required+" "+optional)
+	present := 0
+	for _, key := range allowed {
+		if _, ok := value[key]; ok {
+			present++
 		}
 	}
-	for _, key := range strings.Fields(required) {
-		if _, ok := value[key]; !ok {
-			return false
-		}
-	}
-	return true
+	return value != nil && len(value) == present && !slices.ContainsFunc(requiredFields, func(key string) bool { _, ok := value[key]; return !ok })
 }
-func stringField(value map[string]any, key string) (string, bool) {
-	item, ok := value[key].(string)
-	return item, ok
+func validEmptyObject(raw json.RawMessage) bool { _, ok := object(raw, "", ""); return ok }
+func DecodeMessageSend(raw json.RawMessage) (map[string]any, bool) {
+	params, ok := object(raw, "message", "target targets group")
+	if !ok || !nonempty(params["message"]) {
+		return nil, false
+	}
+	selectors := []string{}
+	for _, key := range strings.Fields("target targets group") {
+		if _, present := params[key]; present {
+			selectors = append(selectors, key)
+		}
+	}
+	if len(selectors) != 1 {
+		return nil, false
+	}
+	if selectors[0] == "targets" {
+		targets, ok := params["targets"].([]any)
+		seen := map[string]bool{}
+		for _, item := range targets {
+			target, valid := item.(string)
+			if !valid || target == "" || seen[target] {
+				return nil, false
+			}
+			seen[target] = true
+		}
+		if !ok || len(seen) == 0 {
+			return nil, false
+		}
+	} else if !nonempty(params[selectors[0]]) {
+		return nil, false
+	}
+	return params, true
 }
 
-func validDoctorResult(raw json.RawMessage) bool {
-	var probe map[string]any
-	if json.Unmarshal(raw, &probe) != nil {
+type resultSchema struct {
+	required, optional, typ, fields string
+	product                         bool
+}
+
+const laneStatusFields = "type product session_id name cwd groups permission_mode state turn_id outcome exit owner_session_id persistent auto_archive auto_archive_after_seconds auto_archive_at"
+
+var resultSchemas = map[byte]resultSchema{
+	'e': {}, 'p': {required: "peers", fields: "h:peers"}, 'm': {required: "message_id deliveries", fields: "t:message_id y:deliveries"},
+	'd': {required: "type contract_version authority product ready native_path runtime_path daemon_reachable supervisor_reachable", typ: "lane.doctor", fields: "2:contract_version a:authority s:product s:native_path s:runtime_path b:ready b:daemon_reachable b:supervisor_reachable", product: true},
+	'l': {required: "type product lanes", typ: "lane.list", fields: "s:product j:lanes", product: true},
+	'r': {required: laneStatusFields + " contract_version", typ: "lane.ready", fields: "s:product s:session_id s:name s:cwd g:groups s:permission_mode s:state s:turn_id s:outcome z:exit s:owner_session_id b:persistent b:auto_archive n:auto_archive_after_seconds i:auto_archive_at 2:contract_version", product: true},
+	'c': {required: "type product session_id turn_id status outcome exit result diagnostic", optional: "native_stop_reason", typ: "turn.completed", fields: "s:product s:session_id s:turn_id s:status s:outcome z:exit s:result s:diagnostic T:native_stop_reason", product: true},
+	's': {required: "type session_id turn_id native_message_id", typ: "turn.steered", fields: "t:session_id t:turn_id t:native_message_id"},
+	't': {required: laneStatusFields, typ: "lane.status", fields: "s:product s:session_id s:name s:cwd g:groups s:permission_mode s:state s:turn_id s:outcome z:exit s:owner_session_id b:persistent b:auto_archive n:auto_archive_after_seconds i:auto_archive_at", product: true},
+	'i': {required: "type session_id turn_id", typ: "turn.interrupting", fields: "s:session_id s:turn_id"},
+	'a': {required: "type product session_id name", optional: "already_archived", typ: "lane.archived", fields: "s:product s:session_id s:name B:already_archived", product: true},
+	'n': {required: "native_message_id", fields: "t:native_message_id"}, 'w': {required: "outcome result reason", fields: "w:outcome s:result"},
+	'q': {required: "id session_id name product status cwd groups permission_mode info", optional: "kind host_id", fields: "s:id s:session_id s:name s:product x:status s:cwd g:groups s:permission_mode o:info K:kind S:host_id"},
+	'v': {required: "target session_id delivery_id status", fields: "s:target s:session_id s:delivery_id v:status"},
+}
+
+func validResultObject(kind byte, params json.RawMessage, value map[string]any) bool {
+	var request struct{ Product string }
+	_ = json.Unmarshal(params, &request)
+	schema, product := resultSchemas[kind], request.Product
+	if kind == 'd' {
+		schema.required += " " + product + "_available " + product + "_path " + product + "_version"
+		schema.optional, schema.fields = product+"_error readiness_error", schema.fields+" s:"+product+"_path s:"+product+"_version b:"+product+"_available S:"+product+"_error S:readiness_error"
+	}
+	if !exactObject(value, schema.required, schema.optional) || schema.typ != "" && value["type"] != schema.typ || schema.product && value["product"] != product {
 		return false
 	}
-	product, ok := stringField(probe, "product")
-	if !ok {
-		return false
-	}
-	value, ok := object(raw, "type contract_version authority product ready native_path runtime_path daemon_reachable supervisor_reachable "+product+"_available "+product+"_path "+product+"_version", product+"_error readiness_error")
-	if !ok || value["type"] != "lane.doctor" || value["authority"] != "daemon" || value["contract_version"] != float64(2) || productcatalog.ValidateToken(product) != nil {
-		return false
-	}
-	for _, key := range []string{"ready", "daemon_reachable", "supervisor_reachable", product + "_available"} {
-		if _, ok := value[key].(bool); !ok {
-			return false
-		}
-	}
-	for _, key := range []string{"native_path", "runtime_path", product + "_path", product + "_version", product + "_error", "readiness_error"} {
-		if item, present := value[key]; present {
-			if _, ok := item.(string); !ok {
+	return !slices.ContainsFunc(strings.Fields(schema.fields), func(rule string) bool {
+		kind, item := rule[0], value[rule[2:]]
+		_, present := value[rule[2:]]
+		if kind >= 'A' && kind <= 'Z' {
+			if !present {
 				return false
 			}
+			kind += 'a' - 'A'
 		}
-	}
-	return true
+		if child := map[byte]byte{'h': 'q', 'j': 't', 'y': 'v'}[kind]; child != 0 {
+			return !validObjects(item, child, params)
+		}
+		return fieldTypes[kind] == nil || !fieldTypes[kind](item)
+	})
 }
-func validListResult(raw json.RawMessage) bool {
-	value, ok := object(raw, "type product lanes", "")
-	product, productOK := stringField(value, "product")
-	lanes, lanesOK := value["lanes"].([]any)
-	if !ok || value["type"] != "lane.list" || !productOK || productcatalog.ValidateToken(product) != nil || !lanesOK {
-		return false
-	}
-	for _, item := range lanes {
-		lane, mapOK := item.(map[string]any)
-		if !mapOK || !exactObject(lane, "type product session_id name cwd groups permission_mode state turn_id outcome exit owner_session_id persistent auto_archive auto_archive_after_seconds auto_archive_at", "") || lane["type"] != "lane.status" || lane["product"] != product || !laneTypes(lane) {
-			return false
-		}
-	}
-	return true
+func validObjects(value any, kind byte, params json.RawMessage) bool {
+	items, ok := value.([]any)
+	return ok && !slices.ContainsFunc(items, func(item any) bool {
+		object, ok := item.(map[string]any)
+		return !ok || !validResultObject(kind, params, object)
+	})
 }
-func laneTypes(lane map[string]any) bool {
-	for _, key := range strings.Fields("session_id name cwd permission_mode state turn_id outcome owner_session_id") {
-		if _, ok := lane[key].(string); !ok {
-			return false
+func nonempty(value any) bool { text, ok := value.(string); return ok && text != "" }
+func integer(value any) bool  { n, ok := value.(float64); return ok && math.Trunc(n) == n }
+
+var fieldTypes = map[byte]func(any) bool{
+	's': func(v any) bool { _, ok := v.(string); return ok }, 't': nonempty,
+	'b': func(v any) bool { _, ok := v.(bool); return ok }, 'n': func(v any) bool { _, ok := v.(float64); return ok },
+	'i': integer, 'z': func(v any) bool { return v == nil || integer(v) },
+	'g': func(v any) bool {
+		list, ok := v.([]any)
+		return ok && !slices.ContainsFunc(list, func(v any) bool { _, ok := v.(string); return !ok })
+	},
+	'o': func(v any) bool {
+		object, ok := v.(map[string]any)
+		for _, v := range object {
+			_, valid := v.(string)
+			ok = ok && valid
 		}
-	}
-	groups, ok := lane["groups"].([]any)
-	if !ok {
-		return false
-	}
-	for _, group := range groups {
-		if _, ok := group.(string); !ok {
-			return false
-		}
-	}
-	for _, key := range []string{"persistent", "auto_archive"} {
-		if _, ok := lane[key].(bool); !ok {
-			return false
-		}
-	}
-	if _, ok := lane["auto_archive_after_seconds"].(float64); !ok {
-		return false
-	}
-	autoAt, ok := lane["auto_archive_at"].(float64)
-	if !ok || math.Trunc(autoAt) != autoAt {
-		return false
-	}
-	exit, ok := lane["exit"].(float64)
-	return lane["exit"] == nil || ok && math.Trunc(exit) == exit
+		return ok
+	},
+	'2': func(v any) bool { return v == float64(2) }, 'a': func(v any) bool { return v == "daemon" },
+	'w': func(v any) bool { return v == "completed" || v == "interrupted" || v == "failed" }, 'x': func(v any) bool { return v == "live" || v == "idle" || v == "busy" },
+	'k': func(v any) bool { return v == "lane" || v == "remote-peer" }, 'v': func(v any) bool { return v == "accepted" },
 }
 
 type RPCError struct {
@@ -297,7 +298,6 @@ func (e *RPCError) Error() string {
 	}
 	return e.Message
 }
-
 func (e *RPCError) RPCErrorDetails() (int, string, json.RawMessage) {
 	if e == nil {
 		return ProductFailure, "live RPC error", nil
@@ -318,10 +318,7 @@ type Connection struct {
 }
 
 func NewConnection(connection net.Conn) *Connection {
-	return &Connection{
-		connection: connection, reader: bufio.NewReaderSize(connection, MaxFrameBytes+1),
-		pending: map[string]chan Frame{},
-	}
+	return &Connection{connection: connection, reader: bufio.NewReaderSize(connection, MaxFrameBytes+1), pending: map[string]chan Frame{}}
 }
 func (c *Connection) Observe(observer func(string, Frame)) { c.observer = observer }
 func (c *Connection) Decode(frame *Frame) error {
@@ -337,6 +334,12 @@ func (c *Connection) Decode(frame *Frame) error {
 	}
 	if err := DecodeStrict(body[:len(body)-1], frame); err != nil {
 		return err
+	}
+	if frame.Method != "" {
+		spec, known := LookupMethod(frame.Method)
+		if known && spec.First != (c.Report().UUID == "") {
+			return errors.New("live method is invalid at this connection phase")
+		}
 	}
 	c.observe("receive", *frame)
 	return nil
@@ -374,9 +377,13 @@ func (c *Connection) Call(ctx context.Context, id, method string, params any) (j
 	if strings.TrimSpace(id) == "" || strings.TrimSpace(method) == "" {
 		return nil, errors.New("live RPC request identity is incomplete")
 	}
+	spec, known := LookupMethod(method)
+	if !known || spec.First {
+		return nil, NewError(NotPermitted, "Operation not permitted", map[string]any{"method": method})
+	}
 	body, err := json.Marshal(params)
-	if err != nil {
-		return nil, err
+	if err != nil || !ValidMethodParams(spec, body) {
+		return nil, NewError(InvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	wireID, _ := json.Marshal(id)
 	key := string(wireID)
@@ -402,6 +409,9 @@ func (c *Connection) Call(ctx context.Context, id, method string, params any) (j
 		}
 		if frame.Error != nil {
 			return nil, frame.Error
+		}
+		if !ValidMethodResult(spec, body, frame.Result) {
+			return nil, errors.New("live presence method returned an invalid result")
 		}
 		return append(json.RawMessage(nil), frame.Result...), nil
 	}
@@ -472,8 +482,8 @@ func ValidReport(report Report) bool {
 }
 
 func validInfo(info map[string]string) bool {
-	cwd, present := info["cwd"]
-	return info != nil && (!present || cwd != "" && filepath.IsAbs(cwd))
+	cwd, ok := info["cwd"]
+	return info != nil && (!ok || filepath.IsAbs(cwd))
 }
 
 func CloneReport(report Report) Report {
@@ -606,9 +616,9 @@ func validSafeInteger(value json.Number) bool {
 	return err == nil && math.Trunc(number) == number && math.Abs(number) <= 9007199254740991
 }
 
-func DecodeHello(raw json.RawMessage) (Report, int, error) {
+func DecodeHello(raw json.RawMessage) (Report, int64, error) {
 	var params struct {
-		Protocol     *int               `json:"protocol"`
+		Protocol     *json.Number       `json:"protocol"`
 		UUID         *string            `json:"uuid"`
 		Name         *string            `json:"name"`
 		Groups       *[]string          `json:"groups"`
@@ -616,10 +626,12 @@ func DecodeHello(raw json.RawMessage) (Report, int, error) {
 		Info         *map[string]string `json:"info"`
 		Capabilities *Capabilities      `json:"capabilities,omitempty"`
 	}
-	if err := DecodeStrict(raw, &params); err != nil || params.Protocol == nil || params.UUID == nil || params.Name == nil ||
+	if err := DecodeStrict(raw, &params); err != nil || params.Protocol == nil || !validSafeInteger(*params.Protocol) || params.UUID == nil || params.Name == nil ||
 		params.Groups == nil || params.Product == nil || params.Info == nil || params.Capabilities != nil && !params.Capabilities.Lane {
 		return Report{}, 0, errors.New("session hello is invalid")
 	}
+	protocolValue, _ := params.Protocol.Float64()
+	protocol := int64(protocolValue)
 	groups := make([]string, len(*params.Groups))
 	copy(groups, *params.Groups)
 	report := Report{
@@ -630,9 +642,9 @@ func DecodeHello(raw json.RawMessage) (Report, int, error) {
 		report.Capabilities = *params.Capabilities
 	}
 	if !ValidReport(report) {
-		return Report{}, *params.Protocol, errors.New("session hello is invalid")
+		return Report{}, protocol, errors.New("session hello is invalid")
 	}
-	return report, *params.Protocol, nil
+	return report, protocol, nil
 }
 
 func DecodeUpdate(raw json.RawMessage) (string, map[string]string, error) {
@@ -776,12 +788,8 @@ func (c *Client) Done() <-chan struct{}  { return c.done }
 
 func (c *Client) Call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
 	spec, known := LookupMethod(method)
-	body, marshalErr := json.Marshal(params)
-	if !known || spec.Direction != ClientToDaemon {
+	if !known || spec.Direction != ClientToDaemon || spec.First {
 		return nil, NewError(NotPermitted, "Operation not permitted", map[string]any{"method": method})
-	}
-	if marshalErr != nil || !ValidMethodParams(spec, body) {
-		return nil, NewError(InvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	c.mu.Lock()
 	connection := c.current
@@ -793,11 +801,7 @@ func (c *Client) Call(ctx context.Context, id, method string, params any) (json.
 		}
 		return nil, errors.New("Agent Sessions daemon is unavailable")
 	}
-	result, err := connection.Call(ctx, "session."+id, method, params)
-	if err == nil && !ValidMethodResult(spec, result) {
-		return nil, errors.New("live presence method returned an invalid result")
-	}
-	return result, err
+	return connection.Call(ctx, "session."+id, method, params)
 }
 
 func (c *Client) UpdateReport(ctx context.Context, report Report) error {
@@ -913,7 +917,7 @@ func (c *Client) read(ctx context.Context, connection *Connection) {
 				result, err := c.call(ctx, frame.Method, frame.Params)
 				if err != nil {
 					response = FailureFromError(frame.ID, frame.Method, err)
-				} else if !ValidMethodResult(spec, result) {
+				} else if !ValidMethodResult(spec, frame.Params, result) {
 					response = FailureFromError(frame.ID, frame.Method, errors.New("product returned an invalid native lane result"))
 				} else {
 					response = Success(frame.ID, result)
@@ -952,13 +956,23 @@ func hello(connection *Connection, report Report) error {
 	if response.Error != nil {
 		return response.Error
 	}
+	spec, _ := LookupMethod("session.hello")
+	if !ValidMethodResult(spec, params, response.Result) {
+		return errors.New("live session hello returned an invalid result")
+	}
 	return nil
 }
 
 func DecodeDeliver(params json.RawMessage) (productruntime.NativeMessage, error) {
 	var request productruntime.NativeMessage
-	if DecodeStrict(params, &request) != nil || strings.TrimSpace(request.ID) == "" || strings.TrimSpace(request.From.UUID) == "" ||
-		strings.TrimSpace(request.From.Product) == "" || request.From.Groups == nil {
+	var required struct {
+		Body *string `json:"body"`
+		From *struct {
+			Name *string `json:"name"`
+		} `json:"from"`
+	}
+	if DecodeStrict(params, &request) != nil || json.Unmarshal(params, &required) != nil || required.Body == nil || required.From == nil || required.From.Name == nil ||
+		request.ID == "" || !sessionidentity.ValidNativeID(request.From.UUID) || !sessionidentity.ValidName(request.From.Name) || request.From.Product == "" || request.From.Groups == nil {
 		return productruntime.NativeMessage{}, NewError(InvalidParams, "Invalid params", map[string]any{"method": "message.deliver"})
 	}
 	return request, nil

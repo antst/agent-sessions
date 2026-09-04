@@ -43,7 +43,7 @@ func TestNoNewProductDispatchSwitches(t *testing.T) {
 		"internal/qwenreadiness/native.go":                1,
 		"internal/releaseevidence/acceptance_products.go": 8,
 		"internal/sessiontools/lane_usage.go":             4,
-		"internal/sessiontools/mcp.go":                    8,
+		"internal/sessiontools/mcp.go":                    6,
 		"scripts/realproducts/main.go":                    4,
 	}
 	root := productCatalogRepositoryRoot(t)

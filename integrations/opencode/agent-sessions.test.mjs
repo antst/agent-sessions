@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import liveSessionModule from "../shared/live-session.js";
 
 class FakeLiveSession extends EventEmitter {
   constructor(active = true) {
@@ -25,13 +26,11 @@ fakeTool.schema = { enum: (values) => ({ values }), string: () => ({}), any: () 
 
 async function loadPlugin(live, deadline = 10_000) {
   globalThis.__testTool = fakeTool;
-  globalThis.__testLiveFactory = () => live;
-	globalThis.__testRenderDelivery = (payload) => payload.body;
+  globalThis.__testLiveSessionModule = { ...liveSessionModule, createLiveSessionClient: () => live, renderDelivery: (payload) => payload.body };
   let source = await readFile(new URL("./agent-sessions.mjs", import.meta.url), "utf8");
   source = source
     .replace('import { tool } from "@opencode-ai/plugin";', "const tool = globalThis.__testTool;")
-    .replace('import liveSessionModule from "../shared/live-session.js";', "")
-		.replace('const { CLIENT_OPERATIONS: OPERATIONS, createLiveSessionClient, renderDelivery } = liveSessionModule;', 'const OPERATIONS = ["peers.list", "message.send", "lane.doctor", "lane.list"]; const createLiveSessionClient = globalThis.__testLiveFactory; const renderDelivery = globalThis.__testRenderDelivery;')
+    .replace('import liveSessionModule from "../shared/live-session.js";', "const liveSessionModule = globalThis.__testLiveSessionModule;")
     .replace("const DELIVERY_DEADLINE_MS = 10_000;", `const DELIVERY_DEADLINE_MS = ${deadline};`);
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Math.random()}`)).default;
 }
@@ -41,7 +40,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 test("OpenCode reports live sessions, title changes, and closes on deletion", async () => {
   const live = new FakeLiveSession();
   const hooks = await (await loadPlugin(live))({ client: {}, directory: "/work" });
-  assert.deepEqual(hooks.tool.agent_sessions.args.operation.values, ["peers.list", "message.send", "lane.doctor", "lane.list"]);
+  assert.deepEqual(hooks.tool.agent_sessions.args.operation.values, liveSessionModule.CLIENT_OPERATIONS);
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "", directory: "/work" } } } });
   assert.deepEqual(live.reported, [{ id: "ses_one", name: "", info: { cwd: "/work" } }]);
   await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_one", title: "native", directory: "/work" } } } });
@@ -105,11 +104,15 @@ test("OpenCode delivers and calls tools on the exact reported session", async ()
   assert.equal(prompts[0].body.agent, "brainstormer");
   assert.deepEqual(prompts[0].body.model, { providerID: "google", modelID: "gemini" });
   assert.deepEqual(live.accepted.map((value) => value.id), ["delivery"]);
-  const result = await hooks.tool.agent_sessions.execute({ operation: "peers.list", arguments: {} }, {
-    sessionID: "ses_one", messageID: "message", abort: new AbortController().signal,
-  });
-  assert.equal(JSON.parse(result).ok, true);
-  assert.equal(live.calls[0].id, "ses_one");
+  for (const operation of ["lane.doctor", "lane.list"]) {
+    const result = await hooks.tool.agent_sessions.execute({ operation, arguments: { product: "codex", arguments: [] } }, {
+      sessionID: "ses_one", messageID: operation, abort: new AbortController().signal,
+    });
+    assert.equal(JSON.parse(result).ok, true);
+  }
+  assert.deepEqual(live.calls.map(({ id, operation }) => ({ id, operation })), [
+    { id: "ses_one", operation: "lane.doctor" }, { id: "ses_one", operation: "lane.list" },
+  ]);
   await assert.rejects(hooks.tool.agent_sessions.execute({ operation: "peers.list", arguments: {} }, {
     sessionID: "ses_other", messageID: "message", abort: new AbortController().signal,
   }), /reported live/u);

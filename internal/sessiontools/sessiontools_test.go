@@ -64,6 +64,12 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 	if _, present := codexProperties["group"]; !present || len(codexSendSchema["oneOf"].([]any)) != 3 {
 		t.Fatalf("send_message selector schema = %#v", codexSendSchema)
 	}
+	laneSchema := tools[5]["inputSchema"].(map[string]any)
+	laneProduct := laneSchema["properties"].(map[string]any)["product"].(map[string]any)
+	if _, enumerated := laneProduct["enum"]; enumerated || laneProduct["pattern"] != `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` ||
+		laneProduct["minLength"] != float64(1) || laneProduct["maxLength"] != float64(64) {
+		t.Fatalf("lane product schema is not an opaque bounded token: %#v", laneProduct)
+	}
 	for _, tool := range tools {
 		if tool["name"] == "broadcast" {
 			t.Fatal("legacy broadcast tool remains")

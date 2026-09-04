@@ -82,6 +82,9 @@ func (c *hostCoordinator) handleLaneCommand(
 	if envelope.Command != "" {
 		envelope.Arguments = append([]string{envelope.Command}, envelope.Arguments...)
 	}
+	if _, ok := c.laneDrivers.ByProduct(envelope.Product); !ok {
+		return nil, livepresence.ProductError(envelope.Product, productruntime.ErrUnavailable)
+	}
 	projected, err := launcher.ProjectNativeLaneArguments(envelope.Product, envelope.Arguments)
 	if err != nil {
 		return nil, err
@@ -94,8 +97,6 @@ func (c *hostCoordinator) handleLaneCommand(
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(request.AttachmentID)
 	}
-	// Standalone lane doctor predates live attachments and retains the daemon
-	// cwd fallback. A live caller is resolved below and uses its report cwd.
 	if parsed.command == "doctor" && strings.TrimSpace(envelope.Host) == "" && sourceID == "" {
 		result, err := doctorLane(ctx, envelope.Product, envelope.Cwd)
 		if err != nil {

@@ -47,7 +47,7 @@ test("Pi and OMP report the current product session and its initial native title
     const pi = new FakePi("first");
     createPiFamilyExtension(product, { liveSessionClient: live })(pi);
     const operations = pi.tools.get("agent_sessions").parameters.properties.operation.enum;
-    assert.ok(operations.includes("lane.doctor") && operations.includes("lane.list"));
+    assert.deepEqual(operations, liveSessionModule.CLIENT_OPERATIONS);
     const ctx = context(`${product}-session`);
     await pi.fire("session_start", {}, ctx);
     assert.deepEqual(live.reported, [{ id: `${product}-session`, name: "first", info: { cwd: "/work" } }]);
@@ -123,18 +123,24 @@ test("Pi family live delivery uses ordinary send when idle and native steer when
   assert.deepEqual(live.accepted.map((value) => value.id), ["delivery"]);
 });
 
-test("Pi family tools stay tied to the reported live native session", async () => {
-  const live = new FakeLiveSession();
-  const pi = new FakePi();
-  createPiFamilyExtension("pi", { liveSessionClient: live })(pi);
-  const exact = context("pi-session");
-  await pi.fire("session_start", {}, exact);
-  const tool = pi.tools.get("agent_sessions");
-  const accepted = await tool.execute("call", { operation: "peers.list", arguments: {} }, undefined, undefined, exact);
-  assert.equal(accepted.isError, undefined);
-  assert.equal(live.calls[0].id, "pi-session");
-  const rejected = await tool.execute("call", { operation: "peers.list", arguments: {} }, undefined, undefined, context("other"));
-  assert.equal(rejected.isError, true);
-  await pi.fire("session_shutdown", { reason: "quit" }, exact);
-  assert.equal(live.sessions.has("pi-session"), false);
+test("Pi and OMP tools forward shared doctor/list operations on the exact reported session", async (t) => {
+  for (const product of ["pi", "omp"]) await t.test(product, async () => {
+    const live = new FakeLiveSession();
+    const pi = new FakePi();
+    createPiFamilyExtension(product, { liveSessionClient: live })(pi);
+    const exact = context(`${product}-session`);
+    await pi.fire("session_start", {}, exact);
+    const tool = pi.tools.get("agent_sessions");
+    for (const operation of ["lane.doctor", "lane.list"]) {
+      const accepted = await tool.execute("call", { operation, arguments: { product: "codex", arguments: [] } }, undefined, undefined, exact);
+      assert.equal(accepted.isError, undefined);
+    }
+    assert.deepEqual(live.calls.map(({ id, operation }) => ({ id, operation })), [
+      { id: `${product}-session`, operation: "lane.doctor" }, { id: `${product}-session`, operation: "lane.list" },
+    ]);
+    const rejected = await tool.execute("call", { operation: "lane.list", arguments: {} }, undefined, undefined, context("other"));
+    assert.equal(rejected.isError, true);
+    await pi.fire("session_shutdown", { reason: "quit" }, exact);
+    assert.equal(live.sessions.has(`${product}-session`), false);
+  });
 });

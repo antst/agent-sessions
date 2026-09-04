@@ -7,11 +7,91 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
+const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
 
 test("default reconnect cadence is two seconds", () => {
   const client = new LiveSessionClient({ env: {} });
   assert.equal(client.reconnectMs, 2000);
+});
+
+test("one shared method authority owns the exact common surface and closed lane results", () => {
+  const expected = {
+    "session.hello": ["client", false, false, true, false], "session.update": ["client", false, false, false, false],
+    "peers.list": ["client", false, false, false, true], "message.send": ["client", false, false, false, true],
+    "lane.doctor": ["client", true, false, false, true], "lane.list": ["client", true, false, false, true],
+    "lane.start": ["client", true, true, false, true], "lane.run": ["client", true, true, false, true], "lane.resume": ["client", true, true, false, true], "lane.steer": ["client", true, true, false, true],
+    "lane.wait": ["client", true, false, false, true], "lane.status": ["client", true, false, false, true], "lane.interrupt": ["client", true, false, false, true], "lane.archive": ["client", true, false, false, true],
+    "message.deliver": ["daemon", false, false, false, false], "lane.turn.start": ["daemon", true, false, false, false], "lane.turn.wait": ["daemon", true, false, false, false],
+    "lane.turn.interrupt": ["daemon", true, false, false, false], "lane.session.archive": ["daemon", true, false, false, false],
+  };
+  assert.equal(Object.keys(METHOD_DEFINITIONS).length, 19);
+  for (const [name, fields] of Object.entries(expected)) {
+    const spec = METHOD_DEFINITIONS[name];
+    assert.deepEqual([spec.direction, spec.lane, spec.needsInput, spec.first, spec.tool], fields, name);
+    assert.equal(typeof spec.params, "function", `${name} params`); assert.equal(typeof spec.result, "function", `${name} result`);
+  }
+  assert.equal(METHOD_DEFINITIONS["lane.future"], undefined);
+  assert.deepEqual(CLIENT_OPERATIONS, Object.entries(expected).filter(([, fields]) => fields[4]).map(([name]) => name));
+
+  const status = { type: "lane.status", product: "codex", session_id: "s", name: "n", cwd: "/w", groups: [], permission_mode: "default", state: "idle", turn_id: "", outcome: "", exit: null, owner_session_id: "p", persistent: false, auto_archive: true, auto_archive_after_seconds: 1.5, auto_archive_at: 0 };
+  const completed = { type: "turn.completed", product: "codex", session_id: "s", turn_id: "t", status: "completed", outcome: "completed", exit: 0, result: "done", diagnostic: "" };
+  const results = {
+    "lane.doctor": { type: "lane.doctor", contract_version: 2, authority: "daemon", product: "codex", ready: true, native_path: "/bin/codex", runtime_path: "/bin/codex", daemon_reachable: true, supervisor_reachable: true, codex_available: true, codex_path: "/bin/codex", codex_version: "1" },
+    "lane.list": { type: "lane.list", product: "codex", lanes: [status] }, "lane.start": { ...status, type: "lane.ready", contract_version: 2 },
+    "lane.run": completed, "lane.resume": completed, "lane.wait": completed, "lane.steer": { type: "turn.steered", session_id: "s", turn_id: "t", native_message_id: "m" },
+    "lane.status": status, "lane.interrupt": { type: "turn.interrupting", session_id: "s", turn_id: "t" }, "lane.archive": { type: "lane.archived", product: "codex", session_id: "s", name: "n", already_archived: false },
+  };
+  const params = { product: "codex", arguments: [] };
+  for (const [name, value] of Object.entries(results)) {
+    const validate = METHOD_DEFINITIONS[name].result;
+    assert.equal(validate(params, value), true, `${name} valid`); assert.equal(validate(params, null), false, `${name} null`);
+    const missing = { ...value }; delete missing.type; assert.equal(validate(params, missing), false, `${name} missing`);
+    assert.equal(validate(params, { ...value, "type product": true }), false, `${name} extra`);
+    assert.equal(validate(params, { ...value, type: 1 }), false, `${name} wrong type`);
+    if ("product" in value) assert.equal(validate({ product: "qwen", arguments: [] }, value), false, `${name} wrong product`);
+  }
+  for (const name of ["lane.run", "lane.resume", "lane.wait"]) {
+    const validate = METHOD_DEFINITIONS[name].result;
+    assert.equal(validate(params, { ...completed, native_stop_reason: "aborted" }), true);
+    assert.equal(validate(params, { ...completed, native_stop_reason: "" }), false);
+    assert.equal(validate(params, { ...completed, native_stop_reason: 1 }), false);
+  }
+  for (const name of ["lane.start", "lane.steer", "lane.status", "lane.interrupt", "lane.archive"])
+    assert.equal(METHOD_DEFINITIONS[name].result(params, { ...results[name], native_stop_reason: "aborted" }), false, name);
+});
+
+test("shared params authority follows Appendix A grammar", async () => {
+  const hello = (overrides = {}) => ({ protocol: 1, uuid: "native", name: "", groups: [], product: "codex", info: {}, ...overrides });
+  const validateHello = METHOD_DEFINITIONS["session.hello"].params;
+  for (const value of [hello(), hello({ protocol: 1.0 }), hello({ uuid: `native\ufeffid` }), hello({ uuid: "x".repeat(128) }), hello({ capabilities: { lane: true } })]) assert.equal(validateHello(value), true);
+  for (const value of [hello({ protocol: 1.5 }), hello({ protocol: 9007199254740992 }), hello({ uuid: "native id" }), hello({ uuid: "native/id" }), hello({ uuid: "native\n" }), hello({ uuid: "x".repeat(129) }), hello({ capabilities: {} }), hello({ capabilities: { lane: false } }), hello({ capabilities: { lane: true, extra: true } })]) assert.equal(validateHello(value), false, JSON.stringify(value));
+  for (const [name, valid] of [["", true], ["n".repeat(256), true], ["n".repeat(257), false], ["bad\u007fname", false]]) {
+    assert.equal(validateHello(hello({ name })), valid, `hello name ${name.length}`);
+    assert.equal(METHOD_DEFINITIONS["session.update"].params({ name, info: {} }), valid, `update name ${name.length}`);
+  }
+  for (const [info, valid] of [[{}, true], [{ cwd: "/work" }, true], [{ cwd: "" }, false], [{ cwd: "work" }, false]]) {
+    assert.equal(validateHello(hello({ info })), valid, JSON.stringify(info));
+    assert.equal(METHOD_DEFINITIONS["session.update"].params({ name: "", info }), valid, JSON.stringify(info));
+  }
+  const laneStart = METHOD_DEFINITIONS["lane.start"].params;
+  assert.equal(laneStart({ product: "codex", arguments: ["line\nbreak", "\0"], input: " " }), true);
+  assert.equal(laneStart({ product: "future-product", arguments: [], input: "work" }), true);
+  assert.equal(laneStart({ product: "codex", arguments: [], input: "work", cwd: "/work", host: " " }), true);
+  assert.equal(laneStart({ product: "codex", arguments: [], input: "work", cwd: "work" }), false);
+  assert.equal(laneStart({ product: "codex", arguments: [], input: "" }), false);
+  assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: " ", body: "\0", mode: "followup" }), true);
+  assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: "", body: "x", mode: "followup" }), false);
+  assert.equal(METHOD_DEFINITIONS["lane.turn.wait"].params({ native_message_id: "\n" }), true);
+  assert.equal(METHOD_DEFINITIONS["lane.turn.wait"].params({ native_message_id: "" }), false);
+  const delivery = { message_id: " ", from: { uuid: "parent", name: "", product: "codex", groups: [] }, body: "" };
+  assert.equal(METHOD_DEFINITIONS["message.deliver"].params(delivery), true);
+  const noBody = { ...delivery }; delete noBody.body; assert.equal(METHOD_DEFINITIONS["message.deliver"].params(noBody), false);
+  const noName = { ...delivery, from: { ...delivery.from } }; delete noName.from.name; assert.equal(METHOD_DEFINITIONS["message.deliver"].params(noName), false);
+
+  const client = new LiveSessionClient({ env: {} });
+  const session = { pending: new Map(), socket: { destroyed: false, write: () => true }, ready: true };
+  await assert.rejects(client._call(session, "wrong-first", "peers.list", {}, true), /connection phase/u);
+  await assert.rejects(client._call(session, "late-hello", "session.hello", hello(), false), /connection phase/u);
 });
 
 test("delivery rendering matches the shared golden fixture", () => {
@@ -53,8 +133,13 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
 
   const call = client.callTool("native", "tool-one", "peers.list", {});
   await until(() => fixture.requests.some((frame) => frame.method === "peers.list"));
-  fixture.write({ jsonrpc: "2.0", id: fixture.requests[0].id, result: { peers: 2 } });
-  assert.deepEqual(await call, { peers: 2 });
+  fixture.write({ jsonrpc: "2.0", id: fixture.requests[0].id, result: { peers: [] } });
+  assert.deepEqual(await call, { peers: [] });
+
+  const invalidCall = client.callTool("native", "invalid-result", "peers.list", {});
+  await until(() => fixture.requests.some((frame) => frame.id === "session.invalid-result"));
+  fixture.write({ jsonrpc: "2.0", id: "session.invalid-result", result: null });
+  await assert.rejects(invalidCall, /invalid peers\.list result/u);
 
   const groupCall = client.callTool("native", "group-one", "message.send", { group: "team", message: "hello all" });
   await until(() => fixture.requests.some((frame) => frame.method === "message.send"));
@@ -67,8 +152,9 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   await until(() => fixture.requests.some((frame) => frame.method === "lane.status"));
   const laneRequest = fixture.requests.find((frame) => frame.method === "lane.status");
   assert.deepEqual(laneRequest.params, { product: "qwen", arguments: ["worker"] });
-  fixture.write({ jsonrpc: "2.0", id: laneRequest.id, result: { type: "lane.status" } });
-  assert.deepEqual(await laneCall, { type: "lane.status" });
+  const laneStatus = { type: "lane.status", product: "qwen", session_id: "lane", name: "worker", cwd: "/work", groups: [], permission_mode: "default", state: "idle", turn_id: "", outcome: "", exit: null, owner_session_id: "native", persistent: false, auto_archive: true, auto_archive_after_seconds: 60, auto_archive_at: 0 };
+  fixture.write({ jsonrpc: "2.0", id: laneRequest.id, result: laneStatus });
+  assert.deepEqual(await laneCall, laneStatus);
 
   client.updateName("native", "after");
   client.updateName("native", "after-again");
@@ -86,6 +172,7 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
     messageID: "message", nativeSessionID: "native",
     from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] }, body: "hello",
   });
+  assert.equal(client.acceptMessage("message", null), false);
   client.acceptMessage("message");
   await until(() => fixture.responses.some((frame) => frame.id === "daemon.message"));
 

@@ -34,22 +34,12 @@ func (c *hostCoordinator) handleLiveSessionCall(
 	method string,
 	params json.RawMessage,
 ) (json.RawMessage, error) {
-	spec, known := livepresence.LookupMethod(method)
-	if !known || spec.Direction != livepresence.ClientToDaemon || method == "session.hello" || method == "session.update" {
-		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
-	}
-	if !livepresence.ValidMethodParams(spec, params) {
-		return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
-	}
 	switch method {
 	case "peers.list":
-		if err := livepresence.DecodeStrict(params, &struct{}{}); err != nil {
-			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
-		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "list_peers", map[string]any{}, nil)
 	case "message.send":
-		arguments, err := decodeLiveMessageSend(params)
-		if err != nil {
+		arguments, ok := livepresence.DecodeMessageSend(params)
+		if !ok {
 			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "send_message", arguments, nil)
@@ -78,48 +68,6 @@ func (c *hostCoordinator) callLiveTool(
 		return json.RawMessage(`{}`), nil
 	}
 	return json.Marshal(result.Data)
-}
-
-func decodeLiveMessageSend(raw json.RawMessage) (map[string]any, error) {
-	var params struct {
-		Target  *string   `json:"target"`
-		Targets *[]string `json:"targets"`
-		Group   *string   `json:"group"`
-		Message *string   `json:"message"`
-	}
-	if err := livepresence.DecodeStrict(raw, &params); err != nil || params.Message == nil || strings.TrimSpace(*params.Message) == "" ||
-		boolCount(params.Target != nil, params.Targets != nil, params.Group != nil) != 1 {
-		return nil, errors.New("message send params are invalid")
-	}
-	arguments := map[string]any{"message": *params.Message}
-	if params.Target != nil {
-		if strings.TrimSpace(*params.Target) == "" {
-			return nil, errors.New("message target is invalid")
-		}
-		arguments["target"] = *params.Target
-		return arguments, nil
-	}
-	if params.Group != nil {
-		if strings.TrimSpace(*params.Group) == "" {
-			return nil, errors.New("message group is invalid")
-		}
-		arguments["group"] = *params.Group
-		return arguments, nil
-	}
-	if len(*params.Targets) == 0 {
-		return nil, errors.New("message targets are invalid")
-	}
-	seen := map[string]bool{}
-	values := make([]any, 0, len(*params.Targets))
-	for _, target := range *params.Targets {
-		if strings.TrimSpace(target) == "" || seen[target] {
-			return nil, errors.New("message targets are invalid")
-		}
-		seen[target] = true
-		values = append(values, target)
-	}
-	arguments["targets"] = values
-	return arguments, nil
 }
 
 func decodeLiveLaneCall(method string, raw json.RawMessage) (map[string]any, *string, error) {
@@ -156,7 +104,14 @@ func (c *hostCoordinator) handleConnectorTool(
 	}
 	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, nil)
 	if err != nil {
-		return nil, livepresence.FailureFromError(nil, "connector.tool", err).Error
+		method := "connector.tool"
+		if call.Name == "lane" {
+			candidate := "lane." + mapString(call.Arguments, "command")
+			if spec, known := livepresence.LookupMethod(candidate); known && spec.Direction == livepresence.ClientToDaemon && spec.Lane {
+				method = candidate
+			}
+		}
+		return nil, livepresence.FailureFromError(nil, method, err).Error
 	}
 	return marshalConnectorToolResult(result)
 }

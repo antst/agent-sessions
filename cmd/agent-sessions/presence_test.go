@@ -565,7 +565,7 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 		if requestID != "session.tool" {
 			t.Fatalf("server request id = %q", requestID)
 		}
-		return append(json.RawMessage(nil), params...), nil
+		return json.RawMessage(`{"peers":[]}`), nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +577,10 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 		if method != "message.deliver" {
 			return nil, fmt.Errorf("unexpected product callback %q", method)
 		}
-		return append(json.RawMessage(nil), params...), nil
+		if !strings.Contains(string(params), `"body":"hello"`) {
+			t.Fatalf("delivery params = %s", params)
+		}
+		return json.RawMessage(`{}`), nil
 	})
 	select {
 	case <-joined:
@@ -586,13 +589,13 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	}
 	var fromSession json.RawMessage
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		fromSession, err = client.Call(ctx, "tool", "peers.list", map[string]string{"probe": "list_peers"})
+		fromSession, err = client.Call(ctx, "tool", "peers.list", map[string]any{})
 		if err == nil {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if err != nil || !strings.Contains(string(fromSession), "list_peers") {
+	if err != nil || string(fromSession) != `{"peers":[]}` {
 		t.Fatalf("session-to-daemon call = %s, %v", fromSession, err)
 	}
 	if _, err = client.Call(ctx, "inactive", "peers.list", map[string]any{}); err == nil {
@@ -600,8 +603,10 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	} else if rpcErr, ok := err.(*livepresence.RPCError); !ok || rpcErr.Code != livepresence.Unknown || string(rpcErr.Data) != `{"target":"session-rpc"}` {
 		t.Fatalf("inactive live session error = %#v", err)
 	}
-	fromDaemon, err := server.Call(ctx, "session-rpc", "delivery", "message.deliver", map[string]string{"body": "hello"})
-	if err != nil || !strings.Contains(string(fromDaemon), "hello") {
+	fromDaemon, err := server.Call(ctx, "session-rpc", "delivery", "message.deliver", productruntime.NativeMessage{
+		ID: "message", From: productruntime.NativeMessageSource{UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"team"}}, Body: "hello",
+	})
+	if err != nil || string(fromDaemon) != `{}` {
 		t.Fatalf("daemon-to-session call = %s, %v", fromDaemon, err)
 	}
 	if _, err := server.Call(ctx, "session-rpc", "forbidden", "lane.turn.start", map[string]string{}); err == nil {

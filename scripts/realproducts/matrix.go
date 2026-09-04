@@ -30,6 +30,8 @@ const (
 
 const codexTUISubmitDelay = 150 * time.Millisecond
 
+const matrixGrokPermissionRule = "MCPTool(agent_sessions__*)"
+
 type matrixOptions struct {
 	repositoryRoot string
 	cwd            string
@@ -173,6 +175,9 @@ func runStandingMatrix(ctx context.Context, args []string, output io.Writer) err
 		}
 		runner.runProduct(ctx, resolved)
 	}
+	if ctx.Err() == nil {
+		runner.runInvalidCwdCell(ctx)
+	}
 	cleanupEvidence := map[string]any{}
 	cleanupErr := runner.cleanupAll(context.Background(), cleanupEvidence)
 	if cleanupErr != nil {
@@ -258,6 +263,9 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if err := rejectExistingMatrixTMUX(tmux); err != nil {
 		return matrixOptions{}, err
 	}
+	if err := requireMatrixGrokPermission(cwd); err != nil {
+		return matrixOptions{}, err
+	}
 	evidence, err := prepareMatrixEvidenceDir(futureEvidence, temporary)
 	if err != nil {
 		return matrixOptions{}, err
@@ -267,6 +275,53 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 		agentSessions: agentSessions, tmux: tmux,
 		presenceSocket: socket, timeout: *timeout,
 	}, nil
+}
+
+func requireMatrixGrokPermission(cwd string) error {
+	if _, err := exec.LookPath("grok"); err != nil {
+		return nil
+	}
+	if _, err := exec.LookPath("grok-peer"); err != nil {
+		return nil
+	}
+	grokHome := os.Getenv("GROK_HOME")
+	if grokHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve Grok configuration home: %w", err)
+		}
+		grokHome = filepath.Join(home, ".grok")
+	}
+	paths := []string{filepath.Join(grokHome, "config.toml"), filepath.Join(cwd, ".grok", "config.toml")}
+	for _, path := range paths {
+		body, readErr := os.ReadFile(path)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return fmt.Errorf("read Grok permission configuration %s: %w", path, readErr)
+		}
+		if matrixGrokConfigAllowsAgentSessions(body) {
+			return nil
+		}
+	}
+	return fmt.Errorf("Grok standing matrix requires this exact one-line permission in %s or trusted %s:\n[permission]\nallow = [\"%s\"]", paths[0], paths[1], matrixGrokPermissionRule)
+}
+
+func matrixGrokConfigAllowsAgentSessions(body []byte) bool {
+	inPermission := false
+	for _, rawLine := range strings.Split(string(body), "\n") {
+		line, _, _ := strings.Cut(rawLine, "#")
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inPermission = line == "[permission]"
+			continue
+		}
+		if compact := strings.ReplaceAll(strings.ReplaceAll(line, " ", ""), "\t", ""); inPermission && compact == `allow=["`+matrixGrokPermissionRule+`"]` {
+			return true
+		}
+	}
+	return false
 }
 
 func rejectExistingMatrixTMUX(tmux string) error {
@@ -364,6 +419,7 @@ func matrixProductInventory() []matrixProduct {
 		{
 			id: "codex", nativeExecutable: "codex", peerExecutable: "codex-peer",
 			displayArguments: []string{"--no-alt-screen"}, nativeQuitCommand: "/quit",
+			nativeLaneProduct:     "codex",
 			nativeSubmitDelay:     codexTUISubmitDelay,
 			nativeQuitDocumentURL: "https://github.com/openai/codex/blob/main/codex-rs/tui/src/slash_command.rs",
 			nativeTrustPrompt:     "Do you trust the contents of this directory?",
@@ -382,6 +438,7 @@ func matrixProductInventory() []matrixProduct {
 		{
 			id: "grok", nativeExecutable: "grok", peerExecutable: "grok-peer",
 			displayArguments: []string{"--no-alt-screen", "--minimal"}, nativeQuitCommand: "/quit",
+			nativeLaneProduct:     "codex",
 			nativeQuitDocumentURL: "https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md",
 			nativeReadyMarker:     "\n❯\nGrok ",
 			nativeEnvelopeFormat:  `<cross-session-message from="%s"`,
@@ -693,9 +750,6 @@ func (runner *matrixRunner) runLaneCell(ctx context.Context, product matrixProdu
 		}
 	}
 	err = errors.Join(err, listErr, connector.recoverLane(parent.sessionID, laneName))
-	invalidEvidence, invalidErr := runner.runInvalidCwdConnectorCase(cleanupCtx, connector, group, prefix+"-invalid-cwd")
-	evidence["invalid_cwd"] = invalidEvidence
-	err = errors.Join(err, invalidErr)
 	finalRows, finalErr := connector.listLanes(parent.sessionID, false)
 	evidence["lane_list_after_cleanup"] = finalRows
 	if row, matchErr := namedLane(finalRows, laneName); finalErr == nil && (matchErr != nil || row != nil) {
@@ -707,7 +761,23 @@ func (runner *matrixRunner) runLaneCell(ctx context.Context, product matrixProdu
 		runner.record(product.id, "08-mcp-lane", matrixFail, err.Error(), evidence)
 		return
 	}
-	runner.record(product.id, "08-mcp-lane", matrixPass, "real Claude MCP tool completed and archived one Codex lane", evidence)
+	runner.record(product.id, "08-mcp-lane", matrixPass, "real product MCP tool completed and archived one Codex lane", evidence)
+}
+func (runner *matrixRunner) runInvalidCwdCell(ctx context.Context) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	connector, err := runner.openMatrixConnector(cleanupCtx)
+	evidence := map[string]any{}
+	if err == nil {
+		evidence["invalid_cwd"], err = runner.runInvalidCwdConnectorCase(cleanupCtx, connector, "matrix-"+runner.runID+"-invalid-cwd", "matrix-"+runner.runID+"-invalid-cwd")
+		err = errors.Join(err, connector.Close())
+		evidence["connector_frames"], evidence["connector_stderr"] = connector.frames, connector.stderr.String()
+	}
+	if err != nil {
+		runner.record("matrix", "08-invalid-cwd", matrixFail, err.Error(), evidence)
+	} else {
+		runner.record("matrix", "08-invalid-cwd", matrixPass, "connector preserved exact invalid-cwd RPC structure", evidence)
+	}
 }
 func matrixLanePrompt(runID, laneName, group string) (string, string) {
 	expected := matrixReceiptToken(runID, "08")
@@ -719,16 +789,17 @@ func matrixLanePrompt(runID, laneName, group string) (string, string) {
 func (runner *matrixRunner) openMatrixConnector(ctx context.Context) (*matrixConnector, error) {
 	command := exec.CommandContext(ctx, runner.config.agentSessions, "connector", "codex") //nolint:gosec // exact preflighted binary.
 	command.Dir, command.Env = runner.config.cwd, os.Environ()
-	input, err := command.StdinPipe()
-	if err != nil {
+	connector := &matrixConnector{command: command}
+	var err error
+	if connector.input, err = command.StdinPipe(); err != nil {
 		return nil, err
 	}
 	output, err := command.StdoutPipe()
 	if err != nil {
-		_ = input.Close()
+		_ = connector.input.Close()
 		return nil, err
 	}
-	connector := &matrixConnector{command: command, input: input, output: json.NewDecoder(output)}
+	connector.output = json.NewDecoder(output)
 	command.Stderr = &connector.stderr
 	if err := command.Start(); err != nil {
 		return nil, err
@@ -736,8 +807,7 @@ func (runner *matrixRunner) openMatrixConnector(ctx context.Context) (*matrixCon
 	return connector, nil
 }
 func (connector *matrixConnector) Close() error {
-	err := connector.input.Close()
-	return errors.Join(err, connector.command.Wait())
+	return errors.Join(connector.input.Close(), connector.command.Wait())
 }
 func (connector *matrixConnector) call(source string, arguments map[string]any) (json.RawMessage, *livepresence.RPCError, error) {
 	connector.serial++
@@ -807,9 +877,14 @@ func (connector *matrixConnector) recoverLane(source, name string) error {
 	if err != nil || row == nil {
 		return err
 	}
-	commands, err := laneRecoveryCommands(fmt.Sprint(row["state"]), name)
-	if err != nil {
-		return err
+	wait := []string{"wait", name, "--timeout", "30"}
+	commands, known := map[string][][]string{
+		"running":  {{"interrupt", name}, wait, {"archive", name}},
+		"retiring": {wait, {"archive", name}}, "preparing": {wait, {"archive", name}}, "interrupting": {wait, {"archive", name}},
+		"idle": {{"archive", name}}, "terminal": {{"archive", name}}, "archived": {},
+	}[fmt.Sprint(row["state"])]
+	if !known {
+		return fmt.Errorf("lane %s has unrecoverable state %s", name, row["state"])
 	}
 	for _, command := range commands {
 		if _, err := connector.lane(source, command[0], command[1:], ""); err != nil {
@@ -817,21 +892,6 @@ func (connector *matrixConnector) recoverLane(source, name string) error {
 		}
 	}
 	return nil
-}
-func laneRecoveryCommands(state, name string) ([][]string, error) {
-	wait := []string{"wait", name, "--timeout", "30"}
-	switch state {
-	case "running":
-		return [][]string{{"interrupt", name}, wait, {"archive", name}}, nil
-	case "retiring", "preparing", "interrupting":
-		return [][]string{wait, {"archive", name}}, nil
-	case "idle", "terminal":
-		return [][]string{{"archive", name}}, nil
-	case "archived":
-		return nil, nil
-	default:
-		return nil, fmt.Errorf("lane %s has unrecoverable state %s", name, state)
-	}
 }
 func (runner *matrixRunner) runInvalidCwdConnectorCase(ctx context.Context, connector *matrixConnector, group, name string) (map[string]any, error) {
 	evidence := map[string]any{}
@@ -864,7 +924,7 @@ func (runner *matrixRunner) runInvalidCwdConnectorCase(ctx context.Context, conn
 	if err != nil {
 		return evidence, err
 	}
-	if rpcErr == nil || rpcErr.Code != livepresence.InvalidParams || string(rpcErr.Data) != `{"detail":"lane cwd is unavailable"}` {
+	if rpcErr == nil || rpcErr.Code != livepresence.InvalidParams || rpcErr.Message != "Invalid params" || string(rpcErr.Data) != `{"method":"lane.start"}` {
 		return evidence, fmt.Errorf("invalid cwd error = %+v", rpcErr)
 	}
 	rows, err := connector.listLanes(uuid, true)

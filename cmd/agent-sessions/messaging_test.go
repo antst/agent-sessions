@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -116,8 +117,8 @@ func TestLiveMessageSendRequiresExactlyOneSelector(t *testing.T) {
 		`{"targets":["one","two"],"message":"hello"}`,
 		`{"group":"team","message":"hello"}`,
 	} {
-		if _, err := decodeLiveMessageSend(json.RawMessage(input)); err != nil {
-			t.Fatalf("valid message.send %s: %v", input, err)
+		if _, ok := livepresence.DecodeMessageSend(json.RawMessage(input)); !ok {
+			t.Fatalf("valid message.send rejected: %s", input)
 		}
 	}
 	for _, input := range []string{
@@ -127,7 +128,7 @@ func TestLiveMessageSendRequiresExactlyOneSelector(t *testing.T) {
 		`{"targets":[],"message":"hello"}`,
 		`{"group":"","message":"hello"}`,
 	} {
-		if _, err := decodeLiveMessageSend(json.RawMessage(input)); err == nil {
+		if _, ok := livepresence.DecodeMessageSend(json.RawMessage(input)); ok {
 			t.Fatalf("invalid message.send accepted: %s", input)
 		}
 	}
@@ -544,7 +545,7 @@ func TestPresenceInvocationCwdIsExplicitAndConnectorUsesTheProductAttachmentCwd(
 	}
 }
 
-func TestConnectorLaneStartUsesTheProductAttachmentCwd(t *testing.T) {
+func TestConnectorLaneStartDerivesTheSameParentCwdForEveryWorker(t *testing.T) {
 	root := shortDaemonTestRoot(t)
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
 	if err != nil {
@@ -553,51 +554,109 @@ func TestConnectorLaneStartUsesTheProductAttachmentCwd(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 	productCwd := t.TempDir()
 	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
-		ID: "codex-session", Product: "codex", NativeSessionID: "codex-session", Cwd: productCwd,
+		ID: "claude-parent", Product: "claude", NativeSessionID: "claude-parent", Cwd: productCwd,
 		Groups: []string{"team"}, PermissionMode: "bypassPermissions",
 	})
-	runtime.Attachments().ReportLive("codex-session", "codex-session", "codex", []string{"team"}, map[string]string{"cwd": productCwd}, false)
-	native := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(native, []byte("#!/bin/sh\nprintf '%s\\n' 'claude fixture'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", native)
-	driver := &cwdRecordingLaneDriver{opened: make(chan productruntime.LaneOpenRequest, 1), release: make(chan struct{})}
-	coordinator := newHostCoordinator(context.Background(), root)
-	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := json.Marshal(connectorToolEnvelope{
-		SourceID: "codex-session", RequestID: "lane-start", Name: "lane", Arguments: map[string]any{
-			"product": "claude", "command": "start", "arguments": []string{"--name", "worker"}, "input": "work",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload})
-	if err != nil || strings.Contains(string(response), `"isError":true`) {
-		t.Fatalf("connector lane start = %s, %v", response, err)
-	}
-	select {
-	case request := <-driver.opened:
-		if request.Cwd != productCwd {
-			t.Fatalf("lane cwd = %q, want product attachment cwd %q", request.Cwd, productCwd)
+	runtime.Attachments().ReportLive("claude-parent", "claude-parent", "claude", []string{"team"}, map[string]string{"cwd": productCwd}, false)
+	drivers := map[string]*cwdRecordingLaneDriver{}
+	registry := map[string]productruntime.LaneDriver{}
+	for _, product := range []string{"claude", "codex"} {
+		native := filepath.Join(t.TempDir(), product)
+		if err := os.WriteFile(native, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("connector lane start did not reach the driver")
+		t.Setenv(strings.ToUpper(product)+"_PEER_"+strings.ToUpper(product)+"_BIN", native)
+		drivers[product] = &cwdRecordingLaneDriver{opened: make(chan productruntime.LaneOpenRequest, 1), release: make(chan struct{})}
+		registry[product] = drivers[product]
+	}
+	coordinator := newHostCoordinator(context.Background(), root)
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, product := range []string{"claude", "codex"} {
+		payload, marshalErr := json.Marshal(connectorToolEnvelope{
+			SourceID: "claude-parent", RequestID: "lane-start-" + product, Name: "lane", Arguments: map[string]any{
+				"product": product, "command": "start", "arguments": []string{"--name", "worker-" + product}, "input": "work",
+			},
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		response, callErr := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload})
+		if callErr != nil || strings.Contains(string(response), `"isError":true`) {
+			t.Fatalf("connector %s lane start = %s, %v", product, response, callErr)
+		}
+		select {
+		case request := <-drivers[product].opened:
+			if request.Cwd != productCwd {
+				t.Fatalf("%s lane cwd = %q, want parent cwd %q", product, request.Cwd, productCwd)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("connector %s lane start did not reach the driver", product)
+		}
 	}
 	coordinator.mu.Lock()
-	var done chan struct{}
+	done := make([]chan struct{}, 0, 2)
 	for _, actor := range coordinator.lanes {
-		done = actor.done
+		done = append(done, actor.done)
 	}
 	coordinator.mu.Unlock()
-	close(driver.release)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("connector lane test turn did not finish")
+	for _, driver := range drivers {
+		close(driver.release)
+	}
+	for _, finished := range done {
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Fatal("connector lane test turn did not finish")
+		}
+	}
+}
+
+func TestDirectAndControlLaneErrorsKeepTheSemanticMethodAndOpaqueProduct(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
+	for _, attachment := range []daemonpkg.ManagedAttachment{
+		{ID: "without-cwd", Product: "claude", NativeSessionID: "without-cwd"},
+		{ID: "with-cwd", Product: "claude", NativeSessionID: "with-cwd", Cwd: t.TempDir()},
+	} {
+		activateTestAttachment(t, runtime, attachment)
+	}
+	tests := []struct {
+		name, source, product string
+		code                  int
+		data                  string
+	}{
+		{name: "invalid cwd", source: "without-cwd", product: "codex", code: livepresence.InvalidParams, data: `{"method":"lane.start"}`},
+		{name: "opaque unknown product", source: "with-cwd", product: "future-product", code: livepresence.ProductUnavailable, data: `{"product":"future-product"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			params := json.RawMessage(fmt.Sprintf(`{"product":%q,"arguments":["--name","worker"],"input":"work"}`, test.product))
+			_, directErr := coordinator.handleLiveSessionCall(context.Background(), runtime, livepresence.Report{UUID: test.source}, "direct", "lane.start", params)
+			assertRPCError(t, livepresence.FailureFromError(nil, "lane.start", directErr).Error, test.code, test.data)
+
+			payload, err := json.Marshal(connectorToolEnvelope{SourceID: test.source, RequestID: "control", Name: "lane", Arguments: map[string]any{
+				"product": test.product, "command": "start", "arguments": []string{"--name", "worker"}, "input": "work",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, controlErr := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload})
+			var rpcErr *livepresence.RPCError
+			if !errors.As(controlErr, &rpcErr) {
+				t.Fatalf("control error = %v", controlErr)
+			}
+			assertRPCError(t, rpcErr, test.code, test.data)
+		})
+	}
+}
+
+func assertRPCError(t *testing.T, err *livepresence.RPCError, code int, data string) {
+	t.Helper()
+	messages := map[int]string{livepresence.InvalidParams: "Invalid params", livepresence.ProductUnavailable: "Product not launchable"}
+	if err == nil || err.Code != code || err.Message != messages[code] || string(err.Data) != data {
+		t.Fatalf("RPC error = %+v, want code=%d data=%s", err, code, data)
 	}
 }

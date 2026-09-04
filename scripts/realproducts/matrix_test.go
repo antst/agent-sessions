@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -177,8 +178,19 @@ func TestMatrixLanePromptAndLostStartRecoveryAreBounded(t *testing.T) {
 	if strings.Contains(prompt, expected) || !strings.Contains(prompt, "agent_sessions lane tool") {
 		t.Fatalf("lane prompt exposed derived marker or omitted tool authority: %q / %q", prompt, expected)
 	}
-	connector, logPath := matrixTestConnector(t, "sequence", 5*time.Second)
-	connector.frames = append(connector.frames, matrixWireFrame{Direction: "send", Frame: livepresence.Frame{ID: []byte(`"lost-start"`), Method: "tools/call"}})
+	state := filepath.Join(t.TempDir(), "committed-lane")
+	starter, startLog := matrixTestConnector(t, "drop-start", 5*time.Second, state)
+	_, _, startErr := starter.call("parent", map[string]any{
+		"product": "codex", "command": "start", "arguments": []string{"--name", "matrix-lane"}, "input": "work",
+	})
+	closeStart := starter.Close()
+	if startErr == nil || closeStart != nil || len(starter.frames) != 1 || starter.frames[0].Direction != "send" {
+		t.Fatalf("dropped committed start = %v / %v / %+v", startErr, closeStart, starter.frames)
+	}
+	if body, _ := os.ReadFile(startLog); string(body) != "start --name matrix-lane\n" {
+		t.Fatalf("committed start evidence = %q", body)
+	}
+	connector, logPath := matrixTestConnector(t, "sequence", 5*time.Second, state)
 	if err := connector.recoverLane("parent", "matrix-lane"); err != nil {
 		t.Fatal(err)
 	}
@@ -188,11 +200,14 @@ func TestMatrixLanePromptAndLostStartRecoveryAreBounded(t *testing.T) {
 	}
 	body, _ := os.ReadFile(logPath)
 	want := "list --mine --all\ninterrupt matrix-lane\nwait matrix-lane --timeout 30\narchive matrix-lane\nlist --mine\n"
-	if string(body) != want || len(connector.frames) != 11 || connector.frames[0].Direction != "send" {
+	if string(body) != want || len(connector.frames) != 10 || connector.frames[0].Direction != "send" {
 		t.Fatalf("lost-response recovery/evidence = %q / %+v", body, connector.frames)
 	}
+	if _, err := os.Lstat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("committed lane state survived archive: %v", err)
+	}
 	ids := map[string]bool{}
-	for _, frame := range connector.frames[1:] {
+	for _, frame := range connector.frames {
 		if frame.Direction == "send" {
 			id := string(frame.Frame.ID)
 			if ids[id] {
@@ -207,7 +222,7 @@ func TestMatrixLanePromptAndLostStartRecoveryAreBounded(t *testing.T) {
 }
 
 func TestMatrixConnectorTimeoutKillsAndJoinsOneProcess(t *testing.T) {
-	connector, _ := matrixTestConnector(t, "hang", 50*time.Millisecond)
+	connector, _ := matrixTestConnector(t, "hang", 50*time.Millisecond, "")
 	started := time.Now()
 	if _, _, err := connector.call("parent", map[string]any{"product": "codex", "command": "list", "arguments": []string{"--mine"}}); err == nil {
 		t.Fatal("hung connector call succeeded")
@@ -217,13 +232,13 @@ func TestMatrixConnectorTimeoutKillsAndJoinsOneProcess(t *testing.T) {
 	}
 }
 
-func matrixTestConnector(t *testing.T, mode string, timeout time.Duration) (*matrixConnector, string) {
+func matrixTestConnector(t *testing.T, mode string, timeout time.Duration, state string) (*matrixConnector, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	logPath := filepath.Join(t.TempDir(), "calls")
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=TestMatrixConnectorProcess")
-	command.Env = append(os.Environ(), "MATRIX_CONNECTOR_HELPER="+mode, "MATRIX_CONNECTOR_LOG="+logPath)
+	command.Env = append(os.Environ(), "MATRIX_CONNECTOR_HELPER="+mode, "MATRIX_CONNECTOR_LOG="+logPath, "MATRIX_CONNECTOR_STATE="+state)
 	input, _ := command.StdinPipe()
 	output, _ := command.StdoutPipe()
 	connector := &matrixConnector{command: command, input: input, output: json.NewDecoder(output)}
@@ -240,7 +255,7 @@ func TestMatrixConnectorProcess(t *testing.T) {
 		return
 	}
 	decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
-	listed := false
+	listed, archived := false, false
 	for {
 		var request livepresence.Frame
 		if decoder.Decode(&request) != nil {
@@ -250,18 +265,35 @@ func TestMatrixConnectorProcess(t *testing.T) {
 			select {}
 		}
 		var call struct {
+			Name      string `json:"name"`
 			Arguments struct {
 				Command   string
 				Arguments []string
+				Input     string
 			} `json:"arguments"`
+			Meta struct {
+				ThreadID string `json:"threadId"`
+			} `json:"_meta"`
 		}
-		if json.Unmarshal(request.Params, &call) != nil {
+		if request.Method != "tools/call" || json.Unmarshal(request.Params, &call) != nil || call.Name != "lane" || call.Meta.ThreadID != "parent" {
 			os.Exit(2)
 		}
 		line := strings.TrimSpace(call.Arguments.Command+" "+strings.Join(call.Arguments.Arguments, " ")) + "\n"
 		file, _ := os.OpenFile(os.Getenv("MATRIX_CONNECTOR_LOG"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		_, _ = file.WriteString(line)
 		_ = file.Close()
+		state := os.Getenv("MATRIX_CONNECTOR_STATE")
+		if mode == "drop-start" {
+			if call.Arguments.Command != "start" || strings.Join(call.Arguments.Arguments, " ") != "--name matrix-lane" || call.Arguments.Input != "work" || os.WriteFile(state, []byte("committed"), 0o600) != nil {
+				os.Exit(2)
+			}
+			return
+		}
+		if !archived {
+			if _, err := os.Lstat(state); err != nil {
+				os.Exit(2)
+			}
+		}
 		result := map[string]any{"type": "ok"}
 		if call.Arguments.Command == "list" {
 			result = map[string]any{"lanes": []map[string]any{}}
@@ -269,6 +301,9 @@ func TestMatrixConnectorProcess(t *testing.T) {
 				result["lanes"] = []map[string]any{{"name": "matrix-lane", "state": "running"}}
 				listed = true
 			}
+		} else if call.Arguments.Command == "archive" {
+			_ = os.Remove(state)
+			archived = true
 		}
 		body, _ := json.Marshal(map[string]any{"structuredContent": result})
 		_ = encoder.Encode(livepresence.Success(request.ID, body))
@@ -367,13 +402,57 @@ func TestMatrixTMUXPreflightRefusesExactNames(t *testing.T) {
 	}
 }
 
+func TestMatrixGrokPermissionRequiresTheExactCompactRule(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"exact", "[permission]\nallow = [\"MCPTool(agent_sessions__*)\"]\n", true},
+		{"deny", "[permission]\ndeny = [\"MCPTool(agent_sessions__*)\"]\n", false},
+		{"multiline", "[permission]\nallow = [\n  \"MCPTool(agent_sessions__*)\",\n]\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := matrixGrokConfigAllowsAgentSessions([]byte(test.body)); got != test.want {
+				t.Fatalf("configured = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMatrixGrokPermissionPreflightUsesGrokHomeOrExactCWDConfig(t *testing.T) {
+	bin, home, cwd := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, name := range []string{"grok", "grok-peer"} {
+		writeMatrixTestExecutable(t, filepath.Join(bin, name), "exit 0")
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("GROK_HOME", filepath.Join(home, "product-owned-grok-home"))
+	if err := requireMatrixGrokPermission(cwd); err == nil || !strings.Contains(err.Error(), matrixGrokPermissionRule) {
+		t.Fatalf("missing permission error = %v", err)
+	}
+	for _, test := range []struct {
+		path string
+		want bool
+	}{{filepath.Join(home, ".grok", "config.toml"), false}, {filepath.Join(os.Getenv("GROK_HOME"), "config.toml"), true}, {filepath.Join(cwd, ".grok", "config.toml"), true}} {
+		if err := os.MkdirAll(filepath.Dir(test.path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(test.path, []byte("[permission]\nallow = [\""+matrixGrokPermissionRule+"\"]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := requireMatrixGrokPermission(cwd); (err == nil) != test.want {
+			t.Fatalf("permission at %s accepted=%t, want %t: %v", test.path, err == nil, test.want, err)
+		}
+		_ = os.Remove(test.path)
+	}
+}
+
 func TestMatrixPrerequisiteFailuresPrecedeEvidenceWrite(t *testing.T) {
 	listener, err := net.Listen("unix", matrixTestSocket(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	for _, missing := range []string{"agent-sessions", "tmux", "socket", "tmux-list"} {
+	for _, missing := range []string{"agent-sessions", "tmux", "socket", "tmux-list", "grok-permission"} {
 		t.Run("missing "+missing, func(t *testing.T) {
 			base, bin := t.TempDir(), t.TempDir()
 			for _, name := range []string{"agent-sessions", "tmux"} {
@@ -385,10 +464,15 @@ func TestMatrixPrerequisiteFailuresPrecedeEvidenceWrite(t *testing.T) {
 					writeMatrixTestExecutable(t, filepath.Join(bin, name), body)
 				}
 			}
+			if missing == "grok-permission" {
+				writeMatrixTestExecutable(t, filepath.Join(bin, "grok"), "exit 0")
+				writeMatrixTestExecutable(t, filepath.Join(bin, "grok-peer"), "exit 0")
+			}
 			cwd, temporary, evidence := filepath.Join(base, "cwd"), filepath.Join(base, "temporary"), filepath.Join(base, "evidence")
 			_ = os.Mkdir(cwd, 0o700)
 			_ = os.Mkdir(temporary, 0o700)
 			t.Setenv("PATH", bin)
+			t.Setenv("HOME", base)
 			socket := listener.Addr().String()
 			if missing == "socket" {
 				socket = filepath.Join(base, "missing.sock")
@@ -419,6 +503,21 @@ func TestMatrixPersistenceRequiresOutputBeforeNativeReady(t *testing.T) {
 		if !complete || wrongOrder || busy {
 			t.Fatalf("%s complete/wrong-order/busy = %t/%t/%t", product.id, complete, wrongOrder, busy)
 		}
+	}
+}
+
+func TestMatrixLaneCellCoversEveryBrokenConnectorParent(t *testing.T) {
+	want := map[string]bool{"claude": true, "codex": true, "grok": true}
+	for _, product := range matrixProductInventory() {
+		if product.nativeLaneProduct != "" {
+			if !want[product.id] || product.nativeLaneProduct != "codex" {
+				t.Fatalf("unexpected lane parent/worker %s/%s", product.id, product.nativeLaneProduct)
+			}
+			delete(want, product.id)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing connector parents: %v", want)
 	}
 }
 

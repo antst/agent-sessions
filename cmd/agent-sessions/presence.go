@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
@@ -168,6 +167,15 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 }
 
 func (s *livePresenceServer) handleRequest(ctx context.Context, connection *livepresence.Connection, frame livepresence.Frame) {
+	spec, known := livepresence.LookupMethod(frame.Method)
+	if !known || spec.Direction != livepresence.ClientToDaemon || spec.First {
+		_ = connection.Write(livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
+		return
+	}
+	if !livepresence.ValidMethodParams(spec, frame.Params) {
+		_ = connection.Write(livepresence.Failure(frame.ID, livepresence.InvalidParams, "Invalid params", map[string]any{"method": frame.Method}))
+		return
+	}
 	if frame.Method == "session.update" {
 		name, info, err := livepresence.DecodeUpdate(frame.Params)
 		if err != nil {
@@ -199,6 +207,8 @@ func (s *livePresenceServer) handleRequest(ctx context.Context, connection *live
 	response := livepresence.Success(frame.ID, result)
 	if err != nil {
 		response = livepresence.FailureFromError(frame.ID, frame.Method, err)
+	} else if !livepresence.ValidMethodResult(spec, frame.Params, result) {
+		response = livepresence.FailureFromError(frame.ID, frame.Method, errors.New("live presence method returned an invalid result"))
 	}
 	_ = connection.Write(response)
 }
@@ -286,8 +296,7 @@ func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report li
 
 func (c *hostCoordinator) retireDepartedLiveSession(runtime *daemonpkg.Runtime, report livepresence.Report) {
 	if err := c.retireParentLanes(runtime, report.UUID, true); err != nil {
-		message := strings.NewReplacer("\n", " ", "\r", " ").Replace(err.Error())
-		fmt.Fprintf(os.Stderr, "retire lanes for disconnected session %s: %.512s\n", report.UUID, message)
+		fmt.Fprintf(os.Stderr, "retire lanes for disconnected session %s: %.512q\n", report.UUID, err.Error())
 	}
 }
 
