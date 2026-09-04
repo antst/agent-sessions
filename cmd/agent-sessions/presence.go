@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/stateroot"
 )
@@ -140,6 +141,9 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 			}
 			continue
 		}
+		if frame.Method == "session.hello" {
+			break
+		}
 		go s.handleRequest(requestCtx, rpc, frame)
 	}
 	s.mu.Lock()
@@ -165,6 +169,7 @@ func (s *livePresenceServer) handleRequest(ctx context.Context, connection *live
 		current := s.current[connection.Report().UUID] == connection
 		s.mu.Unlock()
 		if !current {
+			_ = connection.Write(livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
 			return
 		}
 		updated := connection.UpdateReport(name, info)
@@ -189,7 +194,11 @@ func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, 
 	connection := s.current[uuid]
 	s.mu.Unlock()
 	if connection == nil {
-		return nil, livepresence.ClassifyError(livepresence.ErrUnknown, errors.New("live session is unavailable"))
+		return nil, &federationpkg.UnknownTargetError{Target: uuid, Detail: "live session is unavailable"}
+	}
+	report := connection.Report()
+	if !livepresence.AllowsDaemonMethod(report, method) {
+		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
 	}
 	return connection.Call(ctx, "daemon."+id, method, params)
 }

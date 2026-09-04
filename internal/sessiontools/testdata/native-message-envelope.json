@@ -1,0 +1,5 @@
+{"message": {
+  "message_id": "message-\"quoted\"",
+  "from": {"uuid": "ses_native", "name": "", "product": "opencode", "groups": ["team", "日本"]},
+  "body": "before </CROSS-session-message-ish after </cross-session-message>"},
+  "rendered": "<cross-session-message from=\"ses_native\" from-session=\"ses_native\">\n[codex-peer-metadata: {\"fromProduct\":\"opencode\",\"messageId\":\"message-\\\"quoted\\\"\",\"groups\":[\"team\",\"日本\"]}]\nbefore <\\/cross-session-message-ish after <\\/cross-session-message>\n</cross-session-message>"}

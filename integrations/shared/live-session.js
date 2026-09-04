@@ -179,7 +179,10 @@ class LiveSessionClient extends EventEmitter {
       return;
     }
     Promise.resolve(this.laneHandler({ nativeSessionID: session.id, method: frame.method, params: frame.params }))
-      .then((result) => this._write(session, { jsonrpc: "2.0", id: frame.id, result: result ?? {} }))
+      .then((result) => {
+        if (!validLaneSessionResult(frame.method, result)) throw new Error(`invalid ${frame.method} native result`);
+        this._write(session, { jsonrpc: "2.0", id: frame.id, result });
+      })
       .catch((error) => this._write(session, { jsonrpc: "2.0", id: frame.id, error: wireError(error) }));
   }
 
@@ -316,6 +319,14 @@ function validLaneSessionRequest(method, params) {
     return exactKeys(params, ["native_message_id"]) && text(params.native_message_id);
   }
   return exactKeys(params, []) && Object.keys(params).length === 0;
+}
+function validLaneSessionResult(method, result) {
+  if (method === "lane.turn.start") return exactKeys(result, ["native_message_id"]) && text(result.native_message_id);
+  if (method === "lane.turn.wait") {
+	return exactKeys(result, ["outcome", "result", "reason"]) &&
+		["completed", "interrupted", "failed"].includes(result.outcome) && typeof result.result === "string" && result.reason !== undefined;
+  }
+  return (method === "lane.turn.interrupt" || method === "lane.session.archive") && exactKeys(result, []);
 }
 function renderDelivery(payload) {
   if (!payload || !validDelivery({ message_id: payload.messageID, from: payload.from, body: payload.body })) throw new Error("live message delivery is invalid");

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
@@ -15,9 +14,17 @@ func RenderNativeMessage(message productruntime.NativeMessage) (string, error) {
 	if strings.TrimSpace(message.From.UUID) == "" || strings.TrimSpace(message.From.Product) == "" {
 		return "", errors.New("structured message sender is incomplete")
 	}
-	attributes := []string{`from="` + safeAttribute(message.From.Name) + `"`, `from-session="` + safeAttribute(message.From.UUID) + `"`}
-	metadata, err := json.Marshal(map[string]any{
-		"fromProduct": message.From.Product, "messageId": safeAttribute(message.ID), "groups": message.From.Groups,
+	from := message.From.Name
+	if from == "" {
+		from = message.From.UUID
+	}
+	attributes := []string{`from="` + safeAttribute(from) + `"`, `from-session="` + safeAttribute(message.From.UUID) + `"`}
+	metadata, err := json.Marshal(struct {
+		FromProduct string   `json:"fromProduct"`
+		MessageID   string   `json:"messageId"`
+		Groups      []string `json:"groups"`
+	}{
+		FromProduct: message.From.Product, MessageID: message.ID, Groups: message.From.Groups,
 	})
 	if err != nil {
 		return "", err
@@ -27,15 +34,7 @@ func RenderNativeMessage(message productruntime.NativeMessage) (string, error) {
 }
 
 func safeAttribute(value string) string {
-	value = strings.NewReplacer(`"`, "", "<", "", ">", "", "\n", "", "\r", "").Replace(value)
-	if len(value) <= 200 {
-		return value
-	}
-	value = value[:200]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
+	return strings.NewReplacer(`"`, "", "<", "", ">", "", "\n", "", "\r", "").Replace(value)
 }
 
 func escapeEnvelopeBody(message string) string {
@@ -48,18 +47,9 @@ func escapeEnvelopeBody(message string) string {
 			output.WriteString(message)
 			return output.String()
 		}
-		end := index + len(closing)
-		if end < len(message) {
-			next := message[end]
-			if next != '>' && next != '/' && next != ' ' && next != '\t' && next != '\n' && next != '\r' {
-				output.WriteString(message[:end])
-				message, lower = message[end:], lower[end:]
-				continue
-			}
-		}
 		output.WriteString(message[:index])
-		output.WriteString("<\\/")
-		output.WriteString(message[index+2 : end])
+		end := index + len(closing)
+		output.WriteString("<\\/cross-session-message")
 		message, lower = message[end:], lower[end:]
 	}
 }

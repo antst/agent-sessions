@@ -94,3 +94,19 @@ test("pre-terminal cancellation is a request failure and never a synthesized rea
   agent.inbox.nextTurn.splice(0, 1);
   await assert.rejects(runtime.wait(nativeID), /canceled native input before consumption/u);
 });
+
+test("unknown native wait identity is structured and a second waiter remains a product failure", async () => {
+  const { emit, runtime } = harness();
+  await assert.rejects(runtime.wait("missing-native"), (error) => {
+    assert.deepEqual(error, {
+      code: -32001, message: "Unknown session or target", data: { target: "missing-native" },
+    });
+    return true;
+  });
+  const nativeID = runtime.submit("input-waiters", "do it", "followup");
+  const first = runtime.wait(nativeID);
+  await assert.rejects(runtime.wait(nativeID), /already has a waiter/u);
+  emit("turn/start", { turn: 1 }); emit("user/message", { id: nativeID });
+  emit("turn/end", { turn: 1, reason: { kind: "completed" } });
+  await first;
+});

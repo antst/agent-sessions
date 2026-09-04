@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/agent-sessions/internal/sessionidentity"
 	"github.com/antst/agent-sessions/internal/sessionkey"
 )
 
@@ -1038,7 +1039,7 @@ func validateWirePeer(peer Peer, hostID string) error {
 		product = peer.Entrypoint
 	}
 	if len(hostID) > maxHostIDBytes || len(peer.ID) > maxPeerIDBytes || len(peer.GlobalID) > maxPeerGlobalIDBytes ||
-		len(peer.Name) > maxPeerNameBytes || len(peer.DisplayName) > maxPeerDisplayNameBytes ||
+		len(peer.DisplayName) > maxPeerDisplayNameBytes ||
 		len(peer.HostID) > maxHostIDBytes || len(peer.HostName) > maxHostNameBytes ||
 		len(peer.Product) > maxProductTokenBytes || len(peer.Entrypoint) > maxProductTokenBytes ||
 		len(peer.Status) > maxPeerStatusBytes || len(peer.Cwd) > maxPeerCwdBytes ||
@@ -1056,7 +1057,7 @@ func validateWirePeer(peer Peer, hostID string) error {
 	if productcatalog.ValidateToken(product) != nil ||
 		(peer.Product != "" && productcatalog.ValidateToken(peer.Product) != nil) ||
 		(peer.Entrypoint != "" && productcatalog.ValidateToken(peer.Entrypoint) != nil) ||
-		strings.TrimSpace(peer.Name) == "" || strings.TrimSpace(peer.InstanceID) == "" {
+		!sessionidentity.ValidName(peer.Name) || strings.TrimSpace(peer.InstanceID) == "" {
 		return errors.New("snapshot contains an invalid product peer")
 	}
 	if len(peer.Groups) == 0 || !contains(peer.Groups, PrivateGroup(hostID, peer.SessionID)) {
@@ -1102,9 +1103,7 @@ func BuildPeer(hostID, hostName, sessionID, name, status, cwd, product, permissi
 	if strings.TrimSpace(hostName) == "" {
 		hostName = hostID
 	}
-	if strings.TrimSpace(name) == "" {
-		name = sessionID
-	}
+	displayName := defaultString(name, sessionID)
 	if strings.TrimSpace(instanceID) == "" {
 		instanceID = product + ":" + sessionID
 	}
@@ -1115,7 +1114,7 @@ func BuildPeer(hostID, hostName, sessionID, name, status, cwd, product, permissi
 	peer := Peer{
 		ID: hostID + "/" + sessionID, HostID: hostID, HostName: hostName,
 		SessionID: sessionID, GlobalID: globalSessionID(hostID, sessionID),
-		Name: name, DisplayName: qualifiedName(name, hostName), Product: product, Entrypoint: product,
+		Name: name, DisplayName: qualifiedName(displayName, hostName), Product: product, Entrypoint: product,
 		Status: status, Cwd: cwd, PermissionMode: permission, PeerProtocol: GroupProtocolVersion,
 		InstanceID: instanceID, Groups: effective, ParentSessionID: parentID,
 	}
