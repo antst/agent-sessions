@@ -68,7 +68,7 @@ credentials are never recorded.
 
 ## Reference-worker rows
 
-The non-AI `example-peer-lane` has one documented conformance input in addition to its ordinary
+The non-AI `asl-lane-example` has one documented conformance input in addition to its ordinary
 echo/transform input: `conformance:eof-on-wait`. It is worker-owned behavior sent through the
 normal typed turn input. It adds no environment key, argv mode, daemon hook, product branch, or
 alternate parameter channel.
@@ -122,8 +122,8 @@ The draft fits five A-owned or existing paths:
 | --- | --- | ---: |
 | `scripts/realproducts/matrix.go` | One W helper, three R cells, evidence/cleanup | `+220/-20` |
 | `scripts/realproducts/matrix_test.go` | W capability/order/race tables and R lifecycle tables | `+190/-10` |
-| planned `cmd/example-peer-lane/main.go` | Documented EOF conformance input | `+25/-0` |
-| planned `cmd/example-peer-lane/main_test.go` | EOF behavior | `+35/-0` |
+| planned `cmd/agent-sessions/example_lane.go` | Documented EOF conformance input | `+25/-0` |
+| planned `cmd/agent-sessions/example_lane_test.go` | EOF behavior | `+35/-0` |
 | the A acceptance-plan page | Cell inventory and evidence mapping | `+20/-0` |
 
 Harness/worker production is at most `+245/-20`; tests at most `+225/-10`; documentation at most
