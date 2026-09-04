@@ -16,6 +16,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productruntime"
@@ -350,21 +351,21 @@ func laneInvocationCwd(parent, requested string) (string, error) {
 //nolint:gocyclo // Start is one durable authorization, native dispatch, publication, and rollback transaction.
 func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string, wait bool) (map[string]any, error) {
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(options.name) == "" {
-		return nil, classifyLiveError(errLiveInvalidParams, errors.New("lane start/run requires --name and non-empty input"))
+		return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, errors.New("lane start/run requires --name and non-empty input"))
 	}
 	cwd, err := laneInvocationCwd(parent.Cwd, options.cwd)
 	if err != nil {
-		return nil, classifyLiveError(errLiveInvalidParams, err)
+		return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, err)
 	}
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
 	if err != nil {
 		return nil, err
 	}
 	if err := validateLaneGroupNames(options.groups, parentGroups); err != nil {
-		return nil, classifyLiveError(errLiveInvalidParams, err)
+		return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, err)
 	}
 	if _, err := laneExecutable(product); err != nil {
-		return nil, classifyLiveError(errLiveProductUnavailable, err)
+		return nil, livepresence.ClassifyError(livepresence.ErrProductUnavailable, err)
 	}
 	explicitGroups := uniqueStrings(options.groups)
 	groups := append([]string(nil), explicitGroups...)
@@ -404,7 +405,7 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 	c.mu.Lock()
 	if conflict := c.liveLaneNameLocked(runtime, parent, options.name); conflict {
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveBusy, fmt.Errorf("visible lane name %q is already live", options.name))
+		return nil, livepresence.ClassifyError(livepresence.ErrBusy, fmt.Errorf("visible lane name %q is already live", options.name))
 	}
 	c.lanes[id] = actor
 	c.mu.Unlock()
@@ -428,7 +429,7 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 //nolint:gocyclo // Resume revalidates ownership, native identity, permissions, and dispatch atomically.
 func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product string, options parsedLaneCommand, input string) (map[string]any, error) {
 	if strings.TrimSpace(options.target) == "" || strings.TrimSpace(input) == "" {
-		return nil, classifyLiveError(errLiveInvalidParams, errors.New("lane resume requires one selector and non-empty input"))
+		return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, errors.New("lane resume requires one selector and non-empty input"))
 	}
 	actor, err := c.resolveLaneActor(runtime, parent, product, options.target, true)
 	if err != nil {
@@ -440,22 +441,22 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 			return nil, groupErr
 		}
 		if groupErr := validateLaneGroupNames(options.groups, parentGroups); groupErr != nil {
-			return nil, classifyLiveError(errLiveInvalidParams, groupErr)
+			return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, groupErr)
 		}
 	}
 	cwd, err := laneInvocationCwd(parent.Cwd, options.cwd)
 	if err != nil {
-		return nil, classifyLiveError(errLiveInvalidParams, err)
+		return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, err)
 	}
 	c.mu.Lock()
 	if actor.parentID != "" && actor.parentID != parent.ID && actor.state != "archived" {
 		owner := actor.parentID
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveNotPermitted, fmt.Errorf("lane is live under %s", owner))
+		return nil, livepresence.ClassifyError(livepresence.ErrNotPermitted, fmt.Errorf("lane is live under %s", owner))
 	}
 	if actor.state == "running" {
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveBusy, errors.New("collect or interrupt the active lane turn before resume"))
+		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("collect or interrupt the active lane turn before resume"))
 	}
 	prepareLaneTurnLocked(actor)
 	actor.parentID = parent.ID
@@ -534,7 +535,7 @@ func (c *hostCoordinator) waitLaneActor(ctx context.Context, runtime *daemonpkg.
 	c.mu.Lock()
 	if actor.collecting {
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveBusy, errors.New("lane already has an active collector"))
+		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("lane already has an active collector"))
 	}
 	actor.collecting = true
 	c.mu.Unlock()
@@ -547,7 +548,7 @@ func (c *hostCoordinator) waitLaneActor(ctx context.Context, runtime *daemonpkg.
 	state, done := actor.state, actor.done
 	if state == "idle" || state == "archived" || done == nil {
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveBusy, errors.New("lane has no live turn result"))
+		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("lane has no live turn result"))
 	}
 	c.mu.Unlock()
 	select {
@@ -611,7 +612,7 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 	}
 	c.mu.Unlock()
 	if !running {
-		return nil, classifyLiveError(errLiveBusy, errors.New("lane has no active turn"))
+		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("lane has no active turn"))
 	}
 	if err := c.interruptLaneNative(actor); err != nil {
 		return nil, err
@@ -637,7 +638,7 @@ func (c *hostCoordinator) steerLane(
 	c.mu.Lock()
 	if actor.state != "running" || actor.nativeTurnID == "" {
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveNoRunningTurn, errors.New("lane has no active native turn"))
+		return nil, livepresence.ClassifyError(livepresence.ErrNoRunningTurn, errors.New("lane has no active native turn"))
 	}
 	turn := productruntime.NativeTurnRef{
 		NativeSessionRef: productruntime.NativeSessionRef{
@@ -706,7 +707,7 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 	}
 	if actor.state == "running" {
 		c.mu.Unlock()
-		return nil, classifyLiveError(errLiveBusy, errors.New("refuse to archive a lane with an active turn"))
+		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("refuse to archive a lane with an active turn"))
 	}
 	actor.state = "archived"
 	c.mu.Unlock()
@@ -1241,7 +1242,7 @@ func laneWorkerEnvironment(runtime *daemonpkg.Runtime, input []string, actor *la
 func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, product, target string, all bool) (*laneActor, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return nil, classifyLiveError(errLiveInvalidParams, errors.New("lane selector is required"))
+		return nil, livepresence.ClassifyError(livepresence.ErrInvalidParams, errors.New("lane selector is required"))
 	}
 	if all {
 		if err := c.ensureActiveLaneNames(c.ctx, runtime, parent, product); err != nil {
@@ -1262,10 +1263,10 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 		matches = append(matches, actor)
 	}
 	if len(matches) == 0 {
-		return nil, classifyLiveError(errLiveUnknown, errors.New("lane was not found"))
+		return nil, livepresence.ClassifyError(livepresence.ErrUnknown, errors.New("lane was not found"))
 	}
 	if len(matches) > 1 {
-		return nil, classifyLiveError(errLiveUnknown, errors.New("lane name is ambiguous; use UUID"))
+		return nil, livepresence.ClassifyError(livepresence.ErrUnknown, errors.New("lane name is ambiguous; use UUID"))
 	}
 	return matches[0], nil
 }

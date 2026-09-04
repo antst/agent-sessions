@@ -15,8 +15,8 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
@@ -35,20 +35,20 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return fmt.Errorf("track installed connector image: %w", err)
 	}
 	report, reported := connectorLiveReport(product, os.Getenv)
-	var resolveReport func(context.Context) (liveSessionReport, bool)
+	var resolveReport func(context.Context) (livepresence.Report, bool)
 	if product == connectorProductClaude {
 		report, reported = connectorReportFields(product, os.Getenv)
 		report.UUID, report.Name = "", ""
 		parentPID := os.Getppid()
-		base := cloneLiveSessionReport(report)
-		resolveReport = func(resolveCtx context.Context) (liveSessionReport, bool) {
+		base := livepresence.CloneReport(report)
+		resolveReport = func(resolveCtx context.Context) (livepresence.Report, bool) {
 			return claudeActiveSessionForParent(resolveCtx, parentPID, base)
 		}
 	}
 	if reported {
 		cwd, cwdErr := os.Getwd()
 		if cwdErr == nil {
-			report.Info = liveCwdInfo(cwd)
+			report.Info = livepresence.CwdInfo(cwd)
 		}
 	}
 	if reported && product == connectorProductGrok && report.Name != "" {
@@ -65,15 +65,15 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if reported && product == connectorProductGrok && report.Name == "" {
 		report.Name = report.UUID
 	}
-	var live *liveSessionClient
+	var live *livepresence.Client
 	if reported && connectorClaimsLivePresence(requestedProduct, product, os.Getenv) {
 		if product == connectorProductClaude {
-			base := cloneLiveSessionReport(report)
-			live = startResolvingLiveSessionClient(ctx, defaultPresenceEndpoint(), resolveReport, func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+			base := livepresence.CloneReport(report)
+			live = livepresence.StartResolvingClient(ctx, defaultPresenceEndpoint(), resolveReport, func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, base, method, params)
 			})
 		} else {
-			live = startLiveSessionClient(ctx, defaultPresenceEndpoint(), report,
+			live = livepresence.StartClient(ctx, defaultPresenceEndpoint(), report,
 				func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 					return connectorNativeCall(callCtx, report, method, params)
 				})
@@ -111,7 +111,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 }
 
 func callLiveConnectorTool(
-	ctx context.Context, live *liveSessionClient, requestID, method string, params json.RawMessage,
+	ctx context.Context, live *livepresence.Client, requestID, method string, params json.RawMessage,
 ) (json.RawMessage, error) {
 	if method != "tools/call" {
 		return nil, fmt.Errorf("connector method %s is unsupported", method)
@@ -135,12 +135,12 @@ func callLiveConnectorTool(
 	case "lane":
 		command := strings.TrimSpace(mapString(arguments, "command"))
 		if command == "collect" || !containsString([]string{"start", "run", "resume", "steer", "wait", "status", "interrupt", "archive"}, command) {
-			return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"method": "lane." + command})
+			return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": "lane." + command})
 		}
 		operation = "lane." + command
 		delete(arguments, "command")
 	default:
-		return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"tool": call.Name})
+		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"tool": call.Name})
 	}
 	result, err := live.Call(ctx, requestID, operation, arguments)
 	if err != nil {
@@ -228,17 +228,17 @@ func connectorToolSource(product, ambient string, params json.RawMessage, argume
 	return sourceID
 }
 
-func connectorNativeCall(ctx context.Context, report liveSessionReport, method string, params json.RawMessage) (json.RawMessage, error) {
+func connectorNativeCall(ctx context.Context, report livepresence.Report, method string, params json.RawMessage) (json.RawMessage, error) {
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
-	message, err := liveMessageRequest(params)
+	message, err := livepresence.DecodeDeliver(params)
 	if err != nil {
 		return nil, err
 	}
 	body, err := sessiontools.RenderNativeMessage(message)
 	if err != nil {
-		return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
+		return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	adapter := connectorNativeAdapters[report.Product]
 	if adapter == nil {
@@ -250,16 +250,7 @@ func connectorNativeCall(ctx context.Context, report liveSessionReport, method s
 	return json.RawMessage(`{}`), nil
 }
 
-func liveMessageRequest(params json.RawMessage) (productruntime.NativeMessage, error) {
-	var request productruntime.NativeMessage
-	if decodeStrictJSON(params, &request) != nil || strings.TrimSpace(request.ID) == "" || strings.TrimSpace(request.From.UUID) == "" ||
-		strings.TrimSpace(request.From.Product) == "" || request.From.Groups == nil {
-		return productruntime.NativeMessage{}, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": "message.deliver"})
-	}
-	return request, nil
-}
-
-type connectorNativeAdapter func(context.Context, liveSessionReport, string, string) error
+type connectorNativeAdapter func(context.Context, livepresence.Report, string, string) error
 
 const (
 	connectorProductCodex  = "codex"
@@ -306,7 +297,7 @@ func liveMessageSendArguments(arguments map[string]any) map[string]any {
 	return projected
 }
 
-func deliverCodexConnectorMessage(ctx context.Context, report liveSessionReport, _ string, body string) error {
+func deliverCodexConnectorMessage(ctx context.Context, report livepresence.Report, _ string, body string) error {
 	native, err := bridge.OpenCodexNative(ctx, bridge.CodexNativeConfig{
 		CodexBinary: codexBinary(), CodexHome: codexHome(),
 	})
@@ -318,7 +309,7 @@ func deliverCodexConnectorMessage(ctx context.Context, report liveSessionReport,
 	return err
 }
 
-func deliverGrokConnectorMessage(ctx context.Context, report liveSessionReport, messageID, body string) error {
+func deliverGrokConnectorMessage(ctx context.Context, report livepresence.Report, messageID, body string) error {
 	observer, err := openGrokConnectorObserver(ctx, report)
 	if err != nil {
 		return err
@@ -327,7 +318,7 @@ func deliverGrokConnectorMessage(ctx context.Context, report liveSessionReport, 
 	return observer.Interject(ctx, messageID, body)
 }
 
-func openGrokConnectorObserver(ctx context.Context, report liveSessionReport) (*bridge.GrokNativeObserver, error) {
+func openGrokConnectorObserver(ctx context.Context, report livepresence.Report) (*bridge.GrokNativeObserver, error) {
 	executable, err := launcher.ResolveProductExecutable(connectorProductGrok)
 	if err != nil {
 		return nil, err
@@ -342,7 +333,7 @@ func openGrokConnectorObserver(ctx context.Context, report liveSessionReport) (*
 	)
 }
 
-func deliverClaudeConnectorMessage(_ context.Context, _ liveSessionReport, messageID, body string) error {
+func deliverClaudeConnectorMessage(_ context.Context, _ livepresence.Report, messageID, body string) error {
 	return sendClaudeConnectorMessage(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"), messageID, body)
 }
 
@@ -380,10 +371,10 @@ func sendClaudeConnectorMessage(socket, messageID, message string) error {
 	return err
 }
 
-func connectorLiveReport(product string, getenv func(string) string) (liveSessionReport, bool) {
+func connectorLiveReport(product string, getenv func(string) string) (livepresence.Report, bool) {
 	report, ok := connectorReportFields(product, getenv)
 	if !ok {
-		return liveSessionReport{}, false
+		return livepresence.Report{}, false
 	}
 	uuid := ""
 	if product == connectorProductGrok {
@@ -406,38 +397,38 @@ func connectorLiveReport(product string, getenv func(string) string) (liveSessio
 		}
 	}
 	if uuid == "" {
-		return liveSessionReport{}, false
+		return livepresence.Report{}, false
 	}
 	report.UUID = uuid
 	return report, true
 }
 
-func connectorReportFields(product string, getenv func(string) string) (liveSessionReport, bool) {
+func connectorReportFields(product string, getenv func(string) string) (livepresence.Report, bool) {
 	var groups []string
 	if encoded := strings.TrimSpace(getenv("AGENT_SESSIONS_GROUPS")); encoded != "" {
 		if json.Unmarshal([]byte(encoded), &groups) != nil {
-			return liveSessionReport{}, false
+			return livepresence.Report{}, false
 		}
 	}
-	return liveSessionReport{
+	return livepresence.Report{
 		Name: strings.TrimSpace(getenv("AGENT_SESSIONS_SESSION_NAME")), Groups: append([]string(nil), groups...),
 		Product: product, Info: map[string]string{},
 	}, true
 }
 
-func claudeActiveSessionForParent(ctx context.Context, parentPID int, base liveSessionReport) (liveSessionReport, bool) {
+func claudeActiveSessionForParent(ctx context.Context, parentPID int, base livepresence.Report) (livepresence.Report, bool) {
 	executable, err := launcher.ResolveProductExecutable(connectorProductClaude)
 	if err != nil {
-		return liveSessionReport{}, false
+		return livepresence.Report{}, false
 	}
 	payload, err := exec.CommandContext(ctx, executable, "agents", "--json").Output() //nolint:gosec // selected native Claude executable.
 	if err != nil {
-		return liveSessionReport{}, false
+		return livepresence.Report{}, false
 	}
 	return claudeActiveSessionForParentFromJSON(payload, parentPID, base)
 }
 
-func claudeActiveSessionForParentFromJSON(payload []byte, parentPID int, base liveSessionReport) (liveSessionReport, bool) {
+func claudeActiveSessionForParentFromJSON(payload []byte, parentPID int, base livepresence.Report) (livepresence.Report, bool) {
 	var sessions []struct {
 		SessionID string `json:"sessionId"`
 		Name      string `json:"name"`
@@ -446,20 +437,20 @@ func claudeActiveSessionForParentFromJSON(payload []byte, parentPID int, base li
 		PID       int    `json:"pid"`
 	}
 	if json.Unmarshal(payload, &sessions) != nil {
-		return liveSessionReport{}, false
+		return livepresence.Report{}, false
 	}
-	var confirmed liveSessionReport
+	var confirmed livepresence.Report
 	for _, session := range sessions {
 		sessionID := strings.TrimSpace(session.SessionID)
 		if session.PID != parentPID || session.Kind != "interactive" || sessionID == "" {
 			continue
 		}
-		candidate := cloneLiveSessionReport(base)
+		candidate := livepresence.CloneReport(base)
 		candidate.UUID = sessionID
 		candidate.Name = strings.TrimSpace(session.Name)
-		candidate.Info = liveCwdInfo(strings.TrimSpace(session.Cwd))
+		candidate.Info = livepresence.CwdInfo(strings.TrimSpace(session.Cwd))
 		if confirmed.UUID != "" && (confirmed.UUID != candidate.UUID || confirmed.Name != candidate.Name || confirmed.Info["cwd"] != candidate.Info["cwd"]) {
-			return liveSessionReport{}, false
+			return livepresence.Report{}, false
 		}
 		confirmed = candidate
 	}

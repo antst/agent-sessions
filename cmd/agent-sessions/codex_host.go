@@ -19,6 +19,7 @@ import (
 	"github.com/antst/agent-sessions/internal/claudeprofile"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
@@ -58,7 +59,7 @@ type hostCoordinator struct {
 	laneProcesses        *structuredprocess.Supervisor
 	laneDrivers          *productruntime.LaneRegistry
 	lanes                map[string]*laneActor
-	liveReports          map[string]liveSessionReport
+	liveReports          map[string]livepresence.Report
 	reportedLanes        map[string]string
 	reportedPeers        map[string]bool
 	laneNames            map[string]map[string]laneNameEntry
@@ -94,7 +95,7 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 		pending: map[string]daemonpkg.NativeEvidence{}, pendingCodexLaunches: map[string]*pendingCodexLaunch{},
 		monitored:     map[string]bool{},
 		lanes:         map[string]*laneActor{},
-		liveReports:   map[string]liveSessionReport{},
+		liveReports:   map[string]livepresence.Report{},
 		reportedLanes: map[string]string{},
 		reportedPeers: map[string]bool{},
 		laneNames:     map[string]map[string]laneNameEntry{},
@@ -365,9 +366,9 @@ func (c *hostCoordinator) run(ctx context.Context) error {
 	case runtime = <-c.runtimeReady:
 	}
 	presence, err := startLivePresenceServer(ctx, c.stateRoot,
-		func(report liveSessionReport) { c.joinLiveSession(runtime, report) },
-		func(report liveSessionReport) { c.leaveLiveSession(runtime, report) },
-		func(callCtx context.Context, report liveSessionReport, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
+		func(report livepresence.Report) { c.joinLiveSession(runtime, report) },
+		func(report livepresence.Report) { c.leaveLiveSession(runtime, report) },
+		func(callCtx context.Context, report livepresence.Report, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
 			return c.handleLiveSessionCall(callCtx, runtime, report, requestID, method, params)
 		},
 	)
@@ -777,9 +778,9 @@ func runCodexNativePeer(ctx context.Context, launch launcher.CodexNativeLaunch) 
 		if err != nil {
 			return launcherHeldIdentity{}, err
 		}
-		report := liveSessionReport{
+		report := livepresence.Report{
 			UUID: confirmed.ThreadID, Name: confirmed.Name, Product: connectorProductCodex,
-			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(confirmed.Cwd),
+			Groups: append([]string(nil), launch.Groups...), Info: livepresence.CwdInfo(confirmed.Cwd),
 		}
 		return launcherHeldIdentity{report: report, call: func(
 			callCtx context.Context, method string, params json.RawMessage,

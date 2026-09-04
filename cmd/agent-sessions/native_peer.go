@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/livepresence"
 )
 
 type launcherHeldChild struct {
@@ -19,9 +21,9 @@ type launcherHeldChild struct {
 }
 
 type launcherHeldIdentity struct {
-	report liveSessionReport
+	report livepresence.Report
 	call   func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	watch  func(context.Context, *liveSessionClient, liveSessionReport)
+	watch  func(context.Context, *livepresence.Client, livepresence.Report)
 }
 
 type launcherHeldExit struct {
@@ -116,22 +118,17 @@ func runLauncherHeldPeer(
 		case <-runCtx.Done():
 			return runCtx.Err()
 		}
-		identity.report = normalizeLiveSessionReport(identity.report)
-		if !validLiveSessionReport(identity.report) {
+		identity.report = livepresence.NormalizeReport(identity.report)
+		if !livepresence.ValidReport(identity.report) {
 			return errors.New("product returned an invalid live session identity")
 		}
 
-		client := startLiveSessionClient(runCtx, defaultPresenceEndpoint(), identity.report, identity.call)
+		client := livepresence.StartClient(runCtx, defaultPresenceEndpoint(), identity.report, identity.call)
 		if identity.watch != nil {
 			identity.watch(runCtx, client, identity.report)
 		}
 		defer func() {
 			cancel()
-			client.mu.Lock()
-			if client.current != nil {
-				_ = client.current.connection.Close()
-			}
-			client.mu.Unlock()
 		}()
 	}
 	for {

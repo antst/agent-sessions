@@ -1,80 +1,18 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
-	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/stateroot"
 )
-
-const (
-	liveProtocolVersion          = 1
-	liveSessionReconnectInterval = 2 * time.Second
-)
-
-const (
-	liveRPCInvalidParams      = -32602
-	liveRPCUnknown            = -32001
-	liveRPCBusy               = -32002
-	liveRPCNotPermitted       = -32003
-	liveRPCUnsupportedVersion = -32004
-	liveRPCProductUnavailable = -32005
-	liveRPCProductFailure     = -32006
-)
-
-var (
-	errLiveInvalidParams      = errors.New("invalid params")
-	errLiveUnknown            = errors.New("unknown session or target")
-	errLiveBusy               = errors.New("session busy")
-	errLiveNotPermitted       = errors.New("operation not permitted")
-	errLiveNoRunningTurn      = errors.New("no running turn")
-	errLiveProductUnavailable = errors.New("product not launchable")
-)
-
-type liveClassifiedError struct {
-	class error
-	cause error
-}
-
-func (e liveClassifiedError) Error() string { return e.cause.Error() }
-func (e liveClassifiedError) Unwrap() error { return e.class }
-
-func classifyLiveError(class, cause error) error {
-	if cause == nil {
-		cause = class
-	}
-	return liveClassifiedError{class: class, cause: cause}
-}
-
-// liveSessionReport is the complete reconnect vocabulary. A connection that
-// carries this report is live; closing the connection removes the report.
-type liveSessionReport struct {
-	UUID         string                  `json:"uuid"`
-	Name         string                  `json:"name"`
-	Groups       []string                `json:"groups"`
-	Product      string                  `json:"product"`
-	Info         map[string]string       `json:"info"`
-	Capabilities liveSessionCapabilities `json:"capabilities,omitempty"`
-}
-
-type liveSessionCapabilities struct {
-	Lane bool `json:"lane,omitempty"`
-}
 
 type laneNameEntry struct {
 	UUID    string
@@ -84,143 +22,16 @@ type laneNameEntry struct {
 
 type livePresenceServer struct {
 	listener net.Listener
-	join     func(liveSessionReport)
-	leave    func(liveSessionReport)
-	call     func(context.Context, liveSessionReport, string, string, json.RawMessage) (json.RawMessage, error)
+	join     func(livepresence.Report)
+	leave    func(livepresence.Report)
+	call     func(context.Context, livepresence.Report, string, string, json.RawMessage) (json.RawMessage, error)
 
 	mu       sync.Mutex
-	current  map[string]*liveRPCConnection
+	current  map[string]*livepresence.Connection
 	changed  chan struct{}
 	wg       sync.WaitGroup
 	close    sync.Once
 	closeErr error
-}
-
-// liveRPCFrame is the complete newline-delimited JSON-RPC 2.0 vocabulary.
-type liveRPCFrame struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *liveRPCError   `json:"error,omitempty"`
-}
-
-type liveRPCError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
-}
-
-func (e *liveRPCError) Error() string {
-	if e == nil {
-		return "live RPC error"
-	}
-	return e.Message
-}
-
-func (e *liveRPCError) RPCErrorDetails() (int, string, json.RawMessage) {
-	if e == nil {
-		return liveRPCProductFailure, "live RPC error", nil
-	}
-	return e.Code, e.Message, append(json.RawMessage(nil), e.Data...)
-}
-
-type liveRPCConnection struct {
-	connection net.Conn
-	encoder    *json.Encoder
-	decoder    *json.Decoder
-
-	writeMu sync.Mutex
-	mu      sync.Mutex
-	pending map[string]chan liveRPCFrame
-	report  liveSessionReport
-}
-
-func newLiveRPCConnection(connection net.Conn) *liveRPCConnection {
-	return &liveRPCConnection{
-		connection: connection, encoder: json.NewEncoder(connection), decoder: json.NewDecoder(bufio.NewReader(connection)),
-		pending: map[string]chan liveRPCFrame{},
-	}
-}
-
-func (c *liveRPCConnection) write(frame liveRPCFrame) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.encoder.Encode(frame)
-}
-
-func (c *liveRPCConnection) call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
-	if strings.TrimSpace(id) == "" || strings.TrimSpace(method) == "" {
-		return nil, errors.New("live RPC request identity is incomplete")
-	}
-	body, err := json.Marshal(params)
-	if err != nil {
-		return nil, err
-	}
-	wireID, _ := json.Marshal(id)
-	key := string(wireID)
-	response := make(chan liveRPCFrame, 1)
-	c.mu.Lock()
-	if _, duplicate := c.pending[key]; duplicate {
-		c.mu.Unlock()
-		return nil, errors.New("live RPC request id is already outstanding")
-	}
-	c.pending[key] = response
-	c.mu.Unlock()
-	if err := c.write(liveRPCFrame{JSONRPC: "2.0", ID: wireID, Method: method, Params: body}); err != nil {
-		c.drop(key)
-		return nil, err
-	}
-	select {
-	case <-ctx.Done():
-		c.drop(key)
-		return nil, ctx.Err()
-	case frame, ok := <-response:
-		if !ok {
-			return nil, errors.New("live session disconnected")
-		}
-		if frame.Error != nil {
-			return nil, frame.Error
-		}
-		return append(json.RawMessage(nil), frame.Result...), nil
-	}
-}
-
-func (c *liveRPCConnection) drop(id string) {
-	c.mu.Lock()
-	delete(c.pending, id)
-	c.mu.Unlock()
-}
-
-func (c *liveRPCConnection) resolve(frame liveRPCFrame) bool {
-	key := string(frame.ID)
-	c.mu.Lock()
-	response := c.pending[key]
-	delete(c.pending, key)
-	c.mu.Unlock()
-	if response == nil {
-		return false
-	}
-	response <- frame
-	close(response)
-	return true
-}
-
-func (c *liveRPCConnection) fail() {
-	c.mu.Lock()
-	pending := c.pending
-	c.pending = map[string]chan liveRPCFrame{}
-	c.mu.Unlock()
-	for _, response := range pending {
-		close(response)
-	}
-}
-
-func (c *liveRPCConnection) liveReport() liveSessionReport {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return cloneLiveSessionReport(c.report)
 }
 
 func livePresenceEndpoint(stateRoot string) string {
@@ -238,9 +49,9 @@ func defaultPresenceEndpoint() string {
 func startLivePresenceServer(
 	ctx context.Context,
 	stateRoot string,
-	join func(liveSessionReport),
-	leave func(liveSessionReport),
-	call func(context.Context, liveSessionReport, string, string, json.RawMessage) (json.RawMessage, error),
+	join func(livepresence.Report),
+	leave func(livepresence.Report),
+	call func(context.Context, livepresence.Report, string, string, json.RawMessage) (json.RawMessage, error),
 ) (*livePresenceServer, error) {
 	endpoint := livePresenceEndpoint(stateRoot)
 	if err := os.MkdirAll(filepath.Dir(endpoint), 0o700); err != nil {
@@ -257,7 +68,7 @@ func startLivePresenceServer(
 	}
 	server := &livePresenceServer{
 		listener: listener, join: join, leave: leave, call: call,
-		current: map[string]*liveRPCConnection{}, changed: make(chan struct{}),
+		current: map[string]*livepresence.Connection{}, changed: make(chan struct{}),
 	}
 	server.wg.Add(1)
 	go server.accept()
@@ -285,27 +96,25 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	defer func() { _ = connection.Close() }()
 	requestCtx, cancelRequests := context.WithCancel(context.Background())
 	defer cancelRequests()
-	rpc := newLiveRPCConnection(connection)
-	defer rpc.fail()
-	decoder := rpc.decoder
-	decoder.DisallowUnknownFields()
-	var hello liveRPCFrame
-	if decoder.Decode(&hello) != nil || !validLiveRPCRequest(hello) || hello.Method != "session.hello" {
+	rpc := livepresence.NewConnection(connection)
+	defer rpc.Fail()
+	var hello livepresence.Frame
+	if rpc.Decode(&hello) != nil || !livepresence.ValidRequest(hello) || hello.Method != "session.hello" {
 		return
 	}
-	report, protocol, err := decodeLiveHello(hello.Params)
+	report, protocol, err := livepresence.DecodeHello(hello.Params)
 	if err != nil {
-		_ = rpc.write(liveRPCFailure(hello.ID, liveRPCInvalidParams, "Invalid params", map[string]any{"method": "session.hello"}))
+		_ = rpc.Write(livepresence.Failure(hello.ID, livepresence.InvalidParams, "Invalid params", map[string]any{"method": "session.hello"}))
 		return
 	}
-	if protocol != liveProtocolVersion {
-		_ = rpc.write(liveRPCFailure(hello.ID, liveRPCUnsupportedVersion, "Unsupported protocol version", map[string]any{
-			"supported": liveProtocolVersion, "received": protocol,
+	if protocol != livepresence.ProtocolVersion {
+		_ = rpc.Write(livepresence.Failure(hello.ID, livepresence.UnsupportedVersion, "Unsupported protocol version", map[string]any{
+			"supported": livepresence.ProtocolVersion, "received": protocol,
 		}))
 		return
 	}
-	rpc.report = cloneLiveSessionReport(report)
-	if err := rpc.write(liveRPCSuccess(hello.ID, json.RawMessage(`{}`))); err != nil {
+	rpc.SetReport(report)
+	if err := rpc.Write(livepresence.Success(hello.ID, json.RawMessage(`{}`))); err != nil {
 		return
 	}
 	s.mu.Lock()
@@ -314,19 +123,19 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	s.signalChangedLocked()
 	s.mu.Unlock()
 	if previous != nil {
-		_ = previous.connection.Close()
+		_ = previous.Close()
 	}
 	s.join(report)
 	for {
-		var frame liveRPCFrame
-		if decoder.Decode(&frame) != nil {
+		var frame livepresence.Frame
+		if rpc.Decode(&frame) != nil {
 			break
 		}
-		if !validLiveRPCFrame(frame) {
+		if !livepresence.ValidFrame(frame) {
 			break
 		}
 		if frame.Method == "" {
-			if !rpc.resolve(frame) {
+			if !rpc.Resolve(frame) {
 				break
 			}
 			continue
@@ -341,43 +150,38 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	}
 	s.mu.Unlock()
 	if current {
-		s.leave(rpc.liveReport())
+		s.leave(rpc.Report())
 	}
 }
 
-func (s *livePresenceServer) handleRequest(ctx context.Context, connection *liveRPCConnection, frame liveRPCFrame) {
+func (s *livePresenceServer) handleRequest(ctx context.Context, connection *livepresence.Connection, frame livepresence.Frame) {
 	if frame.Method == "session.update" {
-		name, info, err := decodeLiveUpdate(frame.Params)
+		name, info, err := livepresence.DecodeUpdate(frame.Params)
 		if err != nil {
-			_ = connection.write(liveRPCFailure(frame.ID, liveRPCInvalidParams, "Invalid params", map[string]any{"method": frame.Method}))
+			_ = connection.Write(livepresence.Failure(frame.ID, livepresence.InvalidParams, "Invalid params", map[string]any{"method": frame.Method}))
 			return
 		}
 		s.mu.Lock()
-		current := s.current[connection.report.UUID] == connection
+		current := s.current[connection.Report().UUID] == connection
 		s.mu.Unlock()
 		if !current {
 			return
 		}
-		connection.mu.Lock()
-		updated := cloneLiveSessionReport(connection.report)
-		updated.Name = name
-		updated.Info = cloneLiveInfo(info)
-		connection.report = updated
-		connection.mu.Unlock()
+		updated := connection.UpdateReport(name, info)
 		s.join(updated)
-		_ = connection.write(liveRPCSuccess(frame.ID, json.RawMessage(`{}`)))
+		_ = connection.Write(livepresence.Success(frame.ID, json.RawMessage(`{}`)))
 		return
 	}
 	if s.call == nil {
-		_ = connection.write(liveRPCFailure(frame.ID, liveRPCNotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
+		_ = connection.Write(livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
 		return
 	}
-	result, err := s.call(ctx, connection.liveReport(), liveRPCIDText(frame.ID), frame.Method, frame.Params)
-	response := liveRPCSuccess(frame.ID, result)
+	result, err := s.call(ctx, connection.Report(), livepresence.IDText(frame.ID), frame.Method, frame.Params)
+	response := livepresence.Success(frame.ID, result)
 	if err != nil {
-		response = liveRPCFailureFromError(frame.ID, frame.Method, err)
+		response = livepresence.FailureFromError(frame.ID, frame.Method, err)
 	}
-	_ = connection.write(response)
+	_ = connection.Write(response)
 }
 
 func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, params any) (json.RawMessage, error) {
@@ -385,9 +189,9 @@ func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, 
 	connection := s.current[uuid]
 	s.mu.Unlock()
 	if connection == nil {
-		return nil, classifyLiveError(errLiveUnknown, errors.New("live session is unavailable"))
+		return nil, livepresence.ClassifyError(livepresence.ErrUnknown, errors.New("live session is unavailable"))
 	}
-	return connection.call(ctx, "daemon."+id, method, params)
+	return connection.Call(ctx, "daemon."+id, method, params)
 }
 
 func (s *livePresenceServer) Wait(ctx context.Context, uuid, product string, lane bool) error {
@@ -395,9 +199,9 @@ func (s *livePresenceServer) Wait(ctx context.Context, uuid, product string, lan
 		s.mu.Lock()
 		connection := s.current[uuid]
 		changed := s.changed
-		var report liveSessionReport
+		var report livepresence.Report
 		if connection != nil {
-			report = connection.liveReport()
+			report = connection.Report()
 		}
 		s.mu.Unlock()
 		if connection != nil && report.Product == product && (!lane || report.Capabilities.Lane) {
@@ -420,9 +224,9 @@ func (s *livePresenceServer) Close() error {
 	s.close.Do(func() {
 		s.closeErr = s.listener.Close()
 		s.mu.Lock()
-		connections := make([]net.Conn, 0, len(s.current))
+		connections := make([]*livepresence.Connection, 0, len(s.current))
 		for _, connection := range s.current {
-			connections = append(connections, connection.connection)
+			connections = append(connections, connection)
 		}
 		s.mu.Unlock()
 		for _, connection := range connections {
@@ -436,410 +240,7 @@ func (s *livePresenceServer) Close() error {
 	return s.closeErr
 }
 
-func validLiveSessionReport(report liveSessionReport) bool {
-	return strings.TrimSpace(report.UUID) != "" && strings.TrimSpace(report.Product) != "" && report.Groups != nil && report.Info != nil
-}
-
-func cloneLiveSessionReport(report liveSessionReport) liveSessionReport {
-	groups := make([]string, len(report.Groups))
-	copy(groups, report.Groups)
-	report.Groups = groups
-	report.Info = cloneLiveInfo(report.Info)
-	return report
-}
-
-func cloneLiveInfo(info map[string]string) map[string]string {
-	cloned := make(map[string]string, len(info))
-	for key, value := range info {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func liveCwdInfo(cwd string) map[string]string {
-	info := map[string]string{}
-	if strings.TrimSpace(cwd) != "" {
-		info["cwd"] = cwd
-	}
-	return info
-}
-
-func validLiveRPCRequest(frame liveRPCFrame) bool {
-	return frame.JSONRPC == "2.0" && validLiveRPCID(frame.ID) && strings.TrimSpace(frame.Method) != "" &&
-		len(frame.Params) != 0 && json.Valid(frame.Params) && frame.Result == nil && frame.Error == nil
-}
-
-func validLiveRPCFrame(frame liveRPCFrame) bool {
-	if validLiveRPCRequest(frame) {
-		return true
-	}
-	if frame.JSONRPC != "2.0" || !validLiveRPCID(frame.ID) || frame.Method != "" || frame.Params != nil {
-		return false
-	}
-	return frame.Result != nil && frame.Error == nil || frame.Result == nil && validLiveRPCError(frame.Error)
-}
-
-func validLiveRPCID(raw json.RawMessage) bool {
-	if len(raw) == 0 || !json.Valid(raw) {
-		return false
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if decoder.Decode(&value) != nil {
-		return false
-	}
-	switch value.(type) {
-	case string, json.Number:
-		return true
-	default:
-		return false
-	}
-}
-
-func liveRPCIDText(raw json.RawMessage) string {
-	var value any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if decoder.Decode(&value) != nil {
-		return ""
-	}
-	return fmt.Sprint(value)
-}
-
-func validLiveRPCError(rpcErr *liveRPCError) bool {
-	if rpcErr == nil || strings.TrimSpace(rpcErr.Message) == "" {
-		return false
-	}
-	switch rpcErr.Code {
-	case liveRPCInvalidParams, liveRPCUnknown, liveRPCBusy, liveRPCNotPermitted,
-		liveRPCUnsupportedVersion, liveRPCProductUnavailable, liveRPCProductFailure:
-		return rpcErr.Data == nil || json.Valid(rpcErr.Data)
-	default:
-		return false
-	}
-}
-
-func decodeLiveHello(raw json.RawMessage) (liveSessionReport, int, error) {
-	var params struct {
-		Protocol     *int                     `json:"protocol"`
-		UUID         *string                  `json:"uuid"`
-		Name         *string                  `json:"name"`
-		Groups       *[]string                `json:"groups"`
-		Product      *string                  `json:"product"`
-		Info         *map[string]string       `json:"info"`
-		Capabilities *liveSessionCapabilities `json:"capabilities,omitempty"`
-	}
-	if err := decodeStrictJSON(raw, &params); err != nil || params.Protocol == nil || params.UUID == nil || params.Name == nil ||
-		params.Groups == nil || params.Product == nil || params.Info == nil || params.Capabilities != nil && !params.Capabilities.Lane {
-		return liveSessionReport{}, 0, errors.New("session hello is invalid")
-	}
-	groups := make([]string, len(*params.Groups))
-	copy(groups, *params.Groups)
-	report := liveSessionReport{
-		UUID: *params.UUID, Name: *params.Name, Groups: groups,
-		Product: *params.Product, Info: cloneLiveInfo(*params.Info),
-	}
-	if params.Capabilities != nil {
-		report.Capabilities = *params.Capabilities
-	}
-	if !validLiveSessionReport(report) {
-		return liveSessionReport{}, *params.Protocol, errors.New("session hello is invalid")
-	}
-	return report, *params.Protocol, nil
-}
-
-func decodeLiveUpdate(raw json.RawMessage) (string, map[string]string, error) {
-	var params struct {
-		Name *string            `json:"name"`
-		Info *map[string]string `json:"info"`
-	}
-	if err := decodeStrictJSON(raw, &params); err != nil || params.Name == nil || params.Info == nil {
-		return "", nil, errors.New("session update is invalid")
-	}
-	return *params.Name, cloneLiveInfo(*params.Info), nil
-}
-
-func decodeStrictJSON(raw json.RawMessage, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("JSON value has trailing content")
-	}
-	return nil
-}
-
-func liveRPCSuccess(id, result json.RawMessage) liveRPCFrame {
-	if result == nil {
-		result = json.RawMessage(`null`)
-	}
-	return liveRPCFrame{JSONRPC: "2.0", ID: append(json.RawMessage(nil), id...), Result: result}
-}
-
-func liveRPCFailure(id json.RawMessage, code int, message string, data any) liveRPCFrame {
-	var encoded json.RawMessage
-	if data != nil {
-		encoded, _ = json.Marshal(data)
-	}
-	return liveRPCFrame{JSONRPC: "2.0", ID: append(json.RawMessage(nil), id...), Error: &liveRPCError{
-		Code: code, Message: message, Data: encoded,
-	}}
-}
-
-func newLiveRPCError(code int, message string, data any) error {
-	frame := liveRPCFailure(json.RawMessage(`0`), code, message, data)
-	return frame.Error
-}
-
-func liveRPCFailureFromError(id json.RawMessage, method string, err error) liveRPCFrame {
-	var remote *liveRPCError
-	if errors.As(err, &remote) && validLiveRPCError(remote) {
-		return liveRPCFrame{JSONRPC: "2.0", ID: append(json.RawMessage(nil), id...), Error: remote}
-	}
-	var unknownTarget *federationpkg.UnknownTargetError
-	if errors.As(err, &unknownTarget) {
-		return liveRPCFailure(id, liveRPCUnknown, "Unknown session or target", map[string]any{"target": unknownTarget.Target})
-	}
-	var forbiddenGroup *federationpkg.GroupNotPermittedError
-	if errors.As(err, &forbiddenGroup) {
-		return liveRPCFailure(id, liveRPCNotPermitted, "Operation not permitted", map[string]any{"group": forbiddenGroup.Group})
-	}
-	if errors.Is(err, daemonpkg.InactiveControlError()) || errors.Is(err, federationpkg.ErrUnknownTarget) || errors.Is(err, errLiveUnknown) {
-		return liveRPCFailure(id, liveRPCUnknown, "Unknown session or target", map[string]any{"detail": err.Error()})
-	}
-	if errors.Is(err, errLiveInvalidParams) {
-		return liveRPCFailure(id, liveRPCInvalidParams, "Invalid params", map[string]any{"detail": err.Error()})
-	}
-	if errors.Is(err, errLiveNoRunningTurn) {
-		return liveRPCFailure(id, liveRPCNotPermitted, "Operation not permitted", map[string]any{"reason": "no running turn"})
-	}
-	if errors.Is(err, productruntime.ErrUnsupportedSteer) {
-		return liveRPCFailure(id, liveRPCNotPermitted, "Operation not permitted", map[string]any{"reason": "steer unsupported"})
-	}
-	if errors.Is(err, errLiveNotPermitted) || errors.Is(err, productruntime.ErrUnauthorized) ||
-		errors.Is(err, productruntime.ErrUnsupportedPolicy) || errors.Is(err, productruntime.ErrUnsupportedRename) {
-		return liveRPCFailure(id, liveRPCNotPermitted, "Operation not permitted", map[string]any{"detail": err.Error()})
-	}
-	if errors.Is(err, errLiveBusy) || errors.Is(err, productruntime.ErrAmbiguousSession) {
-		return liveRPCFailure(id, liveRPCBusy, "Session busy", map[string]any{"detail": err.Error()})
-	}
-	if errors.Is(err, errLiveProductUnavailable) || errors.Is(err, productruntime.ErrUnavailable) || errors.Is(err, productruntime.ErrIncompatible) {
-		return liveRPCFailure(id, liveRPCProductUnavailable, "Product not launchable", map[string]any{"detail": err.Error()})
-	}
-	return liveRPCFailure(id, liveRPCProductFailure, err.Error(), map[string]any{
-		"detail": err.Error(), "agent_sessions_bug_report": sessiontools.BugReportGuidance,
-	})
-}
-
-type liveSessionClient struct {
-	ctx           context.Context
-	endpoint      string
-	report        liveSessionReport
-	resolveReport func(context.Context) (liveSessionReport, bool)
-
-	mu      sync.Mutex
-	current *liveRPCConnection
-	call    func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-}
-
-func startLiveSessionClient(
-	ctx context.Context,
-	endpoint string,
-	report liveSessionReport,
-	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
-) *liveSessionClient {
-	report = normalizeLiveSessionReport(report)
-	client := &liveSessionClient{ctx: ctx, endpoint: endpoint, report: report, call: call}
-	if validLiveSessionReport(report) {
-		go client.run()
-	}
-	return client
-}
-
-func startResolvingLiveSessionClient(
-	ctx context.Context,
-	endpoint string,
-	resolveReport func(context.Context) (liveSessionReport, bool),
-	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
-) *liveSessionClient {
-	client := &liveSessionClient{ctx: ctx, endpoint: endpoint, resolveReport: resolveReport, call: call}
-	go client.run()
-	return client
-}
-
-func (c *liveSessionClient) Call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
-	c.mu.Lock()
-	connection := c.current
-	resolvesProductIdentity := c.resolveReport != nil
-	c.mu.Unlock()
-	if connection == nil {
-		if resolvesProductIdentity {
-			return nil, errors.New("live session identity is not confirmed by the product")
-		}
-		return nil, errors.New("Agent Sessions daemon is unavailable")
-	}
-	return connection.call(ctx, "session."+id, method, params)
-}
-
-func (c *liveSessionClient) UpdateReport(ctx context.Context, report liveSessionReport) error {
-	report = normalizeLiveSessionReport(report)
-	if !validLiveSessionReport(report) {
-		return errors.New("live session update is invalid")
-	}
-	c.mu.Lock()
-	c.report = cloneLiveSessionReport(report)
-	connection := c.current
-	c.mu.Unlock()
-	if connection == nil {
-		return nil
-	}
-	_, err := connection.call(ctx, "session.update", "session.update", map[string]any{"name": report.Name, "info": report.Info})
-	return err
-}
-
-func normalizeLiveSessionReport(report liveSessionReport) liveSessionReport {
-	if report.Groups == nil {
-		report.Groups = []string{}
-	}
-	if report.Info == nil {
-		report.Info = map[string]string{}
-	}
-	return cloneLiveSessionReport(report)
-}
-
-func (c *liveSessionClient) run() {
-	for c.ctx.Err() == nil {
-		connection, err := (&net.Dialer{}).DialContext(c.ctx, "unix", c.endpoint)
-		if err == nil {
-			c.mu.Lock()
-			report := cloneLiveSessionReport(c.report)
-			resolveReport := c.resolveReport
-			c.mu.Unlock()
-			confirmed := true
-			if resolveReport != nil {
-				report, confirmed = resolveReport(c.ctx)
-			}
-			report = normalizeLiveSessionReport(report)
-			if !confirmed || !validLiveSessionReport(report) {
-				_ = connection.Close()
-			} else {
-				rpc := newLiveRPCConnection(connection)
-				rpc.decoder.DisallowUnknownFields()
-				closed := make(chan struct{})
-				go func() {
-					select {
-					case <-c.ctx.Done():
-						_ = connection.Close()
-					case <-closed:
-					}
-				}()
-				c.mu.Lock()
-				c.report = cloneLiveSessionReport(report)
-				err = liveSessionHello(rpc, report)
-				if err == nil {
-					rpc.report = cloneLiveSessionReport(report)
-					c.current = rpc
-				}
-				c.mu.Unlock()
-				if err == nil {
-					readCtx, stopReads := context.WithCancel(c.ctx)
-					c.read(readCtx, rpc)
-					stopReads()
-					c.mu.Lock()
-					if c.current == rpc {
-						c.current = nil
-					}
-					c.mu.Unlock()
-				}
-				rpc.fail()
-				_ = connection.Close()
-				close(closed)
-			}
-		}
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-time.After(liveSessionReconnectInterval):
-		}
-	}
-}
-
-func (c *liveSessionClient) read(ctx context.Context, connection *liveRPCConnection) {
-	for {
-		var frame liveRPCFrame
-		if connection.decoder.Decode(&frame) != nil {
-			return
-		}
-		if !validLiveRPCFrame(frame) {
-			return
-		}
-		if frame.Method == "" {
-			if !connection.resolve(frame) {
-				return
-			}
-			continue
-		}
-		go func(frame liveRPCFrame) {
-			response := liveRPCSuccess(frame.ID, nil)
-			if c.call == nil {
-				response = liveRPCFailure(frame.ID, liveRPCNotPermitted, "Operation not permitted", map[string]any{"method": frame.Method})
-			} else {
-				result, err := c.call(ctx, frame.Method, frame.Params)
-				if err != nil {
-					response = liveRPCFailureFromError(frame.ID, frame.Method, err)
-				} else {
-					response = liveRPCSuccess(frame.ID, result)
-				}
-			}
-			_ = connection.write(response)
-		}(frame)
-	}
-}
-
-func liveSessionHello(connection *liveRPCConnection, report liveSessionReport) error {
-	id := json.RawMessage(`"session.hello"`)
-	hello := map[string]any{
-		"protocol": liveProtocolVersion, "uuid": report.UUID, "name": report.Name,
-		"groups": report.Groups, "product": report.Product, "info": report.Info,
-	}
-	if report.Capabilities.Lane {
-		hello["capabilities"] = report.Capabilities
-	}
-	params, err := json.Marshal(hello)
-	if err != nil {
-		return err
-	}
-	if err := connection.write(liveRPCFrame{JSONRPC: "2.0", ID: id, Method: "session.hello", Params: params}); err != nil {
-		return err
-	}
-	var response liveRPCFrame
-	if err := connection.decoder.Decode(&response); err != nil || !validLiveRPCFrame(response) || response.Method != "" || string(response.ID) != string(id) {
-		return errors.New("live session hello returned an invalid response")
-	}
-	if response.Error != nil {
-		return response.Error
-	}
-	return nil
-}
-
-func maintainLivePresence(ctx context.Context, endpoint string, report liveSessionReport) {
-	report = normalizeLiveSessionReport(report)
-	if !validLiveSessionReport(report) {
-		return
-	}
-	client := startLiveSessionClient(ctx, endpoint, report, nil)
-	<-ctx.Done()
-	client.mu.Lock()
-	if client.current != nil {
-		_ = client.current.connection.Close()
-	}
-	client.mu.Unlock()
-}
-
-func (c *hostCoordinator) joinLiveSession(runtime *daemonpkg.Runtime, report liveSessionReport) {
+func (c *hostCoordinator) joinLiveSession(runtime *daemonpkg.Runtime, report livepresence.Report) {
 	c.mu.Lock()
 	if _, existed := c.liveReports[report.UUID]; !existed {
 		delete(c.laneNames, report.UUID)
@@ -849,7 +250,7 @@ func (c *hostCoordinator) joinLiveSession(runtime *daemonpkg.Runtime, report liv
 	c.syncLiveSessions(runtime)
 }
 
-func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report liveSessionReport) {
+func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report livepresence.Report) {
 	c.mu.Lock()
 	current, ok := c.liveReports[report.UUID]
 	departed := ok && current.Product == report.Product
@@ -867,7 +268,7 @@ func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report li
 func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
 	hostID := runtime.HostID()
 	c.mu.Lock()
-	reports := make(map[string]liveSessionReport, len(c.liveReports))
+	reports := make(map[string]livepresence.Report, len(c.liveReports))
 	for id, report := range c.liveReports {
 		reports[id] = report
 	}
@@ -970,7 +371,7 @@ func (c *hostCoordinator) reportedLaneContextLocked(nativeID string) (string, st
 	return "", ""
 }
 
-func (c *hostCoordinator) unboundReportedLaneContextLocked(parentID string, report liveSessionReport) string {
+func (c *hostCoordinator) unboundReportedLaneContextLocked(parentID string, report livepresence.Report) string {
 	for actorKey, actor := range c.lanes {
 		if actor == nil || actor.parentID != parentID || actor.product != report.Product || actor.name != report.Name {
 			continue
@@ -982,7 +383,7 @@ func (c *hostCoordinator) unboundReportedLaneContextLocked(parentID string, repo
 	return ""
 }
 
-func reportParentFromGroups(hostID string, report liveSessionReport, reports map[string]liveSessionReport) string {
+func reportParentFromGroups(hostID string, report livepresence.Report, reports map[string]livepresence.Report) string {
 	for id := range reports {
 		if id == report.UUID {
 			continue

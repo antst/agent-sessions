@@ -13,6 +13,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
@@ -72,7 +73,7 @@ func (driver *cwdRecordingLaneDriver) WaitTurn(context.Context, productruntime.N
 func TestLiveSessionDispatchExposesExactlyTheFirstClassV1Methods(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
-	report := liveSessionReport{UUID: "missing-source", Product: "future", Groups: []string{"team"}, Info: map[string]string{}}
+	report := livepresence.Report{UUID: "missing-source", Product: "future", Groups: []string{"team"}, Info: map[string]string{}}
 	supported := map[string]string{
 		"peers.list":     `{}`,
 		"message.send":   `{"target":"peer","message":"hello"}`,
@@ -87,21 +88,21 @@ func TestLiveSessionDispatchExposesExactlyTheFirstClassV1Methods(t *testing.T) {
 	}
 	for method, params := range supported {
 		_, err := coordinator.handleLiveSessionCall(context.Background(), runtime, report, "request", method, json.RawMessage(params))
-		var rpcErr *liveRPCError
-		if errors.As(err, &rpcErr) && rpcErr.Code == liveRPCNotPermitted {
+		var rpcErr *livepresence.RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == livepresence.NotPermitted {
 			t.Fatalf("supported method %s was refused: %v", method, err)
 		}
 	}
 	_, err := coordinator.handleLiveSessionCall(context.Background(), runtime, report, "request", "lane.status",
 		json.RawMessage(`{"product":"codex","arguments":["worker"],"cwd":"relative"}`))
-	var invalid *liveRPCError
-	if !errors.As(err, &invalid) || invalid.Code != liveRPCInvalidParams {
+	var invalid *livepresence.RPCError
+	if !errors.As(err, &invalid) || invalid.Code != livepresence.InvalidParams {
 		t.Fatalf("relative lane cwd = %v", err)
 	}
 	for _, method := range []string{"tool.call", "tools/call", "lane.collect", "broadcast", "identity"} {
 		_, err := coordinator.handleLiveSessionCall(context.Background(), runtime, report, "request", method, json.RawMessage(`{}`))
-		var rpcErr *liveRPCError
-		if !errors.As(err, &rpcErr) || rpcErr.Code != liveRPCNotPermitted {
+		var rpcErr *livepresence.RPCError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != livepresence.NotPermitted {
 			t.Fatalf("legacy method %s = %v", method, err)
 		}
 	}
@@ -193,16 +194,16 @@ func TestMessagingToolsDeliverLaneThroughOneNativePathWithoutReadingItsState(t *
 func TestPluginLaneMessageUsesPresenceOnceAndReturnsProductErrorVerbatim(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	joined := make(chan liveSessionReport, 1)
-	server, err := startLivePresenceServer(ctx, shortDaemonTestRoot(t), func(report liveSessionReport) {
+	joined := make(chan livepresence.Report, 1)
+	server, err := startLivePresenceServer(ctx, shortDaemonTestRoot(t), func(report livepresence.Report) {
 		joined <- report
-	}, func(liveSessionReport) {}, nil)
+	}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
 	calls := 0
-	startLiveSessionClient(ctx, server.listener.Addr().String(), liveSessionReport{
+	livepresence.StartClient(ctx, server.listener.Addr().String(), livepresence.Report{
 		UUID: "native-id", Name: "worker", Groups: []string{"shared"}, Product: "qwen",
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		calls++
@@ -253,15 +254,15 @@ func TestLaneCanListAndMessageParentThroughItsPrivateAnchor(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	presence, err := startLivePresenceServer(ctx, root,
-		func(report liveSessionReport) { coordinator.joinLiveSession(runtime, report) },
-		func(report liveSessionReport) { coordinator.leaveLiveSession(runtime, report) }, nil)
+		func(report livepresence.Report) { coordinator.joinLiveSession(runtime, report) },
+		func(report livepresence.Report) { coordinator.leaveLiveSession(runtime, report) }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = presence.Close() })
 	coordinator.presence = presence
 	delivered := make(chan productruntime.NativeMessage, 2)
-	_ = startLiveSessionClient(ctx, presence.listener.Addr().String(), liveSessionReport{
+	_ = livepresence.StartClient(ctx, presence.listener.Addr().String(), livepresence.Report{
 		UUID: "parent-id", Name: "parent-name", Product: "claude",
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if method != "message.deliver" {

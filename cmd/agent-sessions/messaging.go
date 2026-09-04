@@ -11,6 +11,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
@@ -29,31 +30,31 @@ type connectorToolEnvelope struct {
 func (c *hostCoordinator) handleLiveSessionCall(
 	ctx context.Context,
 	runtime *daemonpkg.Runtime,
-	report liveSessionReport,
+	report livepresence.Report,
 	requestID string,
 	method string,
 	params json.RawMessage,
 ) (json.RawMessage, error) {
 	switch method {
 	case "peers.list":
-		if err := decodeStrictJSON(params, &struct{}{}); err != nil {
-			return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
+		if err := livepresence.DecodeStrict(params, &struct{}{}); err != nil {
+			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "list_peers", map[string]any{}, nil)
 	case "message.send":
 		arguments, err := decodeLiveMessageSend(params)
 		if err != nil {
-			return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
+			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "send_message", arguments, nil)
 	case "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
 		arguments, invocationCwd, err := decodeLiveLaneCall(method, params)
 		if err != nil {
-			return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
+			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "lane", arguments, &invocationCwd)
 	default:
-		return nil, newLiveRPCError(liveRPCNotPermitted, "Operation not permitted", map[string]any{"method": method})
+		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
 	}
 }
 
@@ -80,7 +81,7 @@ func decodeLiveMessageSend(raw json.RawMessage) (map[string]any, error) {
 		Group   *string   `json:"group"`
 		Message *string   `json:"message"`
 	}
-	if err := decodeStrictJSON(raw, &params); err != nil || params.Message == nil || strings.TrimSpace(*params.Message) == "" ||
+	if err := livepresence.DecodeStrict(raw, &params); err != nil || params.Message == nil || strings.TrimSpace(*params.Message) == "" ||
 		boolCount(params.Target != nil, params.Targets != nil, params.Group != nil) != 1 {
 		return nil, errors.New("message send params are invalid")
 	}
@@ -123,7 +124,7 @@ func decodeLiveLaneCall(method string, raw json.RawMessage) (map[string]any, str
 		Host      *string   `json:"host"`
 		Cwd       *string   `json:"cwd"`
 	}
-	if err := decodeStrictJSON(raw, &params); err != nil || params.Product == nil || strings.TrimSpace(*params.Product) == "" || params.Arguments == nil {
+	if err := livepresence.DecodeStrict(raw, &params); err != nil || params.Product == nil || strings.TrimSpace(*params.Product) == "" || params.Arguments == nil {
 		return nil, "", errors.New("lane params are invalid")
 	}
 	needsInput := method == "lane.start" || method == "lane.run" || method == "lane.resume" || method == "lane.steer"
@@ -569,7 +570,7 @@ func publicLocalTarget(target localPeerTarget) map[string]any {
 			"id": target.attachment.ID, "session_id": target.attachment.NativeSessionID,
 			"name": target.name, "product": target.attachment.Product, "status": "live",
 			"cwd": target.attachment.Cwd, "groups": append([]string(nil), target.attachment.Groups...),
-			"permission_mode": target.attachment.PermissionMode, "info": cloneLiveInfo(target.attachment.Info),
+			"permission_mode": target.attachment.PermissionMode, "info": livepresence.CloneInfo(target.attachment.Info),
 		}
 	}
 	if target.lane == nil {
@@ -734,7 +735,7 @@ func publicAttachment(attachment daemonpkg.ManagedAttachment, name string) map[s
 		"id": attachment.ID, "session_id": attachment.NativeSessionID,
 		"name": name, "product": attachment.Product, "status": "live",
 		"cwd": attachment.Cwd, "groups": append([]string(nil), attachment.Groups...),
-		"permission_mode": attachment.PermissionMode, "info": cloneLiveInfo(attachment.Info),
+		"permission_mode": attachment.PermissionMode, "info": livepresence.CloneInfo(attachment.Info),
 	}
 }
 

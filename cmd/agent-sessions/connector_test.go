@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/livepresence"
 )
 
 func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *testing.T) {
@@ -78,7 +80,7 @@ func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
 	if err := os.Remove(deleted); err != nil {
 		t.Fatal(err)
 	}
-	live := &liveSessionClient{}
+	live := &livepresence.Client{}
 	for _, params := range []json.RawMessage{
 		json.RawMessage(`{"name":"list_peers","arguments":{}}`),
 		json.RawMessage(`{"name":"send_message","arguments":{"target":"peer","message":"hello"}}`),
@@ -247,7 +249,7 @@ func TestClaudeConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
 		"message_id": "message-1", "body": "hello",
 		"from": map[string]any{"uuid": "parent", "name": "parent", "product": "codex", "groups": []string{"team"}},
 	})
-	if _, err := connectorNativeCall(context.Background(), liveSessionReport{UUID: "session-1", Product: "claude"}, "message.deliver", params); err != nil {
+	if _, err := connectorNativeCall(context.Background(), livepresence.Report{UUID: "session-1", Product: "claude"}, "message.deliver", params); err != nil {
 		t.Fatal(err)
 	}
 	select {

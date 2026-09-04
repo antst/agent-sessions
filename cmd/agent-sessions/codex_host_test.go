@@ -13,6 +13,7 @@ import (
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/procinfo"
 	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
@@ -118,11 +119,11 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 	t.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot)
 	serverCtx, stopServer := context.WithCancel(context.Background())
 	defer stopServer()
-	joined := make(chan liveSessionReport, 1)
-	left := make(chan liveSessionReport, 1)
+	joined := make(chan livepresence.Report, 1)
+	left := make(chan livepresence.Report, 1)
 	server, err := startLivePresenceServer(serverCtx, stateRoot,
-		func(report liveSessionReport) { joined <- report },
-		func(report liveSessionReport) { left <- report }, nil)
+		func(report livepresence.Report) { joined <- report },
+		func(report livepresence.Report) { left <- report }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +131,8 @@ func TestCodexLauncherOwnsPresenceForExactChildLifetime(t *testing.T) {
 
 	original := connectorNativeAdapters[connectorProductCodex]
 	defer func() { connectorNativeAdapters[connectorProductCodex] = original }()
-	delivered := make(chan liveSessionReport, 1)
-	connectorNativeAdapters[connectorProductCodex] = func(_ context.Context, report liveSessionReport, _ string, body string) error {
+	delivered := make(chan livepresence.Report, 1)
+	connectorNativeAdapters[connectorProductCodex] = func(_ context.Context, report livepresence.Report, _ string, body string) error {
 		if !strings.Contains(body, "hello") || !strings.Contains(body, `from-session="parent"`) {
 			t.Errorf("delivered body = %q", body)
 		}
@@ -226,10 +227,10 @@ func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
 	runtime := newPresenceTestRuntime(t)
 	coordinator.publishRuntime(runtime)
-	coordinator.joinLiveSession(runtime, liveSessionReport{
+	coordinator.joinLiveSession(runtime, livepresence.Report{
 		UUID: "codex-thread", Name: "launch-name", Product: "codex", Groups: []string{"project"}, Info: map[string]string{},
 	})
-	coordinator.joinLiveSession(runtime, liveSessionReport{
+	coordinator.joinLiveSession(runtime, livepresence.Report{
 		UUID: "claude-session", Name: "claude-name", Product: "claude", Groups: []string{"project"}, Info: map[string]string{},
 	})
 
@@ -245,13 +246,13 @@ func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
 	if title, ok, err := runtime.Attachments().LiveNativeTitle("claude-session"); err != nil || !ok || title != "claude-name" {
 		t.Fatalf("Claude title changed by Codex event: %q, ok=%v, err=%v", title, ok, err)
 	}
-	coordinator.joinLiveSession(runtime, liveSessionReport{
+	coordinator.joinLiveSession(runtime, livepresence.Report{
 		UUID: "unrelated", Name: "updated-peer", Product: "qwen", Groups: []string{"project"}, Info: map[string]string{},
 	})
 	if title, ok, err := runtime.Attachments().LiveNativeTitle("codex-thread"); err != nil || !ok || title != "native-name" {
 		t.Fatalf("unrelated report reverted Codex title: %q, ok=%v, err=%v", title, ok, err)
 	}
-	coordinator.leaveLiveSession(runtime, liveSessionReport{UUID: "codex-thread", Product: "codex"})
+	coordinator.leaveLiveSession(runtime, livepresence.Report{UUID: "codex-thread", Product: "codex"})
 	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{
 		Kind: "thread/name/updated", ThreadID: "codex-thread", Name: "late-name",
 	})

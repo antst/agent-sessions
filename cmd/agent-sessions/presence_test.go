@@ -15,6 +15,7 @@ import (
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
@@ -25,23 +26,23 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 		code   int
 		reason string
 	}{
-		{name: "unknown", err: fmt.Errorf("%w: missing", federationpkg.ErrUnknownTarget), code: liveRPCUnknown},
-		{name: "busy", err: classifyLiveError(errLiveBusy, errors.New("exact busy detail")), code: liveRPCBusy},
-		{name: "no running turn", err: classifyLiveError(errLiveNoRunningTurn, errors.New("exact turn detail")), code: liveRPCNotPermitted, reason: "no running turn"},
-		{name: "steer unsupported", err: productruntime.ErrUnsupportedSteer, code: liveRPCNotPermitted, reason: "steer unsupported"},
-		{name: "unavailable", err: productruntime.ErrUnavailable, code: liveRPCProductUnavailable},
-		{name: "product failure", err: errors.New("product exact failure"), code: liveRPCProductFailure},
+		{name: "unknown", err: fmt.Errorf("%w: missing", federationpkg.ErrUnknownTarget), code: livepresence.Unknown},
+		{name: "busy", err: livepresence.ClassifyError(livepresence.ErrBusy, errors.New("exact busy detail")), code: livepresence.Busy},
+		{name: "no running turn", err: livepresence.ClassifyError(livepresence.ErrNoRunningTurn, errors.New("exact turn detail")), code: livepresence.NotPermitted, reason: "no running turn"},
+		{name: "steer unsupported", err: productruntime.ErrUnsupportedSteer, code: livepresence.NotPermitted, reason: "steer unsupported"},
+		{name: "unavailable", err: productruntime.ErrUnavailable, code: livepresence.ProductUnavailable},
+		{name: "product failure", err: errors.New("product exact failure"), code: livepresence.ProductFailure},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			frame := liveRPCFailureFromError(json.RawMessage(`1`), "lane.steer", test.err)
+			frame := livepresence.FailureFromError(json.RawMessage(`1`), "lane.steer", test.err)
 			if frame.Error == nil || frame.Error.Code != test.code {
 				t.Fatalf("error frame = %+v", frame)
 			}
-			if test.code == liveRPCProductFailure && frame.Error.Message != test.err.Error() {
+			if test.code == livepresence.ProductFailure && frame.Error.Message != test.err.Error() {
 				t.Fatalf("product message = %q", frame.Error.Message)
 			}
-			if test.code == liveRPCProductFailure && !strings.Contains(string(frame.Error.Data), `"agent_sessions_bug_report"`) {
+			if test.code == livepresence.ProductFailure && !strings.Contains(string(frame.Error.Data), `"agent_sessions_bug_report"`) {
 				t.Fatalf("unexpected failure has no bug-report guidance: %s", frame.Error.Data)
 			}
 			if test.reason != "" && !strings.Contains(string(frame.Error.Data), `"reason":"`+test.reason+`"`) {
@@ -49,33 +50,33 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 			}
 		})
 	}
-	structured := newLiveRPCError(liveRPCProductFailure, "native exact failure", map[string]any{"detail": "native exact failure"})
-	frame := liveRPCFailureFromError(json.RawMessage(`2`), "lane.turn.wait", structured)
+	structured := livepresence.NewError(livepresence.ProductFailure, "native exact failure", map[string]any{"detail": "native exact failure"})
+	frame := livepresence.FailureFromError(json.RawMessage(`2`), "lane.turn.wait", structured)
 	if frame.Error == nil || string(frame.Error.Data) != `{"detail":"native exact failure"}` {
 		t.Fatalf("structured native failure was changed: %+v", frame.Error)
 	}
-	frame = liveRPCFailureFromError(json.RawMessage(`3`), "message.send", &federationpkg.UnknownTargetError{
+	frame = livepresence.FailureFromError(json.RawMessage(`3`), "message.send", &federationpkg.UnknownTargetError{
 		Target: "self", Detail: "no live peer session or lane matching self",
 	})
-	if frame.Error == nil || frame.Error.Code != liveRPCUnknown || string(frame.Error.Data) != `{"target":"self"}` {
+	if frame.Error == nil || frame.Error.Code != livepresence.Unknown || string(frame.Error.Data) != `{"target":"self"}` {
 		t.Fatalf("unknown target data = %+v", frame.Error)
 	}
-	frame = liveRPCFailureFromError(json.RawMessage(`4`), "message.send", &federationpkg.GroupNotPermittedError{Group: "other"})
-	if frame.Error == nil || frame.Error.Code != liveRPCNotPermitted || string(frame.Error.Data) != `{"group":"other"}` {
+	frame = livepresence.FailureFromError(json.RawMessage(`4`), "message.send", &federationpkg.GroupNotPermittedError{Group: "other"})
+	if frame.Error == nil || frame.Error.Code != livepresence.NotPermitted || string(frame.Error.Data) != `{"group":"other"}` {
 		t.Fatalf("forbidden group data = %+v", frame.Error)
 	}
 }
 
 func TestLiveSessionReconnectCadenceIsTwoSeconds(t *testing.T) {
-	if liveSessionReconnectInterval != 2*time.Second {
-		t.Fatalf("live reconnect interval = %s", liveSessionReconnectInterval)
+	if livepresence.ReconnectInterval != 2*time.Second {
+		t.Fatalf("live reconnect interval = %s", livepresence.ReconnectInterval)
 	}
 }
 
 func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(liveSessionReport) {}, func(liveSessionReport) {}, nil)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(livepresence.Report) {}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +105,7 @@ func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
 func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(liveSessionReport) {}, func(liveSessionReport) {}, nil)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(livepresence.Report) {}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +121,8 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	var response liveRPCFrame
-	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != liveRPCUnsupportedVersion {
+	var response livepresence.Frame
+	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.UnsupportedVersion {
 		t.Fatalf("unsupported-version response = %+v, %v", response, err)
 	}
 	if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
@@ -140,7 +141,7 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	response = liveRPCFrame{}
+	response = livepresence.Frame{}
 	if err := decoder.Decode(&response); err != nil || response.Error != nil {
 		t.Fatalf("hello response = %+v, %v", response, err)
 	}
@@ -149,8 +150,8 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	response = liveRPCFrame{}
-	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != liveRPCInvalidParams {
+	response = livepresence.Frame{}
+	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams {
 		t.Fatalf("group-update response = %+v, %v", response, err)
 	}
 }
@@ -158,11 +159,11 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 func TestLiveHelloCapabilitiesAreClosedAndOnlyAdvertiseTrueLaneSupport(t *testing.T) {
 	base := `{"protocol":1,"uuid":"session","name":"","groups":[],"product":"dsh","info":{},"capabilities":%s}`
 	for _, invalid := range []string{`{}`, `{"lane":false}`, `{"future":true}`} {
-		if _, _, err := decodeLiveHello(json.RawMessage(fmt.Sprintf(base, invalid))); err == nil {
+		if _, _, err := livepresence.DecodeHello(json.RawMessage(fmt.Sprintf(base, invalid))); err == nil {
 			t.Fatalf("invalid capabilities accepted: %s", invalid)
 		}
 	}
-	report, protocol, err := decodeLiveHello(json.RawMessage(fmt.Sprintf(base, `{"lane":true}`)))
+	report, protocol, err := livepresence.DecodeHello(json.RawMessage(fmt.Sprintf(base, `{"lane":true}`)))
 	if err != nil || protocol != 1 || !report.Capabilities.Lane {
 		t.Fatalf("lane hello = %+v, protocol=%d, err=%v", report, protocol, err)
 	}
@@ -171,9 +172,9 @@ func TestLiveHelloCapabilitiesAreClosedAndOnlyAdvertiseTrueLaneSupport(t *testin
 func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	joined := make(chan liveSessionReport, 2)
-	left := make(chan liveSessionReport, 2)
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) { joined <- report }, func(report liveSessionReport) { left <- report }, nil)
+	joined := make(chan livepresence.Report, 2)
+	left := make(chan livepresence.Report, 2)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) { joined <- report }, func(report livepresence.Report) { left <- report }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 		}}); encodeErr != nil {
 			t.Fatal(encodeErr)
 		}
-		var response liveRPCFrame
+		var response livepresence.Frame
 		if decodeErr := json.NewDecoder(connection).Decode(&response); decodeErr != nil || response.Error != nil {
 			t.Fatalf("hello %s = %+v, %v", name, response, decodeErr)
 		}
@@ -225,20 +226,20 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	joined := make(chan liveSessionReport, 1)
-	left := make(chan liveSessionReport, 1)
+	joined := make(chan livepresence.Report, 1)
+	left := make(chan livepresence.Report, 1)
 	root := t.TempDir()
-	server, err := startLivePresenceServer(ctx, root, func(report liveSessionReport) {
+	server, err := startLivePresenceServer(ctx, root, func(report livepresence.Report) {
 		joined <- report
-	}, func(report liveSessionReport) {
+	}, func(report livepresence.Report) {
 		left <- report
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := liveSessionReport{UUID: "session-1", Name: "builder", Groups: []string{"team", "team"}, Product: "codex"}
+	report := livepresence.Report{UUID: "session-1", Name: "builder", Groups: []string{"team", "team"}, Product: "codex"}
 	clientCtx, stopClient := context.WithCancel(context.Background())
-	go maintainLivePresence(clientCtx, server.listener.Addr().String(), report)
+	livepresence.StartClient(clientCtx, server.listener.Addr().String(), report, nil)
 	select {
 	case got := <-joined:
 		if got.UUID != report.UUID || got.Name != report.Name || !reflect.DeepEqual(got.Groups, []string{"team", "team"}) {
@@ -258,10 +259,10 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("presence disconnect was not observed")
 	}
-	rejoined := make(chan liveSessionReport, 1)
-	successor, err := startLivePresenceServer(ctx, root, func(report liveSessionReport) {
+	rejoined := make(chan livepresence.Report, 1)
+	successor, err := startLivePresenceServer(ctx, root, func(report livepresence.Report) {
 		rejoined <- report
-	}, func(liveSessionReport) {}, nil)
+	}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,28 +281,28 @@ func TestLivePresenceConnectionDefinesSessionLifetime(t *testing.T) {
 func TestResolvingLivePresenceDoesNotHelloUntilProductConfirmsIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	joined := make(chan liveSessionReport, 1)
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
+	joined := make(chan livepresence.Report, 1)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) {
 		joined <- report
-	}, func(liveSessionReport) {}, nil)
+	}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
 	attempted := make(chan struct{}, 1)
 	confirmed := make(chan struct{})
-	client := startResolvingLiveSessionClient(ctx, server.listener.Addr().String(), func(context.Context) (liveSessionReport, bool) {
+	client := livepresence.StartResolvingClient(ctx, server.listener.Addr().String(), func(context.Context) (livepresence.Report, bool) {
 		select {
 		case attempted <- struct{}{}:
 		default:
 		}
 		select {
 		case <-confirmed:
-			return liveSessionReport{
+			return livepresence.Report{
 				UUID: "product-session", Name: "product-name", Groups: []string{"team"}, Product: "claude", Info: map[string]string{},
 			}, true
 		default:
-			return liveSessionReport{}, false
+			return livepresence.Report{}, false
 		}
 	}, nil)
 	select {
@@ -331,16 +332,16 @@ func TestResolvingLivePresenceDoesNotHelloUntilProductConfirmsIdentity(t *testin
 func TestLivePresenceClientProjectsNameOnTheSameConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	joined := make(chan liveSessionReport, 2)
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
+	joined := make(chan livepresence.Report, 2)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) {
 		joined <- report
-	}, func(liveSessionReport) {}, nil)
+	}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = server.Close() }()
-	report := liveSessionReport{UUID: "session", Name: "session", Groups: []string{"group"}, Product: "qwen"}
-	client := startLiveSessionClient(ctx, server.listener.Addr().String(), report, nil)
+	report := livepresence.Report{UUID: "session", Name: "session", Groups: []string{"group"}, Product: "qwen"}
+	client := livepresence.StartClient(ctx, server.listener.Addr().String(), report, nil)
 	select {
 	case initial := <-joined:
 		if initial.Name != "session" {
@@ -368,10 +369,10 @@ func TestLivePresenceClientProjectsNameOnTheSameConnection(t *testing.T) {
 func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	joined := make(chan liveSessionReport, 1)
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) {
+	joined := make(chan livepresence.Report, 1)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) {
 		joined <- report
-	}, func(liveSessionReport) {}, func(_ context.Context, report liveSessionReport, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
+	}, func(livepresence.Report) {}, func(_ context.Context, report livepresence.Report, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
 		if report.UUID != "session-rpc" || requestID != "session.tool" || method != "peers.list" {
 			t.Fatalf("server call = %+v %q", report, method)
 		}
@@ -381,7 +382,7 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	client := startLiveSessionClient(ctx, server.listener.Addr().String(), liveSessionReport{
+	client := livepresence.StartClient(ctx, server.listener.Addr().String(), livepresence.Report{
 		UUID: "session-rpc", Name: "rpc", Product: "codex",
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if method != "message.deliver" {
@@ -414,15 +415,15 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 func TestLivePresencePublishesLaneCapabilityAndServesLaneCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	joined := make(chan liveSessionReport, 1)
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report liveSessionReport) { joined <- report }, func(liveSessionReport) {}, nil)
+	joined := make(chan livepresence.Report, 1)
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) { joined <- report }, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	startLiveSessionClient(ctx, server.listener.Addr().String(), liveSessionReport{
+	livepresence.StartClient(ctx, server.listener.Addr().String(), livepresence.Report{
 		UUID: "dsh-native", Name: "worker", Groups: []string{"team"}, Product: "dsh", Info: map[string]string{},
-		Capabilities: liveSessionCapabilities{Lane: true},
+		Capabilities: livepresence.Capabilities{Lane: true},
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if method != "lane.turn.start" || !strings.Contains(string(params), `"input_id":"input"`) {
 			t.Fatalf("lane request = %q %s", method, params)
@@ -453,7 +454,7 @@ func TestLivePresencePublishesLaneCapabilityAndServesLaneCalls(t *testing.T) {
 func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	parent := liveSessionReport{
+	parent := livepresence.Report{
 		UUID: "parent", Name: "reviewer", Groups: []string{"team"}, Product: "codex",
 		Info: map[string]string{"model": "native-model", "cwd": "/workspace", "future": "verbatim"},
 	}
@@ -463,7 +464,7 @@ func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 		!reflect.DeepEqual(attachment.Info, parent.Info) || attachment.Cwd != "" {
 		t.Fatalf("reported parent = %+v, active=%v, err=%v", attachment, active, err)
 	}
-	lane := liveSessionReport{
+	lane := livepresence.Report{
 		UUID: "native-lane", Name: "worker", Product: "codex",
 		Groups: []string{"session:" + runtime.HostID() + "/parent", "session:" + runtime.HostID() + "/native-lane"},
 	}
@@ -501,13 +502,13 @@ func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 func TestUncataloguedAndLaneOnlyProductReportsRemainVisible(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "dsh-root", Name: "root", Product: "dsh"})
+	coordinator.joinLiveSession(runtime, livepresence.Report{UUID: "dsh-root", Name: "root", Product: "dsh"})
 	if attachment, active, err := runtime.Attachments().ActiveAttachment("dsh-root"); err != nil || !active || attachment.Product != "dsh" {
 		t.Fatalf("uncatalogued live product missing: %+v, active=%v, err=%v", attachment, active, err)
 	}
 
-	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex"})
-	coordinator.joinLiveSession(runtime, liveSessionReport{
+	coordinator.joinLiveSession(runtime, livepresence.Report{UUID: "parent", Name: "parent", Product: "codex"})
+	coordinator.joinLiveSession(runtime, livepresence.Report{
 		UUID: "dsh-lane", Name: "worker", Product: "dsh",
 		Groups: []string{"session:" + runtime.HostID() + "/parent"},
 	})
@@ -525,7 +526,7 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	parentGroups := []string{"team"}
-	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex", Groups: parentGroups})
+	coordinator.joinLiveSession(runtime, livepresence.Report{UUID: "parent", Name: "parent", Product: "codex", Groups: parentGroups})
 	stableGroups := []string{
 		"session:" + runtime.HostID() + "/parent",
 		"session:" + runtime.HostID() + "/parent/native-lane",
@@ -537,7 +538,7 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 		groups: stableGroups, done: make(chan struct{}),
 	}
 	coordinator.mu.Unlock()
-	coordinator.joinLiveSession(runtime, liveSessionReport{
+	coordinator.joinLiveSession(runtime, livepresence.Report{
 		UUID: "native-lane", Name: "worker", Product: "codex",
 		Groups: []string{"team/child", "session:" + runtime.HostID() + "/parent"},
 	})
@@ -570,7 +571,7 @@ func TestLaneReportBindsExistingProductSessionWithoutDuplicatingActor(t *testing
 func TestCallerSuppliedLanePresenceBeforeOpenStillRemembersCandidate(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"team"}})
+	coordinator.joinLiveSession(runtime, livepresence.Report{UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"team"}})
 	primary := "session:" + runtime.HostID() + "/parent"
 	actor := &laneActor{
 		id: "native-lane", product: "pi", name: "worker", parentID: "parent", state: "running",
@@ -579,7 +580,7 @@ func TestCallerSuppliedLanePresenceBeforeOpenStillRemembersCandidate(t *testing.
 	coordinator.mu.Lock()
 	coordinator.lanes[actor.id] = actor
 	coordinator.mu.Unlock()
-	coordinator.joinLiveSession(runtime, liveSessionReport{
+	coordinator.joinLiveSession(runtime, livepresence.Report{
 		UUID: "native-lane", Name: "worker", Product: "pi", Groups: []string{"team/child", primary},
 	})
 	if actor.nativeID != "native-lane" {
@@ -615,7 +616,7 @@ func TestCallerSuppliedLanePresenceBeforeOpenStillRemembersCandidate(t *testing.
 func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	coordinator.joinLiveSession(runtime, liveSessionReport{UUID: "parent", Name: "parent", Product: "codex"})
+	coordinator.joinLiveSession(runtime, livepresence.Report{UUID: "parent", Name: "parent", Product: "codex"})
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
 		t.Fatal(err)
@@ -671,7 +672,7 @@ func TestRestartLeavesCandidateNonLiveUntilProductConfirmedResume(t *testing.T) 
 func TestLaneEOFRematerializesArchivedGroupsOnlyFromDurableCandidate(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
-	parentReport := liveSessionReport{UUID: "parent", Name: "parent", Product: "claude", Groups: []string{"shared"}}
+	parentReport := livepresence.Report{UUID: "parent", Name: "parent", Product: "claude", Groups: []string{"shared"}}
 	coordinator.joinLiveSession(runtime, parentReport)
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
@@ -704,12 +705,12 @@ func TestLaneEOFRematerializesArchivedGroupsOnlyFromDurableCandidate(t *testing.
 	if _, err := coordinator.resolveLaneActor(runtime, parent, candidate.Product, "worker", true); err != nil {
 		t.Fatal(err)
 	}
-	laneReport := liveSessionReport{
+	laneReport := livepresence.Report{
 		UUID: candidate.NativeSessionID, Name: "worker", Product: candidate.Product,
 		Groups: candidateLaneGroups(candidate),
 	}
 	coordinator.joinLiveSession(runtime, laneReport)
-	parentBReport := liveSessionReport{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
+	parentBReport := livepresence.Report{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
 	coordinator.joinLiveSession(runtime, parentBReport)
 	parentB, active, err := runtime.Attachments().ActiveAttachment(parentBReport.UUID)
 	if err != nil || !active {
@@ -751,7 +752,7 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	parentA := liveSessionReport{UUID: "parent-a", Name: "parent-a", Product: "claude", Groups: []string{"shared"}}
+	parentA := livepresence.Report{UUID: "parent-a", Name: "parent-a", Product: "claude", Groups: []string{"shared"}}
 	coordinator.joinLiveSession(runtime, parentA)
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
@@ -778,7 +779,7 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 		parentID: parentA.UUID, groups: []string{"shared"}, permission: "default", persistent: true, state: "idle", done: closedLaneDone(),
 	}
 	coordinator.lanes[idle.id], coordinator.lanes[persistent.id] = idle, persistent
-	laneReport := liveSessionReport{
+	laneReport := livepresence.Report{
 		UUID: persistent.nativeID, Name: persistent.name, Product: persistent.product,
 		Groups: []string{"shared", "session:" + runtime.HostID() + "/" + parentA.UUID},
 	}
@@ -796,7 +797,7 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 		t.Fatalf("persistent parent exit actor=%+v", persistent)
 	}
 
-	parentBReport := liveSessionReport{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
+	parentBReport := livepresence.Report{UUID: "parent-b", Name: "parent-b", Product: "claude", Groups: []string{"shared"}}
 	coordinator.joinLiveSession(runtime, parentBReport)
 	if coordinator.lanes[persistent.id] != persistent || !persistent.persistent || coordinator.reportedLanes[persistent.nativeID] != persistent.id {
 		t.Fatalf("unowned persistent lane was reclassified: actor=%+v lanes=%+v reported=%+v", persistent, coordinator.lanes, coordinator.reportedLanes)
@@ -860,7 +861,7 @@ func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *tes
 		return laneNameEntry{Name: "shared-worker"}, true
 	}
 	outsider := daemonpkg.ManagedAttachment{ID: "parent-outside", Product: "claude", Cwd: t.TempDir(), Groups: []string{"outside"}}
-	coordinator.liveReports[outsider.ID] = liveSessionReport{UUID: outsider.ID, Product: outsider.Product, Groups: outsider.Groups}
+	coordinator.liveReports[outsider.ID] = livepresence.Report{UUID: outsider.ID, Product: outsider.Product, Groups: outsider.Groups}
 	if err := coordinator.ensureActiveLaneNames(context.Background(), runtime, outsider, candidate.Product); err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +870,7 @@ func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *tes
 	}
 
 	parentB := daemonpkg.ManagedAttachment{ID: "parent-b", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}}
-	coordinator.liveReports[parentB.ID] = liveSessionReport{UUID: parentB.ID, Product: parentB.Product, Groups: parentB.Groups}
+	coordinator.liveReports[parentB.ID] = livepresence.Report{UUID: parentB.ID, Product: parentB.Product, Groups: parentB.Groups}
 	actor, err := coordinator.resolveLaneActor(runtime, parentB, candidate.Product, "shared-worker", true)
 	if err != nil {
 		t.Fatal(err)
@@ -906,7 +907,7 @@ func TestResolveLaneActorUsesExistingNativeSessionWithoutCacheDuplicate(t *testi
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "opencode", Cwd: "/workspace", Groups: []string{"team"}}
-	coordinator.liveReports[parent.ID] = liveSessionReport{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
+	coordinator.liveReports[parent.ID] = livepresence.Report{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
 	actor := &laneActor{
 		id: "ses_product", nativeID: "ses_product", product: "opencode", name: "worker",
 		cwd: "/workspace", parentID: parent.ID, groups: []string{"team"}, explicitGroups: []string{"team/worker"},
@@ -936,7 +937,7 @@ func TestConnectorLiveReportUsesOnlyReportedFields(t *testing.T) {
 		"AGENT_SESSIONS_GROUPS":       `["team","team"]`,
 	}
 	report, ok := connectorLiveReport("claude", func(name string) string { return values[name] })
-	if !ok || !reflect.DeepEqual(report, liveSessionReport{
+	if !ok || !reflect.DeepEqual(report, livepresence.Report{
 		UUID: "session-1", Name: "reviewer", Groups: []string{"team", "team"}, Product: "claude", Info: map[string]string{},
 	}) {
 		t.Fatalf("connector report = %+v, ok=%v", report, ok)
@@ -971,7 +972,7 @@ func TestClaudeActiveSessionComesFromExactNativeParentPID(t *testing.T) {
 		{"pid":7,"sessionId":"other","name":"other title","kind":"interactive","cwd":"/other"},
 		{"pid":42,"sessionId":"native-session","name":"product title","kind":"interactive","cwd":"/product"}
 	]`)
-	base := liveSessionReport{Product: "claude", Groups: []string{"team"}, Info: map[string]string{}}
+	base := livepresence.Report{Product: "claude", Groups: []string{"team"}, Info: map[string]string{}}
 	got, ok := claudeActiveSessionForParentFromJSON(payload, 42, base)
 	if !ok || got.UUID != "native-session" || got.Name != "product title" || got.Info["cwd"] != "/product" || !reflect.DeepEqual(got.Groups, []string{"team"}) {
 		t.Fatalf("Claude active session = %+v, ok=%v", got, ok)

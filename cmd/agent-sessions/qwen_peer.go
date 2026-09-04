@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
@@ -37,16 +38,16 @@ func runQwenNativePeer(ctx context.Context, launch launcher.QwenNativeLaunch) er
 		if nativeName, _, ok := qwenNativeSessionInfo(launch.QwenHome, sessionID); ok {
 			name = nativeName
 		}
-		report := liveSessionReport{
+		report := livepresence.Report{
 			UUID: sessionID, Name: name, Product: connectorProductQwen,
-			Groups: append([]string(nil), launch.Groups...), Info: liveCwdInfo(launch.Cwd),
+			Groups: append([]string(nil), launch.Groups...), Info: livepresence.CwdInfo(launch.Cwd),
 		}
 		return launcherHeldIdentity{
 			report: report,
 			call: func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return qwenLauncherLiveCall(callCtx, launch.InputPath, method, params)
 			},
-			watch: func(watchCtx context.Context, live *liveSessionClient, report liveSessionReport) {
+			watch: func(watchCtx context.Context, live *livepresence.Client, report livepresence.Report) {
 				startQwenNativeNameProjection(watchCtx, live, launch.QwenHome, report)
 			},
 		}, nil
@@ -97,9 +98,9 @@ func qwenLaunchSessionID(eventsPath string) (string, bool) {
 
 func startQwenNativeNameProjection(
 	ctx context.Context,
-	live *liveSessionClient,
+	live *livepresence.Client,
 	home string,
-	report liveSessionReport,
+	report livepresence.Report,
 ) {
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -130,13 +131,13 @@ func qwenLauncherLiveCall(
 	if method != "message.deliver" {
 		return nil, fmt.Errorf("live session method %s is unsupported", method)
 	}
-	message, err := liveMessageRequest(params)
+	message, err := livepresence.DecodeDeliver(params)
 	if err != nil {
 		return nil, err
 	}
 	body, err := sessiontools.RenderNativeMessage(message)
 	if err != nil {
-		return nil, newLiveRPCError(liveRPCInvalidParams, "Invalid params", map[string]any{"method": method})
+		return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	if err := submitQwenNativeInput(inputPath, body); err != nil {
 		return nil, err

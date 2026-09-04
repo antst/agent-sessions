@@ -13,6 +13,7 @@ import (
 
 	"github.com/antst/agent-sessions/internal/bridge"
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/permissionmode"
 	"github.com/antst/agent-sessions/internal/productruntime"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
@@ -463,7 +464,7 @@ func TestResumeRefusesLaneLiveUnderAnotherParent(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	parent := daemonpkg.ManagedAttachment{ID: "parent-b", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}}
-	coordinator.liveReports[parent.ID] = liveSessionReport{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
+	coordinator.liveReports[parent.ID] = livepresence.Report{UUID: parent.ID, Product: parent.Product, Groups: parent.Groups}
 	coordinator.lanes["lane"] = &laneActor{
 		id: "lane", nativeID: "native", name: "worker", product: "claude", parentID: "parent-a",
 		groups: []string{"shared"}, state: "idle", done: closedLaneDone(),
@@ -822,7 +823,7 @@ func TestDirectLaneCommandUsesItsInvocationCwd(t *testing.T) {
 	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
 		ID: parentID, Product: "claude", NativeSessionID: parentID, Groups: []string{"shared"},
 	})
-	coordinator.liveReports[parentID] = liveSessionReport{UUID: parentID, Name: "parent", Product: "claude", Groups: []string{"shared"}}
+	coordinator.liveReports[parentID] = livepresence.Report{UUID: parentID, Name: "parent", Product: "claude", Groups: []string{"shared"}}
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
 		t.Fatal(err)
