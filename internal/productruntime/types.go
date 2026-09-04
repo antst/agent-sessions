@@ -148,9 +148,8 @@ type LaneReadiness struct {
 	Error         string `json:"error,omitempty"`
 }
 
-// WireInteger accepts every JSON spelling of an exact IEEE-754 safe integer.
-// JSON Schema numeric equality is mathematical, so 1, 1.0, and 1e0 are the
-// same protocol value.
+// WireInteger accepts a parsed finite integer in the signed 64-bit range.
+// The lexical and IEEE-754 rounding boundary remains a recorded follow-up.
 type WireInteger int64
 
 func (value *WireInteger) UnmarshalJSON(body []byte) error {

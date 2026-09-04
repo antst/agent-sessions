@@ -79,6 +79,31 @@ func TestAuthorityRejectsExpiredTokenWithoutBinding(t *testing.T) {
 	}
 }
 
+func TestAuthorityWaitCancellationRemovesPendingToken(t *testing.T) {
+	authority := testAuthority(t)
+	registration, err := authority.Register(PurposeLaunch, "codex", "lane-1", 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if binding, err := registration.Wait(ctx); err == nil || binding != nil {
+		t.Fatalf("pending wait = %p, %v", binding, err)
+	}
+	authority.mu.Lock()
+	remaining, terminal := len(authority.tokens), registration.state == registrationFinished
+	authority.mu.Unlock()
+	if remaining != 0 || !terminal {
+		t.Fatalf("pending token cleanup = %d, terminal=%v", remaining, terminal)
+	}
+	server, client := net.Pipe()
+	if _, err := authority.Accept(livepresence.NewConnection(server), testHello(registration, "codex")); err == nil {
+		t.Fatal("canceled pending token was accepted late")
+	}
+	_ = server.Close()
+	_ = client.Close()
+}
+
 func TestAuthorityLinearizesWaitCancellationAgainstHelloAck(t *testing.T) {
 	authority := testAuthority(t)
 	registration, err := authority.Register(PurposeLaunch, "codex", "lane-1", 1, time.Minute)
