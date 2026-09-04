@@ -50,7 +50,6 @@ type grokPlan struct {
 	resumeTarget        string
 	permissionMode      string
 	permissionSpecified bool
-	nativeToolGrant     []string
 	peerContext         peerLaunchContext
 	originalArgs        []string
 	interactiveArgs     []string
@@ -68,7 +67,6 @@ type GrokNativeLaunch struct {
 	TUIEnvironment    []string
 	Groups            []string
 	PermissionMode    string
-	NativeToolGrant   []string
 }
 
 // GrokNativeRunner owns the private leader and TUI for one interactive launch.
@@ -109,8 +107,7 @@ func RunGrokPeer(ctx context.Context, args []string, run GrokNativeRunner) error
 	return run(ctx, GrokNativeLaunch{
 		Executable: grok, Cwd: plan.requestedCwd, LeaderSocket: leaderSocket,
 		LeaderEnvironment: append([]string(nil), environment...), TUIArguments: managed, TUIEnvironment: environment,
-		Groups:         append([]string(nil), plan.peerContext.groups...),
-		PermissionMode: plan.permissionMode, NativeToolGrant: append([]string(nil), plan.nativeToolGrant...),
+		Groups: append([]string(nil), plan.peerContext.groups...), PermissionMode: plan.permissionMode,
 	})
 }
 
@@ -130,7 +127,6 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 		return grokPlan{}, err
 	}
 	plan.peerContext = peerContext
-	plan.nativeToolGrant = append([]string(nil), descriptor.NativeToolGrantArgs...)
 	mode, commandIndex, informational, err := classifyGrokMode(contextArgs)
 	if err != nil {
 		return grokPlan{}, err
@@ -151,9 +147,7 @@ func parseGrokPeerArgs(args []string, cwd string) (grokPlan, error) {
 		}
 		return plan, nil
 	}
-	tuiPolicy := descriptor
-	tuiPolicy.NativeToolGrantArgs = nil
-	forwarded, err = projectNativeLaunchPolicy(tuiPolicy, forwarded, peerContext.forceNoYolo)
+	forwarded, err = projectNativeLaunchPolicy(descriptor, forwarded, peerContext.forceNoYolo)
 	if err != nil {
 		return grokPlan{}, err
 	}

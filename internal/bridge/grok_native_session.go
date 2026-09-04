@@ -34,7 +34,6 @@ func NewGrokNativeLeaderBootstrap(
 	environment []string,
 	diagnostics io.Writer,
 	permissionMode string,
-	nativeToolGrant []string,
 ) (*GrokNativeLeaderBootstrap, error) {
 	if strings.TrimSpace(bin) == "" || strings.TrimSpace(cwd) == "" || !strings.HasPrefix(leaderSocket, "/") {
 		return nil, errors.New("invalid Grok private leader configuration")
@@ -42,7 +41,7 @@ func NewGrokNativeLeaderBootstrap(
 	if diagnostics == nil {
 		diagnostics = os.Stderr
 	}
-	permissionArguments, err := grokNativeLeaderPermissionArguments(permissionMode, nativeToolGrant)
+	permissionArguments, err := grokNativeLeaderPermissionArguments(permissionMode)
 	if err != nil {
 		return nil, err
 	}
@@ -59,15 +58,12 @@ func NewGrokNativeLeaderBootstrap(
 	}, nil
 }
 
-func grokNativeLeaderPermissionArguments(permissionMode string, nativeToolGrant []string) ([]string, error) {
+func grokNativeLeaderPermissionArguments(permissionMode string) ([]string, error) {
 	switch permissionMode {
 	case "bypassPermissions":
 		return []string{"--permission-mode", "bypassPermissions"}, nil
 	case "default":
-		if len(nativeToolGrant) != 2 || nativeToolGrant[0] != "--allow" || nativeToolGrant[1] != "MCPTool(agent_sessions__*)" {
-			return nil, errors.New("Grok native leader is missing the exact Agent Sessions tool grant")
-		}
-		return []string{"--permission-mode", "default", nativeToolGrant[0], nativeToolGrant[1]}, nil
+		return []string{"--permission-mode", "default"}, nil
 	default:
 		return nil, fmt.Errorf("unsupported Grok native leader permission mode %q", permissionMode)
 	}

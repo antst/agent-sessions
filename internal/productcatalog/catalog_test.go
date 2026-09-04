@@ -133,7 +133,7 @@ func TestCatalogReturnsDeepIsolatedCopies(t *testing.T) {
 		t.Fatalf("Claude launch policy = %#v", claude)
 	}
 	grok, _ := ByID("grok")
-	if !reflect.DeepEqual(grok.NativeToolGrantArgs, []string{"--allow", "MCPTool(agent_sessions__*)"}) || !reflect.DeepEqual(grok.NativeYoloArgs, []string{"--yolo"}) {
+	if len(grok.NativeToolGrantArgs) != 0 || !reflect.DeepEqual(grok.NativeYoloArgs, []string{"--yolo"}) {
 		t.Fatalf("Grok launch policy = %#v", grok)
 	}
 	qwen, _ := ByID("qwen")

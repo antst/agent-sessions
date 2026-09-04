@@ -40,7 +40,10 @@ after the product confirms that ID still exists.
 The standing real-product matrix requires one `--cwd` that already exists and has been approved
 through every installed product's own trust prompt. Prefer a dedicated empty directory: products
 may index native session history there and load project configuration or hooks under their native
-defaults. The matrix never writes trust configuration or drives a trust prompt.
+defaults. The matrix never writes trust or permission configuration or drives a prompt. When Grok
+is installed, it also requires the exact compact `[permission]` allow entry shown in
+[Installation](INSTALL.md) in `$GROK_HOME/config.toml` (default `~/.grok/config.toml`) or the approved cwd's trusted
+`.grok/config.toml`; absence fails before evidence or product launch.
 
 ## Invocation-owned choices
 

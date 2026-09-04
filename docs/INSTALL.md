@@ -31,6 +31,17 @@ An unavailable product is skipped without blocking the other integrations. A nat
 owns login and first-run setup; complete those through the product itself before starting its first
 managed peer or lane.
 
+For default-mode Grok peers and lanes, authorize only the Agent Sessions MCP server once through Grok's native permission configuration:
+
+```toml
+# $GROK_HOME/config.toml (default ~/.grok/config.toml), or <trusted-project>/.grok/config.toml
+[permission]
+allow = ["MCPTool(agent_sessions__*)"]
+```
+
+Grok also offers an **Always allow** choice at its native MCP permission prompt for ordinary use. The
+standing product matrix requires the declarative rule so its prerequisite is deterministic and reviewable.
+
 ## Verify the installation
 
 ```sh

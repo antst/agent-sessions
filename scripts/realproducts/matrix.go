@@ -29,6 +29,8 @@ const (
 
 const codexTUISubmitDelay = 150 * time.Millisecond
 
+const matrixGrokPermissionRule = "MCPTool(agent_sessions__*)"
+
 type matrixOptions struct {
 	repositoryRoot string
 	cwd            string
@@ -259,6 +261,9 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if err := rejectExistingMatrixTMUX(tmux); err != nil {
 		return matrixOptions{}, err
 	}
+	if err := requireMatrixGrokPermission(cwd); err != nil {
+		return matrixOptions{}, err
+	}
 	evidence, err := prepareMatrixEvidenceDir(futureEvidence, temporary)
 	if err != nil {
 		return matrixOptions{}, err
@@ -268,6 +273,53 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 		agentSessions: agentSessions, tmux: tmux, python: python,
 		presenceSocket: socket, timeout: *timeout,
 	}, nil
+}
+
+func requireMatrixGrokPermission(cwd string) error {
+	if _, err := exec.LookPath("grok"); err != nil {
+		return nil
+	}
+	if _, err := exec.LookPath("grok-peer"); err != nil {
+		return nil
+	}
+	grokHome := os.Getenv("GROK_HOME")
+	if grokHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve Grok configuration home: %w", err)
+		}
+		grokHome = filepath.Join(home, ".grok")
+	}
+	paths := []string{filepath.Join(grokHome, "config.toml"), filepath.Join(cwd, ".grok", "config.toml")}
+	for _, path := range paths {
+		body, readErr := os.ReadFile(path)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return fmt.Errorf("read Grok permission configuration %s: %w", path, readErr)
+		}
+		if matrixGrokConfigAllowsAgentSessions(body) {
+			return nil
+		}
+	}
+	return fmt.Errorf("Grok standing matrix requires this exact one-line permission in %s or trusted %s:\n[permission]\nallow = [\"%s\"]", paths[0], paths[1], matrixGrokPermissionRule)
+}
+
+func matrixGrokConfigAllowsAgentSessions(body []byte) bool {
+	inPermission := false
+	for _, rawLine := range strings.Split(string(body), "\n") {
+		line, _, _ := strings.Cut(rawLine, "#")
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inPermission = line == "[permission]"
+			continue
+		}
+		if compact := strings.ReplaceAll(strings.ReplaceAll(line, " ", ""), "\t", ""); inPermission && compact == `allow=["`+matrixGrokPermissionRule+`"]` {
+			return true
+		}
+	}
+	return false
 }
 
 func rejectExistingMatrixTMUX(tmux string) error {
