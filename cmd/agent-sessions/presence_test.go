@@ -1248,7 +1248,7 @@ func TestClaudeActiveSessionComesFromExactNativeParentPID(t *testing.T) {
 
 func newPresenceTestRuntime(t *testing.T) *daemonpkg.Runtime {
 	t.Helper()
-	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: t.TempDir()})
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: shortDaemonTestRoot(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -101,6 +101,13 @@ func (testStructuredRPCError) RPCErrorDetails() (int, string, json.RawMessage) {
 	return -32001, "Unknown session or target", json.RawMessage(`{"target":"self"}`)
 }
 
+type testStaleRPCError struct{}
+
+func (testStaleRPCError) Error() string { return "connector stale" }
+func (testStaleRPCError) RPCErrorDetails() (int, string, json.RawMessage) {
+	return -32003, "Connector stale", json.RawMessage(`{"reason":"stale_connector"}`)
+}
+
 func TestEveryLaneHelpAdvertisesUniformYoloAliases(t *testing.T) {
 	for product := range laneUsageByProduct {
 		usage, err := LaneUsage(product)
@@ -285,20 +292,18 @@ type relayRefreshProbe struct {
 	calls    int
 }
 
-func newRelayRefreshProbe() *relayRefreshProbe {
-	return &relayRefreshProbe{}
-}
+func newRelayRefreshProbe() *relayRefreshProbe { return &relayRefreshProbe{} }
 func (p *relayRefreshProbe) signal(identity string) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.identity = identity
-	p.mu.Unlock()
 }
 func (p *relayRefreshProbe) pending() string { p.mu.Lock(); defer p.mu.Unlock(); return p.identity }
 func (p *relayRefreshProbe) refresh(context.Context) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.calls++
 	p.identity = ""
-	p.mu.Unlock()
 	return nil
 }
 func (p *relayRefreshProbe) count() int { p.mu.Lock(); defer p.mu.Unlock(); return p.calls }
@@ -322,46 +327,48 @@ func TestMCPRelayRefreshAccountsReadAheadAndFlushesStaleResponses(t *testing.T) 
 		read, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		relay, _ := NewMCPRelay(MCPRelayConfig{Product: "claude", Call: relayUnusedCall,
-			RefreshIdentity: probe.pending, Refresh: probe.refresh,
+			RefreshIdentity: probe.pending, Refresh: func(ctx context.Context) error {
+				if strings.Count(output.String(), `"reason":"stale_connector"`) != 2 {
+					return errors.New("refresh ran before both buffered responses were flushed")
+				}
+				return probe.refresh(ctx)
+			},
 			afterRead: func() { once.Do(func() { close(read); <-release }) },
 		})
-		done := serveRelay(relay, strings.NewReader(request(1)), output)
+		done := serveRelay(relay, relayFileInput(t, request(1)+request(2)), output)
 		<-read
 		probe.signal(strings.Repeat("a", 64))
 		if probe.count() != 0 {
 			t.Fatal("refresh crossed an unaccounted returned frame")
 		}
 		close(release)
-		if err := <-done; err != nil || probe.count() != 1 || !strings.Contains(output.String(), `"reason":"stale_connector"`) {
-			t.Fatalf("serve=%v refresh=%d output=%s", err, probe.count(), output.String())
-		}
-	})
-	t.Run("two buffered frames", func(t *testing.T) {
-		probe, output := newRelayRefreshProbe(), &lockedBuffer{}
-		probe.signal(strings.Repeat("b", 64))
-		relay, _ := NewMCPRelay(MCPRelayConfig{Product: "claude", Call: relayUnusedCall,
-			RefreshIdentity: probe.pending, Refresh: func(ctx context.Context) error {
-				if strings.Count(output.String(), `"reason":"stale_connector"`) != 2 {
-					return errors.New("refresh ran before both buffered responses were flushed")
-				}
-				return probe.refresh(ctx)
-			}})
-		if err := relay.Serve(context.Background(), strings.NewReader(request(1)+request(2)), output); err != nil ||
-			probe.count() != 1 || strings.Count(output.String(), `"reason":"stale_connector"`) != 2 {
+		if err := <-done; err != nil || probe.count() != 1 || strings.Count(output.String(), `"reason":"stale_connector"`) != 2 {
 			t.Fatalf("serve=%v refresh=%d output=%s", err, probe.count(), output.String())
 		}
 	})
 	t.Run("partial tail", func(t *testing.T) {
 		probe, output := newRelayRefreshProbe(), &lockedBuffer{}
-		reader, writer := io.Pipe()
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer func() { cancel(); _ = writer.Close(); _ = reader.Close() }()
+		permitting := make(chan struct{})
+		var once sync.Once
+		checks := 0
 		relay, _ := NewMCPRelay(MCPRelayConfig{Product: "claude", Call: relayUnusedCall,
-			RefreshIdentity: probe.pending, Refresh: probe.refresh})
+			RefreshIdentity: func() string {
+				identity := probe.pending()
+				checks++
+				if checks == 2 {
+					once.Do(func() { close(permitting) })
+				}
+				return identity
+			}, Refresh: probe.refresh})
 		done := serveRelayContext(ctx, relay, reader, output)
-		partialWritten := make(chan struct{})
-		go func() { _, _ = io.WriteString(writer, strings.TrimSuffix(request(1), "\n")); close(partialWritten) }()
-		<-partialWritten
+		_, _ = io.WriteString(writer, strings.TrimSuffix(request(1), "\n"))
+		<-permitting
 		probe.signal(strings.Repeat("c", 64))
 		if probe.count() != 0 {
 			t.Fatal("refresh crossed a partial frame")
@@ -374,6 +381,52 @@ func TestMCPRelayRefreshAccountsReadAheadAndFlushesStaleResponses(t *testing.T) 
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestMCPRelayRefreshesAfterIdentityLearnedInsideCall(t *testing.T) {
+	probe, output := newRelayRefreshProbe(), &lockedBuffer{}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); _ = writer.Close(); _ = reader.Close() }()
+	calls := make(chan struct{}, 2)
+	relay, _ := NewMCPRelay(MCPRelayConfig{Product: "claude", RefreshIdentity: probe.pending,
+		Refresh: func(ctx context.Context) error {
+			if !strings.Contains(output.String(), `"id":1`) {
+				return errors.New("refresh ran before the stale response was flushed")
+			}
+			return probe.refresh(ctx)
+		}, Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+			calls <- struct{}{}
+			if len(calls) == 1 {
+				probe.signal(strings.Repeat("d", 64))
+				return nil, testStaleRPCError{}
+			}
+			return json.RawMessage(`{}`), nil
+		}})
+	done := serveRelayContext(ctx, relay, reader, output)
+	request := func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"lane","arguments":{"product":"codex","command":"list"}}}`+"\n", id)
+	}
+	_, _ = io.WriteString(writer, request(1))
+	waitForCondition(t, func() bool { return probe.count() == 1 })
+	if first := output.String(); !strings.Contains(first, `"id":1`) || !strings.Contains(first, `"reason":"stale_connector"`) {
+		t.Fatalf("first response = %s", first)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls before retry = %d", len(calls))
+	}
+	_, _ = io.WriteString(writer, request(2))
+	waitForText(t, output, `"id":2`)
+	if len(calls) != 2 {
+		t.Fatalf("calls after retry = %d", len(calls))
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMCPRelayKeepsConcurrentAdmissionAndContextCancellation(t *testing.T) {
@@ -424,6 +477,19 @@ func TestMCPRelayBoundedLineFraming(t *testing.T) {
 
 func relayUnusedCall(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(`{}`), nil
+}
+func relayFileInput(t *testing.T, input string) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.WriteString(writer, input); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
 }
 func serveRelay(relay *MCPRelay, input io.Reader, output io.Writer) <-chan error {
 	return serveRelayContext(context.Background(), relay, input, output)

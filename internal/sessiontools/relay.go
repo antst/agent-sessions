@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
+	"golang.org/x/sys/unix"
 )
 
 const defaultMCPRelayFrameBytes = 2 << 20
@@ -25,11 +27,7 @@ type MCPRelayConfig struct {
 	RefreshIdentity func() string
 	afterRead       func()
 }
-
-type MCPRelay struct {
-	config MCPRelayConfig
-}
-
+type MCPRelay struct{ config MCPRelayConfig }
 type relayRequest struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
@@ -41,16 +39,14 @@ type relayFrame struct {
 	buffered int
 }
 type relayResponse struct {
-	id      json.RawMessage
-	result  json.RawMessage
-	failure *rpcError
+	id, result json.RawMessage
+	failure    *rpcError
 }
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
-
 type structuredRPCError interface {
 	error
 	RPCErrorDetails() (int, string, json.RawMessage)
@@ -83,12 +79,39 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 	reader := bufio.NewReaderSize(input, min(4096, r.config.MaxFrameBytes+1))
 	writer := bufio.NewWriter(output)
 	defer func() { _ = writer.Flush() }()
+	readCtx, stopRead := context.WithCancel(ctx)
+	defer stopRead()
+	var waitReady func() error
+	readDone := func() error { return nil }
+	if r.config.Refresh != nil {
+		file, ok := input.(*os.File)
+		if !ok {
+			return errors.New("refresh-enabled MCP relay input must be an OS file")
+		}
+		cancelRead, cancelWrite, err := os.Pipe()
+		if err != nil {
+			return fmt.Errorf("open MCP relay cancellation pipe: %w", err)
+		}
+		context.AfterFunc(readCtx, func() { _ = cancelWrite.Close() })
+		readDone = cancelRead.Close
+		waitReady = func() error { return pollRelayInput(readCtx, file, cancelRead) }
+	}
 	frames := make(chan relayFrame, 1)
+	ready := make(chan struct{})
 	permit := make(chan struct{}, 1)
-	permit <- struct{}{}
-	go r.readFrames(ctx, reader, permit, frames)
+	readerDone := make(chan struct{})
+	go r.readFrames(readCtx, reader, waitReady, readDone, ready, permit, frames, readerDone)
+	if waitReady != nil {
+		defer func() { stopRead(); <-readerDone }()
+	}
 	responses := make(chan relayResponse)
-	readerBusy, inFlight, buffered := true, 0, 0
+	readerReady, readerBusy, inFlight, buffered := false, false, 0, 0
+	permitRead := func() {
+		if readerReady && (r.config.RefreshIdentity() == "" || buffered > 0) {
+			permit <- struct{}{}
+			readerReady, readerBusy = false, true
+		}
+	}
 	refresh := func() error {
 		if r.config.Refresh == nil || r.config.RefreshIdentity() == "" || readerBusy || inFlight != 0 || buffered != 0 {
 			return nil
@@ -99,11 +122,13 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 		if r.config.RefreshIdentity() != "" {
 			return errors.New("installed connector image does not match the ready daemon")
 		}
-		permit <- struct{}{}
-		readerBusy = true
+		permitRead()
 		return nil
 	}
 	for {
+		if err := refresh(); err != nil {
+			return err
+		}
 		if frames == nil && inFlight == 0 {
 			return writer.Flush()
 		}
@@ -118,16 +143,13 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 				return fmt.Errorf("flush MCP relay response: %w", err)
 			}
 			inFlight--
-			if err := refresh(); err != nil {
-				return err
-			}
+		case <-ready:
+			readerReady = true
+			permitRead()
 		case frame, ok := <-frames:
 			if !ok {
 				frames = nil
 				readerBusy = false
-				if err := refresh(); err != nil {
-					return err
-				}
 				continue
 			}
 			readerBusy, buffered = false, frame.buffered
@@ -135,14 +157,7 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 				return fmt.Errorf("%w: %w", ErrMCPRelayFrameTooLarge, frame.err)
 			}
 			identity := r.config.RefreshIdentity()
-			if identity == "" || buffered > 0 {
-				permit <- struct{}{}
-				readerBusy = true
-			}
 			if strings.TrimSpace(frame.line) == "" {
-				if err := refresh(); err != nil {
-					return err
-				}
 				continue
 			}
 			var request relayRequest
@@ -153,15 +168,9 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 				if err := writer.Flush(); err != nil {
 					return fmt.Errorf("flush MCP relay response: %w", err)
 				}
-				if err := refresh(); err != nil {
-					return err
-				}
 				continue
 			}
 			if len(request.ID) == 0 {
-				if err := refresh(); err != nil {
-					return err
-				}
 				continue
 			}
 			request.ID = append(json.RawMessage(nil), request.ID...)
@@ -184,9 +193,23 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 	}
 }
 
-func (r *MCPRelay) readFrames(ctx context.Context, reader *bufio.Reader, permit <-chan struct{}, frames chan<- relayFrame) {
-	defer close(frames)
+func (r *MCPRelay) readFrames(ctx context.Context, reader *bufio.Reader, waitReady, done func() error, ready chan<- struct{}, permit <-chan struct{}, frames chan<- relayFrame, finished chan<- struct{}) {
+	defer func() { _ = done(); close(finished); close(frames) }()
 	for {
+		if reader.Buffered() == 0 && waitReady != nil {
+			if err := waitReady(); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				frames <- relayFrame{err: err}
+				return
+			}
+		}
+		select {
+		case ready <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		select {
 		case <-permit:
 		case <-ctx.Done():
@@ -216,6 +239,27 @@ func (r *MCPRelay) readFrames(ctx context.Context, reader *bufio.Reader, permit 
 		if err != nil {
 			return
 		}
+	}
+}
+
+// Connector hosts are Unix-only in 0.4.0; polling leaves bytes unread until permitted.
+func pollRelayInput(ctx context.Context, input, cancel *os.File) error {
+	fds := []unix.PollFd{{Fd: int32(input.Fd()), Events: unix.POLLIN | unix.POLLHUP}, {Fd: int32(cancel.Fd()), Events: unix.POLLIN | unix.POLLHUP}}
+	for {
+		_, err := unix.Poll(fds, -1)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if fds[1].Revents != 0 {
+			return ctx.Err()
+		}
+		if fds[0].Revents&(unix.POLLIN|unix.POLLHUP) == 0 {
+			return fmt.Errorf("poll MCP relay input returned events %#x", fds[0].Revents)
+		}
+		return nil
 	}
 }
 
