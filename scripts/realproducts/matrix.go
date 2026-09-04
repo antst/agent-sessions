@@ -286,24 +286,20 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 // valid and are the preferred isolated matrix workspace.
 func requireMatrixGitCWD(cwd string) error {
 	_, metadataErr := os.Lstat(filepath.Join(cwd, ".git"))
-	hasMetadata := metadataErr == nil
-	if metadataErr != nil && !errors.Is(metadataErr, os.ErrNotExist) {
+	if errors.Is(metadataErr, os.ErrNotExist) {
+		return nil
+	}
+	if metadataErr != nil {
 		return fmt.Errorf("inspect approved product cwd Git metadata: %w", metadataErr)
 	}
 	git, err := exec.LookPath("git")
 	if err != nil {
-		if hasMetadata {
-			return fmt.Errorf("approved product cwd contains .git but git is unavailable: %w", err)
-		}
-		return nil
+		return fmt.Errorf("approved product cwd contains .git but git is unavailable: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, git, "-C", cwd, "rev-parse", "--is-inside-work-tree", "--show-toplevel").CombinedOutput() //nolint:gosec // read-only Git metadata check for the caller-selected cwd.
 	if err != nil {
-		if !hasMetadata {
-			return nil
-		}
 		return fmt.Errorf("approved product cwd has invalid Git worktree metadata: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
@@ -1182,11 +1178,13 @@ func (runner *matrixRunner) startTUI(
 	}
 	paneCWD, err := runner.paneWorkingDirectory(ctx, tui)
 	if err != nil {
-		return tui, command, fmt.Errorf("observe detached %s TUI cwd: %w", product.id, err)
+		cause := fmt.Errorf("observe detached %s TUI cwd: %w", product.id, err)
+		return tui, command, errors.Join(cause, runner.endTUI(context.Background(), tui))
 	}
 	tui.paneCWD = paneCWD
 	if paneCWD != runner.config.cwd {
-		return tui, command, fmt.Errorf("detached %s TUI started in cwd %s, want approved cwd %s", product.id, paneCWD, runner.config.cwd)
+		cause := fmt.Errorf("detached %s TUI started in cwd %s, want approved cwd %s", product.id, paneCWD, runner.config.cwd)
+		return tui, command, errors.Join(cause, runner.endTUI(context.Background(), tui))
 	}
 	return tui, command, nil
 }

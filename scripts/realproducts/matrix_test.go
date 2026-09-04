@@ -395,8 +395,8 @@ func TestMatrixGitCWDPreflightRejectsRedirectedWorktree(t *testing.T) {
 	if err := os.Mkdir(subdirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := requireMatrixGitCWD(subdirectory); err == nil || !strings.Contains(err.Error(), "resolves to another worktree") {
-		t.Fatalf("nested repository cwd error = %v", err)
+	if err := requireMatrixGitCWD(subdirectory); err != nil {
+		t.Fatalf("nested cwd without its own .git metadata: %v", err)
 	}
 	if output, err := exec.Command("git", "-C", repository, "config", "core.worktree", other).CombinedOutput(); err != nil {
 		t.Fatalf("redirect worktree: %v: %s", err, output)
@@ -673,9 +673,11 @@ func matrixTreeSnapshot(t *testing.T, root string) string {
 func TestMatrixTUIUsesApprovedCWDAndDiagnosesTrust(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "tmux")
 	writeMatrixTestExecutable(t, fake, `case "$1" in
-has-session) exit 1;;
+has-session) [ -n "$MATRIX_TMUX_LIVE" ] && [ -e "$MATRIX_TMUX_LIVE" ];;
+new-session) if [ -n "$MATRIX_TMUX_LIVE" ]; then : >"$MATRIX_TMUX_LIVE"; fi;;
 display-message) printf '%s\n' "$MATRIX_PANE_CWD";;
 capture-pane) [ "$MATRIX_CAPTURE_FAIL" = 1 ] && exit 4; printf '%s\n' "$MATRIX_PANE";;
+kill-session) printf '%s\n' "$3" >>"$MATRIX_TMUX_KILLS"; rm -f "$MATRIX_TMUX_LIVE";;
 esac`)
 	cwd := filepath.Join(t.TempDir(), `odd ' cwd`)
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -693,10 +695,16 @@ esac`)
 		}
 	}
 	wrong := t.TempDir()
+	live, kills := filepath.Join(t.TempDir(), "live"), filepath.Join(t.TempDir(), "kills")
 	t.Setenv("MATRIX_PANE_CWD", wrong)
+	t.Setenv("MATRIX_TMUX_LIVE", live)
+	t.Setenv("MATRIX_TMUX_KILLS", kills)
 	wrongTUI, wrongCommand, wrongErr := runner.startTUI(context.Background(), matrixProduct{id: "grok", peerExecutable: "/native/grok-peer"}, "matrix-name", "matrix-group", "label", false)
-	if wrongErr == nil || wrongTUI == nil || wrongTUI.paneCWD != wrong || len(wrongCommand) < 7 || !strings.Contains(wrongErr.Error(), "want approved cwd "+cwd) {
+	if wrongErr == nil || wrongTUI == nil || wrongTUI.paneCWD != wrong || len(wrongCommand) < 7 || !strings.Contains(wrongErr.Error(), "want approved cwd "+cwd) || runner.active[wrongTUI.tmuxName] != nil {
 		t.Fatalf("wrong pane cwd TUI/command/error = %#v/%q/%v", wrongTUI, wrongCommand, wrongErr)
+	}
+	if body, err := os.ReadFile(kills); err != nil || string(body) != "="+wrongTUI.tmuxName+"\n" {
+		t.Fatalf("wrong pane cwd cleanup = %q/%v", body, err)
 	}
 	product := matrixProduct{id: "codex", nativeTrustPrompt: "Do you trust the contents of this directory?"}
 	tui := &matrixTUI{tmuxName: "owned", pane: "owned:0.0"}
