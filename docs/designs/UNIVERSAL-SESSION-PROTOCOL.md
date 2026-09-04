@@ -319,7 +319,6 @@ Only lanes have durable rows. A row has exactly these columns:
 | Column | Meaning |
 | --- | --- |
 | `session_id` | Daemon-assigned immutable lane ID and primary key. |
-| `kind` | Always `lane` in this version; persisted so the row is itself a `SessionSummary` source. |
 | `product` | Immutable product token used to resolve the worker executable. |
 | `name` | Immutable caller-chosen lane name. |
 | `groups` | Immutable union of the spawning caller's groups and `extra_groups`. |
@@ -332,7 +331,13 @@ Only lanes have durable rows. A row has exactly these columns:
 There are no durable peer rows. A peer hello creates or replaces one transient
 entry containing its asserted identity and exact connection. EOF removes that
 exact entry. Lane EOF removes only the live connection; its row remains offline
-and resumable.
+and resumable. `SessionSummary.kind` is derived: a durable row is a lane and a
+transient entry is a peer.
+
+Daemon start performs no recovery pass. Every durable row starts offline;
+connections, pending turns, row locks, and reservations start empty. Nothing is
+replayed or reaped from a prior incarnation because its workers exited on EOF.
+Restart is therefore a table load, not a lifecycle transition.
 
 Three in-memory indexes are the complete live authority:
 
@@ -407,6 +412,10 @@ transaction waits on the same row lock, so a resumed native session never has
 two worker processes. A lost successful reply is recovered by listing visible
 lanes by name, not by replaying spawn.
 
+The bound is the single constant `spawnTransactionTimeout = 60s` for every
+product and for both describe and spawn. It is not configuration and has no
+per-product override.
+
 ### 2.4 Routing, turns, and close
 
 Every request resolves the caller from its exact current connection, resolves
@@ -436,6 +445,11 @@ bound expires, the daemon closes the connection and synchronously reaps the
 owned tree before writing `closed=true`. Forced cleanup fails the pending run
 once and preserves the previous `last_turn`. The row can never resume after
 that commit.
+
+The process bound is the single constant `supervisorTerminationGrace = 2s`:
+send TERM, wait two seconds, then KILL and reap. It is not configuration and has
+no per-product override. Together with `spawnTransactionTimeout`, these are the
+only daemon lane-path clocks.
 
 Unrequested lane EOF takes the same row lock, removes only the matching
 connection pointer, fails calls once, and synchronously reaps the process tree.
@@ -470,6 +484,9 @@ performs the same row lock, visibility, connection, and pending checks. New
 spawn and describe are always local because neither names a remote host. A
 federated turn is one outstanding RPC at each hop; caller loss has the same
 sink-only effect, and the authoritative daemon alone writes `last_turn`.
+All of this forwarding is one function of at most 60 logical lines: resolve the
+host-qualified ID, forward the identical request once, and return the identical
+response or error. It stores no remote state and never retries.
 
 ### 2.6 Package boundary
 
@@ -503,6 +520,7 @@ lines, not as additions hidden behind relocation accounting:
 | --- | ---: | --- |
 | `internal/daemon` | 1,100 | Table, router, transactions, delivery, and federation together. |
 | Largest daemon router file | 450 | No product literal, argv parser, or product callback. |
+| Cross-host control forwarder | 60 | One hop, no state, retry, or shape translation. |
 | `internal/livepresence` | 650 | Framing and connection mechanics only. |
 | `internal/structuredprocess` | 700 | Generic process ownership; current functionality may remain. |
 | `cmd/agent-sessions` daemon composition | 350 | Construction and rendering only; no protocol state. |
