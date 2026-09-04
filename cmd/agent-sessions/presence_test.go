@@ -97,6 +97,10 @@ func testPresenceServer(t *testing.T) *livePresenceServer {
 }
 
 func openTestPresence(t *testing.T, server *livePresenceServer, identity string) (net.Conn, *json.Encoder, *json.Decoder) {
+	return openTestPresenceAs(t, server, identity, identity)
+}
+
+func openTestPresenceAs(t *testing.T, server *livePresenceServer, identity, name string) (net.Conn, *json.Encoder, *json.Decoder) {
 	t.Helper()
 	connection, err := net.Dial("unix", server.listener.Addr().String())
 	if err != nil {
@@ -106,7 +110,7 @@ func openTestPresence(t *testing.T, server *livePresenceServer, identity string)
 	encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
 	if identity != "" {
 		if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
-			"protocol": 1, "uuid": identity, "name": identity, "groups": []string{}, "product": "future", "info": map[string]string{},
+			"protocol": 1, "uuid": identity, "name": name, "groups": []string{}, "product": "future", "info": map[string]string{},
 		}}); err != nil {
 			t.Fatal(err)
 		}
@@ -138,6 +142,19 @@ func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
 			t.Fatalf("frame %q was not closed: %v", line, readErr)
 		}
 		_ = connection.Close()
+	}
+}
+
+func TestLivePresenceJSONRPCIDRange(t *testing.T) {
+	valid := map[string]bool{`"opaque"`: true, `9007199254740991`: true, `-9007199254740991`: true, `1e3`: true, `1.0`: true}
+	for _, id := range []string{`9007199254740992`, `-9007199254740992`, `1.5`, `1e-3`, `null`} {
+		valid[id] = false
+	}
+	for id, want := range valid {
+		frame := livepresence.Frame{JSONRPC: "2.0", ID: json.RawMessage(id), Method: "probe", Params: json.RawMessage(`{}`)}
+		if got := livepresence.ValidRequest(frame); got != want {
+			t.Fatalf("id %s valid = %t, want %t", id, got, want)
+		}
 	}
 }
 
@@ -177,6 +194,19 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 		t.Fatalf("unsupported-version connection remained open: %v", err)
 	}
 	_ = connection.Close()
+	_, encoder, decoder = openTestPresence(t, server, "")
+	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
+		"protocol": 1, "uuid": "native id", "name": "worker", "groups": []string{}, "product": "future", "info": map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	response = livepresence.Frame{}
+	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams || string(response.Error.Data) != `{"method":"session.hello"}` {
+		t.Fatalf("invalid hello response = %+v, %v", response, err)
+	}
+	if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
+		t.Fatalf("invalid hello connection remained open: %v", err)
+	}
 	_, encoder, decoder = openTestPresence(t, server, "update")
 	response = livepresence.Frame{}
 	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "update", "method": "session.update", "params": map[string]any{
@@ -187,24 +217,6 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	response = livepresence.Frame{}
 	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams {
 		t.Fatalf("group-update response = %+v, %v", response, err)
-	}
-}
-
-func TestLivePresenceAnswersInvalidHelloThenCloses(t *testing.T) {
-	server := testPresenceServer(t)
-	_, encoder, decoder := openTestPresence(t, server, "")
-	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
-		"protocol": 1, "uuid": "native id", "name": "worker", "groups": []string{}, "product": "future", "info": map[string]string{},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	var response livepresence.Frame
-	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams ||
-		string(response.Error.Data) != `{"method":"session.hello"}` {
-		t.Fatalf("invalid hello response = %+v, %v", response, err)
-	}
-	if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
-		t.Fatalf("invalid hello connection remained open: %v", err)
 	}
 }
 
@@ -223,36 +235,33 @@ func TestLiveHelloCapabilitiesAreClosedAndOnlyAdvertiseTrueLaneSupport(t *testin
 
 func TestLiveHelloRejectsEveryInvalidIdentityShape(t *testing.T) {
 	base := livepresence.Report{UUID: "ses_native", Name: "Native Worker/One", Groups: []string{"team!", "session:host/ses_native"}, Product: "future", Info: map[string]string{}}
-	for name, mutate := range map[string]func(*livepresence.Report){
-		"uuid whitespace":  func(value *livepresence.Report) { value.UUID = "native id" },
-		"uuid control":     func(value *livepresence.Report) { value.UUID = "native\n" },
-		"uuid slash":       func(value *livepresence.Report) { value.UUID = "native/id" },
-		"uuid bound":       func(value *livepresence.Report) { value.UUID = strings.Repeat("u", 129) },
-		"name control":     func(value *livepresence.Report) { value.Name = "native\tworker" },
-		"name bound":       func(value *livepresence.Report) { value.Name = strings.Repeat("n", 257) },
-		"group blank":      func(value *livepresence.Report) { value.Groups = []string{""} },
-		"group whitespace": func(value *livepresence.Report) { value.Groups = []string{"two words"} },
-		"group control":    func(value *livepresence.Report) { value.Groups = []string{"team\n"} },
-		"group slash":      func(value *livepresence.Report) { value.Groups = []string{"team/one"} },
-		"group bad anchor": func(value *livepresence.Report) { value.Groups = []string{"session:host"} },
-		"group bound":      func(value *livepresence.Report) { value.Groups = []string{strings.Repeat("g", 193)} },
-		"product token":    func(value *livepresence.Report) { value.Product = "Future" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			value := livepresence.CloneReport(base)
-			mutate(&value)
-			raw, err := json.Marshal(struct {
-				Protocol int `json:"protocol"`
-				livepresence.Report
-			}{1, value})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err := livepresence.DecodeHello(raw); err == nil {
-				t.Fatalf("invalid hello accepted: %s", raw)
-			}
-		})
+	reject := func(value livepresence.Report) {
+		raw, _ := json.Marshal(struct {
+			Protocol int `json:"protocol"`
+			livepresence.Report
+		}{1, value})
+		if _, _, err := livepresence.DecodeHello(raw); err == nil {
+			t.Fatalf("invalid hello accepted: %s", raw)
+		}
 	}
+	for _, invalid := range []string{"native id", "native\n", "native/id", strings.Repeat("u", 129)} {
+		value := livepresence.CloneReport(base)
+		value.UUID = invalid
+		reject(value)
+	}
+	for _, invalid := range []string{"native\tworker", strings.Repeat("n", 257)} {
+		value := livepresence.CloneReport(base)
+		value.Name = invalid
+		reject(value)
+	}
+	for _, invalid := range []string{"", "two words", "team\n", "team/one", "session:host", strings.Repeat("g", 193)} {
+		value := livepresence.CloneReport(base)
+		value.Groups = []string{invalid}
+		reject(value)
+	}
+	value := livepresence.CloneReport(base)
+	value.Product = "Future"
+	reject(value)
 }
 
 func TestLiveUpdateKeepsTheNameIdentityShape(t *testing.T) {
@@ -276,27 +285,11 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	connect := func(name string) net.Conn {
-		connection, dialErr := net.Dial("unix", server.listener.Addr().String())
-		if dialErr != nil {
-			t.Fatal(dialErr)
-		}
-		if encodeErr := json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": name, "method": "session.hello", "params": map[string]any{
-			"protocol": 1, "uuid": "same", "name": name, "groups": []string{"team"}, "product": "future", "info": map[string]string{},
-		}}); encodeErr != nil {
-			t.Fatal(encodeErr)
-		}
-		var response livepresence.Frame
-		if decodeErr := json.NewDecoder(connection).Decode(&response); decodeErr != nil || response.Error != nil {
-			t.Fatalf("hello %s = %+v, %v", name, response, decodeErr)
-		}
-		return connection
-	}
-	first := connect("first")
+	first, _, _ := openTestPresenceAs(t, server, "same", "first")
 	if got := <-joined; got.Name != "first" {
 		t.Fatalf("first join = %+v", got)
 	}
-	second := connect("second")
+	second, _, _ := openTestPresenceAs(t, server, "same", "second")
 	if got := <-joined; got.Name != "second" {
 		t.Fatalf("replacement join = %+v", got)
 	}
@@ -324,12 +317,9 @@ func TestDisplacedLivePresenceUpdateIsRejectedWithoutMutatingReplacement(t *test
 	oldLocal, oldRemote := net.Pipe()
 	defer oldLocal.Close()
 	defer oldRemote.Close()
-	newLocal, newRemote := net.Pipe()
-	defer newLocal.Close()
-	defer newRemote.Close()
 	oldConnection := livepresence.NewConnection(oldLocal)
 	oldConnection.SetReport(livepresence.Report{UUID: "same", Name: "old", Product: "future", Groups: []string{}, Info: map[string]string{}})
-	newConnection := livepresence.NewConnection(newLocal)
+	newConnection := livepresence.NewConnection(oldLocal)
 	newConnection.SetReport(livepresence.Report{UUID: "same", Name: "replacement", Product: "future", Groups: []string{}, Info: map[string]string{}})
 	server := &livePresenceServer{current: map[string]*livepresence.Connection{"same": newConnection}}
 	params := json.RawMessage(`{"name":"displaced","info":{"cwd":"/wrong"}}`)
@@ -351,6 +341,58 @@ func TestDisplacedLivePresenceUpdateIsRejectedWithoutMutatingReplacement(t *test
 	}
 	if got := newConnection.Report(); got.Name != "replacement" || got.Info["cwd"] != "" {
 		t.Fatalf("replacement report mutated = %+v", got)
+	}
+}
+
+func TestLivePresenceUpdateAndReplacementAreLinearized(t *testing.T) {
+	oldLocal, oldRemote := net.Pipe()
+	defer oldLocal.Close()
+	defer oldRemote.Close()
+	oldConnection := livepresence.NewConnection(oldLocal)
+	oldConnection.SetReport(livepresence.Report{UUID: "same", Name: "old"})
+	replacement := livepresence.NewConnection(oldLocal)
+	entered, release := make(chan struct{}), make(chan struct{})
+	server := &livePresenceServer{
+		current: map[string]*livepresence.Connection{"same": oldConnection},
+		join: func(report livepresence.Report) {
+			if report.Name == "updated" {
+				close(entered)
+				<-release
+			}
+		},
+	}
+	updated := make(chan struct{})
+	go func() {
+		server.handleRequest(context.Background(), oldConnection, livepresence.Frame{
+			JSONRPC: "2.0", ID: json.RawMessage(`"update"`), Method: "session.update", Params: json.RawMessage(`{"name":"updated","info":{"cwd":"/old"}}`),
+		})
+		close(updated)
+	}()
+	<-entered
+	replaced := make(chan struct{})
+	go func() {
+		server.mu.Lock()
+		server.current["same"] = replacement
+		server.mu.Unlock()
+		close(replaced)
+	}()
+	select {
+	case <-replaced:
+		t.Fatal("replacement overtook the checked current update")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	var response livepresence.Frame
+	if err := json.NewDecoder(oldRemote).Decode(&response); err != nil || response.Error != nil {
+		t.Fatalf("update response = %+v, %v", response, err)
+	}
+	<-updated
+	<-replaced
+	if got := oldConnection.Report(); got.Name != "updated" || got.Info["cwd"] != "/old" {
+		t.Fatalf("linearized update = %+v", got)
+	}
+	if got := server.current["same"]; got != replacement {
+		t.Fatalf("current connection = %p, want %p", got, replacement)
 	}
 }
 

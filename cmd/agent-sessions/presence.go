@@ -119,14 +119,15 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 		return
 	}
 	s.mu.Lock()
+	// Callbacks take coordinator c.mu and never reenter presence; keep map transitions linear through them.
 	previous := s.current[report.UUID]
 	s.current[report.UUID] = rpc
 	s.signalChangedLocked()
+	s.join(report)
 	s.mu.Unlock()
 	if previous != nil {
 		_ = previous.Close()
 	}
-	s.join(report)
 	for {
 		var frame livepresence.Frame
 		if rpc.Decode(&frame) != nil {
@@ -151,11 +152,9 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	if current {
 		delete(s.current, report.UUID)
 		s.signalChangedLocked()
-	}
-	s.mu.Unlock()
-	if current {
 		s.leave(rpc.Report())
 	}
+	s.mu.Unlock()
 }
 
 func (s *livePresenceServer) handleRequest(ctx context.Context, connection *livepresence.Connection, frame livepresence.Frame) {
@@ -167,13 +166,15 @@ func (s *livePresenceServer) handleRequest(ctx context.Context, connection *live
 		}
 		s.mu.Lock()
 		current := s.current[connection.Report().UUID] == connection
+		if current {
+			updated := connection.UpdateReport(name, info)
+			s.join(updated)
+		}
 		s.mu.Unlock()
 		if !current {
 			_ = connection.Write(livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
 			return
 		}
-		updated := connection.UpdateReport(name, info)
-		s.join(updated)
 		_ = connection.Write(livepresence.Success(frame.ID, json.RawMessage(`{}`)))
 		return
 	}

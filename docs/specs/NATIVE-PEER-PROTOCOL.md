@@ -78,21 +78,11 @@ The client must wait for this result before sending another method. The fields
 mean:
 
 - `protocol` is the integer `1`. No other value is accepted.
-- `uuid` is the stable, opaque session ID issued by the product. The historical
-  field need not be an RFC UUID. It is 1..128 UTF-8 bytes with no whitespace,
-  control characters, or `/`; the client never generates or substitutes it.
-- `name` is the product-owned title carried verbatim. It may be empty before a
-  title exists and may contain whitespace or `/`, but is at most 256 UTF-8
-  bytes and contains no control characters. Rosters display `uuid` while it is empty.
+- `uuid` is the stable, opaque session ID issued by the product. The historical field need not be an RFC UUID. It is 1..128 UTF-8 bytes with no whitespace, control characters, or `/`; the client never generates or substitutes it.
+- `name` is the product-owned title carried verbatim. It may be empty before a title exists and may contain whitespace or `/`, but is at most 256 UTF-8 bytes and contains no control characters. Rosters display `uuid` while it is empty.
 - `groups` is the array of group strings passed from the launch arguments,
-  unchanged and in order. An operator/wire group label is 1..192 UTF-8 bytes
-  with no whitespace, control characters, or `/`. The daemon-derived private
-  anchor is the typed structural value `session:<host>/<uuid>` and is valid
-  only when its host and native-ID components satisfy their own slash-free
-  grammars. The array is fixed for the life of this connection.
-- `product` is an opaque token-shaped label: 1..64 bytes, a lowercase ASCII
-  letter first, then lowercase ASCII letters, digits, or single nonterminal
-  hyphens. The daemon carries it verbatim and never interprets it as a launch capability.
+  unchanged and in order. An operator/wire group label is 1..192 UTF-8 bytes with no whitespace, control characters, or `/`. The daemon-derived private anchor is the typed structural value `session:<host>/<uuid>` and is valid only when its host and native-ID components satisfy their own slash-free grammars. The array is fixed for the life of this connection.
+- `product` is an opaque token-shaped label: 1..64 bytes, a lowercase ASCII letter first, then lowercase ASCII letters, digits, or single nonterminal hyphens. The daemon carries it verbatim and never interprets it as a launch capability.
 - `info` is a string-to-string object owned by the product. The daemon passes
   every key and value through verbatim to rosters and `peers.list` results and
   never interprets them.
@@ -160,13 +150,7 @@ this closed error table:
 | `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
 | `-32006` | `Product operation failed` | A native product or driver operation failed for a reason not represented by another code. The product's error text is preserved verbatim in `message` and `data`. |
 
-Messages use these closed data shapes: `-32602` has `{"method":...}`;
-`-32001` has `{"target":...}`; `-32002` has `{"uuid":...}`; `-32003`
-has the applicable `method`, `reason`, or `group`; `-32004` has
-`{"supported":1,"received":...}`; and `-32005` has `{"product":...}`.
-Fallback `-32006` has `detail` and `agent_sessions_bug_report`. A product's
-valid structured `-32006` is relayed byte-for-byte instead. No other error code
-is emitted. Every accepted request receives exactly one response.
+Messages use these closed data shapes: `-32602` has `{"method":...}`; `-32001` has `{"target":...}`; `-32002` has `{"uuid":...}`; `-32003` has the applicable `method`, `reason`, or `group`; `-32004` has `{"supported":1,"received":...}`; and `-32005` has `{"product":...}`. Fallback `-32006` has `detail` and `agent_sessions_bug_report`. A product's valid structured `-32006` is relayed byte-for-byte instead. No other error code is emitted. Every accepted request receives exactly one response.
 
 ### Product to daemon
 
@@ -294,8 +278,7 @@ BODY
 </cross-session-message>
 ```
 
-That renderer owns attribute filtering and JSON escaping; no earlier layer pre-renders,
-truncates, or strips the message ID.
+That renderer owns attribute filtering and JSON escaping; no earlier layer pre-renders, truncates, or strips the message ID.
 
 ### Daemon to lane-capable product sessions
 
@@ -332,10 +315,7 @@ product. Neither is durable Agent Sessions state.
 `outcome` is `completed`, `interrupted`, or `failed`; `result` is the product's
 assistant text; and `reason` is the product's native terminal reason without
 reinterpretation. For DSH this is its discriminated object, such as
-`{"kind":"completed"}`. DSH 0.1.2-rc.1 defines that closed `TurnEndReason`
-shape in `packages/core/session/src/types.ts:180-196`; the adapter returns the
-`turn/end` event's `reason` value unchanged. The product owns input-to-turn
-correlation.
+`{"kind":"completed"}`. DSH 0.1.2-rc.1 defines `TurnEndReason` through a merge-extensible `TurnEndReasonMap`; plugins may add variants. The adapter returns the `turn/end` event's `reason` value unchanged. The product owns input-to-turn correlation.
 An unknown `native_message_id` returns `-32001` with that value in `data.target`;
 a second waiter for known in-flight work remains a product operation failure.
 
@@ -377,8 +357,7 @@ promptless for the model.
 - On disconnect, outstanding calls in both directions fail. Neither side
   replays calls after reconnect; the caller decides whether an operation is
   safe to retry.
-- Shipped clients reconnect every two seconds while the product session lives.
-  There is no replay or heartbeat.
+- Shipped clients reconnect every two seconds while the product session lives; there is no replay or heartbeat.
 
 ## 6. Product responsibilities
 
@@ -479,7 +458,7 @@ Request:
   "required": ["jsonrpc", "id", "method", "params"],
   "properties": {
     "jsonrpc": {"const": "2.0"},
-    "id": {"type": ["string", "number"]},
+    "id": {"oneOf": [{"type": "string"}, {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}]},
     "method": {
       "enum": [
         "session.hello", "session.update", "peers.list", "message.send",
@@ -504,7 +483,7 @@ Success response:
   "required": ["jsonrpc", "id", "result"],
   "properties": {
     "jsonrpc": {"const": "2.0"},
-    "id": {"type": ["string", "number"]},
+    "id": {"oneOf": [{"type": "string"}, {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}]},
     "result": {}
   }
 }
@@ -520,7 +499,7 @@ Error response:
   "required": ["jsonrpc", "id", "error"],
   "properties": {
     "jsonrpc": {"const": "2.0"},
-    "id": {"type": ["string", "number"]},
+    "id": {"oneOf": [{"type": "string"}, {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}]},
     "error": {
       "type": "object",
       "additionalProperties": false,
