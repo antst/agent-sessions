@@ -62,17 +62,15 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 	if frame.Error == nil || string(frame.Error.Data) != `{"detail":"native exact failure"}` {
 		t.Fatalf("structured native failure was changed: %+v", frame.Error)
 	}
-	versionError := &livepresence.RPCError{Code: livepresence.UnsupportedVersion, Message: "Unsupported protocol version", Data: json.RawMessage(`{"supported":1,"received":1e3}`)}
+	versionError := &livepresence.RPCError{Code: livepresence.UnsupportedVersion, Message: "Unsupported protocol version", Data: json.RawMessage(`{"supported":1,"received":9007199254740991.1}`)}
 	if !livepresence.ValidFrame(livepresence.Frame{JSONRPC: "2.0", ID: json.RawMessage(`2`), Error: versionError}) {
-		t.Fatal("safe mathematical integer was rejected as received protocol version")
+		t.Fatal("parsed safe integer was rejected as received protocol version")
 	}
 	for _, malformed := range []*livepresence.RPCError{
 		{Code: livepresence.Busy, Message: "Session busy", Data: json.RawMessage(`{"uuid":"bad/id"}`)},
 		{Code: livepresence.Busy, Message: "busy", Data: json.RawMessage(`{"uuid":"busy-native"}`)},
 		{Code: livepresence.NotPermitted, Message: "Operation not permitted", Data: json.RawMessage(`{"method":"lane.steer","group":"team"}`)},
-		{Code: livepresence.InvalidParams, Message: "Invalid params", Data: json.RawMessage(`{"method":" lane.steer "}`)},
-		{Code: livepresence.NotPermitted, Message: "Operation not permitted", Data: json.RawMessage(`{"method":"lane.\nsteer"}`)},
-		{Code: livepresence.UnsupportedVersion, Message: "Unsupported protocol version", Data: json.RawMessage(`{"supported":1,"received":9007199254740992}`)},
+		{Code: livepresence.InvalidParams, Message: "Invalid params", Data: json.RawMessage(`{"method":" lane.steer "}`)}, {Code: livepresence.NotPermitted, Message: "Operation not permitted", Data: json.RawMessage(`{"method":"lane.\nsteer"}`)}, {Code: livepresence.UnsupportedVersion, Message: "Unsupported protocol version", Data: json.RawMessage(`{"supported":1,"received":9007199254740992}`)},
 		{Code: livepresence.ProductUnavailable, Message: "Product not launchable", Data: json.RawMessage(`{"product":"Bad"}`)},
 	} {
 		if got := livepresence.FailureFromError(json.RawMessage(`3`), "lane.steer", malformed); got.Error == nil || got.Error.Code != livepresence.ProductFailure || !strings.Contains(string(got.Error.Data), `"agent_sessions_bug_report"`) {
@@ -153,7 +151,7 @@ func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
 }
 
 func TestLivePresenceJSONRPCIDRange(t *testing.T) {
-	valid := map[string]bool{`"opaque"`: true, `9007199254740991`: true, `-9007199254740991`: true, `1e3`: true, `1.0`: true}
+	valid := map[string]bool{`"opaque"`: true, `9007199254740991`: true, `-9007199254740991`: true, `9007199254740991.1`: true, `1e3`: true, `1.0`: true}
 	for _, id := range []string{`9007199254740992`, `-9007199254740992`, `1.5`, `1e-3`, `null`} {
 		valid[id] = false
 	}

@@ -203,7 +203,7 @@ test("numeric JSON-RPC ids are limited to safe mathematical integers", async (t)
   client.on("message", (message) => client.acceptMessage(message.messageID)); client.report("native", "worker");
   await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
   for (const [rawID, messageID, expectedID] of [
-    ["9007199254740991", "safe-max", 9007199254740991], ["-9007199254740991", "safe-min", -9007199254740991], ["1e3", "safe-exponent", 1000],
+    ["9007199254740991", "safe-max", 9007199254740991], ["-9007199254740991", "safe-min", -9007199254740991], ["9007199254740991.1", "rounded-safe", 9007199254740991], ["1e3", "safe-exponent", 1000],
   ]) {
     fixture.writeRaw(`{"jsonrpc":"2.0","id":${rawID},"method":"message.deliver","params":{"message_id":"${messageID}","from":{"uuid":"parent","name":"parent","product":"codex","groups":["team"]},"body":"body"}}`);
     await until(() => fixture.responses.some((frame) => frame.id === expectedID));
@@ -212,6 +212,9 @@ test("numeric JSON-RPC ids are limited to safe mathematical integers", async (t)
     const reportCount = fixture.reports.length; fixture.writeRaw(`{"jsonrpc":"2.0","id":${rawID},"method":"message.deliver","params":{"message_id":"invalid","from":{"uuid":"parent","name":"parent","product":"codex","groups":["team"]},"body":"body"}}`);
     await until(() => fixture.reports.length === reportCount + 1 && client.sessions.get("native")?.ready);
   }
+  const version = client.callTool("native", "version", "peers.list", {}); await until(() => fixture.requests.some((frame) => frame.id === "session.version"));
+  fixture.writeRaw('{"jsonrpc":"2.0","id":"session.version","error":{"code":-32004,"message":"Unsupported protocol version","data":{"supported":1,"received":9007199254740991.1}}}');
+  await assert.rejects(version, (error) => error.code === -32004 && error.data.received === Number.MAX_SAFE_INTEGER);
 });
 
 test("hello acknowledgement publishes readiness before a coalesced lane request", async (t) => {

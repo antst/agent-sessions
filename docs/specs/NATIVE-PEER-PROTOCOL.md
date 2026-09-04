@@ -424,7 +424,7 @@ presence(session):
 
 ## 8. Conformance
 
-Conformance is checked end to end against the real product:
+Conformance is checked end to end against the real product. Version 1 applies the runtime's standard IEEE-754 parser before checking numeric IDs and `data.received`; raw numeric lexical equivalence (including rounded fractions, exponents, and minus zero) remains explicit 0.4.1 debt:
 
 | Cell | Required observation |
 | --- | --- |
