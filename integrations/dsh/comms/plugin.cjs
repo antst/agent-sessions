@@ -3,22 +3,19 @@
 const { createLiveSessionClient, renderDelivery } = require("./shared/live-session.cjs");
 
 const name = "agent-sessions-comms";
-const inject = ["agents", "tools"];
+const inject = ["agents", "tools", "commands", "sessionTitle"];
 const serviceName = "agentSessionsComms";
-const OPERATIONS = Object.freeze(["peers.list", "message.send"]);
+const OPERATIONS = Object.freeze(["identity", "peers.list", "message.send"]);
 const ENVIRONMENT_NAMES = Object.freeze([
   "AGENT_SESSIONS_PRESENCE_SOCKET", "AGENT_SESSIONS_STATE_ROOT",
   "XDG_STATE_HOME", "HOME",
 ]);
-
 function cleanError(error) {
   return String(error?.message ?? error ?? "DSH communication operation failed").replace(/[\0\r\n]/gu, " ").slice(0, 4096);
 }
-
 function text(value) {
   return typeof value === "string" && value.trim() === value && value.length > 0 && !/[\0\r\n]/u.test(value);
 }
-
 function configuredGroups(value) {
   const groups = value?.groups ?? [];
   if (!Array.isArray(groups) || groups.some((group) => !text(group))) {
@@ -26,12 +23,10 @@ function configuredGroups(value) {
   }
   return [...groups];
 }
-
 function launchValue(environment, key) {
   const value = environment?.get(key)?.value;
   return typeof value === "string" ? value : "";
 }
-
 function launchClientEnvironment(environment) {
   const result = { AGENT_SESSIONS_PRODUCT: "dsh", AGENT_SESSIONS_GROUPS: "[]" };
   for (const key of ENVIRONMENT_NAMES) {
@@ -40,16 +35,15 @@ function launchClientEnvironment(environment) {
   }
   return result;
 }
-
 function launchIdentity(environment, agent, fallbackGroups) {
-  const sessionID = String(agent?.session?.id ?? agent?.id ?? "");
+  const nativeID = String(agent?.session?.id ?? agent?.id ?? "");
+  const pinnedID = launchValue(environment, "AGENT_SESSIONS_SESSION_ID");
+  const sessionID = pinnedID || nativeID;
   if (!text(sessionID)) throw new Error("DSH root omitted its native session id");
-  if (launchValue(environment, "AGENT_SESSIONS_SESSION_ID") !== sessionID) {
-    return { sessionID, name: "", groups: [...fallbackGroups] };
-  }
-  let groups;
+  const configured = environment?.get("AGENT_SESSIONS_GROUPS");
+  let groups = fallbackGroups;
   try {
-    groups = JSON.parse(launchValue(environment, "AGENT_SESSIONS_GROUPS") || "[]");
+    if (configured && typeof configured.value === "string") groups = JSON.parse(configured.value);
   } catch {
     throw new Error("agent-sessions DSH launch groups are invalid");
   }
@@ -95,9 +89,15 @@ function createCommsRuntime(ctx, createUserMessage, config = {}, options = {}) {
 
   function present(agent) {
     if (!root(agent) || sessions.has(agent)) return false;
+    if (client.active !== true) return false;
     const identity = launchIdentity(environment, agent, fallbackGroups);
     const extension = extensionFor(identity.sessionID);
     if (extension?.defer === true && extension.ready !== true) return false;
+    const title = identity.name
+      ? ctx.sessionTitle.rename(agent.session, identity.name).title
+      : (ctx.sessionTitle.get(agent.session)?.title ?? "");
+    if (typeof title !== "string") throw new Error("DSH root omitted its native session title");
+    identity.name = title;
     const record = { agent, ...identity };
     sessions.set(agent, record);
     if (!client.report(identity.sessionID, identity.name, sessionInfo(agent), extension?.capabilities ?? {}, identity.groups)) {
@@ -179,7 +179,27 @@ function createCommsRuntime(ctx, createUserMessage, config = {}, options = {}) {
       if (message) receipts.delete(message.id);
     }
   });
-  client.on("diagnostic", (message) => process.stderr.write(`agent-sessions: ${cleanError(message)}\n`));
+  client.once("diagnostic", (message) => process.stderr.write(`agent-sessions: ${cleanError(message)}\n`));
+
+  function command(invocation) {
+    const record = sessions.get(invocation?.agent);
+    if (!record) return { kind: "error", text: root(invocation?.agent) ? "not connected" : "agent-sessions requires an exact DSH root" };
+    const words = String(invocation.rawInput ?? "").trim().split(/\s+/u).filter(Boolean);
+    if (words[0] === "groups" && words.length === 1) {
+      return { kind: "success", text: record.groups.length ? record.groups.join("\n") : "no groups" };
+    }
+    if (words[0] !== "group" || words.length < 2 || words.slice(1).some((group) => !text(group))) {
+      return { kind: "error", text: "usage: /agent-sessions group <group> [<group>...] | groups" };
+    }
+    const groups = [...new Set([...record.groups, ...words.slice(1)])];
+    try {
+      client.replaceGroups(record.sessionID, groups);
+      record.groups = groups;
+      return { kind: "success", text: "groups will update at the next Agent Sessions reconnect" };
+    } catch (error) {
+      return { kind: "error", text: error?.category === "inactive" ? "not connected" : cleanError(error) };
+    }
+  }
 
   async function callTool(agent, operation, argumentsValue) {
     const record = sessions.get(agent);
@@ -199,7 +219,7 @@ function createCommsRuntime(ctx, createUserMessage, config = {}, options = {}) {
     void client.stop();
   }
 
-  return { callTool, client, close, present, registerExtension, sessions };
+  return { callTool, client, close, command, present, registerExtension, sessions };
 }
 
 async function apply(ctx, config = {}) {
@@ -207,9 +227,14 @@ async function apply(ctx, config = {}) {
   const { defineTool } = await import("@deepseek-ai/dsh-tools");
   const runtime = createCommsRuntime(ctx, createUserMessage, config);
   ctx.provide(serviceName, runtime);
+  ctx.commands.register({
+    name: "agent-sessions", description: "List or add this session's Agent Sessions groups.",
+    input: { hint: "group <group> [<group>...] | groups" }, recordInput: false,
+    handler: (invocation) => runtime.command(invocation),
+  });
   ctx.tools.register(defineTool({
     name: "agent_sessions",
-    description: "Use peers.list or message.send; message.send selects one target, targets array, or group.",
+    description: "Use identity, peers.list, or message.send; message.send selects one target, targets array, or group.",
     parameters: {
       action: { type: "string", enum: OPERATIONS, required: true, description: "Exact Agent Sessions operation." },
       arguments: { type: "object", additionalProperties: true, description: "Arguments in the exact shape for the selected operation." },

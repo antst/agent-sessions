@@ -3,7 +3,7 @@ import liveSessionModule from "../shared/live-session.js";
 
 const { createLiveSessionClient, renderDelivery } = liveSessionModule;
 const OPERATIONS = [
-  "peers.list", "message.send",
+  "identity", "peers.list", "message.send",
   "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
   "lane.steer", "lane.interrupt", "lane.archive",
 ];

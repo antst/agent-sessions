@@ -1,12 +1,16 @@
 # Agent Sessions communications for DSH
 
-`@agent-sessions/dsh-comms` publishes each live top-level DeepSeek Harness
-session to the Agent Sessions presence socket. It adds `peers.list` and
-`message.send` (one target, explicit targets, or a group), and delivers inbound messages through DSH's native
-`Agent.steer` path.
+This plugin presents each live top-level DSH session, provides `identity`,
+`peers.list`, and `message.send`, and delivers through native `Agent.steer`.
+Bundles load it through the included patch. Without launch context or plugin
+groups, a root still appears under its native id and title with no groups. The
+plugin does not implement the native lane protocol.
 
-A DSH product bundle includes the package by listing it as a bundle dependency
-and inserting its plugin in the bundle patch. With no Agent Sessions launch
-context or plugin `groups` configuration, the session is still presented under
-its native session id with an empty name and no groups. This package does not
-advertise or implement the native lane protocol.
+The native DSH session title is the sole Agent Sessions name. A launch name
+renames it first. Groups follow patch/profile, launch environment, then additive
+runtime commands. Launch name/groups apply without a session id; when present,
+the session id pins only the UUID. `/agent-sessions group g [g...]` applies at the next existing
+reconnect (about two seconds); confirm acceptance in the roster. It refuses
+while a call or delivery is in flight: retry when idle. `/agent-sessions groups`
+lists the current set. ACP/headless sessions have no command router and use only
+patch/profile or launch environment values.

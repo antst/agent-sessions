@@ -88,11 +88,26 @@ class LiveSessionClient extends EventEmitter {
   callTool(nativeSessionID, callID, operation, argumentsValue) {
     const session = this.sessions.get(nativeSessionID);
     if (!session?.ready) return Promise.reject(new InactiveError("disconnected"));
+    if (operation === "identity") {
+      return Promise.resolve({ uuid: session.id, name: session.name, groups: [...session.groups] });
+    }
     let params = argumentsValue ?? {};
     if (operation.startsWith("lane.") && !Object.hasOwn(params, "cwd")) {
       params = { ...params, cwd: session.info.cwd };
     }
     return this._call(session, callID, operation, params);
+  }
+
+  replaceGroups(nativeSessionID, groups) {
+    const session = this.sessions.get(nativeSessionID);
+    if (!session?.ready) throw new InactiveError("disconnected");
+    if (!stringList(groups)) throw new Error("Agent Sessions groups are invalid");
+    if (session.pending.size > 0 || [...this.inbound.values()].some((value) => value.session === session)) {
+      throw new Error("Agent Sessions session has in-flight work; retry when idle");
+    }
+    session.groups = [...groups];
+    session.ready = false;
+    session.socket.destroy();
   }
 
   acceptMessage(messageID, result = {}) { return this._answer(messageID, result); }
