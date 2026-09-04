@@ -4,9 +4,8 @@ package qwenreadiness
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 
+	"github.com/antst/agent-sessions/internal/productruntime"
 	"github.com/antst/agent-sessions/internal/qwenprofile"
 )
 
@@ -180,7 +179,7 @@ func Check(ctx context.Context, request Request) (Report, error) { //nolint:gocy
 		report.ResolvedExecutable = executable.ResolvedExecutable
 		report.Version = executable.Version
 		report.PackageIdentityOK = executable.Package == ExpectedPackage
-		report.MinimumVersionOK = versionAtLeast(executable.Version, MinimumVersion)
+		report.MinimumVersionOK = productruntime.VersionAtLeast(executable.Version, MinimumVersion)
 		if !report.PackageIdentityOK {
 			addIssue("package_identity", "selected Qwen executable has an unexpected package identity")
 		}
@@ -214,7 +213,7 @@ func Check(ctx context.Context, request Request) (Report, error) { //nolint:gocy
 	case err != nil:
 		addIssue("acp_initialize", err.Error())
 	case acp.ProtocolVersion == 1 && acp.AgentName == "qwen-code" &&
-		versionAtLeast(acp.AgentVersion, MinimumVersion) && acp.LoadSession &&
+		productruntime.VersionAtLeast(acp.AgentVersion, MinimumVersion) && acp.LoadSession &&
 		acp.ListSessions && acp.ResumeSession && acp.MCP:
 		report.ACPContract = StateReady
 	default:
@@ -225,7 +224,7 @@ func Check(ctx context.Context, request Request) (Report, error) { //nolint:gocy
 	switch {
 	case err != nil:
 		addIssue("archive_probe", err.Error())
-	case archive.ProtocolVersion == "v1" && versionAtLeast(archive.QwenVersion, MinimumVersion) &&
+	case archive.ProtocolVersion == "v1" && productruntime.VersionAtLeast(archive.QwenVersion, MinimumVersion) &&
 		archive.Workspace == request.Workspace && contains(archive.Capabilities, "session_archive"):
 		report.ArchiveContract = StateReady
 	default:
@@ -289,43 +288,4 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
-}
-
-// versionAtLeast compares the numeric core of the Qwen semver. Readiness
-// rejects malformed versions; prerelease/build text never upgrades the core.
-func versionAtLeast(value, floor string) bool {
-	parse := func(raw string) ([3]int, bool) {
-		var result [3]int
-		raw = strings.TrimPrefix(strings.TrimSpace(raw), "v")
-		core := strings.SplitN(strings.SplitN(raw, "+", 2)[0], "-", 2)[0]
-		parts := strings.Split(core, ".")
-		if len(parts) != 3 {
-			return result, false
-		}
-		for index, part := range parts {
-			number, parseErr := strconv.Atoi(part)
-			if parseErr != nil || number < 0 {
-				return result, false
-			}
-			result[index] = number
-		}
-		return result, true
-	}
-	got, gotOK := parse(value)
-	want, wantOK := parse(floor)
-	if !gotOK || !wantOK {
-		return false
-	}
-	for index := range got {
-		if got[index] != want[index] {
-			return got[index] > want[index]
-		}
-	}
-	return true
-}
-
-// VersionAtLeast reports whether a Qwen semantic version meets the requested
-// floor using the same parser as the authoritative readiness engine.
-func VersionAtLeast(value, floor string) bool {
-	return versionAtLeast(value, floor)
 }

@@ -1,6 +1,6 @@
 # Shipped adapter architecture
 
-The public native wire is [Native Agent Sessions Presence Protocol v1](specs/NATIVE-PEER-PROTOCOL.md).
+The public native wire is [Native Agent Sessions Presence Protocol v1](PROTOCOL.md).
 This document describes how the shipped product adapters reach that one wire.
 
 ## One live plane

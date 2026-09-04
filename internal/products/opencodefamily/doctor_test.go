@@ -8,7 +8,7 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 )
 
-func TestDoctorFailsClosedOnVersionAndFeatureDrift(t *testing.T) {
+func TestDoctorFailsClosedOnFeatureDrift(t *testing.T) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/doc" {
 			requireBasicAuthOnly(t, request)
@@ -50,9 +50,36 @@ func TestDoctorFailsClosedOnVersionAndFeatureDrift(t *testing.T) {
 	if err != nil || report.State != productruntime.ProbeReady || !report.Features["session-round-trip"] || !report.Features["integration"] {
 		t.Fatalf("ready report = %#v, %v", report, err)
 	}
-	version = "1.18.26"
+	version = "1.18.24"
 	report, err = doctor.Probe(context.Background(), productruntime.ProbeRequest{ProductID: "opencode", ExecutablePath: "/opt/opencode", Depth: productruntime.ProbeFeature})
 	if err != nil || report.State != productruntime.ProbeIncompatible {
 		t.Fatalf("version drift report = %#v, %v", report, err)
+	}
+}
+
+func TestDoctorUsesMinimumVersionPolicy(t *testing.T) {
+	for _, test := range []struct {
+		id, floor, version string
+		dialect            Dialect
+		state              productruntime.ProbeState
+	}{
+		{"opencode", "1.18.25", "1.18.25", DialectOpenCode, productruntime.ProbeReady},
+		{"opencode", "1.18.25", "1.19.0", DialectOpenCode, productruntime.ProbeReady},
+		{"opencode", "1.18.25", "1.18.24", DialectOpenCode, productruntime.ProbeIncompatible},
+		{"opencode", "1.18.25", "malformed", DialectOpenCode, productruntime.ProbeIncompatible},
+		{"kilo", "7.5.6", "7.5.6", DialectKilo, productruntime.ProbeReady},
+		{"kilo", "7.5.6", "8.0.0", DialectKilo, productruntime.ProbeReady},
+		{"kilo", "7.5.6", "7.5.5", DialectKilo, productruntime.ProbeIncompatible},
+		{"kilo", "7.5.6", "malformed", DialectKilo, productruntime.ProbeIncompatible},
+	} {
+		doctor, err := NewDoctorProbe(DoctorConfig{ProductID: test.id, Executable: test.id, TestedVersion: test.floor, Dialect: test.dialect,
+			RunVersion: func(context.Context, string) (string, error) { return test.version, nil }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := doctor.Probe(context.Background(), productruntime.ProbeRequest{ProductID: test.id, ExecutablePath: "/opt/" + test.id, Depth: productruntime.ProbeVersion})
+		if err != nil || report.State != test.state {
+			t.Errorf("%s %s report = %#v, %v", test.id, test.version, report, err)
+		}
 	}
 }

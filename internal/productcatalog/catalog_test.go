@@ -12,6 +12,7 @@ import (
 
 func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 	wantIDs := []string{"codex", "claude", "grok", "qwen", "opencode", "kilo", "pi", "omp", "dsh"}
+	minimumFloors := map[string]string{"opencode": "1.18.25", "kilo": "7.5.6", "pi": "0.84.4", "omp": "18.0.11"}
 	products := All()
 	if len(products) != len(wantIDs) {
 		t.Fatalf("product count = %d", len(products))
@@ -25,6 +26,16 @@ func TestCatalogPreservesBaselineAndAddsValidatedSharedMetadata(t *testing.T) {
 		}
 		if product.SupportState != SupportGeneral || product.TestedVersion == "" {
 			t.Fatalf("shared metadata missing from %#v", product)
+		}
+		if product.ID == "dsh" {
+			if product.Compatibility.Policy != VersionExact {
+				t.Fatalf("DSH version policy = %q", product.Compatibility.Policy)
+			}
+		} else if product.Compatibility.Policy != VersionMinimum {
+			t.Fatalf("%s version policy = %q", product.ID, product.Compatibility.Policy)
+		}
+		if floor, ok := minimumFloors[product.ID]; ok && product.TestedVersion != floor {
+			t.Fatalf("%s minimum floor = %q, want %q", product.ID, product.TestedVersion, floor)
 		}
 		if !product.Acceptance.RealProductRequired || len(product.Acceptance.ExternalCells) != 0 {
 			t.Fatalf("%s acceptance = %#v", product.ID, product.Acceptance)
