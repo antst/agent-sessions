@@ -22,8 +22,7 @@ test("delivery rendering matches the shared golden fixture", () => {
 
 test("one socket reports, calls, updates, and receives messages", async (t) => {
   const fixture = await server(t);
-  const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
-  t.after(() => client.stop());
+  const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 }); t.after(() => client.stop());
   assert.deepEqual(await client.start(), { active: true });
   assert.equal(client.report("native", "before", { cwd: "/work" }), true);
   await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
@@ -117,6 +116,33 @@ test("one session may report product-owned groups instead of process launch grou
   await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
   assert.deepEqual(fixture.reports[0].groups, ["profile-group"]);
   assert.equal(client.report("other", "", { cwd: "/native" }, {}, [1]), false);
+});
+
+test("identity is local and group replacement reconnects only while quiescent", async (t) => {
+  const fixture = await server(t), client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 }); t.after(() => client.stop());
+  client.report("native", "named", { cwd: "/work" }, {}, ["first"]);
+  await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
+  const identity = await client.callTool("native", "identity", "identity", {});
+  assert.deepEqual(identity, { uuid: "native", name: "named", groups: ["first"] });
+  identity.groups.push("mutated");
+  assert.deepEqual((await client.callTool("native", "again", "identity", {})).groups, ["first"]);
+  assert.equal(fixture.requests.length, 0);
+  const pending = client.callTool("native", "pending", "peers.list", {});
+  await until(() => fixture.requests.length === 1);
+  assert.throws(() => client.replaceGroups("native", ["second"]), /in-flight work/u);
+  fixture.write({ jsonrpc: "2.0", id: fixture.requests[0].id, result: {} });
+  await pending;
+  const delivered = new Promise((resolve) => client.once("message", resolve));
+  fixture.write({ jsonrpc: "2.0", id: "delivery", method: "message.deliver", params: {
+    message_id: "inbound", from: { uuid: "parent", name: "", product: "codex", groups: [] }, body: "work",
+  } });
+  await delivered;
+  assert.throws(() => client.replaceGroups("native", ["second"]), /in-flight work/u);
+  client.acceptMessage("inbound");
+  client.replaceGroups("native", ["second"]);
+  assert.throws(() => client.replaceGroups("native", ["third"]), InactiveError);
+  await until(() => fixture.reports.length === 2 && client.sessions.get("native")?.ready);
+  assert.deepEqual(fixture.reports[1], { ...fixture.reports[0], groups: ["second"] });
 });
 
 test("disconnect rejects calls and reconnect reports from scratch", async (t) => {

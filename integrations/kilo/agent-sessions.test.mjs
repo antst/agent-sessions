@@ -101,6 +101,10 @@ test("Kilo submits to the exact live session and acknowledges native evidence", 
   });
   assert.equal(JSON.parse(result).ok, true);
   assert.equal(live.calls[0].id, "ses_one");
+  await hooks.tool.agent_sessions.execute({ operation: "identity", arguments: {} }, {
+    sessionID: "ses_one", messageID: "identity", abort: new AbortController().signal,
+  });
+  assert.equal(live.calls[1].operation, "identity");
 });
 
 test("Kilo rejects failed native submission", async () => {

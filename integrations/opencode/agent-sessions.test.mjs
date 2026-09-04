@@ -109,6 +109,10 @@ test("OpenCode delivers and calls tools on the exact reported session", async ()
   });
   assert.equal(JSON.parse(result).ok, true);
   assert.equal(live.calls[0].id, "ses_one");
+  await hooks.tool.agent_sessions.execute({ operation: "identity", arguments: {} }, {
+    sessionID: "ses_one", messageID: "identity", abort: new AbortController().signal,
+  });
+  assert.equal(live.calls[1].operation, "identity");
   await assert.rejects(hooks.tool.agent_sessions.execute({ operation: "peers.list", arguments: {} }, {
     sessionID: "ses_other", messageID: "message", abort: new AbortController().signal,
   }), /reported live/u);

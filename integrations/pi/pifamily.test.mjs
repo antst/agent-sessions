@@ -131,6 +131,8 @@ test("Pi family tools stay tied to the reported live native session", async () =
   const accepted = await tool.execute("call", { operation: "peers.list", arguments: {} }, undefined, undefined, exact);
   assert.equal(accepted.isError, undefined);
   assert.equal(live.calls[0].id, "pi-session");
+  await tool.execute("identity", { operation: "identity", arguments: {} }, undefined, undefined, exact);
+  assert.equal(live.calls[1].operation, "identity");
   const rejected = await tool.execute("call", { operation: "peers.list", arguments: {} }, undefined, undefined, context("other"));
   assert.equal(rejected.isError, true);
   await pi.fire("session_shutdown", { reason: "quit" }, exact);
