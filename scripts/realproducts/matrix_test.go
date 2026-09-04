@@ -373,6 +373,39 @@ func TestMatrixCWDPreflightDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestMatrixGitCWDPreflightRejectsRedirectedWorktree(t *testing.T) {
+	empty := t.TempDir()
+	if err := requireMatrixGitCWD(empty); err != nil {
+		t.Fatalf("empty cwd: %v", err)
+	}
+	repository, other := t.TempDir(), t.TempDir()
+	for _, arguments := range [][]string{{"init", repository}, {"-C", repository, "config", "core.worktree", repository}} {
+		if output, err := exec.Command("git", arguments...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	repository, err := existingDirectory(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireMatrixGitCWD(repository); err != nil {
+		t.Fatalf("healthy repository cwd: %v", err)
+	}
+	subdirectory := filepath.Join(repository, "subdirectory")
+	if err := os.Mkdir(subdirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireMatrixGitCWD(subdirectory); err == nil || !strings.Contains(err.Error(), "resolves to another worktree") {
+		t.Fatalf("nested repository cwd error = %v", err)
+	}
+	if output, err := exec.Command("git", "-C", repository, "config", "core.worktree", other).CombinedOutput(); err != nil {
+		t.Fatalf("redirect worktree: %v: %s", err, output)
+	}
+	if err := requireMatrixGitCWD(repository); err == nil || !strings.Contains(err.Error(), "resolves to another worktree") || !strings.Contains(err.Error(), other) {
+		t.Fatalf("redirected worktree error = %v", err)
+	}
+}
+
 func TestMatrixTMUXPreflightRefusesExactNames(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "tmux")
 	writeMatrixTestExecutable(t, fake, `printf '%s' "$MATRIX_TMUX_OUTPUT"; exit "${MATRIX_TMUX_STATUS:-0}"`)
@@ -641,6 +674,7 @@ func TestMatrixTUIUsesApprovedCWDAndDiagnosesTrust(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "tmux")
 	writeMatrixTestExecutable(t, fake, `case "$1" in
 has-session) exit 1;;
+display-message) printf '%s\n' "$MATRIX_PANE_CWD";;
 capture-pane) [ "$MATRIX_CAPTURE_FAIL" = 1 ] && exit 4; printf '%s\n' "$MATRIX_PANE";;
 esac`)
 	cwd := filepath.Join(t.TempDir(), `odd ' cwd`)
@@ -648,6 +682,7 @@ esac`)
 		t.Fatal(err)
 	}
 	runner := matrixRunner{config: matrixOptions{cwd: cwd, tmux: fake, evidenceDir: t.TempDir()}, runID: "test", active: map[string]*matrixTUI{}}
+	t.Setenv("MATRIX_PANE_CWD", cwd)
 	for _, product := range matrixProductInventory() {
 		product.peerExecutable = "/native/" + product.id + "-peer"
 		for _, resume := range []bool{false, true} {
@@ -656,6 +691,12 @@ esac`)
 				t.Fatalf("%s resume=%t command/error = %q/%v", product.id, resume, command, err)
 			}
 		}
+	}
+	wrong := t.TempDir()
+	t.Setenv("MATRIX_PANE_CWD", wrong)
+	wrongTUI, wrongCommand, wrongErr := runner.startTUI(context.Background(), matrixProduct{id: "grok", peerExecutable: "/native/grok-peer"}, "matrix-name", "matrix-group", "label", false)
+	if wrongErr == nil || wrongTUI == nil || wrongTUI.paneCWD != wrong || len(wrongCommand) < 7 || !strings.Contains(wrongErr.Error(), "want approved cwd "+cwd) {
+		t.Fatalf("wrong pane cwd TUI/command/error = %#v/%q/%v", wrongTUI, wrongCommand, wrongErr)
 	}
 	product := matrixProduct{id: "codex", nativeTrustPrompt: "Do you trust the contents of this directory?"}
 	tui := &matrixTUI{tmuxName: "owned", pane: "owned:0.0"}
@@ -703,6 +744,7 @@ func TestMatrixDefaultSignalsLeaveExactRefusedResidue(t *testing.T) {
 list-sessions) [ -s "$MATRIX_MARKER" ] && { IFS= read -r name <"$MATRIX_MARKER"; printf '%s\n' "$name"; }; exit 0;;
 has-session) [ -s "$MATRIX_MARKER" ];;
 new-session) printf matrix-residue >"$MATRIX_MARKER"; printf x >>"$MATRIX_STARTS";;
+display-message) printf '%s\n' "$MATRIX_CWD";;
 capture-pane) printf 'starting\n';;
 kill-session) printf '%s\n' "$3" >>"$MATRIX_KILLS"; : >"$MATRIX_MARKER";;
 esac`)
@@ -725,6 +767,7 @@ esac`)
 			t.Setenv("MATRIX_MARKER", marker)
 			t.Setenv("MATRIX_STARTS", starts)
 			t.Setenv("MATRIX_KILLS", kills)
+			t.Setenv("MATRIX_CWD", cwd)
 			t.Setenv("AGENT_SESSIONS_PRESENCE_SOCKET", listener.Addr().String())
 			args := []string{"--standing-matrix", "--repository-root", repositoryRoot(t), "--cwd", cwd, "--temporary-root", temporary, "--evidence-dir", evidence, "--matrix-timeout", "5s"}
 			command := exec.Command(os.Args[0], "-test.run=^TestMatrixDefaultSignalsLeaveExactRefusedResidue$")

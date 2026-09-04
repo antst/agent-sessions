@@ -83,6 +83,7 @@ type matrixTUI struct {
 	product   string
 	name      string
 	sessionID string
+	paneCWD   string
 
 	submitDelay time.Duration
 }
@@ -241,6 +242,9 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if *timeout < 5*time.Second {
 		return matrixOptions{}, errors.New("--matrix-timeout must be at least 5s")
 	}
+	if err := requireMatrixGitCWD(cwd); err != nil {
+		return matrixOptions{}, err
+	}
 	lookup := func(name string) (string, error) {
 		path, lookupErr := exec.LookPath(name)
 		if lookupErr != nil {
@@ -275,6 +279,45 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 		agentSessions: agentSessions, tmux: tmux,
 		presenceSocket: socket, timeout: *timeout,
 	}, nil
+}
+
+// requireMatrixGitCWD catches a checkout whose repository metadata resolves
+// the approved directory to a different worktree. Non-Git directories remain
+// valid and are the preferred isolated matrix workspace.
+func requireMatrixGitCWD(cwd string) error {
+	_, metadataErr := os.Lstat(filepath.Join(cwd, ".git"))
+	hasMetadata := metadataErr == nil
+	if metadataErr != nil && !errors.Is(metadataErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect approved product cwd Git metadata: %w", metadataErr)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		if hasMetadata {
+			return fmt.Errorf("approved product cwd contains .git but git is unavailable: %w", err)
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, git, "-C", cwd, "rev-parse", "--is-inside-work-tree", "--show-toplevel").CombinedOutput() //nolint:gosec // read-only Git metadata check for the caller-selected cwd.
+	if err != nil {
+		if !hasMetadata {
+			return nil
+		}
+		return fmt.Errorf("approved product cwd has invalid Git worktree metadata: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != 2 {
+		return fmt.Errorf("approved product cwd Git metadata returned an unexpected worktree projection: %q", strings.TrimSpace(string(output)))
+	}
+	topLevel, err := existingDirectory(lines[1])
+	if err != nil {
+		return fmt.Errorf("approved product cwd Git top-level: %w", err)
+	}
+	if lines[0] != "true" || topLevel != cwd {
+		return fmt.Errorf("approved product cwd Git metadata resolves to another worktree: cwd=%s inside_work_tree=%s top_level=%s", cwd, lines[0], topLevel)
+	}
+	return nil
 }
 
 func requireMatrixGrokPermission(cwd string) error {
@@ -597,6 +640,7 @@ func (runner *matrixRunner) runNoGroupCell(ctx context.Context, product matrixPr
 	baseline := rosterIDSet(before.Local)
 	tui, command, err := runner.startTUI(ctx, product, "", "", "no-group", false)
 	evidence["command"] = command
+	recordTUILaunchEvidence(evidence, tui)
 	if err != nil {
 		err = runner.diagnoseAttachFailure(product, "no-group", tui, evidence, err)
 		runner.record(product.id, "02-private-anchor-only", matrixFail, err.Error(), evidence)
@@ -1049,6 +1093,7 @@ func (runner *matrixRunner) launchNamed(
 	}
 	tui, command, err := runner.startTUI(ctx, product, name, group, label, false)
 	evidence["command"] = command
+	recordTUILaunchEvidence(evidence, tui)
 	if err != nil {
 		err = runner.diagnoseAttachFailure(product, label, tui, evidence, err)
 		return tui, evidence, err
@@ -1083,6 +1128,7 @@ func (runner *matrixRunner) launchResume(
 	}
 	tui, command, err := runner.startTUI(ctx, product, name, group, label, true)
 	evidence["command"] = command
+	recordTUILaunchEvidence(evidence, tui)
 	if err != nil {
 		err = runner.diagnoseAttachFailure(product, label, tui, evidence, err)
 		return tui, evidence, err
@@ -1134,7 +1180,35 @@ func (runner *matrixRunner) startTUI(
 	if err := cmd.Run(); err != nil {
 		return tui, command, fmt.Errorf("start detached %s TUI: %w: %s", product.id, err, strings.TrimSpace(diagnostics.String()))
 	}
+	paneCWD, err := runner.paneWorkingDirectory(ctx, tui)
+	if err != nil {
+		return tui, command, fmt.Errorf("observe detached %s TUI cwd: %w", product.id, err)
+	}
+	tui.paneCWD = paneCWD
+	if paneCWD != runner.config.cwd {
+		return tui, command, fmt.Errorf("detached %s TUI started in cwd %s, want approved cwd %s", product.id, paneCWD, runner.config.cwd)
+	}
 	return tui, command, nil
+}
+
+func recordTUILaunchEvidence(evidence map[string]any, tui *matrixTUI) {
+	if tui != nil && tui.paneCWD != "" {
+		evidence["pane_cwd"] = tui.paneCWD
+	}
+}
+
+func (runner *matrixRunner) paneWorkingDirectory(ctx context.Context, tui *matrixTUI) (string, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(queryCtx, runner.config.tmux, "display-message", "-p", "-t", tui.pane, "#{pane_current_path}").CombinedOutput() //nolint:gosec // exact generated pane and fixed read-only format.
+	if err != nil {
+		return "", fmt.Errorf("query exact pane %s: %w: %s", tui.pane, err, strings.TrimSpace(string(output)))
+	}
+	path, err := existingDirectory(strings.TrimSuffix(string(output), "\n"))
+	if err != nil {
+		return "", fmt.Errorf("validate exact pane %s cwd: %w", tui.pane, err)
+	}
+	return path, nil
 }
 
 func matrixPeerArguments(product matrixProduct, name, group string, resume bool) []string {
