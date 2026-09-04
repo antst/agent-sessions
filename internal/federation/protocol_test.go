@@ -155,14 +155,11 @@ func TestProtocolAcceptsAdditiveUnknownJSONFields(t *testing.T) {
 	}
 }
 
-func TestWirePeerSyntaxDoesNotRequireLocalCatalogAuthority(t *testing.T) {
+func TestWirePeerProductDoesNotRequireCatalogMembership(t *testing.T) {
 	peer := mustTestPeer(t, "host-a", "future", "codex", "project")
 	peer.Product, peer.Entrypoint = "future-product", "future-product"
 	if err := validateWirePeer(peer, "host-a"); err != nil {
 		t.Fatalf("valid opaque wire product rejected: %v", err)
-	}
-	if err := validateLocalPeer(peer, "host-a"); err == nil {
-		t.Fatal("unknown local product bypassed catalog authority")
 	}
 }
 

@@ -334,7 +334,7 @@ func (h *EmbeddedHost) refreshLocal(ctx context.Context) error {
 	}
 	next := make(map[string]Peer, len(peers))
 	for _, peer := range peers {
-		if err := validateLocalPeer(peer, h.options.HostID); err != nil {
+		if err := validateWirePeer(peer, h.options.HostID); err != nil {
 			return fmt.Errorf("invalid embedded peer %s: %w", peer.ID, err)
 		}
 		if _, exists := next[peer.ID]; exists {
@@ -1080,20 +1080,6 @@ func validateRosterHost(host Host) error {
 	return nil
 }
 
-func validateLocalPeer(peer Peer, hostID string) error {
-	if err := validateWirePeer(peer, hostID); err != nil {
-		return err
-	}
-	product := peer.Product
-	if product == "" {
-		product = peer.Entrypoint
-	}
-	if _, ok := productcatalog.ByID(product); !ok {
-		return errors.New("snapshot contains a product outside the local catalog")
-	}
-	return nil
-}
-
 func validateDeliveryGroups(source, target Peer, frame AgentFrame) error {
 	if frame.Group != "" {
 		if !contains(source.Groups, frame.Group) || !contains(target.Groups, frame.Group) {
@@ -1112,9 +1098,6 @@ func validateDeliveryGroups(source, target Peer, frame AgentFrame) error {
 func BuildPeer(hostID, hostName, sessionID, name, status, cwd, product, permission, instanceID, parentID string, groups []string) (Peer, error) {
 	if !validSimpleID(hostID) || !validSessionID(sessionID) {
 		return Peer{}, errors.New("invalid embedded peer identity")
-	}
-	if _, ok := productcatalog.ByID(product); !ok {
-		return Peer{}, errors.New("invalid embedded peer product")
 	}
 	if strings.TrimSpace(hostName) == "" {
 		hostName = hostID
@@ -1136,7 +1119,7 @@ func BuildPeer(hostID, hostName, sessionID, name, status, cwd, product, permissi
 		Status: status, Cwd: cwd, PermissionMode: permission, PeerProtocol: GroupProtocolVersion,
 		InstanceID: instanceID, Groups: effective, ParentSessionID: parentID,
 	}
-	if err := validateLocalPeer(peer, hostID); err != nil {
+	if err := validateWirePeer(peer, hostID); err != nil {
 		return Peer{}, err
 	}
 	return peer, nil

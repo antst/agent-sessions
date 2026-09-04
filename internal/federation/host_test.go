@@ -403,6 +403,18 @@ func TestHostBoundsInboundRemoteLaneConcurrencyAndRequiresLiveHub(t *testing.T) 
 	}
 }
 
+func TestBuildPeerAcceptsOpaqueProductLabels(t *testing.T) {
+	for _, product := range []string{"ingress", "verbatim-writer"} {
+		peer, err := BuildPeer("host-a", "host-a", product, product, "idle", "/work", product, "default", product+":"+product, "", []string{"project"})
+		if err != nil {
+			t.Fatalf("BuildPeer(%q): %v", product, err)
+		}
+		if peer.Product != product || peer.Entrypoint != product {
+			t.Fatalf("BuildPeer(%q) product/entrypoint = %q/%q", product, peer.Product, peer.Entrypoint)
+		}
+	}
+}
+
 func mustTestPeer(t *testing.T, host, session, product string, groups ...string) Peer {
 	t.Helper()
 	peer, err := BuildPeer(host, host, session, session, "idle", "/work", product, "default", product+":"+session, "", groups)

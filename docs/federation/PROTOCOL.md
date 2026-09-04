@@ -15,8 +15,11 @@ Every recipient receives the same sorted host and live-peer projection, includin
 capability tokens. A host replaces its prior remote projection atomically; rosters are not deltas.
 
 A peer projection contains its global and native IDs, product-owned display fields, status,
-working directory, permission, groups, parent, and source host. The grouped peer protocol version
-is 1. A peer without its mandatory source-host private anchor is invalid.
+working directory, permission, groups, parent, and source host. Product is opaque speaker metadata
+carried verbatim, not launch authority; Entrypoint is its compatibility fallback. Each is a 1–64 byte
+token starting with a lowercase ASCII letter and followed only by lowercase ASCII letters, digits,
+or non-leading, non-trailing, non-consecutive hyphens. The daemon never interprets these labels as
+paths, commands, selectors, or capabilities. Grouped protocol 1 peers require a source-host private anchor.
 
 ## Deliveries
 
