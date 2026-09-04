@@ -140,7 +140,7 @@ func TestAppendixWireGrammarAndRequiredDeliveryFields(t *testing.T) {
 	}{
 		{"integer", "1", "native", "", true}, {"decimal", "1.0", "native", "", true}, {"exponent", "1e0", "native", "", true},
 		{"safe-max", "9007199254740991", "native", "", true}, {"too-large", "9007199254740992", "native", "", false}, {"fraction", "1.5", "native", "", false},
-		{"capability", "1", "native", `{"lane":true}`, true}, {"capability-empty", "1", "native", `{}`, false}, {"capability-false", "1", "native", `{"lane":false}`, false}, {"capability-extra", "1", "native", `{"lane":true,"extra":true}`, false},
+		{"capability", "1", "native", `{"lane":true}`, true}, {"capability-null", "1", "native", `null`, false}, {"capability-empty", "1", "native", `{}`, false}, {"capability-false", "1", "native", `{"lane":false}`, false}, {"capability-extra", "1", "native", `{"lane":true,"extra":true}`, false},
 		{"bom-native-id", "1", "native\ufeffid", "", true}, {"space-native-id", "1", "native id", "", false}, {"slash-native-id", "1", "native/id", "", false}, {"control-native-id", "1", "native\n", "", false},
 		{"native-id-max", "1", strings.Repeat("x", 128), "", true}, {"native-id-over", "1", strings.Repeat("x", 129), "", false},
 	} {

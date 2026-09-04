@@ -219,9 +219,12 @@ class LiveSessionClient extends EventEmitter {
     if (session.pending.has(wireID)) return Promise.reject(new Error("live call id is already outstanding"));
     return new Promise((resolve, reject) => {
       session.pending.set(wireID, { resolve, reject, handshake, method, params, spec });
-      if (!this._write(session, { jsonrpc: "2.0", id: wireID, method, params }, handshake)) {
+      try {
+        if (!this._write(session, { jsonrpc: "2.0", id: wireID, method, params }, handshake)) throw new InactiveError("disconnected");
+      } catch (error) {
         session.pending.delete(wireID);
-        reject(new InactiveError("disconnected"));
+        session.socket?.destroy();
+        reject(error);
       }
     });
   }
@@ -246,8 +249,10 @@ class LiveSessionClient extends EventEmitter {
     if (session.socket !== socket) return;
     session.socket = null;
     session.ready = false;
+    const detail = session.buffer ? "live frame is not newline terminated" : "live session disconnected";
+    if (session.buffer) this.emit("diagnostic", detail);
     session.buffer = "";
-    this._fail(session, "live session disconnected");
+    this._fail(session, detail);
     for (const [id, inbound] of this.inbound) if (inbound.session === session) this.inbound.delete(id);
     this._reconnect(session);
   }

@@ -64,7 +64,7 @@ test("shared params authority follows Appendix A grammar", async () => {
   const hello = (overrides = {}) => ({ protocol: 1, uuid: "native", name: "", groups: [], product: "codex", info: {}, ...overrides });
   const validateHello = METHOD_DEFINITIONS["session.hello"].params;
   for (const value of [hello(), hello({ protocol: 1.0 }), hello({ uuid: `native\ufeffid` }), hello({ uuid: "x".repeat(128) }), hello({ capabilities: { lane: true } })]) assert.equal(validateHello(value), true);
-  for (const value of [hello({ protocol: 1.5 }), hello({ protocol: 9007199254740992 }), hello({ uuid: "native id" }), hello({ uuid: "native/id" }), hello({ uuid: "native\n" }), hello({ uuid: "x".repeat(129) }), hello({ capabilities: {} }), hello({ capabilities: { lane: false } }), hello({ capabilities: { lane: true, extra: true } })]) assert.equal(validateHello(value), false, JSON.stringify(value));
+  for (const value of [hello({ protocol: 1.5 }), hello({ protocol: 9007199254740992 }), hello({ uuid: "native id" }), hello({ uuid: "native/id" }), hello({ uuid: "native\n" }), hello({ uuid: "x".repeat(129) }), hello({ capabilities: null }), hello({ capabilities: {} }), hello({ capabilities: { lane: false } }), hello({ capabilities: { lane: true, extra: true } })]) assert.equal(validateHello(value), false, JSON.stringify(value));
   for (const [name, valid] of [["", true], ["n".repeat(256), true], ["n".repeat(257), false], ["bad\u007fname", false]]) {
     assert.equal(validateHello(hello({ name })), valid, `hello name ${name.length}`);
     assert.equal(METHOD_DEFINITIONS["session.update"].params({ name, info: {} }), valid, `update name ${name.length}`);
@@ -100,9 +100,10 @@ test("delivery rendering matches the shared golden fixture", () => {
   assert.equal(renderDelivery({ messageID, from, body }), fixture.rendered);
 });
 
-test("framing processes complete frames, rejects unknown ids, and accepts backpressure", () => {
+test("framing processes complete frames, rejects truncated tails and write throws, and accepts backpressure", async () => {
   const client = new LiveSessionClient({ env: {} });
-  let destroyed = 0, responses = 0;
+  let destroyed = 0, responses = 0, diagnostic;
+  client.on("diagnostic", (value) => { diagnostic = value; });
   const socket = { destroyed: false, write: () => false, destroy: () => { destroyed += 1; } };
   const session = { ready: true, socket, buffer: "", pending: new Map() };
   assert.equal(client._write(session, { jsonrpc: "2.0", id: "one", result: {} }), true);
@@ -115,11 +116,21 @@ test("framing processes complete frames, rejects unknown ids, and accepts backpr
   assert.equal(responses, 1);
   client._data(session, frame(false));
   assert.equal(destroyed, 1);
+  let tailError;
+  session.pending.set("tail", { reject: (error) => { tailError = error; } });
   client._closed(session, socket);
+  assert.equal(tailError?.message, "live frame is not newline terminated");
+  assert.equal(diagnostic, "live frame is not newline terminated");
   assert.equal(session.buffer, "");
   session.socket = socket;
   client._data(session, `${frame(false)}x`);
   assert.equal(destroyed, 2);
+
+  let writeDestroyed = 0;
+  const throwing = { ready: true, pending: new Map(), socket: { destroyed: false, write: () => { throw new Error("boom"); }, destroy: () => { writeDestroyed += 1; } } };
+  await assert.rejects(client._call(throwing, "throw", "peers.list", {}), /boom/u);
+  assert.equal(throwing.pending.size, 0);
+  assert.equal(writeDestroyed, 1);
 });
 
 test("one socket reports, calls, updates, and receives messages", async (t) => {

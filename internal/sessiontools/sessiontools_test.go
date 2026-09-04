@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -65,10 +66,15 @@ func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {
 		t.Fatalf("send_message selector schema = %#v", codexSendSchema)
 	}
 	laneSchema := tools[5]["inputSchema"].(map[string]any)
-	laneProduct := laneSchema["properties"].(map[string]any)["product"].(map[string]any)
+	laneProperties := laneSchema["properties"].(map[string]any)
+	laneProduct := laneProperties["product"].(map[string]any)
 	if _, enumerated := laneProduct["enum"]; enumerated || laneProduct["pattern"] != `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` ||
 		laneProduct["minLength"] != float64(1) || laneProduct["maxLength"] != float64(64) {
 		t.Fatalf("lane product schema is not an opaque bounded token: %#v", laneProduct)
+	}
+	commands := laneProperties["command"].(map[string]any)["enum"]
+	if want := []any{"doctor", "list", "run", "start", "resume", "steer", "wait", "status", "interrupt", "archive"}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("lane command schema = %#v, want %#v", commands, want)
 	}
 	for _, tool := range tools {
 		if tool["name"] == "broadcast" {

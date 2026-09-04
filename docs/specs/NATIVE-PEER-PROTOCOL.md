@@ -925,6 +925,8 @@ the following closed schema after substituting `P` in the four property names:
 }
 ```
 
+`native_stop_reason` is the exact non-empty, driver-supplied terminal reason. It is transient and omitted when empty or when lane state was reconstructed; it never overloads `result` or `diagnostic`. This pre-0.4.0 greenfield v1 extension is incompatible with strict validators generated from earlier closed drafts.
+
 `turn.steered` result:
 
 ```json

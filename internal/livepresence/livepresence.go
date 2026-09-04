@@ -624,10 +624,11 @@ func DecodeHello(raw json.RawMessage) (Report, int64, error) {
 		Groups       *[]string          `json:"groups"`
 		Product      *string            `json:"product"`
 		Info         *map[string]string `json:"info"`
-		Capabilities *Capabilities      `json:"capabilities,omitempty"`
+		Capabilities json.RawMessage    `json:"capabilities,omitempty"`
 	}
+	var capabilities Capabilities
 	if err := DecodeStrict(raw, &params); err != nil || params.Protocol == nil || !validSafeInteger(*params.Protocol) || params.UUID == nil || params.Name == nil ||
-		params.Groups == nil || params.Product == nil || params.Info == nil || params.Capabilities != nil && !params.Capabilities.Lane {
+		params.Groups == nil || params.Product == nil || params.Info == nil || params.Capabilities != nil && (DecodeStrict(params.Capabilities, &capabilities) != nil || !capabilities.Lane) {
 		return Report{}, 0, errors.New("session hello is invalid")
 	}
 	protocolValue, _ := params.Protocol.Float64()
@@ -638,9 +639,7 @@ func DecodeHello(raw json.RawMessage) (Report, int64, error) {
 		UUID: *params.UUID, Name: *params.Name, Groups: groups,
 		Product: *params.Product, Info: CloneInfo(*params.Info),
 	}
-	if params.Capabilities != nil {
-		report.Capabilities = *params.Capabilities
-	}
+	report.Capabilities = capabilities
 	if !ValidReport(report) {
 		return Report{}, protocol, errors.New("session hello is invalid")
 	}

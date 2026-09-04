@@ -583,10 +583,19 @@ func TestMatrixCodexSubmitDelayAndCancellation(t *testing.T) {
 		t.Fatalf("completed Codex send took %s", time.Since(started))
 	}
 	_ = os.Truncate(log, 0)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	err := runner.sendTUIInput(ctx, tui, "codex-input")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.sendTUIInput(ctx, tui, "codex-input") }()
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		if info, statErr := os.Stat(log); statErr == nil && info.Size() > 0 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatal("first Codex fake-tmux invocation was not observed")
+		}
+	}
 	cancel()
-	if body, _ := os.ReadFile(log); err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) || len(strings.Split(strings.TrimSpace(string(body)), "\n")) != 1 {
+	err := <-done
+	if body, _ := os.ReadFile(log); !errors.Is(err, context.Canceled) || len(strings.Split(strings.TrimSpace(string(body)), "\n")) != 1 {
 		t.Fatalf("cancelled Codex send = %v, calls %q", err, body)
 	}
 	tui.submitDelay = matrixProductInventory()[1].nativeSubmitDelay

@@ -34,17 +34,17 @@ func (c *hostCoordinator) handleLiveSessionCall(
 	method string,
 	params json.RawMessage,
 ) (json.RawMessage, error) {
-	switch method {
-	case "peers.list":
+	switch spec, known := livepresence.LookupMethod(method); {
+	case method == "peers.list":
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "list_peers", map[string]any{}, nil)
-	case "message.send":
+	case method == "message.send":
 		arguments, ok := livepresence.DecodeMessageSend(params)
 		if !ok {
 			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "send_message", arguments, nil)
-	case "lane.doctor", "lane.list", "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
-		arguments, invocationCwd, err := decodeLiveLaneCall(method, params)
+	case known && spec.Direction == livepresence.ClientToDaemon && spec.Lane:
+		arguments, invocationCwd, err := decodeLiveLaneCall(spec, method, params)
 		if err != nil {
 			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
@@ -70,11 +70,7 @@ func (c *hostCoordinator) callLiveTool(
 	return json.Marshal(result.Data)
 }
 
-func decodeLiveLaneCall(method string, raw json.RawMessage) (map[string]any, *string, error) {
-	spec, known := livepresence.LookupMethod(method)
-	if !known || !spec.Lane {
-		return nil, nil, errors.New("lane method is invalid")
-	}
+func decodeLiveLaneCall(spec livepresence.MethodSpec, method string, raw json.RawMessage) (map[string]any, *string, error) {
 	params, valid := livepresence.DecodeLaneCall(spec, raw)
 	if !valid {
 		return nil, nil, errors.New("lane params are invalid")

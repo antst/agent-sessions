@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -11,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/livepresence"
+	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
 func TestAutomaticConnectorProductUsesManagedEnvironmentAndCodexFallback(t *testing.T) {
@@ -92,6 +95,50 @@ func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
 		if err == nil || err.Error() != "Agent Sessions daemon is unavailable" {
 			t.Fatalf("connector call from deleted cwd error = %v", err)
 		}
+	}
+}
+
+func TestConnectorControlRelayPreservesLaneInvalidParams(t *testing.T) {
+	root := shortDaemonTestRoot(t)
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", root)
+	coordinator := newHostCoordinator(context.Background(), root)
+	var runtime *daemonpkg.Runtime
+	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{
+		StateRoot: root,
+		Handler: func(ctx context.Context, request daemonpkg.ControlRequest) (json.RawMessage, error) {
+			return coordinator.handle(ctx, runtime, request)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{ID: "without-cwd", Product: "claude", NativeSessionID: "without-cwd"})
+	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
+		Product: "codex",
+		Call: func(ctx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
+			result, _, callErr := callConnectorDaemonTool(ctx, "codex", "", id, method, params)
+			return result, callErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := `{"jsonrpc":"2.0","id":"bad-cwd","method":"tools/call","params":{"name":"lane","arguments":{"product":"codex","command":"start","arguments":["--name","worker"],"input":"work"},"_meta":{"threadId":"without-cwd"}}}` + "\n"
+	var output bytes.Buffer
+	if err := relay.Serve(context.Background(), strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Error *struct {
+			Code    int               `json:"code"`
+			Message string            `json:"message"`
+			Data    map[string]string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams ||
+		response.Error.Message != "Invalid params" || response.Error.Data["method"] != "lane.start" || len(response.Error.Data) != 1 {
+		t.Fatalf("control-backed MCP error = %s, %v", output.String(), err)
 	}
 }
 
