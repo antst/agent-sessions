@@ -83,9 +83,11 @@ type steerRecordingLaneDriver struct {
 }
 
 type parentExitLaneDriver struct {
-	opens    []productruntime.LaneOpenRequest
-	turns    []productruntime.TurnStartRequest
-	archives []productruntime.NativeSessionRef
+	opens                    []productruntime.LaneOpenRequest
+	turns                    []productruntime.TurnStartRequest
+	archives                 []productruntime.NativeSessionRef
+	interruptErr, archiveErr error
+	onInterrupt, onArchive   func()
 }
 
 func (*parentExitLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
@@ -105,12 +107,18 @@ func (*parentExitLaneDriver) WaitTurn(context.Context, productruntime.NativeTurn
 func (*parentExitLaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
 	return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
 }
-func (*parentExitLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
-	return nil
+func (d *parentExitLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
+	if d.onInterrupt != nil {
+		d.onInterrupt()
+	}
+	return d.interruptErr
 }
 func (d *parentExitLaneDriver) Archive(_ context.Context, session productruntime.NativeSessionRef) error {
+	if d.onArchive != nil {
+		d.onArchive()
+	}
 	d.archives = append(d.archives, session)
-	return nil
+	return d.archiveErr
 }
 
 func (d *steerRecordingLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
@@ -721,22 +729,6 @@ func TestFreshProductGeneratedLaneEnvironmentOmitsProvisionalIdentity(t *testing
 	}
 }
 
-func TestParentDetachImmediatelyArchivesIdleNonPersistentLanes(t *testing.T) {
-	root := shortDaemonTestRoot(t)
-	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
-	coordinator := newHostCoordinator(context.Background(), root)
-	coordinator.lanesLoaded = true
-	coordinator.lanes["idle"] = &laneActor{id: "idle", parentID: "parent", product: "grok", state: "idle", done: closedLaneDone()}
-	coordinator.archiveIdleLanesForParent(runtime, "parent")
-	if coordinator.lanes["idle"].state != "archived" {
-		t.Fatalf("idle orphan survived: actor=%s", coordinator.lanes["idle"].state)
-	}
-}
-
 func TestParentDetachRetiresActiveLaneAndPreservesPersistentLane(t *testing.T) {
 	root := shortDaemonTestRoot(t)
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{StateRoot: root})
@@ -764,6 +756,63 @@ func TestParentDetachRetiresActiveLaneAndPreservesPersistentLane(t *testing.T) {
 	}
 	if persistent.state != "idle" {
 		t.Fatalf("persistent lane was changed actor=%s", persistent.state)
+	}
+}
+func TestParentRetirementRestoresFailedCandidateAndDoesNotHideLaterLanes(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	driver := &parentExitLaneDriver{archiveErr: errors.New("archive refused")}
+	registry, err := productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"codex": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.laneDrivers, coordinator.lanesLoaded = registry, true
+	for _, id := range []string{"a", "b"} {
+		coordinator.lanes[id] = &laneActor{id: id, nativeID: id, parentID: "parent", product: "codex", state: "idle", done: closedLaneDone()}
+	}
+	if err := coordinator.archiveIdleLanesForParent(runtime, "parent"); err == nil {
+		t.Fatal("archive failure was hidden")
+	}
+	if coordinator.lanes["a"].state != "idle" || coordinator.lanes["b"].state != "idle" || len(driver.archives) != 1 {
+		t.Fatalf("failed retirement hid candidates: a=%s b=%s archives=%d", coordinator.lanes["a"].state, coordinator.lanes["b"].state, len(driver.archives))
+	}
+	driver.archiveErr = nil
+	if err := coordinator.archiveIdleLanesForParent(runtime, "parent"); err != nil || coordinator.lanes["a"].state != "archived" || coordinator.lanes["b"].state != "archived" {
+		t.Fatalf("restored candidates were not recoverable: a=%s b=%s err=%v", coordinator.lanes["a"].state, coordinator.lanes["b"].state, err)
+	}
+	driver.interruptErr = errors.New("interrupt refused")
+	active := &laneActor{id: "active", nativeID: "active", nativeTurnID: "turn", parentID: "other", product: "codex", state: "running", turnID: "turn", done: make(chan struct{}), cancel: func() {}}
+	coordinator.lanes[active.id] = active
+	if err := coordinator.archiveIdleLanesForParent(runtime, "other"); err == nil || active.state != "running" {
+		t.Fatalf("failed interrupt was not restored: state=%s err=%v", active.state, err)
+	}
+
+	coordinator.lanes = map[string]*laneActor{}
+	first := &laneActor{id: "a", nativeID: "a", parentID: "parent", product: "codex", state: "idle", done: closedLaneDone()}
+	stale := &laneActor{id: "b", nativeID: "stale", parentID: "parent", product: "codex", state: "idle", done: closedLaneDone()}
+	replacement := &laneActor{id: "b", nativeID: "replacement", parentID: "parent", product: "codex", state: "idle", done: closedLaneDone()}
+	coordinator.lanes["a"], coordinator.lanes["b"], driver.archiveErr, driver.archives = first, stale, nil, nil
+	driver.onArchive = func() {
+		coordinator.mu.Lock()
+		coordinator.lanes["b"] = replacement
+		coordinator.mu.Unlock()
+		driver.onArchive = nil
+	}
+	if err := coordinator.archiveIdleLanesForParent(runtime, "parent"); err != nil || coordinator.lanes["b"] != replacement || replacement.state != "idle" || len(driver.archives) != 1 {
+		t.Fatalf("stale later candidate was touched: replacement=%+v archives=%d err=%v", replacement, len(driver.archives), err)
+	}
+
+	failed := &laneActor{id: "failed", nativeID: "failed", parentID: "failed-parent", product: "codex", state: "idle", done: closedLaneDone()}
+	restored := &laneActor{id: "failed", nativeID: "replacement", parentID: "failed-parent", product: "codex", state: "idle", done: closedLaneDone()}
+	coordinator.lanes["failed"], driver.archiveErr = failed, errors.New("archive refused")
+	driver.onArchive = func() {
+		coordinator.mu.Lock()
+		coordinator.lanes["failed"] = restored
+		coordinator.mu.Unlock()
+		driver.onArchive = nil
+	}
+	if err := coordinator.archiveIdleLanesForParent(runtime, "failed-parent"); err == nil || coordinator.lanes["failed"] != restored || restored.state != "idle" {
+		t.Fatalf("stale restore overwrote replacement: replacement=%+v err=%v", restored, err)
 	}
 }
 
@@ -813,6 +862,12 @@ func TestLaneDoctorDoesNotRequirePeerAttachment(t *testing.T) {
 	}
 	if !strings.Contains(string(result), `"ready":true`) || !strings.Contains(string(result), `"authority":"daemon"`) {
 		t.Fatalf("standalone lane doctor result = %s", result)
+	}
+	runtime := newPresenceTestRuntime(t)
+	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{ID: "live", Product: "claude", NativeSessionID: "live"})
+	live, _ := json.Marshal(laneCommandEnvelope{Product: "codex", Command: "doctor", SourceAttachmentID: "live"})
+	if _, err := coordinator.handleLaneCommand(context.Background(), runtime, daemonpkg.ControlRequest{Payload: live}); !errors.Is(err, livepresence.ErrInvalidParams) {
+		t.Fatalf("live doctor without reported cwd = %v", err)
 	}
 }
 

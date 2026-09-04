@@ -11,6 +11,11 @@ const ENV = Object.freeze({
   groups: "AGENT_SESSIONS_GROUPS",
 });
 const DEFAULT_RECONNECT_MS = 2000;
+const MAX_FRAME_BYTES = 1024 * 1024;
+const CLIENT_OPERATIONS = Object.freeze([
+  "peers.list", "message.send", "lane.doctor", "lane.list", "lane.start", "lane.run", "lane.resume",
+  "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive",
+]);
 
 class InactiveError extends Error {
   constructor(reason) {
@@ -49,10 +54,10 @@ class LiveSessionClient extends EventEmitter {
     if (!this.active || this.stopping || !text(nativeSessionID) || typeof name !== "string") return false;
     const existing = this.sessions.get(nativeSessionID);
     if (existing) return this.update(nativeSessionID, name, info);
-    if (!stringMap(info) || !validCapabilities(capabilities) || !stringList(groups)) return false;
+    if (!validInfo(info) || !validCapabilities(capabilities) || !stringList(groups)) return false;
     const session = {
       id: nativeSessionID, name, info: { ...info }, capabilities: { ...capabilities }, groups: [...groups],
-      socket: null, ready: false, buffer: "", pending: new Map(), timer: null,
+      socket: null, ready: false, buffer: "", pending: new Map(), timer: null, serial: 0,
     };
     this.sessions.set(nativeSessionID, session);
     this._open(session);
@@ -66,11 +71,11 @@ class LiveSessionClient extends EventEmitter {
 
   update(nativeSessionID, name, info) {
     const session = this.sessions.get(nativeSessionID);
-    if (!session || typeof name !== "string" || !stringMap(info)) return false;
+    if (!session || typeof name !== "string" || !validInfo(info)) return false;
     session.name = name;
     session.info = { ...info };
     if (session.ready) {
-      this._call(session, `update-${Date.now()}`, "session.update", { name: session.name, info: { ...session.info } })
+      this._call(session, `update-${++session.serial}`, "session.update", { name: session.name, info: { ...session.info } })
         .catch((error) => this.emit("diagnostic", cleanError(error)));
     }
     return true;
@@ -88,11 +93,8 @@ class LiveSessionClient extends EventEmitter {
   callTool(nativeSessionID, callID, operation, argumentsValue) {
     const session = this.sessions.get(nativeSessionID);
     if (!session?.ready) return Promise.reject(new InactiveError("disconnected"));
-    let params = argumentsValue ?? {};
-    if (operation.startsWith("lane.") && !Object.hasOwn(params, "cwd")) {
-      params = { ...params, cwd: session.info.cwd };
-    }
-    return this._call(session, callID, operation, params);
+    if (!CLIENT_OPERATIONS.includes(operation)) return Promise.reject(new Error("unsupported Agent Sessions operation"));
+    return this._call(session, callID, operation, argumentsValue ?? {});
   }
 
   acceptMessage(messageID, result = {}) { return this._answer(messageID, result); }
@@ -111,6 +113,7 @@ class LiveSessionClient extends EventEmitter {
 
   _open(session) {
     if (this.stopping || this.sessions.get(session.id) !== session || session.socket) return;
+    session.serial = 0;
     let socket;
     try { socket = this.connect(this.socketPath); } catch (error) {
       this.emit("diagnostic", cleanError(error));
@@ -142,12 +145,15 @@ class LiveSessionClient extends EventEmitter {
 
   _data(session, chunk) {
     session.buffer += chunk;
-    if (Buffer.byteLength(session.buffer, "utf8") > 1024 * 1024) return session.socket.destroy();
     for (;;) {
       const newline = session.buffer.indexOf("\n");
-      if (newline < 0) return;
+      if (newline < 0) {
+        if (Buffer.byteLength(session.buffer, "utf8") > MAX_FRAME_BYTES) session.socket.destroy();
+        return;
+      }
       const line = session.buffer.slice(0, newline);
       session.buffer = session.buffer.slice(newline + 1);
+      if (Buffer.byteLength(line, "utf8") + 1 > MAX_FRAME_BYTES) { session.socket.destroy(); return; }
       let frame;
       try { frame = JSON.parse(line); } catch { session.socket.destroy(); return; }
       if (!validFrame(frame)) { session.socket.destroy(); return; }
@@ -185,7 +191,7 @@ class LiveSessionClient extends EventEmitter {
 
   _response(session, frame) {
     const pending = session.pending.get(frame.id);
-    if (!pending) return;
+    if (!pending) { session.socket.destroy(); return; }
     session.pending.delete(frame.id);
     if (frame.error) pending.reject(Object.assign(new Error(frame.error.message), { category: "unavailable", code: frame.error.code, data: frame.error.data }));
     else {
@@ -216,8 +222,9 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _write(session, frame, handshake = false) {
-    return !!((handshake || session.ready) && session.socket && !session.socket.destroyed &&
-      session.socket.write(`${JSON.stringify(frame)}\n`));
+    if (!(handshake || session.ready) || !session.socket || session.socket.destroyed) return false;
+    session.socket.write(`${JSON.stringify(frame)}\n`);
+    return true;
   }
 
   _closed(session, socket) {
@@ -269,6 +276,9 @@ function ownDataKeys(value) { if (!value || typeof value !== "object" || Array.i
 function exactKeys(value, allowed) { const keys = ownDataKeys(value); return !!keys && keys.every((key) => allowed.includes(key)); }
 function stringMap(value) {
   return exactKeys(value, Object.keys(value ?? {})) && Object.values(value).every((item) => typeof item === "string");
+}
+function validInfo(value) {
+  return stringMap(value) && (!Object.hasOwn(value, "cwd") || (value.cwd.length > 0 && path.isAbsolute(value.cwd)));
 }
 function stringList(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -334,4 +344,4 @@ function integer(value, minimum, maximum, name) {
 function cleanError(error) { return String(error?.message ?? error ?? "live session error").replace(/[\0\r\n]/gu, " ").slice(0, 512); }
 function createLiveSessionClient(options) { return new LiveSessionClient(options); }
 
-module.exports = { ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery };
+module.exports = { CLIENT_OPERATIONS, ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery };

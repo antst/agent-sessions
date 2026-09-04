@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -35,6 +34,13 @@ func (c *hostCoordinator) handleLiveSessionCall(
 	method string,
 	params json.RawMessage,
 ) (json.RawMessage, error) {
+	spec, known := livepresence.LookupMethod(method)
+	if !known || spec.Direction != livepresence.ClientToDaemon || method == "session.hello" || method == "session.update" {
+		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
+	}
+	if !livepresence.ValidMethodParams(spec, params) {
+		return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
+	}
 	switch method {
 	case "peers.list":
 		if err := livepresence.DecodeStrict(params, &struct{}{}); err != nil {
@@ -47,12 +53,12 @@ func (c *hostCoordinator) handleLiveSessionCall(
 			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
 		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "send_message", arguments, nil)
-	case "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
+	case "lane.doctor", "lane.list", "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
 		arguments, invocationCwd, err := decodeLiveLaneCall(method, params)
 		if err != nil {
 			return nil, livepresence.NewError(livepresence.InvalidParams, "Invalid params", map[string]any{"method": method})
 		}
-		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "lane", arguments, &invocationCwd)
+		return c.callLiveTool(ctx, runtime, report.UUID, requestID, "lane", arguments, invocationCwd)
 	default:
 		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
 	}
@@ -116,45 +122,27 @@ func decodeLiveMessageSend(raw json.RawMessage) (map[string]any, error) {
 	return arguments, nil
 }
 
-func decodeLiveLaneCall(method string, raw json.RawMessage) (map[string]any, string, error) {
-	var params struct {
-		Product   *string   `json:"product"`
-		Arguments *[]string `json:"arguments"`
-		Input     *string   `json:"input"`
-		Host      *string   `json:"host"`
-		Cwd       *string   `json:"cwd"`
+func decodeLiveLaneCall(method string, raw json.RawMessage) (map[string]any, *string, error) {
+	spec, known := livepresence.LookupMethod(method)
+	if !known || !spec.Lane {
+		return nil, nil, errors.New("lane method is invalid")
 	}
-	if err := livepresence.DecodeStrict(raw, &params); err != nil || params.Product == nil || strings.TrimSpace(*params.Product) == "" || params.Arguments == nil {
-		return nil, "", errors.New("lane params are invalid")
-	}
-	needsInput := method == "lane.start" || method == "lane.run" || method == "lane.resume" || method == "lane.steer"
-	if needsInput != (params.Input != nil) || needsInput && strings.TrimSpace(*params.Input) == "" || params.Host != nil && strings.TrimSpace(*params.Host) == "" {
-		return nil, "", errors.New("lane params are invalid")
-	}
-	invocationCwd := ""
-	if params.Cwd != nil {
-		invocationCwd = *params.Cwd
-		if strings.TrimSpace(invocationCwd) == "" || !filepath.IsAbs(invocationCwd) {
-			return nil, "", errors.New("lane cwd is invalid")
-		}
-	}
-	for _, argument := range *params.Arguments {
-		if strings.ContainsAny(argument, "\x00\r\n") {
-			return nil, "", errors.New("lane argument is invalid")
-		}
+	params, valid := livepresence.DecodeLaneCall(spec, raw)
+	if !valid {
+		return nil, nil, errors.New("lane params are invalid")
 	}
 	operation := strings.TrimPrefix(method, "lane.")
-	if _, err := parseUnifiedLaneCommand(append([]string{operation}, (*params.Arguments)...)); err != nil {
-		return nil, "", err
+	if _, err := parseUnifiedLaneCommand(append([]string{operation}, params.Arguments...)); err != nil {
+		return nil, nil, err
 	}
-	arguments := map[string]any{"product": *params.Product, "command": operation, "arguments": append([]string(nil), (*params.Arguments)...)}
+	arguments := map[string]any{"product": params.Product, "command": operation, "arguments": append([]string(nil), params.Arguments...)}
 	if params.Input != nil {
 		arguments["input"] = *params.Input
 	}
 	if params.Host != nil {
 		arguments["host"] = *params.Host
 	}
-	return arguments, invocationCwd, nil
+	return arguments, params.Cwd, nil
 }
 
 func (c *hostCoordinator) handleConnectorTool(
@@ -167,15 +155,12 @@ func (c *hostCoordinator) handleConnectorTool(
 		return nil, errors.New("connector tool call is invalid")
 	}
 	result, err := c.callLocalToolWithID(ctx, runtime, call.SourceID, call.Name, call.Arguments, call.RequestID, nil)
-	return marshalConnectorToolResult(result, err)
-}
-
-func marshalConnectorToolResult(result localToolResult, err error) (json.RawMessage, error) {
 	if err != nil {
-		return json.Marshal(map[string]any{
-			"content": []map[string]any{{"type": "text", "text": err.Error()}}, "isError": true,
-		})
+		return nil, livepresence.FailureFromError(nil, "connector.tool", err).Error
 	}
+	return marshalConnectorToolResult(result)
+}
+func marshalConnectorToolResult(result localToolResult) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{
 		"content":           []map[string]any{{"type": "text", "text": result.Text}},
 		"structuredContent": result.Data,

@@ -134,7 +134,8 @@ func callLiveConnectorTool(
 		arguments = liveMessageSendArguments(arguments)
 	case "lane":
 		command := strings.TrimSpace(mapString(arguments, "command"))
-		if command == "collect" || !containsString([]string{"start", "run", "resume", "steer", "wait", "status", "interrupt", "archive"}, command) {
+		spec, known := livepresence.LookupMethod("lane." + command)
+		if command == "collect" || !known || spec.Direction != livepresence.ClientToDaemon || !spec.Lane {
 			return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": "lane." + command})
 		}
 		operation = "lane." + command
@@ -209,6 +210,12 @@ func callConnectorDaemonTool(
 		return nil, "", err
 	}
 	if response.Error != nil {
+		if response.Error.RPCCode != 0 {
+			return nil, response.ReleaseIdentity, &livepresence.RPCError{
+				Code: response.Error.RPCCode, Message: response.Error.Message,
+				Data: append(json.RawMessage(nil), response.Error.RPCData...),
+			}
+		}
 		return nil, response.ReleaseIdentity, errors.New(response.Error.Message)
 	}
 	return append(json.RawMessage(nil), response.Payload...), response.ReleaseIdentity, nil

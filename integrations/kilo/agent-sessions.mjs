@@ -1,12 +1,7 @@
 import { tool } from "@kilocode/plugin";
 import liveSessionModule from "../shared/live-session.js";
 
-const { createLiveSessionClient, renderDelivery } = liveSessionModule;
-const OPERATIONS = [
-  "peers.list", "message.send",
-  "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-  "lane.steer", "lane.interrupt", "lane.archive",
-];
+const { CLIENT_OPERATIONS: OPERATIONS, createLiveSessionClient, renderDelivery } = liveSessionModule;
 const MAX_MESSAGE_SNAPSHOT_BYTES = 1024 * 1024;
 const MAX_MESSAGE_ENTRIES = 4096;
 const DELIVERY_DEADLINE_MS = 10_000;

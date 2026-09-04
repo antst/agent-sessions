@@ -77,6 +77,8 @@ func TestLiveSessionDispatchExposesExactlyTheFirstClassV1Methods(t *testing.T) {
 	supported := map[string]string{
 		"peers.list":     `{}`,
 		"message.send":   `{"target":"peer","message":"hello"}`,
+		"lane.doctor":    `{"product":"codex","arguments":["--json"]}`,
+		"lane.list":      `{"product":"codex","arguments":["--mine"]}`,
 		"lane.start":     `{"product":"codex","arguments":["--name","worker"],"input":"work"}`,
 		"lane.run":       `{"product":"codex","arguments":["--name","worker"],"input":"work"}`,
 		"lane.resume":    `{"product":"codex","arguments":["worker"],"input":"work"}`,
@@ -509,6 +511,7 @@ func TestPresenceInvocationCwdIsExplicitAndConnectorUsesTheProductAttachmentCwd(
 	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
 		ID: "session", Product: "claude", NativeSessionID: "native", Cwd: "/stored",
 	})
+	runtime.Attachments().ReportLive("session", "session", "claude", nil, map[string]string{"cwd": "/stored"}, false)
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 
 	emptyCwd := ""
@@ -553,6 +556,7 @@ func TestConnectorLaneStartUsesTheProductAttachmentCwd(t *testing.T) {
 		ID: "codex-session", Product: "codex", NativeSessionID: "codex-session", Cwd: productCwd,
 		Groups: []string{"team"}, PermissionMode: "bypassPermissions",
 	})
+	runtime.Attachments().ReportLive("codex-session", "codex-session", "codex", []string{"team"}, map[string]string{"cwd": productCwd}, false)
 	native := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(native, []byte("#!/bin/sh\nprintf '%s\\n' 'claude fixture'\n"), 0o700); err != nil {
 		t.Fatal(err)

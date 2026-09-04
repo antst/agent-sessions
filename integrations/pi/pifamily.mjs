@@ -1,12 +1,6 @@
 import liveSessionModule from "../shared/live-session.js";
 
-const { createLiveSessionClient, renderDelivery } = liveSessionModule;
-
-const OPERATIONS = Object.freeze([
-  "peers.list", "message.send",
-  "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-  "lane.steer", "lane.interrupt", "lane.archive",
-]);
+const { CLIENT_OPERATIONS: OPERATIONS, createLiveSessionClient, renderDelivery } = liveSessionModule;
 const LANE_OPERATIONS = new Set(OPERATIONS.filter((operation) => operation.startsWith("lane.")));
 const MAX_TEXT_BYTES = 1024 * 1024;
 const GLOBAL_RUNTIME = Symbol.for("agent-sessions.pifamily.live-session");

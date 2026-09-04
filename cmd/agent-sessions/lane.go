@@ -90,19 +90,18 @@ func (c *hostCoordinator) handleLaneCommand(
 	if err != nil {
 		return nil, err
 	}
-	// Readiness inspection is intentionally available outside a managed peer.
-	// The legacy lane wrappers used doctor during preflight, before an
-	// attachment existed, and it is a read-only product inventory operation.
-	if parsed.command == "doctor" && strings.TrimSpace(envelope.Host) == "" {
+	sourceID := strings.TrimSpace(envelope.SourceAttachmentID)
+	if sourceID == "" {
+		sourceID = strings.TrimSpace(request.AttachmentID)
+	}
+	// Standalone lane doctor predates live attachments and retains the daemon
+	// cwd fallback. A live caller is resolved below and uses its report cwd.
+	if parsed.command == "doctor" && strings.TrimSpace(envelope.Host) == "" && sourceID == "" {
 		result, err := doctorLane(ctx, envelope.Product, envelope.Cwd)
 		if err != nil {
 			return nil, livepresence.ProductError(envelope.Product, err)
 		}
 		return json.Marshal(result)
-	}
-	sourceID := strings.TrimSpace(envelope.SourceAttachmentID)
-	if sourceID == "" {
-		sourceID = strings.TrimSpace(request.AttachmentID)
 	}
 	parent, ok, err := c.activeLocalParent(runtime, sourceID)
 	if err != nil {
@@ -151,7 +150,11 @@ func (c *hostCoordinator) dispatchLaneCommand(
 	case "archive":
 		result, err = c.archiveLane(runtime, parent, product, parsed)
 	case "doctor":
-		result, err = doctorLane(ctx, product, parent.Cwd)
+		if parent.Cwd == "" {
+			err = livepresence.ClassifyError(livepresence.ErrInvalidParams, errors.New("lane cwd is unavailable"))
+		} else {
+			result, err = doctorLane(ctx, product, parent.Cwd)
+		}
 	default:
 		err = fmt.Errorf("unsupported lane command %q", parsed.command)
 	}
@@ -337,7 +340,7 @@ func laneInvocationCwd(parent, requested string) (string, error) {
 		cwd = parent
 	}
 	if !filepath.IsAbs(cwd) {
-		if parent == "" {
+		if parent == "" || !filepath.IsAbs(parent) {
 			return "", errors.New("lane cwd is unavailable")
 		}
 		cwd = filepath.Join(parent, cwd)
@@ -774,54 +777,65 @@ func (c *hostCoordinator) reconcileOrphanedLanes(runtime *daemonpkg.Runtime) err
 	return nil
 }
 
-func (c *hostCoordinator) archiveIdleLanesForParent(runtime *daemonpkg.Runtime, parentID string) {
-	_ = c.retireParentLanes(runtime, parentID)
+func (c *hostCoordinator) archiveIdleLanesForParent(runtime *daemonpkg.Runtime, parentID string) error {
+	return c.retireParentLanes(runtime, parentID)
 }
 
 //nolint:gocyclo // Parent retirement handles each durable lane lifecycle state explicitly.
 func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID string, requireDeparted ...bool) error {
 	type transition struct {
-		actor  *laneActor
-		state  string
-		cancel context.CancelFunc
+		actor         *laneActor
+		state, turnID string
+		done          chan struct{}
+		cancel        context.CancelFunc
 	}
 	c.mu.Lock()
 	if _, live := c.liveReports[parentID]; len(requireDeparted) != 0 && requireDeparted[0] && live {
 		c.mu.Unlock()
 		return nil
 	}
-	candidates := make([]transition, 0)
+	candidates := make([]*laneActor, 0)
 	for _, actor := range c.lanes {
-		if actor.parentID != parentID || actor.state == "archived" || actor.state == "retiring" {
+		if actor.parentID == parentID {
+			candidates = append(candidates, actor)
+		}
+	}
+	c.mu.Unlock()
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].id < candidates[j].id })
+	for _, actor := range candidates {
+		c.mu.Lock()
+		if c.lanes[actor.id] != actor || actor.parentID != parentID || actor.state == "archived" || actor.state == "retiring" {
+			c.mu.Unlock()
 			continue
 		}
 		if actor.persistent {
 			actor.parentID = ""
+			c.mu.Unlock()
 			continue
 		}
-		state := "archived"
-		var cancel context.CancelFunc
+		candidate := transition{actor: actor, state: actor.state, turnID: actor.turnID, done: actor.done}
 		if (actor.state == "running" || actor.state == "preparing" || actor.state == "interrupting") && actor.cancel != nil {
-			state, cancel = "retiring", actor.cancel
+			actor.state, candidate.cancel = "retiring", actor.cancel
+		} else {
+			actor.state = "archived"
 		}
-		actor.state = state
-		candidates = append(candidates, transition{actor: actor, state: state, cancel: cancel})
-	}
-	c.mu.Unlock()
-	for _, candidate := range candidates {
-		if candidate.state == "archived" {
-			if err := c.archiveNativeLane(candidate.actor); err != nil {
-				return err
-			}
-		}
-		if candidate.cancel != nil {
-			if _, managed := c.laneDrivers.ByProduct(candidate.actor.product); managed {
-				if err := c.interruptLaneNative(candidate.actor); err != nil {
-					return err
-				}
-				continue
-			}
+		transitioned := actor.state
+		c.mu.Unlock()
+		var err error
+		if transitioned == "archived" {
+			err = c.archiveNativeLane(actor)
+		} else if _, managed := c.laneDrivers.ByProduct(actor.product); managed {
+			err = c.interruptLaneNative(actor)
+		} else {
 			candidate.cancel()
+		}
+		if err != nil {
+			c.mu.Lock()
+			if c.lanes[actor.id] == actor && actor.parentID == parentID && actor.state == transitioned && actor.turnID == candidate.turnID && actor.done == candidate.done {
+				actor.state = candidate.state
+			}
+			c.mu.Unlock()
+			return err
 		}
 	}
 	return nil
