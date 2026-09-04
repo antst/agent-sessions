@@ -4,12 +4,103 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
+
+func TestLaneWorkerSchemaMatchesAuthoritativeGoStructs(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "integrations", "shared", "lane-worker.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Definitions map[string]struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(body, &schema); err != nil {
+		t.Fatal(err)
+	}
+	types := map[string]reflect.Type{
+		"LaneOpenRequest":      reflect.TypeOf(LaneOpenRequest{}),
+		"LaneWorkerHello":      reflect.TypeOf(LaneWorkerHello{}),
+		"LaneDoctorResult":     reflect.TypeOf(LaneDoctorResult{}),
+		"LaneTurnStartRequest": reflect.TypeOf(LaneTurnStartRequest{}),
+	}
+	if len(schema.Definitions) != len(types) {
+		t.Fatalf("schema definitions = %v", reflect.ValueOf(schema.Definitions).MapKeys())
+	}
+	for name, typ := range types {
+		definition, ok := schema.Definitions[name]
+		if !ok {
+			t.Fatalf("schema omits %s", name)
+		}
+		properties, required := jsonFields(typ)
+		actual := make([]string, 0, len(definition.Properties))
+		for property := range definition.Properties {
+			actual = append(actual, property)
+		}
+		sort.Strings(actual)
+		sort.Strings(definition.Required)
+		if !reflect.DeepEqual(actual, properties) || !reflect.DeepEqual(definition.Required, required) {
+			t.Fatalf("%s schema fields = %v required %v; Go fields = %v required %v", name, actual, definition.Required, properties, required)
+		}
+	}
+}
+
+func TestLaneWorkerWireTypesRejectUnknownNullAndInvalidTimeout(t *testing.T) {
+	open := `{"name":"worker","cwd":"/tmp/work","permission_mode":"default","resume":false,"auto_archive_after_seconds":60,"arguments":[]}`
+	if _, err := DecodeLaneOpenRequest([]byte(open)); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{
+		strings.TrimSuffix(open, "}") + `,"extra":true}`,
+		strings.Replace(open, `"name":"worker"`, `"name":null`, 1),
+		strings.Replace(open, `"resume":false`, `"resume":true`, 1),
+	} {
+		if _, err := DecodeLaneOpenRequest([]byte(invalid)); err == nil {
+			t.Fatalf("invalid open accepted: %s", invalid)
+		}
+	}
+	turn := `{"input_id":"input-1","body":"work","mode":"followup","timeout_seconds":0.5}`
+	if _, err := DecodeLaneTurnStartRequest([]byte(turn)); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{
+		strings.Replace(turn, "0.5", "0", 1),
+		strings.Replace(turn, `"followup"`, `"other"`, 1),
+		strings.TrimSuffix(turn, "}") + `,"extra":true}`,
+	} {
+		if _, err := DecodeLaneTurnStartRequest([]byte(invalid)); err == nil {
+			t.Fatalf("invalid turn accepted: %s", invalid)
+		}
+	}
+}
+
+func jsonFields(typ reflect.Type) ([]string, []string) {
+	properties, required := []string{}, []string{}
+	for index := 0; index < typ.NumField(); index++ {
+		tag := typ.Field(index).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name, options, _ := strings.Cut(tag, ",")
+		properties = append(properties, name)
+		if options != "omitempty" {
+			required = append(required, name)
+		}
+	}
+	sort.Strings(properties)
+	sort.Strings(required)
+	return properties, required
+}
 
 func TestRegistrySupportsInjectedSyntheticProductWithoutInitRegistration(t *testing.T) {
 	descriptor := syntheticDescriptor("synthetic")

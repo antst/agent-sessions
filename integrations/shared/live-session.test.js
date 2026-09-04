@@ -7,7 +7,9 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
+const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, readConfiguration, renderDelivery, validLaneWorkerSchema } = require("./live-session.js");
+
+const laneCapabilities = { steer: true, durable_resume: true, caller_supplied_session_id: false, model: true, reasoning_effort: true, agent: false, tool_policy: false, output_schema: true, sandbox: true, permission_default: true, permission_bypass: true };
 
 test("default reconnect cadence is two seconds", () => {
   const client = new LiveSessionClient({ env: {} });
@@ -36,7 +38,7 @@ test("one shared method authority owns the exact common surface and closed lane 
   const status = { type: "lane.status", product: "codex", session_id: "s", name: "n", cwd: "/w", groups: [], permission_mode: "default", state: "idle", turn_id: "", outcome: "", exit: null, owner_session_id: "p", persistent: false, auto_archive: true, auto_archive_after_seconds: 1.5, auto_archive_at: 0 };
   const completed = { type: "turn.completed", product: "codex", session_id: "s", turn_id: "t", status: "completed", outcome: "completed", exit: 0, result: "done", diagnostic: "" };
   const results = {
-    "lane.doctor": { type: "lane.doctor", contract_version: 2, authority: "daemon", product: "codex", ready: true, native_path: "/bin/codex", runtime_path: "/bin/codex", daemon_reachable: true, supervisor_reachable: true, codex_available: true, codex_path: "/bin/codex", codex_version: "1" },
+    "lane.doctor": { type: "lane.doctor", contract_version: 2, authority: "daemon", product: "codex", ready: true, native_path: "/bin/codex", native_version: "1", runtime_path: "/bin/codex", daemon_reachable: true, supervisor_reachable: true, capabilities: laneCapabilities, extra_arguments: [] },
     "lane.list": { type: "lane.list", product: "codex", lanes: [status] }, "lane.start": { ...status, type: "lane.ready", contract_version: 2 },
     "lane.run": completed, "lane.resume": completed, "lane.wait": completed, "lane.steer": { type: "turn.steered", session_id: "s", turn_id: "t", native_message_id: "m" },
     "lane.status": status, "lane.interrupt": { type: "turn.interrupting", session_id: "s", turn_id: "t" }, "lane.archive": { type: "lane.archived", product: "codex", session_id: "s", name: "n", already_archived: false },
@@ -83,6 +85,8 @@ test("shared params authority follows Appendix A grammar", async () => {
   assert.equal(laneStart({ product: "codex", arguments: [], input: "" }), false);
   assert.equal(METHOD_DEFINITIONS["lane.status"].params({ product: "codex", arguments: [], input: null }), false);
   assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: " ", body: "\0", mode: "followup" }), true);
+  assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: "input", body: "work", mode: "followup", timeout_seconds: 0.25 }), true);
+  assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: "input", body: "work", mode: "followup", timeout_seconds: 0 }), false);
   assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: "", body: "x", mode: "followup" }), false);
   assert.equal(METHOD_DEFINITIONS["lane.turn.wait"].params({ native_message_id: "\n" }), true);
   assert.equal(METHOD_DEFINITIONS["lane.turn.wait"].params({ native_message_id: "" }), false);
@@ -95,6 +99,22 @@ test("shared params authority follows Appendix A grammar", async () => {
   const session = { pending: new Map(), socket: { destroyed: false, write: () => true }, ready: true };
   await assert.rejects(client._call(session, "wrong-first", "peers.list", {}, true), /connection phase/u);
   await assert.rejects(client._call(session, "late-hello", "session.hello", hello(), false), /connection phase/u);
+});
+
+test("one shipped schema validates worker hello, open, doctor and turn fixtures", () => {
+  const hello = { protocol: 1, launch_token: "opaque", product: "codex", capabilities: laneCapabilities, extra_arguments: [], readiness: { available: true, native_path: "/bin/codex", native_version: "1" } };
+  const open = { name: "worker", cwd: "/work", permission_mode: "default", resume: false, auto_archive_after_seconds: 60, arguments: [] };
+  const doctor = { type: "lane.doctor", contract_version: 2, authority: "daemon", product: "codex", ready: true, native_path: "/bin/codex", native_version: "1", runtime_path: "/bin/codex", daemon_reachable: true, supervisor_reachable: true, capabilities: laneCapabilities, extra_arguments: [] };
+  const turn = { input_id: "input", body: "work", mode: "followup", timeout_seconds: 1 };
+  for (const [name, value] of Object.entries({ LaneWorkerHello: hello, LaneOpenRequest: open, LaneDoctorResult: doctor, LaneTurnStartRequest: turn })) {
+    assert.equal(validLaneWorkerSchema(name, value), true, `${name} valid`);
+    assert.equal(validLaneWorkerSchema(name, { ...value, extra: true }), false, `${name} closed`);
+  }
+  assert.equal(validLaneWorkerSchema("LaneOpenRequest", { ...open, resume: true }), false);
+  assert.equal(validLaneWorkerSchema("LaneOpenRequest", { ...open, session_id: "native" }), false);
+  assert.equal(validLaneWorkerSchema("LaneOpenRequest", { ...open, resume: true, session_id: "native" }), true);
+  assert.equal(validLaneWorkerSchema("LaneWorkerHello", { ...hello, capabilities: { ...laneCapabilities, extra: true } }), false);
+  assert.equal(validLaneWorkerSchema("LaneTurnStartRequest", { ...turn, timeout_seconds: null }), false);
 });
 
 test("delivery rendering matches the shared golden fixture", () => {

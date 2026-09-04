@@ -1,8 +1,11 @@
 "use strict";
 
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
+
+const LANE_WORKER_SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, "lane-worker.schema.json"), "utf8"));
 
 const ENV = Object.freeze({
   socket: "AGENT_SESSIONS_PRESENCE_SOCKET",
@@ -344,8 +347,45 @@ function validDelivery(params) {
     typeof params.from.product === "string" && params.from.product.length > 0 && stringList(params.from.groups);
 }
 function validLaneCall(value, input) { return exactShape(value, ["product", "arguments", ...(input ? ["input"] : [])], ["cwd", "host"]) && validWireProduct(value.product) && stringList(value.arguments) && (!input || typeof value.input === "string" && value.input.length > 0) && (!("cwd" in value) || typeof value.cwd === "string" && value.cwd.length > 0 && path.isAbsolute(value.cwd)) && (!("host" in value) || typeof value.host === "string" && value.host.length > 0); }
-function validNative(name, value, result) { if (name === "lane.turn.interrupt" || name === "lane.session.archive") return validEmpty(value); if (name === "lane.turn.start" && !result) return exactShape(value, ["input_id", "body", "mode"]) && typeof value.input_id === "string" && value.input_id.length > 0 && typeof value.body === "string" && value.body.length > 0 && ["followup", "steer"].includes(value.mode); if (name === "lane.turn.start" || !result) return exactShape(value, ["native_message_id"]) && typeof value.native_message_id === "string" && value.native_message_id.length > 0; return exactShape(value, ["outcome", "result", "reason"]) && ["completed", "interrupted", "failed"].includes(value.outcome) && typeof value.result === "string" && validJSON(value.reason); }
-function validDoctorResult(params, value) { const product = value?.product; if (!validWireProduct(product) || product !== params.product) return false; const required = ["type", "contract_version", "authority", "product", "ready", "native_path", "runtime_path", "daemon_reachable", "supervisor_reachable", `${product}_available`, `${product}_path`, `${product}_version`]; if (!exactShape(value, required, [`${product}_error`, "readiness_error"]) || value.type !== "lane.doctor" || value.contract_version !== 2 || value.authority !== "daemon") return false; return ["ready", "daemon_reachable", "supervisor_reachable", `${product}_available`].every((key) => typeof value[key] === "boolean") && ["native_path", "runtime_path", `${product}_path`, `${product}_version`, `${product}_error`, "readiness_error"].every((key) => !(key in value) || typeof value[key] === "string"); }
+function validNative(name, value, result) { if (name === "lane.turn.interrupt" || name === "lane.session.archive") return validEmpty(value); if (name === "lane.turn.start" && !result) return validLaneWorkerSchema("LaneTurnStartRequest", value); if (name === "lane.turn.start" || !result) return exactShape(value, ["native_message_id"]) && typeof value.native_message_id === "string" && value.native_message_id.length > 0; return exactShape(value, ["outcome", "result", "reason"]) && ["completed", "interrupted", "failed", "timed_out"].includes(value.outcome) && typeof value.result === "string" && validJSON(value.reason); }
+function validDoctorResult(params, value) { return value?.product === params.product && validWireProduct(value.product) && validLaneWorkerSchema("LaneDoctorResult", value); }
+
+function validLaneWorkerSchema(name, value) {
+  const definition = LANE_WORKER_SCHEMA.$defs?.[name];
+  return !!definition && validateSchemaNode(definition, value);
+}
+
+function validateSchemaNode(node, value) {
+  if (node.$ref) return validateSchemaNode(resolveSchemaRef(node.$ref), value);
+  if (Object.hasOwn(node, "const") && !Object.is(value, node.const)) return false;
+  if (node.enum && !node.enum.some((item) => Object.is(item, value))) return false;
+  if (node.type === "object" || node.properties || node.required || node.additionalProperties !== undefined) {
+    const keys = ownDataKeys(value);
+    if (!keys || node.required?.some((key) => !Object.hasOwn(value, key))) return false;
+    if (node.additionalProperties === false && keys.some((key) => !Object.hasOwn(node.properties ?? {}, key))) return false;
+    if (node.minProperties !== undefined && keys.length < node.minProperties) return false;
+    if (!keys.every((key) => !node.properties?.[key] || validateSchemaNode(node.properties[key], value[key]))) return false;
+  } else if (node.type === "array") {
+    if (!Array.isArray(value) || !value.every((item) => validateSchemaNode(node.items ?? {}, item))) return false;
+    if (node.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) return false;
+  } else if (node.type === "string") {
+    if (typeof value !== "string" || node.minLength !== undefined && value.length < node.minLength) return false;
+  } else if (node.type === "boolean" && typeof value !== "boolean") return false;
+  else if (node.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) return false;
+  if (typeof value === "number" && (node.minimum !== undefined && value < node.minimum || node.exclusiveMinimum !== undefined && value <= node.exclusiveMinimum)) return false;
+  if (node.allOf?.some((child) => !validateSchemaNode(child, value))) return false;
+  if (node.if) {
+    const branch = validateSchemaNode(node.if, value) ? node.then : node.else;
+    if (branch && !validateSchemaNode(branch, value)) return false;
+  }
+  if (node.not && validateSchemaNode(node.not, value)) return false;
+  return true;
+}
+
+function resolveSchemaRef(ref) {
+  if (!ref.startsWith("#/$defs/")) throw new Error(`unsupported lane worker schema reference: ${ref}`);
+  return ref.slice(2).split("/").reduce((value, key) => value[key], LANE_WORKER_SCHEMA);
+}
 function validLaneStatus(value, product) { return exactShape(value, ["type", "product", "session_id", "name", "cwd", "groups", "permission_mode", "state", "turn_id", "outcome", "exit", "owner_session_id", "persistent", "auto_archive", "auto_archive_after_seconds", "auto_archive_at"]) && value.type === "lane.status" && value.product === product && ["session_id", "name", "cwd", "permission_mode", "state", "turn_id", "outcome", "owner_session_id"].every((key) => typeof value[key] === "string") && stringList(value.groups) && ["persistent", "auto_archive"].every((key) => typeof value[key] === "boolean") && typeof value.auto_archive_after_seconds === "number" && Number.isInteger(value.auto_archive_at) && (value.exit === null || Number.isInteger(value.exit)); }
 function validListResult(params, value) { return exactShape(value, ["type", "product", "lanes"]) && value.type === "lane.list" && value.product === params.product && validWireProduct(value.product) && Array.isArray(value.lanes) && value.lanes.every((lane) => validLaneStatus(lane, value.product)); }
 function validReadyResult(params, value) { const { contract_version: version, ...status } = value ?? {}; return value?.type === "lane.ready" && version === 2 && validLaneStatus({ ...status, type: "lane.status" }, params.product); }
@@ -369,4 +409,4 @@ function integer(value, minimum, maximum, name) {
 function cleanError(error) { return String(error?.message ?? error ?? "live session error").replace(/[\0\r\n]/gu, " ").slice(0, 512); }
 function createLiveSessionClient(options) { return new LiveSessionClient(options); }
 
-module.exports = { CLIENT_OPERATIONS, METHOD_DEFINITIONS, ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery };
+module.exports = { CLIENT_OPERATIONS, METHOD_DEFINITIONS, ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery, validLaneWorkerSchema };

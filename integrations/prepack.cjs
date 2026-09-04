@@ -4,16 +4,19 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const product = process.env.npm_package_name?.replace(/^@agent-sessions\//, "");
-if (!["opencode", "kilo", "pi", "omp"].includes(product)) throw new Error(`unsupported package ${product}`);
-const root = path.join(__dirname, product);
+const packageRoot = { "dsh-comms": "dsh/comms", opencode: "opencode", kilo: "kilo", pi: "pi", omp: "omp" }[product];
+if (!packageRoot) throw new Error(`unsupported package ${product}`);
+const root = path.join(__dirname, packageRoot);
+const shared = product === "dsh-comms" ? "../../shared" : "../shared";
 const family = {
   pi: ["pifamily.mjs", "plugin/pifamily.mjs", true],
   omp: ["../pi/pifamily.mjs", "pi/pifamily.mjs", true],
 }[product];
 const files = [
-  ["agent-sessions.mjs", "plugin/agent-sessions.mjs", product === "opencode" || product === "kilo"],
+  ...(product === "dsh-comms" ? [] : [["agent-sessions.mjs", "plugin/agent-sessions.mjs", product === "opencode" || product === "kilo"]]),
   ...(family ? [family] : []),
-  ["../shared/live-session.js", "shared/live-session.cjs", false],
+  [`${shared}/live-session.js`, "shared/live-session.cjs", false],
+  [`${shared}/lane-worker.schema.json`, "shared/lane-worker.schema.json", false],
 ];
 for (const [source, destination, rewriteSharedImport] of files) {
   const target = path.join(root, destination);

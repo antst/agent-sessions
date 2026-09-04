@@ -14,6 +14,7 @@
     "README.md",
     "plugin/agent-sessions.mjs",
     "shared/live-session.cjs",
+    "shared/lane-worker.schema.json",
     "commands",
     "skills"
   ],

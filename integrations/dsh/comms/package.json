@@ -4,7 +4,7 @@
   "type": "commonjs",
   "main": "plugin.cjs",
   "scripts": {
-    "prepack": "node prepack.cjs",
+    "prepack": "node ../../prepack.cjs",
     "test": "node --test plugin.test.cjs"
   },
   "exports": {
@@ -14,9 +14,9 @@
   "files": [
     "README.md",
     "plugin.cjs",
-    "prepack.cjs",
     "cordis.patch.yml",
-    "shared/live-session.cjs"
+    "shared/live-session.cjs",
+    "shared/lane-worker.schema.json"
   ],
   "dsh": {
     "bundle": {

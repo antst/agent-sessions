@@ -13,7 +13,7 @@ const repository = "git+https://github.com/antst/agent-sessions.git";
 const packageSpecs = [
   {
     packagePath: "dsh/comms", name: "@agent-sessions/dsh-comms",
-    bundled: [["shared/live-session.cjs", "shared/live-session.js"]],
+    bundled: [["shared/live-session.cjs", "shared/live-session.js"], ["shared/lane-worker.schema.json", "shared/lane-worker.schema.json"]],
     generated: ["shared"],
   },
   { packagePath: "dsh/lane", name: "@agent-sessions/dsh-lane", commsPeer: true },
@@ -22,6 +22,7 @@ const packageSpecs = [
     bundled: [
       ["plugin/agent-sessions.mjs", "opencode/agent-sessions.mjs", true],
       ["shared/live-session.cjs", "shared/live-session.js"],
+      ["shared/lane-worker.schema.json", "shared/lane-worker.schema.json"],
     ],
     generated: ["plugin", "shared"],
   },
@@ -30,6 +31,7 @@ const packageSpecs = [
     bundled: [
       ["plugin/agent-sessions.mjs", "kilo/agent-sessions.mjs", true],
       ["shared/live-session.cjs", "shared/live-session.js"],
+      ["shared/lane-worker.schema.json", "shared/lane-worker.schema.json"],
     ],
     generated: ["plugin", "shared"],
   },
@@ -39,6 +41,7 @@ const packageSpecs = [
       ["plugin/agent-sessions.mjs", "pi/agent-sessions.mjs"],
       ["plugin/pifamily.mjs", "pi/pifamily.mjs", true],
       ["shared/live-session.cjs", "shared/live-session.js"],
+      ["shared/lane-worker.schema.json", "shared/lane-worker.schema.json"],
     ],
     generated: ["plugin", "shared"],
   },
@@ -48,6 +51,7 @@ const packageSpecs = [
       ["plugin/agent-sessions.mjs", "omp/agent-sessions.mjs"],
       ["pi/pifamily.mjs", "pi/pifamily.mjs", true],
       ["shared/live-session.cjs", "shared/live-session.js"],
+      ["shared/lane-worker.schema.json", "shared/lane-worker.schema.json"],
     ],
     generated: ["plugin", "pi", "shared"],
   },

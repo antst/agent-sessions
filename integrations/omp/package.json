@@ -19,7 +19,8 @@
     "README.md",
     "plugin/agent-sessions.mjs",
     "pi/pifamily.mjs",
-    "shared/live-session.cjs"
+    "shared/live-session.cjs",
+    "shared/lane-worker.schema.json"
   ],
   "publishConfig": {
     "access": "public"

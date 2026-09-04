@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-sessions.dev/schemas/lane-worker.schema.json",
+  "$defs": {
+    "LaneOpenRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "cwd", "permission_mode", "resume", "auto_archive_after_seconds", "arguments"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "cwd": {"type": "string", "minLength": 1},
+        "permission_mode": {"enum": ["default", "bypassPermissions"]},
+        "resume": {"type": "boolean"},
+        "session_id": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "reasoning_effort": {"type": "string", "minLength": 1},
+        "agent": {"type": "string", "minLength": 1},
+        "tool_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tools": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "allow": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+            "deny": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+          },
+          "minProperties": 1
+        },
+        "output_schema": {"type": "object"},
+        "sandbox": {"type": "string", "minLength": 1},
+        "auto_archive_after_seconds": {"type": "number", "minimum": 0},
+        "arguments": {"type": "array", "items": {"type": "string"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"resume": {"const": true}}, "required": ["resume"]},
+          "then": {"required": ["session_id"]},
+          "else": {"not": {"required": ["session_id"]}}
+        }
+      ]
+    },
+    "LaneWorkerHello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "launch_token", "product", "capabilities", "extra_arguments", "readiness"],
+      "properties": {
+        "protocol": {"const": 1},
+        "launch_token": {"type": "string", "minLength": 1},
+        "product": {"type": "string", "minLength": 1},
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["steer", "durable_resume", "caller_supplied_session_id", "model", "reasoning_effort", "agent", "tool_policy", "output_schema", "sandbox", "permission_default", "permission_bypass"],
+          "properties": {
+            "steer": {"type": "boolean"},
+            "durable_resume": {"type": "boolean"},
+            "caller_supplied_session_id": {"type": "boolean"},
+            "model": {"type": "boolean"},
+            "reasoning_effort": {"type": "boolean"},
+            "agent": {"type": "boolean"},
+            "tool_policy": {"type": "boolean"},
+            "output_schema": {"type": "boolean"},
+            "sandbox": {"type": "boolean"},
+            "permission_default": {"type": "boolean"},
+            "permission_bypass": {"type": "boolean"}
+          }
+        },
+        "extra_arguments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "takes_value", "cardinality", "description"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "takes_value": {"type": "boolean"},
+              "cardinality": {"enum": ["zero-or-one", "zero-or-more"]},
+              "description": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "native_path", "native_version"],
+          "properties": {
+            "available": {"type": "boolean"},
+            "native_path": {"type": "string", "minLength": 1},
+            "native_version": {"type": "string", "minLength": 1},
+            "error": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "LaneDoctorResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "contract_version", "authority", "product", "ready", "native_path", "native_version", "runtime_path", "daemon_reachable", "supervisor_reachable", "capabilities", "extra_arguments"],
+      "properties": {
+        "type": {"const": "lane.doctor"},
+        "contract_version": {"const": 2},
+        "authority": {"const": "daemon"},
+        "product": {"type": "string", "minLength": 1},
+        "ready": {"type": "boolean"},
+        "native_path": {"type": "string", "minLength": 1},
+        "native_version": {"type": "string", "minLength": 1},
+        "runtime_path": {"type": "string", "minLength": 1},
+        "daemon_reachable": {"type": "boolean"},
+        "supervisor_reachable": {"type": "boolean"},
+        "readiness_error": {"type": "string", "minLength": 1},
+        "capabilities": {"$ref": "#/$defs/LaneWorkerHello/properties/capabilities"},
+        "extra_arguments": {"$ref": "#/$defs/LaneWorkerHello/properties/extra_arguments"}
+      }
+    },
+    "LaneTurnStartRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_id", "body", "mode"],
+      "properties": {
+        "input_id": {"type": "string", "minLength": 1},
+        "body": {"type": "string", "minLength": 1},
+        "mode": {"enum": ["followup", "steer"]},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    }
+  }
+}
