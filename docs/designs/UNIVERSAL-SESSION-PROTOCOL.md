@@ -722,22 +722,27 @@ plugin needs:
   session; `rename` and `selectModel` apply typed open identity/options;
 - `permissionPresets.names` and `set`, plus `sessions.flush`, commit the open
   configuration;
-- `createUserMessage` with `agent.followup` starts the one requested turn;
+- `createUserMessage` with the exact `agent.followup(message)` call starts the
+  one requested turn. At c5b280d this is the effective call made by
+  `integrations/dsh/lane/plugin.cjs:118` as `agent[mode](message)`, with
+  `internal/products/dsh/lane.go:157` supplying the constant mode `followup`;
 - global `session/event` observation supplies input receipt, turn start,
   assistant text, and terminal reason; no polling is required;
 - `agent.cancel` interrupts, and `agent.whenIdle` supports orderly close;
-- `agent.steer` injects during a run; an idle delivery that cannot be injected
-  without starting an unrequested turn is held in the plugin's small FIFO and
-  truthfully reported `queued_for_next_turn`; and
+- `agent.steer` injects during a run. While idle, the plugin calls
+  `sessionController.appendUserMessage(session_id,message)`, which appends to
+  native session history without starting a turn, and reports `injected`;
+  **requires DSH append-without-run primitive: to add**; and
 - `tools.register` exposes the product's Agent Sessions tool while the kit's
   outbound call API carries it on the same session socket.
 
 Fresh open creates the DSH session only after the typed request arrives and
 returns its exact ID. Resume resolves `resume_native_id` and returns that same
 ID. Run submits one user message and converts the observed DSH terminal reason
-to the three wire outcomes. Deliver never starts an unrequested DSH turn. Close
-cancels if needed, flushes the session, and calls `appExit`; control EOF follows
-the same product cleanup and exit path.
+to the three wire outcomes. Deliver never starts an unrequested DSH turn and
+the native plugin contains no delivery queue; `queued_for_next_turn` exists for
+non-native wrappers only. Close cancels if needed, flushes the session, and
+calls `appExit`; control EOF follows the same product cleanup and exit path.
 
 The DSH-specific layer is capped at 300 production and 300 test logical lines,
 excluding the generic JavaScript kit and shared fixtures. Its conformance result
