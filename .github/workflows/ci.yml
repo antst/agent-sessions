@@ -408,4 +408,4 @@ jobs:
           gh release create "$RELEASE_TAG" dist/release/* \
             --verify-tag \
             --title "$RELEASE_TAG" \
-            --notes $'Precompiled Agent Sessions binaries for Linux and macOS on x86-64 and arm64.\n\nmacOS is not validated in 0.4.0; compatibility is restored in 0.4.1.\n\nVerify the selected archive against SHA256SUMS before installing.'
+            --notes-file "docs/releases/${RELEASE_TAG}.md"
