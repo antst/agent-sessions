@@ -78,13 +78,21 @@ The client must wait for this result before sending another method. The fields
 mean:
 
 - `protocol` is the integer `1`. No other value is accepted.
-- `uuid` is the stable session ID issued by the product. The presence client
-  obtains it from the product and never generates or substitutes one.
-- `name` is the title owned and stored by the product. `""` is valid when
-  the product has no title yet.
+- `uuid` is the stable, opaque session ID issued by the product. The historical
+  field need not be an RFC UUID. It is 1..128 UTF-8 bytes with no whitespace,
+  control characters, or `/`; the client never generates or substitutes it.
+- `name` is the product-owned title carried verbatim. It may be empty before a
+  title exists and may contain whitespace or `/`, but is at most 256 UTF-8
+  bytes and contains no control characters. Rosters display `uuid` while it is empty.
 - `groups` is the array of group strings passed from the launch arguments,
-  unchanged and in order. It is fixed for the life of this connection.
-- `product` is the product's non-empty string identifier.
+  unchanged and in order. An operator/wire group label is 1..192 UTF-8 bytes
+  with no whitespace, control characters, or `/`. The daemon-derived private
+  anchor is the typed structural value `session:<host>/<uuid>` and is valid
+  only when its host and native-ID components satisfy their own slash-free
+  grammars. The array is fixed for the life of this connection.
+- `product` is an opaque token-shaped label: 1..64 bytes, a lowercase ASCII
+  letter first, then lowercase ASCII letters, digits, or single nonterminal
+  hyphens. The daemon carries it verbatim and never interprets it as a launch capability.
 - `info` is a string-to-string object owned by the product. The daemon passes
   every key and value through verbatim to rosters and `peers.list` results and
   never interprets them.
@@ -112,6 +120,9 @@ daemon closes the connection:
 ```json
 {"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"Unsupported protocol version","data":{"supported":1,"received":2}}}
 ```
+
+Invalid identity shapes receive `-32602` with `data:{"method":"session.hello"}` and close the connection.
+A second `session.hello`, any notification, batch, or malformed frame closes without a response.
 
 An unknown product identifier is not an error. It is accepted for presence,
 rosters, peer discovery, and messaging, and is displayed as reported. Catalog
@@ -149,11 +160,13 @@ this closed error table:
 | `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
 | `-32006` | `Product operation failed` | A native product or driver operation failed for a reason not represented by another code. The product's error text is preserved verbatim in `message` and `data`. |
 
-Messages for the first six rows use the canonical text; `data` may identify the
-field, UUID, target, method, or product. A `-32006` response instead uses the
-native product text verbatim as both its message and data detail. No other
-error code is emitted by a version 1 endpoint. A line that is not a JSON object with
-`"jsonrpc":"2.0"` is not a protocol frame; the receiver closes the connection.
+Messages use these closed data shapes: `-32602` has `{"method":...}`;
+`-32001` has `{"target":...}`; `-32002` has `{"uuid":...}`; `-32003`
+has the applicable `method`, `reason`, or `group`; `-32004` has
+`{"supported":1,"received":...}`; and `-32005` has `{"product":...}`.
+Fallback `-32006` has `detail` and `agent_sessions_bug_report`. A product's
+valid structured `-32006` is relayed byte-for-byte instead. No other error code
+is emitted. Every accepted request receives exactly one response.
 
 ### Product to daemon
 
@@ -271,7 +284,24 @@ error:
 The daemon does not wrap `body`, queue it for a disconnected product, or
 synthesize acceptance.
 
+The daemon carries only structured `message_id`, `from`, and `body` values. Exactly
+one client-side renderer wraps them immediately before native input as:
+
+```text
+<cross-session-message from="NAME_OR_UUID" from-session="UUID">
+[codex-peer-metadata: {"fromProduct":"PRODUCT","messageId":"ID","groups":[...]}]
+BODY
+</cross-session-message>
+```
+
+That renderer owns attribute filtering and JSON escaping; no earlier layer pre-renders,
+truncates, or strips the message ID.
+
 ### Daemon to lane-capable product sessions
+
+A normal session accepts only `message.deliver`; a lane-capable session also
+accepts exactly the four methods below. Any other daemon request returns
+`-32003` with `data.method` before a product callback runs.
 
 A session that reports `capabilities:{"lane":true}` is driven over its held
 presence connection. The daemon sends the following requests to that exact
@@ -306,6 +336,8 @@ reinterpretation. For DSH this is its discriminated object, such as
 shape in `packages/core/session/src/types.ts:180-196`; the adapter returns the
 `turn/end` event's `reason` value unchanged. The product owns input-to-turn
 correlation.
+An unknown `native_message_id` returns `-32001` with that value in `data.target`;
+a second waiter for known in-flight work remains a product operation failure.
 
 `lane.turn.interrupt` takes `{}` and asks the product to cancel the active turn
 without discarding already accepted follow-up input. It returns `{}` after the
@@ -334,7 +366,7 @@ promptless for the model.
 - EOF or any connection loss removes the session immediately. There is no
   heartbeat and no grace period.
 - After a daemon restart, the product reconnects and sends `session.hello`
-  again with the same UUID, current product-owned name, original groups, and
+  again with the same native session ID, current product-owned name, original groups, and
   current info map. The daemon rebuilds its live roster from hello requests.
 - A newer connection whose successful hello reports the same UUID replaces and
   closes the older connection. The displaced connection cannot later remove
@@ -345,17 +377,19 @@ promptless for the model.
 - On disconnect, outstanding calls in both directions fail. Neither side
   replays calls after reconnect; the caller decides whether an operation is
   safe to retry.
+- Shipped clients reconnect every two seconds while the product session lives.
+  There is no replay or heartbeat.
 
 ## 6. Product responsibilities
 
 A conforming product provides:
 
-- A stable, product-issued session UUID at or near session start.
+- A stable, product-issued native session ID at or near session start.
 - A requested start-time name written into the product's own session store,
   not merely displayed in the terminal or remembered by Agent Sessions.
 - A current product-owned info map, including `model` and `cwd` whenever known,
   with changes reported for the exact session that changed.
-- Native resume by exact UUID and, where the product supports named sessions,
+- Native resume by exact native session ID and, where the product supports named sessions,
   lookup by name that returns exactly one product session or fails truthfully
   on zero or multiple matches.
 - An addressable API that accepts an inbound message for one exact session and
@@ -428,6 +462,10 @@ Conformance is checked end to end against the real product:
 
 All examples below are complete newline-delimited frames. Line breaks between
 frames are shown literally by placing each JSON object on its own line.
+The schemas describe JSON structure. The UTF-8 byte limits and character
+grammars in section 3, and the canonical error messages and data shapes above,
+are additional normative constraints because JSON Schema counts characters,
+not encoded UTF-8 bytes.
 
 ### A.1 JSON-RPC envelopes
 
@@ -931,6 +969,9 @@ Result: an empty object.
 ```json
 {"jsonrpc":"2.0","id":"lane-archive-1","method":"lane.archive","params":{"product":"qwen","arguments":["reviewer"]}}
 {"jsonrpc":"2.0","id":"lane-archive-1","result":{"type":"lane.archived","product":"qwen","session_id":"27c1a11b-5716-4dc4-a158-a8177c1e7365","name":"reviewer"}}
-{"jsonrpc":"2.0","id":"lane-archive-2","method":"lane.archive","params":{"product":"qwen","arguments":["owned-by-another-session"]}}
-{"jsonrpc":"2.0","id":"lane-archive-2","error":{"code":-32003,"message":"Operation not permitted","data":{"method":"lane.archive"}}}
+{"jsonrpc":"2.0","id":"lane-archive-2","method":"lane.archive","params":{"product":"qwen","arguments":["invisible-lane"]}}
+{"jsonrpc":"2.0","id":"lane-archive-2","error":{"code":-32001,"message":"Unknown session or target","data":{"target":"invisible-lane"}}}
 ```
+
+Any caller that can resolve an idle lane through ownership or shared-group
+visibility may archive it. An invisible lane is unknown, not owner-forbidden.

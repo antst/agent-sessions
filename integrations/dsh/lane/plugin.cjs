@@ -131,7 +131,9 @@ function createLaneRuntime(ctx, createUserMessage, agent) {
 
   async function wait(nativeMessageID) {
     const record = inflight.get(nativeMessageID);
-    if (!record) throw new Error(`unknown DSH native message ${nativeMessageID}`);
+    if (!record) throw {
+      code: -32001, message: "Unknown session or target", data: { target: nativeMessageID },
+    };
     if (!record.terminal) {
       if (record.resolve) throw new Error(`DSH native message ${nativeMessageID} already has a waiter`);
       record.terminal = await new Promise((resolve) => { record.resolve = resolve; });

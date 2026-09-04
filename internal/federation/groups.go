@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"unicode"
+
+	"github.com/antst/agent-sessions/internal/sessionidentity"
 )
 
 var ErrUnknownTarget = errors.New("unknown session or target")
@@ -30,8 +31,8 @@ func (e *GroupNotPermittedError) Error() string {
 
 const (
 	privateGroupPrefix = "session:"
-	maxGroupBytes      = 192
-	maxSessionIDBytes  = 128
+	maxGroupBytes      = sessionidentity.GroupMaxBytes
+	maxSessionIDBytes  = sessionidentity.NativeIDMaxBytes
 )
 
 // Admission is one immutable routing decision. Group membership is
@@ -205,13 +206,7 @@ func validateExplicitGroup(group string) error {
 }
 
 func validateEffectiveGroup(group string) error {
-	if group == "" || group != strings.TrimSpace(group) || len(group) > maxGroupBytes {
-		return fmt.Errorf("invalid group %q", group)
-	}
-	for _, value := range group {
-		if unicode.IsLetter(value) || unicode.IsNumber(value) || strings.ContainsRune("._:/-", value) {
-			continue
-		}
+	if !sessionidentity.ValidGroup(group) {
 		return fmt.Errorf("invalid group %q", group)
 	}
 	return nil
@@ -252,27 +247,9 @@ func contains(values []string, wanted string) bool {
 }
 
 func validSimpleID(value string) bool {
-	if value == "" || value != strings.TrimSpace(value) {
-		return false
-	}
-	for _, r := range value {
-		if unicode.IsLetter(r) || unicode.IsNumber(r) || strings.ContainsRune("._-", r) {
-			continue
-		}
-		return false
-	}
-	return true
+	return sessionidentity.ValidHostID(value)
 }
 
 func validSessionID(value string) bool {
-	if value == "" || len(value) > maxSessionIDBytes || value != strings.TrimSpace(value) {
-		return false
-	}
-	for _, r := range value {
-		if unicode.IsLetter(r) || unicode.IsNumber(r) || strings.ContainsRune("._:-", r) {
-			continue
-		}
-		return false
-	}
-	return true
+	return sessionidentity.ValidNativeID(value)
 }

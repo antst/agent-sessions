@@ -7,11 +7,17 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { InactiveError, LiveSessionClient, readConfiguration } = require("./live-session.js");
+const { InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
 
 test("default reconnect cadence is two seconds", () => {
   const client = new LiveSessionClient({ env: {} });
   assert.equal(client.reconnectMs, 2000);
+});
+
+test("delivery rendering matches the shared golden fixture", () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, "../../internal/sessiontools/testdata/native-message-envelope.json"), "utf8"));
+  const { message_id: messageID, from, body } = fixture.message;
+  assert.equal(renderDelivery({ messageID, from, body }), fixture.rendered);
 });
 
 test("one socket reports, calls, updates, and receives messages", async (t) => {
@@ -83,6 +89,30 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   assert.deepEqual(fixture.responses.find((frame) => frame.id === "daemon.native-failed").error, {
     code: -32006, message: "native exact failure", data: { detail: "native exact failure" },
   });
+
+  const unknownFailure = new Promise((resolve) => client.once("message", resolve));
+  fixture.write({ jsonrpc: "2.0", id: "daemon.unknown-failure", method: "message.deliver", params: {
+    message_id: "unknown-failure", from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] }, body: "fail canonically",
+  } });
+  await unknownFailure;
+  client.rejectMessage("unknown-failure", { code: -32001, message: "Unknown session or target", data: { target: "missing" } });
+  await until(() => fixture.responses.some((frame) => frame.id === "daemon.unknown-failure"));
+  assert.deepEqual(fixture.responses.find((frame) => frame.id === "daemon.unknown-failure").error,
+    { code: -32001, message: "Unknown session or target", data: { target: "missing" } });
+
+  for (const [id, malformed] of [
+    ["malformed-shape", { code: -32002, message: "Session busy", data: { uuid: "bad/id" } }],
+    ["malformed-json", { code: -32006, message: "native failure", data: 1n }],
+  ]) {
+    const deliveredFailure = new Promise((resolve) => client.once("message", resolve));
+    fixture.write({ jsonrpc: "2.0", id: `daemon.${id}`, method: "message.deliver", params: {
+      message_id: id, from: { uuid: "parent", name: "parent", product: "codex", groups: ["team"] }, body: "fail structurally",
+    } });
+    await deliveredFailure; client.rejectMessage(id, malformed);
+    await until(() => fixture.responses.some((frame) => frame.id === `daemon.${id}`));
+    const malformedError = fixture.responses.find((frame) => frame.id === `daemon.${id}`).error;
+    assert.equal(malformedError.code, -32006); assert.match(malformedError.data.agent_sessions_bug_report, /github\.com\/antst\/agent-sessions/u);
+  }
 });
 
 test("one session may report product-owned groups instead of process launch groups", async (t) => {
@@ -134,6 +164,33 @@ test("lane capability serves native lane requests on the held socket", async (t)
   fixture.write({ jsonrpc: "2.0", id: "daemon.invalid", method: "lane.turn.start", params: { input_id: "input" } });
   await until(() => fixture.responses.some((frame) => frame.id === "daemon.invalid"));
   assert.equal(fixture.responses.find((frame) => frame.id === "daemon.invalid").error.code, -32602);
+});
+
+test("lane handlers must return the exact native result shape", async (t) => {
+  const fixture = await server(t);
+  const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
+  t.after(() => client.stop()); let result;
+  client.handleLaneRequests(() => result);
+  client.report("native-lane", "lane", {}, { lane: true });
+  await until(() => fixture.reports.length === 1 && client.sessions.get("native-lane")?.ready);
+  const cases = [
+    ["lane.turn.start", { input_id: "input", body: "work", mode: "followup" }, { native_message_id: "native" }, { native_message_id: "native", extra: true }],
+    ["lane.turn.wait", { native_message_id: "native" }, { outcome: "completed", result: "done", reason: { kind: "completed" } }, { outcome: "unknown", result: "done", reason: {} }],
+    ["lane.turn.interrupt", {}, {}, { extra: true }],
+    ["lane.session.archive", {}, {}, null],
+  ];
+  for (const [method, params, valid, invalid] of cases) {
+    result = valid;
+    const validID = `${method}.valid`;
+    fixture.write({ jsonrpc: "2.0", id: validID, method, params });
+    await until(() => fixture.responses.some((frame) => frame.id === validID));
+    assert.deepEqual(fixture.responses.find((frame) => frame.id === validID).result, valid);
+    result = invalid; const invalidID = `${method}.invalid`;
+    fixture.write({ jsonrpc: "2.0", id: invalidID, method, params });
+    await until(() => fixture.responses.some((frame) => frame.id === invalidID));
+    const error = fixture.responses.find((frame) => frame.id === invalidID).error;
+    assert.equal(error.code, -32006); assert.match(error.data.agent_sessions_bug_report, /github\.com\/antst\/agent-sessions/u);
+  }
 });
 
 test("hello acknowledgement publishes readiness before a coalesced lane request", async (t) => {

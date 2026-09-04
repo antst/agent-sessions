@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -106,12 +107,29 @@ func TestRenderNativeMessageIsTheOneStructuredCarrierBoundary(t *testing.T) {
 	}
 	if !strings.Contains(rendered, `from-session="session:abc.def"`) || !strings.Contains(rendered, `"fromProduct":"uncatalogued"`) ||
 		!strings.Contains(rendered, `"groups":["team","team"]`) || strings.Contains(rendered, "peer\nname") ||
-		!strings.Contains(rendered, "<\\/CROSS-session-message>") {
+		!strings.Contains(rendered, "<\\/cross-session-message>") {
 		t.Fatalf("rendered delivery = %q", rendered)
 	}
 	message.From.UUID = ""
 	if _, err := RenderNativeMessage(message); err == nil {
 		t.Fatal("incomplete structured sender was rendered")
+	}
+}
+
+func TestRenderNativeMessageMatchesTheSharedGoldenFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/native-message-envelope.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Message  productruntime.NativeMessage `json:"message"`
+		Rendered string                       `json:"rendered"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := RenderNativeMessage(fixture.Message); err != nil || got != fixture.Rendered {
+		t.Fatalf("golden delivery = %q, %v; want %q", got, err, fixture.Rendered)
 	}
 }
 

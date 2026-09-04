@@ -175,7 +175,7 @@ func TestSteerLaneDispatchesOneExactActiveNativeTurn(t *testing.T) {
 		driver.request.Effort != actor.effort || driver.request.SchemaPath != actor.schema {
 		t.Fatalf("steer call count=%d turn=%+v request=%+v", driver.calls, driver.turn, driver.request)
 	}
-	if result["type"] != "turn.steered" || result["session_id"] != actor.nativeID || result["thread_id"] != nil ||
+	if len(result) != 4 || result["product"] != nil || result["type"] != "turn.steered" || result["session_id"] != actor.nativeID || result["thread_id"] != nil ||
 		result["turn_id"] != actor.turnID || result["native_message_id"] != driver.acceptance.NativeMessageID {
 		t.Fatalf("steer result = %#v", result)
 	}

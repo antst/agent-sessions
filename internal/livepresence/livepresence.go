@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/agent-sessions/internal/productcatalog"
 	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/agent-sessions/internal/sessionidentity"
 	"github.com/antst/agent-sessions/internal/sessiontools"
 )
 
@@ -42,8 +43,10 @@ var (
 )
 
 type classifiedError struct {
-	class error
-	cause error
+	class   error
+	cause   error
+	uuid    string
+	product string
 }
 
 func (e classifiedError) Error() string { return e.cause.Error() }
@@ -55,6 +58,9 @@ func ClassifyError(class, cause error) error {
 	}
 	return classifiedError{class: class, cause: cause}
 }
+
+func BusyError(uuid string, cause error) error { return classifiedError{ErrBusy, cause, uuid, ""} }
+func ProductError(p string, e error) error     { return classifiedError{ErrProductUnavailable, e, "", p} }
 
 type Report struct {
 	UUID         string            `json:"uuid"`
@@ -215,7 +221,16 @@ func (c *Connection) UpdateReport(name string, info map[string]string) Report {
 func (c *Connection) Close() error { return c.connection.Close() }
 
 func ValidReport(report Report) bool {
-	return strings.TrimSpace(report.UUID) != "" && strings.TrimSpace(report.Product) != "" && report.Groups != nil && report.Info != nil
+	if !sessionidentity.ValidNativeID(report.UUID) || !sessionidentity.ValidName(report.Name) ||
+		productcatalog.ValidateToken(report.Product) != nil || report.Groups == nil || report.Info == nil {
+		return false
+	}
+	for _, group := range report.Groups {
+		if !sessionidentity.ValidGroup(group) {
+			return false
+		}
+	}
+	return true
 }
 
 func CloneReport(report Report) Report {
@@ -290,11 +305,56 @@ func validError(rpcErr *RPCError) bool {
 		return false
 	}
 	switch rpcErr.Code {
-	case InvalidParams, Unknown, Busy, NotPermitted, UnsupportedVersion, ProductUnavailable, ProductFailure:
+	case InvalidParams:
+		method, ok := errorStringData(rpcErr.Data, "method")
+		return rpcErr.Message == "Invalid params" && ok && method != ""
+	case Unknown:
+		target, ok := errorStringData(rpcErr.Data, "target")
+		return rpcErr.Message == "Unknown session or target" && ok && strings.TrimSpace(target) != ""
+	case Busy:
+		uuid, ok := errorStringData(rpcErr.Data, "uuid")
+		return rpcErr.Message == "Session busy" && ok && sessionidentity.ValidNativeID(uuid)
+	case NotPermitted:
+		return rpcErr.Message == "Operation not permitted" && validNotPermittedData(rpcErr.Data)
+	case UnsupportedVersion:
+		var data struct {
+			Supported *int `json:"supported"`
+			Received  *int `json:"received"`
+		}
+		return rpcErr.Message == "Unsupported protocol version" && DecodeStrict(rpcErr.Data, &data) == nil &&
+			data.Supported != nil && *data.Supported == ProtocolVersion && data.Received != nil
+	case ProductUnavailable:
+		product, ok := errorStringData(rpcErr.Data, "product")
+		return rpcErr.Message == "Product not launchable" && ok && productcatalog.ValidateToken(product) == nil
+	case ProductFailure:
 		return rpcErr.Data == nil || json.Valid(rpcErr.Data)
 	default:
 		return false
 	}
+}
+
+func errorStringData(raw json.RawMessage, key string) (string, bool) {
+	var data map[string]json.RawMessage
+	if DecodeStrict(raw, &data) != nil || len(data) != 1 {
+		return "", false
+	}
+	var value string
+	encoded, ok := data[key]
+	if !ok || json.Unmarshal(encoded, &value) != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func validNotPermittedData(raw json.RawMessage) bool {
+	if method, ok := errorStringData(raw, "method"); ok {
+		return strings.TrimSpace(method) != ""
+	}
+	if group, ok := errorStringData(raw, "group"); ok {
+		return sessionidentity.ValidGroup(group)
+	}
+	reason, ok := errorStringData(raw, "reason")
+	return ok && (reason == "no running turn" || reason == "steer unsupported")
 }
 
 func DecodeHello(raw json.RawMessage) (Report, int, error) {
@@ -331,7 +391,7 @@ func DecodeUpdate(raw json.RawMessage) (string, map[string]string, error) {
 		Name *string            `json:"name"`
 		Info *map[string]string `json:"info"`
 	}
-	if err := DecodeStrict(raw, &params); err != nil || params.Name == nil || params.Info == nil {
+	if err := DecodeStrict(raw, &params); err != nil || params.Name == nil || params.Info == nil || !sessionidentity.ValidName(*params.Name) {
 		return "", nil, errors.New("session update is invalid")
 	}
 	return *params.Name, CloneInfo(*params.Info), nil
@@ -384,11 +444,8 @@ func FailureFromError(id json.RawMessage, method string, err error) Frame {
 	if errors.As(err, &forbiddenGroup) {
 		return Failure(id, NotPermitted, "Operation not permitted", map[string]any{"group": forbiddenGroup.Group})
 	}
-	if errors.Is(err, daemonpkg.InactiveControlError()) || errors.Is(err, federationpkg.ErrUnknownTarget) || errors.Is(err, ErrUnknown) {
-		return Failure(id, Unknown, "Unknown session or target", map[string]any{"detail": err.Error()})
-	}
 	if errors.Is(err, ErrInvalidParams) {
-		return Failure(id, InvalidParams, "Invalid params", map[string]any{"detail": err.Error()})
+		return Failure(id, InvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	if errors.Is(err, ErrNoRunningTurn) {
 		return Failure(id, NotPermitted, "Operation not permitted", map[string]any{"reason": "no running turn"})
@@ -398,13 +455,15 @@ func FailureFromError(id json.RawMessage, method string, err error) Frame {
 	}
 	if errors.Is(err, ErrNotPermitted) || errors.Is(err, productruntime.ErrUnauthorized) ||
 		errors.Is(err, productruntime.ErrUnsupportedPolicy) || errors.Is(err, productruntime.ErrUnsupportedRename) {
-		return Failure(id, NotPermitted, "Operation not permitted", map[string]any{"detail": err.Error()})
+		return Failure(id, NotPermitted, "Operation not permitted", map[string]any{"method": method})
 	}
-	if errors.Is(err, ErrBusy) || errors.Is(err, productruntime.ErrAmbiguousSession) {
-		return Failure(id, Busy, "Session busy", map[string]any{"detail": err.Error()})
+	var classified classifiedError
+	if errors.Is(err, ErrBusy) && errors.As(err, &classified) && sessionidentity.ValidNativeID(classified.uuid) {
+		return Failure(id, Busy, "Session busy", map[string]any{"uuid": classified.uuid})
 	}
-	if errors.Is(err, ErrProductUnavailable) || errors.Is(err, productruntime.ErrUnavailable) || errors.Is(err, productruntime.ErrIncompatible) {
-		return Failure(id, ProductUnavailable, "Product not launchable", map[string]any{"detail": err.Error()})
+	if (errors.Is(err, ErrProductUnavailable) || errors.Is(err, productruntime.ErrUnavailable) || errors.Is(err, productruntime.ErrIncompatible)) &&
+		errors.As(err, &classified) && productcatalog.ValidateToken(classified.product) == nil {
+		return Failure(id, ProductUnavailable, "Product not launchable", map[string]any{"product": classified.product})
 	}
 	return Failure(id, ProductFailure, err.Error(), map[string]any{
 		"detail": err.Error(), "agent_sessions_bug_report": sessiontools.BugReportGuidance,
@@ -560,7 +619,9 @@ func (c *Client) read(ctx context.Context, connection *Connection) {
 		}
 		go func(frame Frame) {
 			response := Success(frame.ID, nil)
-			if c.call == nil {
+			if !AllowsDaemonMethod(connection.Report(), frame.Method) {
+				response = Failure(frame.ID, NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method})
+			} else if c.call == nil {
 				response = Failure(frame.ID, NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method})
 			} else {
 				result, err := c.call(ctx, frame.Method, frame.Params)
@@ -573,6 +634,10 @@ func (c *Client) read(ctx context.Context, connection *Connection) {
 			_ = connection.Write(response)
 		}(frame)
 	}
+}
+
+func AllowsDaemonMethod(report Report, method string) bool {
+	return method == "message.deliver" || report.Capabilities.Lane && (method == "lane.turn.start" || method == "lane.turn.wait" || method == "lane.turn.interrupt" || method == "lane.session.archive")
 }
 
 func hello(connection *Connection, report Report) error {
