@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"strings"
 	"sync"
@@ -282,9 +283,12 @@ func validID(raw json.RawMessage) bool {
 	if decoder.Decode(&value) != nil {
 		return false
 	}
-	switch value.(type) {
-	case string, json.Number:
+	switch value := value.(type) {
+	case string:
 		return true
+	case json.Number:
+		number, ok := new(big.Rat).SetString(value.String())
+		return ok && number.IsInt() && new(big.Int).Abs(number.Num()).BitLen() <= 53
 	default:
 		return false
 	}
@@ -306,14 +310,11 @@ func validError(rpcErr *RPCError) bool {
 	}
 	switch rpcErr.Code {
 	case InvalidParams:
-		method, ok := errorStringData(rpcErr.Data, "method")
-		return rpcErr.Message == "Invalid params" && ok && method != ""
+		return validStringError(rpcErr, "Invalid params", "method", func(value string) bool { return value != "" })
 	case Unknown:
-		target, ok := errorStringData(rpcErr.Data, "target")
-		return rpcErr.Message == "Unknown session or target" && ok && strings.TrimSpace(target) != ""
+		return validStringError(rpcErr, "Unknown session or target", "target", func(value string) bool { return strings.TrimSpace(value) != "" })
 	case Busy:
-		uuid, ok := errorStringData(rpcErr.Data, "uuid")
-		return rpcErr.Message == "Session busy" && ok && sessionidentity.ValidNativeID(uuid)
+		return validStringError(rpcErr, "Session busy", "uuid", sessionidentity.ValidNativeID)
 	case NotPermitted:
 		return rpcErr.Message == "Operation not permitted" && validNotPermittedData(rpcErr.Data)
 	case UnsupportedVersion:
@@ -324,8 +325,7 @@ func validError(rpcErr *RPCError) bool {
 		return rpcErr.Message == "Unsupported protocol version" && DecodeStrict(rpcErr.Data, &data) == nil &&
 			data.Supported != nil && *data.Supported == ProtocolVersion && data.Received != nil
 	case ProductUnavailable:
-		product, ok := errorStringData(rpcErr.Data, "product")
-		return rpcErr.Message == "Product not launchable" && ok && productcatalog.ValidateToken(product) == nil
+		return validStringError(rpcErr, "Product not launchable", "product", func(value string) bool { return productcatalog.ValidateToken(value) == nil })
 	case ProductFailure:
 		return rpcErr.Data == nil || json.Valid(rpcErr.Data)
 	default:
@@ -333,17 +333,18 @@ func validError(rpcErr *RPCError) bool {
 	}
 }
 
+func validStringError(rpcErr *RPCError, message, key string, validate func(string) bool) bool {
+	value, ok := errorStringData(rpcErr.Data, key)
+	return rpcErr.Message == message && ok && validate(value)
+}
+
 func errorStringData(raw json.RawMessage, key string) (string, bool) {
-	var data map[string]json.RawMessage
+	var data map[string]string
 	if DecodeStrict(raw, &data) != nil || len(data) != 1 {
 		return "", false
 	}
-	var value string
-	encoded, ok := data[key]
-	if !ok || json.Unmarshal(encoded, &value) != nil {
-		return "", false
-	}
-	return value, true
+	value, ok := data[key]
+	return value, ok
 }
 
 func validNotPermittedData(raw json.RawMessage) bool {
