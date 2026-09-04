@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +95,49 @@ func TestConnectorImageRefresherExecsOnceWhenDaemonAndFileIdentityMatch(t *testi
 	}
 	if !reflect.DeepEqual(invoked[0], want) {
 		t.Fatalf("exec invocation = %#v, want %#v", invoked[0], want)
+	}
+}
+
+func TestConnectorBeforePublishRefreshesOrFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	first := writeConnectorTestImage(t, root, "first", "first")
+	second := writeConnectorTestImage(t, root, "second", "second")
+	alias := filepath.Join(root, "agent-sessions")
+	if err := os.Symlink(first, alias); err != nil {
+		t.Fatal(err)
+	}
+	refresher, err := newConnectorImageRefresher([]string{alias, "connector", "claude"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, alias); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	refresher.exec = func(string, []string, []string) error { calls++; return nil }
+	var log bytes.Buffer
+	gate := connectorBeforePublish(refresher, func(context.Context) string { return connectorTestIdentity("second") }, &log)
+	if err := gate(context.Background()); err != nil || calls != 1 || refresher.identity() != connectorTestIdentity("second") {
+		t.Fatalf("refresh gate = calls %d identity %q error %v", calls, refresher.identity(), err)
+	}
+	if err := gate(context.Background()); err != nil || calls != 1 {
+		t.Fatalf("same-image gate = calls %d error %v", calls, err)
+	}
+	bad := connectorBeforePublish(refresher, func(context.Context) string { return "" }, &log)
+	if err := bad(context.Background()); err == nil || !strings.Contains(log.String(), "unavailable") {
+		t.Fatalf("invalid identity gate = %v log %q", err, log.String())
+	}
+	mismatch := connectorBeforePublish(refresher, func(context.Context) string { return connectorTestIdentity("not-installed") }, &log)
+	if err := mismatch(context.Background()); err == nil || !strings.Contains(log.String(), "does not match") {
+		t.Fatalf("mismatched image gate = %v log %q", err, log.String())
+	}
+	refresher.launchedIdentity = connectorTestIdentity("first")
+	refresher.exec = func(string, []string, []string) error { return errors.New("exec failed") }
+	if err := gate(context.Background()); err == nil || !strings.Contains(log.String(), "exec failed") {
+		t.Fatalf("exec failure gate = %v log %q", err, log.String())
 	}
 }
 

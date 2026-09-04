@@ -37,7 +37,8 @@ const (
 	// ErrorIdempotencyConflict identifies changed reuse of a mutation key.
 	ErrorIdempotencyConflict = "idempotency_conflict"
 	// ErrorInactive identifies a connector outside an attested managed attachment.
-	ErrorInactive = "inactive"
+	ErrorInactive       = "inactive"
+	ErrorStaleConnector = "stale_connector"
 	// ErrorHandler identifies a cause-specific operation failure.
 	ErrorHandler = "operation_failed"
 
@@ -47,15 +48,16 @@ const (
 
 // ControlRequest is one bounded correlated local operation.
 type ControlRequest struct {
-	ID             string          `json:"id"`
-	Role           ControlRole     `json:"role"`
-	Operation      string          `json:"operation"`
-	Generation     uint64          `json:"generation"`
-	IdempotencyKey string          `json:"idempotency_key,omitempty"`
-	AttachmentID   string          `json:"attachment_id,omitempty"`
-	Capability     string          `json:"capability,omitempty"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
-	WaitAdmission  bool            `json:"wait_admission,omitempty"`
+	ID                string          `json:"id"`
+	Role              ControlRole     `json:"role"`
+	Operation         string          `json:"operation"`
+	Generation        uint64          `json:"generation"`
+	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
+	AttachmentID      string          `json:"attachment_id,omitempty"`
+	Capability        string          `json:"capability,omitempty"`
+	ConnectorIdentity string          `json:"connector_identity,omitempty"`
+	Payload           json.RawMessage `json:"payload,omitempty"`
+	WaitAdmission     bool            `json:"wait_admission,omitempty"`
 }
 
 // ControlFailure is one operation failure returned to the same-user caller.
@@ -192,6 +194,9 @@ func (p *controlPolicy) validate(request ControlRequest) *ControlFailure {
 	}
 	if !roleAllowsOperation(request.Role, request.Operation) {
 		return &ControlFailure{Code: ErrorForbidden, Message: "control role does not permit this operation"}
+	}
+	if request.Operation == "connector.tool" && (request.ConnectorIdentity == "" || request.ConnectorIdentity != p.releaseIdentity) {
+		return &ControlFailure{Code: ErrorStaleConnector, Message: "Agent Sessions connector image is stale; retry after automatic refresh"}
 	}
 	if len(request.Payload) != 0 && !json.Valid(request.Payload) {
 		return &ControlFailure{Code: ErrorInvalidRequest, Message: "control request payload is invalid JSON"}

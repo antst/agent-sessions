@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +350,80 @@ func TestConnectionFrameBoundaryAndTruncation(t *testing.T) {
 	frame.Params[0] = '['
 	if string(observed[0].Params) != `{}` {
 		t.Fatalf("observation was not cloned: %+v", observed[0])
+	}
+}
+
+func TestClientBeforePublishGatesTheCurrentConnection(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "release", true: "reject"}[fail], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			path := filepath.Join(t.TempDir(), "presence.sock")
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = listener.Close() }()
+			accepted := make(chan struct{}, 2)
+			go func() {
+				attempts := 1
+				if fail {
+					attempts++
+				}
+				for range attempts {
+					connection, acceptErr := listener.Accept()
+					if acceptErr != nil {
+						return
+					}
+					accepted <- struct{}{}
+					rpc := NewConnection(connection)
+					var hello Frame
+					if rpc.Decode(&hello) == nil {
+						_ = rpc.Write(Frame{JSONRPC: "2.0", ID: hello.ID, Result: json.RawMessage(`{}`)})
+					}
+					_ = connection.Close()
+				}
+			}()
+			entered, release := make(chan struct{}, 2), make(chan struct{})
+			client := StartClientWithOptions(ctx, path, Report{UUID: "native", Name: "native", Product: "codex", Groups: []string{}, Info: map[string]string{}}, nil, nil, ClientOptions{
+				BeforePublish: func(context.Context) error {
+					entered <- struct{}{}
+					<-release
+					if fail {
+						return errors.New("stale image")
+					}
+					return nil
+				},
+			})
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("before-publish gate was not called")
+			}
+			<-accepted
+			if _, err := client.Call(ctx, "gated", "peers.list", map[string]any{}); err == nil {
+				t.Fatal("connection was published while the gate was blocked")
+			}
+			close(release)
+			if fail {
+				select {
+				case <-client.Ready():
+					t.Fatal("rejected connection became ready")
+				case <-time.After(50 * time.Millisecond):
+				}
+				select {
+				case <-accepted:
+				case <-time.After(3 * time.Second):
+					t.Fatal("rejected connection did not enter the existing reconnect loop")
+				}
+				return
+			}
+			select {
+			case <-client.Ready():
+			case <-time.After(time.Second):
+				t.Fatal("accepted connection was not published")
+			}
+		})
 	}
 }
 func testFrame(size int, newline bool) []byte {

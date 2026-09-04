@@ -635,6 +635,11 @@ if [[ "$installed_hash" != "$candidate_hash" ]] ||
   cat "$test_root/success.out" >&2
   exit 1
 fi
+if ! grep -Fxq 'Connectors from a previous install refresh after their next completed tool response. A newly introduced operation may fail once under the old image; repeat it after automatic refresh, or resume or restart that session.' "$test_root/success.out" ||
+   grep -Fq 'Connectors from a previous install refresh' "$test_root/failed.out"; then
+  printf 'connector refresh transition notice was not success-only\n' >&2
+  exit 1
+fi
 if [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] || [[ ! -L "$prefix/bin/user-tool" ]]; then
   printf 'successful host update did not prune only stale managed aliases\n' >&2
   exit 1

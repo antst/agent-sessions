@@ -67,16 +67,17 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	}
 	var live *livepresence.Client
 	if reported && connectorClaimsLivePresence(requestedProduct, product, os.Getenv) {
+		options := livepresence.ClientOptions{BeforePublish: connectorBeforePublish(refresher, connectorDaemonReleaseIdentity, os.Stderr)}
 		if product == connectorProductClaude {
 			base := livepresence.CloneReport(report)
-			live = livepresence.StartResolvingClient(ctx, defaultPresenceEndpoint(), resolveReport, func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+			live = livepresence.StartClientWithOptions(ctx, defaultPresenceEndpoint(), livepresence.Report{}, resolveReport, func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				return connectorNativeCall(callCtx, base, method, params)
-			})
+			}, options)
 		} else {
-			live = livepresence.StartClient(ctx, defaultPresenceEndpoint(), report,
+			live = livepresence.StartClientWithOptions(ctx, defaultPresenceEndpoint(), report, nil,
 				func(callCtx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 					return connectorNativeCall(callCtx, report, method, params)
-				})
+				}, options)
 		}
 	}
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
@@ -99,7 +100,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 				}
 			}
 			sourceID := connectorRelaySource(product, callReport.UUID, os.Getenv(launcher.QwenEventsFileEnv))
-			result, releaseIdentity, callErr := callConnectorDaemonTool(callCtx, product, sourceID, id, method, params)
+			result, releaseIdentity, callErr := callConnectorDaemonTool(callCtx, product, sourceID, id, method, params, refresher.identity())
 			refresher.observeDaemon(releaseIdentity)
 			return result, callErr
 		},
@@ -108,6 +109,26 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		return err
 	}
 	return relay.Serve(ctx, os.Stdin, output)
+}
+
+func connectorBeforePublish(refresher *connectorImageRefresher, resolve func(context.Context) string, log io.Writer) func(context.Context) error {
+	return func(ctx context.Context) error {
+		identity := resolve(ctx)
+		if !validConnectorReleaseIdentity(identity) {
+			err := errors.New("ready daemon release identity is unavailable")
+			_, _ = fmt.Fprintf(log, "Agent Sessions connector refresh: %v\n", err)
+			return err
+		}
+		refresher.observeDaemon(identity)
+		if err := refresher.refresh(); err != nil || refresher.identity() != identity {
+			if err == nil {
+				err = errors.New("installed connector image does not match the ready daemon")
+			}
+			_, _ = fmt.Fprintf(log, "Agent Sessions connector refresh: %v\n", err)
+			return err
+		}
+		return nil
+	}
 }
 
 func callLiveConnectorTool(
@@ -134,12 +155,12 @@ func callLiveConnectorTool(
 		arguments = liveMessageSendArguments(arguments)
 	case "lane":
 		command := strings.TrimSpace(mapString(arguments, "command"))
-		spec, known := livepresence.LookupMethod("lane." + command)
-		if command == "collect" || !known || spec.Direction != livepresence.ClientToDaemon || !spec.Lane {
-			return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": "lane." + command})
-		}
 		operation = "lane." + command
 		delete(arguments, "command")
+		delete(arguments, "session_id")
+		if _, present := arguments["arguments"]; !present {
+			arguments["arguments"] = []string{}
+		}
 	default:
 		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"tool": call.Name})
 	}
@@ -185,7 +206,7 @@ func connectorDeclinesForeignManagedProduct(requestedProduct, resolvedProduct st
 func callConnectorDaemonTool(
 	ctx context.Context, product string,
 	sourceID, requestID, method string,
-	params json.RawMessage,
+	params json.RawMessage, connectorIdentity string,
 ) (json.RawMessage, string, error) {
 	if method != "tools/call" {
 		return nil, "", fmt.Errorf("connector method %s is unsupported", method)
@@ -204,7 +225,7 @@ func callConnectorDaemonTool(
 	id := commandRequestID()
 	response, err := callExistingDaemon(ctx, defaultStateRoot(), daemonpkg.ControlRequest{
 		ID: id, Role: daemonpkg.RoleLauncher, Operation: "connector.tool",
-		Payload: payload,
+		Payload: payload, ConnectorIdentity: connectorIdentity,
 	})
 	if err != nil {
 		return nil, "", err

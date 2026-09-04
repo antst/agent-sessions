@@ -99,12 +99,13 @@ func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
 }
 
 func TestConnectorControlRelayPreservesLaneInvalidParams(t *testing.T) {
+	releaseIdentity := strings.Repeat("a", 64)
 	root := shortDaemonTestRoot(t)
 	t.Setenv("AGENT_SESSIONS_STATE_ROOT", root)
 	coordinator := newHostCoordinator(context.Background(), root)
 	var runtime *daemonpkg.Runtime
 	runtime, err := daemonpkg.StartRuntime(context.Background(), daemonpkg.RuntimeConfig{
-		StateRoot: root,
+		StateRoot: root, ReleaseIdentity: releaseIdentity,
 		Handler: func(ctx context.Context, request daemonpkg.ControlRequest) (json.RawMessage, error) {
 			return coordinator.handle(ctx, runtime, request)
 		},
@@ -117,7 +118,7 @@ func TestConnectorControlRelayPreservesLaneInvalidParams(t *testing.T) {
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
 		Product: "codex",
 		Call: func(ctx context.Context, id, method string, params json.RawMessage) (json.RawMessage, error) {
-			result, _, callErr := callConnectorDaemonTool(ctx, "codex", "", id, method, params)
+			result, _, callErr := callConnectorDaemonTool(ctx, "codex", "", id, method, params, releaseIdentity)
 			return result, callErr
 		},
 	})
@@ -154,6 +155,51 @@ func TestLiveSendProjectsOnlyTheDaemonMessageContract(t *testing.T) {
 	}
 	if _, ok := projected["session_id"]; ok {
 		t.Fatal("session_id reached message.send")
+	}
+}
+
+func TestLiveLaneStripsOptionalSessionContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "presence.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	received := make(chan livepresence.Frame, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		rpc := livepresence.NewConnection(connection)
+		var frame livepresence.Frame
+		if rpc.Decode(&frame) != nil || rpc.Write(livepresence.Frame{JSONRPC: "2.0", ID: frame.ID, Result: json.RawMessage(`{}`)}) != nil {
+			return
+		}
+		rpc.SetReport(livepresence.Report{UUID: "parent"})
+		if rpc.Decode(&frame) != nil {
+			return
+		}
+		received <- frame
+		_ = rpc.Write(livepresence.Frame{JSONRPC: "2.0", ID: frame.ID, Result: json.RawMessage(`{"type":"lane.list","product":"codex","lanes":[]}`)})
+		<-ctx.Done()
+	}()
+	live := livepresence.StartClient(ctx, path, livepresence.Report{UUID: "parent", Name: "parent", Product: "claude", Groups: []string{}, Info: map[string]string{}}, nil)
+	select {
+	case <-live.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("live connector did not become ready")
+	}
+	params := json.RawMessage(`{"name":"lane","arguments":{"product":"codex","command":"list","session_id":"parent"}}`)
+	if _, err := callLiveConnectorTool(ctx, live, "strip-session", "tools/call", params); err != nil {
+		t.Fatal(err)
+	}
+	frame := <-received
+	if strings.Contains(string(frame.Params), "session_id") || !strings.Contains(string(frame.Params), `"arguments":[]`) {
+		t.Fatalf("live lane params = %s", frame.Params)
 	}
 }
 

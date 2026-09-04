@@ -182,6 +182,9 @@ func (r *MCPRelay) handle(ctx context.Context, request relayRequest) (json.RawMe
 }
 
 func (r *MCPRelay) forward(ctx context.Context, request relayRequest) (json.RawMessage, *rpcError) {
+	if invalid := ValidateMCPToolCall(r.config.Product, request.Params); invalid != nil {
+		return nil, &rpcError{Code: -32602, Message: "Invalid params", Data: invalid}
+	}
 	id := string(request.ID)
 	response, err := r.config.Call(ctx, id, request.Method, append(json.RawMessage(nil), request.Params...))
 	if err != nil {

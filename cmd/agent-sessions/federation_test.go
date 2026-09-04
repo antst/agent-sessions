@@ -164,15 +164,20 @@ func TestFederationSnapshotProjectsCurrentDaemonAttachmentsAndLanes(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
-	activateTestAttachment(t, runtime, daemonpkg.ManagedAttachment{
+	parent := daemonpkg.ManagedAttachment{
 		ID: "parent", Product: "codex", NativeSessionID: "native-parent",
 		Cwd: "/work", Groups: []string{"project"}, PermissionMode: "bypassPermissions",
-	})
+	}
+	activateTestAttachment(t, runtime, parent)
 	coordinator := newHostCoordinator(context.Background(), shortDaemonTestRoot(t))
 	coordinator.lanesLoaded = true
+	laneGroups, err := coordinator.anchorLaneGroups(runtime, []string{"project"}, parent, "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
 	coordinator.lanes["lane"] = &laneActor{
 		id: "lane", product: "qwen", name: "worker", cwd: "/work", parentID: "parent",
-		groups:     []string{"project", "session:host-a/parent", "session:host-a/lane"},
+		groups:     laneGroups,
 		permission: "default", state: "running",
 	}
 	peers, err := coordinator.federationSnapshot(runtime, "host-a", "host-a")
@@ -188,7 +193,7 @@ func TestFederationSnapshotProjectsCurrentDaemonAttachmentsAndLanes(t *testing.T
 	}
 	if byID["parent"].PermissionMode != "bypassPermissions" || byID["lane"].Status != "busy" ||
 		!containsString(byID["parent"].Groups, "session:host-a/parent") ||
-		!containsString(byID["lane"].Groups, "session:host-a/lane") {
+		!containsString(byID["lane"].Groups, laneGroups[len(laneGroups)-1]) {
 		t.Fatalf("projected peers = %#v", byID)
 	}
 }

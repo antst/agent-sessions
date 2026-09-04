@@ -15,8 +15,16 @@ func ValidGroup(value string) bool {
 	if !strings.HasPrefix(value, "session:") {
 		return bounded(value, GroupMaxBytes)
 	}
-	hostID, nativeID, separated := strings.Cut(strings.TrimPrefix(value, "session:"), "/")
-	return len(value) <= GroupMaxBytes && separated && ValidHostID(hostID) && ValidNativeID(nativeID)
+	parts := strings.Split(strings.TrimPrefix(value, "session:"), "/")
+	if len(value) > GroupMaxBytes || len(parts) < 2 || !ValidHostID(parts[0]) {
+		return false
+	}
+	for _, nativeID := range parts[1:] {
+		if !ValidNativeID(nativeID) {
+			return false
+		}
+	}
+	return true
 }
 
 func ValidHostID(value string) bool {

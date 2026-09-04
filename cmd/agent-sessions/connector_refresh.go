@@ -59,6 +59,15 @@ func (r *connectorImageRefresher) observeDaemon(identity string) {
 	r.mu.Unlock()
 }
 
+func (r *connectorImageRefresher) identity() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.launchedIdentity
+}
+
 func (r *connectorImageRefresher) refresh() error {
 	if r == nil {
 		return nil

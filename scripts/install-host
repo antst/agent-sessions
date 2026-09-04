@@ -704,3 +704,4 @@ if [[ -n "$backup" && -d "$backup" ]]; then
   fi
 fi
 printf 'Installed Agent Sessions %s for %s and restarted the user service.\n' "$version" "$platform" || true
+printf '%s\n' 'Connectors from a previous install refresh after their next completed tool response. A newly introduced operation may fail once under the old image; repeat it after automatic refresh, or resume or restart that session.' || true

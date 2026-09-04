@@ -752,6 +752,7 @@ type Client struct {
 	report        Report
 	resolveReport func(context.Context) (Report, bool)
 	observer      func(string, Frame)
+	beforePublish func(context.Context) error
 	ready         chan struct{}
 	done          chan struct{}
 	readyOnce     sync.Once
@@ -761,6 +762,11 @@ type Client struct {
 	call    func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
+type ClientOptions struct {
+	Observe       func(string, Frame)
+	BeforePublish func(context.Context) error
+}
+
 func StartClient(
 	ctx context.Context,
 	endpoint string,
@@ -768,9 +774,24 @@ func StartClient(
 	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
 	observers ...func(string, Frame),
 ) *Client {
+	options := ClientOptions{}
+	if len(observers) != 0 {
+		options.Observe = observers[0]
+	}
+	return StartClientWithOptions(ctx, endpoint, report, nil, call, options)
+}
+
+func StartClientWithOptions(
+	ctx context.Context,
+	endpoint string,
+	report Report,
+	resolveReport func(context.Context) (Report, bool),
+	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
+	options ClientOptions,
+) *Client {
 	report = NormalizeReport(report)
-	client := initializeClient(&Client{ctx: ctx, endpoint: endpoint, report: report, call: call}, observers)
-	if ValidReport(report) {
+	client := initializeClient(&Client{ctx: ctx, endpoint: endpoint, report: report, resolveReport: resolveReport, call: call}, options)
+	if resolveReport != nil || ValidReport(report) {
 		go client.run()
 	} else {
 		close(client.done)
@@ -785,16 +806,16 @@ func StartResolvingClient(
 	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
 	observers ...func(string, Frame),
 ) *Client {
-	client := initializeClient(&Client{ctx: ctx, endpoint: endpoint, resolveReport: resolveReport, call: call}, observers)
-	go client.run()
-	return client
+	options := ClientOptions{}
+	if len(observers) != 0 {
+		options.Observe = observers[0]
+	}
+	return StartClientWithOptions(ctx, endpoint, Report{}, resolveReport, call, options)
 }
 
-func initializeClient(client *Client, observers []func(string, Frame)) *Client {
+func initializeClient(client *Client, options ClientOptions) *Client {
 	client.ready, client.done = make(chan struct{}), make(chan struct{})
-	if len(observers) != 0 {
-		client.observer = observers[0]
-	}
+	client.observer, client.beforePublish = options.Observe, options.BeforePublish
 	return client
 }
 func (c *Client) Ready() <-chan struct{} { return c.ready }
@@ -872,11 +893,15 @@ func (c *Client) run() {
 					}
 				}()
 				c.mu.Lock()
-				c.report = CloneReport(report)
 				err = hello(rpc, report)
+				if err == nil && c.beforePublish != nil {
+					c.mu.Unlock()
+					err = c.beforePublish(c.ctx)
+					c.mu.Lock()
+				}
 				if err == nil {
 					rpc.SetReport(report)
-					c.current = rpc
+					c.report, c.current = CloneReport(report), rpc
 					c.readyOnce.Do(func() { close(c.ready) })
 				}
 				c.mu.Unlock()

@@ -109,12 +109,33 @@ func TestConnectorToolCallsAreSynchronousAndUncached(t *testing.T) {
 	server := startControlTestServer(t, 12, func(_ context.Context, _ ControlRequest) (json.RawMessage, error) {
 		return json.Marshal(map[string]int64{"count": handled.Add(1)})
 	})
-	request := ControlRequest{ID: "tool-1", Role: RoleLauncher, Operation: "connector.tool", Generation: 12}
+	request := ControlRequest{ID: "tool-1", Role: RoleLauncher, Operation: "connector.tool", Generation: 12, ConnectorIdentity: "test-release-identity"}
 	first := callControlTest(t, server.Endpoint(), request)
 	request.ID = "tool-2"
 	second := callControlTest(t, server.Endpoint(), request)
 	if !first.OK || !second.OK || handled.Load() != 2 || string(first.Payload) == string(second.Payload) {
-		t.Fatalf("connector calls = first %#v second %#v calls=%d", first, second, handled.Load())
+		t.Fatalf("connector calls = first %#v/%+v second %#v/%+v calls=%d", first, first.Error, second, second.Error, handled.Load())
+	}
+}
+
+func TestConnectorToolRejectsStaleImageBeforeDispatch(t *testing.T) {
+	var handled atomic.Int64
+	server := startControlTestServer(t, 15, func(context.Context, ControlRequest) (json.RawMessage, error) {
+		handled.Add(1)
+		return json.RawMessage(`{}`), nil
+	})
+	for _, identity := range []string{"", "previous-release"} {
+		response := callControlTest(t, server.Endpoint(), ControlRequest{
+			ID: "stale-" + identity, Role: RoleLauncher, Operation: "connector.tool", Generation: 15,
+			ConnectorIdentity: identity,
+		})
+		if response.OK || response.ReleaseIdentity != "test-release-identity" || response.Error == nil ||
+			response.Error.Code != ErrorStaleConnector || response.Error.Message != "Agent Sessions connector image is stale; retry after automatic refresh" {
+			t.Fatalf("stale connector response = %#v", response)
+		}
+	}
+	if handled.Load() != 0 {
+		t.Fatalf("stale connector reached handler %d times", handled.Load())
 	}
 }
 
@@ -133,7 +154,7 @@ func TestControlReturnsPlainAndStructuredHandlerErrors(t *testing.T) {
 	}{{errors.New("product rejected model unavailable-model"), "product rejected model unavailable-model", "", 0},
 		{testRPCFailure{}, "Invalid params", `{"method":"lane.start"}`, -32602}} {
 		server := startControlTestServer(t, 14, func(context.Context, ControlRequest) (json.RawMessage, error) { return nil, test.err })
-		response := callControlTest(t, server.Endpoint(), ControlRequest{ID: "failure", Role: RoleLauncher, Operation: "connector.tool", Generation: 14})
+		response := callControlTest(t, server.Endpoint(), ControlRequest{ID: "failure", Role: RoleLauncher, Operation: "connector.tool", Generation: 14, ConnectorIdentity: "test-release-identity"})
 		if response.OK || response.Error == nil || response.Error.Code != ErrorHandler || response.Error.Message != test.message ||
 			response.Error.RPCCode != test.rpcCode || string(response.Error.RPCData) != test.data {
 			t.Fatalf("handler failure = %#v", response)

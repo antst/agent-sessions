@@ -424,6 +424,7 @@ func matrixProductInventory() []matrixProduct {
 			nativeQuitDocumentURL: "https://github.com/openai/codex/blob/main/codex-rs/tui/src/slash_command.rs",
 			nativeTrustPrompt:     "Do you trust the contents of this directory?",
 			nativeReadyMarker:     "› Ask Codex to do anything",
+			nativeBusyMarker:      "Working (",
 			nativeEnvelopeFormat:  `<cross-session-message from="%s"`,
 		},
 		{
@@ -441,6 +442,7 @@ func matrixProductInventory() []matrixProduct {
 			nativeLaneProduct:     "codex",
 			nativeQuitDocumentURL: "https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md",
 			nativeReadyMarker:     "\n❯\nGrok ",
+			nativeBusyMarker:      "Thinking…",
 			nativeEnvelopeFormat:  `<cross-session-message from="%s"`,
 		},
 		{
@@ -1566,9 +1568,12 @@ func matrixOwnerEnvironmentDetail(product matrixProduct, capture string) string 
 
 func paneHasMarkerThenReady(capture, marker, readyMarker, busyMarker string) bool {
 	markerAt := strings.Index(capture, marker)
-	return markerAt >= 0 &&
-		(readyMarker == "" || strings.Contains(capture[markerAt+len(marker):], readyMarker)) &&
-		(busyMarker == "" || !strings.Contains(capture, busyMarker))
+	if markerAt < 0 {
+		return false
+	}
+	after := capture[markerAt+len(marker):]
+	return (readyMarker == "" || strings.Contains(after, readyMarker)) &&
+		(busyMarker == "" || !strings.Contains(after, busyMarker))
 }
 
 func (runner *matrixRunner) capturePane(ctx context.Context, tui *matrixTUI) (string, error) {

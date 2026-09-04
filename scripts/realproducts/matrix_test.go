@@ -521,6 +521,22 @@ func TestMatrixLaneCellCoversEveryBrokenConnectorParent(t *testing.T) {
 	}
 }
 
+func TestMatrixLaneWaitTokenCannotReleaseBeforeNativeIdle(t *testing.T) {
+	for _, product := range matrixProductInventory() {
+		if product.nativeLaneProduct == "" {
+			continue
+		}
+		token := "matrix-lane-token"
+		busyReleased := product.nativeBusyMarker != "" && paneHasMarkerThenReady(token+product.nativeBusyMarker+product.nativeReadyMarker, token, product.nativeReadyMarker, product.nativeBusyMarker)
+		if paneHasMarkerThenReady(token, token, product.nativeReadyMarker, product.nativeBusyMarker) ||
+			paneHasMarkerThenReady(product.nativeReadyMarker+token, token, product.nativeReadyMarker, product.nativeBusyMarker) ||
+			busyReleased ||
+			!paneHasMarkerThenReady(product.nativeBusyMarker+token+product.nativeReadyMarker, token, product.nativeReadyMarker, product.nativeBusyMarker) {
+			t.Fatalf("%s token/native-idle ordering was not enforced", product.id)
+		}
+	}
+}
+
 func TestMatrixDeliveryRequiresTheRenderedSourceEnvelope(t *testing.T) {
 	const runID = "1788480387-3a1ce53dd5a8"
 	seen := map[string]bool{}

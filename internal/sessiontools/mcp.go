@@ -3,12 +3,79 @@ package sessiontools
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
 )
 
-const maxMCPInputBytes = 1 << 20
+const maxMCPInputBytes, maxMCPArguments, maxMCPArgumentLength = 1 << 20, 256, 4096
+
+var laneCommands = []string{"doctor", "list", "run", "start", "resume", "steer", "wait", "status", "interrupt", "archive"}
+
+func ValidateMCPToolCall(product string, raw json.RawMessage) map[string]any {
+	var call struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(raw, &call) != nil || call.Name != "lane" {
+		return nil
+	}
+	invalid := func(method string) map[string]any {
+		if method == "" {
+			return map[string]any{"tool": "lane"}
+		}
+		return map[string]any{"method": "lane." + method}
+	}
+	var fields map[string]json.RawMessage
+	if len(call.Arguments) == 0 || string(call.Arguments) == "null" || json.Unmarshal(call.Arguments, &fields) != nil {
+		return invalid("")
+	}
+	var command string
+	if value, ok := fields["command"]; !ok || json.Unmarshal(value, &command) != nil {
+		return invalid("")
+	}
+	if !slices.Contains(laneCommands, command) {
+		return invalid(command)
+	}
+	allowed := map[string]bool{"product": true, "command": true, "arguments": true, "input": true, "host": true}
+	if !mcpToolPolicies[product].omitSession {
+		allowed["session_id"] = true
+	}
+	for key := range fields {
+		if !allowed[key] {
+			return invalid(command)
+		}
+	}
+	var token string
+	if value, ok := fields["product"]; !ok || json.Unmarshal(value, &token) != nil || productcatalog.ValidateToken(token) != nil {
+		return invalid(command)
+	}
+	if value, ok := fields["arguments"]; ok {
+		var arguments []string
+		if string(value) == "null" || json.Unmarshal(value, &arguments) != nil || len(arguments) > maxMCPArguments {
+			return invalid(command)
+		}
+		for _, argument := range arguments {
+			if utf8.RuneCountInString(argument) > maxMCPArgumentLength {
+				return invalid(command)
+			}
+		}
+	}
+	for _, field := range []string{"host", "session_id"} {
+		if value, ok := fields[field]; ok && json.Unmarshal(value, new(string)) != nil {
+			return invalid(command)
+		}
+	}
+	if value, ok := fields["input"]; ok {
+		var input string
+		if json.Unmarshal(value, &input) != nil || utf8.RuneCountInString(input) > maxMCPInputBytes {
+			return invalid(command)
+		}
+	}
+	return nil
+}
 
 const BugReportGuidance = "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/agent-sessions with gh issue create, including the exact command, observed behavior, and expected behavior."
 
@@ -109,8 +176,8 @@ func baseToolDefinitions() []map[string]any {
 		{"name": "identity", "description": "Show this Codex session's Claude-compatible peer name and address.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "rename_session", "description": "Change this managed session's public Agent Sessions peer name.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."), "name": map[string]any{"type": "string", "minLength": 1, "maxLength": 80}}, []string{"session_id", "name"})},
 		{"name": "lane", "description": "Run one exact local or federated token-named product lane lifecycle command for this attested parent. The daemon alone decides whether the product is launchable.", "inputSchema": objectSchema(map[string]any{
-			"product": map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, "description": "Opaque product token resolved by the daemon."}, "command": map[string]any{"type": "string", "enum": []string{"doctor", "list", "run", "start", "resume", "steer", "wait", "status", "interrupt", "archive"}},
-			"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": 4096}, "maxItems": 256, "description": "Native arguments after the lifecycle command."}, "input": map[string]any{"type": "string", "maxLength": maxMCPInputBytes, "description": "Optional stdin briefing for run, start, or resume."}, "host": map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
+			"product": map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, "description": "Opaque product token resolved by the daemon."}, "command": map[string]any{"type": "string", "enum": append([]string(nil), laneCommands...)},
+			"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": maxMCPArgumentLength}, "maxItems": maxMCPArguments, "description": "Native arguments after the lifecycle command."}, "input": map[string]any{"type": "string", "maxLength": maxMCPInputBytes, "description": "Optional stdin briefing for run, start, or resume."}, "host": map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
 		}, []string{"product", "command", "session_id"})},
 	}
 }

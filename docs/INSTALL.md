@@ -115,6 +115,7 @@ A successful update changes the selected release and restarts exactly the Agent 
 service. systemd's normal control-group behavior terminates the daemon and its lane worker tree.
 The product-owned Codex App Server runs outside that service and remains available to live Codex
 clients; other product session state remains in the product and returns through confirmed resume.
+Connectors from a previous install refresh after their next completed tool response. A newly introduced operation may fail once under the old image; repeat it after automatic refresh, or resume or restart that session.
 
 Remove Agent Sessions while preserving all Agent Sessions and product state:
 

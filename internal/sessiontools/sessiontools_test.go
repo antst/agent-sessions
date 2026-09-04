@@ -222,6 +222,59 @@ func TestMCPRelayPreservesStructuredDaemonErrors(t *testing.T) {
 	}
 }
 
+func TestLaneToolArgumentsUseThePublishedClosedSchema(t *testing.T) {
+	longArgs, _ := json.Marshal(map[string]any{"product": "codex", "command": "list", "arguments": make([]string, 257)})
+	longInput, _ := json.Marshal(map[string]any{"product": "codex", "command": "start", "input": strings.Repeat("x", maxMCPInputBytes+1)})
+	tests := []struct {
+		name, connector, arguments string
+		valid                      bool
+	}{
+		{"future product", "claude", `{"product":"future-product","command":"start","arguments":[],"session_id":"parent"}`, true},
+		{"optional session", "grok", `{"product":"codex","command":"list","session_id":"parent"}`, true},
+		{"codex session", "codex", `{"product":"codex","command":"list","session_id":"parent"}`, false},
+		{"missing command", "claude", `{"product":"codex"}`, false},
+		{"unknown command", "claude", `{"product":"codex","command":"collect"}`, false},
+		{"product type", "claude", `{"product":1,"command":"list"}`, false},
+		{"command type", "claude", `{"product":"codex","command":1}`, false},
+		{"arguments type", "claude", `{"product":"codex","command":"list","arguments":null}`, false},
+		{"input type", "claude", `{"product":"codex","command":"start","input":1}`, false},
+		{"host type", "claude", `{"product":"codex","command":"list","host":1}`, false},
+		{"session type", "claude", `{"product":"codex","command":"list","session_id":1}`, false},
+		{"extra", "claude", `{"product":"codex","command":"list","extra":true}`, false},
+		{"argument count", "claude", string(longArgs), false}, {"input bound", "claude", string(longInput), false},
+		{"argument bound", "claude", `{"product":"codex","command":"list","arguments":["` + strings.Repeat("x", 4097) + `"]}`, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			params := json.RawMessage(`{"name":"lane","arguments":` + test.arguments + `}`)
+			if got := ValidateMCPToolCall(test.connector, params) == nil; got != test.valid {
+				t.Fatalf("validity = %t, want %t", got, test.valid)
+			}
+			calls := 0
+			relay, _ := NewMCPRelay(MCPRelayConfig{Product: test.connector, Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+				calls++
+				return json.RawMessage(`{"content":[],"structuredContent":{}}`), nil
+			}})
+			var output bytes.Buffer
+			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` + string(params) + "}\n"
+			if err := relay.Serve(context.Background(), strings.NewReader(input), &output); err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			var command string
+			_ = json.Unmarshal([]byte(test.arguments), &fields)
+			_ = json.Unmarshal(fields["command"], &command)
+			data := `"tool":"lane"`
+			if command != "" {
+				data = `"method":"lane.` + command + `"`
+			}
+			if test.valid && calls != 1 || !test.valid && (calls != 0 || !strings.Contains(output.String(), `"code":-32602`) || !strings.Contains(output.String(), data)) {
+				t.Fatalf("calls/output = %d/%s", calls, output.String())
+			}
+		})
+	}
+}
+
 func TestMCPRelayRefreshesOnlyAfterDaemonResponseIsFlushed(t *testing.T) {
 	var output bytes.Buffer
 	refreshed := 0

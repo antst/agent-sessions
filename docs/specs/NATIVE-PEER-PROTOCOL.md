@@ -81,7 +81,7 @@ mean:
 - `uuid` is the stable, opaque session ID issued by the product. The historical field need not be an RFC UUID. It is 1..128 UTF-8 bytes with no whitespace, control characters, or `/`; the client never generates or substitutes it.
 - `name` is the product-owned title carried verbatim. It may be empty before a title exists and may contain whitespace or `/`, but is at most 256 UTF-8 bytes and contains no control characters. Rosters display `uuid` while it is empty.
 - `groups` is the array of group strings passed from the launch arguments,
-  unchanged and in order. An operator/wire group label is 1..192 UTF-8 bytes with no whitespace, control characters, or `/`. The daemon-derived private anchor is the typed structural value `session:<host>/<uuid>` and is valid only when its host and native-ID components satisfy their own slash-free grammars. The array is fixed for the life of this connection.
+  unchanged and in order. An operator/wire group label is 1..192 UTF-8 bytes with no whitespace, control characters, or `/`. A daemon-derived private anchor is the typed structural value `session:<host>/<uuid>(/<uuid>)*` and is valid only when its host and every nonempty native-ID component satisfy their own slash-free grammars. The array is fixed for the life of this connection.
 - `product` is an opaque token-shaped label: 1..64 bytes, a lowercase ASCII letter first, then lowercase ASCII letters, digits, or single nonterminal hyphens. The daemon carries it verbatim and never interprets it as a launch capability.
 - `info` is a string-to-string object owned by the product. The daemon passes
   every key and value through verbatim to rosters and `peers.list` results and
