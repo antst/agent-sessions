@@ -224,10 +224,12 @@ func TestConnectionEnforcesFirstFrameAndNativeLaneAuthority(t *testing.T) {
 	for _, raw := range []string{
 		`{"jsonrpc":"2.0","id":"x","method":"peers.list","params":{},"error":null}`,
 		`{"jsonrpc":"2.0","id":"x","result":{},"error":null}`,
+		`{"jsonrpc":"2.0","id":"x","method":null,"params":{}}`,
+		`{"jsonrpc":"2.0","id":"x","method":null,"result":{}}`,
 	} {
 		var frame Frame
 		if err := DecodeStrict([]byte(raw), &frame); err != nil || ValidFrame(frame) {
-			t.Fatalf("explicit null error was not preserved: frame=%+v err=%v", frame, err)
+			t.Fatalf("explicit null envelope field was not preserved: frame=%+v err=%v", frame, err)
 		}
 	}
 	decode := func(t *testing.T, reported bool, request Frame) error {

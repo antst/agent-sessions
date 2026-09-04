@@ -88,13 +88,13 @@ type Capabilities struct {
 }
 
 type Frame struct {
-	JSONRPC   string          `json:"jsonrpc"`
-	ID        json.RawMessage `json:"id"`
-	Method    string          `json:"method,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     *RPCError       `json:"error,omitempty"`
-	errorNull bool
+	JSONRPC               string          `json:"jsonrpc"`
+	ID                    json.RawMessage `json:"id"`
+	Method                string          `json:"method,omitempty"`
+	Params                json.RawMessage `json:"params,omitempty"`
+	Result                json.RawMessage `json:"result,omitempty"`
+	Error                 *RPCError       `json:"error,omitempty"`
+	errorNull, methodNull bool
 }
 
 func (f *Frame) UnmarshalJSON(body []byte) error {
@@ -102,7 +102,7 @@ func (f *Frame) UnmarshalJSON(body []byte) error {
 	if err := DecodeStrict(body, (*wireFrame)(f)); err != nil {
 		return err
 	}
-	f.errorNull = hasExplicitNull(body, "error")
+	f.errorNull, f.methodNull = hasExplicitNull(body, "error"), hasExplicitNull(body, "method")
 	return nil
 }
 
@@ -534,7 +534,7 @@ func ValidFrame(frame Frame) bool {
 	if ValidRequest(frame) {
 		return true
 	}
-	if frame.JSONRPC != "2.0" || !validID(frame.ID) || frame.Method != "" || frame.Params != nil || frame.errorNull {
+	if frame.JSONRPC != "2.0" || !validID(frame.ID) || frame.Method != "" || frame.Params != nil || frame.errorNull || frame.methodNull {
 		return false
 	}
 	return frame.Result != nil && frame.Error == nil || frame.Result == nil && validError(frame.Error)

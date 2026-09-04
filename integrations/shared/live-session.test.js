@@ -132,6 +132,8 @@ test("framing processes complete frames, rejects truncated tails and write throw
   for (const invalid of [
     { jsonrpc: "2.0", id: "request-null", method: "peers.list", params: {}, error: null },
     { jsonrpc: "2.0", id: "response-null", result: {}, error: null },
+    { jsonrpc: "2.0", id: "method-request-null", method: null, params: {} },
+    { jsonrpc: "2.0", id: "method-response-null", method: null, result: {} },
   ]) {
     let rejected = 0;
     const invalidSession = { ready: true, capabilities: {}, buffer: "", pending: new Map(), socket: { destroyed: false, destroy: () => { rejected += 1; } } };
