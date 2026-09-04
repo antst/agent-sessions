@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,12 @@ type parsedLaneCommand struct {
 	noAutoArchive, autoArchiveAfterSet              bool
 	autoArchiveAfter                                time.Duration
 	native                                          []string
+}
+
+type laneArchiveExpectation struct {
+	state         string
+	turnID        string
+	autoArchiveAt int64
 }
 
 func (c *hostCoordinator) handleLaneCommand(
@@ -719,10 +726,18 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 		c.mu.Unlock()
 		return nil, livepresence.BusyError(actor.id, errors.New("refuse to archive a lane with an active turn"))
 	}
-	actor.state = "archived"
+	if actor.state == "archiving" {
+		c.mu.Unlock()
+		return nil, livepresence.BusyError(actor.id, errors.New("lane archive is already in progress"))
+	}
+	expected := laneArchiveExpectation{state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
 	c.mu.Unlock()
-	if err := c.archiveNativeLane(actor); err != nil {
+	archived, err := c.archiveLaneTransaction(actor, expected)
+	if err != nil {
 		return nil, err
+	}
+	if !archived {
+		return nil, fmt.Errorf("%w: lane changed while archive was starting", productruntime.ErrStale)
 	}
 	if err := c.retireParentLanes(runtime, actor.id); err != nil {
 		return nil, err
@@ -1169,6 +1184,10 @@ func (c *hostCoordinator) completeLaneTurn(
 }
 
 func (c *hostCoordinator) archiveOrphanedCompletedLane(runtime *daemonpkg.Runtime, actor *laneActor) bool {
+	return c.archiveOrphanedCompletedLaneWithDiagnostics(runtime, actor, os.Stderr)
+}
+
+func (c *hostCoordinator) archiveOrphanedCompletedLaneWithDiagnostics(runtime *daemonpkg.Runtime, actor *laneActor, diagnostics io.Writer) bool {
 	c.mu.Lock()
 	persistent, parentID := actor.persistent, actor.parentID
 	c.mu.Unlock()
@@ -1180,13 +1199,51 @@ func (c *hostCoordinator) archiveOrphanedCompletedLane(runtime *daemonpkg.Runtim
 		return false
 	}
 	c.mu.Lock()
-	if actor.state == "running" || actor.state == "preparing" {
+	if c.lanes[actor.id] != actor || actor.state == "running" || actor.state == "preparing" || actor.state == "archived" || actor.state == "archiving" {
 		c.mu.Unlock()
 		return false
 	}
-	actor.state = "archived"
+	expected := laneArchiveExpectation{state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
 	c.mu.Unlock()
-	return c.archiveNativeLane(actor) == nil
+	archived, archiveErr := c.archiveLaneTransaction(actor, expected)
+	if archiveErr != nil {
+		writeLaneArchiveDiagnostic(diagnostics, actor.id, archiveErr)
+	}
+	return archived
+}
+
+func (c *hostCoordinator) archiveLaneTransaction(actor *laneActor, expected laneArchiveExpectation) (bool, error) {
+	c.mu.Lock()
+	if actor == nil || c.lanes[actor.id] != actor || actor.state != expected.state || actor.turnID != expected.turnID || actor.autoArchiveAt != expected.autoArchiveAt {
+		c.mu.Unlock()
+		return false, nil
+	}
+	actor.state, actor.autoArchiveAt = "archiving", 0
+	c.mu.Unlock()
+
+	err := c.archiveNativeLane(actor)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lanes[actor.id] != actor || actor.state != "archiving" {
+		return false, err
+	}
+	if err != nil {
+		actor.state, actor.autoArchiveAt = expected.state, expected.autoArchiveAt
+		return false, err
+	}
+	actor.state = "archived"
+	return true, nil
+}
+
+func writeLaneArchiveDiagnostic(diagnostics io.Writer, laneID string, cause error) {
+	if diagnostics == nil || cause == nil {
+		return
+	}
+	detail := strings.NewReplacer("\n", " ", "\r", " ").Replace(cause.Error())
+	if len(detail) > 512 {
+		detail = detail[:512]
+	}
+	fmt.Fprintf(diagnostics, "Agent Sessions lane %s automatic archive failed: %s\n", laneID, detail)
 }
 
 func (c *hostCoordinator) archiveNativeLane(actor *laneActor) error {
@@ -1523,6 +1580,10 @@ func (c *hostCoordinator) armLaneAutoArchive(runtime *daemonpkg.Runtime, actor *
 }
 
 func (c *hostCoordinator) scheduleLaneAutoArchive(runtime *daemonpkg.Runtime, actor *laneActor) {
+	c.scheduleLaneAutoArchiveWithDiagnostics(runtime, actor, os.Stderr)
+}
+
+func (c *hostCoordinator) scheduleLaneAutoArchiveWithDiagnostics(runtime *daemonpkg.Runtime, actor *laneActor, diagnostics io.Writer) {
 	c.mu.Lock()
 	due := actor.autoArchiveAt
 	eligible := actor.autoArchive && actor.state == "idle" && due > 0
@@ -1542,13 +1603,17 @@ func (c *hostCoordinator) scheduleLaneAutoArchive(runtime *daemonpkg.Runtime, ac
 			}
 		}
 		c.mu.Lock()
-		if actor.state != "idle" || !actor.autoArchive || actor.autoArchiveAt != expected {
-			c.mu.Unlock()
+		turnID := actor.turnID
+		eligible := c.lanes[actor.id] == actor && actor.state == "idle" && actor.autoArchive && actor.autoArchiveAt == expected
+		c.mu.Unlock()
+		if !eligible {
 			return
 		}
-		actor.state, actor.autoArchiveAt = "archived", 0
-		c.mu.Unlock()
-		if c.archiveNativeLane(actor) == nil {
+		archived, archiveErr := c.archiveLaneTransaction(actor, laneArchiveExpectation{state: "idle", turnID: turnID, autoArchiveAt: expected})
+		if archiveErr != nil {
+			writeLaneArchiveDiagnostic(diagnostics, actor.id, archiveErr)
+		}
+		if archived {
 			_ = c.retireParentLanes(runtime, actor.id)
 		}
 	}(due)

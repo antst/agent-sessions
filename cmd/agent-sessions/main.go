@@ -252,8 +252,16 @@ func runDaemon(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 	if len(args) > 0 && args[0] == "run" {
 		args = args[1:]
 	}
+	defaultRoot := ""
+	if !hasStateRootFlag(args) {
+		var err error
+		defaultRoot, err = stateroot.Resolve()
+		if err != nil {
+			return fmt.Errorf("resolve default daemon state root: %w", err)
+		}
+	}
 	set := flag.NewFlagSet("agent-sessions daemon", flag.ContinueOnError)
-	stateRoot := set.String("state-root", defaultStateRoot(), "durable Agent Sessions state root")
+	stateRoot := set.String("state-root", defaultRoot, "durable Agent Sessions state root")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -294,6 +302,18 @@ func runDaemon(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 	}
 	coordinator.publishRuntime(runtime)
 	return runtime.Wait()
+}
+
+func hasStateRootFlag(args []string) bool {
+	for _, argument := range args {
+		if argument == "--" {
+			return false
+		}
+		if argument == "--state-root" || strings.HasPrefix(argument, "--state-root=") {
+			return true
+		}
+	}
+	return false
 }
 
 func isDaemonServiceAction(args []string) bool {
@@ -481,9 +501,7 @@ func defaultStateRoot() string {
 
 func commandRequestID() string {
 	body := make([]byte, 16)
-	if _, err := rand.Read(body); err != nil {
-		return fmt.Sprintf("request-%d", os.Getpid())
-	}
+	_, _ = rand.Read(body)
 	return hex.EncodeToString(body)
 }
 

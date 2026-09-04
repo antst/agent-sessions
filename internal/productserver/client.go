@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -125,7 +126,7 @@ type Client struct {
 
 func NewClient(config ClientConfig) (*Client, error) {
 	base, err := url.Parse(config.Endpoint)
-	if err != nil || base.Scheme != "http" || base.Host == "" {
+	if err != nil || base.Scheme != "http" || base.Host == "" || !loopbackHost(base.Hostname()) {
 		return nil, ErrNonLoopback
 	}
 	if !config.Auth.valid() {
@@ -138,8 +139,18 @@ func NewClient(config ClientConfig) (*Client, error) {
 	transport := &http.Transport{Proxy: nil}
 	return &Client{
 		base: base, auth: config.Auth, limits: limits,
-		httpClient: &http.Client{Transport: transport},
+		httpClient: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return ErrNonLoopback
+		}},
 	}, nil
+}
+
+func loopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (client *Client) Do(ctx context.Context, request Request) (Response, error) {

@@ -70,10 +70,11 @@ do not start a replacement daemon.
 
 ## Installed product integrations
 
-The host transaction uses each product's supported installation surface. It installs product
-plugins or extensions from the selected immutable Agent Sessions release, not from a temporary
-directory. The DSH adapter is packed once and installed into the `agent-sessions` DSH profile with
-DSH's native plugin command; its profile manifest therefore points at release-owned bytes.
+The host transaction uses each product's supported installation surface. It projects the
+release-owned OpenCode and Kilo plugin files into those products' installation roots. Managed Pi
+and OMP launches project their extension assets from the selected immutable release on every
+launch. DSH alone is packed and installed into the `agent-sessions` DSH profile with DSH's native
+plugin command; its profile manifest therefore points at release-owned bytes.
 
 Fresh launches receive one uniform context:
 

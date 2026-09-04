@@ -898,11 +898,11 @@ func (h *EmbeddedHost) startLaneRun(request Message) {
 }
 
 func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
-	defer func() {
-		h.laneMu.Lock()
-		delete(h.laneRuns, request.RequestID)
-		h.laneMu.Unlock()
-	}()
+	defer h.removeLaneRun(request.RequestID, run)
+	terminal := func(message Message) {
+		h.removeLaneRun(request.RequestID, run)
+		_ = h.sendLaneMessage(message)
+	}
 	h.mu.RLock()
 	source, sourceOK := h.remote[request.SourceID]
 	connected := h.network != nil
@@ -910,15 +910,15 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	capability, capabilityErr := laneCapabilityForMessage(request)
 	if !connected || !sourceOK || capabilityErr != nil || !contains(h.options.Capabilities, capability) ||
 		h.options.RunLane == nil || request.ParentContext == nil || len(request.Args) == 0 || len(request.Input) > maxLaneInputBytes {
-		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: "invalid or stale embedded remote lane request"})
+		terminal(Message{Type: "lane_error", RequestID: request.RequestID, Error: "invalid or stale embedded remote lane request"})
 		return
 	}
 	if !parentMatchesPeer(*request.ParentContext, source) {
-		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: "remote lane parent context does not match its source peer"})
+		terminal(Message{Type: "lane_error", RequestID: request.RequestID, Error: "remote lane parent context does not match its source peer"})
 		return
 	}
 	if err := validateRemoteLaneArgs(request.Args); err != nil {
-		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})
+		terminal(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -926,7 +926,7 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	if run.cancelled {
 		run.mu.Unlock()
 		cancel()
-		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: "lane request was cancelled"})
+		terminal(Message{Type: "lane_error", RequestID: request.RequestID, Error: "lane request was cancelled"})
 		return
 	}
 	run.cancel = cancel
@@ -939,7 +939,7 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	})
 	cancel()
 	if err != nil {
-		_ = h.sendLaneMessage(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})
+		terminal(Message{Type: "lane_error", RequestID: request.RequestID, Error: err.Error()})
 		return
 	}
 	if err := h.sendLaneBytes(request.RequestID, "lane_stdout", result.Stdout); err != nil {
@@ -948,7 +948,17 @@ func (h *EmbeddedHost) runInboundLane(request Message, run *laneRun) {
 	if err := h.sendLaneBytes(request.RequestID, "lane_stderr", result.Stderr); err != nil {
 		return
 	}
-	_ = h.sendLaneMessage(Message{Type: "lane_exit", RequestID: request.RequestID, ExitCode: result.ExitCode})
+	terminal(Message{Type: "lane_exit", RequestID: request.RequestID, ExitCode: result.ExitCode})
+}
+
+func (h *EmbeddedHost) removeLaneRun(requestID string, run *laneRun) bool {
+	h.laneMu.Lock()
+	defer h.laneMu.Unlock()
+	if h.laneRuns[requestID] != run {
+		return false
+	}
+	delete(h.laneRuns, requestID)
+	return true
 }
 
 func (h *EmbeddedHost) sendLaneBytes(requestID, kind string, body []byte) error {

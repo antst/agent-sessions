@@ -1,13 +1,85 @@
 package federation
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+type observingWriteConn struct {
+	onWrite func(Message)
+}
+
+func (*observingWriteConn) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *observingWriteConn) Write(body []byte) (int, error) {
+	var message Message
+	if err := json.Unmarshal(bytes.TrimSpace(body), &message); err != nil {
+		return 0, err
+	}
+	if c.onWrite != nil {
+		c.onWrite(message)
+	}
+	return len(body), nil
+}
+func (*observingWriteConn) Close() error                     { return nil }
+func (*observingWriteConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*observingWriteConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*observingWriteConn) SetDeadline(time.Time) error      { return nil }
+func (*observingWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (*observingWriteConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestHubRemovesExactLaneRouteBeforeTerminalPublication(t *testing.T) {
+	sourcePeer := mustTestPeer(t, "source", "caller", "codex", "shared")
+	started, release := make(chan struct{}), make(chan struct{})
+	h := &hub{logger: discardTestLogger(), clients: map[string]*hubClient{}, laneRoutes: map[string]*laneRoute{}, deliveryRoutes: map[string]*deliveryRoute{}}
+	source := &hubClient{hostID: "source", peers: map[string]Peer{sourcePeer.ID: sourcePeer}}
+	destination := &hubClient{hostID: "destination", capabilities: []string{CapabilityCodexLane}}
+	source.wire = newWireConn(&observingWriteConn{onWrite: func(message Message) {
+		if message.Type != "lane_exit" {
+			return
+		}
+		h.mu.Lock()
+		_, exists := h.laneRoutes[message.RequestID]
+		h.mu.Unlock()
+		if exists {
+			t.Error("terminal lane route remained visible during publication")
+		}
+		close(started)
+		<-release
+	}})
+	h.clients[destination.hostID] = destination
+	request := Message{Type: "lane_exec", RequestID: "stable", SourceID: sourcePeer.ID, TargetHostID: destination.hostID, ParentContext: testParentContext(sourcePeer)}
+	_, route, reason := h.admitLaneRoute(source, request, CapabilityCodexLane)
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	if _, _, reason := h.admitLaneRoute(source, request, CapabilityCodexLane); !strings.Contains(reason, "duplicate") {
+		t.Fatalf("in-flight duplicate result = %q", reason)
+	}
+	go h.forwardLaneRoute(request.RequestID, route)
+	route.responses <- Message{Type: "lane_exit", RequestID: request.RequestID}
+	<-started
+	_, replacement, reason := h.admitLaneRoute(source, request, CapabilityCodexLane)
+	if reason != "" || replacement == route {
+		t.Fatalf("immediate stable-id reuse route=%p reason=%q", replacement, reason)
+	}
+	close(release)
+	select {
+	case <-route.done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal route did not stop")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.laneRoutes[request.RequestID] != replacement {
+		t.Fatal("stale terminal cleanup removed replacement route")
+	}
+}
 
 func TestHubRejectsDuplicateDeliveryWhileOriginalIsPending(t *testing.T) {
 	h := &hub{

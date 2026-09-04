@@ -95,7 +95,7 @@ func TestReleaseWorkflowDownloadsExactCandidateArtifacts(t *testing.T) {
 		"dist/packages/*.tgz",
 		"id-token: write",
 		`npm publish "$archive" --provenance --access public`,
-		`npm view "$package_name@$version" version`,
+		`npm view "$package_name@$version" dist.integrity`,
 		`cp dist/candidate/packages/*.tgz dist/release/`,
 		"publish-preview:",
 		"needs: [lint, test, build]",
@@ -108,6 +108,13 @@ func TestReleaseWorkflowDownloadsExactCandidateArtifacts(t *testing.T) {
 	}
 	if strings.Contains(workflow, "- name: Download platform archives\n        uses: actions/download-artifact") {
 		t.Fatal("release workflow downloads platform archives from the tag run instead of the evidence-bound candidate run")
+	}
+	if strings.Contains(workflow, `npm view "$package_name@$version" version`) {
+		t.Fatal("release workflow still skips packages by name and version without integrity")
+	}
+	preflight, publish := strings.Index(workflow, `npm view "$package_name@$version" dist.integrity`), strings.Index(workflow, `npm publish "$archive"`)
+	if preflight < 0 || publish < 0 || preflight > publish || !strings.Contains(workflow[preflight:publish], `queued_archives+=("$archive")`) {
+		t.Fatal("release workflow does not finish the integrity preflight before publishing")
 	}
 	if strings.Contains(workflow, "environment:") || strings.Contains(workflow, "NODE_AUTH_TOKEN") ||
 		strings.Contains(workflow, "@agent-sessions/dsh-") || strings.Contains(workflow, "node-version: 24") {

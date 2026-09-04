@@ -291,9 +291,8 @@ func TestHostReconnectsAndPreservesRemoteDeliveryAndLaneTransport(t *testing.T) 
 	}, "hosts to observe the stopped hub")
 	hubCancel, hubDone = runTestHub(t, address)
 	waitTest(t, func() bool {
-		hosts := hostA.RemoteHosts()
-		return len(hosts) == 1 && hosts[0].Build == "host-build-b"
-	}, "reconnected host metadata")
+		return containsPeerID(hostA.RemotePeers(), target.ID)
+	}, "reconnected remote target")
 	if err := hostA.Send(context.Background(), source, target, "message-after", "after restart", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +400,74 @@ func TestHostBoundsInboundRemoteLaneConcurrencyAndRequiresLiveHub(t *testing.T) 
 	if _, err := host.resolveRemoteHost("host-b", CapabilityCodexLane); err == nil || !strings.Contains(err.Error(), "disconnected") {
 		t.Fatalf("remote host resolved without a live hub: %v", err)
 	}
+}
+
+func TestHostRemovesExactLaneRunBeforeTerminalPublication(t *testing.T) {
+	source := mustTestPeer(t, "host-a", "source", "codex", "project")
+	firstStarted, firstRelease := make(chan struct{}), make(chan struct{})
+	secondStarted := make(chan struct{})
+	var calls atomic.Int32
+	host, err := NewEmbeddedHost(EmbeddedHostOptions{
+		HostID: "host-b", HostName: "host-b", Capabilities: []string{CapabilityCodexLane},
+		Snapshot: func(context.Context) ([]Peer, error) { return nil, nil },
+		Deliver:  func(context.Context, Peer, Peer, AgentFrame) error { return nil },
+		RunLane: func(ctx context.Context, _ RemoteLaneRequest) (RemoteLaneResult, error) {
+			if calls.Add(1) == 1 {
+				close(firstStarted)
+				<-firstRelease
+				return RemoteLaneResult{}, nil
+			}
+			close(secondStarted)
+			<-ctx.Done()
+			return RemoteLaneResult{}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.remote[source.ID] = source
+	writes := make(chan Message, 4)
+	terminalStarted, terminalRelease := make(chan struct{}), make(chan struct{})
+	host.network = newWireConn(&observingWriteConn{onWrite: func(message Message) {
+		writes <- message
+		if message.Type != "lane_exit" {
+			return
+		}
+		host.laneMu.Lock()
+		_, exists := host.laneRuns[message.RequestID]
+		host.laneMu.Unlock()
+		if exists {
+			t.Error("terminal lane run remained visible during publication")
+		}
+		close(terminalStarted)
+		<-terminalRelease
+	}})
+	request := Message{Type: "lane_exec", RequestID: "stable", SourceID: source.ID, TargetHostID: "host-b", Product: "codex", Capabilities: []string{CapabilityCodexLane}, Args: []string{"run"}, ParentContext: testParentContext(source)}
+	host.startLaneRun(request)
+	<-firstStarted
+	host.startLaneRun(request)
+	if message := <-writes; message.Type != "lane_error" || !strings.Contains(message.Error, "duplicate") {
+		t.Fatalf("in-flight duplicate response = %#v", message)
+	}
+	close(firstRelease)
+	<-terminalStarted
+	host.startLaneRun(request)
+	<-secondStarted
+	host.laneMu.Lock()
+	replacement := host.laneRuns[request.RequestID]
+	host.laneMu.Unlock()
+	if replacement == nil {
+		t.Fatal("stable request id was not immediately reusable")
+	}
+	close(terminalRelease)
+	time.Sleep(10 * time.Millisecond)
+	host.laneMu.Lock()
+	stillCurrent := host.laneRuns[request.RequestID] == replacement
+	host.laneMu.Unlock()
+	if !stillCurrent {
+		t.Fatal("stale terminal cleanup removed replacement run")
+	}
+	host.cancelLaneRun(request.RequestID)
 }
 
 func TestBuildPeerAcceptsOpaqueProductLabels(t *testing.T) {

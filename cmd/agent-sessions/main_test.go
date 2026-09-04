@@ -189,6 +189,42 @@ func TestDaemonRefusesToResetEveryExplicitStateRootForm(t *testing.T) {
 	}
 }
 
+func TestDaemonDefaultStateRootFailureDoesNotTouchFallbackAndExplicitOverrideBypassesDiscovery(t *testing.T) {
+	t.Setenv("AGENT_SESSIONS_STATE_ROOT", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("TMPDIR", t.TempDir())
+
+	oldFallback := filepath.Join(os.TempDir(), "agent-sessions-state-unavailable")
+	if err := os.MkdirAll(oldFallback, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(oldFallback, "sentinel")
+	want := []byte("do not reset this directory")
+	if err := os.WriteFile(marker, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runDaemon(context.Background(), clihelp.Invocation{Arguments: []string{"run"}}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "resolve default daemon state root") {
+		t.Fatalf("default discovery error = %v", err)
+	}
+	if got, readErr := os.ReadFile(marker); readErr != nil || !bytes.Equal(got, want) {
+		t.Fatalf("fallback sentinel = %q, %v", got, readErr)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(explicit, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(explicit, "incompatible"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runDaemon(context.Background(), clihelp.Invocation{Arguments: []string{"run", "--state-root", explicit}}, io.Discard)
+	if err == nil || err.Error() != `prepare daemon state root: daemon state root contains unknown entry "incompatible"` {
+		t.Fatalf("explicit override error = %v", err)
+	}
+}
+
 func TestLaneWorkflowReturnsUsageErrorBeforeContactingDaemon(t *testing.T) {
 	stateRoot := filepath.Join(shortDaemonTestRoot(t), "absent")
 	t.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot)

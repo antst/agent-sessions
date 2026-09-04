@@ -28,7 +28,7 @@ jobs:
       matrix: ${{ steps.release.outputs.matrix }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: release
@@ -44,10 +44,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -69,14 +69,14 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Test plugin, native runtime, and federation
@@ -89,14 +89,14 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Race test plugin, native runtime, and federation
@@ -109,8 +109,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -124,8 +124,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -141,7 +141,7 @@ jobs:
             RELEASE_VERSION="${{ needs.inventory.outputs.version }}" \
             RELEASE_OUTPUT_DIR="$RELEASE_OUTPUT_DIR"
       - name: Upload platform archive
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-sessions-${{ matrix.platform }}
           path: dist/release/*.tar.gz
@@ -152,8 +152,8 @@ jobs:
     needs: [lint, test, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Pack publishable packages
@@ -176,10 +176,10 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -193,7 +193,7 @@ jobs:
             --jq '.jobs[] | select(.name == "release-linux") | .html_url' | tail -1)"
           ./scripts/release-gate-manifest --os linux --job-url "$job_url" \
             --evidence-dir dist/gates --output dist/gates/linux.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-gate-linux-${{ github.sha }}
           path: dist/gates
@@ -209,10 +209,10 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -226,7 +226,7 @@ jobs:
             --jq '.jobs[] | select(.name == "release-macos") | .html_url' | tail -1)"
           ./scripts/release-gate-manifest --os macos --job-url "$job_url" \
             --evidence-dir dist/gates --output dist/gates/macos.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-gate-macos-${{ github.sha }}
           path: dist/gates
@@ -241,14 +241,14 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version-file: deploy/agent-sessions/NODE_VERSION
       - name: Require signed release commit
@@ -256,12 +256,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
         run: ./scripts/release-commit-verify "$GITHUB_SHA"
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: agent-sessions-*
           path: dist/release
           merge-multiple: true
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-gate-linux-${{ github.sha }}
           path: dist/gates
@@ -285,7 +285,7 @@ jobs:
             --version "${{ needs.inventory.outputs.version }}" --commit "$GITHUB_SHA" --tree "$tree_sha" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence-${{ github.sha }}
           path: |
@@ -304,14 +304,14 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version-file: deploy/agent-sessions/NODE_VERSION
       - id: tag
@@ -373,6 +373,7 @@ jobs:
           if (major < 11 || (major === 11 && minor < 5)) throw new Error(`npm 11.5.1 or newer is required; found ${process.argv[1]}`);
           ' "$(npm --version)"
           version="${{ needs.inventory.outputs.version }}"
+          queued_archives=()
           while IFS='|' read -r _ package_name; do
             archive_name="${package_name#@}"
             archive="dist/candidate/packages/${archive_name//\//-}-$version.tgz"
@@ -385,15 +386,24 @@ jobs:
           }
           NODE
             view_error="$RUNNER_TEMP/npm-view-error"
-            if npm view "$package_name@$version" version > /dev/null 2>"$view_error"; then
-              printf 'npm package %s@%s already exists; skipping\n' "$package_name" "$version"
+            local_integrity="sha512-$(openssl dgst -sha512 -binary "$archive" | openssl base64 -A)"
+            if remote_integrity="$(npm view "$package_name@$version" dist.integrity 2>"$view_error")"; then
+              if [ "$remote_integrity" != "$local_integrity" ]; then
+                printf 'npm package %s@%s integrity mismatch: published=%s candidate=%s\n' \
+                  "$package_name" "$version" "$remote_integrity" "$local_integrity" >&2
+                exit 1
+              fi
+              printf 'npm package %s@%s already exists with exact integrity; skipping\n' "$package_name" "$version"
             elif grep -Fq 'E404' "$view_error"; then
-              npm publish "$archive" --provenance --access public
+              queued_archives+=("$archive")
             else
               sed -n '1,80p' "$view_error" >&2
               exit 1
             fi
           done < <(./scripts/release-inventory packages)
+          for archive in "${queued_archives[@]}"; do
+            npm publish "$archive" --provenance --access public
+          done
       - name: Generate complete checksums
         run: |
           cp "dist/candidate/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" dist/release/

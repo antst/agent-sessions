@@ -89,6 +89,23 @@ func TestProtocolRejectsMalformedAndOversizedFrames(t *testing.T) {
 	}
 }
 
+func TestProtocolFrameLimitCountsJSONBodyNotDelimiter(t *testing.T) {
+	prefix, suffix := `{"type":"lane_error","error":"`, `"}`
+	body := prefix + strings.Repeat("x", maxWireBytes-len(prefix)-len(suffix)) + suffix
+	called := false
+	err := scanMessages(strings.NewReader(body+"\n"), func(message Message) error {
+		called = message.Type == "lane_error"
+		return nil
+	})
+	if !errors.Is(err, io.EOF) || !called {
+		t.Fatalf("exact maximum body result called=%t err=%v", called, err)
+	}
+	over := prefix + strings.Repeat("x", maxWireBytes+1-len(prefix)-len(suffix)) + suffix
+	if err := scanMessages(strings.NewReader(over+"\n"), func(Message) error { return nil }); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("maximum body plus one result = %v", err)
+	}
+}
+
 func TestEqualProtocolUnrelatedBuildsHandshake(t *testing.T) {
 	server, client := net.Pipe()
 	defer func() { _ = client.Close() }()

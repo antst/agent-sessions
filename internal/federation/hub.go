@@ -481,14 +481,17 @@ func (h *hub) forwardLaneRoute(requestID string, route *laneRoute) {
 		case <-route.done:
 			return
 		case message := <-route.responses:
+			terminal := message.Type == "lane_exit" || message.Type == "lane_error"
+			if terminal && !h.removeLaneRoute(requestID, route) {
+				return
+			}
 			if err := route.source.wire.Send(message); err != nil {
-				if h.removeLaneRoute(requestID, route) {
+				if !terminal && h.removeLaneRoute(requestID, route) {
 					_ = route.destination.wire.Send(Message{Type: "lane_cancel", RequestID: requestID})
 				}
 				return
 			}
-			if message.Type == "lane_exit" || message.Type == "lane_error" {
-				h.removeLaneRoute(requestID, route)
+			if terminal {
 				return
 			}
 		}
@@ -509,6 +512,7 @@ func (h *hub) removeLaneRoute(requestID string, route *laneRoute) bool {
 
 func (h *hub) failLaneRoute(requestID string, route *laneRoute, reason string) {
 	_ = route.destination.wire.Send(Message{Type: "lane_cancel", RequestID: requestID})
+	h.removeLaneRoute(requestID, route)
 	_ = route.source.wire.Send(Message{Type: "lane_error", RequestID: requestID, Error: reason})
 }
 

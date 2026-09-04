@@ -10,6 +10,11 @@
   "exports": {
     ".": "./plugin/agent-sessions.mjs"
   },
+  "omp": {
+    "extensions": [
+      "./plugin/agent-sessions.mjs"
+    ]
+  },
   "files": [
     "README.md",
     "prepack.cjs",

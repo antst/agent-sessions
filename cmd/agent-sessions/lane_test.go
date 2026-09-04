@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,23 @@ import (
 	"github.com/antst/agent-sessions/internal/productruntime"
 	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
 )
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
 
 func TestLaneTerminalNoticeBodyGatesStructuredCollectionHint(t *testing.T) {
 	actor := laneActor{id: "lane", product: "codex", name: "worker", turnID: "turn", outcome: "completed"}
@@ -1105,6 +1123,77 @@ func TestCodexArchiveReaffirmsAlreadyArchivedWithoutNativeRedispatch(t *testing.
 	if !alreadyArchived || openCalls != 0 {
 		t.Fatalf("idempotent archive result=%#v native opens=%d", result, openCalls)
 	}
+}
+
+func TestLaneArchiveTransactionRestoresEveryAutomaticPathWithoutTouchingReplacement(t *testing.T) {
+	runtime := newPresenceTestRuntime(t)
+	newCoordinator := func(driver *parentExitLaneDriver) *hostCoordinator {
+		coordinator := newHostCoordinator(context.Background(), t.TempDir())
+		registry, err := productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"codex": driver})
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator.laneDrivers, coordinator.lanesLoaded = registry, true
+		return coordinator
+	}
+
+	t.Run("explicit failure restores state and deadline", func(t *testing.T) {
+		driver := &parentExitLaneDriver{archiveErr: errors.New("explicit refused")}
+		coordinator := newCoordinator(driver)
+		actor := &laneActor{id: "explicit", nativeID: "explicit", parentID: "parent", product: "codex", name: "explicit", state: "idle", autoArchive: true, autoArchiveAt: 123, groups: []string{"shared"}, done: closedLaneDone()}
+		coordinator.lanes[actor.id] = actor
+		parent := daemonpkg.ManagedAttachment{ID: "parent", Product: "codex", Cwd: t.TempDir(), Groups: []string{"shared"}}
+		if _, err := coordinator.archiveLane(runtime, parent, "codex", parsedLaneCommand{target: actor.id}); err == nil || !strings.Contains(err.Error(), "explicit refused") {
+			t.Fatalf("explicit archive error = %v", err)
+		}
+		if actor.state != "idle" || actor.autoArchiveAt != 123 {
+			t.Fatalf("explicit failure state=%s deadline=%d", actor.state, actor.autoArchiveAt)
+		}
+	})
+
+	t.Run("orphan failure diagnoses visible survivor", func(t *testing.T) {
+		driver := &parentExitLaneDriver{archiveErr: errors.New("orphan\nrefused")}
+		coordinator := newCoordinator(driver)
+		actor := &laneActor{id: "orphan", nativeID: "orphan", parentID: "departed", product: "codex", state: "terminal", autoArchiveAt: 456, groups: []string{"shared"}, done: closedLaneDone()}
+		coordinator.lanes[actor.id] = actor
+		var diagnostics lockedBuffer
+		if coordinator.archiveOrphanedCompletedLaneWithDiagnostics(runtime, actor, &diagnostics) {
+			t.Fatal("failed orphan archive reported success")
+		}
+		if actor.state != "terminal" || actor.autoArchiveAt != 456 || !strings.Contains(diagnostics.String(), "lane orphan automatic archive failed: orphan refused") {
+			t.Fatalf("orphan survivor=%+v diagnostic=%q", actor, diagnostics.String())
+		}
+	})
+
+	t.Run("timer failure retains deadline and stale replacement", func(t *testing.T) {
+		driver := &parentExitLaneDriver{archiveErr: errors.New("timer refused")}
+		coordinator := newCoordinator(driver)
+		due := time.Now().Add(10 * time.Millisecond).UnixMilli()
+		actor := &laneActor{id: "timer", nativeID: "timer", parentID: "parent", product: "codex", state: "idle", autoArchive: true, autoArchiveAt: due, done: closedLaneDone()}
+		replacement := &laneActor{id: actor.id, nativeID: "replacement", parentID: "parent", product: "codex", state: "idle", done: closedLaneDone()}
+		coordinator.lanes[actor.id] = actor
+		driver.onArchive = func() {
+			coordinator.mu.Lock()
+			coordinator.lanes[actor.id] = replacement
+			coordinator.mu.Unlock()
+		}
+		var diagnostics lockedBuffer
+		coordinator.scheduleLaneAutoArchiveWithDiagnostics(runtime, actor, &diagnostics)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			coordinator.mu.Lock()
+			current := coordinator.lanes[actor.id]
+			coordinator.mu.Unlock()
+			if current == replacement && strings.Contains(diagnostics.String(), "timer refused") {
+				if replacement.state != "idle" || actor.autoArchiveAt != 0 {
+					t.Fatalf("stale replacement changed=%+v old deadline=%d", replacement, actor.autoArchiveAt)
+				}
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("timer archive did not finish: diagnostic=%q", diagnostics.String())
+	})
 }
 
 func closedLaneDone() chan struct{} {

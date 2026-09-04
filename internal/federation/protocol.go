@@ -135,7 +135,7 @@ func (w *wireConn) Send(message Message) error {
 
 func scanMessages(reader io.Reader, handle func(Message) error) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), maxWireBytes)
+	scanner.Buffer(make([]byte, 4096), maxWireBytes+1)
 	for scanner.Scan() {
 		var message Message
 		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {

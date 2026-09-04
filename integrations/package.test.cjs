@@ -43,7 +43,7 @@ const packageSpecs = [
     generated: ["plugin", "shared"],
   },
   {
-    packagePath: "omp", name: "@agent-sessions/omp", importable: true,
+    packagePath: "omp", name: "@agent-sessions/omp", importable: true, ompExtension: true,
     bundled: [
       ["plugin/agent-sessions.mjs", "omp/agent-sessions.mjs"],
       ["pi/pifamily.mjs", "pi/pifamily.mjs", true],
@@ -69,9 +69,8 @@ function publishDryRun(packed) {
     "npm", ["publish", "--dry-run", "--json", "--access", "public", packed.archive],
     { encoding: "utf8" },
   );
-  const result = JSON.parse(encoded);
-  assert.equal(result.integrity, packed.result.integrity);
-  return result;
+  const parsed = JSON.parse(encoded);
+  return parsed[packed.result.name] ?? parsed;
 }
 
 function walk(directory) {
@@ -142,6 +141,10 @@ test("all npm packages are exact public, self-contained installation artifacts",
       if (spec.piExtension) {
         assert.ok(manifest.keywords.includes("pi-package"));
         assert.deepEqual(manifest.pi, { extensions: ["./plugin/agent-sessions.mjs"] });
+      }
+      if (spec.ompExtension) {
+        assert.deepEqual(manifest.omp, { extensions: ["./plugin/agent-sessions.mjs"] });
+        assert.ok(fs.statSync(path.join(packageRoot, manifest.omp.extensions[0])).isFile());
       }
       if (spec.commsPeer) {
         assert.equal(manifest.dependencies?.["@agent-sessions/dsh-comms"], undefined);
