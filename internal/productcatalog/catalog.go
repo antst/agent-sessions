@@ -173,10 +173,9 @@ var descriptors = [...]Descriptor{
 		nativeArgumentTranslation(NativeArgumentLane, "--effort", "--effort"),
 		nativeArgumentTranslation(NativeArgumentLane, "--reasoning-effort", "--effort"),
 	),
-	withNativeArgumentRules(withNativeLaunchPolicy(
+	withNativeArgumentRules(withNativeYolo(
 		baselineDescriptor("grok", "Grok", "grok", "grok-peer", "grok-peer-lane", "grok-lane", "grok-lane-manager", "grok-lane", []string{"grok"}, []Capability{CapabilityInteractive, CapabilityLane, CapabilityParent, CapabilityMCPRelay, CapabilityArchive, CapabilityDynamicPermission}, ResumeFlag, false, "1.0.5"),
-		[]string{"--allow", "MCPTool(agent_sessions__*)"},
-		[]string{"--yolo"},
+		"--yolo",
 	),
 		nativeArgumentTranslation(NativeArgumentPeer, "--resume", "--resume"),
 		nativeArgumentTranslation(NativeArgumentPeer, "--agent", "--agent"),

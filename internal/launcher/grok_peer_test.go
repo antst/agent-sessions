@@ -286,6 +286,9 @@ func TestGrokPeerBuildsOneLauncherOwnedLeaderAndTUI(t *testing.T) {
 	if !slices.Contains(got.TUIArguments, "--session-id") || !slices.Contains(got.TUIArguments, testGrokSessionID) {
 		t.Fatalf("tui=%q", got.TUIArguments)
 	}
+	if slices.Contains(got.TUIArguments, "--allow") {
+		t.Fatalf("Grok TUI received a wrapper-synthesized tool grant: %q", got.TUIArguments)
+	}
 	if !reflect.DeepEqual(got.LeaderEnvironment, got.TUIEnvironment) ||
 		environmentValue(got.LeaderEnvironment, peerSessionIDEnv) != testGrokSessionID ||
 		environmentValue(got.LeaderEnvironment, peerProductEnv) != "grok" ||

@@ -211,7 +211,6 @@ func newHostCoordinator(ctx context.Context, stateRoot string) *hostCoordinator 
 	}
 	grokNative, err := newGrokBridgeFactory(BridgeFactoryConfig{
 		Executable: grokDescriptor.NativeExecutable, HostExecutable: hostExecutable,
-		NativeToolGrant: append([]string(nil), grokDescriptor.NativeToolGrantArgs...),
 	})
 	if err != nil {
 		panic(err)

@@ -20,7 +20,7 @@ import (
 func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) error {
 	startup, err := bridge.NewGrokNativeLeaderBootstrap(
 		launch.Executable, launch.Cwd, launch.LeaderSocket, launch.LeaderEnvironment, os.Stderr,
-		launch.PermissionMode, launch.NativeToolGrant,
+		launch.PermissionMode,
 	)
 	if err != nil {
 		return err
@@ -45,10 +45,9 @@ func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) er
 }
 
 type BridgeFactoryConfig struct {
-	Executable      string
-	HostExecutable  string
-	NativeToolGrant []string
-	Diagnostics     io.Writer
+	Executable     string
+	HostExecutable string
+	Diagnostics    io.Writer
 }
 
 type grokBridgeFactory struct{ config BridgeFactoryConfig }
@@ -88,7 +87,7 @@ func (factory *grokBridgeFactory) Open(ctx context.Context, request grokproduct.
 	environment := append([]string(nil), request.Environment...)
 	startup, err := bridge.NewGrokNativeLeaderBootstrap(
 		factory.config.Executable, request.Cwd, socket, environment, factory.config.Diagnostics,
-		request.PermissionMode, factory.config.NativeToolGrant,
+		request.PermissionMode,
 	)
 	if err != nil {
 		return fail(nil, nil, nil, err)

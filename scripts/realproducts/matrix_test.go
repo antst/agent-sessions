@@ -339,13 +339,57 @@ func TestMatrixTMUXPreflightRefusesExactNames(t *testing.T) {
 	}
 }
 
+func TestMatrixGrokPermissionRequiresTheExactCompactRule(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"exact", "[permission]\nallow = [\"MCPTool(agent_sessions__*)\"]\n", true},
+		{"deny", "[permission]\ndeny = [\"MCPTool(agent_sessions__*)\"]\n", false},
+		{"multiline", "[permission]\nallow = [\n  \"MCPTool(agent_sessions__*)\",\n]\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := matrixGrokConfigAllowsAgentSessions([]byte(test.body)); got != test.want {
+				t.Fatalf("configured = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMatrixGrokPermissionPreflightUsesGrokHomeOrExactCWDConfig(t *testing.T) {
+	bin, home, cwd := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, name := range []string{"grok", "grok-peer"} {
+		writeMatrixTestExecutable(t, filepath.Join(bin, name), "exit 0")
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("GROK_HOME", filepath.Join(home, "product-owned-grok-home"))
+	if err := requireMatrixGrokPermission(cwd); err == nil || !strings.Contains(err.Error(), matrixGrokPermissionRule) {
+		t.Fatalf("missing permission error = %v", err)
+	}
+	for _, test := range []struct {
+		path string
+		want bool
+	}{{filepath.Join(home, ".grok", "config.toml"), false}, {filepath.Join(os.Getenv("GROK_HOME"), "config.toml"), true}, {filepath.Join(cwd, ".grok", "config.toml"), true}} {
+		if err := os.MkdirAll(filepath.Dir(test.path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(test.path, []byte("[permission]\nallow = [\""+matrixGrokPermissionRule+"\"]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := requireMatrixGrokPermission(cwd); (err == nil) != test.want {
+			t.Fatalf("permission at %s accepted=%t, want %t: %v", test.path, err == nil, test.want, err)
+		}
+		_ = os.Remove(test.path)
+	}
+}
+
 func TestMatrixPrerequisiteFailuresPrecedeEvidenceWrite(t *testing.T) {
 	listener, err := net.Listen("unix", matrixTestSocket(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	for _, missing := range []string{"agent-sessions", "tmux", "socket", "tmux-list"} {
+	for _, missing := range []string{"agent-sessions", "tmux", "socket", "tmux-list", "grok-permission"} {
 		t.Run("missing "+missing, func(t *testing.T) {
 			base, bin := t.TempDir(), t.TempDir()
 			for _, name := range []string{"agent-sessions", "tmux"} {
@@ -357,10 +401,15 @@ func TestMatrixPrerequisiteFailuresPrecedeEvidenceWrite(t *testing.T) {
 					writeMatrixTestExecutable(t, filepath.Join(bin, name), body)
 				}
 			}
+			if missing == "grok-permission" {
+				writeMatrixTestExecutable(t, filepath.Join(bin, "grok"), "exit 0")
+				writeMatrixTestExecutable(t, filepath.Join(bin, "grok-peer"), "exit 0")
+			}
 			cwd, temporary, evidence := filepath.Join(base, "cwd"), filepath.Join(base, "temporary"), filepath.Join(base, "evidence")
 			_ = os.Mkdir(cwd, 0o700)
 			_ = os.Mkdir(temporary, 0o700)
 			t.Setenv("PATH", bin)
+			t.Setenv("HOME", base)
 			socket := listener.Addr().String()
 			if missing == "socket" {
 				socket = filepath.Join(base, "missing.sock")

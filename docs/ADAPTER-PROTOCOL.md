@@ -22,6 +22,10 @@ its native profile. Codex, Grok, and Qwen use the shared launcher-held Go client
 topology requires the parent process to hold presence. Claude uses its product plugin/connector
 path. All of them use the same first-class methods and the same presence socket.
 
+Grok's private `agent leader` and interactive TUI are sibling product processes. The TUI reads permission rules,
+so the leader keeps only `--permission-mode default` (or bypass under `--yolo`). Its former `--allow` was observed
+not to suppress the Grok 1.0.13 TUI prompt; product-owned authorization is documented in [Installation](INSTALL.md).
+
 ## Identity and product authority
 
 `session.hello.uuid` is the product's native session ID and is the only identity exposed after lane
