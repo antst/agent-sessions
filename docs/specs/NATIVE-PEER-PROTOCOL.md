@@ -250,6 +250,20 @@ does not support steer returns `-32003` with
 `data.reason:"steer unsupported"`. `lane.steer` never returns `-32002` merely
 because the lane is not running.
 
+### Daemon to product: `session.superseded`
+
+When a newer `session.hello` claims the same UUID, the daemon atomically makes
+the newer connection current, then sends the displaced connection this closed,
+ID-bearing request immediately before closing it:
+
+```json
+{"jsonrpc":"2.0","id":"daemon.2","method":"session.superseded","params":{}}
+```
+
+Parameters and result are exactly `{}`. The client marks that identity terminal
+before its best-effort response and MUST NOT reconnect it. Ordinary connection
+loss without this request retains the reconnect behavior below.
+
 ### Daemon to product: `message.deliver`
 
 The daemon sends plain message text and a structured sender:
@@ -353,9 +367,9 @@ promptless for the model.
 - After a daemon restart, the product reconnects and sends `session.hello`
   again with the same native session ID, current product-owned name, original groups, and
   current info map. The daemon rebuilds its live roster from hello requests.
-- A newer connection whose successful hello reports the same UUID replaces and
-  closes the older connection. The displaced connection cannot later remove
-  the replacement.
+- A newer connection whose successful hello reports the same UUID replaces the
+  older connection using `session.superseded`. The displaced identity never
+  reconnects, removes, or sends operations through the replacement.
 - A process hosting several live sessions holds one independent connection per
   session. A multi-root product emits created, changed, and disposed events per
   root and owns one presence loop per root.
@@ -468,7 +482,7 @@ Request:
     "id": {"oneOf": [{"type": "string"}, {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}]},
     "method": {
       "enum": [
-        "session.hello", "session.update", "peers.list", "message.send",
+        "session.hello", "session.update", "session.superseded", "peers.list", "message.send",
         "lane.doctor", "lane.list", "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait",
         "lane.status", "lane.interrupt", "lane.archive", "message.deliver",
         "lane.turn.start", "lane.turn.wait", "lane.turn.interrupt",

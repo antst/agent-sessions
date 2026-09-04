@@ -18,6 +18,7 @@ const laneMethod = (input, validate) => method("client", (value) => validLaneCal
 const nativeMethod = (name) => method("daemon", (value) => validNative(name, value, false), (_params, value) => validNative(name, value, true), true);
 const METHOD_DEFINITIONS = Object.freeze({
   "session.hello": method("client", validHello, result(validEmpty), false, false, true), "session.update": method("client", validUpdate, result(validEmpty)),
+  "session.superseded": method("daemon", validEmpty, result(validEmpty)),
   "peers.list": method("client", validEmpty, result(validPeersResult), false, true), "message.send": method("client", validMessageSend, result(validMessageSendResult), false, true),
   "lane.doctor": laneMethod(false, validDoctorResult), "lane.list": laneMethod(false, validListResult),
   "lane.start": laneMethod(true, validReadyResult), "lane.run": laneMethod(true, validCompletedResult), "lane.resume": laneMethod(true, validCompletedResult), "lane.steer": laneMethod(true, validSteeredResult),
@@ -53,6 +54,7 @@ class LiveSessionClient extends EventEmitter {
     this.groups = config.groups;
     this.stopping = false;
     this.sessions = new Map();
+    this.superseded = new Set();
     this.inbound = new Map();
     this.laneHandler = null;
   }
@@ -62,7 +64,7 @@ class LiveSessionClient extends EventEmitter {
   }
 
   report(nativeSessionID, name, info = {}, capabilities = {}, groups = this.groups) {
-    if (!this.active || this.stopping || !text(nativeSessionID) || typeof name !== "string") return false;
+    if (!this.active || this.stopping || this.superseded.has(nativeSessionID) || !text(nativeSessionID) || typeof name !== "string") return false;
     const existing = this.sessions.get(nativeSessionID);
     if (existing) return this.update(nativeSessionID, name, info);
     if (!validInfo(info) || !(validEmpty(capabilities) || validCapabilities(capabilities)) || !stringList(groups)) return false;
@@ -82,7 +84,7 @@ class LiveSessionClient extends EventEmitter {
 
   update(nativeSessionID, name, info) {
     const session = this.sessions.get(nativeSessionID);
-    if (!session || typeof name !== "string" || !validInfo(info)) return false;
+    if (!session || this.superseded.has(nativeSessionID) || typeof name !== "string" || !validInfo(info)) return false;
     session.name = name;
     session.info = { ...info };
     if (session.ready) {
@@ -123,7 +125,7 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _open(session) {
-    if (this.stopping || this.sessions.get(session.id) !== session || session.socket) return;
+    if (this.stopping || this.superseded.has(session.id) || this.sessions.get(session.id) !== session || session.socket) return;
     session.serial = 0;
     let socket;
     try { socket = this.connect(this.socketPath); } catch (error) {
@@ -185,6 +187,15 @@ class LiveSessionClient extends EventEmitter {
     }
     if (!spec.params(frame.params)) {
       this._write(session, { jsonrpc: "2.0", id: frame.id, error: { code: -32602, message: "Invalid params", data: { method: frame.method } } });
+      return;
+    }
+    if (frame.method === "session.superseded") {
+      this.superseded.add(session.id);
+      session.ready = false;
+      this._fail(session, "live session identity was superseded");
+      for (const [id, inbound] of this.inbound) if (inbound.session === session) this.inbound.delete(id);
+      this._write(session, { jsonrpc: "2.0", id: frame.id, result: {} }, true);
+      session.socket?.end();
       return;
     }
     if (frame.method === "message.deliver") {
@@ -264,7 +275,7 @@ class LiveSessionClient extends EventEmitter {
   }
 
   _reconnect(session) {
-    if (this.stopping || this.sessions.get(session.id) !== session || session.timer) return;
+    if (this.stopping || this.superseded.has(session.id) || this.sessions.get(session.id) !== session || session.timer) return;
     session.timer = setTimeout(() => { session.timer = null; this._open(session); }, this.reconnectMs);
     session.timer.unref?.();
   }

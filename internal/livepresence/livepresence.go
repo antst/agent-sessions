@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -128,7 +129,8 @@ type LaneCallParams struct {
 
 var methodTable = map[string]MethodSpec{
 	"session.hello": {Direction: ClientToDaemon, First: true, params: func(raw json.RawMessage) bool { _, _, err := DecodeHello(raw); return err == nil }, result: 'e'}, "session.update": {Direction: ClientToDaemon, params: func(raw json.RawMessage) bool { _, _, err := DecodeUpdate(raw); return err == nil }, result: 'e'},
-	"peers.list": {Direction: ClientToDaemon, params: validEmptyObject, result: 'p'}, "message.send": {Direction: ClientToDaemon, params: func(raw json.RawMessage) bool { _, ok := DecodeMessageSend(raw); return ok }, result: 'm'},
+	"session.superseded": {Direction: DaemonToClient, params: validEmptyObject, result: 'e'},
+	"peers.list":         {Direction: ClientToDaemon, params: validEmptyObject, result: 'p'}, "message.send": {Direction: ClientToDaemon, params: func(raw json.RawMessage) bool { _, ok := DecodeMessageSend(raw); return ok }, result: 'm'},
 	"lane.doctor": laneMethod(false, 'd'), "lane.list": laneMethod(false, 'l'),
 	"lane.start": laneMethod(true, 'r'), "lane.run": laneMethod(true, 'c'), "lane.resume": laneMethod(true, 'c'), "lane.steer": laneMethod(true, 's'),
 	"lane.wait": laneMethod(false, 'c'), "lane.status": laneMethod(false, 't'), "lane.interrupt": laneMethod(false, 'i'), "lane.archive": laneMethod(false, 'a'),
@@ -331,6 +333,7 @@ type Connection struct {
 	mu        sync.Mutex
 	pending   map[string]chan Frame
 	report    Report
+	sequence  atomic.Uint64
 }
 
 func NewConnection(connection net.Conn) *Connection {
@@ -431,6 +434,23 @@ func (c *Connection) Call(ctx context.Context, id, method string, params any) (j
 		}
 		return append(json.RawMessage(nil), frame.Result...), nil
 	}
+}
+
+func (c *Connection) CallNext(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.Call(ctx, fmt.Sprintf("daemon.%d", c.sequence.Add(1)), method, params)
+}
+
+func (c *Connection) SendNext(method string, params any) error {
+	spec, known := LookupMethod(method)
+	body, err := json.Marshal(params)
+	if !known || spec.Direction != DaemonToClient || spec.First {
+		return NewError(NotPermitted, "Operation not permitted", map[string]any{"method": method})
+	}
+	if err != nil || !ValidMethodParams(spec, body) {
+		return NewError(InvalidParams, "Invalid params", map[string]any{"method": method})
+	}
+	id, _ := json.Marshal(fmt.Sprintf("daemon.%d", c.sequence.Add(1)))
+	return c.Write(Frame{JSONRPC: "2.0", ID: id, Method: method, Params: body})
 }
 
 func (c *Connection) drop(id string) {
@@ -910,9 +930,10 @@ func (c *Client) run() {
 					c.readyOnce.Do(func() { close(c.ready) })
 				}
 				c.mu.Unlock()
+				superseded := false
 				if err == nil {
 					readCtx, stopReads := context.WithCancel(c.ctx)
-					c.read(readCtx, rpc)
+					superseded = c.read(readCtx, rpc)
 					stopReads()
 					c.mu.Lock()
 					if c.current == rpc {
@@ -923,6 +944,9 @@ func (c *Client) run() {
 				rpc.Fail()
 				_ = connection.Close()
 				close(closed)
+				if superseded {
+					return
+				}
 			}
 		}
 		select {
@@ -933,20 +957,34 @@ func (c *Client) run() {
 	}
 }
 
-func (c *Client) read(ctx context.Context, connection *Connection) {
+func (c *Client) read(ctx context.Context, connection *Connection) bool {
 	for {
 		var frame Frame
 		if connection.Decode(&frame) != nil {
-			return
+			return false
 		}
 		if !ValidFrame(frame) {
-			return
+			return false
 		}
 		if frame.Method == "" {
 			if !connection.Resolve(frame) {
-				return
+				return false
 			}
 			continue
+		}
+		if frame.Method == "session.superseded" {
+			spec, _ := LookupMethod(frame.Method)
+			if !ValidMethodParams(spec, frame.Params) {
+				_ = connection.Write(Failure(frame.ID, InvalidParams, "Invalid params", map[string]any{"method": frame.Method}))
+				continue
+			}
+			c.mu.Lock()
+			if c.current == connection {
+				c.current = nil
+			}
+			c.mu.Unlock()
+			_ = connection.Write(Success(frame.ID, json.RawMessage(`{}`)))
+			return true
 		}
 		go func(frame Frame) {
 			response := Success(frame.ID, nil)

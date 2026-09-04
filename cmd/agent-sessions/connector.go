@@ -21,6 +21,8 @@ import (
 )
 
 func runConnector(ctx context.Context, product string, output io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	requestedProduct := product
 	resolved, err := resolveConnectorProduct(product, os.Getenv)
 	if err != nil {
@@ -108,7 +110,29 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return relay.Serve(ctx, os.Stdin, output)
+	var liveDone <-chan struct{}
+	if live != nil {
+		liveDone = live.Done()
+	}
+	return serveConnectorRelay(ctx, liveDone, relay, os.Stdin, output)
+}
+
+func serveConnectorRelay(ctx context.Context, liveDone <-chan struct{}, relay *sessiontools.MCPRelay, input io.Reader, output io.Writer) error {
+	parent := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if liveDone != nil {
+		go func() { <-liveDone; cancel() }()
+	}
+	err := relay.Serve(ctx, input, output)
+	select {
+	case <-liveDone:
+		if parent.Err() == nil {
+			return nil
+		}
+	default:
+	}
+	return err
 }
 
 func connectorBeforePublish(refresher *connectorImageRefresher, resolve func(context.Context) string, log io.Writer) func(context.Context) error {

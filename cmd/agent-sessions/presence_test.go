@@ -295,17 +295,38 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	first, _, _ := openTestPresenceAs(t, server, "same", "first")
+	first, _, firstDecoder := openTestPresenceAs(t, server, "same", "first")
 	if got := <-joined; got.Name != "first" {
 		t.Fatalf("first join = %+v", got)
+	}
+	pending := make(chan error, 1)
+	go func() {
+		_, err := server.Call(ctx, "same", "delivery", "message.deliver", productruntime.NativeMessage{
+			ID: "message", From: productruntime.NativeMessageSource{UUID: "parent", Name: "parent", Product: "codex", Groups: []string{"team"}}, Body: "hello",
+		})
+		pending <- err
+	}()
+	var delivery livepresence.Frame
+	if err := firstDecoder.Decode(&delivery); err != nil || delivery.Method != "message.deliver" {
+		t.Fatalf("pending delivery = %+v, %v", delivery, err)
 	}
 	second, _, _ := openTestPresenceAs(t, server, "same", "second")
 	if got := <-joined; got.Name != "second" {
 		t.Fatalf("replacement join = %+v", got)
 	}
 	_ = first.SetReadDeadline(time.Now().Add(time.Second))
-	if _, readErr := bufio.NewReader(first).ReadByte(); !errors.Is(readErr, io.EOF) {
-		t.Fatalf("older connection was not closed: %v", readErr)
+	var superseded livepresence.Frame
+	if err := firstDecoder.Decode(&superseded); err != nil || superseded.Method != "session.superseded" || string(superseded.Params) != `{}` {
+		t.Fatalf("supersession request = %+v, %v", superseded, err)
+	}
+	if string(superseded.ID) == string(delivery.ID) {
+		t.Fatalf("supersession id collided with pending call: %s", superseded.ID)
+	}
+	if err := firstDecoder.Decode(&superseded); !errors.Is(err, io.EOF) {
+		t.Fatalf("older connection was not closed after supersession: %v", err)
+	}
+	if err := <-pending; err == nil {
+		t.Fatal("pending call on the superseded connection did not fail")
 	}
 	select {
 	case report := <-left:
@@ -331,7 +352,11 @@ func TestDisplacedLivePresenceUpdateIsRejectedWithoutMutatingReplacement(t *test
 	oldConnection.SetReport(livepresence.Report{UUID: "same", Name: "old", Product: "future", Groups: []string{}, Info: map[string]string{}})
 	newConnection := livepresence.NewConnection(oldLocal)
 	newConnection.SetReport(livepresence.Report{UUID: "same", Name: "replacement", Product: "future", Groups: []string{}, Info: map[string]string{}})
-	server := &livePresenceServer{current: map[string]*livepresence.Connection{"same": newConnection}}
+	calls := 0
+	server := &livePresenceServer{current: map[string]*livepresence.Connection{"same": newConnection}, call: func(context.Context, livepresence.Report, string, string, json.RawMessage) (json.RawMessage, error) {
+		calls++
+		return json.RawMessage(`{"peers":[]}`), nil
+	}}
 	params := json.RawMessage(`{"name":"displaced","info":{"cwd":"/wrong"}}`)
 	done := make(chan struct{})
 	go func() {
@@ -351,6 +376,13 @@ func TestDisplacedLivePresenceUpdateIsRejectedWithoutMutatingReplacement(t *test
 	}
 	if got := newConnection.Report(); got.Name != "replacement" || got.Info["cwd"] != "" {
 		t.Fatalf("replacement report mutated = %+v", got)
+	}
+	go server.handleRequest(context.Background(), oldConnection, livepresence.Frame{
+		JSONRPC: "2.0", ID: json.RawMessage(`"tool"`), Method: "peers.list", Params: json.RawMessage(`{}`),
+	})
+	response = livepresence.Frame{}
+	if err := json.NewDecoder(oldRemote).Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.NotPermitted || calls != 0 {
+		t.Fatalf("displaced tool response/calls = %+v/%d, %v", response, calls, err)
 	}
 }
 

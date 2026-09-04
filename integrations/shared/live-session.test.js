@@ -17,6 +17,7 @@ test("default reconnect cadence is two seconds", () => {
 test("one shared method authority owns the exact common surface and closed lane results", () => {
   const expected = {
     "session.hello": ["client", false, false, true, false], "session.update": ["client", false, false, false, false],
+    "session.superseded": ["daemon", false, false, false, false],
     "peers.list": ["client", false, false, false, true], "message.send": ["client", false, false, false, true],
     "lane.doctor": ["client", true, false, false, true], "lane.list": ["client", true, false, false, true],
     "lane.start": ["client", true, true, false, true], "lane.run": ["client", true, true, false, true], "lane.resume": ["client", true, true, false, true], "lane.steer": ["client", true, true, false, true],
@@ -24,7 +25,7 @@ test("one shared method authority owns the exact common surface and closed lane 
     "message.deliver": ["daemon", false, false, false, false], "lane.turn.start": ["daemon", true, false, false, false], "lane.turn.wait": ["daemon", true, false, false, false],
     "lane.turn.interrupt": ["daemon", true, false, false, false], "lane.session.archive": ["daemon", true, false, false, false],
   };
-  assert.equal(Object.keys(METHOD_DEFINITIONS).length, 19);
+  assert.equal(Object.keys(METHOD_DEFINITIONS).length, 20);
   for (const [name, fields] of Object.entries(expected)) {
     const spec = METHOD_DEFINITIONS[name];
     assert.deepEqual([spec.direction, spec.lane, spec.needsInput, spec.first, spec.tool], fields, name);
@@ -32,6 +33,9 @@ test("one shared method authority owns the exact common surface and closed lane 
   }
   assert.equal(METHOD_DEFINITIONS["lane.future"], undefined);
   assert.deepEqual(CLIENT_OPERATIONS, Object.entries(expected).filter(([, fields]) => fields[4]).map(([name]) => name));
+  assert.equal(METHOD_DEFINITIONS["session.superseded"].params({}), true);
+  assert.equal(METHOD_DEFINITIONS["session.superseded"].params({ extra: true }), false);
+  assert.equal(METHOD_DEFINITIONS["session.superseded"].result({}, {}), true);
 
   const status = { type: "lane.status", product: "codex", session_id: "s", name: "n", cwd: "/w", groups: [], permission_mode: "default", state: "idle", turn_id: "", outcome: "", exit: null, owner_session_id: "p", persistent: false, auto_archive: true, auto_archive_after_seconds: 1.5, auto_archive_at: 0 };
   const completed = { type: "turn.completed", product: "codex", session_id: "s", turn_id: "t", status: "completed", outcome: "completed", exit: 0, result: "done", diagnostic: "" };
@@ -271,6 +275,26 @@ test("disconnect rejects calls and reconnect reports from scratch", async (t) =>
   await until(() => fixture.reports.length === 2 && client.sessions.get("native")?.ready);
 });
 
+test("supersession tombstones only the displaced identity", async (t) => {
+  const fixture = await server(t);
+  const old = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
+  const replacement = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
+  t.after(() => Promise.all([old.stop(), replacement.stop()]));
+  old.report("native", "old"); old.report("other", "other");
+  await until(() => fixture.reports.length === 2 && old.sessions.get("native")?.ready && old.sessions.get("other")?.ready);
+  replacement.report("native", "new");
+  await until(() => fixture.reports.length === 3 && replacement.sessions.get("native")?.ready);
+  fixture.writeTo("native", 0, { jsonrpc: "2.0", id: "daemon.supersede", method: "session.superseded", params: {} });
+  await until(() => fixture.responses.some((frame) => frame.id === "daemon.supersede"));
+  assert.equal(old.report("native", "again"), false);
+  assert.equal(old.update("native", "again", {}), false);
+  await assert.rejects(old.callTool("native", "late", "peers.list", {}), /disconnected/u);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(fixture.reports.filter((report) => report.uuid === "native").length, 2);
+  assert.equal(old.sessions.get("other")?.ready, true);
+  assert.equal(replacement.sessions.get("native")?.ready, true);
+});
+
 test("lane capability serves native lane requests on the held socket", async (t) => {
   const fixture = await server(t);
   const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
@@ -401,7 +425,7 @@ function env(socketPath) {
 async function server(t, firstRequest = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-live-"));
   const socketPath = path.join(root, "presence.sock");
-  const reports = [], requests = [], responses = [], sockets = [];
+  const reports = [], requests = [], responses = [], sockets = [], byID = new Map();
   let socket;
   const listener = net.createServer((connection) => {
     socket = connection;
@@ -420,6 +444,7 @@ async function server(t, firstRequest = null) {
           if (frame.jsonrpc !== "2.0" || frame.method !== "session.hello") return connection.destroy();
           reported = true;
           reports.push(frame.params);
+          const sameID = byID.get(frame.params.uuid) ?? []; sameID.push(connection); byID.set(frame.params.uuid, sameID);
           const acknowledgement = `${JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: {} })}\n`;
           const request = firstRequest === null ? "" : `${JSON.stringify(firstRequest)}\n`;
           connection.write(acknowledgement + request);
@@ -437,6 +462,7 @@ async function server(t, firstRequest = null) {
   return {
     path: socketPath, reports, requests, responses, get socket() { return socket; },
     write(frame) { socket.write(`${JSON.stringify(frame)}\n`); },
+    writeTo(id, index, frame) { byID.get(id)[index].write(`${JSON.stringify(frame)}\n`); },
     writeRaw(line) { socket.write(`${line}\n`); },
   };
 }

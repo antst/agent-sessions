@@ -132,6 +132,7 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 	s.join(report)
 	s.mu.Unlock()
 	if previous != nil {
+		_ = previous.SendNext("session.superseded", struct{}{})
 		_ = previous.Close()
 	}
 	for {
@@ -167,6 +168,13 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 }
 
 func (s *livePresenceServer) handleRequest(ctx context.Context, connection *livepresence.Connection, frame livepresence.Frame) {
+	s.mu.Lock()
+	current := s.current[connection.Report().UUID] == connection
+	s.mu.Unlock()
+	if !current {
+		_ = connection.Write(livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
+		return
+	}
 	spec, known := livepresence.LookupMethod(frame.Method)
 	if !known || spec.Direction != livepresence.ClientToDaemon || spec.First {
 		_ = connection.Write(livepresence.Failure(frame.ID, livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method}))
@@ -183,7 +191,7 @@ func (s *livePresenceServer) handleRequest(ctx context.Context, connection *live
 			return
 		}
 		s.mu.Lock()
-		current := s.current[connection.Report().UUID] == connection
+		current = s.current[connection.Report().UUID] == connection
 		if current {
 			updated := connection.UpdateReport(name, info)
 			s.join(updated)
@@ -213,7 +221,7 @@ func (s *livePresenceServer) handleRequest(ctx context.Context, connection *live
 	_ = connection.Write(response)
 }
 
-func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, params any) (json.RawMessage, error) {
+func (s *livePresenceServer) Call(ctx context.Context, uuid, _ string, method string, params any) (json.RawMessage, error) {
 	s.mu.Lock()
 	connection := s.current[uuid]
 	s.mu.Unlock()
@@ -223,7 +231,7 @@ func (s *livePresenceServer) Call(ctx context.Context, uuid, id, method string, 
 	if !livepresence.AllowsDaemonMethod(connection.Report(), method) {
 		return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
 	}
-	return connection.Call(ctx, "daemon."+id, method, params)
+	return connection.CallNext(ctx, method, params)
 }
 
 func (s *livePresenceServer) Wait(ctx context.Context, uuid, product string, lane bool) error {

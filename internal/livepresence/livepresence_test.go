@@ -47,7 +47,8 @@ func TestMethodAuthorityInventoryAndClosedLaneResults(t *testing.T) {
 	}
 	want := map[string]authority{
 		"session.hello": {ClientToDaemon, false, false, true, 'e'}, "session.update": {ClientToDaemon, false, false, false, 'e'},
-		"peers.list": {ClientToDaemon, false, false, false, 'p'}, "message.send": {ClientToDaemon, false, false, false, 'm'},
+		"session.superseded": {DaemonToClient, false, false, false, 'e'},
+		"peers.list":         {ClientToDaemon, false, false, false, 'p'}, "message.send": {ClientToDaemon, false, false, false, 'm'},
 		"lane.doctor": {ClientToDaemon, true, false, false, 'd'}, "lane.list": {ClientToDaemon, true, false, false, 'l'},
 		"lane.start": {ClientToDaemon, true, true, false, 'r'}, "lane.run": {ClientToDaemon, true, true, false, 'c'}, "lane.resume": {ClientToDaemon, true, true, false, 'c'}, "lane.steer": {ClientToDaemon, true, true, false, 's'},
 		"lane.wait": {ClientToDaemon, true, false, false, 'c'}, "lane.status": {ClientToDaemon, true, false, false, 't'}, "lane.interrupt": {ClientToDaemon, true, false, false, 'i'}, "lane.archive": {ClientToDaemon, true, false, false, 'a'},
@@ -65,6 +66,11 @@ func TestMethodAuthorityInventoryAndClosedLaneResults(t *testing.T) {
 	}
 	if _, ok := LookupMethod("lane.future"); ok {
 		t.Fatal("unknown method entered the closed authority")
+	}
+	superseded, _ := LookupMethod("session.superseded")
+	if !ValidMethodParams(superseded, []byte(`{}`)) || ValidMethodParams(superseded, []byte(`{"extra":true}`)) ||
+		!ValidMethodResult(superseded, []byte(`{}`), []byte(`{}`)) {
+		t.Fatal("session.superseded is not closed {} to {}")
 	}
 
 	status := `{"type":"lane.status","product":"codex","session_id":"s","name":"n","cwd":"/w","groups":[],"permission_mode":"default","state":"idle","turn_id":"","outcome":"","exit":null,"owner_session_id":"p","persistent":false,"auto_archive":true,"auto_archive_after_seconds":1.5,"auto_archive_at":0}`
@@ -118,6 +124,83 @@ func TestMethodAuthorityInventoryAndClosedLaneResults(t *testing.T) {
 		body := strings.TrimSuffix(results[method], "}") + `,"native_stop_reason":"aborted"}`
 		if ValidMethodResult(spec, params, []byte(body)) {
 			t.Fatalf("%s accepted native_stop_reason", method)
+		}
+	}
+}
+
+func TestSequencedDaemonRequestsDoNotCollideAndPendingFailsOnce(t *testing.T) {
+	local, remote := net.Pipe()
+	rpc := NewConnection(local)
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := rpc.CallNext(context.Background(), "session.superseded", struct{}{})
+		callDone <- err
+	}()
+	decoder := json.NewDecoder(remote)
+	var first, second Frame
+	if err := decoder.Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- rpc.SendNext("session.superseded", struct{}{}) }()
+	if err := decoder.Decode(&second); err != nil || string(first.ID) == string(second.ID) {
+		t.Fatalf("sequenced requests = %+v / %+v, err=%v", first, second, err)
+	}
+	rpc.Fail()
+	_ = local.Close()
+	_ = remote.Close()
+	if err := <-sendDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-callDone; err == nil {
+		t.Fatal("pending call survived terminal supersession write")
+	}
+}
+
+func TestClientTreatsSupersessionAsTerminal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := filepath.Join(testutil.ShortSocketRoot(t, "sup-", "presence.sock"), "presence.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	served := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			served <- acceptErr
+			return
+		}
+		rpc := NewConnection(connection)
+		var hello Frame
+		if err := rpc.Decode(&hello); err == nil {
+			err = rpc.Write(Success(hello.ID, json.RawMessage(`{}`)))
+		}
+		if err == nil {
+			err = rpc.SendNext("session.superseded", struct{}{})
+		}
+		_ = connection.Close()
+		served <- err
+	}()
+	client := StartClient(ctx, path, Report{UUID: "same", Name: "old", Product: "future", Groups: []string{}, Info: map[string]string{}}, nil)
+	select {
+	case <-client.Done():
+	case <-time.After(time.Second):
+		t.Fatal("superseded client did not terminate")
+	}
+	if err := <-served; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Call(ctx, "late", "peers.list", map[string]any{}); err == nil {
+		t.Fatalf("terminal client call error = %v", err)
+	}
+	if unix, ok := listener.(*net.UnixListener); ok {
+		_ = unix.SetDeadline(time.Now().Add(50 * time.Millisecond))
+		if connection, err := unix.Accept(); err == nil {
+			_ = connection.Close()
+			t.Fatal("superseded client reconnected")
 		}
 	}
 }

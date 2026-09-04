@@ -356,3 +356,28 @@ func TestClaudeConnectorDeliversOverItsLiveProductAdapter(t *testing.T) {
 		t.Fatal("native Claude delivery did not arrive")
 	}
 }
+
+func TestConnectorRelayStopsWhenLiveIdentityIsSuperseded(t *testing.T) {
+	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
+		Product: "codex",
+		Call: func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{}`), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, peer := net.Pipe()
+	defer func() { _ = input.Close(); _ = peer.Close() }()
+	liveDone, served := make(chan struct{}), make(chan error, 1)
+	go func() { served <- serveConnectorRelay(context.Background(), liveDone, relay, input, &bytes.Buffer{}) }()
+	close(liveDone)
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("held connector stdin outlived superseded live identity")
+	}
+}
