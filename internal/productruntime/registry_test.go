@@ -84,6 +84,41 @@ func TestLaneWorkerWireTypesRejectUnknownNullAndInvalidTimeout(t *testing.T) {
 	}
 }
 
+func TestLaneWorkerSharedFixtures(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "integrations", "shared", "lane-worker.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Fixtures []struct {
+			Definition string          `json:"definition"`
+			Valid      bool            `json:"valid"`
+			Value      json.RawMessage `json:"value"`
+		} `json:"x-agent-sessions-fixtures"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil || len(document.Fixtures) != 8 {
+		t.Fatalf("decode shared fixtures: %v (%d)", err, len(document.Fixtures))
+	}
+	for _, fixture := range document.Fixtures {
+		var decodeErr error
+		switch fixture.Definition {
+		case "LaneOpenRequest":
+			_, decodeErr = DecodeLaneOpenRequest(fixture.Value)
+		case "LaneWorkerHello":
+			_, decodeErr = DecodeLaneWorkerHello(fixture.Value)
+		case "LaneDoctorResult":
+			_, decodeErr = DecodeLaneDoctorResult(fixture.Value)
+		case "LaneTurnStartRequest":
+			_, decodeErr = DecodeLaneTurnStartRequest(fixture.Value)
+		default:
+			t.Fatalf("unknown shared fixture definition %q", fixture.Definition)
+		}
+		if (decodeErr == nil) != fixture.Valid {
+			t.Fatalf("%s valid=%v decode error=%v", fixture.Definition, fixture.Valid, decodeErr)
+		}
+	}
+}
+
 func jsonFields(typ reflect.Type) ([]string, []string) {
 	properties, required := []string{}, []string{}
 	for index := 0; index < typ.NumField(); index++ {

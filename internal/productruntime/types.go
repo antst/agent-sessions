@@ -257,6 +257,12 @@ func DecodeLaneWorkerHello(body []byte) (LaneWorkerHello, error) {
 	if err := decodeClosed(body, &hello); err != nil {
 		return LaneWorkerHello{}, err
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || !hasJSONFields(fields["capabilities"],
+		"steer", "durable_resume", "caller_supplied_session_id", "model", "reasoning_effort", "agent", "tool_policy",
+		"output_schema", "sandbox", "permission_default", "permission_bypass") {
+		return LaneWorkerHello{}, fmt.Errorf("%w: lane worker capabilities are incomplete", ErrProtocol)
+	}
 	if hello.Protocol != 1 || strings.TrimSpace(hello.LaunchToken) == "" || strings.TrimSpace(hello.Product) == "" ||
 		hello.ExtraArguments == nil || strings.TrimSpace(hello.Readiness.NativePath) == "" || strings.TrimSpace(hello.Readiness.NativeVersion) == "" {
 		return LaneWorkerHello{}, fmt.Errorf("%w: lane worker hello is invalid", ErrProtocol)
@@ -270,6 +276,32 @@ func DecodeLaneWorkerHello(body []byte) (LaneWorkerHello, error) {
 		seen[rule.Name] = true
 	}
 	return hello, nil
+}
+
+func hasJSONFields(body json.RawMessage, names ...string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || len(fields) != len(names) {
+		return false
+	}
+	for _, name := range names {
+		if fields[name] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func DecodeLaneDoctorResult(body []byte) (LaneDoctorResult, error) {
+	var result LaneDoctorResult
+	if err := decodeClosed(body, &result); err != nil {
+		return LaneDoctorResult{}, err
+	}
+	if result.Type != "lane.doctor" || result.ContractVersion != 2 || result.Authority != "daemon" ||
+		strings.TrimSpace(result.Product) == "" || strings.TrimSpace(result.NativePath) == "" ||
+		strings.TrimSpace(result.NativeVersion) == "" || strings.TrimSpace(result.RuntimePath) == "" || result.ExtraArguments == nil {
+		return LaneDoctorResult{}, fmt.Errorf("%w: lane doctor result is invalid", ErrProtocol)
+	}
+	return result, nil
 }
 
 func DecodeLaneTurnStartRequest(body []byte) (LaneTurnStartRequest, error) {

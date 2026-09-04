@@ -1,6 +1,68 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-sessions.dev/schemas/lane-worker.schema.json",
+  "x-agent-sessions-fixtures": [
+    {
+      "definition": "LaneOpenRequest",
+      "valid": true,
+      "value": {"name": "worker", "cwd": "/work", "permission_mode": "default", "resume": false, "auto_archive_after_seconds": 60, "arguments": []}
+    },
+    {
+      "definition": "LaneOpenRequest",
+      "valid": false,
+      "value": {"name": "worker", "cwd": "/work", "permission_mode": "default", "resume": true, "auto_archive_after_seconds": 60, "arguments": []}
+    },
+    {
+      "definition": "LaneWorkerHello",
+      "valid": true,
+      "value": {
+        "protocol": 1,
+        "launch_token": "opaque",
+        "product": "codex",
+        "capabilities": {"steer": true, "durable_resume": true, "caller_supplied_session_id": false, "model": true, "reasoning_effort": true, "agent": false, "tool_policy": false, "output_schema": true, "sandbox": true, "permission_default": true, "permission_bypass": true},
+        "extra_arguments": [],
+        "readiness": {"available": true, "native_path": "/bin/codex", "native_version": "1"}
+      }
+    },
+    {
+      "definition": "LaneWorkerHello",
+      "valid": false,
+      "value": {"protocol": 1, "launch_token": "opaque", "product": "codex", "capabilities": {}, "extra_arguments": [], "readiness": {"available": true, "native_path": "/bin/codex", "native_version": "1"}}
+    },
+    {
+      "definition": "LaneDoctorResult",
+      "valid": true,
+      "value": {
+        "type": "lane.doctor",
+        "contract_version": 2,
+        "authority": "daemon",
+        "product": "codex",
+        "ready": true,
+        "native_path": "/bin/codex",
+        "native_version": "1",
+        "runtime_path": "/bin/codex",
+        "daemon_reachable": true,
+        "supervisor_reachable": true,
+        "capabilities": {"steer": true, "durable_resume": true, "caller_supplied_session_id": false, "model": true, "reasoning_effort": true, "agent": false, "tool_policy": false, "output_schema": true, "sandbox": true, "permission_default": true, "permission_bypass": true},
+        "extra_arguments": []
+      }
+    },
+    {
+      "definition": "LaneDoctorResult",
+      "valid": false,
+      "value": {"type": "lane.doctor", "contract_version": 2, "authority": "daemon", "product": "codex", "ready": true}
+    },
+    {
+      "definition": "LaneTurnStartRequest",
+      "valid": true,
+      "value": {"input_id": "input", "body": "work", "mode": "followup", "timeout_seconds": 1}
+    },
+    {
+      "definition": "LaneTurnStartRequest",
+      "valid": false,
+      "value": {"input_id": "input", "body": "work", "mode": "followup", "timeout_seconds": 0}
+    }
+  ],
   "$defs": {
     "LaneOpenRequest": {
       "type": "object",

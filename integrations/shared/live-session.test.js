@@ -101,20 +101,25 @@ test("shared params authority follows Appendix A grammar", async () => {
   await assert.rejects(client._call(session, "late-hello", "session.hello", hello(), false), /connection phase/u);
 });
 
-test("one shipped schema validates worker hello, open, doctor and turn fixtures", () => {
-  const hello = { protocol: 1, launch_token: "opaque", product: "codex", capabilities: laneCapabilities, extra_arguments: [], readiness: { available: true, native_path: "/bin/codex", native_version: "1" } };
-  const open = { name: "worker", cwd: "/work", permission_mode: "default", resume: false, auto_archive_after_seconds: 60, arguments: [] };
-  const doctor = { type: "lane.doctor", contract_version: 2, authority: "daemon", product: "codex", ready: true, native_path: "/bin/codex", native_version: "1", runtime_path: "/bin/codex", daemon_reachable: true, supervisor_reachable: true, capabilities: laneCapabilities, extra_arguments: [] };
-  const turn = { input_id: "input", body: "work", mode: "followup", timeout_seconds: 1 };
-  for (const [name, value] of Object.entries({ LaneWorkerHello: hello, LaneOpenRequest: open, LaneDoctorResult: doctor, LaneTurnStartRequest: turn })) {
-    assert.equal(validLaneWorkerSchema(name, value), true, `${name} valid`);
-    assert.equal(validLaneWorkerSchema(name, { ...value, extra: true }), false, `${name} closed`);
-  }
-  assert.equal(validLaneWorkerSchema("LaneOpenRequest", { ...open, resume: true }), false);
-  assert.equal(validLaneWorkerSchema("LaneOpenRequest", { ...open, session_id: "native" }), false);
-  assert.equal(validLaneWorkerSchema("LaneOpenRequest", { ...open, resume: true, session_id: "native" }), true);
-  assert.equal(validLaneWorkerSchema("LaneWorkerHello", { ...hello, capabilities: { ...laneCapabilities, extra: true } }), false);
-  assert.equal(validLaneWorkerSchema("LaneTurnStartRequest", { ...turn, timeout_seconds: null }), false);
+test("one shipped schema validates one shared Go and JavaScript fixture table", () => {
+  const document = JSON.parse(fs.readFileSync(path.join(__dirname, "lane-worker.schema.json"), "utf8"));
+  assert.equal(document["x-agent-sessions-fixtures"].length, 8);
+  for (const fixture of document["x-agent-sessions-fixtures"])
+    assert.equal(validLaneWorkerSchema(fixture.definition, fixture.value), fixture.valid, fixture.definition);
+});
+
+test("the JavaScript schema interpreter rejects unknown schema keywords", () => {
+  const document = JSON.parse(fs.readFileSync(path.join(__dirname, "lane-worker.schema.json"), "utf8"));
+  const keywords = new Set(["$ref", "const", "enum", "type", "required", "additionalProperties", "minProperties", "properties", "items", "uniqueItems", "minLength", "minimum", "exclusiveMinimum", "allOf", "if", "then", "else", "not"]);
+  const walk = (node) => {
+    for (const [key, value] of Object.entries(node)) {
+      assert.ok(keywords.has(key), `unsupported schema keyword ${key}`);
+      if (key === "properties") Object.values(value).forEach(walk);
+      else if (key === "items" || key === "if" || key === "then" || key === "else" || key === "not") walk(value);
+      else if (key === "allOf") value.forEach(walk);
+    }
+  };
+  Object.values(document.$defs).forEach(walk);
 });
 
 test("delivery rendering matches the shared golden fixture", () => {
