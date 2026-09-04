@@ -149,7 +149,7 @@
     "MessageSendDelivery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target", "session_id", "delivery_id", "disposition"],
+      "required": ["target", "disposition"],
       "properties": {
         "target": {"type": "string", "minLength": 1},
         "session_id": {"type": "string", "minLength": 1},
@@ -161,7 +161,21 @@
         {
           "if": {"properties": {"disposition": {"const": "rejected"}}, "required": ["disposition"]},
           "then": {"required": ["reason"]},
-          "else": {"not": {"required": ["reason"]}}
+          "else": {
+            "allOf": [
+              {"required": ["session_id", "delivery_id"]},
+              {"not": {"required": ["reason"]}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"reason": {"const": "ambiguous"}}, "required": ["reason"]},
+          "then": {
+            "allOf": [
+              {"not": {"required": ["session_id"]}},
+              {"not": {"required": ["delivery_id"]}}
+            ]
+          }
         }
       ]
     },
@@ -249,6 +263,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "name": {"type": "string", "minLength": 1},
         "product": {"type": "string", "minLength": 1},
         "resume_session_id": {"type": "string", "minLength": 1},
         "extra_groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
@@ -260,11 +275,12 @@
           "then": {
             "allOf": [
               {"not": {"required": ["product"]}},
+              {"not": {"required": ["name"]}},
               {"not": {"required": ["extra_groups"]}},
               {"not": {"required": ["open"]}}
             ]
           },
-          "else": {"required": ["product", "open"]}
+          "else": {"required": ["name", "product", "open"]}
         }
       ]
     },
@@ -334,7 +350,7 @@
       "required": ["jsonrpc", "id", "error"],
       "properties": {
         "jsonrpc": {"const": "2.0"},
-        "id": {"type": "integer"},
+        "id": {"type": "integer", "minimum": 1},
         "error": {"$ref": "#/$defs/RPCError"}
       }
     },

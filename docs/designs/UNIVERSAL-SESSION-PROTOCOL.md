@@ -15,12 +15,15 @@ connection carries presence, tools, message delivery, lane control, and turn
 results. There is no child presence connection and no relay connection to the
 daemon.
 
-Each frame is one UTF-8 JSON object followed by a newline. Requests have an
-integer `id`; the two directions have independent ID spaces. Notifications,
-batches, unknown fields, explicit nulls, and a second hello are invalid. The
-first request is `session.hello`. The daemon admits no other request from a
-spawned worker until `session.open` has returned a native ID and that ID is
-durably committed.
+Each frame is one UTF-8 JSON object followed by a newline and is at most 1 MiB;
+an oversized frame is closed silently because no request ID can be assumed.
+Request IDs are integers in `[1, 2^53-1]`, with each direction counting from
+one in its independent ID space. When JSON repeats a member, the last value
+wins on both Go and JavaScript implementations. Notifications, batches,
+unknown fields, explicit nulls, and a second hello are invalid. The first
+request is `session.hello`. The daemon admits no other request from a spawned
+worker until `session.open` has returned a native ID and that ID is durably
+committed.
 
 The closed parameter and result shapes are authoritative in
 `integrations/shared/session.schema.json`. The schema uses only the shared
@@ -30,6 +33,9 @@ product code if the corresponding definition does not validate it.
 Authorization is visibility: a session may run, interrupt, close, or message a
 lane exactly when it can see that lane through a shared group in `session.list`.
 This trusted protocol has no ownership field or per-caller ACL.
+Peer identity and groups are asserted rather than attested on the trusted local
+socket, and federation trusts the remote daemon's assertions. No peer
+credentials, signatures, or other security machinery belong in this protocol.
 
 There are eleven methods.
 
@@ -41,7 +47,9 @@ one-use `launch_token`, its supported non-identity open fields, its ordered
 extra-argument descriptions, and optionally the product version. The branches are mutually
 exclusive: a request with both discriminants or neither is invalid. A worker
 sends hello only after its product and plugin are app-ready, so hello success is
-the sole readiness fact. The result is `{}`.
+the sole readiness fact. A peer ID matching a durable lane row is invalid. A
+worker's product must equal the product recorded by its launch-token
+reservation. The result is `{}`.
 
 #### `session.superseded`
 
@@ -50,18 +58,27 @@ The daemon sends the displaced connection the ID-bearing request
 identity. The displaced client marks that identity terminal before its
 best-effort `{}` response, closes, and never reconnects that identity. The new
 connection is already current, so every request from the displaced connection
-is rejected.
+is rejected. The daemon writes the supersession request before closing the old
+local socket. If a displaced client races one final reconnect, that new claim
+may cause one more swap; because each displaced instance becomes terminal, the
+race is bounded and cannot flap indefinitely.
 
 #### `session.list`
 
 A connected session sends `session.list` with an optional `session_id` filter.
 The result contains the matching visible sessions, or all visible sessions when
-the filter is absent. Each item reports immutable identity, whether its one
+the filter is absent. Each item reports identity, whether its one
 connection is open, whether one `turn.run` is outstanding, whether it was
 explicitly closed, the lane native ID when applicable, and the lane's optional
 `last_turn`. A remote item also carries its federated `host`. This single method
-replaces peer listing, lane listing, lane status,
-and lost-caller result recovery.
+replaces peer listing, lane listing, lane status, and lost-caller result
+recovery. Lane-row identity is immutable. Peers have no durable rows: same-ID
+peer hello wholly replaces the transient peer's name, groups, info, and
+connection. A session outside the caller's visibility is indistinguishable
+from a missing session and yields `unknown_session`. Federated `session_id`
+values are host-qualified composite IDs; `host` is only informational, and a
+local ID never crosses a host boundary unqualified. Host presence is a daemon
+invariant rather than a JSON-schema constraint.
 
 #### `message.send`
 
@@ -70,6 +87,9 @@ A connected session sends `message.send` to exactly one `target`, one explicit
 connections, sends each one `message.deliver`, and returns one truthful receipt
 per attempted delivery. The request retains one message body; explicit
 multicast and group expansion do not create another protocol method.
+Resolution tries exact session ID, then host-qualified ID, then visible name.
+An ambiguous name produces a rejected receipt with reason `ambiguous` and no
+resolved IDs. Recipients are deduplicated by session ID, with one receipt each.
 
 #### `message.deliver`
 
@@ -91,11 +111,12 @@ stderr; there is no readiness object or readiness phase.
 
 #### `lane.spawn`
 
-A session sends `lane.spawn` either with a product plus open options and optional
-`extra_groups` for a new lane, or with `resume_session_id` alone for a durable
-offline lane. A new row's groups are the union of the caller's groups and
-`extra_groups`; a caller never sends the complete authoritative group set. The
-daemon resolves and starts the worker, waits for hello, sends `session.open`, durably
+A session sends `lane.spawn` either with a caller-chosen `name`, product, open
+options, and optional `extra_groups` for a new lane, or with
+`resume_session_id` alone for a durable offline lane. A new row's groups are the
+union of the caller's groups and `extra_groups`; a caller never sends the
+complete authoritative group set. The daemon resolves and starts the worker,
+waits for hello, sends `session.open`, durably
 commits its native ID, and only then returns `{session_id,native_id}`. The row
 stores the original closed open-options object as one JSON value. Resume replays
 that value verbatim with the stored native ID; this version permits no resume
@@ -103,6 +124,13 @@ overrides. The one spawn/open transaction timeout covers all of those steps.
 Unsupported supplied
 open fields, an invalid native ID, exit, or timeout fail truthfully and do not
 publish a live session.
+
+One in-memory per-row lock covers the whole spawn, resume, or close transaction;
+it is coordination, not persisted state. Events within spawn/open are handled
+sequentially in arrival order: an open result commits before a later EOF can
+make the row offline, while EOF observed first fails the spawn. Resume requires
+the returned native ID to equal the stored ID. The table enforces global
+uniqueness of `(product,native_id)`; a fresh collision fails the spawn.
 
 #### `session.open`
 
@@ -130,6 +158,8 @@ caller kits keep `turn.run` outstanding and expose local `start`, `wait(timeout)
 and `status` operations with a local-only turn ID. A wait timeout never cancels
 the wire call. If the caller process disappears, the daemon still stores the
 terminal result; a replacement caller reads it through `session.list`.
+The worker kit is full-duplex: its reader never blocks on the native run, so
+delivery, interrupt, and outbound tools dispatch concurrently with it.
 
 #### `turn.interrupt`
 
@@ -138,6 +168,8 @@ to the addressed lane. The request carries only `session_id`; `{}` means the
 product accepted the interrupt request. An idle target returns the closed
 not-running error. There is no interrupt grace timer and no `timed_out` outcome:
 if the native run remains unresponsive, the caller closes the session.
+The worker kit coalesces interrupts: it invokes the native interrupt primitive
+at most once per run, and later interrupt requests return `{}`.
 
 #### `session.close`
 
@@ -148,6 +180,13 @@ the worker does not finish, the process supervisor's existing bounded
 TERM-to-KILL close completes ownership cleanup. This supervisor close bound and
 the spawn/open transaction bound are the only two lane-path timeouts.
 
+If close arrives during a run, the worker kit interrupts once, awaits that same
+run's terminal result within the supervisor bound, and then closes natively. A
+terminal result observed in time is persisted before the row is closed. If the
+bound forces a kill, the row is still closed, `last_turn` remains unchanged,
+and worker EOF fails the outstanding caller exactly once; the daemon never
+fabricates an interrupted result.
+
 An unrequested EOF marks a durable lane offline and resumable; it does not mark
 the row explicitly closed. There is no daemon auto-archive policy. A future
 protocol may add an idle-close option implemented wholly by a product kit, but
@@ -157,6 +196,9 @@ this version has none.
 
 - A hello with both `session_id` and `launch_token`, with neither, or with fields
   from the other branch is invalid and closes the connection.
+- A peer hello whose ID belongs to a lane row is invalid. A worker hello whose
+  product differs from its token reservation is invalid; the token lookup is
+  the authority for both facts.
 - A rowless describe token can authenticate hello but can never authorize
   `session.open`; EOF after describe is the worker's normal exit.
 - Worker-originated tools before the native ID commit are rejected. After the
@@ -169,10 +211,14 @@ this version has none.
   worker connection.
 - `lane.spawn` with `resume_session_id` naming an explicitly closed row returns
   `closed`. The row remains visible only for identity and `last_turn` history.
+- The per-row lock serializes concurrent spawn, resume, and close transactions.
+  A waiter rechecks the row after acquiring it: a second resume sees
+  `already_connected`, a second close sees `closed`, and resume cannot exec
+  until synchronous supervisor cleanup of the prior worker has finished.
 - `turn.run`, `turn.interrupt`, or `session.close` addressed to a durable row
   without a connection returns `not_connected`. Resume is an explicit
   `lane.spawn`; a caller kit may compose that automatically without changing the
-  wire.
+  wire. The `closed` check precedes this connection check.
 - `turn.interrupt` while no run is outstanding returns not-running. An accepted
   interrupt does not promise that the native product has already stopped.
 - Caller timeout or disappearance does not cancel the forwarded run. The daemon
@@ -192,6 +238,15 @@ this version has none.
 - A remote session may carry `host` in `session.list`. Whether a turn crosses a
   host boundary is a daemon-routing question for Section 2, not a second wire
   shape.
+
+This protocol deliberately does not compensate for four losses. A daemon crash
+before commit can orphan native files; workers exit on EOF and those files are
+garbage, not state. A successful spawn reply can be lost with its caller; the
+caller kit lists by name before spawning again. A crash between native close
+and row commit can leave a natively closed session looking resumable; its next
+resume fails truthfully. A wrapper can die after truthfully accepting a queued
+delivery but before the next turn; that private queue is not durable protocol
+state.
 
 ### 1.3 Method convergence
 
@@ -235,12 +290,12 @@ and closes the connection without writing one.
 | ---: | --- | --- |
 | `-32600` | `invalid_frame` | Any method whose envelope or closed params are invalid, but only when a valid request ID is recoverable. |
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
-| `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist. |
-| `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
+| `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
+| `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a non-closed durable row has no connection. |
 | `-32003` | `busy` | `turn.run` when the target already has an outstanding run. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
-| `-32006` | `closed` | Resume or control of an explicitly closed row. |
+| `-32006` | `closed` | Resume or control of an explicitly closed row; this check precedes connection state. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when no executable resolves. |
 | `-32008` | `unsupported_open_field` | New `lane.spawn` when `open` contains a field absent from the worker hello declaration. |
 | `-32009` | `spawn_failed` | `lane.describe` or `lane.spawn` when exec, hello, open, or native creation fails before commit. |
