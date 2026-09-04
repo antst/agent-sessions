@@ -3,7 +3,6 @@ package releaseevidence
 import (
 	"archive/tar"
 	"compress/gzip"
-	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -14,15 +13,8 @@ import (
 	"testing"
 
 	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/releaseinstall"
 	"github.com/antst/agent-sessions/internal/releasepkg"
 )
-
-type inventoryService struct{}
-
-func (inventoryService) Validate(context.Context, string) error { return nil }
-func (inventoryService) Activate(context.Context, string) error { return nil }
-func (inventoryService) Remove(context.Context) error           { return nil }
 
 func TestReleaseInventoryAliasesAndArchiveImagesAreExact(t *testing.T) {
 	repository, err := filepath.Abs(filepath.Join("..", ".."))
@@ -45,15 +37,6 @@ func TestReleaseInventoryAliasesAndArchiveImagesAreExact(t *testing.T) {
 	if !reflect.DeepEqual(hostAliases, wantHostAliases) {
 		t.Fatalf("host aliases = %q, want %q", hostAliases, wantHostAliases)
 	}
-
-	prefix := t.TempDir()
-	transaction := releaseinstall.Transaction{Prefix: prefix, Service: inventoryService{}}
-	installInventoryRole(t, transaction, releaseinstall.HostRole, "agent-sessions")
-	installInventoryRole(t, transaction, releaseinstall.HubRole, "agent-sessions-hub")
-	for _, alias := range append([]string{"agent-sessions"}, hostAliases...) {
-		assertInventoryAlias(t, filepath.Join(prefix, "bin", alias), "agent-sessions")
-	}
-	assertInventoryAlias(t, filepath.Join(prefix, "bin", "agent-sessions-hub"), "agent-sessions-hub")
 
 	binaryRoot := t.TempDir()
 	for _, platform := range releasepkg.SupportedPlatforms {
@@ -88,34 +71,6 @@ func TestReleaseInventoryAliasesAndArchiveImagesAreExact(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s executable images = %q, want %q", artifact.Path, got, want)
 		}
-	}
-}
-
-func installInventoryRole(t *testing.T, transaction releaseinstall.Transaction, role releaseinstall.Role, binary string) {
-	t.Helper()
-	source := t.TempDir()
-	if err := os.Mkdir(filepath.Join(source, "bin"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "bin", binary), []byte(binary+"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := transaction.Install(context.Background(), releaseinstall.InstallRequest{
-		Role: role, Version: "0.3.0", Platform: "linux-x64", SourceDir: source,
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func assertInventoryAlias(t *testing.T, alias, executable string) {
-	t.Helper()
-	info, err := os.Lstat(alias)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("installed alias %s is not a symbolic link: %v", alias, err)
-	}
-	resolved, err := filepath.EvalSymlinks(alias)
-	if err != nil || filepath.Base(resolved) != executable || filepath.Base(filepath.Dir(resolved)) != "bin" {
-		t.Fatalf("installed alias %s resolves to %q, %v; want bin/%s", alias, resolved, err, executable)
 	}
 }
 

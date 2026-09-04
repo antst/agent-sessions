@@ -34,7 +34,7 @@ run_gate race make -C "$root" test-race
 run_gate vet bash -c 'cd "$1"; go vet ./...' release-vet "$root"
 run_gate lint make -C "$root" lint
 run_gate focused_contracts bash -c \
-  'cd "$1"; go test ./internal/bridge ./internal/federator ./internal/launcher ./internal/qwenprofile ./internal/qwenreadiness' \
+  'cd "$1"; go test ./internal/bridge ./internal/federator ./internal/launcher ./internal/products/qwen ./internal/qwenprofile' \
   release-focused "$root"
 run_gate quickstart bash -c \
   'set -euo pipefail; "$1/scripts/test-install-host-transaction"; "$1/scripts/test-install-hub-transaction"; "$1/scripts/test-removal-transaction"' \
