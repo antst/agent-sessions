@@ -148,9 +148,9 @@ this closed error table:
 | `-32003` | `Operation not permitted` | The caller is not allowed to perform the operation, the method is not part of version 1, or `lane.steer` cannot be performed. A steer failure sets `data.reason` to exactly `"no running turn"` or `"steer unsupported"`. |
 | `-32004` | `Unsupported protocol version` | `session.hello.params.protocol` is not exactly `1`. |
 | `-32005` | `Product not launchable` | A lane method names a product the daemon cannot launch or drive. |
-| `-32006` | `Product operation failed` | A native product or driver operation failed for a reason not represented by another code. The product's error text is preserved verbatim in `message` and `data`. |
+| `-32006` | `Product operation failed` | A native product or driver operation failed for a reason not represented by another code. The product's `message` and `data` values are preserved without reclassification. |
 
-Messages use these closed data shapes: `-32602` has `{"method":...}`; `-32001` has `{"target":...}`; `-32002` has `{"uuid":...}`; `-32003` has the applicable `method`, `reason`, or `group`; `-32004` has `{"supported":1,"received":...}`; and `-32005` has `{"product":...}`. Fallback `-32006` has `detail` and `agent_sessions_bug_report`. A product's valid structured `-32006` is relayed byte-for-byte instead. No other error code is emitted. Every accepted request receives exactly one response.
+Messages use these closed data shapes: `-32602` has `{"method":...}`; `-32001` has `{"target":...}`; `-32002` has `{"uuid":...}`; `-32003` has the applicable `method`, `reason`, or `group`; `-32004` has `{"supported":1,"received":...}`; and `-32005` has `{"product":...}`. A `method` value is non-empty with no whitespace or control characters, and `received` is an integer in the JSON-RPC safe range. Fallback `-32006` has `detail` and `agent_sessions_bug_report`. A product's valid structured `-32006` keeps its code, message, and data JSON values unchanged, though the enclosing frame may be reserialized. No other error code is emitted. Every accepted request receives exactly one response.
 
 ### Product to daemon
 

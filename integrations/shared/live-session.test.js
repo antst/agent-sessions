@@ -95,6 +95,9 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   const nativeError = (data) => ({ code: -32006, message: "native failure", data });
   for (const [id, malformed] of [
     ["malformed-shape", { code: -32002, message: "Session busy", data: { uuid: "bad/id" } }],
+    ["invalid-method-space", { code: -32602, message: "Invalid params", data: { method: " lane.steer " } }],
+    ["invalid-method-control", { code: -32003, message: "Operation not permitted", data: { method: "lane.\nsteer" } }],
+    ["invalid-received", { code: -32004, message: "Unsupported protocol version", data: { supported: 1, received: 9007199254740992 } }],
     ["malformed-json", nativeError(1n)],
     ["inherited-message", Object.assign(new Error("native failure"), { code: -32006, data: { detail: "lost message" } })],
     ...[["undefined", { detail: undefined }], ["function", { detail() {} }], ["symbol", { detail: Symbol("x") }], ["nan", { detail: Number.NaN }],
