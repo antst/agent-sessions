@@ -27,6 +27,8 @@ const (
 	matrixSkip = "SKIP"
 )
 
+const codexTUISubmitDelay = 150 * time.Millisecond
+
 type matrixOptions struct {
 	repositoryRoot string
 	cwd            string
@@ -48,6 +50,7 @@ type matrixProduct struct {
 	nativeTrustPrompt     string
 	nativeReadyMarker     string
 	nativeBusyMarker      string
+	nativeSubmitDelay     time.Duration
 }
 
 type matrixRoster struct {
@@ -75,6 +78,8 @@ type matrixTUI struct {
 	product   string
 	name      string
 	sessionID string
+
+	submitDelay time.Duration
 }
 
 type matrixRPCError struct {
@@ -358,6 +363,7 @@ func matrixProductInventory() []matrixProduct {
 		{
 			id: "codex", nativeExecutable: "codex", peerExecutable: "codex-peer",
 			displayArguments: []string{"--no-alt-screen"}, nativeQuitCommand: "/quit",
+			nativeSubmitDelay:     codexTUISubmitDelay,
 			nativeQuitDocumentURL: "https://github.com/openai/codex/blob/main/codex-rs/tui/src/slash_command.rs",
 			nativeTrustPrompt:     "Do you trust the contents of this directory?",
 			nativeReadyMarker:     "› Ask Codex to do anything",
@@ -825,7 +831,7 @@ func (runner *matrixRunner) startTUI(
 	if runner.tmuxExists(tmuxName) {
 		return nil, nil, fmt.Errorf("test-owned tmux name already exists: %s", tmuxName)
 	}
-	tui := &matrixTUI{tmuxName: tmuxName, pane: tmuxName + ":0.0", product: product.id, name: name}
+	tui := &matrixTUI{tmuxName: tmuxName, pane: tmuxName + ":0.0", product: product.id, name: name, submitDelay: product.nativeSubmitDelay}
 	runner.active[tmuxName] = tui
 	peerArgs := matrixPeerArguments(product, name, group, resume)
 	command := make([]string, 0, 8+len(peerArgs))
@@ -880,10 +886,21 @@ func (runner *matrixRunner) sendTUIInput(ctx context.Context, tui *matrixTUI, in
 	if tui == nil || !runner.tmuxExists(tui.tmuxName) {
 		return errors.New("native input target TUI is unavailable")
 	}
-	for _, arguments := range [][]string{
+	for index, arguments := range [][]string{
 		{"send-keys", "-t", tui.pane, "-l", "--", input},
 		{"send-keys", "-t", tui.pane, "Enter"},
 	} {
+		if index == 1 && tui.submitDelay > 0 {
+			// https://github.com/openai/codex/blob/3ba0f711642a888aec92a611a3f3b2211157ff89/codex-rs/tui/src/bottom_pane/paste_burst.rs#L337-L353 suppresses Enter for 120ms.
+			// The 150ms gap leaves a 30ms pty-read margin; a stalled TUI still fails loudly.
+			timer := time.NewTimer(tui.submitDelay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		commandCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		output, err := exec.CommandContext(commandCtx, runner.config.tmux, arguments...).CombinedOutput() //nolint:gosec // exact test-owned pane and documented literal.
 		cancel()

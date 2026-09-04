@@ -356,6 +356,32 @@ func TestMatrixPersistenceRequiresOutputBeforeNativeReady(t *testing.T) {
 	}
 }
 
+func TestMatrixCodexSubmitDelayAndCancellation(t *testing.T) {
+	log, fake := filepath.Join(t.TempDir(), "keys"), filepath.Join(t.TempDir(), "tmux")
+	writeMatrixTestExecutable(t, fake, `[ "$1" = has-session ] && exit 0; printf '%s\n' "$*" >>"$MATRIX_KEYS"`)
+	t.Setenv("MATRIX_KEYS", log)
+	runner := matrixRunner{config: matrixOptions{tmux: fake}}
+	tui := &matrixTUI{tmuxName: "owned", pane: "owned:0.0", submitDelay: matrixProductInventory()[0].nativeSubmitDelay}
+	if started := time.Now(); runner.sendTUIInput(context.Background(), tui, "codex-complete") != nil || time.Since(started) < codexTUISubmitDelay {
+		t.Fatalf("completed Codex send took %s", time.Since(started))
+	}
+	_ = os.Truncate(log, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := runner.sendTUIInput(ctx, tui, "codex-input")
+	cancel()
+	if body, _ := os.ReadFile(log); err != context.DeadlineExceeded || len(strings.Split(strings.TrimSpace(string(body)), "\n")) != 1 {
+		t.Fatalf("cancelled Codex send = %v, calls %q", err, body)
+	}
+	tui.submitDelay = matrixProductInventory()[1].nativeSubmitDelay
+	if err := runner.sendTUIInput(context.Background(), tui, "claude-input"); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(log)
+	if calls := strings.Split(strings.TrimSpace(string(body)), "\n"); len(calls) != 3 || !strings.HasSuffix(calls[2], " Enter") {
+		t.Fatalf("non-Codex calls = %q", body)
+	}
+}
+
 func matrixTreeSnapshot(t *testing.T, root string) string {
 	var entries []string
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
