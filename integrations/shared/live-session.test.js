@@ -97,8 +97,8 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
     ["malformed-shape", { code: -32002, message: "Session busy", data: { uuid: "bad/id" } }],
     ["malformed-json", nativeError(1n)],
     ["inherited-message", Object.assign(new Error("native failure"), { code: -32006, data: { detail: "lost message" } })],
-    ...[["undefined", { detail: undefined }], ["function", { detail() {} }], ["nan", { detail: Number.NaN }],
-      ["infinite", { detail: Number.POSITIVE_INFINITY }], ["sparse", sparse], ["extra-array", extraArray], ["cyclic", cyclic]]
+    ...[["undefined", { detail: undefined }], ["function", { detail() {} }], ["symbol", { detail: Symbol("x") }], ["nan", { detail: Number.NaN }],
+      ["infinite", { detail: Number.POSITIVE_INFINITY }], ["exotic", new Date(0)], ["accessor", Object.defineProperty({}, "detail", { get() { return "x"; }, enumerable: true })], ["sparse", sparse], ["extra-array", extraArray], ["cyclic", cyclic]]
       .map(([id, data]) => [`${id}-json`, nativeError(data)]),
   ]) {
     const malformedError = await reject(id, malformed);
@@ -170,7 +170,7 @@ test("lane handlers must return the exact native result shape", async (t) => {
   Object.defineProperty(nonEnumerable, "outcome", { value: "completed", enumerable: false });
   const invalidWait = [
     { outcome: "unknown", result: "done", reason: {} }, nonEnumerable,
-    ...[undefined, () => {}, Number.NaN, Number.POSITIVE_INFINITY, sparse, cyclic]
+    ...[undefined, () => {}, Symbol("x"), Number.NaN, Number.POSITIVE_INFINITY, new Date(0), sparse, cyclic]
       .map((reason) => ({ outcome: "completed", result: "done", reason })),
   ];
   const cases = [
