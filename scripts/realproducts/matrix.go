@@ -12,12 +12,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/antst/agent-sessions/internal/pathidentity"
@@ -48,6 +46,8 @@ type matrixProduct struct {
 	nativeQuitCommand     string
 	nativeQuitDocumentURL string
 	nativeTrustPrompt     string
+	nativeReadyMarker     string
+	nativeBusyMarker      string
 }
 
 type matrixRoster struct {
@@ -125,8 +125,6 @@ func standingMatrixRequested(args []string) bool {
 }
 
 func runStandingMatrix(ctx context.Context, args []string, output io.Writer) error {
-	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
 	config, err := parseMatrixOptions(args)
 	if err != nil {
 		return err
@@ -139,10 +137,7 @@ func runStandingMatrix(ctx context.Context, args []string, output io.Writer) err
 		config: config, output: output, runID: runID,
 		active: map[string]*matrixTUI{},
 	}
-	defer func() {
-		stopSignals()
-		runner.bestEffortCleanup()
-	}()
+	defer runner.bestEffortCleanup()
 
 	if _, err := fmt.Fprintf(output, "EVIDENCE %s\n", config.evidenceDir); err != nil {
 		return err
@@ -164,17 +159,12 @@ func runStandingMatrix(ctx context.Context, args []string, output io.Writer) err
 		}
 		runner.runProduct(ctx, resolved)
 	}
-	stopSignals()
-	interrupted := ctx.Err()
 	cleanupEvidence := map[string]any{}
 	cleanupErr := runner.cleanupAll(context.Background(), cleanupEvidence)
 	if cleanupErr != nil {
 		runner.record("matrix", "cleanup", matrixFail, cleanupErr.Error(), cleanupEvidence)
 	} else {
 		runner.record("matrix", "cleanup", matrixPass, "all test-owned tmux sessions and live matrix rows are gone", cleanupEvidence)
-	}
-	if interrupted != nil {
-		return fmt.Errorf("standing matrix interrupted: %w", interrupted)
 	}
 	if runner.failures != 0 {
 		return fmt.Errorf("standing matrix had %d failed cell(s) out of %d; evidence: %s", runner.failures, runner.cellCount, config.evidenceDir)
@@ -232,10 +222,6 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if *timeout < 5*time.Second {
 		return matrixOptions{}, errors.New("--matrix-timeout must be at least 5s")
 	}
-	evidence, err := prepareMatrixEvidenceDir(futureEvidence, temporary)
-	if err != nil {
-		return matrixOptions{}, err
-	}
 	lookup := func(name string) (string, error) {
 		path, lookupErr := exec.LookPath(name)
 		if lookupErr != nil {
@@ -263,11 +249,43 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if info, statErr := os.Lstat(helper); statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return matrixOptions{}, errors.New("raw v1 helper is not one repository regular file")
 	}
+	if err := rejectExistingMatrixTMUX(tmux); err != nil {
+		return matrixOptions{}, err
+	}
+	evidence, err := prepareMatrixEvidenceDir(futureEvidence, temporary)
+	if err != nil {
+		return matrixOptions{}, err
+	}
 	return matrixOptions{
 		repositoryRoot: root, cwd: cwd, evidenceDir: evidence,
 		agentSessions: agentSessions, tmux: tmux, python: python,
 		presenceSocket: socket, timeout: *timeout,
 	}, nil
+}
+
+func rejectExistingMatrixTMUX(tmux string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, tmux, "list-sessions", "-F", "#{session_name}").CombinedOutput() //nolint:gosec // resolved tmux and fixed read-only argv.
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if !strings.Contains(message, "\n") && ((strings.HasPrefix(message, "no server running on /") && len(message) > len("no server running on /")) ||
+			(strings.HasPrefix(message, "error connecting to /") && strings.HasSuffix(message, " (No such file or directory)"))) {
+			return nil
+		}
+		return fmt.Errorf("list tmux sessions before standing matrix: %w: %s", err, message)
+	}
+	var commands []string
+	for _, name := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
+		if strings.HasPrefix(name, "matrix-") {
+			commands = append(commands, "tmux kill-session -t '="+strings.ReplaceAll(name, "'", "'\"'\"'")+"'")
+		}
+	}
+	if len(commands) != 0 {
+		sort.Strings(commands)
+		return errors.New("standing matrix found existing matrix-* tmux sessions; run these exact commands first:\n" + strings.Join(commands, "\n"))
+	}
+	return nil
 }
 
 func matrixPathsOverlap(left, right string) bool {
@@ -342,22 +360,27 @@ func matrixProductInventory() []matrixProduct {
 			displayArguments: []string{"--no-alt-screen"}, nativeQuitCommand: "/quit",
 			nativeQuitDocumentURL: "https://github.com/openai/codex/blob/main/codex-rs/tui/src/slash_command.rs",
 			nativeTrustPrompt:     "Do you trust the contents of this directory?",
+			nativeReadyMarker:     "› Ask Codex to do anything",
 		},
 		{
 			id: "claude", nativeExecutable: "claude", peerExecutable: "claude-peer",
 			displayArguments: []string{"--ax-screen-reader"}, nativeQuitCommand: "/exit",
 			nativeQuitDocumentURL: "https://code.claude.com/docs/en/commands",
 			nativeTrustPrompt:     "Permission Required: Accessing workspace:",
+			nativeReadyMarker:     "\n$\n",
 		},
 		{
 			id: "grok", nativeExecutable: "grok", peerExecutable: "grok-peer",
 			displayArguments: []string{"--no-alt-screen", "--minimal"}, nativeQuitCommand: "/quit",
 			nativeQuitDocumentURL: "https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md",
+			nativeReadyMarker:     "\n❯\nGrok ",
 		},
 		{
 			id: "qwen", nativeExecutable: "qwen", peerExecutable: "qwen-peer",
 			displayArguments: []string{"--screen-reader"}, nativeQuitCommand: "/quit",
 			nativeQuitDocumentURL: "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/commands.md",
+			nativeReadyMarker:     "Auto mode   Type your message or @path/to/file",
+			nativeBusyMarker:      "esc to cancel",
 		},
 	}
 }
@@ -523,16 +546,16 @@ func (runner *matrixRunner) runDirectCell(ctx context.Context, product matrixPro
 	name, group := prefix+"-direct", prefix+"-direct"
 	tui, evidence, err := runner.launchNamed(ctx, product, name, group, "direct")
 	if err == nil {
-		marker := prefix + "-direct-receipt"
+		marker := matrixReceiptToken(runner.runID, "03")
 		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "direct", group, map[string]any{
-			"target": name, "message": "Reply OK only. " + marker,
+			"target": name, "message": marker,
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
 		if sendErr == nil {
 			sendErr = requireAcceptedSessions(response, []string{tui.sessionID})
 		}
-		capturePath, receiptErr := runner.captureReceipt(ctx, product.id, "03-direct-send", tui, marker, "target")
+		capturePath, receiptErr := runner.captureReceipt(ctx, product.id, "03-direct-send", tui, marker, "target", "", "")
 		evidence["pane_evidence"] = capturePath
 		err = errors.Join(sendErr, receiptErr)
 	}
@@ -553,17 +576,17 @@ func (runner *matrixRunner) runMulticastCell(ctx context.Context, product matrix
 	evidence := map[string]any{"first_launch": firstEvidence, "second_launch": secondEvidence}
 	err := errors.Join(firstErr, secondErr)
 	if err == nil {
-		marker := prefix + "-multicast-receipt"
+		marker := matrixReceiptToken(runner.runID, "04")
 		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "multicast", group, map[string]any{
-			"targets": []string{first.name, second.name}, "message": "Reply OK only. " + marker,
+			"targets": []string{first.name, second.name}, "message": marker,
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
 		if sendErr == nil {
 			sendErr = requireAcceptedSessions(response, []string{first.sessionID, second.sessionID})
 		}
-		firstCapture, firstReceipt := runner.captureReceipt(ctx, product.id, "04-targets-multicast", first, marker, "target-a")
-		secondCapture, secondReceipt := runner.captureReceipt(ctx, product.id, "04-targets-multicast", second, marker, "target-b")
+		firstCapture, firstReceipt := runner.captureReceipt(ctx, product.id, "04-targets-multicast", first, marker, "target-a", "", "")
+		secondCapture, secondReceipt := runner.captureReceipt(ctx, product.id, "04-targets-multicast", second, marker, "target-b", "", "")
 		evidence["pane_evidence"] = []string{firstCapture, secondCapture}
 		err = errors.Join(sendErr, firstReceipt, secondReceipt)
 	}
@@ -588,9 +611,9 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 	err := errors.Join(firstErr, secondErr)
 	status, detail := matrixPass, "group selector reached exactly the two group member TUIs"
 	if err == nil {
-		marker := prefix + "-group-receipt"
+		marker := matrixReceiptToken(runner.runID, "05")
 		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "group", group, map[string]any{
-			"group": group, "message": "Reply OK only. " + marker,
+			"group": group, "message": marker,
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
@@ -607,8 +630,8 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 		} else if acceptErr := requireAcceptedSessions(response, []string{first.sessionID, second.sessionID}); acceptErr != nil {
 			err = acceptErr
 		} else {
-			firstCapture, firstReceipt := runner.captureReceipt(ctx, product.id, "05-group-send", first, marker, "target-a")
-			secondCapture, secondReceipt := runner.captureReceipt(ctx, product.id, "05-group-send", second, marker, "target-b")
+			firstCapture, firstReceipt := runner.captureReceipt(ctx, product.id, "05-group-send", first, marker, "target-a", "", "")
+			secondCapture, secondReceipt := runner.captureReceipt(ctx, product.id, "05-group-send", second, marker, "target-b", "", "")
 			evidence["pane_evidence"] = []string{firstCapture, secondCapture}
 			err = errors.Join(firstReceipt, secondReceipt)
 		}
@@ -632,6 +655,13 @@ func (runner *matrixRunner) runResumeCell(
 	name, group string,
 ) *matrixTUI {
 	evidence := map[string]any{"original_native_session_id": identity.sessionID}
+	persistencePath, persistenceErr := runner.persistNativeTurn(ctx, product, identity)
+	evidence["persistence_pane"] = persistencePath
+	if persistenceErr != nil {
+		persistenceErr = errors.Join(persistenceErr, runner.endTUI(ctx, identity))
+		runner.record(product.id, "06-resume-by-name", matrixFail, persistenceErr.Error(), evidence)
+		return nil
+	}
 	if err := runner.endTUI(ctx, identity); err != nil {
 		runner.record(product.id, "06-resume-by-name", matrixFail, err.Error(), evidence)
 		return nil
@@ -647,6 +677,17 @@ func (runner *matrixRunner) runResumeCell(
 	}
 	runner.record(product.id, "06-resume-by-name", matrixPass, "resume by exact unique name retained the product-native id without a fork", evidence)
 	return resumed
+}
+
+func (runner *matrixRunner) persistNativeTurn(ctx context.Context, product matrixProduct, tui *matrixTUI) (string, error) {
+	if _, err := runner.captureReceipt(ctx, product.id, "06-resume-by-name", tui, product.nativeReadyMarker, "ready-before-persistence", "", product.nativeBusyMarker); err != nil {
+		return "", err
+	}
+	prompt, expected := matrixPersistencePrompt(runner.runID)
+	if err := runner.sendTUIInput(ctx, tui, prompt); err != nil {
+		return "", err
+	}
+	return runner.captureReceipt(ctx, product.id, "06-resume-by-name", tui, expected, "persistence", product.nativeReadyMarker, product.nativeBusyMarker)
 }
 
 func (runner *matrixRunner) runNativeQuitResumeCell(
@@ -666,7 +707,7 @@ func (runner *matrixRunner) runNativeQuitResumeCell(
 	beforeQuit, beforeEvidence, err := runner.launchResume(ctx, product, name, group, "native-quit-before", expectedID)
 	evidence["before_quit_resume"] = beforeEvidence
 	if err == nil {
-		err = runner.sendNativeQuit(ctx, beforeQuit, product.nativeQuitCommand)
+		err = runner.sendTUIInput(ctx, beforeQuit, product.nativeQuitCommand)
 	}
 	if err == nil {
 		err = runner.waitForRowGone(ctx, expectedID)
@@ -835,19 +876,19 @@ func (runner *matrixRunner) endTUI(ctx context.Context, tui *matrixTUI) error {
 	return runner.waitForRowGone(ctx, tui.sessionID)
 }
 
-func (runner *matrixRunner) sendNativeQuit(ctx context.Context, tui *matrixTUI, quitCommand string) error {
+func (runner *matrixRunner) sendTUIInput(ctx context.Context, tui *matrixTUI, input string) error {
 	if tui == nil || !runner.tmuxExists(tui.tmuxName) {
-		return errors.New("native quit target TUI is unavailable")
+		return errors.New("native input target TUI is unavailable")
 	}
 	for _, arguments := range [][]string{
-		{"send-keys", "-t", tui.pane, "-l", "--", quitCommand},
+		{"send-keys", "-t", tui.pane, "-l", "--", input},
 		{"send-keys", "-t", tui.pane, "Enter"},
 	} {
 		commandCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		output, err := exec.CommandContext(commandCtx, runner.config.tmux, arguments...).CombinedOutput() //nolint:gosec // exact test-owned pane and documented literal.
 		cancel()
 		if err != nil {
-			return fmt.Errorf("send documented native quit %q: %w: %s", quitCommand, err, strings.TrimSpace(string(output)))
+			return fmt.Errorf("send native TUI input %q: %w: %s", input, err, strings.TrimSpace(string(output)))
 		}
 	}
 	return nil
@@ -1102,6 +1143,16 @@ func matrixUUID() (string, error) {
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32], nil
 }
 
+func matrixReceiptToken(runID, cell string) string {
+	return "MX" + runID[len(runID)-8:] + cell
+}
+
+func matrixPersistencePrompt(runID string) (string, string) {
+	expected := matrixReceiptToken(runID, "06")
+	left, right := expected[:len(expected)/2], expected[len(expected)/2:]
+	return fmt.Sprintf("Without tools, concatenate %s and %s. Output only the result.", left, right), expected
+}
+
 func requireAcceptedSessions(response matrixRPCResponse, expected []string) error {
 	if response.Error != nil {
 		return fmt.Errorf("message.send failed: %s (%d)", response.Error.Message, response.Error.Code)
@@ -1131,6 +1182,7 @@ func (runner *matrixRunner) captureReceipt(
 	product, cell string,
 	tui *matrixTUI,
 	marker, label string,
+	afterMarker, busyMarker string,
 ) (string, error) {
 	relative := filepath.Join(product, cell+"-"+label+".pane.txt")
 	deadline, cancel := context.WithTimeout(ctx, runner.config.timeout)
@@ -1142,7 +1194,7 @@ func (runner *matrixRunner) captureReceipt(
 		capture, err := runner.capturePane(deadline, tui)
 		if err == nil {
 			last = capture
-			if strings.Contains(capture, marker) {
+			if paneHasMarkerThenReady(capture, marker, afterMarker, busyMarker) {
 				path, writeErr := runner.writeText(relative, capture)
 				return path, writeErr
 			}
@@ -1153,10 +1205,17 @@ func (runner *matrixRunner) captureReceipt(
 			if writeErr != nil {
 				return path, writeErr
 			}
-			return path, fmt.Errorf("product TUI did not render receipt marker %s", marker)
+			return path, fmt.Errorf("product TUI did not reach expected marker state %s", marker)
 		case <-ticker.C:
 		}
 	}
+}
+
+func paneHasMarkerThenReady(capture, marker, readyMarker, busyMarker string) bool {
+	markerAt := strings.Index(capture, marker)
+	return markerAt >= 0 &&
+		(readyMarker == "" || strings.Contains(capture[markerAt+len(marker):], readyMarker)) &&
+		(busyMarker == "" || !strings.Contains(capture, busyMarker))
 }
 
 func (runner *matrixRunner) capturePane(ctx context.Context, tui *matrixTUI) (string, error) {
