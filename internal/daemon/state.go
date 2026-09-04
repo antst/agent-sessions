@@ -18,9 +18,9 @@ import (
 )
 
 // PrepareStateRoot keeps only an empty root or the current one-table state.
-// Every other safe directory is pre-campaign state and is removed whole; a
-// valid one-table root is never rewritten by this probe.
-func PrepareStateRoot(root string, maxBytes int64, output io.Writer) error {
+// When permitted, every other safe directory is removed as pre-campaign state;
+// otherwise its validation error is returned without changing the root.
+func PrepareStateRoot(root string, maxBytes int64, output io.Writer, resetIncompatible bool) error {
 	if output == nil {
 		output = io.Discard
 	}
@@ -40,6 +40,9 @@ func PrepareStateRoot(root string, maxBytes int64, output io.Writer) error {
 	reason := validateCurrentStateRoot(root, maxBytes)
 	if reason == nil {
 		return nil
+	}
+	if !resetIncompatible {
+		return reason
 	}
 	if err := os.RemoveAll(root); err != nil {
 		return fmt.Errorf("remove incompatible daemon state root %s: %w", root, err)

@@ -152,6 +152,43 @@ func TestDefaultWorkflowUnavailableDoesNotCreateStateOrStartDaemon(t *testing.T)
 	}
 }
 
+func TestDaemonRefusesToResetEveryExplicitStateRootForm(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	conventional := filepath.Join(base, "agent-sessions")
+	tests := []struct {
+		name string
+		env  string
+		args []string
+		root string
+	}{
+		{"separate flag", "", []string{"run", "--state-root", filepath.Join(base, "flag")}, filepath.Join(base, "flag")},
+		{"equals flag", "", []string{"run", "--state-root=" + filepath.Join(base, "equals")}, filepath.Join(base, "equals")},
+		{"environment", filepath.Join(base, "environment"), []string{"run"}, filepath.Join(base, "environment")},
+		{"flag precedes environment", filepath.Join(base, "environment-precedence"), []string{"run", "--state-root=" + filepath.Join(base, "flag-precedence")}, filepath.Join(base, "flag-precedence")},
+		{"explicit conventional", "", []string{"run", "--state-root", conventional}, conventional},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("AGENT_SESSIONS_STATE_ROOT", test.env)
+			if err := os.MkdirAll(test.root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(test.root, "incompatible")
+			if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := runDaemon(context.Background(), clihelp.Invocation{Arguments: test.args}, io.Discard)
+			if err == nil || err.Error() != `prepare daemon state root: daemon state root contains unknown entry "incompatible"` {
+				t.Fatalf("validation error = %v", err)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("explicit state root was removed: %v", err)
+			}
+		})
+	}
+}
+
 func TestLaneWorkflowReturnsUsageErrorBeforeContactingDaemon(t *testing.T) {
 	stateRoot := filepath.Join(shortDaemonTestRoot(t), "absent")
 	t.Setenv("AGENT_SESSIONS_STATE_ROOT", stateRoot)

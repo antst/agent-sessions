@@ -57,7 +57,7 @@ func TestPrepareStateRootRemovesEveryNonCurrentSafeRoot(t *testing.T) {
 			root := t.TempDir()
 			test.setup(t, root)
 			var output bytes.Buffer
-			if err := PrepareStateRoot(root, 1<<20, &output); err != nil {
+			if err := PrepareStateRoot(root, 1<<20, &output, true); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
@@ -67,6 +67,21 @@ func TestPrepareStateRootRemovesEveryNonCurrentSafeRoot(t *testing.T) {
 				t.Fatalf("removal diagnostic = %q", output.String())
 			}
 		})
+	}
+}
+
+func TestPrepareStateRootRefusesToRemoveExplicitNonCurrentRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "random-file")
+	if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := PrepareStateRoot(root, 1<<20, nil, false)
+	if err == nil || err.Error() != `daemon state root contains unknown entry "random-file"` {
+		t.Fatalf("validation error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("explicit state root was removed: %v", err)
 	}
 }
 
@@ -84,7 +99,7 @@ func TestPrepareStateRootLeavesCurrentAndEmptyRootsUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PrepareStateRoot(root, 1<<20, nil); err != nil {
+	if err := PrepareStateRoot(root, 1<<20, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.ReadFile(path)
@@ -109,7 +124,7 @@ func TestPrepareStateRootLeavesCurrentAndEmptyRootsUntouched(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := PrepareStateRoot(emptyRoot, 1<<20, nil); err != nil {
+			if err := PrepareStateRoot(emptyRoot, 1<<20, nil, true); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(emptyRoot); err != nil {

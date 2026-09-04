@@ -260,7 +260,13 @@ func runDaemon(ctx context.Context, invocation clihelp.Invocation, output io.Wri
 	if set.NArg() != 0 {
 		return errors.New("agent-sessions daemon accepts run, start, stop, restart, and run service options")
 	}
-	if err := daemonpkg.PrepareStateRoot(*stateRoot, 8<<20, output); err != nil {
+	resetIncompatible := os.Getenv("AGENT_SESSIONS_STATE_ROOT") == ""
+	set.Visit(func(option *flag.Flag) {
+		if option.Name == "state-root" {
+			resetIncompatible = false
+		}
+	})
+	if err := daemonpkg.PrepareStateRoot(*stateRoot, 8<<20, output, resetIncompatible); err != nil {
 		return fmt.Errorf("prepare daemon state root: %w", err)
 	}
 	executable, err := os.Executable()
