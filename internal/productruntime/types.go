@@ -214,6 +214,18 @@ type LaneStatusProjection struct {
 	AutoArchiveAt int64  `json:"auto_archive_at"`
 }
 
+func (p LaneStatusProjection) Valid() bool {
+	state := p.State == "idle" || p.State == "running" || p.State == "interrupting" || p.State == "terminal" || p.State == "archived"
+	outcome := p.Outcome == "" || p.Outcome == "completed" || p.Outcome == "interrupted" || p.Outcome == "failed" || p.Outcome == "timed_out"
+	if !state || !outcome || p.AutoArchiveAt < 0 {
+		return false
+	}
+	if p.State == "running" || p.State == "interrupting" || p.State == "terminal" {
+		return p.TurnID != ""
+	}
+	return true
+}
+
 type NativeSessionRef struct {
 	LaneID          string
 	NativeSessionID string
@@ -429,6 +441,10 @@ func decodeClosed(body []byte, output any) error {
 	return nil
 }
 
+// DecodeClosed decodes one closed private-wire value after its schema or
+// method-specific validator has accepted the raw JSON.
+func DecodeClosed(body []byte, output any) error { return decodeClosed(body, output) }
+
 type NativeTurnRef struct {
 	NativeSessionRef
 	NativeTurnID string
@@ -440,7 +456,7 @@ const (
 	TurnCompleted   TurnOutcome = "completed"
 	TurnInterrupted TurnOutcome = "interrupted"
 	TurnFailed      TurnOutcome = "failed"
-	TurnTimedOut    TurnOutcome = "timed-out"
+	TurnTimedOut    TurnOutcome = "timed_out"
 )
 
 type NativeTerminal struct {
