@@ -68,10 +68,10 @@ credentials are never recorded.
 
 ## Reference-worker rows
 
-The non-AI `example-peer-lane` has a documented, closed input language in addition to its ordinary
-echo/transform input: `conformance:eof-on-wait` and `conformance:replay-launch-token`. These are
-worker-owned behaviors sent through the normal typed turn input. They add no environment key,
-argv mode, daemon hook, product branch, or alternate parameter channel.
+The non-AI `example-peer-lane` has one documented conformance input in addition to its ordinary
+echo/transform input: `conformance:eof-on-wait`. It is worker-owned behavior sent through the
+normal typed turn input. It adds no environment key, argv mode, daemon hook, product branch, or
+alternate parameter channel.
 
 ### R01: mid-wait EOF
 
@@ -100,17 +100,6 @@ Parent B can see it but `--mine` cannot claim it. B explicitly resumes it, becom
 in-memory owner, and turn 2 returns a unique echo token through the same live worker binding. The
 durable historical parent remains A. B then archives and the residue check is empty.
 
-### R04: one-use launch-token replay
-
-After its valid launch hello is consumed, the example worker receives
-`conformance:replay-launch-token` and opens a second connection using its retained launch token.
-The replay hello must receive the closed invalid/expired-token failure and must not alter the live
-reservation, row, roster, or first connection. The original turn returns the exact
-`replay_rejected` proof, then a second ordinary echo turn succeeds on that original binding.
-Evidence stores the replay failure code/data, both turn results, and the single-row projection; it
-never stores the token or a derivative. Unit tables also cover wrong purpose, product, expiry, and
-a second replay; the live R04 cell exercises only same-token replay.
-
 ### R-row deterministic tests
 
 - R01 pins start acknowledgement before EOF, one failure for the pending wait ID, no replay, and a
@@ -119,8 +108,11 @@ a second replay; the live R04 cell exercises only same-token replay.
   archive failure leaves a visible failed row.
 - R03 pins visibility without ownership mutation, detach without archive, explicit group-authorized
   handover, unchanged durable parent/native ID, and a second turn on the original binding.
-- R04 pins one successful consume, all later consumes rejected without side effects, no token bytes
-  in evidence, and continued use of the first connection.
+
+Launch-token replay is deliberately not a live reference-worker cell. The worker unsets its token
+before starting the native child and never reuses it. The daemon's deterministic token-authority
+table proves one successful consume and side-effect-free rejection of a second consume, wrong
+purpose, wrong product, and expiry. No token bytes or derivatives enter evidence.
 
 ## Integration size and paths
 
@@ -128,10 +120,10 @@ The draft fits five A-owned or existing paths:
 
 | Path | Purpose | Ceiling |
 | --- | --- | ---: |
-| `scripts/realproducts/matrix.go` | One W helper, four R cells, evidence/cleanup | `+220/-20` |
+| `scripts/realproducts/matrix.go` | One W helper, three R cells, evidence/cleanup | `+220/-20` |
 | `scripts/realproducts/matrix_test.go` | W capability/order/race tables and R lifecycle tables | `+190/-10` |
-| planned `cmd/example-peer-lane/main.go` | Two documented conformance inputs | `+25/-0` |
-| planned `cmd/example-peer-lane/main_test.go` | EOF and replay behavior | `+35/-0` |
+| planned `cmd/example-peer-lane/main.go` | Documented EOF conformance input | `+25/-0` |
+| planned `cmd/example-peer-lane/main_test.go` | EOF behavior | `+35/-0` |
 | the A acceptance-plan page | Cell inventory and evidence mapping | `+20/-0` |
 
 Harness/worker production is at most `+245/-20`; tests at most `+225/-10`; documentation at most
