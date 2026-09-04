@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/productcatalog"
@@ -292,8 +293,7 @@ func validID(raw json.RawMessage) bool {
 	case string:
 		return true
 	case json.Number:
-		number, ok := new(big.Rat).SetString(value.String())
-		return ok && number.IsInt() && new(big.Int).Abs(number.Num()).BitLen() <= 53
+		return validSafeInteger(value)
 	default:
 		return false
 	}
@@ -315,7 +315,7 @@ func validError(rpcErr *RPCError) bool {
 	}
 	switch rpcErr.Code {
 	case InvalidParams:
-		return validStringError(rpcErr, "Invalid params", "method", func(value string) bool { return value != "" })
+		return validStringError(rpcErr, "Invalid params", "method", validMethod)
 	case Unknown:
 		return validStringError(rpcErr, "Unknown session or target", "target", func(value string) bool { return strings.TrimSpace(value) != "" })
 	case Busy:
@@ -324,11 +324,11 @@ func validError(rpcErr *RPCError) bool {
 		return rpcErr.Message == "Operation not permitted" && validNotPermittedData(rpcErr.Data)
 	case UnsupportedVersion:
 		var data struct {
-			Supported *int `json:"supported"`
-			Received  *int `json:"received"`
+			Supported *int         `json:"supported"`
+			Received  *json.Number `json:"received"`
 		}
 		return rpcErr.Message == "Unsupported protocol version" && DecodeStrict(rpcErr.Data, &data) == nil &&
-			data.Supported != nil && *data.Supported == ProtocolVersion && data.Received != nil
+			data.Supported != nil && *data.Supported == ProtocolVersion && data.Received != nil && validSafeInteger(*data.Received)
 	case ProductUnavailable:
 		return validStringError(rpcErr, "Product not launchable", "product", func(value string) bool { return productcatalog.ValidateToken(value) == nil })
 	case ProductFailure:
@@ -352,13 +352,22 @@ func errorStringData(raw json.RawMessage, key string) (string, bool) {
 
 func validNotPermittedData(raw json.RawMessage) bool {
 	if method, ok := errorStringData(raw, "method"); ok {
-		return strings.TrimSpace(method) != ""
+		return validMethod(method)
 	}
 	if group, ok := errorStringData(raw, "group"); ok {
 		return sessionidentity.ValidGroup(group)
 	}
 	reason, ok := errorStringData(raw, "reason")
 	return ok && (reason == "no running turn" || reason == "steer unsupported")
+}
+
+func validMethod(value string) bool {
+	return value != "" && strings.IndexFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) < 0
+}
+
+func validSafeInteger(value json.Number) bool {
+	number, ok := new(big.Rat).SetString(value.String())
+	return ok && number.IsInt() && new(big.Int).Abs(number.Num()).BitLen() <= 53
 }
 
 func DecodeHello(raw json.RawMessage) (Report, int, error) {
