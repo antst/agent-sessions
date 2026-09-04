@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -366,8 +366,8 @@ func validMethod(value string) bool {
 }
 
 func validSafeInteger(value json.Number) bool {
-	number, ok := new(big.Rat).SetString(value.String())
-	return ok && number.IsInt() && new(big.Int).Abs(number.Num()).BitLen() <= 53
+	number, err := value.Float64()
+	return err == nil && math.Trunc(number) == number && math.Abs(number) <= 9007199254740991
 }
 
 func DecodeHello(raw json.RawMessage) (Report, int, error) {
