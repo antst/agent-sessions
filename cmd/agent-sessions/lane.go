@@ -96,7 +96,7 @@ func (c *hostCoordinator) handleLaneCommand(
 	if parsed.command == "doctor" && strings.TrimSpace(envelope.Host) == "" {
 		result, err := doctorLane(ctx, envelope.Product, envelope.Cwd)
 		if err != nil {
-			return nil, classifyLaneProductError(envelope.Product, err)
+			return nil, livepresence.ProductError(envelope.Product, err)
 		}
 		return json.Marshal(result)
 	}
@@ -156,16 +156,9 @@ func (c *hostCoordinator) dispatchLaneCommand(
 		err = fmt.Errorf("unsupported lane command %q", parsed.command)
 	}
 	if err != nil {
-		return nil, classifyLaneProductError(product, err)
+		return nil, livepresence.ProductError(product, err)
 	}
 	return json.Marshal(result)
-}
-
-func classifyLaneProductError(product string, err error) error {
-	if errors.Is(err, livepresence.ErrProductUnavailable) || errors.Is(err, productruntime.ErrUnavailable) || errors.Is(err, productruntime.ErrIncompatible) {
-		return livepresence.ProductError(product, err)
-	}
-	return err
 }
 
 func parseUnifiedLaneCommand(arguments []string) (parsedLaneCommand, error) { //nolint:gocyclo // The wrapper owns one deliberately small cross-product option layer.
@@ -786,13 +779,17 @@ func (c *hostCoordinator) archiveIdleLanesForParent(runtime *daemonpkg.Runtime, 
 }
 
 //nolint:gocyclo // Parent retirement handles each durable lane lifecycle state explicitly.
-func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID string) error {
+func (c *hostCoordinator) retireParentLanes(runtime *daemonpkg.Runtime, parentID string, requireDeparted ...bool) error {
 	type transition struct {
 		actor  *laneActor
 		state  string
 		cancel context.CancelFunc
 	}
 	c.mu.Lock()
+	if _, live := c.liveReports[parentID]; len(requireDeparted) != 0 && requireDeparted[0] && live {
+		c.mu.Unlock()
+		return nil
+	}
 	candidates := make([]transition, 0)
 	for _, actor := range c.lanes {
 		if actor.parentID != parentID || actor.state == "archived" || actor.state == "retiring" {

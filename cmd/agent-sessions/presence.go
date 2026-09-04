@@ -25,6 +25,7 @@ type livePresenceServer struct {
 	listener net.Listener
 	join     func(livepresence.Report)
 	leave    func(livepresence.Report)
+	post     func(livepresence.Report)
 	call     func(context.Context, livepresence.Report, string, string, json.RawMessage) (json.RawMessage, error)
 
 	mu       sync.Mutex
@@ -53,6 +54,7 @@ func startLivePresenceServer(
 	join func(livepresence.Report),
 	leave func(livepresence.Report),
 	call func(context.Context, livepresence.Report, string, string, json.RawMessage) (json.RawMessage, error),
+	postLeave ...func(livepresence.Report),
 ) (*livePresenceServer, error) {
 	endpoint := livePresenceEndpoint(stateRoot)
 	if err := os.MkdirAll(filepath.Dir(endpoint), 0o700); err != nil {
@@ -70,6 +72,9 @@ func startLivePresenceServer(
 	server := &livePresenceServer{
 		listener: listener, join: join, leave: leave, call: call,
 		current: map[string]*livepresence.Connection{}, changed: make(chan struct{}),
+	}
+	if len(postLeave) != 0 {
+		server.post = postLeave[0]
 	}
 	server.wg.Add(1)
 	go server.accept()
@@ -119,7 +124,7 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 		return
 	}
 	s.mu.Lock()
-	// Callbacks take coordinator c.mu and never reenter presence; keep map transitions linear through them.
+	// Join and synchronous leave take coordinator c.mu and never reenter presence; keep map transitions linear through them.
 	previous := s.current[report.UUID]
 	s.current[report.UUID] = rpc
 	s.signalChangedLocked()
@@ -155,6 +160,9 @@ func (s *livePresenceServer) serve(connection net.Conn) {
 		s.leave(rpc.Report())
 	}
 	s.mu.Unlock()
+	if current && s.post != nil {
+		s.post(report)
+	}
 }
 
 func (s *livePresenceServer) handleRequest(ctx context.Context, connection *livepresence.Connection, frame livepresence.Frame) {
@@ -272,9 +280,10 @@ func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report li
 	}
 	c.mu.Unlock()
 	c.syncLiveSessions(runtime)
-	if departed {
-		c.archiveIdleLanesForParent(runtime, report.UUID)
-	}
+}
+
+func (c *hostCoordinator) retireDepartedLiveSession(runtime *daemonpkg.Runtime, report livepresence.Report) {
+	_ = c.retireParentLanes(runtime, report.UUID, true)
 }
 
 func (c *hostCoordinator) syncLiveSessions(runtime *daemonpkg.Runtime) {
