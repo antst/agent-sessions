@@ -15,6 +15,7 @@ import (
 	"time"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	federationpkg "github.com/antst/agent-sessions/internal/federation"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/pathidentity"
@@ -95,7 +96,7 @@ func (c *hostCoordinator) handleLaneCommand(
 	if parsed.command == "doctor" && strings.TrimSpace(envelope.Host) == "" {
 		result, err := doctorLane(ctx, envelope.Product, envelope.Cwd)
 		if err != nil {
-			return nil, err
+			return nil, classifyLaneProductError(envelope.Product, err)
 		}
 		return json.Marshal(result)
 	}
@@ -155,9 +156,16 @@ func (c *hostCoordinator) dispatchLaneCommand(
 		err = fmt.Errorf("unsupported lane command %q", parsed.command)
 	}
 	if err != nil {
-		return nil, err
+		return nil, classifyLaneProductError(product, err)
 	}
 	return json.Marshal(result)
+}
+
+func classifyLaneProductError(product string, err error) error {
+	if errors.Is(err, livepresence.ErrProductUnavailable) || errors.Is(err, productruntime.ErrUnavailable) || errors.Is(err, productruntime.ErrIncompatible) {
+		return livepresence.ProductError(product, err)
+	}
+	return err
 }
 
 func parseUnifiedLaneCommand(arguments []string) (parsedLaneCommand, error) { //nolint:gocyclo // The wrapper owns one deliberately small cross-product option layer.
@@ -403,9 +411,14 @@ func (c *hostCoordinator) startLane(ctx context.Context, runtime *daemonpkg.Runt
 		}
 	}
 	c.mu.Lock()
-	if conflict := c.liveLaneNameLocked(runtime, parent, options.name); conflict {
+	conflict, conflictErr := c.liveLaneNameLocked(runtime, parent, options.name)
+	if conflictErr != nil {
 		c.mu.Unlock()
-		return nil, livepresence.ClassifyError(livepresence.ErrBusy, fmt.Errorf("visible lane name %q is already live", options.name))
+		return nil, conflictErr
+	}
+	if conflict != "" {
+		c.mu.Unlock()
+		return nil, livepresence.BusyError(conflict, fmt.Errorf("visible lane name %q is already live", options.name))
 	}
 	c.lanes[id] = actor
 	c.mu.Unlock()
@@ -456,7 +469,7 @@ func (c *hostCoordinator) resumeLane(ctx context.Context, runtime *daemonpkg.Run
 	}
 	if actor.state == "running" {
 		c.mu.Unlock()
-		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("collect or interrupt the active lane turn before resume"))
+		return nil, livepresence.BusyError(actor.id, errors.New("collect or interrupt the active lane turn before resume"))
 	}
 	prepareLaneTurnLocked(actor)
 	actor.parentID = parent.ID
@@ -535,7 +548,7 @@ func (c *hostCoordinator) waitLaneActor(ctx context.Context, runtime *daemonpkg.
 	c.mu.Lock()
 	if actor.collecting {
 		c.mu.Unlock()
-		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("lane already has an active collector"))
+		return nil, livepresence.BusyError(actor.id, errors.New("lane already has an active collector"))
 	}
 	actor.collecting = true
 	c.mu.Unlock()
@@ -548,7 +561,7 @@ func (c *hostCoordinator) waitLaneActor(ctx context.Context, runtime *daemonpkg.
 	state, done := actor.state, actor.done
 	if state == "idle" || state == "archived" || done == nil {
 		c.mu.Unlock()
-		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("lane has no live turn result"))
+		return nil, livepresence.BusyError(actor.id, errors.New("lane has no live turn result"))
 	}
 	c.mu.Unlock()
 	select {
@@ -612,7 +625,7 @@ func (c *hostCoordinator) interruptLane(runtime *daemonpkg.Runtime, parent daemo
 	}
 	c.mu.Unlock()
 	if !running {
-		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("lane has no active turn"))
+		return nil, livepresence.BusyError(actor.id, errors.New("lane has no active turn"))
 	}
 	if err := c.interruptLaneNative(actor); err != nil {
 		return nil, err
@@ -669,7 +682,7 @@ func (c *hostCoordinator) steerLane(
 		return nil, fmt.Errorf("%w: lane steer changed native session from %q to %q", productruntime.ErrAmbiguousSession, turn.NativeSessionID, accepted.NativeSessionID)
 	}
 	return map[string]any{
-		"type": "turn.steered", "product": product, "session_id": sessionID,
+		"type": "turn.steered", "session_id": sessionID,
 		"turn_id": turnID, "native_message_id": accepted.NativeMessageID,
 	}, nil
 }
@@ -707,7 +720,7 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 	}
 	if actor.state == "running" {
 		c.mu.Unlock()
-		return nil, livepresence.ClassifyError(livepresence.ErrBusy, errors.New("refuse to archive a lane with an active turn"))
+		return nil, livepresence.BusyError(actor.id, errors.New("refuse to archive a lane with an active turn"))
 	}
 	actor.state = "archived"
 	c.mu.Unlock()
@@ -1263,25 +1276,25 @@ func (c *hostCoordinator) resolveLaneActor(runtime *daemonpkg.Runtime, parent da
 		matches = append(matches, actor)
 	}
 	if len(matches) == 0 {
-		return nil, livepresence.ClassifyError(livepresence.ErrUnknown, errors.New("lane was not found"))
+		return nil, &federationpkg.UnknownTargetError{Target: target, Detail: "lane was not found"}
 	}
 	if len(matches) > 1 {
-		return nil, livepresence.ClassifyError(livepresence.ErrUnknown, errors.New("lane name is ambiguous; use UUID"))
+		return nil, &federationpkg.UnknownTargetError{Target: target, Detail: "lane name is ambiguous; use an exact native session id"}
 	}
 	return matches[0], nil
 }
 
-func (c *hostCoordinator) liveLaneNameLocked(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, name string) bool {
+func (c *hostCoordinator) liveLaneNameLocked(runtime *daemonpkg.Runtime, parent daemonpkg.ManagedAttachment, name string) (string, error) {
 	parentGroups, err := c.attachmentVisibilityGroups(runtime, parent)
 	if err != nil {
-		return true
+		return "", err
 	}
 	for _, a := range c.lanes {
 		if a.name == name && a.state != "archived" && (a.parentID == parent.ID || groupsIntersect(a.groups, parentGroups)) {
-			return true
+			return a.id, nil
 		}
 	}
-	return false
+	return "", nil
 }
 
 func (c *hostCoordinator) anchorLaneGroups(runtime *daemonpkg.Runtime, groups []string, parent daemonpkg.ManagedAttachment, laneID string) ([]string, error) {

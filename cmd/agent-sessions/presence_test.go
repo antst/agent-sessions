@@ -25,12 +25,16 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 		err    error
 		code   int
 		reason string
+		data   string
 	}{
-		{name: "unknown", err: fmt.Errorf("%w: missing", federationpkg.ErrUnknownTarget), code: livepresence.Unknown},
-		{name: "busy", err: livepresence.ClassifyError(livepresence.ErrBusy, errors.New("exact busy detail")), code: livepresence.Busy},
+		{name: "unknown", err: &federationpkg.UnknownTargetError{Target: "missing", Detail: "missing"}, code: livepresence.Unknown, data: `{"target":"missing"}`},
+		{name: "invalid", err: livepresence.ClassifyError(livepresence.ErrInvalidParams, errors.New("bad")), code: livepresence.InvalidParams, data: `{"method":"lane.steer"}`},
+		{name: "not permitted", err: livepresence.ClassifyError(livepresence.ErrNotPermitted, errors.New("denied")), code: livepresence.NotPermitted, data: `{"method":"lane.steer"}`},
+		{name: "busy", err: livepresence.BusyError("busy-native", errors.New("exact busy detail")), code: livepresence.Busy, data: `{"uuid":"busy-native"}`},
 		{name: "no running turn", err: livepresence.ClassifyError(livepresence.ErrNoRunningTurn, errors.New("exact turn detail")), code: livepresence.NotPermitted, reason: "no running turn"},
 		{name: "steer unsupported", err: productruntime.ErrUnsupportedSteer, code: livepresence.NotPermitted, reason: "steer unsupported"},
-		{name: "unavailable", err: productruntime.ErrUnavailable, code: livepresence.ProductUnavailable},
+		{name: "unavailable", err: livepresence.ProductError("qwen", productruntime.ErrUnavailable), code: livepresence.ProductUnavailable, data: `{"product":"qwen"}`},
+		{name: "ambiguous is not busy", err: productruntime.ErrAmbiguousSession, code: livepresence.ProductFailure},
 		{name: "product failure", err: errors.New("product exact failure"), code: livepresence.ProductFailure},
 	}
 	for _, test := range tests {
@@ -48,6 +52,9 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 			if test.reason != "" && !strings.Contains(string(frame.Error.Data), `"reason":"`+test.reason+`"`) {
 				t.Fatalf("error data = %s", frame.Error.Data)
 			}
+			if test.data != "" && string(frame.Error.Data) != test.data {
+				t.Fatalf("error data = %s, want %s", frame.Error.Data, test.data)
+			}
 		})
 	}
 	structured := livepresence.NewError(livepresence.ProductFailure, "native exact failure", map[string]any{"detail": "native exact failure"})
@@ -55,11 +62,15 @@ func TestLiveRPCErrorTableClassifiesWithoutMaskingProductFailures(t *testing.T) 
 	if frame.Error == nil || string(frame.Error.Data) != `{"detail":"native exact failure"}` {
 		t.Fatalf("structured native failure was changed: %+v", frame.Error)
 	}
-	frame = livepresence.FailureFromError(json.RawMessage(`3`), "message.send", &federationpkg.UnknownTargetError{
-		Target: "self", Detail: "no live peer session or lane matching self",
-	})
-	if frame.Error == nil || frame.Error.Code != livepresence.Unknown || string(frame.Error.Data) != `{"target":"self"}` {
-		t.Fatalf("unknown target data = %+v", frame.Error)
+	for _, malformed := range []*livepresence.RPCError{
+		{Code: livepresence.Busy, Message: "Session busy", Data: json.RawMessage(`{"uuid":"bad/id"}`)},
+		{Code: livepresence.Busy, Message: "busy", Data: json.RawMessage(`{"uuid":"busy-native"}`)},
+		{Code: livepresence.NotPermitted, Message: "Operation not permitted", Data: json.RawMessage(`{"method":"lane.steer","group":"team"}`)},
+		{Code: livepresence.ProductUnavailable, Message: "Product not launchable", Data: json.RawMessage(`{"product":"Bad"}`)},
+	} {
+		if got := livepresence.FailureFromError(json.RawMessage(`3`), "lane.steer", malformed); got.Error == nil || got.Error.Code != livepresence.ProductFailure || !strings.Contains(string(got.Error.Data), `"agent_sessions_bug_report"`) {
+			t.Fatalf("malformed structured error was relayed: %+v", got.Error)
+		}
 	}
 	frame = livepresence.FailureFromError(json.RawMessage(`4`), "message.send", &federationpkg.GroupNotPermittedError{Group: "other"})
 	if frame.Error == nil || frame.Error.Code != livepresence.NotPermitted || string(frame.Error.Data) != `{"group":"other"}` {
@@ -73,14 +84,42 @@ func TestLiveSessionReconnectCadenceIsTwoSeconds(t *testing.T) {
 	}
 }
 
-func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
+func testPresenceServer(t *testing.T) *livePresenceServer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	server, err := startLivePresenceServer(ctx, t.TempDir(), func(livepresence.Report) {}, func(livepresence.Report) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
+	return server
+}
+
+func openTestPresence(t *testing.T, server *livePresenceServer, identity string) (net.Conn, *json.Encoder, *json.Decoder) {
+	t.Helper()
+	connection, err := net.Dial("unix", server.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
+	if identity != "" {
+		if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
+			"protocol": 1, "uuid": identity, "name": identity, "groups": []string{}, "product": "future", "info": map[string]string{},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		var response livepresence.Frame
+		if err := decoder.Decode(&response); err != nil || response.Error != nil {
+			t.Fatalf("hello = %+v, %v", response, err)
+		}
+	}
+	return connection, encoder, decoder
+}
+
+func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
+	server := testPresenceServer(t)
 	for _, line := range []string{
 		`{"uuid":"legacy","name":"legacy","groups":[],"product":"codex"}`,
 		`[{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{}}]`,
@@ -102,22 +141,31 @@ func TestLivePresenceRejectsEveryPreHelloOrNonRequestFrame(t *testing.T) {
 	}
 }
 
-func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(livepresence.Report) {}, func(livepresence.Report) {}, nil)
-	if err != nil {
-		t.Fatal(err)
+func TestLivePresenceClosesSecondHelloAndPostHandshakeNotification(t *testing.T) {
+	server := testPresenceServer(t)
+	for name, next := range map[string]map[string]any{
+		"second hello": {"jsonrpc": "2.0", "id": "again", "method": "session.hello", "params": map[string]any{}},
+		"notification": {"jsonrpc": "2.0", "method": "session.update", "params": map[string]any{"name": "after", "info": map[string]string{}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			identityName := strings.ReplaceAll(name, " ", "-")
+			_, encoder, decoder := openTestPresence(t, server, "native-"+identityName)
+			var response livepresence.Frame
+			if err := encoder.Encode(next); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
+				t.Fatalf("post-handshake %s was answered: %+v, %v", name, response, err)
+			}
+		})
 	}
-	t.Cleanup(func() { _ = server.Close() })
+}
 
-	connection, err := net.Dial("unix", server.listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
+func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
+	server := testPresenceServer(t)
+	connection, encoder, decoder := openTestPresence(t, server, "")
 	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session.hello", "params": map[string]any{
-		"protocol": 2, "uuid": "version", "name": "", "groups": []string{}, "product": "future", "info": map[string]string{},
+		"protocol": 2, "uuid": "version", "name": "version", "groups": []string{}, "product": "future", "info": map[string]string{},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,22 +177,8 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 		t.Fatalf("unsupported-version connection remained open: %v", err)
 	}
 	_ = connection.Close()
-
-	connection, err = net.Dial("unix", server.listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Close()
-	encoder, decoder = json.NewEncoder(connection), json.NewDecoder(connection)
-	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
-		"protocol": 1, "uuid": "update", "name": "before", "groups": []string{"team"}, "product": "future", "info": map[string]string{},
-	}}); err != nil {
-		t.Fatal(err)
-	}
+	_, encoder, decoder = openTestPresence(t, server, "update")
 	response = livepresence.Frame{}
-	if err := decoder.Decode(&response); err != nil || response.Error != nil {
-		t.Fatalf("hello response = %+v, %v", response, err)
-	}
 	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "update", "method": "session.update", "params": map[string]any{
 		"name": "after", "info": map[string]string{}, "groups": []string{"other"},
 	}}); err != nil {
@@ -153,6 +187,24 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	response = livepresence.Frame{}
 	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams {
 		t.Fatalf("group-update response = %+v, %v", response, err)
+	}
+}
+
+func TestLivePresenceAnswersInvalidHelloThenCloses(t *testing.T) {
+	server := testPresenceServer(t)
+	_, encoder, decoder := openTestPresence(t, server, "")
+	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
+		"protocol": 1, "uuid": "native id", "name": "worker", "groups": []string{}, "product": "future", "info": map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var response livepresence.Frame
+	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams ||
+		string(response.Error.Data) != `{"method":"session.hello"}` {
+		t.Fatalf("invalid hello response = %+v, %v", response, err)
+	}
+	if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
+		t.Fatalf("invalid hello connection remained open: %v", err)
 	}
 }
 
@@ -166,6 +218,51 @@ func TestLiveHelloCapabilitiesAreClosedAndOnlyAdvertiseTrueLaneSupport(t *testin
 	report, protocol, err := livepresence.DecodeHello(json.RawMessage(fmt.Sprintf(base, `{"lane":true}`)))
 	if err != nil || protocol != 1 || !report.Capabilities.Lane {
 		t.Fatalf("lane hello = %+v, protocol=%d, err=%v", report, protocol, err)
+	}
+}
+
+func TestLiveHelloRejectsEveryInvalidIdentityShape(t *testing.T) {
+	base := livepresence.Report{UUID: "ses_native", Name: "Native Worker/One", Groups: []string{"team!", "session:host/ses_native"}, Product: "future", Info: map[string]string{}}
+	for name, mutate := range map[string]func(*livepresence.Report){
+		"uuid whitespace":  func(value *livepresence.Report) { value.UUID = "native id" },
+		"uuid control":     func(value *livepresence.Report) { value.UUID = "native\n" },
+		"uuid slash":       func(value *livepresence.Report) { value.UUID = "native/id" },
+		"uuid bound":       func(value *livepresence.Report) { value.UUID = strings.Repeat("u", 129) },
+		"name control":     func(value *livepresence.Report) { value.Name = "native\tworker" },
+		"name bound":       func(value *livepresence.Report) { value.Name = strings.Repeat("n", 257) },
+		"group blank":      func(value *livepresence.Report) { value.Groups = []string{""} },
+		"group whitespace": func(value *livepresence.Report) { value.Groups = []string{"two words"} },
+		"group control":    func(value *livepresence.Report) { value.Groups = []string{"team\n"} },
+		"group slash":      func(value *livepresence.Report) { value.Groups = []string{"team/one"} },
+		"group bad anchor": func(value *livepresence.Report) { value.Groups = []string{"session:host"} },
+		"group bound":      func(value *livepresence.Report) { value.Groups = []string{strings.Repeat("g", 193)} },
+		"product token":    func(value *livepresence.Report) { value.Product = "Future" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := livepresence.CloneReport(base)
+			mutate(&value)
+			raw, err := json.Marshal(struct {
+				Protocol int `json:"protocol"`
+				livepresence.Report
+			}{1, value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := livepresence.DecodeHello(raw); err == nil {
+				t.Fatalf("invalid hello accepted: %s", raw)
+			}
+		})
+	}
+}
+
+func TestLiveUpdateKeepsTheNameIdentityShape(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"name":"bad\nname","info":{}}`),
+		json.RawMessage(`{"name":"` + strings.Repeat("n", 257) + `","info":{}}`),
+	} {
+		if _, _, err := livepresence.DecodeUpdate(raw); err == nil {
+			t.Fatalf("invalid update accepted: %s", raw)
+		}
 	}
 }
 
@@ -220,6 +317,40 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 		}
 	case <-time.After(time.Second):
 		t.Fatal("replacement close was not observed")
+	}
+}
+
+func TestDisplacedLivePresenceUpdateIsRejectedWithoutMutatingReplacement(t *testing.T) {
+	oldLocal, oldRemote := net.Pipe()
+	defer oldLocal.Close()
+	defer oldRemote.Close()
+	newLocal, newRemote := net.Pipe()
+	defer newLocal.Close()
+	defer newRemote.Close()
+	oldConnection := livepresence.NewConnection(oldLocal)
+	oldConnection.SetReport(livepresence.Report{UUID: "same", Name: "old", Product: "future", Groups: []string{}, Info: map[string]string{}})
+	newConnection := livepresence.NewConnection(newLocal)
+	newConnection.SetReport(livepresence.Report{UUID: "same", Name: "replacement", Product: "future", Groups: []string{}, Info: map[string]string{}})
+	server := &livePresenceServer{current: map[string]*livepresence.Connection{"same": newConnection}}
+	params := json.RawMessage(`{"name":"displaced","info":{"cwd":"/wrong"}}`)
+	done := make(chan struct{})
+	go func() {
+		server.handleRequest(context.Background(), oldConnection, livepresence.Frame{
+			JSONRPC: "2.0", ID: json.RawMessage(`"update"`), Method: "session.update", Params: params,
+		})
+		close(done)
+	}()
+	var response livepresence.Frame
+	if err := json.NewDecoder(oldRemote).Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.NotPermitted ||
+		string(response.Error.Data) != `{"method":"session.update"}` {
+		t.Fatalf("displaced update response = %+v, %v", response, err)
+	}
+	<-done
+	if got := oldConnection.Report(); got.Name != "old" || got.Info["cwd"] != "" {
+		t.Fatalf("displaced report mutated = %+v", got)
+	}
+	if got := newConnection.Report(); got.Name != "replacement" || got.Info["cwd"] != "" {
+		t.Fatalf("replacement report mutated = %+v", got)
 	}
 }
 
@@ -350,7 +481,7 @@ func TestLivePresenceClientProjectsNameOnTheSameConnection(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("initial live report was not received")
 	}
-	report.Name = "product title"
+	report.Name = "product-title"
 	updateCtx, stopUpdate := context.WithTimeout(ctx, 2*time.Second)
 	defer stopUpdate()
 	if err := client.UpdateReport(updateCtx, report); err != nil {
@@ -358,7 +489,7 @@ func TestLivePresenceClientProjectsNameOnTheSameConnection(t *testing.T) {
 	}
 	select {
 	case updated := <-joined:
-		if updated.Name != "product title" {
+		if updated.Name != "product-title" {
 			t.Fatalf("updated name = %q", updated.Name)
 		}
 	case <-time.After(2 * time.Second):
@@ -373,8 +504,14 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) {
 		joined <- report
 	}, func(livepresence.Report) {}, func(_ context.Context, report livepresence.Report, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
-		if report.UUID != "session-rpc" || requestID != "session.tool" || method != "peers.list" {
+		if report.UUID != "session-rpc" || method != "peers.list" {
 			t.Fatalf("server call = %+v %q", report, method)
+		}
+		if requestID == "session.inactive" {
+			return nil, daemonpkg.InactiveControlError()
+		}
+		if requestID != "session.tool" {
+			t.Fatalf("server request id = %q", requestID)
 		}
 		return append(json.RawMessage(nil), params...), nil
 	})
@@ -386,7 +523,7 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 		UUID: "session-rpc", Name: "rpc", Product: "codex",
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if method != "message.deliver" {
-			t.Fatalf("client method = %q", method)
+			return nil, fmt.Errorf("unexpected product callback %q", method)
 		}
 		return append(json.RawMessage(nil), params...), nil
 	})
@@ -406,9 +543,27 @@ func TestLivePresenceConnectionCarriesCallsInBothDirections(t *testing.T) {
 	if err != nil || !strings.Contains(string(fromSession), "list_peers") {
 		t.Fatalf("session-to-daemon call = %s, %v", fromSession, err)
 	}
+	if _, err = client.Call(ctx, "inactive", "peers.list", map[string]any{}); err == nil {
+		t.Fatal("inactive live session call succeeded")
+	} else if rpcErr, ok := err.(*livepresence.RPCError); !ok || rpcErr.Code != livepresence.Unknown || string(rpcErr.Data) != `{"target":"session-rpc"}` {
+		t.Fatalf("inactive live session error = %#v", err)
+	}
 	fromDaemon, err := server.Call(ctx, "session-rpc", "delivery", "message.deliver", map[string]string{"body": "hello"})
 	if err != nil || !strings.Contains(string(fromDaemon), "hello") {
 		t.Fatalf("daemon-to-session call = %s, %v", fromDaemon, err)
+	}
+	if _, err := server.Call(ctx, "session-rpc", "forbidden", "lane.turn.start", map[string]string{}); err == nil {
+		t.Fatal("non-lane session received a lane method")
+	} else if rpcErr, ok := err.(*livepresence.RPCError); !ok || rpcErr.Code != livepresence.NotPermitted || string(rpcErr.Data) != `{"method":"lane.turn.start"}` {
+		t.Fatalf("non-lane method error = %#v", err)
+	}
+	server.mu.Lock()
+	connection := server.current["session-rpc"]
+	server.mu.Unlock()
+	if _, err := connection.Call(ctx, "daemon.bypass", "peers.list", map[string]string{}); err == nil {
+		t.Fatal("client accepted a daemon method outside its allowlist")
+	} else if rpcErr, ok := err.(*livepresence.RPCError); !ok || rpcErr.Code != livepresence.NotPermitted || string(rpcErr.Data) != `{"method":"peers.list"}` {
+		t.Fatalf("client allowlist error = %#v", err)
 	}
 }
 
@@ -425,10 +580,13 @@ func TestLivePresencePublishesLaneCapabilityAndServesLaneCalls(t *testing.T) {
 		UUID: "dsh-native", Name: "worker", Groups: []string{"team"}, Product: "dsh", Info: map[string]string{},
 		Capabilities: livepresence.Capabilities{Lane: true},
 	}, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
-		if method != "lane.turn.start" || !strings.Contains(string(params), `"input_id":"input"`) {
-			t.Fatalf("lane request = %q %s", method, params)
+		if method == "lane.turn.start" {
+			if !strings.Contains(string(params), `"input_id":"input"`) {
+				t.Fatalf("lane request = %q %s", method, params)
+			}
+			return json.RawMessage(`{"native_message_id":"product-message"}`), nil
 		}
-		return json.RawMessage(`{"native_message_id":"product-message"}`), nil
+		return json.RawMessage(`{}`), nil
 	})
 	select {
 	case report := <-joined:
@@ -448,6 +606,16 @@ func TestLivePresencePublishesLaneCapabilityAndServesLaneCalls(t *testing.T) {
 	})
 	if err != nil || !strings.Contains(string(result), "product-message") {
 		t.Fatalf("lane response = %s, %v", result, err)
+	}
+	for _, method := range []string{"lane.turn.wait", "lane.turn.interrupt", "lane.session.archive"} {
+		if _, err := server.Call(ctx, "dsh-native", method, method, map[string]string{}); err != nil {
+			t.Fatalf("allowed %s = %v", method, err)
+		}
+	}
+	if _, err := server.Call(ctx, "dsh-native", "forbidden", "peers.list", map[string]string{}); err == nil {
+		t.Fatal("lane session received a non-session method")
+	} else if rpcErr, ok := err.(*livepresence.RPCError); !ok || rpcErr.Code != livepresence.NotPermitted || string(rpcErr.Data) != `{"method":"peers.list"}` {
+		t.Fatalf("lane forbidden-method error = %#v", err)
 	}
 }
 

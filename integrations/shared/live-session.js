@@ -179,7 +179,10 @@ class LiveSessionClient extends EventEmitter {
       return;
     }
     Promise.resolve(this.laneHandler({ nativeSessionID: session.id, method: frame.method, params: frame.params }))
-      .then((result) => this._write(session, { jsonrpc: "2.0", id: frame.id, result: result ?? {} }))
+      .then((result) => {
+        if (!validLaneSessionResult(frame.method, result)) throw new Error(`invalid ${frame.method} native result`);
+        this._write(session, { jsonrpc: "2.0", id: frame.id, result });
+      })
       .catch((error) => this._write(session, { jsonrpc: "2.0", id: frame.id, error: wireError(error) }));
   }
 
@@ -279,9 +282,22 @@ function validCapabilities(value) {
   return exactKeys(value, ["lane"]) && (!("lane" in value) || value.lane === true);
 }
 function validID(value) { return typeof value === "string" || Number.isFinite(value); }
+function boundedWireText(value, maximum) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maximum && !/[\s/\p{Cc}]/u.test(value); }
+function validWireProduct(value) { return typeof value === "string" && Buffer.byteLength(value, "utf8") <= 64 && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9]))*$/u.test(value); }
+function validWireGroup(value) { if (typeof value !== "string" || !value.startsWith("session:")) return boundedWireText(value, 192); const [host, nativeID, extra] = value.slice(8).split("/"); return extra === undefined && Buffer.byteLength(value, "utf8") <= 192 && boundedWireText(nativeID, 128) && typeof host === "string" && Buffer.byteLength(host, "utf8") <= 128 && /^[\p{L}\p{N}._-]+$/u.test(host); }
+function validErrorStringData(value, key, validate = text) { return exactKeys(value.data, [key]) && validate(value.data[key]); }
+function validJSON(value) { try { return JSON.stringify(value) !== undefined; } catch { return false; } }
 function validError(value) {
-  return exactKeys(value, ["code", "message", "data"]) &&
-    [-32602, -32001, -32002, -32003, -32004, -32005, -32006].includes(value.code) && typeof value.message === "string";
+  if (!exactKeys(value, ["code", "message", "data"]) || typeof value.message !== "string" || value.message.trim() === "") return false;
+  if (value.code === -32006) return !("data" in value) || validJSON(value.data);
+  if (value.code === -32602) return value.message === "Invalid params" && validErrorStringData(value, "method");
+  if (value.code === -32001) return value.message === "Unknown session or target" && validErrorStringData(value, "target");
+  if (value.code === -32002) return value.message === "Session busy" && validErrorStringData(value, "uuid", (item) => boundedWireText(item, 128));
+  if (value.code === -32004) return value.message === "Unsupported protocol version" && exactKeys(value.data, ["supported", "received"]) && value.data.supported === 1 && Number.isSafeInteger(value.data.received);
+  if (value.code === -32005) return value.message === "Product not launchable" && validErrorStringData(value, "product", validWireProduct);
+  if (value.code !== -32003 || value.message !== "Operation not permitted") return false;
+  return validErrorStringData(value, "method") || validErrorStringData(value, "group", validWireGroup) ||
+    validErrorStringData(value, "reason", (item) => item === "no running turn" || item === "steer unsupported");
 }
 function wireError(value) {
   if (validError(value)) return value;
@@ -317,11 +333,19 @@ function validLaneSessionRequest(method, params) {
   }
   return exactKeys(params, []) && Object.keys(params).length === 0;
 }
+function validLaneSessionResult(method, result) {
+  if (method === "lane.turn.start") return exactKeys(result, ["native_message_id"]) && text(result.native_message_id);
+  if (method === "lane.turn.wait") {
+	return exactKeys(result, ["outcome", "result", "reason"]) &&
+		["completed", "interrupted", "failed"].includes(result.outcome) && typeof result.result === "string" && result.reason !== undefined;
+  }
+  return (method === "lane.turn.interrupt" || method === "lane.session.archive") && exactKeys(result, []);
+}
 function renderDelivery(payload) {
   if (!payload || !validDelivery({ message_id: payload.messageID, from: payload.from, body: payload.body })) throw new Error("live message delivery is invalid");
   const from = payload.from.name || payload.from.uuid;
   const safeFrom = String(from).replace(/[<>"\r\n]/gu, "");
-  const metadata = JSON.stringify({ fromProduct: payload.from.product, messageId: payload.messageID, groups: payload.from.groups });
+  const metadata = JSON.stringify({ fromProduct: payload.from.product, messageId: payload.messageID, groups: payload.from.groups }).replace(/[<>&\u2028\u2029]/gu, (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`);
   return `<cross-session-message from="${safeFrom}" from-session="${payload.from.uuid.replace(/[<>"\r\n]/gu, "")}">\n[codex-peer-metadata: ${metadata}]\n${payload.body.replace(/<\/cross-session-message/giu, "<\\/cross-session-message")}\n</cross-session-message>`;
 }
 function text(value) { return typeof value === "string" && value.trim() === value && value.length > 0 && !/[\0\r\n]/u.test(value); }

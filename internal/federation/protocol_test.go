@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/antst/agent-sessions/internal/sessionidentity"
 	"time"
 )
 
@@ -163,6 +165,18 @@ func TestWirePeerProductDoesNotRequireCatalogMembership(t *testing.T) {
 	}
 }
 
+func TestBuildPeerCarriesProductNativeNameVerbatim(t *testing.T) {
+	for _, name := range []string{"", " / native title "} {
+		peer, err := BuildPeer("host-a", "host-a", "native-id", name, "idle", "/work", "codex", "default", "codex:native-id", "", []string{"project"})
+		if err != nil || peer.Name != name {
+			t.Fatalf("BuildPeer(%q) = name %q, err %v", name, peer.Name, err)
+		}
+		if name == "" && peer.DisplayName != qualifiedName("native-id", "host-a") {
+			t.Fatalf("empty-name display fallback = %q", peer.DisplayName)
+		}
+	}
+}
+
 func TestHelloBoundsEveryRosterIdentityField(t *testing.T) {
 	valid := Message{
 		Type: "hello", Version: ProtocolVersion, HostID: "host-a", HostName: "workstation", Build: "build-1",
@@ -191,7 +205,7 @@ func TestWirePeerBoundsEveryStringFieldAndCollection(t *testing.T) {
 		"id":                func(peer *Peer) { peer.ID = strings.Repeat("i", maxPeerIDBytes+1) },
 		"session id":        func(peer *Peer) { peer.SessionID = strings.Repeat("s", maxSessionIDBytes+1) },
 		"global id":         func(peer *Peer) { peer.GlobalID = strings.Repeat("g", maxPeerGlobalIDBytes+1) },
-		"name":              func(peer *Peer) { peer.Name = strings.Repeat("n", maxPeerNameBytes+1) },
+		"name":              func(peer *Peer) { peer.Name = strings.Repeat("n", sessionidentity.NameMaxBytes+1) },
 		"display name":      func(peer *Peer) { peer.DisplayName = strings.Repeat("d", maxPeerDisplayNameBytes+1) },
 		"host id":           func(peer *Peer) { peer.HostID = strings.Repeat("h", maxHostIDBytes+1) },
 		"host name":         func(peer *Peer) { peer.HostName = strings.Repeat("h", maxHostNameBytes+1) },
@@ -209,6 +223,28 @@ func TestWirePeerBoundsEveryStringFieldAndCollection(t *testing.T) {
 			mutate(&peer)
 			if err := validateWirePeer(peer, "host-a"); err == nil {
 				t.Fatalf("unbounded peer %s was accepted", label)
+			}
+		})
+	}
+}
+
+func TestWirePeerRejectsEveryInvalidLiveIdentityShape(t *testing.T) {
+	valid := mustTestPeer(t, "host-a", "session", "codex", "project")
+	for name, mutate := range map[string]func(*Peer){
+		"session whitespace": func(peer *Peer) { peer.SessionID = "session id" },
+		"session control":    func(peer *Peer) { peer.SessionID = "session\n" },
+		"session slash":      func(peer *Peer) { peer.SessionID = "session/id" },
+		"name control":       func(peer *Peer) { peer.Name = "native\tworker" },
+		"group blank":        func(peer *Peer) { peer.Groups[0] = "" },
+		"group whitespace":   func(peer *Peer) { peer.Groups[0] = "two words" },
+		"group control":      func(peer *Peer) { peer.Groups[0] = "team\n" },
+		"group slash":        func(peer *Peer) { peer.Groups[0] = "team/one" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			peer := clonePeer(valid)
+			mutate(&peer)
+			if err := validateWirePeer(peer, "host-a"); err == nil {
+				t.Fatalf("invalid peer accepted: %+v", peer)
 			}
 		})
 	}
