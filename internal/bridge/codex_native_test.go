@@ -940,7 +940,7 @@ func TestCodexNativeProjectsNestedThreadStartedIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	native.observeNotification(rpcNotification{Method: "thread/started", Params: params})
-	if observed.Kind != "thread/started" || observed.ThreadID != "00000000-0000-0000-0000-00000000c023" {
+	if observed.Kind != "thread/started" || observed.ThreadID != "00000000-0000-0000-0000-00000000c023" || observed.Cwd != "/native/cwd" {
 		t.Fatalf("thread/started event = %+v", observed)
 	}
 }

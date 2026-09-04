@@ -14,7 +14,6 @@ import (
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
 	"github.com/antst/agent-sessions/internal/launcher"
 	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/procinfo"
 	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
 	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
 	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
@@ -261,32 +260,96 @@ func TestCodexNativeNameEventUpdatesOnlyTheLiveCodexPeer(t *testing.T) {
 	}
 }
 
-func TestCodexPendingLaunchMatchesOnlyTheProductSelectedThread(t *testing.T) {
+func TestCodexUUIDv7UnixMilli(t *testing.T) {
+	tests := []struct {
+		name, id, wantError string
+		want                uint64
+	}{
+		{name: "lowercase", id: "00000001-0002-7000-8000-000000000000", want: 1<<16 | 2},
+		{name: "variant 9", id: "00000001-0002-7000-9000-000000000000", want: 1<<16 | 2},
+		{name: "uppercase", id: "0000000A-000B-7000-A000-ABCDEFABCDEF", want: 10<<16 | 11},
+		{name: "variant b", id: "00000001-0002-7000-b000-000000000000", want: 1<<16 | 2},
+		{name: "full 48 bit", id: "ffffffff-ffff-7fff-bfff-ffffffffffff", want: 1<<48 - 1},
+		{name: "length", id: "bad", wantError: "canonical 8-4-4-4-12"},
+		{name: "hex", id: "00000001-0002-7000-8000-00000000000z", wantError: "hexadecimal"},
+		{name: "version", id: "00000001-0002-6000-8000-000000000000", wantError: "version nibble is 6"},
+		{name: "variant", id: "00000001-0002-7000-c000-000000000000", wantError: "variant bits are 11"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := codexUUIDv7UnixMilli(test.id)
+			if test.wantError == "" && (err != nil || got != test.want) {
+				t.Fatalf("timestamp = %d, %v; want %d", got, err, test.want)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.id) || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("error = %v; want id and %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestCodexPendingLaunchMatchesOnlyEligibleFreshOrNativeResume(t *testing.T) {
 	cwd := t.TempDir()
 	thread := bridge.CodexNativeThread{
-		ID: "00000000-0000-0000-0000-00000000c021", Name: "Exact Native Name", Cwd: cwd,
+		ID: "00000001-0002-7000-8000-000000000000", Name: "Exact Native Name", Cwd: cwd,
 	}
 	for _, test := range []struct {
-		name    string
-		kind    string
-		value   string
-		cwd     string
-		matches bool
+		name, kind, value, cwd, event, eventCwd string
+		registered, started                     uint64
+		captured, matches                       bool
 	}{
-		{name: "fresh cwd", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, matches: true},
-		{name: "bare resume cwd", kind: launcher.CodexLaunchSelectorBare, cwd: cwd, matches: true},
-		{name: "exact name", kind: launcher.CodexLaunchSelectorName, value: thread.Name, cwd: cwd, matches: true},
-		{name: "name is case sensitive", kind: launcher.CodexLaunchSelectorName, value: "exact native name", cwd: cwd},
-		{name: "name is not a prefix", kind: launcher.CodexLaunchSelectorName, value: "Exact Native", cwd: cwd},
-		{name: "exact id", kind: launcher.CodexLaunchSelectorID, value: thread.ID, cwd: cwd, matches: true},
-		{name: "foreign cwd", kind: launcher.CodexLaunchSelectorID, value: thread.ID, cwd: t.TempDir()},
+		{name: "fresh equal millisecond", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, event: "thread/started", registered: 10, started: 10, captured: true, matches: true},
+		{name: "fresh newer millisecond", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, event: "thread/started", registered: 10, started: 11, captured: true, matches: true},
+		{name: "fresh older millisecond", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, event: "thread/started", registered: 10, started: 9, captured: true},
+		{name: "started observed before registration", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, event: "thread/started", registered: 10, started: 11},
+		{name: "fresh event cwd differs", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, event: "thread/started", eventCwd: "/other", registered: 10, started: 11, captured: true},
+		{name: "old status is not fresh", kind: launcher.CodexLaunchSelectorFresh, cwd: cwd, event: "thread/status/changed", registered: 10, started: 11, captured: true},
+		{name: "bare resume status", kind: launcher.CodexLaunchSelectorBare, cwd: cwd, event: "thread/status/changed", matches: true},
+		{name: "exact name status", kind: launcher.CodexLaunchSelectorName, value: thread.Name, cwd: cwd, event: "thread/status/changed", matches: true},
+		{name: "name is case sensitive", kind: launcher.CodexLaunchSelectorName, value: "exact native name", cwd: cwd, event: "thread/status/changed"},
+		{name: "exact id started", kind: launcher.CodexLaunchSelectorID, value: thread.ID, cwd: cwd, event: "thread/started", matches: true},
+		{name: "foreign cwd", kind: launcher.CodexLaunchSelectorID, value: thread.ID, cwd: t.TempDir(), event: "thread/status/changed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := launcher.CodexDaemonPrepareRequest{SelectorKind: test.kind, Selector: test.value, Cwd: test.cwd}
-			if got := pendingCodexLaunchMatches(request, thread); got != test.matches {
+			record := &pendingCodexLaunch{request: launcher.CodexDaemonPrepareRequest{SelectorKind: test.kind, Selector: test.value, Cwd: test.cwd}, registrationUnixMilli: int64(test.registered)}
+			eventCwd := cwd
+			if test.eventCwd != "" {
+				eventCwd = test.eventCwd
+			}
+			observation := codexLaunchObservation{event: bridge.CodexNativeEvent{Kind: test.event, Cwd: eventCwd}, threadUnixMilli: test.started}
+			if test.captured {
+				observation.freshEligible = map[*pendingCodexLaunch]struct{}{record: {}}
+			}
+			if got := pendingCodexLaunchMatches(record, observation, thread); got != test.matches {
 				t.Fatalf("match = %v, want %v", got, test.matches)
 			}
 		})
+	}
+}
+
+func TestInvalidFreshCodexIDFailsOnlyCapturedSameCwd(t *testing.T) {
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
+	matching := &pendingCodexLaunch{request: launcher.CodexDaemonPrepareRequest{SelectorKind: launcher.CodexLaunchSelectorFresh, Cwd: "/match"}, done: make(chan pendingCodexLaunchResult, 1)}
+	foreign := &pendingCodexLaunch{request: launcher.CodexDaemonPrepareRequest{SelectorKind: launcher.CodexLaunchSelectorFresh, Cwd: "/foreign"}, done: make(chan pendingCodexLaunchResult, 1)}
+	coordinator.pendingCodexLaunches["matching"], coordinator.pendingCodexLaunches["foreign"] = matching, foreign
+	productID := "not-a-product-uuid"
+	coordinator.observeCodexNativeEvent(bridge.CodexNativeEvent{Kind: "thread/started", ThreadID: productID, Cwd: "/match"})
+	select {
+	case result := <-matching.done:
+		if result.err == nil || !strings.Contains(result.err.Error(), productID) || !strings.Contains(result.err.Error(), "malformed") {
+			t.Fatalf("matching failure = %v", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("matching fresh call did not receive the invalid product id")
+	}
+	if coordinator.pendingCodexLaunches["matching"] != nil || coordinator.pendingCodexLaunches["foreign"] != foreign {
+		t.Fatal("invalid event removed the wrong pending record")
+	}
+	select {
+	case result := <-foreign.done:
+		t.Fatalf("foreign fresh call received invalid event: %v", result.err)
+	default:
 	}
 }
 
@@ -312,19 +375,17 @@ func TestCodexPendingLaunchOverlapRefusesEveryAmbiguousRegistration(t *testing.T
 	}
 }
 
-func TestCodexPendingLaunchDuplicateNamesWaitingWrapperPID(t *testing.T) {
+func TestCodexPendingLaunchNativeReadinessFailureLeavesNoRecord(t *testing.T) {
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
 	t.Cleanup(func() { _ = coordinator.laneProcesses.Close() })
-	cwd := t.TempDir()
-	coordinator.pendingCodexLaunches["first"] = &pendingCodexLaunch{request: launcher.CodexDaemonPrepareRequest{
-		Cwd: cwd, SelectorKind: launcher.CodexLaunchSelectorName, Selector: "duplicate", Owner: procinfo.Identity{PID: 4242},
-	}}
+	coordinator.openCodex = func(context.Context, bridge.CodexNativeConfig) (*bridge.CodexNative, error) {
+		return nil, errors.New("native readiness failed")
+	}
 	_, err := coordinator.awaitCodexPendingLaunch(context.Background(), nil, launcher.CodexDaemonPrepareRequest{
-		Cwd: cwd, SelectorKind: launcher.CodexLaunchSelectorName, Selector: "duplicate",
-		PendingToken: strings.Repeat("a", 64), Owner: procinfo.Identity{PID: 4343},
+		Cwd: t.TempDir(), SelectorKind: launcher.CodexLaunchSelectorFresh, PendingToken: strings.Repeat("a", 64),
 	})
-	if err == nil || !strings.Contains(err.Error(), "wrapper pid 4242") {
-		t.Fatalf("duplicate pending launch error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "native readiness failed") || len(coordinator.pendingCodexLaunches) != 0 {
+		t.Fatalf("readiness failure = %v, pending = %v", err, coordinator.pendingCodexLaunches)
 	}
 }
 

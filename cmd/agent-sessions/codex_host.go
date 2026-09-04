@@ -75,9 +75,17 @@ type hostCoordinator struct {
 }
 
 type pendingCodexLaunch struct {
-	request launcher.CodexDaemonPrepareRequest
-	ctx     context.Context
-	done    chan pendingCodexLaunchResult
+	request               launcher.CodexDaemonPrepareRequest
+	registrationUnixMilli int64
+	ctx                   context.Context
+	done                  chan pendingCodexLaunchResult
+}
+
+type codexLaunchObservation struct {
+	event              bridge.CodexNativeEvent
+	freshEligible      map[*pendingCodexLaunch]struct{}
+	threadUnixMilli    uint64
+	threadIDValidation error
 }
 
 type pendingCodexLaunchResult struct {
@@ -610,6 +618,13 @@ func (c *hostCoordinator) awaitCodexPendingLaunch(
 	if err := validatePendingCodexLaunch(request); err != nil {
 		return launcher.CodexDaemonPrepareResult{}, err
 	}
+	native, err := c.codexNative()
+	if err == nil {
+		_, _, _, err = native.RefreshAppServerEvidence(ctx)
+	}
+	if err != nil {
+		return launcher.CodexDaemonPrepareResult{}, err
+	}
 	c.mu.Lock()
 	if c.pendingCodexLaunches[request.PendingToken] != nil {
 		c.mu.Unlock()
@@ -622,21 +637,12 @@ func (c *hostCoordinator) awaitCodexPendingLaunch(
 			return launcher.CodexDaemonPrepareResult{}, fmt.Errorf("Codex launch already waiting in %s under wrapper pid %d", request.Cwd, pid)
 		}
 	}
-	record := &pendingCodexLaunch{request: request, ctx: ctx, done: make(chan pendingCodexLaunchResult, 1)}
+	record := &pendingCodexLaunch{
+		request: request, registrationUnixMilli: c.now().UnixMilli(), ctx: ctx,
+		done: make(chan pendingCodexLaunchResult, 1),
+	}
 	c.pendingCodexLaunches[request.PendingToken] = record
 	c.mu.Unlock()
-	native, err := c.codexNative()
-	if err == nil {
-		_, _, _, err = native.RefreshAppServerEvidence(ctx)
-	}
-	if err != nil {
-		c.mu.Lock()
-		if c.pendingCodexLaunches[request.PendingToken] == record {
-			delete(c.pendingCodexLaunches, request.PendingToken)
-		}
-		c.mu.Unlock()
-		return launcher.CodexDaemonPrepareResult{}, err
-	}
 	if !daemonpkg.AdmitControlCall(ctx) {
 		c.mu.Lock()
 		if c.pendingCodexLaunches[request.PendingToken] == record {
@@ -689,12 +695,22 @@ func pendingCodexLaunchesOverlap(first, second launcher.CodexDaemonPrepareReques
 	return first.SelectorKind == second.SelectorKind && first.Selector == second.Selector
 }
 
-func pendingCodexLaunchMatches(request launcher.CodexDaemonPrepareRequest, thread bridge.CodexNativeThread) bool {
+func pendingCodexLaunchMatches(
+	record *pendingCodexLaunch,
+	observation codexLaunchObservation,
+	thread bridge.CodexNativeThread,
+) bool {
+	request := record.request
 	if request.Cwd != thread.Cwd {
 		return false
 	}
 	switch request.SelectorKind {
-	case launcher.CodexLaunchSelectorFresh, launcher.CodexLaunchSelectorBare:
+	case launcher.CodexLaunchSelectorFresh:
+		_, eligible := observation.freshEligible[record]
+		return observation.event.Kind == "thread/started" && observation.event.Cwd == request.Cwd &&
+			eligible && observation.threadIDValidation == nil &&
+			record.registrationUnixMilli >= 0 && observation.threadUnixMilli >= uint64(record.registrationUnixMilli)
+	case launcher.CodexLaunchSelectorBare:
 		return true
 	case launcher.CodexLaunchSelectorName:
 		return request.Selector == thread.Name
@@ -703,6 +719,26 @@ func pendingCodexLaunchMatches(request launcher.CodexDaemonPrepareRequest, threa
 	default:
 		return false
 	}
+}
+
+func codexUUIDv7UnixMilli(value string) (uint64, error) {
+	// RFC 9562 UUIDv7 stores its Unix millisecond timestamp in the first 48 bits.
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return 0, fmt.Errorf("Codex thread/started id %q is malformed: expected canonical 8-4-4-4-12 UUID", value)
+	}
+	compact := value[:8] + value[9:13] + value[14:18] + value[19:23] + value[24:]
+	decoded, err := hex.DecodeString(compact)
+	if err != nil || len(decoded) != 16 {
+		return 0, fmt.Errorf("Codex thread/started id %q is malformed: expected hexadecimal UUID", value)
+	}
+	if version := decoded[6] >> 4; version != 7 {
+		return 0, fmt.Errorf("Codex thread/started id %q is not UUIDv7: version nibble is %x", value, version)
+	}
+	if variant := decoded[8] >> 6; variant != 2 {
+		return 0, fmt.Errorf("Codex thread/started id %q is not UUIDv7: RFC 9562 variant bits are %02b", value, variant)
+	}
+	return uint64(decoded[0])<<40 | uint64(decoded[1])<<32 | uint64(decoded[2])<<24 |
+		uint64(decoded[3])<<16 | uint64(decoded[4])<<8 | uint64(decoded[5]), nil
 }
 
 func (c *hostCoordinator) adoptCodexPeer(
@@ -890,10 +926,30 @@ func (c *hostCoordinator) observeCodexNativeEvent(event bridge.CodexNativeEvent)
 	if event.Kind != "thread/started" && event.Kind != "thread/status/changed" {
 		return
 	}
-	go c.matchPendingCodexLaunch(event.ThreadID)
+	observation := codexLaunchObservation{event: event}
+	if event.Kind == "thread/started" {
+		observation.threadUnixMilli, observation.threadIDValidation = codexUUIDv7UnixMilli(event.ThreadID)
+		c.mu.Lock()
+		// Capture eligibility at observation time so asynchronous resolution cannot
+		// bind this event to a fresh record registered afterward.
+		observation.freshEligible = make(map[*pendingCodexLaunch]struct{})
+		for _, record := range c.pendingCodexLaunches {
+			if record.request.SelectorKind == launcher.CodexLaunchSelectorFresh {
+				observation.freshEligible[record] = struct{}{}
+			}
+		}
+		c.mu.Unlock()
+	}
+	go c.matchPendingCodexLaunch(observation)
 }
 
-func (c *hostCoordinator) matchPendingCodexLaunch(threadID string) {
+func (c *hostCoordinator) matchPendingCodexLaunch(observation codexLaunchObservation) {
+	threadID := observation.event.ThreadID
+	if observation.threadIDValidation != nil {
+		if !c.failInvalidFreshCodexPendingLaunch(observation) {
+			return
+		}
+	}
 	c.mu.Lock()
 	runtime := c.runtime
 	hasPending := len(c.pendingCodexLaunches) != 0
@@ -925,7 +981,7 @@ func (c *hostCoordinator) matchPendingCodexLaunch(threadID string) {
 	c.mu.Lock()
 	matches := make([]*pendingCodexLaunch, 0, 1)
 	for token, record := range c.pendingCodexLaunches {
-		if pendingCodexLaunchMatches(record.request, thread) {
+		if pendingCodexLaunchMatches(record, observation, thread) {
 			matches = append(matches, record)
 			delete(c.pendingCodexLaunches, token)
 		}
@@ -945,6 +1001,28 @@ func (c *hostCoordinator) matchPendingCodexLaunch(threadID string) {
 	result := pendingCodexLaunchResult{}
 	result.handoff, result.err = c.adoptCodexPeer(record.ctx, runtime, record.request, native, thread)
 	record.done <- result
+}
+
+func (c *hostCoordinator) failInvalidFreshCodexPendingLaunch(observation codexLaunchObservation) bool {
+	c.mu.Lock()
+	var failed *pendingCodexLaunch
+	resumePending := false
+	for token, record := range c.pendingCodexLaunches {
+		if record.request.SelectorKind != launcher.CodexLaunchSelectorFresh {
+			resumePending = true
+			continue
+		}
+		_, eligible := observation.freshEligible[record]
+		if failed == nil && eligible && record.request.Cwd == observation.event.Cwd {
+			failed = record
+			delete(c.pendingCodexLaunches, token)
+		}
+	}
+	c.mu.Unlock()
+	if failed != nil {
+		failed.done <- pendingCodexLaunchResult{err: observation.threadIDValidation}
+	}
+	return resumePending
 }
 
 func (c *hostCoordinator) failExactCodexPendingLaunch(threadID string, failure error) bool {

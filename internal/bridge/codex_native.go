@@ -30,6 +30,7 @@ type CodexNativeConfig struct {
 type CodexNativeEvent struct {
 	Kind     string
 	ThreadID string
+	Cwd      string
 	TurnID   string
 	Name     string
 	Status   string
@@ -910,6 +911,7 @@ func (native *CodexNative) observeNotification(notification rpcNotification) {
 	case "thread/started":
 		thread, _ := params["thread"].(map[string]any)
 		event.ThreadID = stringValue(thread["id"])
+		event.Cwd = stringValue(thread["cwd"])
 	case "turn/started":
 		turn, _ := params["turn"].(map[string]any)
 		event.TurnID = stringValue(turn["id"])
