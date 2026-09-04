@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,106 +15,165 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/livepresence"
 )
 
-func TestRawV1HelperSendsHelloBeforeMessage(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is unavailable")
-	}
-	socketPath := filepath.Join(t.TempDir(), "presence.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
-	serverDone := make(chan error, 1)
-	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			serverDone <- acceptErr
-			return
-		}
-		defer func() { _ = connection.Close() }()
+func TestMatrixRawV1ClientHandlesBusyDeliveryAndRecordsEvidence(t *testing.T) {
+	socketPath, serverDone := matrixTestServer(t, func(connection net.Conn) error {
 		decoder, encoder := json.NewDecoder(connection), json.NewEncoder(connection)
-		var hello struct {
-			JSONRPC string `json:"jsonrpc"`
-			ID      string `json:"id"`
-			Method  string `json:"method"`
-			Params  struct {
-				Protocol int      `json:"protocol"`
-				Product  string   `json:"product"`
-				Groups   []string `json:"groups"`
-			} `json:"params"`
+		hello, err := decodeMatrixFrame(decoder)
+		var report struct {
+			UUID string `json:"uuid"`
 		}
-		if decodeErr := decoder.Decode(&hello); decodeErr != nil {
-			serverDone <- decodeErr
-			return
+		if err != nil || json.Unmarshal(hello.Params, &report) != nil || report.UUID == "" ||
+			string(hello.ID) != `"hello"` || hello.Method != "session.hello" {
+			return fmt.Errorf("unexpected hello: %+v/%v", hello, err)
 		}
-		if hello.JSONRPC != "2.0" || hello.ID != "hello" || hello.Method != "session.hello" ||
-			hello.Params.Protocol != 1 || hello.Params.Product != "claude" ||
-			!equalOrderedStrings(hello.Params.Groups, []string{"matrix-group"}) {
-			serverDone <- fmt.Errorf("unexpected hello: %+v", hello)
-			return
+		_ = encoder.Encode(livepresence.Success(hello.ID, json.RawMessage(`{}`)))
+		send, err := decodeMatrixFrame(decoder)
+		if err != nil || string(send.ID) != `"send"` || send.Method != "message.send" {
+			return fmt.Errorf("unexpected send: %+v/%v", send, err)
 		}
-		if encodeErr := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "result": map[string]any{}}); encodeErr != nil {
-			serverDone <- encodeErr
-			return
+		deliver := livepresence.Frame{JSONRPC: "2.0", ID: json.RawMessage(`"delivery-1"`), Method: "message.deliver", Params: json.RawMessage(
+			`{"message_id":"message-in","from":{"uuid":"native-in","name":"peer","product":"codex","groups":["matrix-group"]},"body":"busy"}`)}
+		_ = encoder.Encode(deliver)
+		busy, err := decodeMatrixFrame(decoder)
+		if err != nil || string(busy.ID) != `"delivery-1"` || busy.Error == nil || busy.Error.Code != livepresence.Busy ||
+			busy.Error.Message != "Session busy" || string(busy.Error.Data) != `{"uuid":"`+report.UUID+`"}` {
+			return fmt.Errorf("unexpected busy response: %+v/%v", busy, err)
 		}
-		var send struct {
-			ID     string `json:"id"`
-			Method string `json:"method"`
-			Params struct {
-				Target  string `json:"target"`
-				Message string `json:"message"`
-			} `json:"params"`
-		}
-		if decodeErr := decoder.Decode(&send); decodeErr != nil {
-			serverDone <- decodeErr
-			return
-		}
-		if send.ID != "send" || send.Method != "message.send" || send.Params.Target != "missing" || send.Params.Message != "marker" {
-			serverDone <- fmt.Errorf("unexpected send: %+v", send)
-			return
-		}
-		if encodeErr := encoder.Encode(map[string]any{
-			"jsonrpc": "2.0", "id": "send",
-			"result": map[string]any{"message_id": "message-1", "deliveries": []map[string]any{{
-				"target": "missing", "session_id": "native-1", "delivery_id": "delivery-1", "status": "accepted",
-			}}},
-		}); encodeErr != nil {
-			serverDone <- encodeErr
-			return
-		}
-		var extra json.RawMessage
-		serverDone <- decoder.Decode(&extra)
-	}()
+		_ = encoder.Encode(livepresence.Success(send.ID, json.RawMessage(
+			`{"message_id":"message-1","deliveries":[{"target":"missing","session_id":"native-1","delivery_id":"delivery-1","status":"accepted"}]}`)))
+		_, err = decodeMatrixFrame(decoder)
+		return err
+	})
+	runner := matrixRunner{config: matrixOptions{presenceSocket: socketPath, evidenceDir: t.TempDir()}, runID: "matrix-test"}
+	response, evidence, err := runner.sendV1(context.Background(), "codex", "direct", "matrix-group", map[string]any{"target": "missing", "message": "marker"})
+	if serverErr := <-serverDone; serverErr != io.EOF {
+		t.Fatal(serverErr)
+	}
+	if err != nil || requireAcceptedSessions(response, []string{"native-1"}) != nil {
+		t.Fatalf("raw response/error = %+v, %v", response, err)
+	}
+	wire := readMatrixWire(t, evidence)
+	if wire.Error != "" || len(wire.Frames) != 6 {
+		t.Fatalf("wire evidence = %+v", wire)
+	}
+	var sequence []string
+	for _, frame := range wire.Frames {
+		sequence = append(sequence, frame.Direction+":"+frame.Frame.Method)
+	}
+	if got, want := strings.Join(sequence, ","), "send:session.hello,receive:,send:message.send,receive:message.deliver,send:,receive:"; got != want {
+		t.Fatalf("wire sequence = %q, want %q", got, want)
+	}
+}
 
-	evidence := filepath.Join(t.TempDir(), "wire.json")
-	helper := filepath.Join(repositoryRoot(t), "scripts", "realproducts", "matrix_v1.py")
-	command := exec.Command(python, helper,
-		"--socket", socketPath,
-		"--uuid", "11111111-1111-4111-8111-111111111111",
-		"--name", "matrix-source",
-		"--group", "matrix-group",
-		"--params", `{"target":"missing","message":"marker"}`,
-		"--evidence", evidence,
-	)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helper failed: %v: %s", err, output)
+func TestMatrixRawV1ClientRejectsOversizeUnterminatedFrame(t *testing.T) {
+	socketPath, serverDone := matrixTestServer(t, func(connection net.Conn) error {
+		decoder, encoder := json.NewDecoder(connection), json.NewEncoder(connection)
+		hello, err := decodeMatrixFrame(decoder)
+		if err != nil {
+			return err
+		}
+		_ = encoder.Encode(livepresence.Success(hello.ID, json.RawMessage(`{}`)))
+		if _, err := decodeMatrixFrame(decoder); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(connection, strings.Repeat(" ", matrixMaxFrameBytes+1)); err != nil {
+			return err
+		}
+		_, err = decodeMatrixFrame(decoder)
+		return err
+	})
+	runner := matrixRunner{config: matrixOptions{presenceSocket: socketPath, evidenceDir: t.TempDir()}, runID: "matrix-test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, evidence, err := runner.sendV1(ctx, "codex", "oversize", "matrix-group", map[string]any{"target": "missing", "message": "marker"})
+	if !errors.Is(err, errMatrixFrameTooLarge) {
+		t.Fatalf("oversize error = %v", err)
 	}
 	if serverErr := <-serverDone; serverErr != io.EOF {
 		t.Fatal(serverErr)
 	}
-	var response matrixRPCResponse
-	if err := json.Unmarshal(bytes.TrimSpace(output), &response); err != nil || requireAcceptedSessions(response, []string{"native-1"}) != nil {
-		t.Fatalf("helper response = %s, %v", output, err)
+	wire := readMatrixWire(t, evidence)
+	if !strings.Contains(wire.Error, errMatrixFrameTooLarge.Error()) || len(wire.Frames) != 3 {
+		t.Fatalf("oversize evidence = %+v", wire)
 	}
-	body, err := os.ReadFile(evidence)
-	if err != nil || !bytes.Contains(body, []byte("session.hello")) || !bytes.Contains(body, []byte("message.send")) {
-		t.Fatalf("wire evidence = %s, %v", body, err)
+}
+
+func TestMatrixLiveCallRejectsMalformedAndUnexpectedFrames(t *testing.T) {
+	tests := []struct {
+		frame livepresence.Frame
+		want  string
+	}{
+		{livepresence.Frame{JSONRPC: "1.0", ID: json.RawMessage(`"send"`), Result: json.RawMessage(`{}`)}, "invalid JSON-RPC"},
+		{livepresence.Success(json.RawMessage(`"other"`), json.RawMessage(`{}`)), "response id"},
+		{livepresence.Frame{JSONRPC: "2.0", ID: json.RawMessage(`"update"`), Method: "session.update", Params: json.RawMessage(`{}`)}, "unexpected method"},
+		{livepresence.Frame{JSONRPC: "2.0", ID: json.RawMessage(`"delivery"`), Method: "message.deliver", Params: json.RawMessage(`{}`)}, "invalid message.deliver"},
 	}
+	client, server := net.Pipe()
+	defer client.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		defer server.Close()
+		decoder, encoder := json.NewDecoder(server), json.NewEncoder(server)
+		for _, test := range tests {
+			if _, err := decodeMatrixFrame(decoder); err != nil {
+				serverDone <- err
+				return
+			}
+			if err := encoder.Encode(test.frame); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- nil
+	}()
+	connection := livepresence.NewConnection(newMatrixFramedConn(client))
+	for _, test := range tests {
+		evidence := matrixWireEvidence{}
+		_, err := matrixLiveCall(connection, "send", "message.send", nil, "source", &evidence)
+		if err == nil || !strings.Contains(err.Error(), test.want) || len(evidence.Frames) != 2 {
+			t.Errorf("%s: error/evidence = %v/%+v", test.want, err, evidence)
+		}
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func decodeMatrixFrame(decoder *json.Decoder) (livepresence.Frame, error) {
+	var frame livepresence.Frame
+	err := decoder.Decode(&frame)
+	return frame, err
+}
+
+func matrixTestServer(t *testing.T, serve func(net.Conn) error) (string, <-chan error) {
+	listener, err := net.Listen("unix", matrixTestSocket(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err == nil {
+			err = serve(connection)
+			_ = connection.Close()
+		}
+		done <- err
+	}()
+	return listener.Addr().String(), done
+}
+
+func readMatrixWire(t *testing.T, path string) matrixWireEvidence {
+	body, err := os.ReadFile(path)
+	var evidence matrixWireEvidence
+	if err != nil || json.Unmarshal(body, &evidence) != nil {
+		t.Fatalf("wire evidence = %s/%v", body, err)
+	}
+	return evidence
 }
 
 func TestStandingMatrixRequestDispatch(t *testing.T) {
@@ -173,35 +233,16 @@ func TestMatrixAcceptedDeliveriesRequireExactNativeIDs(t *testing.T) {
 			{Target: "matrix-a", SessionID: "native-a", DeliveryID: "delivery-a", Status: "accepted"},
 		},
 	})
-	response := matrixRPCResponse{JSONRPC: "2.0", Result: result}
+	response := livepresence.Frame{JSONRPC: "2.0", Result: result}
 	if err := requireAcceptedSessions(response, []string{"native-a", "native-b"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := requireAcceptedSessions(response, []string{"native-a"}); err == nil {
 		t.Fatal("delivery assertion accepted an extra native id")
 	}
-	response.Error = &matrixRPCError{Code: -32002, Message: "Session busy"}
+	response.Error = &livepresence.RPCError{Code: -32002, Message: "Session busy"}
 	if err := requireAcceptedSessions(response, []string{"native-a", "native-b"}); err == nil {
 		t.Fatal("delivery assertion accepted an RPC error")
-	}
-}
-
-func TestMatrixGroupPendingFollowsCheckedInSpec(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "docs", "specs", "NATIVE-PEER-PROTOCOL.md")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		body string
-		want bool
-	}{{"message.send supports target and targets\n", false}, {"  \"group\": {\"type\": \"string\"}\n", true}} {
-		if err := os.WriteFile(path, []byte(test.body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := matrixSpecDocumentsGroup(root); err != nil || got != test.want {
-			t.Fatalf("spec detection = %t/%v, want %t", got, err, test.want)
-		}
 	}
 }
 
@@ -298,15 +339,15 @@ func TestMatrixTMUXPreflightRefusesExactNames(t *testing.T) {
 }
 
 func TestMatrixPrerequisiteFailuresPrecedeEvidenceWrite(t *testing.T) {
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "presence.sock"))
+	listener, err := net.Listen("unix", matrixTestSocket(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	for _, missing := range []string{"agent-sessions", "tmux", "python3", "socket", "helper", "tmux-list"} {
+	for _, missing := range []string{"agent-sessions", "tmux", "socket", "tmux-list"} {
 		t.Run("missing "+missing, func(t *testing.T) {
 			base, bin := t.TempDir(), t.TempDir()
-			for _, name := range []string{"agent-sessions", "tmux", "python3"} {
+			for _, name := range []string{"agent-sessions", "tmux"} {
 				if name != missing {
 					body := "exit 0"
 					if name == "tmux" && missing == "tmux-list" {
@@ -324,11 +365,7 @@ func TestMatrixPrerequisiteFailuresPrecedeEvidenceWrite(t *testing.T) {
 				socket = filepath.Join(base, "missing.sock")
 			}
 			t.Setenv("AGENT_SESSIONS_PRESENCE_SOCKET", socket)
-			root := repositoryRoot(t)
-			if missing == "helper" {
-				root = base
-			}
-			arguments := []string{"--standing-matrix", "--repository-root", root, "--cwd", cwd, "--temporary-root", temporary}
+			arguments := []string{"--standing-matrix", "--repository-root", repositoryRoot(t), "--cwd", cwd, "--temporary-root", temporary}
 			if missing != "tmux-list" {
 				arguments = append(arguments, "--evidence-dir", evidence)
 			}
@@ -439,6 +476,15 @@ func writeMatrixTestExecutable(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+func matrixTestSocket(t *testing.T) string {
+	id, err := matrixUUID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(shortTemporaryRoot(), "mx-"+id+".sock")
+}
+
 func TestMatrixDefaultSignalsLeaveExactRefusedResidue(t *testing.T) {
 	if os.Getenv("MATRIX_SIGNAL_HELPER") == "1" {
 		t.Fatalf("matrix returned before its default signal: %v", runStandingMatrix(context.Background(), strings.Split(os.Getenv("MATRIX_ARGS"), "\x1f"), io.Discard))
@@ -456,7 +502,7 @@ capture-pane) printf 'starting\n';;
 kill-session) printf '%s\n' "$3" >>"$MATRIX_KILLS"; : >"$MATRIX_MARKER";;
 esac`)
 			writeMatrixTestExecutable(t, filepath.Join(bin, "agent-sessions"), `printf '%s\n' '{"schema":"agent-sessions.roster.v1","host":{"id":"pdev"},"local":[]}'`)
-			for _, name := range []string{"python3", "codex", "codex-peer"} {
+			for _, name := range []string{"codex", "codex-peer"} {
 				writeMatrixTestExecutable(t, filepath.Join(bin, name), "exit 0")
 			}
 			cwd, temporary, evidence := filepath.Join(base, "cwd"), filepath.Join(base, "temporary"), filepath.Join(base, "evidence")
@@ -465,7 +511,7 @@ esac`)
 					t.Fatal(err)
 				}
 			}
-			listener, err := net.Listen("unix", filepath.Join(base, "presence.sock"))
+			listener, err := net.Listen("unix", matrixTestSocket(t))
 			if err != nil {
 				t.Fatal(err)
 			}

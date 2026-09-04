@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antst/agent-sessions/internal/livepresence"
 	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
@@ -29,13 +32,19 @@ const (
 
 const codexTUISubmitDelay = 150 * time.Millisecond
 
+const matrixMaxFrameBytes = 1024 * 1024
+
+var (
+	errMatrixFrameTooLarge  = errors.New("matrix live frame exceeds 1 MiB")
+	errMatrixFrameTruncated = errors.New("matrix live frame is not newline terminated")
+)
+
 type matrixOptions struct {
 	repositoryRoot string
 	cwd            string
 	evidenceDir    string
 	agentSessions  string
 	tmux           string
-	python         string
 	presenceSocket string
 	timeout        time.Duration
 }
@@ -82,19 +91,6 @@ type matrixTUI struct {
 	submitDelay time.Duration
 }
 
-type matrixRPCError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
-}
-
-type matrixRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *matrixRPCError `json:"error,omitempty"`
-}
-
 type matrixDelivery struct {
 	Target     string `json:"target"`
 	SessionID  string `json:"session_id"`
@@ -105,6 +101,48 @@ type matrixDelivery struct {
 type matrixSendResult struct {
 	MessageID  string           `json:"message_id"`
 	Deliveries []matrixDelivery `json:"deliveries"`
+}
+
+type matrixWireFrame struct {
+	Direction string             `json:"direction"`
+	Frame     livepresence.Frame `json:"frame"`
+}
+
+type matrixWireEvidence struct {
+	Frames []matrixWireFrame `json:"frames"`
+	Error  string            `json:"error,omitempty"`
+}
+
+type matrixFramedConn struct {
+	net.Conn
+	reader *bufio.Reader
+	frame  []byte
+}
+
+func newMatrixFramedConn(connection net.Conn) *matrixFramedConn {
+	return &matrixFramedConn{Conn: connection, reader: bufio.NewReaderSize(connection, matrixMaxFrameBytes+1)}
+}
+
+func (connection *matrixFramedConn) Read(body []byte) (int, error) {
+	if len(body) == 0 {
+		return 0, nil
+	}
+	if len(connection.frame) == 0 {
+		frame, err := connection.reader.ReadSlice('\n')
+		if len(frame) > matrixMaxFrameBytes || errors.Is(err, bufio.ErrBufferFull) {
+			return 0, errMatrixFrameTooLarge
+		}
+		if err != nil {
+			if len(frame) != 0 {
+				return 0, fmt.Errorf("%w: %v", errMatrixFrameTruncated, err)
+			}
+			return 0, err
+		}
+		connection.frame = frame
+	}
+	written := copy(body, connection.frame)
+	connection.frame = connection.frame[written:]
+	return written, nil
 }
 
 type matrixRunner struct {
@@ -242,17 +280,9 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if err != nil {
 		return matrixOptions{}, err
 	}
-	python, err := lookup("python3")
-	if err != nil {
-		return matrixOptions{}, err
-	}
 	socket, err := matrixPresenceSocket()
 	if err != nil {
 		return matrixOptions{}, err
-	}
-	helper := filepath.Join(root, "scripts", "realproducts", "matrix_v1.py")
-	if info, statErr := os.Lstat(helper); statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return matrixOptions{}, errors.New("raw v1 helper is not one repository regular file")
 	}
 	if err := rejectExistingMatrixTMUX(tmux); err != nil {
 		return matrixOptions{}, err
@@ -263,7 +293,7 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	}
 	return matrixOptions{
 		repositoryRoot: root, cwd: cwd, evidenceDir: evidence,
-		agentSessions: agentSessions, tmux: tmux, python: python,
+		agentSessions: agentSessions, tmux: tmux,
 		presenceSocket: socket, timeout: *timeout,
 	}, nil
 }
@@ -615,7 +645,6 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 	second, secondEvidence, secondErr := runner.launchNamed(ctx, product, prefix+"-group-b", group, "group-b")
 	evidence := map[string]any{"first_launch": firstEvidence, "second_launch": secondEvidence}
 	err := errors.Join(firstErr, secondErr)
-	status, detail := matrixPass, "group selector reached exactly the two group member TUIs"
 	if err == nil {
 		marker := matrixReceiptToken(runner.runID, "05")
 		response, wirePath, sendErr := runner.sendV1(ctx, product.id, "group", group, map[string]any{
@@ -623,14 +652,8 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 		})
 		evidence["wire_evidence"] = wirePath
 		evidence["response"] = response
-		documented, documentErr := matrixSpecDocumentsGroup(runner.config.repositoryRoot)
-		evidence["checked_in_spec_documents_group"] = documented
-		if documentErr != nil {
-			err = documentErr
-		} else if sendErr != nil {
+		if sendErr != nil {
 			err = sendErr
-		} else if response.Error != nil && !documented && (response.Error.Code == -32602 || response.Error.Code == -32003) {
-			status, detail = matrixSkip, "pending B1: checked-in spec does not yet advertise group and the live daemon rejected the group selector"
 		} else if response.Error != nil {
 			err = fmt.Errorf("group message.send failed: %s (%d)", response.Error.Message, response.Error.Code)
 		} else if acceptErr := requireAcceptedSessions(response, []string{first.sessionID, second.sessionID}); acceptErr != nil {
@@ -649,9 +672,10 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 		err = errors.Join(err, runner.endTUI(ctx, second))
 	}
 	if err != nil {
-		status, detail = matrixFail, err.Error()
+		runner.record(product.id, "05-group-send", matrixFail, err.Error(), evidence)
+		return
 	}
-	runner.record(product.id, "05-group-send", status, detail, evidence)
+	runner.record(product.id, "05-group-send", matrixPass, "group selector reached exactly the two group member TUIs", evidence)
 }
 
 func (runner *matrixRunner) runResumeCell(
@@ -1114,39 +1138,108 @@ func (runner *matrixRunner) sendV1(
 	ctx context.Context,
 	product, cell, group string,
 	params map[string]any,
-) (matrixRPCResponse, string, error) {
+) (response livepresence.Frame, evidencePath string, resultErr error) {
 	uuid, err := matrixUUID()
 	if err != nil {
-		return matrixRPCResponse{}, "", err
-	}
-	body, err := json.Marshal(params)
-	if err != nil {
-		return matrixRPCResponse{}, "", err
+		return livepresence.Frame{}, "", err
 	}
 	relative := filepath.Join(product, cell+"-wire.json")
-	evidencePath := filepath.Join(runner.config.evidenceDir, relative)
-	arguments := []string{
-		filepath.Join(runner.config.repositoryRoot, "scripts", "realproducts", "matrix_v1.py"),
-		"--socket", runner.config.presenceSocket,
-		"--uuid", uuid,
-		"--name", "matrix-" + runner.runID + "-source-" + product + "-" + cell,
-		"--group", group,
-		"--params", string(body),
-		"--evidence", evidencePath,
-	}
+	evidencePath = filepath.Join(runner.config.evidenceDir, relative)
+	evidence := matrixWireEvidence{Frames: []matrixWireFrame{}}
+	var connection net.Conn
+	var stopCancel func() bool
+	defer func() {
+		if stopCancel != nil {
+			stopCancel()
+		}
+		var closeErr error
+		if connection != nil {
+			closeErr = connection.Close()
+			if errors.Is(closeErr, net.ErrClosed) {
+				closeErr = nil
+			}
+		}
+		terminalErr := errors.Join(resultErr, closeErr)
+		if terminalErr != nil {
+			evidence.Error = terminalErr.Error()
+		}
+		resultErr = errors.Join(terminalErr, runner.writeJSON(relative, evidence))
+	}()
+
 	commandCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
-	command := exec.CommandContext(commandCtx, runner.config.python, arguments...) //nolint:gosec // resolved Python and repository-owned helper.
-	var stdout, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
-		return matrixRPCResponse{}, evidencePath, fmt.Errorf("raw v1 client failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	connection, err = (&net.Dialer{}).DialContext(commandCtx, "unix", runner.config.presenceSocket)
+	if err != nil {
+		return livepresence.Frame{}, evidencePath, fmt.Errorf("connect raw v1 client: %w", err)
 	}
-	var response matrixRPCResponse
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &response); err != nil || response.JSONRPC != "2.0" {
-		return matrixRPCResponse{}, evidencePath, fmt.Errorf("raw v1 client returned an invalid response: %s", strings.TrimSpace(stdout.String()))
+	if deadline, ok := commandCtx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return livepresence.Frame{}, evidencePath, fmt.Errorf("set raw v1 deadline: %w", err)
+		}
+	}
+	stopCancel = context.AfterFunc(commandCtx, func() { _ = connection.Close() })
+	live := livepresence.NewConnection(newMatrixFramedConn(connection))
+	report := map[string]any{"protocol": livepresence.ProtocolVersion, "uuid": uuid, "name": "matrix-" + runner.runID + "-source-" + product + "-" + cell,
+		"groups": []string{group}, "product": "claude", "info": map[string]string{}}
+	hello, err := matrixLiveCall(live, "hello", "session.hello", report, uuid, &evidence)
+	if err != nil {
+		return livepresence.Frame{}, evidencePath, fmt.Errorf("session.hello: %w", err)
+	}
+	var acknowledged map[string]json.RawMessage
+	if hello.Error != nil || livepresence.DecodeStrict(hello.Result, &acknowledged) != nil || acknowledged == nil || len(acknowledged) != 0 {
+		return livepresence.Frame{}, evidencePath, errors.New("session.hello was not acknowledged with an empty object")
+	}
+	response, err = matrixLiveCall(live, "send", "message.send", params, uuid, &evidence)
+	if err != nil {
+		return livepresence.Frame{}, evidencePath, fmt.Errorf("message.send: %w", err)
 	}
 	return response, evidencePath, nil
+}
+
+func matrixLiveCall(
+	connection *livepresence.Connection,
+	id, method string,
+	params any,
+	sourceUUID string,
+	evidence *matrixWireEvidence,
+) (livepresence.Frame, error) {
+	wireID, _ := json.Marshal(id)
+	body, err := json.Marshal(params)
+	if err != nil {
+		return livepresence.Frame{}, err
+	}
+	request := livepresence.Frame{JSONRPC: "2.0", ID: wireID, Method: method, Params: body}
+	evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: "send", Frame: request})
+	if err := connection.Write(request); err != nil {
+		return livepresence.Frame{}, err
+	}
+	for {
+		var frame livepresence.Frame
+		if err := connection.Decode(&frame); err != nil {
+			return livepresence.Frame{}, err
+		}
+		evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: "receive", Frame: frame})
+		if !livepresence.ValidFrame(frame) {
+			return livepresence.Frame{}, errors.New("daemon returned an invalid JSON-RPC frame")
+		}
+		if frame.Method == "" {
+			if !bytes.Equal(frame.ID, wireID) {
+				return livepresence.Frame{}, fmt.Errorf("daemon returned response id %s while awaiting %s", frame.ID, wireID)
+			}
+			return frame, nil
+		}
+		if frame.Method != "message.deliver" || !livepresence.ValidRequest(frame) {
+			return livepresence.Frame{}, fmt.Errorf("daemon interleaved unexpected method %q", frame.Method)
+		}
+		if _, err := livepresence.DecodeDeliver(frame.Params); err != nil {
+			return livepresence.Frame{}, fmt.Errorf("daemon interleaved invalid message.deliver: %w", err)
+		}
+		busy := livepresence.Failure(frame.ID, livepresence.Busy, "Session busy", map[string]any{"uuid": sourceUUID})
+		evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: "send", Frame: busy})
+		if err := connection.Write(busy); err != nil {
+			return livepresence.Frame{}, err
+		}
+	}
 }
 
 func matrixUUID() (string, error) {
@@ -1170,7 +1263,7 @@ func matrixPersistencePrompt(runID string) (string, string) {
 	return fmt.Sprintf("Without tools, concatenate %s and %s. Output only the result.", left, right), expected
 }
 
-func requireAcceptedSessions(response matrixRPCResponse, expected []string) error {
+func requireAcceptedSessions(response livepresence.Frame, expected []string) error {
 	if response.Error != nil {
 		return fmt.Errorf("message.send failed: %s (%d)", response.Error.Message, response.Error.Code)
 	}
@@ -1267,17 +1360,4 @@ func (runner *matrixRunner) diagnoseAttachFailure(product matrixProduct, label s
 		detail = fmt.Errorf("%w; trust %s once via %s's own prompt and rerun", detail, runner.config.cwd, product.id)
 	}
 	return detail
-}
-
-func matrixSpecDocumentsGroup(repositoryRoot string) (bool, error) {
-	body, err := os.ReadFile(filepath.Join(repositoryRoot, "docs", "specs", "NATIVE-PEER-PROTOCOL.md")) //nolint:gosec // Validated repository root and one fixed in-repository path.
-	if err != nil {
-		return false, err
-	}
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), `"group":`) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
