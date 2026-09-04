@@ -1,68 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-sessions.dev/schemas/lane-worker.schema.json",
-  "x-agent-sessions-fixtures": [
-    {
-      "definition": "LaneOpenRequest",
-      "valid": true,
-      "value": {"name": "worker", "cwd": "/work", "permission_mode": "default", "resume": false, "auto_archive_after_seconds": 60, "arguments": []}
-    },
-    {
-      "definition": "LaneOpenRequest",
-      "valid": false,
-      "value": {"name": "worker", "cwd": "/work", "permission_mode": "default", "resume": true, "auto_archive_after_seconds": 60, "arguments": []}
-    },
-    {
-      "definition": "LaneWorkerHello",
-      "valid": true,
-      "value": {
-        "protocol": 1,
-        "launch_token": "opaque",
-        "product": "codex",
-        "capabilities": {"steer": true, "durable_resume": true, "caller_supplied_session_id": false, "model": true, "reasoning_effort": true, "agent": false, "tool_policy": false, "output_schema": true, "sandbox": true, "permission_default": true, "permission_bypass": true},
-        "extra_arguments": [],
-        "readiness": {"available": true, "native_path": "/bin/codex", "native_version": "1"}
-      }
-    },
-    {
-      "definition": "LaneWorkerHello",
-      "valid": false,
-      "value": {"protocol": 1, "launch_token": "opaque", "product": "codex", "capabilities": {}, "extra_arguments": [], "readiness": {"available": true, "native_path": "/bin/codex", "native_version": "1"}}
-    },
-    {
-      "definition": "LaneDoctorResult",
-      "valid": true,
-      "value": {
-        "type": "lane.doctor",
-        "contract_version": 2,
-        "authority": "daemon",
-        "product": "codex",
-        "ready": true,
-        "native_path": "/bin/codex",
-        "native_version": "1",
-        "runtime_path": "/bin/codex",
-        "daemon_reachable": true,
-        "supervisor_reachable": true,
-        "capabilities": {"steer": true, "durable_resume": true, "caller_supplied_session_id": false, "model": true, "reasoning_effort": true, "agent": false, "tool_policy": false, "output_schema": true, "sandbox": true, "permission_default": true, "permission_bypass": true},
-        "extra_arguments": []
-      }
-    },
-    {
-      "definition": "LaneDoctorResult",
-      "valid": false,
-      "value": {"type": "lane.doctor", "contract_version": 2, "authority": "daemon", "product": "codex", "ready": true}
-    },
-    {
-      "definition": "LaneTurnStartRequest",
-      "valid": true,
-      "value": {"input_id": "input", "body": "work", "mode": "followup", "timeout_seconds": 1}
-    },
-    {
-      "definition": "LaneTurnStartRequest",
-      "valid": false,
-      "value": {"input_id": "input", "body": "work", "mode": "followup", "timeout_seconds": 0}
-    }
-  ],
   "$defs": {
     "LaneOpenRequest": {
       "type": "object",
@@ -92,13 +30,7 @@
         "auto_archive_after_seconds": {"type": "number", "minimum": 0},
         "arguments": {"type": "array", "items": {"type": "string"}}
       },
-      "allOf": [
-        {
-          "if": {"properties": {"resume": {"const": true}}, "required": ["resume"]},
-          "then": {"required": ["session_id"]},
-          "else": {"not": {"required": ["session_id"]}}
-        }
-      ]
+      "allOf": [{"if": {"properties": {"resume": {"const": true}}, "required": ["resume"]}, "then": {"required": ["session_id"]}, "else": {"not": {"required": ["session_id"]}}}]
     },
     "LaneWorkerHello": {
       "type": "object",
@@ -146,10 +78,11 @@
           "required": ["available", "native_path", "native_version"],
           "properties": {
             "available": {"type": "boolean"},
-            "native_path": {"type": "string", "minLength": 1},
-            "native_version": {"type": "string", "minLength": 1},
+            "native_path": {"type": "string"},
+            "native_version": {"type": "string"},
             "error": {"type": "string", "minLength": 1}
-          }
+          },
+          "allOf": [{"if": {"properties": {"available": {"const": true}}}, "then": {"properties": {"native_path": {"minLength": 1}, "native_version": {"minLength": 1}}, "not": {"required": ["error"]}}, "else": {"required": ["error"]}}]
         }
       }
     },
@@ -163,15 +96,16 @@
         "authority": {"const": "daemon"},
         "product": {"type": "string", "minLength": 1},
         "ready": {"type": "boolean"},
-        "native_path": {"type": "string", "minLength": 1},
-        "native_version": {"type": "string", "minLength": 1},
+        "native_path": {"type": "string"},
+        "native_version": {"type": "string"},
         "runtime_path": {"type": "string", "minLength": 1},
         "daemon_reachable": {"type": "boolean"},
         "supervisor_reachable": {"type": "boolean"},
         "readiness_error": {"type": "string", "minLength": 1},
         "capabilities": {"$ref": "#/$defs/LaneWorkerHello/properties/capabilities"},
         "extra_arguments": {"$ref": "#/$defs/LaneWorkerHello/properties/extra_arguments"}
-      }
+      },
+      "allOf": [{"if": {"properties": {"ready": {"const": true}}}, "then": {"properties": {"native_path": {"minLength": 1}, "native_version": {"minLength": 1}}, "not": {"required": ["readiness_error"]}}, "else": {"required": ["readiness_error"]}}]
     },
     "LaneTurnStartRequest": {
       "type": "object",

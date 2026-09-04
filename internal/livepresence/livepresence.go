@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -338,6 +339,22 @@ func NewConnection(connection net.Conn) *Connection {
 }
 func (c *Connection) Observe(observer func(string, Frame)) { c.observer = observer }
 func (c *Connection) Decode(frame *Frame) error {
+	if err := c.DecodeWire(frame); err != nil {
+		return err
+	}
+	if frame.Method != "" {
+		spec, known := LookupMethod(frame.Method)
+		if known && spec.First != (c.Report().UUID == "") {
+			return errors.New("live method is invalid at this connection phase")
+		}
+	}
+	return nil
+}
+
+// DecodeWire applies the shared bounded frame contract without imposing the
+// public-presence phase table. The private lane-worker protocol owns its own
+// closed first-frame and lifecycle validation above this framing layer.
+func (c *Connection) DecodeWire(frame *Frame) error {
 	body, err := c.reader.ReadSlice('\n')
 	if err != nil && len(body) == 0 {
 		return err
@@ -350,12 +367,6 @@ func (c *Connection) Decode(frame *Frame) error {
 	}
 	if err := DecodeStrict(body[:len(body)-1], frame); err != nil {
 		return err
-	}
-	if frame.Method != "" {
-		spec, known := LookupMethod(frame.Method)
-		if known && spec.First != (c.Report().UUID == "") {
-			return errors.New("live method is invalid at this connection phase")
-		}
 	}
 	c.observe("receive", *frame)
 	return nil
@@ -402,6 +413,26 @@ func (c *Connection) Call(ctx context.Context, id, method string, params any) (j
 		return nil, NewError(InvalidParams, "Invalid params", map[string]any{"method": method})
 	}
 	wireID, _ := json.Marshal(id)
+	return c.callWire(ctx, wireID, method, body, func(result json.RawMessage) bool {
+		return ValidMethodResult(spec, body, result)
+	})
+}
+
+// CallWire issues one private-protocol request with an integer identifier.
+// Callers supply the closed result validator owned by that protocol.
+func (c *Connection) CallWire(ctx context.Context, id int64, method string, params any, validResult func(json.RawMessage) bool) (json.RawMessage, error) {
+	if ctx == nil || id < 1 || strings.TrimSpace(method) == "" || validResult == nil {
+		return nil, errors.New("private wire request is incomplete")
+	}
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	wireID := json.RawMessage(strconv.FormatInt(id, 10))
+	return c.callWire(ctx, wireID, method, body, validResult)
+}
+
+func (c *Connection) callWire(ctx context.Context, wireID json.RawMessage, method string, body json.RawMessage, validResult func(json.RawMessage) bool) (json.RawMessage, error) {
 	key := string(wireID)
 	response := make(chan Frame, 1)
 	c.mu.Lock()
@@ -426,7 +457,7 @@ func (c *Connection) Call(ctx context.Context, id, method string, params any) (j
 		if frame.Error != nil {
 			return nil, frame.Error
 		}
-		if !ValidMethodResult(spec, body, frame.Result) {
+		if !validResult(frame.Result) {
 			return nil, errors.New("live presence method returned an invalid result")
 		}
 		return append(json.RawMessage(nil), frame.Result...), nil

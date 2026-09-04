@@ -155,6 +155,7 @@ test("all npm packages are exact public, self-contained installation artifacts",
         assert.equal(manifest.peerDependencies?.["@agent-sessions/dsh-comms"], "0.4.0");
       }
       assertSelfContained(packageRoot, manifest);
+      assert.equal(fs.existsSync(path.join(packageRoot, "shared/lane-worker.fixtures.json")), false, `${spec.name} packed test fixtures`);
       if (spec.importable) {
         const loaded = await import(pathToFileURL(path.join(packageRoot, manifest.main)).href);
         assert.equal(typeof loaded.default, "function", `${spec.name} packed entrypoint is not importable`);

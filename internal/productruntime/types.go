@@ -7,8 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -237,84 +238,182 @@ type LaneTurnStartRequest struct {
 
 type TurnStartRequest = LaneTurnStartRequest
 
-func DecodeLaneOpenRequest(body []byte) (LaneOpenRequest, error) {
-	var request LaneOpenRequest
-	if err := decodeClosed(body, &request); err != nil {
-		return LaneOpenRequest{}, err
+type LaneWireSchema struct{ document map[string]any }
+
+func ParseLaneWireSchema(body []byte) (*LaneWireSchema, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var document map[string]any
+	if decoder.Decode(&document) != nil || len(document) != 3 || document["$schema"] == nil || document["$id"] == nil || document["$defs"] == nil {
+		return nil, errors.New("lane worker schema document is invalid")
 	}
-	if strings.TrimSpace(request.Name) == "" || strings.TrimSpace(request.Cwd) == "" ||
-		!request.PermissionMode.Valid() || request.Arguments == nil || request.AutoArchiveAfterSeconds < 0 ||
-		math.IsInf(request.AutoArchiveAfterSeconds, 0) || math.IsNaN(request.AutoArchiveAfterSeconds) ||
-		request.Resume != (request.SessionID != "") || request.OutputSchema != nil && !jsonObject(request.OutputSchema) ||
-		request.ToolPolicy != nil && !validToolPolicy(*request.ToolPolicy) {
-		return LaneOpenRequest{}, fmt.Errorf("%w: lane open request is invalid", ErrProtocol)
+	schema := &LaneWireSchema{document: document}
+	if !schema.keywords(document["$defs"], true) {
+		return nil, errors.New("lane worker schema contains an unsupported keyword")
 	}
-	return request, nil
+	return schema, nil
 }
 
-func DecodeLaneWorkerHello(body []byte) (LaneWorkerHello, error) {
-	var hello LaneWorkerHello
-	if err := decodeClosed(body, &hello); err != nil {
-		return LaneWorkerHello{}, err
+func (s *LaneWireSchema) Decode(name string, body []byte, output any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil || !s.valid(s.definition(name), value) {
+		return fmt.Errorf("%w: %s does not match the lane worker schema", ErrProtocol, name)
 	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(body, &fields) != nil || !hasJSONFields(fields["capabilities"],
-		"steer", "durable_resume", "caller_supplied_session_id", "model", "reasoning_effort", "agent", "tool_policy",
-		"output_schema", "sandbox", "permission_default", "permission_bypass") {
-		return LaneWorkerHello{}, fmt.Errorf("%w: lane worker capabilities are incomplete", ErrProtocol)
-	}
-	if hello.Protocol != 1 || strings.TrimSpace(hello.LaunchToken) == "" || strings.TrimSpace(hello.Product) == "" ||
-		hello.ExtraArguments == nil || strings.TrimSpace(hello.Readiness.NativePath) == "" || strings.TrimSpace(hello.Readiness.NativeVersion) == "" {
-		return LaneWorkerHello{}, fmt.Errorf("%w: lane worker hello is invalid", ErrProtocol)
-	}
-	seen := make(map[string]bool, len(hello.ExtraArguments))
-	for _, rule := range hello.ExtraArguments {
-		if strings.TrimSpace(rule.Name) == "" || strings.TrimSpace(rule.Description) == "" ||
-			(rule.Cardinality != "zero-or-one" && rule.Cardinality != "zero-or-more") || seen[rule.Name] {
-			return LaneWorkerHello{}, fmt.Errorf("%w: lane worker extra argument is invalid", ErrProtocol)
-		}
-		seen[rule.Name] = true
-	}
-	return hello, nil
+	return decodeClosed(body, output)
 }
 
-func hasJSONFields(body json.RawMessage, names ...string) bool {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(body, &fields) != nil || len(fields) != len(names) {
+func (s *LaneWireSchema) definition(name string) map[string]any {
+	definitions, _ := s.document["$defs"].(map[string]any)
+	definition, _ := definitions[name].(map[string]any)
+	return definition
+}
+
+func (s *LaneWireSchema) valid(node map[string]any, value any) bool {
+	if node == nil {
 		return false
 	}
-	for _, name := range names {
-		if fields[name] == nil {
+	if ref, ok := node["$ref"].(string); ok {
+		resolved := s.document
+		for _, part := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+			resolved, _ = resolved[part].(map[string]any)
+		}
+		return s.valid(resolved, value)
+	}
+	if constant, ok := node["const"]; ok && !reflect.DeepEqual(constant, value) {
+		return false
+	}
+	if options, ok := node["enum"].([]any); ok && !slices.ContainsFunc(options, func(option any) bool { return reflect.DeepEqual(option, value) }) {
+		return false
+	}
+	typeName, _ := node["type"].(string)
+	if typeName == "object" || node["properties"] != nil || node["required"] != nil || node["additionalProperties"] != nil {
+		object, ok := value.(map[string]any)
+		properties, _ := node["properties"].(map[string]any)
+		if !ok || !requiredProperties(object, node["required"]) || node["additionalProperties"] == false && unknownProperty(object, properties) || len(object) < int(number(node["minProperties"])) {
 			return false
+		}
+		for key, item := range object {
+			if child, ok := properties[key].(map[string]any); ok && !s.valid(child, item) {
+				return false
+			}
+		}
+	} else if typeName == "array" {
+		array, ok := value.([]any)
+		items, _ := node["items"].(map[string]any)
+		if !ok || slices.ContainsFunc(array, func(item any) bool { return !s.valid(items, item) }) || node["uniqueItems"] == true && !uniqueJSON(array) {
+			return false
+		}
+	} else if typeName == "string" {
+		text, ok := value.(string)
+		if !ok || len([]rune(text)) < int(number(node["minLength"])) {
+			return false
+		}
+	} else if typeName == "boolean" {
+		if _, ok := value.(bool); !ok {
+			return false
+		}
+	} else if typeName == "number" {
+		if _, ok := value.(json.Number); !ok {
+			return false
+		}
+	}
+	numeric, numericOK := value.(json.Number)
+	actual, _ := numeric.Float64()
+	if numericOK && (node["minimum"] != nil && actual < number(node["minimum"]) || node["exclusiveMinimum"] != nil && actual <= number(node["exclusiveMinimum"])) {
+		return false
+	}
+	if all, ok := node["allOf"].([]any); ok && slices.ContainsFunc(all, func(item any) bool { child, _ := item.(map[string]any); return !s.valid(child, value) }) {
+		return false
+	}
+	if condition, ok := node["if"].(map[string]any); ok {
+		branch := "else"
+		if s.valid(condition, value) {
+			branch = "then"
+		}
+		if child, ok := node[branch].(map[string]any); ok && !s.valid(child, value) {
+			return false
+		}
+	}
+	if child, ok := node["not"].(map[string]any); ok && s.valid(child, value) {
+		return false
+	}
+	return true
+}
+
+func (s *LaneWireSchema) keywords(value any, definitions bool) bool {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if definitions {
+		return !slices.ContainsFunc(mapsValues(object), func(child any) bool { return !s.keywords(child, false) })
+	}
+	allowed := map[string]bool{"$ref": true, "const": true, "enum": true, "type": true, "required": true, "additionalProperties": true, "minProperties": true, "properties": true, "items": true, "uniqueItems": true, "minLength": true, "minimum": true, "exclusiveMinimum": true, "allOf": true, "if": true, "then": true, "else": true, "not": true}
+	for key, item := range object {
+		if key == "properties" {
+			children, ok := item.(map[string]any)
+			if !ok || slices.ContainsFunc(mapsValues(children), func(child any) bool { return !s.keywords(child, false) }) {
+				return false
+			}
+			continue
+		}
+		if !allowed[key] {
+			return false
+		}
+		if key == "items" || key == "if" || key == "then" || key == "else" || key == "not" {
+			if !s.keywords(item, false) {
+				return false
+			}
+		} else if key == "allOf" {
+			children, ok := item.([]any)
+			if !ok || slices.ContainsFunc(children, func(child any) bool { return !s.keywords(child, false) }) {
+				return false
+			}
 		}
 	}
 	return true
 }
 
-func DecodeLaneDoctorResult(body []byte) (LaneDoctorResult, error) {
-	var result LaneDoctorResult
-	if err := decodeClosed(body, &result); err != nil {
-		return LaneDoctorResult{}, err
-	}
-	if result.Type != "lane.doctor" || result.ContractVersion != 2 || result.Authority != "daemon" ||
-		strings.TrimSpace(result.Product) == "" || strings.TrimSpace(result.NativePath) == "" ||
-		strings.TrimSpace(result.NativeVersion) == "" || strings.TrimSpace(result.RuntimePath) == "" || result.ExtraArguments == nil {
-		return LaneDoctorResult{}, fmt.Errorf("%w: lane doctor result is invalid", ErrProtocol)
-	}
-	return result, nil
+func requiredProperties(object map[string]any, value any) bool {
+	required, _ := value.([]any)
+	return !slices.ContainsFunc(required, func(item any) bool { name, ok := item.(string); _, present := object[name]; return !ok || !present })
 }
 
-func DecodeLaneTurnStartRequest(body []byte) (LaneTurnStartRequest, error) {
-	var request LaneTurnStartRequest
-	if err := decodeClosed(body, &request); err != nil {
-		return LaneTurnStartRequest{}, err
+func unknownProperty(object, properties map[string]any) bool {
+	for key := range object {
+		if properties[key] == nil {
+			return true
+		}
 	}
-	if strings.TrimSpace(request.InputID) == "" || strings.TrimSpace(request.Body) == "" ||
-		(request.Mode != "followup" && request.Mode != "steer") || request.TimeoutSeconds != nil &&
-		(*request.TimeoutSeconds <= 0 || math.IsInf(*request.TimeoutSeconds, 0) || math.IsNaN(*request.TimeoutSeconds)) {
-		return LaneTurnStartRequest{}, fmt.Errorf("%w: lane turn start request is invalid", ErrProtocol)
+	return false
+}
+
+func mapsValues(object map[string]any) []any {
+	values := make([]any, 0, len(object))
+	for _, value := range object {
+		values = append(values, value)
 	}
-	return request, nil
+	return values
+}
+
+func number(value any) float64 {
+	numeric, _ := value.(json.Number)
+	result, _ := numeric.Float64()
+	return result
+}
+
+func uniqueJSON(values []any) bool {
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		body, _ := json.Marshal(value)
+		if seen[string(body)] {
+			return false
+		}
+		seen[string(body)] = true
+	}
+	return true
 }
 
 func decodeClosed(body []byte, output any) error {
@@ -328,30 +427,6 @@ func decodeClosed(body []byte, output any) error {
 		return fmt.Errorf("%w: trailing JSON value", ErrProtocol)
 	}
 	return nil
-}
-
-func jsonObject(body json.RawMessage) bool {
-	var value map[string]any
-	return decodeClosed(body, &value) == nil && value != nil
-}
-
-func validToolPolicy(policy LaneToolPolicy) bool {
-	if policy.Tools == nil && policy.Allow == nil && policy.Deny == nil {
-		return false
-	}
-	for _, values := range []*[]string{policy.Tools, policy.Allow, policy.Deny} {
-		if values == nil {
-			continue
-		}
-		seen := make(map[string]bool, len(*values))
-		for _, value := range *values {
-			if strings.TrimSpace(value) == "" || seen[value] {
-				return false
-			}
-			seen[value] = true
-		}
-	}
-	return true
 }
 
 type NativeTurnRef struct {

@@ -102,9 +102,9 @@ test("shared params authority follows Appendix A grammar", async () => {
 });
 
 test("one shipped schema validates one shared Go and JavaScript fixture table", () => {
-  const document = JSON.parse(fs.readFileSync(path.join(__dirname, "lane-worker.schema.json"), "utf8"));
-  assert.equal(document["x-agent-sessions-fixtures"].length, 8);
-  for (const fixture of document["x-agent-sessions-fixtures"])
+  const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, "lane-worker.fixtures.json"), "utf8"));
+  assert.equal(fixtures.length, 25);
+  for (const fixture of fixtures)
     assert.equal(validLaneWorkerSchema(fixture.definition, fixture.value), fixture.valid, fixture.definition);
 });
 

@@ -56,8 +56,9 @@ func TestLaneWorkerSchemaMatchesAuthoritativeGoStructs(t *testing.T) {
 }
 
 func TestLaneWorkerWireTypesRejectUnknownNullAndInvalidTimeout(t *testing.T) {
+	schema := testLaneWireSchema(t)
 	open := `{"name":"worker","cwd":"/tmp/work","permission_mode":"default","resume":false,"auto_archive_after_seconds":60,"arguments":[]}`
-	if _, err := DecodeLaneOpenRequest([]byte(open)); err != nil {
+	if err := schema.Decode("LaneOpenRequest", []byte(open), &LaneOpenRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range []string{
@@ -65,12 +66,12 @@ func TestLaneWorkerWireTypesRejectUnknownNullAndInvalidTimeout(t *testing.T) {
 		strings.Replace(open, `"name":"worker"`, `"name":null`, 1),
 		strings.Replace(open, `"resume":false`, `"resume":true`, 1),
 	} {
-		if _, err := DecodeLaneOpenRequest([]byte(invalid)); err == nil {
+		if err := schema.Decode("LaneOpenRequest", []byte(invalid), &LaneOpenRequest{}); err == nil {
 			t.Fatalf("invalid open accepted: %s", invalid)
 		}
 	}
 	turn := `{"input_id":"input-1","body":"work","mode":"followup","timeout_seconds":0.5}`
-	if _, err := DecodeLaneTurnStartRequest([]byte(turn)); err != nil {
+	if err := schema.Decode("LaneTurnStartRequest", []byte(turn), &LaneTurnStartRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range []string{
@@ -78,45 +79,58 @@ func TestLaneWorkerWireTypesRejectUnknownNullAndInvalidTimeout(t *testing.T) {
 		strings.Replace(turn, `"followup"`, `"other"`, 1),
 		strings.TrimSuffix(turn, "}") + `,"extra":true}`,
 	} {
-		if _, err := DecodeLaneTurnStartRequest([]byte(invalid)); err == nil {
+		if err := schema.Decode("LaneTurnStartRequest", []byte(invalid), &LaneTurnStartRequest{}); err == nil {
 			t.Fatalf("invalid turn accepted: %s", invalid)
 		}
 	}
 }
 
 func TestLaneWorkerSharedFixtures(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "integrations", "shared", "lane-worker.schema.json"))
+	schema := testLaneWireSchema(t)
+	body, err := os.ReadFile(filepath.Join("..", "..", "integrations", "shared", "lane-worker.fixtures.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var document struct {
-		Fixtures []struct {
-			Definition string          `json:"definition"`
-			Valid      bool            `json:"valid"`
-			Value      json.RawMessage `json:"value"`
-		} `json:"x-agent-sessions-fixtures"`
+	var fixtures []struct {
+		Definition string          `json:"definition"`
+		Valid      bool            `json:"valid"`
+		Value      json.RawMessage `json:"value"`
 	}
-	if err := json.Unmarshal(body, &document); err != nil || len(document.Fixtures) != 8 {
-		t.Fatalf("decode shared fixtures: %v (%d)", err, len(document.Fixtures))
+	if err := json.Unmarshal(body, &fixtures); err != nil || len(fixtures) != 25 {
+		t.Fatalf("decode shared fixtures: %v (%d)", err, len(fixtures))
 	}
-	for _, fixture := range document.Fixtures {
-		var decodeErr error
+	for _, fixture := range fixtures {
+		var output any
 		switch fixture.Definition {
 		case "LaneOpenRequest":
-			_, decodeErr = DecodeLaneOpenRequest(fixture.Value)
+			output = &LaneOpenRequest{}
 		case "LaneWorkerHello":
-			_, decodeErr = DecodeLaneWorkerHello(fixture.Value)
+			output = &LaneWorkerHello{}
 		case "LaneDoctorResult":
-			_, decodeErr = DecodeLaneDoctorResult(fixture.Value)
+			output = &LaneDoctorResult{}
 		case "LaneTurnStartRequest":
-			_, decodeErr = DecodeLaneTurnStartRequest(fixture.Value)
+			output = &LaneTurnStartRequest{}
 		default:
 			t.Fatalf("unknown shared fixture definition %q", fixture.Definition)
 		}
+		decodeErr := schema.Decode(fixture.Definition, fixture.Value, output)
 		if (decodeErr == nil) != fixture.Valid {
 			t.Fatalf("%s valid=%v decode error=%v", fixture.Definition, fixture.Valid, decodeErr)
 		}
 	}
+}
+
+func testLaneWireSchema(t *testing.T) *LaneWireSchema {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "integrations", "shared", "lane-worker.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, err := ParseLaneWireSchema(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schema
 }
 
 func jsonFields(typ reflect.Type) ([]string, []string) {
