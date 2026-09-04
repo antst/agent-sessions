@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"sync"
@@ -21,9 +22,10 @@ type testRPCRequest struct {
 }
 
 type testRPCProcess struct {
-	reads chan []byte
-	done  chan struct{}
-	once  sync.Once
+	reads     chan []byte
+	responses chan []byte
+	done      chan struct{}
+	once      sync.Once
 
 	mu       sync.Mutex
 	requests []testRPCRequest
@@ -31,7 +33,7 @@ type testRPCProcess struct {
 }
 
 func newTestRPCProcess() *testRPCProcess {
-	return &testRPCProcess{reads: make(chan []byte, 32), done: make(chan struct{})}
+	return &testRPCProcess{reads: make(chan []byte, 32), responses: make(chan []byte, 32), done: make(chan struct{})}
 }
 
 func (process *testRPCProcess) ReadFrame(ctx context.Context) ([]byte, error) {
@@ -50,8 +52,13 @@ func (process *testRPCProcess) WriteFrame(_ context.Context, frame []byte) error
 	if err := json.Unmarshal(frame, &raw); err != nil {
 		return err
 	}
+	method, isRequest := raw["method"].(string)
+	if !isRequest {
+		process.responses <- append([]byte(nil), frame...)
+		return nil
+	}
 	id, _ := rpcID(raw["id"])
-	request := testRPCRequest{ID: id, Method: raw["method"].(string), Params: mapValue(raw["params"])}
+	request := testRPCRequest{ID: id, Method: method, Params: mapValue(raw["params"])}
 	process.mu.Lock()
 	process.requests = append(process.requests, request)
 	handle := process.handle
@@ -84,6 +91,17 @@ func (process *testRPCProcess) respond(id int64, result map[string]any) {
 
 func (process *testRPCProcess) notify(method string, params map[string]any) {
 	process.emit(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+func (process *testRPCProcess) response(t *testing.T) string {
+	t.Helper()
+	select {
+	case response := <-process.responses:
+		return string(response)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Qwen ACP client response")
+		return ""
+	}
 }
 
 func (process *testRPCProcess) methods() []string {
@@ -189,6 +207,19 @@ func TestLaneUsesLiteralYoloNativeNameAndSynchronousTurn(t *testing.T) {
 	}
 	if want := []string{"--acp", "--yolo", "--model", "qwen3.8-max"}; !reflect.DeepEqual(factory.command.Args, want) {
 		t.Fatalf("Qwen args = %q, want %q", factory.command.Args, want)
+	}
+	permissionRequests := []map[string]any{
+		{"jsonrpc": "2.0", "id": int64(41), "method": "session/request_permission", "params": map[string]any{"options": []any{map[string]any{"kind": "allow_once", "optionId": "permit"}}}},
+		{"jsonrpc": "2.0", "id": int64(42), "method": "session/request_permission", "params": map[string]any{"options": "malformed"}},
+		{"jsonrpc": "2.0", "id": int64(43), "method": "session/request_permission"},
+	}
+	for _, request := range permissionRequests {
+		process.emit(request)
+		id, _ := rpcID(request["id"])
+		want := fmt.Sprintf(`{"id":%d,"jsonrpc":"2.0","result":{"outcome":{"outcome":"cancelled"}}}`, id)
+		if got := process.response(t); got != want {
+			t.Fatalf("yolo permission response = %s, want %s", got, want)
+		}
 	}
 	if want := []productruntime.EnvVar{{Name: "AGENT_SESSIONS_PRODUCT", Value: "qwen"}, {Name: "AGENT_SESSIONS_GROUPS", Value: `["parent/private"]`}}; !reflect.DeepEqual(factory.command.Env, want) {
 		t.Fatalf("Qwen env = %#v, want %#v", factory.command.Env, want)

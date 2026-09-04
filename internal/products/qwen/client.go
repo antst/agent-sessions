@@ -151,7 +151,7 @@ func (client *rpcClient) readLoop() {
 		id, hasID := rpcID(message["id"])
 		switch {
 		case hasID && method == "session/request_permission":
-			go client.answerPermission(id, mapValue(message["params"]))
+			go client.answerPermission(id)
 		case hasID && method != "":
 			go client.writeResponse(id, nil, fmt.Errorf("unsupported Qwen ACP client request %q", method))
 		case hasID:
@@ -170,19 +170,8 @@ func (client *rpcClient) readLoop() {
 	}
 }
 
-func (client *rpcClient) answerPermission(id int64, params map[string]any) {
-	options, _ := params["options"].([]any)
-	outcome := map[string]any{"outcome": "cancelled"}
-	for _, raw := range options {
-		option := mapValue(raw)
-		kind, _ := option["kind"].(string)
-		optionID, _ := option["optionId"].(string)
-		if kind == "allow_once" && optionID != "" {
-			outcome = map[string]any{"outcome": "selected", "optionId": optionID}
-			break
-		}
-	}
-	client.writeResponse(id, map[string]any{"outcome": outcome}, nil)
+func (client *rpcClient) answerPermission(id int64) {
+	client.writeResponse(id, map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}, nil)
 }
 
 func (client *rpcClient) writeResponse(id int64, result map[string]any, responseErr error) {
