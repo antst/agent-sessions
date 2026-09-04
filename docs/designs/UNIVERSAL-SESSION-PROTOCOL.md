@@ -302,3 +302,277 @@ and closes the connection without writing one.
 | `-32010` | `timeout` | `lane.describe` or `lane.spawn` when its one spawn/open transaction bound expires. |
 | `-32011` | `not_committed` | Any worker-originated tool request received after hello but before native-ID commit. |
 | `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |
+
+## 2. Daemon
+
+### 2.1 Authority and data
+
+The daemon is a router around one durable table. It does not know how any
+product creates a session, runs a turn, injects a message, or closes. Native
+products and wrappers expose those operations through the eleven methods in
+Section 1. The daemon contains no product switch, lane actor, product driver,
+capability interface, status projection, result collector, archive
+transaction, or idle timer.
+
+Only lanes have durable rows. A row has exactly these columns:
+
+| Column | Meaning |
+| --- | --- |
+| `session_id` | Daemon-assigned immutable lane ID and primary key. |
+| `kind` | Always `lane` in this version; persisted so the row is itself a `SessionSummary` source. |
+| `product` | Immutable product token used to resolve the worker executable. |
+| `name` | Immutable caller-chosen lane name. |
+| `groups` | Immutable union of the spawning caller's groups and `extra_groups`. |
+| `native_id` | Absent before commit; immutable after `session.open`. |
+| `open` | The original closed `SessionOpenOptions` JSON, replayed byte-for-byte on resume. |
+| `last_turn` | Absent until a terminal turn; thereafter the one overwrite-only recovery value. |
+| `closed` | False until explicit `session.close`; never becomes false again. |
+| `created_at` | Daemon timestamp assigned with `session_id`. |
+
+There are no durable peer rows. A peer hello creates or replaces one transient
+entry containing its asserted identity and exact connection. EOF removes that
+exact entry. Lane EOF removes only the live connection; its row remains offline
+and resumable.
+
+Three in-memory indexes are the complete live authority:
+
+- `connections[session_id]` points to the exact current connection and, for a
+  spawned lane, its process supervisor. Admission checks pointer identity on
+  every request.
+- `pending[session_id]` contains at most one forwarded `turn.run`: its input,
+  worker request, and optional caller reply sink. The entry is not a turn state
+  machine; existence means running.
+- `rowLocks[session_id]` is one mutex per durable row. It serializes spawn,
+  resume, and close transactions and is never persisted or exposed.
+
+The durable table separately indexes `(product,native_id)` uniquely. No live
+fact, connection ID, generation, process ID, deadline, caller ID, or
+authorization decision is stored in a row.
+
+### 2.2 Connection admission
+
+The daemon accepts a socket, enforces the framing limits in Section 1, and
+requires `session.hello` first. A peer hello is installed by one atomic map
+swap. The displaced exact pointer becomes inadmissible immediately; the daemon
+writes `session.superseded` through its ordinary per-connection request-ID
+sequence and closes it without waiting for the acknowledgement. All of its
+pending calls fail once. No reconnect lease or grace timer exists.
+
+A worker hello resolves a one-use reservation created by `lane.describe` or
+`lane.spawn`. The reservation binds token, product, transaction, and expiry.
+Validation and token consumption are one locked operation. Wrong-product,
+unknown, expired, or repeated hello is `invalid_hello`; cancellation removes an
+unclaimed reservation. The connection stays provisional until open commits.
+Before commit it may answer daemon calls but every worker-originated tool call
+returns `not_committed`.
+
+The protocol is trusted by construction: local peers assert identity and
+groups, and a federated daemon asserts its own summaries. The daemon adds no
+PID, peer-credential, descendant, signature, or capability machinery.
+
+### 2.3 Describe and spawn
+
+The executable registry is immutable configuration from product token to
+executable plus fixed arguments. Fixed arguments describe a product mode, such
+as `dsh --profile agent-sessions`; caller data never enters argv. Resolution
+falls back to `asl-lane-<product>` on the service PATH with no fixed arguments.
+The one-use token is present only in the child's environment.
+
+`lane.describe` creates a rowless reservation, starts the process, and waits
+for either a valid hello, process exit, or the single spawn timeout. Valid hello
+is the complete result. The daemon returns its declarations and synchronously
+closes the supervised process without sending `session.open`. Describe creates
+no row, native session, connection entry, or product-specific readiness state.
+
+`lane.spawn` runs one sequential transaction while holding the row lock. For a
+new lane it validates the open object, allocates identity and groups, and keeps
+the prospective row private. For resume it checks `closed` before connection,
+then reuses the immutable row identity and stored open object. It resolves the
+worker, creates the reservation, starts the supervised process, consumes hello,
+checks declared open-field support, and sends one `session.open`. Resume includes
+the stored `native_id`; new open omits it.
+
+Frames and process exit are consumed in arrival order by that one transaction.
+If the open result arrives first, the daemon verifies a nonempty native ID,
+requires exact equality on resume, checks global `(product,native_id)`
+uniqueness, durably commits the row, installs the connection, and returns
+success. A following EOF merely makes the committed row offline. If EOF arrives
+first, spawn fails. No compensating close is attempted for a process that may
+have created native files before commit; that explicitly accepted crash window
+does not justify another state.
+
+The spawn timeout covers exec, hello, open, and commit. On failure the daemon
+closes the socket and synchronously reaps the owned process tree. A concurrent
+transaction waits on the same row lock, so a resumed native session never has
+two worker processes. A lost successful reply is recovered by listing visible
+lanes by name, not by replaying spawn.
+
+### 2.4 Routing, turns, and close
+
+Every request resolves the caller from its exact current connection, resolves
+the target among visible sessions, and then forwards the closed method without
+translation. Invisible and absent targets are both `unknown_session`. The
+daemon derives source identity and groups from its current peer entry or lane
+row; caller-supplied authority never crosses the route.
+
+For `turn.run`, the daemon rejects an existing pending entry as `busy`, installs
+one new entry, and sends the request on the target connection. Caller
+cancellation removes only the reply sink, not the worker request. A terminal
+reply is validated and written to `last_turn` before the pending entry is
+removed or any caller response is attempted. Worker EOF fails the pending
+request once and leaves the prior `last_turn` unchanged; the daemon never
+manufactures a terminal outcome.
+
+`turn.interrupt` is an ordinary concurrent call to the same connection. The
+worker kit owns the single native interrupt invocation. `message.deliver` is
+also concurrent and its returned disposition is copied into the sender's
+receipt. The daemon never queues a turn, interrupt, result, or delivery.
+
+`session.close` holds the row lock and checks `closed` before connection. It
+sends close while any run remains outstanding. The worker kit interrupts and
+awaits that same run, so a terminal reply that arrives within the supervisor
+bound follows the normal `last_turn` write. After the close result, or when the
+bound expires, the daemon closes the connection and synchronously reaps the
+owned tree before writing `closed=true`. Forced cleanup fails the pending run
+once and preserves the previous `last_turn`. The row can never resume after
+that commit.
+
+Unrequested lane EOF takes the same row lock, removes only the matching
+connection pointer, fails calls once, and synchronously reaps the process tree.
+A resume waits behind that cleanup. Peer EOF only removes the matching
+transient peer entry. These pointer checks make late EOF from a displaced peer
+or old process harmless without a generation counter.
+
+### 2.5 Listing, messaging, and federation
+
+`session.list` is a read of durable rows plus transient peers plus current
+connection and pending-map membership. `connected` comes only from the exact
+connection pointer; `running` comes only from the pending entry. Filtering and
+group visibility happen before results are assembled. No roster cache or
+projection stream exists.
+
+`message.send` resolves and deduplicates visible targets, sends one
+`message.deliver` per resolved current connection, and returns the product's
+receipt unchanged. Offline lanes and failed calls produce rejected receipts.
+Names are resolved only after exact local and host-qualified IDs; ambiguity is
+a rejected unresolved receipt rather than a guessed delivery.
+
+Federation carries the same closed request and response objects between trusted
+daemons. A daemon publishes only transient peers and durable lane summaries;
+the receiving daemon qualifies every remote ID with its authoritative host and
+never persists a remote row. `session.list` merges those summaries and
+`message.send` forwards a host-qualified delivery once.
+
+Visible remote lanes remain controllable without a second public wire. Resume
+`lane.spawn`, `turn.run`, `turn.interrupt`, and `session.close` addressed by a
+host-qualified ID are forwarded one hop to the authoritative daemon, which
+performs the same row lock, visibility, connection, and pending checks. New
+spawn and describe are always local because neither names a remote host. A
+federated turn is one outstanding RPC at each hop; caller loss has the same
+sink-only effect, and the authoritative daemon alone writes `last_turn`.
+
+### 2.6 Package boundary
+
+`internal/daemon` owns the table, current connections, pending turns, row
+locks, reservations, routing, and federation. `cmd/agent-sessions` only parses
+CLI/MCP input, constructs the daemon and immutable executable registry, and
+renders results. Product selection never enters either request router.
+
+`internal/livepresence` stays but becomes the product-agnostic full-duplex
+connection implementation: bounded framing, closed schema validation,
+independent request IDs, pending-call failure, supersession terminality, and
+exact-pointer close. Product reports, reconnect policy, and method-specific
+routing leave that package.
+
+`internal/structuredprocess` stays. Its newline framing and bounded
+TERM-to-KILL process ownership are generic wrapper/worker infrastructure; it
+must not import a product or protocol state type. `internal/laneworker` does not
+exist at the c5b280d base and is not introduced. The universal Go and JavaScript
+worker kits belong with product integrations, not inside the daemon.
+
+`internal/productruntime` dies completely. Its driver interfaces, per-product
+registry, environment carrier, native references, and daemon-facing errors are
+the architectural seam this protocol removes. Wrapper-specific native code is
+assessed in Sections 3 and 4; it may reuse product primitives, but it cannot
+restore a daemon driver interface.
+
+The implementation size contract is measured as final logical production
+lines, not as additions hidden behind relocation accounting:
+
+| Surface | Maximum | Constraint |
+| --- | ---: | --- |
+| `internal/daemon` | 1,100 | Table, router, transactions, delivery, and federation together. |
+| Largest daemon router file | 450 | No product literal, argv parser, or product callback. |
+| `internal/livepresence` | 650 | Framing and connection mechanics only. |
+| `internal/structuredprocess` | 700 | Generic process ownership; current functionality may remain. |
+| `cmd/agent-sessions` daemon composition | 350 | Construction and rendering only; no protocol state. |
+
+The daemon migration must therefore delete at least 8,000 net production and
+test lines across the surfaces listed below, before any product wrapper
+deletions are credited. A size breach is a design finding, not an invitation to
+move the same state machine into a differently named package.
+
+### 2.7 Migration deletion floor
+
+The following files die rather than being retained as compatibility shims.
+Counts are physical lines at exact base
+`c5b280d8db4fc0069dae50365f3515c6de6ab57e`. Files retained for CLI rendering,
+non-native wrappers, state storage, generic framing, process supervision, and
+federation are deliberately not claimed here; Sections 3 and 4 decide their
+product-side fate.
+
+| Lines | File | Reason |
+| ---: | --- | --- |
+| 1,116 | `cmd/agent-sessions/codex_host.go` | Product-composed host coordinator and attachment authority die. |
+| 445 | `cmd/agent-sessions/codex_host_test.go` | Tests the deleted coordinator. |
+| 169 | `cmd/agent-sessions/control_retry_test.go` | Tests the deleted side control protocol. |
+| 41 | `cmd/agent-sessions/dsh_lane.go` | Daemon-side DSH driver composition dies. |
+| 348 | `cmd/agent-sessions/federation.go` | Product-aware federation router is replaced by closed generic forwarding. |
+| 444 | `cmd/agent-sessions/federation_test.go` | Tests the deleted router. |
+| 1,628 | `cmd/agent-sessions/lane.go` | Lane actor, parsers, lifecycle, and product dispatch die. |
+| 94 | `cmd/agent-sessions/lane_names.go` | Actor-derived name authority dies. |
+| 149 | `cmd/agent-sessions/lane_notice.go` | Terminal notice and collection machinery die. |
+| 1,245 | `cmd/agent-sessions/lane_test.go` | Tests the deleted lane machinery. |
+| 746 | `cmd/agent-sessions/messaging.go` | Product-aware peer/lane routing is replaced by the generic router. |
+| 662 | `cmd/agent-sessions/messaging_test.go` | Tests the deleted messaging router. |
+| 434 | `cmd/agent-sessions/presence.go` | Report/projection presence server is replaced by universal connections. |
+| 1,257 | `cmd/agent-sessions/presence_test.go` | Tests the deleted presence server. |
+| 68 | `cmd/agent-sessions/preparation.go` | Old host preparation composition dies with the coordinator. |
+| 43 | `cmd/agent-sessions/socket_test.go` | Tests the deleted command-side socket server. |
+| 41 | `internal/daemon/admin.go` | Side-channel admin operation dies; list/describe are ordinary methods. |
+| 164 | `internal/daemon/admin_test.go` | Tests deleted admin routing. |
+| 22 | `internal/daemon/adapter_authorization_test.go` | Adapter authorization seam dies. |
+| 53 | `internal/daemon/adapter_claude.go` | Claude attachment adapter dies. |
+| 61 | `internal/daemon/adapter_claude_test.go` | Tests the deleted adapter. |
+| 91 | `internal/daemon/adapter_codex.go` | Codex attachment adapter dies. |
+| 65 | `internal/daemon/adapter_codex_test.go` | Tests the deleted adapter. |
+| 53 | `internal/daemon/adapter_grok.go` | Grok attachment adapter dies. |
+| 54 | `internal/daemon/adapter_grok_test.go` | Tests the deleted adapter. |
+| 47 | `internal/daemon/adapter_qwen.go` | Qwen attachment adapter dies. |
+| 67 | `internal/daemon/adapter_qwen_test.go` | Tests the deleted adapter. |
+| 412 | `internal/daemon/attachment.go` | Attachment transaction engine dies. |
+| 140 | `internal/daemon/attachment_test.go` | Tests the deleted engine. |
+| 314 | `internal/daemon/control.go` | Role-based side control envelope dies. |
+| 268 | `internal/daemon/control_test.go` | Tests the deleted envelope. |
+| 399 | `internal/daemon/control_unix.go` | Side control server is replaced by the universal endpoint. |
+| 189 | `internal/daemon/control_unix_test.go` | Tests the deleted server. |
+| 92 | `internal/daemon/lane.go` | Daemon lane transition helper dies. |
+| 89 | `internal/daemon/lane_test.go` | Tests the deleted helper. |
+| 13 | `internal/daemon/socket_test_helper_test.go` | Helper exists only for the deleted control server. |
+| 75 | `internal/productruntime/architecture_test.go` | Tests the deleted central driver seam. |
+| 47 | `internal/productruntime/drivers.go` | Product driver interfaces die. |
+| 17 | `internal/productruntime/environment.go` | Hidden daemon-to-product environment carrier dies. |
+| 23 | `internal/productruntime/environment_test.go` | Tests the deleted carrier. |
+| 19 | `internal/productruntime/errors.go` | Driver error vocabulary is replaced by wire errors. |
+| 29 | `internal/productruntime/fakes_test.go` | Fakes exist only for deleted drivers. |
+| 31 | `internal/productruntime/lane_registry.go` | In-process product driver registry dies. |
+| 31 | `internal/productruntime/lane_registry_test.go` | Tests the deleted registry. |
+| 110 | `internal/productruntime/registry.go` | Host dependency/product composition registry dies. |
+| 107 | `internal/productruntime/registry_test.go` | Tests the deleted registry. |
+| 251 | `internal/productruntime/types.go` | Daemon-facing native structs and capabilities die. |
+
+This floor is **47 files and 12,263 deleted lines**: 16 command files / 8,889
+lines, 20 daemon files / 2,634 lines, and all 11 product-runtime files / 740
+lines. It excludes product wrapper and kit migration on purpose, so later
+sections may only increase the deletion total, not use this number to hide
+replacement code.
