@@ -594,3 +594,177 @@ lines, 20 daemon files / 2,634 lines, and all 11 product-runtime files / 740
 lines. It excludes product wrapper and kit migration on purpose, so later
 sections may only increase the deletion total, not use this number to hide
 replacement code.
+
+## 3. Native product kits
+
+### 3.1 Product contract
+
+A native product links one dependency-free reference kit and supplies six
+members. This is the complete product-facing contract:
+
+| Member | Product responsibility |
+| --- | --- |
+| `hello()` | Return fixed product, version, supported open fields, and ordered extra-argument declarations after app-ready. |
+| `open(request)` | Create or resume from the typed request and return the exact native ID. |
+| `run(input)` | Start one native turn, observe it to a terminal result, and return that result. |
+| `interrupt()` | Ask the one current native turn to stop. |
+| `deliver(message)` | Inject now or queue for the next turn and return the truthful closed receipt. |
+| `close()` | Stop accepting work, close native state, and release product resources. |
+
+These are primitives, not a daemon adapter interface. They live in the product
+process, receive only closed wire values, and never expose a product type to the
+daemon. A product can replace our kit with its own implementation by passing the
+same conformance fixtures; no daemon, registry, or schema change follows.
+
+The worker kit reads `AGENT_SESSIONS_LAUNCH_TOKEN` once, removes it from the
+process environment, and connects to the daemon endpoint. It sends the worker
+branch of `session.hello` only after `hello()` succeeds. It never logs, returns,
+or copies the token into product configuration. `session.open` is the only call
+that invokes `open()`. Until that result is written, the kit has no public
+session identity and the daemon rejects its outbound tools.
+
+The kit has only two live facts: the connection is open or closed, and a run is
+present or absent. The product's opened native reference is data, not a
+lifecycle state. There is no generation, projection, collector, archive phase,
+deadline, or reconnect state machine.
+
+### 3.2 Full-duplex lifecycle
+
+One reader continuously validates and dispatches inbound requests; it never
+awaits `run()` inline. One writer mutex preserves complete frames. Independent
+request IDs correlate outbound tools and inbound results, so `deliver`,
+`interrupt`, `session.close`, and product-originated tools all proceed while
+`turn.run` is outstanding.
+
+The run slot is installed before `run()` starts and cleared only after its
+validated terminal response is written. A second run receives `busy` without
+calling product code. Interrupt atomically marks that slot once and invokes
+`interrupt()` once; concurrent and later interrupt requests for the same run
+return `{}` without a second native call. No kit timeout is involved.
+
+Close is idempotent. With no run, it calls `close()` once and responds. With a
+run, it claims or joins the same one interrupt, awaits the same run result,
+writes that terminal response, then calls `close()` and responds. If product
+code does not settle, the daemon's two-second process supervisor terminates the
+whole worker; the kit invents no result. An ordinary worker EOF cancels product
+contexts, invokes close once, and exits rather than reconnecting with a consumed
+token.
+
+A peer-mode connection behaves differently only at the connection boundary:
+ordinary daemon EOF reconnects the same asserted peer identity, while
+`session.superseded` tombstones that identity instance and prevents reconnect.
+Worker mode never reconnects. The method router, closed validation, pending
+calls, writer, delivery, and outbound-tool API are otherwise shared.
+
+### 3.3 Go and JavaScript parity
+
+The Go host and JavaScript worker mode implement the preceding algorithm, not
+two interpretations of it. Both load `integrations/shared/session.schema.json`
+and both run one declarative table,
+`integrations/shared/session-lifecycle.fixtures.json`. The table drives fake
+product callbacks and a fake duplex connection; it contains at least these
+rows:
+
+1. app-ready hello, one open, and outbound tools rejected before the open
+   result but accepted on the same connection after it;
+2. describe hello followed by EOF, proving open is never called and close is
+   called once;
+3. completed, interrupted, and failed run results, including empty output;
+4. a blocked run plus a second run rejected before product code;
+5. concurrent interrupt requests and close racing interrupt, with exactly one
+   native interrupt;
+6. delivery and an outbound tool completing while run remains blocked;
+7. close during run, with the terminal run response written before the close
+   response;
+8. control EOF during run, with all pending calls failed and product close
+   invoked once;
+9. peer EOF reconnect versus supersession terminality; and
+10. malformed, unknown, oversized, and out-of-range-ID frames rejected before
+    a callback.
+
+There are no product names, native IDs, clocks, sleeps, or network sockets in
+the fixture data. Tests control every callback and frame boundary
+deterministically.
+
+The size contract is final logical lines:
+
+| Reference surface | Production | Tests |
+| --- | ---: | ---: |
+| Go worker host | 280 | 300 |
+| JavaScript client plus worker mode | 260 | 260 |
+| Shared lifecycle fixture data | — | 180 |
+
+Schema validation and generic connection framing are counted in Section 2,
+not duplicated into either worker host. A kit exceeding these limits has grown
+product policy or a third lifecycle fact and must be simplified.
+
+### 3.4 DSH: the first native worker
+
+DSH uses one Agent Sessions plugin and one connection per DSH root session. In
+ordinary product mode the plugin sends peer hello without a launch token and
+reconnects after daemon EOF. In lane mode it captures and scrubs the token,
+waits for DSH app-ready, and sends worker hello on that same socket. It does not
+also publish peer presence: successful `session.open` turns the worker
+connection itself into the lane's presence, tool path, and delivery path.
+
+The DSH `agent-sessions` profile is exactly headless DSH core plus the unified
+plugin configured `mode: lane`; the plugin is required, and no TUI, second
+comms plugin, lane extension, relay, or local socket is loaded. The executable
+registry entry is fixed `dsh --profile agent-sessions`. In a normal DSH profile
+the same plugin runs in peer mode. Lane mode without a launch token is a startup
+error rather than an accidental peer.
+
+The c5b280d integration already proves the DSH core primitives the unified
+plugin needs:
+
+- `appReady.onReady` and `appExit` gate hello and terminate headless mode;
+- `sessionController.create` and `resolveAgent` create or resume an exact
+  session; `rename` and `selectModel` apply typed open identity/options;
+- `permissionPresets.names` and `set`, plus `sessions.flush`, commit the open
+  configuration;
+- `createUserMessage` with `agent.followup` starts the one requested turn;
+- global `session/event` observation supplies input receipt, turn start,
+  assistant text, and terminal reason; no polling is required;
+- `agent.cancel` interrupts, and `agent.whenIdle` supports orderly close;
+- `agent.steer` injects during a run; an idle delivery that cannot be injected
+  without starting an unrequested turn is held in the plugin's small FIFO and
+  truthfully reported `queued_for_next_turn`; and
+- `tools.register` exposes the product's Agent Sessions tool while the kit's
+  outbound call API carries it on the same session socket.
+
+Fresh open creates the DSH session only after the typed request arrives and
+returns its exact ID. Resume resolves `resume_native_id` and returns that same
+ID. Run submits one user message and converts the observed DSH terminal reason
+to the three wire outcomes. Deliver never starts an unrequested DSH turn. Close
+cancels if needed, flushes the session, and calls `appExit`; control EOF follows
+the same product cleanup and exit path.
+
+The DSH-specific layer is capped at 300 production and 300 test logical lines,
+excluding the generic JavaScript kit and shared fixtures. Its conformance result
+must state: **contract learned nothing from the DSH adapter: yes**.
+
+### 3.5 DSH migration
+
+The entire Go package `internal/products/dsh` dies: 10 files and 1,031 physical
+lines at c5b280d. Product probing moves to `lane.describe`; lane process
+ownership moves to the generic daemon supervisor; permission, model, session,
+turn, and delivery translation move inside the native plugin where the DSH
+primitives exist.
+
+The separate `integrations/dsh/lane` package also dies in full: 5 files and 464
+lines. Its extension registration, presence-served lane RPC, environment
+translation, second package manifest, and second Cordis patch are all forbidden
+by the one-plugin/one-connection design. The nine-line
+`integrations/dsh/comms/prepack.cjs` dies in favor of the repository's generic
+packaging step.
+
+`integrations/dsh/comms` remains under its current package identity and is
+documented as the universal DSH plugin. Its plugin and tests are rewritten
+around the shared JavaScript kit; its Cordis patch installs peer mode, while the
+headless `agent-sessions` profile pins lane mode. Package/install inventory must
+contain one DSH integration artifact, not the old comms-plus-lane pair.
+
+The DSH migration therefore adds **16 more deleted files and 1,504 deleted
+lines** before rewriting the retained unified plugin. Combined with Section 2,
+the signed deletion floor becomes **63 files and 13,767 lines**. The DSH tree
+must remain net-negative after the kit is accounted separately.
