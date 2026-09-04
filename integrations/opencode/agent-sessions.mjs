@@ -147,7 +147,7 @@ export default async function agentSessionsOpenCodePlugin({ client, directory, e
         },
       }, { signal: controller.signal }), deadline, controller);
       requireSDKSuccess(response, 204);
-      live.acceptMessage(payload.messageID, { native_message_id: messageID });
+      live.acceptMessage(payload.messageID, {});
     } catch (error) {
       live.rejectMessage(payload.messageID,
         nativeSubmitAttempted && error?.category !== "native-rejected" ? "native delivery outcome is unknown" : error?.message ?? error);

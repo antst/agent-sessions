@@ -184,12 +184,18 @@ func TestAppendixWireGrammarAndRequiredDeliveryFields(t *testing.T) {
 		{"lane-opaque-product", `{"product":"future-product","arguments":[],"input":"work"}`, true},
 		{"lane-absolute-cwd", `{"product":"codex","arguments":[],"input":"work","cwd":"/work","host":" "}`, true},
 		{"lane-relative-cwd", `{"product":"codex","arguments":[],"input":"work","cwd":"work"}`, false},
+		{"lane-null-cwd", `{"product":"codex","arguments":[],"input":"work","cwd":null}`, false},
+		{"lane-null-host", `{"product":"codex","arguments":[],"input":"work","host":null}`, false},
 		{"lane-empty-input", `{"product":"codex","arguments":[],"input":""}`, false}, {"lane-nonstring-argument", `{"product":"codex","arguments":[1],"input":"work"}`, false},
 	} {
 		spec, _ := LookupMethod("lane.start")
 		if got := ValidMethodParams(spec, []byte(test.body)); got != test.want {
 			t.Fatalf("%s validity = %t, want %t", test.name, got, test.want)
 		}
+	}
+	status, _ := LookupMethod("lane.status")
+	if ValidMethodParams(status, []byte(`{"product":"codex","arguments":[],"input":null}`)) {
+		t.Fatal("no-input lane method accepted explicit null input")
 	}
 	for _, test := range []struct {
 		method, body string
@@ -215,6 +221,15 @@ func TestAppendixWireGrammarAndRequiredDeliveryFields(t *testing.T) {
 }
 
 func TestConnectionEnforcesFirstFrameAndNativeLaneAuthority(t *testing.T) {
+	for _, raw := range []string{
+		`{"jsonrpc":"2.0","id":"x","method":"peers.list","params":{},"error":null}`,
+		`{"jsonrpc":"2.0","id":"x","result":{},"error":null}`,
+	} {
+		var frame Frame
+		if err := DecodeStrict([]byte(raw), &frame); err != nil || ValidFrame(frame) {
+			t.Fatalf("explicit null error was not preserved: frame=%+v err=%v", frame, err)
+		}
+	}
 	decode := func(t *testing.T, reported bool, request Frame) error {
 		server, client := net.Pipe()
 		defer server.Close()

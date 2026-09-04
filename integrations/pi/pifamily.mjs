@@ -166,7 +166,7 @@ export function createPiFamilyExtension(productID, options = {}) {
             } else {
               await Promise.resolve(pi.sendUserMessage(frame.content, { deliverAs: "steer" }));
             }
-            live.acceptMessage(payload.messageID, { native_message_id: frame.messageID });
+            live.acceptMessage(payload.messageID, {});
           } catch (error) {
             live.rejectMessage(payload.messageID, error?.message ?? error);
           }

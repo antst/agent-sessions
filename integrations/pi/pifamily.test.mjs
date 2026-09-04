@@ -7,6 +7,13 @@ import liveSessionModule from "../shared/live-session.js";
 
 const { renderDelivery } = liveSessionModule;
 
+function acceptsDeliveryResult(id, result) {
+  const client = new liveSessionModule.LiveSessionClient({ env: {} });
+  client.inbound.set(id, { session: {}, wireID: id, params: {} });
+  client._write = () => true;
+  return client.acceptMessage(id, result);
+}
+
 class FakeLiveSession extends EventEmitter {
   constructor(active = true) {
     super(); this.active = active; this.sessions = new Map(); this.reported = []; this.updated = [];
@@ -16,7 +23,7 @@ class FakeLiveSession extends EventEmitter {
   report(id, name, info = {}) { this.sessions.set(id, { id, name, info }); this.reported.push({ id, name, info }); return true; }
   updateName(id, name) { this.sessions.get(id).name = name; this.updated.push({ id, name }); return true; }
   closeSession(id) { this.sessions.delete(id); }
-  acceptMessage(id, result) { this.accepted.push({ id, result }); return true; }
+  acceptMessage(id, result) { if (!acceptsDeliveryResult(id, result)) return false; this.accepted.push({ id, result }); return true; }
   rejectMessage(id, error) { this.rejected.push({ id, error: String(error) }); return true; }
   async callTool(id, callID, operation, argumentsValue) { this.calls.push({ id, callID, operation, argumentsValue }); return { ok: true }; }
   async stop() { this.stopped = true; }
@@ -120,7 +127,7 @@ test("Pi family live delivery uses ordinary send when idle and native steer when
 	live.emit("message", delivery);
   await tick();
 	assert.deepEqual(pi.messages, [{ content: renderDelivery(delivery), options: { deliverAs: "steer" } }]);
-  assert.deepEqual(live.accepted.map((value) => value.id), ["delivery"]);
+	assert.deepEqual(live.accepted, [{ id: "delivery", result: {} }]);
 });
 
 test("Pi and OMP tools forward shared doctor/list operations on the exact reported session", async (t) => {

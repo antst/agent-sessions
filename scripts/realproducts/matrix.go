@@ -782,9 +782,8 @@ func (runner *matrixRunner) runInvalidCwdCell(ctx context.Context) {
 func matrixLanePrompt(runID, laneName, group string) (string, string) {
 	expected := matrixReceiptToken(runID, "08")
 	left, right := expected[:len(expected)/2], expected[len(expected)/2:]
-	prompt := fmt.Sprintf("Use only the agent_sessions lane tool, never a shell. Start a codex lane with arguments [\"--name\",%q,\"--group\",%q] and input %q. Wait for that lane, archive it, then output only the exact result returned by wait.",
-		laneName, group, "Without tools, concatenate "+left+" and "+right+". Reply with exactly the result.")
-	return prompt, expected
+	return fmt.Sprintf("Use only the agent_sessions lane tool, never a shell. Start a codex lane with arguments [\"--name\",%q,\"--group\",%q] and input %q. Wait for that lane, archive it, then output only the exact result returned by wait.",
+		laneName, group, "Without tools, concatenate "+left+" and "+right+". Reply with exactly the result."), expected
 }
 func (runner *matrixRunner) openMatrixConnector(ctx context.Context) (*matrixConnector, error) {
 	command := exec.CommandContext(ctx, runner.config.agentSessions, "connector", "codex") //nolint:gosec // exact preflighted binary.
@@ -1191,6 +1190,9 @@ func (runner *matrixRunner) sendTUIInput(ctx context.Context, tui *matrixTUI, in
 		}
 		commandCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		output, err := exec.CommandContext(commandCtx, runner.config.tmux, arguments...).CombinedOutput() //nolint:gosec // exact test-owned pane and documented literal.
+		if commandErr := commandCtx.Err(); commandErr != nil {
+			err = commandErr
+		}
 		cancel()
 		if err != nil {
 			return fmt.Errorf("send native TUI input %q: %w: %s", input, err, strings.TrimSpace(string(output)))

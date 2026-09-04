@@ -4,6 +4,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import liveSessionModule from "../shared/live-session.js";
 
+function acceptsDeliveryResult(id, result) {
+  const client = new liveSessionModule.LiveSessionClient({ env: {} });
+  client.inbound.set(id, { session: {}, wireID: id, params: {} });
+  client._write = () => true;
+  return client.acceptMessage(id, result);
+}
+
 class FakeLiveSession extends EventEmitter {
   constructor(active = true) {
     super(); this.active = active; this.sessions = new Map(); this.reported = []; this.updated = [];
@@ -13,7 +20,7 @@ class FakeLiveSession extends EventEmitter {
   report(id, name, info = {}) { this.sessions.set(id, { id, name, info }); this.reported.push({ id, name, info }); return true; }
   updateName(id, name) { this.sessions.get(id).name = name; this.updated.push({ id, name }); return true; }
   closeSession(id) { this.sessions.delete(id); }
-  acceptMessage(id, result) { this.accepted.push({ id, result }); return true; }
+  acceptMessage(id, result) { if (!acceptsDeliveryResult(id, result)) return false; this.accepted.push({ id, result }); return true; }
   rejectMessage(id, error) { this.rejected.push({ id, error: String(error) }); return true; }
   async callTool(id, callID, operation, argumentsValue) {
     this.calls.push({ id, callID, operation, argumentsValue }); return { ok: true };
@@ -103,7 +110,7 @@ test("OpenCode delivers and calls tools on the exact reported session", async ()
   assert.equal(prompts[0].path.id, "ses_one");
   assert.equal(prompts[0].body.agent, "brainstormer");
   assert.deepEqual(prompts[0].body.model, { providerID: "google", modelID: "gemini" });
-  assert.deepEqual(live.accepted.map((value) => value.id), ["delivery"]);
+  assert.deepEqual(live.accepted, [{ id: "delivery", result: {} }]);
   for (const operation of ["lane.doctor", "lane.list"]) {
     const result = await hooks.tool.agent_sessions.execute({ operation, arguments: { product: "codex", arguments: [] } }, {
       sessionID: "ses_one", messageID: operation, abort: new AbortController().signal,

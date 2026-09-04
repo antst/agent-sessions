@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,35 +84,63 @@ type steerRecordingLaneDriver struct {
 }
 
 type parentExitLaneDriver struct {
+	mu                       sync.Mutex
 	opens                    []productruntime.LaneOpenRequest
 	turns                    []productruntime.TurnStartRequest
 	archives                 []productruntime.NativeSessionRef
 	interruptErr, archiveErr error
 	onInterrupt, onArchive   func()
+	wait                     chan struct{}
+	waitClosed               bool
+	interrupts               int
 }
 
 func (*parentExitLaneDriver) Capabilities() productruntime.LaneCapabilitySet {
-	return productruntime.LaneCapabilitySet{DurableResume: true}
+	return productruntime.LaneCapabilitySet{DurableResume: true, CallerSuppliedSessionID: true}
 }
 func (d *parentExitLaneDriver) Open(_ context.Context, request productruntime.LaneOpenRequest) (productruntime.NativeSessionRef, error) {
 	d.opens = append(d.opens, request)
-	return productruntime.NativeSessionRef{LaneID: request.ResumeNativeID, NativeSessionID: request.ResumeNativeID, Generation: 7}, nil
+	nativeID := request.ResumeNativeID
+	if nativeID == "" {
+		nativeID = request.LaneID
+	}
+	return productruntime.NativeSessionRef{LaneID: nativeID, NativeSessionID: nativeID, Generation: 7}, nil
 }
 func (d *parentExitLaneDriver) StartTurn(_ context.Context, session productruntime.NativeSessionRef, request productruntime.TurnStartRequest) (productruntime.NativeTurnRef, error) {
 	d.turns = append(d.turns, request)
 	return productruntime.NativeTurnRef{NativeSessionRef: session, NativeTurnID: "turn"}, nil
 }
-func (*parentExitLaneDriver) WaitTurn(context.Context, productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
+func (d *parentExitLaneDriver) WaitTurn(ctx context.Context, _ productruntime.NativeTurnRef) (productruntime.NativeTerminal, error) {
+	d.mu.Lock()
+	wait := d.wait
+	d.mu.Unlock()
+	if wait != nil {
+		select {
+		case <-ctx.Done():
+			return productruntime.NativeTerminal{}, ctx.Err()
+		case <-wait:
+			return productruntime.NativeTerminal{Outcome: productruntime.TurnInterrupted, Result: "interrupted"}, nil
+		}
+	}
 	return productruntime.NativeTerminal{Outcome: productruntime.TurnCompleted, Result: "resumed"}, nil
 }
 func (*parentExitLaneDriver) Steer(context.Context, productruntime.NativeTurnRef, productruntime.TurnStartRequest) (productruntime.NativeAcceptance, error) {
 	return productruntime.NativeAcceptance{}, productruntime.ErrUnsupportedSteer
 }
 func (d *parentExitLaneDriver) Interrupt(context.Context, productruntime.NativeTurnRef) error {
+	d.mu.Lock()
+	d.interrupts++
 	if d.onInterrupt != nil {
 		d.onInterrupt()
 	}
-	return d.interruptErr
+	err := d.interruptErr
+	d.interruptErr = nil
+	if err == nil && d.wait != nil && !d.waitClosed {
+		close(d.wait)
+		d.waitClosed = true
+	}
+	d.mu.Unlock()
+	return err
 }
 func (d *parentExitLaneDriver) Archive(_ context.Context, session productruntime.NativeSessionRef) error {
 	if d.onArchive != nil {
@@ -813,6 +842,73 @@ func TestParentRetirementRestoresFailedCandidateAndDoesNotHideLaterLanes(t *test
 	}
 	if err := coordinator.archiveIdleLanesForParent(runtime, "failed-parent"); err == nil || coordinator.lanes["failed"] != restored || restored.state != "idle" {
 		t.Fatalf("stale restore overwrote replacement: replacement=%+v err=%v", restored, err)
+	}
+}
+
+func TestLostStartResponseParentEOFAndFailedRetirementRemainRecoverable(t *testing.T) {
+	t.Setenv("CLAUDE_PEER_CLAUDE_BIN", "/bin/true")
+	runtime := newPresenceTestRuntime(t)
+	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	driver := &parentExitLaneDriver{interruptErr: errors.New("interrupt refused"), wait: make(chan struct{})}
+	registry, err := productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.laneDrivers, coordinator.lanesLoaded = registry, true
+	parentReport := livepresence.Report{UUID: "parent", Name: "parent", Product: "claude", Groups: []string{"shared"}, Info: map[string]string{"cwd": t.TempDir()}}
+	coordinator.joinLiveSession(runtime, parentReport)
+
+	sequence := []string{}
+	call := func(command string, arguments []string, input string, dropResponse bool) map[string]any {
+		t.Helper()
+		sequence = append(sequence, command)
+		values := map[string]any{"product": "claude", "command": command, "arguments": arguments}
+		if input != "" {
+			values["input"] = input
+		}
+		payload, _ := json.Marshal(connectorToolEnvelope{SourceID: parentReport.UUID, RequestID: "causal-" + command, Name: "lane", Arguments: values})
+		raw, callErr := coordinator.handleConnectorTool(context.Background(), runtime, daemonpkg.ControlRequest{Payload: payload})
+		if callErr != nil {
+			t.Fatalf("%s: %v", command, callErr)
+		}
+		if dropResponse {
+			return nil
+		}
+		var result struct {
+			Structured map[string]any `json:"structuredContent"`
+		}
+		if json.Unmarshal(raw, &result) != nil || result.Structured == nil {
+			t.Fatalf("%s result = %s", command, raw)
+		}
+		return result.Structured
+	}
+	call("start", []string{"--name", "lost-lane"}, "work", true)
+	coordinator.mu.Lock()
+	var actor *laneActor
+	for _, candidate := range coordinator.lanes {
+		if candidate.name == "lost-lane" {
+			actor = candidate
+		}
+	}
+	coordinator.mu.Unlock()
+	if actor == nil || actor.state != "running" {
+		t.Fatalf("lost start was not committed: %+v", actor)
+	}
+	turnID, done := actor.turnID, actor.done
+	coordinator.leaveLiveSession(runtime, parentReport)
+	coordinator.retireDepartedLiveSession(runtime, parentReport)
+	if driver.interrupts != 1 || actor.state != "running" || actor.turnID != turnID || actor.done != done {
+		t.Fatalf("failed EOF retirement was not restored: actor=%+v interrupts=%d", actor, driver.interrupts)
+	}
+	coordinator.joinLiveSession(runtime, parentReport)
+	if call("interrupt", []string{"lost-lane"}, "", false)["type"] != "turn.interrupting" ||
+		call("wait", []string{"lost-lane", "--timeout", "1"}, "", false)["outcome"] != "interrupted" ||
+		call("archive", []string{"lost-lane"}, "", false)["type"] != "lane.archived" {
+		t.Fatal("restored lane did not complete explicit recovery")
+	}
+	listed := call("list", []string{"--mine"}, "", false)
+	if lanes, ok := listed["lanes"].([]any); !ok || len(lanes) != 0 || !reflect.DeepEqual(sequence, []string{"start", "interrupt", "wait", "archive", "list"}) {
+		t.Fatalf("recovery evidence = %+v / %v", listed, sequence)
 	}
 }
 

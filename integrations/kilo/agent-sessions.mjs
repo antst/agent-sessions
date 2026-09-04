@@ -152,7 +152,7 @@ export default async function agentSessionsKiloPlugin({ client, directory, envir
         if (!nativeMessageID) await new Promise((resolve) => setTimeout(resolve, Math.min(DELIVERY_POLL_MS, Math.max(0, deadline - Date.now()))));
       }
       if (!nativeMessageID) throw new Error("Kilo /tui submit lacked exact native acceptance evidence");
-      live.acceptMessage(payload.messageID, { native_message_id: nativeMessageID });
+      live.acceptMessage(payload.messageID, {});
     } catch (error) {
       live.rejectMessage(payload.messageID, nativeSubmitAttempted ? "native delivery outcome is unknown" : error?.message ?? error);
     } finally {

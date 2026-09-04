@@ -78,7 +78,10 @@ test("shared params authority follows Appendix A grammar", async () => {
   assert.equal(laneStart({ product: "future-product", arguments: [], input: "work" }), true);
   assert.equal(laneStart({ product: "codex", arguments: [], input: "work", cwd: "/work", host: " " }), true);
   assert.equal(laneStart({ product: "codex", arguments: [], input: "work", cwd: "work" }), false);
+  assert.equal(laneStart({ product: "codex", arguments: [], input: "work", cwd: null }), false);
+  assert.equal(laneStart({ product: "codex", arguments: [], input: "work", host: null }), false);
   assert.equal(laneStart({ product: "codex", arguments: [], input: "" }), false);
+  assert.equal(METHOD_DEFINITIONS["lane.status"].params({ product: "codex", arguments: [], input: null }), false);
   assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: " ", body: "\0", mode: "followup" }), true);
   assert.equal(METHOD_DEFINITIONS["lane.turn.start"].params({ input_id: "", body: "x", mode: "followup" }), false);
   assert.equal(METHOD_DEFINITIONS["lane.turn.wait"].params({ native_message_id: "\n" }), true);
@@ -125,6 +128,16 @@ test("framing processes complete frames, rejects truncated tails and write throw
   session.socket = socket;
   client._data(session, `${frame(false)}x`);
   assert.equal(destroyed, 2);
+
+  for (const invalid of [
+    { jsonrpc: "2.0", id: "request-null", method: "peers.list", params: {}, error: null },
+    { jsonrpc: "2.0", id: "response-null", result: {}, error: null },
+  ]) {
+    let rejected = 0;
+    const invalidSession = { ready: true, capabilities: {}, buffer: "", pending: new Map(), socket: { destroyed: false, destroy: () => { rejected += 1; } } };
+    client._data(invalidSession, `${JSON.stringify(invalid)}\n`);
+    assert.equal(rejected, 1);
+  }
 
   let writeDestroyed = 0;
   const throwing = { ready: true, pending: new Map(), socket: { destroyed: false, write: () => { throw new Error("boom"); }, destroy: () => { writeDestroyed += 1; } } };

@@ -88,13 +88,24 @@ type Capabilities struct {
 }
 
 type Frame struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *RPCError       `json:"error,omitempty"`
+	JSONRPC   string          `json:"jsonrpc"`
+	ID        json.RawMessage `json:"id"`
+	Method    string          `json:"method,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     *RPCError       `json:"error,omitempty"`
+	errorNull bool
 }
+
+func (f *Frame) UnmarshalJSON(body []byte) error {
+	type wireFrame Frame
+	if err := DecodeStrict(body, (*wireFrame)(f)); err != nil {
+		return err
+	}
+	f.errorNull = hasExplicitNull(body, "error")
+	return nil
+}
+
 type MethodDirection string
 
 const (
@@ -134,12 +145,16 @@ func ValidMethodResult(spec MethodSpec, params, result json.RawMessage) bool {
 }
 func DecodeLaneCall(spec MethodSpec, raw json.RawMessage) (LaneCallParams, bool) {
 	var p LaneCallParams
-	if DecodeStrict(raw, &p) != nil || productcatalog.ValidateToken(p.Product) != nil || p.Arguments == nil || spec.NeedsInput != (p.Input != nil) || p.Input != nil && *p.Input == "" || p.Cwd != nil && (*p.Cwd == "" || !filepath.IsAbs(*p.Cwd)) || p.Host != nil && *p.Host == "" {
+	if hasExplicitNull(raw, "input", "cwd", "host") || DecodeStrict(raw, &p) != nil || productcatalog.ValidateToken(p.Product) != nil || p.Arguments == nil || spec.NeedsInput != (p.Input != nil) || p.Input != nil && *p.Input == "" || p.Cwd != nil && (*p.Cwd == "" || !filepath.IsAbs(*p.Cwd)) || p.Host != nil && *p.Host == "" {
 		return p, false
 	}
 	return p, true
 }
-
+func hasExplicitNull(raw []byte, keys ...string) bool {
+	var fields map[string]any
+	_ = json.Unmarshal(raw, &fields)
+	return slices.ContainsFunc(keys, func(key string) bool { value, ok := fields[key]; return ok && value == nil })
+}
 func laneMethod(needsInput bool, result byte) MethodSpec {
 	spec := MethodSpec{Direction: ClientToDaemon, Lane: true, NeedsInput: needsInput, result: result}
 	spec.params = func(raw json.RawMessage) bool { _, ok := DecodeLaneCall(spec, raw); return ok }
@@ -512,14 +527,14 @@ func CwdInfo(cwd string) map[string]string {
 
 func ValidRequest(frame Frame) bool {
 	return frame.JSONRPC == "2.0" && validID(frame.ID) && strings.TrimSpace(frame.Method) != "" &&
-		len(frame.Params) != 0 && json.Valid(frame.Params) && frame.Result == nil && frame.Error == nil
+		len(frame.Params) != 0 && json.Valid(frame.Params) && frame.Result == nil && frame.Error == nil && !frame.errorNull
 }
 
 func ValidFrame(frame Frame) bool {
 	if ValidRequest(frame) {
 		return true
 	}
-	if frame.JSONRPC != "2.0" || !validID(frame.ID) || frame.Method != "" || frame.Params != nil {
+	if frame.JSONRPC != "2.0" || !validID(frame.ID) || frame.Method != "" || frame.Params != nil || frame.errorNull {
 		return false
 	}
 	return frame.Result != nil && frame.Error == nil || frame.Result == nil && validError(frame.Error)

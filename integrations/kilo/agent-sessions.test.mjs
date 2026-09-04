@@ -4,13 +4,20 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import liveSessionModule from "../shared/live-session.js";
 
+function acceptsDeliveryResult(id, result) {
+  const client = new liveSessionModule.LiveSessionClient({ env: {} });
+  client.inbound.set(id, { session: {}, wireID: id, params: {} });
+  client._write = () => true;
+  return client.acceptMessage(id, result);
+}
+
 class FakeLiveSession extends EventEmitter {
   constructor() { super(); this.active = true; this.sessions = new Map(); this.reported = []; this.updated = []; this.accepted = []; this.rejected = []; this.calls = []; }
   async start() { return { active: true }; }
   report(id, name, info = {}) { this.sessions.set(id, { id, name, info }); this.reported.push({ id, name, info }); return true; }
   updateName(id, name) { this.sessions.get(id).name = name; this.updated.push({ id, name }); return true; }
   closeSession(id) { this.sessions.delete(id); }
-  acceptMessage(id, result) { this.accepted.push({ id, result }); return true; }
+  acceptMessage(id, result) { if (!acceptsDeliveryResult(id, result)) return false; this.accepted.push({ id, result }); return true; }
   rejectMessage(id, error) { this.rejected.push({ id, error: String(error) }); return true; }
   async callTool(id, callID, operation, argumentsValue) { this.calls.push({ id, callID, operation, argumentsValue }); return { ok: true }; }
   async stop() {}
@@ -97,7 +104,7 @@ test("Kilo submits to the exact live session and acknowledges native evidence", 
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "one", directory: "/work" } } } });
   live.emit("message", { messageID: "delivery", nativeSessionID: "ses_one", body: "hello" });
   await tick();
-  assert.deepEqual(live.accepted, [{ id: "delivery", result: { native_message_id: "msg_one" } }]);
+  assert.deepEqual(live.accepted, [{ id: "delivery", result: {} }]);
   for (const operation of ["lane.doctor", "lane.list"]) {
     const result = await hooks.tool.agent_sessions.execute({ operation, arguments: { product: "codex", arguments: [] } }, {
       sessionID: "ses_one", messageID: operation, abort: new AbortController().signal,
