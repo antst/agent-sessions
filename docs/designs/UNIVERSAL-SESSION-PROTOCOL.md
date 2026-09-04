@@ -310,7 +310,7 @@ and closes the connection without writing one.
 | `-32011` | `not_committed` | Any worker-originated tool request received after hello but before native-ID commit. |
 | `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |
 | `-32013` | `name_taken` | New `lane.spawn` when another non-closed row on that daemon already holds the requested name. |
-| `-32603` | `internal` | A durable-table write fails after in-memory transaction cleanup; this is its only use. |
+| `-32603` | `internal` | A durable-table write fails after in-memory cleanup, or a worker interrupt/close callback fails; it has no other use. |
 
 ## 2. Daemon
 
@@ -512,6 +512,9 @@ projection stream exists.
 `message.send` resolves and deduplicates visible targets, sends one
 `message.deliver` per resolved current connection, and returns the product's
 receipt unchanged. Offline lanes and failed calls produce rejected receipts.
+If EOF or supersession ends the target connection before a receipt arrives,
+the sender receives rejected reason `no_receipt`; whether product code acted is
+unknowable and is deliberately not promised.
 Names are resolved only after exact local and host-qualified IDs; ambiguity is
 a rejected unresolved receipt rather than a guessed delivery.
 
@@ -648,17 +651,29 @@ members. This is the complete product-facing contract:
 
 | Member | Product responsibility |
 | --- | --- |
-| `hello()` | Return fixed product, version, supported open fields, and ordered extra-argument declarations after app-ready. |
-| `open(request)` | Create or resume from the typed request and return the exact native ID. |
-| `run(input)` | Start one native turn, observe it to a terminal result, and return that result. |
-| `interrupt()` | Ask the one current native turn to stop. |
-| `deliver(message)` | Inject now or queue for the next turn and return the truthful closed receipt. |
-| `close()` | Stop accepting work, close native state, and release product resources. |
+| `hello(cancel)` | Return fixed product, version, supported open fields, and ordered extra-argument declarations after app-ready. |
+| `open(cancel, request)` | Create or resume from the typed request and return the exact native ID. |
+| `run(cancel, input)` | Start one native turn, observe it to a terminal result, and return that result. |
+| `interrupt(cancel)` | Ask the one current native turn to stop. |
+| `deliver(cancel, message)` | Inject now or queue for the next turn and return the truthful closed receipt. |
+| `close(cancel)` | Stop accepting work, close native state, and release product resources. |
 
 These are primitives, not a daemon adapter interface. They live in the product
 process, receive only closed wire values, and never expose a product type to the
 daemon. A product can replace our kit with its own implementation by passing the
 same conformance fixtures; no daemon, registry, or schema change follows.
+`cancel` is a Go context or JavaScript `AbortSignal`; control EOF cancels every
+callback, and close cancels remaining work after the terminal boundary.
+
+Callback failures map exactly once:
+
+| Callback | Wire result |
+| --- | --- |
+| `open` | `spawn_failed` with `stderr_tail:[message]`; the daemon passes it through unchanged. |
+| `run` | Terminal `{outcome:"failed",result:message}`; a run callback never returns an RPC error. |
+| `interrupt` | `internal`. |
+| `deliver` | Rejected receipt with the callback message as `reason`. |
+| `close` | `internal`, followed by ordinary kit exit. |
 
 The worker kit reads `AGENT_SESSIONS_LAUNCH_TOKEN` once, removes it from the
 process environment, and connects to the daemon endpoint. It sends the worker
@@ -675,7 +690,9 @@ deadline, or reconnect state machine.
 ### 3.2 Full-duplex lifecycle
 
 One reader continuously validates and dispatches inbound requests; it never
-awaits `run()` inline. One writer mutex preserves complete frames. Independent
+awaits any product callback inline. This permits open, deliver, interrupt, or
+close code to make an outbound tool call and receive its response. One writer
+mutex preserves complete frames. Independent
 request IDs correlate outbound tools and inbound results, so `deliver`,
 `interrupt`, `session.close`, and product-originated tools all proceed while
 `turn.run` is outstanding.
@@ -686,14 +703,25 @@ calling product code. Interrupt atomically marks that slot once and invokes
 `interrupt()` once; concurrent and later interrupt requests for the same run
 return `{}` without a second native call. No kit timeout is involved.
 
-Close is idempotent. With no run, it calls `close()` once and responds. With a
-run, it claims or joins the same one interrupt, awaits the same run result,
-writes that terminal response, then calls `close()` and responds. If product
+If `run()` has returned but its response has not yet been written, interrupt
+returns `{}` without invoking native code. The run handler alone writes the run
+response; close may await the slot's completion signal but never owns that
+response.
+
+Close is idempotent and first claims the empty run slot or joins the existing
+one. With no run, it calls `close()` once and responds. With a run, it invokes
+the shared interrupt once without awaiting that callback, awaits the run
+result, lets the run handler write its response, then calls `close()` and
+responds. A hanging interrupt cannot hide an available terminal. If product
 code does not settle, the daemon's two-second process supervisor terminates the
-whole worker; the kit invents no result. An ordinary worker EOF cancels product
-contexts, invokes close once, and exits rather than reconnecting with a consumed
-token. From the instant close begins, the run slot remains occupied until exit:
-new runs are `busy`, and delivery is rejected as `closing`.
+whole worker; the kit invents no result. From the instant close owns the slot,
+new runs are `busy`, and delivery is rejected as `closing` before product code.
+
+The kit owns final process ordering: it calls `close()`, writes the close
+response, closes its socket, and then resolves its `closed` signal. The product
+awaits that signal before process exit; `closed` is a kit signal, not a seventh
+callback. An ordinary worker EOF cancels product contexts, invokes close once,
+and exits rather than reconnecting with a consumed token.
 
 A peer-mode connection behaves differently only at the connection boundary:
 ordinary daemon EOF reconnects the same asserted peer identity, while
@@ -723,9 +751,16 @@ rows:
    response;
 8. control EOF during run, with all pending calls failed and product close
    invoked once;
-9. peer EOF reconnect versus supersession terminality; and
+9. peer EOF reconnect versus supersession terminality;
 10. malformed, unknown, oversized, and out-of-range-ID frames rejected before
-    a callback.
+    a callback;
+11. a terminal returned before interrupt is decoded, proving no native
+    interrupt call;
+12. idle close followed by delivery, proving `closing` and zero delivery calls;
+13. a non-run callback that invokes an outbound tool and receives its response;
+    and
+14. single token read plus environment removal, followed by connect failure and
+    process exit without reconnect.
 
 There are no product names, native IDs, clocks, sleeps, or network sockets in
 the fixture data. Tests control every callback and frame boundary
@@ -737,7 +772,7 @@ The size contract is final logical lines:
 | --- | ---: | ---: |
 | Go worker host | 280 | 300 |
 | JavaScript client plus worker mode | 260 | 260 |
-| Shared lifecycle fixture data | — | 180 |
+| Shared lifecycle fixture data | — | 220 |
 
 Schema validation and generic connection framing are counted in Section 2,
 not duplicated into either worker host. A kit exceeding these limits has grown
@@ -796,8 +831,14 @@ returns its exact ID. Resume resolves `resume_native_id` and returns that same
 ID. Run submits one user message and converts the observed DSH terminal reason
 to the three wire outcomes. Deliver never starts an unrequested DSH turn and
 the native plugin contains no delivery queue; `queued_for_next_turn` exists for
-non-native wrappers only. Close cancels if needed, flushes the session, and
-calls `appExit`; control EOF follows the same product cleanup and exit path.
+non-native wrappers only. A running delivery is `injected` exactly when
+`agent.steer` resolves; there is no receipt polling. A DSH rename is a fresh
+peer hello on a new connection that supersedes the old connection, never a
+status update. The registered Agent Sessions tool exposes the caller kit's
+start/wait/status/spawn/describe/close/list/send surface defined once in
+Sections 4 and 5. Close cancels if needed, flushes the session, waits for the
+kit's `closed` signal, and calls `appExit(0)`; control EOF follows the same
+product cleanup and exit path.
 
 The DSH-specific layer is capped at 300 production and 300 test logical lines,
 excluding the generic JavaScript kit and shared fixtures. Its conformance result
