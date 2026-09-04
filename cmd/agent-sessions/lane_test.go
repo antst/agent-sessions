@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1162,6 +1163,47 @@ func TestLaneArchiveTransactionRestoresEveryAutomaticPathWithoutTouchingReplacem
 		}
 		if actor.state != "terminal" || actor.autoArchiveAt != 456 || !strings.Contains(diagnostics.String(), "lane orphan automatic archive failed: orphan refused") {
 			t.Fatalf("orphan survivor=%+v diagnostic=%q", actor, diagnostics.String())
+		}
+	})
+
+	t.Run("orphan liveness result cannot archive a resumed turn", func(t *testing.T) {
+		driver := &parentExitLaneDriver{}
+		coordinator := newCoordinator(driver)
+		actor := &laneActor{
+			id: "resumed", nativeID: "resumed", nativeGeneration: 7, name: "resumed", product: "codex",
+			parentID: "departed", groups: []string{"shared"}, state: "terminal", turnID: "old-turn", done: closedLaneDone(),
+		}
+		coordinator.lanes[actor.id] = actor
+		entered, release := make(chan struct{}), make(chan struct{})
+		archiveResult := make(chan bool, 1)
+		go func() {
+			archiveResult <- coordinator.archiveOrphanedCompletedLaneWithLiveness(runtime, actor, io.Discard, func(_ *daemonpkg.Runtime, parentID string) (bool, error) {
+				if parentID != "departed" {
+					t.Errorf("liveness parent = %q", parentID)
+				}
+				close(entered)
+				<-release
+				return false, nil
+			})
+		}()
+		<-entered
+		coordinator.mu.Lock()
+		actor.state = "archived"
+		coordinator.mu.Unlock()
+		parent := daemonpkg.ManagedAttachment{ID: "replacement-parent", Product: "codex", NativeSessionID: "replacement-parent", Cwd: t.TempDir(), Groups: []string{"shared"}}
+		activateTestAttachment(t, runtime, parent)
+		if _, err := coordinator.resumeLane(context.Background(), runtime, parent, "codex", parsedLaneCommand{target: actor.id}, "replacement turn"); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		if <-archiveResult {
+			t.Fatal("stale parent liveness archived the resumed turn")
+		}
+		coordinator.mu.Lock()
+		parentID, state, turnID, result := actor.parentID, actor.state, actor.turnID, actor.result
+		coordinator.mu.Unlock()
+		if parentID != parent.ID || state != "idle" || turnID == "old-turn" || result != "resumed" || len(driver.archives) != 0 {
+			t.Fatalf("resumed lane changed: parent=%q state=%q turn=%q result=%q archives=%d", parentID, state, turnID, result, len(driver.archives))
 		}
 	})
 

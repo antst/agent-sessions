@@ -1,6 +1,6 @@
 # Installation
 
-Agent Sessions supports Linux and macOS on amd64 and arm64. A source build requires Go 1.22 or
+Agent Sessions supports Linux and macOS on amd64 and arm64. A source build requires Go 1.24 or
 newer. DSH integration also requires pnpm 10.28.1. See [Products](PRODUCTS.md) for the accepted
 native product versions.
 

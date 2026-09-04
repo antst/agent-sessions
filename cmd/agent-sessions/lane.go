@@ -72,6 +72,9 @@ type parsedLaneCommand struct {
 }
 
 type laneArchiveExpectation struct {
+	actor         *laneActor
+	persistent    bool
+	parentID      string
 	state         string
 	turnID        string
 	autoArchiveAt int64
@@ -730,7 +733,7 @@ func (c *hostCoordinator) archiveLane(runtime *daemonpkg.Runtime, parent daemonp
 		c.mu.Unlock()
 		return nil, livepresence.BusyError(actor.id, errors.New("lane archive is already in progress"))
 	}
-	expected := laneArchiveExpectation{state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
+	expected := laneArchiveExpectation{actor: actor, persistent: actor.persistent, parentID: actor.parentID, state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
 	c.mu.Unlock()
 	archived, err := c.archiveLaneTransaction(actor, expected)
 	if err != nil {
@@ -1188,23 +1191,24 @@ func (c *hostCoordinator) archiveOrphanedCompletedLane(runtime *daemonpkg.Runtim
 }
 
 func (c *hostCoordinator) archiveOrphanedCompletedLaneWithDiagnostics(runtime *daemonpkg.Runtime, actor *laneActor, diagnostics io.Writer) bool {
-	c.mu.Lock()
-	persistent, parentID := actor.persistent, actor.parentID
-	c.mu.Unlock()
-	if persistent {
-		return false
-	}
-	live, err := c.localParentIsLive(runtime, parentID)
-	if err != nil || live {
-		return false
-	}
+	return c.archiveOrphanedCompletedLaneWithLiveness(runtime, actor, diagnostics, c.localParentIsLive)
+}
+
+func (c *hostCoordinator) archiveOrphanedCompletedLaneWithLiveness(runtime *daemonpkg.Runtime, actor *laneActor, diagnostics io.Writer, parentIsLive func(*daemonpkg.Runtime, string) (bool, error)) bool {
 	c.mu.Lock()
 	if c.lanes[actor.id] != actor || actor.state == "running" || actor.state == "preparing" || actor.state == "archived" || actor.state == "archiving" {
 		c.mu.Unlock()
 		return false
 	}
-	expected := laneArchiveExpectation{state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
+	expected := laneArchiveExpectation{actor: actor, persistent: actor.persistent, parentID: actor.parentID, state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
 	c.mu.Unlock()
+	if expected.persistent {
+		return false
+	}
+	live, err := parentIsLive(runtime, expected.parentID)
+	if err != nil || live {
+		return false
+	}
 	archived, archiveErr := c.archiveLaneTransaction(actor, expected)
 	if archiveErr != nil {
 		writeLaneArchiveDiagnostic(diagnostics, actor.id, archiveErr)
@@ -1214,7 +1218,7 @@ func (c *hostCoordinator) archiveOrphanedCompletedLaneWithDiagnostics(runtime *d
 
 func (c *hostCoordinator) archiveLaneTransaction(actor *laneActor, expected laneArchiveExpectation) (bool, error) {
 	c.mu.Lock()
-	if actor == nil || c.lanes[actor.id] != actor || actor.state != expected.state || actor.turnID != expected.turnID || actor.autoArchiveAt != expected.autoArchiveAt {
+	if actor == nil || expected.actor != actor || c.lanes[actor.id] != actor || actor.persistent != expected.persistent || actor.parentID != expected.parentID || actor.state != expected.state || actor.turnID != expected.turnID || actor.autoArchiveAt != expected.autoArchiveAt {
 		c.mu.Unlock()
 		return false, nil
 	}
@@ -1603,13 +1607,13 @@ func (c *hostCoordinator) scheduleLaneAutoArchiveWithDiagnostics(runtime *daemon
 			}
 		}
 		c.mu.Lock()
-		turnID := actor.turnID
+		snapshot := laneArchiveExpectation{actor: actor, persistent: actor.persistent, parentID: actor.parentID, state: actor.state, turnID: actor.turnID, autoArchiveAt: actor.autoArchiveAt}
 		eligible := c.lanes[actor.id] == actor && actor.state == "idle" && actor.autoArchive && actor.autoArchiveAt == expected
 		c.mu.Unlock()
 		if !eligible {
 			return
 		}
-		archived, archiveErr := c.archiveLaneTransaction(actor, laneArchiveExpectation{state: "idle", turnID: turnID, autoArchiveAt: expected})
+		archived, archiveErr := c.archiveLaneTransaction(actor, snapshot)
 		if archiveErr != nil {
 			writeLaneArchiveDiagnostic(diagnostics, actor.id, archiveErr)
 		}
