@@ -968,7 +968,7 @@ func TestLaneEOFRematerializesArchivedGroupsOnlyFromDurableCandidate(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if confirmations != 3 || actor.parentID != parentB.ID || actor.cwd != "" || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) || !reflect.DeepEqual(actor.groups, candidateLaneGroups(candidate)) {
+	if confirmations != 3 || actor.parentID != candidate.Parent || actor.cwd != "" || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) || !reflect.DeepEqual(actor.groups, candidateLaneGroups(candidate)) {
 		t.Fatalf("rematerialized actor=%+v confirmations=%d", actor, confirmations)
 	}
 	after, err := runtime.State().Read()
@@ -1083,6 +1083,12 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *testing.T) {
 	runtime := newPresenceTestRuntime(t)
 	coordinator := newHostCoordinator(context.Background(), t.TempDir())
+	driver := &parentExitLaneDriver{}
+	var err error
+	coordinator.laneDrivers, err = productruntime.NewLaneRegistry(map[string]productruntime.LaneDriver{"claude": driver})
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := daemonpkg.NewLaneEngine(runtime.State())
 	if err != nil {
 		t.Fatal(err)
@@ -1112,30 +1118,39 @@ func TestOfflineLaneCandidateVisibilityAndOwnershipFollowLiveParentGroups(t *tes
 		t.Fatalf("non-sharing parent confirmed candidate: calls=%d names=%+v", confirmations, coordinator.laneNames[outsider.ID])
 	}
 
+	parentA := daemonpkg.ManagedAttachment{ID: "parent-a", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}}
+	coordinator.liveReports[parentA.ID] = livepresence.Report{UUID: parentA.ID, Product: parentA.Product, Groups: parentA.Groups}
+	listed, err := coordinator.listLanes(runtime, parentA, candidate.Product, parsedLaneCommand{all: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lanes := listed["lanes"].([]map[string]any)
+	if len(lanes) != 1 || lanes[0]["owner_session_id"] != parentA.ID {
+		t.Fatalf("durable parent list = %+v", listed)
+	}
+	actor := coordinator.lanes[candidate.NativeSessionID]
+	if actor == nil || actor.parentID != parentA.ID || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) {
+		t.Fatalf("durable parent actor=%+v confirmations=%d", actor, confirmations)
+	}
+
 	parentB := daemonpkg.ManagedAttachment{ID: "parent-b", Product: "claude", Cwd: t.TempDir(), Groups: []string{"shared"}}
 	coordinator.liveReports[parentB.ID] = livepresence.Report{UUID: parentB.ID, Product: parentB.Product, Groups: parentB.Groups}
-	actor, err := coordinator.resolveLaneActor(runtime, parentB, candidate.Product, "shared-worker", true)
+	foreign, err := coordinator.listLanes(runtime, parentB, candidate.Product, parsedLaneCommand{all: true, mine: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if confirmations != 1 || actor.parentID != parentB.ID || !reflect.DeepEqual(actor.explicitGroups, candidate.SecondaryGroups) {
-		t.Fatalf("shared candidate actor=%+v confirmations=%d", actor, confirmations)
-	}
-	actor.groups, err = coordinator.effectiveLaneGroups(runtime, actor, parentB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parentBAnchor := "session:" + runtime.HostID() + "/" + parentB.ID
-	wantGroups := []string{"parent-a/child", parentBAnchor, parentBAnchor + "/" + candidate.NativeSessionID, "shared"}
-	if !reflect.DeepEqual(actor.groups, wantGroups) {
-		t.Fatalf("handed-over groups = %v, want %v", actor.groups, wantGroups)
+	if got := foreign["lanes"].([]map[string]any); len(got) != 0 || actor.parentID != parentA.ID {
+		t.Fatalf("foreign --mine list=%+v actor=%+v", foreign, actor)
 	}
 	before, err := runtime.State().Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.recordLaneNativeID(runtime, actor, productruntime.NativeSessionRef{LaneID: candidate.NativeSessionID, NativeSessionID: candidate.NativeSessionID, Generation: 1}, false); err != nil {
-		t.Fatalf("resume rewrote immutable candidate: %v", err)
+	if _, err := coordinator.resumeLane(context.Background(), runtime, parentB, candidate.Product, parsedLaneCommand{target: "shared-worker"}, "continue"); err != nil {
+		t.Fatal(err)
+	}
+	if actor.parentID != parentB.ID {
+		t.Fatalf("explicit resume did not hand over current ownership: %+v", actor)
 	}
 	after, err := runtime.State().Read()
 	if err != nil {

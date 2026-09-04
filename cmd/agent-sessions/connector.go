@@ -81,7 +81,7 @@ func runConnector(ctx context.Context, product string, output io.Writer) error {
 		}
 	}
 	relay, err := sessiontools.NewMCPRelay(sessiontools.MCPRelayConfig{
-		Product: product,
+		Product: product, RefreshIdentity: refresher.pendingIdentity,
 		Refresh: func(context.Context) error {
 			return refresher.refresh()
 		},
@@ -120,10 +120,8 @@ func connectorBeforePublish(refresher *connectorImageRefresher, resolve func(con
 			return err
 		}
 		refresher.observeDaemon(identity)
-		if err := refresher.refresh(); err != nil || refresher.identity() != identity {
-			if err == nil {
-				err = errors.New("installed connector image does not match the ready daemon")
-			}
+		if refresher.pendingIdentity() != "" {
+			err := errors.New("connector image is stale; retry after automatic refresh")
 			_, _ = fmt.Fprintf(log, "Agent Sessions connector refresh: %v\n", err)
 			return err
 		}
@@ -236,6 +234,10 @@ func callConnectorDaemonTool(
 				Code: response.Error.RPCCode, Message: response.Error.Message,
 				Data: append(json.RawMessage(nil), response.Error.RPCData...),
 			}
+		}
+		if response.Error.Code == daemonpkg.ErrorStaleConnector {
+			data, _ := json.Marshal(map[string]string{"reason": daemonpkg.ErrorStaleConnector, "release_identity": response.ReleaseIdentity})
+			return nil, response.ReleaseIdentity, &livepresence.RPCError{Code: livepresence.NotPermitted, Message: response.Error.Message, Data: data}
 		}
 		return nil, response.ReleaseIdentity, errors.New(response.Error.Message)
 	}

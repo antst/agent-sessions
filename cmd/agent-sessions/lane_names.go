@@ -77,7 +77,7 @@ func (c *hostCoordinator) ensureActiveLaneNames(
 		}
 		c.lanes[entry.UUID] = &laneActor{
 			id: entry.UUID, nativeID: entry.UUID, product: entry.Product,
-			name: entry.Name, parentID: parent.ID,
+			name: entry.Name, parentID: confirmed.candidate.Parent,
 			groups:         candidateLaneGroups(confirmed.candidate),
 			explicitGroups: append([]string(nil), confirmed.candidate.SecondaryGroups...),
 			state:          "archived", done: make(chan struct{}),

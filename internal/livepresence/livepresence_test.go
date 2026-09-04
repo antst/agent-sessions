@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/testutil"
 )
 
 func TestClosedLaneMethodValidators(t *testing.T) {
@@ -358,7 +361,7 @@ func TestClientBeforePublishGatesTheCurrentConnection(t *testing.T) {
 		t.Run(map[bool]string{false: "release", true: "reject"}[fail], func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			path := filepath.Join(t.TempDir(), "presence.sock")
+			path := filepath.Join(testutil.ShortSocketRoot(t, "lp-", "presence.sock"), "presence.sock")
 			listener, err := net.Listen("unix", path)
 			if err != nil {
 				t.Fatal(err)
@@ -424,6 +427,56 @@ func TestClientBeforePublishGatesTheCurrentConnection(t *testing.T) {
 				t.Fatal("accepted connection was not published")
 			}
 		})
+	}
+}
+
+func TestClientBeforePublishDoesNotOverwriteAConcurrentReportUpdate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := filepath.Join(testutil.ShortSocketRoot(t, "lp-", "presence.sock"), "presence.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	disconnected := make(chan struct{})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer close(disconnected)
+		rpc := NewConnection(connection)
+		var hello Frame
+		if rpc.Decode(&hello) == nil {
+			_ = rpc.Write(Frame{JSONRPC: "2.0", ID: hello.ID, Result: json.RawMessage(`{}`)})
+		}
+		_, _ = io.Copy(io.Discard, connection)
+	}()
+	entered, release := make(chan struct{}), make(chan struct{})
+	client := StartClientWithOptions(ctx, path, Report{UUID: "native", Name: "before", Product: "codex", Groups: []string{}, Info: map[string]string{}}, nil, nil, ClientOptions{
+		BeforePublish: func(context.Context) error { close(entered); <-release; return nil },
+	})
+	<-entered
+	if err := client.UpdateReport(ctx, Report{UUID: "native", Name: "after", Product: "codex", Groups: []string{}, Info: map[string]string{}}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("stale hello connection was not rejected")
+	}
+	client.mu.Lock()
+	name, current := client.report.Name, client.current
+	client.mu.Unlock()
+	if name != "after" || current != nil {
+		t.Fatalf("report/current after blocked hook = %q/%v", name, current)
+	}
+	select {
+	case <-client.Ready():
+		t.Fatal("stale report became ready")
+	default:
 	}
 }
 func testFrame(size int, newline bool) []byte {

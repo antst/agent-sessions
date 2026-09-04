@@ -68,6 +68,15 @@ func (r *connectorImageRefresher) identity() string {
 	return r.launchedIdentity
 }
 
+func (r *connectorImageRefresher) pendingIdentity() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.daemonIdentity == r.launchedIdentity {
+		return ""
+	}
+	return r.daemonIdentity
+}
+
 func (r *connectorImageRefresher) refresh() error {
 	if r == nil {
 		return nil

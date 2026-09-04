@@ -161,7 +161,7 @@ func TestLiveSendProjectsOnlyTheDaemonMessageContract(t *testing.T) {
 func TestLiveLaneStripsOptionalSessionContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	path := filepath.Join(t.TempDir(), "presence.sock")
+	path := filepath.Join(shortDaemonTestRoot(t), "presence.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

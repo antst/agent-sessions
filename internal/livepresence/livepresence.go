@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -872,6 +873,7 @@ func (c *Client) run() {
 		if err == nil {
 			c.mu.Lock()
 			report := CloneReport(c.report)
+			baseline := CloneReport(c.report)
 			resolveReport := c.resolveReport
 			c.mu.Unlock()
 			confirmed := true
@@ -898,6 +900,9 @@ func (c *Client) run() {
 					c.mu.Unlock()
 					err = c.beforePublish(c.ctx)
 					c.mu.Lock()
+				}
+				if err == nil && !reflect.DeepEqual(baseline, c.report) {
+					err = errors.New("live session report changed during publication")
 				}
 				if err == nil {
 					rpc.SetReport(report)

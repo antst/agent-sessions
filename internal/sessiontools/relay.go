@@ -18,10 +18,12 @@ const defaultMCPRelayFrameBytes = 2 << 20
 var ErrMCPRelayFrameTooLarge = errors.New("MCP relay frame exceeds configured bound")
 
 type MCPRelayConfig struct {
-	Product       string
-	MaxFrameBytes int
-	Call          func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
-	Refresh       func(context.Context) error
+	Product         string
+	MaxFrameBytes   int
+	Call            func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+	Refresh         func(context.Context) error
+	RefreshIdentity func() string
+	afterRead       func()
 }
 
 type MCPRelay struct {
@@ -34,8 +36,9 @@ type relayRequest struct {
 	Params json.RawMessage `json:"params"`
 }
 type relayFrame struct {
-	line string
-	err  error
+	line     string
+	err      error
+	buffered int
 }
 type relayResponse struct {
 	id      json.RawMessage
@@ -63,6 +66,9 @@ func NewMCPRelay(config MCPRelayConfig) (*MCPRelay, error) {
 	if config.MaxFrameBytes <= 0 {
 		config.MaxFrameBytes = defaultMCPRelayFrameBytes
 	}
+	if config.RefreshIdentity == nil {
+		config.RefreshIdentity = func() string { return "" }
+	}
 	return &MCPRelay{config: config}, nil
 }
 
@@ -74,31 +80,29 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 	if ctx == nil || input == nil || output == nil {
 		return errors.New("MCP relay stream is incomplete")
 	}
-	scanner := bufio.NewScanner(input)
-	initial := 4096
-	if r.config.MaxFrameBytes < initial {
-		initial = r.config.MaxFrameBytes
-	}
-	scanner.Buffer(make([]byte, initial), r.config.MaxFrameBytes)
+	reader := bufio.NewReaderSize(input, min(4096, r.config.MaxFrameBytes+1))
 	writer := bufio.NewWriter(output)
 	defer func() { _ = writer.Flush() }()
 	frames := make(chan relayFrame, 1)
-	go func() {
-		defer close(frames)
-		for scanner.Scan() {
-			select {
-			case frames <- relayFrame{line: scanner.Text()}:
-			case <-ctx.Done():
-				return
-			}
-		}
-		select {
-		case frames <- relayFrame{err: scanner.Err()}:
-		case <-ctx.Done():
-		}
-	}()
+	permit := make(chan struct{}, 1)
+	permit <- struct{}{}
+	go r.readFrames(ctx, reader, permit, frames)
 	responses := make(chan relayResponse)
-	inFlight := 0
+	readerBusy, inFlight, buffered := true, 0, 0
+	refresh := func() error {
+		if r.config.Refresh == nil || r.config.RefreshIdentity() == "" || readerBusy || inFlight != 0 || buffered != 0 {
+			return nil
+		}
+		if err := r.config.Refresh(ctx); err != nil {
+			return err
+		}
+		if r.config.RefreshIdentity() != "" {
+			return errors.New("installed connector image does not match the ready daemon")
+		}
+		permit <- struct{}{}
+		readerBusy = true
+		return nil
+	}
 	for {
 		if frames == nil && inFlight == 0 {
 			return writer.Flush()
@@ -114,18 +118,31 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 				return fmt.Errorf("flush MCP relay response: %w", err)
 			}
 			inFlight--
-			if r.config.Refresh != nil && inFlight == 0 {
-				_ = r.config.Refresh(ctx)
+			if err := refresh(); err != nil {
+				return err
 			}
 		case frame, ok := <-frames:
 			if !ok {
 				frames = nil
+				readerBusy = false
+				if err := refresh(); err != nil {
+					return err
+				}
 				continue
 			}
+			readerBusy, buffered = false, frame.buffered
 			if frame.err != nil {
 				return fmt.Errorf("%w: %w", ErrMCPRelayFrameTooLarge, frame.err)
 			}
+			identity := r.config.RefreshIdentity()
+			if identity == "" || buffered > 0 {
+				permit <- struct{}{}
+				readerBusy = true
+			}
 			if strings.TrimSpace(frame.line) == "" {
+				if err := refresh(); err != nil {
+					return err
+				}
 				continue
 			}
 			var request relayRequest
@@ -133,21 +150,71 @@ func (r *MCPRelay) Serve(ctx context.Context, input io.Reader, output io.Writer)
 				if err := writeRelayResponse(writer, nil, nil, &rpcError{Code: -32700, Message: "Parse error"}); err != nil {
 					return err
 				}
+				if err := writer.Flush(); err != nil {
+					return fmt.Errorf("flush MCP relay response: %w", err)
+				}
+				if err := refresh(); err != nil {
+					return err
+				}
 				continue
 			}
 			if len(request.ID) == 0 {
+				if err := refresh(); err != nil {
+					return err
+				}
 				continue
 			}
 			request.ID = append(json.RawMessage(nil), request.ID...)
 			request.Params = append(json.RawMessage(nil), request.Params...)
 			inFlight++
-			go func(request relayRequest) {
-				result, rpcErr := r.handle(ctx, request)
+			go func(request relayRequest, staleIdentity string) {
+				var result json.RawMessage
+				var rpcErr *rpcError
+				if staleIdentity != "" {
+					rpcErr = &rpcError{Code: -32003, Message: "Agent Sessions connector image is stale; retry after automatic refresh", Data: map[string]any{"reason": "stale_connector", "release_identity": staleIdentity}}
+				} else {
+					result, rpcErr = r.handle(ctx, request)
+				}
 				select {
 				case responses <- relayResponse{id: request.ID, result: result, failure: rpcErr}:
 				case <-ctx.Done():
 				}
-			}(request)
+			}(request, identity)
+		}
+	}
+}
+
+func (r *MCPRelay) readFrames(ctx context.Context, reader *bufio.Reader, permit <-chan struct{}, frames chan<- relayFrame) {
+	defer close(frames)
+	for {
+		select {
+		case <-permit:
+		case <-ctx.Done():
+			return
+		}
+		var line []byte
+		var err error
+		for more := true; more; {
+			var part []byte
+			part, more, err = reader.ReadLine()
+			line = append(line, part...)
+			if len(line) > r.config.MaxFrameBytes {
+				err, more = ErrMCPRelayFrameTooLarge, false
+			}
+		}
+		if r.config.afterRead != nil {
+			r.config.afterRead()
+		}
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		select {
+		case frames <- relayFrame{line: string(line), err: err, buffered: reader.Buffered()}:
+		case <-ctx.Done():
+			return
+		}
+		if err != nil {
+			return
 		}
 	}
 }

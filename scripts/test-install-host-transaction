@@ -635,7 +635,7 @@ if [[ "$installed_hash" != "$candidate_hash" ]] ||
   cat "$test_root/success.out" >&2
   exit 1
 fi
-if ! grep -Fxq 'Connectors from a previous install refresh after their next completed tool response. A newly introduced operation may fail once under the old image; repeat it after automatic refresh, or resume or restart that session.' "$test_root/success.out" ||
+if ! grep -Fxq 'Connectors from a previous install refresh after their next completed tool response. Requests already received when the refresh is pending are answered with a stale-connector error; the connector then refreshes once, and retries use the new image.' "$test_root/success.out" ||
    grep -Fq 'Connectors from a previous install refresh' "$test_root/failed.out"; then
   printf 'connector refresh transition notice was not success-only\n' >&2
   exit 1

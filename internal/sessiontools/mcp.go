@@ -3,6 +3,7 @@ package sessiontools
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -13,6 +14,65 @@ import (
 const maxMCPInputBytes, maxMCPArguments, maxMCPArgumentLength = 1 << 20, 256, 4096
 
 var laneCommands = []string{"doctor", "list", "run", "start", "resume", "steer", "wait", "status", "interrupt", "archive"}
+
+func laneToolSchema(product string) map[string]any {
+	properties := map[string]any{
+		"product":    map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, "description": "Opaque product token resolved by the daemon."},
+		"command":    map[string]any{"type": "string", "enum": append([]string(nil), laneCommands...)},
+		"arguments":  map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": maxMCPArgumentLength}, "maxItems": maxMCPArguments, "description": "Native arguments after the lifecycle command."},
+		"input":      map[string]any{"type": "string", "maxLength": maxMCPInputBytes, "description": "Optional stdin briefing for run, start, or resume."},
+		"host":       map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."},
+		"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
+	}
+	if mcpToolPolicies[product].omitSession {
+		delete(properties, "session_id")
+	}
+	return objectSchema(properties, []string{"product", "command"})
+}
+
+func validLaneToolArguments(raw json.RawMessage, schema map[string]any) (string, bool) {
+	var fields map[string]json.RawMessage
+	if string(raw) == "null" || json.Unmarshal(raw, &fields) != nil {
+		return "", false
+	}
+	var command string
+	_ = json.Unmarshal(fields["command"], &command)
+	properties := schema["properties"].(map[string]any)
+	for _, name := range schema["required"].([]string) {
+		if _, ok := fields[name]; !ok {
+			return command, false
+		}
+	}
+	for name, rawValue := range fields {
+		property, ok := properties[name].(map[string]any)
+		if !ok {
+			return command, false
+		}
+		if property["type"] == "array" {
+			var values []string
+			maximum := property["items"].(map[string]any)["maxLength"].(int)
+			if string(rawValue) == "null" || json.Unmarshal(rawValue, &values) != nil || len(values) > property["maxItems"].(int) {
+				return command, false
+			}
+			for _, value := range values {
+				if utf8.RuneCountInString(value) > maximum {
+					return command, false
+				}
+			}
+			continue
+		}
+		var value string
+		if json.Unmarshal(rawValue, &value) != nil || property["minLength"] != nil && utf8.RuneCountInString(value) < property["minLength"].(int) || property["maxLength"] != nil && utf8.RuneCountInString(value) > property["maxLength"].(int) {
+			return command, false
+		}
+		values, _ := property["enum"].([]string)
+		pattern, _ := property["pattern"].(string)
+		if len(values) != 0 && !slices.Contains(values, value) || pattern != "" && !regexp.MustCompile(pattern).MatchString(value) {
+			return command, false
+		}
+	}
+	return command, true
+}
 
 func ValidateMCPToolCall(product string, raw json.RawMessage) map[string]any {
 	var call struct {
@@ -28,51 +88,12 @@ func ValidateMCPToolCall(product string, raw json.RawMessage) map[string]any {
 		}
 		return map[string]any{"method": "lane." + method}
 	}
-	var fields map[string]json.RawMessage
-	if len(call.Arguments) == 0 || string(call.Arguments) == "null" || json.Unmarshal(call.Arguments, &fields) != nil {
+	if len(call.Arguments) == 0 {
 		return invalid("")
 	}
-	var command string
-	if value, ok := fields["command"]; !ok || json.Unmarshal(value, &command) != nil {
-		return invalid("")
-	}
-	if !slices.Contains(laneCommands, command) {
+	command, valid := validLaneToolArguments(call.Arguments, laneToolSchema(product))
+	if !valid {
 		return invalid(command)
-	}
-	allowed := map[string]bool{"product": true, "command": true, "arguments": true, "input": true, "host": true}
-	if !mcpToolPolicies[product].omitSession {
-		allowed["session_id"] = true
-	}
-	for key := range fields {
-		if !allowed[key] {
-			return invalid(command)
-		}
-	}
-	var token string
-	if value, ok := fields["product"]; !ok || json.Unmarshal(value, &token) != nil || productcatalog.ValidateToken(token) != nil {
-		return invalid(command)
-	}
-	if value, ok := fields["arguments"]; ok {
-		var arguments []string
-		if string(value) == "null" || json.Unmarshal(value, &arguments) != nil || len(arguments) > maxMCPArguments {
-			return invalid(command)
-		}
-		for _, argument := range arguments {
-			if utf8.RuneCountInString(argument) > maxMCPArgumentLength {
-				return invalid(command)
-			}
-		}
-	}
-	for _, field := range []string{"host", "session_id"} {
-		if value, ok := fields[field]; ok && json.Unmarshal(value, new(string)) != nil {
-			return invalid(command)
-		}
-	}
-	if value, ok := fields["input"]; ok {
-		var input string
-		if json.Unmarshal(value, &input) != nil || utf8.RuneCountInString(input) > maxMCPInputBytes {
-			return invalid(command)
-		}
 	}
 	return nil
 }
@@ -175,10 +196,7 @@ func baseToolDefinitions() []map[string]any {
 		{"name": "check_inbox", "description": "Recovery-only: read and consume peer messages queued past an automatic delivery boundary. Active peer messages are pushed into the session automatically; do not poll this tool.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "identity", "description": "Show this Codex session's Claude-compatible peer name and address.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context.")}, []string{"session_id"})},
 		{"name": "rename_session", "description": "Change this managed session's public Agent Sessions peer name.", "inputSchema": objectSchema(map[string]any{"session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."), "name": map[string]any{"type": "string", "minLength": 1, "maxLength": 80}}, []string{"session_id", "name"})},
-		{"name": "lane", "description": "Run one exact local or federated token-named product lane lifecycle command for this attested parent. The daemon alone decides whether the product is launchable.", "inputSchema": objectSchema(map[string]any{
-			"product": map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, "description": "Opaque product token resolved by the daemon."}, "command": map[string]any{"type": "string", "enum": append([]string(nil), laneCommands...)},
-			"arguments": map[string]any{"type": "array", "items": map[string]any{"type": "string", "maxLength": maxMCPArgumentLength}, "maxItems": maxMCPArguments, "description": "Native arguments after the lifecycle command."}, "input": map[string]any{"type": "string", "maxLength": maxMCPInputBytes, "description": "Optional stdin briefing for run, start, or resume."}, "host": map[string]any{"type": "string", "description": "Optional connected destination host id or unique name. Omit for a local lane."}, "session_id": sessionProperty("Current Codex session ID supplied by SessionStart context."),
-		}, []string{"product", "command", "session_id"})},
+		{"name": "lane", "description": "Run one exact local or federated token-named product lane lifecycle command for this attested parent. The daemon alone decides whether the product is launchable.", "inputSchema": laneToolSchema("")},
 	}
 }
 
