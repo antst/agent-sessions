@@ -85,6 +85,8 @@ func TestConnectorToolsDoNotReadADeletedProcessCwd(t *testing.T) {
 		json.RawMessage(`{"name":"list_peers","arguments":{}}`),
 		json.RawMessage(`{"name":"send_message","arguments":{"target":"peer","message":"hello"}}`),
 		json.RawMessage(`{"name":"lane","arguments":{"product":"codex","command":"start","arguments":["--name","worker"]}}`),
+		json.RawMessage(`{"name":"lane","arguments":{"product":"codex","command":"doctor","arguments":["--json"]}}`),
+		json.RawMessage(`{"name":"lane","arguments":{"product":"codex","command":"list","arguments":["--mine"]}}`),
 	} {
 		_, err := callLiveConnectorTool(context.Background(), live, "request", "tools/call", params)
 		if err == nil || err.Error() != "Agent Sessions daemon is unavailable" {

@@ -118,16 +118,26 @@ func TestConnectorToolCallsAreSynchronousAndUncached(t *testing.T) {
 	}
 }
 
-func TestControlReturnsHandlerErrorToSameUserCaller(t *testing.T) {
-	server := startControlTestServer(t, 14, func(context.Context, ControlRequest) (json.RawMessage, error) {
-		return nil, errors.New("product rejected model unavailable-model")
-	})
-	response := callControlTest(t, server.Endpoint(), ControlRequest{
-		ID: "product-error", Role: RoleLauncher, Operation: "connector.tool", Generation: 14,
-	})
-	if response.OK || response.Error == nil || response.Error.Code != ErrorHandler ||
-		response.Error.Message != "product rejected model unavailable-model" {
-		t.Fatalf("handler failure = %#v", response)
+type testRPCFailure struct{}
+
+func (testRPCFailure) Error() string { return "structured failure" }
+func (testRPCFailure) RPCErrorDetails() (int, string, json.RawMessage) {
+	return -32602, "Invalid params", json.RawMessage(`{"method":"lane.start"}`)
+}
+
+func TestControlReturnsPlainAndStructuredHandlerErrors(t *testing.T) {
+	for _, test := range []struct {
+		err           error
+		message, data string
+		rpcCode       int
+	}{{errors.New("product rejected model unavailable-model"), "product rejected model unavailable-model", "", 0},
+		{testRPCFailure{}, "Invalid params", `{"method":"lane.start"}`, -32602}} {
+		server := startControlTestServer(t, 14, func(context.Context, ControlRequest) (json.RawMessage, error) { return nil, test.err })
+		response := callControlTest(t, server.Endpoint(), ControlRequest{ID: "failure", Role: RoleLauncher, Operation: "connector.tool", Generation: 14})
+		if response.OK || response.Error == nil || response.Error.Code != ErrorHandler || response.Error.Message != test.message ||
+			response.Error.RPCCode != test.rpcCode || string(response.Error.RPCData) != test.data {
+			t.Fatalf("handler failure = %#v", response)
+		}
 	}
 }
 

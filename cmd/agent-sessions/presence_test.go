@@ -111,48 +111,53 @@ func TestLivePresenceRejectsUnsupportedVersionAndGroupUpdate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Close() })
 
+	for _, test := range []struct {
+		protocol, code int
+		info           map[string]string
+	}{{2, livepresence.UnsupportedVersion, map[string]string{}}, {1, livepresence.InvalidParams, map[string]string{"cwd": "relative"}}, {1, livepresence.InvalidParams, map[string]string{"cwd": ""}}} {
+		connection, dialErr := net.Dial("unix", server.listener.Addr().String())
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
+		_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session.hello", "params": map[string]any{
+			"protocol": test.protocol, "uuid": "hello", "name": "", "groups": []string{}, "product": "future", "info": test.info,
+		}})
+		var response livepresence.Frame
+		if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != test.code {
+			t.Fatalf("hello response = %+v, %v", response, err)
+		}
+		if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
+			t.Fatalf("rejected hello connection remained open: %v", err)
+		}
+		_ = connection.Close()
+	}
+
 	connection, err := net.Dial("unix", server.listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
-	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session.hello", "params": map[string]any{
-		"protocol": 2, "uuid": "version", "name": "", "groups": []string{}, "product": "future", "info": map[string]string{},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	var response livepresence.Frame
-	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.UnsupportedVersion {
-		t.Fatalf("unsupported-version response = %+v, %v", response, err)
-	}
-	if err := decoder.Decode(&response); !errors.Is(err, io.EOF) {
-		t.Fatalf("unsupported-version connection remained open: %v", err)
-	}
-	_ = connection.Close()
-
-	connection, err = net.Dial("unix", server.listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer connection.Close()
-	encoder, decoder = json.NewEncoder(connection), json.NewDecoder(connection)
+	encoder, decoder := json.NewEncoder(connection), json.NewDecoder(connection)
 	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "hello", "method": "session.hello", "params": map[string]any{
 		"protocol": 1, "uuid": "update", "name": "before", "groups": []string{"team"}, "product": "future", "info": map[string]string{},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	response = livepresence.Frame{}
+	response := livepresence.Frame{}
 	if err := decoder.Decode(&response); err != nil || response.Error != nil {
 		t.Fatalf("hello response = %+v, %v", response, err)
 	}
-	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "update", "method": "session.update", "params": map[string]any{
-		"name": "after", "info": map[string]string{}, "groups": []string{"other"},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	response = livepresence.Frame{}
-	if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams {
-		t.Fatalf("group-update response = %+v, %v", response, err)
+	for id, params := range map[string]map[string]any{
+		"group-update": {"name": "after", "info": map[string]string{}, "groups": []string{"other"}},
+		"cwd-update":   {"name": "after", "info": map[string]string{"cwd": "relative"}},
+		"empty-cwd":    {"name": "after", "info": map[string]string{"cwd": ""}},
+	} {
+		_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": id, "method": "session.update", "params": params})
+		response = livepresence.Frame{}
+		if err := decoder.Decode(&response); err != nil || response.Error == nil || response.Error.Code != livepresence.InvalidParams {
+			t.Fatalf("%s response = %+v, %v", id, response, err)
+		}
 	}
 }
 
@@ -461,7 +466,7 @@ func TestCoordinatorRebuildsLivePeerAndLaneFromReports(t *testing.T) {
 	coordinator.joinLiveSession(runtime, parent)
 	attachment, active, err := runtime.Attachments().ActiveAttachment("parent")
 	if err != nil || !active || attachment.Product != "codex" || !reflect.DeepEqual(attachment.Groups, []string{"team"}) ||
-		!reflect.DeepEqual(attachment.Info, parent.Info) || attachment.Cwd != "" {
+		!reflect.DeepEqual(attachment.Info, parent.Info) || attachment.Cwd != "/workspace" {
 		t.Fatalf("reported parent = %+v, active=%v, err=%v", attachment, active, err)
 	}
 	lane := livepresence.Report{

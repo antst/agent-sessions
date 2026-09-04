@@ -60,8 +60,10 @@ type ControlRequest struct {
 
 // ControlFailure is one operation failure returned to the same-user caller.
 type ControlFailure struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string          `json:"code"`
+	Message string          `json:"message"`
+	RPCCode int             `json:"rpc_code,omitempty"`
+	RPCData json.RawMessage `json:"rpc_data,omitempty"`
 }
 
 // ControlResponse is one correlated local result.
@@ -206,6 +208,15 @@ func (p *controlPolicy) invoke(ctx context.Context, request ControlRequest) Cont
 		var classified classifiedControlError
 		if errors.As(err, &classified) && classified.code == ErrorInactive {
 			return failedControlResponse(request.ID, ErrorInactive, CanonicalInactiveMessage)
+		}
+		var rpc interface {
+			RPCErrorDetails() (int, string, json.RawMessage)
+		}
+		if errors.As(err, &rpc) {
+			code, message, data := rpc.RPCErrorDetails()
+			return ControlResponse{ID: request.ID, Error: &ControlFailure{
+				Code: ErrorHandler, Message: message, RPCCode: code, RPCData: append(json.RawMessage(nil), data...),
+			}}
 		}
 		return failedControlResponse(request.ID, ErrorHandler, err.Error())
 	}

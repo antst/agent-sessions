@@ -21,7 +21,7 @@ class FakeLiveSession extends EventEmitter {
 }
 
 function fakeTool(definition) { return definition; }
-fakeTool.schema = { enum: () => ({}), string: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
+fakeTool.schema = { enum: (values) => ({ values }), string: () => ({}), any: () => ({}), record: () => ({ default() { return this; } }) };
 
 async function loadPlugin(live, deadline = 10_000) {
   globalThis.__testTool = fakeTool;
@@ -31,7 +31,7 @@ async function loadPlugin(live, deadline = 10_000) {
   source = source
     .replace('import { tool } from "@opencode-ai/plugin";', "const tool = globalThis.__testTool;")
     .replace('import liveSessionModule from "../shared/live-session.js";', "")
-		.replace('const { createLiveSessionClient, renderDelivery } = liveSessionModule;', "const createLiveSessionClient = globalThis.__testLiveFactory; const renderDelivery = globalThis.__testRenderDelivery;")
+		.replace('const { CLIENT_OPERATIONS: OPERATIONS, createLiveSessionClient, renderDelivery } = liveSessionModule;', 'const OPERATIONS = ["peers.list", "message.send", "lane.doctor", "lane.list"]; const createLiveSessionClient = globalThis.__testLiveFactory; const renderDelivery = globalThis.__testRenderDelivery;')
     .replace("const DELIVERY_DEADLINE_MS = 10_000;", `const DELIVERY_DEADLINE_MS = ${deadline};`);
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Math.random()}`)).default;
 }
@@ -41,6 +41,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 test("OpenCode reports live sessions, title changes, and closes on deletion", async () => {
   const live = new FakeLiveSession();
   const hooks = await (await loadPlugin(live))({ client: {}, directory: "/work" });
+  assert.deepEqual(hooks.tool.agent_sessions.args.operation.values, ["peers.list", "message.send", "lane.doctor", "lane.list"]);
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_one", title: "", directory: "/work" } } } });
   assert.deepEqual(live.reported, [{ id: "ses_one", name: "", info: { cwd: "/work" } }]);
   await hooks.event({ event: { type: "session.updated", properties: { info: { id: "ses_one", title: "native", directory: "/work" } } } });

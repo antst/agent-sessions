@@ -1,13 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import liveSessionModule from "../shared/live-session.js";
 
-const { createLiveSessionClient, renderDelivery } = liveSessionModule;
-
-const OPERATIONS = [
-  "peers.list", "message.send",
-  "lane.start", "lane.run", "lane.resume", "lane.wait", "lane.status",
-  "lane.steer", "lane.interrupt", "lane.archive",
-];
+const { CLIENT_OPERATIONS: OPERATIONS, createLiveSessionClient, renderDelivery } = liveSessionModule;
 const DELIVERY_DEADLINE_MS = 10_000;
 
 function boundedText(value, maximum = 1024 * 1024) {

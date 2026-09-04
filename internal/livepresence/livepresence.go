@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 const (
 	ProtocolVersion   = 1
 	ReconnectInterval = 2 * time.Second
+	MaxFrameBytes     = 1 << 20
 
 	InvalidParams      = -32602
 	Unknown            = -32001
@@ -33,6 +35,8 @@ const (
 )
 
 var (
+	ErrFrameTooLarge      = errors.New("live frame exceeds 1 MiB")
+	ErrFrameTruncated     = errors.New("live frame is not newline terminated")
 	ErrInvalidParams      = errors.New("invalid params")
 	ErrUnknown            = errors.New("unknown session or target")
 	ErrBusy               = errors.New("session busy")
@@ -78,6 +82,38 @@ type Frame struct {
 	Error   *RPCError       `json:"error,omitempty"`
 }
 
+type MethodDirection string
+
+const (
+	ClientToDaemon MethodDirection = "client-to-daemon"
+	DaemonToClient MethodDirection = "daemon-to-client"
+)
+
+type MethodSpec struct {
+	Direction        MethodDirection
+	Lane, NeedsInput bool
+}
+
+func LookupMethod(name string) (MethodSpec, bool) {
+	spec := MethodSpec{Direction: ClientToDaemon}
+	switch name {
+	case "session.hello", "session.update", "peers.list", "message.send":
+	case "lane.doctor", "lane.list", "lane.wait", "lane.status", "lane.interrupt", "lane.archive":
+		spec.Lane = true
+	case "lane.start", "lane.run", "lane.resume", "lane.steer":
+		spec.Lane, spec.NeedsInput = true, true
+	case "message.deliver":
+		spec.Direction = DaemonToClient
+	case "lane.turn.wait", "lane.turn.interrupt", "lane.session.archive":
+		spec.Direction, spec.Lane = DaemonToClient, true
+	case "lane.turn.start":
+		spec.Direction, spec.Lane, spec.NeedsInput = DaemonToClient, true, true
+	default:
+		return MethodSpec{}, false
+	}
+	return spec, true
+}
+
 type RPCError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
@@ -100,30 +136,67 @@ func (e *RPCError) RPCErrorDetails() (int, string, json.RawMessage) {
 
 type Connection struct {
 	connection net.Conn
-	encoder    *json.Encoder
-	decoder    *json.Decoder
+	reader     *bufio.Reader
+	observer   func(string, Frame)
 
-	writeMu sync.Mutex
-	mu      sync.Mutex
-	pending map[string]chan Frame
-	report  Report
+	writeMu   sync.Mutex
+	observeMu sync.Mutex
+	mu        sync.Mutex
+	pending   map[string]chan Frame
+	report    Report
 }
 
 func NewConnection(connection net.Conn) *Connection {
-	decoder := json.NewDecoder(bufio.NewReader(connection))
-	decoder.DisallowUnknownFields()
 	return &Connection{
-		connection: connection, encoder: json.NewEncoder(connection), decoder: decoder,
+		connection: connection, reader: bufio.NewReaderSize(connection, MaxFrameBytes+1),
 		pending: map[string]chan Frame{},
 	}
 }
-
-func (c *Connection) Decode(frame *Frame) error { return c.decoder.Decode(frame) }
-
+func (c *Connection) Observe(observer func(string, Frame)) { c.observer = observer }
+func (c *Connection) Decode(frame *Frame) error {
+	body, err := c.reader.ReadSlice('\n')
+	if err != nil && len(body) == 0 {
+		return err
+	}
+	if errors.Is(err, bufio.ErrBufferFull) || len(body) > MaxFrameBytes {
+		return ErrFrameTooLarge
+	}
+	if err != nil {
+		return ErrFrameTruncated
+	}
+	if err := DecodeStrict(body[:len(body)-1], frame); err != nil {
+		return err
+	}
+	c.observe("receive", *frame)
+	return nil
+}
 func (c *Connection) Write(frame Frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return c.encoder.Encode(frame)
+	body, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	if len(body) > MaxFrameBytes {
+		return ErrFrameTooLarge
+	}
+	c.observe("send", frame)
+	_, err = io.Copy(c.connection, bytes.NewReader(body))
+	return err
+}
+func (c *Connection) observe(direction string, frame Frame) {
+	if c.observer != nil {
+		c.observeMu.Lock()
+		defer c.observeMu.Unlock()
+		c.observer(direction, cloneFrame(frame))
+	}
+}
+func cloneFrame(frame Frame) Frame {
+	body, _ := json.Marshal(frame)
+	var clone Frame
+	_ = json.Unmarshal(body, &clone)
+	return clone
 }
 
 func (c *Connection) Call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
@@ -215,7 +288,12 @@ func (c *Connection) UpdateReport(name string, info map[string]string) Report {
 func (c *Connection) Close() error { return c.connection.Close() }
 
 func ValidReport(report Report) bool {
-	return strings.TrimSpace(report.UUID) != "" && strings.TrimSpace(report.Product) != "" && report.Groups != nil && report.Info != nil
+	return strings.TrimSpace(report.UUID) != "" && strings.TrimSpace(report.Product) != "" && report.Groups != nil && validInfo(report.Info)
+}
+
+func validInfo(info map[string]string) bool {
+	cwd, present := info["cwd"]
+	return info != nil && (!present || cwd != "" && filepath.IsAbs(cwd))
 }
 
 func CloneReport(report Report) Report {
@@ -331,7 +409,7 @@ func DecodeUpdate(raw json.RawMessage) (string, map[string]string, error) {
 		Name *string            `json:"name"`
 		Info *map[string]string `json:"info"`
 	}
-	if err := DecodeStrict(raw, &params); err != nil || params.Name == nil || params.Info == nil {
+	if err := DecodeStrict(raw, &params); err != nil || params.Name == nil || params.Info == nil || !validInfo(*params.Info) {
 		return "", nil, errors.New("session update is invalid")
 	}
 	return *params.Name, CloneInfo(*params.Info), nil
@@ -416,6 +494,10 @@ type Client struct {
 	endpoint      string
 	report        Report
 	resolveReport func(context.Context) (Report, bool)
+	observer      func(string, Frame)
+	ready         chan struct{}
+	done          chan struct{}
+	readyOnce     sync.Once
 
 	mu      sync.Mutex
 	current *Connection
@@ -427,11 +509,14 @@ func StartClient(
 	endpoint string,
 	report Report,
 	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
+	observers ...func(string, Frame),
 ) *Client {
 	report = NormalizeReport(report)
-	client := &Client{ctx: ctx, endpoint: endpoint, report: report, call: call}
+	client := initializeClient(&Client{ctx: ctx, endpoint: endpoint, report: report, call: call}, observers)
 	if ValidReport(report) {
 		go client.run()
+	} else {
+		close(client.done)
 	}
 	return client
 }
@@ -441,11 +526,22 @@ func StartResolvingClient(
 	endpoint string,
 	resolveReport func(context.Context) (Report, bool),
 	call func(context.Context, string, json.RawMessage) (json.RawMessage, error),
+	observers ...func(string, Frame),
 ) *Client {
-	client := &Client{ctx: ctx, endpoint: endpoint, resolveReport: resolveReport, call: call}
+	client := initializeClient(&Client{ctx: ctx, endpoint: endpoint, resolveReport: resolveReport, call: call}, observers)
 	go client.run()
 	return client
 }
+
+func initializeClient(client *Client, observers []func(string, Frame)) *Client {
+	client.ready, client.done = make(chan struct{}), make(chan struct{})
+	if len(observers) != 0 {
+		client.observer = observers[0]
+	}
+	return client
+}
+func (c *Client) Ready() <-chan struct{} { return c.ready }
+func (c *Client) Done() <-chan struct{}  { return c.done }
 
 func (c *Client) Call(ctx context.Context, id, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
@@ -488,6 +584,7 @@ func NormalizeReport(report Report) Report {
 }
 
 func (c *Client) run() {
+	defer close(c.done)
 	for c.ctx.Err() == nil {
 		connection, err := (&net.Dialer{}).DialContext(c.ctx, "unix", c.endpoint)
 		if err == nil {
@@ -504,6 +601,7 @@ func (c *Client) run() {
 				_ = connection.Close()
 			} else {
 				rpc := NewConnection(connection)
+				rpc.Observe(c.observer)
 				closed := make(chan struct{})
 				go func() {
 					select {
@@ -518,6 +616,7 @@ func (c *Client) run() {
 				if err == nil {
 					rpc.SetReport(report)
 					c.current = rpc
+					c.readyOnce.Do(func() { close(c.ready) })
 				}
 				c.mu.Unlock()
 				if err == nil {
@@ -558,9 +657,10 @@ func (c *Client) read(ctx context.Context, connection *Connection) {
 			}
 			continue
 		}
+		spec, known := LookupMethod(frame.Method)
 		go func(frame Frame) {
 			response := Success(frame.ID, nil)
-			if c.call == nil {
+			if !known || spec.Direction != DaemonToClient || c.call == nil {
 				response = Failure(frame.ID, NotPermitted, "Operation not permitted", map[string]any{"method": frame.Method})
 			} else {
 				result, err := c.call(ctx, frame.Method, frame.Params)

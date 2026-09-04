@@ -288,6 +288,7 @@ func (e *AttachmentEngine) ReportLive(id, name, product string, groups []string,
 	attachment.ID = id
 	attachment.NativeSessionID = id
 	attachment.Product = product
+	attachment.Cwd = info["cwd"]
 	attachment.Groups = append([]string(nil), groups...)
 	attachment.Info = cloneStringMap(info)
 	attachment.State = "attached"

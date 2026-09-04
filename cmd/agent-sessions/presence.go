@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
@@ -261,7 +263,10 @@ func (c *hostCoordinator) leaveLiveSession(runtime *daemonpkg.Runtime, report li
 	c.mu.Unlock()
 	c.syncLiveSessions(runtime)
 	if departed {
-		c.archiveIdleLanesForParent(runtime, report.UUID)
+		if err := c.archiveIdleLanesForParent(runtime, report.UUID); err != nil {
+			message := strings.NewReplacer("\n", " ", "\r", " ").Replace(err.Error())
+			fmt.Fprintf(os.Stderr, "retire lanes for disconnected session %s: %.512s\n", report.UUID, message)
+		}
 	}
 }
 

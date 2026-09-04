@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -11,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,13 +29,6 @@ const (
 )
 
 const codexTUISubmitDelay = 150 * time.Millisecond
-
-const matrixMaxFrameBytes = 1024 * 1024
-
-var (
-	errMatrixFrameTooLarge  = errors.New("matrix live frame exceeds 1 MiB")
-	errMatrixFrameTruncated = errors.New("matrix live frame is not newline terminated")
-)
 
 type matrixOptions struct {
 	repositoryRoot string
@@ -62,6 +53,7 @@ type matrixProduct struct {
 	nativeSubmitDelay     time.Duration
 	nativeEnvelopeFormat  string
 	nativeQuotaMarker     string
+	nativeLaneProduct     string
 }
 
 type matrixRoster struct {
@@ -115,36 +107,11 @@ type matrixWireEvidence struct {
 	Error  string            `json:"error,omitempty"`
 }
 
-type matrixFramedConn struct {
-	net.Conn
-	reader *bufio.Reader
-	frame  []byte
-}
-
-func newMatrixFramedConn(connection net.Conn) *matrixFramedConn {
-	return &matrixFramedConn{Conn: connection, reader: bufio.NewReaderSize(connection, matrixMaxFrameBytes+1)}
-}
-
-func (connection *matrixFramedConn) Read(body []byte) (int, error) {
-	if len(body) == 0 {
-		return 0, nil
-	}
-	if len(connection.frame) == 0 {
-		frame, err := connection.reader.ReadSlice('\n')
-		if len(frame) > matrixMaxFrameBytes || errors.Is(err, bufio.ErrBufferFull) {
-			return 0, errMatrixFrameTooLarge
-		}
-		if err != nil {
-			if len(frame) != 0 {
-				return 0, fmt.Errorf("%w: %v", errMatrixFrameTruncated, err)
-			}
-			return 0, err
-		}
-		connection.frame = frame
-	}
-	written := copy(body, connection.frame)
-	connection.frame = connection.frame[written:]
-	return written, nil
+type matrixConnector struct {
+	runner *matrixRunner
+	ctx    context.Context
+	stderr bytes.Buffer
+	frames []matrixWireFrame
 }
 
 type matrixRunner struct {
@@ -408,6 +375,7 @@ func matrixProductInventory() []matrixProduct {
 			nativeTrustPrompt:     "Permission Required: Accessing workspace:",
 			nativeReadyMarker:     "\n$\n",
 			nativeEnvelopeFormat:  "Message from @%s:",
+			nativeLaneProduct:     "codex",
 		},
 		{
 			id: "grok", nativeExecutable: "grok", peerExecutable: "grok-peer",
@@ -531,6 +499,9 @@ func (runner *matrixRunner) runProduct(ctx context.Context, product matrixProduc
 	runner.runDirectCell(ctx, product, prefix)
 	runner.runMulticastCell(ctx, product, prefix)
 	runner.runGroupCell(ctx, product, prefix)
+	if product.nativeLaneProduct != "" && launchErr == nil {
+		runner.runLaneCell(ctx, product, identity, prefix, identityGroup)
+	}
 
 	if launchErr != nil {
 		for _, cell := range []string{"06-resume-by-name", "07-terminal-quit", "07b-native-quit-resume"} {
@@ -691,6 +662,185 @@ func (runner *matrixRunner) runGroupCell(ctx context.Context, product matrixProd
 		return
 	}
 	runner.record(product.id, "05-group-send", matrixPass, "group selector reached exactly the two group member TUIs", evidence)
+}
+
+func (runner *matrixRunner) runLaneCell(ctx context.Context, product matrixProduct, parent *matrixTUI, prefix, group string) {
+	evidence := map[string]any{"parent_native_session_id": parent.sessionID}
+	laneName := prefix + "-lane"
+	prompt, expected := matrixLanePrompt(runner.runID, laneName, group)
+	err := runner.sendTUIInput(ctx, parent, prompt)
+	if err == nil {
+		var pane string
+		pane, err = runner.captureReceipt(ctx, product, "08-mcp-lane", parent, expected, "lifecycle", product.nativeReadyMarker, product.nativeBusyMarker)
+		evidence["pane_evidence"] = pane
+	}
+	cleanupCtx, stopCleanup := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer stopCleanup()
+	connector := &matrixConnector{runner: runner, ctx: cleanupCtx}
+	rows, listErr := connector.listLanes(parent.sessionID, true)
+	evidence["lane_list_after_model"] = rows
+	if listErr == nil {
+		row := namedLane(rows, laneName)
+		if row == nil || row["product"] != product.nativeLaneProduct || row["owner_session_id"] != parent.sessionID || row["state"] != "archived" || row["outcome"] != "completed" {
+			listErr = fmt.Errorf("completed archived lane %s was not proven: %+v", laneName, row)
+		}
+	}
+	err = errors.Join(err, listErr, connector.recoverLane(parent.sessionID, laneName))
+	invalidEvidence, invalidErr := runner.runInvalidCwdConnectorCase(cleanupCtx, connector, group, prefix+"-invalid-cwd")
+	evidence["invalid_cwd"] = invalidEvidence
+	err = errors.Join(err, invalidErr)
+	finalRows, finalErr := connector.listLanes(parent.sessionID, true)
+	evidence["lane_list_after_cleanup"] = finalRows
+	if row := namedLane(finalRows, laneName); finalErr == nil && row != nil && row["state"] != "archived" {
+		finalErr = fmt.Errorf("lane %s survived cleanup: %+v", laneName, row)
+	}
+	err = errors.Join(err, finalErr)
+	evidence["connector_frames"], evidence["connector_stderr"] = connector.frames, connector.stderr.String()
+	if err != nil {
+		runner.record(product.id, "08-mcp-lane", matrixFail, err.Error(), evidence)
+		return
+	}
+	runner.record(product.id, "08-mcp-lane", matrixPass, "real Claude MCP tool completed and archived one Codex lane", evidence)
+}
+func matrixLanePrompt(runID, laneName, group string) (string, string) {
+	expected := matrixReceiptToken(runID, "08")
+	left, right := expected[:len(expected)/2], expected[len(expected)/2:]
+	prompt := fmt.Sprintf("Use only the agent_sessions lane tool, never a shell. Start a codex lane with arguments [\"--name\",%q,\"--group\",%q] and input %q. Wait for that lane, archive it, then output only the exact result returned by wait.",
+		laneName, group, "Without tools, concatenate "+left+" and "+right+". Reply with exactly the result.")
+	return prompt, expected
+}
+func (connector *matrixConnector) call(source string, arguments map[string]any) (json.RawMessage, *livepresence.RPCError, error) {
+	id := json.RawMessage(`"matrix-lane"`)
+	params, _ := json.Marshal(map[string]any{"name": "lane", "arguments": arguments, "_meta": map[string]any{"threadId": source}})
+	request := livepresence.Frame{JSONRPC: "2.0", ID: id, Method: "tools/call", Params: params}
+	connector.frames = append(connector.frames, matrixWireFrame{Direction: "send", Frame: request})
+	input, _ := json.Marshal(request)
+	command := exec.CommandContext(connector.ctx, connector.runner.config.agentSessions, "connector", "codex") //nolint:gosec // exact preflighted binary.
+	command.Dir, command.Env, command.Stdin, command.Stderr = connector.runner.config.cwd, os.Environ(), bytes.NewReader(append(input, '\n')), &connector.stderr
+	output, err := command.Output()
+	if err != nil {
+		return nil, nil, err
+	}
+	var response livepresence.Frame
+	if err := livepresence.DecodeStrict(output, &response); err != nil {
+		return nil, nil, err
+	}
+	connector.frames = append(connector.frames, matrixWireFrame{Direction: "receive", Frame: response})
+	if !livepresence.ValidFrame(response) || response.Method != "" || !bytes.Equal(response.ID, id) {
+		return nil, nil, fmt.Errorf("invalid connector response for id %s: %+v", id, response)
+	}
+	return response.Result, response.Error, nil
+}
+func (connector *matrixConnector) lane(source, command string, arguments []string, input string) (map[string]any, error) {
+	params := map[string]any{"product": "codex", "command": command, "arguments": arguments}
+	if input != "" {
+		params["input"] = input
+	}
+	result, rpcErr, err := connector.call(source, params)
+	if err != nil || rpcErr != nil {
+		return nil, errors.Join(err, rpcErr)
+	}
+	var envelope struct {
+		Structured map[string]any `json:"structuredContent"`
+	}
+	if json.Unmarshal(result, &envelope) != nil || envelope.Structured == nil {
+		return nil, errors.New("connector returned an invalid structured lane result")
+	}
+	return envelope.Structured, nil
+}
+func (connector *matrixConnector) listLanes(source string, all bool) ([]map[string]any, error) {
+	arguments := []string{"--mine"}
+	if all {
+		arguments = append(arguments, "--all")
+	}
+	result, err := connector.lane(source, "list", arguments, "")
+	body, _ := json.Marshal(result["lanes"])
+	var rows []map[string]any
+	if err != nil || json.Unmarshal(body, &rows) != nil || rows == nil {
+		return nil, errors.Join(err, errors.New("lane.list omitted lanes"))
+	}
+	return rows, nil
+}
+func namedLane(rows []map[string]any, name string) map[string]any {
+	for _, row := range rows {
+		if row["name"] == name {
+			return row
+		}
+	}
+	return nil
+}
+func (connector *matrixConnector) recoverLane(source, name string) error {
+	rows, err := connector.listLanes(source, true)
+	row := namedLane(rows, name)
+	if err != nil || row == nil {
+		return err
+	}
+	commands, err := laneRecoveryCommands(fmt.Sprint(row["state"]), name)
+	if err != nil {
+		return err
+	}
+	for _, command := range commands {
+		if _, err := connector.lane(source, command[0], command[1:], ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func laneRecoveryCommands(state, name string) ([][]string, error) {
+	wait := []string{"wait", name, "--timeout", "30"}
+	switch state {
+	case "running":
+		return [][]string{{"interrupt", name}, wait, {"archive", name}}, nil
+	case "retiring", "preparing", "interrupting":
+		return [][]string{wait, {"archive", name}}, nil
+	case "idle", "terminal":
+		return [][]string{{"archive", name}}, nil
+	case "archived":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("lane %s has unrecoverable state %s", name, state)
+	}
+}
+func (runner *matrixRunner) runInvalidCwdConnectorCase(ctx context.Context, connector *matrixConnector, group, name string) (map[string]any, error) {
+	evidence := map[string]any{}
+	uuid, err := matrixUUID()
+	if err != nil {
+		return evidence, err
+	}
+	missing := filepath.Join(runner.config.evidenceDir, "missing-"+uuid)
+	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		return evidence, errors.New("invalid-cwd fixture unexpectedly exists")
+	}
+	parentCtx, cancel := context.WithCancel(ctx)
+	wire := matrixWireEvidence{}
+	report := livepresence.Report{UUID: uuid, Name: name, Groups: []string{group}, Product: "claude", Info: map[string]string{"cwd": missing}}
+	live := livepresence.StartClient(parentCtx, runner.config.presenceSocket, report, nil, func(direction string, frame livepresence.Frame) {
+		wire.Frames = append(wire.Frames, matrixWireFrame{Direction: direction, Frame: frame})
+	})
+	defer func() { cancel(); <-live.Done(); evidence["wire"] = wire }()
+	select {
+	case <-live.Ready():
+	case <-live.Done():
+		return evidence, errors.New("invalid-cwd parent stopped before hello")
+	case <-ctx.Done():
+		return evidence, ctx.Err()
+	}
+	_, rpcErr, err := connector.call(uuid, map[string]any{
+		"product": "codex", "command": "start", "arguments": []string{"--name", name}, "input": "must not run",
+	})
+	evidence["rpc_error"] = rpcErr
+	if err != nil {
+		return evidence, err
+	}
+	if rpcErr == nil || rpcErr.Code != livepresence.InvalidParams || string(rpcErr.Data) != `{"detail":"lane cwd is unavailable"}` {
+		return evidence, fmt.Errorf("invalid cwd error = %+v", rpcErr)
+	}
+	rows, err := connector.listLanes(uuid, true)
+	evidence["lane_list"] = rows
+	if err == nil && namedLane(rows, name) != nil {
+		err = errors.Join(fmt.Errorf("invalid cwd created lane %s", name), connector.recoverLane(uuid, name))
+	}
+	return evidence, err
 }
 
 func (runner *matrixRunner) runResumeCell(
@@ -1166,99 +1316,43 @@ func (runner *matrixRunner) sendV1(
 	relative := filepath.Join(product, cell+"-wire.json")
 	evidencePath = filepath.Join(runner.config.evidenceDir, relative)
 	evidence := matrixWireEvidence{Frames: []matrixWireFrame{}}
-	var connection net.Conn
-	var stopCancel func() bool
-	defer func() {
-		if stopCancel != nil {
-			stopCancel()
-		}
-		var closeErr error
-		if connection != nil {
-			closeErr = connection.Close()
-			if errors.Is(closeErr, net.ErrClosed) {
-				closeErr = nil
-			}
-		}
-		terminalErr := errors.Join(resultErr, closeErr)
-		if terminalErr != nil {
-			evidence.Error = terminalErr.Error()
-		}
-		resultErr = errors.Join(terminalErr, runner.writeJSON(relative, evidence))
-	}()
 	commandCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
-	defer cancel()
-	connection, err = (&net.Dialer{}).DialContext(commandCtx, "unix", runner.config.presenceSocket)
-	if err != nil {
-		return livepresence.Frame{}, evidencePath, fmt.Errorf("connect raw v1 client: %w", err)
-	}
-	if deadline, ok := commandCtx.Deadline(); ok {
-		if err := connection.SetDeadline(deadline); err != nil {
-			return livepresence.Frame{}, evidencePath, fmt.Errorf("set raw v1 deadline: %w", err)
+	var live *livepresence.Client
+	defer func() {
+		cancel()
+		if live != nil {
+			<-live.Done()
 		}
-	}
-	stopCancel = context.AfterFunc(commandCtx, func() { _ = connection.Close() })
-	live := livepresence.NewConnection(newMatrixFramedConn(connection))
-	report := map[string]any{"protocol": livepresence.ProtocolVersion, "uuid": uuid, "name": source,
-		"groups": []string{group}, "product": "claude", "info": map[string]string{}}
-	hello, err := matrixLiveCall(live, "hello", "session.hello", report, uuid, &evidence)
-	if err != nil {
-		return livepresence.Frame{}, evidencePath, fmt.Errorf("session.hello: %w", err)
-	}
-	var acknowledged map[string]json.RawMessage
-	if hello.Error != nil || livepresence.DecodeStrict(hello.Result, &acknowledged) != nil || acknowledged == nil || len(acknowledged) != 0 {
-		return livepresence.Frame{}, evidencePath, errors.New("session.hello was not acknowledged with an empty object")
-	}
-	response, err = matrixLiveCall(live, "send", "message.send", params, uuid, &evidence)
-	if err != nil {
-		return livepresence.Frame{}, evidencePath, fmt.Errorf("message.send: %w", err)
-	}
-	return response, evidencePath, nil
-}
-
-func matrixLiveCall(
-	connection *livepresence.Connection,
-	id, method string,
-	params any,
-	sourceUUID string,
-	evidence *matrixWireEvidence,
-) (livepresence.Frame, error) {
-	wireID, _ := json.Marshal(id)
-	body, err := json.Marshal(params)
-	if err != nil {
-		return livepresence.Frame{}, err
-	}
-	request := livepresence.Frame{JSONRPC: "2.0", ID: wireID, Method: method, Params: body}
-	evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: "send", Frame: request})
-	if err := connection.Write(request); err != nil {
-		return livepresence.Frame{}, err
-	}
-	for {
-		var frame livepresence.Frame
-		if err := connection.Decode(&frame); err != nil {
-			return livepresence.Frame{}, err
+		if resultErr != nil {
+			evidence.Error = resultErr.Error()
 		}
-		evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: "receive", Frame: frame})
-		if !livepresence.ValidFrame(frame) {
-			return livepresence.Frame{}, errors.New("daemon returned an invalid JSON-RPC frame")
-		}
-		if frame.Method == "" {
-			if !bytes.Equal(frame.ID, wireID) {
-				return livepresence.Frame{}, fmt.Errorf("daemon returned response id %s while awaiting %s", frame.ID, wireID)
+		resultErr = errors.Join(resultErr, runner.writeJSON(relative, evidence))
+	}()
+	report := livepresence.Report{UUID: uuid, Name: source, Groups: []string{group}, Product: "claude", Info: map[string]string{}}
+	live = livepresence.StartClient(commandCtx, runner.config.presenceSocket, report,
+		func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+			if method != "message.deliver" {
+				return nil, livepresence.NewError(livepresence.NotPermitted, "Operation not permitted", map[string]any{"method": method})
 			}
-			return frame, nil
-		}
-		if frame.Method != "message.deliver" || !livepresence.ValidRequest(frame) {
-			return livepresence.Frame{}, fmt.Errorf("daemon interleaved unexpected method %q", frame.Method)
-		}
-		if _, err := livepresence.DecodeDeliver(frame.Params); err != nil {
-			return livepresence.Frame{}, fmt.Errorf("daemon interleaved invalid message.deliver: %w", err)
-		}
-		busy := livepresence.Failure(frame.ID, livepresence.Busy, "Session busy", map[string]any{"uuid": sourceUUID})
-		evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: "send", Frame: busy})
-		if err := connection.Write(busy); err != nil {
-			return livepresence.Frame{}, err
-		}
+			if _, err := livepresence.DecodeDeliver(params); err != nil {
+				return nil, err
+			}
+			return nil, livepresence.NewError(livepresence.Busy, "Session busy", map[string]any{"uuid": uuid})
+		}, func(direction string, frame livepresence.Frame) {
+			evidence.Frames = append(evidence.Frames, matrixWireFrame{Direction: direction, Frame: frame})
+		})
+	select {
+	case <-live.Ready():
+	case <-live.Done():
+		return response, evidencePath, errors.New("raw v1 client stopped before session.hello acknowledgement")
+	case <-commandCtx.Done():
+		return response, evidencePath, commandCtx.Err()
 	}
+	result, err := live.Call(commandCtx, "send", "message.send", params)
+	if err != nil {
+		return response, evidencePath, err
+	}
+	return livepresence.Success(nil, result), evidencePath, nil
 }
 
 func matrixUUID() (string, error) {

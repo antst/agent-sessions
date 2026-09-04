@@ -85,9 +85,8 @@ mean:
 - `groups` is the array of group strings passed from the launch arguments,
   unchanged and in order. It is fixed for the life of this connection.
 - `product` is the product's non-empty string identifier.
-- `info` is a string-to-string object owned by the product. The daemon passes
-  every key and value through verbatim to rosters and `peers.list` results and
-  never interprets them.
+- `info` is product-owned string metadata passed through verbatim except that
+  present `cwd` is absolute/non-empty and becomes the caller's lane directory.
 - `capabilities` is optional. It is a closed object; version 1 defines only
   `"lane":true`, meaning this session accepts the daemon-to-product lane
   requests in section 4. Unknown keys and `lane:false` are invalid.
@@ -133,6 +132,9 @@ call is outstanding. Every version 1 method is a request with an ID. Although
 JSON-RPC supports notifications, version 1 assigns none because every operation
 needs a success or error result.
 
+The encoded object plus its newline is at most 1 MiB. Clean between-frame EOF
+ends the stream; any non-empty tail is truncated and an over-bound frame invalid.
+
 ### Error codes
 
 Errors use the standard JSON-RPC error object
@@ -169,7 +171,7 @@ error code is emitted by a version 1 endpoint. A line that is not a JSON object 
 Both fields are required and replace their previous values; omitted `info`
 keys are removed. The UUID, product, and groups remain those from
 `session.hello`. Any attempt to include or change them is rejected, so the
-product always learns whether its update was applied:
+product learns whether its update was applied. The complete update applies the same absolute-or-absent `info.cwd` rule:
 
 ```json
 {"jsonrpc":"2.0","id":"update-2","method":"session.update","params":{"name":"reviewer","info":{},"groups":["other-team"]}}
@@ -214,8 +216,9 @@ A group outside the sender's effective membership returns `-32003` with
 
 #### Lane methods
 
-The version 1 lane methods are `lane.start`, `lane.run`, `lane.resume`,
-`lane.steer`, `lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive`.
+The version 1 lane methods are `lane.doctor`, `lane.list`, `lane.start`,
+`lane.run`, `lane.resume`, `lane.steer`, `lane.wait`, `lane.status`,
+`lane.interrupt`, and `lane.archive`.
 
 Start, run, resume, and steer use:
 
@@ -223,7 +226,7 @@ Start, run, resume, and steer use:
 {"product":"qwen","arguments":["--name","reviewer","--group","team"],"input":"Review the change.","cwd":"/work/project","host":"optional-remote-host"}
 ```
 
-Wait, status, interrupt, and archive omit `input`:
+Doctor, list, wait, status, interrupt, and archive omit `input`:
 
 ```json
 {"product":"qwen","arguments":["reviewer","--timeout","300"],"cwd":"/work/project","host":"optional-remote-host"}
@@ -231,8 +234,8 @@ Wait, status, interrupt, and archive omit `input`:
 
 `product` selects the lane product. `arguments` is the bounded lane command
 argument array without the method name. `input` is required and non-empty
-where shown. `cwd` is the optional absolute invocation directory supplied by the
-calling product; it is independent of `session.hello.info`. `host` is optional.
+where shown. `cwd` is an optional absolute override; when omitted, the daemon
+uses the live caller's `session.hello.info.cwd`. `host` is optional.
 The daemon returns `-32005` when it has no launcher for the requested product.
 
 `lane.steer` addresses a lane that already has a running turn. The daemon
@@ -445,7 +448,7 @@ Request:
     "method": {
       "enum": [
         "session.hello", "session.update", "peers.list", "message.send",
-        "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait",
+        "lane.doctor", "lane.list", "lane.start", "lane.run", "lane.resume", "lane.steer", "lane.wait",
         "lane.status", "lane.interrupt", "lane.archive", "message.deliver",
         "lane.turn.start", "lane.turn.wait", "lane.turn.interrupt",
         "lane.session.archive"
@@ -748,7 +751,7 @@ Result: an empty object.
 }
 ```
 
-`lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive` parameters:
+`lane.doctor`, `lane.list`, `lane.wait`, `lane.status`, `lane.interrupt`, and `lane.archive` parameters:
 
 ```json
 {
@@ -763,6 +766,11 @@ Result: an empty object.
   }
 }
 ```
+
+`lane.doctor` returns the closed readiness report (type, contract version,
+authority, product, readiness/path/reachability, and product status fields).
+`lane.list` returns `{"type":"lane.list","product":STRING,"lanes":[LANE_STATUS...]}`
+using the `lane.status` schema below.
 
 `lane.ready` and `lane.status` result fields:
 

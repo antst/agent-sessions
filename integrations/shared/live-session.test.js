@@ -14,6 +14,28 @@ test("default reconnect cadence is two seconds", () => {
   assert.equal(client.reconnectMs, 2000);
 });
 
+test("framing processes complete frames, rejects unknown ids, and accepts backpressure", () => {
+  const client = new LiveSessionClient({ env: {} });
+  let destroyed = 0, responses = 0;
+  const socket = { destroyed: false, write: () => false, destroy: () => { destroyed += 1; } };
+  const session = { ready: true, socket, buffer: "", pending: new Map() };
+  assert.equal(client._write(session, { jsonrpc: "2.0", id: "one", result: {} }), true);
+  client._response(session, { jsonrpc: "2.0", id: "unknown", result: {} });
+  assert.equal(destroyed, 1);
+  client._response = () => { responses += 1; };
+  const prefix = '{"jsonrpc":"2.0","id":"known","result":{"padding":"', suffix = '"}}';
+  const frame = (newline) => prefix + "x".repeat(1024 * 1024 - prefix.length - suffix.length - (newline ? 1 : 0)) + suffix + (newline ? "\n" : "");
+  client._data(session, frame(true));
+  assert.equal(responses, 1);
+  client._data(session, frame(false));
+  assert.equal(destroyed, 1);
+  client._closed(session, socket);
+  assert.equal(session.buffer, "");
+  session.socket = socket;
+  client._data(session, `${frame(false)}x`);
+  assert.equal(destroyed, 2);
+});
+
 test("one socket reports, calls, updates, and receives messages", async (t) => {
   const fixture = await server(t);
   const client = new LiveSessionClient({ env: env(fixture.path), reconnectMs: 5 });
@@ -38,7 +60,7 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   const laneCall = client.callTool("native", "lane-one", "lane.status", { product: "qwen", arguments: ["worker"] });
   await until(() => fixture.requests.some((frame) => frame.method === "lane.status"));
   const laneRequest = fixture.requests.find((frame) => frame.method === "lane.status");
-  assert.equal(laneRequest.params.cwd, "/work");
+  assert.deepEqual(laneRequest.params, { product: "qwen", arguments: ["worker"] });
   fixture.write({ jsonrpc: "2.0", id: laneRequest.id, result: { type: "lane.status" } });
   assert.deepEqual(await laneCall, { type: "lane.status" });
 
@@ -93,6 +115,8 @@ test("one session may report product-owned groups instead of process launch grou
   await until(() => fixture.reports.length === 1 && client.sessions.get("native")?.ready);
   assert.deepEqual(fixture.reports[0].groups, ["profile-group"]);
   assert.equal(client.report("other", "", { cwd: "/native" }, {}, [1]), false);
+  assert.equal(client.report("relative", "", { cwd: "work" }), false);
+  assert.equal(client.update("native", "", { cwd: "" }), false);
 });
 
 test("disconnect rejects calls and reconnect reports from scratch", async (t) => {

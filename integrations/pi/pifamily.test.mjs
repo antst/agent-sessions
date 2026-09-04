@@ -46,6 +46,8 @@ test("Pi and OMP report the current product session and its initial native title
     const live = new FakeLiveSession();
     const pi = new FakePi("first");
     createPiFamilyExtension(product, { liveSessionClient: live })(pi);
+    const operations = pi.tools.get("agent_sessions").parameters.properties.operation.enum;
+    assert.ok(operations.includes("lane.doctor") && operations.includes("lane.list"));
     const ctx = context(`${product}-session`);
     await pi.fire("session_start", {}, ctx);
     assert.deepEqual(live.reported, [{ id: `${product}-session`, name: "first", info: { cwd: "/work" } }]);
