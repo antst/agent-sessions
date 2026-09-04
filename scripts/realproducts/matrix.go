@@ -12,11 +12,15 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/antst/agent-sessions/internal/pathidentity"
 )
 
 const (
@@ -27,8 +31,8 @@ const (
 
 type matrixOptions struct {
 	repositoryRoot string
+	cwd            string
 	evidenceDir    string
-	temporaryRoot  string
 	agentSessions  string
 	tmux           string
 	python         string
@@ -43,6 +47,7 @@ type matrixProduct struct {
 	displayArguments      []string
 	nativeQuitCommand     string
 	nativeQuitDocumentURL string
+	nativeTrustPrompt     string
 }
 
 type matrixRoster struct {
@@ -101,7 +106,6 @@ type matrixRunner struct {
 	config     matrixOptions
 	output     io.Writer
 	runID      string
-	workspace  string
 	active     map[string]*matrixTUI
 	failures   int
 	cellCount  int
@@ -121,6 +125,8 @@ func standingMatrixRequested(args []string) bool {
 }
 
 func runStandingMatrix(ctx context.Context, args []string, output io.Writer) error {
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	config, err := parseMatrixOptions(args)
 	if err != nil {
 		return err
@@ -129,20 +135,13 @@ func runStandingMatrix(ctx context.Context, args []string, output io.Writer) err
 	if err != nil {
 		return err
 	}
-	workspace, err := os.MkdirTemp(config.temporaryRoot, "agent-sessions-matrix.")
-	if err != nil {
-		return fmt.Errorf("create matrix workspace: %w", err)
-	}
-	if err := os.Chmod(workspace, 0o700); err != nil { //nolint:gosec // Private directories require owner traversal.
-		return fmt.Errorf("secure matrix workspace: %w", err)
-	}
 	runner := &matrixRunner{
-		config: config, output: output, runID: runID, workspace: workspace,
+		config: config, output: output, runID: runID,
 		active: map[string]*matrixTUI{},
 	}
 	defer func() {
+		stopSignals()
 		runner.bestEffortCleanup()
-		_ = removeTestRoot(workspace)
 	}()
 
 	if _, err := fmt.Fprintf(output, "EVIDENCE %s\n", config.evidenceDir); err != nil {
@@ -152,6 +151,9 @@ func runStandingMatrix(ctx context.Context, args []string, output io.Writer) err
 		return err
 	}
 	for _, product := range matrixProductInventory() {
+		if ctx.Err() != nil {
+			break
+		}
 		resolved, reason := resolveMatrixProduct(product)
 		if reason != "" {
 			runner.record(product.id, "product", matrixSkip, reason, map[string]any{
@@ -162,12 +164,17 @@ func runStandingMatrix(ctx context.Context, args []string, output io.Writer) err
 		}
 		runner.runProduct(ctx, resolved)
 	}
+	stopSignals()
+	interrupted := ctx.Err()
 	cleanupEvidence := map[string]any{}
-	cleanupErr := runner.cleanupAll(ctx, cleanupEvidence)
+	cleanupErr := runner.cleanupAll(context.Background(), cleanupEvidence)
 	if cleanupErr != nil {
 		runner.record("matrix", "cleanup", matrixFail, cleanupErr.Error(), cleanupEvidence)
 	} else {
 		runner.record("matrix", "cleanup", matrixPass, "all test-owned tmux sessions and live matrix rows are gone", cleanupEvidence)
+	}
+	if interrupted != nil {
+		return fmt.Errorf("standing matrix interrupted: %w", interrupted)
 	}
 	if runner.failures != 0 {
 		return fmt.Errorf("standing matrix had %d failed cell(s) out of %d; evidence: %s", runner.failures, runner.cellCount, config.evidenceDir)
@@ -181,6 +188,7 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	set.SetOutput(io.Discard)
 	standing := set.Bool("standing-matrix", false, "run the standing live-product regression matrix")
 	repositoryRoot := set.String("repository-root", ".", "repository root")
+	approvedCWD := set.String("cwd", "", "required existing directory already approved in each installed product; prefer a dedicated empty directory")
 	evidenceDir := set.String("evidence-dir", "", "matrix evidence directory (created when absent)")
 	temporaryRoot := set.String("temporary-root", shortTemporaryRoot(), "existing absolute temporary parent")
 	timeout := set.Duration("matrix-timeout", 75*time.Second, "per-operation live-product timeout")
@@ -194,14 +202,37 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 	if err != nil {
 		return matrixOptions{}, fmt.Errorf("repository root: %w", err)
 	}
+	if strings.TrimSpace(*approvedCWD) == "" {
+		return matrixOptions{}, errors.New("--cwd is required for the standing matrix")
+	}
+	cwd, err := existingDirectory(*approvedCWD)
+	if err != nil {
+		return matrixOptions{}, fmt.Errorf("approved product cwd: %w", err)
+	}
 	temporary, err := existingDirectory(*temporaryRoot)
 	if err != nil {
 		return matrixOptions{}, fmt.Errorf("temporary root: %w", err)
 	}
+	if matrixPathsOverlap(cwd, temporary) {
+		return matrixOptions{}, errors.New("approved product cwd and temporary root must be disjoint")
+	}
+	futureEvidence := strings.TrimSpace(*evidenceDir)
+	if futureEvidence != "" {
+		futureEvidence, err = filepath.Abs(futureEvidence)
+		if err == nil {
+			futureEvidence, err = pathidentity.FuturePath(futureEvidence)
+		}
+		if err != nil {
+			return matrixOptions{}, fmt.Errorf("matrix evidence directory: %w", err)
+		}
+	}
+	if futureEvidence != "" && matrixPathsOverlap(cwd, futureEvidence) {
+		return matrixOptions{}, errors.New("approved product cwd and evidence directory must be disjoint")
+	}
 	if *timeout < 5*time.Second {
 		return matrixOptions{}, errors.New("--matrix-timeout must be at least 5s")
 	}
-	evidence, err := prepareMatrixEvidenceDir(*evidenceDir, temporary)
+	evidence, err := prepareMatrixEvidenceDir(futureEvidence, temporary)
 	if err != nil {
 		return matrixOptions{}, err
 	}
@@ -233,10 +264,22 @@ func parseMatrixOptions(args []string) (matrixOptions, error) {
 		return matrixOptions{}, errors.New("raw v1 helper is not one repository regular file")
 	}
 	return matrixOptions{
-		repositoryRoot: root, evidenceDir: evidence, temporaryRoot: temporary,
+		repositoryRoot: root, cwd: cwd, evidenceDir: evidence,
 		agentSessions: agentSessions, tmux: tmux, python: python,
 		presenceSocket: socket, timeout: *timeout,
 	}, nil
+}
+
+func matrixPathsOverlap(left, right string) bool {
+	return matrixPathWithin(left, right) || matrixPathWithin(right, left)
+}
+
+func matrixPathWithin(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
 func prepareMatrixEvidenceDir(raw, temporaryRoot string) (string, error) {
@@ -298,11 +341,13 @@ func matrixProductInventory() []matrixProduct {
 			id: "codex", nativeExecutable: "codex", peerExecutable: "codex-peer",
 			displayArguments: []string{"--no-alt-screen"}, nativeQuitCommand: "/quit",
 			nativeQuitDocumentURL: "https://github.com/openai/codex/blob/main/codex-rs/tui/src/slash_command.rs",
+			nativeTrustPrompt:     "Do you trust the contents of this directory?",
 		},
 		{
 			id: "claude", nativeExecutable: "claude", peerExecutable: "claude-peer",
 			displayArguments: []string{"--ax-screen-reader"}, nativeQuitCommand: "/exit",
 			nativeQuitDocumentURL: "https://code.claude.com/docs/en/commands",
+			nativeTrustPrompt:     "Permission Required: Accessing workspace:",
 		},
 		{
 			id: "grok", nativeExecutable: "grok", peerExecutable: "grok-peer",
@@ -349,6 +394,7 @@ func (runner *matrixRunner) writeMetadata() error {
 	return runner.writeJSON("metadata.json", map[string]any{
 		"run_id":          runner.runID,
 		"repository_root": runner.config.repositoryRoot,
+		"product_cwd":     runner.config.cwd,
 		"presence_socket": runner.config.presenceSocket,
 		"started_at":      time.Now().UTC().Format(time.RFC3339Nano),
 	})
@@ -451,6 +497,7 @@ func (runner *matrixRunner) runNoGroupCell(ctx context.Context, product matrixPr
 	tui, command, err := runner.startTUI(ctx, product, "", "", "no-group", false)
 	evidence["command"] = command
 	if err != nil {
+		err = runner.diagnoseAttachFailure(product, "no-group", tui, evidence, err)
 		runner.record(product.id, "02-private-anchor-only", matrixFail, err.Error(), evidence)
 		return
 	}
@@ -460,6 +507,8 @@ func (runner *matrixRunner) runNoGroupCell(ctx context.Context, product matrixPr
 		tui.sessionID, tui.name = row.NativeSessionID, row.Name
 		evidence["native_session_id"] = row.NativeSessionID
 		err = requireOnlyPrivateAnchor(after, row)
+	} else {
+		err = runner.diagnoseAttachFailure(product, "no-group", tui, evidence, err)
 	}
 	cleanupErr := runner.endTUI(ctx, tui)
 	err = errors.Join(err, cleanupErr)
@@ -665,11 +714,13 @@ func (runner *matrixRunner) launchNamed(
 	tui, command, err := runner.startTUI(ctx, product, name, group, label, false)
 	evidence["command"] = command
 	if err != nil {
+		err = runner.diagnoseAttachFailure(product, label, tui, evidence, err)
 		return tui, evidence, err
 	}
 	row, roster, rawAfter, err := runner.waitForNamedRow(ctx, product.id, name)
 	evidence["roster_after"] = json.RawMessage(rawAfter)
 	if err != nil {
+		err = runner.diagnoseAttachFailure(product, label, tui, evidence, err)
 		return tui, evidence, err
 	}
 	tui.name, tui.sessionID = row.Name, row.NativeSessionID
@@ -697,11 +748,13 @@ func (runner *matrixRunner) launchResume(
 	tui, command, err := runner.startTUI(ctx, product, name, group, label, true)
 	evidence["command"] = command
 	if err != nil {
+		err = runner.diagnoseAttachFailure(product, label, tui, evidence, err)
 		return tui, evidence, err
 	}
 	row, roster, rawAfter, err := runner.waitForNamedRow(ctx, product.id, name)
 	evidence["roster_after"] = json.RawMessage(rawAfter)
 	if err != nil {
+		err = runner.diagnoseAttachFailure(product, label, tui, evidence, err)
 		return tui, evidence, err
 	}
 	tui.name, tui.sessionID = row.Name, row.NativeSessionID
@@ -723,18 +776,19 @@ func (runner *matrixRunner) startTUI(
 	name, group, label string,
 	resume bool,
 ) (*matrixTUI, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	runner.tmuxSerial++
 	tmuxName := fmt.Sprintf("matrix-%s-%s-%02d", runner.runID, product.id, runner.tmuxSerial)
 	if runner.tmuxExists(tmuxName) {
 		return nil, nil, fmt.Errorf("test-owned tmux name already exists: %s", tmuxName)
 	}
-	workspace := filepath.Join(runner.workspace, product.id, label)
-	if err := os.MkdirAll(workspace, 0o700); err != nil {
-		return nil, nil, err
-	}
+	tui := &matrixTUI{tmuxName: tmuxName, pane: tmuxName + ":0.0", product: product.id, name: name}
+	runner.active[tmuxName] = tui
 	peerArgs := matrixPeerArguments(product, name, group, resume)
 	command := make([]string, 0, 8+len(peerArgs))
-	command = append(command, runner.config.tmux, "new-session", "-d", "-s", tmuxName, "-c", workspace, product.peerExecutable)
+	command = append(command, runner.config.tmux, "new-session", "-d", "-s", tmuxName, "-c", runner.config.cwd, product.peerExecutable)
 	command = append(command, peerArgs...)
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -742,10 +796,8 @@ func (runner *matrixRunner) startTUI(
 	var diagnostics bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &diagnostics, &diagnostics
 	if err := cmd.Run(); err != nil {
-		return nil, command, fmt.Errorf("start detached %s TUI: %w: %s", product.id, err, strings.TrimSpace(diagnostics.String()))
+		return tui, command, fmt.Errorf("start detached %s TUI: %w: %s", product.id, err, strings.TrimSpace(diagnostics.String()))
 	}
-	tui := &matrixTUI{tmuxName: tmuxName, pane: tmuxName + ":0.0", product: product.id, name: name}
-	runner.active[tmuxName] = tui
 	return tui, command, nil
 }
 
@@ -1116,6 +1168,29 @@ func (runner *matrixRunner) capturePane(ctx context.Context, tui *matrixTUI) (st
 		return "", err
 	}
 	return string(output), nil
+}
+
+func (runner *matrixRunner) diagnoseAttachFailure(product matrixProduct, label string, tui *matrixTUI, evidence map[string]any, attachErr error) error {
+	if tui == nil {
+		return attachErr
+	}
+	captureCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	capture, err := runner.capturePane(captureCtx, tui)
+	if err != nil {
+		return errors.Join(attachErr, fmt.Errorf("capture unattached %s TUI: %w", product.id, err))
+	}
+	relative := filepath.Join(product.id, "attach-"+label+".pane.txt")
+	path, err := runner.writeText(relative, capture)
+	if err != nil {
+		return errors.Join(attachErr, fmt.Errorf("preserve unattached %s pane: %w", product.id, err))
+	}
+	evidence["pane_evidence"] = path
+	detail := fmt.Errorf("%w; %s TUI did not attach from approved cwd %s; pane evidence: %s", attachErr, product.id, runner.config.cwd, path)
+	if product.nativeTrustPrompt != "" && strings.Contains(capture, product.nativeTrustPrompt) {
+		detail = fmt.Errorf("%w; trust %s once via %s's own prompt and rerun", detail, runner.config.cwd, product.id)
+	}
+	return detail
 }
 
 func matrixSpecDocumentsGroup(repositoryRoot string) (bool, error) {

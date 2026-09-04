@@ -28,11 +28,17 @@ sessions in a peer resume path:
 | Product | Resume behavior |
 | --- | --- |
 | Codex | `codex --remote … resume [SELECTOR]`; the remote client owns name/ID resolution, duplicate handling, and its bare native picker. |
-| Claude, Grok, Qwen | The optional selector passes to the product's native resume flag unchanged. |
+| Claude | The optional selector passes to Claude's native resume flag unchanged. |
+| Grok, Qwen | The optional selector passes to the product's native resume flag unchanged. Native name/title lookup is scoped to the current working directory or project, so resume must use the original cwd. |
 | OpenCode, Kilo, Pi, OMP | The optional selector passes to the translated native resume flag unchanged. The product alone decides whether it is a valid ID, path, name, or picker request. |
 
 Lane resume always resolves to one exact product session ID. Offline candidates are returned only
 after the product confirms that ID still exists.
+
+The standing real-product matrix requires one `--cwd` that already exists and has been approved
+through every installed product's own trust prompt. Prefer a dedicated empty directory: products
+may index native session history there and load project configuration or hooks under their native
+defaults. The matrix never writes trust configuration or drives a trust prompt.
 
 ## Invocation-owned choices
 
