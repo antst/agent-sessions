@@ -850,10 +850,10 @@ entries:
     invariant: Preserve optional products, transactional connectors, exact removal, reproducible archives, and owner-state preservation.
     new_owner: shared host/hub install and service implementation
     new_symbols:
-      - internal/releaseinstall/transaction.go:Transaction.Install
-      - internal/releaseinstall/transaction.go:Transaction.Remove
-      - internal/releaseinstall/connectors.go:ConnectorTransaction.Install
-      - internal/releaseinstall/connectors.go:ConnectorTransaction.Remove
+      - scripts/install-host
+      - scripts/remove-host
+      - scripts/install-hub
+      - scripts/remove-hub
       - internal/releasepkg/inventory.go:BuildArchives
       - internal/servicecontrol/service_linux.go:Linux.Restart
       - internal/servicecontrol/service_darwin.go:Darwin.Restart
@@ -866,10 +866,6 @@ entries:
       - Makefile:remove-hub
       - Makefile:build-release-platform
     replacement_tests:
-      - internal/releaseinstall/greenfield_test.go:TestActiveReleaseSurfacesContainNoLegacyProcessOrStateNames
-      - internal/releaseinstall/greenfield_test.go:TestOperationalSurfacesCannotInvokePreUnificationCleanup
-      - internal/releaseinstall/transaction_test.go
-      - internal/releaseinstall/connectors_test.go
       - internal/releasepkg/inventory_test.go
       - internal/servicecontrol/service_linux_test.go
       - internal/servicecontrol/service_darwin_test.go

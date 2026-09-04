@@ -4,7 +4,7 @@
   "type": "module",
   "main": "plugin/agent-sessions.mjs",
   "scripts": {
-    "prepack": "node prepack.cjs",
+    "prepack": "node ../prepack.cjs",
     "test": "node --test entrypoint.test.mjs"
   },
   "exports": {
@@ -17,7 +17,6 @@
   },
   "files": [
     "README.md",
-    "prepack.cjs",
     "plugin/agent-sessions.mjs",
     "pi/pifamily.mjs",
     "shared/live-session.cjs"
