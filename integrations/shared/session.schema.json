@@ -359,8 +359,8 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": [-32600, -32602, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012]},
-        "message": {"enum": ["invalid_frame", "invalid_hello", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded"]},
+        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012, -32013]},
+        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken"]},
         "data": {"$ref": "#/$defs/SpawnFailedData"}
       },
       "allOf": [
@@ -377,7 +377,7 @@
         {"if": {"properties": {"code": {"const": -32009}}}, "then": {"properties": {"message": {"const": "spawn_failed"}}}},
         {"if": {"properties": {"code": {"const": -32010}}}, "then": {"properties": {"message": {"const": "timeout"}}}},
         {"if": {"properties": {"code": {"const": -32011}}}, "then": {"properties": {"message": {"const": "not_committed"}}}},
-        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}},
+        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
         {
           "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
           "then": {"required": ["data"]},
