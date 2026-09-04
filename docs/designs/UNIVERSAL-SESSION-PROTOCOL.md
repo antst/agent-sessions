@@ -27,14 +27,18 @@ The closed parameter and result shapes are authoritative in
 minimal validator vocabulary. An implementation rejects a frame before invoking
 product code if the corresponding definition does not validate it.
 
+Authorization is visibility: a session may run, interrupt, close, or message a
+lane exactly when it can see that lane through a shared group in `session.list`.
+This trusted protocol has no ownership field or per-caller ACL.
+
 There are eleven methods.
 
 #### `session.hello`
 
 The session sends `session.hello` first. The request is one closed union. A peer
 supplies `session_id`, `name`, `groups`, and `info`. A worker instead supplies a
-one-use `launch_token`, its supported open fields, its ordered extra-argument
-descriptions, and optionally the product version. The branches are mutually
+one-use `launch_token`, its supported non-identity open fields, its ordered
+extra-argument descriptions, and optionally the product version. The branches are mutually
 exclusive: a request with both discriminants or neither is invalid. A worker
 sends hello only after its product and plugin are app-ready, so hello success is
 the sole readiness fact. The result is `{}`.
@@ -55,7 +59,8 @@ The result contains the matching visible sessions, or all visible sessions when
 the filter is absent. Each item reports immutable identity, whether its one
 connection is open, whether one `turn.run` is outstanding, whether it was
 explicitly closed, the lane native ID when applicable, and the lane's optional
-`last_turn`. This single method replaces peer listing, lane listing, lane status,
+`last_turn`. A remote item also carries its federated `host`. This single method
+replaces peer listing, lane listing, lane status,
 and lost-caller result recovery.
 
 #### `message.send`
@@ -86,20 +91,26 @@ stderr; there is no readiness object or readiness phase.
 
 #### `lane.spawn`
 
-A session sends `lane.spawn` either with a product plus open options for a new
-lane, or with `resume_session_id` alone for a durable offline lane. The daemon
-resolves and starts the worker, waits for hello, sends `session.open`, durably
-commits its native ID, and only then returns `{session_id,native_id}`. The one
-spawn/open transaction timeout covers all of those steps. Unsupported supplied
+A session sends `lane.spawn` either with a product plus open options and optional
+`extra_groups` for a new lane, or with `resume_session_id` alone for a durable
+offline lane. A new row's groups are the union of the caller's groups and
+`extra_groups`; a caller never sends the complete authoritative group set. The
+daemon resolves and starts the worker, waits for hello, sends `session.open`, durably
+commits its native ID, and only then returns `{session_id,native_id}`. The row
+stores the original closed open-options object as one JSON value. Resume replays
+that value verbatim with the stored native ID; this version permits no resume
+overrides. The one spawn/open transaction timeout covers all of those steps.
+Unsupported supplied
 open fields, an invalid native ID, exit, or timeout fail truthfully and do not
 publish a live session.
 
 #### `session.open`
 
 The daemon sends `session.open` only to a token-authenticated worker. It carries
-the daemon session ID, the stored native ID when resuming, and one closed `open`
-object containing only the options accepted by `lane.spawn`. The worker creates
-or resumes the native session and returns `{native_id}`. A successful result is
+the daemon session ID, always-present row-authoritative `name` and `groups`, the
+stored native ID when resuming, and one closed `open` object containing only the
+non-identity options accepted by `lane.spawn`. The worker creates or resumes the
+native session and returns `{native_id}`. A successful result is
 the commit point that turns the provisional worker connection into lane
 presence. A probe never receives this method.
 
@@ -153,6 +164,15 @@ this version has none.
   session methods.
 - A second `turn.run` while one is outstanding returns busy. There is one
   running boolean in a product kit and one pending RPC in the daemon.
+- `lane.spawn` with `resume_session_id` naming a connected row returns
+  `already_connected`; lanes never use supersession to manufacture a second
+  worker connection.
+- `lane.spawn` with `resume_session_id` naming an explicitly closed row returns
+  `closed`. The row remains visible only for identity and `last_turn` history.
+- `turn.run`, `turn.interrupt`, or `session.close` addressed to a durable row
+  without a connection returns `not_connected`. Resume is an explicit
+  `lane.spawn`; a caller kit may compose that automatically without changing the
+  wire.
 - `turn.interrupt` while no run is outstanding returns not-running. An accepted
   interrupt does not promise that the native product has already stopped.
 - Caller timeout or disappearance does not cancel the forwarded run. The daemon
@@ -169,6 +189,9 @@ this version has none.
 - A worker executable that is absent or exits before hello fails describe or
   spawn with its exit code and bounded trailing stderr. It never fabricates a
   readiness report.
+- A remote session may carry `host` in `session.list`. Whether a turn crosses a
+  host boundary is a daemon-routing question for Section 2, not a second wire
+  shape.
 
 ### 1.3 Method convergence
 
@@ -197,3 +220,30 @@ this version has none.
 | `lane.session.archive` | `session.close` | Merged with the caller-side lifetime operation. |
 
 The closed method authority therefore shrinks from twenty-one methods to eleven.
+
+### 1.4 Error authority
+
+Every correlated failure uses exactly one numeric JSON-RPC code and symbolic
+message from this table. Kits match the code, never free-form text. Only
+`spawn_failed` has `data`: the closed object
+`{exit_code?:integer,stderr_tail:[string]}`. `exit_code` is absent when process
+creation itself failed, because no child existed from which to obtain one. If an
+invalid frame has no valid request ID, the daemon cannot correlate a response
+and closes the connection without writing one.
+
+| Code | Message | Raised by |
+| ---: | --- | --- |
+| `-32600` | `invalid_frame` | Any method whose envelope or closed params are invalid, but only when a valid request ID is recoverable. |
+| `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
+| `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist. |
+| `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run. |
+| `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
+| `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
+| `-32006` | `closed` | Resume or control of an explicitly closed row. |
+| `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when no executable resolves. |
+| `-32008` | `unsupported_open_field` | New `lane.spawn` when `open` contains a field absent from the worker hello declaration. |
+| `-32009` | `spawn_failed` | `lane.describe` or `lane.spawn` when exec, hello, open, or native creation fails before commit. |
+| `-32010` | `timeout` | `lane.describe` or `lane.spawn` when its one spawn/open transaction bound expires. |
+| `-32011` | `not_committed` | Any worker-originated tool request received after hello but before native-ID commit. |
+| `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |

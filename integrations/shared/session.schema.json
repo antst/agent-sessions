@@ -17,7 +17,7 @@
         "supported_open_fields": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"enum": ["name", "groups", "cwd", "permission_mode", "model", "reasoning_effort", "arguments"]}
+          "items": {"enum": ["cwd", "permission_mode", "model", "reasoning_effort", "arguments"]}
         },
         "extra_arguments": {"type": "array", "items": {"$ref": "#/$defs/ExtraArgument"}},
         "version": {"type": "string", "minLength": 1}
@@ -74,6 +74,7 @@
         "closed": {"type": "boolean"},
         "native_id": {"type": "string", "minLength": 1},
         "last_turn": {"$ref": "#/$defs/LastTurn"},
+        "host": {"type": "string", "minLength": 1},
         "info": {"type": "object", "additionalProperties": true}
       },
       "allOf": [
@@ -217,7 +218,7 @@
         "supported_open_fields": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"enum": ["name", "groups", "cwd", "permission_mode", "model", "reasoning_effort", "arguments"]}
+          "items": {"enum": ["cwd", "permission_mode", "model", "reasoning_effort", "arguments"]}
         },
         "extra_arguments": {"type": "array", "items": {"$ref": "#/$defs/ExtraArgument"}},
         "version": {"type": "string", "minLength": 1}
@@ -237,8 +238,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "cwd": {"type": "string", "minLength": 1},
         "permission_mode": {"type": "string", "minLength": 1},
         "model": {"type": "string", "minLength": 1},
@@ -252,6 +251,7 @@
       "properties": {
         "product": {"type": "string", "minLength": 1},
         "resume_session_id": {"type": "string", "minLength": 1},
+        "extra_groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "open": {"$ref": "#/$defs/SessionOpenOptions"}
       },
       "allOf": [
@@ -260,6 +260,7 @@
           "then": {
             "allOf": [
               {"not": {"required": ["product"]}},
+              {"not": {"required": ["extra_groups"]}},
               {"not": {"required": ["open"]}}
             ]
           },
@@ -279,9 +280,11 @@
     "SessionOpenRequest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "open"],
+      "required": ["session_id", "name", "groups", "open"],
       "properties": {
         "session_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "resume_native_id": {"type": "string", "minLength": 1},
         "open": {"$ref": "#/$defs/SessionOpenOptions"}
       }
@@ -324,6 +327,56 @@
       "required": ["session_id"],
       "properties": {"session_id": {"type": "string", "minLength": 1}}
     },
-    "SessionCloseResult": {"type": "object", "additionalProperties": false}
+    "SessionCloseResult": {"type": "object", "additionalProperties": false},
+    "RPCErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"type": "integer"},
+        "error": {"$ref": "#/$defs/RPCError"}
+      }
+    },
+    "RPCError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": [-32600, -32602, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012]},
+        "message": {"enum": ["invalid_frame", "invalid_hello", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded"]},
+        "data": {"$ref": "#/$defs/SpawnFailedData"}
+      },
+      "allOf": [
+        {"if": {"properties": {"code": {"const": -32600}}}, "then": {"properties": {"message": {"const": "invalid_frame"}}}},
+        {"if": {"properties": {"code": {"const": -32602}}}, "then": {"properties": {"message": {"const": "invalid_hello"}}}},
+        {"if": {"properties": {"code": {"const": -32001}}}, "then": {"properties": {"message": {"const": "unknown_session"}}}},
+        {"if": {"properties": {"code": {"const": -32002}}}, "then": {"properties": {"message": {"const": "not_connected"}}}},
+        {"if": {"properties": {"code": {"const": -32003}}}, "then": {"properties": {"message": {"const": "busy"}}}},
+        {"if": {"properties": {"code": {"const": -32004}}}, "then": {"properties": {"message": {"const": "not_running"}}}},
+        {"if": {"properties": {"code": {"const": -32005}}}, "then": {"properties": {"message": {"const": "already_connected"}}}},
+        {"if": {"properties": {"code": {"const": -32006}}}, "then": {"properties": {"message": {"const": "closed"}}}},
+        {"if": {"properties": {"code": {"const": -32007}}}, "then": {"properties": {"message": {"const": "unknown_product"}}}},
+        {"if": {"properties": {"code": {"const": -32008}}}, "then": {"properties": {"message": {"const": "unsupported_open_field"}}}},
+        {"if": {"properties": {"code": {"const": -32009}}}, "then": {"properties": {"message": {"const": "spawn_failed"}}}},
+        {"if": {"properties": {"code": {"const": -32010}}}, "then": {"properties": {"message": {"const": "timeout"}}}},
+        {"if": {"properties": {"code": {"const": -32011}}}, "then": {"properties": {"message": {"const": "not_committed"}}}},
+        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}},
+        {
+          "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
+          "then": {"required": ["data"]},
+          "else": {"not": {"required": ["data"]}}
+        }
+      ]
+    },
+    "SpawnFailedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stderr_tail"],
+      "properties": {
+        "exit_code": {"type": "integer"},
+        "stderr_tail": {"type": "array", "items": {"type": "string"}}
+      }
+    }
   }
 }
