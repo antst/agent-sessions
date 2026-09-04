@@ -78,6 +78,38 @@ echo/transform input: `conformance:eof-on-wait`. It is worker-owned behavior sen
 normal typed turn input. It adds no environment key, argv mode, daemon hook, product branch, or
 alternate parameter channel.
 
+### E01: ordinary PATH-only example lifecycle
+
+The runner creates no catalog entry or durable lane row, exposes one unregistered
+`asl-lane-example` executable through the test-owned `PATH`, and probes `lane doctor` for product
+`example`. Doctor must report the exact PATH-resolved worker as ready while ordinary lane list and
+the durable store remain empty. No product descriptor, daemon registration, launch environment
+switch, or example-specific harness branch is permitted.
+
+The cell then opens a fresh example lane and completes two ordinary echo turns through the shared
+worker helper. Both results contain their distinct input tokens and retain the same public UUID,
+product-native ID, worker generation, and live binding. With the row idle after turn 2, one
+interrupt attempt returns the exact no-running-turn error without forwarding a worker frame or
+changing that binding. The harness then archives the lane, observes the native archive
+acknowledgement and worker exit, and requires zero catalog, durable, live-roster, process, or
+launch-token residue after bounded cleanup.
+
+E01 evidence is `workers/E01-example.json`: the rowless doctor/list/store projections; PATH
+resolution; ordered open, two-turn, interrupt, terminal, archive, and exit frames; stable identity
+and generation fields; and the final residue audit. It contains no token bytes, environment dump,
+or ambient credentials.
+
+### E01 deterministic tests
+
+- A table fixture with an empty catalog and store resolves only the test PATH executable and uses
+  the same generic worker helper as every W row.
+- Fresh open followed by two echo turns keeps one UUID, native ID, generation, and binding while
+  preserving the two distinct echo tokens.
+- The idle row rejects interrupt once with no-running-turn and zero native interrupt frames;
+  archive is acknowledged before worker exit.
+- Any catalog insertion, durable pre-seed, identity or binding change, duplicate terminal/archive,
+  product branch, or surviving catalog/store/roster/process/token residue fails the cell.
+
 ### R01: mid-wait EOF
 
 The runner opens the example lane and starts `conformance:eof-on-wait`. The worker acknowledges
@@ -162,14 +194,14 @@ The draft fits five A-owned or existing paths:
 
 | Path | Purpose | Ceiling |
 | --- | --- | ---: |
-| `scripts/realproducts/matrix.go` | One W helper, three R cells, evidence/cleanup | `+220/-20` |
-| `scripts/realproducts/matrix_test.go` | W capability/order/race tables and R lifecycle tables | `+190/-10` |
+| `scripts/realproducts/matrix.go` | One W helper, E01, three live R cells, evidence/cleanup | `+280/-20` |
+| `scripts/realproducts/matrix_test.go` | W, E01, R lifecycle, and restart-router tables | `+240/-10` |
 | planned `cmd/agent-sessions/example_lane.go` | Documented EOF conformance input | `+25/-0` |
 | planned `cmd/agent-sessions/example_lane_test.go` | EOF behavior | `+35/-0` |
-| the A acceptance-plan page | Cell inventory and evidence mapping | `+20/-0` |
+| the A acceptance-plan page | W01-W09, E01, and R01-R06 evidence mapping | `+25/-0` |
 
-Harness/worker production is at most `+245/-20`; tests at most `+225/-10`; documentation at most
-`+20`; aggregate net at most `+460`. The example paths are already required by A and the page entry
+Harness/worker production is at most `+305/-20`; tests at most `+275/-10`; documentation at most
+`+25`; aggregate net at most `+575`. The example paths are already required by A and the page entry
 is folded into A's one-page launch story, so the only new matrix-specific path pair is
 `scripts/realproducts/matrix{,_test}.go`. Any daemon test hook, lane-specific environment value,
 product capability table, PID scraping, sleep/retry, or sixth path is scope drift and requires a
