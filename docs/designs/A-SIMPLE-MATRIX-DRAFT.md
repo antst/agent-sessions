@@ -14,6 +14,10 @@ connection-first A-SIMPLE story.
   only when that result advertises semantic steer support.
 - Every selector after open is the returned lane UUID. Names are evidence labels, not control
   identities. Every response is checked against the same UUID and the current turn ID.
+- A daemon restart between completed turns may remove the live binding while retaining the durable
+  row. List then reports that row as offline/resumable; an authorized followup, steer, or archive
+  implicitly runs the ordinary launch transaction with `resume=true` and the stored native ID.
+  The caller never issues a separate resume command, and no reconnect path exists.
 - There are no sleeps, retries, compensating prompts, native pane markers, or product-specific
   control flows. A bounded status observation establishes `running`; all other progress is driven
   by a response or a connection event.
@@ -108,6 +112,34 @@ durable historical parent remains A. B then archives and the residue check is em
   archive failure leaves a visible failed row.
 - R03 pins visibility without ownership mutation, detach without archive, explicit group-authorized
   handover, unchanged durable parent/native ID, and a second turn on the original binding.
+
+## Restart router rows
+
+These are deterministic router cells, not extra live-product branches. They reuse the same launch
+fixture and durable row used by the A router tests, so they add no harness path or capability.
+
+### R04: restart followed by implicit followup
+
+Generation N completes a turn and the daemon restarts, leaving the durable lane row with its native
+ID but no live binding. An authorized `lane.turn.start` followup addressed to the lane UUID starts
+generation N+1 through the ordinary launch transaction with `resume=true` and that stored native
+ID, then forwards the original request. The turn completes once on the replacement binding without
+an explicit resume call. The same dispatch table pins steer and archive as launch-eligible methods;
+unauthorized callers remain side-effect free.
+
+### R05: restart followed by wait
+
+From the same offline/resumable row, `lane.turn.wait` returns the truthful `no live generation`
+error exactly once. It starts no worker, changes no generation, and forwards no frame because the
+in-flight turn died with the daemon. The durable row remains listable as offline/resumable.
+
+### Restart-row deterministic tests
+
+- R04 pins generation N+1, `resume=true`, unchanged native ID, one launch, and one forwarded
+  followup; its launch-eligibility table also covers steer and archive.
+- R05 pins one exact caller error, zero launches, zero worker frames, and an unchanged durable row.
+- The existing parent-departure table is rerun unchanged, proving restart-triggered launch does not
+  alter nonpersistent archive or persistent detach policy.
 
 Launch-token replay is deliberately not a live reference-worker cell. The worker unsets its token
 before starting the native child and never reuses it. The daemon's deterministic token-authority
