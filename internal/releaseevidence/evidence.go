@@ -31,7 +31,6 @@ type GenerateOptions struct {
 	PackageDir    string
 	GateDir       string
 	LinuxGatePath string
-	MacOSGatePath string
 	OutputPath    string
 	Version       string
 	Commit        string
@@ -71,10 +70,6 @@ func Generate(options GenerateOptions) error {
 	if err != nil {
 		return fmt.Errorf("decode Linux gate evidence: %w", err)
 	}
-	macos, err := decodeGateEvidence(options.MacOSGatePath)
-	if err != nil {
-		return fmt.Errorf("decode macOS gate evidence: %w", err)
-	}
 	archives := make(map[string]any, len(platforms))
 	for _, platform := range platforms {
 		filename := "agent-sessions-" + options.Version + "-" + platform + ".tar.gz"
@@ -112,13 +107,13 @@ func Generate(options GenerateOptions) error {
 			"run_attempt": options.RunAttempt, "run_url": options.RunURL,
 		},
 		"toolchains": map[string]any{
-			"linux": linux["toolchain"], "macos": macos["toolchain"],
+			"linux": linux["toolchain"],
 		},
 		"native_clients": map[string]any{
-			"linux": linux["native_clients"], "macos": macos["native_clients"],
+			"linux": linux["native_clients"],
 		},
 		"gates": map[string]any{
-			"linux": linux["gates"], "macos": macos["gates"],
+			"linux": linux["gates"],
 		},
 		"archives":          archives,
 		"npm_packages":      npmArtifacts,
@@ -166,7 +161,8 @@ func Canonicalize(schemaPath, inputPath, outputPath string) error {
 }
 
 // CrossCheck verifies the byte-level and cross-field invariants that JSON
-// Schema cannot express, including archive hashes and declared inventory.
+// Schema cannot express, including archive hashes and declared inventory. The
+// unchanged release-tag-verify binds the signed tag to this same commit/tree.
 //
 //nolint:gocyclo // Explicit validation and lifecycle gates remain together for fail-closed auditability.
 func CrossCheck(schemaPath, documentPath, archiveDir, packageDir, gateDir, commit, tree string, runID int64) error {

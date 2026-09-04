@@ -356,6 +356,18 @@ common_env=(
   "TEST_REAL_HOST_BINARY=$host_binary"
 )
 
+warning='macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.'
+for install_case in "0.4.0 linux-x64" "0.3.0 darwin-x64"; do
+  read -r test_version test_platform <<<"$install_case"
+  set +e
+  env "${common_env[@]}" "$root/scripts/install-host" "$test_root/missing" "$host_binary" "$prefix" "$test_version" "$test_platform" \
+    >/dev/null 2>"$test_root/silent-warning.err"
+  silent_status=$?; set -e
+  if [[ $silent_status -ne 2 ]] || grep -Fq "$warning" "$test_root/silent-warning.err"; then
+    printf 'host installer emitted the 0.4.0 macOS warning for %s\n' "$install_case" >&2; exit 1
+  fi
+done
+
 mkdir -p "$test_root/dsh-state" "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-native"
 : >"$test_root/dsh-state/dsh-native"
 
@@ -452,11 +464,12 @@ printf 'stale same-version cache\n' >>"$test_root/claude-cache/skills/codex-lane
 
 set +e
 env "${common_env[@]}" TEST_QWEN_FAIL_ONCE=1 "$root/scripts/install-host" \
-  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  "$root" "$candidate" "$prefix" 0.4.0 darwin-x64 \
   >"$test_root/failed.out" 2>"$test_root/failed.err"
 failed_status=$?
 set -e
-if [[ $failed_status -eq 0 ]] || ! grep -Fq 'restored the prior host release and integrations' "$test_root/failed.err"; then
+if [[ $failed_status -eq 0 ]] || ! grep -Fq "$warning" "$test_root/failed.err" ||
+   ! grep -Fq 'restored the prior host release and integrations' "$test_root/failed.err"; then
   printf 'failed_status=%s\n' "$failed_status" >&2
   cat "$test_root/failed.out" >&2
   cat "$test_root/failed.err" >&2
@@ -467,6 +480,7 @@ after_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
 selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/host/current" && pwd)
 if [[ "$after_hash" != "$prior_hash" ]] ||
    [[ "$selected_release" != "$release" ]] ||
+   [[ -e "$prefix/libexec/agent-sessions/host/releases/0.4.0" ]] ||
    [[ "$(cat "$test_root/qwen-source")" != "$release/qwen" ]] ||
    ! diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null ||
    ! cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs" >/dev/null ||

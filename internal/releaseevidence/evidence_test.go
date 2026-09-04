@@ -88,6 +88,9 @@ func TestCrossCheckAcceptsExactArchivesAndRejectsBoundaryDrift(t *testing.T) {
 	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, "3333333333333333333333333333333333333333", testTree, testRunID); err == nil {
 		t.Fatal("changed release commit escaped cross-check")
 	}
+	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, "3333333333333333333333333333333333333333", testRunID); err == nil {
+		t.Fatal("changed release tree escaped cross-check")
+	}
 	if err := CrossCheck(schema, canonical, archiveDir, packageDir, gateDir, testCommit, testTree, testRunID+1); err == nil {
 		t.Fatal("changed workflow run escaped cross-check")
 	}
@@ -173,19 +176,16 @@ func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 	toolchains := document["toolchains"].(map[string]any)
 	clients := document["native_clients"].(map[string]any)
 	gates := document["gates"].(map[string]any)
-	linuxPath, macosPath := filepath.Join(root, "linux.json"), filepath.Join(root, "macos.json")
+	linuxPath := filepath.Join(root, "linux.json")
 	writeJSONTestFile(t, linuxPath, map[string]any{
 		"toolchain": toolchains["linux"], "native_clients": clients["linux"], "gates": gates["linux"],
-	})
-	writeJSONTestFile(t, macosPath, map[string]any{
-		"toolchain": toolchains["macos"], "native_clients": clients["macos"], "gates": gates["macos"],
 	})
 	output := filepath.Join(root, "agent-sessions-v0.4.0-release-evidence.json")
 	err := Generate(GenerateOptions{
 		SchemaPath:    filepath.Join("..", "..", "specs", "002-unified-user-daemon", "contracts", "release-evidence.schema.json"),
 		InventoryPath: inventoryPath, PlatformsPath: platformsPath, ArchiveDir: archiveDir,
 		PackageDir: filepath.Join(root, "packages"), GateDir: gateDir,
-		LinuxGatePath: linuxPath, MacOSGatePath: macosPath, OutputPath: output, Version: "0.4.0",
+		LinuxGatePath: linuxPath, OutputPath: output, Version: "0.4.0",
 		Commit: testCommit, Tree: testTree, RunID: testRunID, RunAttempt: 1,
 		RunURL: "https://github.com/antst/agent-sessions/actions/runs/123456",
 	})
@@ -292,27 +292,23 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 			"sha256": digest, "source_commit": testCommit, "inventory_verified": true,
 		}
 	}
-	gate := func(osName, name string, index int) map[string]any {
-		artifact := osName + "-" + name + ".txt"
-		body := []byte(osName + " " + name + " passed\n")
+	gate := func(name string, index int) map[string]any {
+		artifact := "linux-" + name + ".txt"
+		body := []byte("linux " + name + " passed\n")
 		if err := os.WriteFile(filepath.Join(gateDir, artifact), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		digest := sha256.Sum256(body)
 		return map[string]any{
 			"status":            "passed",
-			"job_url":           "https://github.com/antst/agent-sessions/actions/runs/123456/job/" + map[string]string{"linux": "1", "macos": "2"}[osName] + string(rune('0'+index)),
+			"job_url":           "https://github.com/antst/agent-sessions/actions/runs/123456/job/1" + string(rune('0'+index)),
 			"evidence_artifact": artifact,
 			"evidence_sha256":   hex.EncodeToString(digest[:]),
 		}
 	}
-	gates := map[string]any{}
-	for _, osName := range []string{"linux", "macos"} {
-		set := map[string]any{}
-		for index, name := range []string{"normal", "race", "vet", "lint", "focused_contracts", "quickstart", "permissions", "federation", "prebuilt_install", "owner_nonmutation"} {
-			set[name] = gate(osName, name, index)
-		}
-		gates[osName] = set
+	gates := map[string]any{"linux": map[string]any{}}
+	for index, name := range []string{"normal", "race", "vet", "lint", "focused_contracts", "quickstart", "permissions", "federation", "prebuilt_install", "owner_nonmutation"} {
+		gates["linux"].(map[string]any)[name] = gate(name, index)
 	}
 	toolchain := map[string]any{"go": "go1.25.0", "golangci_lint": "2.12.2"}
 	clients := map[string]any{"qwen": "0.22.0", "codex": "0.148.0", "claude": "2.1.237", "grok": "1.0.0"}
@@ -328,8 +324,8 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 			"path": ".github/workflows/ci.yml", "run_id": testRunID, "run_attempt": 1,
 			"run_url": "https://github.com/antst/agent-sessions/actions/runs/123456",
 		},
-		"toolchains":     map[string]any{"linux": toolchain, "macos": toolchain},
-		"native_clients": map[string]any{"linux": clients, "macos": clients},
+		"toolchains":     map[string]any{"linux": toolchain},
+		"native_clients": map[string]any{"linux": clients},
 		"gates":          gates, "archives": archives, "npm_packages": npmArtifacts,
 		"package_inventory": map[string]any{
 			"executables": executables, "plugin_payloads": plugins, "npm_packages": npmInventory,

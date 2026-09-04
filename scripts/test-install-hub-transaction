@@ -94,6 +94,18 @@ common_env=(
   "TEST_SHA256=$fake_bin/test-sha256"
 )
 
+warning='macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.'
+for install_case in "0.4.0 linux-x64" "0.3.0 darwin-x64"; do
+  read -r test_version test_platform <<<"$install_case"
+  set +e
+  env "${common_env[@]}" "$root/scripts/install-hub" "$test_root/missing" "$hub_binary" "$prefix" "$test_version" "$test_platform" \
+    >/dev/null 2>"$test_root/silent-warning.err"
+  silent_status=$?; set -e
+  if [[ $silent_status -ne 2 ]] || grep -Fq "$warning" "$test_root/silent-warning.err"; then
+    printf 'hub installer emitted the 0.4.0 macOS warning for %s\n' "$install_case" >&2; exit 1
+  fi
+done
+
 env "${common_env[@]}" "$root/scripts/install-hub" \
   "$root" "$hub_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
 release="$prefix/libexec/agent-sessions/hub/releases/0.3.0"
@@ -105,11 +117,12 @@ env "${common_env[@]}" systemctl --user stop agent-sessions-hub.service
 
 set +e
 env "${common_env[@]}" TEST_HUB_FAIL_ONCE=1 "$root/scripts/install-hub" \
-  "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
+  "$root" "$candidate" "$prefix" 0.4.0 darwin-x64 \
   >"$test_root/failed.out" 2>"$test_root/failed.err"
 failed_status=$?
 set -e
 if [[ $failed_status -eq 0 ]] ||
+   ! grep -Fq "$warning" "$test_root/failed.err" ||
    ! grep -Fq 'restored the prior hub release' "$test_root/failed.err"; then
   cat "$test_root/failed.out" >&2
   cat "$test_root/failed.err" >&2
@@ -121,6 +134,7 @@ after_hash=$($sha256 "$release/bin/agent-sessions-hub" | awk '{print $1}')
 selected_release=$(cd -P -- "$prefix/libexec/agent-sessions/hub/current" && pwd)
 if [[ "$after_hash" != "$prior_hash" ]] ||
    [[ "$selected_release" != "$release" ]] ||
+   [[ -e "$prefix/libexec/agent-sessions/hub/releases/0.4.0" ]] ||
    [[ -e "$test_root/hub-enabled" ]] ||
    [[ -e "$test_root/hub-active" ]] ||
    [[ -e "$test_root/hub-running-identity" ]] ||

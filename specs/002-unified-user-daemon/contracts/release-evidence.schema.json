@@ -87,14 +87,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "linux",
-        "macos"
+        "linux"
       ],
       "properties": {
         "linux": {
-          "$ref": "#/$defs/toolchain"
-        },
-        "macos": {
           "$ref": "#/$defs/toolchain"
         }
       }
@@ -103,14 +99,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "linux",
-        "macos"
+        "linux"
       ],
       "properties": {
         "linux": {
-          "$ref": "#/$defs/nativeClients"
-        },
-        "macos": {
           "$ref": "#/$defs/nativeClients"
         }
       }
@@ -119,14 +111,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "linux",
-        "macos"
+        "linux"
       ],
       "properties": {
         "linux": {
-          "$ref": "#/$defs/gateSet"
-        },
-        "macos": {
           "$ref": "#/$defs/gateSet"
         }
       }

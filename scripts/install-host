@@ -16,6 +16,9 @@ host_binary=$2
 prefix=$3
 version=$4
 platform=$5
+if [[ "$version" == 0.4.0 && "$platform" == darwin-* ]]; then
+  printf 'macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.\n' >&2
+fi
 codex=${CODEX:-codex}
 claude=${CLAUDE:-claude}
 grok=${GROK:-grok}

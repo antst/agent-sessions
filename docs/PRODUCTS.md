@@ -19,6 +19,8 @@ and performs resume, prompting, interruption, and archive behavior through its o
 The installer detects available products independently. A missing product does not prevent the
 other integrations from being installed.
 
+macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.
+
 ## Resume selectors
 
 Every peer wrapper accepts one uniform `--resume [NATIVE_SELECTOR]` option. Agent Sessions only

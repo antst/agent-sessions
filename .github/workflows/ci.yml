@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_candidate:
-        description: Run the exact-commit two-OS release evidence gate
+        description: Run the exact-commit Linux release evidence gate
         required: true
         default: false
         type: boolean
@@ -235,7 +235,7 @@ jobs:
 
   candidate-evidence:
     if: github.event_name == 'workflow_dispatch' && inputs.release_candidate && github.ref == 'refs/heads/main'
-    needs: [inventory, release-linux, release-macos, build]
+    needs: [inventory, release-linux, build]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -263,9 +263,8 @@ jobs:
           merge-multiple: true
       - uses: actions/download-artifact@v8.0.1
         with:
-          pattern: release-gate-*-${{ github.sha }}
+          name: release-gate-linux-${{ github.sha }}
           path: dist/gates
-          merge-multiple: true
       - name: Pack immutable npm package artifacts
         env:
           PACKAGE_OUTPUT_DIR: dist/packages
@@ -281,7 +280,7 @@ jobs:
             --schema specs/002-unified-user-daemon/contracts/release-evidence.schema.json \
             --inventory dist/package-inventory.json --platforms dist/platforms.txt \
             --archive-dir dist/release --package-dir dist/packages --gate-dir dist/gates \
-            --linux-gate dist/gates/linux.json --macos-gate dist/gates/macos.json \
+            --linux-gate dist/gates/linux.json \
             --output "dist/evidence/agent-sessions-v${{ needs.inventory.outputs.version }}-release-evidence.json" \
             --version "${{ needs.inventory.outputs.version }}" --commit "$GITHUB_SHA" --tree "$tree_sha" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
@@ -409,4 +408,4 @@ jobs:
           gh release create "$RELEASE_TAG" dist/release/* \
             --verify-tag \
             --title "$RELEASE_TAG" \
-            --notes $'Precompiled Agent Sessions binaries for Linux and macOS on x86-64 and arm64.\n\nVerify the selected archive against SHA256SUMS before installing.'
+            --notes $'Precompiled Agent Sessions binaries for Linux and macOS on x86-64 and arm64.\n\nmacOS is not validated in 0.4.0; compatibility is restored in 0.4.1.\n\nVerify the selected archive against SHA256SUMS before installing.'

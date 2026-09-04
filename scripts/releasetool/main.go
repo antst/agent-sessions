@@ -41,7 +41,7 @@ func runEvidence(args []string) error {
 	}
 	switch args[0] {
 	case "generate":
-		values, err := exactNamedArguments(args[1:], "schema", "inventory", "platforms", "archive-dir", "package-dir", "gate-dir", "linux-gate", "macos-gate", "output", "version", "commit", "tree", "run-id", "run-attempt", "run-url")
+		values, err := exactNamedArguments(args[1:], "schema", "inventory", "platforms", "archive-dir", "package-dir", "gate-dir", "linux-gate", "output", "version", "commit", "tree", "run-id", "run-attempt", "run-url")
 		if err != nil {
 			return err
 		}
@@ -58,8 +58,8 @@ func runEvidence(args []string) error {
 			PlatformsPath: values["platforms"], ArchiveDir: values["archive-dir"],
 			PackageDir: values["package-dir"],
 			GateDir:    values["gate-dir"], LinuxGatePath: values["linux-gate"],
-			MacOSGatePath: values["macos-gate"], OutputPath: values["output"],
-			Version: values["version"], Commit: values["commit"], Tree: values["tree"],
+			OutputPath: values["output"],
+			Version:    values["version"], Commit: values["commit"], Tree: values["tree"],
 			RunID: runID, RunAttempt: runAttempt, RunURL: values["run-url"],
 		})
 	case "canonicalize":
