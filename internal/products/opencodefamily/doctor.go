@@ -87,9 +87,9 @@ func (probe *DoctorProbe) Probe(ctx context.Context, request productruntime.Prob
 		report.Detail = productruntime.NewRedactedString("native version probe failed")
 		return report, nil
 	}
-	if report.NativeVersion != probe.config.TestedVersion {
+	if !productruntime.VersionAtLeast(report.NativeVersion, probe.config.TestedVersion) {
 		report.State = productruntime.ProbeIncompatible
-		report.Detail = productruntime.NewRedactedString(fmt.Sprintf("native version %s is not tested version %s", report.NativeVersion, probe.config.TestedVersion))
+		report.Detail = productruntime.NewRedactedString(fmt.Sprintf("native version %s is below minimum supported version %s", report.NativeVersion, probe.config.TestedVersion))
 		return report, nil
 	}
 	features["native-version"] = true

@@ -5,7 +5,7 @@
 - [Groups](GROUPS.md) — visibility, private anchors, lane namespaces, and routing.
 - [Installation](INSTALL.md) — host, product integration, hub, update, and removal.
 - [Adapter architecture](ADAPTER-PROTOCOL.md) — how shipped adapters use the native protocol.
-- [Native peer protocol](specs/NATIVE-PEER-PROTOCOL.md) — the publishable JSON-RPC v1 wire contract.
+- [Native peer protocol](PROTOCOL.md) — the publishable JSON-RPC v1 wire contract.
 - [Federation](FEDERATION.md) and [wire protocol](federation/PROTOCOL.md) — multi-host operation.
 - [Troubleshooting](TROUBLESHOOTING.md) — health checks and product-owned failure diagnosis.
 - [Acceptance matrix](ACCEPTANCE-MATRIX.md) — credited real-product behavior and pending verification.

@@ -17,7 +17,7 @@ import (
 
 const maxDoctorOutput = 64 << 10
 
-var semanticVersion = regexp.MustCompile(`(?:^|[^0-9])v?([0-9]+\.[0-9]+\.[0-9]+)(?:$|[^0-9])`)
+var semanticVersion = regexp.MustCompile(`(?:^|[[:space:]])v?([^[:space:]]+\.[^[:space:]]+\.[^[:space:]]+)(?:$|[[:space:]])`)
 
 type DoctorRunner interface {
 	LookPath(string) (string, error)
@@ -91,12 +91,12 @@ func (probe *DoctorProbe) Probe(ctx context.Context, request productruntime.Prob
 	}
 	version := extractVersion(output)
 	report.NativeVersion = version
-	if version == "" || version != probe.config.Quirks.TestedVersion {
+	if !productruntime.VersionAtLeast(version, probe.config.Quirks.TestedVersion) {
 		report.State = productruntime.ProbeIncompatible
-		report.Detail = productruntime.NewRedactedString(fmt.Sprintf("native version %s does not match tested version %s", version, probe.config.Quirks.TestedVersion))
+		report.Detail = productruntime.NewRedactedString(fmt.Sprintf("native version %s is below minimum supported version %s", version, probe.config.Quirks.TestedVersion))
 		return report, nil
 	}
-	features["tested-version"] = true
+	features["minimum-version"] = true
 	if request.Depth == productruntime.ProbeVersion {
 		return report, nil
 	}

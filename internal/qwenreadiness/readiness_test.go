@@ -69,6 +69,9 @@ func TestCheckUsesPinnedPackageAndMinimumVersion(t *testing.T) {
 		{name: "pinned floor", packageID: ExpectedPackage, version: "0.21.15", wantReady: true},
 		{name: "newer with live contracts", packageID: ExpectedPackage, version: "0.22.0", wantReady: true},
 		{name: "below floor", packageID: ExpectedPackage, version: "0.21.14", wantIssue: "version"},
+		{name: "signed component", packageID: ExpectedPackage, version: "0.21.+15", wantIssue: "version"},
+		{name: "dangling suffix", packageID: ExpectedPackage, version: "0.21.15-", wantIssue: "version"},
+		{name: "portable overflow", packageID: ExpectedPackage, version: "4294967296.21.15", wantIssue: "version"},
 		{name: "wrong package", packageID: "qwen-lookalike", version: "0.21.15", wantIssue: "package"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

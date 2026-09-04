@@ -211,7 +211,7 @@ discovery candidate row. Products remain the authority for whether a session
 exists and for every product-owned field returned to users.
 
 The wire contract for native clients is the
-[Native Agent Sessions Presence Protocol](docs/specs/NATIVE-PEER-PROTOCOL.md).
+[Native Agent Sessions Presence Protocol](docs/PROTOCOL.md).
 The shorter [adapter architecture](docs/ADAPTER-PROTOCOL.md) explains how the
 shipped integrations apply it.
 
@@ -225,7 +225,7 @@ shipped integrations apply it.
 - [Federation](docs/FEDERATION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Acceptance matrix](docs/ACCEPTANCE-MATRIX.md)
-- [Native peer protocol](docs/specs/NATIVE-PEER-PROTOCOL.md)
+- [Native peer protocol](docs/PROTOCOL.md)
 
 ## License
 

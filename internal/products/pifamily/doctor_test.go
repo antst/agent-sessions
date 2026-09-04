@@ -101,6 +101,29 @@ func TestDoctorAcceptsReadableLiveSessionExtension(t *testing.T) {
 	}
 }
 
+func TestDoctorUsesMinimumVersionPolicy(t *testing.T) {
+	for _, test := range []struct {
+		id, version string
+		state       productruntime.ProbeState
+	}{
+		{PiProductID, PiTestedVersion, productruntime.ProbeReady}, {PiProductID, "0.85.0", productruntime.ProbeReady},
+		{PiProductID, "0.84.3", productruntime.ProbeIncompatible}, {PiProductID, PiTestedVersion + "+", productruntime.ProbeIncompatible},
+		{OMPProductID, OMPTestedVersion, productruntime.ProbeReady}, {OMPProductID, "18.1.0", productruntime.ProbeReady},
+		{OMPProductID, "18.0.10", productruntime.ProbeIncompatible}, {OMPProductID, OMPTestedVersion + "+", productruntime.ProbeIncompatible},
+	} {
+		quirks, _ := QuirksFor(test.id)
+		runner := doctorRunnerFixture{path: "/usr/bin/" + quirks.Executable, version: quirks.Executable + " " + test.version}
+		probe, err := NewDoctorProbe(DoctorConfig{Quirks: quirks, ExtensionPath: "/managed/extension.mjs", Runner: runner})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := probe.Probe(context.Background(), productruntime.ProbeRequest{ProductID: test.id, Depth: productruntime.ProbeVersion})
+		if err != nil || report.State != test.state {
+			t.Errorf("%s %s report = %#v, %v", test.id, test.version, report, err)
+		}
+	}
+}
+
 func TestDoctorClassifiesMissingIncompatibleAndUnconfigured(t *testing.T) {
 	quirks, _ := QuirksFor(PiProductID)
 	cases := []struct {
@@ -110,7 +133,7 @@ func TestDoctorClassifiesMissingIncompatibleAndUnconfigured(t *testing.T) {
 		depth  productruntime.ProbeDepth
 	}{
 		{name: "missing", runner: doctorRunnerFixture{lookErr: errors.New("missing")}, state: productruntime.ProbeMissing, depth: productruntime.ProbePresence},
-		{name: "wrong version", runner: doctorRunnerFixture{path: "/usr/bin/pi", version: "pi 99.0.0"}, state: productruntime.ProbeIncompatible, depth: productruntime.ProbeVersion},
+		{name: "wrong version", runner: doctorRunnerFixture{path: "/usr/bin/pi", version: "pi 0.84.3"}, state: productruntime.ProbeIncompatible, depth: productruntime.ProbeVersion},
 		{name: "missing extension", runner: doctorRunnerFixture{path: "/usr/bin/pi", version: PiTestedVersion, help: "--mode --extension --session --tools", statErr: errors.New("missing")}, state: productruntime.ProbeUnconfigured, depth: productruntime.ProbeIntegration},
 	}
 	for _, testCase := range cases {

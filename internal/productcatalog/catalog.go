@@ -232,7 +232,7 @@ func newProductDescriptor(
 		PeerAlias: id + "-peer", LaneAlias: id + "-peer-lane", LaneRuntimeRole: id + "-lane",
 		LaneManagerRole: id + "-lane-manager", LaneCapability: id + "-lane",
 		PluginArchivePaths: []string{"integrations/" + id}, Capabilities: capabilities, ResumeStyle: ResumeFlag,
-		SupportState: SupportGeneral, TestedVersion: testedVersion, Compatibility: Compatibility{Policy: VersionExact},
+		SupportState: SupportGeneral, TestedVersion: testedVersion, Compatibility: Compatibility{Policy: VersionMinimum},
 		PeerTransport: peerTransport, MessageTransport: messageTransport, LaneTransport: laneTransport,
 		DoctorProbeKey: id + "-doctor", PermissionProfileKey: permission,
 		InstallRoot: "integrations/" + id, RequiredDoctorFeatures: doctorFeatures,
