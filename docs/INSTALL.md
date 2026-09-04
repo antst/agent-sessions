@@ -31,6 +31,14 @@ An unavailable product is skipped without blocking the other integrations. A nat
 owns login and first-run setup; complete those through the product itself before starting its first
 managed peer or lane.
 
+The installer captures the invoking shell's `PATH` as the user-service baseline. After installing a
+product into a new directory, start a fresh shell and rerun the installer so the daemon can resolve
+the same executable. The captured path is limited to 64 KiB and must contain only absolute,
+nonempty portable-printable components; unsafe or placeholder-shaped values are refused before
+installation changes anything.
+On Linux, `~/.config/agent-sessions/service.env` and systemd drop-ins are intentional operator
+overrides and take precedence over the captured baseline.
+
 ## Verify the installation
 
 ```sh
@@ -115,6 +123,9 @@ A successful update changes the selected release and restarts exactly the Agent 
 service. systemd's normal control-group behavior terminates the daemon and its lane worker tree.
 The product-owned Codex App Server runs outside that service and remains available to live Codex
 clients; other product session state remains in the product and returns through confirmed resume.
+Before the host-service commit, a failed update restores the exact prior service definition and
+state. A later DSH integration failure retains the already-ready host and captured `PATH`, matching
+the transaction's documented commit boundary.
 
 Remove Agent Sessions while preserving all Agent Sessions and product state:
 

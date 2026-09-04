@@ -51,7 +51,9 @@ prefix="$test_root/prefix"
 fake_bin="$test_root/bin"
 state_root="$test_root/state"
 real_npm=$(command -v npm)
+real_node=$(command -v node)
 mkdir -p "$home" "$prefix" "$fake_bin" "$state_root"
+ln -s "$real_node" "$fake_bin/node"
 
 cat >"$fake_bin/npm" <<'EOF'
 #!/bin/sh
@@ -255,6 +257,8 @@ stop_service() {
   fi
 }
 case "$arguments" in
+  *" is-active --quiet agent-sessions.service "*) test -f "$TEST_SERVICE_PID_FILE" ;;
+  *" is-enabled --quiet agent-sessions.service "*) test -f "$HOME/.config/systemd/user/agent-sessions.service" ;;
   *" disable --now agent-sessions.service "*) stop_service ;;
   *" restart agent-sessions.service "*)
     stop_service
@@ -319,11 +323,13 @@ exec "$TEST_REAL_HOST_BINARY" "$@"
 EOF
 chmod 0755 "$failing_candidate"
 
+service_path_a="$fake_bin:/usr/bin:/bin:$test_root/path with % and \"quote\" and \\slash"
+service_path_b="$fake_bin:/usr/bin:/bin:$test_root/new-kilo-directory"
 common_env=(
   "HOME=$home"
   "XDG_CONFIG_HOME=$home/.config"
   "AGENT_SESSIONS_STATE_ROOT=$state_root"
-  "PATH=$fake_bin:/usr/bin:/bin"
+  "PATH=$service_path_a"
   "CODEX=missing-codex"
   "CLAUDE=claude"
   "GROK=missing-grok"
@@ -356,6 +362,29 @@ common_env=(
   "TEST_REAL_HOST_BINARY=$host_binary"
 )
 
+assert_systemd_path() {
+  local value=$1 expected
+  expected=${value//\\/\\\\}
+  expected=${expected//\"/\\\"}
+  expected=${expected//%/%%}
+  grep -Fxq "Environment=\"PATH=$expected\"" "$home/.config/systemd/user/agent-sessions.service"
+}
+
+printf -v oversized_path '/%*s' 65536 ''
+for unsafe_path in '' '/usr/bin:relative' '/usr/bin:~/bin' '/usr/bin:$VAR/bin' \
+  ':/usr/bin' '/usr/bin:' '/usr/bin::/bin' '/usr/bin:/safe/@CODEX_BIN@/bin' \
+  $'/usr/bin:/bad\npath' $'/usr/bin:/caf\xc3\xa9' $'/usr/bin:/bad\xff' "$oversized_path"; do
+  set +e
+  env "${common_env[@]}" "PATH=$unsafe_path" /bin/bash "$root/scripts/install-host" \
+    "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 >/dev/null 2>"$test_root/unsafe-path.err"
+  unsafe_status=$?
+  set -e
+  if [[ $unsafe_status -ne 2 || -e "$prefix/libexec/agent-sessions/host" ]]; then
+    printf 'unsafe PATH was not refused before host mutation (status=%s)\n' "$unsafe_status" >&2
+    exit 1
+  fi
+done
+
 warning='macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.'
 for install_case in "0.4.0 linux-x64" "0.3.0 darwin-x64"; do
   read -r test_version test_platform <<<"$install_case"
@@ -374,6 +403,7 @@ mkdir -p "$test_root/dsh-state" "$home/.dsh/profiles/agent-sessions/node_modules
 env "${common_env[@]}" "$root/scripts/install-host" \
   "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
 release="$prefix/libexec/agent-sessions/host/releases/0.3.0"
+assert_systemd_path "$service_path_a"
 prior_hash=$(sha256sum "$release/bin/agent-sessions" | awk '{print $1}')
 [[ -n "$prior_hash" && "$(cat "$test_root/qwen-source")" == "$release/qwen" ]]
 diff -qr -- "$release/claude" "$test_root/claude-cache" >/dev/null
@@ -431,10 +461,13 @@ fi
 
 # A native add failure occurs after host commit. The ready candidate and both
 # archive generations stay available while the prior DSH pair remains untouched.
+mkdir -p "$home/.config/agent-sessions" "$home/.config/systemd/user/agent-sessions.service.d"
+printf 'PATH=/operator/service-env\n' >"$home/.config/agent-sessions/service.env"
+printf '[Service]\nEnvironment=PATH=/operator/drop-in\n' >"$home/.config/systemd/user/agent-sessions.service.d/operator.conf"
 : >"$test_root/dsh-record"
 rm -f -- "$test_root/dsh-add-failed-once"
 set +e
-env "${common_env[@]}" TEST_DSH_ADD_FAIL_ONCE=1 "$root/scripts/install-host" \
+env "${common_env[@]}" TEST_DSH_ADD_FAIL_ONCE=1 "PATH=$service_path_b" "$root/scripts/install-host" \
   "$root" "$candidate" "$prefix" 0.3.0 linux-x64 \
   >"$test_root/dsh-add-failure.out" 2>"$test_root/dsh-add-failure.err"
 dsh_add_failure_status=$?
@@ -453,7 +486,11 @@ if [[ $dsh_add_failure_status -eq 0 ]] ||
   printf 'DSH add failure rolled back the ready host or lost a referenced archive\n' >&2
   exit 1
 fi
+assert_systemd_path "$service_path_b"
+grep -Fxq 'PATH=/operator/service-env' "$home/.config/agent-sessions/service.env"
+grep -Fxq 'Environment=PATH=/operator/drop-in' "$home/.config/systemd/user/agent-sessions.service.d/operator.conf"
 env "${common_env[@]}" "$root/scripts/install-host" "$root" "$host_binary" "$prefix" 0.3.0 linux-x64 >/dev/null
+assert_systemd_path "$service_path_a"
 find -P "$release" -type d -exec chmod 0555 {} +
 
 # Reproduce an equal-version active cache that differs from the selected
@@ -461,6 +498,7 @@ find -P "$release" -type d -exec chmod 0555 {} +
 # lifecycle before the deliberately later Qwen failure exercises rollback.
 printf 'stale same-version cache\n' >>"$test_root/claude-cache/skills/codex-lane/SKILL.md"
 : >"$test_root/dsh-record"
+cp -p -- "$home/.config/systemd/user/agent-sessions.service" "$test_root/prior-service-definition"
 
 set +e
 env "${common_env[@]}" TEST_QWEN_FAIL_ONCE=1 "$root/scripts/install-host" \
@@ -489,10 +527,13 @@ if [[ "$after_hash" != "$prior_hash" ]] ||
    ! cmp -- "$home/.config/kilo/shared/live-session.js" "$release/integrations/shared/live-session.js" >/dev/null ||
    ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/plugin.cjs" "$release/integrations/dsh/comms/plugin.cjs" >/dev/null ||
    ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-comms/shared/live-session.cjs" "$release/integrations/shared/live-session.js" >/dev/null ||
-   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs" >/dev/null; then
+   ! cmp -- "$home/.dsh/profiles/agent-sessions/node_modules/@agent-sessions/dsh-lane/plugin.cjs" "$release/integrations/dsh/lane/plugin.cjs" >/dev/null ||
+   ! grep -Fxq 'PATH=/operator/service-env' "$home/.config/agent-sessions/service.env" ||
+   ! grep -Fxq 'Environment=PATH=/operator/drop-in' "$home/.config/systemd/user/agent-sessions.service.d/operator.conf"; then
   printf 'failed host update did not restore the exact release selection and Qwen source\n' >&2
   exit 1
 fi
+cmp -- "$test_root/prior-service-definition" "$home/.config/systemd/user/agent-sessions.service"
 if ! grep -Fxq 'plugin uninstall --scope user --keep-data agent-sessions@agent-sessions' \
     "$test_root/claude-record"; then
   printf 'same-version Claude cache was not refreshed with persistent data preserved\n' >&2
@@ -561,13 +602,14 @@ for signal_case in TERM INT; do
      [[ "$after_hash" != "$prior_hash" ]] ||
      [[ "$selected_release" != "$release" ]] ||
      find "$prefix/libexec/agent-sessions/host/releases" -maxdepth 1 \
-       \( -name '.previous-*' -o -name '.stage.*' \) -print -quit | grep -q .; then
+       \( -name '.previous-*' -o -name '.stage.*' -o -name '.prior-service.*' \) -print -quit | grep -q .; then
     printf '%s signal did not restore the exact prior release (status=%s)\n' \
       "$signal_case" "$signal_status" >&2
     cat "$test_root/signal-$signal_case.out" >&2
     cat "$test_root/signal-$signal_case.err" >&2
     exit 1
   fi
+  cmp -- "$test_root/prior-service-definition" "$home/.config/systemd/user/agent-sessions.service"
 done
 
 run_dsh_commit_signal() {

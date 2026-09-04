@@ -60,7 +60,9 @@ prefix="$test_root/prefix"
 fake_bin="$test_root/bin"
 state_root="$test_root/unified-state"
 real_npm=$(command -v npm)
+real_node=$(command -v node)
 mkdir -p "$home" "$prefix" "$fake_bin" "$state_root"
+ln -s "$real_node" "$fake_bin/node"
 
 cat >"$fake_bin/uname" <<'EOF'
 #!/bin/sh
@@ -214,6 +216,8 @@ stop_service() {
   fi
 }
 case "$arguments" in
+  *" is-active --quiet agent-sessions.service "*) test -f "$TEST_SERVICE_PID_FILE" ;;
+  *" is-enabled --quiet agent-sessions.service "*) test -f "$HOME/.config/systemd/user/agent-sessions.service" ;;
   *" stop agent-sessions.service "*|*" disable --now agent-sessions.service "*) stop_service ;;
   *" restart agent-sessions.service "*)
     stop_service
@@ -263,6 +267,9 @@ install_host() {
 
 install_host
 release="$prefix/libexec/agent-sessions/host/releases/0.3.0"
+service_definition="$home/.config/systemd/user/agent-sessions.service"
+printf '# exact captured PATH removal rollback canary\n' >>"$service_definition"
+cp -p -- "$service_definition" "$test_root/service-definition.before"
 ln -s "$prefix/libexec/agent-sessions/host/current/bin/agent-sessions" "$prefix/bin/peer"
 cmp -- "$home/.config/opencode/plugins/agent-sessions.js" "$release/integrations/opencode/agent-sessions.mjs"
 cmp -- "$home/.config/opencode/shared/live-session.js" "$release/integrations/shared/live-session.js"
@@ -302,11 +309,13 @@ if [[ $failed_status -eq 0 ]] ||
   printf 'failed removal did not restore the installed host transaction\n' >&2
   exit 1
 fi
+cmp -- "$test_root/service-definition.before" "$service_definition"
 env "${common_env[@]}" "$prefix/bin/agent-sessions" status >/dev/null
 printf 'unified-state-canary\n' >"$state_root/canary"
 
 env "${common_env[@]}" "$root/scripts/remove-host" "$prefix" >/dev/null
 if [[ -e "$prefix/libexec/agent-sessions/host" ]] ||
+   [[ -e "$service_definition" ]] ||
    [[ -e "$prefix/bin/agent-sessions" || -L "$prefix/bin/agent-sessions" ]] ||
    [[ -e "$prefix/bin/peer" || -L "$prefix/bin/peer" ]] ||
    [[ -e "$test_root/qwen-source" ]] ||

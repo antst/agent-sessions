@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment="PATH=@SERVICE_PATH@"
 EnvironmentFile=-%h/.config/agent-sessions/service.env
 RuntimeDirectory=agent-sessions
 RuntimeDirectoryMode=0700

@@ -46,6 +46,28 @@ launchd_bootstrap_exact() {
   return 1
 }
 
+launchd_restore_service_definition() {
+  if [[ $# -ne 7 ]]; then
+    printf 'launchd service restore requires domain, target, definition, backup, presence, enabled, and active\n' >&2
+    return 2
+  fi
+  local domain=$1 target=$2 definition=$3 backup=$4 present=$5 enabled=$6 active=$7 staged
+  launchd_bootout_exact "$target" || return 1
+  if [[ $present -eq 1 ]]; then
+    mkdir -p -- "$(dirname -- "$definition")"
+    staged=$(mktemp "${definition}.XXXXXX") || return 1
+    if ! cp -p -- "$backup" "$staged"; then rm -f -- "$staged"; return 1; fi
+    mv -- "$staged" "$definition"
+  else
+    rm -f -- "$definition"
+  fi
+  if [[ $enabled -eq 1 ]]; then launchctl enable "$target"; else launchctl disable "$target"; fi
+  if [[ $active -eq 1 ]]; then
+    launchd_bootstrap_exact "$domain" "$target" "$definition"
+    launchctl kickstart -k "$target"
+  fi
+}
+
 launchd_xml_sed_replacement() {
   local value=$1
   if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
@@ -64,7 +86,7 @@ launchd_render_host_plist() {
   fi
   local template=$1 output=$2 prefix=$3 state_root=$4 home=$5 service_path=$6
   local codex=$7 claude=$8 grok=$9 qwen=${10}
-  local prefix_value state_root_value home_value service_path_value
+  local prefix_value state_root_value home_value service_path_value staged
   local codex_value claude_value grok_value qwen_value
   prefix_value=$(launchd_xml_sed_replacement "$prefix")
   state_root_value=$(launchd_xml_sed_replacement "$state_root")
@@ -74,11 +96,17 @@ launchd_render_host_plist() {
   claude_value=$(launchd_xml_sed_replacement "$claude")
   grok_value=$(launchd_xml_sed_replacement "$grok")
   qwen_value=$(launchd_xml_sed_replacement "$qwen")
-  sed -e "s|@PREFIX@|$prefix_value|g" -e "s|@STATE_ROOT@|$state_root_value|g" \
-    -e "s|@HOME@|$home_value|g" -e "s|@SERVICE_PATH@|$service_path_value|g" \
-    -e "s|@CODEX_BIN@|$codex_value|g" -e "s|@CLAUDE_BIN@|$claude_value|g" \
-    -e "s|@GROK_BIN@|$grok_value|g" -e "s|@QWEN_BIN@|$qwen_value|g" \
-    "$template" >"$output"
+  staged=$(mktemp "${output}.XXXXXX") || return 1
+  if ! sed -e "s|@PREFIX@|$prefix_value|g" -e "s|@STATE_ROOT@|$state_root_value|g" \
+    -e "s|@HOME@|$home_value|g" -e "s|@CODEX_BIN@|$codex_value|g" \
+    -e "s|@CLAUDE_BIN@|$claude_value|g" -e "s|@GROK_BIN@|$grok_value|g" \
+    -e "s|@QWEN_BIN@|$qwen_value|g" -e "s|@SERVICE_PATH@|$service_path_value|g" \
+    "$template" >"$staged"; then
+    rm -f -- "$staged"
+    return 1
+  fi
+  chmod 0644 "$staged"
+  mv -- "$staged" "$output"
 }
 
 launchd_render_hub_plist() {

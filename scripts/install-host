@@ -1,15 +1,35 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "$script_directory/managed-tree"
-source "$script_directory/launchd-control"
-source "$script_directory/dsh-profile"
-
 if [[ $# -ne 5 ]]; then
   printf 'usage: %s SOURCE_ROOT HOST_BINARY PREFIX VERSION PLATFORM\n' "${0##*/}" >&2
   exit 2
 fi
+
+installer_path=${PATH-}
+
+validate_service_path() {
+  local value=$1 component
+  local LC_ALL=C
+  [[ -n "$value" && ${#value} -le 65536 && "$value" != :* && "$value" != *: && "$value" != *::* ]] || return 1
+  [[ "$value" != *[![:print:]]* && ! "$value" =~ @[A-Z_]+@ ]] || return 1
+  local IFS=:
+  read -r -a components <<<"$value"
+  for component in "${components[@]}"; do
+    [[ "$component" == /* ]] || return 1
+  done
+}
+
+validate_service_path "$installer_path" || {
+  printf 'PATH must contain only absolute, nonempty, portable printable components\n' >&2
+  exit 2
+}
+script_directory=${BASH_SOURCE[0]%/*}
+if [[ "$script_directory" == "${BASH_SOURCE[0]}" ]]; then script_directory=.; fi
+script_directory=$(cd -P -- "$script_directory" && pwd)
+source "$script_directory/managed-tree"
+source "$script_directory/launchd-control"
+source "$script_directory/dsh-profile"
 
 source_root=$1
 host_binary=$2
@@ -156,10 +176,12 @@ release="$releases/$version"
 mkdir -p "$releases" "$prefix/bin"
 stage="$(mktemp -d "$releases/.stage.XXXXXX")"
 backup=""
+prior_service_backup=""
 cleanup_stage() {
   if [[ -n "$stage" && -d "$stage" ]]; then
     remove_managed_tree "$stage" "$releases"
   fi
+  if [[ -n "$prior_service_backup" ]]; then rm -f -- "$prior_service_backup"; fi
 }
 trap cleanup_stage EXIT
 
@@ -347,24 +369,33 @@ write_service_definition() {
   local selected_release=$1
   case "$(uname -s)" in
     Linux)
-      local unit_root config_root
+      local unit_root config_root prefix_value path_value staged
       unit_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
       config_root="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sessions"
       mkdir -p "$unit_root" "$config_root"
       if [[ ! -e "$config_root/service.env.example" ]]; then
         install -m 0600 "$selected_release/deploy/agent-sessions/service.env.example" "$config_root/service.env.example"
       fi
-      sed "s|@PREFIX@|$prefix|g" \
-        "$selected_release/deploy/agent-sessions/systemd/user/agent-sessions.service" \
-        >"$unit_root/agent-sessions.service"
+      prefix_value=$(printf '%s' "$prefix" | sed -e 's/[\\&|]/\\&/g')
+      path_value=${installer_path//\\/\\\\}
+      path_value=${path_value//\"/\\\"}
+      path_value=${path_value//%/%%}
+      path_value=$(printf '%s' "$path_value" | sed -e 's/[\\&|]/\\&/g')
+      staged=$(mktemp "$unit_root/.agent-sessions.service.XXXXXX")
+      if ! sed -e "s|@PREFIX@|$prefix_value|g" -e "s|@SERVICE_PATH@|$path_value|g" \
+        "$selected_release/deploy/agent-sessions/systemd/user/agent-sessions.service" >"$staged"; then
+        rm -f -- "$staged"
+        return 1
+      fi
+      chmod 0644 "$staged"
+      mv -- "$staged" "$unit_root/agent-sessions.service"
       systemctl --user daemon-reload
       ;;
     Darwin)
-      local state_root config_root unit_root service_path
+      local state_root config_root unit_root
       state_root="$HOME/.local/state/agent-sessions"
       config_root="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sessions"
       unit_root="$HOME/Library/LaunchAgents"
-      service_path="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
       mkdir -p "$unit_root" "$state_root/logs" "$config_root"
       if [[ ! -e "$config_root/service.env.example" ]]; then
         install -m 0600 "$selected_release/deploy/agent-sessions/service.env.example" "$config_root/service.env.example"
@@ -372,7 +403,7 @@ write_service_definition() {
       launchd_render_host_plist \
         "$selected_release/deploy/agent-sessions/launchd/net.antst.agent-sessions.plist" \
         "$unit_root/net.antst.agent-sessions.plist" "$prefix" "$state_root" "$HOME" \
-        "$service_path" "$codex_path" "$claude_path" "$grok_override" "$qwen_path"
+        "$installer_path" "$codex_path" "$claude_path" "$grok_override" "$qwen_path"
       plutil -lint "$unit_root/net.antst.agent-sessions.plist" >/dev/null
       ;;
     *)
@@ -483,15 +514,18 @@ remove_service() {
 prior_service_definition=0
 prior_service_enabled=0
 prior_service_active=0
+prior_service_path=""
 service_restart_baseline=0
 case "$(uname -s)" in
   Linux)
-    [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions.service" ]] && prior_service_definition=1
+    prior_service_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-sessions.service"
+    [[ -f "$prior_service_path" ]] && prior_service_definition=1
     systemctl --user is-enabled --quiet agent-sessions.service >/dev/null 2>&1 && prior_service_enabled=1 || true
     systemctl --user is-active --quiet agent-sessions.service >/dev/null 2>&1 && prior_service_active=1 || true
     ;;
   Darwin)
-    [[ -f "$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist" ]] && prior_service_definition=1
+    prior_service_path="$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist"
+    [[ -f "$prior_service_path" ]] && prior_service_definition=1
     launchctl print "gui/$(id -u)/net.antst.agent-sessions" >/dev/null 2>&1 && prior_service_active=1 || true
     if ! launchctl print-disabled "gui/$(id -u)" 2>/dev/null |
       grep -Eq '"net\.antst\.agent-sessions"[[:space:]]*=>[[:space:]]*true'; then
@@ -499,16 +533,28 @@ case "$(uname -s)" in
     fi
     ;;
 esac
+if [[ $prior_service_active -eq 1 && $prior_service_definition -eq 0 ]]; then
+  printf 'active Agent Sessions service has no restorable definition\n' >&2
+  exit 1
+fi
+if [[ $prior_service_definition -eq 1 ]]; then
+  prior_service_backup=$(mktemp "$releases/.prior-service.XXXXXX")
+  cp -p -- "$prior_service_path" "$prior_service_backup"
+fi
 
 restore_prior_service() {
-  local selected_release=$1
   if [[ $prior_service_definition -eq 0 ]]; then
     remove_service
     return
   fi
-  write_service_definition "$selected_release"
+  local staged
+  mkdir -p -- "$(dirname -- "$prior_service_path")"
+  staged=$(mktemp "${prior_service_path}.XXXXXX")
+  cp -p -- "$prior_service_backup" "$staged"
+  mv -- "$staged" "$prior_service_path"
   case "$(uname -s)" in
     Linux)
+      systemctl --user daemon-reload
       if [[ $prior_service_enabled -eq 1 ]]; then
         systemctl --user enable agent-sessions.service
       else
@@ -524,15 +570,8 @@ restore_prior_service() {
     Darwin)
       local domain="gui/$(id -u)" target
       target="$domain/net.antst.agent-sessions"
-      if [[ $prior_service_enabled -eq 1 ]]; then
-        launchctl enable "$target"
-      else
-        launchctl disable "$target"
-      fi
-      if [[ $prior_service_active -eq 1 ]]; then
-        launchd_bootstrap_exact "$domain" "$target" "$HOME/Library/LaunchAgents/net.antst.agent-sessions.plist"
-        launchctl kickstart -k "$target"
-      fi
+      launchd_restore_service_definition "$domain" "$target" "$prior_service_path" "$prior_service_backup" \
+        "$prior_service_definition" "$prior_service_enabled" "$prior_service_active"
       ;;
   esac
 }
@@ -597,7 +636,7 @@ rollback_install() {
         "$prior_current" >&2
       rollback_summary='Agent Sessions installation failed; restored the prior host release and service.'
     fi
-    restore_prior_service "$prior_current"
+    restore_prior_service
     if [[ $prior_service_active -eq 1 ]]; then wait_for_host_service; fi
   else
     rm -f -- "$host_root/current"
@@ -606,6 +645,7 @@ rollback_install() {
     done
     rollback_summary='Agent Sessions installation failed; removed the incomplete host release and integrations.'
   fi
+  if [[ -n "$prior_service_backup" ]]; then rm -f -- "$prior_service_backup"; prior_service_backup=""; fi
   printf '%s\n' "$rollback_summary" >&2
   exit "$status"
 }

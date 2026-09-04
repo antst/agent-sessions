@@ -31,6 +31,7 @@ case "$1" in
     fi
     : >"$TEST_LAUNCHCTL_LOADED"
     ;;
+  enable|disable|kickstart) : ;;
   *) exit 91 ;;
 esac
 EOF
@@ -59,10 +60,11 @@ test -e "$TEST_LAUNCHCTL_BOOTSTRAP_RETRIED"
 escaped=$(launchd_xml_sed_replacement '/Users/a&b/<work>|tree')
 test "$escaped" = '/Users/a\&amp;b/\&lt;work\&gt;\|tree'
 rendered="$test_root/rendered.plist"
+host_path='/Users/a&b/<work>/"quote"/\slash/%:/usr/bin'
 launchd_render_host_plist \
   "$root/deploy/agent-sessions/launchd/net.antst.agent-sessions.plist" "$rendered" \
   '/Users/a&b/.local' '/Users/a&b/.local/state' '/Users/a&b' \
-  '/Users/a&b/.local/bin:/usr/bin' '/Applications/Codex & Tools/codex' \
+  "$host_path" '/Applications/Codex & Tools/codex' \
   '/usr/local/bin/claude' '' '/usr/local/bin/qwen'
 if grep -Eq '@(PREFIX|STATE_ROOT|HOME|SERVICE_PATH|CODEX_BIN|CLAUDE_BIN|GROK_BIN|QWEN_BIN)@' "$rendered"; then
   printf 'rendered launchd plist retains a template placeholder\n' >&2
@@ -74,7 +76,17 @@ with open(sys.argv[1], "rb") as stream:
     document = plistlib.load(stream)
 assert document["WorkingDirectory"] == "/Users/a&b"
 assert document["EnvironmentVariables"]["CODEX_PEER_CODEX_BIN"] == "/Applications/Codex & Tools/codex"
+assert document["EnvironmentVariables"]["PATH"] == '/Users/a&b/<work>/"quote"/\\slash/%:/usr/bin'
 PY
+printf 'prior plist bytes & @SERVICE_PATH@ stay exact\n' >"$test_root/prior.plist"
+printf 'candidate bytes\n' >"$plist"
+: >"$TEST_LAUNCHCTL_LOADED"
+launchd_restore_service_definition "gui/501" "$target" "$plist" "$test_root/prior.plist" 1 1 1
+cmp -- "$test_root/prior.plist" "$plist"
+test -e "$TEST_LAUNCHCTL_LOADED"
+launchd_restore_service_definition "gui/501" "$target" "$plist" "$test_root/missing" 0 0 0
+test ! -e "$plist"
+test ! -e "$TEST_LAUNCHCTL_LOADED"
 hub_rendered="$test_root/rendered-hub.plist"
 launchd_render_hub_plist \
   "$root/deploy/agent-sessions-hub/launchd/net.antst.agent-sessions-hub.plist" "$hub_rendered" \
@@ -94,4 +106,7 @@ assert "AGENT_SESSIONS_HUB_LISTEN" not in document["EnvironmentVariables"]
 PY
 grep -Fxq "bootout $target" "$TEST_LAUNCHCTL_LOG"
 grep -Fxq "bootstrap gui/501 $plist" "$TEST_LAUNCHCTL_LOG"
+grep -Fxq "enable $target" "$TEST_LAUNCHCTL_LOG"
+grep -Fxq "disable $target" "$TEST_LAUNCHCTL_LOG"
+grep -Fxq "kickstart -k $target" "$TEST_LAUNCHCTL_LOG"
 printf 'launchd exact-label retry and plist escaping: PASS\n'
