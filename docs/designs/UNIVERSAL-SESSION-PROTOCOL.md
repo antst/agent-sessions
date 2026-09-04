@@ -869,3 +869,124 @@ The DSH migration therefore adds **16 more deleted files and 1,504 deleted
 lines** before rewriting the retained unified plugin. Combined with Section 2,
 the signed deletion floor becomes **63 files and 13,767 lines**. The DSH tree
 must remain net-negative after the kit is accounted separately.
+
+## 4. Non-native resident wrappers
+
+### 4.1 Shared wrapper boundary
+
+| Ledger item | Decision | Reason |
+| --- | --- | --- |
+| Process and connection | One resident wrapper owns one product session and the one daemon connection. Peer mode sends peer hello after resolving native identity; worker mode consumes the launch token and sends worker hello. | A wrapper must be indistinguishable from a native product on Section 1; exec-and-depart launchers cannot own the session socket. |
+| Product boundary | The wrapper exposes the six Section 3 callbacks locally and contains every product import, executable name, argument translation, native protocol, and delivery compromise. | Deleting one wrapper when a vendor adopts the native kit must require no daemon, schema, caller-kit, or registry change. |
+| Tool ingress | The wrapper itself serves loopback HTTP MCP when the product accepts HTTP. Otherwise a packaged stdio helper or JavaScript plugin connects only to a private wrapper endpoint. No product helper connects to the daemon. | There remains exactly one daemon connection and one source of session identity. Local helpers are product plumbing, not presence. |
+| Wrapper-only queue | A wrapper that lacks native append/injection owns one in-memory FIFO capped at 64 deliveries and 1 MiB total. At run start it atomically swaps and canonically renders that FIFO before the caller input; overflow is rejected as `queue_full`. | `queued_for_next_turn` must be truthful and bounded. Loss with wrapper exit is the accepted loss in Section 1.2, not durable daemon state. |
+| Caller tool surface | Every product exposes the same caller-kit start/wait/status/spawn/describe/close/list/send operations; product plugins do not invent wire methods. | Tool presentation is kit sugar over the eleven methods and is identical for native and wrapped products. |
+| Shared size cap | Wrapper host, local HTTP MCP, stdio/plugin bridge protocol, and bounded FIFO together: **400 production / 400 test logical lines**. | Product-independent scaffolding larger than the daemon router would be a second protocol implementation. |
+| Shared deletion | Delete the 16 non-product-specific files in `internal/launcher` (2,199 lines) and `cmd/agent-sessions/connector_refresh.go` plus its test (333 lines). Rewrite `connector.go`/test as the bounded local stdio-to-wrapper bridge and `native_peer.go` as wrapper composition. | The entire old launcher package dies; CLI parsing moves to `cmd`, process ownership to `structuredprocess`, and product recipes to wrappers. Connector self-exec/release refresh is unnecessary when the resident wrapper and helper are one installed image. |
+
+### 4.2 Claude Code
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-claude` owns one long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages` child; the peer command runs the same wrapper around interactive Claude instead of execing away. | This is the proven c5b280d native stream in `internal/products/claude/lane.go:112-145`; process and daemon-socket lifetime become coextensive. |
+| Open and resume | Fresh adds `--session-id <daemon session_id> --name <row name>`; resume uses `--resume <native_id>`. Supported open fields are exactly `cwd`, `permission_mode`, `reasoning_effort`, and `arguments`. | c5b280d maps these at `lane.go:112-141`. `model` is declared unsupported because the typed adapter has no model mapping; callers may still use a product-native argument. |
+| Run | Write one stream-json user frame, keep the run callback pending, and convert the exact result frame to the terminal result. | `lane.go:173-225` already proves the single stream write plus terminal observation. |
+| Tools | The wrapper serves loopback HTTP MCP and supplies that endpoint in Claude's launch configuration; Claude never starts `agent-sessions connector` against the daemon. | The current `claude/.mcp.json` is a stdio daemon connector; replacing it with wrapper-owned HTTP removes the duplicate presence while preserving Claude's MCP surface. |
+| Deliver | While a run is active, write the same user frame and report `injected`; while idle, use the bounded wrapper FIFO and report `queued_for_next_turn`. | Active stream injection is proven by `lane.go:224-249`. The c5 idle `SendMessage` also writes a user frame (`lane.go:251-274`) and would start unrequested work, so it cannot be called idle under the universal contract. |
+| Interrupt and close | Interrupt writes the native `control_request` subtype `interrupt`; close ends the stream and reaps the exact child. | `lane.go:277-321` proves both operations and their native acknowledgements. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open field: `model`. Wrapper-only state: the bounded delivery FIFO. | Every deviation is declared by hello or isolated behind `deliver`; the daemon contains no Claude branch. |
+| Size cap | **360 production / 400 test logical lines**, including stream framing and Claude argument translation but excluding the shared wrapper host. | The current 578-line actor combines generic lifecycle with product translation; the generic kit removes that duplication. |
+| Deletion inventory | Delete all `internal/products/claude` (3 files / 1,108 lines) and `internal/launcher/{claude_peer.go,claude_peer_test.go}` (2 / 183). Rewrite `claude/.mcp.json`; retain product docs/skills. Total: **5 files / 1,291 lines**. | The wrapper replaces both the daemon driver and depart-on-exec peer launcher; no compatibility adapter remains. |
+
+### 4.3 Codex
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-codex` owns one session-specific App Server client/subscription; peer launch uses the same resident wrapper rather than leaving a host-global coordinator as presence. | The existing native surface is already App Server RPC (`internal/bridge/codex_native.go`); the wrapper, not the daemon, owns the thread subscription. |
+| Open and resume | Fresh performs `thread/start`, names the thread, and materializes its rollout; resume performs the exact prepare/resume. It supports all five open fields: `cwd`, `permission_mode`, `model`, `reasoning_effort`, and `arguments`, stored once and applied to every run. | `CodexStartRequest` and `CodexLaneTurnRequest` at `codex_native.go:51-70` expose exactly these settings; c5's split between open and per-turn inputs is collapsed into stored open data. |
+| Run | Send one `turn/start`, await the matching `turn/completed`, and extract the final agent message. | `internal/products/codex/lane.go:75-122` and `codex_native.go:528-656` prove the end-to-end primitive. |
+| Tools | The wrapper serves loopback HTTP MCP and supplies it through App Server thread configuration; tool requests return on the wrapper's existing daemon socket. | Codex App Server already owns MCP configuration/reload (`codex_native.go:184-201`); no stdio daemon connector or second presence is needed. |
+| Deliver | Active thread uses `turn/steer` and reports `injected`; idle delivery enters the bounded wrapper FIFO instead of invoking c5's `turn/start`. | `codex_native.go:479-527` explicitly distinguishes active steer from idle start; universal delivery forbids the latter. |
+| Interrupt and close | Interrupt calls `turn/interrupt` for the exact active turn. Close archives the thread and unsubscribes before the wrapper exits. | `internal/products/codex/lane.go:124-158` and `codex_native.go:758-780` are the existing native boundaries. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only state: the bounded delivery FIFO. | App Server exposes every typed open value; idle delivery is the only missing primitive and stays wrapper-local. |
+| Size cap | **700 production / 700 test logical lines**, including App Server framing and session code but excluding the shared wrapper host. | Native protocol code must be counted with the product that requires it; host-global coordination is forbidden. |
+| Deletion inventory | Delete all `internal/products/codex` (2 files / 331 lines) and `internal/launcher/{codex_peer.go,codex_peer_test.go}` (2 / 786). Total: **4 files / 1,117 lines**. | The lean App Server primitive is rehomed from `internal/bridge` into wrapper-owned code; the daemon-facing driver and depart-on-exec launcher die. |
+
+### 4.4 Grok
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-grok` owns one private leader, one authenticated ACP primary, and one observer for the exact native session; peer mode keeps the same owner resident around the TUI. | `internal/bridge/grok_native_session.go:16-210` and `cmd/agent-sessions/grok_peer.go:22-43` show the current leader/primary process tree that must share the daemon-socket lifetime. |
+| Open and resume | Start the private leader, open or resume the ACP session, then apply model and mode. It supports all five open fields; `model` and `reasoning_effort` are promoted from c5 argument/mode translation into typed open data. | `internal/products/grok/lane.go:98-170` and `grok_native_session.go:248-268` prove native model and mode setters plus cwd, permission, and argument handling. |
+| Run | Call ACP `session/prompt`, consume matching update notifications, and return its stop reason and accumulated output. | `grok_native_session.go:270-308` is the resident prompt primitive. |
+| Tools | The wrapper publishes a private endpoint; the packaged `grok/scripts/native-entry` remains a stdio MCP relay to that endpoint and never connects to the daemon. | Grok's packaged MCP is stdio today; retaining only the local relay is the smallest product-compatible bridge. |
+| Deliver | Observer interjection is used idle or running and reports `injected` only after the native request succeeds. | `internal/products/grok/lane.go:251-260` already sends delivery through the observer without starting a prompt. |
+| Interrupt and close | Interrupt sends ACP cancel once. Close tears down observer, primary, leader, and its private socket directory in that order. | `lane.go:263-285` and `cmd/agent-sessions/grok_peer.go:151-183` prove the exact cleanup ownership. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only queue: **none**. | Grok exposes native interjection and all typed open controls; no limitation leaks outward. |
+| Size cap | **750 production / 700 test logical lines**, including ACP framing and leader bootstrap but excluding the shared wrapper host. | Grok's private leader is product-specific and must not escape its ledger or recreate daemon attachment/generation state. |
+| Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), and `cmd/agent-sessions/grok_peer.go` (1 / 213). Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as local-only relay assets. Total: **5 files / 2,033 lines**. | One resident wrapper replaces three layers of launcher/driver composition. |
+
+### 4.5 Qwen Code
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-qwen` owns one `qwen --acp` child and one ACP client for the session; peer mode uses that same resident wrapper instead of file-observer presence around a departed TUI launch. | `internal/products/qwen/lane.go:102-181` proves the headless ACP lifetime; `cmd/agent-sessions/qwen_peer.go` is the file-based peer path that becomes unnecessary. |
+| Open and resume | Initialize ACP v1, call `session/new` or capability-checked `session/resume`, verify the exact ID, then rename fresh sessions. Supported open fields are exactly `cwd`, `permission_mode`, and `arguments`. | `lane.go:117-178` contains the complete native transaction. `model` and `reasoning_effort` are declared unsupported because c5 exposes no typed ACP mapping for either. |
+| Run | Start `session/prompt`, accumulate session updates, and resolve the matching future to a terminal result. | `lane.go:199-263` and `client.go` prove the one ACP request/future. |
+| Tools | The wrapper serves loopback HTTP MCP and supplies that server in ACP `mcpServers`; Qwen's packaged stdio `native-entry` is removed. | c5 already injects an MCP server during `session/new` (`lane.go:134`); only its transport changes from daemon stdio connector to wrapper HTTP. |
+| Deliver | Always use the bounded wrapper FIFO and report `queued_for_next_turn`; the next run prepends the deliveries. | c5 declares `Steer` unsupported and exposes only ACP prompt plus cancel (`lane.go:265-279`), so claiming live injection would be false. |
+| Interrupt and close | Interrupt calls `craft/cancelPendingPrompt`; close cancels the ACP lifetime and reaps the child. | `lane.go:265-310` proves both calls. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: `model`, `reasoning_effort`. Wrapper-only state: the bounded delivery FIFO. | Unsupported native controls are declared at hello; no Qwen condition enters the daemon. |
+| Size cap | **520 production / 600 test logical lines**, including ACP framing but excluding the shared wrapper host. | The current driver/client split contains generic actor state that disappears; all retained Qwen protocol code remains charged here. |
+| Deletion inventory | Delete all `internal/products/qwen` (4 files / 1,031 lines), `internal/launcher/{qwen_peer.go,qwen_peer_test.go,qwen_test_helpers_test.go}` (3 / 1,412), `cmd/agent-sessions/{qwen_peer.go,qwen_peer_test.go}` (2 / 234), and `qwen/scripts/native-entry` (1 / 11). Rewrite `qwen/mcp.json` for wrapper HTTP. Total: **10 files / 2,688 lines**. | ACP becomes wrapper-owned; event-file identity, peer launcher state, and stdio daemon connector all die. |
+
+### 4.6 OpenCode and Kilo
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-opencode` or `asl-lane-kilo` owns one private authenticated `<product> serve` child and one HTTP/SSE client for exactly one session. | `internal/products/opencodefamily/server.go:74-148` already constructs the private loopback server; the wrapper removes the daemon pool and one key now equals one process. |
+| Open and resume | Create or fetch the exact session, apply title and permission rules, and retain model/agent/variant defaults. Both products support all five open fields. | `opencodefamily/lane.go:69-157` and `:168-187` prove cwd, permission, arguments, parsed model, and reasoning variant. |
+| Run | Call `session.promptAsync`, follow the exact event stream, then fetch the matching assistant result. | `lane.go:168-337` and `client.go` contain the existing bounded HTTP/SSE primitive. |
+| Tools | The retained OpenCode/Kilo JavaScript plugin becomes a private client of the wrapper and registers the common caller tool; it never opens a daemon connection. | The current plugins already own product SDK registration in `integrations/{opencode,kilo}/agent-sessions.mjs`; only their remote endpoint changes. |
+| Deliver | Always use the bounded wrapper FIFO and report `queued_for_next_turn`. | The native driver explicitly returns unsupported steer (`lane.go:259-261`), while the plugins' `promptAsync` delivery starts a native prompt (`integrations/opencode/agent-sessions.mjs:139-151`); neither is valid injection into the current or idle session. |
+| Interrupt and close | Interrupt calls the product abort endpoint and cancels event wait; close stops the private server process. | `lane.go:338-379` proves both product operations. |
+| Exception ledger | Section 1 code exceptions: **0** for both products. Declared unsupported open fields: **none**. Wrapper-only state: the bounded delivery FIFO. | Dialect differences remain local URL/status decoding; they never select a wire method. |
+| Size cap | Shared family wrapper **750 production / 700 test**, plus **60 / 80** per dialect leaf; includes HTTP/SSE and excludes only shared wrapper-host code. | OpenCode and Kilo differ only in dialect, permission mapping, and packaged plugin entrypoint; their native transport stays charged to the family. |
+| Deletion inventory | Delete all `internal/products/opencodefamily` (10 files / 2,776 lines), `internal/products/opencode` (2 / 93), and `internal/products/kilocode` (2 / 98): **14 files / 2,967 lines**. Rewrite, but do not duplicate or delete, the two retained integration packages and tests. | Server pooling, daemon driver maps, doctor probes, and leaf driver composition are replaced by two thin wrapper registrations over one family implementation. |
+
+### 4.7 Pi
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-pi` owns one `pi --mode rpc --extension <managed plugin>` JSONL child for exactly one session. | `internal/products/pifamily/lane.go:119-164` is the proven RPC launch and handshake. |
+| Open and resume | Apply the Pi argument/permission mapping, create with the daemon ID, or pass `--session <native_id>` and verify the returned state. Supported open fields are `cwd`, `permission_mode`, `reasoning_effort`, and `arguments`. | `pifamily/lane.go:76-173` and `quirks.go:113-134` prove those mappings. `model` is declared unsupported because the RPC adapter has no typed model primitive. |
+| Run | Send RPC `prompt`, observe terminal JSONL events, and read the final assistant text. | `pifamily/lane.go:179-300` and `rpc.go` are the existing primitive. |
+| Tools | The retained Pi extension registers the common caller tool and connects only to a private wrapper endpoint. | `integrations/pi/pifamily.mjs:106-151` already owns product tool registration; daemon presence code is replaced by local wrapper calls. |
+| Deliver | Running uses RPC `steer` and reports `injected`; idle uses the bounded wrapper FIFO. | `pifamily/lane.go:301-329` proves active steer. The current extension's idle `sendUserMessage` (`pifamily.mjs:157-174`) starts product work and therefore cannot implement idle injection. |
+| Interrupt and close | Interrupt sends RPC `abort`; close reaps the exact RPC process while leaving its transcript durable. | `pifamily/lane.go:331-379` proves both operations. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open field: `model`. Wrapper-only state: the bounded idle-delivery FIFO. | Pi's absence of typed model/idle append is declared, not emulated in the daemon. |
+| Size cap | Shared Pi-family wrapper **650 production / 700 test**, plus Pi leaf **60 / 80**; includes JSONL framing and excludes only shared wrapper-host code. | Product quirks are fixed launch/terminal data, not lifecycle branches; native framing is not an uncounted utility. |
+| Deletion inventory | Delete all `internal/products/pifamily` (8 files / 2,242 lines) and `internal/products/pi` (3 / 110): **11 files / 2,352 lines**. Rewrite `integrations/pi/pifamily.mjs` and its test as a local wrapper plugin; retain the package entrypoint/manifest. | The common driver and doctor disappear; the family wrapper owns the same native RPC with no daemon-facing interface. |
+
+### 4.8 OMP
+
+| Ledger item | Decision | Source-backed reason |
+| --- | --- | --- |
+| Resident wrapper | `asl-lane-omp` uses the same resident Pi-family JSONL wrapper with OMP's fixed equals-style extension/mode/session arguments and terminal quirks. | `internal/products/pifamily/quirks.go` and `rpc_lane_test.go:388-437` prove the dialect; shared code is counted once under Pi. |
+| Open and resume | Create or resume the exact OMP session and apply mapped permissions. Supported open fields are `cwd`, `permission_mode`, `reasoning_effort`, and `arguments`; `model` is declared unsupported. | OMP's leaf mapping in `internal/products/omp` supplies only permission and fixed quirks; no typed model primitive exists. |
+| Run | Send RPC `prompt`, accept OMP's declared terminal event, and read final assistant text through the family implementation. | `pifamily/rpc.go` contains the closed event decoder; OMP selects the terminal quirk rather than a second lifecycle. |
+| Tools | The retained OMP entrypoint loads the same local-only Pi-family plugin and common caller tool. | `integrations/omp/agent-sessions.mjs` is already a three-line family entrypoint. |
+| Deliver | Running uses RPC `steer` and reports `injected`; idle uses the bounded wrapper FIFO. | The same native distinction as Pi applies; OMP's native steer does its own framing, documented at `pifamily/lane.go:301-326`. |
+| Interrupt and close | RPC `abort` and exact process cleanup are identical to Pi. | No OMP-specific lifecycle callback is justified. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open field: `model`. Wrapper-only state: the bounded idle-delivery FIFO. | The dialect is launch/result data only; it never reaches the daemon or wire. |
+| Size cap | OMP leaf **60 production / 100 test** in addition to the shared Pi-family cap. | The leaf may declare quirks and permissions only. |
+| Deletion inventory | Delete all `internal/products/omp` (3 files / 135 lines); shared `pifamily` deletion is counted under Pi. Rewrite the retained OMP entrypoint/test/manifest around the local wrapper plugin. Total: **3 files / 135 lines**. | OMP becomes one immutable family-wrapper registration, not a driver package. |
+
+### 4.9 Wrapper migration ledger
+
+| Ledger | Files | Deleted lines | Decision |
+| --- | ---: | ---: | --- |
+| Product-specific rows in Sections 4.2-4.8 | 52 | 12,583 | Delete every non-native daemon driver and product-specific depart-on-exec launcher. |
+| Shared wrapper boundary in Section 4.1 | 18 | 2,532 | Delete the remaining launcher package and connector self-refresh; retain only rewritten CLI/wrapper entrypoints. |
+| Section 4 subtotal | **70** | **15,115** | Replacement wrapper and test lines are reported separately against the stated caps. |
+| Cumulative Sections 2-4 floor | **133** | **28,882** | This is the minimum physical deletion from c5b280d before Section 5 migration/conformance cleanup. |
