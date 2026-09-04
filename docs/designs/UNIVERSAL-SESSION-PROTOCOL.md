@@ -992,3 +992,124 @@ must remain net-negative after the kit is accounted separately.
 | Shared wrapper boundary in Section 4.1 | 18 | 2,532 | Delete the remaining launcher package and connector self-refresh; retain only rewritten CLI/wrapper entrypoints. |
 | Section 4 subtotal | **70** | **15,115** | Replacement wrapper and test lines are reported separately against the stated caps. |
 | Cumulative Sections 2-4 floor | **133** | **28,882** | This is the minimum physical deletion from c5b280d before Section 5 migration/conformance cleanup. |
+
+## 5. Migration and conformance
+
+### 5.1 State boundary
+
+The universal daemon reads only a new, initially empty table file; it never
+reads, migrates, backs up, or deletes the c5 catalog file, which remains wholly
+owner-controlled.
+
+### 5.2 Ordered implementation and runtime proof
+
+| Phase | Source deliverable | Gate | Runtime rule |
+| ---: | --- | --- | --- |
+| 0 | Signed document, closed schema, shared validator fixtures, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d. | No daemon or product runtime. |
+| 1 | Universal daemon, durable lane table, executable registry, reference caller, and `asl-lane-example` reference worker. | Daemon caps hold; unit/race/vet/build green; old actor/driver/control packages absent; contract learned nothing from adapters: **yes**. | Daemon integration runs only on `umka-dev1`, against an empty universal table. |
+| 2 | Go and JavaScript native kits, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both kits; DSH passes both cells in Section 5.5. | DSH runtime proof only on `umka-dev1`; no other product is enabled. |
+| 3 | Resident lane wrappers and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
+| 4 | CLI/caller kits, package projections, install/remove inventory, documentation, and federation. | Full unit/race/vet/build/package gates; federation assertions follow Section 5.7; all 18 cells pass in one clean candidate run. | The sole full runtime matrix runs on `umka-dev1`; no install elsewhere. |
+| 5 | Release candidate. | Universal state starts empty; no old protocol endpoint, actor, driver, launcher process, socket, or compatibility package remains. | Production installation requires owner authorization after the clean `umka-dev1` evidence is sealed. |
+
+Source compilation and deterministic unit tests may run in isolated clones on
+other hosts. Starting the daemon, a wrapper, a product, a TUI, or a conformance
+cell is runtime testing and is permitted only on `umka-dev1`.
+
+### 5.3 Reference sides
+
+| Reference | Closed behavior |
+| --- | --- |
+| Reference worker | PATH-resolved `asl-lane-example` with an arbitrary registry product, executable, and optional immutable fixed argv; worker hello declares all five open fields, open returns a deterministic native ID, run can echo/block/fail, deliver can inject/reject, interrupt releases a blocked run, close exits, and outbound tools are scriptable. It imports no product package. |
+| Reference caller | One peer connection plus the shared caller kit. It can issue every client-to-daemon method, deliberately abandon reply sinks, supersede itself, inspect `last_turn`, and script delivery responses. It contains no product condition. |
+| Worker invocation | The worker suite accepts only `product`, `executable`, and immutable `fixed_argv`; every vendor and the reference executable run the identical trace. |
+| Caller invocation | The caller suite invokes the product's installed Agent Sessions tool, not a private test API; every product runs the identical trace against the reference worker. |
+
+### 5.4 Vendor acceptance traces
+
+| Trace | Caller against reference worker |
+| --- | --- |
+| C1 | Peer hello, exact session identity, visibility-filtered list, and full tool schema. |
+| C2 | Describe without open or residue; fresh spawn with identity, groups, all declared open fields, and ordered arguments. |
+| C3 | Local-kit start returns a local ID while one wire `turn.run` remains outstanding; status is running and bounded wait timeout does not cancel it. |
+| C4 | Wait returns the terminal; an abandoned caller sink still yields the same `last_turn` through filtered list. |
+| C5 | Send resolves ID/name/group, deduplicates, and returns injected, queued, rejected, ambiguous, and no-receipt forms exactly. |
+| C6 | Concurrent interrupts coalesce to one worker interrupt and idle interrupt maps `not_running`. |
+| C7 | Explicit close during a run orders terminal-if-observed before closed; forced supervisor close invents no terminal. |
+| C8 | Peer EOF reconnects; same-ID hello supersedes the displaced identity terminally with no flap. |
+| C9 | Offline resume replays stored open byte-for-byte; closed/name-taken/already-connected/not-connected errors match Section 1.4; cleanup leaves no connection, process, token, or pending call. |
+
+| Trace | Worker against reference caller |
+| --- | --- |
+| W1 | Describe launch scrubs the token, sends one valid hello after app-ready, never opens, and exits on EOF without reconnect. |
+| W2 | Fresh and resumed open return the exact native ID; resume mismatch, unsupported field, duplicate native ID, exit, and timeout fail truthfully. |
+| W3 | Outbound tools are `not_committed` before open commit and succeed on the same socket after commit. |
+| W4 | Completed, interrupted, failed, and empty-output runs produce the exact terminal shapes; a second run is busy. |
+| W5 | Reader remains full-duplex: delivery and an outbound tool complete while run is blocked; delivery receipts are exact. |
+| W6 | Concurrent interrupt and close invoke one native interrupt; terminal-before-interrupt invokes none. |
+| W7 | Close claims the slot before product code, rejects later delivery as closing, writes the one run response from its run owner, writes the close response, closes the socket, then resolves `closed`. |
+| W8 | Control EOF cancels every callback, calls native close once, fails pending calls once, and exits; later explicit resume creates one new worker process. |
+| W9 | Malformed, unknown, oversized, duplicate-member, and out-of-range-ID frames follow Section 1.1; product callbacks never see rejected frames and cleanup leaves zero residue. |
+
+### 5.5 Eighteen-cell matrix
+
+| Product | Caller cell against `asl-lane-example` | Worker cell against reference caller |
+| --- | --- | --- |
+| DSH | `C-DSH`: C1-C9 through the unified DSH plugin's registered tool. | `W-DSH`: W1-W9 against fixed `dsh --profile agent-sessions`. |
+| Claude | `C-Claude`: C1-C9 through the product-spawned peer MCP entry. | `W-Claude`: W1-W9 against `asl-lane-claude`. |
+| Codex | `C-Codex`: C1-C9 through the product-spawned peer MCP entry. | `W-Codex`: W1-W9 against `asl-lane-codex`. |
+| Grok | `C-Grok`: C1-C9 through the product-spawned peer MCP entry. | `W-Grok`: W1-W9 against `asl-lane-grok`. |
+| Qwen | `C-Qwen`: C1-C9 through the product-spawned peer MCP entry. | `W-Qwen`: W1-W9 against `asl-lane-qwen`. |
+| OpenCode | `C-OpenCode`: C1-C9 through the JavaScript plugin in peer mode. | `W-OpenCode`: W1-W9 against `asl-lane-opencode`. |
+| Kilo | `C-Kilo`: C1-C9 through the JavaScript plugin in peer mode. | `W-Kilo`: W1-W9 against `asl-lane-kilo`. |
+| Pi | `C-Pi`: C1-C9 through the Pi-family plugin in peer mode. | `W-Pi`: W1-W9 against `asl-lane-pi`. |
+| OMP | `C-OMP`: C1-C9 through the Pi-family plugin in peer mode. | `W-OMP`: W1-W9 against `asl-lane-omp`. |
+
+All eighteen cells are required. A failure may change only the failing product
+wrapper/plugin or a genuinely universal kit defect reproduced by
+`asl-lane-example`; it may not add a product branch, capability exception, or
+alternate daemon path. Every cell records **contract learned nothing from the
+adapter: yes/no**, and any `no` fails the candidate.
+
+### 5.6 Upstream native-worker feasibility
+
+The target for OpenCode, Kilo, Pi, and OMP is a plugin-native worker inside the
+product's own headless start, with no Go wrapper. The deciding current product
+facts are:
+
+| Product | Session-level cwd/model fact |
+| --- | --- |
+| OpenCode | **Present:** its plugin SDK accepts `directory` on session operations and a model object on prompt operations, so both values can arrive after the process and plugin start. |
+| Kilo | **Present:** its plugin SDK accepts `directory` on session operations and carries the active prompt model through its session APIs, so process start need not fix either value. |
+| Pi | **Absent today:** the extension context exposes the process cwd and session manager, but the integrated public surface has no session-level cwd or model setter; both are process flags. |
+| OMP | **Absent today:** the shared extension context likewise exposes process-selected cwd/model and no session-level setter; both are process flags. |
+
+These facts affect only when a vendor can replace its wrapper with the native
+kit. They do not change Section 1, add daemon capabilities, or excuse a wrapper
+from the same conformance matrix.
+
+### 5.7 Federation gate
+
+| Gate | Assertion |
+| --- | --- |
+| Identity | Remote summaries carry host-qualified session IDs; `host` is informational and local IDs never cross unqualified. |
+| Visibility | The authoritative daemon filters by groups; the receiving daemon trusts that assertion and never persists a remote row. |
+| Messaging | One host-qualified message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. |
+| Control, if owner accepts Section 2.5 | One host-qualified resume/run/interrupt/close request is forwarded by the capped one-hop function; new spawn/describe stay local, caller loss removes only the reply sink, and the authoritative daemon alone stores `last_turn`. |
+| Control, if owner vetoes Section 2.5 | Every remote lane control request is `unknown_session`; no other section, schema, matrix cell, or product changes. |
+| Reconnect | A disconnected host removes transient remote summaries and fails pending one-hop calls once; reconnect republishes a fresh snapshot and never replays a request. |
+
+### 5.8 Test rehoming
+
+| Deleted test family | Universal owner |
+| --- | --- |
+| Daemon lane actors, registries, projections, collectors, archives, timers, product dispatch, and argv reparse | Router/table tests drive the eleven methods over a real connection and assert only rows, current pointers, pending calls, and supervisor ownership. |
+| Presence, messaging, federation, roster, names, and notices | Daemon visibility/resolution tests plus the federation gate; no test constructs a private actor or product driver. |
+| Product lane drivers and peer launchers | Each Section 4 wrapper test drives its six callbacks and exact native transcript; peer exec-plan tests stop at product config and never claim socket ownership. |
+| Go/JavaScript lifecycle duplication | The one 14-row fixture table runs unchanged through both native kits and the reference worker. |
+| Connector and plugin tool tests | Caller-kit conformance C1-C9 through the installed peer MCP/plugin entry, with product-private transport tested only at its local boundary. |
+| Packaging and release projections | Package tests assert one schema/kit projection, correct peer and lane entry forms, no deleted compatibility artifact, and byte-identical installed assets. |
+
+Rehoming is mandatory proof, not permission to preserve a deleted abstraction
+under a new test helper. Every deleted test is named in the implementation
+ledger beside its replacement row.
