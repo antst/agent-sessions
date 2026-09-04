@@ -10,16 +10,34 @@ and performs resume, prompting, interruption, and archive behavior through its o
 | Claude Code | `claude-peer` | `claude-peer-lane` | minimum 2.1.252 |
 | Grok Build | `grok-peer` | `grok-peer-lane` | minimum 1.0.5; accepted on 1.0.13 |
 | Qwen Code | `qwen-peer` | `qwen-peer-lane` | minimum 0.22.0; validated on 0.22.3 and 0.23.0 |
-| OpenCode | `opencode-peer` | `opencode-peer-lane` | exact 1.18.25 |
-| Kilo Code | `kilo-peer` | `kilo-peer-lane` | exact 7.5.6 |
-| Pi | `pi-peer` | `pi-peer-lane` | exact 0.84.4 |
-| Oh My Pi | `omp-peer` | `omp-peer-lane` | exact 18.0.11 |
+| OpenCode | `opencode-peer` | `opencode-peer-lane` | minimum 1.18.25 |
+| Kilo Code | `kilo-peer` | `kilo-peer-lane` | minimum 7.5.6 |
+| Pi | `pi-peer` | `pi-peer-lane` | minimum 0.84.4 |
+| Oh My Pi | `omp-peer` | `omp-peer-lane` | minimum 18.0.11 |
 | DeepSeek Harness | — | `dsh-peer-lane` | exact 0.1.2-rc.1 |
 
 The installer detects available products independently. A missing product does not prevent the
 other integrations from being installed.
 
 macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.
+
+`TestedVersion` is the admission floor for a minimum policy. Documenting a newer validated version does not raise it.
+
+## Native integration packages
+
+Manual package management uses each product's own supported surface. Replace `VERSION` with the Agent Sessions release to pin:
+
+| Product | Install | Remove |
+| --- | --- | --- |
+| OpenCode 1.18.25 | `opencode plugin @agent-sessions/opencode@VERSION --global` | This baseline has no plugin-removal command. Remove only the exact `@agent-sessions/opencode@VERSION` entry from the global native `plugin` array. |
+| Kilo 7.5.6 | `kilo plugin @agent-sessions/kilo@VERSION --global` | This baseline has no plugin-removal command. Remove only the exact `@agent-sessions/kilo@VERSION` entry from the global native `plugin` array. |
+| Pi 0.84.4 | `pi install npm:@agent-sessions/pi@VERSION` | `pi remove npm:@agent-sessions/pi` |
+| OMP 18.0.11 | `omp plugin install @agent-sessions/omp@VERSION` | `omp plugin uninstall @agent-sessions/omp` |
+
+OpenCode and Kilo own their plugin caches; removing a configuration entry does not authorize deleting them. These operator-facing forms do not describe the release installer's transactional registration.
+
+Grok imports MCP server definitions from `~/.claude.json` by default, as described in its [MCP server documentation](https://docs.x.ai/build/features/mcp-servers). An [open field report](https://github.com/xai-org/grok-build-plugin-cc/issues/38) for Grok 1.0.13 records a sibling startup failure closing MCP servers that had already connected.
+Inspect or isolate imported siblings rather than interpreting an Agent Sessions connector EOF as durable daemon state.
 
 ## Resume selectors
 
@@ -90,4 +108,4 @@ the requested tool action.
 
 Adapters do not reproduce a product store or model its lifecycle. Where a native capability is
 absent, the wrapper either supplies the smallest proven translation or rejects the operation
-truthfully.
+truthfully. Native clients share the [presence protocol](PROTOCOL.md).

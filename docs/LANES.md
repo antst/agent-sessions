@@ -103,5 +103,5 @@ groups must intersect the recorded lane groups, and the product must confirm the
 new owner is in memory only; the immutable row keeps historical parentage. A lane genuinely live
 under another connected parent cannot be taken over or opened twice.
 
-See [Groups](GROUPS.md) for the full visibility rules and [Products](PRODUCTS.md) for native
-surfaces.
+See [Groups](GROUPS.md) for the full visibility rules, [Products](PRODUCTS.md) for native surfaces,
+and the [native presence protocol](PROTOCOL.md) for the shared wire contract.

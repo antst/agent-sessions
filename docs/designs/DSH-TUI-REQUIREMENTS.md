@@ -27,7 +27,7 @@ the TUI must supply the interactive peer lifecycle without replacing DSH's sessi
 
 ## Native protocol responsibilities
 
-The TUI integration speaks [Native Agent Sessions Presence Protocol v1](../specs/NATIVE-PEER-PROTOCOL.md)
+The TUI integration speaks [Native Agent Sessions Presence Protocol v1](../PROTOCOL.md)
 directly over `presence.sock`:
 
 - `session.hello` reports DSH's native ID, stored title, launch groups, product `dsh`, and live info;
