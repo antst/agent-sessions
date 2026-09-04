@@ -61,7 +61,12 @@ func ClassifyError(class, cause error) error {
 }
 
 func BusyError(uuid string, cause error) error { return classifiedError{ErrBusy, cause, uuid, ""} }
-func ProductError(p string, e error) error     { return classifiedError{ErrProductUnavailable, e, "", p} }
+func ProductError(product string, err error) error {
+	if !errors.Is(err, ErrProductUnavailable) && !errors.Is(err, productruntime.ErrUnavailable) && !errors.Is(err, productruntime.ErrIncompatible) {
+		return err
+	}
+	return classifiedError{ErrProductUnavailable, err, "", product}
+}
 
 type Report struct {
 	UUID         string            `json:"uuid"`
@@ -339,12 +344,10 @@ func validStringError(rpcErr *RPCError, message, key string, validate func(strin
 }
 
 func errorStringData(raw json.RawMessage, key string) (string, bool) {
-	var data map[string]string
-	if DecodeStrict(raw, &data) != nil || len(data) != 1 {
-		return "", false
-	}
+	data := map[string]string{}
+	err := DecodeStrict(raw, &data)
 	value, ok := data[key]
-	return value, ok
+	return value, err == nil && len(data) == 1 && ok
 }
 
 func validNotPermittedData(raw json.RawMessage) bool {

@@ -280,7 +280,11 @@ func TestLivePresenceNewerSameUUIDConnectionReplacesOlderWithoutRemovingIt(t *te
 	defer cancel()
 	joined := make(chan livepresence.Report, 2)
 	left := make(chan livepresence.Report, 2)
-	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) { joined <- report }, func(report livepresence.Report) { left <- report }, nil)
+	var server *livePresenceServer
+	server, err := startLivePresenceServer(ctx, t.TempDir(), func(report livepresence.Report) { joined <- report }, func(livepresence.Report) {}, nil, func(report livepresence.Report) {
+		_, _ = server.Call(context.Background(), "absent", "post-leave", "message.deliver", nil)
+		left <- report
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +1003,13 @@ func TestParentPresenceEOFArchivesNonPersistentAndReleasesPersistentLane(t *test
 	}
 
 	coordinator.leaveLiveSession(runtime, parentA)
+	coordinator.joinLiveSession(runtime, parentA)
+	coordinator.retireDepartedLiveSession(runtime, parentA)
+	if idle.state != "idle" || len(driver.archives) != 0 {
+		t.Fatalf("rejoined parent lost lane: actor=%+v archives=%+v", idle, driver.archives)
+	}
 	coordinator.leaveLiveSession(runtime, parentA)
+	coordinator.retireDepartedLiveSession(runtime, parentA)
 	if idle.state != "archived" || len(driver.archives) != 1 || driver.archives[0].NativeSessionID != idle.nativeID {
 		t.Fatalf("nonpersistent parent exit actor=%+v archives=%+v", idle, driver.archives)
 	}

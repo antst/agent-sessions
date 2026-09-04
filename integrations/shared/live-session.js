@@ -265,10 +265,7 @@ function presenceSocket(env) {
   return root ? path.join(root, "run", "presence.sock") : "";
 }
 
-function ownDataKeys(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value), keys = Reflect.ownKeys(value); return (prototype === Object.prototype || prototype === null) && keys.every((key) => { const descriptor = Object.getOwnPropertyDescriptor(value, key); return typeof key === "string" && descriptor?.enumerable === true && Object.hasOwn(descriptor, "value"); }) ? keys : false;
-}
+function ownDataKeys(value) { if (!value || typeof value !== "object" || Array.isArray(value)) return false; const prototype = Object.getPrototypeOf(value), keys = Reflect.ownKeys(value); return (prototype === Object.prototype || prototype === null) && keys.every((key) => { const descriptor = Object.getOwnPropertyDescriptor(value, key); return typeof key === "string" && descriptor?.enumerable === true && Object.hasOwn(descriptor, "value"); }) ? keys : false; }
 function exactKeys(value, allowed) { const keys = ownDataKeys(value); return !!keys && keys.every((key) => allowed.includes(key)); }
 function stringMap(value) {
   return exactKeys(value, Object.keys(value ?? {})) && Object.values(value).every((item) => typeof item === "string");
@@ -286,22 +283,9 @@ function validWireGroup(value) { if (typeof value !== "string" || !value.startsW
 function validErrorStringData(value, key, validate = text) { return exactKeys(value.data, [key]) && validate(value.data[key]); }
 function validJSON(value, stack = new Set()) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true; if (typeof value === "number") return Number.isFinite(value); if (typeof value !== "object" || stack.has(value)) return false;
-  let keys;
-  if (Array.isArray(value)) {
-    keys = Object.keys(value);
-    if (Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== value.length + 1 || keys.length !== value.length || !keys.every((key, index) => key === String(index) && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key), "value"))) return false;
-  } else if (!(keys = ownDataKeys(value))) return false;
-  stack.add(value); const valid = keys.every((key) => validJSON(value[key], stack)); stack.delete(value); return valid;
-}
-function validError(value) {
-  if (!exactKeys(value, ["code", "message", "data"]) || typeof value.message !== "string" || value.message.trim() === "") return false;
-  if (value.code === -32006) return !("data" in value) || validJSON(value.data); if (value.code === -32602) return value.message === "Invalid params" && validErrorStringData(value, "method");
-  if (value.code === -32001) return value.message === "Unknown session or target" && validErrorStringData(value, "target"); if (value.code === -32002) return value.message === "Session busy" && validErrorStringData(value, "uuid", (item) => boundedWireText(item, 128));
-  if (value.code === -32004) return value.message === "Unsupported protocol version" && exactKeys(value.data, ["supported", "received"]) && value.data.supported === 1 && Number.isSafeInteger(value.data.received); if (value.code === -32005) return value.message === "Product not launchable" && validErrorStringData(value, "product", validWireProduct);
-  if (value.code !== -32003 || value.message !== "Operation not permitted") return false;
-  return validErrorStringData(value, "method") || validErrorStringData(value, "group", validWireGroup) ||
-    validErrorStringData(value, "reason", (item) => item === "no running turn" || item === "steer unsupported");
-}
+  let keys; if (Array.isArray(value)) { keys = Object.keys(value); if (Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== value.length + 1 || keys.length !== value.length || !keys.every((key, index) => key === String(index) && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key), "value"))) return false; } else if (!(keys = ownDataKeys(value))) return false;
+  stack.add(value); const valid = keys.every((key) => validJSON(value[key], stack)); stack.delete(value); return valid; }
+function validError(value) { if (!exactKeys(value, ["code", "message", "data"]) || typeof value.message !== "string" || value.message.trim() === "") return false; if (value.code === -32006) return !("data" in value) || validJSON(value.data); if (value.code === -32602) return value.message === "Invalid params" && validErrorStringData(value, "method"); if (value.code === -32001) return value.message === "Unknown session or target" && validErrorStringData(value, "target"); if (value.code === -32002) return value.message === "Session busy" && validErrorStringData(value, "uuid", (item) => boundedWireText(item, 128)); if (value.code === -32004) return value.message === "Unsupported protocol version" && exactKeys(value.data, ["supported", "received"]) && value.data.supported === 1 && Number.isSafeInteger(value.data.received); if (value.code === -32005) return value.message === "Product not launchable" && validErrorStringData(value, "product", validWireProduct); if (value.code !== -32003 || value.message !== "Operation not permitted") return false; return validErrorStringData(value, "method") || validErrorStringData(value, "group", validWireGroup) || validErrorStringData(value, "reason", (item) => item === "no running turn" || item === "steer unsupported"); }
 function wireError(value) {
   if (validError(value)) return value;
   const message = String(value?.message ?? value ?? "Product operation failed");
@@ -336,11 +320,7 @@ function validLaneSessionRequest(method, params) {
   }
   return exactKeys(params, []) && Object.keys(params).length === 0;
 }
-function validLaneSessionResult(method, result) {
-  if (method === "lane.turn.start") return exactKeys(result, ["native_message_id"]) && text(result.native_message_id);
-  if (method === "lane.turn.wait") return exactKeys(result, ["outcome", "result", "reason"]) && ["completed", "interrupted", "failed"].includes(result.outcome) && typeof result.result === "string" && validJSON(result.reason);
-  return (method === "lane.turn.interrupt" || method === "lane.session.archive") && exactKeys(result, []);
-}
+function validLaneSessionResult(method, result) { if (method === "lane.turn.start") return exactKeys(result, ["native_message_id"]) && text(result.native_message_id); if (method === "lane.turn.wait") return exactKeys(result, ["outcome", "result", "reason"]) && ["completed", "interrupted", "failed"].includes(result.outcome) && typeof result.result === "string" && validJSON(result.reason); return (method === "lane.turn.interrupt" || method === "lane.session.archive") && exactKeys(result, []); }
 function renderDelivery(payload) {
   if (!payload || !validDelivery({ message_id: payload.messageID, from: payload.from, body: payload.body })) throw new Error("live message delivery is invalid");
   const from = payload.from.name || payload.from.uuid;

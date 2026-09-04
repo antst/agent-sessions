@@ -379,6 +379,7 @@ func (c *hostCoordinator) run(ctx context.Context) error {
 		func(callCtx context.Context, report livepresence.Report, requestID, method string, params json.RawMessage) (json.RawMessage, error) {
 			return c.handleLiveSessionCall(callCtx, runtime, report, requestID, method, params)
 		},
+		func(report livepresence.Report) { c.retireDepartedLiveSession(runtime, report) },
 	)
 	if err != nil {
 		return fmt.Errorf("start live session presence: %w", err)
