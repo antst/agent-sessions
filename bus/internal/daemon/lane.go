@@ -1,0 +1,202 @@
+package daemon
+
+import (
+	"syscall"
+	"time"
+
+	"github.com/antst/agent-sessions/bus/internal/protocol"
+)
+
+const closeBound = 10 * time.Second
+
+func (s *session) startLane(start *launch, helloFrame protocol.Frame, hello protocol.HelloDescription) {
+	s.launch, s.identity, s.owned = start, start.entry, 1
+	unsupportedField := unsupported(start.entry.row.Open, hello.SupportedOpenFields)
+	if start.describe || unsupportedField != "" {
+		body, _ := protocol.ResultBytes(helloFrame.ID, helloFrame.Method, struct{}{})
+		s.wire.Finish(body, supersedeWriteBound)
+		result := answer{value: &hello}
+		if unsupportedField != "" {
+			result = answer{code: protocol.UnsupportedOpen}
+		}
+		s.launchResult, s.stopping = &result, true
+		return
+	}
+	s.result(helloFrame, struct{}{})
+	s.beginOpen()
+}
+
+func (s *session) beginOpen() {
+	s.nextOut++
+	value := s.launch.entry.row
+	resume := ""
+	if !s.launch.fresh {
+		resume = unqualify(value.SessionID)
+	}
+	request := protocol.OpenRequest{
+		Name: value.Name, Groups: append([]string(nil), value.Groups...),
+		ResumeSessionID: resume, Open: value.Open,
+	}
+	body, err := protocol.RequestBytes(s.nextOut, "session.open", request)
+	if err != nil || !s.wire.Send(body) {
+		s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(s.child, "worker closed before open")})
+		s.hardStop()
+		return
+	}
+	s.openID = s.nextOut
+}
+
+func (s *session) finishOpen(frame protocol.Frame) {
+	s.openID = 0
+	if frame.Error != nil {
+		s.abortLaunch(errorAnswer(frame.Error))
+		s.orderlyStop()
+		return
+	}
+	decoded, err := protocol.DecodeResult("session.open", frame.Result)
+	if err != nil {
+		s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(s.child, "invalid open result")})
+		s.hardStop()
+		return
+	}
+	opened := decoded.(*protocol.OpenResult)
+	item := s.launch.entry
+	if !validPart(opened.SessionID) || !s.launch.fresh && opened.SessionID != unqualify(item.row.SessionID) {
+		s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(s.child, "worker returned an invalid session id")})
+		s.orderlyStop()
+		return
+	}
+	if s.launch.fresh {
+		item.row.SessionID = qualify(opened.SessionID, s.daemon.host)
+		if !s.daemon.directory.reserveID(item, item.row.SessionID) {
+			s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(s.child, "session id already exists")})
+			s.orderlyStop()
+			return
+		}
+		persisted := cloneRow(item.row)
+		persisted.CreatedAt = time.Now().UTC()
+		if err = s.daemon.table.write(persisted); err != nil {
+			s.abortLaunch(answer{code: protocol.Internal})
+			s.orderlyStop()
+			return
+		}
+		if !s.daemon.directory.publish(s.launch, s, persisted.CreatedAt) {
+			_ = s.daemon.table.delete(item.row.SessionID)
+			s.abortLaunch(answer{code: protocol.Internal})
+			s.orderlyStop()
+			return
+		}
+	} else if !s.daemon.directory.publish(s.launch, s, time.Time{}) {
+		s.abortLaunch(answer{code: protocol.AlreadyConnected})
+		s.orderlyStop()
+		return
+	}
+	s.identity, s.committed = item, true
+	s.launch.timer.Stop()
+	s.launch.reply <- answer{value: &protocol.LaneSpawnResult{SessionID: item.row.SessionID}}
+}
+
+func (s *session) beginClose(request routedRequest) {
+	s.closeCall = &request
+	input := request.params.(*protocol.SessionCloseRequest)
+	s.forget = input.Forget
+	s.nextOut++
+	body, err := protocol.RequestBytes(s.nextOut, "session.close", input)
+	if err != nil || !s.wire.Send(body) {
+		s.hardStop()
+		return
+	}
+	s.daemon.directory.admitted(s.identity, request.method)
+	s.pending[s.nextOut] = request
+	s.closeTimer = time.NewTimer(closeBound)
+}
+
+func (s *session) finishCloseResponse(frame protocol.Frame) {
+	if frame.Error != nil && frame.Error.Code == protocol.Internal {
+		s.closeAnswer = answer{code: protocol.Internal}
+	}
+	s.orderlyStop()
+}
+
+func (s *session) handleProcess(event processEvent) {
+	if event.launch != s.launch {
+		return
+	}
+	if event.child != nil && !event.exited {
+		s.child = event.child
+		if s.stopSignal != 0 {
+			s.child.Signal(s.stopSignal)
+		}
+		return
+	}
+	if s.processExited {
+		return
+	}
+	s.processExited = true
+	if s.owned > 0 {
+		s.owned--
+	}
+	if s.committed && !s.closed && s.closeTimer == nil {
+		s.closeTimer = time.NewTimer(closeBound)
+	}
+	if event.err != nil && s.launchResult == nil && !s.committed {
+		s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(nil, event.err.Error())})
+	}
+}
+
+func (s *session) abortLaunch(value answer) {
+	if s.launchResult != nil || s.committed {
+		return
+	}
+	s.launchResult = &value
+}
+
+func (s *session) orderlyStop() {
+	s.recordStop(syscall.SIGTERM)
+	if !s.processExited && s.closeTimer == nil {
+		s.closeTimer = time.NewTimer(closeBound)
+	}
+}
+
+func (s *session) hardStop() {
+	s.recordStop(syscall.SIGKILL)
+}
+
+func (s *session) recordStop(signal syscall.Signal) {
+	s.stopping = true
+	if s.stopSignal == 0 || signal == syscall.SIGKILL {
+		s.stopSignal = signal
+	}
+	s.wire.Close()
+	if s.child != nil {
+		s.child.Signal(s.stopSignal)
+	}
+}
+
+func (s *session) finishLane() {
+	s.launch.timer.Stop()
+	if s.closeTimer != nil {
+		s.closeTimer.Stop()
+	}
+	if !s.committed {
+		s.daemon.directory.releaseLaunch(s.launch)
+	}
+	if s.launchResult != nil {
+		s.launch.reply <- *s.launchResult
+	}
+	if s.committed {
+		if s.forget {
+			if err := s.daemon.table.delete(s.identity.row.SessionID); err != nil {
+				s.closeAnswer = answer{code: protocol.Internal}
+				s.forget = false
+			}
+		}
+		s.daemon.directory.offline(s.identity, s, s.forget)
+	}
+	if s.closeCall != nil {
+		if s.closeAnswer.code == 0 && s.closeAnswer.value == nil {
+			s.closeAnswer.value = struct{}{}
+		}
+		s.closeCall.reply <- s.closeAnswer
+	}
+}

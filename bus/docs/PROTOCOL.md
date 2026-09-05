@@ -128,8 +128,8 @@ The daemon sends the displaced connection the ID-bearing request
 canonical identity. The displaced client marks that identity terminal before its
 best-effort `{}` response, closes, and never reconnects that identity. The new
 connection is already current, so every request from the displaced connection,
-including another hello, is rejected. After that map swap and outside
-`mapsMutex`, the daemon writes the supersession request once with
+including another hello, is rejected. After the directory replaces the exact
+entry and releases its mutex, the old connection's owner writes the supersession request once with
 `supersedeWriteBound = 1s`, closes the old local socket, and never waits for an
 acknowledgement. A writable socket returns immediately; the bound only stops a
 dead client from blocking this path. If a displaced client races one final reconnect, that new claim
@@ -225,17 +225,16 @@ Unsupported supplied
 open fields, an invalid session ID, exit, or timeout fail truthfully and do not
 publish a live session.
 
-One transaction-local mutex chooses exactly one open-result, exit, timeout, or
-shutdown outcome. Resume also holds its session-ID row lock. A fresh spawn has
-no ID, so its composed name is reserved until the product returns an ID; the
-commit then takes that ID's row lock. The launch token, not a speculative ID,
-keys the provisional worker until open returns. Resume requires the returned ID
+One lane owner processes the open result, exit, timeout, and shutdown in event
+order, so exactly one outcome finishes the request. A fresh spawn has no ID, so
+its composed name is reserved until the product returns an ID. The launch
+token, not a speculative ID, keys the provisional worker until open returns.
+Resume requires the returned ID
 to equal `resume_session_id`. A fresh open returning an ID already held by an
 existing row fails with `spawn_failed` and the exact text `session id already
-exists`. The durable commit runs in the open-response completion hook before
-the reader dispatches the worker's next request. An exit drains the closed
-socket first, so an already-written valid open response can commit; EOF first
-fails the spawn.
+exists`. The lane owner commits while handling the open response, before it
+handles the next inbox frame. An exit drains the closed socket first, so an
+already-written valid open response can commit; EOF first fails the spawn.
 
 #### `session.open`
 
@@ -324,11 +323,11 @@ this version has none.
 - A rowless describe token can authenticate hello but can never authorize
   `session.open`; EOF after describe is the worker's normal exit.
 - Worker-originated session methods before the session ID commit are rejected.
-  The successful open-response completion hook commits the row before the
-  reader advances to the next worker frame; commit failure closes the
-  provisional connection. The kit adds no buffer, gate, or commit wait. After
-  commit, the same connection is the lane's presence and uses those ordinary
-  methods; there is no tool frame.
+  The lane owner commits while handling the successful open response, before
+  handling the next inbox frame; commit failure closes the provisional
+  connection. The kit adds no additional commit buffer, gate, or
+  acknowledgement. After commit, the same connection is the lane's presence
+  and uses those ordinary methods; there is no tool frame.
 - A second `turn.run` while one is outstanding returns busy. There is one
   running boolean in a product kit and one pending RPC in the daemon.
 - `lane.spawn` with `resume_session_id` naming a connected row returns
@@ -345,11 +344,11 @@ this version has none.
 - Composed lane names and recursive private groups record creation ancestry.
   A later peer or parent rename does not cascade into existing child names or
   group paths, and attached lane titles stay fixed.
-- The session-ID row lock serializes resume and close. A waiter rechecks the row
-  after acquiring it: a second resume sees `already_connected`, and resume
-  cannot exec until synchronous supervisor cleanup of the prior worker has
-  finished. Fresh spawn reserves its composed name until its product ID is
-  known, then commits under that ID's row lock.
+- A lane row is claimed for resume, close, or forget until that operation's
+  cleanup finishes. New run, interrupt, close, resume, or forget requests for a
+  claimed row return `busy`; nothing waits on a row. Delivery to a claimed but
+  still attached lane proceeds. Fresh spawn reserves its composed name until
+  its product ID is known.
 - Resume acquires product-side exclusive ownership before touching the existing
   native session and holds it through cleanup. Fresh open does the same before
   create when the wrapper chooses the ID; when only the product can allocate the
@@ -442,7 +441,7 @@ and closes the connection without writing one.
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
-| `-32003` | `busy` | `turn.run` when the target already has an outstanding run, or any routed call when that worker already has 256 unanswered calls. A delivery at that bound returns a rejected receipt with reason `busy`. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run; a worker loop dequeuing a 257th unanswered call; a full 256-event connection inbox; or a new run, interrupt, close, resume, or forget for a claimed lane row. A delivery rejected by either bound has reason `busy`; delivery to a claimed but attached lane is still admitted. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when the product token is invalid or its binary is absent from the target host's service PATH. |
@@ -450,11 +449,11 @@ and closes the connection without writing one.
 | `-32009` | `spawn_failed` | `lane.describe` or `lane.spawn` when exec, hello, open, or native creation fails before commit. |
 | `-32010` | `timeout` | `lane.describe` or `lane.spawn` when its one spawn/open transaction bound expires. |
 | `-32011` | `not_committed` | Any worker-originated client-to-daemon session method received after hello but before product-session-ID commit. |
-| `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |
+| `-32012` | `superseded` | Any request from a peer connection displaced by exact directory replacement. |
 | `-32013` | `name_taken` | New `lane.spawn` when another row on that host already holds the requested composed name. |
 | `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any canonical identity input whose host part is neither local nor connected. |
 | `-32015` | `forward_lost` | A one-hop federated request whose transport ends before its response; the request may or may not have been applied on the target host and is never retried. |
-| `-32603` | `internal` | A durable-table write fails after in-memory cleanup, or a worker interrupt/close callback fails; it has no other use. |
+| `-32603` | `internal` | A durable row-file operation fails after directory cleanup, or a worker interrupt/close callback fails; it has no other use. |
 
 ### 3.1 Product contract
 
