@@ -9,40 +9,60 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const stderrLimit = 64 << 10
 
+type tailBuffer struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (b *tailBuffer) Write(value []byte) (int, error) {
+	b.mu.Lock()
+	b.data = append(b.data, value...)
+	if len(b.data) > stderrLimit {
+		b.data = append([]byte(nil), b.data[len(b.data)-stderrLimit:]...)
+	}
+	b.mu.Unlock()
+	return len(value), nil
+}
+
+func (b *tailBuffer) bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.data...)
+}
+
 type Process struct {
-	cmd    *exec.Cmd
-	done   chan struct{}
-	mu     sync.Mutex
-	stderr []string
-	exit   int
+	cmd  *exec.Cmd
+	done chan struct{}
+	tail *tailBuffer
+	mu   sync.Mutex
+	exit int
+	stop sync.Once
 }
 
 func Start(path string, environment []string) (*Process, error) {
-	stderr, err := os.CreateTemp("", ".agentbus-stderr-*")
+	read, write, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	_ = os.Remove(stderr.Name())
 	command := exec.Command(path)
-	command.Env, command.Stderr = environment, stderr
+	command.Env, command.Stderr = environment, write
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
-		_ = stderr.Close()
+		_ = read.Close()
+		_ = write.Close()
 		return nil, err
 	}
-	p := &Process{cmd: command, done: make(chan struct{}), exit: -1}
+	_ = write.Close()
+	p := &Process{cmd: command, done: make(chan struct{}), tail: &tailBuffer{}, exit: -1}
+	go func() { _, _ = io.Copy(p.tail, read); _ = read.Close() }()
 	go func() {
 		_ = command.Wait()
-		end, _ := stderr.Seek(0, io.SeekEnd)
-		_, _ = stderr.Seek(max(0, end-stderrLimit), io.SeekStart)
-		raw, _ := io.ReadAll(stderr)
-		_ = stderr.Close()
 		p.mu.Lock()
-		p.stderr = splitLines(raw)
 		if command.ProcessState != nil {
 			p.exit = command.ProcessState.ExitCode()
 		}
@@ -67,11 +87,12 @@ func (p *Process) Done() <-chan struct{} { return p.done }
 
 func (p *Process) Details() ([]string, int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]string(nil), p.stderr...), p.exit
+	exit := p.exit
+	p.mu.Unlock()
+	return splitLines(p.tail.bytes()), exit
 }
 
-func (p *Process) Signal(signal syscall.Signal) {
+func (p *Process) signal(signal syscall.Signal) {
 	if p == nil || p.cmd.Process == nil {
 		return
 	}
@@ -80,16 +101,34 @@ func (p *Process) Signal(signal syscall.Signal) {
 	}
 }
 
-func (p *Process) KillAndWait() {
+// Stop signals the owned group, reaps the direct child, then kills any
+// descendants that survived it. It runs once for each process.
+func (p *Process) Stop(grace time.Duration) {
 	if p == nil {
 		return
 	}
-	select {
-	case <-p.done:
-	default:
-		p.Signal(syscall.SIGKILL)
-		<-p.done
-	}
+	p.stop.Do(func() {
+		if grace > 0 {
+			p.signal(syscall.SIGTERM)
+			timer := time.NewTimer(grace)
+			select {
+			case <-p.done:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			case <-timer.C:
+				p.signal(syscall.SIGKILL)
+				<-p.done
+			}
+		} else {
+			p.signal(syscall.SIGKILL)
+			<-p.done
+		}
+		p.signal(syscall.SIGKILL)
+	})
 }
 
 func Environment(base []string, values map[string]string) []string {

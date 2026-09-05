@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"errors"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/antst/agent-sessions/bus/internal/protocol"
@@ -18,63 +18,58 @@ func (d *Daemon) closeSession(connection *live, request *rpc.Request, caller sou
 		if code == 0 {
 			code = protocol.UnknownSession
 		}
-		d.fail(connection, request, code, nil)
+		go d.fail(connection, request, code, nil)
 		return
 	}
-	value, ok := d.table.get(item.id)
-	if !ok {
-		d.fail(connection, request, protocol.UnknownSession, nil)
-		return
-	}
-	lock := d.rowLock(value.SessionID)
+	lock := d.rowLock(item.id)
 	lock.Lock()
-	defer lock.Unlock()
+	value, ok := d.table.get(item.id)
+	if !ok || !shares(caller.groups, value.Groups) {
+		lock.Unlock()
+		go d.fail(connection, request, protocol.UnknownSession, nil)
+		return
+	}
 	d.mapsMutex.Lock()
 	target := d.connections[value.SessionID]
 	d.mapsMutex.Unlock()
 	if target == nil {
-		d.fail(connection, request, protocol.NotConnected, nil)
+		lock.Unlock()
+		go d.fail(connection, request, protocol.NotConnected, nil)
 		return
 	}
 	var output struct{}
-	call, queued := target.enqueue("session.close", input, &output, nil)
-	if !queued {
-		d.fail(connection, request, protocol.Busy, nil)
+	call, code := d.enqueue(target, "session.close", input, &output, nil)
+	if code != 0 {
+		lock.Unlock()
+		go d.fail(connection, request, protocol.Busy, nil)
 		return
 	}
-	timer := time.NewTimer(closeBound)
-	defer timer.Stop()
+	go d.finishClose(connection, request, caller, value, target, call, output, input.Forget, lock, time.Now().Add(closeBound))
+}
+
+func (d *Daemon) finishClose(connection *live, request *rpc.Request, caller source, value row, target *live, call *workerCall, output struct{}, forget bool, lock *sync.Mutex, deadline time.Time) {
+	defer lock.Unlock()
+	timer := time.NewTimer(max(0, time.Until(deadline)))
 	var err error
-	expired := false
 	select {
-	case started := <-call.started:
-		select {
-		case err = <-started:
-		case <-timer.C:
-			expired = true
-		}
+	case err = <-call.done:
 	case <-timer.C:
-		expired = true
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
 	}
 	_ = target.wire.Close()
-	if !expired {
-		target.child.Signal(syscall.SIGTERM)
-		select {
-		case <-target.child.Done():
-		case <-timer.C:
-			expired = true
-		}
-	}
-	if expired {
-		target.child.KillAndWait()
-	}
+	target.child.Stop(max(0, time.Until(deadline)))
 	d.mapsMutex.Lock()
 	if d.connections[value.SessionID] == target {
 		delete(d.connections, value.SessionID)
 		delete(d.pending, value.SessionID)
 	}
 	d.mapsMutex.Unlock()
-	if input.Forget {
+	if forget {
 		if deleteErr := d.table.delete(value.SessionID); deleteErr != nil {
 			d.fail(connection, request, protocol.Internal, nil)
 			return
@@ -85,7 +80,7 @@ func (d *Daemon) closeSession(connection *live, request *rpc.Request, caller sou
 	}
 	if code, data, ok := relayData(err); ok && code == protocol.Internal {
 		d.fail(connection, request, code, data)
-	} else if err != nil && !expired && !errors.Is(err, rpc.ErrClosed) {
+	} else if err != nil && !errors.Is(err, rpc.ErrClosed) {
 		d.fail(connection, request, protocol.Internal, nil)
 	} else {
 		d.result(connection, request, output)

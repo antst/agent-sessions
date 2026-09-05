@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,6 +38,12 @@ func TestMain(m *testing.M) {
 		_ = child.Start()
 		fmt.Fprintln(os.Stderr, "parent exited while descendant held stderr")
 		os.Exit(7)
+	}
+	if strings.HasPrefix(name, "group-parent") {
+		child := exec.Command("sleep", "30")
+		_ = child.Start()
+		_ = os.WriteFile(os.Getenv("CHILD_PID_FILE"), []byte(fmt.Sprint(child.Process.Pid)), 0o600)
+		select {}
 	}
 	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") {
 		worker := sessionkit.NewWorker(&fixtureProduct{product: name})
@@ -196,11 +204,12 @@ func (*fixtureProduct) Deliver(_ context.Context, request sessionkit.DeliveryReq
 func (*fixtureProduct) Close(context.Context) error { return nil }
 
 type peerClient struct {
-	wire       *rpc.Conn
-	superseded chan struct{}
-	deliveries chan protocol.DeliveryRequest
-	mu         sync.Mutex
-	identity   protocol.PeerHello
+	wire         *rpc.Conn
+	superseded   chan struct{}
+	deliveries   chan protocol.DeliveryRequest
+	mu           sync.Mutex
+	identity     protocol.PeerHello
+	deliveryGate chan struct{}
 }
 
 func connectPeer(t *testing.T, socket, id, name string, groups ...string) *peerClient {
@@ -215,7 +224,17 @@ func connectPeer(t *testing.T, socket, id, name string, groups ...string) *peerC
 			_ = peer.wire.Result(request, struct{}{})
 		case "message.deliver":
 			peer.deliveries <- *request.Params.(*protocol.DeliveryRequest)
-			_ = peer.wire.Result(request, protocol.DeliveryReceipt{Disposition: "injected"})
+			peer.mu.Lock()
+			gate := peer.deliveryGate
+			peer.mu.Unlock()
+			if gate == nil {
+				_ = peer.wire.Result(request, protocol.DeliveryReceipt{Disposition: "injected"})
+			} else {
+				go func() {
+					<-gate
+					_ = peer.wire.Result(request, protocol.DeliveryReceipt{Disposition: "injected"})
+				}()
+			}
 		}
 	})
 	peer.identity = protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: id, Name: name, Groups: groups, Info: map[string]any{"ready": true}}
@@ -379,6 +398,43 @@ func TestProcessWaitDoesNotDependOnDescendantStderr(t *testing.T) {
 	lines, _ := child.Details()
 	if !strings.Contains(strings.Join(lines, "\n"), "parent exited") {
 		t.Fatalf("stderr tail = %#v", lines)
+	}
+}
+
+func TestProcessCleanupKillsGroupAndReapsChildOnce(t *testing.T) {
+	directory := t.TempDir()
+	installFixture(t, directory, "group-parent")
+	pidFile := filepath.Join(directory, "child.pid")
+	environment := structuredprocess.Environment(os.Environ(), map[string]string{"CHILD_PID_FILE": pidFile})
+	child, err := structuredprocess.Start(filepath.Join(directory, "group-parent"), environment)
+	must(t, err)
+	var pid int
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		raw, readErr := os.ReadFile(pidFile)
+		if readErr == nil {
+			_, _ = fmt.Sscan(string(raw), &pid)
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("fixture child did not start")
+	}
+	done := make(chan struct{}, 2)
+	for range 2 {
+		go func() { child.Stop(10 * time.Millisecond); done <- struct{}{} }()
+	}
+	<-done
+	<-done
+	for deadline := time.Now().Add(time.Second); ; {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant %d survived process-group cleanup: %v", pid, err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -760,15 +816,10 @@ func TestCloseStopsWorkerBeforeWritingToSlowCaller(t *testing.T) {
 	}
 	select {
 	case <-done:
-		t.Fatal("close reply unexpectedly completed without a reader")
-	default:
+	case <-time.After(time.Second):
+		t.Fatal("close admission blocked on the slow caller")
 	}
 	_ = client.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("close handler stayed blocked after the slow caller disconnected")
-	}
 }
 
 func TestWorkerCallsLeaveInAdmissionOrder(t *testing.T) {
@@ -794,7 +845,7 @@ func TestWorkerCallsLeaveInAdmissionOrder(t *testing.T) {
 }
 
 func TestMessageSendReturnsOneOrderedReceiptPerResolvedLabel(t *testing.T) {
-	_, socket := startDaemon(t)
+	d, socket := startDaemon(t)
 	sender := connectPeer(t, socket, "sender", "sender", "shared")
 	one := connectPeer(t, socket, "one", "one", "shared")
 	two := connectPeer(t, socket, "two", "two", "shared")
@@ -824,6 +875,151 @@ func TestMessageSendReturnsOneOrderedReceiptPerResolvedLabel(t *testing.T) {
 			t.Fatal("resolvable target did not receive delivery")
 		}
 	}
+	d.mapsMutex.Lock()
+	d.connections["one@local"].outstanding = maxPendingWorkerCalls
+	d.mapsMutex.Unlock()
+	sent = protocol.MessageSendResult{}
+	must(t, sender.call("message.send", protocol.MessageSendRequest{Target: "one", Message: "full"}, &sent))
+	if len(sent.Deliveries) != 1 || sent.Deliveries[0].Reason != "busy" {
+		t.Fatalf("full outbound receipt = %#v", sent.Deliveries)
+	}
+	d.mapsMutex.Lock()
+	d.connections["one@local"].outstanding = 0
+	d.mapsMutex.Unlock()
+}
+
+func TestOutboundBoundCountsUnansweredCalls(t *testing.T) {
+	server, client := net.Pipe()
+	d := &Daemon{}
+	connection := &live{fd: server, identityCtx: context.Background()}
+	connection.wire = rpc.New(server, false, nil)
+	connection.startSender()
+	for range maxPendingWorkerCalls {
+		if _, code := d.enqueue(connection, "turn.interrupt", protocol.SessionTarget{SessionID: "lane@local"}, &struct{}{}, nil); code != 0 {
+			t.Fatalf("call below bound = %d", code)
+		}
+	}
+	if _, code := d.enqueue(connection, "turn.interrupt", protocol.SessionTarget{SessionID: "lane@local"}, &struct{}{}, nil); code != protocol.Busy {
+		t.Fatalf("call above bound = %d", code)
+	}
+	_ = client.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.mapsMutex.Lock()
+		outstanding := connection.outstanding
+		d.mapsMutex.Unlock()
+		if outstanding == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unanswered calls after EOF = %d", outstanding)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestDeliveryStaysWithResolvedPeerIdentity(t *testing.T) {
+	_, socket := startDaemon(t)
+	sender := connectPeer(t, socket, "sender", "sender", "shared")
+	target := connectPeer(t, socket, "old", "old", "shared")
+	target.mu.Lock()
+	target.deliveryGate = make(chan struct{})
+	gate := target.deliveryGate
+	target.mu.Unlock()
+	done := make(chan protocol.MessageSendResult, 1)
+	go func() {
+		var sent protocol.MessageSendResult
+		_ = sender.call("message.send", protocol.MessageSendRequest{Target: "old", Message: "before switch"}, &sent)
+		done <- sent
+	}()
+	<-target.deliveries
+	target.identity.SessionID, target.identity.Name = "new", "new"
+	must(t, target.call("session.hello", target.identity, &struct{}{}))
+	sent := <-done
+	if len(sent.Deliveries) != 1 || sent.Deliveries[0].Reason != "no_receipt" {
+		t.Fatalf("detached delivery = %#v", sent.Deliveries)
+	}
+	close(gate)
+}
+
+func TestCloseRechecksRowAfterTakingLock(t *testing.T) {
+	directory := t.TempDir()
+	installFixture(t, directory, "fixture-worker")
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	d, socket := startDaemon(t)
+	parent := connectPeer(t, socket, "parent", "parent", "shared")
+	var spawned protocol.LaneSpawnResult
+	must(t, parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "fixture-worker", Open: &protocol.OpenOptions{}}, &spawned))
+	lock := d.rowLock(spawned.SessionID)
+	lock.Lock()
+	closed := make(chan error, 1)
+	go func() {
+		closed <- parent.call("session.close", protocol.SessionCloseRequest{SessionID: spawned.SessionID}, &struct{}{})
+	}()
+	must(t, d.table.delete(spawned.SessionID))
+	lock.Unlock()
+	if code := rpcCode(<-closed); code != protocol.UnknownSession {
+		t.Fatalf("close after forget = %d", code)
+	}
+}
+
+func TestSupersessionBoundClosesNonReadingPeer(t *testing.T) {
+	d, socket := startDaemon(t)
+	oldFD := rawPeer(t, socket, "stuck", "old", "shared")
+	d.mapsMutex.Lock()
+	old := d.connections["stuck@local"]
+	d.mapsMutex.Unlock()
+	must(t, old.fd.(*net.UnixConn).SetWriteBuffer(1024))
+	sender := connectPeer(t, socket, "sender", "sender", "shared")
+	body := strings.Repeat("x", 8192)
+	for range 64 {
+		var sent protocol.MessageSendResult
+		sender.wire.Begin("message.send", protocol.MessageSendRequest{Target: "stuck", Message: body}, &sent, nil)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.mapsMutex.Lock()
+		outstanding := old.outstanding
+		d.mapsMutex.Unlock()
+		if outstanding > 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("old peer output never filled")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = connectPeer(t, socket, "stuck", "new", "shared")
+	select {
+	case <-old.wire.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("supersession write bound did not close old peer")
+	}
+	d.mapsMutex.Lock()
+	current := d.connections["stuck@local"]
+	d.mapsMutex.Unlock()
+	if current == nil || current.name != "new@local" {
+		t.Fatal("replacement was not current after bounded supersession")
+	}
+	_ = oldFD.Close()
+}
+
+func rawPeer(t *testing.T, socket, id, name string, groups ...string) net.Conn {
+	t.Helper()
+	fd, err := net.Dial("unix", socket)
+	must(t, err)
+	body, err := protocol.RequestBytes(1, "session.hello", protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: id, Name: name, Groups: groups, Info: map[string]any{}})
+	must(t, err)
+	_, err = fd.Write(body)
+	must(t, err)
+	reply, err := bufio.NewReader(fd).ReadBytes('\n')
+	must(t, err)
+	frame, err := protocol.DecodeFrame(reply[:len(reply)-1])
+	if err != nil || frame.ID != 1 || frame.Request || frame.Error != nil {
+		t.Fatalf("peer hello reply = %#v, %v", frame, err)
+	}
+	t.Cleanup(func() { _ = fd.Close() })
+	return fd
 }
 
 func startDaemon(t *testing.T) (*Daemon, string) {

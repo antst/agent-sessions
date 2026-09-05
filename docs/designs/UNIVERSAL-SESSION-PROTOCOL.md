@@ -448,7 +448,7 @@ and closes the connection without writing one.
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
-| `-32003` | `busy` | `turn.run` when the target already has an outstanding run. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run, or any routed call when that worker already has 256 unanswered calls. A delivery at that bound returns a rejected receipt with reason `busy`. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when the product token is invalid or its binary is absent from the target host's service PATH. |
@@ -558,7 +558,9 @@ lookup. It rejects a peer hello unless `session_id` and `name` are valid
 unqualified name parts, then appends its effective host to both. On a first
 hello, that canonical ID is installed by one atomic map swap after consulting
 the durable row table and rejecting an ID owned by a lane as specified in
-Section 1.1. The displaced exact pointer becomes inadmissible immediately; the
+Section 1.1. That same `mapsMutex` critical section cancels the displaced
+identity and detaches its reply sinks before installing the replacement. The
+displaced exact pointer becomes inadmissible immediately; the
 daemon writes `session.superseded` through its ordinary per-connection request-
 ID sequence after the map swap and outside `mapsMutex`, with
 `supersedeWriteBound = 1s`, then closes it without waiting for the
@@ -571,9 +573,10 @@ A second peer hello on that same live connection is handled in frame order. With
 the same `session_id`, its declared groups slice must equal the original slice
 exactly, including order; the daemon then refreshes name and information in place. Different
 groups are `invalid_hello` and close the connection. With a different
-`session_id`, replacement is atomic under the maps mutex: each admitted request
+`session_id`, replacement is atomic under `mapsMutex`: each admitted request
 already holds a copy of the old source identity and groups; the daemon removes the old
-entry and private group, detaches its reply sinks, fails pending inbound
+entry and private group, cancels its identity context, detaches its reply sinks,
+fails pending inbound
 deliveries once, installs the new identity with a new private group and the new
 hello's groups, and only then acknowledges. It sends no
 `session.superseded` on this same socket. This adds one same-ID update branch
@@ -639,21 +642,28 @@ the prospective name until commit or failure. The full composed name part must
 fit the 128-character grammar and be unique among rows and reservations on that host.
 Siblings are thereby unique, and two different parents with the same name part
 collide on the same composed child name; the second spawn receives
-`name_taken`. For resume it takes the session-ID row lock, rejects a live or
-provisional connection, and installs one provisional connection under that ID
-while open is pending; list ignores it. It then reuses the row's product,
+`name_taken`. The transaction goroutine holds that name reservation through
+commit or failure cleanup and takes no session-ID row lock for a fresh spawn.
+For resume it takes the session-ID row lock before rereading the row and holds
+it through open, commit or failure cleanup; a second resume waits on that lock.
+The provisional connection remains transaction-local and is absent from
+`connections` and `session.list`. It then reuses the row's product,
 composed name, groups, and stored open object. It creates the
 reservation, starts `<product>` with empty argv and the launch token, consumes
 hello, checks declared open-field support, and sends one `session.open`. Resume
 includes the row's ID part as `resume_session_id`; new open omits it.
 
 The daemon starts one hello waiter and one direct open call; it has no generic
-event object, gate, or frame queue. The open call's completion hook validates
-the product-returned session ID part, takes that ID's row lock for a fresh
-spawn, and competes for the transaction mutex. If it wins, it requires exact
+event object, gate, or frame queue. One select observes open completion,
+process exit, timeout, and shutdown. After process exit it continues draining
+the already-closed socket while timeout and shutdown remain selectable. The
+open call's completion hook validates the product-returned session ID part and
+competes for the transaction mutex; it takes no row lock. If it wins, it
+requires exact
 equality to `resume_session_id` on resume, rejects a fresh canonical ID already
 owned by a row or peer as `spawn_failed` with `session id already exists`, then
-commits the row and exact connection atomically under `mapsMutex`. The hook
+inserts the row and publishes the exact connection in one `mapsMutex` critical
+section. The hook
 returns before the socket reader advances, so the commit precedes dispatch of
 the worker's next frame. Process exit waits only for the reader to drain that
 already-closed socket: an open response written first can commit; EOF first
@@ -667,7 +677,7 @@ in-memory connection, pending entry, and reservation. There is no storage
 retry.
 
 The spawn timeout covers exec, hello, open, and commit. On failure the daemon
-closes the socket and synchronously reaps the owned process tree. A concurrent
+closes the socket, kills the owned process group, and reaps the direct child. A concurrent
 resume waits on the same session-ID row lock, so a resumed native session never
 has two worker processes; a concurrent fresh spawn sees the composed-name
 reservation. A lost successful reply is recovered by listing visible lanes by
@@ -695,10 +705,14 @@ caller-supplied identity does not cross the route and a later peer identity
 replacement cannot alter an admitted call.
 
 For `turn.run`, the daemon rejects an existing pending entry as `busy`, installs
-one new entry, and enqueues the request on the target connection. Each worker
-connection has one sender goroutine and one ordered outbound queue capped at
-256 calls. Admission enqueues without blocking, so calls leave for that worker
-in admission order; overflow fails only the new call. Caller cancellation
+one new entry, and enqueues the request on the target connection in the same
+`mapsMutex` critical section, so an immediately following interrupt cannot
+overtake it. Each worker connection has one sender goroutine and one ordered
+outbound channel. One counter under `mapsMutex` caps unanswered calls at 256;
+it increments at admission and decrements when a reply or EOF removes the
+pending call. The channel preserves admission order and is not a second count.
+Admission never blocks; a full bound fails only the new call with `busy`.
+Caller cancellation
 removes only the reply sink, not the pending entry or worker request. A terminal
 reply is validated, the pending entry is removed, and the result is delivered
 only when the caller's reply sink remains. If that sink is gone, the daemon
@@ -706,22 +720,29 @@ drains and discards the result; it does not persist product-owned turn output.
 Worker EOF fails the pending request once; the daemon never manufactures a
 terminal outcome.
 
-`turn.interrupt` and `session.close` use that same ordered sender. The worker kit
+`turn.interrupt` and `session.close` use that same ordered sender. Their
+handlers enqueue synchronously in frame order and move only response waiting
+to a goroutine. The worker kit
 owns the single native interrupt invocation. `message.deliver` uses the target
 connection's sender too, while deliveries to different targets are concurrent;
 its returned disposition is copied into the sender's receipt. The daemon queues
 only bounded outbound calls needed to preserve one connection's wire order; it
 does not queue product work or results.
 
-`session.close` holds the row lock and requires a current connection. It sends
+`session.close` takes the row lock first, then rereads the row and current
+connection; a row removed by a preceding `forget` is `unknown_session`. It sends
 close while any run remains outstanding. The worker kit interrupts and awaits
 that same run. The one `closeBound = 10s` deadline starts when the daemon sends
 `session.close`. Close waits for the worker response, never for delivery of that
 response to the caller. If the result arrives before the bound, the daemon
-closes the socket, sends TERM, and waits for the owned process group. If the
+closes the socket, sends TERM to the owned process group, and waits only for the
+direct child. If the
 deadline expires first, it closes the worker file descriptor to interrupt a
-blocked call, sends KILL, and waits for the process, with no second bound. The
-daemon closes its stderr handle itself and never waits for descendant pipe EOF.
+blocked call, sends KILL to the group, and reaps the child, with no second bound;
+after reaping it sends one final group KILL so no descendant survives. Process
+cleanup runs once. Stderr uses one pipe reader and a bounded trailing buffer;
+the parent closes its write end after start, and process wait never joins the
+reader or descendant pipe EOF.
 The row then remains offline and resumable. With `forget:true`, the daemon
 deletes the row only after that cleanup; later control or resume resolves to
 `unknown_session`. Forced cleanup fails the pending run once and persists no
@@ -744,7 +765,8 @@ same worker connection is therefore a protocol violation and closes that
 connection without a reply.
 
 Unrequested lane EOF takes the same row lock, removes only the matching
-connection pointer, fails calls once, and synchronously reaps the process tree.
+connection pointer, fails calls once, kills the process group, and reaps the
+direct child.
 A resume waits behind that cleanup. Peer EOF only removes the matching
 transient peer entry. These pointer checks make late EOF from a displaced peer
 or old process harmless without a generation counter.
@@ -768,9 +790,13 @@ projection stream exists.
 deduplicates visible targets. Every remaining label yields one receipt:
 unresolvable labels are rejected with `unknown_session`, `unknown_host`, or
 `ambiguous`, while every resolvable current target receives one
-`message.deliver`. Those deliveries run concurrently, and one response returns
+`message.deliver`. Resolution captures the destination's identity context with
+the connection snapshot; a same-socket identity change cancels that old
+destination, so its late receipt cannot attach to the new identity. Those
+deliveries run concurrently, and one response returns
 the receipts in label order after session-ID deduplication. There is no delivery
-timer. Offline lanes and failed calls produce rejected receipts. If EOF or
+timer. Offline lanes and failed calls produce rejected receipts. A target at
+the 256-unanswered-call bound produces rejected reason `busy`. If EOF or
 supersession ends the target connection before a receipt arrives, the sender
 receives rejected reason `no_receipt`; whether product code acted is unknowable
 and deliberately not promised. Canonical names are resolved only after

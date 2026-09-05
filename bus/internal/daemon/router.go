@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/rand"
 	"regexp"
 	"slices"
@@ -19,6 +20,7 @@ type session struct {
 	info                    map[string]any
 	connection              *live
 	running                 bool
+	ctx                     context.Context
 }
 
 type deliveryCall struct {
@@ -26,6 +28,7 @@ type deliveryCall struct {
 	connection *live
 	call       *workerCall
 	receipt    *protocol.DeliveryReceipt
+	ctx        context.Context
 }
 
 func (d *Daemon) list(connection *live, request *rpc.Request, caller source) {
@@ -101,11 +104,14 @@ func (d *Daemon) sendMessage(connection *live, request *rpc.Request, caller sour
 			params := protocol.DeliveryRequest{MessageID: messageID, From: protocol.DeliverySource{SessionID: caller.sessionID,
 				Name: caller.name, Product: caller.product, Groups: caller.groups}, Body: input.Message}
 			receipt := &protocol.DeliveryReceipt{}
-			call, ok := item.connection.enqueue("message.deliver", params, receipt, nil)
-			if !ok {
+			call, code := d.enqueue(item.connection, "message.deliver", params, receipt, nil)
+			if code != 0 {
 				delivery.Disposition, delivery.Reason = "rejected", "no_receipt"
+				if code == protocol.Busy {
+					delivery.Reason = "busy"
+				}
 			} else {
-				calls = append(calls, deliveryCall{index: len(result.Deliveries), connection: item.connection, call: call, receipt: receipt})
+				calls = append(calls, deliveryCall{index: len(result.Deliveries), connection: item.connection, call: call, receipt: receipt, ctx: item.ctx})
 			}
 		}
 		result.Deliveries = append(result.Deliveries, delivery)
@@ -120,7 +126,7 @@ func (d *Daemon) finishMessage(connection *live, request *rpc.Request, caller so
 		go func() {
 			defer waits.Done()
 			delivery := &result.Deliveries[pending.index]
-			if pending.call.wait(pending.connection) != nil {
+			if d.waitCallContext(pending.connection, pending.call, pending.ctx) != nil {
 				delivery.Disposition, delivery.Reason = "rejected", "no_receipt"
 			} else {
 				delivery.Disposition, delivery.Reason = pending.receipt.Disposition, pending.receipt.Reason
@@ -147,21 +153,20 @@ func (d *Daemon) run(connection *live, request *rpc.Request, caller source) {
 	}
 	pending := &pendingRun{}
 	d.pending[target.id] = pending
-	d.mapsMutex.Unlock()
 	var output protocol.TurnResult
-	call, ok := target.connection.enqueue("turn.run", request.Params, &output, nil)
-	if !ok {
-		d.mapsMutex.Lock()
+	call, code := d.enqueueLocked(target.connection, "turn.run", request.Params, &output, nil)
+	if code != 0 {
 		delete(d.pending, target.id)
 		d.mapsMutex.Unlock()
 		go d.fail(connection, request, protocol.Busy, nil)
 		return
 	}
+	d.mapsMutex.Unlock()
 	go d.finishRun(connection, request, caller, target, pending, call, &output)
 }
 
 func (d *Daemon) finishRun(connection *live, request *rpc.Request, caller source, target *session, pending *pendingRun, call *workerCall, output *protocol.TurnResult) {
-	err := call.wait(target.connection)
+	err := d.waitCall(target.connection, call)
 	d.mapsMutex.Lock()
 	if d.pending[target.id] == pending {
 		delete(d.pending, target.id)
@@ -184,13 +189,13 @@ func (d *Daemon) interrupt(connection *live, request *rpc.Request, caller source
 		return
 	}
 	var output struct{}
-	call, ok := target.connection.enqueue("turn.interrupt", request.Params, &output, nil)
-	if !ok {
+	call, code := d.enqueue(target.connection, "turn.interrupt", request.Params, &output, nil)
+	if code != 0 {
 		go d.fail(connection, request, protocol.Busy, nil)
 		return
 	}
 	go func() {
-		err := call.wait(target.connection)
+		err := d.waitCall(target.connection, call)
 		d.replyCall(connection, request, caller, err, output)
 	}()
 }
@@ -299,7 +304,7 @@ func sessionOf(connection *live, running bool) session {
 		kind = "lane"
 	}
 	return session{id: connection.sessionID, name: connection.name, kind: kind, product: connection.product,
-		groups: append([]string(nil), connection.groups...), info: connection.info, connection: connection, running: running}
+		groups: append([]string(nil), connection.groups...), info: connection.info, connection: connection, running: running, ctx: connection.identityCtx}
 }
 
 func validPart(value string) bool {

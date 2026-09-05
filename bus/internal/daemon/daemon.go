@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/antst/agent-sessions/bus/internal/protocol"
 	"github.com/antst/agent-sessions/bus/internal/rpc"
 	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
 )
@@ -37,6 +38,7 @@ type live struct {
 	cancelIdentity context.CancelFunc
 	child          *structuredprocess.Process
 	outbound       chan *workerCall
+	outstanding    int
 }
 
 type source struct {
@@ -56,6 +58,7 @@ type workerCall struct {
 	result  any
 	seen    func() error
 	started chan (<-chan error)
+	done    chan error
 }
 
 type reservation struct {
@@ -180,7 +183,7 @@ func (d *Daemon) Close() error {
 			_ = connection.fd.Close()
 		}
 		for _, child := range children {
-			child.KillAndWait()
+			child.Stop(0)
 		}
 		<-d.acceptDone
 		d.spawnWG.Wait()
@@ -219,7 +222,7 @@ func (d *Daemon) disconnected(connection *live) {
 	}
 	value, ok := d.table.get(id)
 	if !ok {
-		connection.child.KillAndWait()
+		connection.child.Stop(0)
 		return
 	}
 	lock := d.rowLock(value.SessionID)
@@ -230,7 +233,7 @@ func (d *Daemon) disconnected(connection *live) {
 		delete(d.pending, id)
 	}
 	d.mapsMutex.Unlock()
-	connection.child.KillAndWait()
+	connection.child.Stop(0)
 	lock.Unlock()
 }
 
@@ -260,21 +263,36 @@ func (connection *live) startSender() {
 	}()
 }
 
-func (connection *live) enqueue(method string, params, result any, seen func() error) (*workerCall, bool) {
-	call := &workerCall{method: method, params: params, result: result, seen: seen, started: make(chan (<-chan error), 1)}
+func (d *Daemon) enqueue(connection *live, method string, params, result any, seen func() error) (*workerCall, int) {
+	d.mapsMutex.Lock()
+	call, code := d.enqueueLocked(connection, method, params, result, seen)
+	d.mapsMutex.Unlock()
+	return call, code
+}
+
+func (d *Daemon) enqueueLocked(connection *live, method string, params, result any, seen func() error) (*workerCall, int) {
+	if connection.outstanding == maxPendingWorkerCalls {
+		return nil, protocol.Busy
+	}
+	call := &workerCall{method: method, params: params, result: result, seen: seen, started: make(chan (<-chan error), 1), done: make(chan error, 1)}
+	connection.outstanding++
 	if connection.outbound == nil {
-		done := make(chan error, 1)
-		call.started <- done
-		go func(ctx context.Context) { done <- connection.wire.CallObserved(ctx, method, params, result, seen) }(connection.identityCtx)
-		return call, true
+		response := make(chan error, 1)
+		call.started <- response
+		go func(ctx context.Context) { response <- connection.wire.CallObserved(ctx, method, params, result, seen) }(connection.identityCtx)
+		go d.finishCall(connection, call)
+		return call, 0
 	}
 	select {
 	case connection.outbound <- call:
-		return call, true
+		go d.finishCall(connection, call)
+		return call, 0
 	case <-connection.wire.Done():
-		return nil, false
+		connection.outstanding--
+		return nil, protocol.NotConnected
 	default:
-		return nil, false
+		connection.outstanding--
+		return nil, protocol.Busy
 	}
 }
 
@@ -290,4 +308,27 @@ func (call *workerCall) wait(connection *live) error {
 			return rpc.ErrClosed
 		}
 	}
+}
+
+func (d *Daemon) finishCall(connection *live, call *workerCall) {
+	err := call.wait(connection)
+	d.releaseCall(connection)
+	call.done <- err
+}
+
+func (d *Daemon) waitCall(_ *live, call *workerCall) error { return <-call.done }
+
+func (d *Daemon) waitCallContext(_ *live, call *workerCall, ctx context.Context) error {
+	select {
+	case err := <-call.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *Daemon) releaseCall(connection *live) {
+	d.mapsMutex.Lock()
+	connection.outstanding--
+	d.mapsMutex.Unlock()
 }

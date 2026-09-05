@@ -442,7 +442,7 @@ and closes the connection without writing one.
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
-| `-32003` | `busy` | `turn.run` when the target already has an outstanding run. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run, or any routed call when that worker already has 256 unanswered calls. A delivery at that bound returns a rejected receipt with reason `busy`. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when the product token is invalid or its binary is absent from the target host's service PATH. |

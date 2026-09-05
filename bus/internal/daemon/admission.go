@@ -44,7 +44,7 @@ func (d *Daemon) handle(_ context.Context, connection *live, request *rpc.Reques
 	case "turn.interrupt":
 		d.interrupt(connection, request, caller)
 	case "session.close":
-		go d.closeSession(connection, request, caller)
+		d.closeSession(connection, request, caller)
 	default:
 		d.fail(connection, request, protocol.InvalidFrame, nil)
 		_ = connection.wire.Close()
@@ -101,6 +101,12 @@ func (d *Daemon) peerHello(connection *live, request *rpc.Request, hello *protoc
 		return
 	}
 	oldCancel := connection.cancelIdentity
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if displaced != nil && displaced != connection && displaced.cancelIdentity != nil {
+		displaced.cancelIdentity()
+	}
 	connection.sessionID, connection.name = id, name
 	connection.product, connection.declaredGroups = hello.Product, declared
 	connection.privateGroup = "session:" + id
@@ -108,9 +114,6 @@ func (d *Daemon) peerHello(connection *live, request *rpc.Request, hello *protoc
 	connection.identityCtx, connection.cancelIdentity = context.WithCancel(connection.wire.Context())
 	d.connections[id] = connection
 	d.mapsMutex.Unlock()
-	if oldCancel != nil {
-		oldCancel()
-	}
 	if displaced != nil && displaced != connection {
 		go d.supersede(displaced)
 	}
@@ -160,12 +163,6 @@ func (d *Daemon) caller(connection *live) (source, int) {
 }
 
 func (d *Daemon) supersede(connection *live) {
-	d.mapsMutex.Lock()
-	cancel := connection.cancelIdentity
-	d.mapsMutex.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 	_ = connection.fd.SetWriteDeadline(time.Now().Add(supersedeWriteBound))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
