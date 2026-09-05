@@ -78,10 +78,11 @@ kits emit compact JSON with no insignificant whitespace.
 
 The closed parameter and result shapes are authoritative in
 `bus/internal/protocol/session.schema.json`, re-exported as bytes by each public
-SDK. An implementation decodes each frame into the closed types generated from
-the schema and rejects unknown fields, missing or null required fields, and
-out-of-range values before invoking product code. The schema is the published
-contract and the shared fixture file is its test, not a runtime component. Its
+SDK. An implementation validates each frame against that schema with a small
+interpreter and no validation library, then decodes it into the closed types.
+Unknown fields, missing or null required fields, and out-of-range values are
+rejected before product code runs. The shared fixture file tests the same
+definitions in Go and JavaScript. The schema's
 **440-line cap** includes the optional federated product-discovery and bounded
 turn-result shapes; this
 is list data, never launch authority.
@@ -1101,11 +1102,12 @@ the shared fixtures; a later Python SDK is a translation of this surface, not a
 new contract.
 
 The Go host and JavaScript worker mode implement the preceding algorithm, not
-two interpretations of it. Both are tested against the published
+two interpretations of it. Each uses a small interpreter over the published
+schema with no external validation library. Both are tested against
 `bus/internal/protocol/session.fixtures.json`, and both run the same ordinary
 table-driven lifecycle cases with fake product callbacks and a fake duplex
-connection. The schema and fixtures are build artifacts for vendors to test
-their kits; neither is a runtime validator. The lifecycle cases are:
+connection. The schema and fixtures are published for vendors to test their
+kits. The lifecycle cases are:
 
 1. app-ready hello, one open, and worker-originated session methods rejected before the open
    result but accepted on the same connection after it;
