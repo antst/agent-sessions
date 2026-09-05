@@ -526,6 +526,8 @@ reads the slot under the same lock. Whichever side observes the other performs
 the one native interrupt. Once `run()` returns, the kit issues no new native
 interrupt, including while it writes the terminal result. A product or wrapper
 keeps no second starting, active, or interrupt-requested lifecycle bits.
+`Run.Done()` closes only after the terminal response has been written and the
+run slot has been cleared.
 
 Before mutating an existing session, a native product must acquire exclusivity
 that excludes any competing process and hold it through native cleanup. A

@@ -57,10 +57,8 @@ func (p *fakeProduct) Run(ctx context.Context, run *Run, input string) (TurnResu
 		return TurnResult{}, p
 	case "long":
 		return TurnResult{Outcome: "completed", Result: strings.Repeat("x", protocol.MaxTextRunes+1)}, nil
-	case "empty":
-		return TurnResult{Outcome: "completed"}, nil
-	case "interrupted":
-		return TurnResult{Outcome: "interrupted"}, nil
+	case "empty", "interrupted":
+		return TurnResult{Outcome: map[string]string{"empty": "completed", "interrupted": "interrupted"}[input]}, nil
 	default:
 		return TurnResult{Outcome: "completed", Result: input}, nil
 	}
@@ -108,7 +106,6 @@ func (p *fakeProduct) Error() string {
 	}
 	return "failed exactly"
 }
-
 func startHarness(t *testing.T, p *fakeProduct, acknowledge, openNow bool) *rpc.Conn {
 	setEnvironment(t, "token", "")
 	worker, daemon := net.Pipe()
@@ -164,8 +161,7 @@ func TestWorkerLifecycleTable(t *testing.T) {
 		} `json:"cases"`
 	}
 	raw, err := os.ReadFile("../../internal/protocol/session-lifecycle.fixtures.json")
-	must(t, err)
-	must(t, json.Unmarshal(raw, &table))
+	check(t, err == nil && json.Unmarshal(raw, &table) == nil, "read lifecycle table: %v", err)
 	for _, row := range table.Cases {
 		t.Run(row.Name, func(t *testing.T) {
 			check(t, runCase(t, row.Name) == row.Calls, "callback calls did not match %v", row.Calls)
@@ -185,17 +181,11 @@ func runCase(t *testing.T, name string) [6]int32 {
 		startHarness(t, p, false, false)
 	case "terminal-results":
 		h := startHarness(t, p, true, true)
-		for _, test := range []struct {
-			input string
-			want  TurnResult
-		}{
-			{"ok", TurnResult{Outcome: "completed", Result: "ok"}}, {"interrupted", TurnResult{Outcome: "interrupted"}}, {"fail", TurnResult{Outcome: "failed", Result: "failed exactly"}}, {"empty", TurnResult{Outcome: "completed"}}, {"long", TurnResult{Outcome: "completed", Result: strings.Repeat("x", protocol.MaxTextRunes), Truncated: true}},
-		} {
+		for input, want := range map[string]TurnResult{"ok": {Outcome: "completed", Result: "ok"}, "interrupted": {Outcome: "interrupted"}, "fail": {Outcome: "failed", Result: "failed exactly"}, "empty": {Outcome: "completed"}, "long": {Outcome: "completed", Result: strings.Repeat("x", protocol.MaxTextRunes), Truncated: true}} {
 			var result TurnResult
-			must(t, h.Call(context.Background(), "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: test.input}, &result))
-			check(t, result == test.want, "%s result = %#v", test.input, result)
+			check(t, h.Call(context.Background(), "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: input}, &result) == nil && result == want, "%s result = %#v", input, result)
 		}
-	case "one-run", "one-interrupt", "full-duplex", "close-during-run", "callback-originated-method":
+	case "one-run", "one-interrupt", "full-duplex", "close-during-run", "callback-originated-method", "run-done":
 		return blockingCase(t, name)
 	case "eof-during-run":
 		h := startHarness(t, p, true, true)
@@ -209,10 +199,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := startHarness(t, p, true, false)
 		must(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}))
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
-		for _, item := range []string{"eof reconnect", "same-id re-hello", "changed groups", "different-id re-hello"} {
-			t.Run(item, func(t *testing.T) { t.Skip("pending connectPeer in commit 3") })
-		}
-		t.Run("worker re-hello", func(t *testing.T) { t.Skip("pending daemon admission (commit 2)") })
+		t.Run("connectPeer proofs", func(t *testing.T) { t.Skip("pending connectPeer in commit 3") })
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.hello", protocol.WorkerHello{Protocol: 1, LaunchToken: "again", HelloDescription: HelloDescription{Product: "worker", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}}, &struct{}{}) != nil, "expected error")
@@ -238,8 +225,12 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "environment":
 		setEnvironment(t, "token", "key")
 		err := NewWorker(p).Serve(context.Background())
-		check(t, err != nil && err.Error() == "local key transport not implemented in this build", "key error = %v", err)
-		check(t, os.Getenv("AGENTBUS_LAUNCH_TOKEN") == "" && os.Getenv("AGENTBUS_LOCAL_KEY") == "" && os.Getenv("AGENTBUS_SOCKET") == "", "keyed worker environment was not scrubbed")
+		check(t, err != nil && err.Error() == "local key transport not implemented in this build" && os.Getenv("AGENTBUS_LAUNCH_TOKEN") == "" && os.Getenv("AGENTBUS_LOCAL_KEY") == "" && os.Getenv("AGENTBUS_SOCKET") == "", "key error or uncleared environment: %v", err)
+	case "shutdown":
+		startHarness(t, p, true, false)
+		p.worker.Shutdown()
+		p.worker.Shutdown()
+		<-p.worker.Closed()
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}
@@ -258,8 +249,7 @@ func blockingCase(t *testing.T, name string) [6]int32 {
 		p.interrupted = make(chan struct{})
 		first, second := async(h, "turn.interrupt", target, &struct{}{}), async(h, "turn.interrupt", target, &struct{}{})
 		<-p.interrupted
-		must(t, <-first)
-		must(t, <-second)
+		must(t, errors.Join(<-first, <-second))
 	case "full-duplex", "callback-originated-method":
 		p.outbound = true
 		checkDelivery(t, h, "injected")
@@ -274,9 +264,16 @@ func blockingCase(t *testing.T, name string) [6]int32 {
 		close(p.closeEnd)
 		must(t, <-closed)
 		return p.calls
+	case "run-done":
+		select {
+		case <-runToken.Done():
+			t.Fatal("Run.Done closed before the terminal response")
+		default:
+		}
 	}
 	close(p.release)
 	must(t, <-run)
+	<-runToken.Done()
 	if name == "one-interrupt" {
 		check(t, runToken.Native == nil, "native work started after pre-handoff interrupt")
 	}
