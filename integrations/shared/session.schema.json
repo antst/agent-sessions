@@ -10,7 +10,7 @@
         "protocol": {"type": "integer", "const": 1},
         "product": {"type": "string", "minLength": 1},
         "session_id": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "info": {"type": "object", "additionalProperties": true},
         "launch_token": {"type": "string", "minLength": 1},
@@ -79,14 +79,13 @@
         "session_id": {"type": "string", "minLength": 1},
         "kind": {"enum": ["peer", "lane"]},
         "product": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 161},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "connected": {"type": "boolean"},
         "running": {"type": "boolean"},
         "closed": {"type": "boolean"},
         "native_id": {"type": "string", "minLength": 1},
         "last_turn": {"$ref": "#/$defs/LastTurn"},
-        "host": {"type": "string", "minLength": 1},
         "info": {"type": "object", "additionalProperties": true}
       },
       "allOf": [
@@ -209,7 +208,7 @@
       "required": ["session_id", "name", "product", "groups"],
       "properties": {
         "session_id": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 161},
         "product": {"type": "string", "minLength": 1},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
       }
@@ -276,7 +275,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
         "product": {"type": "string", "minLength": 1},
         "host": {"type": "string", "minLength": 1},
         "resume_session_id": {"type": "string", "minLength": 1},
@@ -313,7 +312,7 @@
       "required": ["session_id", "name", "groups", "open"],
       "properties": {
         "session_id": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 161},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "resume_native_id": {"type": "string", "minLength": 1},
         "open": {"$ref": "#/$defs/SessionOpenOptions"}
