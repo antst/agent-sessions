@@ -1,0 +1,129 @@
+package host
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"strings"
+	"syscall"
+)
+
+const (
+	SocketEnv    = "AGENTBUS_SOCKET"
+	LocalKeyEnv  = "AGENTBUS_LOCAL_KEY"
+	TokenEnv     = "AGENTBUS_LAUNCH_TOKEN"
+	SessionIDEnv = "AGENTBUS_SESSION_ID"
+	NameEnv      = "AGENTBUS_SESSION_NAME"
+	GroupsEnv    = "AGENTBUS_GROUPS"
+)
+
+func LaneMode() bool { _, present := os.LookupEnv(TokenEnv); return present }
+
+type PeerIdentity struct{ SessionID, Name string }
+
+type ExecPlan struct {
+	Path string
+	Args []string
+	Env  []string
+}
+
+// InteractivePlan removes only wrapper-owned group flags. Native option arity
+// protects a following value that happens to look like a group flag.
+func InteractivePlan(path string, args, environment []string, identity PeerIdentity, consumesValue func(string) bool) (ExecPlan, error) {
+	if path == "" {
+		return ExecPlan{}, errors.New("product executable is required")
+	}
+	forwarded, groups := make([]string, 0, len(args)), []string{}
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			forwarded = append(forwarded, args[index:]...)
+			break
+		}
+		if argument == "-g" || argument == "--group" {
+			if index+1 == len(args) || strings.TrimSpace(args[index+1]) == "" {
+				return ExecPlan{}, errors.New("-g/--group requires a non-empty value")
+			}
+			groups, index = append(groups, args[index+1]), index+1
+			continue
+		}
+		if strings.HasPrefix(argument, "-g=") || strings.HasPrefix(argument, "--group=") {
+			_, group, _ := strings.Cut(argument, "=")
+			if strings.TrimSpace(group) == "" {
+				return ExecPlan{}, errors.New("-g/--group requires a non-empty value")
+			}
+			groups = append(groups, group)
+			continue
+		}
+		forwarded = append(forwarded, argument)
+		if consumesValue != nil && consumesValue(argument) && index+1 < len(args) {
+			index++
+			forwarded = append(forwarded, args[index])
+		}
+	}
+	encoded, _ := json.Marshal(groups)
+	environment = replaceEnv(environment, GroupsEnv, string(encoded))
+	environment = replaceEnv(environment, SessionIDEnv, identity.SessionID)
+	environment = replaceEnv(environment, NameEnv, identity.Name)
+	return ExecPlan{Path: path, Args: forwarded, Env: environment}, nil
+}
+
+func (p ExecPlan) Exec() error {
+	return syscall.Exec(p.Path, append([]string{p.Path}, p.Args...), p.Env) //nolint:gosec // the product wrapper selects the executable.
+}
+
+type ArgumentRule struct {
+	Name          string
+	TakesValue    bool
+	ConflictField string
+	Conflict      func(value string) string
+}
+
+func BuildArguments(arguments []string, rules []ArgumentRule) ([]string, error) {
+	result := make([]string, 0, len(arguments))
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		name, value, attached := strings.Cut(argument, "=")
+		var rule *ArgumentRule
+		for candidate := range rules {
+			if rules[candidate].Name == name {
+				rule = &rules[candidate]
+				break
+			}
+		}
+		if rule == nil || attached && !rule.TakesValue {
+			return nil, errors.New("unsupported argument " + argument)
+		}
+		result = append(result, argument)
+		if rule.TakesValue && !attached {
+			if index+1 == len(arguments) {
+				return nil, errors.New(argument + " requires a value")
+			}
+			index++
+			value = arguments[index]
+			result = append(result, value)
+		}
+		field := rule.ConflictField
+		if rule.Conflict != nil {
+			field = rule.Conflict(value)
+		}
+		if field != "" {
+			return nil, errors.New("argument conflicts with typed field " + field)
+		}
+	}
+	return result, nil
+}
+
+func replaceEnv(environment []string, name, value string) []string {
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != name {
+			result = append(result, entry)
+		}
+	}
+	if value == "" {
+		return result
+	}
+	return append(result, name+"="+value)
+}
