@@ -33,11 +33,12 @@ type creation struct {
 
 // Handoff owns the only boundary between queued delivery and a native turn.
 type Handoff struct {
-	mu        sync.Mutex
-	queue     []string
-	queueSize int
-	starting  *creation
-	active    Turn
+	mu                 sync.Mutex
+	queue              []string
+	queueSize          int
+	starting           *creation
+	active             Turn
+	interruptRequested bool
 }
 
 func (h *Handoff) Run(ctx context.Context, input string, start StartTurn) (sessionkit.TurnResult, error) {
@@ -45,6 +46,11 @@ func (h *Handoff) Run(ctx context.Context, input string, start StartTurn) (sessi
 	if h.starting != nil || h.active != nil {
 		h.mu.Unlock()
 		return sessionkit.TurnResult{}, errors.New("turn already active")
+	}
+	if h.interruptRequested {
+		h.interruptRequested = false
+		h.mu.Unlock()
+		return sessionkit.TurnResult{Outcome: "interrupted"}, nil
 	}
 	queued := append([]string(nil), h.queue...)
 	starting := &creation{done: make(chan struct{})}
@@ -110,6 +116,8 @@ func (h *Handoff) Interrupt(ctx context.Context) error {
 	starting, turn := h.starting, h.active
 	if starting != nil {
 		starting.interrupted = true
+	} else if turn == nil {
+		h.interruptRequested = true
 	}
 	h.mu.Unlock()
 	if starting != nil {
