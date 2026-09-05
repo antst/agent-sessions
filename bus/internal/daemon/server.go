@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 
 	"github.com/antst/agent-sessions/bus/internal/conn"
 )
@@ -24,7 +23,6 @@ type Daemon struct {
 	table      *table
 	directory  *directory
 	listener   net.Listener
-	closing    atomic.Bool
 	shutdown   chan struct{}
 	done       chan struct{}
 	acceptDone chan struct{}
@@ -83,10 +81,6 @@ func (d *Daemon) accept() {
 		if err != nil {
 			return
 		}
-		if d.closing.Load() {
-			_ = fd.Close()
-			continue
-		}
 		d.group.Add(1)
 		s := newSession(d)
 		s.wire = conn.Start(fd, s.inbox, &d.group)
@@ -95,15 +89,17 @@ func (d *Daemon) accept() {
 }
 
 func (d *Daemon) Close() error {
-	if !d.closing.CompareAndSwap(false, true) {
+	d.directory.mu.Lock()
+	if d.directory.closing {
+		d.directory.mu.Unlock()
 		<-d.done
 		return nil
 	}
+	d.directory.closing = true
+	d.directory.mu.Unlock()
 	_ = d.listener.Close()
 	close(d.shutdown)
 	<-d.acceptDone
-	d.directory.mu.Lock()
-	d.directory.mu.Unlock()
 	d.group.Wait()
 	_ = os.Remove(d.config.SocketPath)
 	close(d.done)

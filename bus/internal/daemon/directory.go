@@ -24,6 +24,7 @@ type entry struct {
 type directory struct {
 	daemon  *Daemon
 	mu      sync.Mutex
+	closing bool
 	entries map[string]*entry
 	names   map[string]*entry
 	tokens  map[string]*launch
@@ -166,7 +167,7 @@ func (d *directory) reserveDescribe(start *launch) int {
 }
 
 func (d *directory) addLaunch(start *launch) int {
-	if d.daemon.closing.Load() {
+	if d.closing {
 		return protocol.Internal
 	}
 	d.tokens[start.token] = start
