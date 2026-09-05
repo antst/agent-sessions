@@ -258,6 +258,10 @@ func (s *session) receiveResponse(frame protocol.Frame) {
 		return
 	}
 	delete(s.pending, frame.ID)
+	if request.destination != s.identity || !s.daemon.directory.current(request.destination, s) {
+		request.reply <- answer{code: protocol.NotConnected}
+		return
+	}
 	if request.method == "turn.run" {
 		s.daemon.directory.finishRun(s.identity, s)
 	}

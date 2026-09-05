@@ -607,7 +607,7 @@ func TestSpawnRunCloseResumeForgetAndRestart(t *testing.T) {
 		}()
 	}
 	codes := []int{rpcCode(<-closed), rpcCode(<-closed)}
-	if !(codes[0] == 0 && (codes[1] == protocol.Busy || codes[1] == protocol.NotConnected) || codes[1] == 0 && (codes[0] == protocol.Busy || codes[0] == protocol.NotConnected)) {
+	if !(codes[0] == 0 && codes[1] == protocol.Busy || codes[1] == 0 && codes[0] == protocol.Busy) {
 		t.Fatalf("concurrent close codes = %#v", codes)
 	}
 	listed = protocol.SessionListResult{}

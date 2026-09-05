@@ -103,7 +103,10 @@ func (d *directory) admit(item *entry, owner *session, method string) int {
 	if item.attachment != owner {
 		return protocol.NotConnected
 	}
-	if method == "turn.run" && item.running || method == "session.close" && item.claimed {
+	if item.claimed && method != "message.deliver" {
+		return protocol.Busy
+	}
+	if method == "turn.run" && item.running {
 		return protocol.Busy
 	}
 	if method == "turn.interrupt" && !item.running {
@@ -329,7 +332,13 @@ func (d *directory) route(item *entry, method string, request routedRequest) int
 }
 
 func (d *directory) routeLocked(item *entry, method string, request routedRequest) int {
-	if item == nil || d.entries[item.row.SessionID] != item || item.attachment == nil {
+	if item == nil || d.entries[item.row.SessionID] != item {
+		return protocol.NotConnected
+	}
+	if item.claimed && method != "message.deliver" {
+		return protocol.Busy
+	}
+	if item.attachment == nil {
 		return protocol.NotConnected
 	}
 	if item.peer && method != "message.deliver" {

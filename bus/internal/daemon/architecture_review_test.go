@@ -190,3 +190,79 @@ func TestReviewLateChildKeepsHardStopIntent(t *testing.T) {
 		t.Fatal("late child received TERM after the spawn deadline requested KILL")
 	}
 }
+
+func TestReviewWorkerPendingAndInboxBoundsAreSeparate(t *testing.T) {
+	d, s, _ := reviewSession(t)
+	item := &entry{row: row{SessionID: "lane@local"}, attachment: s, done: make(chan struct{})}
+	d.directory.entries[item.row.SessionID], s.identity = item, item
+	for id := int64(1); id <= maxPendingCalls; id++ {
+		s.pending[id] = routedRequest{}
+	}
+	reply := make(chan answer, 1)
+	s.handleEvent(routedRequest{destination: item, method: "turn.run", reply: reply})
+	if got := <-reply; got.code != protocol.Busy {
+		t.Fatalf("257th unanswered call = %#v", got)
+	}
+	for range conn.OutboxSize {
+		s.inbox <- struct{}{}
+	}
+	d.directory.mu.Lock()
+	code := d.directory.routeLocked(item, "message.deliver", routedRequest{reply: reply})
+	d.directory.mu.Unlock()
+	if code != protocol.Busy {
+		t.Fatalf("full mixed-event inbox = %d", code)
+	}
+}
+
+func TestReviewClaimedLaneRejectsNewControl(t *testing.T) {
+	d, s, _ := reviewSession(t)
+	item := &entry{row: row{SessionID: "lane@local", Groups: []string{"shared"}}, claimed: true, done: make(chan struct{})}
+	d.directory.entries[item.row.SessionID], s.identity = item, item
+	d.directory.mu.Lock()
+	code := d.directory.routeLocked(item, "session.close", routedRequest{})
+	d.directory.mu.Unlock()
+	if code != protocol.Busy {
+		t.Fatalf("close during provisional resume = %d", code)
+	}
+	item.attachment = s
+	for _, method := range []string{"turn.run", "turn.interrupt", "session.close"} {
+		d.directory.mu.Lock()
+		code = d.directory.routeLocked(item, method, routedRequest{})
+		d.directory.mu.Unlock()
+		if code != protocol.Busy {
+			t.Fatalf("%s after close claim = %d", method, code)
+		}
+	}
+	start := newLaunch("", false, false)
+	t.Cleanup(func() { start.timer.Stop() })
+	if _, code = d.directory.reserveResume(item.row.SessionID, item.row.Groups, start); code != protocol.Busy {
+		t.Fatalf("resume of claimed lane = %d", code)
+	}
+	d.directory.mu.Lock()
+	code = d.directory.routeLocked(item, "message.deliver", routedRequest{})
+	d.directory.mu.Unlock()
+	if code != 0 {
+		t.Fatalf("delivery to claimed attached lane = %d", code)
+	}
+}
+
+func TestReviewStaleResponseSettlesNoReceipt(t *testing.T) {
+	d, s, _ := reviewSession(t)
+	old := &entry{row: row{SessionID: "old@local"}, peer: true, attachment: s, done: make(chan struct{})}
+	d.directory.entries[old.row.SessionID], s.identity = old, old
+	reply := make(chan answer, 1)
+	s.pending[1] = routedRequest{destination: old, method: "message.deliver", reply: reply}
+	replacement := &entry{row: row{SessionID: old.row.SessionID}, peer: true, done: make(chan struct{})}
+	d.directory.mu.Lock()
+	d.directory.entries[old.row.SessionID] = replacement
+	d.directory.mu.Unlock()
+	result, err := protocol.ResultBytes(1, "message.deliver", protocol.DeliveryReceipt{Disposition: "injected"})
+	must(t, err)
+	frame, err := protocol.DecodeFrame(result[:len(result)-1])
+	must(t, err)
+	s.receiveResponse(frame)
+	got := <-reply
+	if got.code != protocol.NotConnected || reason(got.code, "") != "no_receipt" {
+		t.Fatalf("stale receipt = %#v", got)
+	}
+}
