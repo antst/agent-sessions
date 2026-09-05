@@ -1,0 +1,413 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-sessions:universal-session:v1",
+  "$defs": {
+    "SessionHelloRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "product"],
+      "properties": {
+        "protocol": {"type": "integer", "const": 1},
+        "product": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "info": {"type": "object", "additionalProperties": true},
+        "launch_token": {"type": "string", "minLength": 1},
+        "supported_open_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["cwd", "permission_mode", "model", "reasoning_effort", "arguments"]}
+        },
+        "extra_arguments": {"type": "array", "items": {"$ref": "#/$defs/ExtraArgument"}},
+        "version": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["launch_token"]},
+          "then": {
+            "allOf": [
+              {"required": ["launch_token", "supported_open_fields", "extra_arguments"]},
+              {"not": {"required": ["session_id"]}},
+              {"not": {"required": ["name"]}},
+              {"not": {"required": ["groups"]}},
+              {"not": {"required": ["info"]}}
+            ]
+          },
+          "else": {
+            "allOf": [
+              {"required": ["session_id", "name", "groups", "info"]},
+              {"not": {"required": ["supported_open_fields"]}},
+              {"not": {"required": ["extra_arguments"]}},
+              {"not": {"required": ["version"]}}
+            ]
+          }
+        }
+      ]
+    },
+    "SessionHelloResult": {"type": "object", "additionalProperties": false},
+    "SessionSupersededRequest": {"type": "object", "additionalProperties": false},
+    "SessionSupersededResult": {"type": "object", "additionalProperties": false},
+    "SessionListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"session_id": {"type": "string", "minLength": 1}}
+    },
+    "SessionListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions"],
+      "properties": {
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/SessionSummary"}},
+        "hosts": {"type": "array", "items": {"$ref": "#/$defs/HostProducts"}}
+      }
+    },
+    "HostProducts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "products"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "products": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "SessionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "kind", "product", "name", "groups", "connected", "running", "closed"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["peer", "lane"]},
+        "product": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "connected": {"type": "boolean"},
+        "running": {"type": "boolean"},
+        "closed": {"type": "boolean"},
+        "native_id": {"type": "string", "minLength": 1},
+        "last_turn": {"$ref": "#/$defs/LastTurn"},
+        "host": {"type": "string", "minLength": 1},
+        "info": {"type": "object", "additionalProperties": true}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "lane"}}, "required": ["kind"]},
+          "then": {"required": ["native_id"]},
+          "else": {"not": {"required": ["native_id"]}}
+        },
+        {
+          "if": {"properties": {"connected": {"const": false}}, "required": ["connected"]},
+          "then": {"properties": {"running": {"const": false}}}
+        },
+        {
+          "if": {"properties": {"closed": {"const": true}}, "required": ["closed"]},
+          "then": {"properties": {"connected": {"const": false}, "running": {"const": false}}}
+        }
+      ]
+    },
+    "LastTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "outcome", "result", "finished_at"],
+      "properties": {
+        "input": {"type": "string", "minLength": 1, "maxLength": 262144},
+        "outcome": {"enum": ["completed", "interrupted", "failed"]},
+        "result": {"type": "string", "maxLength": 262144},
+        "truncated": {"type": "boolean"},
+        "native_stop_reason": {"type": "string", "minLength": 1},
+        "finished_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "MessageSendRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message"],
+      "properties": {
+        "target": {"type": "string", "minLength": 1},
+        "targets": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "allOf": [{"not": {"const": []}}]
+        },
+        "group": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1, "maxLength": 262144}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["target"]},
+          "then": {
+            "allOf": [
+              {"not": {"required": ["targets"]}},
+              {"not": {"required": ["group"]}}
+            ]
+          },
+          "else": {
+            "if": {"required": ["targets"]},
+            "then": {"not": {"required": ["group"]}},
+            "else": {"required": ["group"]}
+          }
+        }
+      ]
+    },
+    "MessageSendResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "deliveries"],
+      "properties": {
+        "message_id": {"type": "string", "minLength": 1},
+        "deliveries": {"type": "array", "items": {"$ref": "#/$defs/MessageSendDelivery"}}
+      }
+    },
+    "MessageSendDelivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "disposition"],
+      "properties": {
+        "target": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "delivery_id": {"type": "string", "minLength": 1},
+        "disposition": {"enum": ["injected", "queued_for_next_turn", "rejected"]},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"disposition": {"const": "rejected"}}, "required": ["disposition"]},
+          "then": {"required": ["reason"]},
+          "else": {
+            "allOf": [
+              {"required": ["session_id", "delivery_id"]},
+              {"not": {"required": ["reason"]}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"reason": {"const": "ambiguous"}}, "required": ["reason"]},
+          "then": {
+            "allOf": [
+              {"not": {"required": ["session_id"]}},
+              {"not": {"required": ["delivery_id"]}}
+            ]
+          }
+        }
+      ]
+    },
+    "MessageDeliverRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "from", "body"],
+      "properties": {
+        "message_id": {"type": "string", "minLength": 1},
+        "from": {"$ref": "#/$defs/DeliverySource"},
+        "body": {"type": "string", "maxLength": 262144}
+      }
+    },
+    "MessageDeliverResult": {"$ref": "#/$defs/DeliveryReceipt"},
+    "DeliverySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "name", "product", "groups"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "product": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "DeliveryReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition"],
+      "properties": {
+        "disposition": {"enum": ["injected", "queued_for_next_turn", "rejected"]},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"disposition": {"const": "rejected"}}, "required": ["disposition"]},
+          "then": {"required": ["reason"]},
+          "else": {"not": {"required": ["reason"]}}
+        }
+      ]
+    },
+    "LaneDescribeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product"],
+      "properties": {"product": {"type": "string", "minLength": 1}, "host": {"type": "string", "minLength": 1}}
+    },
+    "LaneDescribeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product", "supported_open_fields", "extra_arguments"],
+      "properties": {
+        "product": {"type": "string", "minLength": 1},
+        "supported_open_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["cwd", "permission_mode", "model", "reasoning_effort", "arguments"]}
+        },
+        "extra_arguments": {"type": "array", "items": {"$ref": "#/$defs/ExtraArgument"}},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "ExtraArgument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "takes_value"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "takes_value": {"type": "boolean"}
+      }
+    },
+    "SessionOpenOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cwd": {"type": "string", "minLength": 1},
+        "permission_mode": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "reasoning_effort": {"type": "string", "minLength": 1},
+        "arguments": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "LaneSpawnRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "product": {"type": "string", "minLength": 1},
+        "host": {"type": "string", "minLength": 1},
+        "resume_session_id": {"type": "string", "minLength": 1},
+        "extra_groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "open": {"$ref": "#/$defs/SessionOpenOptions"}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["resume_session_id"]},
+          "then": {
+            "allOf": [
+              {"not": {"required": ["product"]}},
+              {"not": {"required": ["name"]}},
+              {"not": {"required": ["extra_groups"]}},
+              {"not": {"required": ["open"]}}, {"not": {"required": ["host"]}}
+            ]
+          },
+          "else": {"required": ["name", "product", "open"]}
+        }
+      ]
+    },
+    "LaneSpawnResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "native_id"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "native_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "SessionOpenRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "name", "groups", "open"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "resume_native_id": {"type": "string", "minLength": 1},
+        "open": {"$ref": "#/$defs/SessionOpenOptions"}
+      }
+    },
+    "SessionOpenResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["native_id"],
+      "properties": {"native_id": {"type": "string", "minLength": 1}}
+    },
+    "TurnRunRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "input"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "input": {"type": "string", "minLength": 1, "maxLength": 262144}
+      }
+    },
+    "TurnRunResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "result"],
+      "properties": {
+        "outcome": {"enum": ["completed", "interrupted", "failed"]},
+        "result": {"type": "string", "maxLength": 262144},
+        "truncated": {"type": "boolean"},
+        "native_stop_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "TurnInterruptRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": {"session_id": {"type": "string", "minLength": 1}}
+    },
+    "TurnInterruptResult": {"type": "object", "additionalProperties": false},
+    "SessionCloseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": {"session_id": {"type": "string", "minLength": 1}}
+    },
+    "SessionCloseResult": {"type": "object", "additionalProperties": false},
+    "RPCErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"type": "integer", "minimum": 1},
+        "error": {"$ref": "#/$defs/RPCError"}
+      }
+    },
+    "RPCError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014]},
+        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host"]},
+        "data": {"$ref": "#/$defs/SpawnFailedData"}
+      },
+      "allOf": [
+        {"if": {"properties": {"code": {"const": -32600}}}, "then": {"properties": {"message": {"const": "invalid_frame"}}}},
+        {"if": {"properties": {"code": {"const": -32602}}}, "then": {"properties": {"message": {"const": "invalid_hello"}}}},
+        {"if": {"properties": {"code": {"const": -32001}}}, "then": {"properties": {"message": {"const": "unknown_session"}}}},
+        {"if": {"properties": {"code": {"const": -32002}}}, "then": {"properties": {"message": {"const": "not_connected"}}}},
+        {"if": {"properties": {"code": {"const": -32003}}}, "then": {"properties": {"message": {"const": "busy"}}}},
+        {"if": {"properties": {"code": {"const": -32004}}}, "then": {"properties": {"message": {"const": "not_running"}}}},
+        {"if": {"properties": {"code": {"const": -32005}}}, "then": {"properties": {"message": {"const": "already_connected"}}}},
+        {"if": {"properties": {"code": {"const": -32006}}}, "then": {"properties": {"message": {"const": "closed"}}}},
+        {"if": {"properties": {"code": {"const": -32007}}}, "then": {"properties": {"message": {"const": "unknown_product"}}}},
+        {"if": {"properties": {"code": {"const": -32008}}}, "then": {"properties": {"message": {"const": "unsupported_open_field"}}}},
+        {"if": {"properties": {"code": {"const": -32009}}}, "then": {"properties": {"message": {"const": "spawn_failed"}}}},
+        {"if": {"properties": {"code": {"const": -32010}}}, "then": {"properties": {"message": {"const": "timeout"}}}},
+        {"if": {"properties": {"code": {"const": -32011}}}, "then": {"properties": {"message": {"const": "not_committed"}}}},
+        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32014}}}, "then": {"properties": {"message": {"const": "unknown_host"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
+        {
+          "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
+          "then": {"required": ["data"]},
+          "else": {"not": {"required": ["data"]}}
+        }
+      ]
+    },
+    "SpawnFailedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stderr_tail"],
+      "properties": {
+        "exit_code": {"type": "integer"},
+        "stderr_tail": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
