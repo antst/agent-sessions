@@ -25,7 +25,7 @@ class Caller {
   close(request, cancel) { return this.connection.call("session.close", request, cancel); }
 
   start(request) {
-    if (!validate("TurnRunRequest", request)) throw new Error("invalid TurnRunRequest");
+    if (!validate("TurnRunRequest", request)) throw new Error("invalid session value");
     if (this.targets.has(request.session_id)) throw new ProtocolError({ code: -32003, message: "busy" });
     const id = `t-${++this.next}`;
     let finish;
