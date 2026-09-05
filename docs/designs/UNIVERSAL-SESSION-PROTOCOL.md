@@ -70,7 +70,7 @@ start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
 
 Turn input and result strings, `message.send.message`, and
 `message.deliver.body` are each limited to 262,144 decoded characters through
-the schema's `maxLength` keyword. The raw 1 MiB framing guard remains an earlier,
+the closed generated types. The raw 1 MiB framing guard remains an earlier,
 independent byte limit because UTF-8 width and JSON escaping are not character
 counts. A worker kit truncates a longer native turn result to 262,144 characters
 and sets `truncated:true`. Both
@@ -78,10 +78,10 @@ kits emit compact JSON with no insignificant whitespace.
 
 The closed parameter and result shapes are authoritative in
 `bus/internal/protocol/session.schema.json`, re-exported as bytes by each public
-SDK. The schema uses only the shared
-minimal validator vocabulary, including `maxLength` alongside `minLength`; both
-validator allowlists and their shared authority test name it. An implementation rejects a frame before invoking
-product code if the corresponding definition does not validate it. Its
+SDK. An implementation decodes each frame into the closed types generated from
+the schema and rejects unknown fields, missing or null required fields, and
+out-of-range values before invoking product code. The schema is the published
+contract and the shared fixture file is its test, not a runtime component. Its
 **440-line cap** includes the optional federated product-discovery and bounded
 turn-result shapes; this
 is list data, never launch authority.
@@ -816,9 +816,15 @@ parses CLI/MCP input, constructs the daemon with its optional federation,
 discovery, and local-encryption configuration, and renders results. Product
 selection never enters either request router.
 
-`bus/internal/livepresence` is the product-agnostic full-duplex connection
-implementation: bounded framing, closed schema validation, independent request
-IDs, pending-call failure, supersession terminality, and exact-pointer close.
+`bus/internal/rpc` is the product-agnostic full-duplex connection
+implementation. One reader dispatches requests without waiting. One send helper
+holds a write mutex for one complete frame; it checks the closed flag immediately
+before writing, and any write error calls `Close`. A separate mutex protects only
+the closed flag, the strictly increasing request counters, and the pending map;
+it is never held during I/O or a callback. `Close` marks the connection closed,
+detaches pending calls, closes the file descriptor to interrupt blocked I/O, and
+fails each detached call once. It never waits for the write mutex and is
+idempotent. Any read error or EOF follows that same close path.
 Product reports, reconnect policy, and method-specific routing do not enter it.
 
 `bus/internal/structuredprocess` retains generic bounded TERM/KILL process
@@ -849,8 +855,14 @@ lines, not as additions hidden behind relocation accounting:
 | --- | ---: | --- |
 | `bus/internal/daemon` | 1,100 | Table, router, transactions, delivery, and federation together. |
 | Largest daemon router file | 450 | No product literal, argv parser, or product callback. |
+| Durable table | 120 | Open, load, insert, name update, and delete for the six stored columns. |
+| Connection admission | 150 | First hello, both peer re-hello branches, and supersession. |
+| Spawn/describe transaction | 200 | Reservation, empty-argv exec, one event loop, 60-second bound, commit before dispatch. |
+| Routing and visibility | 200 | Request dispatch, group visibility, and last-`@`/bare-name resolution. |
+| Close, EOF, and forget | 100 | Stop, remove the live entry, optional row delete, and KILL at 10 seconds. |
+| CLI, composition, and config | 100 | Optional hub, host, products, and local-key loading. |
 | Cross-host forwarder | 60 | Host-qualified session ID or explicit spawn/describe host; one hop, no state, retry, or shape translation. |
-| `bus/internal/livepresence` | 650 | Framing and connection mechanics only. |
+| `bus/internal/rpc` | 200 | Framing, one reader, pending calls, complete-frame writes, and close. |
 | `bus/internal/structuredprocess` | 700 | Generic process ownership; current functionality may remain. |
 | `bus/cmd/agentbus` daemon composition | 350 | Construction and rendering only; no protocol state. |
 
@@ -1059,7 +1071,7 @@ The product's current title is the peer name. A same-ID re-hello updates that
 name and information in place only when groups are byte-for-byte equal. A
 different-ID re-hello ends the old transient identity and installs the new one
 on the same socket; it is not a supersession. Worker mode never reconnects or
-re-hellos. The method router, closed validation, pending calls, writer,
+re-hellos. The closed types, pending calls, complete-frame writes,
 delivery, and worker-originated session-method API are otherwise shared.
 
 ### 3.3 Go and JavaScript parity
@@ -1080,12 +1092,11 @@ the shared fixtures; a later Python SDK is a translation of this surface, not a
 new contract.
 
 The Go host and JavaScript worker mode implement the preceding algorithm, not
-two interpretations of it. Both load the schema through their public SDK,
-whose embedded authority is `bus/internal/protocol/session.schema.json`, and
-both run one declarative table,
-`bus/internal/protocol/session-lifecycle.fixtures.json`. The table drives fake
-product callbacks and a fake duplex connection; it contains at least these
-rows:
+two interpretations of it. Both are tested against the published
+`bus/internal/protocol/session.fixtures.json`, and both run the same ordinary
+table-driven lifecycle cases with fake product callbacks and a fake duplex
+connection. The schema and fixtures are build artifacts for vendors to test
+their kits; neither is a runtime validator. The lifecycle cases are:
 
 1. app-ready hello, one open, and worker-originated session methods rejected before the open
    result but accepted on the same connection after it;
@@ -1123,14 +1134,18 @@ The size contract is final logical lines:
 
 | Reference surface | Production | Tests |
 | --- | ---: | ---: |
-| Go worker host | 280 | 300 |
-| JavaScript client plus worker mode | 260 | 260 |
+| Go transport (`bus/internal/rpc`) | 200 | 250 |
+| Go worker host | 200 | 250 |
+| JavaScript client plus worker mode | 200 | 250 |
+| Go caller kit | 250 | 250 |
+| JavaScript caller kit | 150 | 150 |
+| Reference caller | 200 | 200 |
+| Reference worker | 250 | 150 |
+| Shared wrapper host | 400 | 400 |
 | Shared lifecycle fixture data | — | 220 |
 
-Schema validation and generic connection framing are counted in Section 2,
-not duplicated into either worker host. Optional local-TLS key loading,
-scrubbing, and connection setup may add at most **20 production logical lines
-per kit**; its proofs remain inside each kit's existing test cap. A kit
+Generic connection framing is counted in Section 2, not duplicated into either
+worker host. A kit
 exceeding these limits has grown product policy or a third lifecycle fact and
 must be simplified.
 
@@ -1412,7 +1427,7 @@ owner-controlled.
 
 | Phase | Source deliverable | Gate | Runtime rule |
 | ---: | --- | --- | --- |
-| 0 | Signed document, `bus/internal/protocol` schema and shared validator fixtures re-exported by the public SDKs, generated protocol, architecture boundaries, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d; `bus/` has no wrapper import or product token. | No installed daemon or product runtime. |
+| 0 | Signed document, `bus/internal/protocol` schema and shared fixtures re-exported by the public SDKs, generated protocol, architecture boundaries, and deletion ledger. | Schema fixtures pass in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d; `bus/` has no wrapper import or product token. | No installed daemon or product runtime. |
 | 1 | `bus/sdk/go` worker kit, universal daemon, durable lane table, Go caller kit, reference caller, and token-selected `bus/cmd/example-peer` reference worker. | Daemon caps hold; unit/race/vet/build green; an in-process restart with durable rows proves every row loads offline with empty maps/reservations and no spawn; old actor/driver/control packages are absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
 | 2 | JavaScript worker kit, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both worker kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
 | 3 | `wrappers/` resident lane binaries and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
@@ -1438,7 +1453,7 @@ The caller/reference size contract is final logical lines:
 | Reference surface | Production | Tests |
 | --- | ---: | ---: |
 | Go caller kit | 250 | 250 |
-| JavaScript caller kit, additional to the 260-line JavaScript client/worker cap | 200 | 200 |
+| JavaScript caller kit, additional to the 200-line JavaScript client/worker cap | 150 | 150 |
 | Reference caller | 200 | 200 |
 | Reference worker | 250 | 150 |
 
