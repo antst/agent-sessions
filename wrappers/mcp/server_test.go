@@ -86,7 +86,7 @@ func TestToolArgumentsMustBeObject(t *testing.T) {
 	for _, arguments := range []string{"null", `[]`, `"scalar"`} {
 		t.Run(arguments, func(t *testing.T) {
 			backend := &fakeBackend{}
-			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":` + arguments + `}}`
+			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":` + arguments + `}}}`
 			response, err := serveOne(&Server{Backend: backend}, input)
 			check(t, err == nil, "serve: %v", err)
 			failed := response["error"].(map[string]any)

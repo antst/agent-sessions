@@ -12,10 +12,7 @@ import (
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 )
 
-const (
-	ToolName        = "agent_sessions"
-	ProtocolVersion = "2025-06-18"
-)
+const ToolName, ProtocolVersion = "agent_sessions", "2025-06-18"
 
 var Actions = []string{"list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"}
 
@@ -30,9 +27,8 @@ type Server struct {
 }
 
 type request struct {
-	ID     json.RawMessage
-	Method string
-	Params json.RawMessage
+	ID, Params json.RawMessage
+	Method     string
 }
 
 type failure struct {
@@ -107,26 +103,22 @@ func (s *Server) call(ctx context.Context, request request) (any, *failure) {
 
 func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (any, *failure) {
 	var call struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
+		Name      string `json:"name"`
+		Arguments struct {
+			Action    string          `json:"action"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"arguments"`
 	}
-	if !object(raw) || json.Unmarshal(raw, &call) != nil || call.Name != ToolName || !object(call.Arguments) {
+	if json.Unmarshal(raw, &call) != nil || call.Name != ToolName || !validAction(call.Arguments.Action) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	var input struct {
-		Action    string          `json:"action"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	if json.Unmarshal(call.Arguments, &input) != nil || !validAction(input.Action) {
-		return nil, &failure{Code: -32602, Message: "Invalid params"}
-	}
-	arguments := input.Arguments
+	arguments := call.Arguments.Arguments
 	if len(arguments) == 0 {
 		arguments = json.RawMessage(`{}`)
 	} else if !object(arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	result, err := s.Backend.Call(ctx, input.Action, arguments)
+	result, err := s.Backend.Call(ctx, call.Arguments.Action, arguments)
 	if err != nil {
 		return nil, errorFailure(err)
 	}
@@ -148,21 +140,17 @@ func decodeRequest(body []byte) (request, *failure) {
 	if json.Unmarshal(body, &fields) != nil || fields == nil {
 		return request{}, &failure{Code: -32600, Message: "Invalid Request"}
 	}
-	value := request{ID: usableID(fields["id"]), Params: fields["params"]}
-	var version string
+	id, head := fields["id"], bytes.TrimSpace(fields["id"])
+	idOK := len(head) == 0 || head[0] == '"' || head[0] == '-' || head[0] >= '0' && head[0] <= '9'
+	value, version := request{ID: id, Params: fields["params"]}, ""
+	if !idOK {
+		value.ID = nil
+	}
 	methodOK := json.Unmarshal(fields["method"], &value.Method) == nil && value.Method != ""
-	if json.Unmarshal(fields["jsonrpc"], &version) != nil || version != "2.0" || !methodOK || (len(fields["id"]) != 0 && value.ID == nil) {
+	if json.Unmarshal(fields["jsonrpc"], &version) != nil || version != "2.0" || !methodOK || !idOK {
 		return value, &failure{Code: -32600, Message: "Invalid Request"}
 	}
 	return value, nil
-}
-
-func usableID(raw json.RawMessage) json.RawMessage {
-	body := bytes.TrimSpace(raw)
-	if len(body) == 0 || body[0] == '"' || body[0] == '-' || body[0] >= '0' && body[0] <= '9' {
-		return raw
-	}
-	return nil
 }
 
 func object(raw json.RawMessage) bool {
