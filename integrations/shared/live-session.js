@@ -12,6 +12,7 @@ const ENV = Object.freeze({
 });
 const DEFAULT_RECONNECT_MS = 2000;
 const MAX_FRAME_BYTES = 1024 * 1024;
+const SESSION_SCHEMA_KEYS = new Set(["$ref", "type", "additionalProperties", "required", "properties", "allOf", "if", "then", "else", "not", "items", "uniqueItems", "enum", "const", "minLength", "maxLength", "minimum"]);
 const result = (validate) => (_params, value) => validate(value);
 const method = (direction, params, validate, lane = false, tool = false, first = false, needsInput = false) => Object.freeze({ direction, params, result: validate, lane, tool, first, needsInput });
 const laneMethod = (input, validate) => method("client", (value) => validLaneCall(value, input), validate, true, true, false, input);
@@ -284,6 +285,63 @@ function readConfiguration(env) {
   return { active: true, reason: "live-presence", socketPath, productID, groups };
 }
 
+function compileSessionSchema(root) {
+  const keys = ownDataKeys(root), defs = ownDataKeys(root?.$defs);
+  if (!keys || !defs?.length || !keys.every((key) => ["$schema", "$id", "$defs"].includes(key))) throw new Error("invalid session schema root");
+  for (const [name, node] of Object.entries(root.$defs)) checkSessionSchemaNode(root, node, name);
+  return Object.freeze({
+    definitions: Object.freeze(Object.keys(root.$defs).sort()),
+    validate(name, value) {
+      if (!Object.hasOwn(root.$defs, name)) throw new Error(`unknown session schema definition ${name}`);
+      return validSessionSchemaNode(root, root.$defs[name], value);
+    },
+  });
+}
+
+function checkSessionSchemaNode(root, node, at) {
+  const keys = ownDataKeys(node);
+  if (!keys) throw new Error(`schema node ${at} is not an object`);
+  for (const key of keys) {
+    if (!SESSION_SCHEMA_KEYS.has(key)) throw new Error(`unsupported schema keyword ${key}`);
+    if (key === "$ref" && (!node[key].startsWith("#/$defs/") || !Object.hasOwn(root.$defs, node[key].slice(8)))) throw new Error(`unknown schema reference ${node[key]}`);
+    if (key === "properties") for (const [name, child] of Object.entries(node[key])) checkSessionSchemaNode(root, child, `${at}.${name}`);
+    else if (["items", "if", "then", "else", "not"].includes(key)) checkSessionSchemaNode(root, node[key], `${at}.${key}`);
+    else if (key === "allOf") node[key].forEach((child, index) => checkSessionSchemaNode(root, child, `${at}.allOf[${index}]`));
+  }
+}
+
+function validSessionSchemaNode(root, node, value) {
+  if (node.$ref) { const name = node.$ref.slice(8); return node.$ref.startsWith("#/$defs/") && Object.hasOwn(root.$defs, name) && validSessionSchemaNode(root, root.$defs[name], value); }
+  if (node.type && !validSessionSchemaType(node.type, value)) return false;
+  if (Object.hasOwn(node, "const") && !equalSessionJSON(value, node.const)) return false;
+  if (node.enum && !node.enum.some((item) => equalSessionJSON(value, item))) return false;
+  if (typeof value === "string") { const length = [...value].length; if (node.minLength > length || node.maxLength < length) return false; }
+  if (typeof value === "number" && node.minimum > value) return false;
+  const keys = ownDataKeys(value);
+  if (keys) {
+    if (node.required?.some((key) => !Object.hasOwn(value, key))) return false;
+    if (node.additionalProperties === false && keys.some((key) => !Object.hasOwn(node.properties ?? {}, key))) return false;
+    if (node.properties && !Object.entries(node.properties).every(([key, child]) => !Object.hasOwn(value, key) || validSessionSchemaNode(root, child, value[key]))) return false;
+  }
+  if (Array.isArray(value) && node.items && !value.every((item) => validSessionSchemaNode(root, node.items, item))) return false;
+  if (Array.isArray(value) && node.uniqueItems && value.some((item, index) => value.slice(0, index).some((prior) => equalSessionJSON(item, prior)))) return false;
+  if (node.allOf && !node.allOf.every((child) => validSessionSchemaNode(root, child, value))) return false;
+  if (node.not && validSessionSchemaNode(root, node.not, value)) return false;
+  if (node.if) return validSessionSchemaNode(root, node.if, value) ? !node.then || validSessionSchemaNode(root, node.then, value) : !node.else || validSessionSchemaNode(root, node.else, value);
+  return true;
+}
+
+function validSessionSchemaType(type, value) {
+  return type === "object" ? !!ownDataKeys(value) : type === "array" ? Array.isArray(value) : type === "integer" ? Number.isFinite(value) && Number.isInteger(value) : typeof value === type;
+}
+
+function equalSessionJSON(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => equalSessionJSON(item, right[index]));
+  const leftKeys = ownDataKeys(left), rightKeys = ownDataKeys(right);
+  return !!leftKeys && !!rightKeys && leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.hasOwn(right, key) && equalSessionJSON(left[key], right[key]));
+}
+
 function presenceSocket(env) {
   if (env[ENV.socket]) return env[ENV.socket];
   let root = env[ENV.stateRoot];
@@ -369,4 +427,4 @@ function integer(value, minimum, maximum, name) {
 function cleanError(error) { return String(error?.message ?? error ?? "live session error").replace(/[\0\r\n]/gu, " ").slice(0, 512); }
 function createLiveSessionClient(options) { return new LiveSessionClient(options); }
 
-module.exports = { CLIENT_OPERATIONS, METHOD_DEFINITIONS, ENV, InactiveError, LiveSessionClient, createLiveSessionClient, readConfiguration, renderDelivery };
+module.exports = { CLIENT_OPERATIONS, METHOD_DEFINITIONS, ENV, InactiveError, LiveSessionClient, compileSessionSchema, createLiveSessionClient, readConfiguration, renderDelivery };

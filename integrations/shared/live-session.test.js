@@ -7,7 +7,34 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
+const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, compileSessionSchema, readConfiguration, renderDelivery } = require("./live-session.js");
+
+test("universal session schema accepts the shared fixtures", () => {
+  const root = JSON.parse(fs.readFileSync(path.join(__dirname, "session.schema.json"), "utf8"));
+  const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, "session.fixtures.json"), "utf8"));
+  const schema = compileSessionSchema(root), coverage = new Map();
+  for (const fixture of fixtures.cases) {
+    let value = fixture.raw ? JSON.parse(fixture.raw) : structuredClone(fixture.value);
+    if (fixture.repeat) {
+      let target = value;
+      for (const key of fixture.repeat.path.slice(0, -1)) target = target[key];
+      target[fixture.repeat.path.at(-1)] = fixture.repeat.text.repeat(fixture.repeat.count);
+    }
+    assert.equal(schema.validate(fixture.definition, value), fixture.valid, fixture.name);
+    const seen = coverage.get(fixture.definition) ?? [false, false];
+    seen[fixture.valid ? 0 : 1] = true;
+    coverage.set(fixture.definition, seen);
+  }
+  for (const definition of schema.definitions) assert.deepEqual(coverage.get(definition), [true, true], definition);
+  assert.equal(coverage.size, schema.definitions.length);
+  const mutated = structuredClone(root);
+  mutated.$defs.SessionHelloRequest.properties.product.pattern = "^never-shared$";
+  assert.throws(() => compileSessionSchema(mutated), /unsupported schema keyword/u);
+  delete mutated.$defs.SessionHelloRequest.properties.product.pattern;
+  mutated.$defs.SessionOpenRequest.properties.open.$ref = "#/$defs/Missing";
+  assert.throws(() => compileSessionSchema(mutated), /unknown schema reference/u);
+  assert.throws(() => compileSessionSchema({ $defs: {} }), /invalid session schema root/u);
+});
 
 test("default reconnect cadence is two seconds", () => {
   const client = new LiveSessionClient({ env: {} });
