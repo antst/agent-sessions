@@ -1230,11 +1230,12 @@ delivery, and worker-originated session-method API are otherwise shared.
 The public SDK exposes `WorkerCallbacks`, the kit-owned `Run`, and the wire types
 generated from the schema:
 `HelloDescription`, `ExtraArgument`, `OpenOptions`, `OpenRequest`, `OpenResult`,
-`TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`,
+`TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`, `Identity`,
 `SessionSummary`, `HostProducts`, and `ProtocolError`; wrappers and products do
 not hand-maintain protocol-shaped duplicates. The worker entry is
 `serveWorker(callbacks, env)`, which returns the kit-owned `closed` signal. Peer
-mode is `connectPeer(identity, deliver)` plus `rehello(name, info)`. A
+mode is `connectPeer(identity, deliver)`, `rehello(name, info)`, and
+`replace(ctx, identity)`. A
 connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 `run`, `interrupt`, and `close(forget)` and is usable from every callback
 without blocking the reader. Go also exports one thin no-hello client:
