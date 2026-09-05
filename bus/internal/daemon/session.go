@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"encoding/json"
-	"log"
 	"syscall"
 	"time"
 
@@ -49,7 +48,6 @@ type session struct {
 	owned         int
 	stopping      bool
 	closed        bool
-	logged        bool
 	child         *structuredprocess.Process
 	launch        *launch
 	committed     bool
@@ -251,10 +249,8 @@ func (s *session) issue(request routedRequest) {
 func (s *session) receiveResponse(frame protocol.Frame) {
 	request, ok := s.pending[frame.ID]
 	if !ok {
-		if !s.logged {
-			log.Printf("agentbus: dropping unmatched response id %d", frame.ID)
-			s.logged = true
-		}
+		s.stopping = true
+		s.wire.Close()
 		return
 	}
 	delete(s.pending, frame.ID)

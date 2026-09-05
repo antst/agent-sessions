@@ -17,7 +17,7 @@ import (
 	"github.com/antst/agent-sessions/bus/internal/protocol"
 )
 
-func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
+func TestCallRoundTripIncreasingIDsAndUnmatchedResponse(t *testing.T) {
 	client, peer := net.Pipe()
 	c := New(client, true, nil)
 	defer c.Close()
@@ -27,17 +27,23 @@ func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
 			check(t, frame.ID == id, "id = %d, want %d", frame.ID, id)
 			body, _ := protocol.ResultBytes(id, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
 			_, _ = peer.Write(body)
-			if id == 1 {
+			if id == 2 {
 				_, _ = peer.Write(body)
 			}
 		}
 	}()
-	for range 2 {
-		var result protocol.SessionListResult
-		must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
-	}
+	var result protocol.SessionListResult
+	must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
 	c.next = protocol.MaxRequestID
 	check(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "exhausted request id succeeded")
+	c.next = 1
+	must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
+	select {
+	case <-c.Done():
+	case <-time.After(time.Second):
+		t.Fatal("unmatched response did not close connection")
+	}
+	check(t, errors.Is(c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}), ErrClosed), "call after unmatched response did not fail closed")
 }
 
 func TestResponseClaimsTargetBeforeCancelOrClose(t *testing.T) {
@@ -106,19 +112,12 @@ func TestCloseUnblocksWriter(t *testing.T) {
 	_ = peer.Close()
 }
 
-func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
+func TestRequestIDsIncreaseAndInvalidUTF8StopsLaterFrame(t *testing.T) {
 	local, peer := net.Pipe()
 	requests := make(chan *Request, 1)
 	c := New(local, true, func(_ context.Context, request *Request) { requests <- request })
-	ctx, cancel := context.WithCancel(context.Background())
-	returned := asyncCall(c, ctx)
-	lost := readFrame(t, peer)
-	cancel()
-	check(t, errors.Is(<-returned, context.Canceled), "cancelled call did not return context error")
 	go func() {
-		body, _ := protocol.ResultBytes(lost.ID, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
-		_, _ = peer.Write(body)
-		body = []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"unknown\",\"method\":\"session.open\",\"params\":{\"name\":\"lane@local\",\"groups\":[],\"open\":{}}}\n")
+		body := []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"unknown\",\"method\":\"session.open\",\"params\":{\"name\":\"lane@local\",\"groups\":[],\"open\":{}}}\n")
 		_, _ = peer.Write(body)
 	}()
 	select {

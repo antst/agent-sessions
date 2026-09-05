@@ -145,9 +145,10 @@ func TestDialIsOneShotFramedClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := client.Call(context.Background(), "session.list", SessionListRequest{})
-	if err != nil || string(raw) != `{"sessions":[]}` {
-		t.Fatalf("result = %s, err %v", raw, err)
+	caller := NewCaller(client.Call)
+	listed, err := caller.List(context.Background(), SessionListRequest{})
+	if err != nil || len(listed.Sessions) != 0 {
+		t.Fatalf("result = %#v, err %v", listed, err)
 	}
 	if err = client.Close(); err != nil {
 		t.Fatal(err)

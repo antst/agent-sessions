@@ -2,6 +2,7 @@ package sessionkit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -49,6 +50,16 @@ type WaitRequest struct {
 
 func newCaller(call callFunc) *Caller {
 	return &Caller{call: call, runs: map[string]*localRun{}, targets: map[string]*localRun{}}
+}
+
+func NewCaller(call func(context.Context, string, any) (json.RawMessage, error)) *Caller {
+	return newCaller(func(ctx context.Context, method string, params, result any) error {
+		raw, err := call(ctx, method, params)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, result)
+	})
 }
 
 func callAs[T any](ctx context.Context, call callFunc, method string, params any) (T, error) {
@@ -146,6 +157,10 @@ func (c *Caller) Wait(request WaitRequest) (TurnStatus, error) {
 
 func (c *Caller) settle(run *localRun, result TurnResult, err error) {
 	c.mu.Lock()
+	if c.targets[run.SessionID] != run {
+		c.mu.Unlock()
+		return
+	}
 	if err == nil {
 		run.State, run.Result = "done", &result
 	} else {
@@ -157,5 +172,15 @@ func (c *Caller) settle(run *localRun, result TurnResult, err error) {
 	}
 	delete(c.targets, run.SessionID)
 	close(run.done)
+	c.mu.Unlock()
+}
+
+func (c *Caller) disconnected() {
+	c.mu.Lock()
+	for target, run := range c.targets {
+		run.State, run.Reason = "unavailable", fmt.Sprintf("%d %s", protocol.NotConnected, "not_connected")
+		delete(c.targets, target)
+		close(run.done)
+	}
 	c.mu.Unlock()
 }

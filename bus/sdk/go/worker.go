@@ -3,6 +3,7 @@ package sessionkit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -50,7 +51,10 @@ type Worker struct {
 
 func NewWorker(product WorkerCallbacks) *Worker {
 	worker := &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
-	worker.caller = newCaller(worker.Call)
+	worker.caller = NewCaller(func(ctx context.Context, method string, params any) (result json.RawMessage, err error) {
+		err = worker.Call(ctx, method, params, &result)
+		return
+	})
 	return worker
 }
 
